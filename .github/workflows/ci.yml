@@ -128,10 +128,12 @@ jobs:
       - name: Test Windows local-artifact resolution
         run: >-
           uv run pytest -q
+          tests/test_local_store_locator.py
           tests/test_local_path_policy.py
           tests/test_local_file_access.py
           tests/test_windows_local_file.py
           tests/test_artifact_resolution.py
+          tests/test_context_queries_prepared_resolution.py
           tests/test_external_artifacts_routes.py
           tests/test_data_stores_routes.py
           tests/test_evidence_artifact_read_opacity.py

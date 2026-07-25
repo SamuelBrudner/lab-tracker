@@ -605,12 +605,15 @@ def test_resolve_endpoint_resolves_store_locator(client, admin_auth_headers, tmp
     body = response.json()["data"]
     assert body["status"] == "verified"
     assert base64.b64decode(body["content_base64"]) == data
-    # The materialized concrete URI is reported.
-    assert body["uri"] == (tmp_path / "exp" / "x.txt").as_uri()
+    assert body["uri"] == "store://lab-fs/exp/x.txt"
 
 
-def test_resolve_endpoint_uses_store_field_form(client, admin_auth_headers, tmp_path):
-    data = b"resolved through the structured store fields"
+def test_resolve_endpoint_rejects_mismatched_structured_store_identity(
+    client,
+    admin_auth_headers,
+    tmp_path,
+):
+    data = b"must not resolve through mismatched structured store fields"
     (tmp_path / "exp").mkdir()
     (tmp_path / "exp" / "x.txt").write_bytes(data)
     _install_local_registry(client, tmp_path)
@@ -636,8 +639,6 @@ def test_resolve_endpoint_uses_store_field_form(client, admin_auth_headers, tmp_
         },
         headers=admin_auth_headers,
     ).json()["data"]["question_id"]
-    # The structured store_name/locator fields drive resolution; the URI names a
-    # different (non-existent) store to prove the fields take precedence.
     dataset_id = client.post(
         "/datasets",
         json={
@@ -667,8 +668,231 @@ def test_resolve_endpoint_uses_store_field_form(client, admin_auth_headers, tmp_
 
     assert response.status_code == 200, response.text
     body = response.json()["data"]
+    assert body["status"] == "unresolved"
+    assert body["uri"] == "store://[redacted]"
+    assert body["detail"] == "Store artifact reference is invalid."
+    assert body["content_base64"] is None
+    assert "wrong-store" not in response.text
+    assert str(tmp_path) not in response.text
+
+
+def test_resolve_endpoint_uses_matching_structured_store_identity(
+    client,
+    admin_auth_headers,
+    tmp_path,
+):
+    data = b"resolved through canonical structured store fields"
+    (tmp_path / "exp").mkdir()
+    (tmp_path / "exp" / "x.txt").write_bytes(data)
+    _install_local_registry(client, tmp_path)
+
+    project_id = client.post(
+        "/projects", json={"name": "Matching field form project"}, headers=admin_auth_headers
+    ).json()["data"]["project_id"]
+    _create_store(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        name="lab-fs",
+        kind="local_fs",
+        root=str(tmp_path),
+    )
+    question_id = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Canonical field form?",
+            "question_type": "descriptive",
+            "status": "active",
+        },
+        headers=admin_auth_headers,
+    ).json()["data"]["question_id"]
+    dataset_id = client.post(
+        "/datasets",
+        json={
+            "project_id": project_id,
+            "primary_question_id": question_id,
+            "status": "committed",
+            "commit_manifest": {
+                "external_artifacts": [
+                    {
+                        "source_system": "store",
+                        "uri": "store://lab-fs/exp/x.txt",
+                        "content_hash": _sha256(data),
+                        "store_name": "lab-fs",
+                        "locator": "exp/x.txt",
+                    }
+                ]
+            },
+        },
+        headers=admin_auth_headers,
+    ).json()["data"]["dataset_id"]
+
+    response = client.post(
+        "/external-artifacts/resolve",
+        json={"entity_type": "dataset", "entity_id": dataset_id},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()["data"]
     assert body["status"] == "verified"
+    assert body["uri"] == "store://lab-fs/exp/x.txt"
     assert base64.b64decode(body["content_base64"]) == data
+
+
+def test_local_store_locator_cannot_escape_registered_root_with_uri_or_fields(
+    client,
+    admin_auth_headers,
+    tmp_path,
+):
+    global_root = tmp_path / "global"
+    store_root = global_root / "registered"
+    sibling_root = global_root / "sibling"
+    store_root.mkdir(parents=True)
+    sibling_root.mkdir()
+    secret = sibling_root / "secret.bin"
+    secret_bytes = b"sibling bytes outside the registered store"
+    secret.write_bytes(secret_bytes)
+    _install_local_registry(client, global_root)
+
+    project_id = client.post(
+        "/projects",
+        json={"name": "Registered store confinement project"},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    _create_store(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        name="lab-fs",
+        kind="local_fs",
+        root=str(store_root),
+    )
+    question_id = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Can a store locator leave its registered root?",
+            "question_type": "descriptive",
+            "status": "active",
+        },
+        headers=admin_auth_headers,
+    ).json()["data"]["question_id"]
+
+    references = (
+        {
+            "source_system": "store",
+            "uri": "store://lab-fs/../sibling/secret.bin",
+        },
+        {
+            "source_system": "store",
+            "uri": "store://lab-fs/../sibling/secret.bin",
+            "store_name": "lab-fs",
+            "locator": "../sibling/secret.bin",
+        },
+    )
+    for reference_fields in references:
+        # The bogus-hash attempt would disclose an observed hash as DRIFTED in
+        # the vulnerable implementation. Retrying that observed hash would then
+        # return VERIFIED bytes. Both attempts must fail before filesystem I/O.
+        for content_hash in (_sha256(b"bogus"), _sha256(secret_bytes)):
+            dataset_response = client.post(
+                "/datasets",
+                json={
+                    "project_id": project_id,
+                    "primary_question_id": question_id,
+                    "status": "committed",
+                    "commit_manifest": {
+                        "external_artifacts": [
+                            {
+                                **reference_fields,
+                                "content_hash": content_hash,
+                            }
+                        ]
+                    },
+                },
+                headers=admin_auth_headers,
+            )
+            assert dataset_response.status_code == 201, dataset_response.text
+            dataset_id = dataset_response.json()["data"]["dataset_id"]
+
+            response = client.post(
+                "/external-artifacts/resolve",
+                json={"entity_type": "dataset", "entity_id": dataset_id},
+                headers=admin_auth_headers,
+            )
+
+            assert response.status_code == 200, response.text
+            body = response.json()["data"]
+            assert body["status"] == "unresolved"
+            assert body["uri"] == "store://[redacted]"
+            assert body["observed_hash"] is None
+            assert body["content_base64"] is None
+            assert body["returned_bytes"] == 0
+            assert "secret.bin" not in response.text
+            assert str(global_root) not in response.text
+
+
+def test_malformed_store_uri_matrix_never_reaches_resolver(
+    client,
+    admin_auth_headers,
+    tmp_path,
+):
+    project_id = client.post(
+        "/projects",
+        json={"name": "Malformed store URI project"},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    _create_store(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        name="lab-fs",
+        kind="local_fs",
+        root=str(tmp_path),
+    )
+    # An invalid reference must materialize to a static result. This object has
+    # no resolver methods, so any dispatch attempt makes the regression fail.
+    client.app.state.resolver_registry = object()
+    malformed_cases = (
+        ("store://lab-fs//absolute-alias.txt", "Store artifact reference is invalid."),
+        ("store://lab-fs/../sibling.txt", "Store artifact reference is invalid."),
+        (
+            "store://lab-fs/path.txt?download=1",
+            "Store artifact reference is invalid.",
+        ),
+        ("store://lab-fs/path.txt#fragment", "Store artifact reference is invalid."),
+        (
+            "store://user@lab-fs/path.txt",
+            "Store artifact could not be resolved.",
+        ),
+        ("store://lab-fs/%2e%2e/sibling.txt", "Store artifact reference is invalid."),
+        ("store://lab-fs/%70ath.txt", "Store artifact reference is invalid."),
+    )
+
+    for index, (uri, expected_detail) in enumerate(malformed_cases):
+        dataset_id = _create_dataset_with_artifact(
+            client,
+            admin_auth_headers,
+            project_id=project_id,
+            uri=uri,
+            content_hash=_sha256(f"invalid-{index}".encode()),
+            source_system="store",
+        )
+
+        response = client.post(
+            "/external-artifacts/resolve",
+            json={"entity_type": "dataset", "entity_id": dataset_id},
+            headers=admin_auth_headers,
+        )
+
+        assert response.status_code == 200, response.text
+        body = response.json()["data"]
+        assert body["status"] == "unresolved"
+        assert body["uri"] == "store://[redacted]"
+        assert body["detail"] == expected_detail
+        assert body["content_base64"] is None
 
 
 def test_resolve_endpoint_unknown_store_is_unresolved(client, admin_auth_headers, tmp_path):
@@ -693,7 +917,9 @@ def test_resolve_endpoint_unknown_store_is_unresolved(client, admin_auth_headers
     assert response.status_code == 200
     body = response.json()["data"]
     assert body["status"] == "unresolved"
-    assert "nonexistent" in (body["detail"] or "")
+    assert body["uri"] == "store://[redacted]"
+    assert body["detail"] == "Store artifact could not be resolved."
+    assert "nonexistent" not in response.text
     assert body["content_base64"] is None
     assert body["returned_bytes"] == 0
 

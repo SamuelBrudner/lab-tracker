@@ -12,6 +12,8 @@ from lab_tracker.errors import (
     OpaqueTargetNotFoundError,
     ValidationError,
 )
+from lab_tracker.local_path_policy import is_supported_absolute_local_root
+from lab_tracker.local_store_locator import is_valid_local_store_name
 from lab_tracker.models import (
     DataStore,
     StoreCapability,
@@ -63,6 +65,19 @@ class DataStoreService(BaseService):
             scope_label = "group"
         ensure_non_empty(name, "name")
         ensure_non_empty(root, "root")
+        if kind is StoreKind.LOCAL_FS and not is_valid_local_store_name(name):
+            raise ValidationError(
+                "Local filesystem store name must use 1-63 ASCII letters, digits, dots, "
+                "underscores, or hyphens and must start with a letter or digit."
+            )
+        if kind is StoreKind.LOCAL_FS and not is_supported_absolute_local_root(
+            root
+        ):
+            raise ValidationError(
+                "Local filesystem store root must be a supported absolute local path."
+            )
+        stored_name = name if kind is StoreKind.LOCAL_FS else name.strip()
+        stored_root = root if kind is StoreKind.LOCAL_FS else root.strip()
         resolved_capabilities = (
             list(capabilities) if capabilities is not None else default_store_capabilities(kind)
         )
@@ -70,10 +85,10 @@ class DataStoreService(BaseService):
             store_id=uuid4(),
             project_id=project_id,
             group_id=group_id,
-            name=name.strip(),
+            name=stored_name,
             kind=kind,
             capabilities=resolved_capabilities,
-            root=root.strip(),
+            root=stored_root,
             endpoint=endpoint.strip() if endpoint else None,
             credential_ref=credential_ref.strip() if credential_ref else None,
             is_default=is_default,

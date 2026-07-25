@@ -400,6 +400,32 @@ point before the final handle path is authorized. The resolver never returns
 those outside bytes; pre-follow reparse inspection and traversal availability
 remain explicitly owned by `lab-tracker-n5kp.61`.
 
+### Registered local-store confinement
+
+A registered `local_fs` store is a second authority boundary, not merely a
+prefix concatenated onto the broader operator allowlist. Its locator is parsed
+without filesystem work into strict relative components, and the raw store root
+must already be a supported native absolute path before expansion or
+canonicalization. Its name has a portable 1–63-character ASCII grammar, and
+legacy rows outside either local contract fail closed. Resolution carries those
+values in a frozen prepared target across request-scope release.
+
+The local resolver then requires the complete canonical store root to be
+contained by one configured operator root and constructs the exact
+handle-bound reader from a short-lived policy rooted at that store. Direct
+reads, final-handle validation, and recovery all use this same narrower policy.
+There is no fallback to ordinary unscoped local resolution. Consequently a
+lexical traversal, static link, raced junction, or content-hash recovery cannot
+reach a sibling store even when both stores sit below one broad operator root.
+The result retains the canonical logical `store://` URI; concrete host paths are
+not exposed in store-scoped diagnostics.
+
+The raw-absolute rule applies to registered store roots, not operator
+configuration: global resolver roots preserve their established `~` expansion
+and relative-to-process-working-directory behavior. Non-local locator syntax is
+also unchanged here; Git, HTTP, and rclone prefix confinement is a separate
+adapter-specific follow-up.
+
 ## Recovering moved/renamed local artifacts
 
 The `content_hash` is not only the integrity gate — it is a location-independent
@@ -407,9 +433,11 @@ identity that survives a rename. So when a local reference's file is *missing at
 its `uri`* (the researcher moved or renamed it), the local resolver can recover
 it instead of dead-ending at `UNRESOLVED`: it scans the resolver's already
 configured `allowed_roots` for a file whose recomputed digest matches the
-reference, and returns that file `VERIFIED`. The recovery detail records the path
-it was found at; the stored `uri` is **not** rewritten (recovery is read-only —
-auto-repairing the pointer is deferred).
+reference, and returns that file `VERIFIED`. A direct local reference may report
+the recovered host path; a registered-store result uses a generic in-store
+recovery detail and retains its logical `store://` URI. The stored reference is
+**not** rewritten (recovery is read-only — auto-repairing the pointer is
+deferred).
 
 Within the canonical-path threat model, recovery preserves these boundaries:
 
@@ -531,6 +559,11 @@ Shipped (`src/lab_tracker/artifact_resolution.py`, tested in
   bytes being hashed; a missing file whose bytes still exist under a root
   resolves `VERIFIED` instead of `UNRESOLVED` (read-only; the `uri` is not
   rewritten).
+- ✅ Registered `local_fs` targets carry their validated locator and trusted
+  store root through database-scope release. The exact handle-bound reader and
+  recovery roots are narrowed to that store root while remaining conjunctive
+  with the operator allowlist; invalid or mismatched logical store locators fail
+  closed before candidate filesystem work.
 - ✅ `HttpResolver` — `http(s)`, full-body verify with a `max_fetch_bytes` cap
   (oversized → `UNRESOLVED`, never uncertified bytes), plus a shared outbound
   destination policy that validates every IPv4/IPv6 answer, pins the vetted

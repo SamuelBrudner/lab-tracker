@@ -18,6 +18,7 @@ from http_security_fakes import (
     FakeSafeHttpClient,
 )
 
+import lab_tracker.artifact_resolution as artifact_resolution
 import lab_tracker.local_file_access as local_file_access
 from lab_tracker.artifact_resolution import (
     DEFAULT_MAX_BYTES,
@@ -26,6 +27,7 @@ from lab_tracker.artifact_resolution import (
     GitResolver,
     HttpResolver,
     LocalFilesystemResolver,
+    LocalStoreResolutionTarget,
     RcloneCompleted,
     RcloneResolver,
     RecoveryPolicy,
@@ -36,6 +38,7 @@ from lab_tracker.artifact_resolution import (
     check_store_health,
     default_registry,
     is_verifiable_hash,
+    local_store_resolution_target,
     outbound_http_policy_from_env,
     parse_content_hash,
     registry_from_env,
@@ -48,6 +51,7 @@ from lab_tracker.local_file_access import (
     OpenedLocalFile,
 )
 from lab_tracker.local_path_policy import LocalPathPolicy
+from lab_tracker.local_store_locator import LocalStoreLocator
 from lab_tracker.models import DataStore, ExternalArtifactReference, StoreKind
 from lab_tracker.outbound_http import (
     ApprovedSocketAddress,
@@ -1311,12 +1315,24 @@ def test_rclone_resolver_can_resolve_only_rclone_scheme():
 # --- ExternalArtifactReference.for_store (field form) ---------------------
 
 
-def test_external_artifact_reference_for_store_sets_fields_and_uri():
-    ref = ExternalArtifactReference.for_store(
-        store_name="lab-onedrive", locator="/exp/001/x.fcs", content_hash=_sha256(b"x")
+def test_external_artifact_reference_for_store_rejects_leading_slash():
+    with pytest.raises(ValueError, match="Invalid local-store"):
+        ExternalArtifactReference.for_local_store(
+            store_name="lab-onedrive",
+            locator="/exp/001/x.fcs",
+            content_hash=_sha256(b"x"),
+        )
+
+
+def test_external_artifact_reference_for_store_sets_canonical_fields_and_uri():
+    ref = ExternalArtifactReference.for_local_store(
+        store_name="lab-onedrive",
+        locator="exp/001/x.fcs",
+        content_hash=_sha256(b"x"),
     )
+
     assert ref.store_name == "lab-onedrive"
-    assert ref.locator == "exp/001/x.fcs"  # leading slash stripped
+    assert ref.locator == "exp/001/x.fcs"
     assert ref.uri == "store://lab-onedrive/exp/001/x.fcs"
     assert ref.source_system == "store"
 
@@ -1354,13 +1370,164 @@ def _data_store(kind: StoreKind, root: str, **overrides) -> DataStore:
     return DataStore(**fields)
 
 
-def test_store_relative_reference_local_builds_native_file_uri(tmp_path):
+def _local_store_target(
+    store: DataStore,
+    locator_path: str,
+    content_hash: str,
+) -> LocalStoreResolutionTarget:
+    locator = LocalStoreLocator.parse_decoded(locator_path)
+    assert locator is not None
+    logical_reference = ExternalArtifactReference.for_local_store(
+        store_name=store.name,
+        locator=locator.path,
+        content_hash=content_hash,
+    )
+    target = local_store_resolution_target(
+        store,
+        locator=locator,
+        logical_reference=logical_reference,
+    )
+    assert isinstance(target, LocalStoreResolutionTarget)
+    return target
+
+
+def test_store_relative_reference_local_builds_scoped_logical_target(tmp_path):
     root = tmp_path / "data store"
     store = _data_store(StoreKind.LOCAL_FS, str(root))
-    ref = store_relative_reference(store, path="exp/001/x.txt", content_hash=_sha256(b"x"))
-    assert ref is not None
-    assert ref.source_system == "local"
-    assert ref.uri == (root / "exp" / "001" / "x.txt").as_uri()
+    target = store_relative_reference(
+        store,
+        path="exp/001/x.txt",
+        content_hash=_sha256(b"x"),
+    )
+
+    assert isinstance(target, LocalStoreResolutionTarget)
+    assert target.store_root == str(root)
+    assert target.locator.components == ("exp", "001", "x.txt")
+    assert target.logical_reference.source_system == "store"
+    assert target.logical_reference.uri == "store://store/exp/001/x.txt"
+
+
+def test_local_store_target_factory_rejects_mismatched_logical_identity(tmp_path):
+    store = _data_store(StoreKind.LOCAL_FS, str(tmp_path), name="lab-fs")
+    locator = LocalStoreLocator.parse_decoded("nested/artifact.bin")
+    other_locator = LocalStoreLocator.parse_decoded("other/artifact.bin")
+    assert locator is not None
+    assert other_locator is not None
+    reference = ExternalArtifactReference.for_local_store(
+        store_name=store.name,
+        locator=locator.path,
+        content_hash=_sha256(b"x"),
+    )
+    wrong_store_reference = reference.model_copy(
+        update={"store_name": "other", "uri": "store://other/nested/artifact.bin"}
+    )
+    wrong_uri_reference = reference.model_copy(
+        update={"uri": "store://lab-fs/other/artifact.bin"}
+    )
+
+    assert (
+        local_store_resolution_target(
+            store,
+            locator=locator,
+            logical_reference=wrong_store_reference,
+        )
+        is None
+    )
+    assert (
+        local_store_resolution_target(
+            store,
+            locator=other_locator,
+            logical_reference=reference,
+        )
+        is None
+    )
+    assert (
+        local_store_resolution_target(
+            store,
+            locator=locator,
+            logical_reference=wrong_uri_reference,
+        )
+        is None
+    )
+
+
+def test_local_store_target_cannot_be_constructed_without_validated_factory(
+    tmp_path,
+):
+    locator = LocalStoreLocator.parse_decoded("artifact.bin")
+    assert locator is not None
+    reference = ExternalArtifactReference.for_local_store(
+        store_name="lab-fs",
+        locator=locator.path,
+        content_hash=_sha256(b"x"),
+    )
+
+    with pytest.raises(TypeError, match="validated factory"):
+        LocalStoreResolutionTarget(
+            logical_reference=reference,
+            store_root=str(tmp_path),
+            locator=locator,
+            _factory_token=object(),
+        )
+
+
+@pytest.mark.parametrize(
+    ("root_factory", "path"),
+    (
+        (lambda tmp_path: "relative/store", "exp/001/x.txt"),
+        (lambda tmp_path: str(tmp_path / "store"), "../sibling-secret.txt"),
+    ),
+)
+def test_invalid_local_store_materialization_does_no_host_path_io(
+    tmp_path, monkeypatch, root_factory, path
+):
+    store = _data_store(StoreKind.LOCAL_FS, root_factory(tmp_path))
+
+    def unexpected_host_path_operation(*_args, **_kwargs):
+        raise AssertionError("invalid local materialization touched a host path")
+
+    monkeypatch.setattr(
+        artifact_resolution.Path,
+        "as_uri",
+        unexpected_host_path_operation,
+    )
+    monkeypatch.setattr(
+        artifact_resolution.os.path,
+        "realpath",
+        unexpected_host_path_operation,
+    )
+    monkeypatch.setattr(
+        artifact_resolution.os,
+        "open",
+        unexpected_host_path_operation,
+    )
+
+    assert (
+        store_relative_reference(
+            store,
+            path=path,
+            content_hash=_sha256(b"x"),
+        )
+        is None
+    )
+
+
+def test_broader_global_root_does_not_make_sibling_escape_a_store_locator(tmp_path):
+    store_root = tmp_path / "store"
+    store_root.mkdir()
+    sibling = _write(tmp_path, "sibling-secret.txt", b"secret")
+    store = _data_store(StoreKind.LOCAL_FS, str(store_root))
+    resolver = LocalFilesystemResolver(allowed_roots=[tmp_path])
+
+    target = store_relative_reference(
+        store,
+        path="../sibling-secret.txt",
+        content_hash=_sha256(b"secret"),
+    )
+    ordinary = resolver.resolve(_local_ref(sibling, _sha256(b"secret")))
+
+    assert target is None
+    assert ordinary.status is ResolutionStatus.VERIFIED
 
 
 def test_store_relative_reference_rclone_uses_credential_ref_as_remote():
@@ -1445,6 +1612,26 @@ def test_check_store_health_local_fs_missing_root(tmp_path):
     health = check_store_health(store)
     assert health.status is StoreHealthStatus.UNREACHABLE
     assert "not found" in (health.detail or "").lower()
+
+
+@pytest.mark.parametrize("root", ("relative/store", "~/store", "C:store"))
+def test_check_store_health_rejects_invalid_local_root_before_probe(
+    root, monkeypatch
+):
+    store = _data_store(StoreKind.LOCAL_FS, root)
+
+    def unexpected_probe(*_args, **_kwargs):
+        raise AssertionError("invalid local store root reached a filesystem probe")
+
+    monkeypatch.setattr(artifact_resolution.os.path, "realpath", unexpected_probe)
+    monkeypatch.setattr(artifact_resolution.os.path, "isdir", unexpected_probe)
+
+    health = check_store_health(store)
+
+    assert health == artifact_resolution.StoreHealth(
+        StoreHealthStatus.UNREACHABLE,
+        "Local store root is invalid.",
+    )
 
 
 def test_check_store_health_rclone_healthy_via_runner():
@@ -1791,6 +1978,265 @@ def test_registry_allowed_roots_thread_through(tmp_path):
     assert result.status is ResolutionStatus.UNRESOLVED
 
 
+def test_registry_never_falls_back_to_ordinary_resolve_for_local_store(tmp_path):
+    store_root = tmp_path / "store"
+    store_root.mkdir()
+    store = _data_store(StoreKind.LOCAL_FS, str(store_root))
+    target = _local_store_target(store, "artifact.bin", _sha256(b"x"))
+
+    class OrdinaryOnlyResolver(ArtifactResolver):
+        def can_resolve(self, ref):
+            return True
+
+        def resolve(self, ref, *, max_bytes=DEFAULT_MAX_BYTES, byte_range=None):
+            raise AssertionError("scoped dispatch fell back to ordinary resolution")
+
+    result = ResolverRegistry([OrdinaryOnlyResolver()]).resolve_local_store(target)
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.uri == target.logical_reference.uri
+    assert result.detail == "No scoped local-store resolver is registered."
+
+
+def test_local_store_scope_rejects_static_link_escape_but_allows_safe_link(
+    tmp_path,
+):
+    store_root = tmp_path / "store"
+    store_root.mkdir()
+    in_store = _write(store_root, "in-store.bin", b"inside")
+    outside = _write(tmp_path, "outside.bin", b"outside")
+    safe_link = store_root / "safe-link.bin"
+    escape_link = store_root / "escape-link.bin"
+    try:
+        safe_link.symlink_to(in_store)
+        escape_link.symlink_to(outside)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"file symlinks are unavailable: {exc}")
+
+    store = _data_store(StoreKind.LOCAL_FS, str(store_root))
+    resolver = ResolverRegistry([LocalFilesystemResolver(allowed_roots=[tmp_path])])
+
+    safe = resolver.resolve_local_store(
+        _local_store_target(store, safe_link.name, _sha256(b"inside"))
+    )
+    escaped = resolver.resolve_local_store(
+        _local_store_target(store, escape_link.name, _sha256(b"outside"))
+    )
+
+    assert safe.status is ResolutionStatus.VERIFIED
+    assert safe.content == b"inside"
+    assert safe.uri == f"store://store/{safe_link.name}"
+    assert escaped.status is ResolutionStatus.UNRESOLVED
+    assert escaped.content is None
+    assert str(outside) not in (escaped.detail or "")
+
+
+def test_local_store_recovery_never_searches_global_sibling(tmp_path):
+    store_root = tmp_path / "store"
+    sibling_root = tmp_path / "sibling"
+    store_root.mkdir()
+    sibling_root.mkdir()
+    data = b"same content outside registered store"
+    _write(sibling_root, "moved.bin", data)
+    store = _data_store(StoreKind.LOCAL_FS, str(store_root))
+    target = _local_store_target(store, "missing.bin", _sha256(data))
+    registry = ResolverRegistry(
+        [
+            LocalFilesystemResolver(
+                allowed_roots=[tmp_path],
+                recovery=RecoveryPolicy(enabled=True),
+            )
+        ]
+    )
+
+    result = registry.resolve_local_store(target)
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.content is None
+
+
+def test_local_store_recovery_can_find_match_inside_same_store(tmp_path):
+    store_root = tmp_path / "store"
+    store_root.mkdir()
+    data = b"same content moved within registered store"
+    moved = _write(store_root, "moved.bin", data)
+    store = _data_store(StoreKind.LOCAL_FS, str(store_root))
+    target = _local_store_target(store, "missing.bin", _sha256(data))
+    registry = ResolverRegistry(
+        [
+            LocalFilesystemResolver(
+                allowed_roots=[tmp_path],
+                recovery=RecoveryPolicy(enabled=True),
+            )
+        ]
+    )
+
+    result = registry.resolve_local_store(target)
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == data
+    assert result.uri == "store://store/missing.bin"
+    assert result.source_system == "store"
+    assert result.detail == (
+        "Recovered within registered local store "
+        "(differs from reference locator)."
+    )
+    assert str(moved) not in (result.detail or "")
+
+
+def test_scoped_reader_uses_exact_store_policy_and_opened_stream_identity(tmp_path):
+    store_root = tmp_path / "store"
+    store_root.mkdir()
+    recorded = b"descriptor-owned store bytes"
+    replacement = b"replacement pathname bytes"
+    path = _write(store_root, "artifact.bin", recorded)
+    store = _data_store(StoreKind.LOCAL_FS, str(store_root))
+    target = _local_store_target(store, path.name, _sha256(recorded))
+    seen_policies: list[LocalPathPolicy] = []
+
+    class SwappingReader:
+        @contextmanager
+        def open_regular_file(self, requested_path):
+            assert os.fspath(requested_path) == os.path.realpath(path)
+            stream = BytesIO(recorded)
+            path.write_bytes(replacement)
+            try:
+                yield OpenedLocalFile(
+                    stream=stream,
+                    display_path=str(path),
+                    size_hint_bytes=len(recorded),
+                )
+            finally:
+                stream.close()
+
+    def reader_factory(policy):
+        seen_policies.append(policy)
+        return SwappingReader()
+
+    registry = ResolverRegistry(
+        [
+            LocalFilesystemResolver(
+                allowed_roots=[tmp_path],
+                file_reader_factory=reader_factory,
+            )
+        ]
+    )
+
+    result = registry.resolve_local_store(target)
+
+    assert len(seen_policies) == 2
+    assert seen_policies[0].canonical_roots == (os.path.realpath(tmp_path),)
+    assert seen_policies[1].canonical_roots == (os.path.realpath(store_root),)
+    assert path.read_bytes() == replacement
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == recorded
+    assert result.source_system == "store"
+    assert result.uri == "store://store/artifact.bin"
+    assert result.detail is None
+
+
+def test_scoped_root_second_canonicalization_failure_is_opaque_and_never_reads(
+    tmp_path, monkeypatch
+):
+    store_root = tmp_path / "store"
+    store_root.mkdir()
+    store = _data_store(StoreKind.LOCAL_FS, str(store_root))
+    target = _local_store_target(store, "artifact.bin", _sha256(b"x"))
+    reader_policies: list[LocalPathPolicy] = []
+
+    class UnexpectedReader:
+        @contextmanager
+        def open_regular_file(self, _requested_path):
+            raise AssertionError("failed store scoping reached the byte reader")
+            yield  # pragma: no cover
+
+    def reader_factory(policy):
+        reader_policies.append(policy)
+        return UnexpectedReader()
+
+    resolver = LocalFilesystemResolver(
+        allowed_roots=[tmp_path],
+        file_reader_factory=reader_factory,
+    )
+    original_realpath = artifact_resolution.os.path.realpath
+    calls = 0
+
+    def fail_second_store_realpath(path):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("store root changed")
+        return original_realpath(path)
+
+    monkeypatch.setattr(
+        artifact_resolution.os.path,
+        "realpath",
+        fail_second_store_realpath,
+    )
+
+    result = resolver.resolve_within_root(target)
+
+    assert calls == 2
+    assert len(reader_policies) == 1
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.uri == "store://store/artifact.bin"
+    assert result.detail == "Local store artifact is not authorized."
+    assert result.content is None
+
+
+def test_scoped_root_retarget_between_canonicalizations_never_changes_store(
+    tmp_path, monkeypatch
+):
+    store_root = tmp_path / "store"
+    sibling_root = tmp_path / "sibling"
+    store_root.mkdir()
+    sibling_root.mkdir()
+    store = _data_store(StoreKind.LOCAL_FS, str(store_root))
+    target = _local_store_target(store, "artifact.bin", _sha256(b"sibling"))
+    reader_policies: list[LocalPathPolicy] = []
+
+    class UnexpectedReader:
+        @contextmanager
+        def open_regular_file(self, _requested_path):
+            raise AssertionError("retargeted store root reached the byte reader")
+            yield  # pragma: no cover
+
+    def reader_factory(policy):
+        reader_policies.append(policy)
+        return UnexpectedReader()
+
+    resolver = LocalFilesystemResolver(
+        allowed_roots=[tmp_path],
+        file_reader_factory=reader_factory,
+    )
+    original_realpath = artifact_resolution.os.path.realpath
+    sibling_canonical = original_realpath(sibling_root)
+    calls = 0
+
+    def retarget_store_root(path):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            return sibling_canonical
+        return original_realpath(path)
+
+    monkeypatch.setattr(
+        artifact_resolution.os.path,
+        "realpath",
+        retarget_store_root,
+    )
+
+    result = resolver.resolve_within_root(target)
+
+    assert calls == 2
+    assert len(reader_policies) == 1
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.uri == "store://store/artifact.bin"
+    assert result.detail == "Local store artifact is not authorized."
+    assert result.observed_hash is None
+    assert result.content is None
+
+
 def test_registry_prefers_first_capable_resolver(tmp_path):
     data = b"first wins"
     path = _write(tmp_path, "a.txt", data)
@@ -2063,6 +2509,105 @@ def test_recovery_deduplicates_canonical_root_aliases(tmp_path):
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires Windows directory junctions")
+def test_windows_local_store_direct_safe_junction_verifies(tmp_path):
+    store_root = tmp_path / "store"
+    target_parent = store_root / "target-parent"
+    target_parent.mkdir(parents=True)
+    data = b"safe bytes through in-store junction"
+    _write(target_parent, "artifact.bin", data)
+    junction = store_root / "safe-junction"
+    completed = subprocess.run(
+        ["cmd.exe", "/d", "/c", "mklink", "/J", str(junction), str(target_parent)],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    assert completed.returncode == 0, (
+        f"mklink /J failed: stdout={completed.stdout!r} stderr={completed.stderr!r}"
+    )
+    store = _data_store(StoreKind.LOCAL_FS, str(store_root))
+    target = _local_store_target(
+        store,
+        "safe-junction/artifact.bin",
+        _sha256(data),
+    )
+
+    result = ResolverRegistry(
+        [LocalFilesystemResolver(allowed_roots=[tmp_path])]
+    ).resolve_local_store(target)
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == data
+    assert result.uri == "store://store/safe-junction/artifact.bin"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows directory junctions")
+def test_windows_local_store_direct_parent_swap_never_hashes_global_sibling(
+    tmp_path, monkeypatch
+):
+    store_root = tmp_path / "store"
+    parent = store_root / "victim-parent"
+    parent.mkdir(parents=True)
+    inside = _write(parent, "artifact.bin", b"in-store decoy")
+    moved_parent = store_root / "original-parent"
+    sibling_parent = tmp_path / "global-sibling"
+    sibling_parent.mkdir()
+    sibling_data = b"matching bytes outside registered store"
+    sibling = _write(sibling_parent, inside.name, sibling_data)
+    store = _data_store(StoreKind.LOCAL_FS, str(store_root))
+    target = _local_store_target(
+        store,
+        "victim-parent/artifact.bin",
+        _sha256(sibling_data),
+    )
+    resolver = LocalFilesystemResolver(allowed_roots=[tmp_path])
+    real_open = local_file_access._open_windows_descriptor
+    swapped = False
+
+    def swap_candidate_parent(planned_path):
+        nonlocal swapped
+        if not swapped and os.path.basename(planned_path) == inside.name:
+            parent.rename(moved_parent)
+            completed = subprocess.run(
+                [
+                    "cmd.exe",
+                    "/d",
+                    "/c",
+                    "mklink",
+                    "/J",
+                    str(parent),
+                    str(sibling_parent),
+                ],
+                capture_output=True,
+                check=False,
+                text=True,
+            )
+            assert completed.returncode == 0, (
+                f"mklink /J failed: stdout={completed.stdout!r} "
+                f"stderr={completed.stderr!r}"
+            )
+            swapped = True
+        return real_open(planned_path)
+
+    monkeypatch.setattr(
+        local_file_access,
+        "_open_windows_descriptor",
+        swap_candidate_parent,
+    )
+
+    result = ResolverRegistry([resolver]).resolve_local_store(target)
+
+    assert swapped is True
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.content is None
+    assert result.observed_hash is None
+    assert result.detail == (
+        "Local artifact is not an authorized readable regular file."
+    )
+    assert str(sibling) not in (result.detail or "")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows directory junctions")
 def test_windows_recovery_never_descends_through_junction_escape(tmp_path):
     root = tmp_path / "store"
     root.mkdir()
@@ -2152,6 +2697,69 @@ def test_windows_recovery_parent_swap_never_hashes_outside_target(
     assert swapped is True
     assert result.status is ResolutionStatus.UNRESOLVED
     assert result.content is None
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows directory junctions")
+def test_windows_local_store_recovery_final_handle_uses_store_not_global_scope(
+    tmp_path, monkeypatch
+):
+    store_root = tmp_path / "store"
+    parent = store_root / "victim-parent"
+    parent.mkdir(parents=True)
+    candidate = parent / "moved.bin"
+    candidate.write_bytes(b"scan-visible in-store decoy")
+    moved_parent = store_root / "original-parent"
+    sibling_parent = tmp_path / "global-sibling"
+    sibling_parent.mkdir()
+    sibling = sibling_parent / candidate.name
+    sibling_data = b"matching bytes in global sibling"
+    sibling.write_bytes(sibling_data)
+    store = _data_store(StoreKind.LOCAL_FS, str(store_root))
+    target = _local_store_target(store, "gone.bin", _sha256(sibling_data))
+    resolver = LocalFilesystemResolver(
+        allowed_roots=[tmp_path],
+        recovery=RecoveryPolicy(enabled=True),
+    )
+    real_open = local_file_access._open_windows_descriptor
+    swapped = False
+
+    def swap_candidate_parent(planned_path):
+        nonlocal swapped
+        if not swapped and os.path.basename(planned_path) == candidate.name:
+            parent.rename(moved_parent)
+            completed = subprocess.run(
+                [
+                    "cmd.exe",
+                    "/d",
+                    "/c",
+                    "mklink",
+                    "/J",
+                    str(parent),
+                    str(sibling_parent),
+                ],
+                capture_output=True,
+                check=False,
+                text=True,
+            )
+            assert completed.returncode == 0, (
+                f"mklink /J failed: stdout={completed.stdout!r} "
+                f"stderr={completed.stderr!r}"
+            )
+            swapped = True
+        return real_open(planned_path)
+
+    monkeypatch.setattr(
+        local_file_access,
+        "_open_windows_descriptor",
+        swap_candidate_parent,
+    )
+
+    result = ResolverRegistry([resolver]).resolve_local_store(target)
+
+    assert swapped is True
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.content is None
+    assert str(sibling) not in (result.detail or "")
 
 
 def test_recovery_respects_byte_budget(tmp_path):
