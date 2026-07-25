@@ -53,6 +53,7 @@ from lab_tracker.bounded_subprocess import (
     ProcessExecutor,
 )
 from lab_tracker.git_remote_policy import ApprovedGitRemote, GitRemotePolicy
+from lab_tracker.local_path_policy import LocalPathPolicy, native_local_path_from_uri
 from lab_tracker.models import DataStore, ExternalArtifactReference, StoreKind
 from lab_tracker.outbound_http import (
     DEFAULT_OUTBOUND_HTTP_DEADLINE_SECONDS,
@@ -576,10 +577,12 @@ class LocalFilesystemResolver(ArtifactResolver):
     UNRESOLVED, so resolution cannot be used to read arbitrary host files.
 
     When ``recovery`` is enabled and allowed roots are configured, a reference
-    whose file is missing at its URI (moved/renamed) triggers a bounded
+    whose file is missing at its URI (moved/renamed) triggers a file/byte-bounded
     content-hash search of those roots: a file whose recomputed digest matches
-    the reference is returned VERIFIED instead of UNRESOLVED. The scan never
-    reads outside the allowed roots and never relaxes the integrity gate.
+    the reference is returned VERIFIED instead of UNRESOLVED. Canonical
+    pathname checks constrain the scan to the allowed roots and the content
+    hash remains mandatory. Handle-bound protection against a concurrent path
+    replacement is tracked separately by ``lab-tracker-n5kp.59``.
     """
 
     def __init__(
@@ -588,13 +591,8 @@ class LocalFilesystemResolver(ArtifactResolver):
         *,
         recovery: RecoveryPolicy | None = None,
     ) -> None:
-        self._allowed_roots: list[str] | None
-        if allowed_roots is None:
-            self._allowed_roots = None
-        else:
-            self._allowed_roots = [
-                os.path.realpath(Path(root).expanduser()) for root in allowed_roots
-            ]
+        self._path_policy = LocalPathPolicy(allowed_roots)
+        self._recovery_roots = self._path_policy.canonical_roots
         self._recovery = recovery or RecoveryPolicy()
 
     def can_resolve(self, ref: ExternalArtifactReference) -> bool:
@@ -621,12 +619,14 @@ class LocalFilesystemResolver(ArtifactResolver):
                 detail=f"Cannot verify content hash with algorithm '{algorithm}'.",
             )
 
-        path = self._local_path(ref.uri)
-        if path is None:
-            return _unresolved(ref, detail="Reference URI is not a local filesystem path.")
-
-        real_path = os.path.realpath(path)
-        if not self._within_allowed_roots(real_path):
+        local_path = native_local_path_from_uri(ref.uri)
+        if local_path is None:
+            return _unresolved(
+                ref,
+                detail="Reference URI is not a local filesystem path.",
+            )
+        real_path = self._path_policy.authorize_path(local_path)
+        if real_path is None:
             return _unresolved(ref, detail="Path is outside the allowed resolver roots.")
         if not os.path.isfile(real_path):
             recovered = self._recover_by_hash(
@@ -657,27 +657,6 @@ class LocalFilesystemResolver(ArtifactResolver):
             content_type=content_type or "application/octet-stream",
         )
 
-    def _local_path(self, uri: str) -> str | None:
-        try:
-            parsed = urlsplit(uri)
-        except ValueError:
-            return None
-        scheme = parsed.scheme.lower()
-        if scheme == "file":
-            # file:///abs/path -> /abs/path ; tolerate a localhost netloc.
-            return unquote(parsed.path) or None
-        if scheme == "":
-            return uri or None
-        return None
-
-    def _within_allowed_roots(self, real_path: str) -> bool:
-        if self._allowed_roots is None:
-            return True
-        return any(
-            real_path == root or real_path.startswith(root + os.sep)
-            for root in self._allowed_roots
-        )
-
     def _recover_by_hash(
         self,
         ref: ExternalArtifactReference,
@@ -695,7 +674,7 @@ class LocalFilesystemResolver(ArtifactResolver):
         missing, so a match is exactly as trustworthy as one found at the URI.
         """
 
-        if not self._recovery.enabled or not self._allowed_roots:
+        if not self._recovery.enabled or not self._recovery_roots:
             return None
 
         algorithm, expected_digest = parse_content_hash(ref.content_hash)
@@ -711,8 +690,8 @@ class LocalFilesystemResolver(ArtifactResolver):
                 considered += 1
                 if considered > self._recovery.max_files:
                     return None
-                real = os.path.realpath(candidate)
-                if not self._within_allowed_roots(real):
+                real = self._path_policy.authorize_path(candidate)
+                if real is None:
                     continue
                 try:
                     size = os.path.getsize(real)
@@ -757,8 +736,11 @@ class LocalFilesystemResolver(ArtifactResolver):
         False yields the remainder. Symlinks are not followed during the walk.
         """
 
-        for root in self._allowed_roots or []:
-            for dirpath, _dirs, files in os.walk(root):
+        for root in self._recovery_roots or ():
+            for dirpath, directories, files in os.walk(
+                root, topdown=True, followlinks=False
+            ):
+                self._path_policy.prune_walk_directories(dirpath, directories)
                 for name in files:
                     is_match = target_name is not None and name == target_name
                     if prefer_name != is_match:
