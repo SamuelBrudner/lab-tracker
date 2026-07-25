@@ -17,6 +17,9 @@ export interface paths {
   "/auth/me": {
     get: operations["auth_me_auth_me_get"];
   };
+  "/auth/setup-readiness": {
+    get: operations["auth_setup_readiness_auth_setup_readiness_get"];
+  };
   "/auth/users": {
     get: operations["list_auth_users_auth_users_get"];
   };
@@ -55,6 +58,10 @@ export interface paths {
   "/projects/{project_id}/members": {
     get: operations["list_project_members_projects__project_id__members_get"];
   };
+  "/projects/{project_id}/graph-draft-batch-settings": {
+    get: operations["get_batch_settings_projects__project_id__graph_draft_batch_settings_get"];
+    patch: operations["update_batch_settings_projects__project_id__graph_draft_batch_settings_patch"];
+  };
   "/datasets": {
     get: operations["list_datasets_datasets_get"];
   };
@@ -69,6 +76,12 @@ export interface paths {
   };
   "/graph-drafts/{change_set_id}": {
     get: operations["get_graph_draft_graph_drafts__change_set_id__get"];
+  };
+  "/review-email/test": {
+    post: operations["enqueue_test_email_review_email_test_post"];
+  };
+  "/review-email/deliveries": {
+    get: operations["list_email_deliveries_review_email_deliveries_get"];
   };
 }
 
@@ -114,6 +127,15 @@ export interface operations {
       200: {
         content: {
           "application/json": components["schemas"]["Envelope_AuthUserRead_"];
+        };
+      };
+    };
+  };
+  "auth_setup_readiness_auth_setup_readiness_get": {
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["Envelope_AuthSetupReadiness_"];
         };
       };
     };
@@ -244,6 +266,24 @@ export interface operations {
       };
     };
   };
+  "get_batch_settings_projects__project_id__graph_draft_batch_settings_get": {
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["Envelope_GraphDraftBatchSettings_"];
+        };
+      };
+    };
+  };
+  "update_batch_settings_projects__project_id__graph_draft_batch_settings_patch": {
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["Envelope_GraphDraftBatchSettings_"];
+        };
+      };
+    };
+  };
   "list_datasets_datasets_get": {
     responses: {
       200: {
@@ -289,6 +329,24 @@ export interface operations {
       };
     };
   };
+  "enqueue_test_email_review_email_test_post": {
+    responses: {
+      201: {
+        content: {
+          "application/json": components["schemas"]["Envelope_ReviewEmailDelivery_"];
+        };
+      };
+    };
+  };
+  "list_email_deliveries_review_email_deliveries_get": {
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["ListEnvelope_ReviewEmailDelivery_"];
+        };
+      };
+    };
+  };
 }
 
 export interface components {
@@ -313,6 +371,12 @@ export interface components {
       "role": components["schemas"]["Role"];
       "status": string;
       "warning"?: (string | null);
+    };
+    "AuthSetupReadiness": {
+      "background_worker_enabled": boolean;
+      "provider": string;
+      "provider_credential_configured": boolean;
+      "scheduler_enabled": boolean;
     };
     "AuthTokenRead": {
       "access_token": string;
@@ -396,6 +460,10 @@ export interface components {
       "data": components["schemas"]["AuthInvitationRead"];
       "meta"?: (Record<string, unknown> | null);
     };
+    "Envelope_AuthSetupReadiness_": {
+      "data": components["schemas"]["AuthSetupReadiness"];
+      "meta"?: (Record<string, unknown> | null);
+    };
     "Envelope_AuthTokenRead_": {
       "data": components["schemas"]["AuthTokenRead"];
       "meta"?: (Record<string, unknown> | null);
@@ -424,6 +492,10 @@ export interface components {
       "data": components["schemas"]["GraphChangeSet"];
       "meta"?: (Record<string, unknown> | null);
     };
+    "Envelope_GraphDraftBatchSettings_": {
+      "data": components["schemas"]["GraphDraftBatchSettings"];
+      "meta"?: (Record<string, unknown> | null);
+    };
     "Envelope_Note_": {
       "data": components["schemas"]["Note"];
       "meta"?: (Record<string, unknown> | null);
@@ -434,6 +506,10 @@ export interface components {
     };
     "Envelope_PersonalAccessTokenRead_": {
       "data": components["schemas"]["PersonalAccessTokenRead"];
+      "meta"?: (Record<string, unknown> | null);
+    };
+    "Envelope_ReviewEmailDelivery_": {
+      "data": components["schemas"]["ReviewEmailDelivery"];
       "meta"?: (Record<string, unknown> | null);
     };
     "ExternalArtifactKind": "entity" | "activity";
@@ -518,6 +594,22 @@ export interface components {
       "updated_at"?: string;
     };
     "GraphChangeSetStatus": "drafting" | "ready" | "submitted" | "changes_requested" | "committing" | "rejected" | "failed" | "committed";
+    "GraphDraftBatchSettings": {
+      "cadence_minutes"?: number;
+      "created_at"?: string;
+      "email_notifications_enabled"?: boolean;
+      "enabled"?: boolean;
+      "next_run_at"?: (string | null);
+      "notification_email"?: (string | null);
+      "notification_email_confirmed_at"?: (string | null);
+      "project_id": string;
+      "run_at_local_time"?: string;
+      "settings_id": string;
+      "timezone_name"?: string;
+      "updated_at"?: string;
+      "updated_by"?: (string | null);
+      "user_id"?: (string | null);
+    };
     "GraphDraftMode": "graph_context" | "image_only" | "graph_batch";
     "GraphDraftSemanticType": "create_entity" | "update_entity" | "create_note" | "link_note_to_question" | "link_note_to_session" | "link_note_to_dataset" | "link_note_to_analysis" | "suggest_new_question" | "suggest_new_dataset" | "suggest_new_goal" | "link_node_to_goal" | "update_goal" | "suggest_followup" | "request_clarification";
     "ListEnvelope_AuthInvitationRead_": {
@@ -550,6 +642,10 @@ export interface components {
     };
     "ListEnvelope_Project_": {
       "data": Array<components["schemas"]["Project"]>;
+      "meta": components["schemas"]["PaginationMeta"];
+    };
+    "ListEnvelope_ReviewEmailDelivery_": {
+      "data": Array<components["schemas"]["ReviewEmailDelivery"]>;
       "meta": components["schemas"]["PaginationMeta"];
     };
     "Note": {
@@ -646,6 +742,26 @@ export interface components {
       "role": components["schemas"]["QuestionLinkRole"];
     };
     "QuestionLinkRole": "primary" | "secondary";
+    "ReviewEmailDelivery": {
+      "accepted_at"?: (string | null);
+      "attempt_count"?: number;
+      "change_set_id"?: (string | null);
+      "claim_token"?: (string | null);
+      "claimed_at"?: (string | null);
+      "created_at"?: string;
+      "delivery_id": string;
+      "destination_email": string;
+      "event_type"?: "review_ready" | "test";
+      "idempotency_key": string;
+      "last_error"?: (string | null);
+      "lease_expires_at"?: (string | null);
+      "next_attempt_at"?: (string | null);
+      "provider_message_id"?: (string | null);
+      "recipient_user_id"?: (string | null);
+      "status"?: components["schemas"]["ReviewEmailDeliveryStatus"];
+      "updated_at"?: string;
+    };
+    "ReviewEmailDeliveryStatus": "pending" | "sending" | "retryable" | "accepted" | "failed";
     "Role": "admin" | "editor" | "viewer";
   };
 }

@@ -20,6 +20,7 @@ SCOPED_OPERATIONS = (
     ("post", "/auth/login"),
     ("post", "/auth/refresh"),
     ("get", "/auth/me"),
+    ("get", "/auth/setup-readiness"),
     ("get", "/auth/users"),
     ("patch", "/auth/users/{user_id}"),
     ("get", "/auth/invitations"),
@@ -34,11 +35,15 @@ SCOPED_OPERATIONS = (
     ("delete", "/auth/tokens/{token_id}"),
     ("get", "/projects"),
     ("get", "/projects/{project_id}/members"),
+    ("get", "/projects/{project_id}/graph-draft-batch-settings"),
+    ("patch", "/projects/{project_id}/graph-draft-batch-settings"),
     ("get", "/datasets"),
     ("get", "/datasets/{dataset_id}"),
     ("get", "/notes"),
     ("get", "/notes/{note_id}"),
     ("get", "/graph-drafts/{change_set_id}"),
+    ("post", "/review-email/test"),
+    ("get", "/review-email/deliveries"),
 )
 
 
