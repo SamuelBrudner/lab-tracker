@@ -209,6 +209,7 @@ def test_posix_helper_accepts_only_a_plain_directory_without_output(
     assert capsys.readouterr() == ("", "")
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX open flags")
 def test_posix_helper_uses_o_exec_when_o_search_and_o_path_are_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -228,6 +229,7 @@ def test_posix_helper_uses_o_exec_when_o_search_and_o_path_are_unavailable(
     assert flags & execute_mode
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX open flags")
 def test_posix_helper_uses_darwin_o_exec_abi_when_python_omits_symbol(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
