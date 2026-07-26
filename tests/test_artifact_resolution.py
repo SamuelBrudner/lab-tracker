@@ -1577,7 +1577,7 @@ def test_malformed_legacy_http_uri_is_redacted_despite_mismatched_source_label()
         content_hash=_sha256(b"x"),
     )
 
-    result = ResolverRegistry().resolve(ref)
+    result = HttpResolver().resolve(ref)
     payload = result.to_json_dict()
 
     assert result.status is ResolutionStatus.UNRESOLVED
@@ -1585,7 +1585,7 @@ def test_malformed_legacy_http_uri_is_redacted_despite_mismatched_source_label()
     assert secret not in str(payload)
 
 
-def test_default_registry_dispatches_http():
+def test_default_registry_configures_working_http_resolver():
     body = b"served over http"
     client = FakeSafeHttpClient((FakeHttpResponse(chunks=(body,)),))
     policy = OutboundHttpPolicy(
@@ -1595,7 +1595,13 @@ def test_default_registry_dispatches_http():
         http_policy=policy,
         http_client=client,
     )
-    result = registry.resolve(_http_ref("https://store.example/x", _sha256(body)))
+    resolver = next(
+        candidate
+        for candidate in registry._resolvers
+        if isinstance(candidate, HttpResolver)
+    )
+    result = resolver.resolve(_http_ref("https://store.example/x", _sha256(body)))
+
     assert result.status is ResolutionStatus.VERIFIED
 
 
@@ -3023,7 +3029,7 @@ def test_registry_rejects_a_precomputed_resolved_artifact_subclass():
     assert "secret" not in str(result.to_json_dict())
 
 
-def test_registry_dispatches_prepared_external_reference_to_ordinary_resolver():
+def test_registry_rejects_raw_external_reference_without_resolver_work():
     resolver = _RecordingPreparedResolver()
     reference = ExternalArtifactReference(
         source_system="test",
@@ -3037,9 +3043,49 @@ def test_registry_dispatches_prepared_external_reference_to_ordinary_resolver():
         byte_range=(2, 5),
     )
 
-    assert result.uri == reference.uri
-    assert resolver.can_resolve_references == [reference]
-    assert resolver.calls == [("ordinary", reference, 17, (2, 5))]
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.source_system == "artifact"
+    assert result.uri == "artifact://[redacted]"
+    assert result.expected_hash == "unavailable"
+    assert result.observed_hash is None
+    assert result.content is None
+    assert result.detail == "Prepared artifact resolution target is unsupported."
+    assert resolver.can_resolve_references == []
+    assert resolver.calls == []
+
+
+@pytest.mark.parametrize("with_configured_registry", (False, True))
+def test_prepared_registry_selector_rejects_runtime_raw_reference_without_config(
+    monkeypatch,
+    with_configured_registry,
+):
+    reference = ExternalArtifactReference(
+        source_system="file",
+        uri="file:///operator/private/secret.bin",
+        content_hash=_sha256(b"secret"),
+    )
+    configured = ResolverRegistry([_RecordingPreparedResolver()])
+
+    def unexpected_registry_from_env():
+        raise AssertionError("unprepared target loaded resolver configuration")
+
+    monkeypatch.setattr(
+        artifact_resolution,
+        "registry_from_env",
+        unexpected_registry_from_env,
+    )
+
+    selected = artifact_resolution.resolver_registry_for_prepared_target(
+        reference,  # type: ignore[arg-type]
+        configured=configured if with_configured_registry else None,
+    )
+
+    assert selected is not configured
+    result = selected.resolve_prepared(reference)
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.source_system == "artifact"
+    assert result.uri == "artifact://[redacted]"
+    assert result.content is None
 
 
 def test_registry_dispatches_prepared_local_target_to_scoped_resolver(tmp_path):
@@ -3200,9 +3246,9 @@ def test_registry_validates_view_before_dispatch_or_target_inspection(
 
 def test_registry_rejects_an_exact_target_with_missing_identity_without_dispatch():
     resolver = _RecordingPreparedResolver()
-    malformed = object.__new__(ExternalArtifactReference)
+    malformed = object.__new__(HttpStoreResolutionTarget)
 
-    result = ResolverRegistry([resolver]).resolve(malformed)
+    result = ResolverRegistry([resolver]).resolve_prepared(malformed)
 
     assert result.status is ResolutionStatus.UNRESOLVED
     assert result.source_system == "artifact"
@@ -3220,17 +3266,11 @@ def test_hash_collector_rejects_missing_resolver_limit_before_consuming_chunks()
         )
 
 
-def test_every_registry_dispatch_path_rejects_custom_output_overruns(tmp_path):
+def test_every_scoped_registry_dispatch_path_rejects_custom_output_overruns(tmp_path):
     content = b"secret artifact content"
-    reference = ExternalArtifactReference(
-        source_system="custom",
-        uri="secret://ordinary-locator",
-        content_hash=_sha256(content),
-    )
     local_root = tmp_path / "store"
     local_root.mkdir()
     targets = (
-        reference,
         _local_store_target(
             _data_store(StoreKind.LOCAL_FS, str(local_root)),
             "artifact.bin",
@@ -3261,11 +3301,10 @@ def test_every_registry_dispatch_path_rejects_custom_output_overruns(tmp_path):
     resolver = OverproducingResolver()
     registry = ResolverRegistry([resolver])
     calls = (
-        lambda: registry.resolve(targets[0], max_bytes=1),
-        lambda: registry.resolve_local_store(targets[1], max_bytes=1),
-        lambda: registry.resolve_http_store(targets[2], max_bytes=1),
-        lambda: registry.resolve_rclone_store(targets[3], max_bytes=1),
-        lambda: registry.resolve_git_store(targets[4], max_bytes=1),
+        lambda: registry.resolve_local_store(targets[0], max_bytes=1),
+        lambda: registry.resolve_http_store(targets[1], max_bytes=1),
+        lambda: registry.resolve_rclone_store(targets[2], max_bytes=1),
+        lambda: registry.resolve_git_store(targets[3], max_bytes=1),
     )
 
     for call in calls:
@@ -3285,11 +3324,7 @@ def test_every_registry_dispatch_path_rejects_custom_output_overruns(tmp_path):
 def test_registry_rejects_self_consistent_output_for_a_different_artifact():
     requested = b"requested"
     substituted = b"substituted secret"
-    reference = ExternalArtifactReference(
-        source_system="custom",
-        uri="custom://requested",
-        content_hash=_sha256(requested),
-    )
+    target = _registered_http_target(content_hash=_sha256(requested))
 
     class SubstitutingResolver(_RecordingPreparedResolver):
         @staticmethod
@@ -3306,7 +3341,7 @@ def test_registry_rejects_self_consistent_output_for_a_different_artifact():
                 fetched_at=datetime.now(timezone.utc),
             )
 
-    result = ResolverRegistry([SubstitutingResolver()]).resolve(reference)
+    result = ResolverRegistry([SubstitutingResolver()]).resolve_prepared(target)
 
     assert result.status is ResolutionStatus.UNRESOLVED
     assert result.source_system == "artifact"
@@ -3318,17 +3353,11 @@ def test_registry_rejects_self_consistent_output_for_a_different_artifact():
 def test_registry_rehashes_a_complete_verified_result_before_accepting_content():
     requested = b"right"
     substituted = b"wrong"
-    reference = ExternalArtifactReference(
-        source_system="custom",
-        uri="custom://requested",
-        content_hash=_sha256(requested),
-    )
+    target = _registered_http_target(content_hash=_sha256(requested))
 
-    class LyingResolver(ArtifactResolver):
-        def can_resolve(self, _ref):
-            return True
-
-        def resolve(self, ref, *, max_bytes=DEFAULT_MAX_BYTES, byte_range=None):
+    class LyingResolver(_RecordingPreparedResolver):
+        @staticmethod
+        def _result(ref):
             return ResolvedArtifact(
                 status=ResolutionStatus.VERIFIED,
                 source_system=ref.source_system,
@@ -3340,7 +3369,7 @@ def test_registry_rehashes_a_complete_verified_result_before_accepting_content()
                 fetched_at=datetime.now(timezone.utc),
             )
 
-    result = ResolverRegistry([LyingResolver()]).resolve(reference)
+    result = ResolverRegistry([LyingResolver()]).resolve_prepared(target)
 
     assert result.status is ResolutionStatus.UNRESOLVED
     assert result.source_system == "artifact"
@@ -3350,20 +3379,20 @@ def test_registry_rehashes_a_complete_verified_result_before_accepting_content()
 def test_registry_snapshots_identity_before_a_resolver_can_mutate_its_reference():
     requested = b"requested"
     substituted = b"substituted secret"
-    reference = ExternalArtifactReference(
-        source_system="custom",
-        uri="custom://requested",
-        content_hash=_sha256(requested),
-    )
+    target = _registered_http_target(content_hash=_sha256(requested))
 
-    class MutatingResolver(ArtifactResolver):
-        def can_resolve(self, ref):
+    class MutatingResolver(_RecordingPreparedResolver):
+        def resolve_within_http_store(
+            self,
+            target,
+            *,
+            max_bytes=DEFAULT_MAX_BYTES,
+            byte_range=None,
+        ):
+            ref = target.logical_reference
             object.__setattr__(ref, "source_system", "secret-source")
             object.__setattr__(ref, "uri", "secret://different-artifact")
             object.__setattr__(ref, "content_hash", _sha256(substituted))
-            return True
-
-        def resolve(self, ref, *, max_bytes=DEFAULT_MAX_BYTES, byte_range=None):
             return ResolvedArtifact(
                 status=ResolutionStatus.VERIFIED,
                 source_system=ref.source_system,
@@ -3375,7 +3404,7 @@ def test_registry_snapshots_identity_before_a_resolver_can_mutate_its_reference(
                 fetched_at=datetime.now(timezone.utc),
             )
 
-    result = ResolverRegistry([MutatingResolver()]).resolve(reference)
+    result = ResolverRegistry([MutatingResolver()]).resolve_prepared(target)
 
     assert result.status is ResolutionStatus.UNRESOLVED
     assert result.source_system == "artifact"
@@ -3386,14 +3415,12 @@ def test_registry_snapshots_identity_before_a_resolver_can_mutate_its_reference(
 
 def test_registry_returns_a_detached_snapshot_of_an_accepted_result():
     content = b"ok"
-    reference = ExternalArtifactReference(
-        source_system="custom",
-        uri="custom://requested",
-        content_hash=_sha256(content),
-    )
+    target = _registered_http_target(content_hash=_sha256(content))
+    reference = target.logical_reference
 
-    class RetainingResolver(ArtifactResolver):
+    class RetainingResolver(_RecordingPreparedResolver):
         def __init__(self):
+            super().__init__()
             self.returned = ResolvedArtifact(
                 status=ResolutionStatus.VERIFIED,
                 source_system=reference.source_system,
@@ -3405,14 +3432,11 @@ def test_registry_returns_a_detached_snapshot_of_an_accepted_result():
                 fetched_at=datetime.now(timezone.utc),
             )
 
-        def can_resolve(self, _ref):
-            return True
-
-        def resolve(self, _ref, *, max_bytes=DEFAULT_MAX_BYTES, byte_range=None):
+        def _result(self, _ref):
             return self.returned
 
     resolver = RetainingResolver()
-    result = ResolverRegistry([resolver]).resolve(reference)
+    result = ResolverRegistry([resolver]).resolve_prepared(target)
 
     assert result is not resolver.returned
     object.__setattr__(resolver.returned, "content", b"mutated secret")
@@ -3423,18 +3447,12 @@ def test_registry_returns_a_detached_snapshot_of_an_accepted_result():
 
 
 def test_registry_preserves_safe_unresolved_diagnostics_and_normalizes_timestamp():
-    reference = ExternalArtifactReference(
-        source_system="custom",
-        uri="custom://requested",
-        content_hash=_sha256(b"requested"),
-    )
+    target = _registered_http_target(content_hash=_sha256(b"requested"))
     offset = timezone(timedelta(hours=2))
 
-    class DiagnosticResolver(ArtifactResolver):
-        def can_resolve(self, _ref):
-            return True
-
-        def resolve(self, ref, *, max_bytes=DEFAULT_MAX_BYTES, byte_range=None):
+    class DiagnosticResolver(_RecordingPreparedResolver):
+        @staticmethod
+        def _result(ref):
             return ResolvedArtifact(
                 status=ResolutionStatus.UNRESOLVED,
                 source_system=ref.source_system,
@@ -3448,7 +3466,7 @@ def test_registry_preserves_safe_unresolved_diagnostics_and_normalizes_timestamp
                 detail="Safe diagnostic metadata.",
             )
 
-    result = ResolverRegistry([DiagnosticResolver()]).resolve(reference)
+    result = ResolverRegistry([DiagnosticResolver()]).resolve_prepared(target)
 
     assert result.status is ResolutionStatus.UNRESOLVED
     assert result.observed_hash == _sha256(b"partial")
@@ -3460,21 +3478,15 @@ def test_registry_preserves_safe_unresolved_diagnostics_and_normalizes_timestamp
 
 
 def test_registry_rejects_an_exact_result_with_missing_fields_without_raising():
-    reference = ExternalArtifactReference(
-        source_system="custom",
-        uri="custom://requested",
-        content_hash=_sha256(b"requested"),
-    )
+    target = _registered_http_target(content_hash=_sha256(b"requested"))
     malformed = object.__new__(ResolvedArtifact)
 
-    class MissingFieldsResolver(ArtifactResolver):
-        def can_resolve(self, _ref):
-            return True
-
-        def resolve(self, _ref, *, max_bytes=DEFAULT_MAX_BYTES, byte_range=None):
+    class MissingFieldsResolver(_RecordingPreparedResolver):
+        @staticmethod
+        def _result(_ref):
             return malformed
 
-    result = ResolverRegistry([MissingFieldsResolver()]).resolve(reference)
+    result = ResolverRegistry([MissingFieldsResolver()]).resolve_prepared(target)
 
     assert result.status is ResolutionStatus.UNRESOLVED
     assert result.source_system == "artifact"
@@ -3489,17 +3501,11 @@ def test_registry_rejects_a_semantically_naive_aware_datetime():
         def dst(self, _dt):
             return None
 
-    reference = ExternalArtifactReference(
-        source_system="custom",
-        uri="custom://requested",
-        content_hash=_sha256(b"requested"),
-    )
+    target = _registered_http_target(content_hash=_sha256(b"requested"))
 
-    class NaiveTimestampResolver(ArtifactResolver):
-        def can_resolve(self, _ref):
-            return True
-
-        def resolve(self, ref, *, max_bytes=DEFAULT_MAX_BYTES, byte_range=None):
+    class NaiveTimestampResolver(_RecordingPreparedResolver):
+        @staticmethod
+        def _result(ref):
             return ResolvedArtifact(
                 status=ResolutionStatus.UNRESOLVED,
                 source_system=ref.source_system,
@@ -3508,7 +3514,7 @@ def test_registry_rejects_a_semantically_naive_aware_datetime():
                 fetched_at=datetime(2026, 1, 1, tzinfo=SemanticallyNaiveTimezone()),
             )
 
-    result = ResolverRegistry([NaiveTimestampResolver()]).resolve(reference)
+    result = ResolverRegistry([NaiveTimestampResolver()]).resolve_prepared(target)
 
     assert result.status is ResolutionStatus.UNRESOLVED
     assert result.source_system == "artifact"
@@ -3532,11 +3538,8 @@ def test_registry_rejects_malformed_exact_result_fields_without_serializing_them
     field,
     value,
 ):
-    reference = ExternalArtifactReference(
-        source_system="custom",
-        uri="custom://requested",
-        content_hash=_sha256(b"requested"),
-    )
+    target = _registered_http_target(content_hash=_sha256(b"requested"))
+    reference = target.logical_reference
     malformed = ResolvedArtifact(
         status=ResolutionStatus.UNRESOLVED,
         source_system=reference.source_system,
@@ -3552,7 +3555,7 @@ def test_registry_rejects_malformed_exact_result_fields_without_serializing_them
         def _result(_ref):
             return malformed
 
-    result = ResolverRegistry([MalformedResolver()]).resolve(reference)
+    result = ResolverRegistry([MalformedResolver()]).resolve_prepared(target)
 
     assert result.status is ResolutionStatus.UNRESOLVED
     assert result.source_system == "artifact"
@@ -3573,11 +3576,7 @@ def test_registry_rejects_inconsistent_verified_size_and_truncation(
     truncated,
 ):
     content = b"ok"
-    reference = ExternalArtifactReference(
-        source_system="custom",
-        uri="custom://requested",
-        content_hash=_sha256(content),
-    )
+    target = _registered_http_target(content_hash=_sha256(content))
 
     class InconsistentResolver(_RecordingPreparedResolver):
         @staticmethod
@@ -3594,28 +3593,25 @@ def test_registry_rejects_inconsistent_verified_size_and_truncation(
                 fetched_at=datetime.now(timezone.utc),
             )
 
-    result = ResolverRegistry([InconsistentResolver()]).resolve(reference)
+    resolver = InconsistentResolver()
+    result = ResolverRegistry([resolver]).resolve_prepared(target)
 
     assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.source_system == "artifact"
     assert result.content is None
+    assert len(resolver.calls) == 1
 
 
 def test_registry_rejects_a_resolver_result_subclass():
     content = b"content"
-    reference = ExternalArtifactReference(
-        source_system="custom",
-        uri="secret://ordinary-locator",
-        content_hash=_sha256(content),
-    )
+    target = _registered_http_target(content_hash=_sha256(content))
 
     class CustomResolvedArtifact(ResolvedArtifact):
         pass
 
-    class CustomResolver(ArtifactResolver):
-        def can_resolve(self, _ref):
-            return True
-
-        def resolve(self, ref, *, max_bytes=DEFAULT_MAX_BYTES, byte_range=None):
+    class CustomResolver(_RecordingPreparedResolver):
+        @staticmethod
+        def _result(ref):
             return CustomResolvedArtifact(
                 status=ResolutionStatus.UNRESOLVED,
                 source_system=ref.source_system,
@@ -3624,25 +3620,31 @@ def test_registry_rejects_a_resolver_result_subclass():
                 fetched_at=datetime.now(timezone.utc),
             )
 
-    result = ResolverRegistry([CustomResolver()]).resolve(reference)
+    result = ResolverRegistry([CustomResolver()]).resolve_prepared(target)
 
     assert result.status is ResolutionStatus.UNRESOLVED
     assert result.source_system == "artifact"
     assert result.uri == "artifact://[redacted]"
 
 
-def test_registry_dispatches_to_matching_resolver(tmp_path):
+def test_default_registry_configures_working_local_resolver(tmp_path):
     data = b"hello"
     path = _write(tmp_path, "a.txt", data)
     registry = default_registry()
+    resolver = next(
+        candidate
+        for candidate in registry._resolvers
+        if isinstance(candidate, LocalFilesystemResolver)
+    )
 
-    result = registry.resolve(_local_ref(path, _sha256(data)))
+    result = resolver.resolve(_local_ref(path, _sha256(data)))
 
     assert result.status is ResolutionStatus.VERIFIED
 
 
-def test_registry_unresolved_when_no_resolver_matches():
-    registry = default_registry()
+def test_registry_resolve_denies_direct_reference_without_adapter_dispatch():
+    resolver = _RecordingPreparedResolver()
+    registry = ResolverRegistry([resolver])
     ref = ExternalArtifactReference(
         source_system="s3", uri="s3://bucket/key", content_hash=_sha256(b"x")
     )
@@ -3650,16 +3652,26 @@ def test_registry_unresolved_when_no_resolver_matches():
     result = registry.resolve(ref)
 
     assert result.status is ResolutionStatus.UNRESOLVED
-    assert "s3" in (result.detail or "")
+    assert result.source_system == "artifact"
+    assert result.uri == "artifact://[redacted]"
+    assert result.expected_hash == "unavailable"
+    assert result.detail == "Direct artifact references are metadata only."
+    assert resolver.can_resolve_references == []
+    assert resolver.calls == []
 
 
-def test_registry_allowed_roots_thread_through(tmp_path):
+def test_default_registry_threads_allowed_roots_into_local_resolver(tmp_path):
     allowed = tmp_path / "store"
     allowed.mkdir()
     outside = _write(tmp_path, "secret.txt", b"nope")
     registry = default_registry(allowed_roots=[allowed])
+    resolver = next(
+        candidate
+        for candidate in registry._resolvers
+        if isinstance(candidate, LocalFilesystemResolver)
+    )
 
-    result = registry.resolve(_local_ref(outside, _sha256(b"nope")))
+    result = resolver.resolve(_local_ref(outside, _sha256(b"nope")))
 
     assert result.status is ResolutionStatus.UNRESOLVED
 
@@ -3678,7 +3690,7 @@ def test_default_registry_preserves_explicit_local_policy_identity(tmp_path):
         for candidate in registry._resolvers
         if isinstance(candidate, LocalFilesystemResolver)
     )
-    result = registry.resolve(_local_ref(inside, _sha256(data)))
+    result = resolver.resolve(_local_ref(inside, _sha256(data)))
 
     assert isinstance(resolver._file_reader, BoundedLocalFilesystemOperations)
     assert resolver._recovery_enumerator is resolver._file_reader
@@ -3948,30 +3960,13 @@ def test_scoped_resolution_passes_the_snapshotted_raw_store_target_to_broker(tmp
     assert result.content is None
 
 
-def test_registry_prefers_first_capable_resolver(tmp_path):
+def test_local_resolver_resolves_matching_reference_directly(tmp_path):
     data = b"first wins"
     path = _write(tmp_path, "a.txt", data)
 
-    class StubResolver(ArtifactResolver):
-        def can_resolve(self, ref):
-            return True
+    result = LocalFilesystemResolver().resolve(_local_ref(path, _sha256(data)))
 
-        def resolve(self, ref, *, max_bytes=DEFAULT_MAX_BYTES, byte_range=None):
-            from datetime import datetime, timezone
-
-            return ResolvedArtifact(
-                status=ResolutionStatus.DRIFTED,
-                source_system=ref.source_system,
-                uri=ref.uri,
-                expected_hash=ref.content_hash,
-                fetched_at=datetime.now(timezone.utc),
-                detail="stub",
-            )
-
-    registry = ResolverRegistry([LocalFilesystemResolver(), StubResolver()])
-    result = registry.resolve(_local_ref(path, _sha256(data)))
-
-    assert result.status is ResolutionStatus.VERIFIED  # local resolver matched first
+    assert result.status is ResolutionStatus.VERIFIED
 
 
 def test_resolved_artifact_to_json_dict_omits_raw_bytes(tmp_path):
@@ -5012,7 +5007,13 @@ def test_registry_from_env_enables_recovery(tmp_path, monkeypatch):
     monkeypatch.setenv("LAB_TRACKER_RESOLVER_ALLOWED_ROOTS", str(root))
     monkeypatch.setenv("LAB_TRACKER_RESOLVER_RECOVERY", "1")
 
-    result = registry_from_env().resolve(_local_ref(missing, _sha256(data)))
+    registry = registry_from_env()
+    resolver = next(
+        candidate
+        for candidate in registry._resolvers
+        if isinstance(candidate, LocalFilesystemResolver)
+    )
+    result = resolver.resolve(_local_ref(missing, _sha256(data)))
 
     assert result.status is ResolutionStatus.VERIFIED
     assert result.content == data
@@ -5027,7 +5028,13 @@ def test_registry_from_env_recovery_off_by_default(tmp_path, monkeypatch):
     monkeypatch.setenv("LAB_TRACKER_RESOLVER_ALLOWED_ROOTS", str(root))
     monkeypatch.delenv("LAB_TRACKER_RESOLVER_RECOVERY", raising=False)
 
-    result = registry_from_env().resolve(_local_ref(missing, _sha256(data)))
+    registry = registry_from_env()
+    resolver = next(
+        candidate
+        for candidate in registry._resolvers
+        if isinstance(candidate, LocalFilesystemResolver)
+    )
+    result = resolver.resolve(_local_ref(missing, _sha256(data)))
 
     assert result.status is ResolutionStatus.UNRESOLVED
 
@@ -5112,7 +5119,7 @@ def test_registry_from_env_explicit_local_policy_overrides_environment_without_p
         for candidate in registry._resolvers
         if isinstance(candidate, LocalFilesystemResolver)
     )
-    result = registry.resolve(_local_ref(inside, _sha256(data)))
+    result = resolver.resolve(_local_ref(inside, _sha256(data)))
 
     assert not policy
     assert isinstance(resolver._file_reader, BoundedLocalFilesystemOperations)
@@ -6025,8 +6032,9 @@ def test_registry_dispatches_git(tmp_path):
             _git_resolver(runner=_fake_git_runner(blob=data), cache_root=tmp_path),
         ]
     )
+    target = _git_store_target(content_hash=_sha256(data))
 
-    result = registry.resolve(_git_ref(_sha256(data)))
+    result = registry.resolve_prepared(target)
 
     assert result.status is ResolutionStatus.VERIFIED
 
@@ -6209,7 +6217,13 @@ def test_git_resolver_evicts_cache_over_quota(tmp_path):
 def test_registry_from_env_git_denies_remotes_by_default(monkeypatch):
     monkeypatch.delenv("LAB_TRACKER_GIT_ALLOWED_REMOTES", raising=False)
 
-    result = registry_from_env().resolve(_git_ref(_sha256(b"x")))
+    registry = registry_from_env()
+    resolver = next(
+        candidate
+        for candidate in registry._resolvers
+        if isinstance(candidate, GitResolver)
+    )
+    result = resolver.resolve(_git_ref(_sha256(b"x")))
 
     assert result.status is ResolutionStatus.UNRESOLVED
     assert "allowlist" in (result.detail or "")
@@ -6218,7 +6232,13 @@ def test_registry_from_env_git_denies_remotes_by_default(monkeypatch):
 def test_registry_from_env_git_allowlist_excludes_unlisted_remote(monkeypatch):
     monkeypatch.setenv("LAB_TRACKER_GIT_ALLOWED_REMOTES", "https://other.example/")
 
-    result = registry_from_env().resolve(_git_ref(_sha256(b"x")))
+    registry = registry_from_env()
+    resolver = next(
+        candidate
+        for candidate in registry._resolvers
+        if isinstance(candidate, GitResolver)
+    )
+    result = resolver.resolve(_git_ref(_sha256(b"x")))
 
     assert result.status is ResolutionStatus.UNRESOLVED
     assert "allowlist" in (result.detail or "")
@@ -6495,7 +6515,15 @@ def test_default_registry_shares_even_a_falsey_process_executor():
 def test_registry_from_env_rclone_denies_remotes_by_default(monkeypatch):
     monkeypatch.delenv("LAB_TRACKER_RCLONE_ALLOWED_REMOTES", raising=False)
 
-    result = registry_from_env().resolve(_rclone_ref("rclone://any-remote/x.bin", _sha256(b"x")))
+    registry = registry_from_env()
+    resolver = next(
+        candidate
+        for candidate in registry._resolvers
+        if isinstance(candidate, RcloneResolver)
+    )
+    result = resolver.resolve(
+        _rclone_ref("rclone://any-remote/x.bin", _sha256(b"x"))
+    )
 
     assert result.status is ResolutionStatus.UNRESOLVED
     assert "allowlist" in (result.detail or "")
@@ -6523,12 +6551,19 @@ def test_registry_from_env_rclone_allowlist_admits_named_remote(monkeypatch):
     monkeypatch.setenv("LAB_TRACKER_RCLONE_ALLOWED_REMOTES", "lab-onedrive,backup")
 
     registry = registry_from_env()
-    denied = registry.resolve(_rclone_ref("rclone://other/x.bin", _sha256(b"x")))
+    resolver = next(
+        candidate
+        for candidate in registry._resolvers
+        if isinstance(candidate, RcloneResolver)
+    )
+    denied = resolver.resolve(_rclone_ref("rclone://other/x.bin", _sha256(b"x")))
 
     assert denied.status is ResolutionStatus.UNRESOLVED
     assert "allowlist" in (denied.detail or "")
     # A listed remote passes the allowlist gate (and then fails on the real
     # rclone binary being absent/unreachable in this environment, which is a
     # different detail message).
-    allowed = registry.resolve(_rclone_ref("rclone://lab-onedrive/x.bin", _sha256(b"x")))
+    allowed = resolver.resolve(
+        _rclone_ref("rclone://lab-onedrive/x.bin", _sha256(b"x"))
+    )
     assert "allowlist" not in (allowed.detail or "")

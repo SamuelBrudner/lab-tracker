@@ -1145,6 +1145,96 @@ def test_resolve_artifact_tool_rejects_invalid_bounds_before_client_acquisition(
     assert payload["error"]["operation"] == "lab_tracker_resolve_artifact"
 
 
+def test_resolve_artifact_tool_denies_direct_reference_through_http_application(
+    client,
+    admin_auth_headers,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from lab_tracker.mcp_tools import read as read_tools
+
+    content = b"operator-owned bytes"
+    artifact = tmp_path / "private.bin"
+    artifact.write_bytes(content)
+    project_id = client.post(
+        "/projects",
+        json={"name": "MCP direct-reference denial"},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    question_id = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Can MCP bypass registered stores?",
+            "question_type": "descriptive",
+            "status": "active",
+        },
+        headers=admin_auth_headers,
+    ).json()["data"]["question_id"]
+    dataset_response = client.post(
+        "/datasets",
+        json={
+            "project_id": project_id,
+            "primary_question_id": question_id,
+            "status": "committed",
+            "commit_manifest": {
+                "external_artifacts": [
+                    {
+                        "source_system": "local",
+                        "uri": artifact.as_uri(),
+                        "content_hash": (
+                            "sha256:" + hashlib.sha256(content).hexdigest()
+                        ),
+                    }
+                ]
+            },
+        },
+        headers=admin_auth_headers,
+    )
+    assert dataset_response.status_code == 201, dataset_response.text
+    dataset_id = dataset_response.json()["data"]["dataset_id"]
+
+    class UnexpectedRegistry:
+        def resolve_prepared(self, *_args, **_kwargs):
+            raise AssertionError("MCP direct reference reached resolver dispatch")
+
+    client.app.state.resolver_registry = UnexpectedRegistry()
+
+    def bridge_to_application(request: httpx.Request) -> httpx.Response:
+        response = client.request(
+            request.method,
+            request.url.path,
+            json=json.loads(request.content),
+            headers=admin_auth_headers,
+        )
+        return httpx.Response(response.status_code, json=response.json())
+
+    api_client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(base_url="http://testserver"),
+        transport=httpx.MockTransport(bridge_to_application),
+    )
+    read_tools.close_cached_read_client()
+    monkeypatch.setattr(read_tools, "client_from_env", lambda: api_client)
+
+    try:
+        payload = read_tools.lab_tracker_resolve_artifact(
+            entity_type="dataset",
+            entity_id=dataset_id,
+        )
+    finally:
+        read_tools.close_cached_read_client()
+
+    data = payload["data"]
+    assert data["status"] == "unresolved"
+    assert data["source_system"] == "store"
+    assert data["uri"] == "store://[redacted]"
+    assert data["observed_hash"] is None
+    assert data["content_base64"] is None
+    assert data["returned_bytes"] == 0
+    assert artifact.as_uri() not in json.dumps(payload)
+    assert content.decode() not in json.dumps(payload)
+
+
 @pytest.mark.parametrize("status", ["drifted", "unresolved", None, "future-status"])
 def test_resolve_artifact_tool_suppresses_unverified_content(monkeypatch, status) -> None:
     from lab_tracker.mcp_tools import read as read_tools

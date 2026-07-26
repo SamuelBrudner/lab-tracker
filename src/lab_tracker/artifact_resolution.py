@@ -1,10 +1,12 @@
-"""On-demand resolution of external artifact pointers.
+"""On-demand resolution of registered external-artifact store pointers.
 
 An :class:`~lab_tracker.models.ExternalArtifactReference` is a *pointer* — a
-``source_system`` + ``uri`` + ``content_hash`` — not bytes. This module turns
-that pointer into a bounded, integrity-checked view of its content on demand, so
-an assistant reasoning over the graph can pull content that was never captured in
-the original metadata snapshot.
+``source_system`` + ``uri`` + ``content_hash`` — not bytes. The application
+authorizes a canonical registered-store reference and prepares a narrow target;
+this module turns that target into a bounded, integrity-checked view on demand.
+Raw filesystem, URL, rclone, and Git locators remain inert metadata at the
+public registry boundary. Concrete direct resolver methods are trusted internal
+primitives only.
 
 Design: ``docs/external-artifact-resolution-design.md`` and
 ``docs/data-store-registry-design.md``.
@@ -634,8 +636,7 @@ class ScopedGitStoreResolver(ABC):
 
 
 PreparedArtifactResolutionTarget: TypeAlias = (
-    ExternalArtifactReference
-    | LocalStoreResolutionTarget
+    LocalStoreResolutionTarget
     | HttpStoreResolutionTarget
     | RcloneStoreResolutionTarget
     | GitStoreResolutionTarget
@@ -656,7 +657,7 @@ class ArtifactResolutionIdentity:
 
 
 class ResolverRegistry:
-    """Dispatches a reference to the first resolver that can handle it."""
+    """Dispatch exact prepared store targets; reject raw references."""
 
     def __init__(self, resolvers: Iterable[ArtifactResolver] | None = None) -> None:
         self._resolvers: list[ArtifactResolver] = list(resolvers or [])
@@ -710,12 +711,6 @@ class ResolverRegistry:
                 max_bytes=bounds.max_bytes,
                 byte_range=bounds.byte_range,
             )
-        if type(runtime_target) is ExternalArtifactReference:
-            return self.resolve(
-                runtime_target,
-                max_bytes=bounds.max_bytes,
-                byte_range=bounds.byte_range,
-            )
         return _sanitized_unresolved_result("Prepared artifact resolution target is unsupported.")
 
     def resolve(
@@ -725,25 +720,17 @@ class ResolverRegistry:
         max_bytes: int = DEFAULT_MAX_BYTES,
         byte_range: tuple[int, int] | None = None,
     ) -> ResolvedArtifact:
-        bounds = ArtifactContentBounds.from_resolver(max_bytes, byte_range)
-        identity = snapshot_artifact_resolution_identity(ref)
-        if identity is None:
-            return _sanitized_unresolved_result("Artifact resolution target is invalid.")
-        for resolver in self._resolvers:
-            if resolver.can_resolve(ref):
-                result = resolver.resolve(
-                    ref,
-                    max_bytes=bounds.max_bytes,
-                    byte_range=bounds.byte_range,
-                )
-                return sanitize_artifact_resolution_result(
-                    result,
-                    identity=identity,
-                    bounds=bounds,
-                )
-        return _unresolved_for_identity(
-            identity,
-            detail=(f"No resolver registered for source_system '{identity.source_system}'."),
+        """Retain direct references as metadata without granting resolver authority.
+
+        Application resolution is deliberately store-relative. Concrete
+        adapters keep their direct methods as trusted implementation primitives,
+        but the public registry never turns a persisted raw locator into host,
+        network, credential, cache, or subprocess work.
+        """
+
+        ArtifactContentBounds.from_resolver(max_bytes, byte_range)
+        return _sanitized_unresolved_result(
+            "Direct artifact references are metadata only.",
         )
 
     def resolve_local_store(
@@ -880,19 +867,16 @@ def resolver_registry_for_prepared_target(
     *,
     configured: ResolverRegistry | None,
 ) -> ResolverRegistry:
-    """Select a registry without loading adapter config for a static result.
+    """Select adapter configuration only for an exact scoped store target."""
 
-    An injected registry remains authoritative, including for precomputed
-    results, so composition roots and tests retain one observable boundary.
-    Without an injection, a precomputed result needs no adapters and must not be
-    replaced by an unrelated resolver-configuration failure.
-    """
-
-    if configured is not None:
-        return configured
-    if type(target) is ResolvedArtifact:
+    if not (
+        type(target) is LocalStoreResolutionTarget
+        or type(target) is HttpStoreResolutionTarget
+        or type(target) is RcloneStoreResolutionTarget
+        or type(target) is GitStoreResolutionTarget
+    ):
         return ResolverRegistry()
-    return registry_from_env()
+    return configured if configured is not None else registry_from_env()
 
 
 def _unresolved(ref: ExternalArtifactReference, *, detail: str) -> ResolvedArtifact:

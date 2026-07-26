@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 import hashlib
+from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timezone
+from threading import Barrier, Event, Lock
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
 
-from lab_tracker.application.context_queries import ContextQueries
+from lab_tracker.application.context_queries import (
+    ContextQueries,
+    PreparedExternalArtifactResolution,
+)
 from lab_tracker.artifact_resolution import (
     GitStoreResolutionTarget,
     HttpStoreResolutionTarget,
@@ -24,7 +30,7 @@ from lab_tracker.artifact_resolution_limits import (
     MAX_INLINE_ARTIFACT_BYTES,
 )
 from lab_tracker.auth import AuthContext, Role
-from lab_tracker.errors import ValidationError
+from lab_tracker.errors import NotFoundError, ValidationError
 from lab_tracker.models import (
     DataStore,
     ExternalArtifactReference,
@@ -36,6 +42,26 @@ def _sha256(content: bytes) -> str:
     return f"sha256:{hashlib.sha256(content).hexdigest()}"
 
 
+def _http_store_fixture(
+    *,
+    locator: str = "artifact.bin",
+) -> tuple[UUID, ExternalArtifactReference, DataStore]:
+    project_id = uuid4()
+    reference = ExternalArtifactReference.for_store(
+        store_name="web",
+        locator=locator,
+        content_hash=_sha256(b"ok"),
+    )
+    store = DataStore(
+        store_id=uuid4(),
+        project_id=project_id,
+        name="web",
+        kind=StoreKind.HTTP,
+        root="https://files.example/base",
+    )
+    return project_id, reference, store
+
+
 class _ContextApi:
     def __init__(self, *, project_id: UUID, reference: ExternalArtifactReference) -> None:
         self.project_id = project_id
@@ -44,13 +70,26 @@ class _ContextApi:
         self.raise_on_read = False
 
     def get_dataset_for_read(self, _dataset_id: UUID, *, actor: AuthContext):
+        return self._authorized_entity(actor, "commit_manifest")
+
+    def get_analysis_for_read(self, _analysis_id: UUID, *, actor: AuthContext):
+        return self._authorized_entity(actor, "external_artifacts")
+
+    def get_claim_for_read(self, _claim_id: UUID, *, actor: AuthContext):
+        return self._authorized_entity(actor, "external_citations")
+
+    def _authorized_entity(self, actor: AuthContext, artifact_field: str):
         if self.raise_on_read:
             raise AssertionError("resolve must not read through the API")
         self.calls.append(f"authorized:{actor.user_id}")
-        return SimpleNamespace(
-            project_id=self.project_id,
-            commit_manifest=SimpleNamespace(external_artifacts=[self.reference]),
-        )
+        fields = {"project_id": self.project_id}
+        if artifact_field == "commit_manifest":
+            fields[artifact_field] = SimpleNamespace(
+                external_artifacts=[self.reference]
+            )
+        else:
+            fields[artifact_field] = [self.reference]
+        return SimpleNamespace(**fields)
 
 
 class _DataStoreLookup:
@@ -151,7 +190,7 @@ class _ResolverRegistry:
         )
 
 
-def test_prepared_resolution_releases_before_resolving_detached_reference():
+def test_direct_reference_denial_releases_scope_without_resolver_work():
     project_id = uuid4()
     dataset_id = uuid4()
     source_reference = ExternalArtifactReference(
@@ -190,14 +229,520 @@ def test_prepared_resolution_releases_before_resolving_detached_reference():
 
     assert api.calls == ["authorized:reader"]
     assert lookup.calls == []
-    assert calls == ["release", "resolve-prepared"]
-    assert registry.prepared_targets == [prepared.target]
-    assert registry.parameters == [(64, (1, 3))]
-    assert registry.references[0].metadata == {"nested": {"value": "prepared"}}
+    assert isinstance(prepared.target, ResolvedArtifact)
+    assert calls == ["release"]
+    assert registry.prepared_targets == []
+    assert registry.parameters == []
+    assert registry.references == []
+    assert result["status"] == "unresolved"
+    assert result["source_system"] == "store"
+    assert result["uri"] == "store://[redacted]"
+    assert result["observed_hash"] is None
+    assert result["returned_bytes"] == 0
+    assert result["detail"] == "Store artifact could not be resolved."
     assert result["entity_type"] == "dataset"
     assert result["entity_id"] == str(dataset_id)
     assert result["artifact_index"] == 0
-    assert result["content_base64"] == "aw=="
+    assert result["content_base64"] is None
+    assert "prepared" not in str(result)
+
+
+@pytest.mark.parametrize("entity_type", ("dataset", "analysis", "claim"))
+@pytest.mark.parametrize(
+    ("source_system", "uri"),
+    (
+        ("file", "file:///operator/private/secret.bin"),
+        ("http", "https://private.example/secret.bin"),
+        ("rclone", "rclone://operator-private/secret.bin"),
+        ("git", "git+https://git.example/private/repository.git#secret.bin"),
+    ),
+)
+def test_contributor_direct_reference_bogus_hash_sequence_is_blocked_before_dispatch(
+    entity_type,
+    source_system,
+    uri,
+):
+    secret = b"operator bytes outside project authority"
+    for content_hash in (_sha256(b"bogus"), _sha256(secret)):
+        reference = ExternalArtifactReference(
+            source_system=source_system,
+            uri=uri,
+            content_hash=content_hash,
+        )
+        api = _ContextApi(project_id=uuid4(), reference=reference)
+        lookup = _DataStoreLookup()
+        calls: list[str] = []
+        registry = _ResolverRegistry(calls)
+        queries = ContextQueries(
+            api=api,
+            repository=_ContextRepository(lookup),
+            session=object(),
+            release_read_scope=lambda calls=calls: calls.append("release"),
+            resolver_registry=registry,
+        )
+
+        prepared = queries.prepare_external_artifact_resolution(
+            actor=AuthContext(user_id="reader", role=Role.VIEWER),
+            entity_type=entity_type,
+            entity_id=uuid4(),
+            artifact_index=0,
+            content_hash=None,
+            max_bytes=None,
+            byte_start=None,
+            byte_end=None,
+        )
+        result = queries.resolve_prepared_external_artifact(prepared)
+
+        assert api.calls == ["authorized:reader"]
+        assert lookup.calls == []
+        assert isinstance(prepared.target, ResolvedArtifact)
+        assert calls == ["release"]
+        assert registry.prepared_targets == []
+        assert result["status"] == "unresolved"
+        assert result["source_system"] == "store"
+        assert result["uri"] == "store://[redacted]"
+        assert result["expected_hash"] == content_hash
+        assert result["observed_hash"] is None
+        assert result["content_base64"] is None
+        assert result["returned_bytes"] == 0
+        assert result["detail"] == "Store artifact could not be resolved."
+        assert "secret.bin" not in str(result)
+
+
+def test_entity_authorization_failure_precedes_direct_reference_denial():
+    reference = ExternalArtifactReference(
+        source_system="http",
+        uri="https://private.example/secret.bin",
+        content_hash=_sha256(b"secret"),
+    )
+
+    class DeniedApi(_ContextApi):
+        def get_dataset_for_read(
+            self,
+            _dataset_id: UUID,
+            *,
+            actor: AuthContext,
+        ):
+            self.calls.append(f"authorized:{actor.user_id}")
+            raise NotFoundError("Dataset does not exist.")
+
+    api = DeniedApi(project_id=uuid4(), reference=reference)
+    lookup = _DataStoreLookup()
+    calls: list[str] = []
+    registry = _ResolverRegistry(calls)
+    queries = ContextQueries(
+        api=api,
+        repository=_ContextRepository(lookup),
+        session=object(),
+        release_read_scope=lambda: calls.append("release"),
+        resolver_registry=registry,
+    )
+
+    with pytest.raises(NotFoundError, match="Dataset does not exist"):
+        queries.prepare_external_artifact_resolution(
+            actor=AuthContext(user_id="reader", role=Role.VIEWER),
+            entity_type="dataset",
+            entity_id=uuid4(),
+            artifact_index=0,
+            content_hash=None,
+            max_bytes=None,
+            byte_start=None,
+            byte_end=None,
+        )
+
+    assert api.calls == ["authorized:reader"]
+    assert lookup.calls == []
+    assert calls == []
+    assert registry.prepared_targets == []
+
+
+def test_forged_prepared_raw_reference_fails_closed_before_resolver_dispatch():
+    raw_reference = ExternalArtifactReference(
+        source_system="file",
+        uri="file:///operator/private/secret.bin",
+        content_hash=_sha256(b"secret"),
+    )
+    calls: list[str] = []
+    registry = _ResolverRegistry(calls)
+    queries = ContextQueries(
+        api=_ContextApi(project_id=uuid4(), reference=raw_reference),
+        repository=_ContextRepository(_DataStoreLookup()),
+        session=object(),
+        release_read_scope=lambda: calls.append("release"),
+        resolver_registry=registry,
+    )
+    forged = PreparedExternalArtifactResolution(
+        entity_type="dataset",
+        entity_id=uuid4(),
+        artifact_index=0,
+        target=raw_reference,
+        max_bytes=64,
+        byte_range=None,
+    )
+
+    result = queries.resolve_prepared_external_artifact(forged)
+
+    assert calls == ["release"]
+    assert registry.prepared_targets == []
+    assert registry.parameters == []
+    assert result["status"] == "unresolved"
+    assert result["source_system"] == "artifact"
+    assert result["uri"] == "artifact://[redacted]"
+    assert result["expected_hash"] == "unavailable"
+    assert result["observed_hash"] is None
+    assert result["content_base64"] is None
+    assert result["returned_bytes"] == 0
+    assert result["detail"] == "Artifact resolver result could not be returned safely."
+    assert "secret.bin" not in str(result)
+
+
+def test_forged_custom_prepared_handle_fails_closed_without_reflection():
+    class SensitiveHandle:
+        @property
+        def _authorization(self):
+            raise AssertionError("forged handle authorization was inspected")
+
+        def __getattr__(self, _name):
+            raise AssertionError("forged handle field was inspected")
+
+        def __str__(self):
+            raise AssertionError("forged handle was stringified")
+
+    calls: list[str] = []
+    registry = _ResolverRegistry(calls)
+    queries = ContextQueries(
+        api=_ContextApi(
+            project_id=uuid4(),
+            reference=ExternalArtifactReference(
+                source_system="file",
+                uri="file:///operator/private/secret.bin",
+                content_hash=_sha256(b"secret"),
+            ),
+        ),
+        repository=_ContextRepository(_DataStoreLookup()),
+        session=object(),
+        release_read_scope=lambda: calls.append("release"),
+        resolver_registry=registry,
+    )
+
+    result = queries.resolve_prepared_external_artifact(
+        SensitiveHandle(),  # type: ignore[arg-type]
+    )
+
+    assert calls == ["release"]
+    assert registry.prepared_targets == []
+    assert result["status"] == "unresolved"
+    assert result["source_system"] == "artifact"
+    assert result["uri"] == "artifact://[redacted]"
+    assert result["content_base64"] is None
+
+
+def _prepare_store_capability(tmp_path, store_kind, *, release_hook=None):
+    project_id = uuid4()
+    store_name = f"registered-{store_kind.value}"
+    store_kwargs: dict[str, object] = {
+        "store_id": uuid4(),
+        "project_id": project_id,
+        "name": store_name,
+        "kind": store_kind,
+    }
+    if store_kind is StoreKind.LOCAL_FS:
+        store_kwargs["root"] = str(tmp_path / "store")
+        reference = ExternalArtifactReference.for_store(
+            store_name=store_name,
+            locator="artifact.bin",
+            content_hash=_sha256(b"ok"),
+        )
+    elif store_kind is StoreKind.HTTP:
+        store_kwargs["root"] = "https://files.example/base"
+        reference = ExternalArtifactReference.for_store(
+            store_name=store_name,
+            locator="artifact.bin",
+            content_hash=_sha256(b"ok"),
+        )
+    elif store_kind is StoreKind.RCLONE:
+        store_kwargs.update(root="/lab", credential_ref="approved-remote")
+        reference = ExternalArtifactReference.for_store(
+            store_name=store_name,
+            locator="artifact.bin",
+            content_hash=_sha256(b"ok"),
+        )
+    else:
+        store_kwargs["root"] = "https://git.example/lab/repository.git"
+        reference = ExternalArtifactReference.for_git_store(
+            store_name=store_name,
+            repository_path="artifact.bin",
+            object_id="a" * 40,
+            content_hash=_sha256(b"ok"),
+        )
+    store = DataStore(**store_kwargs)
+    calls: list[str] = []
+    registry = _ResolverRegistry(calls)
+
+    def release_read_scope() -> None:
+        calls.append("release")
+        if release_hook is not None:
+            release_hook()
+
+    queries = ContextQueries(
+        api=_ContextApi(project_id=project_id, reference=reference),
+        repository=_ContextRepository(_DataStoreLookup(store)),
+        session=object(),
+        release_read_scope=release_read_scope,
+        resolver_registry=registry,
+    )
+    prepared = queries.prepare_external_artifact_resolution(
+        actor=AuthContext(user_id="reader", role=Role.VIEWER),
+        entity_type="dataset",
+        entity_id=uuid4(),
+        artifact_index=0,
+        content_hash=None,
+        max_bytes=64,
+        byte_start=None,
+        byte_end=None,
+    )
+    return queries, prepared, calls, registry, reference, store
+
+
+def _poison_store_target(target):
+    poisoned = deepcopy(target)
+    object.__setattr__(
+        poisoned,
+        "logical_reference",
+        ExternalArtifactReference.for_store(
+            store_name="attacker",
+            locator="private/secret.bin",
+            content_hash=_sha256(b"secret"),
+        ),
+    )
+    if type(poisoned) is LocalStoreResolutionTarget:
+        object.__setattr__(poisoned, "store_root", "/operator/private")
+    elif type(poisoned) is HttpStoreResolutionTarget:
+        object.__setattr__(poisoned, "registered_prefix", object())
+    elif (
+        type(poisoned) is RcloneStoreResolutionTarget
+        or type(poisoned) is GitStoreResolutionTarget
+    ):
+        object.__setattr__(poisoned, "remote", object())
+    return poisoned
+
+
+@pytest.mark.parametrize(
+    ("store_kind", "expected_target_type"),
+    (
+        (StoreKind.LOCAL_FS, LocalStoreResolutionTarget),
+        (StoreKind.HTTP, HttpStoreResolutionTarget),
+        (StoreKind.RCLONE, RcloneStoreResolutionTarget),
+        (StoreKind.GIT, GitStoreResolutionTarget),
+    ),
+)
+def test_prepared_store_capability_cannot_cross_context_query_instances(
+    tmp_path,
+    store_kind: StoreKind,
+    expected_target_type: type[object],
+):
+    producer, prepared, producer_calls, producer_registry, reference, store = (
+        _prepare_store_capability(tmp_path, store_kind)
+    )
+    assert type(prepared.target) is expected_target_type
+
+    attacker_calls: list[str] = []
+    attacker_registry = _ResolverRegistry(attacker_calls)
+    attacker = ContextQueries(
+        api=_ContextApi(project_id=store.project_id, reference=reference),
+        repository=_ContextRepository(_DataStoreLookup(store)),
+        session=object(),
+        release_read_scope=lambda: attacker_calls.append("release"),
+        resolver_registry=attacker_registry,
+    )
+
+    rejected = attacker.resolve_prepared_external_artifact(prepared)
+
+    assert attacker_calls == ["release"]
+    assert attacker_registry.prepared_targets == []
+    assert rejected["status"] == "unresolved"
+    assert rejected["source_system"] == "artifact"
+    assert rejected["uri"] == "artifact://[redacted]"
+    assert rejected["expected_hash"] == "unavailable"
+    assert rejected["content_base64"] is None
+
+    accepted = producer.resolve_prepared_external_artifact(prepared)
+
+    assert producer_calls == ["release", "resolve-prepared"]
+    assert producer_registry.prepared_targets == [prepared.target]
+    assert accepted["status"] == "verified"
+
+
+@pytest.mark.parametrize(
+    "store_kind",
+    (StoreKind.LOCAL_FS, StoreKind.HTTP, StoreKind.RCLONE, StoreKind.GIT),
+)
+def test_prepared_resolution_ignores_post_issuance_public_target_replacement(
+    tmp_path,
+    store_kind,
+):
+    queries, prepared, calls, registry, _, _ = _prepare_store_capability(
+        tmp_path,
+        store_kind,
+    )
+    original_target = deepcopy(prepared.target)
+    poisoned_target = _poison_store_target(prepared.target)
+    object.__setattr__(prepared, "target", poisoned_target)
+
+    result = queries.resolve_prepared_external_artifact(prepared)
+
+    assert result["status"] == "verified"
+    assert calls == ["release", "resolve-prepared"]
+    assert len(registry.prepared_targets) == 1
+    dispatched = registry.prepared_targets[0]
+    assert dispatched == original_target
+    assert dispatched is not poisoned_target
+    assert dispatched.logical_reference.uri != "store://attacker/private/secret.bin"
+
+
+@pytest.mark.parametrize(
+    "store_kind",
+    (StoreKind.LOCAL_FS, StoreKind.HTTP, StoreKind.RCLONE, StoreKind.GIT),
+)
+def test_prepared_resolution_dispatches_internal_snapshot_during_concurrent_mutation(
+    tmp_path,
+    store_kind,
+):
+    release_started = Event()
+    mutation_finished = Event()
+
+    def release_hook() -> None:
+        release_started.set()
+        assert mutation_finished.wait(timeout=2)
+
+    queries, prepared, calls, registry, _, _ = _prepare_store_capability(
+        tmp_path,
+        store_kind,
+        release_hook=release_hook,
+    )
+    original_target = deepcopy(prepared.target)
+    poisoned_target = _poison_store_target(prepared.target)
+
+    def mutate_public_plan() -> None:
+        assert release_started.wait(timeout=2)
+        object.__setattr__(prepared, "target", poisoned_target)
+        object.__setattr__(prepared, "max_bytes", True)
+        object.__setattr__(prepared, "entity_id", uuid4())
+        mutation_finished.set()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        mutation = executor.submit(mutate_public_plan)
+        result = queries.resolve_prepared_external_artifact(prepared)
+        mutation.result()
+
+    assert result["status"] == "verified"
+    assert calls == ["release", "resolve-prepared"]
+    assert len(registry.prepared_targets) == 1
+    dispatched = registry.prepared_targets[0]
+    assert dispatched == original_target
+    assert dispatched is not poisoned_target
+    assert dispatched.logical_reference.uri != "store://attacker/private/secret.bin"
+
+
+def test_prepared_store_capability_is_single_use():
+    project_id, reference, store = _http_store_fixture()
+    calls: list[str] = []
+    registry = _ResolverRegistry(calls)
+    queries = ContextQueries(
+        api=_ContextApi(project_id=project_id, reference=reference),
+        repository=_ContextRepository(_DataStoreLookup(store)),
+        session=object(),
+        release_read_scope=lambda: calls.append("release"),
+        resolver_registry=registry,
+    )
+    prepared = queries.prepare_external_artifact_resolution(
+        actor=AuthContext(user_id="reader", role=Role.VIEWER),
+        entity_type="dataset",
+        entity_id=uuid4(),
+        artifact_index=0,
+        content_hash=None,
+        max_bytes=64,
+        byte_start=None,
+        byte_end=None,
+    )
+
+    accepted = queries.resolve_prepared_external_artifact(prepared)
+    rejected_replay = queries.resolve_prepared_external_artifact(prepared)
+
+    assert accepted["status"] == "verified"
+    assert calls == ["release", "resolve-prepared", "release"]
+    assert registry.prepared_targets == [prepared.target]
+    assert rejected_replay["status"] == "unresolved"
+    assert rejected_replay["source_system"] == "artifact"
+    assert rejected_replay["uri"] == "artifact://[redacted]"
+    assert rejected_replay["content_base64"] is None
+
+
+def test_prepared_store_capability_has_one_concurrent_winner():
+    project_id, reference, store = _http_store_fixture()
+    calls: list[str] = []
+    registry = _ResolverRegistry(calls)
+    release_started = Event()
+    allow_release = Event()
+    overlapping_release = Event()
+    release_state_lock = Lock()
+    active_releases = 0
+
+    def release_read_scope() -> None:
+        nonlocal active_releases
+        with release_state_lock:
+            active_releases += 1
+            if active_releases > 1:
+                overlapping_release.set()
+        calls.append("release")
+        release_started.set()
+        assert allow_release.wait(timeout=2)
+        with release_state_lock:
+            active_releases -= 1
+
+    queries = ContextQueries(
+        api=_ContextApi(project_id=project_id, reference=reference),
+        repository=_ContextRepository(_DataStoreLookup(store)),
+        session=object(),
+        release_read_scope=release_read_scope,
+        resolver_registry=registry,
+    )
+    prepared = queries.prepare_external_artifact_resolution(
+        actor=AuthContext(user_id="reader", role=Role.VIEWER),
+        entity_type="dataset",
+        entity_id=uuid4(),
+        artifact_index=0,
+        content_hash=None,
+        max_bytes=64,
+        byte_start=None,
+        byte_end=None,
+    )
+    start = Barrier(2)
+
+    def resolve() -> dict[str, object]:
+        start.wait()
+        return queries.resolve_prepared_external_artifact(prepared)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = (executor.submit(resolve), executor.submit(resolve))
+        try:
+            assert release_started.wait(timeout=2)
+            assert not overlapping_release.wait(timeout=0.1)
+        finally:
+            allow_release.set()
+        results = [future.result() for future in futures]
+
+    assert sorted(result["source_system"] for result in results) == [
+        "artifact",
+        "store",
+    ]
+    assert sorted(result["status"] for result in results) == [
+        "unresolved",
+        "verified",
+    ]
+    assert calls.count("release") == 2
+    assert calls.count("resolve-prepared") == 1
+    assert registry.prepared_targets == [prepared.target]
 
 
 def test_preparation_rejects_reversed_byte_range_before_entity_or_resolver_work():
@@ -298,17 +843,13 @@ def test_preparation_rejects_invalid_content_bounds_before_entity_or_resolver_wo
     assert registry.references == []
 
 
-def test_resolution_rejects_a_mutated_missing_limit_before_release_or_dispatch():
-    source_reference = ExternalArtifactReference(
-        source_system="test",
-        uri="test://artifact",
-        content_hash=_sha256(b"ok"),
-    )
+def test_resolution_uses_issued_bounds_after_public_handle_mutation():
+    project_id, source_reference, store = _http_store_fixture()
     calls: list[str] = []
     registry = _ResolverRegistry(calls)
     queries = ContextQueries(
-        api=_ContextApi(project_id=uuid4(), reference=source_reference),
-        repository=_ContextRepository(_DataStoreLookup()),
+        api=_ContextApi(project_id=project_id, reference=source_reference),
+        repository=_ContextRepository(_DataStoreLookup(store)),
         session=object(),
         release_read_scope=lambda: calls.append("release"),
         resolver_registry=registry,
@@ -324,12 +865,13 @@ def test_resolution_rejects_a_mutated_missing_limit_before_release_or_dispatch()
         byte_end=None,
     )
     object.__setattr__(prepared, "max_bytes", None)
+    object.__setattr__(prepared, "byte_range", (2, 1))
 
-    with pytest.raises(ValidationError, match="max_bytes must be an integer"):
-        queries.resolve_prepared_external_artifact(prepared)
+    result = queries.resolve_prepared_external_artifact(prepared)
 
-    assert calls == []
-    assert registry.prepared_targets == []
+    assert result["status"] == "verified"
+    assert calls == ["release", "resolve-prepared"]
+    assert registry.parameters == [(64, None)]
 
 
 def test_prepared_resolution_releases_before_returning_materialized_unresolved_result():
@@ -367,9 +909,9 @@ def test_prepared_resolution_releases_before_returning_materialized_unresolved_r
     result = queries.resolve_prepared_external_artifact(prepared)
 
     assert lookup.calls == ["store"]
-    assert calls == ["release", "resolve-prepared"]
-    assert len(registry.precomputed_targets) == 1
-    assert registry.precomputed_targets[0] is prepared.target
+    assert calls == ["release"]
+    assert registry.prepared_targets == []
+    assert registry.precomputed_targets == []
     assert registry.references == []
     assert registry.local_targets == []
     assert registry.http_targets == []
@@ -378,12 +920,10 @@ def test_prepared_resolution_releases_before_returning_materialized_unresolved_r
 
 
 def test_prepared_resolution_rejects_oversized_custom_resolver_output_before_base64():
-    source_reference = ExternalArtifactReference(
-        source_system="test",
-        uri="test://secret-locator",
-        content_hash=_sha256(b"ok"),
+    project_id, source_reference, store = _http_store_fixture(
+        locator="secret-locator"
     )
-    api = _ContextApi(project_id=uuid4(), reference=source_reference)
+    api = _ContextApi(project_id=project_id, reference=source_reference)
     calls: list[str] = []
 
     class OversizedRegistry(_ResolverRegistry):
@@ -395,7 +935,7 @@ def test_prepared_resolution_rejects_oversized_custom_resolver_output_before_bas
     registry = OversizedRegistry(calls)
     queries = ContextQueries(
         api=api,
-        repository=_ContextRepository(_DataStoreLookup()),
+        repository=_ContextRepository(_DataStoreLookup(store)),
         session=object(),
         release_read_scope=lambda: calls.append("release"),
         resolver_registry=registry,
@@ -425,26 +965,26 @@ def test_prepared_resolution_rejects_oversized_custom_resolver_output_before_bas
 
 
 def test_prepared_resolution_rejects_under_cap_substitution_from_injected_registry():
-    source_reference = ExternalArtifactReference(
-        source_system="test",
-        uri="test://logical-reference",
-        content_hash=_sha256(b"ok"),
+    project_id, source_reference, store = _http_store_fixture(
+        locator="logical-reference"
     )
-    api = _ContextApi(project_id=uuid4(), reference=source_reference)
+    api = _ContextApi(project_id=project_id, reference=source_reference)
     calls: list[str] = []
 
     class SubstitutingRegistry:
         def resolve_prepared(self, target, **_kwargs):
             calls.append("resolve-prepared")
+            assert isinstance(target, HttpStoreResolutionTarget)
+            reference = target.logical_reference
             substituted = b"x"
             substituted_hash = _sha256(substituted)
-            object.__setattr__(target, "source_system", "secret-source")
-            object.__setattr__(target, "uri", "secret://different-artifact")
-            object.__setattr__(target, "content_hash", substituted_hash)
+            object.__setattr__(reference, "source_system", "secret-source")
+            object.__setattr__(reference, "uri", "secret://different-artifact")
+            object.__setattr__(reference, "content_hash", substituted_hash)
             return ResolvedArtifact(
                 status=ResolutionStatus.VERIFIED,
-                source_system=target.source_system,
-                uri=target.uri,
+                source_system=reference.source_system,
+                uri=reference.uri,
                 expected_hash=substituted_hash,
                 observed_hash=substituted_hash,
                 size_bytes=len(substituted),
@@ -454,7 +994,7 @@ def test_prepared_resolution_rejects_under_cap_substitution_from_injected_regist
 
     queries = ContextQueries(
         api=api,
-        repository=_ContextRepository(_DataStoreLookup()),
+        repository=_ContextRepository(_DataStoreLookup(store)),
         session=object(),
         release_read_scope=lambda: calls.append("release"),
         resolver_registry=SubstitutingRegistry(),
@@ -481,12 +1021,10 @@ def test_prepared_resolution_rejects_under_cap_substitution_from_injected_regist
 
 
 def test_prepared_resolution_sanitizes_unsupported_custom_resolver_output():
-    source_reference = ExternalArtifactReference(
-        source_system="test",
-        uri="test://logical-reference",
-        content_hash=_sha256(b"ok"),
+    project_id, source_reference, store = _http_store_fixture(
+        locator="logical-reference"
     )
-    api = _ContextApi(project_id=uuid4(), reference=source_reference)
+    api = _ContextApi(project_id=project_id, reference=source_reference)
     calls: list[str] = []
 
     class UnsupportedRegistry:
@@ -496,7 +1034,7 @@ def test_prepared_resolution_sanitizes_unsupported_custom_resolver_output():
 
     queries = ContextQueries(
         api=api,
-        repository=_ContextRepository(_DataStoreLookup()),
+        repository=_ContextRepository(_DataStoreLookup(store)),
         session=object(),
         release_read_scope=lambda: calls.append("release"),
         resolver_registry=UnsupportedRegistry(),
@@ -1115,9 +1653,9 @@ def test_invalid_http_store_definition_or_locator_never_reaches_resolver_io(
     )
     result = queries.resolve_prepared_external_artifact(prepared)
 
-    assert calls == ["release", "resolve-prepared"]
-    assert len(registry.precomputed_targets) == 1
-    assert registry.precomputed_targets[0] is prepared.target
+    assert calls == ["release"]
+    assert registry.prepared_targets == []
+    assert registry.precomputed_targets == []
     assert registry.references == []
     assert registry.local_targets == []
     assert registry.http_targets == []
@@ -1353,7 +1891,8 @@ def test_present_empty_rclone_credential_fails_closed_without_scoped_dispatch():
     result = queries.resolve_prepared_external_artifact(prepared)
 
     assert isinstance(prepared.target, ResolvedArtifact)
-    assert calls == ["release", "resolve-prepared"]
+    assert calls == ["release"]
+    assert registry.prepared_targets == []
     assert registry.references == []
     assert registry.rclone_targets == []
     assert result["status"] == "unresolved"
@@ -1475,7 +2014,8 @@ def test_invalid_rclone_identity_locator_root_or_remote_fails_opaquely(
     result = queries.resolve_prepared_external_artifact(prepared)
 
     assert isinstance(prepared.target, ResolvedArtifact)
-    assert calls == ["release", "resolve-prepared"]
+    assert calls == ["release"]
+    assert registry.prepared_targets == []
     assert registry.references == []
     assert registry.rclone_targets == []
     assert result["status"] == "unresolved"
@@ -1717,7 +2257,8 @@ def test_invalid_git_identity_pin_path_or_remote_fails_opaquely(
     result = queries.resolve_prepared_external_artifact(prepared)
 
     assert isinstance(prepared.target, ResolvedArtifact)
-    assert calls == ["release", "resolve-prepared"]
+    assert calls == ["release"]
+    assert registry.prepared_targets == []
     assert registry.references == []
     assert registry.git_targets == []
     assert result["status"] == "unresolved"
@@ -1819,7 +2360,8 @@ def test_git_store_materialization_rejects_nonportable_ads_punctuation():
     assert isinstance(prepared.target, ResolvedArtifact)
     assert registry.git_targets == []
     assert registry.references == []
-    assert calls == ["release", "resolve-prepared"]
+    assert registry.prepared_targets == []
+    assert calls == ["release"]
     assert result["status"] == "unresolved"
     assert result["uri"] == "store://[redacted]"
     assert result["detail"] == "Store artifact reference is invalid."
@@ -1915,9 +2457,9 @@ def test_same_backend_punctuation_is_invalid_for_local_store(tmp_path):
     assert lookup.names == ["lab-fs"]
     assert registry.references == []
     assert registry.local_targets == []
-    assert calls == ["release", "resolve-prepared"]
-    assert len(registry.precomputed_targets) == 1
-    assert registry.precomputed_targets[0] is prepared.target
+    assert calls == ["release"]
+    assert registry.prepared_targets == []
+    assert registry.precomputed_targets == []
     assert result["status"] == "unresolved"
     assert result["uri"] == "store://[redacted]"
     assert result["detail"] == "Store artifact reference is invalid."
@@ -2099,9 +2641,9 @@ def test_invalid_store_identity_fails_closed_before_resolver_work(
     result = queries.resolve_prepared_external_artifact(prepared)
 
     assert lookup.calls == ["store"] * expected_store_lookups
-    assert calls == ["release", "resolve-prepared"]
-    assert len(registry.precomputed_targets) == 1
-    assert registry.precomputed_targets[0] is prepared.target
+    assert calls == ["release"]
+    assert registry.prepared_targets == []
+    assert registry.precomputed_targets == []
     assert registry.references == []
     assert registry.local_targets == []
     assert result["status"] == "unresolved"
@@ -2151,17 +2693,13 @@ def test_prepared_resolution_does_not_resolve_when_scope_release_raises_base_exc
 
 
 def test_prepared_resolution_releases_before_resolver_base_exception():
-    source_reference = ExternalArtifactReference(
-        source_system="test",
-        uri="test://artifact",
-        content_hash=_sha256(b"ok"),
-    )
-    api = _ContextApi(project_id=uuid4(), reference=source_reference)
+    project_id, source_reference, store = _http_store_fixture()
+    api = _ContextApi(project_id=project_id, reference=source_reference)
     calls: list[str] = []
     registry = _ResolverRegistry(calls, error=KeyboardInterrupt("resolver cancelled"))
     queries = ContextQueries(
         api=api,
-        repository=_ContextRepository(_DataStoreLookup()),
+        repository=_ContextRepository(_DataStoreLookup(store)),
         session=object(),
         release_read_scope=lambda: calls.append("release"),
         resolver_registry=registry,
@@ -2184,4 +2722,5 @@ def test_prepared_resolution_releases_before_resolver_base_exception():
     assert api.calls == ["authorized:reader"]
     assert calls == ["release", "resolve-prepared"]
     assert registry.parameters == [(64, (1, 3))]
-    assert len(registry.references) == 1
+    assert registry.references == []
+    assert len(registry.http_targets) == 1
