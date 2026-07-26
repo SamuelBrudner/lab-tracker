@@ -33,7 +33,9 @@ def test_unset_empty_and_whitespace_configurations_deny_all_without_getcwd(
     def unexpected_getcwd() -> str:
         raise AssertionError("deny-all authority captured a working directory")
 
-    monkeypatch.setattr(authority_module.os, "getcwd", unexpected_getcwd)
+    isolated_os = SimpleNamespace(**vars(os))
+    isolated_os.getcwd = unexpected_getcwd
+    monkeypatch.setattr(authority_module, "os", isolated_os)
 
     for raw in (None, "", " \t "):
         authority = LocalFilesystemAuthority.from_config(raw)
@@ -102,7 +104,9 @@ def test_relative_roots_use_one_captured_startup_working_directory(
         calls += 1
         return str(tmp_path)
 
-    monkeypatch.setattr(authority_module.os, "getcwd", recording_getcwd)
+    isolated_os = SimpleNamespace(**vars(os))
+    isolated_os.getcwd = recording_getcwd
+    monkeypatch.setattr(authority_module, "os", isolated_os)
 
     authority = LocalFilesystemAuthority.from_roots(["first", "second/nested"])
 
