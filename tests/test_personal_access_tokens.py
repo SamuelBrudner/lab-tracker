@@ -222,6 +222,19 @@ def test_read_only_all_scope_allows_exact_external_artifact_semantic_read(
     )
 
 
+@pytest.mark.parametrize("role", (Role.VIEWER, Role.EDITOR, Role.ADMIN))
+def test_read_only_all_scope_allows_exact_decision_context_semantic_read(
+    role: Role,
+) -> None:
+    assert service_principal_can_access(
+        "POST",
+        "/assistant/decision-context",
+        read_only=True,
+        role=role,
+        scope=PAT_SCOPE_ALL,
+    )
+
+
 @pytest.mark.parametrize(
     ("role", "expected"),
     (
@@ -247,6 +260,30 @@ def test_external_artifact_semantic_read_preserves_write_enabled_role_policy(
 
 
 @pytest.mark.parametrize(
+    ("role", "expected"),
+    (
+        (Role.VIEWER, False),
+        (Role.EDITOR, True),
+        (Role.ADMIN, True),
+    ),
+)
+def test_decision_context_semantic_read_preserves_write_enabled_role_policy(
+    role: Role,
+    expected: bool,
+) -> None:
+    assert (
+        service_principal_can_access(
+            "POST",
+            "/assistant/decision-context",
+            read_only=False,
+            role=role,
+            scope=PAT_SCOPE_ALL,
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize(
     "path",
     (
         "/projects",
@@ -255,6 +292,26 @@ def test_external_artifact_semantic_read_preserves_write_enabled_role_policy(
     ),
 )
 def test_read_only_external_artifact_exception_rejects_post_near_misses(
+    path: str,
+) -> None:
+    assert not service_principal_can_access(
+        "POST",
+        path,
+        read_only=True,
+        role=Role.ADMIN,
+        scope=PAT_SCOPE_ALL,
+    )
+
+
+@pytest.mark.parametrize(
+    "path",
+    (
+        "/assistant",
+        "/api/assistant/decision-context",
+        "/assistant/decision-context/",
+    ),
+)
+def test_read_only_decision_context_exception_rejects_post_near_misses(
     path: str,
 ) -> None:
     assert not service_principal_can_access(
@@ -309,6 +366,13 @@ def test_batch_run_due_scope_allows_only_the_run_due_post():
         scope=PAT_SCOPE_BATCH_RUN_DUE,
     )
     assert not service_principal_can_access(
+        "POST",
+        "/assistant/decision-context",
+        read_only=True,
+        role=Role.ADMIN,
+        scope=PAT_SCOPE_BATCH_RUN_DUE,
+    )
+    assert not service_principal_can_access(
         "POST", "/batches/run-now", read_only=False, role=Role.ADMIN, scope=PAT_SCOPE_BATCH_RUN_DUE
     )
     assert not service_principal_can_access(
@@ -326,6 +390,7 @@ def test_batch_run_due_scope_allows_only_the_run_due_post():
         ("GET", "/projects", True),
         ("POST", "/batches/run-due", True),
         ("POST", "/external-artifacts/resolve", True),
+        ("POST", "/assistant/decision-context", True),
         ("POST", "/projects", False),
     ),
 )
@@ -349,6 +414,7 @@ def test_unknown_service_principal_scopes_fail_closed_before_every_allowance(
         ("GET", "/projects", True),
         ("POST", "/batches/run-due", True),
         ("POST", "/external-artifacts/resolve", True),
+        ("POST", "/assistant/decision-context", True),
         ("POST", "/projects", False),
     ),
 )

@@ -680,6 +680,16 @@ def service_principal_can_access(
         # verifies its bytes, and returns a bounded representation. Entity-level
         # authorization and opaque target handling remain inside the route.
         return True
+    if (
+        scope == PAT_SCOPE_ALL
+        and read_only
+        and method == "POST"
+        and path == "/assistant/decision-context"
+    ):
+        # Decision context is also a semantic read despite its request body.
+        # Project and anchor authorization remain inside the use case, where
+        # inaccessible records retain the same opaque contracts as missing ones.
+        return True
     if read_only:
         return False
     return role in {Role.ADMIN, Role.EDITOR}
