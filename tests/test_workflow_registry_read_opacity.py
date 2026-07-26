@@ -8,6 +8,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
+from api_helpers import TEST_STORE_AUTHORITY_GRANT_ID
 from fastapi.testclient import TestClient
 from read_opacity_inventory import (
     READ_OPACITY_VARIANTS_BY_ID,
@@ -27,7 +28,7 @@ from lab_tracker.sqlalchemy_repository_parts.graph_drafts import (
     SQLAlchemyGraphChangeSetRepository,
 )
 from lab_tracker.store_health import (
-    LOCAL_STORE_HEALTH_FAILURE_DETAIL,
+    STORE_HEALTH_PROBE_UNAVAILABLE_MESSAGE,
     CachedStoreHealthProbe,
     StoreHealth,
     StoreHealthStatus,
@@ -211,6 +212,7 @@ def _create_workflow_registry_records(
             "name": f"{label}-local-store",
             "kind": "local_fs",
             "root": str(store_root),
+            "authority_grant_id": TEST_STORE_AUTHORITY_GRANT_ID,
         },
         headers=admin_auth_headers,
     )
@@ -439,8 +441,12 @@ def test_store_health_authorizes_before_live_checker(
         headers=admin_auth_headers,
     )
     assert authorized.status_code == 200, authorized.text
-    assert authorized.json()["data"]["status"] == "healthy"
-    assert [str(target.store_id) for target in checked] == [records.store_id]
+    assert authorized.json()["data"]["status"] == "unsupported"
+    assert (
+        authorized.json()["data"]["detail"]
+        == STORE_HEALTH_PROBE_UNAVAILABLE_MESSAGE
+    )
+    assert checked == []
 
     hidden = client.get(
         f"/data-stores/{records.store_id}/health",
@@ -451,7 +457,7 @@ def test_store_health_authorizes_before_live_checker(
         headers=scoped_project_member.member_headers,
     )
     assert hidden.status_code == missing.status_code == 404
-    assert [str(target.store_id) for target in checked] == [records.store_id]
+    assert checked == []
 
 
 def test_store_health_cache_and_admission_preserve_browser_device_and_lpat_scope(
@@ -467,6 +473,7 @@ def test_store_health_cache_and_admission_preserve_browser_device_and_lpat_scope
             "name": "visible-principal-health",
             "kind": "local_fs",
             "root": str(tmp_path / "visible"),
+            "authority_grant_id": TEST_STORE_AUTHORITY_GRANT_ID,
         },
         headers=admin_auth_headers,
     )
@@ -477,6 +484,7 @@ def test_store_health_cache_and_admission_preserve_browser_device_and_lpat_scope
             "name": "hidden-principal-health",
             "kind": "local_fs",
             "root": str(tmp_path / "hidden"),
+            "authority_grant_id": TEST_STORE_AUTHORITY_GRANT_ID,
         },
         headers=admin_auth_headers,
     )
@@ -547,10 +555,10 @@ def test_store_health_cache_and_admission_preserve_browser_device_and_lpat_scope
         headers=admin_auth_headers,
     )
     assert warmed_hidden.status_code == 200, warmed_hidden.text
-    assert warmed_hidden.json()["data"]["status"] == "unreachable"
+    assert warmed_hidden.json()["data"]["status"] == "unsupported"
     assert (
         warmed_hidden.json()["data"]["detail"]
-        == LOCAL_STORE_HEALTH_FAILURE_DETAIL
+        == STORE_HEALTH_PROBE_UNAVAILABLE_MESSAGE
     )
 
     principal_headers = [
@@ -574,18 +582,18 @@ def test_store_health_cache_and_admission_preserve_browser_device_and_lpat_scope
             headers=headers,
         )
         assert visible.status_code == 200, visible.text
-        assert visible.json()["data"]["status"] == "unreachable"
-        assert visible.json()["data"]["detail"] == LOCAL_STORE_HEALTH_FAILURE_DETAIL
+        assert visible.json()["data"]["status"] == "unsupported"
+        assert (
+            visible.json()["data"]["detail"]
+            == STORE_HEALTH_PROBE_UNAVAILABLE_MESSAGE
+        )
         assert hidden.status_code == missing.status_code == 404
         assert hidden.content == missing.content
         hidden_responses.append(hidden.content)
         missing_responses.append(missing.content)
 
     assert hidden_responses == missing_responses
-    assert [str(target.store_id) for target in checked] == [
-        hidden_store_id,
-        visible_store_id,
-    ]
+    assert checked == []
     assert executor.calls == []
 
     held = client.app.state.store_health_admission.try_acquire(
@@ -660,7 +668,11 @@ def test_project_and_group_inherited_readers_can_use_all_four_variants(
         assert responses[0].json()["data"]["change_set_id"] == (records.graph_change_set_id)
         assert responses[1].json()["data"]["change_set_id"] == (records.graph_change_set_id)
         assert responses[2].json()["data"]["store_id"] == records.store_id
-        assert responses[3].json()["data"]["status"] == "healthy"
+        assert responses[3].json()["data"]["status"] == "unsupported"
+        assert (
+            responses[3].json()["data"]["detail"]
+            == STORE_HEALTH_PROBE_UNAVAILABLE_MESSAGE
+        )
 
 
 def test_plain_group_membership_reads_group_store_but_not_project_records(
@@ -704,6 +716,7 @@ def test_plain_group_membership_reads_group_store_but_not_project_records(
             "name": "plain-group-store",
             "kind": "local_fs",
             "root": str(tmp_path),
+            "authority_grant_id": TEST_STORE_AUTHORITY_GRANT_ID,
         },
         headers=admin_auth_headers,
     )
@@ -821,6 +834,7 @@ def test_group_store_health_authorizes_before_live_checker(
             "name": "health-group-store",
             "kind": "local_fs",
             "root": str(tmp_path),
+            "authority_grant_id": TEST_STORE_AUTHORITY_GRANT_ID,
         },
         headers=admin_auth_headers,
     )
@@ -838,7 +852,12 @@ def test_group_store_health_authorizes_before_live_checker(
         headers=member_headers,
     )
     assert authorized.status_code == 200, authorized.text
-    assert [str(target.store_id) for target in checked] == [store_id]
+    assert authorized.json()["data"]["status"] == "unsupported"
+    assert (
+        authorized.json()["data"]["detail"]
+        == STORE_HEALTH_PROBE_UNAVAILABLE_MESSAGE
+    )
+    assert checked == []
 
     hidden = client.get(
         f"/data-stores/{store_id}/health",
@@ -849,7 +868,7 @@ def test_group_store_health_authorizes_before_live_checker(
         headers=scoped_project_member.member_headers,
     )
     assert hidden.status_code == missing.status_code == 404
-    assert [str(target.store_id) for target in checked] == [store_id]
+    assert checked == []
 
 
 def test_workflow_registry_mutations_keep_permission_errors(

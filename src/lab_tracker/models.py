@@ -172,6 +172,7 @@ class UsageEventResourceType(str, Enum):
     NOTE = "note"
     SESSION = "session"
     DATASET = "dataset"
+    DATA_STORE = "data_store"
     ANALYSIS = "analysis"
     CLAIM = "claim"
     CLAIM_EDGE = "claim_edge"
@@ -1285,6 +1286,16 @@ class DataStore(_DomainModel):
     root: str
     endpoint: str | None = None
     credential_ref: str | None = None
+    authority_grant_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+    )
+    authority_grant_fingerprint: str | None = Field(
+        default=None,
+        pattern=r"^sag-v1-sha256:[0-9a-f]{64}$",
+    )
     is_default: bool = False
     created_at: datetime = Field(default_factory=utc_now)
     created_by: str | None = None
@@ -1295,6 +1306,12 @@ class DataStore(_DomainModel):
     def _exactly_one_scope(self) -> DataStore:
         if (self.project_id is None) == (self.group_id is None):
             raise ValueError("DataStore must be scoped to exactly one of project_id or group_id.")
+        if (self.authority_grant_id is None) != (
+            self.authority_grant_fingerprint is None
+        ):
+            raise ValueError(
+                "DataStore authority grant id and fingerprint must both be set or both be null."
+            )
         return self
 
 

@@ -21,6 +21,17 @@ class AuthError(LabTrackerError):
     """Authentication or authorization failure."""
 
 
+class StoreAuthorityDeniedError(LabTrackerError):
+    """A data-store grant did not authorize the requested registration."""
+
+
+class DataStorePersistenceError(LabTrackerError):
+    """A data-store registration failed after admission."""
+
+    def __init__(self) -> None:
+        super().__init__("Data store registration could not be completed.")
+
+
 class ConflictError(LabTrackerError):
     """Conflicting state or duplicate entity."""
 

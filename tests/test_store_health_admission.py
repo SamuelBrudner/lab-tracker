@@ -3,10 +3,13 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from threading import Event, Lock
 from uuid import UUID, uuid4
 
 import pytest
+from api_helpers import (
+    TEST_STORE_AUTHORITY_GRANT_ID,
+    install_exact_candidate_store_authority,
+)
 from fastapi import FastAPI
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -15,9 +18,9 @@ from starlette.testclient import TestClient
 from lab_tracker.app_parts.middleware import _apply_store_health_admission
 from lab_tracker.auth import AuthContext, Role
 from lab_tracker.store_health import (
+    STORE_HEALTH_PROBE_UNAVAILABLE_MESSAGE,
     CachedStoreHealthProbe,
     StoreHealth,
-    StoreHealthStatus,
     StoreProbeTarget,
 )
 from lab_tracker.store_health_admission import StoreHealthAdmission
@@ -356,7 +359,7 @@ def test_admitted_malformed_store_id_remains_422_and_releases_capacity(
     assert response.json()["error"]["code"] == "request_validation_error"
 
 
-def test_http_singleflight_waiter_timeout_is_generic_and_keeps_the_leader(
+def test_fail_closed_health_bypasses_singleflight_for_concurrent_callers(
     client: TestClient,
     admin_auth_headers: dict[str, str],
     viewer_user,
@@ -382,81 +385,64 @@ def test_http_singleflight_waiter_timeout_is_generic_and_keeps_the_leader(
             "name": "single-flight-http",
             "kind": "local_fs",
             "root": str(tmp_path),
+            "authority_grant_id": TEST_STORE_AUTHORITY_GRANT_ID,
         },
         headers=admin_auth_headers,
     )
     assert store.status_code == 201, store.text
     store_id = store.json()["data"]["store_id"]
 
-    entered = Event()
-    release = Event()
-    calls_lock = Lock()
     calls = 0
 
-    def blocking_probe(_target: StoreProbeTarget) -> StoreHealth:
+    def forbidden_probe(_target: StoreProbeTarget) -> StoreHealth:
         nonlocal calls
-        with calls_lock:
-            calls += 1
-        entered.set()
-        assert release.wait(timeout=5)
-        return StoreHealth(StoreHealthStatus.HEALTHY)
+        calls += 1
+        raise AssertionError("fail-closed health reached the checker")
 
     original_checker = client.app.state.store_health_checker
     checker = CachedStoreHealthProbe(
-        blocking_probe,
+        forbidden_probe,
         singleflight_wait_seconds=0.05,
     )
     client.app.state.store_health_checker = checker
     http_client = TestClient(client.app, raise_server_exceptions=False)
-    executor = ThreadPoolExecutor(max_workers=2)
     try:
-        leader = executor.submit(
-            http_client.get,
-            f"/data-stores/{store_id}/health",
-            headers=admin_auth_headers,
-        )
-        assert entered.wait(timeout=5)
-        follower = executor.submit(
-            http_client.get,
-            f"/data-stores/{store_id}/health",
-            headers=viewer_user.headers,
-        )
-        follower_response = follower.result(timeout=5)
-        assert leader.done() is False
-        assert checker.in_flight_count == 1
-        assert checker.entry_count == 0
-
-        release.set()
-        leader_response = leader.result(timeout=5)
-        cached_response = http_client.get(
-            f"/data-stores/{store_id}/health",
-            headers=viewer_user.headers,
-        )
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = (
+                executor.submit(
+                    http_client.get,
+                    f"/data-stores/{store_id}/health",
+                    headers=admin_auth_headers,
+                ),
+                executor.submit(
+                    http_client.get,
+                    f"/data-stores/{store_id}/health",
+                    headers=viewer_user.headers,
+                ),
+            )
+            responses = [future.result(timeout=5) for future in futures]
     finally:
-        release.set()
-        executor.shutdown(wait=True)
         http_client.close()
         client.app.state.store_health_checker = original_checker
 
-    assert follower_response.status_code == 500
-    assert follower_response.json() == {
-        "error": {
-            "code": "internal_server_error",
-            "message": "Internal server error.",
-            "issues": None,
-        }
-    }
-    assert leader_response.status_code == 200, leader_response.text
-    assert cached_response.status_code == 200, cached_response.text
-    assert calls == 1
+    assert [response.status_code for response in responses] == [200, 200]
+    assert {
+        (
+            response.json()["data"]["status"],
+            response.json()["data"]["detail"],
+        )
+        for response in responses
+    } == {("unsupported", STORE_HEALTH_PROBE_UNAVAILABLE_MESSAGE)}
+    assert calls == 0
     assert checker.in_flight_count == 0
-    assert checker.entry_count == 1
+    assert checker.entry_count == 0
 
 
-def test_missing_checker_wiring_fails_closed_with_generic_error(
+def test_missing_checker_wiring_returns_static_unavailable_result(
     app: FastAPI,
     tmp_path,
 ) -> None:
+    install_exact_candidate_store_authority(app)
     user = app.state.auth_service.register_user(
         username=f"missing-health-checker-{uuid4().hex}",
         password="secret",
@@ -481,6 +467,7 @@ def test_missing_checker_wiring_fails_closed_with_generic_error(
                 "name": "missing-checker",
                 "kind": "local_fs",
                 "root": str(tmp_path),
+                "authority_grant_id": TEST_STORE_AUTHORITY_GRANT_ID,
             },
             headers=headers,
         )
@@ -497,12 +484,11 @@ def test_missing_checker_wiring_fails_closed_with_generic_error(
         finally:
             app.state.store_health_checker = original_checker
 
-    assert response.status_code == 500
-    assert response.json() == {
-        "error": {
-            "code": "internal_server_error",
-            "message": "Internal server error.",
-            "issues": None,
-        }
+    assert response.status_code == 200
+    assert response.json()["data"] == {
+        "store_id": store.json()["data"]["store_id"],
+        "kind": "local_fs",
+        "status": "unsupported",
+        "detail": STORE_HEALTH_PROBE_UNAVAILABLE_MESSAGE,
     }
     assert unrelated.status_code == 200, unrelated.text

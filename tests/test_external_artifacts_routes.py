@@ -1,20 +1,15 @@
 import base64
 import hashlib
 import json
-import threading
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
+from api_helpers import TEST_STORE_AUTHORITY_GRANT_ID
 from http_security_fakes import (
     FakeAddressResolver,
-    FakeClock,
     FakeHttpResponse,
     FakeSafeHttpClient,
 )
-from sqlalchemy import create_engine, event
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import QueuePool
 from starlette.testclient import TestClient
 
 from lab_tracker.artifact_resolution import (
@@ -482,35 +477,27 @@ def test_resolve_endpoint_denies_direct_rclone_before_metadata_subprocess(
     assert "private stderr" not in response.text
 
 
-def test_resolve_endpoint_deadline_discards_partial_body_and_closes_session(
+def test_registered_http_gate_returns_before_dns_or_stream_work(
     client,
     admin_auth_headers,
 ):
-    clock = FakeClock()
-    stream_entered = threading.Event()
-    expire_stream = threading.Event()
-
-    def wait_then_expire(_index: int) -> None:
-        stream_entered.set()
-        assert expire_stream.wait(timeout=5.0)
-        clock.advance(2.0)
-
     response = FakeHttpResponse(
         chunks=(b"partial secret bytes",),
-        on_chunk=wait_then_expire,
+        on_chunk=lambda _index: (_ for _ in ()).throw(
+            AssertionError("registered-store gate reached the HTTP stream")
+        ),
     )
     http_client = FakeSafeHttpClient((response,))
+    address_resolver = FakeAddressResolver(
+        {"slow.example": ["93.184.216.34"]}
+    )
     client.app.state.resolver_registry = ResolverRegistry(
         [
             HttpResolver(
                 policy=OutboundHttpPolicy(
-                    address_resolver=FakeAddressResolver(
-                        {"slow.example": ["93.184.216.34"]}
-                    )
+                    address_resolver=address_resolver
                 ),
                 client=http_client,
-                deadline_seconds=1.0,
-                clock=clock,
             )
         ]
     )
@@ -536,115 +523,26 @@ def test_resolve_endpoint_deadline_discards_partial_body_and_closes_session(
         content_hash=_sha256(b"partial secret bytes"),
     )
 
-    original_factory = client.app.state.db_session_factory
-    pool_lock = threading.Lock()
-    unrelated_connection_acquired = threading.Event()
-    first_connection_released = threading.Event()
-    checkout_attempts = 0
-
-    class OneSlotSignalingPool(QueuePool):
-        def _do_get(self):
-            nonlocal checkout_attempts
-            with pool_lock:
-                checkout_attempts += 1
-                attempt = checkout_attempts
-            connection = super()._do_get()
-            if attempt == 2:
-                assert first_connection_released.is_set()
-                unrelated_connection_acquired.set()
-            return connection
-
-    bounded_engine = create_engine(
-        client.app.state.settings.database_url,
-        future=True,
-        pool_pre_ping=True,
-        poolclass=OneSlotSignalingPool,
-        pool_size=1,
-        max_overflow=0,
-        pool_timeout=5.0,
-        connect_args={"check_same_thread": False},
+    resolve_response = client.post(
+        "/external-artifacts/resolve",
+        json={"entity_type": "dataset", "entity_id": dataset_id},
+        headers=admin_auth_headers,
     )
-    bounded_factory = sessionmaker(
-        bind=bounded_engine,
-        autoflush=False,
-        autocommit=False,
-        future=True,
-    )
-    connection_checkins = 0
-
-    @event.listens_for(bounded_engine, "checkin")
-    def record_connection_release(*_args) -> None:
-        nonlocal connection_checkins
-        with pool_lock:
-            connection_checkins += 1
-            checkin = connection_checkins
-        if checkin == 1:
-            first_connection_released.set()
-
-    factory_lock = threading.Lock()
-    factory_calls = 0
-    closed_session_indexes: list[int] = []
-
-    def tracking_session_factory():
-        nonlocal factory_calls
-        with factory_lock:
-            factory_calls += 1
-            session_index = factory_calls
-        session = bounded_factory()
-        original_close = session.close
-
-        def tracked_close() -> None:
-            try:
-                original_close()
-            finally:
-                closed_session_indexes.append(session_index)
-
-        session.close = tracked_close
-        return session
-
-    client.app.state.db_session_factory = tracking_session_factory
-    executor = ThreadPoolExecutor(max_workers=2)
-    try:
-        resolve_future = executor.submit(
-            client.post,
-            "/external-artifacts/resolve",
-            json={"entity_type": "dataset", "entity_id": dataset_id},
-            headers=admin_auth_headers,
-        )
-        assert stream_entered.wait(timeout=5.0)
-        # The resolver remains deliberately blocked, but its read scope must
-        # already have returned this sole connection to the pool.
-        assert first_connection_released.wait(timeout=5.0)
-
-        follow_up_future = executor.submit(
-            client.get,
-            f"/projects/{project_id}",
-            headers=admin_auth_headers,
-        )
-        follow_up = follow_up_future.result(timeout=5.0)
-        assert unrelated_connection_acquired.is_set()
-        assert resolve_future.done() is False
-
-        expire_stream.set()
-        resolve_response = resolve_future.result(timeout=5.0)
-    finally:
-        expire_stream.set()
-        executor.shutdown(wait=True)
-        client.app.state.db_session_factory = original_factory
-        bounded_engine.dispose()
 
     assert resolve_response.status_code == 200, resolve_response.text
     body = resolve_response.json()["data"]
     assert body["status"] == "unresolved"
+    assert body["source_system"] == "store"
+    assert body["uri"] == "store://[redacted]"
+    assert body["detail"] == "Store artifact could not be resolved."
     assert body["content_base64"] is None
     assert body["returned_bytes"] == 0
     assert "partial secret bytes" not in resolve_response.text
     assert "slow.example" not in resolve_response.text
-    assert response.closed is True
-    assert first_connection_released.is_set()
-    assert unrelated_connection_acquired.is_set()
-    assert sorted(closed_session_indexes) == [1, 2]
-    assert follow_up.status_code == 200, follow_up.text
+    assert address_resolver.calls == []
+    assert http_client.calls == []
+    assert response.iterated_chunks == 0
+    assert response.closed is False
 
 
 def test_dataset_write_rejects_malformed_http_uri_without_server_error(
@@ -723,9 +621,12 @@ def test_resolve_endpoint_returns_verified_content(client, admin_auth_headers, t
 
     assert response.status_code == 200, response.text
     body = response.json()["data"]
-    assert body["status"] == "verified"
-    assert body["observed_hash"] == _sha256(data)
-    assert base64.b64decode(body["content_base64"]) == data
+    assert body["status"] == "unresolved"
+    assert body["source_system"] == "store"
+    assert body["uri"] == "store://[redacted]"
+    assert body["observed_hash"] is None
+    assert body["content_base64"] is None
+    assert body["detail"] == "Store artifact could not be resolved."
     assert body["entity_type"] == "dataset"
 
 
@@ -771,12 +672,14 @@ def test_resolve_endpoint_caps_a_requested_range(client, admin_auth_headers, tmp
 
     assert response.status_code == 200, response.text
     body = response.json()["data"]
-    assert body["status"] == "verified"
-    assert body["observed_hash"] == _sha256(data)
-    assert body["size_bytes"] == len(data)
-    assert body["returned_bytes"] == 3
-    assert body["truncated"] is True
-    assert base64.b64decode(body["content_base64"]) == b"234"
+    assert body["status"] == "unresolved"
+    assert body["uri"] == "store://[redacted]"
+    assert body["observed_hash"] is None
+    assert body["size_bytes"] is None
+    assert body["returned_bytes"] == 0
+    assert body["truncated"] is False
+    assert body["content_base64"] is None
+    assert body["detail"] == "Store artifact could not be resolved."
 
 
 def test_resolve_endpoint_uses_registered_http_store_prefix_and_logical_identity(
@@ -810,6 +713,7 @@ def test_resolve_endpoint_uses_registered_http_store_prefix_and_logical_identity
             "name": "web",
             "kind": "http",
             "root": "https://store.example/base",
+            "authority_grant_id": TEST_STORE_AUTHORITY_GRANT_ID,
         },
         headers=admin_auth_headers,
     )
@@ -837,14 +741,13 @@ def test_resolve_endpoint_uses_registered_http_store_prefix_and_logical_identity
 
     assert response.status_code == 200, response.text
     body = response.json()["data"]
-    assert body["status"] == "verified"
+    assert body["status"] == "unresolved"
     assert body["source_system"] == "store"
-    assert body["uri"] == "store://web/nested/artifact.bin"
-    assert base64.b64decode(body["content_base64"]) == data
-    assert address_resolver.calls == [("store.example", 443)]
-    assert http_client.calls[0][1].absolute_url == (
-        "https://store.example/base/nested/artifact.bin"
-    )
+    assert body["uri"] == "store://[redacted]"
+    assert body["content_base64"] is None
+    assert body["detail"] == "Store artifact could not be resolved."
+    assert address_resolver.calls == []
+    assert http_client.calls == []
 
 
 def test_resolve_endpoint_uses_registered_rclone_root_and_logical_identity(
@@ -887,6 +790,7 @@ def test_resolve_endpoint_uses_registered_rclone_root_and_logical_identity(
             "kind": "onedrive",
             "root": "/experiments",
             "credential_ref": "lab-onedrive",
+            "authority_grant_id": TEST_STORE_AUTHORITY_GRANT_ID,
         },
         headers=admin_auth_headers,
     )
@@ -914,14 +818,12 @@ def test_resolve_endpoint_uses_registered_rclone_root_and_logical_identity(
 
     assert response.status_code == 200, response.text
     body = response.json()["data"]
-    assert body["status"] == "verified"
+    assert body["status"] == "unresolved"
     assert body["source_system"] == "store"
-    assert body["uri"] == "store://cloud/nested/artifact.bin"
-    assert base64.b64decode(body["content_base64"]) == data
-    assert calls == [
-        ["size", "--json", "lab-onedrive:/experiments/nested/artifact.bin"],
-        ["cat", "lab-onedrive:/experiments/nested/artifact.bin"],
-    ]
+    assert body["uri"] == "store://[redacted]"
+    assert body["content_base64"] is None
+    assert body["detail"] == "Store artifact could not be resolved."
+    assert calls == []
     assert "lab-onedrive" not in response.text
     assert "/experiments" not in response.text
 
@@ -1005,6 +907,7 @@ def test_resolve_endpoint_rejects_invalid_registered_rclone_targets_before_proce
             "kind": "rclone",
             "root": "/configured-root-secret",
             "credential_ref": "configured-remote-secret",
+            "authority_grant_id": TEST_STORE_AUTHORITY_GRANT_ID,
         },
         headers=admin_auth_headers,
     )
@@ -1112,6 +1015,7 @@ def test_resolve_endpoint_uses_registered_git_pin_and_logical_identity(
             "name": "analysis-repo",
             "kind": "git",
             "root": remote,
+            "authority_grant_id": TEST_STORE_AUTHORITY_GRANT_ID,
         },
         headers=admin_auth_headers,
     )
@@ -1140,16 +1044,12 @@ def test_resolve_endpoint_uses_registered_git_pin_and_logical_identity(
 
     assert response.status_code == 200, response.text
     body = response.json()["data"]
-    assert body["status"] == "verified"
+    assert body["status"] == "unresolved"
     assert body["source_system"] == "store"
-    assert body["uri"] == logical_uri
-    assert base64.b64decode(body["content_base64"]) == data
-    assert len(calls) == 5
-    cache_dirs = {args[args.index("-C") + 1] for args in calls}
-    assert len(cache_dirs) == 1
-    cache_dir = Path(next(iter(cache_dirs)))
-    assert cache_dir.parent == cache_root
-    assert cache_dir.name.startswith("sha1-")
+    assert body["uri"] == "store://[redacted]"
+    assert body["content_base64"] is None
+    assert body["detail"] == "Store artifact could not be resolved."
+    assert calls == []
     assert remote not in response.text
 
 
@@ -1217,6 +1117,7 @@ def test_resolve_endpoint_rejects_invalid_registered_git_targets_before_cache_or
             "name": "analysis-repo",
             "kind": "git",
             "root": valid_remote,
+            "authority_grant_id": TEST_STORE_AUTHORITY_GRANT_ID,
         },
         headers=admin_auth_headers,
     )
@@ -1258,7 +1159,11 @@ def test_resolve_endpoint_rejects_invalid_registered_git_targets_before_cache_or
     assert all(value not in response.text for value in forbidden_values)
 
 
-def test_resolve_endpoint_reports_drift(client, admin_auth_headers, tmp_path):
+def test_registered_store_gate_returns_before_drift_check(
+    client,
+    admin_auth_headers,
+    tmp_path,
+):
     recorded_hash = _sha256(b"what was recorded at capture")
     artifact = tmp_path / "result.txt"
     artifact.write_bytes(b"actual bytes on disk")
@@ -1292,16 +1197,16 @@ def test_resolve_endpoint_reports_drift(client, admin_auth_headers, tmp_path):
 
     assert response.status_code == 200
     body = response.json()["data"]
-    assert body["status"] == "drifted"
-    assert body["uri"] == "store://local-results/result.txt"
+    assert body["status"] == "unresolved"
+    assert body["uri"] == "store://[redacted]"
     assert body["expected_hash"] == recorded_hash
-    assert body["observed_hash"] == _sha256(b"actual bytes on disk")
-    assert body["content_type"] == "text/plain"
-    assert body["size_bytes"] == len(b"actual bytes on disk")
+    assert body["observed_hash"] is None
+    assert body["content_type"] is None
+    assert body["size_bytes"] is None
     assert body["content_base64"] is None
     assert body["returned_bytes"] == 0
     assert body["truncated"] is False
-    assert body["detail"] == "Recomputed hash does not match content_hash."
+    assert body["detail"] == "Store artifact could not be resolved."
     assert base64.b64encode(b"actual bytes on disk").decode("ascii") not in response.text
 
 
@@ -1367,7 +1272,13 @@ def test_resolve_endpoint_rejects_unauthorized_caller(
 def _create_store(client, headers, *, project_id, name, kind, root) -> None:
     response = client.post(
         "/data-stores",
-        json={"project_id": project_id, "name": name, "kind": kind, "root": root},
+        json={
+            "project_id": project_id,
+            "name": name,
+            "kind": kind,
+            "root": root,
+            "authority_grant_id": TEST_STORE_AUTHORITY_GRANT_ID,
+        },
         headers=headers,
     )
     assert response.status_code == 201, response.text
@@ -1406,9 +1317,11 @@ def test_resolve_endpoint_resolves_store_locator(client, admin_auth_headers, tmp
 
     assert response.status_code == 200, response.text
     body = response.json()["data"]
-    assert body["status"] == "verified"
-    assert base64.b64decode(body["content_base64"]) == data
-    assert body["uri"] == "store://lab-fs/exp/x.txt"
+    assert body["status"] == "unresolved"
+    assert body["source_system"] == "store"
+    assert body["uri"] == "store://[redacted]"
+    assert body["content_base64"] is None
+    assert body["detail"] == "Store artifact could not be resolved."
 
 
 def test_resolve_endpoint_rejects_mismatched_structured_store_identity(
@@ -1473,7 +1386,7 @@ def test_resolve_endpoint_rejects_mismatched_structured_store_identity(
     body = response.json()["data"]
     assert body["status"] == "unresolved"
     assert body["uri"] == "store://[redacted]"
-    assert body["detail"] == "Store artifact reference is invalid."
+    assert body["detail"] == "Store artifact could not be resolved."
     assert body["content_base64"] is None
     assert "wrong-store" not in response.text
     assert str(tmp_path) not in response.text
@@ -1539,9 +1452,11 @@ def test_resolve_endpoint_uses_matching_structured_store_identity(
 
     assert response.status_code == 200, response.text
     body = response.json()["data"]
-    assert body["status"] == "verified"
-    assert body["uri"] == "store://lab-fs/exp/x.txt"
-    assert base64.b64decode(body["content_base64"]) == data
+    assert body["status"] == "unresolved"
+    assert body["source_system"] == "store"
+    assert body["uri"] == "store://[redacted]"
+    assert body["content_base64"] is None
+    assert body["detail"] == "Store artifact could not be resolved."
 
 
 def test_local_store_locator_cannot_escape_registered_root_with_uri_or_fields(
@@ -1666,22 +1581,16 @@ def test_malformed_store_uri_matrix_never_reaches_resolver(
 
     client.app.state.resolver_registry = ResolverRegistry([UnexpectedResolver()])
     malformed_cases = (
-        ("store://lab-fs//absolute-alias.txt", "Store artifact reference is invalid."),
-        ("store://lab-fs/../sibling.txt", "Store artifact reference is invalid."),
-        (
-            "store://lab-fs/path.txt?download=1",
-            "Store artifact reference is invalid.",
-        ),
-        ("store://lab-fs/path.txt#fragment", "Store artifact reference is invalid."),
-        (
-            "store://user@lab-fs/path.txt",
-            "Store artifact could not be resolved.",
-        ),
-        ("store://lab-fs/%2e%2e/sibling.txt", "Store artifact reference is invalid."),
-        ("store://lab-fs/%70ath.txt", "Store artifact reference is invalid."),
+        "store://lab-fs//absolute-alias.txt",
+        "store://lab-fs/../sibling.txt",
+        "store://lab-fs/path.txt?download=1",
+        "store://lab-fs/path.txt#fragment",
+        "store://user@lab-fs/path.txt",
+        "store://lab-fs/%2e%2e/sibling.txt",
+        "store://lab-fs/%70ath.txt",
     )
 
-    for index, (uri, expected_detail) in enumerate(malformed_cases):
+    for index, uri in enumerate(malformed_cases):
         dataset_id = _create_dataset_with_artifact(
             client,
             admin_auth_headers,
@@ -1701,7 +1610,7 @@ def test_malformed_store_uri_matrix_never_reaches_resolver(
         body = response.json()["data"]
         assert body["status"] == "unresolved"
         assert body["uri"] == "store://[redacted]"
-        assert body["detail"] == expected_detail
+        assert body["detail"] == "Store artifact could not be resolved."
         assert body["content_base64"] is None
 
 
@@ -1777,6 +1686,7 @@ def test_resolve_endpoint_denies_registered_local_store_without_configured_roots
     assert response.status_code == 200
     body = response.json()["data"]
     assert body["status"] == "unresolved"
-    assert body["uri"] == "store://unconfigured-local/result.txt"
+    assert body["uri"] == "store://[redacted]"
+    assert body["detail"] == "Store artifact could not be resolved."
     assert body["content_base64"] is None
     assert body["returned_bytes"] == 0

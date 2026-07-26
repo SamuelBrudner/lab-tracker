@@ -68,6 +68,7 @@ from lab_tracker.services import (
     TransactionalDraftCommitCoordinator,
     VisualizationService,
 )
+from lab_tracker.store_authority_registry import StoreAuthorityRegistry
 
 _logger = logging.getLogger(__name__)
 
@@ -101,12 +102,18 @@ class LabTrackerAPI(
         repository: LabTrackerRepository | None = None,
         request_context: LabTrackerRequestContext | None = None,
         settings: Settings | None = None,
+        store_authority_registry: StoreAuthorityRegistry | None = None,
         surface: str | None = None,
     ) -> None:
         self._raw_storage = raw_storage
         self._repository = repository
         self._request_context = request_context
         self._settings = settings or get_settings()
+        self._store_authority_registry = (
+            store_authority_registry
+            if store_authority_registry is not None
+            else StoreAuthorityRegistry.deny_all()
+        )
         self._surface = surface
         self._service_context = ServiceContext(
             raw_storage=raw_storage,
@@ -207,6 +214,7 @@ class LabTrackerAPI(
             context,
             projects=self.projects,
             authorization=self.project_authorization,
+            store_authority_registry=self._store_authority_registry,
         )
         self.notes: NoteService = NoteService(
             context,
@@ -318,6 +326,7 @@ class LabTrackerAPI(
             repository=request_context.repository,
             request_context=request_context,
             settings=self._settings,
+            store_authority_registry=self._store_authority_registry,
         )
 
     def request_scope(
