@@ -76,6 +76,13 @@ from lab_tracker.rclone_remote_policy import RcloneRemotePolicy
 from lab_tracker.rclone_store_locator import RcloneRemoteName, RegisteredRcloneRoot
 
 
+class _FalseyLocalPathPolicy(LocalPathPolicy):
+    __slots__ = ()
+
+    def __bool__(self) -> bool:
+        return False
+
+
 def _sha256(data: bytes) -> str:
     return "sha256:" + hashlib.sha256(data).hexdigest()
 
@@ -297,6 +304,23 @@ def test_local_resolver_allows_paths_within_roots(tmp_path):
         _local_ref(inside, _sha256(data))
     )
 
+    assert result.status is ResolutionStatus.VERIFIED
+
+
+def test_local_resolver_preserves_even_a_falsey_explicit_policy_identity(tmp_path):
+    data = b"explicit local authority"
+    inside = _write(tmp_path, "authorized.txt", data)
+    policy = _FalseyLocalPathPolicy([tmp_path])
+
+    resolver = LocalFilesystemResolver(
+        allowed_roots=[],
+        path_policy=policy,
+    )
+    result = resolver.resolve(_local_ref(inside, _sha256(data)))
+
+    assert not policy
+    assert resolver._operator_policy is policy
+    assert resolver._scope.path_policy is policy
     assert result.status is ResolutionStatus.VERIFIED
 
 
@@ -2264,28 +2288,24 @@ def test_store_relative_reference_git_resolves_end_to_end(tmp_path):
 # --- check_store_health ---------------------------------------------------
 
 
-def test_check_store_health_local_fs_healthy(tmp_path):
-    store = _data_store(StoreKind.LOCAL_FS, str(tmp_path))
-    health = check_store_health(store)
-    assert health.status is StoreHealthStatus.HEALTHY
-    assert health.is_healthy is True
-
-
-def test_check_store_health_local_fs_missing_root(tmp_path):
-    store = _data_store(StoreKind.LOCAL_FS, str(tmp_path / "absent"))
-    health = check_store_health(store)
-    assert health.status is StoreHealthStatus.UNREACHABLE
-    assert "not found" in (health.detail or "").lower()
-
-
-@pytest.mark.parametrize("root", ("relative/store", "~/store", "C:store"))
-def test_check_store_health_rejects_invalid_local_root_before_probe(
-    root, monkeypatch
+@pytest.mark.parametrize(
+    "root_kind",
+    ("existing", "missing", "relative"),
+)
+def test_legacy_check_store_health_local_fs_fails_closed_without_host_io_or_path_leak(
+    root_kind,
+    tmp_path,
+    monkeypatch,
 ):
+    root = {
+        "existing": str(tmp_path),
+        "missing": str(tmp_path / "secret-missing-root"),
+        "relative": "secret-relative/root",
+    }[root_kind]
     store = _data_store(StoreKind.LOCAL_FS, root)
 
     def unexpected_probe(*_args, **_kwargs):
-        raise AssertionError("invalid local store root reached a filesystem probe")
+        raise AssertionError("legacy local health reached a filesystem probe")
 
     monkeypatch.setattr(artifact_resolution.os.path, "realpath", unexpected_probe)
     monkeypatch.setattr(artifact_resolution.os.path, "isdir", unexpected_probe)
@@ -2294,8 +2314,9 @@ def test_check_store_health_rejects_invalid_local_root_before_probe(
 
     assert health == artifact_resolution.StoreHealth(
         StoreHealthStatus.UNREACHABLE,
-        "Local store root is invalid.",
+        artifact_resolution.LOCAL_STORE_HEALTH_FAILURE_DETAIL,
     )
+    assert root not in str(health.to_json_dict())
 
 
 def test_legacy_check_store_health_rclone_fails_closed_without_process_work(
@@ -2673,6 +2694,27 @@ def test_registry_allowed_roots_thread_through(tmp_path):
     result = registry.resolve(_local_ref(outside, _sha256(b"nope")))
 
     assert result.status is ResolutionStatus.UNRESOLVED
+
+
+def test_default_registry_preserves_explicit_local_policy_identity(tmp_path):
+    data = b"shared local policy"
+    inside = _write(tmp_path, "shared.txt", data)
+    policy = LocalPathPolicy([tmp_path])
+
+    registry = default_registry(
+        allowed_roots=[],
+        local_path_policy=policy,
+    )
+    resolver = next(
+        candidate
+        for candidate in registry._resolvers
+        if isinstance(candidate, LocalFilesystemResolver)
+    )
+    result = registry.resolve(_local_ref(inside, _sha256(data)))
+
+    assert resolver._operator_policy is policy
+    assert resolver._scope.path_policy is policy
+    assert result.status is ResolutionStatus.VERIFIED
 
 
 def test_registry_never_falls_back_to_ordinary_resolve_for_local_store(tmp_path):
@@ -3674,6 +3716,46 @@ def test_registry_from_env_recovery_off_by_default(tmp_path, monkeypatch):
     result = registry_from_env().resolve(_local_ref(missing, _sha256(data)))
 
     assert result.status is ResolutionStatus.UNRESOLVED
+
+
+def test_registry_from_env_explicit_local_policy_overrides_environment_without_parsing(
+    tmp_path,
+    monkeypatch,
+):
+    data = b"settings-selected local authority"
+    inside = _write(tmp_path, "selected.txt", data)
+    policy = _FalseyLocalPathPolicy([tmp_path])
+    monkeypatch.setenv(
+        "LAB_TRACKER_RESOLVER_ALLOWED_ROOTS",
+        "//environment.example/secret-untrusted-root",
+    )
+
+    def unexpected_environment_parse(_cls, _raw):
+        raise AssertionError("explicit local policy still parsed the environment")
+
+    monkeypatch.setattr(
+        LocalPathPolicy,
+        "from_config",
+        classmethod(unexpected_environment_parse),
+    )
+
+    registry = registry_from_env(
+        local_path_policy=policy,
+        http_policy=OutboundHttpPolicy(),
+        rclone_remote_policy=RcloneRemotePolicy.deny_all(),
+        git_remote_policy=GitRemotePolicy.deny_all(),
+    )
+    resolver = next(
+        candidate
+        for candidate in registry._resolvers
+        if isinstance(candidate, LocalFilesystemResolver)
+    )
+    result = registry.resolve(_local_ref(inside, _sha256(data)))
+
+    assert not policy
+    assert resolver._operator_policy is policy
+    assert resolver._scope.path_policy is policy
+    assert result.status is ResolutionStatus.VERIFIED
 
 
 def test_registry_from_env_honors_http_deadline_without_runtime_settings(

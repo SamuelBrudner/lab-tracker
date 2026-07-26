@@ -46,6 +46,8 @@ from lab_tracker.git_remote_policy import GitRemotePolicy
 from lab_tracker.git_store_health import GitStoreHealthProbe
 from lab_tracker.graph_drafting import GraphDraftClientFactory, make_graph_draft_client
 from lab_tracker.http_store_health import HttpStoreHealthProbe
+from lab_tracker.local_path_policy import LocalPathPolicy
+from lab_tracker.local_store_health import LocalStoreHealthProbe
 from lab_tracker.logging import configure_logging
 from lab_tracker.models import ReviewEmailDelivery, StoreKind
 from lab_tracker.note_storage import LocalNoteStorage
@@ -108,11 +110,14 @@ class _OwnedGitHealthWorkdir:
 class _StoreHealthDispatchProbe:
     """Dispatch external probes explicitly; retain only safe legacy leaves."""
 
+    local_probe: StoreProbe
     http_probe: StoreProbe
     rclone_probe: StoreProbe
     git_probe: StoreProbe
 
     def __call__(self, target: StoreProbeTarget) -> StoreHealth:
+        if target.kind is StoreKind.LOCAL_FS:
+            return self.local_probe(target)
         if target.kind is StoreKind.HTTP:
             return self.http_probe(target)
         if is_rclone_store_kind(target.kind):
@@ -140,6 +145,7 @@ class AppRuntime:
     review_email_provider: ReviewEmailProvider | None
     auth_rate_limiter: InMemoryRateLimiter
     pat_rate_limiter: InMemoryRateLimiter
+    local_path_policy: LocalPathPolicy
     outbound_http_policy: OutboundHttpPolicy
     outbound_http_client: OutboundHttpClient
     rclone_remote_policy: RcloneRemotePolicy
@@ -163,6 +169,9 @@ class AppRuntime:
 
 def build_app_runtime(settings: Settings) -> AppRuntime:
     configure_logging(settings.log_level)
+    local_path_policy = LocalPathPolicy.from_config(
+        settings.resolver_allowed_roots,
+    )
     outbound_http_policy = outbound_http_policy_from_config(
         allowed_authorities=settings.resolver_http_allowed_authorities,
         allowed_networks=settings.resolver_http_allowed_networks,
@@ -182,6 +191,7 @@ def build_app_runtime(settings: Settings) -> AppRuntime:
     git_health_workdir_owner = _OwnedGitHealthWorkdir()
     try:
         resolver_registry = registry_from_env(
+            local_path_policy=local_path_policy,
             http_policy=outbound_http_policy,
             http_client=outbound_http_client,
             rclone_remote_policy=rclone_remote_policy,
@@ -192,6 +202,7 @@ def build_app_runtime(settings: Settings) -> AppRuntime:
         )
         return _build_app_runtime(
             settings,
+            local_path_policy=local_path_policy,
             outbound_http_policy=outbound_http_policy,
             outbound_http_client=outbound_http_client,
             rclone_remote_policy=rclone_remote_policy,
@@ -208,6 +219,7 @@ def build_app_runtime(settings: Settings) -> AppRuntime:
 def _build_app_runtime(
     settings: Settings,
     *,
+    local_path_policy: LocalPathPolicy,
     outbound_http_policy: OutboundHttpPolicy,
     outbound_http_client: OutboundHttpClient,
     rclone_remote_policy: RcloneRemotePolicy,
@@ -271,6 +283,11 @@ def _build_app_runtime(
     )
     store_health_checker = CachedStoreHealthProbe(
         _StoreHealthDispatchProbe(
+            local_probe=LocalStoreHealthProbe(
+                policy=local_path_policy,
+                executor=process_executor,
+                deadline_seconds=settings.resolver_subprocess_deadline_seconds,
+            ),
             http_probe=HttpStoreHealthProbe(
                 policy=outbound_http_policy,
                 client=outbound_http_client,
@@ -310,6 +327,7 @@ def _build_app_runtime(
         review_email_provider=review_email_provider,
         auth_rate_limiter=auth_rate_limiter,
         pat_rate_limiter=pat_rate_limiter,
+        local_path_policy=local_path_policy,
         outbound_http_policy=outbound_http_policy,
         outbound_http_client=outbound_http_client,
         rclone_remote_policy=rclone_remote_policy,
@@ -592,6 +610,7 @@ def configure_app_state(app: FastAPI, runtime: AppRuntime) -> None:
     app.state.review_email_provider = runtime.review_email_provider
     app.state.auth_rate_limiter = runtime.auth_rate_limiter
     app.state.pat_rate_limiter = runtime.pat_rate_limiter
+    app.state.local_path_policy = runtime.local_path_policy
     app.state.outbound_http_policy = runtime.outbound_http_policy
     app.state.rclone_remote_policy = runtime.rclone_remote_policy
     app.state.git_remote_policy = runtime.git_remote_policy

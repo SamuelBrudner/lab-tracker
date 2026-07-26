@@ -11,6 +11,7 @@ import os
 import re
 import stat
 from collections.abc import MutableSequence, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import unquote_to_bytes, urlsplit
 from urllib.request import url2pathname
@@ -224,6 +225,7 @@ def _is_link_or_reparse_point(path: str) -> bool:
     return bool(reparse_flag and attributes & reparse_flag)
 
 
+@dataclass(frozen=True, slots=True, init=False, eq=False, repr=False)
 class LocalPathPolicy:
     """Prepare native local paths against optional canonical allowed roots.
 
@@ -233,10 +235,13 @@ class LocalPathPolicy:
     byte readers must still bind final authorization to the opened descriptor.
     """
 
+    _lexical_roots: tuple[str, ...] | None
+    _canonical_roots: tuple[str, ...] | None
+
     def __init__(self, allowed_roots: Sequence[str | Path] | None = None) -> None:
         if allowed_roots is None:
-            self._lexical_roots: tuple[str, ...] | None = None
-            self._canonical_roots: tuple[str, ...] | None = None
+            object.__setattr__(self, "_lexical_roots", None)
+            object.__setattr__(self, "_canonical_roots", None)
             return
 
         lexical_roots: list[str] = []
@@ -244,15 +249,23 @@ class LocalPathPolicy:
         seen_lexical: set[str] = set()
         for root in allowed_roots:
             try:
-                lexical = os.path.abspath(os.fspath(Path(root).expanduser()))
-            except (OSError, TypeError, ValueError) as exc:
-                raise ValueError("Local resolver roots must be valid local paths.") from exc
+                expanded = os.fspath(Path(root).expanduser())
+                lexical = os.path.abspath(expanded)
+            except (OSError, RuntimeError, TypeError, ValueError):
+                raise ValueError(
+                    "Local resolver roots must be valid local paths."
+                ) from None
             if not _is_supported_absolute_path(lexical):
                 raise ValueError("Local resolver roots must be absolute local paths.")
             try:
-                canonical = os.path.realpath(lexical)
-            except (OSError, ValueError) as exc:
-                raise ValueError("Local resolver roots could not be canonicalized.") from exc
+                # Preserve unresolved ``..`` components until realpath follows
+                # preceding links. Lexically collapsing ``link/..`` first can
+                # authorize a different directory from native path traversal.
+                canonical = os.path.realpath(expanded)
+            except (OSError, RuntimeError, ValueError):
+                raise ValueError(
+                    "Local resolver roots could not be canonicalized."
+                ) from None
             if not _is_supported_absolute_path(canonical):
                 raise ValueError("Local resolver roots must resolve to local paths.")
             lexical_key = _lexical_path_key(lexical)
@@ -273,8 +286,25 @@ class LocalPathPolicy:
                 if not _is_contained(existing, canonical, canonical=True)
             ]
             canonical_roots.append(canonical)
-        self._lexical_roots = tuple(lexical_roots)
-        self._canonical_roots = tuple(canonical_roots)
+        object.__setattr__(self, "_lexical_roots", tuple(lexical_roots))
+        object.__setattr__(self, "_canonical_roots", tuple(canonical_roots))
+
+    @classmethod
+    def from_config(cls, raw: str | None) -> LocalPathPolicy:
+        """Parse an ``os.pathsep``-separated operator root configuration.
+
+        This preserves the historical environment parser: unset, empty, and
+        whitespace-only values deny every local path; empty components are
+        omitted; and non-empty components retain their exact spelling for the
+        constructor's existing relative/tilde normalization.
+        """
+
+        if raw is not None and not isinstance(raw, str):
+            raise TypeError("Local resolver root configuration must be a string.")
+        allowed_roots = (
+            [part for part in raw.split(os.pathsep) if part.strip()] if raw else []
+        )
+        return cls(allowed_roots)
 
     @property
     def canonical_roots(self) -> tuple[str, ...] | None:
@@ -294,13 +324,17 @@ class LocalPathPolicy:
         registered store.
         """
 
-        if not is_supported_absolute_local_root(root):
-            return None
         if self._canonical_roots == ():
             return None
         try:
-            lexical_root = os.path.normpath(os.fspath(root))
+            raw_root = os.fspath(root)
         except (OSError, TypeError, ValueError):
+            return None
+        if not is_supported_absolute_local_root(raw_root):
+            return None
+        try:
+            lexical_root = os.path.normpath(raw_root)
+        except (OSError, ValueError):
             return None
         if self._canonical_roots is not None:
             precheck_roots = (
@@ -313,8 +347,10 @@ class LocalPathPolicy:
             ):
                 return None
         try:
-            canonical_root = os.path.realpath(lexical_root)
-        except (OSError, ValueError):
+            # Canonicalize the original spelling so a link followed by ``..``
+            # retains native filesystem traversal semantics.
+            canonical_root = os.path.realpath(raw_root)
+        except (OSError, RuntimeError, ValueError):
             return None
         if not is_supported_absolute_local_root(canonical_root):
             return None

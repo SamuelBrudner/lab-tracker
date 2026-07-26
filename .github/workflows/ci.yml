@@ -153,6 +153,7 @@ jobs:
           tests/test_git_process.py
           tests/test_git_store_health.py
           tests/test_local_path_policy.py
+          tests/test_local_store_health.py
           tests/test_local_file_access.py
           tests/test_windows_local_file.py
           tests/test_outbound_http_deadline.py

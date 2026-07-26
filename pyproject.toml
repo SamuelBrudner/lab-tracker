@@ -139,6 +139,8 @@ files = [
   "src/lab_tracker/provider_error_redaction.py",
   "src/lab_tracker/outbound_http.py",
   "src/lab_tracker/http_store_health.py",
+  "src/lab_tracker/local_store_health.py",
+  "src/lab_tracker/_local_store_health_helper.py",
   "src/lab_tracker/rclone_remote_policy.py",
   "src/lab_tracker/rclone_store_definition.py",
   "src/lab_tracker/rclone_store_health.py",

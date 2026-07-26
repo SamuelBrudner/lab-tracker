@@ -130,6 +130,7 @@ from lab_tracker.rclone_store_locator import (
 from lab_tracker.store_health import (
     GIT_STORE_HEALTH_FAILURE_DETAIL,
     HTTP_STORE_HEALTH_FAILURE_DETAIL,
+    LOCAL_STORE_HEALTH_FAILURE_DETAIL,
     RCLONE_STORE_HEALTH_FAILURE_DETAIL,
     StoreHealth,
     StoreHealthStatus,
@@ -1012,27 +1013,19 @@ def check_store_health(
 ) -> StoreHealth:
     """Probe whether a registered store is reachable from this host.
 
-    This transitional helper retains only the local directory leaf. HTTP,
-    rclone, and Git fail closed here and are handled only by the runtime's
-    dedicated policy-authorized adapters. ``object_table`` and ``database`` are
-    reported ``unsupported`` until their adapters land. Health transport,
-    runner, executor, policy, and timeout keywords were intentionally removed
-    so direct callers cannot mistake this compatibility path for a safe external
-    probe.
+    This transitional helper fails closed for local, HTTP, rclone, and Git
+    stores; the runtime handles them only through dedicated policy-authorized
+    adapters. ``object_table`` and ``database`` are reported ``unsupported``
+    until their adapters land. Health transport, runner, executor, policy, and
+    timeout keywords were intentionally removed so direct callers cannot mistake
+    this compatibility path for a safe host-I/O probe.
     """
 
     kind = store.kind
     if kind is StoreKind.LOCAL_FS:
-        if not is_supported_absolute_local_root(store.root):
-            return StoreHealth(
-                StoreHealthStatus.UNREACHABLE,
-                "Local store root is invalid.",
-            )
-        root = os.path.realpath(store.root)
-        if os.path.isdir(root):
-            return StoreHealth(StoreHealthStatus.HEALTHY)
         return StoreHealth(
-            StoreHealthStatus.UNREACHABLE, f"Root directory not found: {store.root}"
+            StoreHealthStatus.UNREACHABLE,
+            LOCAL_STORE_HEALTH_FAILURE_DETAIL,
         )
 
     if kind is StoreKind.HTTP:
@@ -1101,10 +1094,15 @@ class LocalFilesystemResolver(ArtifactResolver, ScopedLocalStoreResolver):
         self,
         allowed_roots: Sequence[str | Path] | None = None,
         *,
+        path_policy: LocalPathPolicy | None = None,
         recovery: RecoveryPolicy | None = None,
         file_reader_factory: Callable[[LocalPathPolicy], LocalFileReader] | None = None,
     ) -> None:
-        self._operator_policy = LocalPathPolicy(allowed_roots)
+        self._operator_policy = (
+            path_policy
+            if path_policy is not None
+            else LocalPathPolicy(allowed_roots)
+        )
         self._file_reader_factory = (
             HandleBoundLocalFileAccess
             if file_reader_factory is None
@@ -2540,6 +2538,7 @@ def _build_resolved(
 def default_registry(
     *,
     allowed_roots: Sequence[str | Path] | None = None,
+    local_path_policy: LocalPathPolicy | None = None,
     recovery: RecoveryPolicy | None = None,
     http_policy: OutboundHttpPolicy | None = None,
     http_client: OutboundHttpClient | None = None,
@@ -2564,7 +2563,10 @@ def default_registry(
     for every command in a single rclone or Git resolution.
     ``rclone_remote_policy`` and ``git_remote_policy`` are immutable authorities
     shared with health composition; omission denies every corresponding remote.
-    One process executor is shared by both subprocess resolvers.
+    ``local_path_policy`` is the typed local authority shared with health
+    composition; when supplied it takes precedence over compatibility
+    ``allowed_roots``. One process executor is shared by both subprocess
+    resolvers.
     """
 
     shared_process_executor = (
@@ -2574,7 +2576,11 @@ def default_registry(
     )
     return ResolverRegistry(
         [
-            LocalFilesystemResolver(allowed_roots=allowed_roots, recovery=recovery),
+            LocalFilesystemResolver(
+                allowed_roots=allowed_roots,
+                path_policy=local_path_policy,
+                recovery=recovery,
+            ),
             HttpResolver(
                 policy=http_policy,
                 client=http_client,
@@ -2721,6 +2727,7 @@ def _strict_comma_separated_values(
 
 def registry_from_env(
     *,
+    local_path_policy: LocalPathPolicy | None = None,
     http_policy: OutboundHttpPolicy | None = None,
     http_client: OutboundHttpClient | None = None,
     http_deadline_seconds: float | None = None,
@@ -2731,10 +2738,10 @@ def registry_from_env(
 ) -> ResolverRegistry:
     """Build the default registry, reading resolver config from the env."""
 
-    raw = os.environ.get(LAB_TRACKER_RESOLVER_ALLOWED_ROOTS_ENV)
-    allowed_roots = (
-        [part for part in raw.split(os.pathsep) if part.strip()] if raw else []
-    )
+    if local_path_policy is None:
+        local_path_policy = LocalPathPolicy.from_config(
+            os.environ.get(LAB_TRACKER_RESOLVER_ALLOWED_ROOTS_ENV)
+        )
     if rclone_remote_policy is None:
         rclone_remote_policy = RcloneRemotePolicy.from_config(
             os.environ.get(LAB_TRACKER_RCLONE_ALLOWED_REMOTES_ENV),
@@ -2798,7 +2805,7 @@ def registry_from_env(
             f"and between 0 and {MAX_SUBPROCESS_DEADLINE_SECONDS:g} seconds."
         ) from None
     return default_registry(
-        allowed_roots=allowed_roots,
+        local_path_policy=local_path_policy,
         recovery=recovery_from_env(),
         http_policy=(
             http_policy

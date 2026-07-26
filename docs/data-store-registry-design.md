@@ -91,9 +91,12 @@ class DataStore(_DomainModel):
 ```
 
 A project's **effective store set** = its own stores plus inherited group stores;
-at most one is the **default** (a scope may have none). Registration validates stored configuration
-without initiating backend I/O. Operators can run the separate health endpoint
-to stat a local root, list a remote prefix, or test configured credentials.
+at most one is the **default** (a scope may have none). Registration validates
+stored configuration without initiating backend I/O or invoking a health
+adapter. Operators can run the separate, read-only health endpoint for a bounded
+advisory check of a local root, remote prefix, or configured credentials. A
+healthy result describes reachability at probe time; it is not a registration
+guarantee or a durable capability.
 
 ## Backends differ by capability, not brand
 
@@ -303,9 +306,15 @@ Shipped:
   preflight, redirect denial, sanitized environment, app-owned working
   directory, and one deadline across both bounded commands. Invalid targets
   perform no per-probe process work, and ordinary failures expose only one
-  static detail per adapter. The legacy helper now fails closed for HTTP,
-  rclone, and Git. Local directory containment remains tracked separately;
-  `object_table` and `database` remain unsupported.
+  static detail per adapter. Local health first restricts the object-identical
+  operator `LocalPathPolicy` to the complete registered root, then invokes one
+  fixed isolated, output-free Python helper under the shared process executor
+  and subprocess deadline. The helper performs a no-follow final directory stat
+  and rejects Windows reparse-point roots. Policy narrowing and canonicalization
+  occur in the parent before that deadline. This is static, advisory containment,
+  not a handle-bound guarantee against root retargeting; that follow-up is
+  `lab-tracker-n5kp.41.6`. The legacy helper now fails closed for local, HTTP,
+  rclone, and Git. `object_table` and `database` remain unsupported.
 - ✅ Group-scoped stores: a store is scoped to exactly one of a project or a
   group (migration `0050`, nullable `project_id` + `group_id`). A group store is
   inherited by every project in the group — `get_by_name` resolves a project's
@@ -328,7 +337,10 @@ Shipped:
   path. Its effective read authority is conjunctive with the operator's global
   local-root policy, and the exact reader plus recovery walk are scoped to the
   registered store root. A broader global root therefore cannot make sibling
-  files addressable through that store.
+  files addressable through that store. Application composition parses
+  `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS` once as an `os.pathsep`-separated
+  operator list and shares one immutable policy with local resolution and local
+  health; unset or empty runtime configuration denies every local root.
 - ✅ Registered HTTP prefix confinement: a pure value validates the canonical
   HTTP origin and portable path components without DNS. A frozen, factory-only
   target crosses the database-scope boundary, and the resolver checks the
