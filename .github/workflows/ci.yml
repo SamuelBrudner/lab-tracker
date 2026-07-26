@@ -2,7 +2,16 @@ name: ci
 
 on:
   push:
+    branches: [main]
   pull_request:
+
+# A PR branch push previously triggered both a `push` and a `pull_request` run
+# of this workflow on the same commit, doubling the exposure to any flaky job.
+# Restrict `push` to `main` so PR branches run exactly once (via pull_request),
+# and cancel superseded in-progress runs when a ref is updated again.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
