@@ -4,6 +4,7 @@ import asyncio
 import gc
 import os
 import stat
+import traceback
 import warnings
 from pathlib import Path
 from uuid import UUID
@@ -73,6 +74,7 @@ def _clear_auth_env(monkeypatch) -> None:
         "LAB_TRACKER_RESOLVER_RECOVERY_MAX_FILES",
         "LAB_TRACKER_RESOLVER_RECOVERY_MAX_DIRECTORIES",
         "LAB_TRACKER_RESOLVER_RECOVERY_MAX_BYTES",
+        "LAB_TRACKER_STORE_AUTHORITY_GRANTS_JSON",
         "LAB_TRACKER_RCLONE_ALLOWED_REMOTES",
         "LAB_TRACKER_GIT_ALLOWED_REMOTES",
         "LAB_TRACKER_STORE_HEALTH_GLOBAL_IN_FLIGHT_LIMIT",
@@ -124,6 +126,72 @@ def test_dotenv_ignores_non_lab_tracker_keys(tmp_path, monkeypatch):
 
     assert settings.environment == "local"
     assert settings.openai_model == "gpt-test"
+
+
+def test_store_authority_grants_default_to_deny_all_input(monkeypatch):
+    _clear_auth_env(monkeypatch)
+
+    assert _settings_from_environment().store_authority_grants_json == ""
+
+
+def test_store_authority_grants_load_exact_environment_value(monkeypatch):
+    _clear_auth_env(monkeypatch)
+    configured = '{"schema":"lab-tracker/store-authority/v1","grants":[]}'
+    monkeypatch.setenv("LAB_TRACKER_STORE_AUTHORITY_GRANTS_JSON", configured)
+
+    assert _settings_from_environment().store_authority_grants_json == configured
+
+
+def test_store_authority_grants_load_exact_dotenv_value(tmp_path, monkeypatch):
+    _clear_auth_env(monkeypatch)
+    configured = '{"schema":"lab-tracker/store-authority/v1","grants":[]}'
+    dotenv_path = tmp_path / ".env"
+    dotenv_path.write_text(
+        f"LAB_TRACKER_STORE_AUTHORITY_GRANTS_JSON='{configured}'\n",
+        encoding="utf-8",
+    )
+
+    assert Settings(_env_file=dotenv_path).store_authority_grants_json == configured
+
+
+def test_store_authority_grants_are_hidden_from_settings_rendering():
+    secret = "sag-sensitive-sentinel-7f94d128"
+    settings = Settings(
+        _env_file=None,
+        store_authority_grants_json=secret,
+    )
+
+    assert secret not in repr(settings)
+    assert secret not in str(settings)
+    assert "store_authority_grants_json" not in settings.model_dump()
+    assert "store_authority_grants_json" not in settings.model_dump_json()
+
+
+def test_store_authority_grants_are_hidden_from_other_settings_validation_errors(
+    caplog,
+):
+    secret = "sag-validation-secret-7f94d128"
+
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(
+            _env_file=None,
+            environment="production",
+            auth_enabled=False,
+            store_authority_grants_json=secret,
+        )
+
+    error = exc_info.value
+    rendered = "".join(
+        traceback.format_exception(
+            type(error),
+            error,
+            error.__traceback__,
+        )
+    )
+    assert secret not in str(error)
+    assert secret not in repr(error)
+    assert secret not in rendered
+    assert secret not in caplog.text
 
 
 def test_dotenv_loads_resolver_settings(tmp_path, monkeypatch):
@@ -522,6 +590,55 @@ def test_invalid_dotenv_http_policy_fails_runtime_composition(tmp_path, monkeypa
 
     with pytest.raises(ValueError, match="exact origins"):
         build_app_runtime(settings)
+
+
+def test_invalid_store_authority_config_fails_before_logging_or_runtime_side_effects(
+    monkeypatch,
+    caplog,
+):
+    _clear_auth_env(monkeypatch)
+    secret = "operator-secret-must-not-leak"
+    settings = Settings(
+        _env_file=None,
+        database_url="sqlite+pysqlite:///:memory:",
+        store_authority_grants_json=(
+            '{"schema":"lab-tracker/store-authority/v1","grants":[],'
+            f'"password":"{secret}"}}'
+        ),
+    )
+
+    def unexpected_side_effect(*_args, **_kwargs):
+        pytest.fail("invalid store authority configuration reached a runtime side effect")
+
+    for name in (
+        "configure_logging",
+        "outbound_http_policy_from_config",
+        "BoundedSubprocessExecutor",
+        "BoundedLocalFilesystemOperations",
+        "SafeHttpClient",
+        "_OwnedGitHealthWorkdir",
+        "get_engine",
+        "LocalFileStorageBackend",
+        "LocalNoteStorage",
+        "CachedStoreHealthProbe",
+    ):
+        monkeypatch.setattr(runtime_module, name, unexpected_side_effect)
+    caplog.clear()
+
+    with pytest.raises(ValueError) as exc_info:
+        build_app_runtime(settings)
+
+    rendered = "".join(
+        traceback.format_exception(
+            type(exc_info.value),
+            exc_info.value,
+            exc_info.value.__traceback__,
+        )
+    )
+    assert secret not in rendered
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__context__ is None
+    assert not caplog.records
 
 
 def test_invalid_local_policy_fails_before_workdir_or_database_without_path_leak(
@@ -952,6 +1069,33 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(
     assert not git_health_workdir.exists()
 
 
+def test_runtime_retains_one_store_authority_snapshot_without_environment_reread(
+    monkeypatch,
+):
+    _clear_auth_env(monkeypatch)
+    configured = '{"schema":"lab-tracker/store-authority/v1","grants":[]}'
+    settings = Settings(
+        _env_file=None,
+        database_url="sqlite+pysqlite:///:memory:",
+        store_authority_grants_json=configured,
+    )
+    monkeypatch.setenv(
+        "LAB_TRACKER_STORE_AUTHORITY_GRANTS_JSON",
+        "environment-must-not-be-reread",
+    )
+
+    runtime = build_app_runtime(settings)
+    app = FastAPI()
+    try:
+        configure_app_state(app, runtime)
+
+        assert app.state.store_authority_registry is runtime.store_authority_registry
+        assert "store_authority_registry=" not in repr(runtime)
+    finally:
+        runtime.engine.dispose()
+        runtime.cleanup_git_health_workdir()
+
+
 def test_lifespan_removes_app_owned_git_health_workdir(monkeypatch):
     _clear_auth_env(monkeypatch)
     resolver_registry = ResolverRegistry()
@@ -1111,6 +1255,10 @@ def test_compose_forwards_outbound_artifact_policy_settings():
     assert ("LAB_TRACKER_GIT_ALLOWED_REMOTES: ${LAB_TRACKER_GIT_ALLOWED_REMOTES:-}") in compose
     assert (
         "LAB_TRACKER_RCLONE_ALLOWED_REMOTES: ${LAB_TRACKER_RCLONE_ALLOWED_REMOTES:-}"
+    ) in compose
+    assert (
+        "LAB_TRACKER_STORE_AUTHORITY_GRANTS_JSON: "
+        "${LAB_TRACKER_STORE_AUTHORITY_GRANTS_JSON:-}"
     ) in compose
 
 

@@ -81,6 +81,32 @@ This is what makes "pull content that wasn't captured" trustworthy: the agent
 gets new content *and* a guarantee it is the same artifact, or an explicit
 warning that it is not.
 
+## Scoped authority is distinct from global resolver policy
+
+The operator-owned `StoreAuthorityRegistry` is parsed once, before all other
+runtime composition, from the strict versioned configuration documented in
+[`configuration.md`](configuration.md#scoped-store-authority-grants). A grant
+names one exact project or group scope, store kind, capability subset, and
+typed structural boundary. Explicit grant-ID selection returns a sealed,
+opaque proof only for an exact match; the registry never searches for or
+reveals a matching grant.
+
+That scoped grant is conjunctive with, not replaced by, the existing global
+filesystem, HTTP, rclone, and Git policies. A broad global root, origin,
+network, remote, or repository prefix is only a server-wide outer ceiling; it
+does not grant any project access. Conversely, a scoped grant cannot widen a
+global ceiling. Role membership only controls graph access and likewise cannot
+manufacture host or network authority.
+
+The registry snapshot is immutable and restart-only. Revocation is complete
+only after every process retaining the old snapshot has stopped. This registry
+slice is not yet enforced by registration or I/O; persisted grant bindings and
+use-time fingerprint revalidation are separate follow-on slices. During that
+staged integration, a lexical local proof is registration-only and must produce
+an opaque I/O denial until the local-use slice carries the selected boundary
+into the retained-handle helper. Direct non-store references remain inert
+metadata throughout.
+
 ## Interface
 
 The application prepares an exact, detached target while its authorized
@@ -698,6 +724,11 @@ Shipped (`src/lab_tracker/artifact_resolution.py`, tested in
   `ResolvedArtifact` result with `to_json_dict()`, narrow scoped adapter
   protocols, and a `ResolverRegistry` that dispatches exact prepared store
   targets and fails closed for raw references.
+- ✅ One deny-by-default immutable `StoreAuthorityRegistry`, parsed from a
+  strict versioned operator envelope before any other runtime composition and
+  retained by exact identity on runtime/app state. Its typed proofs and
+  fingerprints are pure foundations; registration binding and use-time
+  enforcement are not part of this slice.
 - ✅ `LocalFilesystemResolver` — `file://` and `local`/`local_fs` sources, with
   native `file:` URI conversion, an empty/`localhost`-only authority policy,
   and a shared filesystem-I/O-free lexical authority plus bounded broker.

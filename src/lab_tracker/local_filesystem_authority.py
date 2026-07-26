@@ -10,11 +10,12 @@ from __future__ import annotations
 import ntpath
 import os
 import posixpath
+import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass
 from itertools import islice
 from os import PathLike
-from typing import Final
+from typing import Final, Literal
 
 from lab_tracker.local_path_syntax import parse_windows_absolute_local_path
 
@@ -41,6 +42,70 @@ class _LexicalCandidate:
     rendered: str
     anchor: str
     components: tuple[str, ...]
+
+
+_LOCAL_FILESYSTEM_BOUNDARY_FACTORY_TOKEN = object()
+
+
+@dataclass(frozen=True, slots=True, init=False, repr=False)
+class LocalFilesystemAuthorityBoundary:
+    """One strict native lexical boundary, parsed without filesystem I/O."""
+
+    flavor: Literal["posix", "windows"]
+    rendered: str
+    anchor: str
+    components: tuple[str, ...]
+
+    def __init__(
+        self,
+        *,
+        flavor: Literal["posix", "windows"],
+        rendered: str,
+        anchor: str,
+        components: tuple[str, ...],
+        _factory_token: object,
+    ) -> None:
+        if _factory_token is not _LOCAL_FILESYSTEM_BOUNDARY_FACTORY_TOKEN:
+            raise TypeError(
+                "LocalFilesystemAuthorityBoundary must be built by its parser."
+            )
+        object.__setattr__(self, "flavor", flavor)
+        object.__setattr__(self, "rendered", rendered)
+        object.__setattr__(self, "anchor", anchor)
+        object.__setattr__(self, "components", components)
+
+    @classmethod
+    def parse(cls, value: object) -> LocalFilesystemAuthorityBoundary | None:
+        """Parse an absolute native root with the strict authority grammar."""
+
+        if not isinstance(value, str) or not _is_registry_safe_path_text(value):
+            return None
+        try:
+            parsed = _parse_absolute(value)
+        except (OSError, RuntimeError, TypeError, ValueError):
+            return None
+        flavor: Literal["posix", "windows"] = (
+            "windows" if os.name == "nt" else "posix"
+        )
+        return cls(
+            flavor=flavor,
+            rendered=parsed.rendered,
+            anchor=parsed.anchor,
+            components=parsed.components,
+            _factory_token=_LOCAL_FILESYSTEM_BOUNDARY_FACTORY_TOKEN,
+        )
+
+    def contains(self, candidate: LocalFilesystemAuthorityBoundary) -> bool:
+        """Return exact-case lexical component containment."""
+
+        if not isinstance(candidate, LocalFilesystemAuthorityBoundary):
+            return False
+        size = len(self.components)
+        return (
+            candidate.flavor == self.flavor
+            and candidate.anchor == self.anchor
+            and candidate.components[:size] == self.components
+        )
 
 
 @dataclass(frozen=True, slots=True, eq=False, repr=False)
@@ -403,6 +468,14 @@ def _validate_lexical_path_budget(path: str, *, windows: bool) -> None:
 
 def _filesystem_path_bytes(path: str) -> int:
     return len(os.fsencode(path))
+
+
+def _is_registry_safe_path_text(value: str) -> bool:
+    try:
+        value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError:
+        return False
+    return not any(unicodedata.category(character) == "Cc" for character in value)
 
 
 def _reject_control_characters(value: str) -> None:

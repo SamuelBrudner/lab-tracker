@@ -140,6 +140,7 @@ files = [
   "src/lab_tracker/outbound_http.py",
   "src/lab_tracker/http_store_health.py",
   "src/lab_tracker/local_filesystem_authority.py",
+  "src/lab_tracker/store_authority_registry.py",
   "src/lab_tracker/local_filesystem_operations.py",
   "src/lab_tracker/local_filesystem_ports.py",
   "src/lab_tracker/local_resolution_budget.py",

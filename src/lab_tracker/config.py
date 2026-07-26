@@ -6,7 +6,7 @@ import math
 from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from lab_tracker.artifact_resolution_admission import (
@@ -69,6 +69,11 @@ class Settings(BaseSettings):
     bootstrap_admin_token_disclosure: Literal["local", "first_run", "never"] = "local"
     auth_enabled: bool | None = None
     max_upload_bytes: int = 100 * 1024 * 1024
+    store_authority_grants_json: str = Field(
+        default="",
+        repr=False,
+        exclude=True,
+    )
     resolver_allowed_roots: str = ""
     resolver_http_allowed_authorities: str = ""
     resolver_http_allowed_networks: str = ""
@@ -435,6 +440,7 @@ class Settings(BaseSettings):
         env_file=".env",
         case_sensitive=False,
         extra="ignore",
+        hide_input_in_errors=True,
     )
 
 
