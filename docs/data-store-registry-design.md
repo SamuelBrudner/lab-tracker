@@ -187,6 +187,8 @@ the store registry is what its `ResolverRegistry` dispatches through:
 3. Pick the adapter for that `kind`; assert the operation's required capability
    (e.g. a byte-range read needs `BYTE_RANGE`; a query needs `QUERY`).
 4. Adapter resolves the in-store locator → bounded bytes / bounded result set.
+   Artifact content has one 8 MiB hard/default decoded-byte ceiling; a byte
+   range narrows the selected view and can never enlarge that ceiling.
 5. Verify against `content_hash` → tri-state `verified` / `drifted` /
    `unresolved`, plus `unversioned` for mutable-DB reads that cannot be certified.
 

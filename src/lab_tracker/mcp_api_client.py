@@ -12,6 +12,10 @@ from typing import Any
 
 import httpx
 
+from lab_tracker.artifact_resolution_limits import (
+    ArtifactContentBounds,
+    ArtifactContentBoundsError,
+)
 from lab_tracker.assistant_next_questions import (
     OPEN_GOAL_STATUSES,
     OPEN_QUESTION_STATUSES,
@@ -496,6 +500,14 @@ class LabTrackerAPIClient:
         byte_start: int | None = None,
         byte_end: int | None = None,
     ) -> JsonObject:
+        try:
+            ArtifactContentBounds.for_request(max_bytes, byte_start, byte_end)
+        except ArtifactContentBoundsError as exc:
+            raise LabTrackerAPIValidationError(
+                str(exc),
+                code="validation_error",
+            ) from exc
+
         payload: JsonObject = {
             "entity_type": entity_type,
             "entity_id": entity_id,
