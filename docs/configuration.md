@@ -91,6 +91,48 @@ roots fail startup. The policy grants only complete contained roots: a
 registered store root must be a native absolute local path, and a grant to one
 of its children cannot partially authorize the broader store.
 
+#### Mount and namespace authority
+
+An allowed root grants the transitive subtree visible beneath that path in the
+service's host or container filesystem namespace. It is a namespace grant, not
+a grant to one device, filesystem, or volume identity. The supported cases are:
+
+| Namespace case | Decision |
+| --- | --- |
+| POSIX ordinary mount beneath an allowed root | Allowed |
+| Linux bind mount beneath an allowed root | Allowed |
+| Supported Windows drive-letter anchor | Allowed and trusted for that operation |
+| Windows nested volume mount point | Unsupported; fail closed |
+| Windows UNC, device, or GUID-volume namespace | Unsupported; fail closed |
+| Symlink or junction alias proven to resolve inside the same grant | Allowed as an alias |
+| Escaping or ambiguous name-surrogate alias | Denied |
+| Directory-capable, non-name-surrogate Cloud Files placeholder | Eligible; not a mount crossing |
+
+Consequently, POSIX traversal must not reject a descendant merely because it
+crosses a device boundary: `RESOLVE_NO_XDEV`, `st_dev` equality, and similar
+checks would incorrectly revoke an allowed ordinary or bind mount. On Windows,
+the configured drive mapping is part of the trusted deployment boundary.
+Network mappings that normalize outside the supported drive namespace, nested
+volume mount points, and unsupported final namespaces fail closed. Symlinks and
+junctions do not add authority; an operation may use one only after its bounded
+resolver proves that the destination remains inside the same root.
+
+The deployment operator is trusted to control this setting, the service mount
+namespace, bind and FUSE mounts, container volume mappings, and Windows DOS
+device mappings. API users and ordinary data writers are not trusted to mutate
+that topology. If an untrusted principal can change mount, FUSE, device-map, or
+volume-mapping topology beneath an allowed root, local artifact resolution,
+recovery, and health are unsupported and must be disabled or isolated from that
+principal.
+
+Mount and device-map changes are deployment changes and must not occur during a
+filesystem operation. Each operation observes a point-in-time namespace.
+Retained descriptors and handles bind the selected objects for that operation;
+they do not create a lease over later namespace state, and store health remains
+only a point-in-time reachability result. See
+[`self-hosted-operations.md`](self-hosted-operations.md#local-filesystem-stores)
+for deployment guidance.
+
 Runtime composition parses this setting once into one frozen, slotted
 `LocalPathPolicy` instance and shares that same object between local artifact
 resolution and local store health. An explicitly injected typed policy takes
@@ -255,9 +297,8 @@ static detail. Adapter-level `BaseException` still propagates after
 executor-owned cleanup. Health is a point-in-time result about the exact
 directory object retained when validation completes, not a durable capability
 or lease. Parent-side canonicalization remains outside the helper deadline.
-Ordinary or bind-mount crossing authority and pre-follow-safe parent planning
-are separate concerns tracked by `lab-tracker-n5kp.72` and
-`lab-tracker-n5kp.71`.
+Mount crossings follow the namespace-transitive authority above; bounded
+pre-follow-safe parent planning remains tracked by `lab-tracker-n5kp.71`.
 
 - `LAB_TRACKER_STORE_HEALTH_GLOBAL_IN_FLIGHT_LIMIT`: maximum admitted health
   requests in one application process (default: `4`, maximum: `16`).

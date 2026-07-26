@@ -344,7 +344,11 @@ Shipped:
   files addressable through that store. Application composition parses
   `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS` once as an `os.pathsep`-separated
   operator list and shares one immutable policy with local resolution and local
-  health; unset or empty runtime configuration denies every local root.
+  health; unset or empty runtime configuration denies every local root. The
+  grant is namespace-transitive rather than device-bound; the trusted actor,
+  platform matrix, and point-in-time lifecycle are defined by the normative
+  [mount and namespace authority](configuration.md#mount-and-namespace-authority)
+  contract.
 - ✅ Registered HTTP prefix confinement: a pure value validates the canonical
   HTTP origin and portable path components without DNS. A frozen, factory-only
   target crosses the database-scope boundary, and the resolver checks the

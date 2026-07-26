@@ -368,13 +368,26 @@ component case remains exact for case-sensitive NTFS directories; cross-drive
 comparisons fail closed. Canonicalization rejects static POSIX symlink and
 Windows-junction targets outside the configured roots.
 
+The normative mount and namespace contract is
+[`configuration.md`](configuration.md#mount-and-namespace-authority). In
+particular, an allowed root grants the transitive subtree visible in the
+service namespace: POSIX ordinary and bind mounts beneath it remain authorized,
+while unsupported Windows nested volume mounts and UNC/device/GUID namespaces
+fail closed. This authority is about namespace reachability, not device
+identity. Symlinks and junctions are aliases rather than mount grants and are
+eligible only when bounded resolution proves their destination remains inside
+the same root. Non-name-surrogate Cloud Files directory placeholders are not
+mount crossings.
+
 Recovery applies the same policy to traversal itself as well as to candidate
 files. Every symlink/reparse-point directory is pruned before recursive descent,
 and ordinary directory candidates whose canonical targets leave the root are
-also removed. The current recovery budget counts candidate files and hashed
-bytes; `lab-tracker-n5kp.61` separately owns pre-follow reparse inspection plus
-explicit directory-count and wall-clock budgets, so this slice does not
-overstate traversal availability.
+also removed. This current blanket rule conservatively makes recovery through a
+Cloud Files directory placeholder unavailable even though the placeholder is
+not itself a mount crossing. `lab-tracker-n5kp.47` owns the future single
+operation deadline and actual-byte budget; `lab-tracker-n5kp.61` will consume
+that budget while adding pre-follow-safe enumeration and an explicit
+directory-count limit, including the more precise Cloud Files classification.
 
 Canonical pathname authorization is a preliminary plan, not a capability that
 the resolver may later reopen. The local access boundary opens one file and
@@ -400,8 +413,10 @@ prevents unmatched bytes from being returned as `VERIFIED`.
 
 Windows may initiate target-side I/O while opening a path through a reparse
 point before the final handle path is authorized. The resolver never returns
-those outside bytes; pre-follow reparse inspection and traversal availability
-remain explicitly owned by `lab-tracker-n5kp.61`.
+those outside bytes. The bounded pre-follow capability is tracked by
+`lab-tracker-n5kp.71`; its direct-read role and total operation budget are
+tracked by `lab-tracker-n5kp.47`, while recovery enumeration remains
+`lab-tracker-n5kp.61`.
 
 ### Registered local-store confinement
 
@@ -471,8 +486,9 @@ filesystem work. During helper validation, an intermediate or final
 link/junction substitution cannot redirect inspection, and replacement after
 open cannot redirect the retained handle. The result remains an advisory
 point-in-time snapshot rather than a durable lease. Pre-follow-safe parent
-planning and mount-crossing authority remain `lab-tracker-n5kp.71` and
-`lab-tracker-n5kp.72`.
+planning remains `lab-tracker-n5kp.71`; mount crossings follow the normative
+namespace-transitive policy in
+[`configuration.md`](configuration.md#mount-and-namespace-authority).
 
 ## Recovering moved/renamed local artifacts
 
