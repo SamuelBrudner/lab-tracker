@@ -7,9 +7,9 @@ protocol is the process exit status.
 The walk deliberately anchors the drive root with ``CreateFileW`` and opens
 each subsequent component relative to the retained directory handle with
 ``NtCreateFile``.  ``OBJ_DONT_REPARSE`` prevents a lookup from following a
-reparse point; older filesystems that reject that object-attribute flag get one
-explicit fallback without it, after which the opened handle's attributes and
-normalized final DOS path still have to match exactly.
+reparse point.  A single-component retry without that flag still uses
+``FILE_OPEN_REPARSE_POINT`` and accepts the exact opened directory only after
+same-handle tag classification rejects name-surrogate links and junctions.
 """
 
 from __future__ import annotations
@@ -38,8 +38,12 @@ _FILE_ATTRIBUTE_DIRECTORY = 0x00000010
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 _FILE_OPEN = 1
 _FILE_OPEN_REPARSE_POINT = 0x00200000
+_FILE_ATTRIBUTE_TAG_INFO_CLASS = 9
 _OBJ_DONT_REPARSE = 0x00001000
+_REPARSE_TAG_DIRECTORY = 0x10000000
+_REPARSE_TAG_NAME_SURROGATE = 0x20000000
 _STATUS_INVALID_PARAMETER = 0xC000000D
+_STATUS_REPARSE_POINT_ENCOUNTERED = 0xC000050B
 
 _FILE_NAME_NORMALIZED_AND_VOLUME_NAME_DOS = 0
 _INITIAL_PATH_BUFFER_CHARS = 260
@@ -58,6 +62,7 @@ _WINDOWS_RESERVED_NAMES = frozenset(
 
 _BOOL = ctypes.c_int32
 _DWORD = ctypes.c_uint32
+_FILE_INFO_BY_HANDLE_CLASS = ctypes.c_int
 _HANDLE = ctypes.c_void_p
 _NTSTATUS = ctypes.c_int32
 _ULONG = ctypes.c_uint32
@@ -67,7 +72,10 @@ CreateFile = Callable[
     [object, object, object, object, object, object, object],
     object,
 ]
-GetFileInformationByHandle = Callable[[object, object], object]
+GetFileInformationByHandleEx = Callable[
+    [object, object, object, object],
+    object,
+]
 GetFinalPathNameByHandle = Callable[[object, object, object, object], object]
 CloseHandle = Callable[[object], object]
 NtCreateFile = Callable[
@@ -88,25 +96,10 @@ NtCreateFile = Callable[
 ]
 
 
-class _FILETIME(ctypes.Structure):
+class _FILE_ATTRIBUTE_TAG_INFO(ctypes.Structure):
     _fields_ = [
-        ("dwLowDateTime", _DWORD),
-        ("dwHighDateTime", _DWORD),
-    ]
-
-
-class _BY_HANDLE_FILE_INFORMATION(ctypes.Structure):
-    _fields_ = [
-        ("dwFileAttributes", _DWORD),
-        ("ftCreationTime", _FILETIME),
-        ("ftLastAccessTime", _FILETIME),
-        ("ftLastWriteTime", _FILETIME),
-        ("dwVolumeSerialNumber", _DWORD),
-        ("nFileSizeHigh", _DWORD),
-        ("nFileSizeLow", _DWORD),
-        ("nNumberOfLinks", _DWORD),
-        ("nFileIndexHigh", _DWORD),
-        ("nFileIndexLow", _DWORD),
+        ("FileAttributes", _DWORD),
+        ("ReparseTag", _DWORD),
     ]
 
 
@@ -157,8 +150,8 @@ class WindowsDirectoryApi(Protocol):
     def open_component(self, parent: int, component: str) -> int:
         """Open one component relative to an owned parent directory handle."""
 
-    def file_attributes(self, handle: int) -> int:
-        """Return attributes for the exact borrowed handle."""
+    def file_attributes_and_reparse_tag(self, handle: int) -> tuple[int, int]:
+        """Return attributes and reparse tag for the exact borrowed handle."""
 
     def normalized_dos_path(self, handle: int) -> str:
         """Return the normalized DOS path for the exact borrowed handle."""
@@ -183,11 +176,17 @@ class _CreateFileFunction(Protocol):
     ) -> object: ...
 
 
-class _GetFileInformationFunction(Protocol):
+class _GetFileInformationExFunction(Protocol):
     argtypes: list[object]
     restype: object
 
-    def __call__(self, handle: object, information: object) -> object: ...
+    def __call__(
+        self,
+        handle: object,
+        information_class: object,
+        information: object,
+        information_size: object,
+    ) -> object: ...
 
 
 class _GetFinalPathFunction(Protocol):
@@ -237,7 +236,7 @@ class CtypesWindowsDirectoryApi:
         self,
         *,
         create_file: CreateFile | None = None,
-        get_file_information_by_handle: GetFileInformationByHandle | None = None,
+        get_file_information_by_handle_ex: GetFileInformationByHandleEx | None = None,
         get_final_path_name_by_handle: GetFinalPathNameByHandle | None = None,
         close_handle: CloseHandle | None = None,
         nt_create_file: NtCreateFile | None = None,
@@ -246,7 +245,7 @@ class CtypesWindowsDirectoryApi:
         ntdll: object | None = None
         if (
             create_file is None
-            or get_file_information_by_handle is None
+            or get_file_information_by_handle_ex is None
             or get_final_path_name_by_handle is None
             or close_handle is None
         ):
@@ -259,10 +258,10 @@ class CtypesWindowsDirectoryApi:
             if create_file is not None
             else self._bind_create_file(_required_library(kernel32))
         )
-        self._get_file_information_by_handle = (
-            get_file_information_by_handle
-            if get_file_information_by_handle is not None
-            else self._bind_get_file_information(_required_library(kernel32))
+        self._get_file_information_by_handle_ex = (
+            get_file_information_by_handle_ex
+            if get_file_information_by_handle_ex is not None
+            else self._bind_get_file_information_ex(_required_library(kernel32))
         )
         self._get_final_path_name_by_handle = (
             get_final_path_name_by_handle
@@ -331,31 +330,41 @@ class CtypesWindowsDirectoryApi:
             object_name,
             _OBJ_DONT_REPARSE,
         )
-        if _status_code(status) == _STATUS_INVALID_PARAMETER:
+        # OBJ_DONT_REPARSE reports a reparse encounter before returning an
+        # inspectable handle. Retrying this one relative component without the
+        # object-manager flag remains no-follow because FILE_OPEN_REPARSE_POINT
+        # is unchanged; same-handle tag validation runs before the handle can
+        # become the next RootDirectory.
+        if _status_code(status) in (
+            _STATUS_INVALID_PARAMETER,
+            _STATUS_REPARSE_POINT_ENCOUNTERED,
+        ):
             self._close_failed_output(handle)
             status, handle = self._nt_open_component(parent, object_name, 0)
 
-        if not _nt_success(status) or not _is_valid_handle(handle):
+        if _status_code(status) != 0 or not _is_valid_handle(handle):
             self._close_failed_output(handle)
             raise WindowsLocalStoreHealthError(_GENERIC_FAILURE_DETAIL)
         return cast(int, handle)
 
-    def file_attributes(self, handle: int) -> int:
-        """Read attributes from the exact open object."""
+    def file_attributes_and_reparse_tag(self, handle: int) -> tuple[int, int]:
+        """Read attributes and the reparse tag from the exact open object."""
 
         if not _is_valid_handle(handle):
             raise WindowsLocalStoreHealthError(_GENERIC_FAILURE_DETAIL)
-        information = _BY_HANDLE_FILE_INFORMATION()
+        information = _FILE_ATTRIBUTE_TAG_INFO()
         try:
-            succeeded = self._get_file_information_by_handle(
+            succeeded = self._get_file_information_by_handle_ex(
                 _HANDLE(handle),
+                _FILE_INFO_BY_HANDLE_CLASS(_FILE_ATTRIBUTE_TAG_INFO_CLASS),
                 ctypes.byref(information),
+                _DWORD(ctypes.sizeof(information)),
             )
         except Exception:
             raise WindowsLocalStoreHealthError(_GENERIC_FAILURE_DETAIL) from None
         if not _as_bool(succeeded):
             raise WindowsLocalStoreHealthError(_GENERIC_FAILURE_DETAIL)
-        return int(information.dwFileAttributes)
+        return int(information.FileAttributes), int(information.ReparseTag)
 
     def normalized_dos_path(self, handle: int) -> str:
         """Return a strict normalized native DOS path for ``handle``."""
@@ -465,16 +474,18 @@ class CtypesWindowsDirectoryApi:
         return function
 
     @staticmethod
-    def _bind_get_file_information(
+    def _bind_get_file_information_ex(
         library: object,
-    ) -> _GetFileInformationFunction:
+    ) -> _GetFileInformationExFunction:
         function = cast(
-            _GetFileInformationFunction,
-            _library_function(library, "GetFileInformationByHandle"),
+            _GetFileInformationExFunction,
+            _library_function(library, "GetFileInformationByHandleEx"),
         )
         function.argtypes = [
             _HANDLE,
-            ctypes.POINTER(_BY_HANDLE_FILE_INFORMATION),
+            _FILE_INFO_BY_HANDLE_CLASS,
+            ctypes.c_void_p,
+            _DWORD,
         ]
         function.restype = _BOOL
         return function
@@ -576,10 +587,6 @@ def _status_code(status: int) -> int:
     return status & 0xFFFFFFFF
 
 
-def _nt_success(status: int) -> bool:
-    return bool((_status_code(status) & 0x80000000) == 0)
-
-
 def _is_reserved_component(component: str) -> bool:
     stem = component.partition(".")[0].rstrip(" ").upper()
     return stem in _WINDOWS_RESERVED_NAMES
@@ -638,32 +645,51 @@ def _native_path_from_extended_final_path(final_path: str) -> str:
     return canonical
 
 
-def _is_plain_directory(attributes: int) -> bool:
-    return bool(attributes & _FILE_ATTRIBUTE_DIRECTORY) and not bool(
-        attributes & _FILE_ATTRIBUTE_REPARSE_POINT
-    )
+def _is_traversable_directory(
+    attributes: int,
+    reparse_tag: int,
+    *,
+    allow_non_name_surrogate_reparse: bool,
+) -> bool:
+    if not attributes & _FILE_ATTRIBUTE_DIRECTORY:
+        return False
+    if attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
+        return (
+            allow_non_name_surrogate_reparse
+            and bool(reparse_tag & _REPARSE_TAG_DIRECTORY)
+            and not bool(reparse_tag & _REPARSE_TAG_NAME_SURROGATE)
+        )
+    return True
 
 
 def _validate_open_directory(
     api: WindowsDirectoryApi,
     handle: int,
     expected_path: str,
+    *,
+    allow_non_name_surrogate_reparse: bool,
 ) -> None:
-    if not _is_plain_directory(api.file_attributes(handle)):
+    attributes, reparse_tag = api.file_attributes_and_reparse_tag(handle)
+    if not _is_traversable_directory(
+        attributes,
+        reparse_tag,
+        allow_non_name_surrogate_reparse=allow_non_name_surrogate_reparse,
+    ):
         raise WindowsLocalStoreHealthError(_GENERIC_FAILURE_DETAIL)
     if api.normalized_dos_path(handle) != expected_path:
         raise WindowsLocalStoreHealthError(_GENERIC_FAILURE_DETAIL)
 
 
-def is_handle_bound_plain_directory(
+def is_handle_bound_traversable_directory(
     path: str,
     *,
     api: WindowsDirectoryApi | None = None,
 ) -> bool:
-    """Return whether the exact handle-walked object is traversable and plain.
+    """Return whether the exact handle-walked object is safely traversable.
 
-    Explicit handle cleanup is best effort. Helper-process exit backstops
-    failed closes and asynchronous interruption windows.
+    Non-name-surrogate reparse directories such as Cloud Files placeholders
+    remain eligible. Explicit handle cleanup is best effort. Helper-process
+    exit backstops failed closes and asynchronous interruption windows.
     """
 
     owned_handles: list[int] = []
@@ -674,14 +700,24 @@ def is_handle_bound_plain_directory(
 
         current = directory_api.open_root(root)
         owned_handles.append(current)
-        _validate_open_directory(directory_api, current, root)
+        _validate_open_directory(
+            directory_api,
+            current,
+            root,
+            allow_non_name_surrogate_reparse=False,
+        )
 
         cumulative_path = root.rstrip("\\")
         for component in components:
             child = directory_api.open_component(current, component)
             owned_handles.append(child)
             cumulative_path = f"{cumulative_path}\\{component}"
-            _validate_open_directory(directory_api, child, cumulative_path)
+            _validate_open_directory(
+                directory_api,
+                child,
+                cumulative_path,
+                allow_non_name_surrogate_reparse=True,
+            )
 
             parent = owned_handles.pop(0)
             directory_api.close(parent)
@@ -719,7 +755,9 @@ def main(
         if not root or "\0" in root:
             return _UNREACHABLE_EXIT
         return (
-            _HEALTHY_EXIT if is_handle_bound_plain_directory(root, api=api) else _UNREACHABLE_EXIT
+            _HEALTHY_EXIT
+            if is_handle_bound_traversable_directory(root, api=api)
+            else _UNREACHABLE_EXIT
         )
     except BaseException:
         return _UNREACHABLE_EXIT

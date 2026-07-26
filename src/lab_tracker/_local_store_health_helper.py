@@ -21,25 +21,40 @@ LOCAL_STORE_HEALTH_ROOT_ENV = "LAB_TRACKER_INTERNAL_LOCAL_STORE_HEALTH_ROOT"
 
 _HEALTHY_EXIT = 0
 _UNREACHABLE_EXIT = 1
+# Darwin's public sys/fcntl.h defines O_EXEC as this stable ABI bit. Some
+# setup-python builds omit both O_EXEC and O_SEARCH from the os module even
+# though the running kernel supports them.
+_DARWIN_O_EXEC = 0x40000000
 
 
 def _directory_open_flags() -> int | None:
-    required_names = ("O_DIRECTORY", "O_NOFOLLOW", "O_CLOEXEC")
-    if any(not hasattr(os, name) for name in required_names):
+    directory_mode = getattr(os, "O_DIRECTORY", None)
+    nofollow_mode = getattr(os, "O_NOFOLLOW", None)
+    cloexec_mode = getattr(os, "O_CLOEXEC", None)
+    if (
+        not isinstance(directory_mode, int)
+        or not isinstance(nofollow_mode, int)
+        or not isinstance(cloexec_mode, int)
+    ):
         return None
     search_mode = getattr(os, "O_SEARCH", None)
     path_mode = getattr(os, "O_PATH", None)
+    execute_mode = getattr(os, "O_EXEC", None)
     if isinstance(search_mode, int):
         access_mode = search_mode
     elif isinstance(path_mode, int):
         access_mode = path_mode
+    elif isinstance(execute_mode, int):
+        access_mode = execute_mode
+    elif sys.platform == "darwin":
+        access_mode = _DARWIN_O_EXEC
     else:
         return None
     return (
         int(access_mode)
-        | int(os.O_DIRECTORY)
-        | int(os.O_NOFOLLOW)
-        | int(os.O_CLOEXEC)
+        | directory_mode
+        | nofollow_mode
+        | cloexec_mode
     )
 
 

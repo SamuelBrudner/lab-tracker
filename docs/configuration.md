@@ -222,15 +222,30 @@ no stdout or stderr. On POSIX it opens every canonical path component relative
 to the retained preceding directory descriptor with directory, no-follow, and
 close-on-exec flags, classifies each descriptor with `fstat`, and verifies
 search permission relative to that retained descriptor. On Windows it requests
-traverse permission while validating one drive-root handle, opens each
-remaining component relative to the preceding handle without following reparse
-points, and validates type, reparse metadata, and the normalized final path
-through the retained handle. A link or junction substituted before its
-component is opened is rejected; a rename after open cannot redirect later
-traversal or final inspection. Search-only POSIX directories remain eligible;
-an unsearchable directory fails closed. Explicit helper-owned descriptor and
-handle cleanup is best effort, with contained helper exit as the backstop for
-failed closes and asynchronous interruption windows.
+traverse permission while validating one plain, non-reparse drive-root handle
+and opens each remaining component relative to the preceding handle. Each
+component open disables final reparse processing. The helper then queries
+attributes and the reparse tag through that exact handle: symlinks, junctions,
+and other name-surrogate tags are rejected, while non-name-surrogate tags whose
+directory bit is set, such as OneDrive Files On-Demand Cloud Files
+placeholders, remain eligible. A reparse directory whose tag cannot be queried,
+lacks the directory bit, or sets the name-surrogate bit fails closed; the tag
+member is ignored when the reparse attribute is clear, as required by the
+Windows contract. This classification matters because [Windows implements
+every Files On-Demand-synced file and folder as a reparse
+point](https://learn.microsoft.com/en-us/troubleshoot/sharepoint/sync/delete-onedrive-synced-file-error).
+Rejecting the reparse attribute by itself would reject a locally synced
+OneDrive store.
+
+A link or junction substituted before its component is opened is rejected; a
+rename after open cannot redirect later traversal or final inspection.
+Search-only POSIX directories remain eligible; an unsearchable directory fails
+closed. POSIX uses `O_SEARCH`, `O_PATH`, or the equivalent directory use of
+`O_EXEC`; it never falls back to a read-requiring `O_RDONLY` open. A macOS
+compatibility branch supplies the public Darwin `O_EXEC` ABI bit when an older
+CPython build omits that symbolic constant. Explicit helper-owned descriptor
+and handle cleanup is best effort, with contained helper exit as the backstop
+for failed closes and asynchronous interruption windows.
 
 The deadline covers interpreter startup, helper-side opens and validation,
 process exit, and output drainage and is checked again after the executor

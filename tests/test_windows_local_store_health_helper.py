@@ -16,6 +16,9 @@ _ROOT_HANDLE = 101
 _CHILD_HANDLE = 202
 _DIRECTORY_ATTRIBUTES = 0x10
 _REPARSE_DIRECTORY_ATTRIBUTES = 0x410
+_CLOUD_REPARSE_TAG = 0x9000001A
+_MOUNT_POINT_REPARSE_TAG = 0xA0000003
+_NON_DIRECTORY_REPARSE_TAG = 0x80000021
 _STATIC_ERROR = "Windows local store health verification failed."
 
 
@@ -65,10 +68,11 @@ class FakeCreateFile:
         return self.handle
 
 
-class FakeGetInformation:
+class FakeGetInformationEx:
     def __init__(
         self,
         attributes: Mapping[int, int] | None = None,
+        reparse_tags: Mapping[int, int] | None = None,
         *,
         result: int = 1,
     ) -> None:
@@ -79,18 +83,28 @@ class FakeGetInformation:
                 _CHILD_HANDLE: _DIRECTORY_ATTRIBUTES,
             }
         )
+        self.reparse_tags = dict(reparse_tags or {})
         self.result = result
-        self.calls: list[int] = []
+        self.calls: list[tuple[int, int, int]] = []
 
-    def __call__(self, raw_handle: object, raw_information: object) -> int:
+    def __call__(
+        self,
+        raw_handle: object,
+        raw_information_class: object,
+        raw_information: object,
+        raw_information_size: object,
+    ) -> int:
         handle = _as_int(raw_handle)
-        self.calls.append(handle)
+        information_class = _as_int(raw_information_class)
+        information_size = _as_int(raw_information_size)
+        self.calls.append((handle, information_class, information_size))
         if self.result:
             information = ctypes.cast(
                 cast(Any, raw_information),
-                ctypes.POINTER(helper._BY_HANDLE_FILE_INFORMATION),
+                ctypes.POINTER(helper._FILE_ATTRIBUTE_TAG_INFO),
             )
-            information.contents.dwFileAttributes = self.attributes[handle]
+            information.contents.FileAttributes = self.attributes[handle]
+            information.contents.ReparseTag = self.reparse_tags.get(handle, 0)
         return self.result
 
 
@@ -205,7 +219,7 @@ def _raw_api(
 ) -> helper.CtypesWindowsDirectoryApi:
     return helper.CtypesWindowsDirectoryApi(
         create_file=create_file or FakeCreateFile(),
-        get_file_information_by_handle=get_information or FakeGetInformation(),
+        get_file_information_by_handle_ex=get_information or FakeGetInformationEx(),
         get_final_path_name_by_handle=get_final_path
         or FakeGetFinalPath(
             {
@@ -234,6 +248,13 @@ def test_create_file_anchors_only_the_drive_root_with_exact_flags() -> None:
             None,
         )
     ]
+
+
+def test_file_attribute_tag_info_matches_the_public_windows_abi() -> None:
+    assert ctypes.sizeof(helper._FILE_ATTRIBUTE_TAG_INFO) == 8
+    assert ctypes.alignment(helper._FILE_ATTRIBUTE_TAG_INFO) == 4
+    assert helper._FILE_ATTRIBUTE_TAG_INFO.FileAttributes.offset == 0
+    assert helper._FILE_ATTRIBUTE_TAG_INFO.ReparseTag.offset == 4
 
 
 def test_create_file_root_adapter_rejects_a_full_path_before_io() -> None:
@@ -291,8 +312,47 @@ def test_invalid_parameter_retries_once_without_obj_dont_reparse() -> None:
     assert close_handle.calls == [303]
 
 
+def test_reparse_encounter_retries_once_for_same_handle_tag_inspection() -> None:
+    nt_create_file = FakeNtCreateFile(
+        (
+            (0xC000050B, 303),
+            (0, _CHILD_HANDLE),
+        )
+    )
+    close_handle = FakeCloseHandle()
+    api = _raw_api(
+        nt_create_file=nt_create_file,
+        close_handle=close_handle,
+    )
+
+    assert api.open_component(_ROOT_HANDLE, "store") == _CHILD_HANDLE
+    assert [call["attributes"] for call in nt_create_file.calls] == [0x1000, 0]
+    assert [call["create_options"] for call in nt_create_file.calls] == [
+        0x00200000,
+        0x00200000,
+    ]
+    assert close_handle.calls == [303]
+
+
+def test_nonzero_success_status_fails_closed_and_closes_output() -> None:
+    nt_create_file = FakeNtCreateFile(((0x00000103, _CHILD_HANDLE),))
+    close_handle = FakeCloseHandle()
+    api = _raw_api(
+        nt_create_file=nt_create_file,
+        close_handle=close_handle,
+    )
+
+    with pytest.raises(
+        helper.WindowsLocalStoreHealthError,
+        match=f"^{_STATIC_ERROR}$",
+    ):
+        api.open_component(_ROOT_HANDLE, "store")
+
+    assert close_handle.calls == [_CHILD_HANDLE]
+
+
 @pytest.mark.parametrize("failure_status", [0xC0000022, 0xC0000034, -1])
-def test_no_status_except_invalid_parameter_uses_the_fallback(
+def test_no_status_except_the_two_safe_cases_uses_the_fallback(
     failure_status: int,
 ) -> None:
     nt_create_file = FakeNtCreateFile(((failure_status, 303),))
@@ -379,17 +439,39 @@ def test_open_component_rejects_noncanonical_names_without_calling_nt(
 
 
 def test_same_handle_attributes_and_final_path_are_queried() -> None:
-    get_information = FakeGetInformation({_CHILD_HANDLE: _DIRECTORY_ATTRIBUTES})
+    get_information = FakeGetInformationEx(
+        {_CHILD_HANDLE: _REPARSE_DIRECTORY_ATTRIBUTES},
+        {_CHILD_HANDLE: _CLOUD_REPARSE_TAG},
+    )
     get_final_path = FakeGetFinalPath({_CHILD_HANDLE: r"\\?\C:\store"})
     api = _raw_api(
         get_information=get_information,
         get_final_path=get_final_path,
     )
 
-    assert api.file_attributes(_CHILD_HANDLE) == _DIRECTORY_ATTRIBUTES
+    assert api.file_attributes_and_reparse_tag(_CHILD_HANDLE) == (
+        _REPARSE_DIRECTORY_ATTRIBUTES,
+        _CLOUD_REPARSE_TAG,
+    )
     assert api.normalized_dos_path(_CHILD_HANDLE) == r"C:\store"
-    assert get_information.calls == [_CHILD_HANDLE]
+    assert get_information.calls == [
+        (
+            _CHILD_HANDLE,
+            9,
+            ctypes.sizeof(helper._FILE_ATTRIBUTE_TAG_INFO),
+        )
+    ]
     assert get_final_path.calls == [(_CHILD_HANDLE, 260, 0)]
+
+
+def test_attribute_tag_query_failure_fails_closed() -> None:
+    api = _raw_api(get_information=FakeGetInformationEx(result=0))
+
+    with pytest.raises(
+        helper.WindowsLocalStoreHealthError,
+        match=f"^{_STATIC_ERROR}$",
+    ):
+        api.file_attributes_and_reparse_tag(_CHILD_HANDLE)
 
 
 def test_final_path_query_retries_to_support_a_long_unicode_path() -> None:
@@ -443,12 +525,14 @@ class RecordingDirectoryApi:
         open_handles: Sequence[int],
         paths: Mapping[int, str],
         attributes: Mapping[int, int] | None = None,
+        reparse_tags: Mapping[int, int] | None = None,
         close_failures: Mapping[int, BaseException] | None = None,
         attribute_failure: BaseException | None = None,
     ) -> None:
         self.open_handles = list(open_handles)
         self.paths = dict(paths)
         self.attributes = dict(attributes or {})
+        self.reparse_tags = dict(reparse_tags or {})
         self.close_failures = dict(close_failures or {})
         self.attribute_failure = attribute_failure
         self.root_calls: list[str] = []
@@ -465,11 +549,14 @@ class RecordingDirectoryApi:
         self.component_calls.append((parent, component))
         return self.open_handles.pop(0)
 
-    def file_attributes(self, handle: int) -> int:
+    def file_attributes_and_reparse_tag(self, handle: int) -> tuple[int, int]:
         self.attribute_calls.append(handle)
         if self.attribute_failure is not None:
             raise self.attribute_failure
-        return self.attributes.get(handle, _DIRECTORY_ATTRIBUTES)
+        return (
+            self.attributes.get(handle, _DIRECTORY_ATTRIBUTES),
+            self.reparse_tags.get(handle, 0),
+        )
 
     def normalized_dos_path(self, handle: int) -> str:
         self.path_calls.append(handle)
@@ -492,7 +579,7 @@ def test_handle_walk_retains_each_parent_until_its_child_is_validated() -> None:
         },
     )
 
-    assert helper.is_handle_bound_plain_directory(
+    assert helper.is_handle_bound_traversable_directory(
         r"c:\allowed\store",
         api=api,
     )
@@ -504,34 +591,98 @@ def test_handle_walk_retains_each_parent_until_its_child_is_validated() -> None:
 
 
 @pytest.mark.parametrize(
-    ("paths", "attributes"),
+    ("paths", "attributes", "reparse_tags"),
     [
         (
             {10: "C:\\", 20: r"C:\outside"},
+            {},
             {},
         ),
         (
             {10: "C:\\", 20: r"C:\store"},
             {20: _REPARSE_DIRECTORY_ATTRIBUTES},
+            {},
+        ),
+        (
+            {10: "C:\\", 20: r"C:\store"},
+            {20: _REPARSE_DIRECTORY_ATTRIBUTES},
+            {20: _MOUNT_POINT_REPARSE_TAG},
+        ),
+        (
+            {10: "C:\\", 20: r"C:\store"},
+            {20: _REPARSE_DIRECTORY_ATTRIBUTES},
+            {20: _NON_DIRECTORY_REPARSE_TAG},
         ),
         (
             {10: "C:\\", 20: r"C:\store"},
             {20: 0x80},
+            {},
         ),
     ],
 )
 def test_mismatched_final_identity_or_attributes_fail_closed(
     paths: Mapping[int, str],
     attributes: Mapping[int, int],
+    reparse_tags: Mapping[int, int],
 ) -> None:
     api = RecordingDirectoryApi(
         open_handles=(10, 20),
         paths=paths,
         attributes=attributes,
+        reparse_tags=reparse_tags,
     )
 
-    assert not helper.is_handle_bound_plain_directory(r"C:\store", api=api)
+    assert not helper.is_handle_bound_traversable_directory(
+        r"C:\store",
+        api=api,
+    )
     assert api.close_calls == [20, 10]
+
+
+def test_drive_root_reparse_point_is_rejected_even_when_not_a_name_surrogate() -> None:
+    api = RecordingDirectoryApi(
+        open_handles=(10,),
+        paths={10: "C:\\"},
+        attributes={10: _REPARSE_DIRECTORY_ATTRIBUTES},
+        reparse_tags={10: _CLOUD_REPARSE_TAG},
+    )
+
+    assert not helper.is_handle_bound_traversable_directory("C:\\", api=api)
+    assert api.component_calls == []
+    assert api.close_calls == [10]
+
+
+def test_walk_can_open_a_child_relative_to_a_cloud_directory_handle() -> None:
+    api = RecordingDirectoryApi(
+        open_handles=(10, 20, 30),
+        paths={
+            10: "C:\\",
+            20: r"C:\OneDrive",
+            30: r"C:\OneDrive\store",
+        },
+        attributes={20: _REPARSE_DIRECTORY_ATTRIBUTES},
+        reparse_tags={20: _CLOUD_REPARSE_TAG},
+    )
+
+    assert helper.is_handle_bound_traversable_directory(
+        r"C:\OneDrive\store",
+        api=api,
+    )
+    assert api.component_calls == [(10, "OneDrive"), (20, "store")]
+    assert api.path_calls == [10, 20, 30]
+    assert api.close_calls == [10, 20, 30]
+
+
+def test_unused_tag_is_ignored_for_a_plain_directory() -> None:
+    api = RecordingDirectoryApi(
+        open_handles=(10,),
+        paths={10: "C:\\"},
+        attributes={10: _DIRECTORY_ATTRIBUTES},
+        reparse_tags={10: _MOUNT_POINT_REPARSE_TAG},
+    )
+
+    assert helper.is_handle_bound_traversable_directory("C:\\", api=api)
+    assert api.close_calls == [10]
 
 
 def test_injected_base_exception_attempts_each_tracked_handle_close() -> None:
@@ -541,7 +692,10 @@ def test_injected_base_exception_attempts_each_tracked_handle_close() -> None:
         close_failures={10: KeyboardInterrupt("private close detail")},
     )
 
-    assert not helper.is_handle_bound_plain_directory(r"C:\store", api=api)
+    assert not helper.is_handle_bound_traversable_directory(
+        r"C:\store",
+        api=api,
+    )
     assert api.close_calls == [10, 20]
 
 
@@ -552,7 +706,7 @@ def test_injected_validation_base_exception_attempts_tracked_handle_close() -> N
         attribute_failure=KeyboardInterrupt("private attribute detail"),
     )
 
-    assert not helper.is_handle_bound_plain_directory("C:\\", api=api)
+    assert not helper.is_handle_bound_traversable_directory("C:\\", api=api)
     assert api.close_calls == [10]
 
 
@@ -580,7 +734,10 @@ def test_strict_native_path_parser_rejects_aliasing_syntax_before_io(
 ) -> None:
     api = RecordingDirectoryApi(open_handles=(), paths={})
 
-    assert not helper.is_handle_bound_plain_directory(unsafe_path, api=api)
+    assert not helper.is_handle_bound_traversable_directory(
+        unsafe_path,
+        api=api,
+    )
     assert api.root_calls == []
     assert api.component_calls == []
     assert api.close_calls == []
@@ -678,8 +835,8 @@ class _NativeDirectoryApi:
     def open_component(self, parent: int, component: str) -> int:
         return self.delegate.open_component(parent, component)
 
-    def file_attributes(self, handle: int) -> int:
-        return self.delegate.file_attributes(handle)
+    def file_attributes_and_reparse_tag(self, handle: int) -> tuple[int, int]:
+        return self.delegate.file_attributes_and_reparse_tag(handle)
 
     def normalized_dos_path(self, handle: int) -> str:
         return self.delegate.normalized_dos_path(handle)
@@ -751,9 +908,7 @@ class _PostValidationParentJunctionRaceApi(_NativeDirectoryApi):
                 self.outside_parent,
             )
             self.swapped = True
-        elif self.swapped and actual_path.startswith(
-            os.path.realpath(self.moved_parent) + "\\"
-        ):
+        elif self.swapped and actual_path.startswith(os.path.realpath(self.moved_parent) + "\\"):
             self.opened_child_path = actual_path
         return actual_path
 
@@ -783,9 +938,7 @@ def test_native_windows_pre_open_junction_substitution_is_rejected(
 ) -> None:
     root = tmp_path / "pre-open-race"
     raced = root / (
-        "raced-final-component"
-        if race_final_component
-        else "raced-intermediate-component"
+        "raced-final-component" if race_final_component else "raced-intermediate-component"
     )
     target = raced if race_final_component else raced / "store"
     target.mkdir(parents=True)
@@ -804,7 +957,10 @@ def test_native_windows_pre_open_junction_substitution_is_rejected(
         swap_before_open=True,
     )
 
-    assert not helper.is_handle_bound_plain_directory(canonical_target, api=api)
+    assert not helper.is_handle_bound_traversable_directory(
+        canonical_target,
+        api=api,
+    )
     assert api.swapped
     if api.open_returned:
         assert api.opened_path_after_swap is not None
@@ -831,7 +987,10 @@ def test_native_windows_post_open_replacement_inspects_retained_final_handle(
         swap_before_open=False,
     )
 
-    assert not helper.is_handle_bound_plain_directory(canonical_target, api=api)
+    assert not helper.is_handle_bound_traversable_directory(
+        canonical_target,
+        api=api,
+    )
     assert api.swapped
     assert api.opened_path_after_swap is not None
     assert api.opened_path_after_swap != os.path.realpath(outside)
@@ -854,7 +1013,10 @@ def test_native_windows_post_validation_replacement_keeps_relative_handle_walk(
         outside_parent=outside,
     )
 
-    assert not helper.is_handle_bound_plain_directory(canonical_target, api=api)
+    assert not helper.is_handle_bound_traversable_directory(
+        canonical_target,
+        api=api,
+    )
     assert api.swapped
     assert api.opened_child_path is not None
     assert api.opened_child_path != os.path.realpath(outside / target.name)
