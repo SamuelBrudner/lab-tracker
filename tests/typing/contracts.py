@@ -36,6 +36,7 @@ from lab_tracker.local_filesystem_operations import (
 )
 from lab_tracker.local_filesystem_ports import (
     LocalDirectoryInspector,
+    LocalRecoveryEnumerator,
     LocalRegularFileReader,
 )
 from lab_tracker.note_storage import LocalNoteStorage
@@ -190,6 +191,10 @@ def _requires_local_regular_file_reader(value: LocalRegularFileReader) -> None:
     pass
 
 
+def _requires_local_recovery_enumerator(value: LocalRecoveryEnumerator) -> None:
+    pass
+
+
 def local_filesystem_contracts(
     operations: BoundedLocalFilesystemOperations,
     runtime: AppRuntime,
@@ -198,6 +203,8 @@ def local_filesystem_contracts(
     _requires_local_directory_inspector(runtime.local_filesystem_operations)
     _requires_local_regular_file_reader(operations)
     _requires_local_regular_file_reader(runtime.local_filesystem_operations)
+    _requires_local_recovery_enumerator(operations)
+    _requires_local_recovery_enumerator(runtime.local_filesystem_operations)
 
 
 def _requires_file_storage(value: FileStorage) -> None:

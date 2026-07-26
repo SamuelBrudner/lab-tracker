@@ -30,7 +30,10 @@ from lab_tracker.artifact_resolution_admission import (
 )
 from lab_tracker.config import DEFAULT_AUTH_SECRET_KEY, Settings
 from lab_tracker.local_resolution_budget import (
+    DEFAULT_LOCAL_RECOVERY_MAX_DIRECTORIES,
     DEFAULT_LOCAL_RECOVERY_MAX_FILES,
+    MAX_LOCAL_RECOVERY_MAX_DIRECTORIES,
+    MAX_LOCAL_RECOVERY_MAX_FILES,
     MAX_LOCAL_RESOLUTION_MAX_READ_BYTES,
 )
 from lab_tracker.models import StoreKind
@@ -68,6 +71,7 @@ def _clear_auth_env(monkeypatch) -> None:
         "LAB_TRACKER_RESOLVER_ALLOWED_ROOTS",
         "LAB_TRACKER_RESOLVER_RECOVERY",
         "LAB_TRACKER_RESOLVER_RECOVERY_MAX_FILES",
+        "LAB_TRACKER_RESOLVER_RECOVERY_MAX_DIRECTORIES",
         "LAB_TRACKER_RESOLVER_RECOVERY_MAX_BYTES",
         "LAB_TRACKER_RCLONE_ALLOWED_REMOTES",
         "LAB_TRACKER_GIT_ALLOWED_REMOTES",
@@ -134,6 +138,7 @@ def test_dotenv_loads_resolver_settings(tmp_path, monkeypatch):
         "LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS=7.25\n"
         "LAB_TRACKER_RESOLVER_RECOVERY=true\n"
         "LAB_TRACKER_RESOLVER_RECOVERY_MAX_FILES=23\n"
+        "LAB_TRACKER_RESOLVER_RECOVERY_MAX_DIRECTORIES=29\n"
         "LAB_TRACKER_RESOLVER_RECOVERY_MAX_BYTES=1048576\n"
         "LAB_TRACKER_RCLONE_ALLOWED_REMOTES=lab-onedrive,archive-s3\n"
         "LAB_TRACKER_GIT_ALLOWED_REMOTES=https://git.example/lab\n",
@@ -152,6 +157,7 @@ def test_dotenv_loads_resolver_settings(tmp_path, monkeypatch):
     assert settings.resolver_subprocess_deadline_seconds == 7.25
     assert settings.resolver_recovery is True
     assert settings.resolver_recovery_max_files == 23
+    assert settings.resolver_recovery_max_directories == 29
     assert settings.resolver_recovery_max_bytes == 1_048_576
     assert settings.rclone_allowed_remotes == "lab-onedrive,archive-s3"
     assert settings.git_allowed_remotes == "https://git.example/lab"
@@ -163,7 +169,7 @@ def test_rclone_remote_policy_defaults_to_deny_all(monkeypatch):
     assert _settings_from_environment().rclone_allowed_remotes == ""
 
 
-def test_local_path_policy_defaults_to_deny_all(monkeypatch):
+def test_local_filesystem_authority_defaults_to_deny_all(monkeypatch):
     _clear_auth_env(monkeypatch)
 
     assert _settings_from_environment().resolver_allowed_roots == ""
@@ -190,7 +196,36 @@ def test_local_resolution_controls_have_fail_closed_defaults(monkeypatch):
 
     assert settings.resolver_recovery is False
     assert settings.resolver_recovery_max_files == DEFAULT_LOCAL_RECOVERY_MAX_FILES
+    assert (
+        settings.resolver_recovery_max_directories
+        == DEFAULT_LOCAL_RECOVERY_MAX_DIRECTORIES
+    )
     assert settings.resolver_recovery_max_bytes == MAX_LOCAL_RESOLUTION_MAX_READ_BYTES
+
+
+def test_runtime_rejects_enabled_recovery_roots_that_exceed_one_helper_request():
+    if os.name == "nt":
+        roots = [
+            rf"C:\{'a' * 200}\{index:02d}{'b' * 190}"
+            for index in range(64)
+        ]
+    else:
+        roots = [
+            f"/{'a' * 200}/{index:02d}{'b' * 190}"
+            for index in range(64)
+        ]
+    settings = Settings(
+        _env_file=None,
+        database_url="sqlite+pysqlite:///:memory:",
+        resolver_allowed_roots=os.pathsep.join(roots),
+        resolver_recovery=True,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="roots exceed the bounded helper request limit",
+    ):
+        build_app_runtime(settings)
 
 
 @pytest.mark.parametrize(
@@ -201,6 +236,17 @@ def test_local_resolution_controls_have_fail_closed_defaults(monkeypatch):
         ("LAB_TRACKER_RESOLVER_RECOVERY_MAX_FILES", "0"),
         ("LAB_TRACKER_RESOLVER_RECOVERY_MAX_FILES", "-1"),
         ("LAB_TRACKER_RESOLVER_RECOVERY_MAX_FILES", "1.5"),
+        (
+            "LAB_TRACKER_RESOLVER_RECOVERY_MAX_FILES",
+            str(MAX_LOCAL_RECOVERY_MAX_FILES + 1),
+        ),
+        ("LAB_TRACKER_RESOLVER_RECOVERY_MAX_DIRECTORIES", "0"),
+        ("LAB_TRACKER_RESOLVER_RECOVERY_MAX_DIRECTORIES", "-1"),
+        ("LAB_TRACKER_RESOLVER_RECOVERY_MAX_DIRECTORIES", "1.5"),
+        (
+            "LAB_TRACKER_RESOLVER_RECOVERY_MAX_DIRECTORIES",
+            str(MAX_LOCAL_RECOVERY_MAX_DIRECTORIES + 1),
+        ),
         ("LAB_TRACKER_RESOLVER_RECOVERY_MAX_BYTES", "0"),
         ("LAB_TRACKER_RESOLVER_RECOVERY_MAX_BYTES", "true"),
         (
@@ -227,6 +273,8 @@ def test_invalid_local_resolution_controls_fail_settings(
         ("resolver_recovery", 1),
         ("resolver_recovery_max_files", True),
         ("resolver_recovery_max_files", 1.5),
+        ("resolver_recovery_max_directories", True),
+        ("resolver_recovery_max_directories", 1.5),
         ("resolver_recovery_max_bytes", False),
         ("resolver_recovery_max_bytes", 1.5),
     ],
@@ -603,8 +651,8 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(
 
     def recording_registry_from_env(
         *,
-        local_path_policy,
         local_file_reader,
+        local_recovery_enumerator,
         local_resolution_limits,
         recovery,
         http_policy,
@@ -616,8 +664,8 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(
         subprocess_deadline_seconds,
     ):
         assert safe_http_client_timeouts == [12.5]
-        captured["registry_local_path_policy"] = local_path_policy
         captured["registry_local_file_reader"] = local_file_reader
+        captured["registry_local_recovery_enumerator"] = local_recovery_enumerator
         captured["registry_local_resolution_limits"] = local_resolution_limits
         captured["registry_recovery"] = recovery
         captured["registry_http_policy"] = http_policy
@@ -742,6 +790,7 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(
         resolver_subprocess_deadline_seconds=7.25,
         resolver_recovery=True,
         resolver_recovery_max_files=23,
+        resolver_recovery_max_directories=29,
         resolver_recovery_max_bytes=1_048_576,
         artifact_resolution_global_in_flight_limit=5,
         artifact_resolution_per_actor_in_flight_limit=3,
@@ -761,7 +810,9 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(
 
         assert not hasattr(app.state, "local_filesystem_authority")
         assert not hasattr(app.state, "local_filesystem_operations")
-        assert app.state.local_path_policy is runtime.local_path_policy
+        assert not hasattr(app.state, "local_path_policy")
+        assert not hasattr(runtime, "local_filesystem_authority")
+        assert not hasattr(runtime, "local_path_policy")
         assert app.state.outbound_http_policy is runtime.outbound_http_policy
         assert runtime.outbound_http_client is outbound_http_client
         assert app.state.rclone_remote_policy is runtime.rclone_remote_policy
@@ -782,17 +833,20 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(
         assert runtime.store_health_checker.waiter_timeout_seconds == 2.25
         assert app.state.cleanup_git_health_workdir.__self__ is runtime
         assert safe_http_client_timeouts == [12.5]
-        assert captured["registry_local_path_policy"] is runtime.local_path_policy
         assert captured["registry_local_file_reader"] is runtime.local_filesystem_operations
+        assert (
+            captured["registry_local_recovery_enumerator"]
+            is runtime.local_filesystem_operations
+        )
         local_resolution_limits = captured["registry_local_resolution_limits"]
         assert local_resolution_limits.max_read_bytes == 1_048_576
         assert local_resolution_limits.deadline_seconds == 7.25
         recovery = captured["registry_recovery"]
         assert recovery.enabled is True
         assert recovery.max_files == 23
+        assert recovery.max_directories == 29
         assert recovery.max_bytes == 1_048_576
         assert captured["health_local_inspector"] is runtime.local_filesystem_operations
-        assert runtime.local_filesystem_operations.authority is runtime.local_filesystem_authority
         assert runtime.local_filesystem_operations.executor is runtime.process_executor
         assert captured["registry_http_policy"] is runtime.outbound_http_policy
         assert captured["health_http_policy"] is runtime.outbound_http_policy
@@ -865,10 +919,18 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(
         assert not (git_health_workdir / ".git").exists()
         if os.name != "nt":
             assert stat.S_IMODE(git_health_workdir.stat().st_mode) == 0o700
-        assert runtime.local_path_policy.authorize_path(settings_local_root) == str(
-            settings_local_root
+        assert (
+            runtime.local_filesystem_operations.authority.select_directory(
+                str(settings_local_root)
+            )
+            is not None
         )
-        assert runtime.local_path_policy.authorize_path(environment_local_root) is None
+        assert (
+            runtime.local_filesystem_operations.authority.select_directory(
+                str(environment_local_root)
+            )
+            is None
+        )
         assert runtime.rclone_remote_policy.authorize("settings-remote") is not None
         assert runtime.rclone_remote_policy.authorize("environment-remote") is None
         assert (
@@ -896,8 +958,8 @@ def test_lifespan_removes_app_owned_git_health_workdir(monkeypatch):
 
     def recording_registry_from_env(
         *,
-        local_path_policy,
         local_file_reader,
+        local_recovery_enumerator,
         local_resolution_limits,
         recovery,
         http_policy,
@@ -909,8 +971,8 @@ def test_lifespan_removes_app_owned_git_health_workdir(monkeypatch):
         subprocess_deadline_seconds,
     ):
         del (
-            local_path_policy,
             local_file_reader,
+            local_recovery_enumerator,
             local_resolution_limits,
             recovery,
             http_policy,

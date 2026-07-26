@@ -172,9 +172,11 @@ research record:
   results are path-free. Local resolution optionally recovers a moved/renamed
   file by its content hash within those roots
   (`LAB_TRACKER_RESOLVER_RECOVERY`, off by default; candidate-file default
-  `4096`; read-only). Recovery enumeration/root metadata remain transitional
-  application-side work until `lab-tracker-n5kp.61`; deadline checks cannot yet
-  interrupt one blocked directory operation.
+  and hard maximum `4096`; directory-attempt default and hard maximum `4096`;
+  read-only). Recovery enumeration is a single pre-follow-safe helper traversal
+  under the same absolute deadline. It returns only bounded path-free relative
+  locators after cleanup and fails terminally on malformed, partial, ambiguous,
+  timed-out, or cleanup-uncertain results.
 
   The root authority grants the subtree visible in the operator-controlled
   service namespace rather than one device identity, and the application

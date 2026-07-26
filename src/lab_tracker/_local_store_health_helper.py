@@ -2,8 +2,9 @@
 
 The application executes this file directly with ``python -I -S -B``.  Keep
 the module self-contained and standard-library-only. Directory inspection is
-output-free. Successful file reads emit only the exact raw artifact bytes;
-every operation also returns one fixed process status.
+output-free. Successful file reads emit only the exact raw artifact bytes.
+Successful recovery enumeration emits one bounded canonical ASCII JSON value
+after cleanup; every operation also returns one fixed process status.
 
 Configured roots are trusted, operator-owned bootstrap paths.  The helper may
 follow a configured root while opening its retained anchor, but it never opens
@@ -22,15 +23,18 @@ import os
 import stat
 import sys
 from collections import deque
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
+from typing import Protocol
 
 LOCAL_FILESYSTEM_REQUEST_ENV = "LAB_TRACKER_INTERNAL_LOCAL_FILESYSTEM_REQUEST"
 LOCAL_FILESYSTEM_PROTOCOL_VERSION = 1
 INSPECT_DIRECTORY_OPERATION = "inspect-directory"
 READ_FILE_OPERATION = "read-file"
 READ_REGISTERED_FILE_OPERATION = "read-registered-file"
+ENUMERATE_FILES_OPERATION = "enumerate-files"
+ENUMERATE_REGISTERED_FILES_OPERATION = "enumerate-registered-files"
 
 COMPLETE_EXIT = 0
 ACCESSIBLE_EXIT = COMPLETE_EXIT
@@ -41,6 +45,8 @@ MISSING_EXIT = 4
 MAX_LOCAL_FILESYSTEM_REQUEST_BYTES = 24 * 1024
 MAX_LOCAL_FILESYSTEM_SELECTED_ROOTS = 64
 MAX_LOCAL_FILESYSTEM_READ_BYTES = 512 * 1024 * 1024
+MAX_LOCAL_FILESYSTEM_ENUMERATION_ITEMS = 4_096
+MAX_LOCAL_FILESYSTEM_ENUMERATION_METADATA_BYTES = 8 * 1024 * 1024
 
 _MAX_PATH_BYTES = 16 * 1024
 _MAX_COMPONENT_BYTES = 255
@@ -106,6 +112,23 @@ class _RegisteredReadRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class _EnumerationRequest:
+    roots: tuple[str, ...]
+    target_name: str | None
+    max_files: int
+    max_directories: int
+
+
+@dataclass(frozen=True, slots=True)
+class _RegisteredEnumerationRequest:
+    store_root: str
+    roots: tuple[str, ...]
+    target_name: str | None
+    max_files: int
+    max_directories: int
+
+
+@dataclass(frozen=True, slots=True)
 class _SelectedPath:
     root: str
     root_components: tuple[str, ...]
@@ -120,6 +143,55 @@ class _FileSnapshot:
     size: int
     modified_ns: int
     changed_ns: int
+
+
+@dataclass(frozen=True, slots=True)
+class _EnumerationBoundary:
+    fd: int
+    components: tuple[str, ...]
+    spellings: frozenset[tuple[str, ...]]
+
+
+@dataclass(frozen=True, slots=True)
+class _DirectoryWork:
+    root_index: int
+    locator: tuple[str, ...]
+    expected_identity: tuple[int, int] | None
+    encoded_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
+class _EnumerationCandidate:
+    root_index: int
+    locator: tuple[str, ...]
+    identity: tuple[int, int]
+    encoded_bytes: int
+
+
+@dataclass(slots=True)
+class _EnumerationState:
+    target_name: str | None
+    max_files: int
+    max_directories: int
+    directories: int
+    visited_directories: set[tuple[int, int]]
+    preferred: list[_EnumerationCandidate]
+    fallback: list[_EnumerationCandidate]
+    retained_file_identities: dict[tuple[int, int], _EnumerationCandidate]
+    candidate_encoded_bytes: int
+    queued_directory_encoded_bytes: int
+    candidate_limited: bool
+    directory_limited: bool
+
+
+class _StaticEnumerationSkip(Exception):
+    """A directory entry is statically outside scope, cyclic, or ineligible."""
+
+
+class _ScandirIterator(Protocol):
+    def __iter__(self) -> Iterator[os.DirEntry[str]]: ...
+
+    def close(self) -> None: ...
 
 
 def _directory_open_flags(*, follow_symlinks: bool = False) -> int | None:
@@ -154,6 +226,26 @@ def _directory_open_flags(*, follow_symlinks: bool = False) -> int | None:
     return flags
 
 
+def _enumerable_directory_open_flags(*, follow_symlinks: bool = False) -> int | None:
+    directory_mode = getattr(os, "O_DIRECTORY", None)
+    cloexec_mode = getattr(os, "O_CLOEXEC", None)
+    nofollow_mode = getattr(os, "O_NOFOLLOW", None)
+    readonly_mode = getattr(os, "O_RDONLY", None)
+    if (
+        not isinstance(directory_mode, int)
+        or not isinstance(cloexec_mode, int)
+        or not isinstance(readonly_mode, int)
+        or (not follow_symlinks and not isinstance(nofollow_mode, int))
+    ):
+        return None
+
+    flags = readonly_mode | directory_mode | cloexec_mode
+    if not follow_symlinks:
+        assert isinstance(nofollow_mode, int)
+        flags |= nofollow_mode
+    return flags
+
+
 def _regular_file_open_flags() -> int | None:
     cloexec_mode = getattr(os, "O_CLOEXEC", None)
     nofollow_mode = getattr(os, "O_NOFOLLOW", None)
@@ -180,7 +272,13 @@ def _canonical_request_payload(request: object) -> str:
 
 def _parse_request(
     environment: Mapping[str, str],
-) -> _Request | _DirectReadRequest | _RegisteredReadRequest:
+) -> (
+    _Request
+    | _DirectReadRequest
+    | _RegisteredReadRequest
+    | _EnumerationRequest
+    | _RegisteredEnumerationRequest
+):
     raw = environment.get(LOCAL_FILESYSTEM_REQUEST_ENV)
     if not isinstance(raw, str):
         raise _Failed
@@ -264,6 +362,49 @@ def _parse_request(
             max_bytes=_validate_max_bytes(max_bytes),
         )
 
+    if operation == ENUMERATE_FILES_OPERATION:
+        if set(value) != {
+            "max_directories",
+            "max_files",
+            "op",
+            "roots",
+            "target_name",
+            "v",
+        }:
+            raise _Failed
+        roots = _validate_roots(value["roots"], exact_one=False)
+        if not roots:
+            raise _Failed
+        return _EnumerationRequest(
+            roots=roots,
+            target_name=_validate_target_name(value["target_name"]),
+            max_files=_validate_enumeration_limit(value["max_files"]),
+            max_directories=_validate_enumeration_limit(value["max_directories"]),
+        )
+
+    if operation == ENUMERATE_REGISTERED_FILES_OPERATION:
+        if set(value) != {
+            "max_directories",
+            "max_files",
+            "op",
+            "roots",
+            "store_root",
+            "target_name",
+            "v",
+        }:
+            raise _Failed
+        store_root = value["store_root"]
+        if type(store_root) is not str:
+            raise _Failed
+        _validate_candidate(store_root)
+        return _RegisteredEnumerationRequest(
+            store_root=store_root,
+            roots=_validate_roots(value["roots"], exact_one=True),
+            target_name=_validate_target_name(value["target_name"]),
+            max_files=_validate_enumeration_limit(value["max_files"]),
+            max_directories=_validate_enumeration_limit(value["max_directories"]),
+        )
+
     raise _Failed
 
 
@@ -295,6 +436,30 @@ def _validate_max_bytes(value: object) -> int:
     return value
 
 
+def _validate_enumeration_limit(value: object) -> int:
+    if (
+        type(value) is not int
+        or value < 0
+        or value > MAX_LOCAL_FILESYSTEM_ENUMERATION_ITEMS
+    ):
+        raise _Failed
+    return value
+
+
+def _validate_target_name(value: object) -> str | None:
+    if value is None:
+        return None
+    if (
+        type(value) is not str
+        or value in ("", ".", "..")
+        or "/" in value
+        or "\0" in value
+        or _path_bytes(value) > _MAX_COMPONENT_BYTES
+    ):
+        raise _Failed
+    return value
+
+
 def _validate_locator(value: object) -> tuple[str, ...]:
     if (
         type(value) is not list
@@ -304,7 +469,7 @@ def _validate_locator(value: object) -> tuple[str, ...]:
             type(component) is not str
             or component in ("", ".", "..")
             or "/" in component
-            or _has_forbidden_characters(component)
+            or "\0" in component
             or _path_bytes(component) > _MAX_COMPONENT_BYTES
             for component in value
         )
@@ -715,6 +880,494 @@ def _lexically_normalized_absolute_components(path: str) -> tuple[str, ...]:
     return tuple(normalized)
 
 
+def _directory_identity_from_metadata(
+    metadata: os.stat_result,
+) -> tuple[int, int]:
+    try:
+        mode = metadata.st_mode
+        device = metadata.st_dev
+        inode = metadata.st_ino
+    except BaseException as exc:
+        raise _Failed from exc
+    if (
+        type(mode) is not int
+        or type(device) is not int
+        or type(inode) is not int
+        or device < 0
+        or inode < 0
+        or not stat.S_ISDIR(mode)
+    ):
+        raise _Failed
+    return device, inode
+
+
+def _directory_descriptor_identity(fd: int) -> tuple[int, int]:
+    try:
+        metadata = os.fstat(fd)
+    except BaseException as exc:
+        raise _Failed from exc
+    return _directory_identity_from_metadata(metadata)
+
+
+def _symlink_identity(metadata: os.stat_result) -> tuple[int, int]:
+    try:
+        mode = metadata.st_mode
+        device = metadata.st_dev
+        inode = metadata.st_ino
+    except BaseException as exc:
+        raise _Failed from exc
+    if (
+        type(mode) is not int
+        or type(device) is not int
+        or type(inode) is not int
+        or device < 0
+        or inode < 0
+        or not stat.S_ISLNK(mode)
+    ):
+        raise _Failed
+    return device, inode
+
+
+def _regular_identity_from_metadata(
+    metadata: os.stat_result,
+) -> tuple[int, int]:
+    try:
+        mode = metadata.st_mode
+        device = metadata.st_dev
+        inode = metadata.st_ino
+    except BaseException as exc:
+        raise _Failed from exc
+    if (
+        type(mode) is not int
+        or type(device) is not int
+        or type(inode) is not int
+        or device < 0
+        or inode < 0
+        or not stat.S_ISREG(mode)
+    ):
+        raise _Failed
+    return device, inode
+
+
+def _open_enumeration_boundary(
+    root: str,
+    configured_components: tuple[str, ...],
+    owned: list[int],
+) -> _EnumerationBoundary:
+    root_flags = _enumerable_directory_open_flags(follow_symlinks=True)
+    if root_flags is None:
+        raise _Failed
+    root_fd = _open_directory(root, root_flags)
+    _track_descriptor(owned, root_fd)
+    _directory_descriptor_identity(root_fd)
+    resolved_components = _bound_resolved_root_components(root, root_fd)
+    try:
+        spellings = frozenset((configured_components, resolved_components))
+    except BaseException as exc:
+        raise _Failed from exc
+    return _EnumerationBoundary(
+        fd=root_fd,
+        components=resolved_components,
+        spellings=spellings,
+    )
+
+
+def _replace_enumeration_descriptor(
+    *,
+    owned: list[int],
+    current: int,
+    replacement: int,
+) -> int:
+    _close_descriptor(owned, current)
+    return replacement
+
+
+def _resolve_enumeration_components(
+    *,
+    boundary: _EnumerationBoundary,
+    components: tuple[str, ...],
+    owned: list[int],
+    directory_flags: int,
+) -> tuple[str, int | None, tuple[str, ...], tuple[int, int]]:
+    """Resolve a locator beneath ``boundary`` without opening a file leaf.
+
+    The returned kind is ``"directory"`` with an owned enumerable descriptor,
+    or ``"regular"`` with no descriptor. Statically proven escapes, symlink
+    loops, and non-file/non-directory targets raise ``_StaticEnumerationSkip``.
+    """
+
+    try:
+        pending = deque(components)
+    except BaseException as exc:
+        raise _Failed from exc
+    current = _open_directory(".", directory_flags, dir_fd=boundary.fd, missing=True)
+    _track_descriptor(owned, current)
+    current_components = list(boundary.components)
+    boundary_depth = len(current_components)
+    seen_symlinks: set[tuple[int, int]] = set()
+    steps = 0
+    transferred = False
+    try:
+        while pending:
+            steps += 1
+            if steps > _MAX_RESOLUTION_STEPS or len(pending) > _MAX_COMPONENTS:
+                raise _StaticEnumerationSkip
+            component = pending.popleft()
+            if component in ("", "."):
+                continue
+            if component == "..":
+                if len(current_components) == boundary_depth:
+                    raise _StaticEnumerationSkip
+                parent = _open_directory(
+                    "..",
+                    directory_flags,
+                    dir_fd=current,
+                    missing=True,
+                )
+                _track_descriptor(owned, parent)
+                _directory_descriptor_identity(parent)
+                current = _replace_enumeration_descriptor(
+                    owned=owned,
+                    current=current,
+                    replacement=parent,
+                )
+                try:
+                    current_components.pop()
+                except BaseException as exc:
+                    raise _Failed from exc
+                continue
+
+            metadata = _lstat_component(current, component, missing=True)
+            try:
+                mode = metadata.st_mode
+            except BaseException as exc:
+                raise _Failed from exc
+            if type(mode) is not int:
+                raise _Failed
+
+            if stat.S_ISLNK(mode):
+                identity = _symlink_identity(metadata)
+                if identity in seen_symlinks:
+                    raise _StaticEnumerationSkip
+                try:
+                    seen_symlinks.add(identity)
+                except BaseException as exc:
+                    raise _Failed from exc
+                if len(seen_symlinks) > _MAX_SYMLINKS:
+                    raise _StaticEnumerationSkip
+                target = _readlink_component(current, component, missing=True)
+                absolute = target.startswith("/")
+                try:
+                    target_components = _resolution_components(
+                        target,
+                        absolute=absolute,
+                    )
+                except _Denied as exc:
+                    raise _StaticEnumerationSkip from exc
+                if absolute:
+                    matching_prefixes = tuple(
+                        spelling
+                        for spelling in boundary.spellings
+                        if target_components[: len(spelling)] == spelling
+                    )
+                    if not matching_prefixes:
+                        raise _StaticEnumerationSkip
+                    prefix_length = max(map(len, matching_prefixes))
+                    reset = _open_directory(
+                        ".",
+                        directory_flags,
+                        dir_fd=boundary.fd,
+                        missing=True,
+                    )
+                    _track_descriptor(owned, reset)
+                    _directory_descriptor_identity(reset)
+                    current = _replace_enumeration_descriptor(
+                        owned=owned,
+                        current=current,
+                        replacement=reset,
+                    )
+                    try:
+                        current_components[:] = boundary.components
+                    except BaseException as exc:
+                        raise _Failed from exc
+                    target_components = target_components[prefix_length:]
+                if len(target_components) + len(pending) > _MAX_COMPONENTS:
+                    raise _StaticEnumerationSkip
+                try:
+                    pending.extendleft(reversed(target_components))
+                except BaseException as exc:
+                    raise _Failed from exc
+                continue
+
+            final_component = not pending
+            if stat.S_ISREG(mode):
+                if not final_component:
+                    raise _StaticEnumerationSkip
+                identity = _regular_identity_from_metadata(metadata)
+                _close_descriptor(owned, current)
+                current = -1
+                return "regular", None, tuple(current_components), identity
+            if not stat.S_ISDIR(mode):
+                raise _StaticEnumerationSkip
+
+            expected_identity = _directory_identity_from_metadata(metadata)
+            child = _open_directory(
+                component,
+                directory_flags,
+                dir_fd=current,
+                missing=True,
+            )
+            _track_descriptor(owned, child)
+            if _directory_descriptor_identity(child) != expected_identity:
+                raise _Failed
+            current = _replace_enumeration_descriptor(
+                owned=owned,
+                current=current,
+                replacement=child,
+            )
+            try:
+                current_components.append(component)
+            except BaseException as exc:
+                raise _Failed from exc
+
+        identity = _directory_descriptor_identity(current)
+        transferred = True
+        return "directory", current, tuple(current_components), identity
+    finally:
+        if not transferred and current >= 0 and current in owned:
+            _close_descriptor(owned, current)
+
+
+def _canonical_ascii_json(value: object) -> bytes:
+    try:
+        rendered = json.dumps(
+            value,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        encoded = rendered.encode("ascii")
+    except (TypeError, ValueError, UnicodeError, RecursionError, MemoryError) as exc:
+        raise _Failed from exc
+    return encoded
+
+
+def _locator_payload(root_index: int, locator: tuple[str, ...]) -> dict[str, object]:
+    return {
+        "root_index": root_index,
+        "locator": list(locator),
+    }
+
+
+def _encoded_locator_bytes(root_index: int, locator: tuple[str, ...]) -> int:
+    return len(_canonical_ascii_json(_locator_payload(root_index, locator)))
+
+
+def _locator_path_bytes(locator: tuple[str, ...]) -> int:
+    total = max(0, len(locator) - 1)
+    for component in locator:
+        total += _path_bytes(component)
+        if total > _MAX_PATH_BYTES:
+            return total
+    return total
+
+
+_MAX_ENUMERATION_RESPONSE_OVERHEAD = len(
+    _canonical_ascii_json(
+        {
+            "v": LOCAL_FILESYSTEM_PROTOCOL_VERSION,
+            "status": "complete",
+            "directories": MAX_LOCAL_FILESYSTEM_ENUMERATION_ITEMS,
+            "candidates": [],
+        }
+    )
+)
+_MAX_ENUMERATION_CANDIDATE_BYTES = (
+    MAX_LOCAL_FILESYSTEM_ENUMERATION_METADATA_BYTES
+    - _MAX_ENUMERATION_RESPONSE_OVERHEAD
+)
+_QUEUED_DIRECTORY_IDENTITY_BYTES = 2 * 8
+
+
+def _candidate_payload_bytes(
+    encoded_sum: int,
+    count: int,
+) -> int:
+    return encoded_sum + max(0, count - 1)
+
+
+def _enumeration_metadata_fits(
+    state: _EnumerationState,
+    *,
+    candidate_encoded_bytes: int | None = None,
+    candidate_count: int | None = None,
+    queued_directory_encoded_bytes: int | None = None,
+) -> bool:
+    retained_encoded_bytes = (
+        state.candidate_encoded_bytes
+        if candidate_encoded_bytes is None
+        else candidate_encoded_bytes
+    )
+    retained_count = (
+        len(state.preferred) + len(state.fallback)
+        if candidate_count is None
+        else candidate_count
+    )
+    queued_encoded_bytes = (
+        state.queued_directory_encoded_bytes
+        if queued_directory_encoded_bytes is None
+        else queued_directory_encoded_bytes
+    )
+    return (
+        retained_encoded_bytes >= 0
+        and retained_count >= 0
+        and queued_encoded_bytes >= 0
+        and _candidate_payload_bytes(retained_encoded_bytes, retained_count)
+        + queued_encoded_bytes
+        <= _MAX_ENUMERATION_CANDIDATE_BYTES
+    )
+
+
+def _retain_enumeration_candidate(
+    state: _EnumerationState,
+    *,
+    root_index: int,
+    locator: tuple[str, ...],
+    identity: tuple[int, int],
+) -> None:
+    if _locator_path_bytes(locator) > _MAX_PATH_BYTES:
+        state.candidate_limited = True
+        return
+    encoded_bytes = _encoded_locator_bytes(root_index, locator)
+    candidate = _EnumerationCandidate(
+        root_index=root_index,
+        locator=locator,
+        identity=identity,
+        encoded_bytes=encoded_bytes,
+    )
+    preferred = state.target_name is not None and locator[-1] == state.target_name
+    destination = state.preferred if preferred else state.fallback
+
+    existing = state.retained_file_identities.get(identity)
+    if existing is not None:
+        existing_is_preferred = (
+            state.target_name is not None
+            and existing.locator[-1] == state.target_name
+        )
+        if not preferred or existing_is_preferred:
+            return
+        retained_count = len(state.preferred) + len(state.fallback)
+        if (
+            retained_count > state.max_files
+            or not _enumeration_metadata_fits(
+                state,
+                candidate_encoded_bytes=(
+                    state.candidate_encoded_bytes
+                    - existing.encoded_bytes
+                    + encoded_bytes
+                ),
+                candidate_count=retained_count,
+            )
+        ):
+            state.candidate_limited = True
+            return
+        try:
+            state.fallback.remove(existing)
+            del state.retained_file_identities[identity]
+        except BaseException as exc:
+            raise _Failed from exc
+        state.candidate_encoded_bytes -= existing.encoded_bytes
+
+    def fits(additional_bytes: int) -> bool:
+        count = len(state.preferred) + len(state.fallback) + 1
+        return (
+            count <= state.max_files
+            and _enumeration_metadata_fits(
+                state,
+                candidate_encoded_bytes=(
+                    state.candidate_encoded_bytes + additional_bytes
+                ),
+                candidate_count=count,
+            )
+        )
+
+    if not preferred:
+        if not fits(encoded_bytes):
+            state.candidate_limited = True
+            return
+        try:
+            destination.append(candidate)
+            state.retained_file_identities[identity] = candidate
+        except BaseException as exc:
+            raise _Failed from exc
+        state.candidate_encoded_bytes += encoded_bytes
+        return
+
+    while not fits(encoded_bytes) and state.fallback:
+        try:
+            removed = state.fallback.pop()
+            del state.retained_file_identities[removed.identity]
+        except BaseException as exc:
+            raise _Failed from exc
+        state.candidate_encoded_bytes -= removed.encoded_bytes
+        state.candidate_limited = True
+    if not fits(encoded_bytes):
+        state.candidate_limited = True
+        return
+    try:
+        destination.append(candidate)
+        state.retained_file_identities[identity] = candidate
+    except BaseException as exc:
+        raise _Failed from exc
+    state.candidate_encoded_bytes += encoded_bytes
+
+
+def _validated_scandir_name(entry: os.DirEntry[str]) -> str:
+    try:
+        name = entry.name
+    except BaseException as exc:
+        raise _Failed from exc
+    if (
+        type(name) is not str
+        or name in ("", ".", "..")
+        or "/" in name
+        or "\0" in name
+        or _path_bytes(name) > _MAX_COMPONENT_BYTES
+    ):
+        raise _Failed
+    return name
+
+
+def _scandir_iterator(fd: int) -> _ScandirIterator:
+    try:
+        iterator = os.scandir(fd)
+    except BaseException as exc:
+        raise _Failed from exc
+    try:
+        close = iterator.close
+        iter(iterator)
+    except BaseException as exc:
+        with suppress(BaseException):
+            close = iterator.close
+            close()
+        raise _Failed from exc
+    if not callable(close):
+        with suppress(BaseException):
+            iterator.close()
+        raise _Failed
+    return iterator
+
+
+def _close_scandir_iterator(iterator: _ScandirIterator) -> None:
+    try:
+        close = iterator.close
+        if not callable(close):
+            raise TypeError
+        close()
+    except BaseException as exc:
+        raise _Failed from exc
+
+
 def _open_selected_scope(
     selected: _SelectedPath,
     owned: list[int],
@@ -977,6 +1630,445 @@ def _read_registered_file(request: _RegisteredReadRequest) -> None:
     raise _Failed from outcome
 
 
+def _new_enumeration_state(
+    request: _EnumerationRequest | _RegisteredEnumerationRequest,
+) -> _EnumerationState:
+    try:
+        return _EnumerationState(
+            target_name=request.target_name,
+            max_files=request.max_files,
+            max_directories=request.max_directories,
+            directories=0,
+            visited_directories=set(),
+            preferred=[],
+            fallback=[],
+            retained_file_identities={},
+            candidate_encoded_bytes=0,
+            queued_directory_encoded_bytes=0,
+            candidate_limited=False,
+            directory_limited=False,
+        )
+    except BaseException as exc:
+        raise _Failed from exc
+
+
+def _append_directory_work(
+    queue: deque[_DirectoryWork],
+    *,
+    queued_bytes: int,
+    state: _EnumerationState,
+    root_index: int,
+    locator: tuple[str, ...],
+    expected_identity: tuple[int, int] | None,
+) -> int:
+    if queued_bytes != state.queued_directory_encoded_bytes:
+        raise _Failed
+    if (
+        len(locator) > _MAX_COMPONENTS
+        or _locator_path_bytes(locator) > _MAX_PATH_BYTES
+    ):
+        state.directory_limited = True
+        return queued_bytes
+    if state.directories + len(queue) >= state.max_directories:
+        state.directory_limited = True
+        return queued_bytes
+    encoded_bytes = (
+        _encoded_locator_bytes(root_index, locator)
+        + _QUEUED_DIRECTORY_IDENTITY_BYTES
+    )
+    next_queued_bytes = queued_bytes + encoded_bytes
+    if not _enumeration_metadata_fits(
+        state,
+        queued_directory_encoded_bytes=next_queued_bytes,
+    ):
+        state.directory_limited = True
+        return queued_bytes
+    work = _DirectoryWork(
+        root_index=root_index,
+        locator=locator,
+        expected_identity=expected_identity,
+        encoded_bytes=encoded_bytes,
+    )
+    try:
+        queue.append(work)
+    except BaseException as exc:
+        raise _Failed from exc
+    state.queued_directory_encoded_bytes = next_queued_bytes
+    return next_queued_bytes
+
+
+def _classify_enumeration_entry(
+    *,
+    boundary: _EnumerationBoundary,
+    directory_fd: int,
+    directory_locator: tuple[str, ...],
+    name: str,
+    root_index: int,
+    owned: list[int],
+    directory_flags: int,
+    queue: deque[_DirectoryWork],
+    queued_bytes: int,
+    state: _EnumerationState,
+) -> int:
+    metadata = _lstat_component(directory_fd, name, missing=True)
+    try:
+        mode = metadata.st_mode
+    except BaseException as exc:
+        raise _Failed from exc
+    if type(mode) is not int:
+        raise _Failed
+    try:
+        locator = (*directory_locator, name)
+    except BaseException as exc:
+        raise _Failed from exc
+    if (
+        len(locator) > _MAX_COMPONENTS
+        or _locator_path_bytes(locator) > _MAX_PATH_BYTES
+    ):
+        if stat.S_ISDIR(mode) or stat.S_ISREG(mode) or stat.S_ISLNK(mode):
+            if stat.S_ISDIR(mode) or stat.S_ISLNK(mode):
+                state.directory_limited = True
+            else:
+                state.candidate_limited = True
+        return queued_bytes
+
+    if stat.S_ISREG(mode):
+        _retain_enumeration_candidate(
+            state,
+            root_index=root_index,
+            locator=locator,
+            identity=_regular_identity_from_metadata(metadata),
+        )
+        return queued_bytes
+
+    if stat.S_ISDIR(mode):
+        identity = _directory_identity_from_metadata(metadata)
+        return _append_directory_work(
+            queue,
+            queued_bytes=queued_bytes,
+            state=state,
+            root_index=root_index,
+            locator=locator,
+            expected_identity=identity,
+        )
+
+    if not stat.S_ISLNK(mode):
+        return queued_bytes
+
+    if state.directories + len(queue) >= state.max_directories:
+        state.directory_limited = True
+        return queued_bytes
+
+    try:
+        (
+            kind,
+            resolved_fd,
+            _resolved_components,
+            resolved_identity,
+        ) = _resolve_enumeration_components(
+            boundary=boundary,
+            components=locator,
+            owned=owned,
+            directory_flags=directory_flags,
+        )
+    except _StaticEnumerationSkip:
+        return queued_bytes
+    if kind == "regular":
+        if resolved_fd is not None:
+            raise _Failed
+        _retain_enumeration_candidate(
+            state,
+            root_index=root_index,
+            locator=locator,
+            identity=resolved_identity,
+        )
+        return queued_bytes
+    if kind != "directory" or resolved_fd is None:
+        raise _Failed
+    try:
+        identity = _directory_descriptor_identity(resolved_fd)
+    finally:
+        _close_descriptor(owned, resolved_fd)
+    return _append_directory_work(
+        queue,
+        queued_bytes=queued_bytes,
+        state=state,
+        root_index=root_index,
+        locator=locator,
+        expected_identity=identity,
+    )
+
+
+def _scan_enumeration_directory(
+    *,
+    boundary: _EnumerationBoundary,
+    work: _DirectoryWork,
+    directory_fd: int,
+    owned: list[int],
+    directory_flags: int,
+    queue: deque[_DirectoryWork],
+    queued_bytes: int,
+    state: _EnumerationState,
+) -> int:
+    iterator = _scandir_iterator(directory_fd)
+    outcome: BaseException | None = None
+    try:
+        for entry in iterator:
+            name = _validated_scandir_name(entry)
+            queued_bytes = _classify_enumeration_entry(
+                boundary=boundary,
+                directory_fd=directory_fd,
+                directory_locator=work.locator,
+                name=name,
+                root_index=work.root_index,
+                owned=owned,
+                directory_flags=directory_flags,
+                queue=queue,
+                queued_bytes=queued_bytes,
+                state=state,
+            )
+    except BaseException as exc:
+        outcome = exc
+    finally:
+        try:
+            _close_scandir_iterator(iterator)
+        except BaseException as exc:
+            outcome = exc
+    if outcome is None:
+        return queued_bytes
+    if isinstance(outcome, (_Denied, _Missing, _Failed)):
+        raise outcome
+    raise _Failed from outcome
+
+
+def _traverse_enumeration_boundary(
+    *,
+    boundary: _EnumerationBoundary,
+    root_index: int,
+    owned: list[int],
+    state: _EnumerationState,
+) -> None:
+    directory_flags = _enumerable_directory_open_flags()
+    if directory_flags is None:
+        raise _Failed
+    try:
+        queue: deque[_DirectoryWork] = deque()
+    except BaseException as exc:
+        raise _Failed from exc
+    queued_bytes = _append_directory_work(
+        queue,
+        queued_bytes=0,
+        state=state,
+        root_index=root_index,
+        locator=(),
+        expected_identity=_directory_descriptor_identity(boundary.fd),
+    )
+    while queue:
+        try:
+            work = queue.popleft()
+        except BaseException as exc:
+            raise _Failed from exc
+        if (
+            queued_bytes != state.queued_directory_encoded_bytes
+            or work.encoded_bytes > queued_bytes
+        ):
+            raise _Failed
+        if state.directories >= state.max_directories:
+            state.directory_limited = True
+            try:
+                queue.clear()
+            except BaseException as exc:
+                raise _Failed from exc
+            queued_bytes = 0
+            state.queued_directory_encoded_bytes = 0
+            break
+
+        try:
+            try:
+                (
+                    kind,
+                    directory_fd,
+                    _resolved_components,
+                    _resolved_identity,
+                ) = _resolve_enumeration_components(
+                    boundary=boundary,
+                    components=work.locator,
+                    owned=owned,
+                    directory_flags=directory_flags,
+                )
+            except _StaticEnumerationSkip as exc:
+                raise _Failed from exc
+            if kind != "directory" or directory_fd is None:
+                raise _Failed
+            try:
+                identity = _directory_descriptor_identity(directory_fd)
+                if (
+                    work.expected_identity is not None
+                    and identity != work.expected_identity
+                ):
+                    raise _Failed
+                state.directories += 1
+                if identity in state.visited_directories:
+                    continue
+                try:
+                    state.visited_directories.add(identity)
+                except BaseException as exc:
+                    raise _Failed from exc
+                queued_bytes = _scan_enumeration_directory(
+                    boundary=boundary,
+                    work=work,
+                    directory_fd=directory_fd,
+                    owned=owned,
+                    directory_flags=directory_flags,
+                    queue=queue,
+                    queued_bytes=queued_bytes,
+                    state=state,
+                )
+            finally:
+                _close_descriptor(owned, directory_fd)
+        finally:
+            queued_bytes -= work.encoded_bytes
+            state.queued_directory_encoded_bytes -= work.encoded_bytes
+            if (
+                queued_bytes < 0
+                or state.queued_directory_encoded_bytes != queued_bytes
+            ):
+                raise _Failed
+    if queued_bytes != 0 or state.queued_directory_encoded_bytes != 0:
+        raise _Failed
+
+
+def _registered_enumeration_boundary(
+    request: _RegisteredEnumerationRequest,
+    owned: list[int],
+) -> _EnumerationBoundary:
+    selected = _select_candidate(request.store_root, request.roots)
+    operator_boundary = _open_enumeration_boundary(
+        selected.root,
+        selected.root_components,
+        owned,
+    )
+    directory_flags = _enumerable_directory_open_flags()
+    if directory_flags is None:
+        raise _Failed
+    try:
+        (
+            kind,
+            store_fd,
+            store_components,
+            _store_identity,
+        ) = _resolve_enumeration_components(
+            boundary=operator_boundary,
+            components=selected.candidate_components,
+            owned=owned,
+            directory_flags=directory_flags,
+        )
+    except _StaticEnumerationSkip as exc:
+        raise _Denied from exc
+    if kind != "directory" or store_fd is None:
+        raise _Denied
+    try:
+        configured_store_components = _lexically_normalized_absolute_components(
+            request.store_root
+        )
+        spellings = frozenset((store_components, configured_store_components))
+    except BaseException:
+        _close_descriptor(owned, store_fd)
+        raise
+    _close_descriptor(owned, operator_boundary.fd)
+    return _EnumerationBoundary(
+        fd=store_fd,
+        components=store_components,
+        spellings=spellings,
+    )
+
+
+def _enumeration_response(
+    state: _EnumerationState,
+) -> bytes:
+    if state.queued_directory_encoded_bytes != 0:
+        raise _Failed
+    try:
+        candidates = [
+            _locator_payload(candidate.root_index, candidate.locator)
+            for candidate in (*state.preferred, *state.fallback)
+        ]
+    except BaseException as exc:
+        raise _Failed from exc
+    status = (
+        "limit"
+        if state.candidate_limited or state.directory_limited
+        else "complete"
+    )
+    encoded = _canonical_ascii_json(
+        {
+            "v": LOCAL_FILESYSTEM_PROTOCOL_VERSION,
+            "status": status,
+            "directories": state.directories,
+            "candidates": candidates,
+        }
+    )
+    if len(encoded) > MAX_LOCAL_FILESYSTEM_ENUMERATION_METADATA_BYTES:
+        raise _Failed
+    return encoded
+
+
+def _enumerate_files(
+    request: _EnumerationRequest | _RegisteredEnumerationRequest,
+) -> bytes:
+    state = _new_enumeration_state(request)
+    if request.max_files == 0:
+        return _enumeration_response(state)
+    if request.max_directories == 0:
+        state.directory_limited = True
+        return _enumeration_response(state)
+
+    owned: list[int] = []
+    outcome: BaseException | None = None
+    response: bytes | None = None
+    try:
+        if isinstance(request, _RegisteredEnumerationRequest):
+            boundary = _registered_enumeration_boundary(request, owned)
+            _traverse_enumeration_boundary(
+                boundary=boundary,
+                root_index=0,
+                owned=owned,
+                state=state,
+            )
+            _close_descriptor(owned, boundary.fd)
+        else:
+            for root_index, root in enumerate(request.roots):
+                if state.directories >= state.max_directories:
+                    state.directory_limited = True
+                    break
+                boundary = _open_enumeration_boundary(
+                    root,
+                    _normalized_root_components(root),
+                    owned,
+                )
+                _traverse_enumeration_boundary(
+                    boundary=boundary,
+                    root_index=root_index,
+                    owned=owned,
+                    state=state,
+                )
+                _close_descriptor(owned, boundary.fd)
+                if state.directory_limited:
+                    break
+        response = _enumeration_response(state)
+    except BaseException as exc:
+        outcome = exc
+    finally:
+        if not _close_all(owned):
+            outcome = _Failed()
+
+    if outcome is None and response is not None:
+        return response
+    if isinstance(outcome, (_Denied, _Missing, _Failed)):
+        raise outcome
+    raise _Failed from outcome
+
+
 def _select_candidate(candidate: str, roots: tuple[str, ...]) -> _SelectedPath:
     return _select_path(_Request(candidate=candidate, roots=roots))
 
@@ -1004,7 +2096,13 @@ def _execute_request(environment: Mapping[str, str]) -> None:
             request.max_bytes,
         )
         return
-    _read_registered_file(request)
+    if isinstance(request, _RegisteredReadRequest):
+        _read_registered_file(request)
+        return
+    if isinstance(request, (_EnumerationRequest, _RegisteredEnumerationRequest)):
+        _write_stdout(_enumerate_files(request))
+        return
+    raise _Failed
 
 
 def main(

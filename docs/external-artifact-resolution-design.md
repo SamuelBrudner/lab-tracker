@@ -411,14 +411,20 @@ timed-out, changed, or otherwise ambiguous attempt consumes the remainder and
 makes recovery terminal. All such failures are reported with static,
 path-free details.
 
-Recovery enumeration and root metadata are the remaining transitional
-application-side filesystem work. `os.walk` still produces candidate names and
-prunes directories with the legacy path policy, but every candidate's
-authorization/open/read uses the broker and the same budget. Deadline checks
-run between enumeration steps; an individual blocked directory call is not yet
-interruptible. Pre-follow-safe bounded enumeration, an explicit directory
-limit, and precise Cloud Files classification remain
-`lab-tracker-n5kp.61`.
+Recovery enumeration is also a capability-owned helper operation. It performs
+one pre-follow-safe traversal under the same logical deadline. Every root or
+child-directory attempt is charged before directory-identity deduplication, so
+aliases and cycles cannot evade the configured ceiling even though one retained
+directory identity is never enumerated twice. File and directory ceilings both
+default to and are capped at `4096`. The helper returns only bounded
+root-slot/relative-component metadata after cleanup in one response capped at
+8 MiB. The broker preflights each exact candidate-read encoding against the
+fixed 24 KiB helper-request envelope; a locator that cannot fit is omitted and
+turns the enumeration into an explicit limit result, so it cannot later consume
+the logical byte budget as an internal protocol failure. Timeout—including
+broker-side response parsing—malformed or partial output, stderr, count/schema
+mismatch, ownership uncertainty, and cleanup failure discard the candidate set
+and make recovery terminal.
 
 ### Registered local-store confinement
 
@@ -437,10 +443,11 @@ second nested boundary before it traverses the locator. Direct and recovery
 candidate reads use this retained nested-store scope; there is no fallback to
 ordinary unscoped local resolution. Consequently traversal, aliases, races, and
 content-hash recovery cannot reach a sibling store even when both stores sit
-below one broad operator root. Recovery enumeration is still narrowed with a
-transitional store-root policy, but candidate bytes cross only the nested helper
-role. The result retains the canonical logical `store://` URI; concrete host
-paths are not exposed in store-scoped diagnostics.
+below one broad operator root. Registered recovery enumeration uses that same
+retained store root as a non-popable boundary and returns only relative locator
+components; candidate bytes then cross the same nested helper role. The result
+retains the canonical logical `store://` URI; concrete host paths are not
+exposed in store-scoped diagnostics.
 
 The raw-absolute rule applies to registered store roots, not operator
 configuration: global resolver roots preserve current-user `~` expansion from
@@ -458,10 +465,10 @@ filesystem-I/O-free authority preserves unambiguous lexical components, expands
 the current-user `~` from the process environment, prefixes relative roots with
 the startup working directory, and rejects dot/dot-dot or unsupported platform
 spellings rather than canonicalizing them.
-One bounded filesystem broker serves local health, direct local reads, and every
-recovery candidate read. A transitional `LocalPathPolicy` derived from the same
-roots remains only for recovery enumeration and root metadata until
-`lab-tracker-n5kp.61`. Health admits only a configured lexical root spelling;
+One bounded filesystem broker serves local health, direct local reads, recovery
+enumeration, and every recovery candidate read. The application runtime retains
+neither a parallel authority nor a `LocalPathPolicy`. Health admits only a
+configured lexical root spelling;
 the separate physical spelling behind an operator root alias must be configured
 explicitly if registered stores use it.
 
@@ -516,27 +523,28 @@ Recovery preserves these boundaries:
 - **Integrity is unchanged.** A recovered file is verified by the same
   re-hash-and-compare as any other resolve, so it is exactly as trustworthy as
   one found at the `uri`; a same-named decoy with different bytes does not match.
-- **Retained-handle confinement.** Enumeration starts from the configured roots
-  and prunes linked/reparse directories with the transitional path policy. Each
-  yielded candidate is independently authorized, opened, and streamed by the
-  same pre-follow-safe helper as the direct read. A registered-store candidate
-  additionally stays beneath the helper-retained nested store boundary.
-  Pathname replacement cannot redirect the descriptor or handle that is hashed.
-- **Opt-in and file/byte/deadline-bounded where implemented.** Recovery is off
+- **Retained-handle confinement.** Enumeration starts from retained configured
+  roots and classifies each child without following it before descent. Each
+  yielded relative locator is independently opened and streamed by the same
+  pre-follow-safe helper as the direct read. A registered-store enumeration and
+  candidate additionally stay beneath the helper-retained nested store
+  boundary. Pathname replacement cannot redirect the descriptor or handle that
+  is hashed.
+- **Opt-in and file/directory/byte/deadline-bounded.** Recovery is off
   unless `LAB_TRACKER_RESOLVER_RECOVERY` is enabled *and* roots are configured.
-  The typed runtime defaults to at most `4096` candidate files and one cumulative
-  `536870912`-byte (512 MiB) direct-plus-recovery read allowance, with the latter
-  also the hard maximum. Candidates sharing the original basename are tried
-  first. Every successful complete candidate read debits its exact full payload;
-  ambiguous reads terminate the logical budget rather than continuing after
-  uncertain consumption. The request's separate `max_bytes` remains only the
-  returned-view cap (8 MiB hard/default), never a substitute for hashing the
-  whole file.
-- **Enumeration caveat.** The one local subprocess deadline is reused and
-  checked between scan and read steps, but the transitional application-side
-  `os.walk` has no directory-count limit and cannot interrupt a single blocked
-  directory call. Moving root metadata and enumeration into a bounded broker
-  role remains `lab-tracker-n5kp.61`.
+  The typed runtime defaults to at most `4096` candidate files and `4096`
+  directory attempts; both are hard maxima. Enabled application composition
+  rejects an aggregate root set that cannot fit one fixed-size request even
+  with a worst-case target name, and rejects any individual root for which even
+  a one-component candidate read cannot fit the fixed request envelope. One
+  cumulative `536870912`-byte
+  (512 MiB) direct-plus-recovery read allowance is also the hard maximum.
+  Candidates sharing the original basename are returned first without a second
+  traversal. Every successful complete candidate read debits its exact full
+  payload; ambiguous reads terminate the logical budget rather than continuing
+  after uncertain consumption. The request's separate `max_bytes` remains only
+  the returned-view cap (8 MiB hard/default), never a substitute for hashing
+  the whole file.
 
 ## Read-surface integration
 
@@ -683,11 +691,11 @@ Shipped (`src/lab_tracker/artifact_resolution.py`, tested in
   Directory inspection has zero-byte output caps; file reads stream only opaque
   bytes under the logical reservation. Results and ordinary failures stay
   static, redacted, and point-in-time rather than durable filesystem leases.
-- ⚠️ Recovery root metadata and enumeration remain transitional
-  application-side operations. They reuse the deadline and produce candidates
-  only; candidate bytes always cross the broker. A blocked directory call is not
-  yet interruptible, and a directory-count/pre-follow-safe enumeration role
-  remains `lab-tracker-n5kp.61`.
+- ✅ Recovery enumeration is a narrow broker role implemented by the same
+  contained helper. One basename-prioritized pass consumes the existing
+  resolution deadline, visits no more than `4096` directories, returns no more
+  than `4096` path-free relative locators, and fails terminally on malformed,
+  partial, ambiguous, or cleanup-uncertain results.
 - ✅ `HttpResolver` — `http(s)`, full-body verify with a `max_fetch_bytes` cap
   (oversized → `UNRESOLVED`, never uncertified bytes), plus a shared outbound
   destination policy that validates every IPv4/IPv6 answer, pins the vetted

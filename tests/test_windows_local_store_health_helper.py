@@ -6,7 +6,7 @@ import json
 import os
 import subprocess
 import sys
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
 
@@ -72,6 +72,56 @@ def _registered_read_request(
         sort_keys=True,
         separators=(",", ":"),
     )
+
+
+def _enumerate_request(
+    roots: Sequence[str],
+    *,
+    target_name: str | None = None,
+    max_files: int = 16,
+    max_directories: int = 16,
+) -> str:
+    return json.dumps(
+        {
+            "v": 1,
+            "op": "enumerate-files",
+            "roots": list(roots),
+            "target_name": target_name,
+            "max_files": max_files,
+            "max_directories": max_directories,
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _registered_enumerate_request(
+    store_root: str,
+    root: str,
+    *,
+    target_name: str | None = None,
+    max_files: int = 16,
+    max_directories: int = 16,
+) -> str:
+    return json.dumps(
+        {
+            "v": 1,
+            "op": "enumerate-registered-files",
+            "roots": [root],
+            "store_root": store_root,
+            "target_name": target_name,
+            "max_files": max_files,
+            "max_directories": max_directories,
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _enumeration_payload(output: io.BytesIO) -> dict[str, object]:
+    return cast(dict[str, object], json.loads(output.getvalue().decode("ascii")))
 
 
 def _snapshot(
@@ -149,10 +199,12 @@ class FakeGetInformationEx:
         *,
         attributes: Mapping[int, int] | None = None,
         tags: Mapping[int, int] | None = None,
+        identities: Mapping[int, tuple[int, bytes]] | None = None,
         result: int = 1,
     ) -> None:
         self.attributes = dict(attributes or {})
         self.tags = dict(tags or {})
+        self.identities = dict(identities or {})
         self.result = result
         self.calls: list[tuple[int, int, int]] = []
 
@@ -164,14 +216,31 @@ class FakeGetInformationEx:
         raw_size: object,
     ) -> int:
         handle = _as_int(raw_handle)
-        self.calls.append((handle, _as_int(raw_class), _as_int(raw_size)))
+        information_class = _as_int(raw_class)
+        self.calls.append((handle, information_class, _as_int(raw_size)))
         if self.result:
-            information = ctypes.cast(
-                cast(Any, raw_information),
-                ctypes.POINTER(helper._FILE_ATTRIBUTE_TAG_INFO),
-            )
-            information.contents.FileAttributes = self.attributes.get(handle, _DIRECTORY)
-            information.contents.ReparseTag = self.tags.get(handle, 0)
+            if information_class == helper._FILE_ID_INFO_CLASS:
+                volume, file_id = self.identities.get(
+                    handle,
+                    (1, b"i" * 16),
+                )
+                information = ctypes.cast(
+                    cast(Any, raw_information),
+                    ctypes.POINTER(helper._FILE_ID_INFO),
+                )
+                information.contents.VolumeSerialNumber = volume
+                for index, value in enumerate(file_id):
+                    information.contents.FileId.Identifier[index] = value
+            else:
+                information = ctypes.cast(
+                    cast(Any, raw_information),
+                    ctypes.POINTER(helper._FILE_ATTRIBUTE_TAG_INFO),
+                )
+                information.contents.FileAttributes = self.attributes.get(
+                    handle,
+                    _DIRECTORY,
+                )
+                information.contents.ReparseTag = self.tags.get(handle, 0)
         return self.result
 
 
@@ -359,6 +428,7 @@ def _raw_api(
     get_file_type: Callable[..., object] | None = None,
     read_file: Callable[..., object] | None = None,
     nt_create_file: Callable[..., object] | None = None,
+    get_last_error: Callable[[], object] | None = None,
 ) -> helper.CtypesWindowsDirectoryApi:
     return helper.CtypesWindowsDirectoryApi(
         create_file=create_file or FakeCreateFile(),
@@ -375,6 +445,7 @@ def _raw_api(
         read_file=read_file or FakeReadFile(),
         close_handle=close_handle or FakeCloseHandle(),
         nt_create_file=nt_create_file or FakeNtCreateFile(),
+        get_last_error=get_last_error,
     )
 
 
@@ -385,6 +456,11 @@ def test_public_protocol_constants_are_fixed() -> None:
     assert helper.LOCAL_FILESYSTEM_INSPECT_DIRECTORY_OP == "inspect-directory"
     assert helper.LOCAL_FILESYSTEM_READ_FILE_OP == "read-file"
     assert helper.LOCAL_FILESYSTEM_READ_REGISTERED_FILE_OP == "read-registered-file"
+    assert helper.LOCAL_FILESYSTEM_ENUMERATE_FILES_OP == "enumerate-files"
+    assert (
+        helper.LOCAL_FILESYSTEM_ENUMERATE_REGISTERED_FILES_OP
+        == "enumerate-registered-files"
+    )
     assert helper.LOCAL_FILESYSTEM_COMPLETE_EXIT == 0
     assert helper.LOCAL_FILESYSTEM_ACCESSIBLE_EXIT == 0
     assert helper.LOCAL_FILESYSTEM_DENIED_EXIT == 2
@@ -393,6 +469,11 @@ def test_public_protocol_constants_are_fixed() -> None:
     assert helper.INSPECT_DIRECTORY_OPERATION == "inspect-directory"
     assert helper.READ_FILE_OPERATION == "read-file"
     assert helper.READ_REGISTERED_FILE_OPERATION == "read-registered-file"
+    assert helper.ENUMERATE_FILES_OPERATION == "enumerate-files"
+    assert (
+        helper.ENUMERATE_REGISTERED_FILES_OPERATION
+        == "enumerate-registered-files"
+    )
     assert helper.COMPLETE_EXIT == 0
     assert helper.ACCESSIBLE_EXIT == 0
     assert helper.DENIED_EXIT == 2
@@ -402,6 +483,10 @@ def test_public_protocol_constants_are_fixed() -> None:
     assert helper.MAX_LOCAL_FILESYSTEM_ROOTS == 64
     assert helper.MAX_LOCAL_FILESYSTEM_SELECTED_ROOTS == 64
     assert helper.MAX_LOCAL_FILESYSTEM_READ_BYTES == 512 * 1024 * 1024
+    assert helper.MAX_LOCAL_FILESYSTEM_ENUMERATION_ITEMS == 4096
+    assert helper.MAX_LOCAL_FILESYSTEM_ENUMERATED_FILES == 4096
+    assert helper.MAX_LOCAL_FILESYSTEM_ENUMERATED_DIRECTORIES == 4096
+    assert helper.MAX_LOCAL_FILESYSTEM_ENUMERATION_METADATA_BYTES == 8 * 1024 * 1024
 
 
 def test_windows_ctypes_structures_match_the_native_abi() -> None:
@@ -479,6 +564,256 @@ def test_ntcreatefile_opens_final_file_once_for_synchronous_bounded_read() -> No
             "ea_length": 0,
         }
     ]
+
+
+def test_ntcreatefile_opens_enumerable_directory_with_exact_contract() -> None:
+    nt_create = FakeNtCreateFile(((0, _CHILD_HANDLE),))
+    api = _raw_api(nt_create_file=nt_create)
+
+    assert (
+        api.open_enumerable_component(_ROOT_HANDLE, "recovery")
+        == _CHILD_HANDLE
+    )
+    assert nt_create.calls == [
+        {
+            "desired_access": 0xA1,
+            "parent": _ROOT_HANDLE,
+            "component": "recovery",
+            "name_length": len("recovery".encode("utf-16-le")),
+            "name_maximum_length": len("recovery".encode("utf-16-le")) + 2,
+            "attributes": 0x1000,
+            "create_options": 0x00200001,
+            "share_access": 0x7,
+            "create_disposition": 1,
+            "file_attributes": 0,
+            "allocation_size": None,
+            "ea_buffer": None,
+            "ea_length": 0,
+        }
+    ]
+
+
+def test_ntcreatefile_opens_candidate_for_attributes_only_without_recall() -> None:
+    nt_create = FakeNtCreateFile(((0, _FILE_HANDLE),))
+    api = _raw_api(nt_create_file=nt_create)
+
+    assert (
+        api.open_candidate_component(_ROOT_HANDLE, "artifact.bin")
+        == _FILE_HANDLE
+    )
+    assert nt_create.calls == [
+        {
+            "desired_access": 0x80,
+            "parent": _ROOT_HANDLE,
+            "component": "artifact.bin",
+            "name_length": len("artifact.bin".encode("utf-16-le")),
+            "name_maximum_length": len("artifact.bin".encode("utf-16-le")) + 2,
+            "attributes": 0x1000,
+            "create_options": 0x00600000,
+            "share_access": 0x7,
+            "create_disposition": 1,
+            "file_attributes": 0,
+            "allocation_size": None,
+            "ea_buffer": None,
+            "ea_length": 0,
+        }
+    ]
+
+
+def test_candidate_identity_reads_only_exact_disk_handle_identity() -> None:
+    file_id = bytes(range(16))
+    information = FakeGetInformationEx(
+        identities={_FILE_HANDLE: (0x1234, file_id)}
+    )
+    file_type = FakeGetFileType(1)
+    api = _raw_api(
+        get_information=information,
+        get_file_type=file_type,
+    )
+
+    assert api.candidate_file_identity(_FILE_HANDLE) == (0x1234, file_id)
+    assert file_type.calls == [_FILE_HANDLE]
+    assert information.calls == [
+        (_FILE_HANDLE, helper._FILE_ID_INFO_CLASS, 24)
+    ]
+
+
+def test_candidate_identity_skips_special_handle_without_identity_query() -> None:
+    information = FakeGetInformationEx()
+    file_type = FakeGetFileType(2)
+    api = _raw_api(
+        get_information=information,
+        get_file_type=file_type,
+    )
+
+    assert api.candidate_file_identity(_FILE_HANDLE) is None
+    assert file_type.calls == [_FILE_HANDLE]
+    assert information.calls == []
+
+
+def test_create_file_opens_enumerable_drive_root_with_exact_access() -> None:
+    create = FakeCreateFile()
+    api = _raw_api(create_file=create)
+
+    assert api.open_enumerable_root("C:\\") == _ROOT_HANDLE
+    assert create.calls == [
+        (
+            "\\\\?\\C:\\",
+            0xA1,
+            0x7,
+            None,
+            3,
+            0x02200000,
+            None,
+        )
+    ]
+
+
+@pytest.mark.parametrize("status", (0xC000000D, 0xC000050B))
+def test_enumerable_component_keeps_exact_dont_reparse_retry(
+    status: int,
+) -> None:
+    nt_create = FakeNtCreateFile(((status, 303), (0, _CHILD_HANDLE)))
+    close = FakeCloseHandle()
+    api = _raw_api(nt_create_file=nt_create, close_handle=close)
+
+    assert (
+        api.open_enumerable_component(_ROOT_HANDLE, "recovery")
+        == _CHILD_HANDLE
+    )
+    assert [call["attributes"] for call in nt_create.calls] == [0x1000, 0]
+    assert [call["desired_access"] for call in nt_create.calls] == [0xA1, 0xA1]
+    assert [call["create_options"] for call in nt_create.calls] == [
+        0x00200001,
+        0x00200001,
+    ]
+    assert close.calls == [303]
+
+
+def _directory_information_buffer(
+    records: Sequence[tuple[str, int, int, bytes]],
+) -> bytes:
+    buffer = bytearray(64 * 1024)
+    offset = 0
+    for index, (name, attributes, tag, file_id) in enumerate(records):
+        raw_name = name.encode("utf-16-le")
+        assert len(file_id) == 16
+        record_size = (88 + len(raw_name) + 7) & ~7
+        next_offset = 0 if index == len(records) - 1 else record_size
+        buffer[offset : offset + 4] = next_offset.to_bytes(4, "little")
+        buffer[offset + 56 : offset + 60] = attributes.to_bytes(4, "little")
+        buffer[offset + 60 : offset + 64] = len(raw_name).to_bytes(4, "little")
+        buffer[offset + 68 : offset + 72] = tag.to_bytes(4, "little")
+        buffer[offset + 72 : offset + 88] = file_id
+        buffer[offset + 88 : offset + 88 + len(raw_name)] = raw_name
+        offset += record_size
+    return bytes(buffer)
+
+
+class FakeDirectoryQuery:
+    def __init__(self, buffers: Sequence[bytes]) -> None:
+        self.buffers = list(buffers)
+        self.calls: list[tuple[int, int, int]] = []
+
+    def __call__(
+        self,
+        raw_handle: object,
+        raw_class: object,
+        raw_information: object,
+        raw_size: object,
+    ) -> int:
+        self.calls.append(
+            (_as_int(raw_handle), _as_int(raw_class), _as_int(raw_size))
+        )
+        if not self.buffers:
+            return 0
+        data = self.buffers.pop(0)
+        ctypes.memmove(raw_information, data, len(data))
+        return 1
+
+
+def test_native_directory_query_restarts_then_continues_on_same_handle() -> None:
+    first = _directory_information_buffer(
+        (("first.bin", 0x80, 0, b"a" * 16),)
+    )
+    second = _directory_information_buffer(
+        (("nested", _DIRECTORY, 0, b"b" * 16),)
+    )
+    query = FakeDirectoryQuery((first, second))
+    api = _raw_api(get_information=query, get_last_error=lambda: 18)
+
+    assert list(api.enumerate_directory(_ROOT_HANDLE)) == [
+        helper._DirectoryEntry("first.bin", 0x80, 0, b"a" * 16),
+        helper._DirectoryEntry("nested", _DIRECTORY, 0, b"b" * 16),
+    ]
+    assert query.calls == [
+        (_ROOT_HANDLE, 0x14, 64 * 1024),
+        (_ROOT_HANDLE, 0x13, 64 * 1024),
+        (_ROOT_HANDLE, 0x13, 64 * 1024),
+    ]
+
+
+def test_directory_query_accepts_only_no_more_files_as_clean_end() -> None:
+    query = FakeDirectoryQuery(())
+    api = _raw_api(get_information=query, get_last_error=lambda: 5)
+
+    with pytest.raises(helper.WindowsLocalStoreHealthDenied):
+        list(api.enumerate_directory(_ROOT_HANDLE))
+
+
+def test_directory_query_skips_dot_entries_before_clean_end() -> None:
+    query = FakeDirectoryQuery(
+        (
+            _directory_information_buffer(
+                (
+                    (".", _DIRECTORY, 0, b"." * 16),
+                    ("..", _DIRECTORY, 0, b":" * 16),
+                )
+            ),
+        )
+    )
+    api = _raw_api(get_information=query, get_last_error=lambda: 18)
+
+    assert list(api.enumerate_directory(_ROOT_HANDLE)) == []
+    assert [information_class for _, information_class, _ in query.calls] == [
+        0x14,
+        0x13,
+    ]
+
+
+def test_file_id_extd_directory_parser_validates_the_native_abi() -> None:
+    valid = _directory_information_buffer(
+        (
+            (".", _DIRECTORY, 0, b"." * 16),
+            ("..", _DIRECTORY, 0, b":" * 16),
+            ("données-🧪.bin", 0x80, 0, b"f" * 16),
+        )
+    )
+    assert helper._parse_file_id_extd_directory_info(valid) == (
+        helper._DirectoryEntry("données-🧪.bin", 0x80, 0, b"f" * 16),
+    )
+
+    malformed: list[bytes] = []
+    for next_offset in (80, 89, 64 * 1024 + 8):
+        changed = bytearray(valid)
+        changed[:4] = next_offset.to_bytes(4, "little")
+        malformed.append(bytes(changed))
+    odd_length = bytearray(
+        _directory_information_buffer((("name", 0x80, 0, b"x" * 16),))
+    )
+    odd_length[60:64] = (3).to_bytes(4, "little")
+    malformed.append(bytes(odd_length))
+    overrun = bytearray(valid)
+    overrun[60:64] = (0x1_0000).to_bytes(4, "little")
+    malformed.append(bytes(overrun))
+    invalid_utf16 = bytearray(
+        _directory_information_buffer((("x", 0x80, 0, b"x" * 16),))
+    )
+    invalid_utf16[88:90] = b"\x00\xd8"
+    malformed.append(bytes(invalid_utf16))
+    for raw in malformed:
+        with pytest.raises(helper.WindowsLocalStoreHealthDenied):
+            helper._parse_file_id_extd_directory_info(raw)
 
 
 def test_ctypes_readfile_is_binary_and_strictly_bounded() -> None:
@@ -699,6 +1034,2179 @@ def _direct_file_api(
         snapshots={_FILE_HANDLE: snapshots or (stable, stable)},
         attributes={_FILE_HANDLE: 0x80},
     )
+
+
+class TrackingDirectoryIterator:
+    def __init__(
+        self,
+        entries: Sequence[helper._DirectoryEntry],
+        *,
+        failure: BaseException | None = None,
+        close_failure: BaseException | None = None,
+    ) -> None:
+        self.entries = list(entries)
+        self.failure = failure
+        self.close_failure = close_failure
+        self.closed = False
+
+    def __iter__(self) -> TrackingDirectoryIterator:
+        return self
+
+    def __next__(self) -> helper._DirectoryEntry:
+        if self.failure is not None:
+            failure = self.failure
+            self.failure = None
+            raise failure
+        if not self.entries:
+            raise StopIteration
+        return self.entries.pop(0)
+
+    def close(self) -> None:
+        assert not self.closed
+        self.closed = True
+        if self.close_failure is not None:
+            raise self.close_failure
+
+
+class ScriptedEnumerationApi:
+    def __init__(
+        self,
+        *,
+        roots: Mapping[str, int],
+        children: Mapping[tuple[int, str], int],
+        candidate_children: Mapping[tuple[int, str], int] | None = None,
+        final_paths: Mapping[int, str],
+        identities: Mapping[int, tuple[int, bytes]],
+        candidate_identities: Mapping[int, tuple[int, bytes]] | None = None,
+        candidate_file_types: Mapping[int, int] | None = None,
+        listings: Mapping[int, Sequence[helper._DirectoryEntry]],
+        attributes: Mapping[int, int] | None = None,
+        tags: Mapping[int, int] | None = None,
+        reparses: Mapping[int, bytes] | None = None,
+        iterator_failures: Mapping[int, BaseException] | None = None,
+        iterator_close_failures: Mapping[int, BaseException] | None = None,
+        close_failures: Mapping[int, BaseException] | None = None,
+    ) -> None:
+        self.roots = dict(roots)
+        self.children = dict(children)
+        self.child_keys_by_handle = {
+            handle: key for key, handle in self.children.items()
+        }
+        self.candidate_children = dict(candidate_children or {})
+        self.final_paths = dict(final_paths)
+        self.identities = dict(identities)
+        self.candidate_identities = dict(candidate_identities or {})
+        self.candidate_file_types = dict(candidate_file_types or {})
+        self.listings = {handle: list(entries) for handle, entries in listings.items()}
+        self.candidate_records = {
+            (parent, entry.name): entry
+            for parent, entries in self.listings.items()
+            for entry in entries
+            if not entry.file_attributes & _DIRECTORY
+        }
+        self.candidate_keys_by_handle = {
+            handle: key for key, handle in self.candidate_children.items()
+        }
+        self.next_candidate_handle = 10_000
+        self.attributes = dict(attributes or {})
+        self.tags = dict(tags or {})
+        self.reparses = dict(reparses or {})
+        self.iterator_failures = dict(iterator_failures or {})
+        self.iterator_close_failures = dict(iterator_close_failures or {})
+        self.close_failures = dict(close_failures or {})
+        self.root_calls: list[str] = []
+        self.component_calls: list[tuple[int, str]] = []
+        self.alias_component_calls: list[tuple[int, str]] = []
+        self.candidate_component_calls: list[tuple[int, str]] = []
+        self.attribute_calls: list[int] = []
+        self.final_path_calls: list[int] = []
+        self.identity_calls: list[int] = []
+        self.candidate_identity_calls: list[int] = []
+        self.enumeration_calls: list[int] = []
+        self.reparse_calls: list[int] = []
+        self.close_calls: list[int] = []
+        self.iterators: list[TrackingDirectoryIterator] = []
+
+    def open_enumerable_root(self, root: str) -> int:
+        self.root_calls.append(root)
+        try:
+            return self.roots[root]
+        except KeyError:
+            raise helper.WindowsLocalStoreHealthDenied from None
+
+    def open_enumerable_component(self, parent: int, component: str) -> int:
+        self.component_calls.append((parent, component))
+        try:
+            return self.children[(parent, component)]
+        except KeyError:
+            raise helper.WindowsLocalStoreHealthMissing from None
+
+    def open_component(self, parent: int, component: str) -> int:
+        self.alias_component_calls.append((parent, component))
+        try:
+            return self.children[(parent, component)]
+        except KeyError:
+            raise helper.WindowsLocalStoreHealthMissing from None
+
+    def open_candidate_component(self, parent: int, component: str) -> int:
+        self.candidate_component_calls.append((parent, component))
+        key = (parent, component)
+        record = self.candidate_records.get(key)
+        if record is None:
+            record = next(
+                (
+                    entry
+                    for entry in self.listings.get(parent, ())
+                    if entry.name == component
+                    and (
+                        not entry.file_attributes & _DIRECTORY
+                        or key in self.candidate_children
+                    )
+                ),
+                None,
+            )
+        if record is None:
+            raise helper.WindowsLocalStoreHealthMissing
+        self.candidate_records[key] = record
+        handle = self.candidate_children.get(key)
+        if handle is None:
+            while (
+                self.next_candidate_handle in self.candidate_keys_by_handle
+                or self.next_candidate_handle in self.roots.values()
+                or self.next_candidate_handle in self.children.values()
+            ):
+                self.next_candidate_handle += 1
+            handle = self.next_candidate_handle
+            self.next_candidate_handle += 1
+            self.candidate_children[key] = handle
+            self.candidate_keys_by_handle[handle] = key
+        return handle
+
+    def file_attributes_and_reparse_tag(self, handle: int) -> tuple[int, int]:
+        self.attribute_calls.append(handle)
+        record = (
+            self.candidate_records[self.candidate_keys_by_handle[handle]]
+            if handle in self.candidate_keys_by_handle
+            else None
+        )
+        return (
+            self.attributes.get(
+                handle,
+                _DIRECTORY if record is None else record.file_attributes,
+            ),
+            self.tags.get(
+                handle,
+                0 if record is None else record.reparse_tag,
+            ),
+        )
+
+    def normalized_dos_path(self, handle: int) -> str:
+        self.final_path_calls.append(handle)
+        return self.final_paths[handle]
+
+    def directory_identity(self, handle: int) -> tuple[int, bytes]:
+        self.identity_calls.append(handle)
+        exact = self.identities.get(handle)
+        if exact is not None:
+            return exact
+        parent, component = self.child_keys_by_handle[handle]
+        record = next(
+            entry
+            for entry in self.listings[parent]
+            if entry.name == component
+            and entry.file_attributes & _DIRECTORY
+        )
+        return (self.identities[parent][0], record.file_id)
+
+    def candidate_file_identity(
+        self,
+        handle: int,
+    ) -> tuple[int, bytes] | None:
+        self.candidate_identity_calls.append(handle)
+        if self.candidate_file_types.get(handle, 1) != 1:
+            return None
+        exact = self.candidate_identities.get(handle)
+        if exact is not None:
+            return exact
+        parent, component = self.candidate_keys_by_handle[handle]
+        return (
+            self.identities[parent][0],
+            self.candidate_records[(parent, component)].file_id,
+        )
+
+    def enumerate_directory(
+        self,
+        handle: int,
+    ) -> TrackingDirectoryIterator:
+        self.enumeration_calls.append(handle)
+        iterator = TrackingDirectoryIterator(
+            self.listings[handle],
+            failure=self.iterator_failures.get(handle),
+            close_failure=self.iterator_close_failures.get(handle),
+        )
+        self.iterators.append(iterator)
+        return iterator
+
+    def read_reparse_point(self, handle: int) -> bytes:
+        self.reparse_calls.append(handle)
+        return self.reparses[handle]
+
+    def close(self, handle: int) -> None:
+        self.close_calls.append(handle)
+        failure = self.close_failures.get(handle)
+        if failure is not None:
+            raise failure
+
+
+def _entry(
+    name: str,
+    *,
+    attributes: int = 0x80,
+    tag: int = 0,
+    identity_byte: bytes | None = None,
+    identity: bytes | None = None,
+) -> helper._DirectoryEntry:
+    assert identity is None or len(identity) == 16
+    assert identity is None or identity_byte is None
+    if identity is not None:
+        file_id = identity
+    else:
+        file_id = (
+            (name.encode("utf-8") + b"\0" * 16)[:16]
+            if identity_byte is None
+            else identity_byte * 16
+        )
+    return helper._DirectoryEntry(
+        name,
+        attributes,
+        tag,
+        file_id,
+    )
+
+
+def _enumeration_api() -> ScriptedEnumerationApi:
+    return ScriptedEnumerationApi(
+        roots={"C:\\": 10},
+        children={(10, "sub"): 20},
+        final_paths={10: "C:\\", 20: r"C:\sub"},
+        identities={10: (1, b"r" * 16), 20: (1, b"s" * 16)},
+        listings={
+            10: [
+                _entry("fallback.bin"),
+                _entry(
+                    "sub",
+                    attributes=_DIRECTORY,
+                    identity_byte=b"s",
+                ),
+            ],
+            20: [_entry("artifact.dat")],
+        },
+    )
+
+
+def _deep_enumeration_api(
+    directory_components: Sequence[str],
+    leaf: str,
+) -> tuple[ScriptedEnumerationApi, int]:
+    children: dict[tuple[int, str], int] = {}
+    final_paths = {10: "C:\\"}
+    identities = {10: (1, (1).to_bytes(16, "little"))}
+    listings: dict[int, list[helper._DirectoryEntry]] = {}
+    current = 10
+    rendered_components: list[str] = []
+    for index, component in enumerate(directory_components, start=1):
+        child = 10 + index
+        children[(current, component)] = child
+        child_identity = (index + 1).to_bytes(16, "little")
+        listings[current] = [
+            _entry(
+                component,
+                attributes=_DIRECTORY,
+                identity=child_identity,
+            )
+        ]
+        rendered_components.append(component)
+        final_paths[child] = "C:\\" + "\\".join(rendered_components)
+        identities[child] = (1, child_identity)
+        current = child
+    listings[current] = [_entry(leaf)]
+    return (
+        ScriptedEnumerationApi(
+            roots={"C:\\": 10},
+            children=children,
+            final_paths=final_paths,
+            identities=identities,
+            listings=listings,
+        ),
+        current,
+    )
+
+
+def test_enumeration_zero_limits_are_output_only_and_perform_no_native_io() -> None:
+    api = ScriptedEnumerationApi(
+        roots={},
+        children={},
+        final_paths={},
+        identities={},
+        listings={},
+    )
+    no_files = io.BytesIO()
+    no_directories = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request(
+                ("C:\\",),
+                max_files=0,
+                max_directories=4,
+            ),
+            api=api,
+            output=no_files,
+        )
+        == helper.COMPLETE_EXIT
+    )
+    assert _enumeration_payload(no_files) == {
+        "v": 1,
+        "status": "complete",
+        "directories": 0,
+        "candidates": [],
+    }
+    assert (
+        helper.execute_request(
+            _enumerate_request(
+                ("C:\\",),
+                max_files=4,
+                max_directories=0,
+            ),
+            api=api,
+            output=no_directories,
+        )
+        == helper.COMPLETE_EXIT
+    )
+    assert _enumeration_payload(no_directories) == {
+        "v": 1,
+        "status": "limit",
+        "directories": 0,
+        "candidates": [],
+    }
+    assert api.root_calls == []
+
+
+def test_direct_enumeration_rejects_an_empty_root_set() -> None:
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request((), max_files=1, max_directories=0),
+            output=output,
+        )
+        == helper.FAILED_EXIT
+    )
+    assert output.getvalue() == b""
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("max_files", True),
+        ("max_files", -1),
+        ("max_files", 4097),
+        ("max_directories", True),
+        ("max_directories", -1),
+        ("max_directories", 4097),
+        ("target_name", ""),
+        ("target_name", "nested/name"),
+    ),
+)
+def test_enumeration_protocol_rejects_nonexact_limits_and_target_names(
+    field: str,
+    value: object,
+) -> None:
+    payload = cast(
+        dict[str, object],
+        json.loads(_enumerate_request(("C:\\",))),
+    )
+    payload[field] = value
+    raw = json.dumps(
+        payload,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    output = io.BytesIO()
+
+    assert helper.execute_request(raw, output=output) == helper.FAILED_EXIT
+    assert output.getvalue() == b""
+
+
+@pytest.mark.parametrize(
+    ("target_name", "expected_exit"),
+    (
+        ("é" * 128, helper.COMPLETE_EXIT),
+        ("é" * 255, helper.COMPLETE_EXIT),
+        ("😀" * 127 + "a", helper.COMPLETE_EXIT),
+        ("é" * 256, helper.FAILED_EXIT),
+        ("😀" * 128, helper.FAILED_EXIT),
+    ),
+)
+def test_target_name_uses_windows_utf16_component_budget(
+    target_name: str,
+    expected_exit: int,
+) -> None:
+    api = ScriptedEnumerationApi(
+        roots={},
+        children={},
+        final_paths={},
+        identities={},
+        listings={},
+    )
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request(
+                ("C:\\",),
+                target_name=target_name,
+                max_files=0,
+            ),
+            api=api,
+            output=output,
+        )
+        == expected_exit
+    )
+    if expected_exit == helper.COMPLETE_EXIT:
+        assert _enumeration_payload(output)["status"] == "complete"
+    else:
+        assert output.getvalue() == b""
+    assert api.root_calls == []
+
+
+@pytest.mark.parametrize("name", ("é" * 128, "é" * 255, "😀" * 127 + "a"))
+def test_legal_utf16_component_is_retained_even_when_utf8_exceeds_255(
+    name: str,
+) -> None:
+    api, _parent = _deep_enumeration_api((), name)
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request(("C:\\",)),
+            api=api,
+            output=output,
+        )
+        == helper.COMPLETE_EXIT
+    )
+    assert _enumeration_payload(output) == {
+        "v": 1,
+        "status": "complete",
+        "directories": 1,
+        "candidates": [{"root_index": 0, "locator": [name]}],
+    }
+
+
+def test_overlong_utf16_file_component_is_limited_before_child_open() -> None:
+    name = "é" * 256
+    api, _parent = _deep_enumeration_api((), name)
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request(("C:\\",)),
+            api=api,
+            output=output,
+        )
+        == helper.COMPLETE_EXIT
+    )
+    assert _enumeration_payload(output) == {
+        "v": 1,
+        "status": "limit",
+        "directories": 1,
+        "candidates": [],
+    }
+    assert api.candidate_component_calls == []
+    assert api.candidate_identity_calls == []
+    assert api.candidate_children == {}
+    assert api.close_calls == [10]
+
+
+def test_overlong_utf16_directory_component_is_limited_before_child_open() -> None:
+    name = "é" * 256
+    api = ScriptedEnumerationApi(
+        roots={"C:\\": 10},
+        children={(10, name): 20},
+        final_paths={10: "C:\\", 20: "C:\\" + name},
+        identities={
+            10: (1, b"r" * 16),
+            20: (1, b"d" * 16),
+        },
+        listings={
+            10: [_entry(name, attributes=_DIRECTORY)],
+            20: [_entry("never.bin")],
+        },
+    )
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request(("C:\\",)),
+            api=api,
+            output=output,
+        )
+        == helper.COMPLETE_EXIT
+    )
+    assert _enumeration_payload(output) == {
+        "v": 1,
+        "status": "limit",
+        "directories": 1,
+        "candidates": [],
+    }
+    assert api.component_calls == []
+    assert api.identity_calls == [10]
+    assert api.close_calls == [10]
+
+
+def test_exact_windows_utf16_locator_boundary_is_retained() -> None:
+    directories = ("d" * 255,) * 63 + ("e" * 254,)
+    leaf = "f"
+    assert (
+        sum(len(component) for component in (*directories, leaf))
+        + len(directories)
+        == 16 * 1024
+    )
+    api, _parent = _deep_enumeration_api(directories, leaf)
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request(("C:\\",), max_directories=65),
+            api=api,
+            output=output,
+        )
+        == helper.COMPLETE_EXIT
+    )
+    assert _enumeration_payload(output)["status"] == "complete"
+    assert _enumeration_payload(output)["directories"] == 65
+    assert _enumeration_payload(output)["candidates"] == [
+        {"root_index": 0, "locator": [*directories, leaf]}
+    ]
+
+
+def test_overlong_windows_utf16_file_locator_is_limited_before_child_open() -> None:
+    directories = ("d" * 255,) * 63 + ("e" * 254,)
+    leaf = "ff"
+    assert (
+        sum(len(component) for component in (*directories, leaf))
+        + len(directories)
+        == 16 * 1024 + 1
+    )
+    api, parent = _deep_enumeration_api(directories, leaf)
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request(("C:\\",), max_directories=65),
+            api=api,
+            output=output,
+        )
+        == helper.COMPLETE_EXIT
+    )
+    assert _enumeration_payload(output) == {
+        "v": 1,
+        "status": "limit",
+        "directories": 65,
+        "candidates": [],
+    }
+    assert (parent, leaf) not in api.candidate_component_calls
+    assert api.candidate_identity_calls == []
+    assert api.candidate_children == {}
+
+
+def test_overlong_windows_utf16_directory_locator_stops_before_child_open() -> None:
+    directories = ("d" * 255,) * 63 + ("e" * 254,)
+    api, parent = _deep_enumeration_api(directories, "placeholder.bin")
+    child_name = "ff"
+    child_handle = 999
+    api.listings[parent] = [_entry(child_name, attributes=_DIRECTORY)]
+    api.children[(parent, child_name)] = child_handle
+    api.final_paths[child_handle] = (
+        api.final_paths[parent] + "\\" + child_name
+    )
+    api.identities[child_handle] = (1, b"x" * 16)
+    api.listings[child_handle] = []
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request(("C:\\",), max_directories=66),
+            api=api,
+            output=output,
+        )
+        == helper.COMPLETE_EXIT
+    )
+    assert _enumeration_payload(output) == {
+        "v": 1,
+        "status": "limit",
+        "directories": 65,
+        "candidates": [],
+    }
+    assert (parent, child_name) not in api.component_calls
+    assert child_handle not in api.identity_calls
+    assert child_handle not in api.close_calls
+
+
+def test_one_pass_global_preference_displaces_fallback_at_candidate_cap() -> None:
+    api = _enumeration_api()
+    api.listings[10].append(_entry("later.bin"))
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request(
+                ("C:\\",),
+                target_name="artifact.dat",
+                max_files=2,
+            ),
+            api=api,
+            output=output,
+        )
+        == helper.COMPLETE_EXIT
+    )
+    assert _enumeration_payload(output) == {
+        "v": 1,
+        "status": "limit",
+        "directories": 2,
+        "candidates": [
+            {"root_index": 0, "locator": ["sub", "artifact.dat"]},
+            {"root_index": 0, "locator": ["fallback.bin"]},
+        ],
+    }
+    assert api.enumeration_calls == [10, 20]
+    assert all(iterator.closed for iterator in api.iterators)
+
+
+def test_regular_identity_alias_dedup_promotes_preferred_without_limit() -> None:
+    api = ScriptedEnumerationApi(
+        roots={"C:\\": 10},
+        children={},
+        final_paths={10: "C:\\"},
+        identities={10: (7, b"r" * 16)},
+        listings={
+            10: [
+                _entry("first-alias.bin", identity_byte=b"x"),
+                _entry("artifact.dat", identity_byte=b"x"),
+                _entry("other.bin", identity_byte=b"y"),
+            ]
+        },
+    )
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request(
+                ("C:\\",),
+                target_name="artifact.dat",
+                max_files=2,
+            ),
+            api=api,
+            output=output,
+        )
+        == helper.COMPLETE_EXIT
+    )
+    assert _enumeration_payload(output) == {
+        "v": 1,
+        "status": "complete",
+        "directories": 1,
+        "candidates": [
+            {"root_index": 0, "locator": ["artifact.dat"]},
+            {"root_index": 0, "locator": ["other.bin"]},
+        ],
+    }
+
+
+def test_candidate_identity_mismatch_discards_uncertain_enumeration() -> None:
+    api = ScriptedEnumerationApi(
+        roots={"C:\\": 10},
+        children={},
+        candidate_children={
+            (10, "first.bin"): 101,
+            (10, "second.bin"): 102,
+        },
+        final_paths={10: "C:\\"},
+        identities={10: (7, b"r" * 16)},
+        candidate_identities={
+            101: (7, b"a" * 16),
+            102: (7, b"b" * 16),
+        },
+        listings={
+            10: [
+                _entry("first.bin", identity_byte=b"x"),
+                _entry("second.bin", identity_byte=b"x"),
+            ]
+        },
+    )
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request(("C:\\",), max_files=2),
+            api=api,
+            output=output,
+        )
+        == helper.FAILED_EXIT
+    )
+    assert output.getvalue() == b""
+    assert api.candidate_component_calls == [(10, "first.bin")]
+    assert api.candidate_identity_calls == [101]
+    assert api.close_calls == [101, 10]
+
+
+def test_file_symlink_identity_mismatch_fails_before_reparse_read() -> None:
+    api = ScriptedEnumerationApi(
+        roots={"C:\\": 10},
+        children={},
+        candidate_children={(10, "link.bin"): 101},
+        final_paths={10: "C:\\"},
+        identities={10: (7, b"r" * 16)},
+        candidate_identities={101: (7, b"x" * 16)},
+        listings={10: [_entry("link.bin", identity_byte=b"l")]},
+        attributes={101: 0x400},
+        tags={101: _SYMLINK_TAG},
+        reparses={
+            101: _reparse_buffer(
+                tag=_SYMLINK_TAG,
+                substitute="target.bin",
+                relative=True,
+            )
+        },
+    )
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request(("C:\\",)),
+            api=api,
+            output=output,
+        )
+        == helper.FAILED_EXIT
+    )
+    assert output.getvalue() == b""
+    assert api.candidate_identity_calls == [101]
+    assert api.reparse_calls == []
+    assert api.close_calls == [101, 10]
+
+
+def test_exact_handle_classification_skips_unsupported_and_special_files() -> None:
+    api = ScriptedEnumerationApi(
+        roots={"C:\\": 10},
+        children={},
+        candidate_children={
+            (10, "unsupported.bin"): 101,
+            (10, "symlink.bin"): 102,
+            (10, "special.bin"): 103,
+            (10, "ordinary.bin"): 104,
+        },
+        final_paths={10: "C:\\"},
+        identities={10: (7, b"r" * 16)},
+        candidate_file_types={103: 2},
+        listings={
+            10: [
+                _entry("unsupported.bin"),
+                _entry("symlink.bin"),
+                _entry("special.bin"),
+                _entry("ordinary.bin"),
+            ]
+        },
+        attributes={101: 0x400, 102: 0x400},
+        tags={101: 0x8000001B, 102: _SYMLINK_TAG},
+        reparses={
+            102: _reparse_buffer(
+                tag=_SYMLINK_TAG,
+                substitute="unsupported.bin",
+                relative=True,
+            )
+        },
+    )
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request(("C:\\",), max_files=1),
+            api=api,
+            output=output,
+        )
+        == helper.COMPLETE_EXIT
+    )
+    assert _enumeration_payload(output) == {
+        "v": 1,
+        "status": "complete",
+        "directories": 1,
+        "candidates": [
+            {"root_index": 0, "locator": ["ordinary.bin"]}
+        ],
+    }
+    assert api.candidate_component_calls == [
+        (10, "unsupported.bin"),
+        (10, "symlink.bin"),
+        (10, "unsupported.bin"),
+        (10, "special.bin"),
+        (10, "ordinary.bin"),
+    ]
+    assert api.candidate_identity_calls == [101, 102, 101, 103, 104]
+    assert api.reparse_calls == [102]
+    assert api.close_calls == [101, 102, 101, 103, 104, 10]
+
+
+def test_file_symlink_promotes_preferred_alias_and_deduplicates_later_target() -> None:
+    api = ScriptedEnumerationApi(
+        roots={"C:\\": 10},
+        children={},
+        candidate_children={
+            (10, "decoy.bin"): 101,
+            (10, "artifact.dat"): 102,
+            (10, "target.bin"): 103,
+        },
+        final_paths={10: "C:\\"},
+        identities={10: (7, b"r" * 16)},
+        listings={
+            10: [
+                _entry("decoy.bin", identity_byte=b"d"),
+                _entry(
+                    "artifact.dat",
+                    attributes=0x400,
+                    tag=_SYMLINK_TAG,
+                    identity_byte=b"l",
+                ),
+                _entry("target.bin", identity_byte=b"t"),
+            ]
+        },
+        attributes={102: 0x400},
+        tags={102: _SYMLINK_TAG},
+        reparses={
+            102: _reparse_buffer(
+                tag=_SYMLINK_TAG,
+                substitute="target.bin",
+                relative=True,
+            )
+        },
+    )
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request(
+                ("C:\\",),
+                target_name="artifact.dat",
+                max_files=1,
+            ),
+            api=api,
+            output=output,
+        )
+        == helper.COMPLETE_EXIT
+    )
+    assert _enumeration_payload(output) == {
+        "v": 1,
+        "status": "limit",
+        "directories": 1,
+        "candidates": [
+            {"root_index": 0, "locator": ["artifact.dat"]}
+        ],
+    }
+    assert api.candidate_component_calls == [
+        (10, "decoy.bin"),
+        (10, "artifact.dat"),
+        (10, "target.bin"),
+        (10, "target.bin"),
+    ]
+    assert api.candidate_identity_calls == [101, 102, 103, 103]
+    assert api.reparse_calls == [102]
+    assert api.close_calls == [101, 102, 103, 103, 10]
+
+
+def test_chained_file_symlinks_preserve_first_alias_and_final_identity() -> None:
+    api = ScriptedEnumerationApi(
+        roots={"C:\\": 10},
+        children={},
+        candidate_children={
+            (10, "link-one.bin"): 101,
+            (10, "link-two.bin"): 102,
+            (10, "target.bin"): 103,
+        },
+        final_paths={10: "C:\\"},
+        identities={10: (7, b"r" * 16)},
+        listings={
+            10: [
+                _entry(
+                    "link-one.bin",
+                    attributes=0x400,
+                    tag=_SYMLINK_TAG,
+                    identity_byte=b"a",
+                ),
+                _entry(
+                    "link-two.bin",
+                    attributes=0x400,
+                    tag=_SYMLINK_TAG,
+                    identity_byte=b"b",
+                ),
+                _entry("target.bin", identity_byte=b"t"),
+            ]
+        },
+        attributes={101: 0x400, 102: 0x400},
+        tags={101: _SYMLINK_TAG, 102: _SYMLINK_TAG},
+        reparses={
+            101: _reparse_buffer(
+                tag=_SYMLINK_TAG,
+                substitute="link-two.bin",
+                relative=True,
+            ),
+            102: _reparse_buffer(
+                tag=_SYMLINK_TAG,
+                substitute="target.bin",
+                relative=True,
+            ),
+        },
+    )
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request(("C:\\",)),
+            api=api,
+            output=output,
+        )
+        == helper.COMPLETE_EXIT
+    )
+    assert _enumeration_payload(output) == {
+        "v": 1,
+        "status": "complete",
+        "directories": 1,
+        "candidates": [
+            {"root_index": 0, "locator": ["link-one.bin"]}
+        ],
+    }
+    assert api.reparse_calls == [101, 102, 102]
+    assert api.close_calls == [101, 102, 103, 102, 103, 103, 10]
+
+
+def test_file_symlink_cycle_discards_all_output_and_closes_exact_handles() -> None:
+    api = ScriptedEnumerationApi(
+        roots={"C:\\": 10},
+        children={},
+        candidate_children={
+            (10, "link-one.bin"): 101,
+            (10, "link-two.bin"): 102,
+        },
+        final_paths={10: "C:\\"},
+        identities={10: (7, b"r" * 16)},
+        listings={
+            10: [
+                _entry(
+                    "link-one.bin",
+                    attributes=0x400,
+                    tag=_SYMLINK_TAG,
+                    identity_byte=b"a",
+                )
+            ]
+        },
+        attributes={101: 0x400, 102: 0x400},
+        tags={101: _SYMLINK_TAG, 102: _SYMLINK_TAG},
+        reparses={
+            101: _reparse_buffer(
+                tag=_SYMLINK_TAG,
+                substitute="link-two.bin",
+                relative=True,
+            ),
+            102: _reparse_buffer(
+                tag=_SYMLINK_TAG,
+                substitute="link-one.bin",
+                relative=True,
+            ),
+        },
+    )
+    api.candidate_records[(10, "link-two.bin")] = _entry(
+        "link-two.bin",
+        attributes=0x400,
+        tag=_SYMLINK_TAG,
+        identity_byte=b"b",
+    )
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request(("C:\\",)),
+            api=api,
+            output=output,
+        )
+        == helper.FAILED_EXIT
+    )
+    assert output.getvalue() == b""
+    assert api.candidate_component_calls == [
+        (10, "link-one.bin"),
+        (10, "link-two.bin"),
+        (10, "link-one.bin"),
+    ]
+    assert api.reparse_calls == [101, 102, 101]
+    assert api.close_calls == [101, 102, 101, 10]
+    assert all(iterator.closed for iterator in api.iterators)
+
+
+@pytest.mark.parametrize(
+    ("substitute", "relative"),
+    (
+        (r"..\outside.bin", True),
+        (r"\??\D:\outside.bin", False),
+    ),
+)
+def test_file_symlink_escape_fails_before_target_side_open(
+    substitute: str,
+    relative: bool,
+) -> None:
+    api = ScriptedEnumerationApi(
+        roots={"C:\\": 10},
+        children={},
+        candidate_children={(10, "link.bin"): 101},
+        final_paths={10: "C:\\"},
+        identities={10: (7, b"r" * 16)},
+        listings={
+            10: [
+                _entry(
+                    "link.bin",
+                    attributes=0x400,
+                    tag=_SYMLINK_TAG,
+                    identity_byte=b"l",
+                )
+            ]
+        },
+        attributes={101: 0x400},
+        tags={101: _SYMLINK_TAG},
+        reparses={
+            101: _reparse_buffer(
+                tag=_SYMLINK_TAG,
+                substitute=substitute,
+                relative=relative,
+            )
+        },
+    )
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request(("C:\\",)),
+            api=api,
+            output=output,
+        )
+        == helper.DENIED_EXIT
+    )
+    assert output.getvalue() == b""
+    assert api.candidate_component_calls == [(10, "link.bin")]
+    assert api.alias_component_calls == []
+    assert api.close_calls == [101, 10]
+
+
+def test_file_symlink_missing_target_race_discards_retained_candidates() -> None:
+    api = ScriptedEnumerationApi(
+        roots={"C:\\": 10},
+        children={},
+        candidate_children={
+            (10, "decoy.bin"): 101,
+            (10, "link.bin"): 102,
+        },
+        final_paths={10: "C:\\"},
+        identities={10: (7, b"r" * 16)},
+        listings={
+            10: [
+                _entry("decoy.bin", identity_byte=b"d"),
+                _entry(
+                    "link.bin",
+                    attributes=0x400,
+                    tag=_SYMLINK_TAG,
+                    identity_byte=b"l",
+                ),
+            ]
+        },
+        attributes={102: 0x400},
+        tags={102: _SYMLINK_TAG},
+        reparses={
+            102: _reparse_buffer(
+                tag=_SYMLINK_TAG,
+                substitute="missing.bin",
+                relative=True,
+            )
+        },
+    )
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request(("C:\\",)),
+            api=api,
+            output=output,
+        )
+        == helper.FAILED_EXIT
+    )
+    assert output.getvalue() == b""
+    assert api.candidate_component_calls == [
+        (10, "decoy.bin"),
+        (10, "link.bin"),
+        (10, "missing.bin"),
+    ]
+    assert api.close_calls == [101, 102, 10]
+    assert all(iterator.closed for iterator in api.iterators)
+
+
+def test_file_symlink_target_becoming_directory_is_fatal() -> None:
+    api = ScriptedEnumerationApi(
+        roots={"C:\\": 10},
+        children={},
+        candidate_children={
+            (10, "link.bin"): 101,
+            (10, "target"): 102,
+        },
+        final_paths={10: "C:\\"},
+        identities={10: (7, b"r" * 16)},
+        listings={
+            10: [
+                _entry(
+                    "link.bin",
+                    attributes=0x400,
+                    tag=_SYMLINK_TAG,
+                    identity_byte=b"l",
+                ),
+                _entry(
+                    "target",
+                    attributes=_DIRECTORY,
+                    identity_byte=b"d",
+                ),
+            ]
+        },
+        attributes={101: 0x400, 102: _DIRECTORY},
+        tags={101: _SYMLINK_TAG},
+        reparses={
+            101: _reparse_buffer(
+                tag=_SYMLINK_TAG,
+                substitute="target",
+                relative=True,
+            )
+        },
+    )
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request(("C:\\",)),
+            api=api,
+            output=output,
+        )
+        == helper.FAILED_EXIT
+    )
+    assert output.getvalue() == b""
+    assert api.candidate_identity_calls == [101]
+    assert api.close_calls == [101, 102, 10]
+
+
+def test_file_symlink_without_final_leaf_is_fatal() -> None:
+    api = ScriptedEnumerationApi(
+        roots={"C:\\": 10},
+        children={},
+        candidate_children={(10, "link.bin"): 101},
+        final_paths={10: "C:\\"},
+        identities={10: (7, b"r" * 16)},
+        listings={
+            10: [
+                _entry(
+                    "link.bin",
+                    attributes=0x400,
+                    tag=_SYMLINK_TAG,
+                    identity_byte=b"l",
+                )
+            ]
+        },
+        attributes={101: 0x400},
+        tags={101: _SYMLINK_TAG},
+        reparses={
+            101: _reparse_buffer(
+                tag=_SYMLINK_TAG,
+                substitute=".",
+                relative=True,
+            )
+        },
+    )
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request(("C:\\",)),
+            api=api,
+            output=output,
+        )
+        == helper.FAILED_EXIT
+    )
+    assert output.getvalue() == b""
+    assert api.candidate_component_calls == [(10, "link.bin")]
+    assert api.close_calls == [101, 10]
+
+
+def test_file_symlink_target_cleanup_failure_discards_all_output() -> None:
+    api = ScriptedEnumerationApi(
+        roots={"C:\\": 10},
+        children={},
+        candidate_children={
+            (10, "link.bin"): 101,
+            (10, "target.bin"): 102,
+        },
+        final_paths={10: "C:\\"},
+        identities={10: (7, b"r" * 16)},
+        listings={
+            10: [
+                _entry(
+                    "link.bin",
+                    attributes=0x400,
+                    tag=_SYMLINK_TAG,
+                    identity_byte=b"l",
+                ),
+                _entry("target.bin", identity_byte=b"t"),
+            ]
+        },
+        attributes={101: 0x400},
+        tags={101: _SYMLINK_TAG},
+        reparses={
+            101: _reparse_buffer(
+                tag=_SYMLINK_TAG,
+                substitute="target.bin",
+                relative=True,
+            )
+        },
+        close_failures={
+            102: KeyboardInterrupt("private exact-target cleanup")
+        },
+    )
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request(("C:\\",)),
+            api=api,
+            output=output,
+        )
+        == helper.FAILED_EXIT
+    )
+    assert output.getvalue() == b""
+    assert api.close_calls == [101, 102, 10]
+    assert all(iterator.closed for iterator in api.iterators)
+
+
+def test_file_symlink_at_directory_cap_is_limited_without_target_follow() -> None:
+    api = ScriptedEnumerationApi(
+        roots={"C:\\": 10},
+        children={},
+        candidate_children={
+            (10, "link.bin"): 101,
+            (10, "target.bin"): 102,
+        },
+        final_paths={10: "C:\\"},
+        identities={10: (7, b"r" * 16)},
+        listings={
+            10: [
+                _entry(
+                    "link.bin",
+                    attributes=0x400,
+                    tag=_SYMLINK_TAG,
+                    identity_byte=b"l",
+                )
+            ]
+        },
+        attributes={101: 0x400},
+        tags={101: _SYMLINK_TAG},
+        reparses={
+            101: _reparse_buffer(
+                tag=_SYMLINK_TAG,
+                substitute="target.bin",
+                relative=True,
+            )
+        },
+    )
+    api.candidate_records[(10, "target.bin")] = _entry(
+        "target.bin",
+        identity_byte=b"t",
+    )
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request(("C:\\",), max_directories=1),
+            api=api,
+            output=output,
+        )
+        == helper.COMPLETE_EXIT
+    )
+    assert _enumeration_payload(output) == {
+        "v": 1,
+        "status": "limit",
+        "directories": 1,
+        "candidates": [],
+    }
+    assert api.candidate_component_calls == [(10, "link.bin")]
+    assert api.candidate_identity_calls == [101]
+    assert api.reparse_calls == []
+    assert api.close_calls == [101, 10]
+
+
+def test_file_symlink_intermediate_directory_is_not_enumerated_or_counted() -> None:
+    api = ScriptedEnumerationApi(
+        roots={"C:\\": 10},
+        children={(10, "sub"): 20},
+        candidate_children={
+            (10, "link.bin"): 101,
+            (20, "target.bin"): 102,
+        },
+        final_paths={10: "C:\\", 20: r"C:\sub"},
+        identities={
+            10: (7, b"r" * 16),
+            20: (7, b"s" * 16),
+        },
+        listings={
+            10: [
+                _entry(
+                    "link.bin",
+                    attributes=0x400,
+                    tag=_SYMLINK_TAG,
+                    identity_byte=b"l",
+                )
+            ],
+            20: [_entry("target.bin", identity_byte=b"t")],
+        },
+        attributes={101: 0x400},
+        tags={101: _SYMLINK_TAG},
+        reparses={
+            101: _reparse_buffer(
+                tag=_SYMLINK_TAG,
+                substitute=r"sub\target.bin",
+                relative=True,
+            )
+        },
+    )
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request(("C:\\",)),
+            api=api,
+            output=output,
+        )
+        == helper.COMPLETE_EXIT
+    )
+    assert _enumeration_payload(output) == {
+        "v": 1,
+        "status": "complete",
+        "directories": 1,
+        "candidates": [
+            {"root_index": 0, "locator": ["link.bin"]}
+        ],
+    }
+    assert api.alias_component_calls == [(10, "sub")]
+    assert api.component_calls == []
+    assert api.enumeration_calls == [10]
+    assert api.close_calls == [101, 102, 20, 10]
+
+
+def test_file_symlink_expansion_ceiling_returns_limit_with_no_candidate() -> None:
+    names = [f"link-{index}.bin" for index in range(257)]
+    handles = {
+        (10, name): 1_000 + index
+        for index, name in enumerate(names)
+    }
+    reparses = {
+        1_000 + index: _reparse_buffer(
+            tag=_SYMLINK_TAG,
+            substitute=(
+                names[index + 1]
+                if index + 1 < len(names)
+                else "never-opened.bin"
+            ),
+            relative=True,
+        )
+        for index in range(len(names))
+    }
+    api = ScriptedEnumerationApi(
+        roots={"C:\\": 10},
+        children={},
+        candidate_children=handles,
+        final_paths={10: "C:\\"},
+        identities={10: (7, b"r" * 16)},
+        listings={
+            10: [
+                _entry(
+                    names[0],
+                    attributes=0x400,
+                    tag=_SYMLINK_TAG,
+                    identity=(1).to_bytes(16, "little"),
+                )
+            ]
+        },
+        attributes={handle: 0x400 for handle in handles.values()},
+        tags={handle: _SYMLINK_TAG for handle in handles.values()},
+        reparses=reparses,
+    )
+    for index, name in enumerate(names[1:], start=2):
+        api.candidate_records[(10, name)] = _entry(
+            name,
+            attributes=0x400,
+            tag=_SYMLINK_TAG,
+            identity=index.to_bytes(16, "little"),
+        )
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request(("C:\\",)),
+            api=api,
+            output=output,
+        )
+        == helper.COMPLETE_EXIT
+    )
+    assert _enumeration_payload(output) == {
+        "v": 1,
+        "status": "limit",
+        "directories": 1,
+        "candidates": [],
+    }
+    assert len(api.candidate_component_calls) == 257
+    assert len(api.reparse_calls) == 257
+    assert (10, "never-opened.bin") not in api.candidate_component_calls
+    assert api.close_calls == [*handles.values(), 10]
+
+
+def test_file_symlink_target_metadata_pressure_returns_limit_before_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        helper,
+        "MAX_LOCAL_FILESYSTEM_ENUMERATION_METADATA_BYTES",
+        128,
+    )
+    api = ScriptedEnumerationApi(
+        roots={"C:\\": 10},
+        children={},
+        candidate_children={
+            (10, "link.bin"): 101,
+            (10, "target.bin"): 102,
+        },
+        final_paths={10: "C:\\"},
+        identities={10: (7, b"r" * 16)},
+        listings={
+            10: [
+                _entry(
+                    "link.bin",
+                    attributes=0x400,
+                    tag=_SYMLINK_TAG,
+                    identity_byte=b"l",
+                )
+            ]
+        },
+        attributes={101: 0x400},
+        tags={101: _SYMLINK_TAG},
+        reparses={
+            101: _reparse_buffer(
+                tag=_SYMLINK_TAG,
+                substitute="target.bin",
+                relative=True,
+            )
+        },
+    )
+    api.candidate_records[(10, "target.bin")] = _entry(
+        "target.bin",
+        identity_byte=b"t",
+    )
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request(("C:\\",)),
+            api=api,
+            output=output,
+        )
+        == helper.COMPLETE_EXIT
+    )
+    assert _enumeration_payload(output) == {
+        "v": 1,
+        "status": "limit",
+        "directories": 1,
+        "candidates": [],
+    }
+    assert api.candidate_component_calls == [(10, "link.bin")]
+    assert api.reparse_calls == [101]
+    assert api.close_calls == [101, 10]
+
+
+def test_record_to_directory_race_discards_uncertain_enumeration() -> None:
+    api = ScriptedEnumerationApi(
+        roots={"C:\\": 10},
+        children={},
+        candidate_children={(10, "raced.bin"): 101},
+        final_paths={10: "C:\\"},
+        identities={10: (7, b"r" * 16)},
+        listings={10: [_entry("raced.bin")]},
+        attributes={101: _DIRECTORY},
+    )
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request(("C:\\",)),
+            api=api,
+            output=output,
+        )
+        == helper.FAILED_EXIT
+    )
+    assert output.getvalue() == b""
+    assert api.candidate_identity_calls == []
+    assert api.close_calls == [101, 10]
+    assert all(iterator.closed for iterator in api.iterators)
+
+
+def test_directory_record_identity_mismatch_fails_before_target_follow() -> None:
+    target = _reparse_buffer(
+        tag=_SYMLINK_TAG,
+        substitute=r"\??\C:\target",
+    )
+    api = ScriptedEnumerationApi(
+        roots={"C:\\": 10},
+        children={(10, "link"): 20, (10, "target"): 30},
+        final_paths={10: "C:\\", 30: r"C:\target"},
+        identities={
+            10: (7, b"r" * 16),
+            20: (7, b"x" * 16),
+            30: (7, b"t" * 16),
+        },
+        listings={
+            10: [
+                _entry(
+                    "link",
+                    attributes=_REPARSE_DIRECTORY,
+                    tag=_SYMLINK_TAG,
+                    identity_byte=b"y",
+                )
+            ],
+            30: [_entry("inside.bin")],
+        },
+        attributes={20: _REPARSE_DIRECTORY},
+        tags={20: _SYMLINK_TAG},
+        reparses={20: target},
+    )
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request(("C:\\",)),
+            api=api,
+            output=output,
+        )
+        == helper.FAILED_EXIT
+    )
+    assert output.getvalue() == b""
+    assert api.identity_calls == [10, 20]
+    assert api.reparse_calls == []
+    assert api.enumeration_calls == [10]
+    assert api.close_calls == [20, 10]
+    assert all(iterator.closed for iterator in api.iterators)
+
+
+def test_exact_cloud_file_is_eligible_without_payload_or_data_read() -> None:
+    api = ScriptedEnumerationApi(
+        roots={"C:\\": 10},
+        children={},
+        candidate_children={(10, "cloud.bin"): 101},
+        final_paths={10: "C:\\"},
+        identities={10: (7, b"r" * 16)},
+        listings={10: [_entry("cloud.bin")]},
+        attributes={101: 0x400},
+        tags={101: _CLOUD_TAG},
+    )
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request(("C:\\",)),
+            api=api,
+            output=output,
+        )
+        == helper.COMPLETE_EXIT
+    )
+    assert _enumeration_payload(output)["candidates"] == [
+        {"root_index": 0, "locator": ["cloud.bin"]}
+    ]
+    assert api.reparse_calls == []
+    assert api.candidate_identity_calls == [101]
+    assert api.close_calls == [101, 10]
+
+
+def test_candidate_handle_cleanup_failure_discards_the_entire_response() -> None:
+    api = ScriptedEnumerationApi(
+        roots={"C:\\": 10},
+        children={},
+        candidate_children={(10, "artifact.bin"): 101},
+        final_paths={10: "C:\\"},
+        identities={10: (7, b"r" * 16)},
+        listings={10: [_entry("artifact.bin")]},
+        close_failures={101: KeyboardInterrupt("private candidate close")},
+    )
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request(("C:\\",)),
+            api=api,
+            output=output,
+        )
+        == helper.FAILED_EXIT
+    )
+    assert output.getvalue() == b""
+    assert api.close_calls == [101, 10]
+    assert all(iterator.closed for iterator in api.iterators)
+
+
+def test_directory_limit_counts_before_query_without_off_by_one() -> None:
+    api = ScriptedEnumerationApi(
+        roots={"C:\\": 10},
+        children={(10, "one"): 20, (20, "two"): 30},
+        final_paths={10: "C:\\", 20: r"C:\one", 30: r"C:\one\two"},
+        identities={
+            10: (1, b"a" * 16),
+            20: (1, b"b" * 16),
+            30: (1, b"c" * 16),
+        },
+        listings={
+            10: [
+                _entry(
+                    "one",
+                    attributes=_DIRECTORY,
+                    identity_byte=b"b",
+                )
+            ],
+            20: [
+                _entry(
+                    "two",
+                    attributes=_DIRECTORY,
+                    identity_byte=b"c",
+                )
+            ],
+            30: [_entry("never.bin")],
+        },
+    )
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request(("C:\\",), max_directories=2),
+            api=api,
+            output=output,
+        )
+        == helper.COMPLETE_EXIT
+    )
+    assert _enumeration_payload(output)["status"] == "limit"
+    assert _enumeration_payload(output)["directories"] == 2
+    assert api.enumeration_calls == [10, 20]
+    assert 30 not in api.identity_calls
+    assert 30 not in api.close_calls
+
+
+def test_exhausted_directory_cap_opens_no_remaining_child() -> None:
+    api = ScriptedEnumerationApi(
+        roots={"C:\\": 10},
+        children={
+            (10, "one"): 20,
+            (10, "two"): 30,
+            (10, "three"): 40,
+        },
+        final_paths={
+            10: "C:\\",
+            20: r"C:\one",
+            30: r"C:\two",
+            40: r"C:\three",
+        },
+        identities={
+            10: (1, b"a" * 16),
+            20: (1, b"b" * 16),
+            30: (1, b"c" * 16),
+            40: (1, b"d" * 16),
+        },
+        listings={
+            10: [
+                _entry("one", attributes=_DIRECTORY),
+                _entry("two", attributes=_DIRECTORY),
+                _entry("three", attributes=_DIRECTORY),
+            ],
+            20: [],
+            30: [],
+            40: [],
+        },
+    )
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request(("C:\\",), max_directories=1),
+            api=api,
+            output=output,
+        )
+        == helper.COMPLETE_EXIT
+    )
+    assert _enumeration_payload(output)["status"] == "limit"
+    assert _enumeration_payload(output)["directories"] == 1
+    assert api.enumeration_calls == [10]
+    assert api.identity_calls == [10]
+    assert api.close_calls == [10]
+
+
+def test_metadata_pressure_returns_a_clean_limit_without_querying_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    long_name = "directory-" + "x" * 64
+    api = ScriptedEnumerationApi(
+        roots={"C:\\": 10},
+        children={(10, long_name): 20},
+        final_paths={10: "C:\\", 20: rf"C:\{long_name}"},
+        identities={10: (1, b"a" * 16), 20: (1, b"b" * 16)},
+        listings={10: [_entry(long_name, attributes=_DIRECTORY)], 20: []},
+    )
+    monkeypatch.setattr(
+        helper,
+        "MAX_LOCAL_FILESYSTEM_ENUMERATION_METADATA_BYTES",
+        160,
+    )
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request(("C:\\",)),
+            api=api,
+            output=output,
+        )
+        == helper.COMPLETE_EXIT
+    )
+    assert _enumeration_payload(output) == {
+        "v": 1,
+        "status": "limit",
+        "directories": 1,
+        "candidates": [],
+    }
+    assert api.enumeration_calls == [10]
+    assert 20 not in api.identity_calls
+    assert 20 not in api.close_calls
+
+
+def test_root_alias_identity_is_enumerated_once_across_all_roots() -> None:
+    api = ScriptedEnumerationApi(
+        roots={"C:\\": 10, "D:\\": 20},
+        children={},
+        final_paths={10: "C:\\", 20: "D:\\"},
+        identities={10: (7, b"x" * 16), 20: (7, b"x" * 16)},
+        listings={10: [_entry("only.bin")]},
+    )
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request(
+                ("C:\\", "D:\\"),
+                max_directories=2,
+            ),
+            api=api,
+            output=output,
+        )
+        == helper.COMPLETE_EXIT
+    )
+    assert _enumeration_payload(output) == {
+        "v": 1,
+        "status": "complete",
+        "directories": 2,
+        "candidates": [{"root_index": 0, "locator": ["only.bin"]}],
+    }
+    assert api.enumeration_calls == [10]
+    assert api.close_calls == [10_000, 10, 20]
+
+
+def test_safe_relative_junction_is_resolved_beneath_retained_boundary() -> None:
+    target = _reparse_buffer(
+        tag=_MOUNT_TAG,
+        substitute=r"\??\C:\target",
+    )
+    api = ScriptedEnumerationApi(
+        roots={"C:\\": 10},
+        children={(10, "link"): 20, (10, "target"): 30},
+        final_paths={10: "C:\\", 30: r"C:\target"},
+        identities={10: (1, b"r" * 16), 30: (1, b"t" * 16)},
+        listings={
+            10: [_entry("link", attributes=_REPARSE_DIRECTORY, tag=_MOUNT_TAG)],
+            30: [_entry("inside.bin")],
+        },
+        attributes={20: _REPARSE_DIRECTORY},
+        tags={20: _MOUNT_TAG},
+        reparses={20: target},
+    )
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request(("C:\\",)),
+            api=api,
+            output=output,
+        )
+        == helper.COMPLETE_EXIT
+    )
+    assert _enumeration_payload(output)["candidates"] == [
+        {"root_index": 0, "locator": ["link", "inside.bin"]}
+    ]
+    assert api.reparse_calls == [20]
+    assert api.enumeration_calls == [10, 30]
+
+
+def test_escaping_relative_junction_fails_before_target_open_and_output() -> None:
+    escaping = _reparse_buffer(
+        tag=_SYMLINK_TAG,
+        substitute=r"..\outside",
+        relative=True,
+    )
+    api = ScriptedEnumerationApi(
+        roots={"C:\\": 10},
+        children={(10, "link"): 20},
+        final_paths={10: "C:\\"},
+        identities={10: (1, b"r" * 16)},
+        listings={
+            10: [
+                _entry(
+                    "link",
+                    attributes=_REPARSE_DIRECTORY,
+                    tag=_SYMLINK_TAG,
+                )
+            ]
+        },
+        attributes={20: _REPARSE_DIRECTORY},
+        tags={20: _SYMLINK_TAG},
+        reparses={20: escaping},
+    )
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request(("C:\\",)),
+            api=api,
+            output=output,
+        )
+        == helper.DENIED_EXIT
+    )
+    assert output.getvalue() == b""
+    assert all(component != "outside" for _, component in api.component_calls)
+    assert all(iterator.closed for iterator in api.iterators)
+
+
+@pytest.mark.parametrize(
+    "substitute",
+    (
+        r"\??\Volume{01234567-89ab-cdef-0123-456789abcdef}\\",
+        r"\??\UNC\server\share",
+        r"\Device\HarddiskVolume1\outside",
+    ),
+)
+def test_unsupported_junction_namespaces_emit_no_partial_response(
+    substitute: str,
+) -> None:
+    raw = _reparse_buffer(tag=_MOUNT_TAG, substitute=substitute)
+    api = ScriptedEnumerationApi(
+        roots={"C:\\": 10},
+        children={(10, "link"): 20},
+        final_paths={10: "C:\\"},
+        identities={10: (1, b"r" * 16)},
+        listings={
+            10: [_entry("link", attributes=_REPARSE_DIRECTORY, tag=_MOUNT_TAG)]
+        },
+        attributes={20: _REPARSE_DIRECTORY},
+        tags={20: _MOUNT_TAG},
+        reparses={20: raw},
+    )
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request(("C:\\",)),
+            api=api,
+            output=output,
+        )
+        == helper.DENIED_EXIT
+    )
+    assert output.getvalue() == b""
+
+
+def test_cloud_directory_uses_the_same_handle_without_payload_or_reopen() -> None:
+    api = ScriptedEnumerationApi(
+        roots={"C:\\": 10},
+        children={(10, "cloud"): 20},
+        final_paths={10: "C:\\", 20: r"C:\cloud"},
+        identities={10: (1, b"r" * 16), 20: (1, b"c" * 16)},
+        listings={
+            10: [
+                _entry(
+                    "cloud",
+                    attributes=_REPARSE_DIRECTORY,
+                    tag=_CLOUD_TAG,
+                    identity_byte=b"c",
+                )
+            ],
+            20: [_entry("hydrated.bin")],
+        },
+        attributes={20: _REPARSE_DIRECTORY},
+        tags={20: _CLOUD_TAG},
+    )
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request(("C:\\",)),
+            api=api,
+            output=output,
+        )
+        == helper.COMPLETE_EXIT
+    )
+    assert api.component_calls == [(10, "cloud")]
+    assert api.reparse_calls == []
+    assert api.enumeration_calls == [10, 20]
+
+
+def test_registered_store_is_the_non_popable_enumeration_boundary() -> None:
+    escaping = _reparse_buffer(
+        tag=_SYMLINK_TAG,
+        substitute=r"..\sibling",
+        relative=True,
+    )
+    api = ScriptedEnumerationApi(
+        roots={"C:\\": 10},
+        children={
+            (10, "grant"): 20,
+            (20, "store"): 30,
+            (30, "escape"): 40,
+            (20, "sibling"): 50,
+        },
+        final_paths={
+            10: "C:\\",
+            20: r"C:\grant",
+            30: r"C:\grant\store",
+            50: r"C:\grant\sibling",
+        },
+        identities={30: (1, b"s" * 16)},
+        listings={
+            30: [
+                _entry(
+                    "escape",
+                    attributes=_REPARSE_DIRECTORY,
+                    tag=_SYMLINK_TAG,
+                )
+            ]
+        },
+        attributes={40: _REPARSE_DIRECTORY},
+        tags={40: _SYMLINK_TAG},
+        reparses={40: escaping},
+    )
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _registered_enumerate_request(
+                r"C:\grant\store",
+                r"C:\grant",
+            ),
+            api=api,
+            output=output,
+        )
+        == helper.DENIED_EXIT
+    )
+    assert output.getvalue() == b""
+    assert (20, "sibling") not in api.component_calls
+
+
+def test_registered_store_rebind_enumerates_the_retained_original_handle() -> None:
+    class RebindingStoreApi(ScriptedEnumerationApi):
+        def open_enumerable_component(
+            self,
+            parent: int,
+            component: str,
+        ) -> int:
+            handle = super().open_enumerable_component(parent, component)
+            if (parent, component) == (20, "store"):
+                assert handle == 30
+                self.children[(parent, component)] = 31
+            return handle
+
+    api = RebindingStoreApi(
+        roots={"C:\\": 10},
+        children={(10, "grant"): 20, (20, "store"): 30},
+        final_paths={
+            10: "C:\\",
+            20: r"C:\grant",
+            30: r"C:\grant\retained-store",
+            31: r"C:\grant\replacement-store",
+        },
+        identities={30: (1, b"s" * 16), 31: (1, b"x" * 16)},
+        listings={
+            30: [_entry("original.bin")],
+            31: [_entry("replacement.bin")],
+        },
+    )
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _registered_enumerate_request(
+                r"C:\grant\store",
+                r"C:\grant",
+            ),
+            api=api,
+            output=output,
+        )
+        == helper.COMPLETE_EXIT
+    )
+    assert _enumeration_payload(output)["candidates"] == [
+        {"root_index": 0, "locator": ["original.bin"]}
+    ]
+    assert api.enumeration_calls == [30]
+    assert 31 not in api.identity_calls
+
+
+def test_directory_cycle_attempt_consumes_the_exact_directory_budget() -> None:
+    self_link = _reparse_buffer(
+        tag=_SYMLINK_TAG,
+        substitute=".",
+        relative=True,
+    )
+    api = ScriptedEnumerationApi(
+        roots={"C:\\": 10},
+        children={(10, "self"): 20},
+        final_paths={10: "C:\\"},
+        identities={10: (1, b"r" * 16)},
+        listings={
+            10: [
+                _entry(
+                    "self",
+                    attributes=_REPARSE_DIRECTORY,
+                    tag=_SYMLINK_TAG,
+                )
+            ]
+        },
+        attributes={20: _REPARSE_DIRECTORY},
+        tags={20: _SYMLINK_TAG},
+        reparses={20: self_link},
+    )
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request(("C:\\",), max_directories=2),
+            api=api,
+            output=output,
+        )
+        == helper.COMPLETE_EXIT
+    )
+    assert _enumeration_payload(output)["status"] == "complete"
+    assert _enumeration_payload(output)["directories"] == 2
+    assert api.enumeration_calls == [10]
+
+
+def test_many_cycle_alias_attempts_cannot_evade_the_directory_ceiling() -> None:
+    self_link = _reparse_buffer(
+        tag=_SYMLINK_TAG,
+        substitute=".",
+        relative=True,
+    )
+    api = ScriptedEnumerationApi(
+        roots={"C:\\": 10},
+        children={
+            (10, "self-one"): 20,
+            (10, "self-two"): 21,
+            (10, "self-three"): 22,
+        },
+        final_paths={10: "C:\\"},
+        identities={10: (1, b"r" * 16)},
+        listings={
+            10: [
+                _entry(
+                    name,
+                    attributes=_REPARSE_DIRECTORY,
+                    tag=_SYMLINK_TAG,
+                )
+                for name in ("self-one", "self-two", "self-three")
+            ]
+        },
+        attributes={
+            20: _REPARSE_DIRECTORY,
+            21: _REPARSE_DIRECTORY,
+            22: _REPARSE_DIRECTORY,
+        },
+        tags={20: _SYMLINK_TAG, 21: _SYMLINK_TAG, 22: _SYMLINK_TAG},
+        reparses={20: self_link, 21: self_link, 22: self_link},
+    )
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request(("C:\\",), max_directories=3),
+            api=api,
+            output=output,
+        )
+        == helper.COMPLETE_EXIT
+    )
+    assert _enumeration_payload(output)["status"] == "limit"
+    assert _enumeration_payload(output)["directories"] == 3
+    assert api.enumeration_calls == [10]
+    assert set(api.close_calls) == {10, 20, 21}
+    assert 22 not in api.identity_calls
+
+
+@pytest.mark.parametrize(
+    ("iterator_failure", "iterator_close_failure", "close_failure"),
+    (
+        (KeyboardInterrupt("private next"), None, None),
+        (None, KeyboardInterrupt("private iterator close"), None),
+        (None, None, KeyboardInterrupt("private handle close")),
+    ),
+)
+def test_enumeration_cleanup_or_baseexception_emits_zero_stdout(
+    iterator_failure: BaseException | None,
+    iterator_close_failure: BaseException | None,
+    close_failure: BaseException | None,
+) -> None:
+    api = ScriptedEnumerationApi(
+        roots={"C:\\": 10},
+        children={},
+        final_paths={10: "C:\\"},
+        identities={10: (1, b"r" * 16)},
+        listings={10: [_entry("would-have-been.bin")]},
+        iterator_failures=(
+            {} if iterator_failure is None else {10: iterator_failure}
+        ),
+        iterator_close_failures=(
+            {}
+            if iterator_close_failure is None
+            else {10: iterator_close_failure}
+        ),
+        close_failures=(
+            {} if close_failure is None else {10: close_failure}
+        ),
+    )
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request(("C:\\",)),
+            api=api,
+            output=output,
+        )
+        == helper.FAILED_EXIT
+    )
+    assert output.getvalue() == b""
+    assert api.close_calls[-1] == 10
+    assert set(api.close_calls) == {
+        10,
+        *api.candidate_children.values(),
+    }
+    assert all(iterator.closed for iterator in api.iterators)
 
 
 def test_direct_read_preserves_opaque_bytes_at_exact_reservation_cap() -> None:
@@ -2014,6 +4522,9 @@ class _PostOpenJunctionRebindApi:
     def open_root(self, root: str) -> int:
         return self.delegate.open_root(root)
 
+    def open_enumerable_root(self, root: str) -> int:
+        return self.delegate.open_enumerable_root(root)
+
     def open_component(self, parent: int, component: str) -> int:
         handle = self.delegate.open_component(parent, component)
         if component == self.raced_component and not self.swapped:
@@ -2021,6 +4532,17 @@ class _PostOpenJunctionRebindApi:
             _create_windows_junction(self.original, self.outside)
             self.swapped = True
         return handle
+
+    def open_enumerable_component(self, parent: int, component: str) -> int:
+        handle = self.delegate.open_enumerable_component(parent, component)
+        if component == self.raced_component and not self.swapped:
+            self.original.rename(self.moved)
+            _create_windows_junction(self.original, self.outside)
+            self.swapped = True
+        return handle
+
+    def open_candidate_component(self, parent: int, component: str) -> int:
+        return self.delegate.open_candidate_component(parent, component)
 
     def file_attributes_and_reparse_tag(self, handle: int) -> tuple[int, int]:
         return self.delegate.file_attributes_and_reparse_tag(handle)
@@ -2033,6 +4555,21 @@ class _PostOpenJunctionRebindApi:
         if self.swapped:
             self.normalized_paths_after_swap.append(path)
         return path
+
+    def directory_identity(self, handle: int) -> tuple[int, bytes]:
+        return self.delegate.directory_identity(handle)
+
+    def candidate_file_identity(
+        self,
+        handle: int,
+    ) -> tuple[int, bytes] | None:
+        return self.delegate.candidate_file_identity(handle)
+
+    def enumerate_directory(
+        self,
+        handle: int,
+    ) -> Iterator[helper._DirectoryEntry]:
+        return self.delegate.enumerate_directory(handle)
 
     def close(self, handle: int) -> None:
         self.delegate.close(handle)
@@ -2137,6 +4674,91 @@ def test_real_helper_registered_nested_read_keeps_binary_stdout_clean(
     assert completed.returncode == helper.COMPLETE_EXIT
     assert completed.stdout == data
     assert completed.stderr == b""
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows handles")
+def test_real_helper_enumerates_nested_files_with_canonical_json(
+    tmp_path: Path,
+) -> None:
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    (tmp_path / "fallback.bin").write_bytes(b"fallback")
+    (nested / "artifact.dat").write_bytes(b"preferred")
+
+    completed = _run_real_raw_request(
+        _enumerate_request(
+            (str(tmp_path),),
+            target_name="artifact.dat",
+        )
+    )
+
+    assert completed.returncode == helper.COMPLETE_EXIT
+    assert completed.stderr == b""
+    rendered = completed.stdout.decode("ascii")
+    payload = cast(dict[str, object], json.loads(rendered))
+    assert rendered == json.dumps(
+        payload,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    assert payload["status"] == "complete"
+    candidates = cast(list[dict[str, object]], payload["candidates"])
+    assert candidates[0] == {
+        "root_index": 0,
+        "locator": ["nested", "artifact.dat"],
+    }
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows junctions")
+def test_native_enumeration_junction_rebind_uses_retained_handle(
+    tmp_path: Path,
+) -> None:
+    allowed = tmp_path / "allowed"
+    target = allowed / "target"
+    target.mkdir(parents=True)
+    (target / "inside.bin").write_bytes(b"inside")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "outside.bin").write_bytes(b"outside")
+    junction = allowed / "junction-raced-after-open"
+    moved = tmp_path / "original-enumeration-junction"
+    _create_windows_junction(junction, target)
+    api = _PostOpenJunctionRebindApi(
+        raced_component=junction.name,
+        original=junction,
+        moved=moved,
+        outside=outside,
+    )
+    output = io.BytesIO()
+
+    result = helper.execute_request(
+        _enumerate_request((str(allowed),)),
+        api=api,
+        output=output,
+    )
+
+    payload = _enumeration_payload(output)
+    assert result == helper.COMPLETE_EXIT
+    assert api.swapped
+    assert payload["candidates"] in (
+        [
+            {
+                "root_index": 0,
+                "locator": [junction.name, "inside.bin"],
+            }
+        ],
+        [
+            {
+                "root_index": 0,
+                "locator": ["target", "inside.bin"],
+            }
+        ],
+    )
+    assert all(
+        "outside.bin" not in cast(list[str], candidate["locator"])
+        for candidate in cast(list[dict[str, object]], payload["candidates"])
+    )
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires Windows junctions")

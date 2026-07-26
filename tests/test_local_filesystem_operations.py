@@ -24,12 +24,17 @@ from lab_tracker.local_filesystem_operations import (
     LOCAL_FILESYSTEM_PROTOCOL_VERSION,
     LOCAL_FILESYSTEM_REQUEST_ENV,
     MAX_LOCAL_FILESYSTEM_REQUEST_BYTES,
+    MAX_LOCAL_RECOVERY_RESPONSE_BYTES,
     BoundedLocalFilesystemOperations,
 )
 from lab_tracker.local_filesystem_ports import (
+    DirectLocalRecoveryScope,
     DirectLocalRegularFileTarget,
+    EnumeratedLocalRegularFileTarget,
     LocalDirectoryInspection,
+    LocalRecoveryEnumerationOutcome,
     LocalRegularFileReadOutcome,
+    RegisteredLocalRecoveryScope,
     RegisteredLocalRegularFileTarget,
 )
 from lab_tracker.local_resolution_budget import (
@@ -117,6 +122,25 @@ def _result(
         stdout_bytes=len(stdout) if stdout_bytes is None else stdout_bytes,
         stderr_bytes=stderr_bytes,
     )
+
+
+def _enumeration_stdout(
+    *,
+    status: str = "complete",
+    directories: int = 1,
+    candidates: list[dict[str, object]] | None = None,
+) -> bytes:
+    return json.dumps(
+        {
+            "v": LOCAL_FILESYSTEM_PROTOCOL_VERSION,
+            "status": status,
+            "directories": directories,
+            "candidates": [] if candidates is None else candidates,
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("ascii")
 
 
 def _operations(
@@ -208,6 +232,592 @@ def test_regular_file_broker_keeps_registered_root_and_locator_separate(
         "v": LOCAL_FILESYSTEM_PROTOCOL_VERSION,
     }
     assert "candidate" not in request
+
+
+def test_recovery_broker_returns_path_free_direct_targets_under_exact_budget(
+    tmp_path: Path,
+) -> None:
+    first_root = tmp_path / "first-secret-root"
+    second_root = tmp_path / "second-secret-root"
+    stdout = _enumeration_stdout(
+        directories=3,
+        candidates=[
+            {"root_index": 1, "locator": ["nested", "result.csv"]},
+            {"root_index": 0, "locator": ["fallback.bin"]},
+        ],
+    )
+    executor = RecordingExecutor([_result(0, stdout=stdout)])
+    operations = BoundedLocalFilesystemOperations(
+        authority=LocalFilesystemAuthority.from_roots([first_root, second_root]),
+        executor=executor,
+    )
+    budget = LocalResolutionBudget(
+        LocalResolutionLimits(max_read_bytes=17, deadline_seconds=5.0),
+        clock=FakeClock(),
+    )
+
+    result = operations.enumerate_recovery_candidates(
+        DirectLocalRecoveryScope(),
+        target_name="result.csv",
+        max_files=2,
+        max_directories=7,
+        budget=budget,
+    )
+
+    assert result.outcome is LocalRecoveryEnumerationOutcome.COMPLETE
+    assert result.directories_visited == 3
+    assert [candidate.name for candidate in result.candidates] == [
+        "result.csv",
+        "fallback.bin",
+    ]
+    assert [
+        (candidate.target.root_index, candidate.target.locator)
+        for candidate in result.candidates
+        if isinstance(candidate.target, EnumeratedLocalRegularFileTarget)
+    ] == [
+        (1, ("nested", "result.csv")),
+        (0, ("fallback.bin",)),
+    ]
+    assert budget.remaining_bytes == 17
+    assert budget.terminal is False
+    call = executor.calls[0]
+    assert call["deadline"] is budget.deadline
+    assert call["stdout_limit_bytes"] == MAX_LOCAL_RECOVERY_RESPONSE_BYTES
+    assert call["stderr_limit_bytes"] == 0
+    assert call["stdout_consumer"] is None
+    request = json.loads(call["env"][LOCAL_FILESYSTEM_REQUEST_ENV])
+    assert request == {
+        "max_directories": 7,
+        "max_files": 2,
+        "op": "enumerate-files",
+        "roots": [str(first_root), str(second_root)],
+        "target_name": "result.csv",
+        "v": LOCAL_FILESYSTEM_PROTOCOL_VERSION,
+    }
+
+
+def test_recovery_broker_keeps_registered_enumeration_nested(
+    tmp_path: Path,
+) -> None:
+    operator_root = tmp_path / "operator"
+    store_root = operator_root / "store"
+    stdout = _enumeration_stdout(
+        directories=2,
+        candidates=[{"root_index": 0, "locator": ["nested", "artifact.bin"]}]
+    )
+    executor = RecordingExecutor([_result(0, stdout=stdout)])
+    operations = _operations(operator_root, executor)
+    budget = LocalResolutionBudget(clock=FakeClock())
+
+    result = operations.enumerate_recovery_candidates(
+        RegisteredLocalRecoveryScope(str(store_root)),
+        target_name=None,
+        max_files=4,
+        max_directories=5,
+        budget=budget,
+    )
+
+    assert result.outcome is LocalRecoveryEnumerationOutcome.COMPLETE
+    candidate = result.candidates[0]
+    assert candidate.name == "artifact.bin"
+    assert type(candidate.target) is RegisteredLocalRegularFileTarget
+    assert candidate.target.store_root == str(store_root)
+    assert candidate.target.locator == ("nested", "artifact.bin")
+    request = json.loads(executor.calls[0]["env"][LOCAL_FILESYSTEM_REQUEST_ENV])
+    assert request == {
+        "max_directories": 5,
+        "max_files": 4,
+        "op": "enumerate-registered-files",
+        "roots": [str(operator_root)],
+        "store_root": str(store_root),
+        "target_name": None,
+        "v": LOCAL_FILESYSTEM_PROTOCOL_VERSION,
+    }
+
+
+def test_windows_registered_recovery_preserves_raw_store_identity_for_the_caller(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_store_root = "C:/grant/store/"
+    executor = RecordingExecutor(
+        [
+            _result(
+                0,
+                stdout=_enumeration_stdout(
+                    directories=2,
+                    candidates=[
+                        {
+                            "root_index": 0,
+                            "locator": ["nested", "artifact.bin"],
+                        }
+                    ]
+                ),
+            )
+        ]
+    )
+    monkeypatch.setattr(operations_module.os, "name", "nt")
+    operations = BoundedLocalFilesystemOperations(
+        authority=LocalFilesystemAuthority.from_roots([r"C:\grant"]),
+        executor=executor,
+    )
+
+    result = operations.enumerate_recovery_candidates(
+        RegisteredLocalRecoveryScope(raw_store_root),
+        target_name=None,
+        max_files=1,
+        max_directories=2,
+        budget=LocalResolutionBudget(clock=FakeClock()),
+    )
+
+    assert result.outcome is LocalRecoveryEnumerationOutcome.COMPLETE
+    target = result.candidates[0].target
+    assert type(target) is RegisteredLocalRegularFileTarget
+    assert target.store_root == raw_store_root
+    request = json.loads(executor.calls[0]["env"][LOCAL_FILESYSTEM_REQUEST_ENV])
+    assert request["roots"] == [r"C:\grant"]
+    assert request["store_root"] == r"C:\grant\store"
+
+
+def test_enumerated_direct_target_reads_through_retained_root_boundary(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "operator"
+    executor = RecordingExecutor([_result(0)])
+    operations = _operations(root, executor)
+    budget = LocalResolutionBudget(
+        LocalResolutionLimits(max_read_bytes=9),
+        clock=FakeClock(),
+    )
+
+    result = operations.read_regular_file(
+        EnumeratedLocalRegularFileTarget(0, ("nested", "artifact.bin")),
+        budget=budget,
+        stdout_consumer=lambda _chunk: None,
+    )
+
+    assert result.outcome is LocalRegularFileReadOutcome.COMPLETE
+    request = json.loads(executor.calls[0]["env"][LOCAL_FILESYSTEM_REQUEST_ENV])
+    assert request == {
+        "locator": ["nested", "artifact.bin"],
+        "max_bytes": 9,
+        "op": "read-registered-file",
+        "roots": [str(root)],
+        "store_root": str(root),
+        "v": LOCAL_FILESYSTEM_PROTOCOL_VERSION,
+    }
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    (
+        b"",
+        b"{}",
+        b'{"candidates":[],"directories":0,"status":"complete","v":2}',
+        b'{"candidates":[],"directories":0,"extra":1,"status":"complete","v":1}',
+        _enumeration_stdout(directories=0),
+        _enumeration_stdout(
+            directories=0,
+            candidates=[{"root_index": 0, "locator": ["artifact.bin"]}],
+        ),
+        _enumeration_stdout(
+            directories=1,
+            candidates=[
+                {
+                    "root_index": 0,
+                    "locator": ["nested", "artifact.bin"],
+                }
+            ],
+        ),
+        _enumeration_stdout(directories=3),
+        _enumeration_stdout(
+            candidates=[
+                {"root_index": 0, "locator": ["fallback.bin"]},
+                {"root_index": 0, "locator": ["result.csv"]},
+            ]
+        ),
+        _enumeration_stdout(
+            candidates=[{"root_index": 1, "locator": ["artifact.bin"]}]
+        ),
+        _enumeration_stdout(
+            candidates=[{"root_index": 0, "locator": ["..", "artifact.bin"]}]
+        ),
+        _enumeration_stdout(
+            candidates=[
+                {"root_index": 0, "locator": ["artifact.bin"]},
+                {"root_index": 0, "locator": ["artifact.bin"]},
+            ]
+        ),
+    ),
+)
+def test_malformed_recovery_output_is_all_or_nothing_and_terminal(
+    tmp_path: Path,
+    stdout: bytes,
+) -> None:
+    executor = RecordingExecutor([_result(0, stdout=stdout)])
+    budget = LocalResolutionBudget(clock=FakeClock())
+
+    result = _operations(tmp_path, executor).enumerate_recovery_candidates(
+        DirectLocalRecoveryScope(),
+        target_name="result.csv",
+        max_files=2,
+        max_directories=2,
+        budget=budget,
+    )
+
+    assert result.outcome is LocalRecoveryEnumerationOutcome.FAILED
+    assert result.candidates == ()
+    assert result.directories_visited == 0
+    assert budget.terminal is True
+    assert budget.remaining_bytes == 0
+
+
+@pytest.mark.parametrize(
+    "process_result",
+    (
+        _result(3, stdout=_enumeration_stdout()),
+        _result(
+            0,
+            stdout=_enumeration_stdout(),
+            stdout_bytes=len(_enumeration_stdout()) - 1,
+        ),
+        _result(0, stdout=_enumeration_stdout(), stderr_bytes=1),
+        cast(ProcessResult, object()),
+    ),
+)
+def test_recovery_process_metadata_uncertainty_discards_every_candidate(
+    tmp_path: Path,
+    process_result: ProcessResult,
+) -> None:
+    budget = LocalResolutionBudget(clock=FakeClock())
+
+    result = _operations(
+        tmp_path,
+        RecordingExecutor([process_result]),
+    ).enumerate_recovery_candidates(
+        DirectLocalRecoveryScope(),
+        target_name=None,
+        max_files=1,
+        max_directories=1,
+        budget=budget,
+    )
+
+    assert result.outcome is LocalRecoveryEnumerationOutcome.FAILED
+    assert result.candidates == ()
+    assert result.directories_visited == 0
+    assert budget.terminal is True
+    assert budget.remaining_bytes == 0
+
+
+@pytest.mark.parametrize(
+    "component",
+    ("CON", "artifact.", "artifact ", "bad:name", "bad\ud800name"),
+)
+def test_windows_recovery_output_rejects_unsupported_components_before_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    component: str,
+) -> None:
+    stdout = _enumeration_stdout(
+        candidates=[{"root_index": 0, "locator": [component]}]
+    )
+    budget = LocalResolutionBudget(clock=FakeClock())
+    operations = _operations(
+        tmp_path,
+        RecordingExecutor([_result(0, stdout=stdout)]),
+    )
+    monkeypatch.setattr(operations_module.os, "name", "nt")
+
+    result = operations.enumerate_recovery_candidates(
+        DirectLocalRecoveryScope(),
+        target_name=None,
+        max_files=1,
+        max_directories=1,
+        budget=budget,
+    )
+
+    assert result.outcome is LocalRecoveryEnumerationOutcome.FAILED
+    assert result.candidates == ()
+    assert budget.terminal is True
+
+
+def test_windows_recovery_locator_uses_utf16_authority_limits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(operations_module.os, "name", "nt")
+    exact_total = (*(("a" * 255,) * 63), "b" * 127, "c" * 128)
+    over_total = (*(("a" * 255,) * 63), "b" * 127, "c" * 129)
+
+    assert operations_module._valid_recovery_locator(("é" * 128,))
+    assert operations_module._valid_recovery_locator(("a" * 255,))
+    assert not operations_module._valid_recovery_locator(("a" * 256,))
+    assert operations_module._valid_recovery_locator(exact_total)
+    assert not operations_module._valid_recovery_locator(over_total)
+
+
+def test_recovery_limit_result_remains_usable_until_candidates_are_read(
+    tmp_path: Path,
+) -> None:
+    stdout = _enumeration_stdout(
+        status="limit",
+        directories=2,
+        candidates=[{"root_index": 0, "locator": ["artifact.bin"]}],
+    )
+    budget = LocalResolutionBudget(clock=FakeClock())
+
+    result = _operations(
+        tmp_path,
+        RecordingExecutor([_result(0, stdout=stdout)]),
+    ).enumerate_recovery_candidates(
+        DirectLocalRecoveryScope(),
+        target_name=None,
+        max_files=1,
+        max_directories=2,
+        budget=budget,
+    )
+
+    assert result.outcome is LocalRecoveryEnumerationOutcome.LIMIT_REACHED
+    assert len(result.candidates) == 1
+    assert result.directories_visited == 2
+    assert budget.terminal is False
+
+
+def test_zero_recovery_caps_and_unscoped_roots_spawn_no_process(
+    tmp_path: Path,
+) -> None:
+    executor = RecordingExecutor([])
+    operations = _operations(tmp_path, executor)
+
+    zero_files = operations.enumerate_recovery_candidates(
+        DirectLocalRecoveryScope(),
+        target_name=None,
+        max_files=0,
+        max_directories=3,
+        budget=LocalResolutionBudget(clock=FakeClock()),
+    )
+    zero_directories = operations.enumerate_recovery_candidates(
+        DirectLocalRecoveryScope(),
+        target_name=None,
+        max_files=3,
+        max_directories=0,
+        budget=LocalResolutionBudget(clock=FakeClock()),
+    )
+    unscoped = BoundedLocalFilesystemOperations(
+        authority=LocalFilesystemAuthority.for_unscoped_library_compatibility(),
+        executor=executor,
+    ).enumerate_recovery_candidates(
+        DirectLocalRecoveryScope(),
+        target_name=None,
+        max_files=3,
+        max_directories=3,
+        budget=LocalResolutionBudget(clock=FakeClock()),
+    )
+
+    assert zero_files.outcome is LocalRecoveryEnumerationOutcome.COMPLETE
+    assert zero_directories.outcome is LocalRecoveryEnumerationOutcome.LIMIT_REACHED
+    assert unscoped.outcome is LocalRecoveryEnumerationOutcome.COMPLETE
+    assert executor.calls == []
+
+
+def test_recovery_executor_failure_and_late_deadline_abort_budget(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    budget = LocalResolutionBudget(
+        LocalResolutionLimits(deadline_seconds=1),
+        clock=clock,
+    )
+    executor = RecordingExecutor(
+        [_result(0, stdout=_enumeration_stdout())],
+        after_run=lambda: clock.advance(2),
+    )
+
+    result = _operations(tmp_path, executor).enumerate_recovery_candidates(
+        DirectLocalRecoveryScope(),
+        target_name=None,
+        max_files=1,
+        max_directories=1,
+        budget=budget,
+    )
+
+    assert result.outcome is LocalRecoveryEnumerationOutcome.FAILED
+    assert budget.terminal is True
+
+
+def test_recovery_deadline_covers_response_parsing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = FakeClock()
+    budget = LocalResolutionBudget(
+        LocalResolutionLimits(deadline_seconds=1),
+        clock=clock,
+    )
+    original_parser = operations_module._parse_enumeration_result
+
+    def parse_after_deadline(*args: Any, **kwargs: Any):
+        parsed = original_parser(*args, **kwargs)
+        clock.advance(2)
+        return parsed
+
+    monkeypatch.setattr(
+        operations_module,
+        "_parse_enumeration_result",
+        parse_after_deadline,
+    )
+
+    result = _operations(
+        tmp_path,
+        RecordingExecutor([_result(0, stdout=_enumeration_stdout())]),
+    ).enumerate_recovery_candidates(
+        DirectLocalRecoveryScope(),
+        target_name=None,
+        max_files=1,
+        max_directories=1,
+        budget=budget,
+    )
+
+    assert result.outcome is LocalRecoveryEnumerationOutcome.FAILED
+    assert result.candidates == ()
+    assert budget.terminal is True
+
+
+def test_recovery_fatal_executor_failure_aborts_before_propagating(
+    tmp_path: Path,
+) -> None:
+    fatal = FatalOperationFailure("operator interruption")
+    budget = LocalResolutionBudget(clock=FakeClock())
+
+    with pytest.raises(FatalOperationFailure) as exc_info:
+        _operations(
+            tmp_path,
+            RecordingExecutor([fatal]),
+        ).enumerate_recovery_candidates(
+            DirectLocalRecoveryScope(),
+            target_name=None,
+            max_files=1,
+            max_directories=1,
+            budget=budget,
+        )
+
+    assert exc_info.value is fatal
+    assert budget.terminal is True
+
+
+def test_enabled_recovery_configuration_must_fit_one_helper_request() -> None:
+    separator = "\\" if os.name == "nt" else "/"
+    anchor = "C:\\" if os.name == "nt" else "/"
+    long_roots = [
+        f"{anchor}{'a' * 200}{separator}{index:02d}{'b' * 190}"
+        for index in range(64)
+    ]
+    operations = BoundedLocalFilesystemOperations(
+        authority=LocalFilesystemAuthority.from_roots(long_roots),
+        executor=RecordingExecutor([]),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="roots exceed the bounded helper request limit",
+    ):
+        operations.validate_direct_recovery_configuration(
+            max_files=4096,
+            max_directories=4096,
+        )
+
+    operations.validate_direct_recovery_configuration(
+        max_files=0,
+        max_directories=4096,
+    )
+
+
+def test_enabled_recovery_configuration_requires_a_readable_candidate_envelope() -> None:
+    separator = "\\" if os.name == "nt" else "/"
+    anchor = "C:\\" if os.name == "nt" else "/"
+    root = anchor + separator.join(["a" * 245] * 50)
+    executor = RecordingExecutor([])
+    operations = BoundedLocalFilesystemOperations(
+        authority=LocalFilesystemAuthority.from_roots([root]),
+        executor=executor,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="roots exceed the bounded helper request limit",
+    ):
+        operations.validate_direct_recovery_configuration(
+            max_files=4096,
+            max_directories=4096,
+        )
+
+    assert executor.calls == []
+
+
+@pytest.mark.parametrize(
+    ("platform_name", "root", "component"),
+    (
+        ("posix", "/grant", "é" * 127),
+        ("nt", r"C:\grant", "é" * 255),
+    ),
+)
+def test_candidate_read_envelope_overflow_is_a_limit_not_a_terminal_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    platform_name: str,
+    root: str,
+    component: str,
+) -> None:
+    monkeypatch.setattr(operations_module.os, "name", platform_name)
+    long_locator = (component,) * 64
+    executor = RecordingExecutor(
+        [
+            _result(
+                0,
+                stdout=_enumeration_stdout(
+                    directories=64,
+                    candidates=[
+                        {
+                            "root_index": 0,
+                            "locator": list(long_locator),
+                        },
+                        {
+                            "root_index": 0,
+                            "locator": ["match.bin"],
+                        },
+                    ],
+                ),
+            ),
+            _result(0),
+        ]
+    )
+    operations = BoundedLocalFilesystemOperations(
+        authority=LocalFilesystemAuthority.from_roots([root]),
+        executor=executor,
+    )
+    budget = LocalResolutionBudget(clock=FakeClock())
+
+    enumeration = operations.enumerate_recovery_candidates(
+        DirectLocalRecoveryScope(),
+        target_name=None,
+        max_files=2,
+        max_directories=64,
+        budget=budget,
+    )
+
+    assert enumeration.outcome is LocalRecoveryEnumerationOutcome.LIMIT_REACHED
+    assert len(enumeration.candidates) == 1
+    candidate = enumeration.candidates[0]
+    assert candidate.name == "match.bin"
+    assert budget.terminal is False
+
+    read = operations.read_regular_file(
+        candidate.target,
+        budget=budget,
+        stdout_consumer=lambda _chunk: None,
+    )
+
+    assert read.outcome is LocalRegularFileReadOutcome.COMPLETE
+    assert budget.terminal is False
+    request = json.loads(executor.calls[1]["env"][LOCAL_FILESYSTEM_REQUEST_ENV])
+    assert request["locator"] == ["match.bin"]
 
 
 @pytest.mark.parametrize(

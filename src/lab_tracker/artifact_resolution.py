@@ -35,7 +35,7 @@ import shutil
 import tempfile
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -93,11 +93,19 @@ from lab_tracker.local_filesystem_operations import (
     BoundedLocalFilesystemOperations,
 )
 from lab_tracker.local_filesystem_ports import (
+    DirectLocalRecoveryScope,
     DirectLocalRegularFileTarget,
+    EnumeratedLocalRegularFileTarget,
+    LocalRecoveryCandidate,
+    LocalRecoveryEnumerationOutcome,
+    LocalRecoveryEnumerationResult,
+    LocalRecoveryEnumerator,
+    LocalRecoveryScope,
     LocalRegularFileReader,
     LocalRegularFileReadOutcome,
     LocalRegularFileReadResult,
     LocalRegularFileTarget,
+    RegisteredLocalRecoveryScope,
     RegisteredLocalRegularFileTarget,
 )
 from lab_tracker.local_path_policy import (
@@ -106,8 +114,11 @@ from lab_tracker.local_path_policy import (
     native_local_path_from_uri,
 )
 from lab_tracker.local_resolution_budget import (
+    DEFAULT_LOCAL_RECOVERY_MAX_DIRECTORIES,
     DEFAULT_LOCAL_RECOVERY_MAX_FILES,
     DEFAULT_LOCAL_RESOLUTION_MAX_READ_BYTES,
+    MAX_LOCAL_RECOVERY_MAX_DIRECTORIES,
+    MAX_LOCAL_RECOVERY_MAX_FILES,
     MAX_LOCAL_RESOLUTION_MAX_READ_BYTES,
     LocalResolutionBudget,
     LocalResolutionLimits,
@@ -183,6 +194,7 @@ _GIT_GENERIC_HTTP_REDIRECT_CONFIG = GIT_GENERIC_HTTP_REDIRECT_CONFIG
 # matches the reference, and return it VERIFIED instead of UNRESOLVED. Opt-in and
 # bounded — see :class:`RecoveryPolicy` and :class:`LocalFilesystemResolver`.
 DEFAULT_RECOVERY_MAX_FILES = DEFAULT_LOCAL_RECOVERY_MAX_FILES
+DEFAULT_RECOVERY_MAX_DIRECTORIES = DEFAULT_LOCAL_RECOVERY_MAX_DIRECTORIES
 DEFAULT_RECOVERY_MAX_BYTES = DEFAULT_LOCAL_RESOLUTION_MAX_READ_BYTES
 
 
@@ -202,15 +214,17 @@ class RecoveryPolicy:
     """Bounds a content-hash recovery scan of a resolver's allowed roots.
 
     Recovery only runs when ``enabled`` *and* the resolver was given explicit
-    allowed roots to scope the walk. ``max_files`` caps how many candidate files
-    the scan may examine and ``max_bytes`` how many bytes it may hash before
-    giving up (falling back to UNRESOLVED, i.e. today's behaviour). The integrity
-    gate is never relaxed: a recovered file is still verified by recomputing its
-    full digest before its bytes are returned.
+    allowed roots to scope the traversal. ``max_files`` caps returned unique
+    candidate-file identities, ``max_directories`` caps admitted root/child
+    directory attempts, and ``max_bytes`` caps accepted full-file bytes across
+    the logical resolution. The integrity gate is never relaxed: a recovered
+    file is still verified by recomputing its full digest before its bytes are
+    returned.
     """
 
     enabled: bool = False
     max_files: int = DEFAULT_RECOVERY_MAX_FILES
+    max_directories: int = DEFAULT_RECOVERY_MAX_DIRECTORIES
     max_bytes: int = DEFAULT_RECOVERY_MAX_BYTES
 
     def __post_init__(self) -> None:
@@ -218,7 +232,15 @@ class RecoveryPolicy:
 
         if type(self.enabled) is not bool:
             raise ValueError("Local recovery policy is invalid.")
-        if type(self.max_files) is not int or self.max_files < 0:
+        if (
+            type(self.max_files) is not int
+            or not 0 <= self.max_files <= MAX_LOCAL_RECOVERY_MAX_FILES
+        ):
+            raise ValueError("Local recovery policy is invalid.")
+        if (
+            type(self.max_directories) is not int
+            or not 0 <= self.max_directories <= MAX_LOCAL_RECOVERY_MAX_DIRECTORIES
+        ):
             raise ValueError("Local recovery policy is invalid.")
         if (
             type(self.max_bytes) is not int
@@ -1426,15 +1448,6 @@ def check_store_health(
     )
 
 
-@dataclass(frozen=True)
-class _LocalRecoveryScope:
-    """Transitional enumeration state; candidate bytes stay behind the broker."""
-
-    path_policy: LocalPathPolicy
-    recovery_roots: tuple[str, ...] | None
-    registered_store_root: str | None = None
-
-
 class _RecoveryDisposition(Enum):
     MATCHED = "matched"
     EXHAUSTED = "exhausted"
@@ -1447,10 +1460,61 @@ class _RecoveryResult:
     artifact: ResolvedArtifact | None = None
 
 
-def _raise_recovery_walk_error(error: OSError) -> None:
-    """Make an incomplete recovery enumeration an explicit failed attempt."""
+def _valid_recovery_enumeration(
+    result: LocalRecoveryEnumerationResult,
+    *,
+    scope: LocalRecoveryScope,
+    policy: RecoveryPolicy,
+    target_name: str | None,
+) -> bool:
+    if (
+        type(result) is not LocalRecoveryEnumerationResult
+        or type(result.outcome) is not LocalRecoveryEnumerationOutcome
+        or type(result.candidates) is not tuple
+        or len(result.candidates) > policy.max_files
+        or type(result.directories_visited) is not int
+        or not 0 <= result.directories_visited <= policy.max_directories
+    ):
+        return False
+    if result.outcome is LocalRecoveryEnumerationOutcome.FAILED:
+        return not result.candidates and result.directories_visited == 0
 
-    raise error
+    seen: set[tuple[object, ...]] = set()
+    fallback_seen = False
+    for candidate in result.candidates:
+        if (
+            type(candidate) is not LocalRecoveryCandidate
+            or type(candidate.name) is not str
+            or not candidate.name
+        ):
+            return False
+        target = candidate.target
+        if type(scope) is DirectLocalRecoveryScope:
+            if type(target) is not EnumeratedLocalRegularFileTarget:
+                return False
+            key: tuple[object, ...] = (
+                target.root_index,
+                *target.locator,
+            )
+        elif type(scope) is RegisteredLocalRecoveryScope:
+            if (
+                type(target) is not RegisteredLocalRegularFileTarget
+                or target.store_root != scope.store_root
+            ):
+                return False
+            key = (target.store_root, *target.locator)
+        else:
+            return False
+        if not target.locator or candidate.name != target.locator[-1] or key in seen:
+            return False
+        seen.add(key)
+
+        preferred = target_name is not None and candidate.name == target_name
+        if fallback_seen and preferred:
+            return False
+        if not preferred:
+            fallback_seen = True
+    return True
 
 
 class LocalFilesystemResolver(ArtifactResolver, ScopedLocalStoreResolver):
@@ -1463,6 +1527,7 @@ class LocalFilesystemResolver(ArtifactResolver, ScopedLocalStoreResolver):
         path_policy: LocalPathPolicy | None = None,
         recovery: RecoveryPolicy | None = None,
         file_reader: LocalRegularFileReader | None = None,
+        recovery_enumerator: LocalRecoveryEnumerator | None = None,
         limits: LocalResolutionLimits | None = None,
         process_executor: ProcessExecutor | None = None,
     ) -> None:
@@ -1488,21 +1553,24 @@ class LocalFilesystemResolver(ArtifactResolver, ScopedLocalStoreResolver):
         )
         if resolved_recovery.max_bytes != resolved_limits.max_read_bytes:
             raise ValueError("Local recovery and resolution byte limits must match.")
-        self._operator_policy = (
-            path_policy if path_policy is not None else LocalPathPolicy(allowed_roots)
-        )
         self._recovery = resolved_recovery
         self._limits = resolved_limits
-        if file_reader is not None:
-            self._file_reader = file_reader
-        else:
-            lexical_roots = self._operator_policy.lexical_roots
+        default_operations: BoundedLocalFilesystemOperations | None = None
+        if file_reader is None or recovery_enumerator is None:
+            if path_policy is not None:
+                lexical_roots = path_policy.lexical_roots
+            else:
+                lexical_roots = (
+                    None
+                    if allowed_roots is None
+                    else tuple(os.fspath(root) for root in allowed_roots)
+                )
             authority = (
                 LocalFilesystemAuthority.for_unscoped_library_compatibility()
                 if lexical_roots is None
                 else LocalFilesystemAuthority.from_roots(lexical_roots)
             )
-            self._file_reader = BoundedLocalFilesystemOperations(
+            default_operations = BoundedLocalFilesystemOperations(
                 authority=authority,
                 executor=(
                     process_executor
@@ -1510,10 +1578,25 @@ class LocalFilesystemResolver(ArtifactResolver, ScopedLocalStoreResolver):
                     else BoundedSubprocessExecutor()
                 ),
             )
-        self._scope = _LocalRecoveryScope(
-            path_policy=self._operator_policy,
-            recovery_roots=self._operator_policy.recovery_roots,
-        )
+        if file_reader is None:
+            assert default_operations is not None
+            self._file_reader: LocalRegularFileReader = default_operations
+        else:
+            self._file_reader = file_reader
+        if recovery_enumerator is None:
+            assert default_operations is not None
+            self._recovery_enumerator: LocalRecoveryEnumerator = default_operations
+        else:
+            self._recovery_enumerator = recovery_enumerator
+        if (
+            self._recovery.enabled
+            and type(self._recovery_enumerator) is BoundedLocalFilesystemOperations
+        ):
+            self._recovery_enumerator.validate_direct_recovery_configuration(
+                max_files=self._recovery.max_files,
+                max_directories=self._recovery.max_directories,
+            )
+        self._recovery_scope = DirectLocalRecoveryScope()
 
     def can_resolve(self, ref: ExternalArtifactReference) -> bool:
         if ref.source_system.strip().lower() in _LOCAL_SOURCE_SYSTEMS:
@@ -1549,7 +1632,7 @@ class LocalFilesystemResolver(ArtifactResolver, ScopedLocalStoreResolver):
             max_bytes=bounds.max_bytes,
             window=bounds.byte_range,
             mime_path=local_path,
-            recovery_scope=self._scope,
+            recovery_scope=self._recovery_scope,
             recovery_name=os.path.basename(local_path) or None,
             opaque_store_detail=False,
         )
@@ -1597,7 +1680,7 @@ class LocalFilesystemResolver(ArtifactResolver, ScopedLocalStoreResolver):
         max_bytes: int,
         window: tuple[int, int] | None,
         mime_path: str,
-        recovery_scope: _LocalRecoveryScope | None,
+        recovery_scope: LocalRecoveryScope | None,
         recovery_name: str | None,
         opaque_store_detail: bool,
     ) -> ResolvedArtifact:
@@ -1625,7 +1708,7 @@ class LocalFilesystemResolver(ArtifactResolver, ScopedLocalStoreResolver):
 
         if opaque_store_detail:
             assert isinstance(target, RegisteredLocalRegularFileTarget)
-            recovery_scope = self._registered_recovery_scope(target.store_root)
+            recovery_scope = RegisteredLocalRecoveryScope(target.store_root)
         recovered = self._recover_by_hash(
             ref,
             budget=budget,
@@ -1706,21 +1789,6 @@ class LocalFilesystemResolver(ArtifactResolver, ScopedLocalStoreResolver):
             budget.abort_terminal()
             raise
 
-    def _registered_recovery_scope(
-        self,
-        store_root: str,
-    ) -> _LocalRecoveryScope | None:
-        if not self._recovery.enabled:
-            return None
-        store_policy = self._operator_policy.restricted_to_absolute_root(store_root)
-        if store_policy is None:
-            return None
-        return _LocalRecoveryScope(
-            path_policy=store_policy,
-            recovery_roots=store_policy.recovery_roots,
-            registered_store_root=store_root,
-        )
-
     def _recover_by_hash(
         self,
         ref: ExternalArtifactReference,
@@ -1728,63 +1796,71 @@ class LocalFilesystemResolver(ArtifactResolver, ScopedLocalStoreResolver):
         budget: LocalResolutionBudget,
         max_bytes: int,
         window: tuple[int, int] | None,
-        scope: _LocalRecoveryScope | None,
+        scope: LocalRecoveryScope | None,
         target_name: str | None,
         opaque_store_detail: bool,
     ) -> _RecoveryResult:
-        if not self._recovery.enabled or scope is None or not scope.recovery_roots:
+        if not self._recovery.enabled or scope is None:
             return _RecoveryResult(_RecoveryDisposition.EXHAUSTED)
 
         try:
             _, expected_digest = parse_content_hash(ref.content_hash)
-            considered = 0
-            passes = (True, False) if target_name is not None else (False,)
-            for prefer_name in passes:
-                for candidate in self._iter_candidate_files(
-                    target_name,
-                    prefer_name,
-                    scope=scope,
-                    deadline=budget.deadline,
-                ):
-                    budget.deadline.check()
-                    considered += 1
-                    if considered > self._recovery.max_files:
-                        return _RecoveryResult(_RecoveryDisposition.EXHAUSTED)
-                    candidate_target = self._recovery_target(scope, candidate)
-                    if candidate_target is None:
-                        budget.abort_terminal()
-                        return _RecoveryResult(_RecoveryDisposition.FAILED)
-                    attempt = self._read_and_collect(
-                        ref,
-                        target=candidate_target,
-                        budget=budget,
-                        max_bytes=max_bytes,
-                        window=window,
-                        mime_path=os.path.basename(candidate),
-                    )
-                    if isinstance(attempt, ResolvedArtifact):
-                        if (
-                            attempt.observed_hash is not None
-                            and parse_content_hash(attempt.observed_hash)[1] == expected_digest
-                        ):
-                            return _RecoveryResult(
-                                _RecoveryDisposition.MATCHED,
-                                replace(
-                                    attempt,
-                                    detail=(
-                                        "Recovered within registered local store "
-                                        "(differs from reference locator)."
-                                        if opaque_store_detail
-                                        else "Recovered within authorized local roots "
-                                        "(differs from reference URI)."
-                                    ),
+            enumeration = self._recovery_enumerator.enumerate_recovery_candidates(
+                scope,
+                target_name=target_name,
+                max_files=self._recovery.max_files,
+                max_directories=self._recovery.max_directories,
+                budget=budget,
+            )
+            if not _valid_recovery_enumeration(
+                enumeration,
+                scope=scope,
+                policy=self._recovery,
+                target_name=target_name,
+            ):
+                budget.abort_terminal()
+                return _RecoveryResult(_RecoveryDisposition.FAILED)
+            if enumeration.outcome is LocalRecoveryEnumerationOutcome.FAILED:
+                budget.abort_terminal()
+                return _RecoveryResult(_RecoveryDisposition.FAILED)
+
+            budget.deadline.check()
+            for candidate in enumeration.candidates:
+                budget.deadline.check()
+                attempt = self._read_and_collect(
+                    ref,
+                    target=candidate.target,
+                    budget=budget,
+                    max_bytes=max_bytes,
+                    window=window,
+                    mime_path=candidate.name,
+                )
+                if isinstance(attempt, ResolvedArtifact):
+                    if (
+                        attempt.observed_hash is not None
+                        and parse_content_hash(attempt.observed_hash)[1] == expected_digest
+                    ):
+                        return _RecoveryResult(
+                            _RecoveryDisposition.MATCHED,
+                            replace(
+                                attempt,
+                                detail=(
+                                    "Recovered within registered local store "
+                                    "(differs from reference locator)."
+                                    if opaque_store_detail
+                                    else "Recovered within authorized local roots "
+                                    "(differs from reference URI)."
                                 ),
-                            )
-                        continue
-                    if attempt is LocalRegularFileReadOutcome.FAILED:
-                        budget.abort_terminal()
-                        return _RecoveryResult(_RecoveryDisposition.FAILED)
-                    budget.deadline.check()
+                            ),
+                        )
+                    continue
+                if attempt is LocalRegularFileReadOutcome.FAILED:
+                    budget.abort_terminal()
+                    return _RecoveryResult(_RecoveryDisposition.FAILED)
+                budget.deadline.check()
+            if enumeration.outcome is LocalRecoveryEnumerationOutcome.LIMIT_REACHED:
+                budget.abort_terminal()
+                return _RecoveryResult(_RecoveryDisposition.FAILED)
         except Exception:
             budget.abort_terminal()
             return _RecoveryResult(_RecoveryDisposition.FAILED)
@@ -1792,61 +1868,6 @@ class LocalFilesystemResolver(ArtifactResolver, ScopedLocalStoreResolver):
             budget.abort_terminal()
             raise
         return _RecoveryResult(_RecoveryDisposition.EXHAUSTED)
-
-    def _recovery_target(
-        self,
-        scope: _LocalRecoveryScope,
-        candidate: str,
-    ) -> LocalRegularFileTarget | None:
-        if scope.registered_store_root is None:
-            return DirectLocalRegularFileTarget(candidate)
-        roots = scope.recovery_roots
-        if not roots or len(roots) != 1:
-            return None
-        try:
-            relative = os.path.relpath(candidate, roots[0])
-        except (OSError, ValueError):
-            return None
-        components = tuple(
-            component for component in relative.split(os.path.sep) if component not in ("", ".")
-        )
-        if not components or any(component == ".." for component in components):
-            return None
-        return RegisteredLocalRegularFileTarget(
-            scope.registered_store_root,
-            components,
-        )
-
-    def _iter_candidate_files(
-        self,
-        target_name: str | None,
-        prefer_name: bool,
-        *,
-        scope: _LocalRecoveryScope | None = None,
-        deadline: ProcessDeadline | None = None,
-    ) -> Iterator[str]:
-        """Yield transitional recovery candidates without opening their bytes."""
-
-        active_scope = self._scope if scope is None else scope
-        for root in active_scope.recovery_roots or ():
-            if deadline is not None:
-                deadline.check()
-            for dirpath, directories, files in os.walk(
-                root,
-                topdown=True,
-                onerror=_raise_recovery_walk_error,
-                followlinks=False,
-            ):
-                if deadline is not None:
-                    deadline.check()
-                active_scope.path_policy.prune_walk_directories(dirpath, directories)
-                for name in files:
-                    is_match = target_name is not None and name == target_name
-                    if prefer_name != is_match:
-                        continue
-                    if deadline is not None:
-                        deadline.check()
-                    yield os.path.join(dirpath, name)
 
 
 class HttpResolver(ArtifactResolver, ScopedHttpStoreResolver):
@@ -2884,6 +2905,7 @@ def default_registry(
     allowed_roots: Sequence[str | Path] | None = None,
     local_path_policy: LocalPathPolicy | None = None,
     local_file_reader: LocalRegularFileReader | None = None,
+    local_recovery_enumerator: LocalRecoveryEnumerator | None = None,
     local_resolution_limits: LocalResolutionLimits | None = None,
     recovery: RecoveryPolicy | None = None,
     http_policy: OutboundHttpPolicy | None = None,
@@ -2909,11 +2931,11 @@ def default_registry(
     for every command in a single rclone or Git resolution.
     ``rclone_remote_policy`` and ``git_remote_policy`` are immutable authorities
     shared with health composition; omission denies every corresponding remote.
-    ``local_path_policy`` is the transitional typed authority for direct local
-    resolution and recovery only; when supplied it takes precedence over
-    compatibility ``allowed_roots``. Local health receives its separate bounded
-    broker at runtime composition. One process executor is shared by the
-    subprocess resolvers and health adapters.
+    ``local_path_policy`` remains a library compatibility input; when supplied
+    its configured roots take precedence over ``allowed_roots``. Runtime shares
+    one bounded local broker across directory inspection, file reads, and
+    recovery enumeration. One process executor is shared by the subprocess
+    resolvers and health adapters.
     """
 
     shared_process_executor = (
@@ -2925,6 +2947,7 @@ def default_registry(
                 allowed_roots=allowed_roots,
                 path_policy=local_path_policy,
                 file_reader=local_file_reader,
+                recovery_enumerator=local_recovery_enumerator,
                 limits=local_resolution_limits,
                 recovery=recovery,
                 process_executor=shared_process_executor,
@@ -2957,10 +2980,14 @@ def default_registry(
 LAB_TRACKER_RESOLVER_ALLOWED_ROOTS_ENV = "LAB_TRACKER_RESOLVER_ALLOWED_ROOTS"
 
 # Opt-in flag for content-hash recovery of missing local artifacts (off unless
-# truthy). Recovery still only runs when allowed roots are configured. The two
-# budget vars override the RecoveryPolicy defaults when set to a positive int.
+# truthy). Recovery still only runs when allowed roots are configured. The
+# three budget vars override the RecoveryPolicy defaults when set to a positive
+# int.
 LAB_TRACKER_RESOLVER_RECOVERY_ENV = "LAB_TRACKER_RESOLVER_RECOVERY"
 LAB_TRACKER_RESOLVER_RECOVERY_MAX_FILES_ENV = "LAB_TRACKER_RESOLVER_RECOVERY_MAX_FILES"
+LAB_TRACKER_RESOLVER_RECOVERY_MAX_DIRECTORIES_ENV = (
+    "LAB_TRACKER_RESOLVER_RECOVERY_MAX_DIRECTORIES"
+)
 LAB_TRACKER_RESOLVER_RECOVERY_MAX_BYTES_ENV = "LAB_TRACKER_RESOLVER_RECOVERY_MAX_BYTES"
 
 # Comma-separated exact HTTP(S) origins and IP networks for internal artifact
@@ -3015,6 +3042,13 @@ def recovery_from_env() -> RecoveryPolicy:
             os.environ.get(LAB_TRACKER_RESOLVER_RECOVERY_MAX_FILES_ENV),
             DEFAULT_RECOVERY_MAX_FILES,
             variable=LAB_TRACKER_RESOLVER_RECOVERY_MAX_FILES_ENV,
+            maximum=MAX_LOCAL_RECOVERY_MAX_FILES,
+        ),
+        max_directories=_strict_env_positive_int(
+            os.environ.get(LAB_TRACKER_RESOLVER_RECOVERY_MAX_DIRECTORIES_ENV),
+            DEFAULT_RECOVERY_MAX_DIRECTORIES,
+            variable=LAB_TRACKER_RESOLVER_RECOVERY_MAX_DIRECTORIES_ENV,
+            maximum=MAX_LOCAL_RECOVERY_MAX_DIRECTORIES,
         ),
         max_bytes=_strict_env_positive_int(
             os.environ.get(LAB_TRACKER_RESOLVER_RECOVERY_MAX_BYTES_ENV),
@@ -3097,6 +3131,7 @@ def registry_from_env(
     *,
     local_path_policy: LocalPathPolicy | None = None,
     local_file_reader: LocalRegularFileReader | None = None,
+    local_recovery_enumerator: LocalRecoveryEnumerator | None = None,
     local_resolution_limits: LocalResolutionLimits | None = None,
     recovery: RecoveryPolicy | None = None,
     http_policy: OutboundHttpPolicy | None = None,
@@ -3109,7 +3144,10 @@ def registry_from_env(
 ) -> ResolverRegistry:
     """Build the default registry, reading resolver config from the env."""
 
-    if local_path_policy is None:
+    if (
+        local_path_policy is None
+        and (local_file_reader is None or local_recovery_enumerator is None)
+    ):
         local_path_policy = LocalPathPolicy.from_config(
             os.environ.get(LAB_TRACKER_RESOLVER_ALLOWED_ROOTS_ENV)
         )
@@ -3182,6 +3220,7 @@ def registry_from_env(
     return default_registry(
         local_path_policy=local_path_policy,
         local_file_reader=local_file_reader,
+        local_recovery_enumerator=local_recovery_enumerator,
         local_resolution_limits=resolution_limits,
         recovery=recovery_policy,
         http_policy=(http_policy if http_policy is not None else outbound_http_policy_from_env()),

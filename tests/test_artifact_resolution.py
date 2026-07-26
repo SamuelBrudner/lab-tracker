@@ -7,6 +7,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 from uuid import uuid4
 
 import pytest
@@ -66,14 +67,23 @@ from lab_tracker.local_filesystem_operations import (
     BoundedLocalFilesystemOperations,
 )
 from lab_tracker.local_filesystem_ports import (
+    DirectLocalRecoveryScope,
     DirectLocalRegularFileTarget,
+    EnumeratedLocalRegularFileTarget,
+    LocalRecoveryCandidate,
+    LocalRecoveryEnumerationOutcome,
+    LocalRecoveryEnumerationResult,
+    LocalRecoveryScope,
     LocalRegularFileReadOutcome,
     LocalRegularFileReadResult,
     LocalRegularFileTarget,
+    RegisteredLocalRecoveryScope,
     RegisteredLocalRegularFileTarget,
 )
 from lab_tracker.local_path_policy import LocalPathPolicy
 from lab_tracker.local_resolution_budget import (
+    MAX_LOCAL_RECOVERY_MAX_DIRECTORIES,
+    MAX_LOCAL_RECOVERY_MAX_FILES,
     MAX_LOCAL_RESOLUTION_MAX_READ_BYTES,
     LocalResolutionBudget,
     LocalResolutionLimits,
@@ -141,6 +151,70 @@ class _CallbackLocalFileReader:
     ) -> LocalRegularFileReadResult:
         self.calls.append(target)
         return self._callback(target, budget, stdout_consumer)
+
+
+class _StaticLocalRecoveryEnumerator:
+    def __init__(self, result: LocalRecoveryEnumerationResult) -> None:
+        self.result = result
+        self.calls: list[dict[str, object]] = []
+
+    def enumerate_recovery_candidates(
+        self,
+        scope: LocalRecoveryScope,
+        *,
+        target_name: str | None,
+        max_files: int,
+        max_directories: int,
+        budget: LocalResolutionBudget,
+    ) -> LocalRecoveryEnumerationResult:
+        self.calls.append(
+            {
+                "scope": scope,
+                "target_name": target_name,
+                "max_files": max_files,
+                "max_directories": max_directories,
+                "budget": budget,
+                "deadline": budget.deadline,
+            }
+        )
+        return self.result
+
+
+def _direct_recovery_result(
+    *locators: tuple[str, ...],
+    outcome: LocalRecoveryEnumerationOutcome = LocalRecoveryEnumerationOutcome.COMPLETE,
+    directories: int = 1,
+) -> LocalRecoveryEnumerationResult:
+    return LocalRecoveryEnumerationResult(
+        outcome,
+        tuple(
+            LocalRecoveryCandidate(
+                EnumeratedLocalRegularFileTarget(0, locator),
+                locator[-1],
+            )
+            for locator in locators
+        ),
+        directories,
+    )
+
+
+def _registered_recovery_result(
+    store_root: str,
+    *locators: tuple[str, ...],
+    outcome: LocalRecoveryEnumerationOutcome = LocalRecoveryEnumerationOutcome.COMPLETE,
+    directories: int = 1,
+) -> LocalRecoveryEnumerationResult:
+    return LocalRecoveryEnumerationResult(
+        outcome,
+        tuple(
+            LocalRecoveryCandidate(
+                RegisteredLocalRegularFileTarget(store_root, locator),
+                locator[-1],
+            )
+            for locator in locators
+        ),
+        directories,
+    )
 
 
 def _complete_local_read(
@@ -392,7 +466,9 @@ def test_local_resolver_allows_paths_within_roots(tmp_path):
     assert result.status is ResolutionStatus.VERIFIED
 
 
-def test_local_resolver_preserves_even_a_falsey_explicit_policy_identity(tmp_path):
+def test_local_resolver_uses_falsey_policy_roots_without_retaining_path_authority(
+    tmp_path,
+):
     data = b"explicit local authority"
     inside = _write(tmp_path, "authorized.txt", data)
     policy = _FalseyLocalPathPolicy([tmp_path])
@@ -404,8 +480,11 @@ def test_local_resolver_preserves_even_a_falsey_explicit_policy_identity(tmp_pat
     result = resolver.resolve(_local_ref(inside, _sha256(data)))
 
     assert not policy
-    assert resolver._operator_policy is policy
-    assert resolver._scope.path_policy is policy
+    assert isinstance(resolver._file_reader, BoundedLocalFilesystemOperations)
+    assert resolver._recovery_enumerator is resolver._file_reader
+    assert resolver._file_reader.authority.legacy_roots == (str(tmp_path),)
+    assert type(resolver._recovery_scope) is DirectLocalRecoveryScope
+    assert not hasattr(resolver, "_operator_policy")
     assert result.status is ResolutionStatus.VERIFIED
 
 
@@ -3601,8 +3680,10 @@ def test_default_registry_preserves_explicit_local_policy_identity(tmp_path):
     )
     result = registry.resolve(_local_ref(inside, _sha256(data)))
 
-    assert resolver._operator_policy is policy
-    assert resolver._scope.path_policy is policy
+    assert isinstance(resolver._file_reader, BoundedLocalFilesystemOperations)
+    assert resolver._recovery_enumerator is resolver._file_reader
+    assert resolver._file_reader.authority.legacy_roots == (str(tmp_path),)
+    assert not hasattr(resolver, "_operator_policy")
     assert result.status is ResolutionStatus.VERIFIED
 
 
@@ -3611,11 +3692,18 @@ def test_default_registry_preserves_explicit_local_reader_limits_and_recovery_id
         raise AssertionError("identity test unexpectedly read a file")
 
     reader = _CallbackLocalFileReader(unexpected_read)
+    enumerator = _StaticLocalRecoveryEnumerator(_direct_recovery_result())
     limits = LocalResolutionLimits(max_read_bytes=1234, deadline_seconds=2.5)
-    recovery = RecoveryPolicy(enabled=True, max_files=7, max_bytes=1234)
+    recovery = RecoveryPolicy(
+        enabled=True,
+        max_files=7,
+        max_directories=11,
+        max_bytes=1234,
+    )
 
     registry = default_registry(
         local_file_reader=reader,
+        local_recovery_enumerator=enumerator,
         local_resolution_limits=limits,
         recovery=recovery,
     )
@@ -3626,6 +3714,7 @@ def test_default_registry_preserves_explicit_local_reader_limits_and_recovery_id
     )
 
     assert resolver._file_reader is reader
+    assert resolver._recovery_enumerator is enumerator
     assert resolver._limits is limits
     assert resolver._recovery is recovery
 
@@ -3999,6 +4088,11 @@ def test_resolved_artifact_sanitizes_non_bytes_without_calling_hostile_len():
         {"max_files": True},
         {"max_files": -1},
         {"max_files": 1.5},
+        {"max_files": MAX_LOCAL_RECOVERY_MAX_FILES + 1},
+        {"max_directories": True},
+        {"max_directories": -1},
+        {"max_directories": 1.5},
+        {"max_directories": MAX_LOCAL_RECOVERY_MAX_DIRECTORIES + 1},
         {"max_bytes": False},
         {"max_bytes": 0},
         {"max_bytes": 1.5},
@@ -4044,34 +4138,44 @@ def test_local_resolver_derives_read_limits_from_explicit_recovery():
 def test_local_resolution_reuses_one_budget_and_deadline_across_recovery(tmp_path):
     root = tmp_path / "store"
     root.mkdir()
-    decoy = _write(root, "artifact.bin", b"bad")
+    _write(root, "artifact.bin", b"bad")
     expected = b"target"
-    match = _write(root, "match.bin", expected)
+    _write(root, "match.bin", expected)
     missing = root / "missing" / "artifact.bin"
     seen_budgets: list[LocalResolutionBudget] = []
     seen_deadlines = []
     seen_allowances: list[int] = []
+    enumerator = _StaticLocalRecoveryEnumerator(
+        _direct_recovery_result(("artifact.bin",), ("match.bin",))
+    )
 
     def read_in_order(target, budget, stdout_consumer):
-        assert type(target) is DirectLocalRegularFileTarget
         seen_budgets.append(budget)
         seen_deadlines.append(budget.deadline)
         seen_allowances.append(budget.remaining_bytes)
-        if target.candidate == str(missing):
+        if type(target) is DirectLocalRegularFileTarget:
+            assert target.candidate == str(missing)
             return _clean_local_read(LocalRegularFileReadOutcome.MISSING, budget)
-        if target.candidate == str(decoy):
+        assert type(target) is EnumeratedLocalRegularFileTarget
+        if target.locator == ("artifact.bin",):
             return _complete_local_read(b"bad", budget, stdout_consumer)
-        assert target.candidate == str(match)
+        assert target.locator == ("match.bin",)
         return _complete_local_read(expected, budget, stdout_consumer)
 
     resolver = LocalFilesystemResolver(
         allowed_roots=[root],
-        recovery=RecoveryPolicy(enabled=True, max_bytes=12),
+        recovery=RecoveryPolicy(
+            enabled=True,
+            max_files=2,
+            max_directories=3,
+            max_bytes=12,
+        ),
         limits=LocalResolutionLimits(
             max_read_bytes=12,
             deadline_seconds=5,
         ),
         file_reader=_CallbackLocalFileReader(read_in_order),
+        recovery_enumerator=enumerator,
     )
 
     result = resolver.resolve(_local_ref(missing, _sha256(expected)))
@@ -4083,6 +4187,13 @@ def test_local_resolution_reuses_one_budget_and_deadline_across_recovery(tmp_pat
     assert all(deadline is seen_deadlines[0] for deadline in seen_deadlines)
     assert seen_allowances == [12, 12, 9]
     assert seen_budgets[0].remaining_bytes == 3
+    assert len(enumerator.calls) == 1
+    assert enumerator.calls[0]["budget"] is seen_budgets[0]
+    assert enumerator.calls[0]["deadline"] is seen_deadlines[0]
+    assert type(enumerator.calls[0]["scope"]) is DirectLocalRecoveryScope
+    assert enumerator.calls[0]["target_name"] == "artifact.bin"
+    assert enumerator.calls[0]["max_files"] == 2
+    assert enumerator.calls[0]["max_directories"] == 3
 
 
 def test_recovery_deadline_after_clean_missing_terminally_aborts_budget(tmp_path):
@@ -4110,7 +4221,7 @@ def test_recovery_deadline_after_clean_missing_terminally_aborts_budget(tmp_path
     assert seen_budgets[0].terminal is True
 
 
-def test_recovery_scandir_failure_terminally_aborts_budget(tmp_path, monkeypatch):
+def test_recovery_enumeration_failure_terminally_aborts_budget(tmp_path):
     missing = tmp_path / "missing.bin"
     seen_budgets: list[LocalResolutionBudget] = []
 
@@ -4122,13 +4233,16 @@ def test_recovery_scandir_failure_terminally_aborts_budget(tmp_path, monkeypatch
         allowed_roots=[tmp_path],
         recovery=RecoveryPolicy(enabled=True, max_bytes=8),
         file_reader=_CallbackLocalFileReader(clean_missing),
+        recovery_enumerator=_StaticLocalRecoveryEnumerator(
+            LocalRecoveryEnumerationResult(
+                LocalRecoveryEnumerationOutcome.FAILED,
+                (),
+                0,
+            )
+        ),
         limits=LocalResolutionLimits(max_read_bytes=8),
     )
 
-    def denied_scandir(_path):
-        raise PermissionError("private enumeration detail")
-
-    monkeypatch.setattr(artifact_resolution.os, "scandir", denied_scandir)
     result = resolver.resolve(_local_ref(missing, _sha256(b"expected")))
 
     assert result.status is ResolutionStatus.UNRESOLVED
@@ -4136,6 +4250,79 @@ def test_recovery_scandir_failure_terminally_aborts_budget(tmp_path, monkeypatch
     assert len(seen_budgets) == 1
     assert seen_budgets[0].remaining_bytes == 0
     assert seen_budgets[0].terminal is True
+
+
+def test_malformed_recovery_enumeration_is_discarded_before_candidate_reads(tmp_path):
+    missing = tmp_path / "missing.bin"
+    malformed = _StaticLocalRecoveryEnumerator(
+        cast(LocalRecoveryEnumerationResult, object())
+    )
+
+    def clean_missing(target, budget, _stdout_consumer):
+        assert type(target) is DirectLocalRegularFileTarget
+        return _clean_local_read(LocalRegularFileReadOutcome.MISSING, budget)
+
+    reader = _CallbackLocalFileReader(clean_missing)
+    result = LocalFilesystemResolver(
+        allowed_roots=[tmp_path],
+        recovery=RecoveryPolicy(enabled=True),
+        file_reader=reader,
+        recovery_enumerator=malformed,
+    ).resolve(_local_ref(missing, _sha256(b"expected")))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.detail == "Failed to read local artifact."
+    assert len(reader.calls) == 1
+    budget = malformed.calls[0]["budget"]
+    assert type(budget) is LocalResolutionBudget
+    assert budget.terminal is True
+
+
+def test_recovery_enumerator_base_exception_aborts_before_propagating(tmp_path):
+    class FatalEnumerationSignal(BaseException):
+        pass
+
+    class FatalEnumerator:
+        def __init__(self, signal):
+            self.signal = signal
+            self.budgets = []
+
+        def enumerate_recovery_candidates(
+            self,
+            _scope,
+            *,
+            target_name,
+            max_files,
+            max_directories,
+            budget,
+        ):
+            del target_name, max_files, max_directories
+            self.budgets.append(budget)
+            raise self.signal
+
+    missing = tmp_path / "missing.bin"
+    signal = FatalEnumerationSignal()
+    enumerator = FatalEnumerator(signal)
+    reader_budgets = []
+
+    def clean_missing(_target, budget, _stdout_consumer):
+        reader_budgets.append(budget)
+        return _clean_local_read(LocalRegularFileReadOutcome.MISSING, budget)
+
+    resolver = LocalFilesystemResolver(
+        allowed_roots=[tmp_path],
+        recovery=RecoveryPolicy(enabled=True),
+        file_reader=_CallbackLocalFileReader(clean_missing),
+        recovery_enumerator=enumerator,
+    )
+
+    with pytest.raises(FatalEnumerationSignal) as caught:
+        resolver.resolve(_local_ref(missing, _sha256(b"expected")))
+
+    assert caught.value is signal
+    assert enumerator.budgets == reader_budgets
+    assert len(enumerator.budgets) == 1
+    assert enumerator.budgets[0].terminal is True
 
 
 def test_local_full_read_limit_is_distinct_from_returned_view_limit(tmp_path):
@@ -4231,19 +4418,23 @@ def test_recovery_starts_after_missing_reader_context_has_closed(tmp_path):
     candidate.write_bytes(data)
     missing = root / "gone.bin"
     active = False
+    enumerator = _StaticLocalRecoveryEnumerator(
+        _direct_recovery_result(("moved.bin",))
+    )
 
     def non_reentrant_read(target, budget, stdout_consumer):
         nonlocal active
         assert active is False
-        assert type(target) is DirectLocalRegularFileTarget
         active = True
         try:
-            if target.candidate == str(missing):
+            if type(target) is DirectLocalRegularFileTarget:
+                assert target.candidate == str(missing)
                 return _clean_local_read(
                     LocalRegularFileReadOutcome.MISSING,
                     budget,
                 )
-            assert target.candidate == str(candidate)
+            assert type(target) is EnumeratedLocalRegularFileTarget
+            assert target.locator == ("moved.bin",)
             return _complete_local_read(data, budget, stdout_consumer)
         finally:
             active = False
@@ -4253,6 +4444,7 @@ def test_recovery_starts_after_missing_reader_context_has_closed(tmp_path):
         allowed_roots=[root],
         recovery=RecoveryPolicy(enabled=True),
         file_reader=reader,
+        recovery_enumerator=enumerator,
     )
 
     result = resolver.resolve(_local_ref(missing, _sha256(data)))
@@ -4260,7 +4452,219 @@ def test_recovery_starts_after_missing_reader_context_has_closed(tmp_path):
     assert result.status is ResolutionStatus.VERIFIED
     assert result.content == data
     assert len(reader.calls) == 2
+    assert len(enumerator.calls) == 1
     assert active is False
+
+
+def test_recovery_rejects_preference_order_before_reading_any_candidate(tmp_path):
+    missing = tmp_path / "gone.bin"
+    invalid_order = _StaticLocalRecoveryEnumerator(
+        _direct_recovery_result(("fallback.bin",), ("gone.bin",))
+    )
+
+    def missing_only(target, budget, _stdout_consumer):
+        assert type(target) is DirectLocalRegularFileTarget
+        assert target.candidate == str(missing)
+        return _clean_local_read(LocalRegularFileReadOutcome.MISSING, budget)
+
+    reader = _CallbackLocalFileReader(missing_only)
+    result = LocalFilesystemResolver(
+        allowed_roots=[tmp_path],
+        recovery=RecoveryPolicy(enabled=True),
+        file_reader=reader,
+        recovery_enumerator=invalid_order,
+    ).resolve(_local_ref(missing, _sha256(b"expected")))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.detail == "Failed to read local artifact."
+    assert len(reader.calls) == 1
+    assert len(invalid_order.calls) == 1
+    budget = invalid_order.calls[0]["budget"]
+    assert type(budget) is LocalResolutionBudget
+    assert budget.terminal is True
+
+
+def test_recovery_limit_without_a_match_is_one_opaque_terminal_failure(tmp_path):
+    missing = tmp_path / "gone.bin"
+    enumerator = _StaticLocalRecoveryEnumerator(
+        _direct_recovery_result(
+            ("decoy.bin",),
+            outcome=LocalRecoveryEnumerationOutcome.LIMIT_REACHED,
+        )
+    )
+
+    def read_decoy(target, budget, stdout_consumer):
+        if type(target) is DirectLocalRegularFileTarget:
+            return _clean_local_read(LocalRegularFileReadOutcome.MISSING, budget)
+        assert type(target) is EnumeratedLocalRegularFileTarget
+        assert target.locator == ("decoy.bin",)
+        return _complete_local_read(b"decoy", budget, stdout_consumer)
+
+    result = LocalFilesystemResolver(
+        allowed_roots=[tmp_path],
+        recovery=RecoveryPolicy(enabled=True, max_files=1),
+        file_reader=_CallbackLocalFileReader(read_decoy),
+        recovery_enumerator=enumerator,
+    ).resolve(_local_ref(missing, _sha256(b"expected")))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.detail == "Failed to read local artifact."
+    budget = enumerator.calls[0]["budget"]
+    assert type(budget) is LocalResolutionBudget
+    assert budget.terminal is True
+
+
+def test_recovery_may_verify_a_preferred_match_at_the_enumeration_limit(tmp_path):
+    data = b"matching bounded candidate"
+    missing = tmp_path / "gone.bin"
+    enumerator = _StaticLocalRecoveryEnumerator(
+        _direct_recovery_result(
+            ("gone.bin",),
+            outcome=LocalRecoveryEnumerationOutcome.LIMIT_REACHED,
+        )
+    )
+
+    def read_match(target, budget, stdout_consumer):
+        if type(target) is DirectLocalRegularFileTarget:
+            return _clean_local_read(LocalRegularFileReadOutcome.MISSING, budget)
+        assert type(target) is EnumeratedLocalRegularFileTarget
+        assert target.locator == ("gone.bin",)
+        return _complete_local_read(data, budget, stdout_consumer)
+
+    result = LocalFilesystemResolver(
+        allowed_roots=[tmp_path],
+        recovery=RecoveryPolicy(enabled=True, max_files=1),
+        file_reader=_CallbackLocalFileReader(read_match),
+        recovery_enumerator=enumerator,
+    ).resolve(_local_ref(missing, _sha256(data)))
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == data
+
+
+def test_registered_recovery_uses_only_the_retained_store_scope(tmp_path):
+    store_root = tmp_path / "store"
+    store_root.mkdir()
+    data = b"registered recovery candidate"
+    store = _data_store(StoreKind.LOCAL_FS, str(store_root))
+    target = _local_store_target(store, "old/result.bin", _sha256(data))
+    enumerator = _StaticLocalRecoveryEnumerator(
+        _registered_recovery_result(
+            str(store_root),
+            ("moved", "result.bin"),
+        )
+    )
+
+    def read_registered(target, budget, stdout_consumer):
+        assert type(target) is RegisteredLocalRegularFileTarget
+        assert target.store_root == str(store_root)
+        if target.locator == ("old", "result.bin"):
+            return _clean_local_read(LocalRegularFileReadOutcome.MISSING, budget)
+        assert target.locator == ("moved", "result.bin")
+        return _complete_local_read(data, budget, stdout_consumer)
+
+    result = ResolverRegistry(
+        [
+            LocalFilesystemResolver(
+                allowed_roots=[tmp_path],
+                recovery=RecoveryPolicy(enabled=True),
+                file_reader=_CallbackLocalFileReader(read_registered),
+                recovery_enumerator=enumerator,
+            )
+        ]
+    ).resolve_local_store(target)
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == data
+    assert len(enumerator.calls) == 1
+    scope = enumerator.calls[0]["scope"]
+    assert type(scope) is RegisteredLocalRecoveryScope
+    assert scope.store_root == str(store_root)
+    assert enumerator.calls[0]["target_name"] == "result.bin"
+
+
+def test_registered_recovery_rejects_a_candidate_from_another_store_before_read(
+    tmp_path,
+):
+    store_root = tmp_path / "store"
+    sibling_root = tmp_path / "sibling"
+    store_root.mkdir()
+    sibling_root.mkdir()
+    data = b"must remain store-confined"
+    store = _data_store(StoreKind.LOCAL_FS, str(store_root))
+    target = _local_store_target(store, "old/result.bin", _sha256(data))
+    enumerator = _StaticLocalRecoveryEnumerator(
+        _registered_recovery_result(
+            str(sibling_root),
+            ("result.bin",),
+        )
+    )
+
+    def missing_only(candidate, budget, _stdout_consumer):
+        assert type(candidate) is RegisteredLocalRegularFileTarget
+        assert candidate.store_root == str(store_root)
+        assert candidate.locator == ("old", "result.bin")
+        return _clean_local_read(LocalRegularFileReadOutcome.MISSING, budget)
+
+    reader = _CallbackLocalFileReader(missing_only)
+    result = ResolverRegistry(
+        [
+            LocalFilesystemResolver(
+                allowed_roots=[tmp_path],
+                recovery=RecoveryPolicy(enabled=True),
+                file_reader=reader,
+                recovery_enumerator=enumerator,
+            )
+        ]
+    ).resolve_local_store(target)
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.detail == "Failed to read local artifact."
+    assert len(reader.calls) == 1
+    budget = enumerator.calls[0]["budget"]
+    assert type(budget) is LocalResolutionBudget
+    assert budget.terminal is True
+
+
+def test_recovery_application_never_inspects_host_paths(
+    tmp_path,
+    monkeypatch,
+):
+    data = b"broker-owned traversal"
+    missing = tmp_path / "gone.bin"
+    reference = _local_ref(missing, _sha256(data))
+    enumerator = _StaticLocalRecoveryEnumerator(
+        _direct_recovery_result(("moved.bin",))
+    )
+
+    def read_candidate(target, budget, stdout_consumer):
+        if type(target) is DirectLocalRegularFileTarget:
+            return _clean_local_read(LocalRegularFileReadOutcome.MISSING, budget)
+        assert type(target) is EnumeratedLocalRegularFileTarget
+        return _complete_local_read(data, budget, stdout_consumer)
+
+    def unexpected_path_inspection(*_args, **_kwargs):
+        raise AssertionError("application inspected a host path")
+
+    resolver = LocalFilesystemResolver(
+        allowed_roots=[tmp_path],
+        recovery=RecoveryPolicy(enabled=True),
+        file_reader=_CallbackLocalFileReader(read_candidate),
+        recovery_enumerator=enumerator,
+    )
+    monkeypatch.setattr(artifact_resolution.os, "walk", unexpected_path_inspection)
+    monkeypatch.setattr(artifact_resolution.os, "scandir", unexpected_path_inspection)
+    monkeypatch.setattr(artifact_resolution.os, "stat", unexpected_path_inspection)
+    monkeypatch.setattr(
+        artifact_resolution.os.path,
+        "realpath",
+        unexpected_path_inspection,
+    )
+
+    result = resolver.resolve(reference)
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == data
 
 
 def test_recovery_disabled_by_default_stays_unresolved(tmp_path):
@@ -4275,6 +4679,33 @@ def test_recovery_disabled_by_default_stays_unresolved(tmp_path):
 
     assert result.status is ResolutionStatus.UNRESOLVED
     assert "not found" in (result.detail or "").lower()
+
+
+def test_enabled_recovery_rejects_roots_that_cannot_fit_one_helper_request():
+    if os.name == "nt":
+        long_roots = [
+            rf"C:\{'a' * 200}\{index:02d}{'b' * 190}"
+            for index in range(64)
+        ]
+    else:
+        long_roots = [
+            f"/{'a' * 200}/{index:02d}{'b' * 190}"
+            for index in range(64)
+        ]
+
+    with pytest.raises(
+        ValueError,
+        match="roots exceed the bounded helper request limit",
+    ):
+        LocalFilesystemResolver(
+            allowed_roots=long_roots,
+            recovery=RecoveryPolicy(enabled=True),
+        )
+
+    LocalFilesystemResolver(
+        allowed_roots=long_roots,
+        recovery=RecoveryPolicy(enabled=False),
+    )
 
 
 def test_recovery_requires_allowed_roots(tmp_path):
@@ -4416,10 +4847,9 @@ def test_windows_recovery_never_descends_through_junction_escape(tmp_path):
     missing = root / "gone.bin"
     resolver = LocalFilesystemResolver(allowed_roots=[root], recovery=RecoveryPolicy(enabled=True))
 
-    candidates = list(resolver._iter_candidate_files(outside_file.name, True))
     result = resolver.resolve(_local_ref(missing, _sha256(data)))
 
-    assert candidates == []
+    assert outside_file.exists()
     assert result.status is ResolutionStatus.UNRESOLVED
     assert result.content is None
 
@@ -4447,12 +4877,16 @@ def test_recovery_enforces_remaining_budget_when_open_file_grows(tmp_path, monke
     candidate.write_bytes(b"scan-visible placeholder")
     missing = root / "gone.bin"
     grown = b"g" * 64
+    enumerator = _StaticLocalRecoveryEnumerator(
+        _direct_recovery_result(("moved.bin",))
+    )
 
     def reject_growth_past_reservation(target, budget, stdout_consumer):
-        assert type(target) is DirectLocalRegularFileTarget
-        if target.candidate == str(missing):
+        if type(target) is DirectLocalRegularFileTarget:
+            assert target.candidate == str(missing)
             return _clean_local_read(LocalRegularFileReadOutcome.MISSING, budget)
-        assert target.candidate == str(candidate)
+        assert type(target) is EnumeratedLocalRegularFileTarget
+        assert target.locator == ("moved.bin",)
         assert len(grown) > budget.remaining_bytes
         return _terminal_local_read(budget, stdout_consumer)
 
@@ -4468,6 +4902,7 @@ def test_recovery_enforces_remaining_budget_when_open_file_grows(tmp_path, monke
         allowed_roots=[root],
         recovery=RecoveryPolicy(enabled=True, max_bytes=8),
         file_reader=reader,
+        recovery_enumerator=enumerator,
     )
 
     result = resolver.resolve(_local_ref(missing, _sha256(grown)))
@@ -4485,13 +4920,17 @@ def test_recovery_debits_partial_reads_that_end_in_io_failure(tmp_path):
     first.touch()
     second.touch()
     missing = root / "gone.bin"
-    opened_candidates: list[str] = []
+    opened_candidates: list[tuple[str, ...]] = []
+    enumerator = _StaticLocalRecoveryEnumerator(
+        _direct_recovery_result(("first.bin",), ("second.bin",))
+    )
 
     def fail_after_partial_read(target, budget, stdout_consumer):
-        assert type(target) is DirectLocalRegularFileTarget
-        if target.candidate == str(missing):
+        if type(target) is DirectLocalRegularFileTarget:
+            assert target.candidate == str(missing)
             return _clean_local_read(LocalRegularFileReadOutcome.MISSING, budget)
-        opened_candidates.append(target.candidate)
+        assert type(target) is EnumeratedLocalRegularFileTarget
+        opened_candidates.append(target.locator)
         return _terminal_local_read(
             budget,
             stdout_consumer,
@@ -4502,12 +4941,13 @@ def test_recovery_debits_partial_reads_that_end_in_io_failure(tmp_path):
         allowed_roots=[root],
         recovery=RecoveryPolicy(enabled=True, max_files=2, max_bytes=8),
         file_reader=_CallbackLocalFileReader(fail_after_partial_read),
+        recovery_enumerator=enumerator,
     )
 
     result = resolver.resolve(_local_ref(missing, _sha256(b"not present")))
 
     assert result.status is ResolutionStatus.UNRESOLVED
-    assert opened_candidates == [str(first)]
+    assert opened_candidates == [("first.bin",)]
 
 
 def test_recovery_hashes_opened_stream_without_reopening_candidate(tmp_path):
@@ -4518,12 +4958,16 @@ def test_recovery_hashes_opened_stream_without_reopening_candidate(tmp_path):
     candidate = root / "moved.bin"
     candidate.write_bytes(recorded)
     missing = root / "gone.bin"
+    enumerator = _StaticLocalRecoveryEnumerator(
+        _direct_recovery_result(("moved.bin",))
+    )
 
     def read_retained_recovery_handle(target, budget, stdout_consumer):
-        assert type(target) is DirectLocalRegularFileTarget
-        if target.candidate == str(missing):
+        if type(target) is DirectLocalRegularFileTarget:
+            assert target.candidate == str(missing)
             return _clean_local_read(LocalRegularFileReadOutcome.MISSING, budget)
-        assert target.candidate == str(candidate)
+        assert type(target) is EnumeratedLocalRegularFileTarget
+        assert target.locator == ("moved.bin",)
         candidate.write_bytes(replacement)
         return _complete_local_read(recorded, budget, stdout_consumer)
 
@@ -4532,6 +4976,7 @@ def test_recovery_hashes_opened_stream_without_reopening_candidate(tmp_path):
         allowed_roots=[root],
         recovery=RecoveryPolicy(enabled=True),
         file_reader=reader,
+        recovery_enumerator=enumerator,
     )
 
     result = resolver.resolve(_local_ref(missing, _sha256(recorded)))
@@ -4593,6 +5038,16 @@ def test_registry_from_env_recovery_off_by_default(tmp_path, monkeypatch):
         ("LAB_TRACKER_RESOLVER_RECOVERY", "sometimes"),
         ("LAB_TRACKER_RESOLVER_RECOVERY_MAX_FILES", "0"),
         ("LAB_TRACKER_RESOLVER_RECOVERY_MAX_FILES", "1.5"),
+        (
+            "LAB_TRACKER_RESOLVER_RECOVERY_MAX_FILES",
+            str(MAX_LOCAL_RECOVERY_MAX_FILES + 1),
+        ),
+        ("LAB_TRACKER_RESOLVER_RECOVERY_MAX_DIRECTORIES", "0"),
+        ("LAB_TRACKER_RESOLVER_RECOVERY_MAX_DIRECTORIES", "1.5"),
+        (
+            "LAB_TRACKER_RESOLVER_RECOVERY_MAX_DIRECTORIES",
+            str(MAX_LOCAL_RECOVERY_MAX_DIRECTORIES + 1),
+        ),
         ("LAB_TRACKER_RESOLVER_RECOVERY_MAX_BYTES", "0"),
         (
             "LAB_TRACKER_RESOLVER_RECOVERY_MAX_BYTES",
@@ -4660,9 +5115,50 @@ def test_registry_from_env_explicit_local_policy_overrides_environment_without_p
     result = registry.resolve(_local_ref(inside, _sha256(data)))
 
     assert not policy
-    assert resolver._operator_policy is policy
-    assert resolver._scope.path_policy is policy
+    assert isinstance(resolver._file_reader, BoundedLocalFilesystemOperations)
+    assert resolver._recovery_enumerator is resolver._file_reader
+    assert resolver._file_reader.authority.legacy_roots == (str(tmp_path),)
+    assert not hasattr(resolver, "_operator_policy")
     assert result.status is ResolutionStatus.VERIFIED
+
+
+def test_registry_from_env_shared_local_roles_do_not_construct_transitional_policy(
+    monkeypatch,
+):
+    def unexpected_environment_parse(_cls, _raw):
+        raise AssertionError("shared local roles still parsed a path policy")
+
+    def unexpected_read(_target, _budget, _stdout_consumer):
+        raise AssertionError("composition test unexpectedly read a file")
+
+    monkeypatch.setenv(
+        "LAB_TRACKER_RESOLVER_ALLOWED_ROOTS",
+        "//environment.example/untrusted-root",
+    )
+    monkeypatch.setattr(
+        LocalPathPolicy,
+        "from_config",
+        classmethod(unexpected_environment_parse),
+    )
+    reader = _CallbackLocalFileReader(unexpected_read)
+    enumerator = _StaticLocalRecoveryEnumerator(_direct_recovery_result())
+
+    registry = registry_from_env(
+        local_file_reader=reader,
+        local_recovery_enumerator=enumerator,
+        http_policy=OutboundHttpPolicy(),
+        rclone_remote_policy=RcloneRemotePolicy.deny_all(),
+        git_remote_policy=GitRemotePolicy.deny_all(),
+    )
+    resolver = next(
+        candidate
+        for candidate in registry._resolvers
+        if isinstance(candidate, LocalFilesystemResolver)
+    )
+
+    assert resolver._file_reader is reader
+    assert resolver._recovery_enumerator is enumerator
+    assert not hasattr(resolver, "_operator_policy")
 
 
 def test_registry_from_env_honors_http_deadline_without_runtime_settings(

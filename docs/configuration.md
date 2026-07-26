@@ -85,9 +85,12 @@ operator authority:
   moved or renamed local artifact after its original path returns a clean
   missing result (default: `false`). Accepted values are the normal explicit
   boolean spellings; an unrecognized value fails startup.
-- `LAB_TRACKER_RESOLVER_RECOVERY_MAX_FILES`: maximum candidate files considered
-  by one recovery scan (default: `4096`; minimum: `1`). This does not bound the
-  number of directories visited.
+- `LAB_TRACKER_RESOLVER_RECOVERY_MAX_FILES`: maximum unique candidate-file
+  identities returned by one recovery scan (default and hard maximum: `4096`;
+  minimum: `1`).
+- `LAB_TRACKER_RESOLVER_RECOVERY_MAX_DIRECTORIES`: maximum root/child-directory
+  attempts admitted by one recovery scan (default and hard maximum: `4096`;
+  minimum: `1`).
 - `LAB_TRACKER_RESOLVER_RECOVERY_MAX_BYTES`: cumulative accepted full-file
   payload allowance across one logical direct attempt and every recovery
   candidate (default and hard maximum: `536870912`, 512 MiB; minimum: `1`).
@@ -109,7 +112,12 @@ namespaces fail startup. POSIX repeated separators are rejected; Windows
 normalizes only slash direction plus redundant or trailing separators, which
 are native spelling aliases. A registered store root must be a native absolute
 local path, and a grant to one of its children cannot partially authorize the
-broader store.
+broader store. When recovery is enabled, startup also proves that the complete
+configured root set plus a worst-case portable target name fits the broker's
+single fixed-size helper request, and that every individual root can carry at
+least a one-component candidate read at the hard byte allowance. An oversized
+aggregate or individually unusable root set fails startup instead of turning
+every recovery into an opaque runtime failure.
 
 Health admission recognizes the configured lexical root spelling. If that root
 is itself an operator-installed alias, a registered store written with the
@@ -120,19 +128,32 @@ candidate remain eligible when the bounded helper proves their destination is
 inside the selected grant.
 
 Application composition builds one filesystem-I/O-free
-`LocalFilesystemAuthority`, one bounded local-filesystem operations broker, and
-one bounded process executor from these roots. Local-store health, direct local
-artifact reads, and every recovery candidate read receive that exact broker;
-the broker in turn holds the exact shared authority and executor. Candidate
-authorization, alias traversal, open, regular-file validation, and byte reads
-therefore occur in the isolated helper, not in the application process.
+`LocalFilesystemAuthority` inside one bounded local-filesystem operations
+broker and shares one bounded process executor. The runtime retains the broker,
+not a parallel authority or path policy. Local-store health, direct local
+artifact reads, recovery enumeration, and every recovery candidate read receive
+that exact broker. Candidate authorization, alias traversal, enumeration, open,
+regular-file validation, and byte reads therefore occur in the isolated helper,
+not in the application process.
 
-Recovery enumeration and root metadata remain a transitional exception. The
-application still derives a `LocalPathPolicy` from the same roots to run
-`os.walk`, prune directories, and produce candidate names. Every candidate's
-authorization/open/read is nevertheless delegated to the broker. Moving
-enumeration behind an interruptible, pre-follow-safe broker role—including an
-explicit directory bound—is tracked by `lab-tracker-n5kp.61`.
+Recovery is one helper-owned, pre-follow-safe traversal under the logical
+resolution deadline. A registered recovery first retains its store root as a
+nested non-popable boundary. Every root or child-directory attempt consumes the
+directory ceiling before identity deduplication; duplicate aliases and cycles
+are not enumerated twice, but cannot evade the cap. The helper admits no more
+than the configured number of unique candidate-file identities or directory
+attempts and emits only bounded path-free locator metadata in one response
+capped at 8 MiB. It may keep classifying entries under the shared deadline to
+find and promote an original-basename alias, but never descends into work that
+the directory ceiling did not admit. Before exposing a candidate, the broker
+also proves that its exact subsequent retained-root read request fits the fixed
+24 KiB request envelope. An otherwise valid locator that cannot fit is omitted
+and changes the result to an explicit limit rather than poisoning the logical
+read budget. A ceiling or metadata omission produces the same limit result,
+which cannot be mistaken for an exhaustive scan; if its bounded candidates do
+not verify, recovery fails terminally. Malformed output, deadline expiry
+(including response validation), traversal ambiguity, cleanup failure, or an
+unsupported namespace discards the candidate set and fails closed.
 
 #### Mount and namespace authority
 
@@ -176,12 +197,13 @@ only a point-in-time reachability result. See
 [`self-hosted-operations.md`](self-hosted-operations.md#local-filesystem-stores)
 for deployment guidance.
 
-Runtime composition parses these settings once into typed `Settings`, one
-frozen, slotted authority, and one shared broker/executor pair. It derives the
-transitional `LocalPathPolicy` only for recovery enumeration and root metadata.
-Direct construction of `LocalFilesystemResolver()` and `default_registry()`
-retains an unscoped compatibility mode for library callers; the application
-runtime never selects that mode merely because the root setting is absent.
+Runtime composition parses these settings once into typed `Settings` and one
+shared broker/executor pair. The broker exclusively owns the frozen, slotted
+authority used by health, reads, and enumeration; no `LocalPathPolicy` is
+retained by the application runtime. Direct construction of
+`LocalFilesystemResolver()` and `default_registry()` retains an explicit
+unscoped compatibility mode for library callers; the application runtime never
+selects that mode merely because the root setting is absent.
 
 #### Bounded local artifact reads
 
@@ -210,11 +232,12 @@ These checks do not provide snapshot isolation and do not promise detection of
 every same-size concurrent rewrite. The full content hash remains the integrity
 gate for the bytes observed.
 
-The deadline is checked around broker and enumeration steps, but the
-application-side directory enumeration retained until `lab-tracker-n5kp.61`
-cannot interrupt an individual blocked directory operation. Operators must
-continue to treat untrusted or indefinitely blocking mounted directory
-topologies as unsupported.
+Enumeration runs in the same contained helper-process boundary as reads. The
+shared absolute deadline covers root admission, the single traversal, candidate
+reads, and verification; expiry terminates the helper and makes the logical
+budget terminal. Subprocess containment cleanup may additionally use the
+executor's fixed cleanup grace. Operators must still treat mount and device-map
+topology as a trusted deployment boundary rather than a tenant-controlled input.
 
 ### Outbound HTTP policy
 
@@ -462,13 +485,13 @@ also rejected. Credentials belong in operator-controlled Git credential helpers
 or SSH facilities, never in this setting or a persisted store root.
 
 The local root list, local recovery controls, and rclone and Git policies are
-parsed once from `Settings` at startup; no consumer independently rereads the
-process environment. Runtime builds one lexical local authority and operations
-broker from that root list, passes the exact broker to health and artifact
-resolution, and retains a derived legacy local policy only for recovery
-enumeration. Rclone and Git resolution and health share one immutable instance
-of their corresponding policy. All subprocess-backed adapters share one bounded
-process executor. Rclone health preserves the registered distinction
+parsed once from `Settings` at startup; no runtime consumer independently
+rereads the process environment. Runtime builds one local operations broker
+from that root list and passes the exact broker to health, artifact resolution,
+and bounded recovery enumeration. Rclone and Git resolution and health share
+one immutable instance of their corresponding policy. All subprocess-backed
+adapters share one bounded process executor. Rclone health preserves the
+registered distinction
 between `remote:path`, `remote:/path`, and `remote:/`. A present
 `credential_ref` remains authoritative even when blank or invalid and never
 falls back to the store name. Its bounded `rclone lsf` intentionally reports a
