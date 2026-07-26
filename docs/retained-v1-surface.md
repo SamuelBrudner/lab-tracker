@@ -154,9 +154,14 @@ research record:
   roots when it is unset or empty. Local resolution optionally recovers a
   moved/renamed file by its content hash within those roots
   (`LAB_TRACKER_RESOLVER_RECOVERY`, off by default, bounded, read-only).
-  Local health is a bounded, isolated, output-free static directory probe. It is
-  advisory rather than registration validation or a handle-bound filesystem
-  capability; retarget hardening remains `lab-tracker-n5kp.41.6`.
+  Local health is a bounded, isolated, output-free directory probe whose
+  helper-side search/traversal and validation remain bound to no-follow
+  directory handles across link and junction substitution races. Helper-owned
+  close attempts are best effort and contained helper exit is the cleanup
+  backstop. The result is advisory rather than registration validation or a
+  durable filesystem lease; bounded pre-follow parent planning and
+  mount-crossing authority remain `lab-tracker-n5kp.71` and
+  `lab-tracker-n5kp.72`.
   Registered `git` data stores resolve `path@commit` locators read-only and
   on demand, gated by an operator remote allowlist
   (`LAB_TRACKER_GIT_ALLOWED_REMOTES`, deny-by-default), a protocol allowlist,

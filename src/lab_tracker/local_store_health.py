@@ -11,7 +11,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final
 
-from lab_tracker._local_store_health_helper import LOCAL_STORE_HEALTH_ROOT_ENV
 from lab_tracker.bounded_subprocess import (
     DEFAULT_PROCESS_DEADLINE_SECONDS,
     MAX_PROCESS_DEADLINE_SECONDS,
@@ -27,9 +26,13 @@ from lab_tracker.store_health import (
     StoreProbeTarget,
 )
 
-_HELPER_PATH: Final = Path(os.path.abspath(__file__)).with_name(
-    "_local_store_health_helper.py"
+LOCAL_STORE_HEALTH_ROOT_ENV: Final = "LAB_TRACKER_INTERNAL_LOCAL_STORE_HEALTH_ROOT"
+_HELPER_FILENAME: Final = (
+    "_windows_local_store_health_helper.py"
+    if os.name == "nt"
+    else "_local_store_health_helper.py"
 )
+_HELPER_PATH: Final = Path(os.path.abspath(__file__)).with_name(_HELPER_FILENAME)
 _HELPER_OPTIONS: Final = ("-I", "-S", "-B")
 _POSIX_LOCALE_VARIABLES: Final = frozenset({"LANG", "LC_ALL", "LC_CTYPE"})
 _WINDOWS_RUNTIME_VARIABLES: Final = frozenset({"SYSTEMROOT", "WINDIR"})

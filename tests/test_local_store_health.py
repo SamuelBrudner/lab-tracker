@@ -184,7 +184,8 @@ def _create_windows_junction(junction: Path, target: Path) -> None:
     )
 
 
-def test_helper_accepts_only_a_plain_directory_without_output(
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX directory descriptors")
+def test_posix_helper_accepts_only_a_plain_directory_without_output(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -208,6 +209,41 @@ def test_helper_accepts_only_a_plain_directory_without_output(
     assert capsys.readouterr() == ("", "")
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX open flags")
+def test_posix_helper_uses_o_exec_when_o_search_and_o_path_are_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    execute_mode = 1 << 60
+    monkeypatch.setattr(local_health_helper.os, "O_SEARCH", None, raising=False)
+    monkeypatch.setattr(local_health_helper.os, "O_PATH", None, raising=False)
+    monkeypatch.setattr(
+        local_health_helper.os,
+        "O_EXEC",
+        execute_mode,
+        raising=False,
+    )
+
+    flags = local_health_helper._directory_open_flags()
+
+    assert flags is not None
+    assert flags & execute_mode
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX open flags")
+def test_posix_helper_uses_darwin_o_exec_abi_when_python_omits_symbol(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(local_health_helper.os, "O_SEARCH", None, raising=False)
+    monkeypatch.setattr(local_health_helper.os, "O_PATH", None, raising=False)
+    monkeypatch.setattr(local_health_helper.os, "O_EXEC", None, raising=False)
+    monkeypatch.setattr(local_health_helper.sys, "platform", "darwin")
+
+    flags = local_health_helper._directory_open_flags()
+
+    assert flags is not None
+    assert flags & local_health_helper._DARWIN_O_EXEC
+
+
 @pytest.mark.parametrize(
     ("argv", "environment"),
     (
@@ -227,14 +263,19 @@ def test_helper_rejects_malformed_protocol_without_output(
     assert capsys.readouterr() == ("", "")
 
 
-def test_helper_collapses_even_control_flow_stat_failures_without_output(
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX directory descriptors")
+def test_posix_helper_collapses_control_flow_fstat_failures_without_output(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    def fail_stat(*_args: object, **_kwargs: object) -> object:
-        raise KeyboardInterrupt("private path diagnostic")
+    real_fstat = local_health_helper.os.fstat
 
-    monkeypatch.setattr(local_health_helper.os, "stat", fail_stat)
+    def fail_fstat(fd: int) -> os.stat_result:
+        if fd >= 0:
+            raise KeyboardInterrupt("private path diagnostic")
+        return real_fstat(fd)
+
+    monkeypatch.setattr(local_health_helper.os, "fstat", fail_fstat)
 
     assert local_health_helper.main(
         ("helper",),
@@ -243,29 +284,292 @@ def test_helper_collapses_even_control_flow_stat_failures_without_output(
     assert capsys.readouterr() == ("", "")
 
 
-def test_helper_rejects_windows_reparse_metadata(
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX directory descriptors")
+def test_posix_helper_walks_each_component_relative_and_closes_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    reparse_flag = 0x400
+    opened = iter((10, 11, 12))
+    open_calls: list[tuple[str, int, int | None]] = []
+    close_calls: list[int] = []
+
+    def fake_open(path: str, flags: int, *, dir_fd: int | None = None) -> int:
+        open_calls.append((path, flags, dir_fd))
+        return next(opened)
+
+    monkeypatch.setattr(local_health_helper.os, "open", fake_open)
     monkeypatch.setattr(
-        local_health_helper.stat,
-        "FILE_ATTRIBUTE_REPARSE_POINT",
-        reparse_flag,
-        raising=False,
+        local_health_helper.os,
+        "fstat",
+        lambda _fd: SimpleNamespace(st_mode=stat.S_IFDIR),
+    )
+    access_calls: list[tuple[str, int, int, bool]] = []
+
+    def fake_access(
+        path: str,
+        mode: int,
+        *,
+        dir_fd: int,
+        effective_ids: bool,
+    ) -> bool:
+        access_calls.append((path, mode, dir_fd, effective_ids))
+        return True
+
+    monkeypatch.setattr(local_health_helper.os, "access", fake_access)
+    monkeypatch.setattr(
+        local_health_helper.os,
+        "close",
+        lambda fd: close_calls.append(fd),
+    )
+
+    assert (
+        local_health_helper._is_handle_bound_searchable_directory("/one/two")
+        is True
+    )
+    assert [(path, dir_fd) for path, _flags, dir_fd in open_calls] == [
+        ("/", None),
+        ("one", 10),
+        ("two", 11),
+    ]
+    for _path, flags, _dir_fd in open_calls:
+        assert flags & os.O_DIRECTORY
+        assert flags & os.O_NOFOLLOW
+        assert flags & os.O_CLOEXEC
+    assert access_calls == [
+        (".", os.X_OK, 10, True),
+        (".", os.X_OK, 11, True),
+        (".", os.X_OK, 12, True),
+    ]
+    assert close_calls == [10, 11, 12]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX directory descriptors")
+def test_posix_helper_close_failure_still_attempts_each_owned_close_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    opened = iter((20, 21))
+    close_calls: list[int] = []
+
+    monkeypatch.setattr(
+        local_health_helper.os,
+        "open",
+        lambda *_args, **_kwargs: next(opened),
     )
     monkeypatch.setattr(
         local_health_helper.os,
-        "stat",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            st_mode=stat.S_IFDIR,
-            st_file_attributes=reparse_flag,
-        ),
+        "fstat",
+        lambda _fd: SimpleNamespace(st_mode=stat.S_IFDIR),
+    )
+    monkeypatch.setattr(local_health_helper.os, "access", lambda *_args, **_kwargs: True)
+
+    def fail_first_close(fd: int) -> None:
+        close_calls.append(fd)
+        if fd == 20:
+            raise OSError("private close diagnostic")
+
+    monkeypatch.setattr(local_health_helper.os, "close", fail_first_close)
+
+    assert (
+        local_health_helper._is_handle_bound_searchable_directory("/child") is False
+    )
+    assert close_calls == [20, 21]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX directory descriptors")
+def test_posix_helper_injected_base_exception_attempts_each_tracked_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    opened = iter((30, 31))
+    close_calls: list[int] = []
+    fstat_calls = 0
+
+    monkeypatch.setattr(
+        local_health_helper.os,
+        "open",
+        lambda *_args, **_kwargs: next(opened),
     )
 
-    assert local_health_helper.main(
-        ("helper",),
-        {local_health_helper.LOCAL_STORE_HEALTH_ROOT_ENV: "/approved/store"},
-    ) != 0
+    def fail_second_fstat(_fd: int) -> SimpleNamespace:
+        nonlocal fstat_calls
+        fstat_calls += 1
+        if fstat_calls == 2:
+            raise KeyboardInterrupt("private fstat diagnostic")
+        return SimpleNamespace(st_mode=stat.S_IFDIR)
+
+    monkeypatch.setattr(local_health_helper.os, "fstat", fail_second_fstat)
+    monkeypatch.setattr(local_health_helper.os, "access", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        local_health_helper.os,
+        "close",
+        lambda fd: close_calls.append(fd),
+    )
+
+    assert (
+        local_health_helper._is_handle_bound_searchable_directory("/child") is False
+    )
+    assert close_calls == [31, 30]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX symbolic links")
+def test_posix_helper_rejects_intermediate_symlink_substitution_before_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / "race-parent-before"
+    target = parent / "store"
+    target.mkdir(parents=True)
+    outside = tmp_path / "outside-before"
+    (outside / "store").mkdir(parents=True)
+    moved = tmp_path / "moved-before"
+    real_open = os.open
+    swapped = False
+
+    def swap_then_open(
+        path: str,
+        flags: int,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal swapped
+        if path == parent.name and not swapped:
+            swapped = True
+            parent.rename(moved)
+            parent.symlink_to(outside, target_is_directory=True)
+        return real_open(path, flags, dir_fd=dir_fd)
+
+    monkeypatch.setattr(local_health_helper.os, "open", swap_then_open)
+
+    assert (
+        local_health_helper._is_handle_bound_searchable_directory(
+            os.fspath(target)
+        )
+        is False
+    )
+    assert swapped is True
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX symbolic links")
+def test_posix_helper_pins_an_intermediate_open_before_path_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / "race-parent-after"
+    target = parent / "store"
+    target.mkdir(parents=True)
+    outside = tmp_path / "outside-after"
+    (outside / "store").mkdir(parents=True)
+    moved = tmp_path / "moved-after"
+    real_open = os.open
+    swapped = False
+
+    def open_then_swap(
+        path: str,
+        flags: int,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal swapped
+        fd = real_open(path, flags, dir_fd=dir_fd)
+        if path == parent.name and not swapped:
+            swapped = True
+            parent.rename(moved)
+            parent.symlink_to(outside, target_is_directory=True)
+        return fd
+
+    monkeypatch.setattr(local_health_helper.os, "open", open_then_swap)
+
+    assert (
+        local_health_helper._is_handle_bound_searchable_directory(
+            os.fspath(target)
+        )
+        is True
+    )
+    assert swapped is True
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX symbolic links")
+@pytest.mark.parametrize("swap_before_open", (True, False))
+def test_posix_helper_final_replacement_is_rejected_or_bound_to_open_handle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    swap_before_open: bool,
+) -> None:
+    target = tmp_path / f"race-leaf-{swap_before_open}"
+    target.mkdir()
+    outside = tmp_path / f"outside-leaf-{swap_before_open}"
+    outside.mkdir()
+    moved = tmp_path / f"moved-leaf-{swap_before_open}"
+    real_open = os.open
+    swapped = False
+
+    def racing_open(
+        path: str,
+        flags: int,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal swapped
+        if path == target.name and not swapped and swap_before_open:
+            swapped = True
+            target.rename(moved)
+            target.symlink_to(outside, target_is_directory=True)
+        fd = real_open(path, flags, dir_fd=dir_fd)
+        if path == target.name and not swapped:
+            swapped = True
+            target.rename(moved)
+            target.symlink_to(outside, target_is_directory=True)
+        return fd
+
+    monkeypatch.setattr(local_health_helper.os, "open", racing_open)
+
+    assert (
+        local_health_helper._is_handle_bound_searchable_directory(
+            os.fspath(target)
+        )
+        is (not swap_before_open)
+    )
+    assert swapped is True
+
+
+def test_posix_helper_rejects_noncanonical_or_unsupported_paths_without_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_open(*_args: object, **_kwargs: object) -> int:
+        raise AssertionError("invalid path reached os.open")
+
+    monkeypatch.setattr(local_health_helper.os, "open", fail_open)
+
+    invalid = ("relative", "//authority/path", "/a//b", "/a/../b", "/a/\x01b")
+    for path in invalid:
+        assert (
+            local_health_helper._is_handle_bound_searchable_directory(path) is False
+        )
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX permission modes")
+def test_real_posix_helper_accepts_search_only_and_rejects_unsearchable_directory(
+    tmp_path: Path,
+) -> None:
+    if os.geteuid() == 0:
+        pytest.skip("root bypasses ordinary directory permission checks")
+    search_only = tmp_path / "search-only"
+    unsearchable = tmp_path / "unsearchable"
+    search_only.mkdir()
+    unsearchable.mkdir()
+    search_only.chmod(0o111)
+    unsearchable.chmod(0o000)
+    try:
+        searchable_result = _run_helper(search_only)
+        unsearchable_result = _run_helper(unsearchable)
+    finally:
+        search_only.chmod(0o700)
+        unsearchable.chmod(0o700)
+
+    assert searchable_result.returncode == 0
+    assert searchable_result.stdout == b""
+    assert searchable_result.stderr == b""
+    assert unsearchable_result.returncode != 0
+    assert unsearchable_result.stdout == b""
+    assert unsearchable_result.stderr == b""
 
 
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX symbolic links")

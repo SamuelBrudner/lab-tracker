@@ -309,12 +309,16 @@ Shipped:
   static detail per adapter. Local health first restricts the object-identical
   operator `LocalPathPolicy` to the complete registered root, then invokes one
   fixed isolated, output-free Python helper under the shared process executor
-  and subprocess deadline. The helper performs a no-follow final directory stat
-  and rejects Windows reparse-point roots. Policy narrowing and canonicalization
-  occur in the parent before that deadline. This is static, advisory containment,
-  not a handle-bound guarantee against root retargeting; that follow-up is
-  `lab-tracker-n5kp.41.6`. The legacy helper now fails closed for local, HTTP,
-  rclone, and Git. `object_table` and `database` remain unsupported.
+  and subprocess deadline. The platform helper opens each canonical component
+  relative to the retained preceding no-follow directory handle, requires
+  search/traverse permission, and validates the final handle, preventing helper
+  inspection from being redirected by a link or junction substitution race.
+  Helper-owned close attempts are best effort and contained helper exit is the
+  cleanup backstop. Policy narrowing and canonicalization occur in the parent
+  before that deadline. This remains a static, advisory point-in-time result
+  rather than a durable filesystem lease. The legacy helper now fails closed
+  for local, HTTP, rclone, and Git. `object_table` and `database` remain
+  unsupported.
 - ✅ Group-scoped stores: a store is scoped to exactly one of a project or a
   group (migration `0050`, nullable `project_id` + `group_id`). A group store is
   inherited by every project in the group — `get_by_name` resolves a project's

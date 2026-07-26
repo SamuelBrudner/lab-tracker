@@ -14,7 +14,10 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - exercised by Python 3.10 CI
     import tomli as tomllib
 
-_LOCAL_STORE_HEALTH_HELPER = "lab_tracker/_local_store_health_helper.py"
+_POSIX_LOCAL_STORE_HEALTH_HELPER = "lab_tracker/_local_store_health_helper.py"
+_WINDOWS_LOCAL_STORE_HEALTH_HELPER = (
+    "lab_tracker/_windows_local_store_health_helper.py"
+)
 _LOCAL_STORE_HEALTH_ROOT_ENV = "LAB_TRACKER_INTERNAL_LOCAL_STORE_HEALTH_ROOT"
 
 
@@ -156,12 +159,18 @@ def test_wheel_contains_and_runs_isolated_local_health_helper(
 ) -> None:
     target = tmp_path / "wheel"
     with zipfile.ZipFile(built_wheel) as archive:
-        assert _LOCAL_STORE_HEALTH_HELPER in archive.namelist()
-        archive.extract(_LOCAL_STORE_HEALTH_HELPER, target)
+        assert _POSIX_LOCAL_STORE_HEALTH_HELPER in archive.namelist()
+        assert _WINDOWS_LOCAL_STORE_HEALTH_HELPER in archive.namelist()
+        active_helper = (
+            _WINDOWS_LOCAL_STORE_HEALTH_HELPER
+            if os.name == "nt"
+            else _POSIX_LOCAL_STORE_HEALTH_HELPER
+        )
+        archive.extract(active_helper, target)
 
     store_root = tmp_path / "store"
     store_root.mkdir()
-    helper = target / _LOCAL_STORE_HEALTH_HELPER
+    helper = target / active_helper
     completed = subprocess.run(  # noqa: S603 - fixed interpreter and wheel member
         [sys.executable, "-I", "-S", "-B", str(helper)],
         check=False,
