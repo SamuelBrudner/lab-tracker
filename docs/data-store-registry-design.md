@@ -168,9 +168,14 @@ grammar for local, HTTP, rclone, and registered Git references.
 
 `ExternalArtifactReference` is unchanged for existing rows: a legacy reference
 with a free-form `source_system` (`s3`, `mlflow`, `doi`, `datalad`…) and an
-absolute `uri` still resolves through the generic local/http/kind adapters from
-the resolver design. New captures **prefer** explicit `store_name`/`locator`
-fields or a `store://` URI. Legacy source-system labels remain compatible; they
+absolute `uri` remains readable and exportable as metadata, but application,
+HTTP, and MCP resolution fail it closed without dispatching a resolver. A
+project contributor's ability to record a pointer is not authority to make the
+service process read a host path, use a credential, open a network connection,
+or run a subprocess. To make an existing pointer resolvable, register an
+appropriate data store and replace the captured pointer with its
+`store_name`/`locator` identity (or canonical `store://` URI) while retaining
+the content hash. Legacy source-system labels remain compatible metadata; they
 do not independently name or authorize a registered store. No migration is
 forced.
 

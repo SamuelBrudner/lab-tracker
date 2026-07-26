@@ -11,18 +11,20 @@ boundary — see [`build-vs-buy-boundaries.md`](build-vs-buy-boundaries.md): byt
 durability, transfer, and cross-workstation availability belong to object
 storage and data substrates, not to Lab Tracker.
 
-Before this capability shipped, the pointer was **dead**: nothing in the
-codebase dereferenced a reference to fetch its content. When an agent needed
-content that was *never captured in the metadata snapshot* — the actual
-sample→condition map inside `samples.xlsx`, the full text of an as-run protocol,
-the values behind a plate map, a region of an `.fcs` file — the graph could tell
-the agent *that* an artifact existed and *where*, but could not let the agent
-*read* it.
+Before registered-store resolution shipped, the pointer was **dead**: nothing
+in the codebase could fetch its content through a project-scoped storage
+authority. When an agent needed content that was *never captured in the
+metadata snapshot* — the actual sample→condition map inside `samples.xlsx`, the
+full text of an as-run protocol, the values behind a plate map, a region of an
+`.fcs` file — the graph could tell the agent *that* an artifact existed and
+*where*, but could not let the agent *read* it.
 
 For artifacts that reach a durable store (OneDrive, Box, S3, a DataLad remote),
-Lab Tracker needs a way to **resolve the pointer on demand**: given a reference
-already in the graph, fetch a bounded, hash-verified view of its content at
-reasoning time.
+Lab Tracker resolves a **registered store pointer on demand**: after authorizing
+the entity and its project-scoped store, it converts the stored reference into
+a bounded capability and fetches a hash-verified view at reasoning time. Direct
+filesystem paths, URLs, rclone locators, and Git remotes remain inert metadata;
+persisting one never grants the application process authority to use it.
 
 ## Scope and non-goals
 
@@ -30,12 +32,12 @@ This is a **read-only** capability and stays inside the established boundaries.
 
 In scope:
 
-- Dereference an existing `ExternalArtifactReference` on demand and return a
-  bounded, integrity-checked view of its content.
-- A pluggable, per-`source_system` adapter registry with a local-filesystem
-  fallback — exactly the shape `build-vs-buy-boundaries.md` prescribes for byte
-  and asset storage ("integrate behind a pluggable object-storage interface;
-  keep local filesystem fallback").
+- Dereference an existing canonical `store://` reference on demand, after entity,
+  project, and registered-store authorization, and return a bounded,
+  integrity-checked view of its content.
+- A pluggable registry of narrow, store-kind capabilities — exactly the shape
+  `build-vs-buy-boundaries.md` prescribes for byte and asset storage ("integrate
+  behind a pluggable object-storage interface; keep local filesystem fallback").
 - Expose resolution through the read-only assistant / MCP surface alongside the
   existing provenance read tools.
 
@@ -44,11 +46,15 @@ Explicitly **not** in scope (anti-scope from `build-vs-buy-boundaries.md`):
 - No data catalog and no load-by-name. You resolve a reference that already
   exists in the graph, identified by its `content_hash`; you do not look
   artifacts up by name.
+- **No direct-locator authority.** A raw path, URL, rclone locator, or Git remote
+  is metadata only. It must be converted to a canonical reference under a
+  registered store before the application or MCP surface can resolve it.
 - No object-store lifecycle, replication, or transfer management.
 - **No auto-interception of reads.** `build-vs-buy-boundaries.md` says never hook
   `open()`/audit reads at capture time. On-demand resolution is the opposite
-  mechanism: an *explicit, agent-initiated, read-only* dereference of a pointer
-  the graph already holds. It draws no new edges and writes nothing to the graph.
+  mechanism: an *explicit, agent-initiated, read-only* dereference of a
+  registered-store pointer the graph already holds. It draws no new edges and
+  writes nothing to the graph.
 - No new provenance edges. Resolution reads; it does not commit. (A resolution
   *event* may be logged for audit, like export events, but that is optional.)
 
@@ -66,9 +72,10 @@ tri-state, and the agent must be told which:
   does **not** match. The file moved/changed/was overwritten since capture.
   Surface the diagnostic metadata loudly, but withhold the mismatched bytes;
   never substitute drifted content for the captured artifact.
-- **`unresolved`** — no adapter for this `source_system`, the locator is
-  unreachable on this host, or access was denied. Return the pointer and the
-  reason, not content.
+- **`unresolved`** — the reference is direct metadata, no scoped adapter exists
+  for the registered store, the store-relative locator is unreachable on this
+  host, or access was denied. Return a safe diagnostic, not content or an
+  authority-bearing locator.
 
 This is what makes "pull content that wasn't captured" trustworthy: the agent
 gets new content *and* a guarantee it is the same artifact, or an explicit
@@ -76,9 +83,14 @@ warning that it is not.
 
 ## Interface
 
-Mirror the existing internal [`FileStorageBackend`](../src/lab_tracker/file_storage.py)
-(`store`/`retrieve`/`exists`/`iter_chunks`), but for *outbound* dereferencing.
-New module, e.g. `src/lab_tracker/artifact_resolution.py`:
+The application prepares an exact, detached target while its authorized
+database scope is open, then releases that scope before dispatch. Prepared plans
+are sealed to the producing application-query instance and single-use. The
+caller-visible handle is not the dispatch authority: resolution consumes a
+private detached record and never re-reads mutable handle contents. Callers
+therefore cannot forge, replace, race, or replay a typed target to skip the
+entity read. The essential surface in
+`src/lab_tracker/artifact_resolution.py` is:
 
 ```python
 class ResolutionStatus(str, Enum):
@@ -100,37 +112,49 @@ class ResolvedArtifact:
     fetched_at: datetime
     detail: str | None              # reason when unresolved/drifted
 
-class ArtifactResolver(Protocol):
-    def can_resolve(self, ref: ExternalArtifactReference) -> bool: ...
-    def resolve(
+PreparedArtifactResolutionTarget = (
+    LocalStoreResolutionTarget
+    | HttpStoreResolutionTarget
+    | RcloneStoreResolutionTarget
+    | GitStoreResolutionTarget
+    | ResolvedArtifact
+)
+
+class ResolverRegistry:
+    def resolve_prepared(
         self,
-        ref: ExternalArtifactReference,
+        target: PreparedArtifactResolutionTarget,
         *,
         max_bytes: int = DEFAULT_MAX_BYTES,
         byte_range: tuple[int, int] | None = None,
     ) -> ResolvedArtifact:
-        """Fetch a bounded view and verify the content hash."""
+        """Dispatch an application-prepared, store-scoped capability."""
+
+    def resolve(self, ref: ExternalArtifactReference, ...) -> ResolvedArtifact:
+        """Fail closed: direct references are metadata only."""
 ```
 
-A `ResolverRegistry` dispatches by `source_system` (with a generic `http`/`https`
-fallback), tries each registered adapter's `can_resolve`, and returns
-`UNRESOLVED` if none matches. This is the "Adapter configuration" the boundary
-doc explicitly permits.
+`ResolverRegistry.resolve_prepared` dispatches by the exact typed target to a
+narrow scoped adapter protocol and returns `UNRESOLVED` if none matches. Its
+public `resolve` facade never dispatches a raw `ExternalArtifactReference`.
+Concrete adapters retain direct resolver methods as trusted internal
+implementation primitives, not as application or MCP authority surfaces.
 
 ### Adapters, phased
 
 | Adapter | `source_system` | Phase | Notes |
 | --- | --- | --- | --- |
-| Local filesystem | `local`, or any `file://`/path locator | v1 slice | Resolves a path on *this host*. Needs the host-local mount config below. |
-| Generic HTTP(S) | `http`/`https`, `doi` (follow to file) | v1 slice | Bounded, hash-verified reads; public global destinations or explicit exact-authority/CIDR exceptions only. |
+| Local filesystem | registered `local_fs` store | v1 slice | Resolves a store-relative path on *this host*. Needs the host-local mount config below. The direct-path adapter is an internal primitive, not an application authority surface. |
+| HTTP(S) | registered `http` store | v1 slice | Bounded, hash-verified reads under the store prefix; the generic direct-URL adapter is an internal primitive only. |
 | S3 / MinIO | `s3` | next | Object storage; the boundary doc's primary byte target. Credentials via adapter config. |
 | OneDrive / Box | `onedrive`, `box` | later | Graph/Box API + OAuth. This is the "offload credential/session/device-grant plumbing later" boundary — do it once auth is offloaded. |
 | DataLad / DVC | `datalad`, `dvc` | later | `datalad get` / `dvc pull` by hash; substrate already models content. |
 
-Start with **local + HTTP(S)**, because that covers the scientist's real case:
+Start with registered **local + HTTP(S)** stores, because that covers the
+scientist's real case:
 files consolidated into a OneDrive folder that is **locally synced** on the
-machine the agent runs on resolve as local paths today, with no cloud
-credentials. The cloud-API adapters are the upgrade for when the file is *not*
+machine the agent runs on as store-relative local paths, with no cloud
+credentials. The cloud-API adapters are the upgrade for when the file is not
 synced locally.
 
 ## Outbound HTTP destination policy
@@ -327,18 +351,17 @@ backstop.
 
 ## The host-local locator problem
 
-A stored `uri` is portable identity-wise but not location-wise: OneDrive mounts
-at a different local path on every machine (`C:\Users\…\OneDrive` vs
-`/Users/…/OneDrive`), and a captured `uri` might be a cloud URL, a logical path,
-or a machine-specific absolute path. So an adapter needs **host-local config** —
-a small mount/endpoint table mapping a `source_system` (and optional URI prefix)
-to how it is reachable *here*:
+A registered store identity is portable, but its root may be host-specific:
+OneDrive mounts at a different local path on every machine
+(`C:\Users\…\OneDrive` vs `/Users/…/OneDrive`). The registered `DataStore`
+therefore supplies the project-scoped root or endpoint, while deployment
+configuration supplies the host-local authority under which that store may be
+reached. Raw captured locators never select this configuration.
 
 ```
-[resolvers.onedrive]
-local_mount = "/home/sam/OneDrive"     # this host's sync root, if synced
-# or
-api_base = "https://graph.microsoft.com/v1.0/..."   # later, when not synced
+[registered store: project-onedrive]
+kind = "local_fs"
+root = "/home/sam/OneDrive"
 ```
 
 The `content_hash` is what makes this safe: even when the path differs across
@@ -465,10 +488,10 @@ filesystem-I/O-free authority preserves unambiguous lexical components, expands
 the current-user `~` from the process environment, prefixes relative roots with
 the startup working directory, and rejects dot/dot-dot or unsupported platform
 spellings rather than canonicalizing them.
-One bounded filesystem broker serves local health, direct local reads, recovery
-enumeration, and every recovery candidate read. The application runtime retains
-neither a parallel authority nor a `LocalPathPolicy`. Health admits only a
-configured lexical root spelling;
+One bounded filesystem broker serves local health, registered local reads,
+recovery enumeration, and every recovery candidate read. The application
+runtime retains neither a parallel authority nor a `LocalPathPolicy`. Health
+admits only a configured lexical root spelling;
 the separate physical spelling behind an operator root alias must be configured
 explicitly if registered stores use it.
 
@@ -579,6 +602,16 @@ the same canonical entity-not-found response regardless of whether the supplied
 index or hash would be valid. The resolver cannot become a way to enumerate
 artifacts or fetch bytes for a project the caller cannot read.
 
+Resolution also requires a registered, store-relative identity. Direct
+project-authored `file:`, HTTP(S), `rclone:`, Git, native-path, and other
+non-`store://` references remain valid provenance metadata but resolve to one
+content-free, redacted `unresolved` result. This denial is prepared only after
+the owning entity's opaque read boundary and occurs before adapter selection,
+cache access, filesystem work, DNS, network, credential lookup, working- or
+cache-directory creation, observed-hash calculation, or subprocess execution.
+Register the target as a data store and replace the pointer with its canonical
+`store_name`/`locator` or `store://` identity to make it resolvable.
+
 ## Bounding and untrusted content
 
 Resolving arbitrary external content into an agent's context is a payload-size
@@ -646,8 +679,9 @@ and prompt-injection surface, so the resolver is bounded by construction:
 
 - **Pointer model preserved.** The graph still stores references, not bytes;
   resolution is a separate, on-demand read path.
-- **Adapters stay thin and optional.** Each `source_system` adapter only knows
-  how to fetch and is added when needed; the registry degrades to `UNRESOLVED`.
+- **Adapters stay thin and optional.** Each scoped store adapter only knows how
+  to fetch within its prepared authority; the registry degrades to
+  `UNRESOLVED`.
 - **Hash stays the join key.** The same digest that links artifacts across
   machines now also certifies that a resolved view is the captured artifact.
 - **Read-only, no interception, no new edges.** It extends the assistant/MCP read
@@ -659,9 +693,9 @@ Shipped (`src/lab_tracker/artifact_resolution.py`, tested in
 `tests/test_artifact_resolution.py` and `tests/test_external_artifacts_routes.py`):
 
 - ✅ `ResolutionStatus` (`verified`/`drifted`/`unresolved`), the frozen
-  `ResolvedArtifact` result with `to_json_dict()`, the `ArtifactResolver`
-  protocol, and a `ResolverRegistry` that dispatches to the first capable
-  adapter and falls back to `UNRESOLVED`.
+  `ResolvedArtifact` result with `to_json_dict()`, narrow scoped adapter
+  protocols, and a `ResolverRegistry` that dispatches exact prepared store
+  targets and fails closed for raw references.
 - ✅ `LocalFilesystemResolver` — `file://` and `local`/`local_fs` sources, with
   native `file:` URI conversion, an empty/`localhost`-only authority policy,
   and a shared filesystem-I/O-free lexical authority plus bounded broker.
@@ -708,8 +742,9 @@ Shipped (`src/lab_tracker/artifact_resolution.py`, tested in
   before DNS, composed exactly once, and checked against the registered prefix
   before every redirect hop. Invalid legacy definitions and escaping redirects
   fail with the opaque store result before the next network operation, while
-  successful results retain their logical `store://` identity. Ordinary direct
-  HTTP references keep their existing redirect behavior.
+  successful results retain their logical `store://` identity. The generic HTTP
+  adapter remains an internal resolver primitive; project-authored direct HTTP
+  references never dispatch to it.
 - ✅ `RcloneResolver` — `rclone://<remote>/<path>`, the locked-in unifier for
   S3 / SFTP / Dropbox / Google Drive / Box / OneDrive; stats then fetches, and
   degrades to `UNRESOLVED` when the binary is absent. Gated by an operator
@@ -730,8 +765,9 @@ Shipped (`src/lab_tracker/artifact_resolution.py`, tested in
   `RcloneStoreResolutionTarget` crosses the database-scope boundary. The scoped
   resolver checks the typed remote directly against the allowlist and composes
   one exact positional token without URI decoding or path normalization.
-  Results retain the logical `store://` identity. Ordinary direct
-  `rclone://` references keep their existing parser and subprocess lifecycle.
+  Results retain the logical `store://` identity. The generic rclone parser and
+  subprocess lifecycle remain internal resolver primitives; project-authored
+  direct `rclone://` references never dispatch to them.
 - ✅ Rclone and Git store-health subprocesses use dedicated adapters over the
   same object-identical immutable policies and bounded process executor as
   resolution. Rclone preserves relative, rooted, and sole-root registered
@@ -754,16 +790,18 @@ Shipped (`src/lab_tracker/artifact_resolution.py`, tested in
   logical `store://` identity. The scoped resolver reauthorizes that address,
   uses object-format-separated cache namespaces, and explicitly runs
   `git init --object-format=sha1|sha256` before the existing exact-URL preflight,
-  fetch, size, stream, and hash lifecycle. Ordinary direct `git+` references
-  retain their established parsing and cache behavior pending separate generic
-  Git hardening.
+  fetch, size, stream, and hash lifecycle. The generic Git lifecycle remains an
+  internal resolver primitive; project-authored direct `git+` references never
+  dispatch to it.
 - ✅ Content hash is the integrity gate across all adapters (the whole object is
   hashed; `max_bytes`/`byte_range` bound only the returned payload), via the
   shared `_hash_and_collect` helper.
 - ✅ `POST /external-artifacts/resolve` — resolve-by-entity, gated by the owning
   dataset, analysis, or claim's opaque read boundary before artifact selection,
-  hash comparison, materialization, or resolver work; authenticated requests
-  are then admitted under process-local global and per-actor no-wait limits.
+  hash comparison, materialization, or resolver work. Non-store references are
+  metadata only and fail to one static redacted result before cache, host,
+  network, credential, or subprocess work; authenticated requests are then
+  admitted under process-local global and per-actor no-wait limits.
   Saturated requests return the same generic `429` plus `Retry-After` without
   constructing the ordinary request session. Accepted calls complete all
   database-backed preparation and release their read scope before resolver I/O;

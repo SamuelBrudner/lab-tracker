@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import base64
 from collections.abc import Callable
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, field
+from threading import Lock
 from typing import Any, Literal, Protocol
 from urllib.parse import urlsplit
 from uuid import UUID
@@ -12,7 +14,11 @@ from uuid import UUID
 from sqlalchemy.orm import Session as OrmSession
 
 from lab_tracker.artifact_resolution import (
+    GitStoreResolutionTarget,
+    HttpStoreResolutionTarget,
+    LocalStoreResolutionTarget,
     PreparedArtifactResolutionTarget,
+    RcloneStoreResolutionTarget,
     ResolvedArtifact,
     ResolverRegistry,
     git_store_resolution_target,
@@ -88,11 +94,25 @@ ExternalArtifactEntityType = Literal["analysis", "claim", "dataset"]
 
 @dataclass(frozen=True)
 class PreparedExternalArtifactResolution:
-    """A database-free external-artifact resolution plan.
+    """A caller-visible handle for a database-free resolution plan.
 
-    Preparation authorizes and materializes the target while the request scope is
-    open. Resolution then releases that scope before invoking an external resolver.
+    ``target`` is an inspectable detached view, never the dispatch authority.
+    Resolution consumes a separate private record created while the authorized
+    request scope is open, releases that scope, then invokes an external resolver.
     """
+
+    entity_type: ExternalArtifactEntityType
+    entity_id: UUID
+    artifact_index: int
+    target: PreparedArtifactResolutionTarget
+    max_bytes: int
+    byte_range: tuple[int, int] | None
+    _authorization: object | None = field(default=None, repr=False, compare=False)
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedExternalArtifactResolutionRecord:
+    """Private detached authority consumed instead of caller-visible plan data."""
 
     entity_type: ExternalArtifactEntityType
     entity_id: UUID
@@ -230,6 +250,15 @@ class ContextQueries:
     session: OrmSession
     release_read_scope: Callable[[], None]
     resolver_registry: ResolverRegistry | None = None
+    _prepared_external_artifact_resolutions: dict[
+        object, _PreparedExternalArtifactResolutionRecord
+    ] = field(default_factory=dict, init=False, repr=False, compare=False)
+    _prepared_external_artifact_resolution_lock: Lock = field(
+        default_factory=Lock,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def decision_context(
         self,
@@ -522,14 +551,27 @@ class ContextQueries:
             if isinstance(materialized, ExternalArtifactReference)
             else materialized
         )
-        return PreparedExternalArtifactResolution(
+        authorization = object()
+        prepared = PreparedExternalArtifactResolution(
             entity_type=entity_type,
             entity_id=entity_id,
             artifact_index=artifact_index,
             target=target,
             max_bytes=bounds.max_bytes,
             byte_range=bounds.byte_range,
+            _authorization=authorization,
         )
+        record = _PreparedExternalArtifactResolutionRecord(
+            entity_type=entity_type,
+            entity_id=entity_id,
+            artifact_index=artifact_index,
+            target=deepcopy(target),
+            max_bytes=bounds.max_bytes,
+            byte_range=bounds.byte_range,
+        )
+        with self._prepared_external_artifact_resolution_lock:
+            self._prepared_external_artifact_resolutions[authorization] = record
+        return prepared
 
     def resolve_prepared_external_artifact(
         self,
@@ -537,37 +579,77 @@ class ContextQueries:
     ) -> dict[str, Any]:
         """Release SQLAlchemy resources, then resolve a detached target only."""
 
-        try:
-            bounds = ArtifactContentBounds.from_resolver(
-                prepared.max_bytes,
-                prepared.byte_range,
+        authorization = (
+            prepared._authorization
+            if type(prepared) is PreparedExternalArtifactResolution
+            else None
+        )
+        with self._prepared_external_artifact_resolution_lock:
+            record = (
+                self._prepared_external_artifact_resolutions.pop(authorization, None)
+                if type(authorization) is object
+                else None
             )
-        except ArtifactContentBoundsError as exc:
-            raise ValidationError(str(exc)) from exc
+            # The request scope itself is not a concurrent primitive. Serialize
+            # repeated/forged plan cleanup while keeping external resolver work
+            # outside this lock.
+            self.release_read_scope()
 
-        identity = snapshot_artifact_resolution_identity(prepared.target)
-        self.release_read_scope()
-        if identity is None:
-            result: object = None
+        if record is None:
+            bounds = ArtifactContentBounds.from_resolver(1, None)
+            target: object = None
+            entity_type: ExternalArtifactEntityType = "dataset"
+            entity_id = UUID(int=0)
+            artifact_index = 0
         else:
+            try:
+                bounds = ArtifactContentBounds.from_resolver(
+                    record.max_bytes,
+                    record.byte_range,
+                )
+            except ArtifactContentBoundsError as exc:
+                raise ValidationError(str(exc)) from exc
+            target = record.target
+            entity_type = record.entity_type
+            entity_id = record.entity_id
+            artifact_index = record.artifact_index
+
+        identity = snapshot_artifact_resolution_identity(target)
+        if record is None or identity is None:
+            result: object = None
+        elif type(target) is ResolvedArtifact:
+            # Static application denials never cross an injected resolver
+            # boundary: a custom registry could otherwise perform cache, host,
+            # network, credential, or subprocess work.
+            result = target
+        elif (
+            type(target) is LocalStoreResolutionTarget
+            or type(target) is HttpStoreResolutionTarget
+            or type(target) is RcloneStoreResolutionTarget
+            or type(target) is GitStoreResolutionTarget
+        ):
             registry = resolver_registry_for_prepared_target(
-                prepared.target,
+                target,
                 configured=self.resolver_registry,
             )
             result = registry.resolve_prepared(
-                prepared.target,
+                target,
                 max_bytes=bounds.max_bytes,
                 byte_range=bounds.byte_range,
             )
+        else:
+            # Raw references and unknown targets are not prepared capabilities.
+            # Fail closed before touching resolver configuration or adapters.
+            result = None
         result = sanitize_artifact_resolution_result(
             result,
             identity=identity,
             bounds=bounds,
         )
         body = result.to_json_dict()
-        body["entity_type"] = prepared.entity_type
-        body["entity_id"] = str(prepared.entity_id)
-        body["artifact_index"] = prepared.artifact_index
+        body["entity_type"] = entity_type
+        body["entity_id"] = str(entity_id)
+        body["artifact_index"] = artifact_index
         body["content_base64"] = (
             base64.b64encode(result.content).decode("ascii")
             if result.is_verified and result.content is not None
@@ -639,7 +721,10 @@ class ContextQueries:
                 or _looks_like_store_uri(reference.uri)
             ):
                 return _invalid_store_reference(reference)
-            return reference
+            # Project-authored direct references are metadata only. A project
+            # role does not confer authority over the process-wide filesystem,
+            # network, credential, or subprocess resolver configuration.
+            return _unavailable_store_reference(reference)
         return self._resolve_store(
             reference,
             project_id,

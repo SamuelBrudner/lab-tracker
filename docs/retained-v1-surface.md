@@ -148,13 +148,16 @@ research record:
   URIs with the canonical URI echoed as `meta.iri` in plain envelopes, and a
   committed worked example under `docs/examples/` guarded by a drift test.
 - On-demand resolution of external artifact references (content hash is the
-  integrity gate). Inline content has one 8 MiB hard/default decoded-byte cap
-  across ordinary, registered-store, ranged, HTTP, rclone, Git, and local
-  resolution paths; ranges can only narrow that allowance. Runtime parses the
+  integrity gate). Project-authored direct references remain metadata only and
+  fail closed before resolver, cache, filesystem, network, credential, or
+  subprocess work; resolvable pointers use a registered `store://` identity.
+  Inline content has one 8 MiB hard/default decoded-byte cap across registered
+  store, ranged, HTTP, rclone, Git, and local resolution paths; ranges can only
+  narrow that allowance. Runtime parses the
   platform-path-separated
   `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS` once into one filesystem-I/O-free lexical
   authority, bounded local-filesystem broker, and bounded process executor.
-  Registered local-store health, direct local reads, and every recovery
+  Registered local-store health, registered local reads, and every recovery
   candidate read receive those exact shared objects. The helper anchors the
   trusted grant, resolves aliases component-by-component from no-follow retained
   descriptors/handles, and rejects an escape before target traversal. A

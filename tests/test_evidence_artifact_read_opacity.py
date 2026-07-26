@@ -137,10 +137,24 @@ def _create_evidence_artifact_records(
     artifact = artifact_root / f"artifact-{uuid4().hex}.bin"
     artifact.write_bytes(artifact_content)
     artifact_hash = _sha256(artifact_content)
+    store_name = "opacity-artifacts"
+    store_response = client.post(
+        "/data-stores",
+        json={
+            "project_id": project_id,
+            "name": store_name,
+            "kind": "local_fs",
+            "root": str(artifact_root),
+        },
+        headers=headers,
+    )
+    assert store_response.status_code == 201, store_response.text
     artifact_reference = {
-        "source_system": "local",
-        "uri": artifact.as_uri(),
+        "source_system": "store",
+        "uri": f"store://{store_name}/{artifact.name}",
         "content_hash": artifact_hash,
+        "store_name": store_name,
+        "locator": artifact.name,
     }
     client.app.state.resolver_registry = ResolverRegistry(
         [LocalFilesystemResolver(allowed_roots=[artifact_root])]

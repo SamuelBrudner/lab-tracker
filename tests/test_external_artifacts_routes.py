@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -25,6 +26,7 @@ from lab_tracker.artifact_resolution import (
     RcloneCompleted,
     RcloneResolver,
     ResolverRegistry,
+    registry_from_env,
 )
 from lab_tracker.artifact_resolution_limits import (
     MAX_ARTIFACT_BYTE_OFFSET,
@@ -165,6 +167,142 @@ def test_resolve_endpoint_openapi_publishes_portable_content_bounds(client):
     assert byte_end_schema == byte_start_schema
 
 
+@pytest.mark.parametrize(
+    ("source_system", "uri_factory"),
+    [
+        ("local", lambda artifact: artifact.as_uri()),
+        ("http", lambda _artifact: "https://files.example/private.bin"),
+        ("rclone", lambda _artifact: "rclone://private/private.bin"),
+        (
+            "git",
+            lambda _artifact: (
+                "git+https://git.example/private.git"
+                "#private.bin@1111111111111111111111111111111111111111"
+            ),
+        ),
+    ],
+)
+def test_resolve_endpoint_treats_direct_references_as_metadata_without_dispatch(
+    client,
+    admin_auth_headers,
+    tmp_path,
+    source_system,
+    uri_factory,
+):
+    secret = b"operator-owned artifact"
+    artifact = tmp_path / "private.bin"
+    artifact.write_bytes(secret)
+    direct_uri = uri_factory(artifact)
+    project_id = client.post(
+        "/projects",
+        json={"name": f"Direct {source_system} metadata"},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+
+    class UnexpectedRegistry:
+        def resolve_prepared(self, *_args, **_kwargs):
+            raise AssertionError("direct reference reached resolver dispatch")
+
+    client.app.state.resolver_registry = UnexpectedRegistry()
+
+    for expected_hash in (_sha256(b"bogus"), _sha256(secret)):
+        dataset_id = _create_dataset_with_artifact(
+            client,
+            admin_auth_headers,
+            project_id=project_id,
+            source_system=source_system,
+            uri=direct_uri,
+            content_hash=expected_hash,
+        )
+
+        response = client.post(
+            "/external-artifacts/resolve",
+            json={"entity_type": "dataset", "entity_id": dataset_id},
+            headers=admin_auth_headers,
+        )
+
+        assert response.status_code == 200, response.text
+        body = response.json()["data"]
+        assert body["status"] == "unresolved"
+        assert body["source_system"] == "store"
+        assert body["uri"] == "store://[redacted]"
+        assert body["expected_hash"] == expected_hash
+        assert body["observed_hash"] is None
+        assert body["content_base64"] is None
+        assert body["returned_bytes"] == 0
+        assert body["detail"] == "Store artifact could not be resolved."
+        assert direct_uri not in response.text
+        assert secret.decode() not in response.text
+
+
+def test_resolve_endpoint_denies_direct_reference_from_legacy_manifest_metadata(
+    client,
+    admin_auth_headers,
+):
+    project_id = client.post(
+        "/projects",
+        json={"name": "Legacy direct-reference metadata"},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    question_id = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Does legacy metadata bypass registered stores?",
+            "question_type": "descriptive",
+            "status": "active",
+        },
+        headers=admin_auth_headers,
+    ).json()["data"]["question_id"]
+    direct_uri = "https://files.example/private-legacy.bin"
+    expected_hash = _sha256(b"legacy")
+    dataset_response = client.post(
+        "/datasets",
+        json={
+            "project_id": project_id,
+            "primary_question_id": question_id,
+            "status": "committed",
+            "commit_manifest": {
+                "metadata": {
+                    "external_artifacts": json.dumps(
+                        [
+                            {
+                                "source_system": "http",
+                                "uri": direct_uri,
+                                "content_hash": expected_hash,
+                            }
+                        ]
+                    )
+                }
+            },
+        },
+        headers=admin_auth_headers,
+    )
+    assert dataset_response.status_code == 201, dataset_response.text
+    dataset_id = dataset_response.json()["data"]["dataset_id"]
+
+    class UnexpectedRegistry:
+        def resolve_prepared(self, *_args, **_kwargs):
+            raise AssertionError("legacy direct reference reached resolver dispatch")
+
+    client.app.state.resolver_registry = UnexpectedRegistry()
+    response = client.post(
+        "/external-artifacts/resolve",
+        json={"entity_type": "dataset", "entity_id": dataset_id},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()["data"]
+    assert body["status"] == "unresolved"
+    assert body["source_system"] == "store"
+    assert body["uri"] == "store://[redacted]"
+    assert body["expected_hash"] == expected_hash
+    assert body["observed_hash"] is None
+    assert body["content_base64"] is None
+    assert direct_uri not in response.text
+
+
 def test_resolve_endpoint_redacts_denied_http_credentials_and_target(
     client,
     admin_auth_headers,
@@ -193,13 +331,15 @@ def test_resolve_endpoint_redacts_denied_http_credentials_and_target(
     assert response.status_code == 200, response.text
     body = response.json()["data"]
     assert body["status"] == "unresolved"
-    assert body["uri"] == "http(s)://[redacted]"
+    assert body["source_system"] == "store"
+    assert body["uri"] == "store://[redacted]"
+    assert body["detail"] == "Store artifact could not be resolved."
     assert body["content_base64"] is None
     assert secret not in response.text
     assert "169.254.169.254" not in response.text
 
 
-def test_resolve_endpoint_redacts_rclone_process_failure(
+def test_resolve_endpoint_denies_direct_rclone_before_process_failure(
     client,
     admin_auth_headers,
 ):
@@ -239,8 +379,9 @@ def test_resolve_endpoint_redacts_rclone_process_failure(
     assert response.status_code == 200, response.text
     body = response.json()["data"]
     assert body["status"] == "unresolved"
-    assert body["uri"] == "rclone://[redacted]"
-    assert body["detail"] == "rclone artifact resolution failed."
+    assert body["source_system"] == "store"
+    assert body["uri"] == "store://[redacted]"
+    assert body["detail"] == "Store artifact could not be resolved."
     assert body["content_base64"] is None
     assert body["observed_hash"] is None
     assert secret not in response.text
@@ -286,12 +427,14 @@ def test_resolve_endpoint_rejects_decoded_rclone_nul_without_500(
     assert response.status_code == 200, response.text
     body = response.json()["data"]
     assert body["status"] == "unresolved"
-    assert body["uri"] == "rclone://[redacted]"
+    assert body["source_system"] == "store"
+    assert body["uri"] == "store://[redacted]"
+    assert body["detail"] == "Store artifact could not be resolved."
     assert body["content_base64"] is None
     assert secret not in response.text
 
 
-def test_resolve_endpoint_maps_malformed_rclone_metadata_to_unresolved(
+def test_resolve_endpoint_denies_direct_rclone_before_metadata_subprocess(
     client,
     admin_auth_headers,
 ):
@@ -331,8 +474,9 @@ def test_resolve_endpoint_maps_malformed_rclone_metadata_to_unresolved(
     assert response.status_code == 200, response.text
     body = response.json()["data"]
     assert body["status"] == "unresolved"
-    assert body["uri"] == "rclone://[redacted]"
-    assert body["detail"] == "rclone artifact resolution failed."
+    assert body["source_system"] == "store"
+    assert body["uri"] == "store://[redacted]"
+    assert body["detail"] == "Store artifact could not be resolved."
     assert body["content_base64"] is None
     assert secret not in response.text
     assert "private stderr" not in response.text
@@ -375,12 +519,20 @@ def test_resolve_endpoint_deadline_discards_partial_body_and_closes_session(
         json={"name": "Deadline cleanup project"},
         headers=admin_auth_headers,
     ).json()["data"]["project_id"]
+    _create_store(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        name="slow-store",
+        kind="http",
+        root="https://slow.example",
+    )
     dataset_id = _create_dataset_with_artifact(
         client,
         admin_auth_headers,
         project_id=project_id,
-        source_system="http",
-        uri="https://slow.example/private-result.bin",
+        source_system="store",
+        uri="store://slow-store/private-result.bin",
         content_hash=_sha256(b"partial secret bytes"),
     )
 
@@ -546,11 +698,20 @@ def test_resolve_endpoint_returns_verified_content(client, admin_auth_headers, t
     project_id = client.post(
         "/projects", json={"name": "Resolve project"}, headers=admin_auth_headers
     ).json()["data"]["project_id"]
+    _create_store(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        name="local-results",
+        kind="local_fs",
+        root=str(tmp_path),
+    )
     dataset_id = _create_dataset_with_artifact(
         client,
         admin_auth_headers,
         project_id=project_id,
-        uri=artifact.as_uri(),
+        source_system="store",
+        uri="store://local-results/result.txt",
         content_hash=_sha256(data),
     )
 
@@ -579,11 +740,20 @@ def test_resolve_endpoint_caps_a_requested_range(client, admin_auth_headers, tmp
         json={"name": "Capped range project"},
         headers=admin_auth_headers,
     ).json()["data"]["project_id"]
+    _create_store(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        name="local-results",
+        kind="local_fs",
+        root=str(tmp_path),
+    )
     dataset_id = _create_dataset_with_artifact(
         client,
         admin_auth_headers,
         project_id=project_id,
-        uri=artifact.as_uri(),
+        source_system="store",
+        uri="store://local-results/ranged-result.bin",
         content_hash=_sha256(data),
     )
 
@@ -1097,11 +1267,20 @@ def test_resolve_endpoint_reports_drift(client, admin_auth_headers, tmp_path):
     project_id = client.post(
         "/projects", json={"name": "Drift project"}, headers=admin_auth_headers
     ).json()["data"]["project_id"]
+    _create_store(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        name="local-results",
+        kind="local_fs",
+        root=str(tmp_path),
+    )
     dataset_id = _create_dataset_with_artifact(
         client,
         admin_auth_headers,
         project_id=project_id,
-        uri=artifact.as_uri(),
+        source_system="store",
+        uri="store://local-results/result.txt",
         content_hash=recorded_hash,
     )
 
@@ -1114,7 +1293,7 @@ def test_resolve_endpoint_reports_drift(client, admin_auth_headers, tmp_path):
     assert response.status_code == 200
     body = response.json()["data"]
     assert body["status"] == "drifted"
-    assert body["uri"] == artifact.as_uri()
+    assert body["uri"] == "store://local-results/result.txt"
     assert body["expected_hash"] == recorded_hash
     assert body["observed_hash"] == _sha256(b"actual bytes on disk")
     assert body["content_type"] == "text/plain"
@@ -1555,23 +1734,38 @@ def test_resolve_endpoint_unknown_store_is_unresolved(client, admin_auth_headers
     assert body["returned_bytes"] == 0
 
 
-def test_resolve_endpoint_denies_local_paths_without_configured_roots(
-    client, admin_auth_headers, tmp_path
+def test_resolve_endpoint_denies_registered_local_store_without_configured_roots(
+    client,
+    admin_auth_headers,
+    tmp_path,
+    monkeypatch,
 ):
     data = b"unconfigured"
     artifact = tmp_path / "result.txt"
     artifact.write_bytes(data)
-    # No resolver_registry installed -> registry_from_env with no allowed roots.
+    monkeypatch.delenv("LAB_TRACKER_RESOLVER_ALLOWED_ROOTS", raising=False)
+    client.app.state.resolver_registry = registry_from_env()
 
     project_id = client.post(
         "/projects", json={"name": "Default-deny project"}, headers=admin_auth_headers
     ).json()["data"]["project_id"]
+    _create_store(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        name="unconfigured-local",
+        kind="local_fs",
+        root=str(tmp_path),
+    )
     dataset_id = _create_dataset_with_artifact(
         client,
         admin_auth_headers,
         project_id=project_id,
-        uri=artifact.as_uri(),
+        uri="store://unconfigured-local/result.txt",
         content_hash=_sha256(data),
+        source_system="store",
+        store_name="unconfigured-local",
+        locator="result.txt",
     )
 
     response = client.post(
@@ -1583,5 +1777,6 @@ def test_resolve_endpoint_denies_local_paths_without_configured_roots(
     assert response.status_code == 200
     body = response.json()["data"]
     assert body["status"] == "unresolved"
+    assert body["uri"] == "store://unconfigured-local/result.txt"
     assert body["content_base64"] is None
     assert body["returned_bytes"] == 0

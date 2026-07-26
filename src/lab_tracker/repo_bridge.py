@@ -7,8 +7,10 @@ the semantic graph, these helpers translate that metadata into the fields an
 :class:`~lab_tracker.models.Analysis` records — the commit SHA into the opaque
 ``code_version`` (the project's decided encoding for commits: pins/version
 strings, not a commit-entity DAG), and per-file artifact pointers into
-:class:`~lab_tracker.models.ExternalArtifactReference` values the resolver
-stack can verify (and, for moved files, recover by content hash).
+:class:`~lab_tracker.models.ExternalArtifactReference` metadata. Direct
+``file://`` pointers retain captured identity and hashes but require conversion
+to a registered store-relative identity before the resolver stack may read
+them.
 
 The helpers are pure and side-effect free; draft-authoring surfaces (the
 assistant, graph-draft tooling, or a human filling an AnalysisCreate payload)
@@ -78,9 +80,10 @@ def analysis_fields_from_repo_note(
 
     Returns ``{"code_version": ..., "external_artifacts": [...]}`` (plus
     ``environment_hash`` when captured), or ``None`` for non-repo notes. The
-    artifact pointers become ``source_system="local"`` references — their
-    ``file://`` URI plus captured sha256 makes them verifiable today and
-    recoverable by content hash if the file later moves.
+    artifact pointers become ``source_system="local"`` metadata references.
+    Their ``file://`` URI plus captured sha256 records identity, but project
+    roles cannot resolve the host path directly. Convert the pointer to a
+    registered store-relative identity before requesting bytes.
     """
 
     capture = repo_note_capture(metadata)

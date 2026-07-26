@@ -526,15 +526,16 @@ def lab_tracker_resolve_artifact(
         | None
     ) = None,
 ) -> JsonObject:
-    """Resolve an artifact pointer; only verified results include bounded content.
+    """Resolve a registered store pointer; direct locators remain metadata.
 
-    Use when reasoning needs the actual content of a file that was referenced but
-    not captured in the graph's metadata snapshot. entity_type is dataset,
-    analysis, or claim; artifact_index selects which embedded reference. Returns a
-    status of verified (bytes match the recorded content_hash), drifted (the
-    artifact changed since capture — do not trust it as the captured evidence), or
-    unresolved (no adapter, unreachable, or unverifiable). Only verified results
-    include base64 content; drifted results retain diagnostics but withhold bytes.
+    Use when reasoning needs the actual content of a registered ``store://``
+    artifact that was referenced but not captured in the graph's metadata
+    snapshot. Direct file, HTTP, rclone, Git, and other non-store references are
+    provenance metadata only and return unresolved without resolver work.
+    entity_type is dataset, analysis, or claim; artifact_index selects which
+    embedded reference. Returns verified (bytes match content_hash), drifted (do
+    not trust the changed bytes), or unresolved. Only verified results include
+    base64 content.
     """
     try:
         ArtifactContentBounds.for_request(max_bytes, byte_start, byte_end)

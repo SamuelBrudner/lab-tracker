@@ -201,7 +201,7 @@ with the strongest response in macrophages.
 - Raw data:   store://lab-onedrive/experiments/001/flow/*.fcs   (+ content hashes)
 - Analysis:   store://lab-onedrive/experiments/001/analysis/... (software outputs)
 - Figures:    store://lab-onedrive/experiments/001/figures/...
-  # store-relative locators resolve + hash-verify from any host; a bare URI still works
+  # only registered store-relative locators resolve; bare URIs remain metadata
 
 ## Findings                         # → Claim (statement + evidence + question)
 - <claim>, confidence <…>, supported by dataset <…> / analysis <…>,

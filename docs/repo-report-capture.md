@@ -108,9 +108,9 @@ fields (pure helpers; nothing auto-commits):
 
 - commit SHA → `Analysis.code_version` (commits are encoded as pins/version
   strings, per the project's provenance design — no commit-entity DAG),
-- declared artifact pointers → verifiable `ExternalArtifactReference`s
-  (`file://` URI + sha256), resolvable now and recoverable by content hash if
-  the file later moves,
+- declared artifact pointers → `ExternalArtifactReference` metadata
+  (`file://` URI + sha256). Direct host paths are not resolver authority; map
+  the pointer to a registered local or Git store before requesting bytes,
 - `repo_environment_hash` → `Analysis.environment_hash`.
 
 To pin a specific *code file* verifiably, register the repository as a `git`

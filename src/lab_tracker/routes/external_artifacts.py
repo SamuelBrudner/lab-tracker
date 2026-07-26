@@ -1,11 +1,12 @@
 """Read-only on-demand resolution of external artifact pointers.
 
-`POST /external-artifacts/resolve` dereferences an
+`POST /external-artifacts/resolve` dereferences a registered store-relative
 :class:`~lab_tracker.models.ExternalArtifactReference` embedded on a dataset,
-analysis, or claim, returning a bounded, hash-verified view of its content. It is
-resolve-by-entity: the caller names the owning entity and the artifact's index,
-and access is gated by the same project-read check as reading that entity, so
-resolution never widens what a caller can see.
+analysis, or claim, returning a bounded, hash-verified view of its content.
+Direct locators remain metadata and fail closed without resolver work. The
+operation is resolve-by-entity: the caller names the owning entity and the
+artifact's index, and access is gated by the same project-read check as reading
+that entity, so resolution never widens what a caller can see.
 
 Design: ``docs/external-artifact-resolution-design.md``.
 """

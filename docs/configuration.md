@@ -92,10 +92,10 @@ operator authority:
   attempts admitted by one recovery scan (default and hard maximum: `4096`;
   minimum: `1`).
 - `LAB_TRACKER_RESOLVER_RECOVERY_MAX_BYTES`: cumulative accepted full-file
-  payload allowance across one logical direct attempt and every recovery
+  payload allowance across one logical registered-store attempt and every recovery
   candidate (default and hard maximum: `536870912`, 512 MiB; minimum: `1`).
-  The compatibility name refers to recovery, but this is also the direct local
-  payload ceiling. The helper may read one additional byte only as a fatal EOF
+  The compatibility name refers to recovery, but this is also the registered
+  local payload ceiling. The helper may read one additional byte only as a fatal EOF
   proof; that byte is discarded and terminates resolution. This setting is
   separate from the request's `max_bytes`, which controls only the returned
   view and remains capped at 8 MiB.
@@ -130,7 +130,7 @@ inside the selected grant.
 Application composition builds one filesystem-I/O-free
 `LocalFilesystemAuthority` inside one bounded local-filesystem operations
 broker and shares one bounded process executor. The runtime retains the broker,
-not a parallel authority or path policy. Local-store health, direct local
+not a parallel authority or path policy. Local-store health, registered local
 artifact reads, recovery enumeration, and every recovery candidate read receive
 that exact broker. Candidate authorization, alias traversal, enumeration, open,
 regular-file validation, and byte reads therefore occur in the isolated helper,
@@ -200,10 +200,11 @@ for deployment guidance.
 Runtime composition parses these settings once into typed `Settings` and one
 shared broker/executor pair. The broker exclusively owns the frozen, slotted
 authority used by health, reads, and enumeration; no `LocalPathPolicy` is
-retained by the application runtime. Direct construction of
-`LocalFilesystemResolver()` and `default_registry()` retains an explicit
-unscoped compatibility mode for library callers; the application runtime never
-selects that mode merely because the root setting is absent.
+retained by the application runtime. Concrete resolver methods remain trusted
+library primitives for explicitly constructed adapters. The public
+`ResolverRegistry.resolve()` facade, including the registry returned by
+`default_registry()`, refuses raw references; application and MCP resolution
+dispatch only sealed, project-authorized registered-store targets.
 
 #### Bounded local artifact reads
 
