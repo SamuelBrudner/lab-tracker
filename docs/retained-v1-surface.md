@@ -148,17 +148,24 @@ research record:
   URIs with the canonical URI echoed as `meta.iri` in plain envelopes, and a
   committed worked example under `docs/examples/` guarded by a drift test.
 - On-demand resolution of external artifact references (content hash is the
-  integrity gate). Local resolution optionally recovers a moved/renamed file by
-  its content hash within operator-configured `allowed_roots`
+  integrity gate). Local resolution and registered local-store health share one
+  immutable operator-root policy parsed from the platform-path-separated
+  `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS`; the application runtime denies all local
+  roots when it is unset or empty. Local resolution optionally recovers a
+  moved/renamed file by its content hash within those roots
   (`LAB_TRACKER_RESOLVER_RECOVERY`, off by default, bounded, read-only).
+  Local health is a bounded, isolated, output-free static directory probe. It is
+  advisory rather than registration validation or a handle-bound filesystem
+  capability; retarget hardening remains `lab-tracker-n5kp.41.6`.
   Registered `git` data stores resolve `path@commit` locators read-only and
   on demand, gated by an operator remote allowlist
   (`LAB_TRACKER_GIT_ALLOWED_REMOTES`, deny-by-default), a protocol allowlist,
   a fetch size cap, and a bounded cache — never by cloning or polling. Rclone
   resolution and store health are likewise gated by one immutable exact
   remote-name policy (`LAB_TRACKER_RCLONE_ALLOWED_REMOTES`, deny-by-default).
-  Rclone and Git health commands reuse resolution's bounded cross-platform
-  process executor and expose only static adapter-specific failures. See
+  Local, rclone, and Git health commands reuse resolution's bounded
+  cross-platform process executor and expose only static adapter-specific
+  failures. See
   [external-artifact-resolution-design.md](external-artifact-resolution-design.md).
 - Read-only assistant and MCP decision-context endpoints over the retained
   graph. Assistants may inspect context through these surfaces, but retained v1

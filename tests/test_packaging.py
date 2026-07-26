@@ -14,6 +14,9 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - exercised by Python 3.10 CI
     import tomli as tomllib
 
+_LOCAL_STORE_HEALTH_HELPER = "lab_tracker/_local_store_health_helper.py"
+_LOCAL_STORE_HEALTH_ROOT_ENV = "LAB_TRACKER_INTERNAL_LOCAL_STORE_HEALTH_ROOT"
+
 
 def _packaged_files(package_root: Path, subdir: str) -> set[str]:
     root = package_root / subdir
@@ -32,6 +35,20 @@ def _package_data_patterns(repo_root: Path) -> list[str]:
 def _package_data_matches(file_path: str, patterns: list[str]) -> bool:
     path = PurePosixPath(file_path)
     return any(path.match(pattern) for pattern in patterns)
+
+
+def _isolated_helper_environment(root: Path) -> dict[str, str]:
+    environment = {_LOCAL_STORE_HEALTH_ROOT_ENV: os.fspath(root)}
+    if os.name == "nt":
+        for name, value in os.environ.items():
+            if name.upper() in {"SYSTEMROOT", "WINDIR"}:
+                environment[name] = value
+        return environment
+    if os.name == "posix":
+        for name, value in os.environ.items():
+            if name in {"LANG", "LC_ALL", "LC_CTYPE"}:
+                environment[name] = value
+    return environment
 
 
 def _build_wheel(repo_root: Path, wheelhouse: Path) -> Path:
@@ -131,6 +148,30 @@ def test_wheel_contains_all_frontend_bundle_files(built_wheel: Path):
         }
 
     assert wheel_files == bundle_files
+
+
+def test_wheel_contains_and_runs_isolated_local_health_helper(
+    tmp_path: Path,
+    built_wheel: Path,
+) -> None:
+    target = tmp_path / "wheel"
+    with zipfile.ZipFile(built_wheel) as archive:
+        assert _LOCAL_STORE_HEALTH_HELPER in archive.namelist()
+        archive.extract(_LOCAL_STORE_HEALTH_HELPER, target)
+
+    store_root = tmp_path / "store"
+    store_root.mkdir()
+    helper = target / _LOCAL_STORE_HEALTH_HELPER
+    completed = subprocess.run(  # noqa: S603 - fixed interpreter and wheel member
+        [sys.executable, "-I", "-S", "-B", str(helper)],
+        check=False,
+        capture_output=True,
+        env=_isolated_helper_environment(store_root),
+    )
+
+    assert completed.returncode == 0
+    assert completed.stdout == b""
+    assert completed.stderr == b""
 
 
 def test_alembic_package_data_covers_all_migration_files():

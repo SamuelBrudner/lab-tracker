@@ -61,6 +61,7 @@ def _clear_auth_env(monkeypatch) -> None:
         raising=False,
     )
     for variable in (
+        "LAB_TRACKER_RESOLVER_ALLOWED_ROOTS",
         "LAB_TRACKER_RCLONE_ALLOWED_REMOTES",
         "LAB_TRACKER_GIT_ALLOWED_REMOTES",
         "LAB_TRACKER_STORE_HEALTH_GLOBAL_IN_FLIGHT_LIMIT",
@@ -119,6 +120,7 @@ def test_dotenv_loads_resolver_settings(tmp_path, monkeypatch):
     dotenv_path = tmp_path / ".env"
     dotenv_path.write_text(
         "LAB_TRACKER_ENVIRONMENT=local\n"
+        f"LAB_TRACKER_RESOLVER_ALLOWED_ROOTS={tmp_path}\n"
         "LAB_TRACKER_RESOLVER_HTTP_ALLOWED_AUTHORITIES=http://10.20.1.7\n"
         "LAB_TRACKER_RESOLVER_HTTP_ALLOWED_NETWORKS=10.20.0.0/16\n"
         "LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS=12.5\n"
@@ -135,6 +137,7 @@ def test_dotenv_loads_resolver_settings(tmp_path, monkeypatch):
     )
 
     assert policy.authorize("http://10.20.1.7/artifact.bin").hostname == "10.20.1.7"
+    assert settings.resolver_allowed_roots == str(tmp_path)
     assert settings.resolver_http_deadline_seconds == 12.5
     assert settings.resolver_subprocess_deadline_seconds == 7.25
     assert settings.rclone_allowed_remotes == "lab-onedrive,archive-s3"
@@ -145,6 +148,12 @@ def test_rclone_remote_policy_defaults_to_deny_all(monkeypatch):
     _clear_auth_env(monkeypatch)
 
     assert _settings_from_environment().rclone_allowed_remotes == ""
+
+
+def test_local_path_policy_defaults_to_deny_all(monkeypatch):
+    _clear_auth_env(monkeypatch)
+
+    assert _settings_from_environment().resolver_allowed_roots == ""
 
 
 def test_git_remote_policy_defaults_to_deny_all(monkeypatch):
@@ -396,6 +405,32 @@ def test_invalid_dotenv_http_policy_fails_runtime_composition(tmp_path, monkeypa
         build_app_runtime(settings)
 
 
+def test_invalid_local_policy_fails_before_workdir_or_database_without_path_leak(
+    monkeypatch,
+):
+    _clear_auth_env(monkeypatch)
+    secret = "startup-secret-must-not-leak"
+    settings = Settings(
+        _env_file=None,
+        database_url="sqlite+pysqlite:///:memory:",
+        resolver_allowed_roots=f"\0{secret}",
+    )
+
+    def unexpected_side_effect(*_args, **_kwargs):
+        pytest.fail("invalid local policy reached a runtime side effect")
+
+    monkeypatch.setattr(runtime_module, "mkdtemp", unexpected_side_effect)
+    monkeypatch.setattr(runtime_module, "get_engine", unexpected_side_effect)
+    monkeypatch.setattr(runtime_module, "SafeHttpClient", unexpected_side_effect)
+
+    with pytest.raises(ValueError) as exc_info:
+        build_app_runtime(settings)
+
+    rendered = f"{exc_info.value!s}\n{exc_info.value!r}"
+    assert "local" in rendered.lower()
+    assert secret not in rendered
+
+
 def test_invalid_git_policy_fails_before_workdir_or_database_without_secret_leak(
     monkeypatch,
 ):
@@ -448,8 +483,19 @@ def test_invalid_rclone_policy_fails_before_workdir_or_database_without_secret_l
     assert secret not in rendered
 
 
-def test_runtime_installs_one_validated_policy_graph_and_registry(monkeypatch):
+def test_runtime_installs_one_validated_policy_graph_and_registry(
+    monkeypatch,
+    tmp_path,
+):
     _clear_auth_env(monkeypatch)
+    settings_local_root = tmp_path / "settings-local"
+    environment_local_root = tmp_path / "environment-local"
+    settings_local_root.mkdir()
+    environment_local_root.mkdir()
+    monkeypatch.setenv(
+        "LAB_TRACKER_RESOLVER_ALLOWED_ROOTS",
+        str(environment_local_root),
+    )
     monkeypatch.setenv(
         "LAB_TRACKER_RCLONE_ALLOWED_REMOTES",
         "environment-remote",
@@ -486,6 +532,7 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(monkeypatch):
 
     def recording_registry_from_env(
         *,
+        local_path_policy,
         http_policy,
         http_client,
         rclone_remote_policy,
@@ -495,6 +542,7 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(monkeypatch):
         subprocess_deadline_seconds,
     ):
         assert safe_http_client_timeouts == [12.5]
+        captured["registry_local_path_policy"] = local_path_policy
         captured["registry_http_policy"] = http_policy
         captured["registry_http_client"] = http_client
         captured["registry_rclone_remote_policy"] = rclone_remote_policy
@@ -510,6 +558,28 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(monkeypatch):
         runtime_module,
         "registry_from_env",
         recording_registry_from_env,
+    )
+
+    def recording_local_store_health_probe(
+        *,
+        policy,
+        executor,
+        deadline_seconds,
+    ):
+        captured["health_local_policy"] = policy
+        captured["health_local_executor"] = executor
+        captured["health_local_deadline_seconds"] = deadline_seconds
+
+        def probe(target):
+            captured["local_health_target"] = target
+            return StoreHealth(StoreHealthStatus.HEALTHY)
+
+        return probe
+
+    monkeypatch.setattr(
+        runtime_module,
+        "LocalStoreHealthProbe",
+        recording_local_store_health_probe,
     )
 
     def recording_http_store_health_probe(
@@ -592,6 +662,7 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(monkeypatch):
     settings = Settings(
         _env_file=None,
         database_url="sqlite+pysqlite:///:memory:",
+        resolver_allowed_roots=str(settings_local_root),
         resolver_http_allowed_authorities="http://10.20.1.7",
         resolver_http_allowed_networks="10.20.0.0/16",
         resolver_http_deadline_seconds=12.5,
@@ -612,6 +683,7 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(monkeypatch):
     try:
         configure_app_state(app, runtime)
 
+        assert app.state.local_path_policy is runtime.local_path_policy
         assert app.state.outbound_http_policy is runtime.outbound_http_policy
         assert runtime.outbound_http_client is outbound_http_client
         assert app.state.rclone_remote_policy is runtime.rclone_remote_policy
@@ -635,6 +707,11 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(monkeypatch):
         assert runtime.store_health_checker.waiter_timeout_seconds == 2.25
         assert app.state.cleanup_git_health_workdir.__self__ is runtime
         assert safe_http_client_timeouts == [12.5]
+        assert (
+            captured["registry_local_path_policy"]
+            is runtime.local_path_policy
+        )
+        assert captured["health_local_policy"] is runtime.local_path_policy
         assert captured["registry_http_policy"] is runtime.outbound_http_policy
         assert captured["health_http_policy"] is runtime.outbound_http_policy
         assert captured["registry_http_client"] is runtime.outbound_http_client
@@ -647,14 +724,28 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(monkeypatch):
         assert captured["registry_git_remote_policy"] is runtime.git_remote_policy
         assert captured["health_git_policy"] is runtime.git_remote_policy
         assert captured["registry_process_executor"] is runtime.process_executor
+        assert captured["health_local_executor"] is runtime.process_executor
         assert captured["health_rclone_executor"] is runtime.process_executor
         assert captured["health_git_executor"] is runtime.process_executor
         assert captured["health_git_workdir"] is runtime.git_health_workdir
         assert captured["registry_http_deadline_seconds"] == 12.5
         assert captured["health_http_deadline_seconds"] == 12.5
         assert captured["registry_subprocess_deadline_seconds"] == 7.25
+        assert captured["health_local_deadline_seconds"] == 7.25
         assert captured["health_rclone_deadline_seconds"] == 7.25
         assert captured["health_git_deadline_seconds"] == 7.25
+
+        local_health_target = StoreProbeTarget(
+            store_id=UUID(int=4),
+            name="runtime-local-wiring",
+            kind=StoreKind.LOCAL_FS,
+            root=str(settings_local_root),
+            endpoint=None,
+            credential_ref=None,
+        )
+        assert runtime.store_health_checker(local_health_target).is_healthy
+        assert captured["local_health_target"] is local_health_target
+        assert "legacy_health_target" not in captured
 
         http_health_target = StoreProbeTarget(
             store_id=UUID(int=1),
@@ -697,6 +788,14 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(monkeypatch):
         if os.name != "nt":
             assert stat.S_IMODE(git_health_workdir.stat().st_mode) == 0o700
         assert (
+            runtime.local_path_policy.authorize_path(settings_local_root)
+            == str(settings_local_root)
+        )
+        assert (
+            runtime.local_path_policy.authorize_path(environment_local_root)
+            is None
+        )
+        assert (
             runtime.rclone_remote_policy.authorize("settings-remote")
             is not None
         )
@@ -736,6 +835,7 @@ def test_lifespan_removes_app_owned_git_health_workdir(monkeypatch):
 
     def recording_registry_from_env(
         *,
+        local_path_policy,
         http_policy,
         http_client,
         rclone_remote_policy,
@@ -745,6 +845,7 @@ def test_lifespan_removes_app_owned_git_health_workdir(monkeypatch):
         subprocess_deadline_seconds,
     ):
         del (
+            local_path_policy,
             http_policy,
             http_client,
             rclone_remote_policy,

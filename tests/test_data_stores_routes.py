@@ -11,13 +11,16 @@ from http_security_fakes import FakeAddressResolver, FakeSafeHttpClient
 from starlette.testclient import TestClient
 
 from lab_tracker.artifact_resolution import LocalFilesystemResolver, ResolverRegistry
-from lab_tracker.bounded_subprocess import ProcessResult
+from lab_tracker.bounded_subprocess import BoundedSubprocessExecutor, ProcessResult
 from lab_tracker.http_store_health import HttpStoreHealthProbe
+from lab_tracker.local_path_policy import LocalPathPolicy
+from lab_tracker.local_store_health import LocalStoreHealthProbe
 from lab_tracker.outbound_http import OutboundHttpPolicy
 from lab_tracker.rclone_remote_policy import RcloneRemotePolicy
 from lab_tracker.rclone_store_health import RcloneStoreHealthProbe
 from lab_tracker.store_health import (
     HTTP_STORE_HEALTH_FAILURE_DETAIL,
+    LOCAL_STORE_HEALTH_FAILURE_DETAIL,
     RCLONE_STORE_HEALTH_FAILURE_DETAIL,
     CachedStoreHealthProbe,
 )
@@ -30,6 +33,17 @@ def _sha256(data: bytes) -> str:
 def _install_local_registry(client: TestClient, allowed_root: Path) -> None:
     client.app.state.resolver_registry = ResolverRegistry(
         [LocalFilesystemResolver(allowed_roots=[allowed_root])]
+    )
+
+
+def _install_local_health(client: TestClient, allowed_root: Path) -> None:
+    policy = LocalPathPolicy([allowed_root])
+    client.app.state.local_path_policy = policy
+    client.app.state.store_health_checker = CachedStoreHealthProbe(
+        LocalStoreHealthProbe(
+            policy=policy,
+            executor=BoundedSubprocessExecutor(),
+        )
     )
 
 
@@ -450,6 +464,7 @@ def test_create_data_store_requires_contributor(client, scoped_project_member):
 
 
 def test_data_store_health_local_fs(client, admin_auth_headers, tmp_path):
+    _install_local_health(client, tmp_path)
     project_id = _create_project(client, admin_auth_headers, "Health project")
     store_id = client.post(
         "/data-stores",
@@ -463,6 +478,7 @@ def test_data_store_health_local_fs(client, admin_auth_headers, tmp_path):
 
 
 def test_data_store_health_local_fs_missing_root(client, admin_auth_headers, tmp_path):
+    _install_local_health(client, tmp_path)
     project_id = _create_project(client, admin_auth_headers, "Unhealthy project")
     missing = str(tmp_path / "does-not-exist")
     store_id = client.post(
@@ -476,6 +492,55 @@ def test_data_store_health_local_fs_missing_root(client, admin_auth_headers, tmp
     body = response.json()["data"]
     assert body["status"] == "unreachable"
     assert body["kind"] == "local_fs"
+
+
+def test_data_store_health_local_fs_defaults_to_denied_and_redacted(
+    client,
+    admin_auth_headers,
+    tmp_path,
+):
+    secret = "default-denied-local-root"
+    root = tmp_path / secret
+    project_id = _create_project(client, admin_auth_headers, "Denied local health")
+    store_id = client.post(
+        "/data-stores",
+        json=_store_payload(
+            project_id,
+            name="denied-local",
+            kind="local_fs",
+            root=str(root),
+        ),
+        headers=admin_auth_headers,
+    ).json()["data"]["store_id"]
+
+    class RecordingExecutor:
+        def __init__(self):
+            self.calls = []
+
+        def run(self, command, **kwargs):
+            self.calls.append((command, kwargs))
+            raise AssertionError("deny-all local health reached the process executor")
+
+    executor = RecordingExecutor()
+    policy = client.app.state.local_path_policy
+    assert policy.canonical_roots == ()
+    client.app.state.store_health_checker = CachedStoreHealthProbe(
+        LocalStoreHealthProbe(
+            policy=policy,
+            executor=executor,
+        )
+    )
+
+    response = client.get(
+        f"/data-stores/{store_id}/health",
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["status"] == "unreachable"
+    assert response.json()["data"]["detail"] == LOCAL_STORE_HEALTH_FAILURE_DETAIL
+    assert secret not in response.text
+    assert executor.calls == []
 
 
 def test_git_store_health_uses_installed_policy_without_leaking_credentials(
@@ -676,6 +741,7 @@ def test_group_member_can_read_group_scoped_store(
     """A group-scoped store has project_id=None; authorization must check the
     group scope, not deny every non-admin via ensure_project_read(None)."""
 
+    _install_local_health(client, tmp_path)
     group_id = _create_group(client, admin_auth_headers, "Readable lab")
     store_id = client.post(
         "/data-stores",

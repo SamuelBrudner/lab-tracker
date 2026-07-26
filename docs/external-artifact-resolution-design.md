@@ -220,7 +220,7 @@ multiply across Uvicorn workers and replicas. The supported deployment uses
 one Uvicorn worker per service process; this mechanism is not a cluster-wide
 admission system.
 
-## Bounded rclone and Git subprocesses
+## Bounded resolver and store-health subprocesses
 
 Rclone and Git resolution use optional host binaries, but a persisted artifact
 reference cannot be allowed to control an unbounded child process. The shared
@@ -232,8 +232,11 @@ output never resets the deadline.
 
 `LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS` controls that budget
 (default: `30`). It is independent from the HTTP deadline and must be finite,
-greater than zero, and no greater than `86400` seconds. Metadata stdout and
-stderr are captured under separate fixed byte caps. Artifact stdout is streamed
+greater than zero, and no greater than `86400` seconds. It also gives each
+local, rclone, or Git store-health probe a fresh bounded execution budget; local
+health's parent-side policy narrowing and canonicalization happen before that
+budget begins. Metadata stdout and stderr are captured under separate fixed byte
+caps. Artifact stdout is streamed
 instead: actual bytes read, rather than advisory rclone or Git metadata, are
 enforced against the existing `max_fetch_bytes` limit while the full object is
 hashed. An object that grows after a size preflight therefore cannot bypass the
@@ -426,6 +429,43 @@ and relative-to-process-working-directory behavior. Non-local locator syntax is
 also unchanged here; each remote adapter owns a separate typed authority
 boundary.
 
+### Bounded advisory local-store health
+
+Application composition parses `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS` once using
+the host's `os.pathsep` (`:` on POSIX, `;` on Windows). Unset, empty, and
+whitespace-only configuration creates a deny-all runtime policy. Empty or
+whitespace-only components are omitted; non-empty components retain their exact
+spelling for the operator-root normalization described above. The same frozen,
+slotted `LocalPathPolicy` object is shared by local resolution and local health.
+Explicit typed composition can override configuration without parsing it;
+direct resolver construction retains its historical unscoped compatibility
+mode, which is not the application's absent-setting behavior.
+
+Local-store health is an explicit read-only advisory probe, never a side effect
+of registration. The parent validates the registered root as native and
+absolute and restricts the shared policy to that complete root before allocating
+a deadline or starting a child. A rejected target performs no per-probe process
+work and returns only the static local-health failure detail. The accepted
+canonical root is passed in one dedicated minimal environment variable to a
+fixed absolute sibling stdlib-only Python helper launched as
+`sys.executable -I -S -B <helper>` with no caller-controlled argument or working
+directory. The helper emits no output, performs a no-follow final directory
+stat, rejects Windows reparse points, and communicates reachability only by exit
+status.
+
+The shared bounded executor contains the helper's descendants and applies the
+configured subprocess deadline to interpreter startup, the stat, and process
+output/drain, then checks the deadline again after the executor returns. Only an
+exact clean exit with zero output is healthy; timeout, containment failure,
+nonzero exit, output, and ordinary adapter errors collapse to the same static
+detail. Adapter-level `BaseException` still propagates after executor-owned
+cleanup. Policy restriction and canonicalization in the parent precede the
+deadline, so the setting does not bound that filesystem work. The probe
+establishes static pathname containment at one instant; it does not hold a
+directory handle or claim resistance to a concurrent root replacement.
+Handle-bound retarget hardening is tracked separately by
+`lab-tracker-n5kp.41.6`.
+
 ## Recovering moved/renamed local artifacts
 
 The `content_hash` is not only the integrity gate — it is a location-independent
@@ -564,6 +604,15 @@ Shipped (`src/lab_tracker/artifact_resolution.py`, tested in
   recovery roots are narrowed to that store root while remaining conjunctive
   with the operator allowlist; invalid or mismatched logical store locators fail
   closed before candidate filesystem work.
+- ✅ Registered local-store health shares the resolver's object-identical
+  immutable `LocalPathPolicy`, restricts it to the complete registered root, and
+  runs one fixed isolated stdlib helper through the bounded process executor.
+  The helper is run with zero-byte stdout/stderr caps, emits no output, performs
+  a no-follow final directory stat, and rejects Windows reparse roots. Its
+  deadline begins after parent-side canonicalization. Results are static,
+  redacted reachability hints rather than handle-bound capabilities; retarget
+  hardening remains
+  `lab-tracker-n5kp.41.6`.
 - ✅ `HttpResolver` — `http(s)`, full-body verify with a `max_fetch_bytes` cap
   (oversized → `UNRESOLVED`, never uncertified bytes), plus a shared outbound
   destination policy that validates every IPv4/IPv6 answer, pins the vetted
@@ -637,13 +686,14 @@ Shipped (`src/lab_tracker/artifact_resolution.py`, tested in
   database-backed preparation and release their read scope before resolver I/O;
   returns the envelope plus base64 content. Registry comes from
   `request.app.state.resolver_registry` or
-  `registry_from_env()`; `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS` gates local roots
-  (unset → local artifacts resolve `UNRESOLVED`), HTTP(S) is constrained by the
-  outbound destination policy, and rclone is constrained by its configured
+  `registry_from_env()`; `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS` is parsed with the
+  host's `os.pathsep` and gates local roots (unset or empty → local artifacts
+  resolve `UNRESOLVED` and local health fails closed), HTTP(S) is constrained by
+  the outbound destination policy, and rclone is constrained by its configured
   remote-name allowlist. HTTP resolution additionally uses the single total
   deadline configured by `LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS`; rclone
-  and Git use the independent single total deadline configured by
-  `LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS`.
+  and Git resolution plus local, rclone, and Git health use the independent
+  deadline configured by `LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS`.
 - ✅ `lab_tracker_resolve_artifact` MCP read tool + `resolve_external_artifact`
   client method.
 

@@ -71,6 +71,34 @@ that destination through your normal off-machine backup process.
   Uploads that exceed the limit are rejected and partial local files are
   cleaned up.
 
+### Local filesystem policy
+
+Local artifact resolution and registered `local_fs` store health share one
+operator authority:
+
+- `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS`: a list of host-local roots separated by
+  `os.pathsep` (`:` on POSIX, `;` on Windows). An unset, empty, or
+  whitespace-only value produces an explicit deny-all policy in the application
+  runtime. Empty or whitespace-only components are omitted. Other components
+  retain their exact spelling rather than being trimmed.
+
+Operator roots preserve the existing configuration semantics: `~` is expanded,
+relative entries are resolved against the service process's working directory,
+and each result is canonicalized with native filesystem semantics during
+application composition. Use absolute paths in deployments so a
+working-directory change cannot change the grant. Malformed or unsupported
+roots fail startup. The policy grants only complete contained roots: a
+registered store root must be a native absolute local path, and a grant to one
+of its children cannot partially authorize the broader store.
+
+Runtime composition parses this setting once into one frozen, slotted
+`LocalPathPolicy` instance and shares that same object between local artifact
+resolution and local store health. An explicitly injected typed policy takes
+precedence and does not parse the environment setting. Direct construction of
+`LocalFilesystemResolver()` and `default_registry()` retains an unscoped
+compatibility mode for library callers; the application runtime never selects
+that mode merely because the setting is absent.
+
 ### Outbound HTTP policy
 
 HTTP(S) external-artifact resolution and HTTP data-store health share one
@@ -178,6 +206,29 @@ redirects may proceed, and an HTTPS-to-HTTP downgrade is denied. A terminal
 loops or limit exhaustion, transport/deadline failures, and other terminal
 statuses all return the same static redacted health detail.
 
+Local-store health is a bounded, read-only reachability hint, not registration
+validation or a durable filesystem capability. Registration performs no host
+I/O. For an explicit health request, the parent process first requires a native
+absolute registered root and narrows the shared operator policy to that whole
+root. A denial returns one static local-health failure detail without starting a
+child or disclosing the path. This policy narrowing and its filesystem
+canonicalization occur before the helper deadline starts.
+
+An admitted root is checked by a fixed isolated Python helper through the same
+bounded process executor used by rclone and Git. The root is the only
+application-controlled datum in a dedicated environment otherwise limited to
+the platform bootstrap and locale variables needed by Python. The helper emits
+no stdout or stderr, requires a directory through a no-follow final stat, and
+rejects a Windows reparse-point root. The deadline covers interpreter startup,
+helper execution, and process output/drain and is checked again after the
+executor returns; only exit code zero with zero output is healthy. Timeout,
+containment failure, nonzero exit, output, or any ordinary adapter error returns
+the same static detail. Adapter-level `BaseException` still propagates after
+executor-owned cleanup. This is static pathname containment at probe time, not
+a handle-bound guarantee against a concurrent root replacement. Parent-side
+canonicalization is outside the helper deadline, and handle-bound retarget
+resistance is tracked separately by `lab-tracker-n5kp.41.6`.
+
 - `LAB_TRACKER_STORE_HEALTH_GLOBAL_IN_FLIGHT_LIMIT`: maximum admitted health
   requests in one application process (default: `4`, maximum: `16`).
 - `LAB_TRACKER_STORE_HEALTH_PER_ACTOR_IN_FLIGHT_LIMIT`: maximum admitted health
@@ -211,14 +262,17 @@ Rclone and Git adapters execute optional host binaries under a separate process
 budget. The configured budget is one monotonic deadline for the entire logical
 operation: rclone metadata lookup, transfer, and verification share one
 deadline, as do Git fetch, object inspection, transfer, and verification. A
-store-health probe receives a fresh deadline; Git's URL preflight and HEAD query
-share it. Progress or moving between subprocesses does not reset it.
+local, rclone, or Git store-health probe receives a fresh deadline; Git's URL
+preflight and HEAD query share it. Progress or moving between subprocesses does
+not reset it. Local health's parent-side policy narrowing and canonicalization
+precede this deadline as described above.
 
 - `LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS`: execution and verification
-  budget for one rclone or Git artifact resolution or store-health probe
-  (default: `30`). The value must be finite, greater than zero, and no greater
-  than `86400` seconds (one day); invalid values fail application startup. This
-  setting is independent of `LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS`.
+  budget for one rclone or Git artifact resolution, or one local, rclone, or Git
+  store-health probe (default: `30`). The value must be finite, greater than
+  zero, and no greater than `86400` seconds (one day); invalid values fail
+  application startup. This setting is independent of
+  `LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS`.
 - `LAB_TRACKER_RCLONE_ALLOWED_REMOTES`: strict comma-separated exact remote
   names for server-side rclone resolution and rclone store-health probes. The
   unset or empty value denies every remote. Entries are not
@@ -255,10 +309,11 @@ fragment components, percent escapes, and malformed paths or authorities are
 also rejected. Credentials belong in operator-controlled Git credential helpers
 or SSH facilities, never in this setting or a persisted store root.
 
-Both policies are parsed once from `Settings` at startup. One immutable instance
-of each policy and one bounded process executor are shared by the resolver
-registry and store-health checker; those components do not independently reread
-the process environment. Rclone health preserves the registered distinction
+The local, rclone, and Git policies are parsed once from `Settings` at startup.
+One immutable instance of each policy and one bounded process executor are
+shared by the resolver registry and store-health checker; those components do
+not independently reread the process environment. Rclone health preserves the
+registered distinction
 between `remote:path`, `remote:/path`, and `remote:/`. A present
 `credential_ref` remains authoritative even when blank or invalid and never
 falls back to the store name. Its bounded `rclone lsf` intentionally reports a
