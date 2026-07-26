@@ -3,13 +3,12 @@ import os
 import shutil
 import subprocess
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
-import httpx
 import pytest
 from http_security_fakes import (
     FakeAddressResolver,
@@ -54,6 +53,10 @@ from lab_tracker.artifact_resolution import (
     registry_from_env,
     store_relative_reference,
 )
+from lab_tracker.artifact_resolution_limits import (
+    MAX_INLINE_ARTIFACT_BYTES,
+    ArtifactContentBoundsError,
+)
 from lab_tracker.git_remote_policy import (
     GitRemotePolicy,
     parse_git_remote_address,
@@ -73,7 +76,15 @@ from lab_tracker.outbound_http import (
     OutboundHttpTransportError,
     RegisteredHttpPrefix,
 )
+from lab_tracker.rclone_remote_policy import RcloneRemotePolicy
 from lab_tracker.rclone_store_locator import RcloneRemoteName, RegisteredRcloneRoot
+
+
+class _FalseyLocalPathPolicy(LocalPathPolicy):
+    __slots__ = ()
+
+    def __bool__(self) -> bool:
+        return False
 
 
 def _sha256(data: bytes) -> str:
@@ -92,6 +103,10 @@ def _git_resolver(*, remote_policy: GitRemotePolicy | None = None, **kwargs):
         remote_policy=remote_policy or _git_policy(_GIT_REMOTE),
         **kwargs,
     )
+
+
+def _rclone_policy(*grants: str) -> RcloneRemotePolicy:
+    return RcloneRemotePolicy.from_config(",".join(grants))
 
 
 class _FakeProcessExecutor:
@@ -296,6 +311,23 @@ def test_local_resolver_allows_paths_within_roots(tmp_path):
     assert result.status is ResolutionStatus.VERIFIED
 
 
+def test_local_resolver_preserves_even_a_falsey_explicit_policy_identity(tmp_path):
+    data = b"explicit local authority"
+    inside = _write(tmp_path, "authorized.txt", data)
+    policy = _FalseyLocalPathPolicy([tmp_path])
+
+    resolver = LocalFilesystemResolver(
+        allowed_roots=[],
+        path_policy=policy,
+    )
+    result = resolver.resolve(_local_ref(inside, _sha256(data)))
+
+    assert not policy
+    assert resolver._operator_policy is policy
+    assert resolver._scope.path_policy is policy
+    assert result.status is ResolutionStatus.VERIFIED
+
+
 def test_local_resolver_hashes_opened_stream_without_reopening_path(tmp_path):
     recorded = b"descriptor-owned recorded bytes"
     replacement = b"replacement pathname bytes"
@@ -462,6 +494,99 @@ def test_local_resolver_returns_byte_range_slice(tmp_path):
     assert result.size_bytes == 10
 
 
+def test_local_resolver_caps_a_requested_byte_range_while_hashing_the_full_file(
+    tmp_path,
+):
+    data = b"0123456789"
+    path = _write(tmp_path, "capped-range.bin", data)
+
+    result = LocalFilesystemResolver().resolve(
+        _local_ref(path, _sha256(data)),
+        max_bytes=2,
+        byte_range=(2, 8),
+    )
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == b"23"
+    assert result.observed_hash == _sha256(data)
+    assert result.size_bytes == len(data)
+    assert result.truncated is True
+
+
+def test_scoped_local_resolver_caps_a_requested_byte_range_and_verifies(tmp_path):
+    data = b"0123456789"
+    store_root = tmp_path / "store"
+    store_root.mkdir()
+    _write(store_root, "artifact.bin", data)
+    target = _local_store_target(
+        _data_store(StoreKind.LOCAL_FS, str(store_root)),
+        "artifact.bin",
+        _sha256(data),
+    )
+
+    result = LocalFilesystemResolver(allowed_roots=[tmp_path]).resolve_within_root(
+        target,
+        max_bytes=2,
+        byte_range=(2, 8),
+    )
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == b"23"
+    assert result.observed_hash == _sha256(data)
+    assert result.size_bytes == len(data)
+    assert result.uri == target.logical_reference.uri
+
+
+@pytest.mark.parametrize(
+    ("chunks", "max_bytes", "byte_range", "expected_content", "truncated"),
+    (
+        ((b"012", b"345", b"6789"), 4, None, b"0123", True),
+        ((b"012", b"345", b"6789"), 3, (2, 8), b"234", True),
+        ((b"01234", b"56789"), 3, (4, 7), b"456", True),
+        ((b"012", b"345", b"6789"), 4, (8, 20), b"89", True),
+        ((b"0123",), 4, (8, 10), b"", True),
+        ((b"012", b"345"), 4, (3, 3), b"", True),
+        ((b"0123",), 4, (4, 4), b"", True),
+        ((b"012", b"345"), 8, (0, 8), b"012345", False),
+        ((b"", b"012345"), 8, None, b"012345", False),
+        ((), 4, None, b"", False),
+    ),
+)
+def test_hash_collector_chunk_range_and_cap_matrix(
+    chunks,
+    max_bytes,
+    byte_range,
+    expected_content,
+    truncated,
+):
+    data = b"".join(chunks)
+
+    content, total, was_truncated, observed = artifact_resolution._hash_and_collect(
+        chunks,
+        algorithm="sha256",
+        max_bytes=max_bytes,
+        window=byte_range,
+    )
+
+    assert content == expected_content
+    assert total == len(data)
+    assert was_truncated is truncated
+    assert observed == _sha256(data)
+
+
+def test_hash_collector_hashes_beyond_the_selected_view_and_honors_fetch_cap():
+    collector = artifact_resolution._HashCollector(
+        algorithm="sha256",
+        max_bytes=1,
+        window=(2, 8),
+        max_total=5,
+    )
+
+    collector.consume(b"012")
+    with pytest.raises(artifact_resolution._FetchTooLarge):
+        collector.consume(b"345")
+
+
 def test_local_resolver_withholds_byte_range_when_hash_drifts(tmp_path):
     data = b"0123456789"
     path = _write(tmp_path, "drifted-range.bin", data)
@@ -480,15 +605,94 @@ def test_local_resolver_withholds_byte_range_when_hash_drifts(tmp_path):
     assert result.detail == "Recomputed hash does not match content_hash."
 
 
+def test_capped_range_withholds_content_when_drift_occurs_after_retention(tmp_path):
+    recorded = b"0123456789"
+    actual = b"012345678X"
+    path = _write(tmp_path, "late-drift-range.bin", actual)
+
+    result = LocalFilesystemResolver().resolve(
+        _local_ref(path, _sha256(recorded)),
+        max_bytes=2,
+        byte_range=(2, 8),
+    )
+
+    assert result.status is ResolutionStatus.DRIFTED
+    assert result.observed_hash == _sha256(actual)
+    assert result.content is None
+    assert result.returned_bytes == 0
+    assert result.truncated is True
+    assert result.size_bytes == len(actual)
+
+
 def test_local_resolver_rejects_invalid_byte_range(tmp_path):
     data = b"0123456789"
     path = _write(tmp_path, "ranged.bin", data)
 
-    result = LocalFilesystemResolver().resolve(
-        _local_ref(path, _sha256(data)), byte_range=(5, 2)
+    with pytest.raises(
+        ArtifactContentBoundsError,
+        match="greater than or equal to byte_start",
+    ):
+        LocalFilesystemResolver().resolve(
+            _local_ref(path, _sha256(data)), byte_range=(5, 2)
+        )
+
+
+@pytest.mark.parametrize("invalid_max_bytes", [True, None])
+def test_all_concrete_resolver_entrypoints_reject_invalid_views_before_io(
+    tmp_path,
+    monkeypatch,
+    invalid_max_bytes,
+):
+    reference = ExternalArtifactReference(
+        source_system="custom",
+        uri="secret://artifact",
+        content_hash=_sha256(b"artifact"),
+    )
+    local = LocalFilesystemResolver()
+    http, http_client, dns = _safe_http_resolver()
+    rclone_runner = _fake_rclone_runner(size_bytes=1, body=b"x")
+    rclone = RcloneResolver(
+        runner=rclone_runner,
+        remote_policy=_rclone_policy("remote"),
+    )
+    git_runner = _fake_git_runner(blob=b"x")
+    git = _git_resolver(runner=git_runner, cache_root=tmp_path)
+
+    def unexpected_local_parse(_uri):
+        raise AssertionError("invalid view reached local path parsing")
+
+    monkeypatch.setattr(
+        artifact_resolution,
+        "native_local_path_from_uri",
+        unexpected_local_parse,
     )
 
-    assert result.status is ResolutionStatus.UNRESOLVED
+    for call in (
+        lambda: local.resolve(reference, max_bytes=invalid_max_bytes),
+        lambda: http.resolve(reference, max_bytes=invalid_max_bytes),
+        lambda: rclone.resolve(reference, max_bytes=invalid_max_bytes),
+        lambda: git.resolve(reference, max_bytes=invalid_max_bytes),
+        lambda: local.resolve_within_root(
+            object(), max_bytes=invalid_max_bytes
+        ),
+        lambda: http.resolve_within_http_store(
+            object(), max_bytes=invalid_max_bytes
+        ),
+        lambda: rclone.resolve_within_rclone_store(
+            object(), max_bytes=invalid_max_bytes
+        ),
+        lambda: git.resolve_within_git_store(
+            object(), max_bytes=invalid_max_bytes
+        ),
+    ):
+        with pytest.raises(ArtifactContentBoundsError):
+            call()
+
+    assert http_client.calls == []
+    assert dns.calls == []
+    assert rclone_runner.calls == []
+    assert git_runner.calls == []
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_local_resolver_can_resolve_by_source_system_and_scheme(tmp_path):
@@ -745,6 +949,44 @@ def test_http_resolver_truncates_payload_but_verifies():
     assert result.content == b"abcd"
     assert result.truncated is True
     assert result.size_bytes == 10
+
+
+def test_http_resolver_caps_a_requested_byte_range_but_verifies():
+    body = b"0123456789"
+    resolver, _, _ = _safe_http_resolver(
+        FakeHttpResponse(chunks=(body[:3], body[3:7], body[7:]))
+    )
+
+    result = resolver.resolve(
+        _http_ref("https://store.example/x", _sha256(body)),
+        max_bytes=2,
+        byte_range=(2, 8),
+    )
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == b"23"
+    assert result.observed_hash == _sha256(body)
+    assert result.size_bytes == len(body)
+
+
+def test_scoped_http_resolver_caps_a_requested_byte_range_but_verifies():
+    body = b"0123456789"
+    resolver, _, _ = _safe_http_resolver(
+        FakeHttpResponse(chunks=(body[:3], body[3:7], body[7:]))
+    )
+    target = _registered_http_target(content_hash=_sha256(body))
+
+    result = resolver.resolve_within_http_store(
+        target,
+        max_bytes=2,
+        byte_range=(2, 8),
+    )
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == b"23"
+    assert result.observed_hash == _sha256(body)
+    assert result.size_bytes == len(body)
+    assert result.uri == target.logical_reference.uri
 
 
 def test_http_resolver_transport_error_is_unresolved_and_redacted():
@@ -1212,7 +1454,10 @@ def _fake_rclone_runner(*, size_bytes: int | None, body: bytes, cat_returncode: 
 def test_rclone_resolver_verifies_object():
     data = b"object stored in onedrive via rclone"
     runner = _fake_rclone_runner(size_bytes=len(data), body=data)
-    resolver = RcloneResolver(runner=runner)
+    resolver = RcloneResolver(
+        runner=runner,
+        remote_policy=_rclone_policy("lab-onedrive"),
+    )
 
     result = resolver.resolve(
         _rclone_ref("rclone://lab-onedrive/experiments/001/x.bin", _sha256(data))
@@ -1233,7 +1478,7 @@ def test_rclone_resolver_uses_registered_target_without_generic_uri_reparse(
     runner = _fake_rclone_runner(size_bytes=len(data), body=data)
     resolver = RcloneResolver(
         runner=runner,
-        allowed_remotes=["Lab Team@org"],
+        remote_policy=_rclone_policy("Lab Team@org"),
     )
     target = _rclone_store_target(
         root="/experiments",
@@ -1258,13 +1503,13 @@ def test_rclone_resolver_uses_registered_target_without_generic_uri_reparse(
     ]
 
 
-def test_rclone_registered_target_denied_by_exact_allowlist_before_process():
+def test_rclone_registered_target_denied_by_exact_policy_before_process():
     runner = _fake_rclone_runner(size_bytes=1, body=b"x")
     target = _rclone_store_target(remote="lab+archive")
 
     result = RcloneResolver(
         runner=runner,
-        allowed_remotes=["LAB+archive"],
+        remote_policy=_rclone_policy("LAB+archive"),
     ).resolve_within_rclone_store(target)
 
     assert result.status is ResolutionStatus.UNRESOLVED
@@ -1277,7 +1522,10 @@ def test_rclone_registered_target_invalid_hash_does_no_process_work():
     runner = _fake_rclone_runner(size_bytes=1, body=b"x")
     target = _rclone_store_target(content_hash="datalad-key:opaque")
 
-    result = RcloneResolver(runner=runner).resolve_within_rclone_store(target)
+    result = RcloneResolver(
+        runner=runner,
+        remote_policy=_rclone_policy("lab-onedrive"),
+    ).resolve_within_rclone_store(target)
 
     assert result.status is ResolutionStatus.UNRESOLVED
     assert result.detail == "Cannot verify content hash with algorithm 'datalad-key'."
@@ -1287,9 +1535,12 @@ def test_rclone_registered_target_invalid_hash_does_no_process_work():
 def test_rclone_resolver_reports_drift():
     data = b"actual remote bytes"
     runner = _fake_rclone_runner(size_bytes=len(data), body=data)
-    resolver = RcloneResolver(runner=runner)
+    resolver = RcloneResolver(
+        runner=runner,
+        remote_policy=_rclone_policy("remote"),
+    )
 
-    result = resolver.resolve(_rclone_ref("rclone://r/x", _sha256(b"recorded")))
+    result = resolver.resolve(_rclone_ref("rclone://remote/x", _sha256(b"recorded")))
 
     assert result.status is ResolutionStatus.DRIFTED
     assert result.observed_hash == _sha256(data)
@@ -1300,9 +1551,12 @@ def test_rclone_resolver_reports_drift():
 
 def test_rclone_resolver_missing_object_is_unresolved():
     runner = _fake_rclone_runner(size_bytes=None, body=b"")
-    resolver = RcloneResolver(runner=runner)
+    resolver = RcloneResolver(
+        runner=runner,
+        remote_policy=_rclone_policy("remote"),
+    )
 
-    result = resolver.resolve(_rclone_ref("rclone://r/missing", _sha256(b"x")))
+    result = resolver.resolve(_rclone_ref("rclone://remote/missing", _sha256(b"x")))
 
     assert result.status is ResolutionStatus.UNRESOLVED
     # cat must not run when the object cannot be stat-ed.
@@ -1311,9 +1565,13 @@ def test_rclone_resolver_missing_object_is_unresolved():
 
 def test_rclone_resolver_refuses_oversized_object():
     runner = _fake_rclone_runner(size_bytes=1_000_000, body=b"x")
-    resolver = RcloneResolver(runner=runner, max_fetch_bytes=1024)
+    resolver = RcloneResolver(
+        runner=runner,
+        remote_policy=_rclone_policy("remote"),
+        max_fetch_bytes=1024,
+    )
 
-    result = resolver.resolve(_rclone_ref("rclone://r/big", _sha256(b"x")))
+    result = resolver.resolve(_rclone_ref("rclone://remote/big", _sha256(b"x")))
 
     assert result.status is ResolutionStatus.UNRESOLVED
     assert "limit" in (result.detail or "").lower()
@@ -1323,21 +1581,72 @@ def test_rclone_resolver_refuses_oversized_object():
 def test_rclone_resolver_truncates_payload_but_verifies():
     data = b"abcdefghij"
     runner = _fake_rclone_runner(size_bytes=len(data), body=data)
-    resolver = RcloneResolver(runner=runner)
+    resolver = RcloneResolver(
+        runner=runner,
+        remote_policy=_rclone_policy("remote"),
+    )
 
-    result = resolver.resolve(_rclone_ref("rclone://r/x", _sha256(data)), max_bytes=4)
+    result = resolver.resolve(
+        _rclone_ref("rclone://remote/x", _sha256(data)),
+        max_bytes=4,
+    )
 
     assert result.status is ResolutionStatus.VERIFIED
     assert result.content == b"abcd"
     assert result.truncated is True
 
 
+def test_rclone_resolver_caps_a_requested_byte_range_but_verifies():
+    data = b"0123456789"
+    runner = _fake_rclone_runner(size_bytes=len(data), body=data)
+    resolver = RcloneResolver(
+        runner=runner,
+        remote_policy=_rclone_policy("remote"),
+    )
+
+    result = resolver.resolve(
+        _rclone_ref("rclone://remote/x", _sha256(data)),
+        max_bytes=2,
+        byte_range=(2, 8),
+    )
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == b"23"
+    assert result.observed_hash == _sha256(data)
+    assert result.size_bytes == len(data)
+
+
+def test_scoped_rclone_resolver_caps_a_requested_byte_range_but_verifies():
+    data = b"0123456789"
+    runner = _fake_rclone_runner(size_bytes=len(data), body=data)
+    resolver = RcloneResolver(
+        runner=runner,
+        remote_policy=_rclone_policy("lab-onedrive"),
+    )
+    target = _rclone_store_target(content_hash=_sha256(data))
+
+    result = resolver.resolve_within_rclone_store(
+        target,
+        max_bytes=2,
+        byte_range=(2, 8),
+    )
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == b"23"
+    assert result.observed_hash == _sha256(data)
+    assert result.size_bytes == len(data)
+    assert result.uri == target.logical_reference.uri
+
+
 def test_rclone_resolver_cat_failure_is_unresolved():
     data = b"data"
     runner = _fake_rclone_runner(size_bytes=len(data), body=data, cat_returncode=1)
-    resolver = RcloneResolver(runner=runner)
+    resolver = RcloneResolver(
+        runner=runner,
+        remote_policy=_rclone_policy("remote"),
+    )
 
-    result = resolver.resolve(_rclone_ref("rclone://r/x", _sha256(data)))
+    result = resolver.resolve(_rclone_ref("rclone://remote/x", _sha256(data)))
 
     assert result.status is ResolutionStatus.UNRESOLVED
     assert result.detail == "rclone artifact resolution failed."
@@ -1347,9 +1656,10 @@ def test_rclone_resolver_missing_binary_is_unresolved():
     def runner(args):
         raise FileNotFoundError("rclone not installed")
 
-    result = RcloneResolver(runner=runner).resolve(
-        _rclone_ref("rclone://r/x", _sha256(b"x"))
-    )
+    result = RcloneResolver(
+        runner=runner,
+        remote_policy=_rclone_policy("remote"),
+    ).resolve(_rclone_ref("rclone://remote/x", _sha256(b"x")))
 
     assert result.status is ResolutionStatus.UNRESOLVED
     assert result.detail == "rclone artifact resolution failed."
@@ -1365,7 +1675,7 @@ def test_rclone_executor_streams_under_one_deadline_and_verifies():
     )
     resolver = RcloneResolver(
         executor=executor,
-        allowed_remotes=["lab"],
+        remote_policy=_rclone_policy("lab"),
         max_fetch_bytes=len(data),
     )
 
@@ -1388,6 +1698,7 @@ def test_rclone_actual_stream_growth_over_cap_discards_partial_result():
     )
     result = RcloneResolver(
         executor=executor,
+        remote_policy=_rclone_policy("private"),
         max_fetch_bytes=2,
     ).resolve(_rclone_ref("rclone://private/secret.bin", _sha256(b"ab")))
 
@@ -1414,7 +1725,10 @@ def test_rclone_actual_stream_growth_over_cap_discards_partial_result():
 def test_rclone_non_integer_or_non_object_size_metadata_is_rejected(metadata):
     executor = _FakeProcessExecutor([(0, (metadata,), b"")])
 
-    result = RcloneResolver(executor=executor).resolve(
+    result = RcloneResolver(
+        executor=executor,
+        remote_policy=_rclone_policy("private"),
+    ).resolve(
         _rclone_ref("rclone://private/x", _sha256(b"x"))
     )
 
@@ -1426,7 +1740,10 @@ def test_rclone_non_integer_or_non_object_size_metadata_is_rejected(metadata):
 def test_rclone_rejects_decoded_control_character_before_spawn():
     executor = _FakeProcessExecutor([])
 
-    result = RcloneResolver(executor=executor).resolve(
+    result = RcloneResolver(
+        executor=executor,
+        remote_policy=_rclone_policy("private"),
+    ).resolve(
         _rclone_ref("rclone://private/path%00secret", _sha256(b"x"))
     )
 
@@ -1439,7 +1756,10 @@ def test_rclone_rejects_decoded_control_character_before_spawn():
 def test_rclone_process_failure_redacts_target_credentials_and_stderr():
     secret = "remote-token-and-target"
     executor = _FakeProcessExecutor([OSError(secret)])
-    result = RcloneResolver(executor=executor).resolve(
+    result = RcloneResolver(
+        executor=executor,
+        remote_policy=_rclone_policy("private"),
+    ).resolve(
         _rclone_ref(f"rclone://private/{secret}.bin", _sha256(b"x"))
     )
 
@@ -1464,6 +1784,7 @@ def test_rclone_deadline_is_not_reset_between_stat_and_cat():
     )
     result = RcloneResolver(
         executor=executor,
+        remote_policy=_rclone_policy("private"),
         deadline_seconds=1.0,
         clock=clock,
     ).resolve(_rclone_ref("rclone://private/x", _sha256(b"x")))
@@ -1479,12 +1800,16 @@ def test_rclone_rejects_ambiguous_process_seams():
         RcloneResolver(
             runner=_fake_rclone_runner(size_bytes=1, body=b"x"),
             executor=_FakeProcessExecutor([]),
+            remote_policy=RcloneRemotePolicy.deny_all(),
         )
 
 
 def test_rclone_resolver_can_resolve_only_rclone_scheme():
-    resolver = RcloneResolver(runner=lambda args: RcloneCompleted(0, b"", b""))
-    assert resolver.can_resolve(_rclone_ref("rclone://r/x", _sha256(b"x"))) is True
+    resolver = RcloneResolver(
+        runner=lambda args: RcloneCompleted(0, b"", b""),
+        remote_policy=_rclone_policy("remote"),
+    )
+    assert resolver.can_resolve(_rclone_ref("rclone://remote/x", _sha256(b"x"))) is True
     assert (
         resolver.can_resolve(
             ExternalArtifactReference(
@@ -2219,28 +2544,24 @@ def test_store_relative_reference_git_resolves_end_to_end(tmp_path):
 # --- check_store_health ---------------------------------------------------
 
 
-def test_check_store_health_local_fs_healthy(tmp_path):
-    store = _data_store(StoreKind.LOCAL_FS, str(tmp_path))
-    health = check_store_health(store)
-    assert health.status is StoreHealthStatus.HEALTHY
-    assert health.is_healthy is True
-
-
-def test_check_store_health_local_fs_missing_root(tmp_path):
-    store = _data_store(StoreKind.LOCAL_FS, str(tmp_path / "absent"))
-    health = check_store_health(store)
-    assert health.status is StoreHealthStatus.UNREACHABLE
-    assert "not found" in (health.detail or "").lower()
-
-
-@pytest.mark.parametrize("root", ("relative/store", "~/store", "C:store"))
-def test_check_store_health_rejects_invalid_local_root_before_probe(
-    root, monkeypatch
+@pytest.mark.parametrize(
+    "root_kind",
+    ("existing", "missing", "relative"),
+)
+def test_legacy_check_store_health_local_fs_fails_closed_without_host_io_or_path_leak(
+    root_kind,
+    tmp_path,
+    monkeypatch,
 ):
+    root = {
+        "existing": str(tmp_path),
+        "missing": str(tmp_path / "secret-missing-root"),
+        "relative": "secret-relative/root",
+    }[root_kind]
     store = _data_store(StoreKind.LOCAL_FS, root)
 
     def unexpected_probe(*_args, **_kwargs):
-        raise AssertionError("invalid local store root reached a filesystem probe")
+        raise AssertionError("legacy local health reached a filesystem probe")
 
     monkeypatch.setattr(artifact_resolution.os.path, "realpath", unexpected_probe)
     monkeypatch.setattr(artifact_resolution.os.path, "isdir", unexpected_probe)
@@ -2249,67 +2570,45 @@ def test_check_store_health_rejects_invalid_local_root_before_probe(
 
     assert health == artifact_resolution.StoreHealth(
         StoreHealthStatus.UNREACHABLE,
-        "Local store root is invalid.",
+        artifact_resolution.LOCAL_STORE_HEALTH_FAILURE_DETAIL,
     )
+    assert root not in str(health.to_json_dict())
 
 
-def test_check_store_health_rclone_healthy_via_runner():
+def test_legacy_check_store_health_rclone_fails_closed_without_process_work(
+    monkeypatch,
+):
     store = _data_store(
         StoreKind.ONEDRIVE, "experiments", name="lab", credential_ref="lab-onedrive"
     )
-    calls = []
 
-    def runner(args):
-        calls.append(args)
-        return RcloneCompleted(0, b"001/\n002/\n", b"")
+    def unexpected_process(*_args, **_kwargs):
+        raise AssertionError("legacy rclone health path reached a process")
 
-    health = check_store_health(store, rclone_runner=runner)
-    assert health.status is StoreHealthStatus.HEALTHY
-    assert calls[0] == ["lsf", "--max-depth", "1", "lab-onedrive:experiments"]
+    monkeypatch.setattr(subprocess, "run", unexpected_process)
 
+    health = check_store_health(store)
 
-def test_check_store_health_rclone_unreachable_via_runner():
-    store = _data_store(StoreKind.S3, "lab-archive", name="arch", credential_ref="s3")
-
-    def runner(args):
-        return RcloneCompleted(1, b"", b"directory not found")
-
-    health = check_store_health(store, rclone_runner=runner)
     assert health.status is StoreHealthStatus.UNREACHABLE
+    assert health.detail == "Rclone store health check failed."
+    assert "lab-onedrive" not in str(health.to_json_dict())
 
 
-def test_check_store_health_rclone_missing_binary():
-    store = _data_store(StoreKind.BOX, "root", name="b", credential_ref="box")
+def test_legacy_check_store_health_http_fails_closed_without_client_seam():
+    secret = "legacy-http-target-must-not-escape"
+    store = _data_store(
+        StoreKind.HTTP,
+        f"https://user:{secret}@files.example/base",
+        name="web",
+    )
 
-    def runner(args):
-        raise FileNotFoundError("rclone not installed")
+    health = check_store_health(store)
 
-    health = check_store_health(store, rclone_runner=runner)
     assert health.status is StoreHealthStatus.UNREACHABLE
-    assert "unavailable" in (health.detail or "").lower()
-
-
-def test_check_store_health_http_healthy_via_client():
-    store = _data_store(StoreKind.HTTP, "https://files.example/base", name="web")
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert request.method == "HEAD"
-        return httpx.Response(200)
-
-    client = httpx.Client(transport=httpx.MockTransport(handler))
-    health = check_store_health(store, http_client=client)
-    assert health.status is StoreHealthStatus.HEALTHY
-
-
-def test_check_store_health_http_unreachable_via_client():
-    store = _data_store(StoreKind.HTTP, "https://files.example/base", name="web")
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(500)
-
-    client = httpx.Client(transport=httpx.MockTransport(handler))
-    health = check_store_health(store, http_client=client)
-    assert health.status is StoreHealthStatus.UNREACHABLE
+    assert health.detail == "HTTP store health check failed."
+    assert secret not in str(health.to_json_dict())
+    with pytest.raises(TypeError):
+        check_store_health(store, http_client=object())  # type: ignore[call-arg]
 
 
 def test_check_store_health_database_is_unsupported():
@@ -2318,247 +2617,53 @@ def test_check_store_health_database_is_unsupported():
     assert health.status is StoreHealthStatus.UNSUPPORTED
 
 
-def test_check_store_health_git_healthy_via_runner(tmp_path):
-    store = _data_store(StoreKind.GIT, "https://example.com/org/repo.git", name="repo")
-    calls = []
-
-    def runner(args):
-        calls.append(args)
-        if "--get-url" in args:
-            return GitCompleted(0, f"{store.root}\n".encode(), b"")
-        return GitCompleted(0, b"a" * 40 + b"\tHEAD\n", b"")
-
-    health = check_store_health(
-        store,
-        git_runner=runner,
-        git_remote_policy=_git_policy(store.root),
-        git_health_cwd=tmp_path,
-    )
-    assert health.status is StoreHealthStatus.HEALTHY
-    assert len(calls) == 2
-    expected_config = [
-        "-c",
-        "http.followRedirects=false",
-        "-c",
-        f"http.{store.root}.followRedirects=false",
-    ]
-    assert all(call[:4] == expected_config for call in calls)
-    assert calls[0][-4:] == ["ls-remote", "--get-url", "--", store.root]
-    assert calls[1][-4:] == ["ls-remote", "--", store.root, "HEAD"]
-
-
-def test_check_store_health_git_unreachable_via_runner(tmp_path):
-    store = _data_store(StoreKind.GIT, "https://example.com/org/missing.git", name="repo")
-
-    def runner(args):
-        if "--get-url" in args:
-            return GitCompleted(0, f"{store.root}\n".encode(), b"")
-        return GitCompleted(128, b"", b"fatal: repository not found")
-
-    health = check_store_health(
-        store,
-        git_runner=runner,
-        git_remote_policy=_git_policy(store.root),
-        git_health_cwd=tmp_path,
-    )
-    assert health.status is StoreHealthStatus.UNREACHABLE
-    assert health.detail == "Git store health check failed."
-
-
-def test_check_store_health_git_missing_binary(tmp_path):
-    store = _data_store(StoreKind.GIT, "https://example.com/org/repo.git", name="repo")
-
-    def runner(args):
-        raise OSError("git not found")
-
-    health = check_store_health(
-        store,
-        git_runner=runner,
-        git_remote_policy=_git_policy(store.root),
-        git_health_cwd=tmp_path,
-    )
-    assert health.status is StoreHealthStatus.UNREACHABLE
-    assert health.detail == "Git store health check failed."
-
-
-def test_check_store_health_git_denial_does_no_process_or_cwd_work(tmp_path):
-    store = _data_store(StoreKind.GIT, _GIT_REMOTE, name="repo")
-    calls = []
-
-    def runner(args):
-        calls.append(args)
-        raise AssertionError("denied health check must not invoke Git")
-
-    missing_cwd = tmp_path / "must-not-be-inspected"
-    health = check_store_health(
-        store,
-        git_runner=runner,
-        git_remote_policy=GitRemotePolicy.deny_all(),
-        git_health_cwd=missing_cwd,
+def test_legacy_check_store_health_git_fails_closed_without_process_or_cwd_work(
+    monkeypatch,
+):
+    secret = "legacy-git-target-must-not-escape"
+    store = _data_store(
+        StoreKind.GIT,
+        f"https://git.example/{secret}.git",
+        name="repo",
     )
 
-    assert health.status is StoreHealthStatus.UNREACHABLE
-    assert health.detail == "Git store health check failed."
-    assert calls == []
+    def unexpected_host_work(*_args, **_kwargs):
+        raise AssertionError("legacy Git health path reached host work")
 
+    monkeypatch.setattr(artifact_resolution.os.path, "realpath", unexpected_host_work)
+    monkeypatch.setattr(artifact_resolution.os.path, "isdir", unexpected_host_work)
+    monkeypatch.setattr(subprocess, "run", unexpected_host_work)
 
-def test_check_store_health_git_runner_exception_is_redacted(tmp_path):
-    secret = "private-runner-diagnostic"
-    store = _data_store(StoreKind.GIT, _GIT_REMOTE, name="repo")
-
-    def runner(args):
-        raise RuntimeError(secret)
-
-    health = check_store_health(
-        store,
-        git_runner=runner,
-        git_remote_policy=_git_policy(_GIT_REMOTE),
-        git_health_cwd=tmp_path,
-    )
+    health = check_store_health(store)
 
     assert health.status is StoreHealthStatus.UNREACHABLE
     assert health.detail == "Git store health check failed."
     assert secret not in str(health.to_json_dict())
 
 
-def test_check_store_health_git_preflight_mismatch_prevents_network_call(tmp_path):
-    store = _data_store(StoreKind.GIT, _GIT_REMOTE, name="repo")
-    calls = []
-
-    def runner(args):
-        calls.append(args)
-        if "--get-url" in args:
-            return GitCompleted(
-                0,
-                b"https://attacker.invalid/rewrite.git\n",
-                b"private preflight diagnostic",
-            )
-        raise AssertionError("health probe must stop before network-capable ls-remote")
-
-    health = check_store_health(
-        store,
-        git_runner=runner,
-        git_remote_policy=_git_policy(_GIT_REMOTE),
-        git_health_cwd=tmp_path,
-    )
-
-    assert health.status is StoreHealthStatus.UNREACHABLE
-    assert health.detail == "Git store health check failed."
-    assert len(calls) == 1
-    assert "--get-url" in calls[0]
-
-
-def test_check_store_health_git_does_not_inherit_parent_repository_config(
-    tmp_path,
-    monkeypatch,
+@pytest.mark.parametrize(
+    ("keyword", "value"),
+    (
+        ("http_timeout", 1.0),
+        ("rclone_runner", object()),
+        ("git_runner", object()),
+        ("git_executor", object()),
+        ("git_remote_policy", GitRemotePolicy.deny_all()),
+        ("git_health_cwd", Path(".")),
+        ("git_binary", "git"),
+        ("git_allow_protocol", "https"),
+        ("git_deadline_seconds", 1.0),
+        ("git_clock", lambda: 0.0),
+    ),
+)
+def test_legacy_check_store_health_rejects_removed_process_probe_kwargs(
+    keyword,
+    value,
 ):
-    git = shutil.which("git")
-    if git is None:
-        pytest.skip("git is unavailable")
-    _isolate_real_git_config(monkeypatch, tmp_path)
-    parent_repo = tmp_path / "parent-repository"
-    health_cwd = parent_repo / "health-cwd"
-    parent_repo.mkdir()
-    health_cwd.mkdir()
-    remote = "https://ceiling-regression.example/org/repo.git"
-    rewritten = "https://attacker.invalid/rewritten.git"
-    clean_env = dict(os.environ)
-    for variable in (
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-        "GIT_CEILING_DIRECTORIES",
-        "GIT_COMMON_DIR",
-        "GIT_DIR",
-        "GIT_INDEX_FILE",
-        "GIT_OBJECT_DIRECTORY",
-        "GIT_WORK_TREE",
-    ):
-        clean_env.pop(variable, None)
-    subprocess.run(  # noqa: S603 - fixed executable and controlled test path
-        [git, "init", "-q", os.fspath(parent_repo)],
-        check=True,
-        capture_output=True,
-        env=clean_env,
-    )
-    subprocess.run(  # noqa: S603 - fixed executable and controlled test values
-        [
-            git,
-            "-C",
-            os.fspath(parent_repo),
-            "config",
-            f"url.{rewritten}.insteadOf",
-            remote,
-        ],
-        check=True,
-        capture_output=True,
-        env=clean_env,
-    )
-    inherited = subprocess.run(  # noqa: S603 - no-network Git metadata query
-        [
-            git,
-            "-C",
-            os.fspath(health_cwd),
-            "ls-remote",
-            "--get-url",
-            "--",
-            remote,
-        ],
-        check=True,
-        capture_output=True,
-        env=clean_env,
-    )
-    assert inherited.stdout == f"{rewritten}\n".encode()
+    store = _data_store(StoreKind.GIT, _GIT_REMOTE, name="repo")
 
-    class RealPreflightExecutor:
-        def __init__(self):
-            self.calls = []
-            self.preflight_stdout = None
-
-        def run(
-            self,
-            command,
-            *,
-            deadline,
-            stdout_limit_bytes,
-            stderr_limit_bytes,
-            stdout_consumer=None,
-            cwd=None,
-            env=None,
-        ):
-            self.calls.append({"command": command, "cwd": cwd, "env": env})
-            if "--get-url" in command:
-                completed = subprocess.run(  # noqa: S603 - built Git argv
-                    command,
-                    check=False,
-                    capture_output=True,
-                    cwd=cwd,
-                    env=env,
-                )
-                self.preflight_stdout = completed.stdout
-                return SimpleNamespace(
-                    returncode=completed.returncode,
-                    stdout=completed.stdout,
-                    stderr=completed.stderr,
-                )
-            return SimpleNamespace(returncode=128, stdout=b"", stderr=b"intercepted")
-
-    executor = RealPreflightExecutor()
-    health = check_store_health(
-        _data_store(StoreKind.GIT, remote, name="repo"),
-        git_executor=executor,
-        git_remote_policy=_git_policy(remote),
-        git_health_cwd=health_cwd,
-        git_binary=git,
-    )
-
-    assert health.status is StoreHealthStatus.UNREACHABLE
-    assert health.detail == "Git store health check failed."
-    assert executor.preflight_stdout == f"{remote}\n".encode()
-    assert len(executor.calls) == 2
-    assert all(call["cwd"] == os.path.realpath(health_cwd) for call in executor.calls)
-    assert all(
-        call["env"]["GIT_CEILING_DIRECTORIES"] == os.path.realpath(parent_repo)
-        for call in executor.calls
-    )
+    with pytest.raises(TypeError):
+        check_store_health(store, **{keyword: value})
 
 
 # --- ResolverRegistry -----------------------------------------------------
@@ -2656,7 +2761,7 @@ def test_registry_returns_precomputed_prepared_result_without_resolver_work():
         uri="store://[redacted]",
         expected_hash=_sha256(b"artifact"),
         fetched_at=datetime.now(timezone.utc),
-        detail="already resolved",
+        detail="Store artifact could not be resolved.",
     )
 
     result = ResolverRegistry([resolver]).resolve_prepared(
@@ -2665,9 +2770,83 @@ def test_registry_returns_precomputed_prepared_result_without_resolver_work():
         byte_range=(2, 5),
     )
 
-    assert result is precomputed
+    assert result is not precomputed
+    assert result == precomputed
     assert resolver.can_resolve_references == []
     assert resolver.calls == []
+
+
+@pytest.mark.parametrize(
+    "status",
+    (ResolutionStatus.VERIFIED, ResolutionStatus.DRIFTED),
+)
+def test_registry_rejects_precomputed_integrity_results(status):
+    content = b"secret precomputed bytes"
+    precomputed = ResolvedArtifact(
+        status=status,
+        source_system="secret-source",
+        uri="secret://locator",
+        expected_hash=_sha256(content),
+        observed_hash=_sha256(content),
+        content=content,
+        size_bytes=len(content),
+        fetched_at=datetime.now(timezone.utc),
+        detail="secret detail",
+    )
+
+    result = ResolverRegistry().resolve_prepared(precomputed)
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.source_system == "artifact"
+    assert result.uri == "artifact://[redacted]"
+    assert result.expected_hash == "unavailable"
+    assert result.observed_hash is None
+    assert result.content_type is None
+    assert result.size_bytes is None
+    assert result.content is None
+    assert result.truncated is False
+    assert "secret" not in str(result.to_json_dict())
+
+
+def test_registry_rejects_a_mutated_content_bearing_precomputed_failure():
+    precomputed = ResolvedArtifact(
+        status=ResolutionStatus.UNRESOLVED,
+        source_system="secret-source",
+        uri="secret://locator",
+        expected_hash=_sha256(b"secret"),
+        fetched_at=datetime.now(timezone.utc),
+        detail="secret detail",
+    )
+    object.__setattr__(precomputed, "content", b"secret")
+
+    result = ResolverRegistry().resolve_prepared(precomputed)
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.source_system == "artifact"
+    assert result.uri == "artifact://[redacted]"
+    assert result.content is None
+    assert "secret" not in str(result.to_json_dict())
+
+
+def test_registry_rejects_a_precomputed_resolved_artifact_subclass():
+    class CustomResolvedArtifact(ResolvedArtifact):
+        pass
+
+    target = CustomResolvedArtifact(
+        status=ResolutionStatus.UNRESOLVED,
+        source_system="secret-source",
+        uri="secret://locator",
+        expected_hash=_sha256(b"secret"),
+        fetched_at=datetime.now(timezone.utc),
+        detail="secret detail",
+    )
+
+    result = ResolverRegistry().resolve_prepared(target)
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.source_system == "artifact"
+    assert result.uri == "artifact://[redacted]"
+    assert "secret" not in str(result.to_json_dict())
 
 
 def test_registry_dispatches_prepared_external_reference_to_ordinary_resolver():
@@ -2804,14 +2983,478 @@ def test_registry_rejects_unsupported_prepared_runtime_type_without_reflection()
     )
 
     assert result.status is ResolutionStatus.UNRESOLVED
-    assert result.source_system == "prepared"
-    assert result.uri == "prepared://[redacted]"
+    assert result.source_system == "artifact"
+    assert result.uri == "artifact://[redacted]"
     assert result.expected_hash == "unavailable"
     assert result.observed_hash is None
     assert result.content is None
     assert result.detail == "Prepared artifact resolution target is unsupported."
     assert resolver.can_resolve_references == []
     assert resolver.calls == []
+
+
+@pytest.mark.parametrize("invalid_max_bytes", [True, None])
+def test_registry_validates_view_before_dispatch_or_target_inspection(
+    invalid_max_bytes,
+):
+    resolver = _RecordingPreparedResolver()
+    registry = ResolverRegistry([resolver])
+    reference = ExternalArtifactReference(
+        source_system="test",
+        uri="test://artifact",
+        content_hash=_sha256(b"artifact"),
+    )
+
+    with pytest.raises(ArtifactContentBoundsError):
+        registry.resolve(reference, max_bytes=invalid_max_bytes)
+    for method_name in (
+        "resolve_prepared",
+        "resolve_local_store",
+        "resolve_http_store",
+        "resolve_rclone_store",
+        "resolve_git_store",
+    ):
+        with pytest.raises(ArtifactContentBoundsError):
+            getattr(registry, method_name)(
+                object(),
+                max_bytes=invalid_max_bytes,
+            )
+
+    assert resolver.can_resolve_references == []
+    assert resolver.calls == []
+
+
+def test_registry_rejects_an_exact_target_with_missing_identity_without_dispatch():
+    resolver = _RecordingPreparedResolver()
+    malformed = object.__new__(ExternalArtifactReference)
+
+    result = ResolverRegistry([resolver]).resolve(malformed)
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.source_system == "artifact"
+    assert result.uri == "artifact://[redacted]"
+    assert resolver.can_resolve_references == []
+    assert resolver.calls == []
+
+
+def test_hash_collector_rejects_missing_resolver_limit_before_consuming_chunks():
+    with pytest.raises(ArtifactContentBoundsError, match="must be an integer"):
+        artifact_resolution._HashCollector(  # type: ignore[attr-defined]
+            algorithm="sha256",
+            max_bytes=None,
+            window=None,
+        )
+
+
+def test_every_registry_dispatch_path_rejects_custom_output_overruns(tmp_path):
+    content = b"secret artifact content"
+    reference = ExternalArtifactReference(
+        source_system="custom",
+        uri="secret://ordinary-locator",
+        content_hash=_sha256(content),
+    )
+    local_root = tmp_path / "store"
+    local_root.mkdir()
+    targets = (
+        reference,
+        _local_store_target(
+            _data_store(StoreKind.LOCAL_FS, str(local_root)),
+            "artifact.bin",
+            _sha256(content),
+        ),
+        _registered_http_target(content_hash=_sha256(content)),
+        _rclone_store_target(content_hash=_sha256(content)),
+        _git_store_target(content_hash=_sha256(content)),
+    )
+
+    class OverproducingResolver(_RecordingPreparedResolver):
+        @staticmethod
+        def _result(ref):
+            return ResolvedArtifact(
+                status=ResolutionStatus.VERIFIED,
+                source_system="secret-source",
+                uri="secret://adapter-locator",
+                expected_hash=ref.content_hash,
+                observed_hash=ref.content_hash,
+                content_type="secret/type",
+                size_bytes=len(content),
+                content=content,
+                truncated=True,
+                fetched_at=datetime.now(timezone.utc),
+                detail="secret detail",
+            )
+
+    resolver = OverproducingResolver()
+    registry = ResolverRegistry([resolver])
+    calls = (
+        lambda: registry.resolve(targets[0], max_bytes=1),
+        lambda: registry.resolve_local_store(targets[1], max_bytes=1),
+        lambda: registry.resolve_http_store(targets[2], max_bytes=1),
+        lambda: registry.resolve_rclone_store(targets[3], max_bytes=1),
+        lambda: registry.resolve_git_store(targets[4], max_bytes=1),
+    )
+
+    for call in calls:
+        result = call()
+        assert result.status is ResolutionStatus.UNRESOLVED
+        assert result.source_system == "artifact"
+        assert result.uri == "artifact://[redacted]"
+        assert result.expected_hash == "unavailable"
+        assert result.observed_hash is None
+        assert result.content_type is None
+        assert result.size_bytes is None
+        assert result.content is None
+        assert result.truncated is False
+        assert "secret" not in str(result.to_json_dict())
+
+
+def test_registry_rejects_self_consistent_output_for_a_different_artifact():
+    requested = b"requested"
+    substituted = b"substituted secret"
+    reference = ExternalArtifactReference(
+        source_system="custom",
+        uri="custom://requested",
+        content_hash=_sha256(requested),
+    )
+
+    class SubstitutingResolver(_RecordingPreparedResolver):
+        @staticmethod
+        def _result(_ref):
+            substituted_hash = _sha256(substituted)
+            return ResolvedArtifact(
+                status=ResolutionStatus.VERIFIED,
+                source_system="secret-source",
+                uri="secret://different-artifact",
+                expected_hash=substituted_hash,
+                observed_hash=substituted_hash,
+                size_bytes=len(substituted),
+                content=substituted,
+                fetched_at=datetime.now(timezone.utc),
+            )
+
+    result = ResolverRegistry([SubstitutingResolver()]).resolve(reference)
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.source_system == "artifact"
+    assert result.uri == "artifact://[redacted]"
+    assert result.content is None
+    assert "secret" not in str(result.to_json_dict())
+
+
+def test_registry_rehashes_a_complete_verified_result_before_accepting_content():
+    requested = b"right"
+    substituted = b"wrong"
+    reference = ExternalArtifactReference(
+        source_system="custom",
+        uri="custom://requested",
+        content_hash=_sha256(requested),
+    )
+
+    class LyingResolver(ArtifactResolver):
+        def can_resolve(self, _ref):
+            return True
+
+        def resolve(self, ref, *, max_bytes=DEFAULT_MAX_BYTES, byte_range=None):
+            return ResolvedArtifact(
+                status=ResolutionStatus.VERIFIED,
+                source_system=ref.source_system,
+                uri=ref.uri,
+                expected_hash=ref.content_hash,
+                observed_hash=ref.content_hash,
+                size_bytes=len(substituted),
+                content=substituted,
+                fetched_at=datetime.now(timezone.utc),
+            )
+
+    result = ResolverRegistry([LyingResolver()]).resolve(reference)
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.source_system == "artifact"
+    assert result.content is None
+
+
+def test_registry_snapshots_identity_before_a_resolver_can_mutate_its_reference():
+    requested = b"requested"
+    substituted = b"substituted secret"
+    reference = ExternalArtifactReference(
+        source_system="custom",
+        uri="custom://requested",
+        content_hash=_sha256(requested),
+    )
+
+    class MutatingResolver(ArtifactResolver):
+        def can_resolve(self, ref):
+            object.__setattr__(ref, "source_system", "secret-source")
+            object.__setattr__(ref, "uri", "secret://different-artifact")
+            object.__setattr__(ref, "content_hash", _sha256(substituted))
+            return True
+
+        def resolve(self, ref, *, max_bytes=DEFAULT_MAX_BYTES, byte_range=None):
+            return ResolvedArtifact(
+                status=ResolutionStatus.VERIFIED,
+                source_system=ref.source_system,
+                uri=ref.uri,
+                expected_hash=ref.content_hash,
+                observed_hash=ref.content_hash,
+                size_bytes=len(substituted),
+                content=substituted,
+                fetched_at=datetime.now(timezone.utc),
+            )
+
+    result = ResolverRegistry([MutatingResolver()]).resolve(reference)
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.source_system == "artifact"
+    assert result.uri == "artifact://[redacted]"
+    assert result.content is None
+    assert "secret" not in str(result.to_json_dict())
+
+
+def test_registry_returns_a_detached_snapshot_of_an_accepted_result():
+    content = b"ok"
+    reference = ExternalArtifactReference(
+        source_system="custom",
+        uri="custom://requested",
+        content_hash=_sha256(content),
+    )
+
+    class RetainingResolver(ArtifactResolver):
+        def __init__(self):
+            self.returned = ResolvedArtifact(
+                status=ResolutionStatus.VERIFIED,
+                source_system=reference.source_system,
+                uri=reference.uri,
+                expected_hash=reference.content_hash,
+                observed_hash=reference.content_hash,
+                size_bytes=len(content),
+                content=content,
+                fetched_at=datetime.now(timezone.utc),
+            )
+
+        def can_resolve(self, _ref):
+            return True
+
+        def resolve(self, _ref, *, max_bytes=DEFAULT_MAX_BYTES, byte_range=None):
+            return self.returned
+
+    resolver = RetainingResolver()
+    result = ResolverRegistry([resolver]).resolve(reference)
+
+    assert result is not resolver.returned
+    object.__setattr__(resolver.returned, "content", b"mutated secret")
+    object.__setattr__(resolver.returned, "uri", "secret://mutated")
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.uri == reference.uri
+    assert result.content == content
+
+
+def test_registry_preserves_safe_unresolved_diagnostics_and_normalizes_timestamp():
+    reference = ExternalArtifactReference(
+        source_system="custom",
+        uri="custom://requested",
+        content_hash=_sha256(b"requested"),
+    )
+    offset = timezone(timedelta(hours=2))
+
+    class DiagnosticResolver(ArtifactResolver):
+        def can_resolve(self, _ref):
+            return True
+
+        def resolve(self, ref, *, max_bytes=DEFAULT_MAX_BYTES, byte_range=None):
+            return ResolvedArtifact(
+                status=ResolutionStatus.UNRESOLVED,
+                source_system=ref.source_system,
+                uri=ref.uri,
+                expected_hash=ref.content_hash,
+                observed_hash=_sha256(b"partial"),
+                content_type="application/octet-stream",
+                size_bytes=17,
+                truncated=True,
+                fetched_at=datetime.now(offset),
+                detail="Safe diagnostic metadata.",
+            )
+
+    result = ResolverRegistry([DiagnosticResolver()]).resolve(reference)
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.observed_hash == _sha256(b"partial")
+    assert result.content_type == "application/octet-stream"
+    assert result.size_bytes == 17
+    assert result.truncated is True
+    assert result.content is None
+    assert result.fetched_at.tzinfo is timezone.utc
+
+
+def test_registry_rejects_an_exact_result_with_missing_fields_without_raising():
+    reference = ExternalArtifactReference(
+        source_system="custom",
+        uri="custom://requested",
+        content_hash=_sha256(b"requested"),
+    )
+    malformed = object.__new__(ResolvedArtifact)
+
+    class MissingFieldsResolver(ArtifactResolver):
+        def can_resolve(self, _ref):
+            return True
+
+        def resolve(self, _ref, *, max_bytes=DEFAULT_MAX_BYTES, byte_range=None):
+            return malformed
+
+    result = ResolverRegistry([MissingFieldsResolver()]).resolve(reference)
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.source_system == "artifact"
+    assert result.uri == "artifact://[redacted]"
+
+
+def test_registry_rejects_a_semantically_naive_aware_datetime():
+    class SemanticallyNaiveTimezone(tzinfo):
+        def utcoffset(self, _dt):
+            return None
+
+        def dst(self, _dt):
+            return None
+
+    reference = ExternalArtifactReference(
+        source_system="custom",
+        uri="custom://requested",
+        content_hash=_sha256(b"requested"),
+    )
+
+    class NaiveTimestampResolver(ArtifactResolver):
+        def can_resolve(self, _ref):
+            return True
+
+        def resolve(self, ref, *, max_bytes=DEFAULT_MAX_BYTES, byte_range=None):
+            return ResolvedArtifact(
+                status=ResolutionStatus.UNRESOLVED,
+                source_system=ref.source_system,
+                uri=ref.uri,
+                expected_hash=ref.content_hash,
+                fetched_at=datetime(2026, 1, 1, tzinfo=SemanticallyNaiveTimezone()),
+            )
+
+    result = ResolverRegistry([NaiveTimestampResolver()]).resolve(reference)
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.source_system == "artifact"
+    assert result.uri == "artifact://[redacted]"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("status", "unresolved"),
+        ("source_system", object()),
+        ("observed_hash", object()),
+        ("content_type", object()),
+        ("size_bytes", True),
+        ("truncated", 0),
+        ("fetched_at", datetime.now()),
+        ("detail", object()),
+    ),
+)
+def test_registry_rejects_malformed_exact_result_fields_without_serializing_them(
+    field,
+    value,
+):
+    reference = ExternalArtifactReference(
+        source_system="custom",
+        uri="custom://requested",
+        content_hash=_sha256(b"requested"),
+    )
+    malformed = ResolvedArtifact(
+        status=ResolutionStatus.UNRESOLVED,
+        source_system=reference.source_system,
+        uri=reference.uri,
+        expected_hash=reference.content_hash,
+        fetched_at=datetime.now(timezone.utc),
+        detail="diagnostic",
+    )
+    object.__setattr__(malformed, field, value)
+
+    class MalformedResolver(_RecordingPreparedResolver):
+        @staticmethod
+        def _result(_ref):
+            return malformed
+
+    result = ResolverRegistry([MalformedResolver()]).resolve(reference)
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.source_system == "artifact"
+    assert result.uri == "artifact://[redacted]"
+    assert result.to_json_dict()["status"] == "unresolved"
+
+
+@pytest.mark.parametrize(
+    ("size_bytes", "truncated"),
+    (
+        (1, False),
+        (2, True),
+        (3, False),
+    ),
+)
+def test_registry_rejects_inconsistent_verified_size_and_truncation(
+    size_bytes,
+    truncated,
+):
+    content = b"ok"
+    reference = ExternalArtifactReference(
+        source_system="custom",
+        uri="custom://requested",
+        content_hash=_sha256(content),
+    )
+
+    class InconsistentResolver(_RecordingPreparedResolver):
+        @staticmethod
+        def _result(ref):
+            return ResolvedArtifact(
+                status=ResolutionStatus.VERIFIED,
+                source_system=ref.source_system,
+                uri=ref.uri,
+                expected_hash=ref.content_hash,
+                observed_hash=ref.content_hash,
+                size_bytes=size_bytes,
+                content=content,
+                truncated=truncated,
+                fetched_at=datetime.now(timezone.utc),
+            )
+
+    result = ResolverRegistry([InconsistentResolver()]).resolve(reference)
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.content is None
+
+
+def test_registry_rejects_a_resolver_result_subclass():
+    content = b"content"
+    reference = ExternalArtifactReference(
+        source_system="custom",
+        uri="secret://ordinary-locator",
+        content_hash=_sha256(content),
+    )
+
+    class CustomResolvedArtifact(ResolvedArtifact):
+        pass
+
+    class CustomResolver(ArtifactResolver):
+        def can_resolve(self, _ref):
+            return True
+
+        def resolve(self, ref, *, max_bytes=DEFAULT_MAX_BYTES, byte_range=None):
+            return CustomResolvedArtifact(
+                status=ResolutionStatus.UNRESOLVED,
+                source_system=ref.source_system,
+                uri=ref.uri,
+                expected_hash=ref.content_hash,
+                fetched_at=datetime.now(timezone.utc),
+            )
+
+    result = ResolverRegistry([CustomResolver()]).resolve(reference)
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.source_system == "artifact"
+    assert result.uri == "artifact://[redacted]"
 
 
 def test_registry_dispatches_to_matching_resolver(tmp_path):
@@ -2845,6 +3488,27 @@ def test_registry_allowed_roots_thread_through(tmp_path):
     result = registry.resolve(_local_ref(outside, _sha256(b"nope")))
 
     assert result.status is ResolutionStatus.UNRESOLVED
+
+
+def test_default_registry_preserves_explicit_local_policy_identity(tmp_path):
+    data = b"shared local policy"
+    inside = _write(tmp_path, "shared.txt", data)
+    policy = LocalPathPolicy([tmp_path])
+
+    registry = default_registry(
+        allowed_roots=[],
+        local_path_policy=policy,
+    )
+    resolver = next(
+        candidate
+        for candidate in registry._resolvers
+        if isinstance(candidate, LocalFilesystemResolver)
+    )
+    result = registry.resolve(_local_ref(inside, _sha256(data)))
+
+    assert resolver._operator_policy is policy
+    assert resolver._scope.path_policy is policy
+    assert result.status is ResolutionStatus.VERIFIED
 
 
 def test_registry_never_falls_back_to_ordinary_resolve_for_local_store(tmp_path):
@@ -3204,6 +3868,55 @@ def test_resolved_artifact_downgrades_false_verified_status():
     assert result.returned_bytes == 0
 
 
+def test_resolved_artifact_defensively_sanitizes_content_above_the_global_cap():
+    content = b"x" * (MAX_INLINE_ARTIFACT_BYTES + 1)
+    result = ResolvedArtifact(
+        status=ResolutionStatus.VERIFIED,
+        source_system="secret-source",
+        uri="secret://locator",
+        expected_hash=_sha256(content),
+        observed_hash=_sha256(content),
+        content_type="secret/type",
+        size_bytes=len(content),
+        content=content,
+        truncated=True,
+        fetched_at=datetime(2000, 1, 1, tzinfo=timezone.utc),
+        detail="secret detail",
+    )
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.source_system == "artifact"
+    assert result.uri == "artifact://[redacted]"
+    assert result.expected_hash == "unavailable"
+    assert result.observed_hash is None
+    assert result.content_type is None
+    assert result.size_bytes is None
+    assert result.content is None
+    assert result.truncated is False
+    assert result.fetched_at != datetime(2000, 1, 1, tzinfo=timezone.utc)
+    assert "secret" not in str(result.to_json_dict())
+
+
+def test_resolved_artifact_sanitizes_non_bytes_without_calling_hostile_len():
+    class HostileContent:
+        def __len__(self):
+            raise AssertionError("attacker-controlled __len__ was called")
+
+    result = ResolvedArtifact(
+        status=ResolutionStatus.VERIFIED,
+        source_system="secret-source",
+        uri="secret://locator",
+        expected_hash=_sha256(b"secret"),
+        observed_hash=_sha256(b"secret"),
+        content=HostileContent(),  # type: ignore[arg-type]
+        fetched_at=datetime.now(timezone.utc),
+    )
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.uri == "artifact://[redacted]"
+    assert result.content is None
+
+
 # --- content-hash recovery of moved/renamed local artifacts ---------------
 
 
@@ -3224,6 +3937,32 @@ def test_recovery_finds_moved_file_by_hash(tmp_path):
     assert result.status is ResolutionStatus.VERIFIED
     assert result.content == data
     assert result.observed_hash == _sha256(data)
+    assert "Recovered from" in (result.detail or "")
+
+
+def test_recovery_caps_selected_range_while_verifying_full_moved_file(tmp_path):
+    root = tmp_path / "store"
+    root.mkdir()
+    data = b"0123456789"
+    moved = _write(root, "moved.bin", data)
+    missing = root / "missing.bin"
+    resolver = LocalFilesystemResolver(
+        allowed_roots=[root],
+        recovery=RecoveryPolicy(enabled=True),
+    )
+
+    result = resolver.resolve(
+        _local_ref(missing, _sha256(data)),
+        max_bytes=2,
+        byte_range=(2, 8),
+    )
+
+    assert moved.exists()
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == b"23"
+    assert result.observed_hash == _sha256(data)
+    assert result.size_bytes == len(data)
+    assert result.truncated is True
     assert "Recovered from" in (result.detail or "")
 
 
@@ -3848,6 +4587,46 @@ def test_registry_from_env_recovery_off_by_default(tmp_path, monkeypatch):
     assert result.status is ResolutionStatus.UNRESOLVED
 
 
+def test_registry_from_env_explicit_local_policy_overrides_environment_without_parsing(
+    tmp_path,
+    monkeypatch,
+):
+    data = b"settings-selected local authority"
+    inside = _write(tmp_path, "selected.txt", data)
+    policy = _FalseyLocalPathPolicy([tmp_path])
+    monkeypatch.setenv(
+        "LAB_TRACKER_RESOLVER_ALLOWED_ROOTS",
+        "//environment.example/secret-untrusted-root",
+    )
+
+    def unexpected_environment_parse(_cls, _raw):
+        raise AssertionError("explicit local policy still parsed the environment")
+
+    monkeypatch.setattr(
+        LocalPathPolicy,
+        "from_config",
+        classmethod(unexpected_environment_parse),
+    )
+
+    registry = registry_from_env(
+        local_path_policy=policy,
+        http_policy=OutboundHttpPolicy(),
+        rclone_remote_policy=RcloneRemotePolicy.deny_all(),
+        git_remote_policy=GitRemotePolicy.deny_all(),
+    )
+    resolver = next(
+        candidate
+        for candidate in registry._resolvers
+        if isinstance(candidate, LocalFilesystemResolver)
+    )
+    result = registry.resolve(_local_ref(inside, _sha256(data)))
+
+    assert not policy
+    assert resolver._operator_policy is policy
+    assert resolver._scope.path_policy is policy
+    assert result.status is ResolutionStatus.VERIFIED
+
+
 def test_registry_from_env_honors_http_deadline_without_runtime_settings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3856,16 +4635,19 @@ def test_registry_from_env_honors_http_deadline_without_runtime_settings(
         "2.5",
     )
 
+    http_client = FakeSafeHttpClient(())
     registry = registry_from_env(
         http_policy=OutboundHttpPolicy(
             address_resolver=FakeAddressResolver(),
-        )
+        ),
+        http_client=http_client,
     )
 
     http_resolver = next(
         resolver for resolver in registry._resolvers if isinstance(resolver, HttpResolver)
     )
     assert http_resolver._deadline_seconds == 2.5
+    assert http_resolver._client is http_client
 
 
 @pytest.mark.parametrize("value", ("0", "-1", "nan", "inf", "not-a-number"))
@@ -4678,6 +5460,40 @@ def test_git_resolver_returns_byte_range_slice(tmp_path):
     assert result.content == data[4:8]
 
 
+def test_git_resolver_caps_a_requested_byte_range_but_verifies(tmp_path):
+    data = b"0123456789abcdef"
+    resolver = _git_resolver(runner=_fake_git_runner(blob=data), cache_root=tmp_path)
+
+    result = resolver.resolve(
+        _git_ref(_sha256(data)),
+        max_bytes=2,
+        byte_range=(4, 10),
+    )
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == b"45"
+    assert result.observed_hash == _sha256(data)
+    assert result.size_bytes == len(data)
+
+
+def test_scoped_git_resolver_caps_a_requested_byte_range_but_verifies(tmp_path):
+    data = b"0123456789abcdef"
+    resolver = _git_resolver(runner=_fake_git_runner(blob=data), cache_root=tmp_path)
+    target = _git_store_target(content_hash=_sha256(data))
+
+    result = resolver.resolve_within_git_store(
+        target,
+        max_bytes=2,
+        byte_range=(4, 10),
+    )
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == b"45"
+    assert result.observed_hash == _sha256(data)
+    assert result.size_bytes == len(data)
+    assert result.uri == target.logical_reference.uri
+
+
 def test_git_resolver_can_resolve_by_source_system_and_scheme():
     resolver = _git_resolver(runner=_fake_git_runner(blob=b""))
 
@@ -4918,6 +5734,23 @@ def test_default_registry_preserves_explicit_git_policy_identity():
     assert resolver._remote_policy is policy
 
 
+def test_default_registry_preserves_even_a_falsey_git_policy_identity():
+    class FalseyGitPolicy(GitRemotePolicy):
+        def __bool__(self):
+            return False
+
+    policy = FalseyGitPolicy.from_config(_GIT_REMOTE)
+
+    registry = default_registry(git_remote_policy=policy)
+
+    resolver = next(
+        candidate
+        for candidate in registry._resolvers
+        if isinstance(candidate, GitResolver)
+    )
+    assert resolver._remote_policy is policy
+
+
 def test_registry_from_env_explicit_git_policy_overrides_environment(monkeypatch):
     policy = _git_policy(_GIT_REMOTE)
     monkeypatch.setenv(
@@ -5073,33 +5906,102 @@ def test_git_resolver_rejects_option_like_components(tmp_path):
     assert runner.calls == []
 
 
-# --- RcloneResolver remote allowlist ---------------------------------------
+# --- RcloneResolver remote policy ------------------------------------------
 
 
-def test_rclone_resolver_refuses_remote_not_in_allowlist():
+def test_rclone_resolver_denies_by_default_without_process_work():
     runner = _fake_rclone_runner(size_bytes=4, body=b"data")
-    resolver = RcloneResolver(runner=runner, allowed_remotes=["lab-onedrive"])
+    resolver = RcloneResolver(runner=runner)
+
+    result = resolver.resolve(
+        _rclone_ref("rclone://lab-onedrive/exp/x.bin", _sha256(b"data"))
+    )
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert "allowlist" in (result.detail or "")
+    assert runner.calls == []
+
+
+def test_rclone_resolver_refuses_remote_not_in_typed_policy():
+    runner = _fake_rclone_runner(size_bytes=4, body=b"data")
+    policy = _rclone_policy("lab-onedrive")
+    resolver = RcloneResolver(runner=runner, remote_policy=policy)
 
     result = resolver.resolve(
         _rclone_ref("rclone://other-remote/exp/x.bin", _sha256(b"data"))
     )
 
+    assert resolver._remote_policy is policy
     assert result.status is ResolutionStatus.UNRESOLVED
     assert "allowlist" in (result.detail or "")
-    assert runner.calls == []  # refused before any rclone subprocess
+    assert runner.calls == []
 
 
-def test_rclone_resolver_allows_listed_remote():
+def test_rclone_resolver_preserves_typed_policy_identity_and_allows_exact_remote():
     data = b"allowed remote payload"
     runner = _fake_rclone_runner(size_bytes=len(data), body=data)
-    resolver = RcloneResolver(runner=runner, allowed_remotes=["lab-onedrive"])
+    policy = _rclone_policy("lab-onedrive")
+    resolver = RcloneResolver(runner=runner, remote_policy=policy)
 
     result = resolver.resolve(
         _rclone_ref("rclone://lab-onedrive/exp/x.bin", _sha256(data))
     )
 
+    assert resolver._remote_policy is policy
     assert result.status is ResolutionStatus.VERIFIED
     assert result.content == data
+
+
+def test_default_registry_preserves_explicit_rclone_policy_identity():
+    policy = _rclone_policy("lab-onedrive")
+
+    registry = default_registry(rclone_remote_policy=policy)
+
+    resolver = next(
+        candidate
+        for candidate in registry._resolvers
+        if isinstance(candidate, RcloneResolver)
+    )
+    assert resolver._remote_policy is policy
+
+
+def test_default_registry_preserves_even_a_falsey_rclone_policy_identity():
+    class FalseyRclonePolicy(RcloneRemotePolicy):
+        def __bool__(self):
+            return False
+
+    policy = FalseyRclonePolicy.from_config("lab-onedrive")
+
+    registry = default_registry(rclone_remote_policy=policy)
+
+    resolver = next(
+        candidate
+        for candidate in registry._resolvers
+        if isinstance(candidate, RcloneResolver)
+    )
+    assert resolver._remote_policy is policy
+
+
+def test_default_registry_shares_even_a_falsey_process_executor():
+    class FalseyExecutor:
+        def __bool__(self):
+            return False
+
+    executor = FalseyExecutor()
+    registry = default_registry(process_executor=executor)  # type: ignore[arg-type]
+    rclone = next(
+        candidate
+        for candidate in registry._resolvers
+        if isinstance(candidate, RcloneResolver)
+    )
+    git = next(
+        candidate
+        for candidate in registry._resolvers
+        if isinstance(candidate, GitResolver)
+    )
+
+    assert rclone._executor is executor
+    assert git._executor is executor
 
 
 def test_registry_from_env_rclone_denies_remotes_by_default(monkeypatch):
@@ -5113,8 +6015,28 @@ def test_registry_from_env_rclone_denies_remotes_by_default(monkeypatch):
     assert "allowlist" in (result.detail or "")
 
 
+def test_registry_from_env_explicit_rclone_policy_overrides_environment(monkeypatch):
+    policy = _rclone_policy("lab-onedrive")
+    monkeypatch.setenv(
+        "LAB_TRACKER_RCLONE_ALLOWED_REMOTES",
+        "this/environment/value/is/intentionally/invalid",
+    )
+
+    registry = registry_from_env(
+        rclone_remote_policy=policy,
+        http_policy=OutboundHttpPolicy(),
+    )
+
+    resolver = next(
+        candidate
+        for candidate in registry._resolvers
+        if isinstance(candidate, RcloneResolver)
+    )
+    assert resolver._remote_policy is policy
+
+
 def test_registry_from_env_rclone_allowlist_admits_named_remote(monkeypatch):
-    monkeypatch.setenv("LAB_TRACKER_RCLONE_ALLOWED_REMOTES", "lab-onedrive, backup")
+    monkeypatch.setenv("LAB_TRACKER_RCLONE_ALLOWED_REMOTES", "lab-onedrive,backup")
 
     registry = registry_from_env()
     denied = registry.resolve(_rclone_ref("rclone://other/x.bin", _sha256(b"x")))

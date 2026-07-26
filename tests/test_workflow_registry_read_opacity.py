@@ -17,6 +17,9 @@ from read_opacity_inventory import (
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.auth import Role, utc_now
+from lab_tracker.local_filesystem_authority import LocalFilesystemAuthority
+from lab_tracker.local_filesystem_operations import BoundedLocalFilesystemOperations
+from lab_tracker.local_store_health import LocalStoreHealthProbe
 from lab_tracker.models import GraphChangeSet
 from lab_tracker.routes import graph_batches as graph_batch_routes
 from lab_tracker.routes import graph_drafts as graph_draft_routes
@@ -24,6 +27,7 @@ from lab_tracker.sqlalchemy_repository_parts.graph_drafts import (
     SQLAlchemyGraphChangeSetRepository,
 )
 from lab_tracker.store_health import (
+    LOCAL_STORE_HEALTH_FAILURE_DETAIL,
     CachedStoreHealthProbe,
     StoreHealth,
     StoreHealthStatus,
@@ -517,9 +521,25 @@ def test_store_health_cache_and_admission_preserve_browser_device_and_lpat_scope
 
     checked: list[StoreProbeTarget] = []
 
+    class RecordingExecutor:
+        def __init__(self) -> None:
+            self.calls: list[object] = []
+
+        def run(self, command, **kwargs):
+            self.calls.append((command, kwargs))
+            raise AssertionError("deny-all local policy reached the process executor")
+
+    executor = RecordingExecutor()
+    local_probe = LocalStoreHealthProbe(
+        inspector=BoundedLocalFilesystemOperations(
+            authority=LocalFilesystemAuthority.from_roots([]),
+            executor=executor,
+        ),
+    )
+
     def checker(target: StoreProbeTarget) -> StoreHealth:
         checked.append(target)
-        return StoreHealth(StoreHealthStatus.HEALTHY)
+        return local_probe(target)
 
     client.app.state.store_health_checker = CachedStoreHealthProbe(checker)
     warmed_hidden = client.get(
@@ -527,6 +547,11 @@ def test_store_health_cache_and_admission_preserve_browser_device_and_lpat_scope
         headers=admin_auth_headers,
     )
     assert warmed_hidden.status_code == 200, warmed_hidden.text
+    assert warmed_hidden.json()["data"]["status"] == "unreachable"
+    assert (
+        warmed_hidden.json()["data"]["detail"]
+        == LOCAL_STORE_HEALTH_FAILURE_DETAIL
+    )
 
     principal_headers = [
         scoped_project_member.member_headers,
@@ -549,6 +574,8 @@ def test_store_health_cache_and_admission_preserve_browser_device_and_lpat_scope
             headers=headers,
         )
         assert visible.status_code == 200, visible.text
+        assert visible.json()["data"]["status"] == "unreachable"
+        assert visible.json()["data"]["detail"] == LOCAL_STORE_HEALTH_FAILURE_DETAIL
         assert hidden.status_code == missing.status_code == 404
         assert hidden.content == missing.content
         hidden_responses.append(hidden.content)
@@ -559,6 +586,7 @@ def test_store_health_cache_and_admission_preserve_browser_device_and_lpat_scope
         hidden_store_id,
         visible_store_id,
     ]
+    assert executor.calls == []
 
     held = client.app.state.store_health_admission.try_acquire(
         UUID(scoped_project_member.member_user_id)
@@ -586,6 +614,9 @@ def test_project_and_group_inherited_readers_can_use_all_four_variants(
     scoped_project_member,
     tmp_path: Path,
 ) -> None:
+    client.app.state.store_health_checker = CachedStoreHealthProbe(
+        lambda _target: StoreHealth(StoreHealthStatus.HEALTHY)
+    )
     direct = _create_workflow_registry_records(
         client,
         admin_auth_headers,

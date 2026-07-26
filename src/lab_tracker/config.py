@@ -61,6 +61,7 @@ class Settings(BaseSettings):
     bootstrap_admin_token_disclosure: Literal["local", "first_run", "never"] = "local"
     auth_enabled: bool | None = None
     max_upload_bytes: int = 100 * 1024 * 1024
+    resolver_allowed_roots: str = ""
     resolver_http_allowed_authorities: str = ""
     resolver_http_allowed_networks: str = ""
     resolver_http_deadline_seconds: float = 30.0
@@ -82,6 +83,7 @@ class Settings(BaseSettings):
     store_health_singleflight_wait_seconds: float = (
         DEFAULT_STORE_HEALTH_SINGLEFLIGHT_WAIT_SECONDS
     )
+    rclone_allowed_remotes: str = ""
     git_allowed_remotes: str = ""
     graph_draft_provider: str = "openai"
     graph_draft_background_enabled: bool = False

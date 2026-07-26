@@ -12,6 +12,7 @@ from http_security_fakes import (
     RecordingSslContext,
 )
 
+import lab_tracker.outbound_http as outbound_http
 from lab_tracker.outbound_http import (
     ApprovedSocketAddress,
     OutboundHttpDeadline,
@@ -32,7 +33,8 @@ class _FakeConnectSocket:
         *,
         peer: tuple[str, int],
         on_connect: Callable[[], None] | None = None,
-        connect_error: OSError | None = None,
+        connect_error: BaseException | None = None,
+        close_error: Exception | None = None,
     ) -> None:
         self.peer = peer
         self.timeout: float | None = None
@@ -41,6 +43,7 @@ class _FakeConnectSocket:
         self.closed = False
         self._on_connect = on_connect
         self._connect_error = connect_error
+        self._close_error = close_error
 
     def settimeout(self, value: float) -> None:
         self.timeout = value
@@ -58,6 +61,8 @@ class _FakeConnectSocket:
 
     def close(self) -> None:
         self.closed = True
+        if self._close_error is not None:
+            raise self._close_error
 
 
 def test_system_connector_uses_only_vetted_numeric_sockaddr(
@@ -137,6 +142,28 @@ def test_system_connector_closes_socket_when_connect_exhausts_deadline(
 
     assert fake_socket.closed is True
     assert fake_socket.timeouts == [1.0]
+
+
+def test_system_connector_preserves_base_exception_when_cleanup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    approved = ApprovedSocketAddress.from_ip(PUBLIC_IP, 443)
+    interruption = KeyboardInterrupt("connector interrupted")
+    fake_socket = _FakeConnectSocket(
+        peer=(PUBLIC_IP, 443),
+        connect_error=interruption,
+        close_error=RuntimeError("cleanup failed"),
+    )
+    monkeypatch.setattr(
+        "lab_tracker.outbound_http.socket.socket",
+        lambda *args: fake_socket,
+    )
+
+    with pytest.raises(KeyboardInterrupt) as exc_info:
+        SystemPinnedSocketConnector().connect((approved,), 5.0)
+
+    assert exc_info.value is interruption
+    assert fake_socket.closed is True
 
 
 def test_system_connector_closes_socket_and_redacts_timeout_overflow(
@@ -290,6 +317,274 @@ def test_safe_https_client_closes_socket_when_tls_exhausts_deadline() -> None:
     assert wrapped_socket.closed is True
 
 
+def test_safe_https_client_preserves_tls_base_exception_when_cleanup_fails() -> None:
+    target = OutboundHttpPolicy(
+        address_resolver=FakeAddressResolver({"files.example": [PUBLIC_IP]})
+    ).authorize("https://files.example/artifact.bin")
+    interruption = KeyboardInterrupt("TLS interrupted")
+    raw_socket = RecordingSocket(HTTP_RESPONSE)
+    original_close = raw_socket.close
+
+    def close_then_fail() -> None:
+        original_close()
+        raise RuntimeError("TLS cleanup failed")
+
+    def interrupt_wrap() -> None:
+        raise interruption
+
+    raw_socket.close = close_then_fail  # type: ignore[method-assign]
+    connector = RecordingPinnedConnector(b"", socket=raw_socket)
+    ssl_context = RecordingSslContext(on_wrap=interrupt_wrap)
+
+    with pytest.raises(KeyboardInterrupt) as exc_info:
+        SafeHttpClient(
+            connector=connector,
+            ssl_context=ssl_context,  # type: ignore[arg-type]
+        ).open("GET", target)
+
+    assert exc_info.value is interruption
+    assert raw_socket.closed is True
+
+
+def test_safe_http_client_preserves_header_base_exception_and_closes_resources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = OutboundHttpPolicy(
+        address_resolver=FakeAddressResolver({"files.example": [PUBLIC_IP]})
+    ).authorize("http://files.example/artifact.bin")
+    interruption = KeyboardInterrupt("header inspection interrupted")
+    raw_socket = RecordingSocket(HTTP_RESPONSE)
+    original_socket_close = raw_socket.close
+
+    def close_socket_then_fail() -> None:
+        original_socket_close()
+        raise RuntimeError("socket cleanup failed")
+
+    raw_socket.close = close_socket_then_fail  # type: ignore[method-assign]
+    connector = RecordingPinnedConnector(b"", socket=raw_socket)
+
+    class InterruptingResponse:
+        status = 200
+
+        def __init__(self) -> None:
+            self.closed = False
+
+        def getheader(self, _name: str) -> str | None:
+            raise interruption
+
+        def close(self) -> None:
+            self.closed = True
+            raise RuntimeError("response cleanup failed")
+
+    response = InterruptingResponse()
+    monkeypatch.setattr(
+        outbound_http._PinnedHttpConnection,
+        "getresponse",
+        lambda _connection: response,
+    )
+
+    with pytest.raises(KeyboardInterrupt) as exc_info:
+        SafeHttpClient(connector=connector).open("HEAD", target)
+
+    assert exc_info.value is interruption
+    assert response.closed is True
+    assert raw_socket.closed is True
+
+
+def test_safe_http_client_closes_connection_after_cleanup_base_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = OutboundHttpPolicy(
+        address_resolver=FakeAddressResolver({"files.example": [PUBLIC_IP]})
+    ).authorize("http://files.example/artifact.bin")
+    cleanup_interruption = KeyboardInterrupt("response cleanup interrupted")
+    raw_socket = RecordingSocket(HTTP_RESPONSE)
+    original_socket_close = raw_socket.close
+
+    def close_socket_then_fail() -> None:
+        original_socket_close()
+        raise SystemExit("connection cleanup interrupted")
+
+    raw_socket.close = close_socket_then_fail  # type: ignore[method-assign]
+    connector = RecordingPinnedConnector(b"", socket=raw_socket)
+
+    class FailingResponse:
+        status = 200
+
+        def __init__(self) -> None:
+            self.closed = False
+
+        def getheader(self, _name: str) -> str | None:
+            raise RuntimeError("header inspection failed")
+
+        def close(self) -> None:
+            self.closed = True
+            raise cleanup_interruption
+
+    response = FailingResponse()
+    monkeypatch.setattr(
+        outbound_http._PinnedHttpConnection,
+        "getresponse",
+        lambda _connection: response,
+    )
+
+    with pytest.raises(KeyboardInterrupt) as exc_info:
+        SafeHttpClient(connector=connector).open("HEAD", target)
+
+    assert exc_info.value is cleanup_interruption
+    assert response.closed is True
+    assert raw_socket.closed is True
+
+
+def test_safe_http_client_preserves_send_base_exception_when_cleanup_fails() -> None:
+    target = OutboundHttpPolicy(
+        address_resolver=FakeAddressResolver({"files.example": [PUBLIC_IP]})
+    ).authorize("http://files.example/artifact.bin")
+    interruption = KeyboardInterrupt("send interrupted")
+    raw_socket = RecordingSocket(HTTP_RESPONSE)
+    original_close = raw_socket.close
+
+    def interrupt_send(_data: bytes, _flags: int = 0) -> None:
+        raise interruption
+
+    def close_then_fail() -> None:
+        original_close()
+        raise RuntimeError("send cleanup failed")
+
+    raw_socket.sendall = interrupt_send  # type: ignore[method-assign]
+    raw_socket.close = close_then_fail  # type: ignore[method-assign]
+    connector = RecordingPinnedConnector(b"", socket=raw_socket)
+
+    with pytest.raises(KeyboardInterrupt) as exc_info:
+        SafeHttpClient(connector=connector).open("HEAD", target)
+
+    assert exc_info.value is interruption
+    assert raw_socket.closed is True
+
+
+def test_streaming_response_cleanup_cannot_mask_base_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = OutboundHttpPolicy(
+        address_resolver=FakeAddressResolver({"files.example": [PUBLIC_IP]})
+    ).authorize("http://files.example/artifact.bin")
+    interruption = KeyboardInterrupt("post-open header interrupted")
+    raw_socket = RecordingSocket(HTTP_RESPONSE)
+    original_socket_close = raw_socket.close
+
+    def close_socket_then_fail() -> None:
+        original_socket_close()
+        raise RuntimeError("socket cleanup failed")
+
+    raw_socket.close = close_socket_then_fail  # type: ignore[method-assign]
+    connector = RecordingPinnedConnector(b"", socket=raw_socket)
+
+    class LaterInterruptingResponse:
+        status = 200
+
+        def __init__(self) -> None:
+            self.closed = False
+
+        def getheader(self, name: str) -> str | None:
+            if name.lower() == "content-encoding":
+                return None
+            raise interruption
+
+        def close(self) -> None:
+            self.closed = True
+            raise RuntimeError("response cleanup failed")
+
+    inner_response = LaterInterruptingResponse()
+    monkeypatch.setattr(
+        outbound_http._PinnedHttpConnection,
+        "getresponse",
+        lambda _connection: inner_response,
+    )
+
+    with (
+        pytest.raises(KeyboardInterrupt) as exc_info,
+        SafeHttpClient(connector=connector).open("HEAD", target) as response,
+    ):
+        response.get_header("location")
+
+    assert exc_info.value is interruption
+    assert inner_response.closed is True
+    assert raw_socket.closed is True
+
+
+def test_streaming_response_redacts_close_failure_and_closes_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = OutboundHttpPolicy(
+        address_resolver=FakeAddressResolver({"files.example": [PUBLIC_IP]})
+    ).authorize("http://files.example/artifact.bin")
+    raw_socket = RecordingSocket(HTTP_RESPONSE)
+    connector = RecordingPinnedConnector(b"", socket=raw_socket)
+
+    class FailingCloseResponse:
+        status = 200
+
+        def getheader(self, _name: str) -> str | None:
+            return None
+
+        def close(self) -> None:
+            raise RuntimeError("cleanup leaked https://files.example/secret")
+
+    monkeypatch.setattr(
+        outbound_http._PinnedHttpConnection,
+        "getresponse",
+        lambda _connection: FailingCloseResponse(),
+    )
+    response = SafeHttpClient(connector=connector).open("HEAD", target)
+
+    with pytest.raises(OutboundHttpTransportError) as exc_info:
+        response.close()
+
+    assert str(exc_info.value) == "Outbound HTTP request failed."
+    assert "files.example" not in str(exc_info.value)
+    assert raw_socket.closed is True
+
+
+def test_streaming_response_preserves_cleanup_base_exception_after_other_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = OutboundHttpPolicy(
+        address_resolver=FakeAddressResolver({"files.example": [PUBLIC_IP]})
+    ).authorize("http://files.example/artifact.bin")
+    cleanup_interruption = KeyboardInterrupt("connection cleanup interrupted")
+    raw_socket = RecordingSocket(HTTP_RESPONSE)
+    original_socket_close = raw_socket.close
+
+    def close_socket_then_interrupt() -> None:
+        original_socket_close()
+        raise cleanup_interruption
+
+    raw_socket.close = close_socket_then_interrupt  # type: ignore[method-assign]
+    connector = RecordingPinnedConnector(b"", socket=raw_socket)
+
+    class FailingCloseResponse:
+        status = 200
+
+        def getheader(self, _name: str) -> str | None:
+            return None
+
+        def close(self) -> None:
+            raise RuntimeError("ordinary cleanup failure")
+
+    monkeypatch.setattr(
+        outbound_http._PinnedHttpConnection,
+        "getresponse",
+        lambda _connection: FailingCloseResponse(),
+    )
+    response = SafeHttpClient(connector=connector).open("HEAD", target)
+
+    with pytest.raises(KeyboardInterrupt) as exc_info:
+        response.close()
+
+    assert exc_info.value is cleanup_interruption
+    assert raw_socket.closed is True
+
+
 def test_safe_http_client_stops_drip_fed_headers_at_total_deadline() -> None:
     target = OutboundHttpPolicy(
         address_resolver=FakeAddressResolver({"files.example": [PUBLIC_IP]})
@@ -345,13 +640,18 @@ def test_safe_http_client_stops_drip_fed_body_at_total_deadline() -> None:
     assert all(timeout <= 1.0 for timeout in raw_socket.timeouts)
 
 
-def test_safe_http_client_redacts_connector_failures() -> None:
+@pytest.mark.parametrize("error_type", (OSError, RuntimeError))
+def test_safe_http_client_redacts_connector_failures(
+    error_type: type[Exception],
+) -> None:
     target = OutboundHttpPolicy(
         address_resolver=FakeAddressResolver({"files.example": [PUBLIC_IP]})
     ).authorize("https://files.example/secret?token=hunter2")
     connector = RecordingPinnedConnector(
         b"",
-        error=OSError("failed https://user:hunter2@files.example/secret?token=hunter2"),
+        error=error_type(
+            "failed https://user:hunter2@files.example/secret?token=hunter2"
+        ),
     )
     client = SafeHttpClient(connector=connector)
 
@@ -380,6 +680,27 @@ def test_safe_http_client_rejects_content_encoding_and_closes_connection() -> No
         SafeHttpClient(connector=connector).open("GET", target)
 
     request = bytes(connector.socket.sent)
+    assert b"\r\nAccept-Encoding: identity\r\n" in request
+    assert connector.socket.closed is True
+
+
+def test_safe_http_client_allows_content_encoding_metadata_for_head() -> None:
+    response = (
+        b"HTTP/1.1 200 OK\r\n"
+        b"Content-Length: 4096\r\n"
+        b"Content-Encoding: gzip\r\n"
+        b"\r\n"
+    )
+    target = OutboundHttpPolicy(
+        address_resolver=FakeAddressResolver({"files.example": [PUBLIC_IP]})
+    ).authorize("http://files.example/health")
+    connector = RecordingPinnedConnector(response)
+
+    with SafeHttpClient(connector=connector).open("HEAD", target) as opened:
+        assert opened.status_code == 200
+
+    request = bytes(connector.socket.sent)
+    assert request.startswith(b"HEAD /health HTTP/1.1\r\n")
     assert b"\r\nAccept-Encoding: identity\r\n" in request
     assert connector.socket.closed is True
 

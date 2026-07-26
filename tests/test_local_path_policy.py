@@ -1,5 +1,6 @@
 import os
 import subprocess
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 
 import pytest
@@ -132,6 +133,62 @@ def test_empty_root_policy_denies_without_candidate_canonicalization(
     assert policy.authorize_path(tmp_path / "artifact.bin") is None
 
 
+def test_policy_is_frozen_slotted_and_uses_identity_semantics() -> None:
+    policy = LocalPathPolicy([])
+    equivalent = LocalPathPolicy([])
+
+    assert policy is not equivalent
+    assert policy != equivalent
+    assert not hasattr(policy, "__dict__")
+    with pytest.raises(FrozenInstanceError):
+        policy._canonical_roots = None  # type: ignore[misc]
+
+
+@pytest.mark.parametrize("raw", (None, "", " \t "))
+def test_configured_empty_roots_are_deny_all(raw: str | None) -> None:
+    policy = LocalPathPolicy.from_config(raw)
+
+    assert policy.canonical_roots == ()
+
+
+def test_configured_roots_preserve_pathsep_parsing(tmp_path: Path) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    raw = os.pathsep.join((str(first), "", str(second)))
+
+    policy = LocalPathPolicy.from_config(raw)
+
+    assert policy.canonical_roots == (
+        os.path.realpath(first),
+        os.path.realpath(second),
+    )
+
+
+def test_configured_roots_reject_non_string_values() -> None:
+    with pytest.raises(TypeError, match="must be a string"):
+        LocalPathPolicy.from_config(1)  # type: ignore[arg-type]
+
+
+def test_configured_root_normalization_failure_is_redacted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "operator-root-secret"
+
+    def fail_expansion(_path: Path) -> Path:
+        raise RuntimeError(secret)
+
+    monkeypatch.setattr(Path, "expanduser", fail_expansion)
+
+    with pytest.raises(ValueError) as exc_info:
+        LocalPathPolicy.from_config("~/private")
+
+    assert secret not in str(exc_info.value)
+    assert secret not in repr(exc_info.value)
+    assert exc_info.value.__cause__ is None
+
+
 @pytest.mark.parametrize(
     "root",
     (
@@ -171,6 +228,26 @@ def test_operator_policy_preserves_relative_and_tilde_root_normalization(
 
     assert relative_policy.canonical_roots == (os.path.realpath(relative_root),)
     assert tilde_policy.canonical_roots == (os.path.realpath(tilde_root),)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX symbolic links")
+def test_operator_policy_preserves_link_parent_traversal_semantics(tmp_path):
+    allowed = tmp_path / "allowed"
+    physical_root = allowed / "narrow"
+    link_target = physical_root / "nested"
+    link_target.mkdir(parents=True)
+    link = allowed / "link"
+    try:
+        link.symlink_to(link_target, target_is_directory=True)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"directory symbolic links are unavailable: {exc}")
+    configured_root = os.path.join(os.fspath(link), os.pardir)
+
+    policy = LocalPathPolicy([configured_root])
+
+    assert policy.canonical_roots == (os.path.realpath(configured_root),)
+    assert policy.canonical_roots == (os.fspath(physical_root),)
+    assert policy.canonical_roots != (os.fspath(allowed),)
 
 
 def test_absolute_root_predicate_is_lexical_and_side_effect_free(

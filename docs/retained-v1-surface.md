@@ -148,15 +148,41 @@ research record:
   URIs with the canonical URI echoed as `meta.iri` in plain envelopes, and a
   committed worked example under `docs/examples/` guarded by a drift test.
 - On-demand resolution of external artifact references (content hash is the
-  integrity gate). Local resolution optionally recovers a moved/renamed file by
-  its content hash within operator-configured `allowed_roots`
+  integrity gate). Inline content has one 8 MiB hard/default decoded-byte cap
+  across ordinary, registered-store, ranged, HTTP, rclone, Git, and local
+  resolution paths; ranges can only narrow that allowance. Runtime parses the
+  platform-path-separated
+  `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS` once. Registered local-store health uses
+  a lexical authority and bounded broker; direct resolution and recovery still
+  use a transitional policy derived from the same immutable root set. That
+  root authority grants the subtree visible in the operator-controlled service
+  namespace rather than one device identity, and the application runtime
+  denies all local roots when it is unset or empty. Local resolution optionally
+  recovers a moved/renamed file by its content hash within those roots
   (`LAB_TRACKER_RESOLVER_RECOVERY`, off by default, bounded, read-only).
+  Local health is a bounded, isolated, output-free directory operation behind
+  a narrow role. One deadline starts before lexical admission; the helper
+  anchors the trusted grant, resolves aliases component-by-component from
+  no-follow handles, and rejects an escape before target traversal. It never
+  returns or reopens a canonical pathname plan. Helper-owned close attempts are
+  best effort and contained helper exit is the cleanup backstop. The result is
+  advisory rather than registration validation or a durable filesystem lease.
+  POSIX ordinary/bind mounts beneath a root are allowed; unsupported Windows
+  nested volume/UNC/device/GUID namespaces fail closed; eligible Cloud
+  directories remain traversable; untrusted topology mutation makes the local
+  surface unsupported. Direct file and recovery operations remain the
+  `lab-tracker-n5kp.47` and `lab-tracker-n5kp.61` follow-ups. The mount decision
+  is normative in
+  [`configuration.md`](configuration.md#mount-and-namespace-authority).
   Registered `git` data stores resolve `path@commit` locators read-only and
   on demand, gated by an operator remote allowlist
   (`LAB_TRACKER_GIT_ALLOWED_REMOTES`, deny-by-default), a protocol allowlist,
   a fetch size cap, and a bounded cache — never by cloning or polling. Rclone
-  resolution is likewise gated by an operator remote-name allowlist
-  (`LAB_TRACKER_RCLONE_ALLOWED_REMOTES`, deny-by-default). See
+  resolution and store health are likewise gated by one immutable exact
+  remote-name policy (`LAB_TRACKER_RCLONE_ALLOWED_REMOTES`, deny-by-default).
+  Local, rclone, and Git health commands reuse resolution's bounded
+  cross-platform process executor and expose only static adapter-specific
+  failures. See
   [external-artifact-resolution-design.md](external-artifact-resolution-design.md).
 - Read-only assistant and MCP decision-context endpoints over the retained
   graph. Assistants may inspect context through these surfaces, but retained v1

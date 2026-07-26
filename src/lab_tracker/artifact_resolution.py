@@ -41,9 +41,14 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import BinaryIO, Protocol, TypeAlias
-from urllib.parse import unquote, urljoin, urlsplit
+from typing import BinaryIO, TypeAlias
+from urllib.parse import unquote, urlsplit
 
+from lab_tracker.artifact_resolution_limits import (
+    DEFAULT_MAX_BYTES,
+    MAX_INLINE_ARTIFACT_BYTES,
+    ArtifactContentBounds,
+)
 from lab_tracker.bounded_subprocess import (
     DEFAULT_PROCESS_DEADLINE_SECONDS,
     DEFAULT_PROCESS_STDERR_LIMIT_BYTES,
@@ -52,6 +57,25 @@ from lab_tracker.bounded_subprocess import (
     ProcessDeadline,
     ProcessExecutionError,
     ProcessExecutor,
+)
+from lab_tracker.git_process import (
+    DEFAULT_GIT_ALLOW_PROTOCOL,
+    GIT_GENERIC_HTTP_REDIRECT_CONFIG,
+    GIT_PROCESS_METADATA_LIMIT_BYTES,
+    GitCompleted,
+    GitRunner,
+)
+from lab_tracker.git_process import (
+    build_git_environment as _git_environment,
+)
+from lab_tracker.git_process import (
+    git_http_config_args as _git_http_config_args,
+)
+from lab_tracker.git_process import (
+    git_remote_preflight_matches as _git_remote_preflight_matches,
+)
+from lab_tracker.git_process import (
+    run_git_command as _run_git_command,
 )
 from lab_tracker.git_remote_policy import (
     ApprovedGitRemote,
@@ -83,7 +107,9 @@ from lab_tracker.local_store_locator import (
 )
 from lab_tracker.models import DataStore, ExternalArtifactReference, StoreKind
 from lab_tracker.outbound_http import (
+    DEFAULT_MAX_HTTP_REDIRECTS,
     DEFAULT_OUTBOUND_HTTP_DEADLINE_SECONDS,
+    HTTP_REDIRECT_STATUS_CODES,
     MAX_OUTBOUND_HTTP_DEADLINE_SECONDS,
     OutboundHttpClient,
     OutboundHttpDeadline,
@@ -92,16 +118,29 @@ from lab_tracker.outbound_http import (
     OutboundHttpTransportError,
     RegisteredHttpPrefix,
     SafeHttpClient,
+    resolve_direct_http_redirect,
+)
+from lab_tracker.rclone_remote_policy import (
+    DEFAULT_RCLONE_REMOTE_POLICY_VARIABLE,
+    RcloneRemotePolicy,
+)
+from lab_tracker.rclone_store_definition import (
+    RegisteredRcloneStoreAddress,
+    is_rclone_store_kind,
 )
 from lab_tracker.rclone_store_locator import (
     RcloneRemoteName,
     RegisteredRcloneRoot,
 )
-from lab_tracker.store_health import StoreHealth, StoreHealthStatus, StoreProbeTarget
-
-# Default cap on the bytes returned inline to a caller. Bounds payload size, not
-# verification: the full artifact is always hashed regardless of this cap.
-DEFAULT_MAX_BYTES = 8 * 1024 * 1024
+from lab_tracker.store_health import (
+    GIT_STORE_HEALTH_FAILURE_DETAIL,
+    HTTP_STORE_HEALTH_FAILURE_DETAIL,
+    LOCAL_STORE_HEALTH_FAILURE_DETAIL,
+    RCLONE_STORE_HEALTH_FAILURE_DETAIL,
+    StoreHealth,
+    StoreHealthStatus,
+    StoreProbeTarget,
+)
 
 # Hash algorithms we can recompute to verify a fetched artifact. A reference
 # whose hash uses anything else (e.g. ``datalad-key:``) cannot be certified by
@@ -117,7 +156,6 @@ _HTTP_SCHEMES = frozenset({"http", "https"})
 # be hashed to certify it, so an artifact larger than this is refused
 # (UNRESOLVED) rather than returned uncertified.
 DEFAULT_MAX_FETCH_BYTES = 64 * 1024 * 1024
-DEFAULT_MAX_HTTP_REDIRECTS = 3
 DEFAULT_SUBPROCESS_DEADLINE_SECONDS = DEFAULT_PROCESS_DEADLINE_SECONDS
 MAX_SUBPROCESS_DEADLINE_SECONDS = MAX_PROCESS_DEADLINE_SECONDS
 
@@ -125,13 +163,9 @@ MAX_SUBPROCESS_DEADLINE_SECONDS = MAX_PROCESS_DEADLINE_SECONDS
 # independent so a noisy stderr cannot consume the stdout budget (or vice versa).
 _PROCESS_METADATA_LIMIT_BYTES = 64 * 1024
 _PROCESS_STDERR_LIMIT_BYTES = DEFAULT_PROCESS_STDERR_LIMIT_BYTES
-
-# Protocols the git resolver's subprocess is allowed to use. Restricting this
-# blocks `file://` (local reads) and `ext::`/`fd::` (arbitrary command execution)
-# vectors that a malicious reference could otherwise trigger via git.
-DEFAULT_GIT_ALLOW_PROTOCOL = "https:ssh:git"
-_GIT_GENERIC_HTTP_REDIRECT_CONFIG = "http.followRedirects=false"
-_GIT_HEALTH_FAILURE_DETAIL = "Git store health check failed."
+# Retain the established private name for callers that imported this module's
+# former helper surface. Git execution itself now lives in ``git_process``.
+_GIT_GENERIC_HTTP_REDIRECT_CONFIG = GIT_GENERIC_HTTP_REDIRECT_CONFIG
 
 _STREAM_CHUNK_SIZE = 1024 * 1024
 
@@ -203,6 +237,27 @@ class ResolvedArtifact:
 
     def __post_init__(self) -> None:
         """Fail closed when an adapter marks uncertified bytes as verified."""
+
+        if self.content is not None and (
+            type(self.content) is not bytes
+            or len(self.content) > MAX_INLINE_ARTIFACT_BYTES
+        ):
+            object.__setattr__(self, "status", ResolutionStatus.UNRESOLVED)
+            object.__setattr__(self, "source_system", "artifact")
+            object.__setattr__(self, "uri", "artifact://[redacted]")
+            object.__setattr__(self, "expected_hash", "unavailable")
+            object.__setattr__(self, "observed_hash", None)
+            object.__setattr__(self, "content_type", None)
+            object.__setattr__(self, "size_bytes", None)
+            object.__setattr__(self, "content", None)
+            object.__setattr__(self, "truncated", False)
+            object.__setattr__(self, "fetched_at", _now())
+            object.__setattr__(
+                self,
+                "detail",
+                "Artifact content exceeded the inline byte limit.",
+            )
+            return
 
         if self.status is ResolutionStatus.VERIFIED:
             if self.observed_hash is None or not is_verifiable_hash(self.expected_hash):
@@ -568,6 +623,18 @@ PreparedArtifactResolutionTarget: TypeAlias = (
 )
 
 
+@dataclass(frozen=True, slots=True)
+class ArtifactResolutionIdentity:
+    """Immutable primitive identity captured before untrusted resolver work."""
+
+    source_system: str
+    uri: str
+    expected_hash: str
+    precomputed: bool = False
+    detail: str | None = None
+    fetched_at: datetime | None = None
+
+
 class ResolverRegistry:
     """Dispatches a reference to the first resolver that can handle it."""
 
@@ -586,46 +653,51 @@ class ResolverRegistry:
     ) -> ResolvedArtifact:
         """Resolve an application-prepared target through its narrow capability."""
 
+        bounds = ArtifactContentBounds.from_resolver(max_bytes, byte_range)
         runtime_target: object = target
-        if isinstance(runtime_target, ResolvedArtifact):
-            return runtime_target
-        if isinstance(runtime_target, LocalStoreResolutionTarget):
+        identity = snapshot_artifact_resolution_identity(runtime_target)
+        if identity is None:
+            return _sanitized_unresolved_result(
+                "Prepared artifact resolution target is unsupported."
+            )
+        if type(runtime_target) is ResolvedArtifact:
+            return sanitize_artifact_resolution_result(
+                runtime_target,
+                identity=identity,
+                bounds=bounds,
+            )
+        if type(runtime_target) is LocalStoreResolutionTarget:
             return self.resolve_local_store(
                 runtime_target,
-                max_bytes=max_bytes,
-                byte_range=byte_range,
+                max_bytes=bounds.max_bytes,
+                byte_range=bounds.byte_range,
             )
-        if isinstance(runtime_target, HttpStoreResolutionTarget):
+        if type(runtime_target) is HttpStoreResolutionTarget:
             return self.resolve_http_store(
                 runtime_target,
-                max_bytes=max_bytes,
-                byte_range=byte_range,
+                max_bytes=bounds.max_bytes,
+                byte_range=bounds.byte_range,
             )
-        if isinstance(runtime_target, RcloneStoreResolutionTarget):
+        if type(runtime_target) is RcloneStoreResolutionTarget:
             return self.resolve_rclone_store(
                 runtime_target,
-                max_bytes=max_bytes,
-                byte_range=byte_range,
+                max_bytes=bounds.max_bytes,
+                byte_range=bounds.byte_range,
             )
-        if isinstance(runtime_target, GitStoreResolutionTarget):
+        if type(runtime_target) is GitStoreResolutionTarget:
             return self.resolve_git_store(
                 runtime_target,
-                max_bytes=max_bytes,
-                byte_range=byte_range,
+                max_bytes=bounds.max_bytes,
+                byte_range=bounds.byte_range,
             )
-        if isinstance(runtime_target, ExternalArtifactReference):
+        if type(runtime_target) is ExternalArtifactReference:
             return self.resolve(
                 runtime_target,
-                max_bytes=max_bytes,
-                byte_range=byte_range,
+                max_bytes=bounds.max_bytes,
+                byte_range=bounds.byte_range,
             )
-        return ResolvedArtifact(
-            status=ResolutionStatus.UNRESOLVED,
-            source_system="prepared",
-            uri="prepared://[redacted]",
-            expected_hash="unavailable",
-            fetched_at=_now(),
-            detail="Prepared artifact resolution target is unsupported.",
+        return _sanitized_unresolved_result(
+            "Prepared artifact resolution target is unsupported."
         )
 
     def resolve(
@@ -635,12 +707,30 @@ class ResolverRegistry:
         max_bytes: int = DEFAULT_MAX_BYTES,
         byte_range: tuple[int, int] | None = None,
     ) -> ResolvedArtifact:
+        bounds = ArtifactContentBounds.from_resolver(max_bytes, byte_range)
+        identity = snapshot_artifact_resolution_identity(ref)
+        if identity is None:
+            return _sanitized_unresolved_result(
+                "Artifact resolution target is invalid."
+            )
         for resolver in self._resolvers:
             if resolver.can_resolve(ref):
-                return resolver.resolve(ref, max_bytes=max_bytes, byte_range=byte_range)
-        return _unresolved(
-            ref,
-            detail=f"No resolver registered for source_system '{ref.source_system}'.",
+                result = resolver.resolve(
+                    ref,
+                    max_bytes=bounds.max_bytes,
+                    byte_range=bounds.byte_range,
+                )
+                return sanitize_artifact_resolution_result(
+                    result,
+                    identity=identity,
+                    bounds=bounds,
+                )
+        return _unresolved_for_identity(
+            identity,
+            detail=(
+                "No resolver registered for source_system "
+                f"'{identity.source_system}'."
+            ),
         )
 
     def resolve_local_store(
@@ -652,15 +742,26 @@ class ResolverRegistry:
     ) -> ResolvedArtifact:
         """Dispatch only to a resolver that honors registered-store scoping."""
 
+        bounds = ArtifactContentBounds.from_resolver(max_bytes, byte_range)
+        identity = snapshot_artifact_resolution_identity(target)
+        if identity is None:
+            return _sanitized_unresolved_result(
+                "Prepared artifact resolution target is unsupported."
+            )
         for resolver in self._resolvers:
             if isinstance(resolver, ScopedLocalStoreResolver):
-                return resolver.resolve_within_root(
+                result = resolver.resolve_within_root(
                     target,
-                    max_bytes=max_bytes,
-                    byte_range=byte_range,
+                    max_bytes=bounds.max_bytes,
+                    byte_range=bounds.byte_range,
                 )
-        return _unresolved(
-            target.logical_reference,
+                return sanitize_artifact_resolution_result(
+                    result,
+                    identity=identity,
+                    bounds=bounds,
+                )
+        return _unresolved_for_identity(
+            identity,
             detail="No scoped local-store resolver is registered.",
         )
 
@@ -673,15 +774,26 @@ class ResolverRegistry:
     ) -> ResolvedArtifact:
         """Dispatch only to a resolver that honors registered HTTP scoping."""
 
+        bounds = ArtifactContentBounds.from_resolver(max_bytes, byte_range)
+        identity = snapshot_artifact_resolution_identity(target)
+        if identity is None:
+            return _sanitized_unresolved_result(
+                "Prepared artifact resolution target is unsupported."
+            )
         for resolver in self._resolvers:
             if isinstance(resolver, ScopedHttpStoreResolver):
-                return resolver.resolve_within_http_store(
+                result = resolver.resolve_within_http_store(
                     target,
-                    max_bytes=max_bytes,
-                    byte_range=byte_range,
+                    max_bytes=bounds.max_bytes,
+                    byte_range=bounds.byte_range,
                 )
-        return _unresolved(
-            target.logical_reference,
+                return sanitize_artifact_resolution_result(
+                    result,
+                    identity=identity,
+                    bounds=bounds,
+                )
+        return _unresolved_for_identity(
+            identity,
             detail="No scoped HTTP-store resolver is registered.",
         )
 
@@ -694,15 +806,26 @@ class ResolverRegistry:
     ) -> ResolvedArtifact:
         """Dispatch only to a resolver that honors registered rclone scoping."""
 
+        bounds = ArtifactContentBounds.from_resolver(max_bytes, byte_range)
+        identity = snapshot_artifact_resolution_identity(target)
+        if identity is None:
+            return _sanitized_unresolved_result(
+                "Prepared artifact resolution target is unsupported."
+            )
         for resolver in self._resolvers:
             if isinstance(resolver, ScopedRcloneStoreResolver):
-                return resolver.resolve_within_rclone_store(
+                result = resolver.resolve_within_rclone_store(
                     target,
-                    max_bytes=max_bytes,
-                    byte_range=byte_range,
+                    max_bytes=bounds.max_bytes,
+                    byte_range=bounds.byte_range,
                 )
-        return _unresolved(
-            target.logical_reference,
+                return sanitize_artifact_resolution_result(
+                    result,
+                    identity=identity,
+                    bounds=bounds,
+                )
+        return _unresolved_for_identity(
+            identity,
             detail="No scoped rclone-store resolver is registered.",
         )
 
@@ -715,15 +838,26 @@ class ResolverRegistry:
     ) -> ResolvedArtifact:
         """Dispatch only to a resolver for registered immutable Git objects."""
 
+        bounds = ArtifactContentBounds.from_resolver(max_bytes, byte_range)
+        identity = snapshot_artifact_resolution_identity(target)
+        if identity is None:
+            return _sanitized_unresolved_result(
+                "Prepared artifact resolution target is unsupported."
+            )
         for resolver in self._resolvers:
             if isinstance(resolver, ScopedGitStoreResolver):
-                return resolver.resolve_within_git_store(
+                result = resolver.resolve_within_git_store(
                     target,
-                    max_bytes=max_bytes,
-                    byte_range=byte_range,
+                    max_bytes=bounds.max_bytes,
+                    byte_range=bounds.byte_range,
                 )
-        return _unresolved(
-            target.logical_reference,
+                return sanitize_artifact_resolution_result(
+                    result,
+                    identity=identity,
+                    bounds=bounds,
+                )
+        return _unresolved_for_identity(
+            identity,
             detail="No scoped Git-store resolver is registered.",
         )
 
@@ -743,7 +877,7 @@ def resolver_registry_for_prepared_target(
 
     if configured is not None:
         return configured
-    if isinstance(target, ResolvedArtifact):
+    if type(target) is ResolvedArtifact:
         return ResolverRegistry()
     return registry_from_env()
 
@@ -765,26 +899,315 @@ def unresolved(ref: ExternalArtifactReference, *, detail: str) -> ResolvedArtifa
     return _unresolved(ref, detail=detail)
 
 
-# Store kinds whose objects are fetched through the rclone adapter.
-_RCLONE_STORE_KINDS = frozenset(
+def _sanitized_unresolved_result(detail: str) -> ResolvedArtifact:
+    """Build an opaque failure that cannot echo adapter-controlled fields."""
+
+    return ResolvedArtifact(
+        status=ResolutionStatus.UNRESOLVED,
+        source_system="artifact",
+        uri="artifact://[redacted]",
+        expected_hash="unavailable",
+        fetched_at=_now(),
+        detail=detail,
+    )
+
+
+def _unresolved_for_identity(
+    identity: ArtifactResolutionIdentity,
+    *,
+    detail: str,
+) -> ResolvedArtifact:
+    """Build a failure from the immutable pre-dispatch identity snapshot."""
+
+    return ResolvedArtifact(
+        status=ResolutionStatus.UNRESOLVED,
+        source_system=identity.source_system,
+        uri=identity.uri,
+        expected_hash=identity.expected_hash,
+        fetched_at=_now(),
+        detail=detail,
+    )
+
+
+_SAFE_PRECOMPUTED_DETAILS = frozenset(
     {
-        StoreKind.S3,
-        StoreKind.GCS,
-        StoreKind.AZURE_BLOB,
-        StoreKind.DROPBOX,
-        StoreKind.GDRIVE,
-        StoreKind.BOX,
-        StoreKind.ONEDRIVE,
-        StoreKind.SSH,
-        StoreKind.RCLONE,
+        "Store artifact reference is invalid.",
+        "Store artifact could not be resolved.",
     }
 )
 
 
-def is_rclone_store_kind(kind: StoreKind) -> bool:
-    """Return whether ``kind`` resolves through the rclone adapter."""
+def sanitize_artifact_resolution_result(
+    result: object,
+    *,
+    identity: ArtifactResolutionIdentity | None,
+    bounds: ArtifactContentBounds,
+) -> ResolvedArtifact:
+    """Fail closed unless a result exactly matches its target and selected view.
 
-    return kind in _RCLONE_STORE_KINDS
+    Registered adapters remain responsible for hashing the full artifact, which
+    cannot be reconstructed from a truncated view. Their result objects still
+    cross an application shape/identity boundary, so this postcondition is used
+    both after registry dispatch and immediately before serialization. Whenever
+    the returned view is the complete artifact, its digest is recomputed here too.
+    """
+
+    invalid = _sanitized_unresolved_result(
+        "Artifact resolver result could not be returned safely."
+    )
+    snapshot = _detached_safe_result(result)
+    if snapshot is None or identity is None:
+        return invalid
+
+    if identity.precomputed:
+        if _is_safe_precomputed_result(snapshot, identity):
+            return snapshot
+        return invalid
+
+    if (
+        snapshot.source_system != identity.source_system
+        or snapshot.uri != identity.uri
+        or snapshot.expected_hash != identity.expected_hash
+    ):
+        return invalid
+
+    if snapshot.status is ResolutionStatus.UNRESOLVED:
+        if snapshot.content is not None:
+            return invalid
+        return snapshot
+
+    if (
+        snapshot.observed_hash is None
+        or snapshot.size_bytes is None
+        or not is_verifiable_hash(identity.expected_hash)
+        or not is_verifiable_hash(snapshot.observed_hash)
+    ):
+        return invalid
+
+    observed_matches = parse_content_hash(snapshot.observed_hash) == parse_content_hash(
+        identity.expected_hash
+    )
+    expected_returned_bytes = _selected_view_size(snapshot.size_bytes, bounds)
+    expected_truncated = expected_returned_bytes < snapshot.size_bytes
+    if snapshot.truncated is not expected_truncated:
+        return invalid
+
+    if snapshot.status is ResolutionStatus.VERIFIED:
+        if (
+            not observed_matches
+            or snapshot.content is None
+            or len(snapshot.content) != expected_returned_bytes
+            or len(snapshot.content) > bounds.returned_allowance
+            or (
+                not snapshot.truncated
+                and not _content_matches_expected_hash(
+                    snapshot.content,
+                    identity.expected_hash,
+                )
+            )
+        ):
+            return invalid
+        return snapshot
+
+    if (
+        snapshot.status is not ResolutionStatus.DRIFTED
+        or observed_matches
+        or snapshot.content is not None
+    ):
+        return invalid
+    return snapshot
+
+
+def _detached_safe_result(result: object) -> ResolvedArtifact | None:
+    """Copy exact safe fields so adapters cannot mutate accepted output later."""
+
+    if type(result) is not ResolvedArtifact:
+        return None
+
+    try:
+        status = result.status
+        source_system = result.source_system
+        uri = result.uri
+        expected_hash = result.expected_hash
+        fetched_at = result.fetched_at
+        observed_hash = result.observed_hash
+        content_type = result.content_type
+        size_bytes = result.size_bytes
+        content = result.content
+        truncated = result.truncated
+        detail = result.detail
+    except Exception:
+        return None
+    if not (
+        type(status) is ResolutionStatus
+        and type(source_system) is str
+        and type(uri) is str
+        and type(expected_hash) is str
+        and type(fetched_at) is datetime
+        and fetched_at.tzinfo is not None
+        and (observed_hash is None or type(observed_hash) is str)
+        and (content_type is None or type(content_type) is str)
+        and (
+            size_bytes is None
+            or (type(size_bytes) is int and size_bytes >= 0)
+        )
+        and (content is None or type(content) is bytes)
+        and type(truncated) is bool
+        and (detail is None or type(detail) is str)
+    ):
+        return None
+
+    try:
+        if fetched_at.utcoffset() is None:
+            return None
+        normalized_fetched_at = fetched_at.astimezone(timezone.utc)
+    except Exception:
+        return None
+    snapshot = ResolvedArtifact(
+        status=status,
+        source_system=source_system,
+        uri=uri,
+        expected_hash=expected_hash,
+        fetched_at=normalized_fetched_at,
+        observed_hash=observed_hash,
+        content_type=content_type,
+        size_bytes=size_bytes,
+        content=content,
+        truncated=truncated,
+        detail=detail,
+    )
+    if (
+        snapshot.status is not status
+        or snapshot.source_system != source_system
+        or snapshot.uri != uri
+        or snapshot.expected_hash != expected_hash
+        or snapshot.observed_hash != observed_hash
+        or snapshot.content_type != content_type
+        or snapshot.size_bytes != size_bytes
+        or snapshot.content != content
+        or snapshot.truncated is not truncated
+        or snapshot.detail != detail
+    ):
+        return None
+    return snapshot
+
+
+def snapshot_artifact_resolution_identity(
+    target: object,
+) -> ArtifactResolutionIdentity | None:
+    """Copy a target's primitive identity before calling untrusted code."""
+
+    if type(target) is ResolvedArtifact:
+        precomputed = _detached_safe_result(target)
+        if precomputed is None or not _is_safe_precomputed_shape(precomputed):
+            return None
+        return ArtifactResolutionIdentity(
+            source_system=precomputed.source_system,
+            uri=precomputed.uri,
+            expected_hash=precomputed.expected_hash,
+            precomputed=True,
+            detail=precomputed.detail,
+            fetched_at=precomputed.fetched_at,
+        )
+
+    try:
+        reference = _logical_reference_for_resolution_target(target)
+        if reference is None:
+            return None
+        source_system = reference.source_system
+        uri = reference.uri
+        expected_hash = reference.content_hash
+    except Exception:
+        return None
+    if not (
+        type(source_system) is str
+        and type(uri) is str
+        and type(expected_hash) is str
+    ):
+        return None
+    return ArtifactResolutionIdentity(
+        source_system=source_system,
+        uri=uri,
+        expected_hash=expected_hash,
+    )
+
+
+def _logical_reference_for_resolution_target(
+    target: object,
+) -> ExternalArtifactReference | None:
+    if type(target) is ExternalArtifactReference:
+        assert isinstance(target, ExternalArtifactReference)
+        return target
+    if type(target) is LocalStoreResolutionTarget:
+        assert isinstance(target, LocalStoreResolutionTarget)
+        return target.logical_reference
+    if type(target) is HttpStoreResolutionTarget:
+        assert isinstance(target, HttpStoreResolutionTarget)
+        return target.logical_reference
+    if type(target) is RcloneStoreResolutionTarget:
+        assert isinstance(target, RcloneStoreResolutionTarget)
+        return target.logical_reference
+    if type(target) is GitStoreResolutionTarget:
+        assert isinstance(target, GitStoreResolutionTarget)
+        return target.logical_reference
+    return None
+
+
+def _is_safe_precomputed_shape(result: ResolvedArtifact) -> bool:
+    """Recognize the only content-free static result shape prepared by the app."""
+
+    return (
+        result.status is ResolutionStatus.UNRESOLVED
+        and result.source_system == "store"
+        and result.uri == "store://[redacted]"
+        and bool(result.expected_hash.strip())
+        and result.observed_hash is None
+        and result.content_type is None
+        and result.size_bytes is None
+        and result.content is None
+        and result.truncated is False
+        and result.detail in _SAFE_PRECOMPUTED_DETAILS
+    )
+
+
+def _is_safe_precomputed_result(
+    result: ResolvedArtifact,
+    identity: ArtifactResolutionIdentity,
+) -> bool:
+    """Tie a returned static failure to the exact pre-dispatch snapshot."""
+
+    return (
+        _is_safe_precomputed_shape(result)
+        and result.source_system == identity.source_system
+        and result.uri == identity.uri
+        and result.expected_hash == identity.expected_hash
+        and result.detail == identity.detail
+        and result.fetched_at == identity.fetched_at
+    )
+
+
+def _selected_view_size(
+    total_size: int,
+    bounds: ArtifactContentBounds,
+) -> int:
+    """Return the exact number of bytes retained from a full artifact stream."""
+
+    if bounds.byte_range is None:
+        return min(total_size, bounds.max_bytes)
+    start, end = bounds.byte_range
+    retained_end = min(end, start + bounds.max_bytes)
+    return max(0, min(total_size, retained_end) - start)
+
+
+def _content_matches_expected_hash(content: bytes, expected_hash: str) -> bool:
+    """Recheck integrity when the bounded response contains the full artifact."""
+
+    algorithm, expected_digest = parse_content_hash(expected_hash)
+    try:
+        observed_digest = hashlib.new(algorithm, content).hexdigest()
+    except ValueError:
+        return False
+    return observed_digest.lower() == expected_digest
 
 
 def local_store_resolution_target(
@@ -852,18 +1275,19 @@ def rclone_store_resolution_target(
         or logical_reference.store_name != store.name
     ):
         return None
-    remote_value = (
-        store.name if store.credential_ref is None else store.credential_ref
+    address = RegisteredRcloneStoreAddress.parse(
+        kind=store.kind,
+        name=store.name,
+        root=store.root,
+        credential_ref=store.credential_ref,
     )
-    remote = RcloneRemoteName.parse(remote_value)
-    registered_root = RegisteredRcloneRoot.parse_decoded(store.root)
-    if remote is None or registered_root is None:
+    if address is None:
         return None
     try:
         return RcloneStoreResolutionTarget(
             logical_reference=logical_reference,
-            remote=remote,
-            registered_root=registered_root,
+            remote=address.remote,
+            registered_root=address.root,
             locator=locator,
             _factory_token=_RCLONE_STORE_TARGET_FACTORY_TOKEN,
         )
@@ -996,184 +1420,48 @@ def store_relative_reference(
     return None
 
 
-class _StoreHealthHttpResponse(Protocol):
-    status_code: int
-
-
-class _StoreHealthHttpClient(Protocol):
-    def head(self, url: str) -> _StoreHealthHttpResponse: ...
-
-    def close(self) -> None: ...
-
-
 def check_store_health(
     store: DataStore | StoreProbeTarget,
-    *,
-    rclone_runner: RcloneRunner | None = None,
-    git_runner: GitRunner | None = None,
-    git_executor: ProcessExecutor | None = None,
-    git_remote_policy: GitRemotePolicy | None = None,
-    git_health_cwd: str | Path | None = None,
-    git_binary: str = "git",
-    git_allow_protocol: str | None = DEFAULT_GIT_ALLOW_PROTOCOL,
-    git_deadline_seconds: float = DEFAULT_SUBPROCESS_DEADLINE_SECONDS,
-    git_clock: Callable[[], float] = time.monotonic,
-    http_client: _StoreHealthHttpClient | None = None,
-    http_timeout: float = 10.0,
 ) -> StoreHealth:
     """Probe whether a registered store is reachable from this host.
 
-    Lightweight and read-only: a directory stat for ``local_fs``, an HTTP ``HEAD``
-    for ``http``, ``rclone lsf`` for the cloud/remote kinds, and ``git ls-remote``
-    for ``git``. ``object_table`` and ``database`` are reported ``unsupported``
-    until their adapters land.
+    This transitional helper fails closed for local, HTTP, rclone, and Git
+    stores; the runtime handles them only through dedicated policy-authorized
+    adapters. ``object_table`` and ``database`` are reported ``unsupported``
+    until their adapters land. Health transport, runner, executor, policy, and
+    timeout keywords were intentionally removed so direct callers cannot mistake
+    this compatibility path for a safe host-I/O probe.
     """
 
     kind = store.kind
     if kind is StoreKind.LOCAL_FS:
-        if not is_supported_absolute_local_root(store.root):
-            return StoreHealth(
-                StoreHealthStatus.UNREACHABLE,
-                "Local store root is invalid.",
-            )
-        root = os.path.realpath(store.root)
-        if os.path.isdir(root):
-            return StoreHealth(StoreHealthStatus.HEALTHY)
         return StoreHealth(
-            StoreHealthStatus.UNREACHABLE, f"Root directory not found: {store.root}"
+            StoreHealthStatus.UNREACHABLE,
+            LOCAL_STORE_HEALTH_FAILURE_DETAIL,
         )
 
     if kind is StoreKind.HTTP:
-        return _check_http_store_health(store, http_client=http_client, timeout=http_timeout)
-
-    if kind in _RCLONE_STORE_KINDS:
-        runner = rclone_runner or _subprocess_rclone_runner("rclone")
-        remote = store.credential_ref or store.name
-        target = f"{remote}:{store.root.lstrip('/')}"
-        try:
-            rclone_completed = runner(["lsf", "--max-depth", "1", target])
-        except OSError as exc:
-            return StoreHealth(StoreHealthStatus.UNREACHABLE, f"rclone is unavailable: {exc}")
-        if rclone_completed.returncode == 0:
-            return StoreHealth(StoreHealthStatus.HEALTHY)
         return StoreHealth(
             StoreHealthStatus.UNREACHABLE,
-            _rclone_error_detail(rclone_completed),
+            HTTP_STORE_HEALTH_FAILURE_DETAIL,
+        )
+
+    if is_rclone_store_kind(kind):
+        return StoreHealth(
+            StoreHealthStatus.UNREACHABLE,
+            RCLONE_STORE_HEALTH_FAILURE_DETAIL,
         )
 
     if kind is StoreKind.GIT:
-        policy = (
-            git_remote_policy
-            if git_remote_policy is not None
-            else GitRemotePolicy.deny_all()
-        )
-        approved = policy.authorize(store.root)
-        if approved is None or git_health_cwd is None:
-            return StoreHealth(
-                StoreHealthStatus.UNREACHABLE,
-                _GIT_HEALTH_FAILURE_DETAIL,
-            )
-        cwd = os.path.realpath(os.fspath(git_health_cwd))
-        if not os.path.isdir(cwd) or (git_runner is not None and git_executor is not None):
-            return StoreHealth(
-                StoreHealthStatus.UNREACHABLE,
-                _GIT_HEALTH_FAILURE_DETAIL,
-            )
-        try:
-            deadline = ProcessDeadline.after(
-                _validate_subprocess_deadline_seconds(git_deadline_seconds),
-                clock=git_clock,
-            )
-            env = _git_environment(git_allow_protocol, cwd=cwd)
-            config_args = _git_http_config_args(approved)
-            executor = (
-                git_executor
-                if git_executor is not None
-                else BoundedSubprocessExecutor()
-            )
-            preflight = _run_git_command(
-                runner=git_runner,
-                executor=executor,
-                binary=git_binary,
-                args=["ls-remote", "--get-url", "--", approved.subprocess_value],
-                cwd=cwd,
-                env=env,
-                config_args=config_args,
-                deadline=deadline,
-                stdout_limit_bytes=_PROCESS_METADATA_LIMIT_BYTES,
-            )
-            if not _git_remote_preflight_matches(preflight, approved.subprocess_value):
-                return StoreHealth(
-                    StoreHealthStatus.UNREACHABLE,
-                    _GIT_HEALTH_FAILURE_DETAIL,
-                )
-            git_completed = _run_git_command(
-                runner=git_runner,
-                executor=executor,
-                binary=git_binary,
-                args=["ls-remote", "--", approved.subprocess_value, "HEAD"],
-                cwd=cwd,
-                env=env,
-                config_args=config_args,
-                deadline=deadline,
-                stdout_limit_bytes=_PROCESS_METADATA_LIMIT_BYTES,
-            )
-            deadline.check()
-        except Exception:
-            return StoreHealth(
-                StoreHealthStatus.UNREACHABLE,
-                _GIT_HEALTH_FAILURE_DETAIL,
-            )
-        if git_completed.returncode == 0:
-            return StoreHealth(StoreHealthStatus.HEALTHY)
         return StoreHealth(
             StoreHealthStatus.UNREACHABLE,
-            _GIT_HEALTH_FAILURE_DETAIL,
+            GIT_STORE_HEALTH_FAILURE_DETAIL,
         )
 
     return StoreHealth(
         StoreHealthStatus.UNSUPPORTED,
         f"Health checks for '{kind.value}' stores are not supported yet.",
     )
-
-
-def _check_http_store_health(
-    store: DataStore | StoreProbeTarget,
-    *,
-    http_client: _StoreHealthHttpClient | None,
-    timeout: float,
-) -> StoreHealth:
-    import httpx
-
-    base = store.endpoint or store.root
-    owns_client = http_client is None
-    client: _StoreHealthHttpClient = (
-        http_client if http_client is not None else httpx.Client(timeout=timeout)
-    )
-    try:
-        response = client.head(base)
-    except httpx.HTTPError as exc:
-        return StoreHealth(StoreHealthStatus.UNREACHABLE, f"Cannot reach {base}: {exc}")
-    finally:
-        if owns_client:
-            client.close()
-    if response.status_code < 400 or response.status_code in (403, 405):
-        # 403/405 mean the endpoint answered but refused HEAD — still reachable.
-        return StoreHealth(StoreHealthStatus.HEALTHY)
-    return StoreHealth(
-        StoreHealthStatus.UNREACHABLE, f"HEAD {base} returned {response.status_code}."
-    )
-
-
-def _normalize_byte_range(byte_range: tuple[int, int] | None) -> tuple[int, int] | None:
-    if byte_range is None:
-        return None
-    start, end = byte_range
-    if start < 0 or end < 0:
-        raise ValueError("byte_range bounds must be non-negative.")
-    if end < start:
-        raise ValueError("byte_range end must be >= start.")
-    return start, end
 
 
 @dataclass(frozen=True)
@@ -1207,10 +1495,15 @@ class LocalFilesystemResolver(ArtifactResolver, ScopedLocalStoreResolver):
         self,
         allowed_roots: Sequence[str | Path] | None = None,
         *,
+        path_policy: LocalPathPolicy | None = None,
         recovery: RecoveryPolicy | None = None,
         file_reader_factory: Callable[[LocalPathPolicy], LocalFileReader] | None = None,
     ) -> None:
-        self._operator_policy = LocalPathPolicy(allowed_roots)
+        self._operator_policy = (
+            path_policy
+            if path_policy is not None
+            else LocalPathPolicy(allowed_roots)
+        )
         self._file_reader_factory = (
             HandleBoundLocalFileAccess
             if file_reader_factory is None
@@ -1238,10 +1531,7 @@ class LocalFilesystemResolver(ArtifactResolver, ScopedLocalStoreResolver):
         max_bytes: int = DEFAULT_MAX_BYTES,
         byte_range: tuple[int, int] | None = None,
     ) -> ResolvedArtifact:
-        try:
-            window = _normalize_byte_range(byte_range)
-        except ValueError as exc:
-            return _unresolved(ref, detail=str(exc))
+        bounds = ArtifactContentBounds.from_resolver(max_bytes, byte_range)
 
         if not is_verifiable_hash(ref.content_hash):
             algorithm, _ = parse_content_hash(ref.content_hash)
@@ -1266,8 +1556,8 @@ class LocalFilesystemResolver(ArtifactResolver, ScopedLocalStoreResolver):
             ref,
             scope=self._scope,
             planned_path=planned_path,
-            max_bytes=max_bytes,
-            window=window,
+            max_bytes=bounds.max_bytes,
+            window=bounds.byte_range,
             mime_path=None,
             recovery_name=os.path.basename(planned_path) or None,
             opaque_store_detail=False,
@@ -1282,11 +1572,8 @@ class LocalFilesystemResolver(ArtifactResolver, ScopedLocalStoreResolver):
     ) -> ResolvedArtifact:
         """Resolve a logical locator through one store-restricted handle scope."""
 
+        bounds = ArtifactContentBounds.from_resolver(max_bytes, byte_range)
         ref = target.logical_reference
-        try:
-            window = _normalize_byte_range(byte_range)
-        except ValueError as exc:
-            return _unresolved(ref, detail=str(exc))
         if not is_verifiable_hash(ref.content_hash):
             algorithm, _ = parse_content_hash(ref.content_hash)
             return _unresolved(
@@ -1326,8 +1613,8 @@ class LocalFilesystemResolver(ArtifactResolver, ScopedLocalStoreResolver):
             ref,
             scope=scope,
             planned_path=planned_path,
-            max_bytes=max_bytes,
-            window=window,
+            max_bytes=bounds.max_bytes,
+            window=bounds.byte_range,
             mime_path=target.locator.path,
             recovery_name=target.locator.components[-1],
             opaque_store_detail=True,
@@ -1515,20 +1802,6 @@ class LocalFilesystemResolver(ArtifactResolver, ScopedLocalStoreResolver):
                     yield os.path.join(dirpath, name)
 
 
-def _resolve_direct_http_redirect(current_url: str, location: str) -> str | None:
-    """Retain direct-reference redirect semantics outside registered stores."""
-
-    try:
-        next_url = urljoin(current_url, location)
-        current_scheme = urlsplit(current_url).scheme.lower()
-        next_scheme = urlsplit(next_url).scheme.lower()
-    except ValueError:
-        return None
-    if current_scheme == "https" and next_scheme == "http":
-        return None
-    return next_url
-
-
 class HttpResolver(ArtifactResolver, ScopedHttpStoreResolver):
     """Resolves artifacts addressed by ``http(s)`` URLs.
 
@@ -1568,8 +1841,12 @@ class HttpResolver(ArtifactResolver, ScopedHttpStoreResolver):
                 "HTTP deadline must be finite, positive, and no greater than "
                 f"{MAX_OUTBOUND_HTTP_DEADLINE_SECONDS:g} seconds."
             )
-        self._policy = policy or OutboundHttpPolicy()
-        self._client = client or SafeHttpClient(timeout=deadline_seconds)
+        self._policy = policy if policy is not None else OutboundHttpPolicy()
+        self._client = (
+            client
+            if client is not None
+            else SafeHttpClient(timeout=deadline_seconds)
+        )
         self._deadline_seconds = deadline_seconds
         self._clock = clock
         self._max_fetch_bytes = max_fetch_bytes
@@ -1588,12 +1865,12 @@ class HttpResolver(ArtifactResolver, ScopedHttpStoreResolver):
         max_bytes: int = DEFAULT_MAX_BYTES,
         byte_range: tuple[int, int] | None = None,
     ) -> ResolvedArtifact:
+        bounds = ArtifactContentBounds.from_resolver(max_bytes, byte_range)
         return self._resolve_http_url(
             ref,
             initial_url=ref.uri,
-            redirect_resolver=_resolve_direct_http_redirect,
-            max_bytes=max_bytes,
-            byte_range=byte_range,
+            redirect_resolver=resolve_direct_http_redirect,
+            bounds=bounds,
         )
 
     def resolve_within_http_store(
@@ -1605,6 +1882,7 @@ class HttpResolver(ArtifactResolver, ScopedHttpStoreResolver):
     ) -> ResolvedArtifact:
         """Resolve through a registered prefix without exposing its concrete URL."""
 
+        bounds = ArtifactContentBounds.from_resolver(max_bytes, byte_range)
         initial_url = target.registered_prefix.compose(target.locator)
         if (
             initial_url is None
@@ -1618,8 +1896,7 @@ class HttpResolver(ArtifactResolver, ScopedHttpStoreResolver):
             target.logical_reference,
             initial_url=initial_url,
             redirect_resolver=target.registered_prefix.resolve_redirect,
-            max_bytes=max_bytes,
-            byte_range=byte_range,
+            bounds=bounds,
         )
 
     def _resolve_http_url(
@@ -1628,14 +1905,8 @@ class HttpResolver(ArtifactResolver, ScopedHttpStoreResolver):
         *,
         initial_url: str,
         redirect_resolver: Callable[[str, str], str | None],
-        max_bytes: int,
-        byte_range: tuple[int, int] | None,
+        bounds: ArtifactContentBounds,
     ) -> ResolvedArtifact:
-        try:
-            window = _normalize_byte_range(byte_range)
-        except ValueError as exc:
-            return _unresolved(ref, detail=str(exc))
-
         if not is_verifiable_hash(ref.content_hash):
             algorithm, _ = parse_content_hash(ref.content_hash)
             return _unresolved(
@@ -1667,7 +1938,7 @@ class HttpResolver(ArtifactResolver, ScopedHttpStoreResolver):
                 deadline.check()
                 with self._client.open("GET", target, deadline=deadline) as response:
                     deadline.check()
-                    if response.status_code in {301, 302, 303, 307, 308}:
+                    if response.status_code in HTTP_REDIRECT_STATUS_CODES:
                         location = response.get_header("location")
                         deadline.check()
                         if not location or redirect_count >= self._max_redirects:
@@ -1707,8 +1978,8 @@ class HttpResolver(ArtifactResolver, ScopedHttpStoreResolver):
                     content, total, truncated, observed = _hash_and_collect(
                         response.iter_bytes(),
                         algorithm=algorithm,
-                        max_bytes=max_bytes,
-                        window=window,
+                        max_bytes=bounds.max_bytes,
+                        window=bounds.byte_range,
                         max_total=self._max_fetch_bytes,
                         budget_check=deadline.check,
                     )
@@ -1773,24 +2044,6 @@ def _validate_subprocess_deadline_seconds(value: float) -> float:
     return value
 
 
-def _subprocess_rclone_runner(binary: str) -> RcloneRunner:
-    def run(args: list[str]) -> RcloneCompleted:
-        import subprocess
-
-        completed = subprocess.run(  # noqa: S603 - args are built, not shell
-            [binary, *args],
-            capture_output=True,
-            check=False,
-        )
-        return RcloneCompleted(
-            returncode=completed.returncode,
-            stdout=completed.stdout,
-            stderr=completed.stderr,
-        )
-
-    return run
-
-
 class RcloneResolver(ArtifactResolver, ScopedRcloneStoreResolver):
     """Resolves artifacts via ``rclone``, the unifier for cloud and remote stores.
 
@@ -1804,13 +2057,10 @@ class RcloneResolver(ArtifactResolver, ScopedRcloneStoreResolver):
     is checked first (``rclone size``) and an object larger than
     ``max_fetch_bytes`` is refused as UNRESOLVED rather than downloaded.
 
-    ``allowed_remotes`` — ``None`` means unrestricted (library default); a list
-    restricts resolution to those rclone remote *names*, and anything else
-    resolves UNRESOLVED before any rclone subprocess runs. Without it, a
-    reference can drive server-side ``rclone cat`` against ANY remote in the
-    host's rclone config. ``registry_from_env`` denies all remotes unless
-    ``LAB_TRACKER_RCLONE_ALLOWED_REMOTES`` is set — the same opt-in posture as
-    the local resolver's allowed roots and the git resolver's remote allowlist.
+    ``remote_policy`` is the only authority for rclone remote names. Omission
+    denies every remote, including for direct library use. Runtime composition
+    parses the strict configured policy once and shares that exact object with
+    store health.
     """
 
     def __init__(
@@ -1819,7 +2069,7 @@ class RcloneResolver(ArtifactResolver, ScopedRcloneStoreResolver):
         runner: RcloneRunner | None = None,
         executor: ProcessExecutor | None = None,
         binary: str = "rclone",
-        allowed_remotes: Sequence[str] | None = None,
+        remote_policy: RcloneRemotePolicy | None = None,
         max_fetch_bytes: int = DEFAULT_MAX_FETCH_BYTES,
         deadline_seconds: float = DEFAULT_SUBPROCESS_DEADLINE_SECONDS,
         clock: Callable[[], float] = time.monotonic,
@@ -1827,10 +2077,14 @@ class RcloneResolver(ArtifactResolver, ScopedRcloneStoreResolver):
         if runner is not None and executor is not None:
             raise ValueError("Configure either runner or executor, not both.")
         self._runner = runner
-        self._executor = executor or BoundedSubprocessExecutor()
+        self._executor = (
+            executor if executor is not None else BoundedSubprocessExecutor()
+        )
         self._binary = binary
-        self._allowed_remotes = (
-            None if allowed_remotes is None else list(allowed_remotes)
+        self._remote_policy = (
+            remote_policy
+            if remote_policy is not None
+            else RcloneRemotePolicy.deny_all()
         )
         self._max_fetch_bytes = max_fetch_bytes
         self._deadline_seconds = _validate_subprocess_deadline_seconds(
@@ -1841,11 +2095,6 @@ class RcloneResolver(ArtifactResolver, ScopedRcloneStoreResolver):
     def can_resolve(self, ref: ExternalArtifactReference) -> bool:
         return _uri_scheme(ref.uri) == "rclone"
 
-    def _remote_allowed(self, remote: str) -> bool:
-        if self._allowed_remotes is None:
-            return True
-        return remote in self._allowed_remotes
-
     def resolve(
         self,
         ref: ExternalArtifactReference,
@@ -1853,10 +2102,7 @@ class RcloneResolver(ArtifactResolver, ScopedRcloneStoreResolver):
         max_bytes: int = DEFAULT_MAX_BYTES,
         byte_range: tuple[int, int] | None = None,
     ) -> ResolvedArtifact:
-        try:
-            window = _normalize_byte_range(byte_range)
-        except ValueError as exc:
-            return _unresolved(ref, detail=str(exc))
+        bounds = ArtifactContentBounds.from_resolver(max_bytes, byte_range)
 
         if not is_verifiable_hash(ref.content_hash):
             algorithm, _ = parse_content_hash(ref.content_hash)
@@ -1869,7 +2115,7 @@ class RcloneResolver(ArtifactResolver, ScopedRcloneStoreResolver):
         if target is None:
             return _unresolved(ref, detail="Reference URI is not an rclone locator.")
         remote_name = target.partition(":")[0]
-        if not self._remote_allowed(remote_name):
+        if self._remote_policy.authorize(remote_name) is None:
             return _unresolved(
                 ref, detail="Remote is not in the rclone resolver allowlist."
             )
@@ -1879,8 +2125,8 @@ class RcloneResolver(ArtifactResolver, ScopedRcloneStoreResolver):
             ref,
             target=target,
             algorithm=algorithm,
-            window=window,
-            max_bytes=max_bytes,
+            window=bounds.byte_range,
+            max_bytes=bounds.max_bytes,
         )
 
     def resolve_within_rclone_store(
@@ -1892,11 +2138,8 @@ class RcloneResolver(ArtifactResolver, ScopedRcloneStoreResolver):
     ) -> ResolvedArtifact:
         """Resolve a prevalidated registered target without URI reparsing."""
 
+        bounds = ArtifactContentBounds.from_resolver(max_bytes, byte_range)
         ref = target.logical_reference
-        try:
-            window = _normalize_byte_range(byte_range)
-        except ValueError as exc:
-            return _unresolved(ref, detail=str(exc))
 
         if not is_verifiable_hash(ref.content_hash):
             algorithm, _ = parse_content_hash(ref.content_hash)
@@ -1904,7 +2147,7 @@ class RcloneResolver(ArtifactResolver, ScopedRcloneStoreResolver):
                 ref,
                 detail=f"Cannot verify content hash with algorithm '{algorithm}'.",
             )
-        if not self._remote_allowed(target.remote.value):
+        if self._remote_policy.authorize_name(target.remote) is None:
             return _unresolved(
                 ref, detail="Remote is not in the rclone resolver allowlist."
             )
@@ -1914,8 +2157,8 @@ class RcloneResolver(ArtifactResolver, ScopedRcloneStoreResolver):
             ref,
             target=target.argv_target,
             algorithm=algorithm,
-            window=window,
-            max_bytes=max_bytes,
+            window=bounds.byte_range,
+            max_bytes=bounds.max_bytes,
         )
 
     def _resolve_validated_target(
@@ -2066,148 +2309,6 @@ class RcloneResolver(ArtifactResolver, ScopedRcloneStoreResolver):
         return f"{parsed.netloc}:{path}"
 
 
-def _rclone_error_detail(completed: RcloneCompleted) -> str:
-    """Legacy store-health diagnostic; resolver subprocesses use generic errors."""
-
-    stderr = completed.stderr.decode("utf-8", errors="replace").strip()
-    if stderr:
-        return f"rclone failed: {stderr.splitlines()[-1]}"
-    return f"rclone exited with status {completed.returncode}."
-
-
-@dataclass(frozen=True)
-class GitCompleted:
-    """Result of one git invocation."""
-
-    returncode: int
-    stdout: bytes
-    stderr: bytes
-
-
-# A runner takes git argv (without the binary name) and returns its result.
-GitRunner = Callable[[list[str]], GitCompleted]
-
-
-def _git_environment(
-    allow_protocol: str | None,
-    *,
-    cwd: str,
-) -> dict[str, str]:
-    """Capture one non-interactive Git environment for a logical operation."""
-
-    env = dict(os.environ)
-    for variable in (
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-        "GIT_COMMON_DIR",
-        "GIT_DIR",
-        "GIT_INDEX_FILE",
-        "GIT_OBJECT_DIRECTORY",
-        "GIT_WORK_TREE",
-    ):
-        env.pop(variable, None)
-    env["GIT_TERMINAL_PROMPT"] = "0"
-    # The operation cwd may sit below an unrelated repository (notably under a
-    # shared /tmp). Let Git discover the cache repository at ``cwd``, but never
-    # walk into its parent and inherit repository-local URL rewrites or hooks.
-    env["GIT_CEILING_DIRECTORIES"] = os.path.dirname(os.path.realpath(cwd))
-    if allow_protocol is None:
-        env.pop("GIT_ALLOW_PROTOCOL", None)
-    else:
-        env["GIT_ALLOW_PROTOCOL"] = allow_protocol
-    return env
-
-
-def _git_http_config_args(approved: ApprovedGitRemote) -> list[str]:
-    """Disable generic and approved-URL redirects before every Git subcommand."""
-
-    args = ["-c", _GIT_GENERIC_HTTP_REDIRECT_CONFIG]
-    if approved.scheme == "https":
-        args.extend(
-            [
-                "-c",
-                (
-                    f"http.{approved.subprocess_value}."
-                    "followRedirects=false"
-                ),
-            ]
-        )
-    return args
-
-
-def _run_git_command(
-    *,
-    runner: GitRunner | None,
-    executor: ProcessExecutor,
-    binary: str,
-    args: list[str],
-    cwd: str,
-    env: dict[str, str],
-    config_args: Sequence[str],
-    deadline: ProcessDeadline,
-    stdout_limit_bytes: int,
-    stdout_consumer: Callable[[bytes], None] | None = None,
-) -> GitCompleted:
-    """Run one Git command through the trusted runner or bounded production seam."""
-
-    if runner is not None:
-        # The callable seam is retained for deterministic tests and trusted callers.
-        # Encoding the cwd in argv keeps its command interpretation identical.
-        deadline.check()
-        legacy_completed = runner([*config_args, "-C", cwd, *args])
-        deadline.check()
-        if (
-            len(legacy_completed.stdout) > stdout_limit_bytes
-            or len(legacy_completed.stderr) > _PROCESS_STDERR_LIMIT_BYTES
-        ):
-            raise _LegacyProcessOutputExceeded
-        stdout = legacy_completed.stdout
-        if stdout_consumer is not None:
-            stdout_consumer(stdout)
-            deadline.check()
-            stdout = b""
-        return GitCompleted(
-            legacy_completed.returncode,
-            stdout,
-            legacy_completed.stderr,
-        )
-
-    process_result = executor.run(
-        [binary, *config_args, *args],
-        cwd=cwd,
-        deadline=deadline,
-        stdout_limit_bytes=stdout_limit_bytes,
-        stderr_limit_bytes=_PROCESS_STDERR_LIMIT_BYTES,
-        stdout_consumer=stdout_consumer,
-        env=env,
-    )
-    return GitCompleted(
-        process_result.returncode,
-        process_result.stdout,
-        b"",
-    )
-
-
-def _git_remote_preflight_matches(
-    completed: GitCompleted,
-    canonical_remote: str,
-) -> bool:
-    """Require one exact, terminal UTF-8 line from ``ls-remote --get-url``."""
-
-    if completed.returncode != 0:
-        return False
-    try:
-        output = completed.stdout.decode("utf-8")
-    except UnicodeDecodeError:
-        return False
-    if output.endswith("\r\n"):
-        line = output[:-2]
-    elif output.endswith("\n"):
-        line = output[:-1]
-    else:
-        return False
-    return line == canonical_remote
-
-
 class _GitReadError(Exception):
     """A git command failed while reading a blob; carries a caller-facing detail."""
 
@@ -2315,10 +2416,7 @@ class GitResolver(ArtifactResolver, ScopedGitStoreResolver):
         max_bytes: int = DEFAULT_MAX_BYTES,
         byte_range: tuple[int, int] | None = None,
     ) -> ResolvedArtifact:
-        try:
-            window = _normalize_byte_range(byte_range)
-        except ValueError as exc:
-            return _unresolved(ref, detail=str(exc))
+        bounds = ArtifactContentBounds.from_resolver(max_bytes, byte_range)
 
         if not is_verifiable_hash(ref.content_hash):
             algorithm, _ = parse_content_hash(ref.content_hash)
@@ -2345,8 +2443,8 @@ class GitResolver(ArtifactResolver, ScopedGitStoreResolver):
             path=path,
             object_format=None,
             algorithm=algorithm,
-            window=window,
-            max_bytes=max_bytes,
+            window=bounds.byte_range,
+            max_bytes=bounds.max_bytes,
         )
 
     def resolve_within_git_store(
@@ -2358,11 +2456,8 @@ class GitResolver(ArtifactResolver, ScopedGitStoreResolver):
     ) -> ResolvedArtifact:
         """Resolve a registered immutable object without generic URI parsing."""
 
+        bounds = ArtifactContentBounds.from_resolver(max_bytes, byte_range)
         ref = target.logical_reference
-        try:
-            window = _normalize_byte_range(byte_range)
-        except ValueError as exc:
-            return _unresolved(ref, detail=str(exc))
 
         if not is_verifiable_hash(ref.content_hash):
             algorithm, _ = parse_content_hash(ref.content_hash)
@@ -2385,8 +2480,8 @@ class GitResolver(ArtifactResolver, ScopedGitStoreResolver):
             path=target.pin.path.path,
             object_format=target.pin.object_id.object_format,
             algorithm=algorithm,
-            window=window,
-            max_bytes=max_bytes,
+            window=bounds.byte_range,
+            max_bytes=bounds.max_bytes,
         )
 
     def _resolve_authorized_target(
@@ -2488,7 +2583,7 @@ class GitResolver(ArtifactResolver, ScopedGitStoreResolver):
             env=env,
             config_args=config_args,
             deadline=deadline,
-            stdout_limit_bytes=_PROCESS_METADATA_LIMIT_BYTES,
+            stdout_limit_bytes=GIT_PROCESS_METADATA_LIMIT_BYTES,
         )
         if initialized.returncode != 0:
             raise _GitReadError("Git artifact resolution failed.")
@@ -2499,7 +2594,7 @@ class GitResolver(ArtifactResolver, ScopedGitStoreResolver):
             env=env,
             config_args=config_args,
             deadline=deadline,
-            stdout_limit_bytes=_PROCESS_METADATA_LIMIT_BYTES,
+            stdout_limit_bytes=GIT_PROCESS_METADATA_LIMIT_BYTES,
         )
         if not _git_remote_preflight_matches(preflight, remote):
             raise _GitReadError("Git artifact resolution failed.")
@@ -2519,7 +2614,7 @@ class GitResolver(ArtifactResolver, ScopedGitStoreResolver):
             env=env,
             config_args=config_args,
             deadline=deadline,
-            stdout_limit_bytes=_PROCESS_METADATA_LIMIT_BYTES,
+            stdout_limit_bytes=GIT_PROCESS_METADATA_LIMIT_BYTES,
         )
         if fetch.returncode != 0:
             raise _GitReadError("Git artifact resolution failed.")
@@ -2531,7 +2626,7 @@ class GitResolver(ArtifactResolver, ScopedGitStoreResolver):
             env=env,
             config_args=config_args,
             deadline=deadline,
-            stdout_limit_bytes=_PROCESS_METADATA_LIMIT_BYTES,
+            stdout_limit_bytes=GIT_PROCESS_METADATA_LIMIT_BYTES,
         )
         if size_out.returncode != 0:
             raise _GitReadError("Git artifact resolution failed.")
@@ -2697,9 +2792,9 @@ def _hash_and_collect(
 
     Returns ``(content, total_size, truncated, observed_hash)``. The whole stream
     is hashed; ``content`` is either the first ``max_bytes`` (no window) or the
-    requested ``[start, end)`` slice. Raises :class:`_FetchTooLarge` if the total
-    exceeds ``max_total`` (so an oversized artifact is refused rather than
-    returned uncertified).
+    capped ``[start, min(end, start + max_bytes))`` slice. Raises
+    :class:`_FetchTooLarge` if the total exceeds ``max_total`` (so an oversized
+    artifact is refused rather than returned uncertified).
     """
 
     collector = _HashCollector(
@@ -2726,12 +2821,17 @@ class _HashCollector:
         max_total: int | None = None,
         budget_check: Callable[[], None] | None = None,
     ) -> None:
+        bounds = ArtifactContentBounds.from_resolver(max_bytes, window)
         self._algorithm = algorithm
         self._hasher = hashlib.new(algorithm)
         self._collected = bytearray()
         self._total = 0
-        self._max_bytes = max_bytes
-        self._window = window
+        self._max_bytes = bounds.max_bytes
+        if bounds.byte_range is None:
+            self._window: tuple[int, int] | None = None
+        else:
+            start, end = bounds.byte_range
+            self._window = (start, min(end, start + bounds.max_bytes))
         self._max_total = max_total
         self._budget_check = budget_check
 
@@ -2820,13 +2920,15 @@ def _build_resolved(
 def default_registry(
     *,
     allowed_roots: Sequence[str | Path] | None = None,
+    local_path_policy: LocalPathPolicy | None = None,
     recovery: RecoveryPolicy | None = None,
     http_policy: OutboundHttpPolicy | None = None,
     http_client: OutboundHttpClient | None = None,
     http_deadline_seconds: float = DEFAULT_OUTBOUND_HTTP_DEADLINE_SECONDS,
     subprocess_deadline_seconds: float = DEFAULT_SUBPROCESS_DEADLINE_SECONDS,
-    rclone_allowed_remotes: Sequence[str] | None = None,
+    rclone_remote_policy: RcloneRemotePolicy | None = None,
     git_remote_policy: GitRemotePolicy | None = None,
+    process_executor: ProcessExecutor | None = None,
     git_cache_root: str | Path | None = None,
     git_max_cache_bytes: int | None = None,
 ) -> ResolverRegistry:
@@ -2836,28 +2938,45 @@ def default_registry(
     adapters degrade to UNRESOLVED when their binary is absent, so including them
     is safe by default. Native store-backed adapters (s3, ssh, database) register
     here as they land. ``recovery`` opts the local resolver into content-hash
-    recovery of missing files within ``allowed_roots``. ``http_policy`` is the
-    shared outbound destination policy later reused by store-health probes.
+    recovery of missing files within ``allowed_roots``. ``http_policy`` and
+    ``http_client`` are the outbound authority and pinned transport that runtime
+    composition shares exactly with HTTP store-health probes.
     ``subprocess_deadline_seconds`` is one shared execution/verification budget
     for every command in a single rclone or Git resolution.
-    ``git_remote_policy`` is one immutable structural policy shared with health
-    composition; omission denies every Git remote.
+    ``rclone_remote_policy`` and ``git_remote_policy`` are immutable authorities
+    shared with health composition; omission denies every corresponding remote.
+    ``local_path_policy`` is the transitional typed authority for direct local
+    resolution and recovery only; when supplied it takes precedence over
+    compatibility ``allowed_roots``. Local health receives its separate bounded
+    broker at runtime composition. One process executor is shared by the
+    subprocess resolvers and health adapters.
     """
 
+    shared_process_executor = (
+        process_executor
+        if process_executor is not None
+        else BoundedSubprocessExecutor()
+    )
     return ResolverRegistry(
         [
-            LocalFilesystemResolver(allowed_roots=allowed_roots, recovery=recovery),
+            LocalFilesystemResolver(
+                allowed_roots=allowed_roots,
+                path_policy=local_path_policy,
+                recovery=recovery,
+            ),
             HttpResolver(
                 policy=http_policy,
                 client=http_client,
                 deadline_seconds=http_deadline_seconds,
             ),
             RcloneResolver(
-                allowed_remotes=rclone_allowed_remotes,
+                remote_policy=rclone_remote_policy,
+                executor=shared_process_executor,
                 deadline_seconds=subprocess_deadline_seconds,
             ),
             GitResolver(
                 remote_policy=git_remote_policy,
+                executor=shared_process_executor,
                 cache_root=git_cache_root,
                 max_cache_bytes=git_max_cache_bytes,
                 deadline_seconds=subprocess_deadline_seconds,
@@ -2880,10 +2999,10 @@ LAB_TRACKER_RESOLVER_RECOVERY_MAX_FILES_ENV = "LAB_TRACKER_RESOLVER_RECOVERY_MAX
 LAB_TRACKER_RESOLVER_RECOVERY_MAX_BYTES_ENV = "LAB_TRACKER_RESOLVER_RECOVERY_MAX_BYTES"
 
 # Comma-separated exact HTTP(S) origins and IP networks for internal artifact
-# destinations. Both variables are required for an exception: the normalized
-# scheme/host/effective-port origin must match exactly and every DNS answer must
-# fall inside one configured CIDR. Without an exception, every answer must be a
-# globally routable public address.
+# resolution and store-health destinations. Both variables are required for an
+# exception: the normalized scheme/host/effective-port origin must match exactly
+# and every DNS answer must fall inside one configured CIDR. Without an
+# exception, every answer must be a globally routable public address.
 LAB_TRACKER_RESOLVER_HTTP_ALLOWED_AUTHORITIES_ENV = (
     "LAB_TRACKER_RESOLVER_HTTP_ALLOWED_AUTHORITIES"
 )
@@ -2902,7 +3021,7 @@ LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS_ENV = (
 # UNRESOLVED) until an operator opts specific remotes in — without it, a
 # reference could drive server-side `rclone cat` against any remote in the
 # host's rclone config.
-LAB_TRACKER_RCLONE_ALLOWED_REMOTES_ENV = "LAB_TRACKER_RCLONE_ALLOWED_REMOTES"
+LAB_TRACKER_RCLONE_ALLOWED_REMOTES_ENV = DEFAULT_RCLONE_REMOTE_POLICY_VARIABLE
 
 # Comma-separated structural Git grants. Each grant is parsed and canonicalized;
 # candidates are authorized by scheme, host, effective port, optional SSH user,
@@ -2991,24 +3110,26 @@ def _strict_comma_separated_values(
 
 def registry_from_env(
     *,
+    local_path_policy: LocalPathPolicy | None = None,
     http_policy: OutboundHttpPolicy | None = None,
+    http_client: OutboundHttpClient | None = None,
     http_deadline_seconds: float | None = None,
     subprocess_deadline_seconds: float | None = None,
+    rclone_remote_policy: RcloneRemotePolicy | None = None,
     git_remote_policy: GitRemotePolicy | None = None,
+    process_executor: ProcessExecutor | None = None,
 ) -> ResolverRegistry:
     """Build the default registry, reading resolver config from the env."""
 
-    raw = os.environ.get(LAB_TRACKER_RESOLVER_ALLOWED_ROOTS_ENV)
-    allowed_roots = (
-        [part for part in raw.split(os.pathsep) if part.strip()] if raw else []
-    )
-    raw_rclone = os.environ.get(LAB_TRACKER_RCLONE_ALLOWED_REMOTES_ENV)
-    # Unset -> [] -> deny all rclone remotes (opt-in, mirroring allowed roots).
-    rclone_allowed_remotes = (
-        [part.strip() for part in raw_rclone.split(",") if part.strip()]
-        if raw_rclone
-        else []
-    )
+    if local_path_policy is None:
+        local_path_policy = LocalPathPolicy.from_config(
+            os.environ.get(LAB_TRACKER_RESOLVER_ALLOWED_ROOTS_ENV)
+        )
+    if rclone_remote_policy is None:
+        rclone_remote_policy = RcloneRemotePolicy.from_config(
+            os.environ.get(LAB_TRACKER_RCLONE_ALLOWED_REMOTES_ENV),
+            variable=LAB_TRACKER_RCLONE_ALLOWED_REMOTES_ENV,
+        )
     if git_remote_policy is None:
         git_remote_policy = GitRemotePolicy.from_config(
             os.environ.get(LAB_TRACKER_GIT_ALLOWED_REMOTES_ENV),
@@ -3067,13 +3188,19 @@ def registry_from_env(
             f"and between 0 and {MAX_SUBPROCESS_DEADLINE_SECONDS:g} seconds."
         ) from None
     return default_registry(
-        allowed_roots=allowed_roots,
+        local_path_policy=local_path_policy,
         recovery=recovery_from_env(),
-        http_policy=http_policy or outbound_http_policy_from_env(),
+        http_policy=(
+            http_policy
+            if http_policy is not None
+            else outbound_http_policy_from_env()
+        ),
+        http_client=http_client,
         http_deadline_seconds=http_deadline_seconds,
         subprocess_deadline_seconds=subprocess_deadline_seconds,
-        rclone_allowed_remotes=rclone_allowed_remotes,
+        rclone_remote_policy=rclone_remote_policy,
         git_remote_policy=git_remote_policy,
+        process_executor=process_executor,
         git_cache_root=git_cache_root,
         git_max_cache_bytes=git_max_cache_bytes or None,
     )

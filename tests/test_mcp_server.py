@@ -9,6 +9,7 @@ from pathlib import Path
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from mcp.server.fastmcp.exceptions import ToolError
 
 try:
     import tomllib
@@ -16,6 +17,10 @@ except ModuleNotFoundError:  # pragma: no cover - exercised by Python 3.10 CI
     import tomli as tomllib
 
 from lab_tracker import mcp_server
+from lab_tracker.artifact_resolution_limits import (
+    MAX_ARTIFACT_BYTE_OFFSET,
+    MAX_INLINE_ARTIFACT_BYTES,
+)
 from lab_tracker.auth import utc_now
 from lab_tracker.cli import _cursor_mcp_json, _mcp_json
 from lab_tracker.decision_context_constants import code_facing_idioms
@@ -66,6 +71,61 @@ def test_fastmcp_registers_lab_tracker_tools() -> None:
     assert "CALL THIS FIRST before research-facing decisions" in (mcp_server.server.instructions)
     assert "what to plot" in mcp_server.server.instructions
     assert "AI can suggest; only a person commits" in mcp_server.server.instructions
+
+
+def test_fastmcp_artifact_tool_schema_publishes_portable_content_bounds() -> None:
+    tools = asyncio.run(mcp_server.server.list_tools())
+    tool = {item.name: item for item in tools}["lab_tracker_resolve_artifact"]
+
+    max_bytes_schema = tool.inputSchema["properties"]["max_bytes"]["anyOf"][0]
+    byte_start_schema = tool.inputSchema["properties"]["byte_start"]["anyOf"][0]
+    byte_end_schema = tool.inputSchema["properties"]["byte_end"]["anyOf"][0]
+    assert max_bytes_schema == {
+        "type": "integer",
+        "maximum": MAX_INLINE_ARTIFACT_BYTES,
+        "minimum": 1,
+    }
+    assert byte_start_schema == {
+        "type": "integer",
+        "maximum": MAX_ARTIFACT_BYTE_OFFSET,
+        "minimum": 0,
+    }
+    assert byte_end_schema == byte_start_schema
+
+
+@pytest.mark.parametrize(
+    "invalid_max_bytes",
+    [True, 1.0, "1", 0, MAX_INLINE_ARTIFACT_BYTES + 1],
+)
+def test_fastmcp_artifact_call_rejects_coercion_before_client_acquisition(
+    monkeypatch,
+    invalid_max_bytes,
+) -> None:
+    from lab_tracker.mcp_tools import read as read_tools
+
+    acquisitions = 0
+
+    def unexpected_client():
+        nonlocal acquisitions
+        acquisitions += 1
+        raise AssertionError("invalid FastMCP input acquired an API client")
+
+    read_tools.close_cached_read_client()
+    monkeypatch.setattr(read_tools, "client_from_env", unexpected_client)
+
+    with pytest.raises(ToolError, match="validation error"):
+        asyncio.run(
+            mcp_server.server.call_tool(
+                "lab_tracker_resolve_artifact",
+                {
+                    "entity_type": "dataset",
+                    "entity_id": "dataset-1",
+                    "max_bytes": invalid_max_bytes,
+                },
+            )
+        )
+
+    assert acquisitions == 0
 
 
 def test_fastmcp_tool_annotations_mark_reads_and_writes_for_copilot() -> None:
@@ -839,6 +899,57 @@ def test_client_resolve_artifact_posts_to_resolve_route() -> None:
     assert "byte_start" not in body
 
 
+@pytest.mark.parametrize(
+    "invalid_fields",
+    [
+        {"max_bytes": True},
+        {"max_bytes": False},
+        {"max_bytes": 1.0},
+        {"max_bytes": "1"},
+        {"max_bytes": 0},
+        {"max_bytes": -1},
+        {"max_bytes": MAX_INLINE_ARTIFACT_BYTES + 1},
+        {"byte_start": True, "byte_end": 1},
+        {"byte_start": 1.0, "byte_end": 2},
+        {"byte_start": "1", "byte_end": 2},
+        {"byte_start": -1, "byte_end": 2},
+        {
+            "byte_start": MAX_ARTIFACT_BYTE_OFFSET + 1,
+            "byte_end": MAX_ARTIFACT_BYTE_OFFSET + 1,
+        },
+        {"byte_start": 0, "byte_end": MAX_ARTIFACT_BYTE_OFFSET + 1},
+        {"byte_start": 1},
+        {"byte_end": 1},
+        {"byte_start": 2, "byte_end": 1},
+    ],
+)
+def test_client_rejects_invalid_artifact_bounds_before_api_request(
+    invalid_fields,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        raise AssertionError("invalid artifact bounds reached the network")
+
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(base_url="http://testserver"),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with pytest.raises(mcp_server.LabTrackerAPIValidationError) as exc_info:
+            client.resolve_external_artifact(
+                entity_type="dataset",
+                entity_id="dataset-1",
+                **invalid_fields,
+            )
+    finally:
+        client.close()
+
+    assert exc_info.value.code == "validation_error"
+    assert requests == []
+
+
 @pytest.mark.parametrize("status", ["drifted", "unresolved", None, "future-status"])
 def test_client_suppresses_content_from_unverified_artifact_response(status) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
@@ -980,6 +1091,58 @@ def test_client_does_not_remint_credentials_after_opaque_resolver_not_found() ->
 def test_resolve_artifact_is_registered_read_tool() -> None:
     assert "lab_tracker_resolve_artifact" in {tool.__name__ for tool in READ_TOOLS}
     assert "lab_tracker_resolve_artifact" not in {tool.__name__ for tool in WRITE_TOOLS}
+
+
+@pytest.mark.parametrize(
+    "invalid_fields",
+    [
+        {"max_bytes": True},
+        {"max_bytes": False},
+        {"max_bytes": 1.0},
+        {"max_bytes": "1"},
+        {"max_bytes": 0},
+        {"max_bytes": -1},
+        {"max_bytes": MAX_INLINE_ARTIFACT_BYTES + 1},
+        {"byte_start": True, "byte_end": 1},
+        {"byte_start": 1.0, "byte_end": 2},
+        {"byte_start": "1", "byte_end": 2},
+        {"byte_start": -1, "byte_end": 2},
+        {
+            "byte_start": MAX_ARTIFACT_BYTE_OFFSET + 1,
+            "byte_end": MAX_ARTIFACT_BYTE_OFFSET + 1,
+        },
+        {"byte_start": 0, "byte_end": MAX_ARTIFACT_BYTE_OFFSET + 1},
+        {"byte_start": 1},
+        {"byte_end": 1},
+        {"byte_start": 2, "byte_end": 1},
+    ],
+)
+def test_resolve_artifact_tool_rejects_invalid_bounds_before_client_acquisition(
+    monkeypatch,
+    invalid_fields,
+) -> None:
+    from lab_tracker.mcp_tools import read as read_tools
+
+    acquisitions = 0
+
+    def unexpected_client():
+        nonlocal acquisitions
+        acquisitions += 1
+        raise AssertionError("invalid artifact bounds acquired an API client")
+
+    read_tools.close_cached_read_client()
+    monkeypatch.setattr(read_tools, "client_from_env", unexpected_client)
+
+    payload = read_tools.lab_tracker_resolve_artifact(
+        entity_type="dataset",
+        entity_id="dataset-1",
+        **invalid_fields,
+    )
+
+    assert acquisitions == 0
+    assert payload["data"] is None
+    assert payload["error"]["code"] == "validation_error"
+    assert payload["error"]["operation"] == "lab_tracker_resolve_artifact"
 
 
 @pytest.mark.parametrize("status", ["drifted", "unresolved", None, "future-status"])

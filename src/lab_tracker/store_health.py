@@ -36,6 +36,10 @@ MAX_STORE_HEALTH_SINGLEFLIGHT_WAIT_SECONDS: Final = 60.0
 STORE_HEALTH_PROBE_UNAVAILABLE_MESSAGE: Final = (
     "Store health probe is temporarily unavailable."
 )
+HTTP_STORE_HEALTH_FAILURE_DETAIL: Final = "HTTP store health check failed."
+LOCAL_STORE_HEALTH_FAILURE_DETAIL: Final = "Local store health check failed."
+RCLONE_STORE_HEALTH_FAILURE_DETAIL: Final = "Rclone store health check failed."
+GIT_STORE_HEALTH_FAILURE_DETAIL: Final = "Git store health check failed."
 
 
 @dataclass(frozen=True, slots=True)

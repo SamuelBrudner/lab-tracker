@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -9,10 +10,20 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 
+from lab_tracker.local_filesystem_operations import (
+    LOCAL_FILESYSTEM_PROTOCOL_VERSION,
+    LOCAL_FILESYSTEM_REQUEST_ENV,
+)
+
 try:
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover - exercised by Python 3.10 CI
     import tomli as tomllib
+
+_POSIX_LOCAL_STORE_HEALTH_HELPER = "lab_tracker/_local_store_health_helper.py"
+_WINDOWS_LOCAL_STORE_HEALTH_HELPER = (
+    "lab_tracker/_windows_local_store_health_helper.py"
+)
 
 
 def _packaged_files(package_root: Path, subdir: str) -> set[str]:
@@ -32,6 +43,31 @@ def _package_data_patterns(repo_root: Path) -> list[str]:
 def _package_data_matches(file_path: str, patterns: list[str]) -> bool:
     path = PurePosixPath(file_path)
     return any(path.match(pattern) for pattern in patterns)
+
+
+def _isolated_helper_environment(root: Path) -> dict[str, str]:
+    request = json.dumps(
+        {
+            "v": LOCAL_FILESYSTEM_PROTOCOL_VERSION,
+            "op": "inspect-directory",
+            "candidate": os.fspath(root),
+            "roots": [os.fspath(root.parent)],
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    environment = {LOCAL_FILESYSTEM_REQUEST_ENV: request}
+    if os.name == "nt":
+        for name, value in os.environ.items():
+            if name.upper() in {"SYSTEMROOT", "WINDIR"}:
+                environment[name] = value
+        return environment
+    if os.name == "posix":
+        for name, value in os.environ.items():
+            if name in {"LANG", "LC_ALL", "LC_CTYPE"}:
+                environment[name] = value
+    return environment
 
 
 def _build_wheel(repo_root: Path, wheelhouse: Path) -> Path:
@@ -131,6 +167,36 @@ def test_wheel_contains_all_frontend_bundle_files(built_wheel: Path):
         }
 
     assert wheel_files == bundle_files
+
+
+def test_wheel_contains_and_runs_isolated_local_health_helper(
+    tmp_path: Path,
+    built_wheel: Path,
+) -> None:
+    target = tmp_path / "wheel"
+    with zipfile.ZipFile(built_wheel) as archive:
+        assert _POSIX_LOCAL_STORE_HEALTH_HELPER in archive.namelist()
+        assert _WINDOWS_LOCAL_STORE_HEALTH_HELPER in archive.namelist()
+        active_helper = (
+            _WINDOWS_LOCAL_STORE_HEALTH_HELPER
+            if os.name == "nt"
+            else _POSIX_LOCAL_STORE_HEALTH_HELPER
+        )
+        archive.extract(active_helper, target)
+
+    store_root = tmp_path / "store"
+    store_root.mkdir()
+    helper = target / active_helper
+    completed = subprocess.run(  # noqa: S603 - fixed interpreter and wheel member
+        [sys.executable, "-I", "-S", "-B", str(helper)],
+        check=False,
+        capture_output=True,
+        env=_isolated_helper_environment(store_root),
+    )
+
+    assert completed.returncode == 0
+    assert completed.stdout == b""
+    assert completed.stderr == b""
 
 
 def test_alembic_package_data_covers_all_migration_files():

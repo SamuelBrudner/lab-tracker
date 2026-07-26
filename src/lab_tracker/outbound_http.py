@@ -22,7 +22,7 @@ from collections.abc import Awaitable, Callable, Iterable, Iterator, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Protocol, cast
+from typing import Final, Protocol, cast
 from urllib.parse import SplitResult, quote, urljoin, urlsplit
 
 import dns.asyncresolver
@@ -36,6 +36,8 @@ _MAX_URL_LENGTH = 8192
 _STREAM_CHUNK_SIZE = 1024 * 1024
 DEFAULT_OUTBOUND_HTTP_DEADLINE_SECONDS = 30.0
 MAX_OUTBOUND_HTTP_DEADLINE_SECONDS = 86_400.0
+DEFAULT_MAX_HTTP_REDIRECTS = 3
+HTTP_REDIRECT_STATUS_CODES: Final = frozenset({301, 302, 303, 307, 308})
 _GENERIC_POLICY_DETAIL = "Outbound HTTP destination is not allowed."
 _GENERIC_TRANSPORT_DETAIL = "Outbound HTTP request failed."
 _PATH_SAFE_CHARACTERS = "/:@!$&'()*+,;=-._~%"
@@ -71,6 +73,28 @@ class OutboundHttpTransportError(RuntimeError):
 
 class OutboundHttpDeadlineExceeded(OutboundHttpTransportError):
     """The request-wide outbound HTTP budget expired."""
+
+
+def resolve_direct_http_redirect(
+    current_url: str,
+    location: str,
+) -> str | None:
+    """Resolve one direct-reference redirect without permitting TLS downgrade.
+
+    This helper does not authorize the resulting destination. Callers must pass
+    every returned URL through :class:`OutboundHttpPolicy` before opening a
+    connection, including cross-origin redirects.
+    """
+
+    try:
+        next_url = urljoin(current_url, location)
+        current_scheme = urlsplit(current_url).scheme.lower()
+        next_scheme = urlsplit(next_url).scheme.lower()
+    except (TypeError, UnicodeError, ValueError):
+        return None
+    if current_scheme == "https" and next_scheme == "http":
+        return None
+    return next_url
 
 
 Clock = Callable[[], float]
@@ -331,7 +355,11 @@ class SystemAddressResolver:
         *,
         deadline: OutboundHttpDeadline | None = None,
     ) -> Sequence[ApprovedSocketAddress]:
-        active_deadline = deadline or OutboundHttpDeadline.after(self._default_timeout)
+        active_deadline = (
+            deadline
+            if deadline is not None
+            else OutboundHttpDeadline.after(self._default_timeout)
+        )
         active_deadline.check()
         try:
             asyncio.get_running_loop()
@@ -414,7 +442,11 @@ class OutboundHttpPolicy:
     ) -> ApprovedHttpTarget:
         """Parse, resolve, and authorize one URL without sending request bytes."""
 
-        active_deadline = deadline or OutboundHttpDeadline.after(self._default_timeout)
+        active_deadline = (
+            deadline
+            if deadline is not None
+            else OutboundHttpDeadline.after(self._default_timeout)
+        )
         try:
             active_deadline.check()
         except OutboundHttpTransportError:
@@ -496,17 +528,21 @@ class SystemPinnedSocketConnector:
                 peer_ip = ipaddress.ip_address(str(peer[0]).split("%", 1)[0])
                 peer_port = int(peer[1])
                 if peer_ip != address.ip or peer_port != address.sockaddr[1]:
-                    candidate.close()
+                    _close_quietly(candidate)
                     continue
                 _set_socket_deadline(candidate, active_deadline)
                 return candidate
             except OutboundHttpDeadlineExceeded:
                 if candidate is not None:
-                    candidate.close()
+                    _close_quietly(candidate)
                 raise
             except (OSError, ValueError, OutboundHttpTransportError):
                 if candidate is not None:
-                    candidate.close()
+                    _close_quietly(candidate)
+            except BaseException:
+                if candidate is not None:
+                    _close_preserving_active_exception(candidate)
+                raise
         raise OutboundHttpTransportError(_GENERIC_TRANSPORT_DETAIL)
 
 
@@ -621,6 +657,32 @@ def _close_quietly(resource: _Closable) -> None:
         resource.close()
 
 
+def _close_preserving_active_exception(resource: _Closable) -> None:
+    """Attempt cleanup without replacing an exception already in flight."""
+
+    with suppress(BaseException):
+        resource.close()
+
+
+def _close_resources(*resources: _Closable) -> None:
+    """Close all resources, redacting ordinary failures and preserving interrupts."""
+
+    ordinary_failure = False
+    base_failure: BaseException | None = None
+    for resource in resources:
+        try:
+            resource.close()
+        except Exception:
+            ordinary_failure = True
+        except BaseException as exc:
+            if base_failure is None:
+                base_failure = exc
+    if base_failure is not None:
+        raise base_failure
+    if ordinary_failure:
+        raise OutboundHttpTransportError(_GENERIC_TRANSPORT_DETAIL) from None
+
+
 class OutboundHttpResponse(Protocol):
     """Narrow streaming response consumed by artifact and health adapters."""
 
@@ -687,10 +749,7 @@ class _StreamingResponse:
             raise OutboundHttpTransportError(_GENERIC_TRANSPORT_DETAIL) from None
 
     def close(self) -> None:
-        try:
-            self._response.close()
-        finally:
-            self._connection.close()
+        _close_resources(self._response, self._connection)
 
     def __enter__(self) -> _StreamingResponse:
         return self
@@ -701,7 +760,10 @@ class _StreamingResponse:
         exc: BaseException | None,
         traceback: object | None,
     ) -> None:
-        self.close()
+        if exc is None:
+            self.close()
+            return
+        _close_preserving_active_exception(self)
 
 
 class _PinnedHttpConnection(http.client.HTTPConnection):
@@ -718,7 +780,11 @@ class _PinnedHttpConnection(http.client.HTTPConnection):
 
     def connect(self) -> None:
         raw_socket = self._connector.connect(self._approved_addresses, self._deadline)
-        self.sock = cast(socket.socket, _DeadlineSocket(raw_socket, self._deadline))
+        try:
+            self.sock = cast(socket.socket, _DeadlineSocket(raw_socket, self._deadline))
+        except BaseException:
+            _close_preserving_active_exception(raw_socket)
+            raise
 
 
 class _PinnedHttpsConnection(http.client.HTTPSConnection):
@@ -759,8 +825,8 @@ class _PinnedHttpsConnection(http.client.HTTPSConnection):
             )
         except BaseException:
             if wrapped_socket is not None and wrapped_socket is not raw_socket:
-                _close_quietly(wrapped_socket)
-            _close_quietly(raw_socket)
+                _close_preserving_active_exception(wrapped_socket)
+            _close_preserving_active_exception(raw_socket)
             raise
 
 
@@ -776,8 +842,12 @@ class SafeHttpClient:
     ) -> None:
         _validate_timeout(timeout, name="HTTP timeout")
         self._timeout = timeout
-        self._connector = connector or SystemPinnedSocketConnector()
-        self._ssl_context = ssl_context or ssl.create_default_context()
+        self._connector = (
+            connector if connector is not None else SystemPinnedSocketConnector()
+        )
+        self._ssl_context = (
+            ssl_context if ssl_context is not None else ssl.create_default_context()
+        )
 
     def open(
         self,
@@ -789,7 +859,11 @@ class SafeHttpClient:
         normalized_method = method.upper()
         if normalized_method not in {"GET", "HEAD"}:
             raise ValueError("SafeHttpClient supports only GET and HEAD.")
-        active_deadline = deadline or OutboundHttpDeadline.after(self._timeout)
+        active_deadline = (
+            deadline
+            if deadline is not None
+            else OutboundHttpDeadline.after(self._timeout)
+        )
         active_deadline.check()
         connection: http.client.HTTPConnection
         if target.scheme == "https":
@@ -805,6 +879,7 @@ class SafeHttpClient:
                 self._connector,
                 active_deadline,
             )
+        response: http.client.HTTPResponse | None = None
         try:
             active_deadline.check()
             connection.request(
@@ -819,19 +894,27 @@ class SafeHttpClient:
             response = connection.getresponse()
             active_deadline.check()
             content_encoding = response.getheader("content-encoding")
-            if content_encoding and content_encoding.strip().lower() != "identity":
-                _close_quietly(response)
-                _close_quietly(connection)
+            if (
+                normalized_method != "HEAD"
+                and content_encoding
+                and content_encoding.strip().lower() != "identity"
+            ):
                 raise OutboundHttpTransportError(_GENERIC_TRANSPORT_DETAIL)
             return _StreamingResponse(connection, response, active_deadline)
-        except (
-            OSError,
-            UnicodeError,
-            http.client.HTTPException,
-            OutboundHttpTransportError,
-        ):
+        except Exception:
+            if response is not None:
+                try:
+                    _close_quietly(response)
+                except BaseException:
+                    _close_preserving_active_exception(connection)
+                    raise
             _close_quietly(connection)
             raise OutboundHttpTransportError(_GENERIC_TRANSPORT_DETAIL) from None
+        except BaseException:
+            if response is not None:
+                _close_preserving_active_exception(response)
+            _close_preserving_active_exception(connection)
+            raise
 
 
 @dataclass(frozen=True)
