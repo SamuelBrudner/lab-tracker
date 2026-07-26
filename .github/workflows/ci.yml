@@ -154,6 +154,7 @@ jobs:
           tests/test_git_store_health.py
           tests/test_local_path_policy.py
           tests/test_local_store_health.py
+          tests/test_windows_local_store_health_helper.py
           tests/test_local_file_access.py
           tests/test_windows_local_file.py
           tests/test_outbound_http_deadline.py
@@ -169,3 +170,40 @@ jobs:
           tests/test_external_artifacts_routes.py
           tests/test_data_stores_routes.py
           tests/test_evidence_artifact_read_opacity.py
+
+  windows-local-store-health:
+    name: Windows handle-bound local store health (Python 3.10)
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.10"
+      - uses: astral-sh/setup-uv@v7
+      - name: Install frozen Python test dependencies
+        run: uv sync --frozen --extra test
+      - name: Test handle-bound local store health
+        run: >-
+          uv run pytest -q
+          tests/test_windows_local_store_health_helper.py
+          tests/test_local_store_health.py
+          tests/test_packaging.py::test_wheel_contains_and_runs_isolated_local_health_helper
+
+  macos-local-store-health:
+    name: macOS handle-bound local store health
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v7
+      - name: Install frozen Python test dependencies
+        run: uv sync --frozen --extra test
+      - name: Test O_SEARCH helper and wheel
+        run: >-
+          uv run pytest -q
+          tests/test_local_store_health.py
+          tests/test_packaging.py

@@ -449,22 +449,30 @@ work and returns only the static local-health failure detail. The accepted
 canonical root is passed in one dedicated minimal environment variable to a
 fixed absolute sibling stdlib-only Python helper launched as
 `sys.executable -I -S -B <helper>` with no caller-controlled argument or working
-directory. The helper emits no output, performs a no-follow final directory
-stat, rejects Windows reparse points, and communicates reachability only by exit
-status.
+directory. The helper emits no output and communicates reachability only by
+exit status. POSIX opens every canonical component descriptor-relatively with
+directory/no-follow flags, requires search permission through each retained
+descriptor, and classifies the retained final descriptor. Windows requests
+traverse permission, anchors a validated drive-root handle, opens one component
+at a time relative to the retained preceding handle without following reparse
+points, and validates the final path and directory metadata through that same
+handle. Explicit helper-owned close attempts are best effort; contained helper
+exit backstops failed closes and asynchronous interruption windows.
 
 The shared bounded executor contains the helper's descendants and applies the
-configured subprocess deadline to interpreter startup, the stat, and process
-output/drain, then checks the deadline again after the executor returns. Only an
-exact clean exit with zero output is healthy; timeout, containment failure,
-nonzero exit, output, and ordinary adapter errors collapse to the same static
-detail. Adapter-level `BaseException` still propagates after executor-owned
-cleanup. Policy restriction and canonicalization in the parent precede the
-deadline, so the setting does not bound that filesystem work. The probe
-establishes static pathname containment at one instant; it does not hold a
-directory handle or claim resistance to a concurrent root replacement.
-Handle-bound retarget hardening is tracked separately by
-`lab-tracker-n5kp.41.6`.
+configured subprocess deadline to interpreter startup, helper-side opens and
+validation, and process output/drain, then checks the deadline again after the
+executor returns. Only an exact clean exit with zero output is healthy;
+timeout, containment failure, nonzero exit, output, and ordinary adapter errors
+collapse to the same static detail. Adapter-level `BaseException` still
+propagates after executor-owned cleanup. Policy restriction and canonicalization
+in the parent precede the deadline, so the setting does not bound that
+filesystem work. During helper validation, an intermediate or final
+link/junction substitution cannot redirect inspection, and replacement after
+open cannot redirect the retained handle. The result remains an advisory
+point-in-time snapshot rather than a durable lease. Pre-follow-safe parent
+planning and mount-crossing authority remain `lab-tracker-n5kp.71` and
+`lab-tracker-n5kp.72`.
 
 ## Recovering moved/renamed local artifacts
 
@@ -607,12 +615,14 @@ Shipped (`src/lab_tracker/artifact_resolution.py`, tested in
 - ✅ Registered local-store health shares the resolver's object-identical
   immutable `LocalPathPolicy`, restricts it to the complete registered root, and
   runs one fixed isolated stdlib helper through the bounded process executor.
-  The helper is run with zero-byte stdout/stderr caps, emits no output, performs
-  a no-follow final directory stat, and rejects Windows reparse roots. Its
-  deadline begins after parent-side canonicalization. Results are static,
-  redacted reachability hints rather than handle-bound capabilities; retarget
-  hardening remains
-  `lab-tracker-n5kp.41.6`.
+  The helper is run with zero-byte stdout/stderr caps and emits no output.
+  POSIX and Windows each traverse through retained no-follow directory handles
+  and classify the final handle. Link or junction substitution before a
+  component open is rejected; replacement after open cannot redirect the
+  retained handle. Ordinary pre-open replacement remains part of the parent
+  planning work tracked by `lab-tracker-n5kp.71`. The helper deadline begins
+  after parent-side canonicalization. Results are static, redacted,
+  point-in-time reachability hints rather than durable filesystem leases.
 - ✅ `HttpResolver` — `http(s)`, full-body verify with a `max_fetch_bytes` cap
   (oversized → `UNRESOLVED`, never uncertified bytes), plus a shared outbound
   destination policy that validates every IPv4/IPv6 answer, pins the vetted

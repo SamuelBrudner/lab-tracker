@@ -218,16 +218,31 @@ An admitted root is checked by a fixed isolated Python helper through the same
 bounded process executor used by rclone and Git. The root is the only
 application-controlled datum in a dedicated environment otherwise limited to
 the platform bootstrap and locale variables needed by Python. The helper emits
-no stdout or stderr, requires a directory through a no-follow final stat, and
-rejects a Windows reparse-point root. The deadline covers interpreter startup,
-helper execution, and process output/drain and is checked again after the
-executor returns; only exit code zero with zero output is healthy. Timeout,
-containment failure, nonzero exit, output, or any ordinary adapter error returns
-the same static detail. Adapter-level `BaseException` still propagates after
-executor-owned cleanup. This is static pathname containment at probe time, not
-a handle-bound guarantee against a concurrent root replacement. Parent-side
-canonicalization is outside the helper deadline, and handle-bound retarget
-resistance is tracked separately by `lab-tracker-n5kp.41.6`.
+no stdout or stderr. On POSIX it opens every canonical path component relative
+to the retained preceding directory descriptor with directory, no-follow, and
+close-on-exec flags, classifies each descriptor with `fstat`, and verifies
+search permission relative to that retained descriptor. On Windows it requests
+traverse permission while validating one drive-root handle, opens each
+remaining component relative to the preceding handle without following reparse
+points, and validates type, reparse metadata, and the normalized final path
+through the retained handle. A link or junction substituted before its
+component is opened is rejected; a rename after open cannot redirect later
+traversal or final inspection. Search-only POSIX directories remain eligible;
+an unsearchable directory fails closed. Explicit helper-owned descriptor and
+handle cleanup is best effort, with contained helper exit as the backstop for
+failed closes and asynchronous interruption windows.
+
+The deadline covers interpreter startup, helper-side opens and validation,
+process exit, and output drainage and is checked again after the executor
+returns; only exit code zero with zero output is healthy. Timeout, containment
+failure, nonzero exit, output, or any ordinary adapter error returns the same
+static detail. Adapter-level `BaseException` still propagates after
+executor-owned cleanup. Health is a point-in-time result about the exact
+directory object retained when validation completes, not a durable capability
+or lease. Parent-side canonicalization remains outside the helper deadline.
+Ordinary or bind-mount crossing authority and pre-follow-safe parent planning
+are separate concerns tracked by `lab-tracker-n5kp.72` and
+`lab-tracker-n5kp.71`.
 
 - `LAB_TRACKER_STORE_HEALTH_GLOBAL_IN_FLIGHT_LIMIT`: maximum admitted health
   requests in one application process (default: `4`, maximum: `16`).
