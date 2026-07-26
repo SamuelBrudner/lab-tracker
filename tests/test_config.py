@@ -29,6 +29,10 @@ from lab_tracker.artifact_resolution_admission import (
     DEFAULT_ARTIFACT_RESOLUTION_PER_ACTOR_IN_FLIGHT_LIMIT,
 )
 from lab_tracker.config import DEFAULT_AUTH_SECRET_KEY, Settings
+from lab_tracker.local_resolution_budget import (
+    DEFAULT_LOCAL_RECOVERY_MAX_FILES,
+    MAX_LOCAL_RESOLUTION_MAX_READ_BYTES,
+)
 from lab_tracker.models import StoreKind
 from lab_tracker.store_health import (
     DEFAULT_STORE_HEALTH_CACHE_MAX_ENTRIES,
@@ -62,6 +66,9 @@ def _clear_auth_env(monkeypatch) -> None:
     )
     for variable in (
         "LAB_TRACKER_RESOLVER_ALLOWED_ROOTS",
+        "LAB_TRACKER_RESOLVER_RECOVERY",
+        "LAB_TRACKER_RESOLVER_RECOVERY_MAX_FILES",
+        "LAB_TRACKER_RESOLVER_RECOVERY_MAX_BYTES",
         "LAB_TRACKER_RCLONE_ALLOWED_REMOTES",
         "LAB_TRACKER_GIT_ALLOWED_REMOTES",
         "LAB_TRACKER_STORE_HEALTH_GLOBAL_IN_FLIGHT_LIMIT",
@@ -125,6 +132,9 @@ def test_dotenv_loads_resolver_settings(tmp_path, monkeypatch):
         "LAB_TRACKER_RESOLVER_HTTP_ALLOWED_NETWORKS=10.20.0.0/16\n"
         "LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS=12.5\n"
         "LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS=7.25\n"
+        "LAB_TRACKER_RESOLVER_RECOVERY=true\n"
+        "LAB_TRACKER_RESOLVER_RECOVERY_MAX_FILES=23\n"
+        "LAB_TRACKER_RESOLVER_RECOVERY_MAX_BYTES=1048576\n"
         "LAB_TRACKER_RCLONE_ALLOWED_REMOTES=lab-onedrive,archive-s3\n"
         "LAB_TRACKER_GIT_ALLOWED_REMOTES=https://git.example/lab\n",
         encoding="utf-8",
@@ -140,6 +150,9 @@ def test_dotenv_loads_resolver_settings(tmp_path, monkeypatch):
     assert settings.resolver_allowed_roots == str(tmp_path)
     assert settings.resolver_http_deadline_seconds == 12.5
     assert settings.resolver_subprocess_deadline_seconds == 7.25
+    assert settings.resolver_recovery is True
+    assert settings.resolver_recovery_max_files == 23
+    assert settings.resolver_recovery_max_bytes == 1_048_576
     assert settings.rclone_allowed_remotes == "lab-onedrive,archive-s3"
     assert settings.git_allowed_remotes == "https://git.example/lab"
 
@@ -168,6 +181,59 @@ def test_resolver_http_deadline_defaults_to_thirty_seconds(monkeypatch):
     monkeypatch.delenv("LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS", raising=False)
 
     assert _settings_from_environment().resolver_http_deadline_seconds == 30.0
+
+
+def test_local_resolution_controls_have_fail_closed_defaults(monkeypatch):
+    _clear_auth_env(monkeypatch)
+
+    settings = _settings_from_environment()
+
+    assert settings.resolver_recovery is False
+    assert settings.resolver_recovery_max_files == DEFAULT_LOCAL_RECOVERY_MAX_FILES
+    assert settings.resolver_recovery_max_bytes == MAX_LOCAL_RESOLUTION_MAX_READ_BYTES
+
+
+@pytest.mark.parametrize(
+    ("variable", "value"),
+    [
+        ("LAB_TRACKER_RESOLVER_RECOVERY", "sometimes"),
+        ("LAB_TRACKER_RESOLVER_RECOVERY", "2"),
+        ("LAB_TRACKER_RESOLVER_RECOVERY_MAX_FILES", "0"),
+        ("LAB_TRACKER_RESOLVER_RECOVERY_MAX_FILES", "-1"),
+        ("LAB_TRACKER_RESOLVER_RECOVERY_MAX_FILES", "1.5"),
+        ("LAB_TRACKER_RESOLVER_RECOVERY_MAX_BYTES", "0"),
+        ("LAB_TRACKER_RESOLVER_RECOVERY_MAX_BYTES", "true"),
+        (
+            "LAB_TRACKER_RESOLVER_RECOVERY_MAX_BYTES",
+            str(MAX_LOCAL_RESOLUTION_MAX_READ_BYTES + 1),
+        ),
+    ],
+)
+def test_invalid_local_resolution_controls_fail_settings(
+    monkeypatch,
+    variable,
+    value,
+):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv(variable, value)
+
+    with pytest.raises(ValidationError, match="RESOLVER_RECOVERY|recovery limits"):
+        _settings_from_environment()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("resolver_recovery", 1),
+        ("resolver_recovery_max_files", True),
+        ("resolver_recovery_max_files", 1.5),
+        ("resolver_recovery_max_bytes", False),
+        ("resolver_recovery_max_bytes", 1.5),
+    ],
+)
+def test_local_resolution_controls_reject_coercible_python_values(field, value):
+    with pytest.raises(ValidationError, match="RESOLVER_RECOVERY|recovery limits"):
+        Settings(_env_file=None, **{field: value})
 
 
 @pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "-inf"])
@@ -272,21 +338,14 @@ def test_store_health_control_plane_defaults_are_bounded(monkeypatch):
     settings = _settings_from_environment()
 
     assert (
-        settings.store_health_global_in_flight_limit
-        == DEFAULT_STORE_HEALTH_GLOBAL_IN_FLIGHT_LIMIT
+        settings.store_health_global_in_flight_limit == DEFAULT_STORE_HEALTH_GLOBAL_IN_FLIGHT_LIMIT
     )
     assert (
         settings.store_health_per_actor_in_flight_limit
         == DEFAULT_STORE_HEALTH_PER_ACTOR_IN_FLIGHT_LIMIT
     )
-    assert (
-        settings.store_health_cache_max_entries
-        == DEFAULT_STORE_HEALTH_CACHE_MAX_ENTRIES
-    )
-    assert (
-        settings.store_health_cache_ttl_seconds
-        == DEFAULT_STORE_HEALTH_CACHE_TTL_SECONDS
-    )
+    assert settings.store_health_cache_max_entries == DEFAULT_STORE_HEALTH_CACHE_MAX_ENTRIES
+    assert settings.store_health_cache_ttl_seconds == DEFAULT_STORE_HEALTH_CACHE_TTL_SECONDS
     assert (
         settings.store_health_singleflight_wait_seconds
         == DEFAULT_STORE_HEALTH_SINGLEFLIGHT_WAIT_SECONDS
@@ -388,6 +447,18 @@ def test_resolver_deadlines_allow_exactly_one_day(monkeypatch, variable, field):
     monkeypatch.setenv(variable, "86400")
 
     assert getattr(_settings_from_environment(), field) == 86_400.0
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "resolver_http_deadline_seconds",
+        "resolver_subprocess_deadline_seconds",
+    ],
+)
+def test_resolver_deadlines_reject_booleans(field):
+    with pytest.raises(ValidationError, match="do not accept booleans"):
+        Settings(_env_file=None, **{field: True})
 
 
 def test_invalid_dotenv_http_policy_fails_runtime_composition(tmp_path, monkeypatch):
@@ -533,6 +604,9 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(
     def recording_registry_from_env(
         *,
         local_path_policy,
+        local_file_reader,
+        local_resolution_limits,
+        recovery,
         http_policy,
         http_client,
         rclone_remote_policy,
@@ -543,15 +617,16 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(
     ):
         assert safe_http_client_timeouts == [12.5]
         captured["registry_local_path_policy"] = local_path_policy
+        captured["registry_local_file_reader"] = local_file_reader
+        captured["registry_local_resolution_limits"] = local_resolution_limits
+        captured["registry_recovery"] = recovery
         captured["registry_http_policy"] = http_policy
         captured["registry_http_client"] = http_client
         captured["registry_rclone_remote_policy"] = rclone_remote_policy
         captured["registry_git_remote_policy"] = git_remote_policy
         captured["registry_process_executor"] = process_executor
         captured["registry_http_deadline_seconds"] = http_deadline_seconds
-        captured["registry_subprocess_deadline_seconds"] = (
-            subprocess_deadline_seconds
-        )
+        captured["registry_subprocess_deadline_seconds"] = subprocess_deadline_seconds
         return resolver_registry
 
     monkeypatch.setattr(
@@ -665,6 +740,9 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(
         resolver_http_allowed_networks="10.20.0.0/16",
         resolver_http_deadline_seconds=12.5,
         resolver_subprocess_deadline_seconds=7.25,
+        resolver_recovery=True,
+        resolver_recovery_max_files=23,
+        resolver_recovery_max_bytes=1_048_576,
         artifact_resolution_global_in_flight_limit=5,
         artifact_resolution_per_actor_in_flight_limit=3,
         store_health_global_in_flight_limit=3,
@@ -691,10 +769,7 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(
         assert app.state.process_executor is runtime.process_executor
         assert runtime.process_executor is process_executor
         assert app.state.resolver_registry is resolver_registry
-        assert (
-            app.state.artifact_resolution_admission
-            is runtime.artifact_resolution_admission
-        )
+        assert app.state.artifact_resolution_admission is runtime.artifact_resolution_admission
         assert runtime.artifact_resolution_admission.global_in_flight_limit == 5
         assert runtime.artifact_resolution_admission.per_actor_in_flight_limit == 3
         assert app.state.store_health_admission is runtime.store_health_admission
@@ -707,30 +782,23 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(
         assert runtime.store_health_checker.waiter_timeout_seconds == 2.25
         assert app.state.cleanup_git_health_workdir.__self__ is runtime
         assert safe_http_client_timeouts == [12.5]
-        assert (
-            captured["registry_local_path_policy"]
-            is runtime.local_path_policy
-        )
-        assert (
-            captured["health_local_inspector"]
-            is runtime.local_filesystem_operations
-        )
-        assert (
-            runtime.local_filesystem_operations.authority
-            is runtime.local_filesystem_authority
-        )
-        assert (
-            runtime.local_filesystem_operations.executor
-            is runtime.process_executor
-        )
+        assert captured["registry_local_path_policy"] is runtime.local_path_policy
+        assert captured["registry_local_file_reader"] is runtime.local_filesystem_operations
+        local_resolution_limits = captured["registry_local_resolution_limits"]
+        assert local_resolution_limits.max_read_bytes == 1_048_576
+        assert local_resolution_limits.deadline_seconds == 7.25
+        recovery = captured["registry_recovery"]
+        assert recovery.enabled is True
+        assert recovery.max_files == 23
+        assert recovery.max_bytes == 1_048_576
+        assert captured["health_local_inspector"] is runtime.local_filesystem_operations
+        assert runtime.local_filesystem_operations.authority is runtime.local_filesystem_authority
+        assert runtime.local_filesystem_operations.executor is runtime.process_executor
         assert captured["registry_http_policy"] is runtime.outbound_http_policy
         assert captured["health_http_policy"] is runtime.outbound_http_policy
         assert captured["registry_http_client"] is runtime.outbound_http_client
         assert captured["health_http_client"] is runtime.outbound_http_client
-        assert (
-            captured["registry_rclone_remote_policy"]
-            is runtime.rclone_remote_policy
-        )
+        assert captured["registry_rclone_remote_policy"] is runtime.rclone_remote_policy
         assert captured["health_rclone_policy"] is runtime.rclone_remote_policy
         assert captured["registry_git_remote_policy"] is runtime.git_remote_policy
         assert captured["health_git_policy"] is runtime.git_remote_policy
@@ -797,38 +865,21 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(
         assert not (git_health_workdir / ".git").exists()
         if os.name != "nt":
             assert stat.S_IMODE(git_health_workdir.stat().st_mode) == 0o700
+        assert runtime.local_path_policy.authorize_path(settings_local_root) == str(
+            settings_local_root
+        )
+        assert runtime.local_path_policy.authorize_path(environment_local_root) is None
+        assert runtime.rclone_remote_policy.authorize("settings-remote") is not None
+        assert runtime.rclone_remote_policy.authorize("environment-remote") is None
         assert (
-            runtime.local_path_policy.authorize_path(settings_local_root)
-            == str(settings_local_root)
+            runtime.git_remote_policy.authorize("https://settings.example/lab/repo.git") is not None
         )
         assert (
-            runtime.local_path_policy.authorize_path(environment_local_root)
+            runtime.git_remote_policy.authorize("https://environment.example/ignored/repo.git")
             is None
         )
         assert (
-            runtime.rclone_remote_policy.authorize("settings-remote")
-            is not None
-        )
-        assert (
-            runtime.rclone_remote_policy.authorize("environment-remote")
-            is None
-        )
-        assert (
-            runtime.git_remote_policy.authorize(
-                "https://settings.example/lab/repo.git"
-            )
-            is not None
-        )
-        assert (
-            runtime.git_remote_policy.authorize(
-                "https://environment.example/ignored/repo.git"
-            )
-            is None
-        )
-        assert (
-            runtime.outbound_http_policy.authorize(
-                "http://10.20.1.7/artifact.bin"
-            ).hostname
+            runtime.outbound_http_policy.authorize("http://10.20.1.7/artifact.bin").hostname
             == "10.20.1.7"
         )
     finally:
@@ -846,6 +897,9 @@ def test_lifespan_removes_app_owned_git_health_workdir(monkeypatch):
     def recording_registry_from_env(
         *,
         local_path_policy,
+        local_file_reader,
+        local_resolution_limits,
+        recovery,
         http_policy,
         http_client,
         rclone_remote_policy,
@@ -856,6 +910,9 @@ def test_lifespan_removes_app_owned_git_health_workdir(monkeypatch):
     ):
         del (
             local_path_policy,
+            local_file_reader,
+            local_resolution_limits,
+            recovery,
             http_policy,
             http_client,
             rclone_remote_policy,
@@ -947,9 +1004,7 @@ def test_git_health_workdir_gc_fallback_is_silent(monkeypatch):
         gc.collect()
 
     assert not git_health_workdir.exists()
-    assert not [
-        warning for warning in captured if issubclass(warning.category, ResourceWarning)
-    ]
+    assert not [warning for warning in captured if issubclass(warning.category, ResourceWarning)]
 
 
 def test_test_resource_drain_runs_cleanup_after_engine_disposal_error():
@@ -991,13 +1046,9 @@ def test_compose_forwards_outbound_artifact_policy_settings():
         "LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS: "
         "${LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS:-30}"
     ) in compose
+    assert ("LAB_TRACKER_GIT_ALLOWED_REMOTES: ${LAB_TRACKER_GIT_ALLOWED_REMOTES:-}") in compose
     assert (
-        "LAB_TRACKER_GIT_ALLOWED_REMOTES: "
-        "${LAB_TRACKER_GIT_ALLOWED_REMOTES:-}"
-    ) in compose
-    assert (
-        "LAB_TRACKER_RCLONE_ALLOWED_REMOTES: "
-        "${LAB_TRACKER_RCLONE_ALLOWED_REMOTES:-}"
+        "LAB_TRACKER_RCLONE_ALLOWED_REMOTES: ${LAB_TRACKER_RCLONE_ALLOWED_REMOTES:-}"
     ) in compose
 
 

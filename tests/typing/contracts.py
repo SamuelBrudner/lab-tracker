@@ -34,7 +34,10 @@ from lab_tracker.graph_drafting import (
 from lab_tracker.local_filesystem_operations import (
     BoundedLocalFilesystemOperations,
 )
-from lab_tracker.local_filesystem_ports import LocalDirectoryInspector
+from lab_tracker.local_filesystem_ports import (
+    LocalDirectoryInspector,
+    LocalRegularFileReader,
+)
 from lab_tracker.note_storage import LocalNoteStorage
 from lab_tracker.project_graph import ProjectGraphRepository
 from lab_tracker.repository import LabTrackerRepository
@@ -183,12 +186,18 @@ def _requires_local_directory_inspector(value: LocalDirectoryInspector) -> None:
     pass
 
 
+def _requires_local_regular_file_reader(value: LocalRegularFileReader) -> None:
+    pass
+
+
 def local_filesystem_contracts(
     operations: BoundedLocalFilesystemOperations,
     runtime: AppRuntime,
 ) -> None:
     _requires_local_directory_inspector(operations)
     _requires_local_directory_inspector(runtime.local_filesystem_operations)
+    _requires_local_regular_file_reader(operations)
+    _requires_local_regular_file_reader(runtime.local_filesystem_operations)
 
 
 def _requires_file_storage(value: FileStorage) -> None:

@@ -120,9 +120,7 @@ def test_double_encoded_separator_is_decoded_exactly_once(tmp_path):
     assert native_local_path_from_uri(path.as_uri()) == str(path)
 
 
-def test_empty_root_policy_denies_without_candidate_canonicalization(
-    tmp_path, monkeypatch
-):
+def test_empty_root_policy_denies_without_candidate_canonicalization(tmp_path, monkeypatch):
     policy = LocalPathPolicy([])
 
     def unexpected_realpath(_path):
@@ -149,6 +147,8 @@ def test_configured_empty_roots_are_deny_all(raw: str | None) -> None:
     policy = LocalPathPolicy.from_config(raw)
 
     assert policy.canonical_roots == ()
+    assert policy.lexical_roots == ()
+    assert policy.recovery_roots == ()
 
 
 def test_configured_roots_preserve_pathsep_parsing(tmp_path: Path) -> None:
@@ -164,6 +164,8 @@ def test_configured_roots_preserve_pathsep_parsing(tmp_path: Path) -> None:
         os.path.realpath(first),
         os.path.realpath(second),
     )
+    assert policy.lexical_roots == (str(first), str(second))
+    assert policy.recovery_roots == (str(first), str(second))
 
 
 def test_configured_roots_reject_non_string_values() -> None:
@@ -200,9 +202,7 @@ def test_configured_root_normalization_failure_is_redacted(
         r"\\.\PhysicalDrive0",
     ),
 )
-def test_registered_root_predicate_rejects_non_native_absolute_root_without_io(
-    root, monkeypatch
-):
+def test_registered_root_predicate_rejects_non_native_absolute_root_without_io(root, monkeypatch):
     def unexpected_path_operation(_path):
         raise AssertionError("invalid raw root reached a host-path operation")
 
@@ -212,9 +212,7 @@ def test_registered_root_predicate_rejects_non_native_absolute_root_without_io(
     assert is_supported_absolute_local_root(root) is False
 
 
-def test_operator_policy_preserves_relative_and_tilde_root_normalization(
-    tmp_path, monkeypatch
-):
+def test_operator_policy_preserves_relative_and_tilde_root_normalization(tmp_path, monkeypatch):
     relative_root = tmp_path / "relative-store"
     tilde_root = tmp_path / "tilde-store"
     relative_root.mkdir()
@@ -250,9 +248,7 @@ def test_operator_policy_preserves_link_parent_traversal_semantics(tmp_path):
     assert policy.canonical_roots != (os.fspath(allowed),)
 
 
-def test_absolute_root_predicate_is_lexical_and_side_effect_free(
-    tmp_path, monkeypatch
-):
+def test_absolute_root_predicate_is_lexical_and_side_effect_free(tmp_path, monkeypatch):
     def unexpected_realpath(_path):
         raise AssertionError("root predicate canonicalized the filesystem")
 
@@ -304,9 +300,7 @@ def test_narrow_operator_root_does_not_partially_authorize_broader_store(tmp_pat
     granted_child = store / "granted"
     granted_child.mkdir(parents=True)
 
-    assert (
-        LocalPathPolicy([granted_child]).restricted_to_absolute_root(store) is None
-    )
+    assert LocalPathPolicy([granted_child]).restricted_to_absolute_root(store) is None
 
 
 def test_disjoint_operator_and_store_roots_do_not_intersect(tmp_path, monkeypatch):
@@ -380,6 +374,8 @@ def test_canonical_roots_collapse_aliases_and_overlapping_children(tmp_path):
     policy = LocalPathPolicy([alias, child, root])
 
     assert policy.canonical_roots == (os.path.realpath(root),)
+    assert policy.lexical_roots == (str(alias), str(child), str(root))
+    assert policy.recovery_roots == (str(alias),)
 
 
 def test_walk_pruning_removes_linked_directory(tmp_path):
@@ -497,9 +493,7 @@ def test_windows_final_containment_does_not_fold_component_case(tmp_path):
 @pytest.mark.skipif(os.name != "nt", reason="requires Windows drive anchors")
 def test_windows_cross_drive_candidate_fails_before_realpath(tmp_path, monkeypatch):
     current_drive = Path(tmp_path).drive.upper()
-    other_drive = next(
-        drive for drive in ("Z:", "Y:", "X:", "W:") if drive != current_drive
-    )
+    other_drive = next(drive for drive in ("Z:", "Y:", "X:", "W:") if drive != current_drive)
     policy = LocalPathPolicy([tmp_path])
 
     def unexpected_realpath(_path):

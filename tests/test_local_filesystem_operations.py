@@ -26,7 +26,16 @@ from lab_tracker.local_filesystem_operations import (
     MAX_LOCAL_FILESYSTEM_REQUEST_BYTES,
     BoundedLocalFilesystemOperations,
 )
-from lab_tracker.local_filesystem_ports import LocalDirectoryInspection
+from lab_tracker.local_filesystem_ports import (
+    DirectLocalRegularFileTarget,
+    LocalDirectoryInspection,
+    LocalRegularFileReadOutcome,
+    RegisteredLocalRegularFileTarget,
+)
+from lab_tracker.local_resolution_budget import (
+    LocalResolutionBudget,
+    LocalResolutionLimits,
+)
 
 
 class FakeClock:
@@ -50,9 +59,15 @@ class RecordingExecutor:
         outcomes: Sequence[ProcessResult | BaseException],
         *,
         after_run: Callable[[], None] | None = None,
+        stdout_chunks: Sequence[Sequence[bytes]] | None = None,
     ) -> None:
         self._outcomes = list(outcomes)
         self.after_run = after_run
+        self._stdout_chunks = (
+            [tuple(chunks) for chunks in stdout_chunks]
+            if stdout_chunks is not None
+            else [()] * len(self._outcomes)
+        )
         self.calls: list[dict[str, Any]] = []
 
     def run(
@@ -78,6 +93,10 @@ class RecordingExecutor:
             }
         )
         outcome = self._outcomes.pop(0)
+        chunks = self._stdout_chunks.pop(0)
+        if stdout_consumer is not None:
+            for chunk in chunks:
+                stdout_consumer(chunk)
         if self.after_run is not None:
             self.after_run()
         if isinstance(outcome, BaseException):
@@ -112,6 +131,221 @@ def _operations(
 
 def _deadline(clock: FakeClock | None = None) -> ProcessDeadline:
     return ProcessDeadline.after(5.0, clock=clock or FakeClock())
+
+
+def test_regular_file_broker_streams_direct_bytes_under_the_exact_budget(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "operator-secret-root"
+    candidate = root / "artifact.bin"
+    payload = b"\x00raw\r\n\x1a\xff"
+    executor = RecordingExecutor(
+        [_result(0, stdout_bytes=len(payload))],
+        stdout_chunks=[(payload[:3], payload[3:])],
+    )
+    operations = _operations(root, executor)
+    budget = LocalResolutionBudget(
+        LocalResolutionLimits(max_read_bytes=32, deadline_seconds=5.0),
+        clock=FakeClock(),
+    )
+    received = bytearray()
+
+    result = operations.read_regular_file(
+        DirectLocalRegularFileTarget(str(candidate)),
+        budget=budget,
+        stdout_consumer=received.extend,
+    )
+
+    assert result.outcome is LocalRegularFileReadOutcome.COMPLETE
+    assert result.bytes_read == len(payload)
+    assert bytes(received) == payload
+    assert budget.remaining_bytes == 32 - len(payload)
+    assert budget.terminal is False
+    call = executor.calls[0]
+    assert call["deadline"] is budget.deadline
+    assert call["stdout_limit_bytes"] == 33
+    assert call["stderr_limit_bytes"] == 0
+    assert call["stdout_consumer"] is not None
+    request = json.loads(call["env"][LOCAL_FILESYSTEM_REQUEST_ENV])
+    assert request == {
+        "candidate": str(candidate),
+        "max_bytes": 32,
+        "op": "read-file",
+        "roots": [str(root)],
+        "v": LOCAL_FILESYSTEM_PROTOCOL_VERSION,
+    }
+
+
+def test_regular_file_broker_keeps_registered_root_and_locator_separate(
+    tmp_path: Path,
+) -> None:
+    operator_root = tmp_path / "operator"
+    store_root = operator_root / "store"
+    executor = RecordingExecutor([_result(0)])
+    operations = _operations(operator_root, executor)
+    budget = LocalResolutionBudget(
+        LocalResolutionLimits(max_read_bytes=17, deadline_seconds=5.0),
+        clock=FakeClock(),
+    )
+
+    result = operations.read_regular_file(
+        RegisteredLocalRegularFileTarget(
+            str(store_root),
+            ("nested", "artifact.bin"),
+        ),
+        budget=budget,
+        stdout_consumer=lambda _chunk: None,
+    )
+
+    assert result.outcome is LocalRegularFileReadOutcome.COMPLETE
+    request = json.loads(executor.calls[0]["env"][LOCAL_FILESYSTEM_REQUEST_ENV])
+    assert request == {
+        "locator": ["nested", "artifact.bin"],
+        "max_bytes": 17,
+        "op": "read-registered-file",
+        "roots": [str(operator_root)],
+        "store_root": str(store_root),
+        "v": LOCAL_FILESYSTEM_PROTOCOL_VERSION,
+    }
+    assert "candidate" not in request
+
+
+@pytest.mark.parametrize(
+    ("returncode", "expected"),
+    (
+        (4, LocalRegularFileReadOutcome.MISSING),
+        (2, LocalRegularFileReadOutcome.DENIED),
+    ),
+)
+def test_clean_zero_pre_read_outcomes_release_the_reservation(
+    tmp_path: Path,
+    returncode: int,
+    expected: LocalRegularFileReadOutcome,
+) -> None:
+    executor = RecordingExecutor([_result(returncode)])
+    budget = LocalResolutionBudget(
+        LocalResolutionLimits(max_read_bytes=11, deadline_seconds=5.0),
+        clock=FakeClock(),
+    )
+
+    result = _operations(tmp_path, executor).read_regular_file(
+        DirectLocalRegularFileTarget(str(tmp_path / "artifact.bin")),
+        budget=budget,
+        stdout_consumer=lambda _chunk: None,
+    )
+
+    assert result.outcome is expected
+    assert result.bytes_read == 0
+    assert budget.remaining_bytes == 11
+    assert budget.terminal is False
+
+
+@pytest.mark.parametrize(
+    "result",
+    (
+        _result(0, stdout=b"captured", stdout_bytes=0),
+        _result(0, stdout_bytes=True),
+        _result(0, stdout_bytes=-1),
+        _result(0, stderr_bytes=1),
+        _result(True),
+        _result(1),
+        _result(3),
+        _result(4, stdout_bytes=1),
+    ),
+)
+def test_malformed_or_failed_regular_file_result_consumes_budget_terminally(
+    tmp_path: Path,
+    result: ProcessResult,
+) -> None:
+    executor = RecordingExecutor([result])
+    budget = LocalResolutionBudget(
+        LocalResolutionLimits(max_read_bytes=11, deadline_seconds=5.0),
+        clock=FakeClock(),
+    )
+
+    read = _operations(tmp_path, executor).read_regular_file(
+        DirectLocalRegularFileTarget(str(tmp_path / "artifact.bin")),
+        budget=budget,
+        stdout_consumer=lambda _chunk: None,
+    )
+
+    assert read.outcome is LocalRegularFileReadOutcome.FAILED
+    assert budget.remaining_bytes == 0
+    assert budget.terminal is True
+
+
+def test_partial_executor_failure_discards_bytes_and_consumes_budget(
+    tmp_path: Path,
+) -> None:
+    executor = RecordingExecutor(
+        [RuntimeError("secret helper failure")],
+        stdout_chunks=[(b"partial",)],
+    )
+    budget = LocalResolutionBudget(
+        LocalResolutionLimits(max_read_bytes=11, deadline_seconds=5.0),
+        clock=FakeClock(),
+    )
+    received = bytearray()
+
+    read = _operations(tmp_path, executor).read_regular_file(
+        DirectLocalRegularFileTarget(str(tmp_path / "artifact.bin")),
+        budget=budget,
+        stdout_consumer=received.extend,
+    )
+
+    assert bytes(received) == b"partial"
+    assert read.outcome is LocalRegularFileReadOutcome.FAILED
+    assert read.bytes_read == 0
+    assert budget.terminal is True
+    assert budget.remaining_bytes == 0
+
+
+def test_fatal_executor_failure_consumes_budget_before_propagating(
+    tmp_path: Path,
+) -> None:
+    fatal = FatalOperationFailure("operator interruption")
+    executor = RecordingExecutor(
+        [fatal],
+        stdout_chunks=[(b"partial",)],
+    )
+    budget = LocalResolutionBudget(
+        LocalResolutionLimits(max_read_bytes=11, deadline_seconds=5.0),
+        clock=FakeClock(),
+    )
+
+    with pytest.raises(FatalOperationFailure) as exc_info:
+        _operations(tmp_path, executor).read_regular_file(
+            DirectLocalRegularFileTarget(str(tmp_path / "artifact.bin")),
+            budget=budget,
+            stdout_consumer=lambda _chunk: None,
+        )
+
+    assert exc_info.value is fatal
+    assert budget.terminal is True
+    assert budget.remaining_bytes == 0
+
+
+def test_denied_regular_file_target_never_spawns_or_debits_budget(
+    tmp_path: Path,
+) -> None:
+    allowed = tmp_path / "allowed"
+    outside = tmp_path / "outside.bin"
+    executor = RecordingExecutor([])
+    budget = LocalResolutionBudget(
+        LocalResolutionLimits(max_read_bytes=11, deadline_seconds=5.0),
+        clock=FakeClock(),
+    )
+
+    result = _operations(allowed, executor).read_regular_file(
+        DirectLocalRegularFileTarget(str(outside)),
+        budget=budget,
+        stdout_consumer=lambda _chunk: None,
+    )
+
+    assert result.outcome is LocalRegularFileReadOutcome.DENIED
+    assert executor.calls == []
+    assert budget.remaining_bytes == 11
+    assert budget.terminal is False
 
 
 def test_broker_uses_fixed_isolated_command_and_exact_compact_request(
@@ -431,9 +665,7 @@ def test_oversized_candidate_component_is_denied_without_spawning(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "allowed"
-    oversized_component = "x" * (
-        authority_module.MAX_LOCAL_FILESYSTEM_COMPONENT_BYTES + 1
-    )
+    oversized_component = "x" * (authority_module.MAX_LOCAL_FILESYSTEM_COMPONENT_BYTES + 1)
     executor = RecordingExecutor([])
 
     result = _operations(root, executor).inspect_directory(

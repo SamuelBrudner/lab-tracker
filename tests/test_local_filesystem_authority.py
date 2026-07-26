@@ -62,6 +62,34 @@ def test_authority_is_slotted_frozen_identity_based_and_redacted(tmp_path: Path)
     assert str(secret) not in repr(grant)
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX path semantics")
+def test_unscoped_library_compatibility_selects_direct_root_without_enumerable_roots(
+    tmp_path: Path,
+) -> None:
+    authority = LocalFilesystemAuthority.for_unscoped_library_compatibility()
+    candidate = tmp_path / "artifact.bin"
+
+    assert authority.legacy_roots == ()
+    assert _selected_request(authority, candidate) == (str(candidate), ("/",))
+    assert authority.select_directory("//unsupported/namespace") is None
+
+
+def test_unscoped_library_compatibility_selects_the_candidate_windows_drive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    windows_os = SimpleNamespace(**vars(os))
+    windows_os.name = "nt"
+    monkeypatch.setattr(authority_module, "os", windows_os)
+    authority = LocalFilesystemAuthority.for_unscoped_library_compatibility()
+
+    assert _selected_request(authority, r"d:\Lab\artifact.bin") == (
+        r"D:\Lab\artifact.bin",
+        ("D:\\",),
+    )
+    assert authority.legacy_roots == ()
+    assert authority.select_directory(r"\\server\share\artifact.bin") is None
+
+
 def test_selection_is_purely_lexical_and_never_calls_target_filesystem(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -224,9 +252,7 @@ def test_candidate_alias_parent_suffix_is_preserved_for_native_resolution(
     allowed = tmp_path / "allowed"
     authority = LocalFilesystemAuthority.from_roots([allowed])
     candidate = f"{allowed}/link/.."
-    expected_candidate = (
-        str(allowed / "link" / "..") if os.name == "nt" else candidate
-    )
+    expected_candidate = str(allowed / "link" / "..") if os.name == "nt" else candidate
 
     assert _selected_request(authority, candidate) == (
         expected_candidate,
@@ -343,9 +369,7 @@ def test_root_admission_has_pre_split_size_and_component_ceilings(root: str) -> 
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX path semantics")
 def test_oversized_candidate_fails_closed_before_component_allocation() -> None:
     authority = LocalFilesystemAuthority.from_roots(["/allowed"])
-    candidate = "/allowed/" + "/".join(
-        ["a"] * (MAX_LOCAL_FILESYSTEM_PATH_COMPONENTS + 1)
-    )
+    candidate = "/allowed/" + "/".join(["a"] * (MAX_LOCAL_FILESYSTEM_PATH_COMPONENTS + 1))
 
     assert authority.select_directory(candidate) is None
 

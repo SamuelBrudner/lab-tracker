@@ -222,13 +222,15 @@ admission system.
 
 ## Bounded resolver and store-health subprocesses
 
-Rclone and Git resolution use optional host binaries, but a persisted artifact
-reference cannot be allowed to control an unbounded child process. The shared
-subprocess boundary therefore applies one monotonic deadline to each complete
-logical resolution. Rclone's metadata lookup, content transfer, hashing, and
-collection consume one budget; Git fetch, object inspection, content transfer,
-hashing, and collection consume another. A successful subprocess or incremental
-output never resets the deadline.
+Local resolution uses a fixed isolated Python helper, while rclone and Git use
+optional host binaries; a persisted artifact reference cannot be allowed to
+control any of them without bounds. The shared subprocess boundary therefore
+applies one monotonic deadline to each complete logical resolution. A local
+direct attempt and all recovery candidates consume one budget; rclone's metadata
+lookup, content transfer, hashing, and collection consume another; Git fetch,
+object inspection, content transfer, hashing, and collection consume another.
+A successful subprocess, recovery attempt, or incremental output never resets
+the deadline.
 
 `LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS` controls that budget
 (default: `30`). It is independent from the HTTP deadline and must be finite,
@@ -236,11 +238,11 @@ greater than zero, and no greater than `86400` seconds. It also gives each
 local, rclone, or Git store-health probe a fresh bounded execution budget; local
 health creates that budget before its filesystem-I/O-free lexical admission and
 passes the exact deadline through its bounded filesystem broker. Metadata stdout
-and stderr are captured under separate fixed byte caps. Artifact stdout is streamed
-instead: actual bytes read, rather than advisory rclone or Git metadata, are
-enforced against the existing `max_fetch_bytes` limit while the full object is
-hashed. An object that grows after a size preflight therefore cannot bypass the
-fetch cap.
+and stderr are captured under separate fixed byte caps. Local artifact stdout
+is streamed under the cumulative local-read allowance (plus only the fatal EOF
+proof byte); rclone and Git artifact stdout is streamed under `max_fetch_bytes`.
+Every adapter still hashes the full object even when the returned view is
+smaller.
 
 On deadline expiry, output overflow, malformed output, or process failure, the
 boundary closes pipes and performs terminate-then-kill-and-reap cleanup under a
@@ -359,14 +361,13 @@ case-insensitive); UNC/network-share URI forms and every other authority are
 denied. Plain native **absolute** paths bypass URI decoding but pass through the
 same authorization policy; relative path locators are rejected.
 
-The candidate and each configured `allowed_root` are canonicalized with native
-filesystem semantics before comparison. Authorization uses component-aware
-containment (`os.path.commonpath` on POSIX and exact canonical components on
-Windows), not textual prefix matching, so a sibling whose name merely begins
-with an allowed root is denied. Windows drive letters are normalized while
-component case remains exact for case-sensitive NTFS directories; cross-drive
-comparisons fail closed. Canonicalization rejects static POSIX symlink and
-Windows-junction targets outside the configured roots.
+Application composition parses the configured roots once into a
+filesystem-I/O-free `LocalFilesystemAuthority`. Pure component comparison
+selects the most-specific lexical grant, so a malformed, disjoint, cross-drive,
+or sibling-prefix candidate is denied before a helper starts or the target
+filesystem is touched. Direct resolution passes the decoded native path and
+that one selected grant to the shared bounded local-filesystem broker. It does
+not canonicalize, stat, or open the candidate in the application process.
 
 The normative mount and namespace contract is
 [`configuration.md`](configuration.md#mount-and-namespace-authority). In
@@ -379,43 +380,44 @@ eligible only when bounded resolution proves their destination remains inside
 the same root. Non-name-surrogate Cloud Files directory placeholders are not
 mount crossings.
 
-Recovery applies the same policy to traversal itself as well as to candidate
-files. Every symlink/reparse-point directory is pruned before recursive descent,
-and ordinary directory candidates whose canonical targets leave the root are
-also removed. This current blanket rule conservatively makes recovery through a
-Cloud Files directory placeholder unavailable even though the placeholder is
-not itself a mount crossing. `lab-tracker-n5kp.47` owns the future single
-operation deadline and actual-byte budget; `lab-tracker-n5kp.61` will consume
-that budget while adding pre-follow-safe enumeration and an explicit
-directory-count limit, including the more precise Cloud Files classification.
-
-Canonical pathname authorization is a preliminary plan, not a capability that
-the resolver may later reopen. The local access boundary opens one file and
-retains that descriptor through hashing and range collection:
-
-- On POSIX, the canonical absolute path is opened one component at a time,
-  relative to the preceding directory descriptor. Parent directories and the
-  leaf use no-follow operations. An obvious non-regular leaf is rejected by a
-  descriptor-relative metadata check before open; the leaf is then opened
-  nonblocking and the same fd is revalidated as regular before any content read.
-- On Windows, the file is opened once and its borrowed native handle is queried
-  with `GetFinalPathNameByHandleW(FILE_NAME_NORMALIZED | VOLUME_NAME_DOS)`.
-  Only a supported drive path contained by the canonical roots is accepted, and
-  the same CRT descriptor is validated and read. UNC, device, GUID-volume, and
-  malformed final namespaces fail closed.
+The broker runs one fixed, isolated, stdlib-only helper through the shared
+bounded process executor. The helper first resolves and retains the selected
+operator grant, then traverses the candidate component-by-component from
+no-follow descriptors or handles. POSIX aliases are read and rewritten from
+their exact directory entry; Windows symlink and junction reparse data is read
+from the exact retained handle. An escape or unsupported Windows namespace is
+denied before its target is traversed. The regular-file leaf remains open on
+that retained descriptor or handle while its complete bytes are streamed to the
+application's hash/view collector; no canonical pathname plan crosses the
+process boundary and no accepted object is reopened by path.
 
 A rename after open cannot redirect the descriptor, and an outside
-symlink/junction target is rejected before the first content read. Safe
-in-root links remain supported because canonical planning resolves them before
-the handle-bound step. This is not snapshot isolation: a concurrent writer can
-still produce drift or a mixed sequential view, but the full content-hash gate
-prevents unmatched bytes from being returned as `VERIFIED`.
+symlink/junction target is rejected before it is followed. Before/after metadata
+snapshots, an exact-size read, and one EOF proof detect many concurrent changes,
+but this is not snapshot isolation and does not promise to detect every
+same-size rewrite whose compared metadata is unchanged. The full content-hash
+gate prevents bytes with a different digest from being returned as `VERIFIED`.
 
-Windows may initiate target-side I/O while opening a path through a reparse
-point before the final handle path is authorized. The resolver never returns
-those outside bytes. The bounded pre-follow capability is tracked by
-`lab-tracker-n5kp.71`; its direct-read role and total operation budget are
-tracked by `lab-tracker-n5kp.47`, while recovery enumeration remains
+One `LocalResolutionBudget` owns the complete logical operation: its default and
+hard maximum is 512 MiB of accepted full-file payload, and its one absolute
+subprocess deadline defaults to 30 seconds. A direct attempt and every recovery
+candidate share that same budget. The helper reads exactly the size in its first
+metadata snapshot and then makes one one-byte EOF read. The raw process-output
+ceiling is therefore the remaining allowance plus one solely to expose a fatal
+growth proof; that proof byte is never accepted. A stable file exactly equal to
+the remaining allowance succeeds when the EOF read is empty. Clean zero-output
+missing/denied attempts release their reservation, while any partial, malformed,
+timed-out, changed, or otherwise ambiguous attempt consumes the remainder and
+makes recovery terminal. All such failures are reported with static,
+path-free details.
+
+Recovery enumeration and root metadata are the remaining transitional
+application-side filesystem work. `os.walk` still produces candidate names and
+prunes directories with the legacy path policy, but every candidate's
+authorization/open/read uses the broker and the same budget. Deadline checks
+run between enumeration steps; an individual blocked directory call is not yet
+interruptible. Pre-follow-safe bounded enumeration, an explicit directory
+limit, and precise Cloud Files classification remain
 `lab-tracker-n5kp.61`.
 
 ### Registered local-store confinement
@@ -428,15 +430,17 @@ canonicalization. Its name has a portable 1–63-character ASCII grammar, and
 legacy rows outside either local contract fail closed. Resolution carries those
 values in a frozen prepared target across request-scope release.
 
-The local resolver then requires the complete canonical store root to be
-contained by one configured operator root and constructs the exact
-handle-bound reader from a short-lived policy rooted at that store. Direct
-reads, final-handle validation, and recovery all use this same narrower policy.
-There is no fallback to ordinary unscoped local resolution. Consequently a
-lexical traversal, static link, raced junction, or content-hash recovery cannot
-reach a sibling store even when both stores sit below one broad operator root.
-The result retains the canonical logical `store://` URI; concrete host paths are
-not exposed in store-scoped diagnostics.
+The broker first admits the raw store root against one configured operator
+grant. Inside the helper it resolves and retains that grant, traverses and
+retains the registered store root, and makes the resulting directory stack a
+second nested boundary before it traverses the locator. Direct and recovery
+candidate reads use this retained nested-store scope; there is no fallback to
+ordinary unscoped local resolution. Consequently traversal, aliases, races, and
+content-hash recovery cannot reach a sibling store even when both stores sit
+below one broad operator root. Recovery enumeration is still narrowed with a
+transitional store-root policy, but candidate bytes cross only the nested helper
+role. The result retains the canonical logical `store://` URI; concrete host
+paths are not exposed in store-scoped diagnostics.
 
 The raw-absolute rule applies to registered store roots, not operator
 configuration: global resolver roots preserve current-user `~` expansion from
@@ -454,11 +458,12 @@ filesystem-I/O-free authority preserves unambiguous lexical components, expands
 the current-user `~` from the process environment, prefixes relative roots with
 the startup working directory, and rejects dot/dot-dot or unsupported platform
 spellings rather than canonicalizing them.
-One bounded filesystem broker serves local health. A transitional
-`LocalPathPolicy` derived from the same roots remains only for direct resolution
-and recovery until their broker roles land. Health admits only a configured
-lexical root spelling; the separate physical spelling behind an operator root
-alias must be configured explicitly if registered stores use it.
+One bounded filesystem broker serves local health, direct local reads, and every
+recovery candidate read. A transitional `LocalPathPolicy` derived from the same
+roots remains only for recovery enumeration and root metadata until
+`lab-tracker-n5kp.61`. Health admits only a configured lexical root spelling;
+the separate physical spelling behind an operator root alias must be configured
+explicitly if registered stores use it.
 
 Local-store health is an explicit read-only advisory probe, never a side effect
 of registration. It creates one absolute deadline before invoking the broker.
@@ -500,33 +505,38 @@ identity that survives a rename. So when a local reference's file is *missing at
 its `uri`* (the researcher moved or renamed it), the local resolver can recover
 it instead of dead-ending at `UNRESOLVED`: it scans the resolver's already
 configured `allowed_roots` for a file whose recomputed digest matches the
-reference, and returns that file `VERIFIED`. A direct local reference may report
-the recovered host path; a registered-store result uses a generic in-store
-recovery detail and retains its logical `store://` URI. The stored reference is
-**not** rewritten (recovery is read-only — auto-repairing the pointer is
-deferred).
+reference, and returns that file `VERIFIED`. Direct and registered-store results
+both use static path-free recovery details and retain the original reference
+URI; a registered result therefore keeps its logical `store://` identity. The
+stored reference is **not** rewritten (recovery is read-only — auto-repairing
+the pointer is deferred).
 
-Within the canonical-path threat model, recovery preserves these boundaries:
+Recovery preserves these boundaries:
 
 - **Integrity is unchanged.** A recovered file is verified by the same
   re-hash-and-compare as any other resolve, so it is exactly as trustworthy as
   one found at the `uri`; a same-named decoy with different bytes does not match.
-- **Handle-bound confinement.** The scan starts from canonical
-  `allowed_roots`, prunes linked/reparse directories, and opens each candidate
-  through the same handle-bound access layer as direct resolution. Pathname
-  replacement cannot redirect the descriptor that is hashed.
-- **Opt-in and logically file/byte-bounded.** Recovery is off unless
-  `LAB_TRACKER_RESOLVER_RECOVERY` is truthy *and* roots are configured. A
-  `RecoveryPolicy` budget (`max_files`, `max_bytes`, overridable via
-  `LAB_TRACKER_RESOLVER_RECOVERY_MAX_FILES` / `_MAX_BYTES`) caps the scan;
-  candidates that share the original basename are tried first so the common case
-  (a rename that kept the filename, or a moved parent directory) is cheap. When
-  the same-fd size hint fits, the remaining logical hashing budget is still
-  debited as chunks are read—even when a later read fails—so failed or growing
-  candidates cannot collectively exceed it. Exact OS bytes-read and local
-  resolution deadlines are tracked by
-  `lab-tracker-n5kp.47`; directory/time traversal bounds are tracked by
-  `lab-tracker-n5kp.61`.
+- **Retained-handle confinement.** Enumeration starts from the configured roots
+  and prunes linked/reparse directories with the transitional path policy. Each
+  yielded candidate is independently authorized, opened, and streamed by the
+  same pre-follow-safe helper as the direct read. A registered-store candidate
+  additionally stays beneath the helper-retained nested store boundary.
+  Pathname replacement cannot redirect the descriptor or handle that is hashed.
+- **Opt-in and file/byte/deadline-bounded where implemented.** Recovery is off
+  unless `LAB_TRACKER_RESOLVER_RECOVERY` is enabled *and* roots are configured.
+  The typed runtime defaults to at most `4096` candidate files and one cumulative
+  `536870912`-byte (512 MiB) direct-plus-recovery read allowance, with the latter
+  also the hard maximum. Candidates sharing the original basename are tried
+  first. Every successful complete candidate read debits its exact full payload;
+  ambiguous reads terminate the logical budget rather than continuing after
+  uncertain consumption. The request's separate `max_bytes` remains only the
+  returned-view cap (8 MiB hard/default), never a substitute for hashing the
+  whole file.
+- **Enumeration caveat.** The one local subprocess deadline is reused and
+  checked between scan and read steps, but the transitional application-side
+  `os.walk` has no directory-count limit and cannot interrupt a single blocked
+  directory call. Moving root metadata and enumeration into a bounded broker
+  role remains `lab-tracker-n5kp.61`.
 
 ## Read-surface integration
 
@@ -646,36 +656,38 @@ Shipped (`src/lab_tracker/artifact_resolution.py`, tested in
   adapter and falls back to `UNRESOLVED`.
 - ✅ `LocalFilesystemResolver` — `file://` and `local`/`local_fs` sources, with
   native `file:` URI conversion, an empty/`localhost`-only authority policy,
-  and canonical `allowed_roots` containment. Component-aware comparison uses
-  `commonpath` on POSIX and exact canonical components on Windows to deny
-  sibling-prefix, case-sensitive-sibling, and cross-drive escapes; static
-  symlink and Windows-junction targets outside the roots are rejected. A narrow
-  handle-bound reader then validates a same-descriptor regular file: POSIX uses
-  descriptor-relative no-follow component traversal, while Windows validates
-  the normalized final path from the borrowed handle before reading. Hashing
-  never reopens an authorized pathname.
+  and a shared filesystem-I/O-free lexical authority plus bounded broker.
+  Component-aware admission denies malformed, sibling-prefix, and cross-drive
+  candidates without target I/O. The isolated helper then anchors the selected
+  grant and follows POSIX aliases or Windows symlink/junction reparse data one
+  component at a time from retained no-follow descriptors/handles. Escapes and
+  unsupported namespaces fail before target traversal; the retained regular-file
+  object is streamed without reopening an authorized pathname.
 - ✅ Content-hash recovery of moved/renamed local artifacts — opt-in
-  (`LAB_TRACKER_RESOLVER_RECOVERY`), logically file/byte-bounded by a
-  `RecoveryPolicy`,
-  scans only `allowed_roots`, prunes symlink/junction escapes, and searches
-  basename-first. Each candidate's same descriptor supplies the size hint and
-  bytes being hashed; a missing file whose bytes still exist under a root
-  resolves `VERIFIED` instead of `UNRESOLVED` (read-only; the `uri` is not
-  rewritten).
+  (`LAB_TRACKER_RESOLVER_RECOVERY`), basename-first and candidate-file-bounded by
+  a typed `RecoveryPolicy`. One logical budget shares a 512 MiB default/hard-max
+  cumulative full-read allowance and one subprocess deadline across the direct
+  attempt and all candidates. A stable exact-limit file succeeds after an empty
+  EOF proof; the broker's allowance-plus-one raw ceiling exists only so a
+  nonempty proof fails terminally. Clean zero-output misses/denials release a
+  reservation, while ambiguous outcomes terminate the budget. Recovery is
+  read-only, preserves the original URI, and emits path-free details.
 - ✅ Registered `local_fs` targets carry their validated locator and trusted
-  store root through database-scope release. The exact handle-bound reader and
-  recovery roots are narrowed to that store root while remaining conjunctive
-  with the operator allowlist; invalid or mismatched logical store locators fail
+  store root through database-scope release. The helper anchors the selected
+  operator grant and then the exact registered root as a retained nested scope
+  before traversing the locator. Direct and recovery candidate reads remain
+  conjunctive with both boundaries; invalid or mismatched logical locators fail
   closed before candidate filesystem work.
-- ✅ Registered local-store health consumes a narrow directory-inspection role
-  backed by one filesystem-I/O-free authority and bounded operations broker. It
-  creates one deadline before lexical admission and runs one fixed isolated
-  stdlib helper through the shared process executor with zero-byte output caps.
-  The helper anchors the selected operator grant, parses alias targets from
-  retained no-follow handles, and walks only proven in-grant components.
-  Escaping aliases are denied before target traversal; replacement after open
-  cannot redirect the retained handle. Results are static, redacted,
-  point-in-time reachability hints rather than durable filesystem leases.
+- ✅ Local-store health and local artifact reads consume narrow roles on the
+  exact same bounded operations broker, authority, and process executor.
+  Directory inspection has zero-byte output caps; file reads stream only opaque
+  bytes under the logical reservation. Results and ordinary failures stay
+  static, redacted, and point-in-time rather than durable filesystem leases.
+- ⚠️ Recovery root metadata and enumeration remain transitional
+  application-side operations. They reuse the deadline and produce candidates
+  only; candidate bytes always cross the broker. A blocked directory call is not
+  yet interruptible, and a directory-count/pre-follow-safe enumeration role
+  remains `lab-tracker-n5kp.61`.
 - ✅ `HttpResolver` — `http(s)`, full-body verify with a `max_fetch_bytes` cap
   (oversized → `UNRESOLVED`, never uncertified bytes), plus a shared outbound
   destination policy that validates every IPv4/IPv6 answer, pins the vetted
@@ -754,9 +766,10 @@ Shipped (`src/lab_tracker/artifact_resolution.py`, tested in
   resolve `UNRESOLVED` and local health fails closed), HTTP(S) is constrained by
   the outbound destination policy, and rclone is constrained by its configured
   remote-name allowlist. HTTP resolution additionally uses the single total
-  deadline configured by `LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS`; rclone
-  and Git resolution plus local, rclone, and Git health use the independent
-  deadline configured by `LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS`.
+  deadline configured by `LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS`; local,
+  rclone, and Git resolution plus local, rclone, and Git health use the
+  independent deadline configured by
+  `LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS`.
 - ✅ `lab_tracker_resolve_artifact` MCP read tool + `resolve_external_artifact`
   client method.
 

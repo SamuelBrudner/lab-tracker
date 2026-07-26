@@ -81,6 +81,21 @@ operator authority:
   whitespace-only value produces an explicit deny-all policy in the application
   runtime. Empty or whitespace-only components are omitted. Other components
   retain their exact spelling rather than being trimmed.
+- `LAB_TRACKER_RESOLVER_RECOVERY`: enable read-only content-hash recovery for a
+  moved or renamed local artifact after its original path returns a clean
+  missing result (default: `false`). Accepted values are the normal explicit
+  boolean spellings; an unrecognized value fails startup.
+- `LAB_TRACKER_RESOLVER_RECOVERY_MAX_FILES`: maximum candidate files considered
+  by one recovery scan (default: `4096`; minimum: `1`). This does not bound the
+  number of directories visited.
+- `LAB_TRACKER_RESOLVER_RECOVERY_MAX_BYTES`: cumulative accepted full-file
+  payload allowance across one logical direct attempt and every recovery
+  candidate (default and hard maximum: `536870912`, 512 MiB; minimum: `1`).
+  The compatibility name refers to recovery, but this is also the direct local
+  payload ceiling. The helper may read one additional byte only as a fatal EOF
+  proof; that byte is discarded and terminates resolution. This setting is
+  separate from the request's `max_bytes`, which controls only the returned
+  view and remains capped at 8 MiB.
 
 Operator roots preserve the useful configuration semantics without inspecting
 their filesystem targets: the current-user `~` form is expanded only from
@@ -105,13 +120,19 @@ candidate remain eligible when the bounded helper proves their destination is
 inside the selected grant.
 
 Application composition builds one filesystem-I/O-free
-`LocalFilesystemAuthority` and one bounded local-filesystem operations broker
-from these roots. Local-store health uses that broker and never canonicalizes a
-candidate in the application process. Direct artifact resolution and recovery
-temporarily retain the legacy `LocalPathPolicy`, derived from the same operator
-root spellings; those unmigrated flows still canonicalize their roots during
-startup until `lab-tracker-n5kp.47` and `lab-tracker-n5kp.61` move them behind
-the broker.
+`LocalFilesystemAuthority`, one bounded local-filesystem operations broker, and
+one bounded process executor from these roots. Local-store health, direct local
+artifact reads, and every recovery candidate read receive that exact broker;
+the broker in turn holds the exact shared authority and executor. Candidate
+authorization, alias traversal, open, regular-file validation, and byte reads
+therefore occur in the isolated helper, not in the application process.
+
+Recovery enumeration and root metadata remain a transitional exception. The
+application still derives a `LocalPathPolicy` from the same roots to run
+`os.walk`, prune directories, and produce candidate names. Every candidate's
+authorization/open/read is nevertheless delegated to the broker. Moving
+enumeration behind an interruptible, pre-follow-safe broker role—including an
+explicit directory bound—is tracked by `lab-tracker-n5kp.61`.
 
 #### Mount and namespace authority
 
@@ -155,12 +176,45 @@ only a point-in-time reachability result. See
 [`self-hosted-operations.md`](self-hosted-operations.md#local-filesystem-stores)
 for deployment guidance.
 
-Runtime composition parses this setting once into one frozen, slotted authority
-and shares one broker with local health. It also derives one transitional
-`LocalPathPolicy` for local artifact resolution and recovery. Direct
-construction of `LocalFilesystemResolver()` and `default_registry()` retains
-an unscoped compatibility mode for library callers; the application runtime
-never selects that mode merely because the setting is absent.
+Runtime composition parses these settings once into typed `Settings`, one
+frozen, slotted authority, and one shared broker/executor pair. It derives the
+transitional `LocalPathPolicy` only for recovery enumeration and root metadata.
+Direct construction of `LocalFilesystemResolver()` and `default_registry()`
+retains an unscoped compatibility mode for library callers; the application
+runtime never selects that mode merely because the root setting is absent.
+
+#### Bounded local artifact reads
+
+One `LocalResolutionBudget` is created for a logical direct or registered-store
+resolve. It owns one absolute
+`LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS` deadline and the cumulative
+`LAB_TRACKER_RESOLVER_RECOVERY_MAX_BYTES` allowance. The same identity-stable
+budget is reused for the direct attempt and all recovery candidates. A clean
+missing or denied attempt that emitted no bytes releases its reservation.
+Programmatic composition that supplies both `RecoveryPolicy.max_bytes` and
+`LocalResolutionLimits.max_read_bytes` must use the same value; conflicting
+limits are rejected rather than silently choosing one.
+Successful reads debit their exact payload length. Timeout, malformed protocol,
+unexpected output, partial read, metadata change, cleanup/process failure, or
+any other ambiguous outcome consumes the remaining allowance and makes the
+logical budget terminal; resolution returns a static, path-free failure.
+
+The helper retains the authorized file descriptor or handle from traversal
+through hashing output. It takes before/after metadata snapshots, reads exactly
+the size reported by the first snapshot, then performs one bounded one-byte EOF
+read. The process boundary permits at most the current allowance plus that
+single proof byte on raw stdout. A proof byte is always fatal and is never
+accepted as payload. A stable file whose size equals the allowance succeeds
+when the EOF read is empty; a larger preflight size fails without being read.
+These checks do not provide snapshot isolation and do not promise detection of
+every same-size concurrent rewrite. The full content hash remains the integrity
+gate for the bytes observed.
+
+The deadline is checked around broker and enumeration steps, but the
+application-side directory enumeration retained until `lab-tracker-n5kp.61`
+cannot interrupt an individual blocked directory operation. Operators must
+continue to treat untrusted or indefinitely blocking mounted directory
+topologies as unsupported.
 
 ### Outbound HTTP policy
 
@@ -351,22 +405,25 @@ deployment therefore uses one Uvicorn worker per service process. Do not treat
 these values as cluster-wide quotas; distributed admission is a separate
 requirement.
 
-### External rclone and Git artifact resolution
+### Subprocess-backed artifact resolution
 
-Rclone and Git adapters execute optional host binaries under a separate process
-budget. The configured budget is one monotonic deadline for the entire logical
-operation: rclone metadata lookup, transfer, and verification share one
-deadline, as do Git fetch, object inspection, transfer, and verification. A
+Local reads execute a fixed Python helper, while rclone and Git adapters execute
+optional host binaries, through the shared bounded process executor. The
+configured budget is one monotonic deadline for the entire logical operation:
+a local direct read and all of its recovery candidate reads share one deadline;
+rclone metadata lookup, transfer, and verification share one deadline; and Git
+fetch, object inspection, transfer, and verification share one deadline. A
 local, rclone, or Git store-health probe receives a fresh deadline; Git's URL
-preflight and HEAD query share it. Progress or moving between subprocesses does
-not reset it. Local health creates the deadline before lexical admission and
-passes that exact deadline through the bounded filesystem broker.
+preflight and HEAD query share it. Progress, recovery, or moving between
+subprocesses does not reset it. Local health creates the deadline before lexical
+admission; local artifact resolution creates it once for the logical read. Both
+pass the exact deadline object through the bounded filesystem broker.
 
 - `LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS`: execution and verification
-  budget for one rclone or Git artifact resolution, or one local, rclone, or Git
-  store-health probe (default: `30`). The value must be finite, greater than
-  zero, and no greater than `86400` seconds (one day); invalid values fail
-  application startup. This setting is independent of
+  budget for one local, rclone, or Git artifact resolution, or one local,
+  rclone, or Git store-health probe (default: `30`). The value must be finite,
+  greater than zero, and no greater than `86400` seconds (one day); invalid
+  values fail application startup. This setting is independent of
   `LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS`.
 - `LAB_TRACKER_RCLONE_ALLOWED_REMOTES`: strict comma-separated exact remote
   names for server-side rclone resolution and rclone store-health probes. The
@@ -404,14 +461,14 @@ fragment components, percent escapes, and malformed paths or authorities are
 also rejected. Credentials belong in operator-controlled Git credential helpers
 or SSH facilities, never in this setting or a persisted store root.
 
-The local root list and the rclone and Git policies are parsed once from
-`Settings` at startup; no consumer independently rereads the process
-environment. Runtime builds the lexical local authority and health broker from
-that root list, while direct resolution and recovery temporarily receive a
-derived legacy local policy. Rclone and Git resolution and health share one
-immutable instance of their corresponding policy. All subprocess-backed
-adapters share one bounded process executor. Rclone health preserves the
-registered distinction
+The local root list, local recovery controls, and rclone and Git policies are
+parsed once from `Settings` at startup; no consumer independently rereads the
+process environment. Runtime builds one lexical local authority and operations
+broker from that root list, passes the exact broker to health and artifact
+resolution, and retains a derived legacy local policy only for recovery
+enumeration. Rclone and Git resolution and health share one immutable instance
+of their corresponding policy. All subprocess-backed adapters share one bounded
+process executor. Rclone health preserves the registered distinction
 between `remote:path`, `remote:/path`, and `remote:/`. A present
 `credential_ref` remains authoritative even when blank or invalid and never
 falls back to the store name. Its bounded `rclone lsf` intentionally reports a
@@ -442,16 +499,17 @@ operator-controlled configuration; users who can modify them can change where
 Git connects or disclose Git credentials. Do not mount user-writable Git,
 credential-helper, proxy, or OpenSSH configuration into the service.
 
-Every subprocess receives independent stdout and stderr memory caps. Actual
-artifact bytes are streamed and checked against the resolver's existing
-`max_fetch_bytes` limit as they arrive; a preflight size is advisory and cannot
-permit a growing object to exceed that limit. Timeout, output overflow,
-malformed metadata, or failed cleanup produces a generic unresolved or
-adapter-specific unreachable result without exposing a remote, path, credential,
-exception, or raw stderr. Pipes are closed and an uncooperative process is
-terminated, then killed and reaped within a separate fixed cleanup grace. A
-failed call can therefore exceed the configured execution deadline only by that
-bounded cleanup grace.
+Every subprocess receives independent stdout and stderr memory caps. Local raw
+file output is capped at its remaining logical allowance plus the one EOF-proof
+byte described above. Rclone and Git artifact bytes are streamed and checked
+against the resolver's `max_fetch_bytes` limit as they arrive; their preflight
+size is advisory and cannot permit a growing object to exceed that limit.
+Timeout, output overflow, malformed metadata, or failed cleanup produces a
+generic unresolved or adapter-specific unreachable result without exposing a
+remote, path, credential, exception, or raw stderr. Pipes are closed and an
+uncooperative process is terminated, then killed and reaped within a separate
+fixed cleanup grace. A failed call can therefore exceed the configured
+execution deadline only by that bounded cleanup grace.
 
 The bounded rclone/Git process boundary contains complete descendant trees on
 both supported process platforms. POSIX hosts use a dedicated process group.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import io
 import json
 import os
 import subprocess
@@ -20,6 +21,7 @@ _MOUNT_TAG = 0xA0000003
 _SYMLINK_TAG = 0xA000000C
 _ROOT_HANDLE = 101
 _CHILD_HANDLE = 202
+_FILE_HANDLE = 303
 
 
 def _request(candidate: str, roots: Sequence[str]) -> str:
@@ -33,6 +35,65 @@ def _request(candidate: str, roots: Sequence[str]) -> str:
         ensure_ascii=True,
         sort_keys=True,
         separators=(",", ":"),
+    )
+
+
+def _read_request(candidate: str, root: str, max_bytes: int) -> str:
+    return json.dumps(
+        {
+            "v": 1,
+            "op": "read-file",
+            "candidate": candidate,
+            "roots": [root],
+            "max_bytes": max_bytes,
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _registered_read_request(
+    store_root: str,
+    locator: Sequence[str],
+    root: str,
+    max_bytes: int,
+) -> str:
+    return json.dumps(
+        {
+            "v": 1,
+            "op": "read-registered-file",
+            "store_root": store_root,
+            "locator": list(locator),
+            "roots": [root],
+            "max_bytes": max_bytes,
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _snapshot(
+    size: int,
+    *,
+    volume: int = 7,
+    file_id: bytes = b"0123456789abcdef",
+    last_write: int = 11,
+    change: int = 12,
+    file_type: int = 1,
+    attributes: int = 0x80,
+    tag: int = 0,
+) -> helper._RegularFileSnapshot:
+    return helper._RegularFileSnapshot(
+        volume_serial_number=volume,
+        file_id=file_id,
+        end_of_file=size,
+        last_write_time=last_write,
+        change_time=change,
+        file_type=file_type,
+        file_attributes=attributes,
+        reparse_tag=tag,
     )
 
 
@@ -61,22 +122,14 @@ def _reparse_buffer(
     path_buffer = substitute_raw + print_raw
     fixed = 12 if tag == _SYMLINK_TAG else 8
     payload_length = fixed + len(path_buffer)
-    header = (
-        tag.to_bytes(4, "little")
-        + payload_length.to_bytes(2, "little")
-        + b"\0\0"
-    )
+    header = tag.to_bytes(4, "little") + payload_length.to_bytes(2, "little") + b"\0\0"
     names = (
         (0).to_bytes(2, "little")
         + len(substitute_raw).to_bytes(2, "little")
         + len(substitute_raw).to_bytes(2, "little")
         + len(print_raw).to_bytes(2, "little")
     )
-    flags = (
-        (1 if relative else 0).to_bytes(4, "little")
-        if tag == _SYMLINK_TAG
-        else b""
-    )
+    flags = (1 if relative else 0).to_bytes(4, "little") if tag == _SYMLINK_TAG else b""
     return header + names + flags + path_buffer
 
 
@@ -199,6 +252,43 @@ class FakeCloseHandle:
         return self.result
 
 
+class FakeGetFileType:
+    def __init__(self, result: int = 1) -> None:
+        self.result = result
+        self.calls: list[int] = []
+
+    def __call__(self, raw_handle: object) -> int:
+        self.calls.append(_as_int(raw_handle))
+        return self.result
+
+
+class FakeReadFile:
+    def __init__(self, chunks: Sequence[bytes] = ()) -> None:
+        self.chunks = list(chunks)
+        self.calls: list[tuple[int, int]] = []
+
+    def __call__(
+        self,
+        raw_handle: object,
+        raw_buffer: object,
+        raw_size: object,
+        raw_returned: object,
+        _overlapped: object,
+    ) -> int:
+        handle = _as_int(raw_handle)
+        size = _as_int(raw_size)
+        self.calls.append((handle, size))
+        chunk = self.chunks.pop(0) if self.chunks else b""
+        assert len(chunk) <= size
+        ctypes.memmove(raw_buffer, chunk, len(chunk))
+        returned = ctypes.cast(
+            cast(Any, raw_returned),
+            ctypes.POINTER(ctypes.c_uint32),
+        )
+        returned.contents.value = len(chunk)
+        return 1
+
+
 class FakeNtCreateFile:
     def __init__(
         self,
@@ -266,6 +356,8 @@ def _raw_api(
     get_final_path: Callable[..., object] | None = None,
     device_io: Callable[..., object] | None = None,
     close_handle: Callable[..., object] | None = None,
+    get_file_type: Callable[..., object] | None = None,
+    read_file: Callable[..., object] | None = None,
     nt_create_file: Callable[..., object] | None = None,
 ) -> helper.CtypesWindowsDirectoryApi:
     return helper.CtypesWindowsDirectoryApi(
@@ -279,25 +371,37 @@ def _raw_api(
                 substitute=r"\??\C:\store",
             )
         ),
+        get_file_type=get_file_type or FakeGetFileType(),
+        read_file=read_file or FakeReadFile(),
         close_handle=close_handle or FakeCloseHandle(),
         nt_create_file=nt_create_file or FakeNtCreateFile(),
     )
 
 
 def test_public_protocol_constants_are_fixed() -> None:
-    assert (
-        helper.LOCAL_FILESYSTEM_REQUEST_ENV
-        == "LAB_TRACKER_INTERNAL_LOCAL_FILESYSTEM_REQUEST"
-    )
+    assert helper.LOCAL_FILESYSTEM_REQUEST_ENV == "LAB_TRACKER_INTERNAL_LOCAL_FILESYSTEM_REQUEST"
     assert helper.LOCAL_FILESYSTEM_PROTOCOL_VERSION == 1
     assert helper.LOCAL_FILESYSTEM_REQUEST_VERSION == 1
     assert helper.LOCAL_FILESYSTEM_INSPECT_DIRECTORY_OP == "inspect-directory"
+    assert helper.LOCAL_FILESYSTEM_READ_FILE_OP == "read-file"
+    assert helper.LOCAL_FILESYSTEM_READ_REGISTERED_FILE_OP == "read-registered-file"
+    assert helper.LOCAL_FILESYSTEM_COMPLETE_EXIT == 0
     assert helper.LOCAL_FILESYSTEM_ACCESSIBLE_EXIT == 0
     assert helper.LOCAL_FILESYSTEM_DENIED_EXIT == 2
     assert helper.LOCAL_FILESYSTEM_FAILED_EXIT == 3
+    assert helper.LOCAL_FILESYSTEM_MISSING_EXIT == 4
+    assert helper.INSPECT_DIRECTORY_OPERATION == "inspect-directory"
+    assert helper.READ_FILE_OPERATION == "read-file"
+    assert helper.READ_REGISTERED_FILE_OPERATION == "read-registered-file"
+    assert helper.COMPLETE_EXIT == 0
+    assert helper.ACCESSIBLE_EXIT == 0
+    assert helper.DENIED_EXIT == 2
+    assert helper.FAILED_EXIT == 3
+    assert helper.MISSING_EXIT == 4
     assert helper.MAX_LOCAL_FILESYSTEM_REQUEST_BYTES == 24 * 1024
     assert helper.MAX_LOCAL_FILESYSTEM_ROOTS == 64
     assert helper.MAX_LOCAL_FILESYSTEM_SELECTED_ROOTS == 64
+    assert helper.MAX_LOCAL_FILESYSTEM_READ_BYTES == 512 * 1024 * 1024
 
 
 def test_windows_ctypes_structures_match_the_native_abi() -> None:
@@ -306,6 +410,9 @@ def test_windows_ctypes_structures_match_the_native_abi() -> None:
     assert helper._FILE_ATTRIBUTE_TAG_INFO.ReparseTag.offset == 4
     assert helper._OBJECT_ATTRIBUTES.RootDirectory.offset in (4, 8)
     assert ctypes.sizeof(helper._IO_STATUS_BLOCK) in (8, 16)
+    assert ctypes.sizeof(helper._FILE_BASIC_INFO) == 40
+    assert ctypes.sizeof(helper._FILE_STANDARD_INFO) == 24
+    assert ctypes.sizeof(helper._FILE_ID_INFO) == 24
 
 
 def test_create_file_anchors_only_a_drive_root_with_exact_flags() -> None:
@@ -350,6 +457,39 @@ def test_ntcreatefile_uses_one_component_no_follow_contract() -> None:
     ]
 
 
+def test_ntcreatefile_opens_final_file_once_for_synchronous_bounded_read() -> None:
+    nt_create = FakeNtCreateFile(((0, _FILE_HANDLE),))
+    api = _raw_api(nt_create_file=nt_create)
+
+    assert api.open_file_component(_ROOT_HANDLE, "artifact.bin") == _FILE_HANDLE
+    assert nt_create.calls == [
+        {
+            "desired_access": 0x00100081,
+            "parent": _ROOT_HANDLE,
+            "component": "artifact.bin",
+            "name_length": len("artifact.bin".encode("utf-16-le")),
+            "name_maximum_length": len("artifact.bin".encode("utf-16-le")) + 2,
+            "attributes": 0x1000,
+            "create_options": 0x00200060,
+            "share_access": 0x7,
+            "create_disposition": 1,
+            "file_attributes": 0,
+            "allocation_size": None,
+            "ea_buffer": None,
+            "ea_length": 0,
+        }
+    ]
+
+
+def test_ctypes_readfile_is_binary_and_strictly_bounded() -> None:
+    raw = b"\x00line\r\n\x1a\xff"
+    read = FakeReadFile((raw,))
+    api = _raw_api(read_file=read)
+
+    assert api.read_file(_FILE_HANDLE, len(raw)) == raw
+    assert read.calls == [(_FILE_HANDLE, len(raw))]
+
+
 @pytest.mark.parametrize("status", (0xC000000D, 0xC000050B))
 def test_ntcreatefile_safe_fallback_closes_stray_output(status: int) -> None:
     nt_create = FakeNtCreateFile(((status, 303), (0, _CHILD_HANDLE)))
@@ -384,15 +524,11 @@ def test_device_io_control_uses_exact_fsctl_and_bounded_buffer() -> None:
     api = _raw_api(device_io=device_io)
 
     assert api.read_reparse_point(_CHILD_HANDLE) == raw
-    assert device_io.calls == [
-        (_CHILD_HANDLE, 0x000900A8, None, 0, 16 * 1024, None)
-    ]
+    assert device_io.calls == [(_CHILD_HANDLE, 0x000900A8, None, 0, 16 * 1024, None)]
 
 
 def test_final_path_adapter_accepts_only_strict_dos_namespace() -> None:
-    api = _raw_api(
-        get_final_path=FakeGetFinalPath({_CHILD_HANDLE: r"\\?\D:\data\store"})
-    )
+    api = _raw_api(get_final_path=FakeGetFinalPath({_CHILD_HANDLE: r"\\?\D:\data\store"}))
     assert api.normalized_dos_path(_CHILD_HANDLE) == r"D:\data\store"
 
     for unsafe in (
@@ -400,9 +536,7 @@ def test_final_path_adapter_accepts_only_strict_dos_namespace() -> None:
         r"\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\\",
         r"\\?\GLOBALROOT\Device\HarddiskVolume1",
     ):
-        api = _raw_api(
-            get_final_path=FakeGetFinalPath({_CHILD_HANDLE: unsafe})
-        )
+        api = _raw_api(get_final_path=FakeGetFinalPath({_CHILD_HANDLE: unsafe}))
         with pytest.raises(helper.WindowsLocalStoreHealthDenied):
             api.normalized_dos_path(_CHILD_HANDLE)
 
@@ -442,6 +576,10 @@ class ScriptedDirectoryApi:
         roots: Mapping[str, int],
         children: Mapping[tuple[int, str], int],
         final_paths: Mapping[int, str],
+        file_children: Mapping[tuple[int, str], int] | None = None,
+        file_data: Mapping[int, bytes] | None = None,
+        snapshots: Mapping[int, Sequence[helper._RegularFileSnapshot]] | None = None,
+        read_results: Mapping[int, Sequence[bytes]] | None = None,
         attributes: Mapping[int, int] | None = None,
         tags: Mapping[int, int] | None = None,
         reparses: Mapping[int, bytes] | None = None,
@@ -450,6 +588,13 @@ class ScriptedDirectoryApi:
     ) -> None:
         self.roots = dict(roots)
         self.children = dict(children)
+        self.file_children = dict(file_children or {})
+        self.file_data = dict(file_data or {})
+        self.snapshots = {handle: list(values) for handle, values in (snapshots or {}).items()}
+        self.read_results = {
+            handle: list(values) for handle, values in (read_results or {}).items()
+        }
+        self.read_offsets: dict[int, int] = {}
         self.final_paths = dict(final_paths)
         self.attributes = dict(attributes or {})
         self.tags = dict(tags or {})
@@ -458,6 +603,9 @@ class ScriptedDirectoryApi:
         self.attribute_failure = attribute_failure
         self.root_calls: list[str] = []
         self.component_calls: list[tuple[int, str]] = []
+        self.file_component_calls: list[tuple[int, str]] = []
+        self.snapshot_calls: list[int] = []
+        self.read_calls: list[tuple[int, int]] = []
         self.attribute_calls: list[int] = []
         self.final_path_calls: list[int] = []
         self.reparse_calls: list[int] = []
@@ -475,7 +623,14 @@ class ScriptedDirectoryApi:
         try:
             return self.children[(parent, component)]
         except KeyError:
-            raise helper.WindowsLocalStoreHealthDenied from None
+            raise helper.WindowsLocalStoreHealthMissing from None
+
+    def open_file_component(self, parent: int, component: str) -> int:
+        self.file_component_calls.append((parent, component))
+        try:
+            return self.file_children[(parent, component)]
+        except KeyError:
+            raise helper.WindowsLocalStoreHealthMissing from None
 
     def file_attributes_and_reparse_tag(self, handle: int) -> tuple[int, int]:
         self.attribute_calls.append(handle)
@@ -494,6 +649,24 @@ class ScriptedDirectoryApi:
         self.reparse_calls.append(handle)
         return self.reparses[handle]
 
+    def regular_file_snapshot(self, handle: int) -> helper._RegularFileSnapshot:
+        self.snapshot_calls.append(handle)
+        values = self.snapshots[handle]
+        if len(values) > 1:
+            return values.pop(0)
+        return values[0]
+
+    def read_file(self, handle: int, byte_count: int) -> bytes:
+        self.read_calls.append((handle, byte_count))
+        scripted = self.read_results.get(handle)
+        if scripted:
+            return scripted.pop(0)
+        data = self.file_data.get(handle, b"")
+        offset = self.read_offsets.get(handle, 0)
+        chunk = data[offset : offset + byte_count]
+        self.read_offsets[handle] = offset + len(chunk)
+        return chunk
+
     def close(self, handle: int) -> None:
         self.close_calls.append(handle)
         failure = self.close_failures.get(handle)
@@ -507,6 +680,623 @@ def _plain_api() -> ScriptedDirectoryApi:
         children={(10, "allowed"): 20, (20, "store"): 30},
         final_paths={10: "C:\\", 20: r"C:\allowed", 30: r"C:\allowed\store"},
     )
+
+
+def _direct_file_api(
+    data: bytes,
+    *,
+    announced_size: int | None = None,
+    snapshots: Sequence[helper._RegularFileSnapshot] | None = None,
+) -> ScriptedDirectoryApi:
+    size = len(data) if announced_size is None else announced_size
+    stable = _snapshot(size)
+    return ScriptedDirectoryApi(
+        roots={"C:\\": 10},
+        children={(10, "grant"): 20},
+        file_children={(20, "artifact.bin"): _FILE_HANDLE},
+        final_paths={10: "C:\\", 20: r"C:\grant"},
+        file_data={_FILE_HANDLE: data},
+        snapshots={_FILE_HANDLE: snapshots or (stable, stable)},
+        attributes={_FILE_HANDLE: 0x80},
+    )
+
+
+def test_direct_read_preserves_opaque_bytes_at_exact_reservation_cap() -> None:
+    data = b"\x00line one\r\nline two\x1a\xff"
+    api = _direct_file_api(data)
+    output = io.BytesIO()
+
+    result = helper.execute_request(
+        _read_request(r"C:\grant\artifact.bin", r"C:\grant", len(data)),
+        api=api,
+        output=output,
+    )
+
+    assert result == helper.LOCAL_FILESYSTEM_COMPLETE_EXIT
+    assert output.getvalue() == data
+    assert api.file_component_calls == [(20, "artifact.bin")]
+    assert api.read_calls == [(_FILE_HANDLE, len(data)), (_FILE_HANDLE, 1)]
+    assert api.snapshot_calls == [_FILE_HANDLE, _FILE_HANDLE]
+    assert api.close_calls == [10, _FILE_HANDLE, 20]
+
+
+def test_empty_file_uses_only_one_byte_eof_proof() -> None:
+    api = _direct_file_api(b"")
+    output = io.BytesIO()
+
+    result = helper.execute_request(
+        _read_request(r"C:\grant\artifact.bin", r"C:\grant", 1),
+        api=api,
+        output=output,
+    )
+
+    assert result == helper.COMPLETE_EXIT
+    assert output.getvalue() == b""
+    assert api.read_calls == [(_FILE_HANDLE, 1)]
+
+
+def test_large_file_is_streamed_in_fixed_bounded_readfile_chunks() -> None:
+    data = b"a" * (64 * 1024) + b"\x00\r\n\x1a\xff"
+    api = _direct_file_api(data)
+    output = io.BytesIO()
+
+    result = helper.execute_request(
+        _read_request(r"C:\grant\artifact.bin", r"C:\grant", len(data)),
+        api=api,
+        output=output,
+    )
+
+    assert result == helper.COMPLETE_EXIT
+    assert output.getvalue() == data
+    assert api.read_calls == [
+        (_FILE_HANDLE, 64 * 1024),
+        (_FILE_HANDLE, 5),
+        (_FILE_HANDLE, 1),
+    ]
+
+
+def test_registered_nested_read_retains_store_as_its_scope_boundary() -> None:
+    data = b"registered nested bytes"
+    stable = _snapshot(len(data))
+    api = ScriptedDirectoryApi(
+        roots={"C:\\": 10},
+        children={
+            (10, "grant"): 20,
+            (20, "store"): 30,
+            (30, "nested"): 40,
+        },
+        file_children={(40, "artifact.bin"): _FILE_HANDLE},
+        final_paths={
+            10: "C:\\",
+            20: r"C:\grant",
+            30: r"C:\grant\store",
+            40: r"C:\grant\store\nested",
+        },
+        file_data={_FILE_HANDLE: data},
+        snapshots={_FILE_HANDLE: (stable, stable)},
+        attributes={_FILE_HANDLE: 0x80},
+    )
+    output = io.BytesIO()
+
+    result = helper.execute_request(
+        _registered_read_request(
+            r"C:\grant\store",
+            ("nested", "artifact.bin"),
+            r"C:\grant",
+            len(data),
+        ),
+        api=api,
+        output=output,
+    )
+
+    assert result == helper.LOCAL_FILESYSTEM_COMPLETE_EXIT
+    assert output.getvalue() == data
+    assert api.component_calls == [
+        (10, "grant"),
+        (20, "store"),
+        (30, "nested"),
+    ]
+    assert api.file_component_calls == [(40, "artifact.bin")]
+    assert api.close_calls == [10, 20, _FILE_HANDLE, 40, 30]
+
+
+def test_file_larger_than_reservation_fails_before_read_or_output() -> None:
+    data = b"12345"
+    api = _direct_file_api(data)
+    output = io.BytesIO()
+
+    result = helper.execute_request(
+        _read_request(r"C:\grant\artifact.bin", r"C:\grant", len(data) - 1),
+        api=api,
+        output=output,
+    )
+
+    assert result == helper.LOCAL_FILESYSTEM_FAILED_EXIT
+    assert output.getvalue() == b""
+    assert api.read_calls == []
+    assert api.snapshot_calls == [_FILE_HANDLE]
+
+
+def test_misleading_smaller_size_emits_only_bounded_eof_proof_then_fails() -> None:
+    api = _direct_file_api(b"abc", announced_size=2)
+    output = io.BytesIO()
+
+    result = helper.execute_request(
+        _read_request(r"C:\grant\artifact.bin", r"C:\grant", 2),
+        api=api,
+        output=output,
+    )
+
+    assert result == helper.LOCAL_FILESYSTEM_FAILED_EXIT
+    assert output.getvalue() == b"abc"
+    assert api.read_calls == [(_FILE_HANDLE, 2), (_FILE_HANDLE, 1)]
+    assert api.snapshot_calls == [_FILE_HANDLE]
+
+
+def test_short_read_against_announced_size_fails_without_unbounded_retry() -> None:
+    api = _direct_file_api(b"abc", announced_size=4)
+    output = io.BytesIO()
+
+    result = helper.execute_request(
+        _read_request(r"C:\grant\artifact.bin", r"C:\grant", 4),
+        api=api,
+        output=output,
+    )
+
+    assert result == helper.LOCAL_FILESYSTEM_FAILED_EXIT
+    assert output.getvalue() == b""
+    assert api.read_calls == [(_FILE_HANDLE, 4)]
+    assert api.snapshot_calls == [_FILE_HANDLE]
+
+
+@pytest.mark.parametrize(
+    "after",
+    (
+        _snapshot(3, volume=8),
+        _snapshot(3, file_id=b"fedcba9876543210"),
+        _snapshot(4),
+        _snapshot(3, last_write=13),
+        _snapshot(3, change=14),
+        _snapshot(3, file_type=2),
+        _snapshot(3, attributes=0x400, tag=_CLOUD_TAG),
+    ),
+)
+def test_same_handle_identity_size_timestamp_and_type_drift_fails(
+    after: helper._RegularFileSnapshot,
+) -> None:
+    before = _snapshot(3)
+    api = _direct_file_api(b"abc", snapshots=(before, after))
+    output = io.BytesIO()
+
+    result = helper.execute_request(
+        _read_request(r"C:\grant\artifact.bin", r"C:\grant", 3),
+        api=api,
+        output=output,
+    )
+
+    assert result == helper.LOCAL_FILESYSTEM_FAILED_EXIT
+    assert output.getvalue() == b"abc"
+    assert api.snapshot_calls == [_FILE_HANDLE, _FILE_HANDLE]
+
+
+def test_non_name_surrogate_cloud_file_is_an_eligible_regular_object() -> None:
+    data = b"hydrated cloud bytes"
+    cloud = _snapshot(
+        len(data),
+        attributes=0x400,
+        tag=_CLOUD_TAG,
+    )
+    api = _direct_file_api(data, snapshots=(cloud, cloud))
+    api.attributes[_FILE_HANDLE] = 0x400
+    api.tags[_FILE_HANDLE] = _CLOUD_TAG
+    output = io.BytesIO()
+
+    result = helper.execute_request(
+        _read_request(r"C:\grant\artifact.bin", r"C:\grant", len(data)),
+        api=api,
+        output=output,
+    )
+
+    assert result == helper.LOCAL_FILESYSTEM_COMPLETE_EXIT
+    assert output.getvalue() == data
+
+
+@pytest.mark.parametrize(
+    ("attributes", "tag"),
+    (
+        (_DIRECTORY, 0),
+        (0x400, 0x8000001B),
+    ),
+)
+def test_nonregular_or_ineligible_final_object_is_denied(
+    attributes: int,
+    tag: int,
+) -> None:
+    api = _direct_file_api(b"x")
+    api.attributes[_FILE_HANDLE] = attributes
+    api.tags[_FILE_HANDLE] = tag
+    output = io.BytesIO()
+
+    result = helper.execute_request(
+        _read_request(r"C:\grant\artifact.bin", r"C:\grant", 1),
+        api=api,
+        output=output,
+    )
+
+    assert result == helper.LOCAL_FILESYSTEM_DENIED_EXIT
+    assert output.getvalue() == b""
+    assert api.snapshot_calls == []
+
+
+def test_safe_final_symlink_is_explicitly_resolved_inside_direct_grant() -> None:
+    data = b"safe target"
+    stable = _snapshot(len(data))
+    link = _reparse_buffer(
+        tag=_SYMLINK_TAG,
+        substitute=r"\??\C:\grant\target.bin",
+    )
+    api = ScriptedDirectoryApi(
+        roots={"C:\\": 10},
+        children={(10, "grant"): 20},
+        file_children={
+            (20, "link.bin"): 30,
+            (20, "target.bin"): _FILE_HANDLE,
+        },
+        final_paths={10: "C:\\", 20: r"C:\grant"},
+        file_data={_FILE_HANDLE: data},
+        snapshots={_FILE_HANDLE: (stable, stable)},
+        attributes={30: 0x400, _FILE_HANDLE: 0x80},
+        tags={30: _SYMLINK_TAG},
+        reparses={30: link},
+    )
+    output = io.BytesIO()
+
+    result = helper.execute_request(
+        _read_request(r"C:\grant\link.bin", r"C:\grant", len(data)),
+        api=api,
+        output=output,
+    )
+
+    assert result == helper.LOCAL_FILESYSTEM_COMPLETE_EXIT
+    assert output.getvalue() == data
+    assert api.file_component_calls == [
+        (20, "link.bin"),
+        (20, "target.bin"),
+    ]
+    assert api.reparse_calls == [30]
+
+
+def test_safe_intermediate_junction_is_resolved_before_final_file_open() -> None:
+    data = b"junction target"
+    stable = _snapshot(len(data))
+    junction = _reparse_buffer(
+        tag=_MOUNT_TAG,
+        substitute=r"\??\C:\grant\target",
+    )
+    api = ScriptedDirectoryApi(
+        roots={"C:\\": 10},
+        children={
+            (10, "grant"): 20,
+            (20, "link"): 30,
+            (20, "target"): 40,
+        },
+        file_children={(40, "artifact.bin"): _FILE_HANDLE},
+        final_paths={
+            10: "C:\\",
+            20: r"C:\grant",
+            40: r"C:\grant\target",
+        },
+        file_data={_FILE_HANDLE: data},
+        snapshots={_FILE_HANDLE: (stable, stable)},
+        attributes={30: _REPARSE_DIRECTORY, _FILE_HANDLE: 0x80},
+        tags={30: _MOUNT_TAG},
+        reparses={30: junction},
+    )
+    output = io.BytesIO()
+
+    result = helper.execute_request(
+        _read_request(
+            r"C:\grant\link\artifact.bin",
+            r"C:\grant",
+            len(data),
+        ),
+        api=api,
+        output=output,
+    )
+
+    assert result == helper.LOCAL_FILESYSTEM_COMPLETE_EXIT
+    assert output.getvalue() == data
+    assert api.component_calls == [
+        (10, "grant"),
+        (20, "link"),
+        (20, "target"),
+    ]
+    assert api.file_component_calls == [(40, "artifact.bin")]
+
+
+def test_escaping_final_symlink_is_denied_before_target_side_open() -> None:
+    escaping = _reparse_buffer(
+        tag=_SYMLINK_TAG,
+        substitute=r"\??\C:\outside\secret.bin",
+    )
+    api = ScriptedDirectoryApi(
+        roots={"C:\\": 10},
+        children={(10, "grant"): 20},
+        file_children={(20, "link.bin"): 30},
+        final_paths={10: "C:\\", 20: r"C:\grant"},
+        attributes={30: 0x400},
+        tags={30: _SYMLINK_TAG},
+        reparses={30: escaping},
+    )
+    output = io.BytesIO()
+
+    result = helper.execute_request(
+        _read_request(r"C:\grant\link.bin", r"C:\grant", 16),
+        api=api,
+        output=output,
+    )
+
+    assert result == helper.LOCAL_FILESYSTEM_DENIED_EXIT
+    assert output.getvalue() == b""
+    assert api.file_component_calls == [(20, "link.bin")]
+    assert all(component != "outside" for _, component in api.component_calls)
+
+
+def test_escaping_intermediate_junction_is_denied_before_outside_file_open() -> None:
+    escaping = _reparse_buffer(
+        tag=_MOUNT_TAG,
+        substitute=r"\??\C:\outside",
+    )
+    api = ScriptedDirectoryApi(
+        roots={"C:\\": 10},
+        children={(10, "grant"): 20, (20, "link"): 30},
+        file_children={},
+        final_paths={10: "C:\\", 20: r"C:\grant"},
+        attributes={30: _REPARSE_DIRECTORY},
+        tags={30: _MOUNT_TAG},
+        reparses={30: escaping},
+    )
+    output = io.BytesIO()
+
+    result = helper.execute_request(
+        _read_request(
+            r"C:\grant\link\secret.bin",
+            r"C:\grant",
+            16,
+        ),
+        api=api,
+        output=output,
+    )
+
+    assert result == helper.LOCAL_FILESYSTEM_DENIED_EXIT
+    assert output.getvalue() == b""
+    assert api.component_calls == [(10, "grant"), (20, "link")]
+    assert api.file_component_calls == []
+
+
+def test_registered_locator_cannot_follow_alias_to_operator_grant_sibling() -> None:
+    escaping = _reparse_buffer(
+        tag=_SYMLINK_TAG,
+        substitute=r"\??\C:\grant\sibling\secret.bin",
+    )
+    api = ScriptedDirectoryApi(
+        roots={"C:\\": 10},
+        children={(10, "grant"): 20, (20, "store"): 30},
+        file_children={(30, "link.bin"): 40},
+        final_paths={
+            10: "C:\\",
+            20: r"C:\grant",
+            30: r"C:\grant\store",
+        },
+        attributes={40: 0x400},
+        tags={40: _SYMLINK_TAG},
+        reparses={40: escaping},
+    )
+    output = io.BytesIO()
+
+    result = helper.execute_request(
+        _registered_read_request(
+            r"C:\grant\store",
+            ("link.bin",),
+            r"C:\grant",
+            16,
+        ),
+        api=api,
+        output=output,
+    )
+
+    assert result == helper.LOCAL_FILESYSTEM_DENIED_EXIT
+    assert output.getvalue() == b""
+    assert api.file_component_calls == [(30, "link.bin")]
+    assert all(component != "sibling" for _, component in api.component_calls)
+
+
+def test_replaced_registered_scope_uses_retained_original_store_handle() -> None:
+    data = b"original store bytes"
+    stable = _snapshot(len(data))
+
+    class ReplacedStoreApi(ScriptedDirectoryApi):
+        def open_component(self, parent: int, component: str) -> int:
+            handle = super().open_component(parent, component)
+            if (parent, component) == (20, "store"):
+                assert handle == 30
+                self.children[(20, "store")] = 31
+            return handle
+
+    api = ReplacedStoreApi(
+        roots={"C:\\": 10},
+        children={(10, "grant"): 20, (20, "store"): 30},
+        file_children={
+            (30, "artifact.bin"): _FILE_HANDLE,
+            (31, "artifact.bin"): 99,
+        },
+        final_paths={
+            10: "C:\\",
+            20: r"C:\grant",
+            30: r"C:\grant\store",
+        },
+        file_data={_FILE_HANDLE: data, 99: b"outside replacement"},
+        snapshots={_FILE_HANDLE: (stable, stable)},
+        attributes={_FILE_HANDLE: 0x80, 99: 0x80},
+    )
+    output = io.BytesIO()
+
+    result = helper.execute_request(
+        _registered_read_request(
+            r"C:\grant\store",
+            ("artifact.bin",),
+            r"C:\grant",
+            len(data),
+        ),
+        api=api,
+        output=output,
+    )
+
+    assert result == helper.LOCAL_FILESYSTEM_COMPLETE_EXIT
+    assert output.getvalue() == data
+    assert api.children[(20, "store")] == 31
+    assert api.file_component_calls == [(30, "artifact.bin")]
+    assert 99 not in api.snapshot_calls
+
+
+def test_missing_final_file_has_distinct_fixed_status_and_no_output() -> None:
+    api = ScriptedDirectoryApi(
+        roots={"C:\\": 10},
+        children={(10, "grant"): 20},
+        final_paths={10: "C:\\", 20: r"C:\grant"},
+    )
+    output = io.BytesIO()
+
+    result = helper.execute_request(
+        _read_request(r"C:\grant\missing.bin", r"C:\grant", 16),
+        api=api,
+        output=output,
+    )
+
+    assert result == helper.LOCAL_FILESYSTEM_MISSING_EXIT
+    assert output.getvalue() == b""
+
+
+def test_missing_registered_intermediate_has_distinct_status_and_no_output() -> None:
+    api = ScriptedDirectoryApi(
+        roots={"C:\\": 10},
+        children={(10, "grant"): 20, (20, "store"): 30},
+        final_paths={
+            10: "C:\\",
+            20: r"C:\grant",
+            30: r"C:\grant\store",
+        },
+    )
+    output = io.BytesIO()
+
+    result = helper.execute_request(
+        _registered_read_request(
+            r"C:\grant\store",
+            ("missing", "artifact.bin"),
+            r"C:\grant",
+            16,
+        ),
+        api=api,
+        output=output,
+    )
+
+    assert result == helper.MISSING_EXIT
+    assert output.getvalue() == b""
+    assert api.file_component_calls == []
+
+
+@pytest.mark.parametrize(
+    "raw",
+    (
+        json.dumps(
+            {
+                "v": 1,
+                "op": "read-file",
+                "candidate": r"C:\grant\a",
+                "roots": [r"C:\grant", r"C:\other"],
+                "max_bytes": 1,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        json.dumps(
+            {
+                "v": 1,
+                "op": "read-file",
+                "candidate": r"C:\grant\a",
+                "roots": [r"C:\grant"],
+                "max_bytes": True,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        json.dumps(
+            {
+                "v": 1,
+                "op": "read-file",
+                "candidate": r"C:\grant\a",
+                "roots": [r"C:\grant"],
+                "max_bytes": 0,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        json.dumps(
+            {
+                "v": 1,
+                "op": "read-file",
+                "candidate": r"C:\grant\a",
+                "roots": [r"C:\grant"],
+                "max_bytes": 512 * 1024 * 1024 + 1,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        json.dumps(
+            {
+                "v": 1,
+                "op": "read-registered-file",
+                "store_root": r"C:\grant\store",
+                "locator": ["..", "escape"],
+                "roots": [r"C:\grant"],
+                "max_bytes": 1,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    ),
+)
+def test_malformed_read_protocol_fails_before_native_io(raw: str) -> None:
+    api = ScriptedDirectoryApi(roots={}, children={}, final_paths={})
+
+    result = helper.execute_request(raw, api=api, output=io.BytesIO())
+
+    assert result == helper.LOCAL_FILESYSTEM_FAILED_EXIT
+    assert api.root_calls == []
+
+
+@pytest.mark.parametrize(
+    "raw",
+    (
+        _read_request(r"C:\sibling\artifact.bin", r"C:\grant", 1),
+        _registered_read_request(
+            r"C:\sibling\store",
+            ("artifact.bin",),
+            r"C:\grant",
+            1,
+        ),
+        _read_request(r"C:\grant\..\outside.bin", r"C:\grant", 1),
+    ),
+)
+def test_lexically_denied_read_scope_performs_zero_native_io(raw: str) -> None:
+    api = ScriptedDirectoryApi(roots={}, children={}, final_paths={})
+
+    result = helper.execute_request(raw, api=api, output=io.BytesIO())
+
+    assert result == helper.DENIED_EXIT
+    assert api.root_calls == []
+    assert api.component_calls == []
+    assert api.file_component_calls == []
 
 
 def test_plain_handle_walk_is_accessible_and_cleanup_is_reverse_owned_order() -> None:
@@ -569,10 +1359,7 @@ def test_plain_handle_walk_is_accessible_and_cleanup_is_reverse_owned_order() ->
 )
 def test_malformed_protocol_fails_without_native_io(payload: str | None) -> None:
     api = ScriptedDirectoryApi(roots={}, children={}, final_paths={})
-    assert (
-        helper.inspect_directory_request(payload, api=api)
-        == helper.LOCAL_FILESYSTEM_FAILED_EXIT
-    )
+    assert helper.inspect_directory_request(payload, api=api) == helper.LOCAL_FILESYSTEM_FAILED_EXIT
     assert api.root_calls == []
 
 
@@ -582,12 +1369,10 @@ def test_bounded_protocol_rejects_too_many_roots_and_oversize_bytes() -> None:
     oversize = " " * (24 * 1024 + 1)
 
     assert (
-        helper.inspect_directory_request(too_many, api=api)
-        == helper.LOCAL_FILESYSTEM_FAILED_EXIT
+        helper.inspect_directory_request(too_many, api=api) == helper.LOCAL_FILESYSTEM_FAILED_EXIT
     )
     assert (
-        helper.inspect_directory_request(oversize, api=api)
-        == helper.LOCAL_FILESYSTEM_FAILED_EXIT
+        helper.inspect_directory_request(oversize, api=api) == helper.LOCAL_FILESYSTEM_FAILED_EXIT
     )
     assert api.root_calls == []
 
@@ -1178,6 +1963,25 @@ def _run_real_helper(
     )
 
 
+def _run_real_raw_request(raw: str) -> subprocess.CompletedProcess[bytes]:
+    environment = {
+        "SYSTEMROOT": os.environ.get("SYSTEMROOT", r"C:\Windows"),
+        helper.LOCAL_FILESYSTEM_REQUEST_ENV: raw,
+    }
+    return subprocess.run(  # noqa: S603 - fixed interpreter and helper path
+        [
+            sys.executable,
+            "-I",
+            "-S",
+            "-B",
+            str(Path(helper.__file__).resolve()),
+        ],
+        check=False,
+        capture_output=True,
+        env=environment,
+    )
+
+
 def _create_windows_junction(junction: Path, target: Path) -> None:
     completed = subprocess.run(
         ["cmd.exe", "/d", "/c", "mklink", "/J", str(junction), str(target)],
@@ -1246,9 +2050,7 @@ class _PostValidationParentRebindApi:
         self.original_parent = original_parent
         self.moved_parent = moved_parent
         self.outside_parent = outside_parent
-        self.expected_parent_path = os.path.normcase(
-            os.path.realpath(original_parent)
-        )
+        self.expected_parent_path = os.path.normcase(os.path.realpath(original_parent))
         self.swapped = False
         self.normalized_paths_after_swap: list[str] = []
 
@@ -1266,10 +2068,7 @@ class _PostValidationParentRebindApi:
 
     def normalized_dos_path(self, handle: int) -> str:
         path = self.delegate.normalized_dos_path(handle)
-        if (
-            not self.swapped
-            and os.path.normcase(path) == self.expected_parent_path
-        ):
+        if not self.swapped and os.path.normcase(path) == self.expected_parent_path:
             self.original_parent.rename(self.moved_parent)
             _create_windows_junction(
                 self.original_parent,
@@ -1297,6 +2096,46 @@ def test_real_helper_accepts_long_unicode_plain_directory_without_output(
 
     assert completed.returncode == 0
     assert completed.stdout == b""
+    assert completed.stderr == b""
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows handles")
+def test_real_helper_direct_read_preserves_opaque_binary_stdout(
+    tmp_path: Path,
+) -> None:
+    data = b"\x00windows\r\nopaque\x1a\xff"
+    artifact = tmp_path / "artifact.bin"
+    artifact.write_bytes(data)
+
+    completed = _run_real_raw_request(_read_request(str(artifact), str(tmp_path), len(data)))
+
+    assert completed.returncode == helper.COMPLETE_EXIT
+    assert completed.stdout == data
+    assert completed.stderr == b""
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows handles")
+def test_real_helper_registered_nested_read_keeps_binary_stdout_clean(
+    tmp_path: Path,
+) -> None:
+    data = b"\xffregistered\x00\r\n\x1a"
+    store = tmp_path / "store"
+    nested = store / "nested"
+    nested.mkdir(parents=True)
+    artifact = nested / "artifact.bin"
+    artifact.write_bytes(data)
+
+    completed = _run_real_raw_request(
+        _registered_read_request(
+            str(store),
+            ("nested", "artifact.bin"),
+            str(tmp_path),
+            len(data),
+        )
+    )
+
+    assert completed.returncode == helper.COMPLETE_EXIT
+    assert completed.stdout == data
     assert completed.stderr == b""
 
 
@@ -1368,8 +2207,7 @@ def test_native_replaced_parent_keeps_child_lookup_on_retained_handle(
     assert api.swapped
     assert retained_store in normalized_after_swap
     assert all(
-        path != outside_store
-        and not path.startswith(outside_store + "\\")
+        path != outside_store and not path.startswith(outside_store + "\\")
         for path in normalized_after_swap
     )
 
