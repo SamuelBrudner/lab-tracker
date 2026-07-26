@@ -74,6 +74,7 @@ from lab_tracker.models import (
     Visualization,
     VisualizationInput,
 )
+from lab_tracker.store_authority_registry import MAX_STORE_AUTHORITY_GRANT_ID_LENGTH
 
 T = TypeVar("T")
 
@@ -926,7 +927,10 @@ class DataStoreCreate(RequestModel):
     name: NonBlankStr = Field(max_length=DATA_STORE_NAME_MAX_LENGTH)
     kind: StoreKind
     root: NonBlankStr = Field(max_length=DATA_STORE_ROOT_MAX_LENGTH)
-    capabilities: list[StoreCapability] | None = None
+    capabilities: list[StoreCapability] | None = Field(
+        default=None,
+        max_length=len(StoreCapability),
+    )
     endpoint: str | None = Field(
         default=None,
         max_length=DATA_STORE_ENDPOINT_MAX_LENGTH,
@@ -934,6 +938,11 @@ class DataStoreCreate(RequestModel):
     credential_ref: str | None = Field(
         default=None,
         max_length=DATA_STORE_CREDENTIAL_REF_MAX_LENGTH,
+    )
+    authority_grant_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=MAX_STORE_AUTHORITY_GRANT_ID_LENGTH,
     )
     is_default: bool = False
 

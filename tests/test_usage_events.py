@@ -6,7 +6,11 @@ from uuid import uuid4
 
 import httpx
 import pytest
-from api_helpers import register_test_resources
+from api_helpers import (
+    TEST_STORE_AUTHORITY_GRANT_ID,
+    ExactCandidateTestStoreAuthority,
+    register_test_resources,
+)
 from fastapi.testclient import TestClient
 from sqlalchemy import JSON, String, Text, create_engine, select
 from sqlalchemy.orm import sessionmaker
@@ -18,6 +22,7 @@ from lab_tracker.config import Settings
 from lab_tracker.db import Base
 from lab_tracker.db_models import UsageEventModel, UsageEventRollupModel
 from lab_tracker.mcp_api_client import LabTrackerAPIClient, MCPSettings
+from lab_tracker.models import StoreKind
 from lab_tracker.services import base as service_base
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 from lab_tracker_client.client import LabTracker
@@ -62,6 +67,36 @@ def test_usage_event_seam_records_after_success_and_respects_flag():
     assert event.verb == "create"
     assert event.resource_type == "project"
     assert event.resource_id == project.project_id
+    assert event.project_id == project.project_id
+    assert event.actor_user_id == actor.user_id
+    assert event.outcome == "ok"
+
+
+def test_data_store_registration_records_only_safe_generic_usage_identity() -> None:
+    actor = AuthContext(user_id=uuid4(), role=Role.ADMIN)
+    api = _usage_api(usage_events=True)
+    authority = ExactCandidateTestStoreAuthority()
+    api._store_authority_registry = authority
+    api.data_stores.store_authority_registry = authority
+    project = api.create_project("Store telemetry project", actor=actor)
+
+    store = api.create_data_store(
+        project_id=project.project_id,
+        name="safe-audit-store",
+        kind=StoreKind.HTTP,
+        root="https://sensitive-target.example.test/private",
+        credential_ref=None,
+        authority_grant_id=TEST_STORE_AUTHORITY_GRANT_ID,
+        actor=actor,
+    )
+
+    events, total = api.query_usage_events()
+    store_events = [event for event in events if event.resource_type == "data_store"]
+    assert total == 2
+    assert len(store_events) == 1
+    [event] = store_events
+    assert event.verb == "create"
+    assert event.resource_id == store.store_id
     assert event.project_id == project.project_id
     assert event.actor_user_id == actor.user_id
     assert event.outcome == "ok"

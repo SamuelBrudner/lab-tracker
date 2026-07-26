@@ -40,6 +40,7 @@ def build_data_stores_router(api: LabTrackerAPI) -> APIRouter:
             capabilities=payload.capabilities,
             endpoint=payload.endpoint,
             credential_ref=payload.credential_ref,
+            authority_grant_id=payload.authority_grant_id,
             is_default=payload.is_default,
             actor=actor_from_request(request),
         )
