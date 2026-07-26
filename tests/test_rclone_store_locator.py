@@ -5,6 +5,12 @@ from dataclasses import FrozenInstanceError
 import pytest
 
 from lab_tracker.local_store_locator import PortableStorePath
+from lab_tracker.models import StoreKind
+from lab_tracker.rclone_store_definition import (
+    RCLONE_BACKED_STORE_KINDS,
+    RegisteredRcloneStoreAddress,
+    is_rclone_store_kind,
+)
 from lab_tracker.rclone_store_locator import (
     RcloneRemoteName,
     RegisteredRcloneRoot,
@@ -221,3 +227,60 @@ def test_registered_rclone_root_compose_rejects_untyped_inputs():
 
     assert root.compose("archive", locator) is None  # type: ignore[arg-type]
     assert root.compose(remote, "x") is None  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "kind",
+    sorted(RCLONE_BACKED_STORE_KINDS, key=lambda item: item.value),
+)
+def test_registered_address_classifies_and_parses_every_rclone_store_kind(
+    kind: StoreKind,
+):
+    address = RegisteredRcloneStoreAddress.parse(
+        kind=kind,
+        name="fallback",
+        root="/experiments",
+        credential_ref="archive",
+    )
+
+    assert is_rclone_store_kind(kind)
+    assert address == RegisteredRcloneStoreAddress(
+        remote=RcloneRemoteName("archive"),
+        root=RegisteredRcloneRoot(True, ("experiments",)),
+    )
+
+
+@pytest.mark.parametrize(
+    "kind",
+    tuple(kind for kind in StoreKind if kind not in RCLONE_BACKED_STORE_KINDS),
+)
+def test_registered_address_rejects_non_rclone_store_kinds(kind: StoreKind):
+    assert not is_rclone_store_kind(kind)
+    assert (
+        RegisteredRcloneStoreAddress.parse(
+            kind=kind,
+            name="fallback",
+            root="/experiments",
+            credential_ref="archive",
+        )
+        is None
+    )
+
+
+def test_registered_address_preserves_non_none_credential_authority():
+    fallback = RegisteredRcloneStoreAddress.parse(
+        kind=StoreKind.RCLONE,
+        name="fallback",
+        root="/",
+        credential_ref=None,
+    )
+    invalid_authoritative = RegisteredRcloneStoreAddress.parse(
+        kind=StoreKind.RCLONE,
+        name="fallback",
+        root="/",
+        credential_ref="",
+    )
+
+    assert fallback is not None
+    assert fallback.remote == RcloneRemoteName("fallback")
+    assert invalid_authoritative is None

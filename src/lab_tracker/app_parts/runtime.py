@@ -22,6 +22,7 @@ from lab_tracker.api import LabTrackerAPI
 from lab_tracker.app_parts.middleware import system_auth_context
 from lab_tracker.artifact_resolution import (
     LAB_TRACKER_GIT_ALLOWED_REMOTES_ENV,
+    LAB_TRACKER_RCLONE_ALLOWED_REMOTES_ENV,
     ResolverRegistry,
     check_store_health,
     outbound_http_policy_from_config,
@@ -37,10 +38,12 @@ from lab_tracker.auth import (
     ensure_local_auth_user,
 )
 from lab_tracker.backup import database_lock_path
+from lab_tracker.bounded_subprocess import BoundedSubprocessExecutor, ProcessExecutor
 from lab_tracker.config import Settings
 from lab_tracker.db import get_engine, get_session_factory
 from lab_tracker.file_storage import LocalFileStorageBackend
 from lab_tracker.git_remote_policy import GitRemotePolicy
+from lab_tracker.git_store_health import GitStoreHealthProbe
 from lab_tracker.graph_drafting import GraphDraftClientFactory, make_graph_draft_client
 from lab_tracker.http_store_health import HttpStoreHealthProbe
 from lab_tracker.logging import configure_logging
@@ -53,6 +56,9 @@ from lab_tracker.outbound_http import (
 )
 from lab_tracker.process_lock import ProcessLock
 from lab_tracker.rate_limit import InMemoryRateLimiter
+from lab_tracker.rclone_remote_policy import RcloneRemotePolicy
+from lab_tracker.rclone_store_definition import is_rclone_store_kind
+from lab_tracker.rclone_store_health import RcloneStoreHealthProbe
 from lab_tracker.review_email_transport import (
     ReviewEmailDeliveryError,
     ReviewEmailProvider,
@@ -100,20 +106,20 @@ class _OwnedGitHealthWorkdir:
 
 @dataclass(frozen=True)
 class _StoreHealthDispatchProbe:
-    """Route HTTP health through the hardened adapter and retain legacy leaves."""
+    """Dispatch external probes explicitly; retain only safe legacy leaves."""
 
     http_probe: StoreProbe
-    git_remote_policy: GitRemotePolicy
-    git_health_workdir: Path
+    rclone_probe: StoreProbe
+    git_probe: StoreProbe
 
     def __call__(self, target: StoreProbeTarget) -> StoreHealth:
         if target.kind is StoreKind.HTTP:
             return self.http_probe(target)
-        return check_store_health(
-            target,
-            git_remote_policy=self.git_remote_policy,
-            git_health_cwd=self.git_health_workdir,
-        )
+        if is_rclone_store_kind(target.kind):
+            return self.rclone_probe(target)
+        if target.kind is StoreKind.GIT:
+            return self.git_probe(target)
+        return check_store_health(target)
 
 
 @dataclass(frozen=True)
@@ -136,7 +142,9 @@ class AppRuntime:
     pat_rate_limiter: InMemoryRateLimiter
     outbound_http_policy: OutboundHttpPolicy
     outbound_http_client: OutboundHttpClient
+    rclone_remote_policy: RcloneRemotePolicy
     git_remote_policy: GitRemotePolicy
+    process_executor: ProcessExecutor
     resolver_registry: ResolverRegistry
     artifact_resolution_admission: ArtifactResolutionAdmission
     store_health_admission: StoreHealthAdmission
@@ -163,6 +171,11 @@ def build_app_runtime(settings: Settings) -> AppRuntime:
         settings.git_allowed_remotes,
         variable=LAB_TRACKER_GIT_ALLOWED_REMOTES_ENV,
     )
+    rclone_remote_policy = RcloneRemotePolicy.from_config(
+        settings.rclone_allowed_remotes,
+        variable=LAB_TRACKER_RCLONE_ALLOWED_REMOTES_ENV,
+    )
+    process_executor = BoundedSubprocessExecutor()
     outbound_http_client = SafeHttpClient(
         timeout=settings.resolver_http_deadline_seconds,
     )
@@ -171,7 +184,9 @@ def build_app_runtime(settings: Settings) -> AppRuntime:
         resolver_registry = registry_from_env(
             http_policy=outbound_http_policy,
             http_client=outbound_http_client,
+            rclone_remote_policy=rclone_remote_policy,
             git_remote_policy=git_remote_policy,
+            process_executor=process_executor,
             http_deadline_seconds=settings.resolver_http_deadline_seconds,
             subprocess_deadline_seconds=settings.resolver_subprocess_deadline_seconds,
         )
@@ -179,7 +194,9 @@ def build_app_runtime(settings: Settings) -> AppRuntime:
             settings,
             outbound_http_policy=outbound_http_policy,
             outbound_http_client=outbound_http_client,
+            rclone_remote_policy=rclone_remote_policy,
             git_remote_policy=git_remote_policy,
+            process_executor=process_executor,
             resolver_registry=resolver_registry,
             git_health_workdir_owner=git_health_workdir_owner,
         )
@@ -193,7 +210,9 @@ def _build_app_runtime(
     *,
     outbound_http_policy: OutboundHttpPolicy,
     outbound_http_client: OutboundHttpClient,
+    rclone_remote_policy: RcloneRemotePolicy,
     git_remote_policy: GitRemotePolicy,
+    process_executor: ProcessExecutor,
     resolver_registry: ResolverRegistry,
     git_health_workdir_owner: _OwnedGitHealthWorkdir,
 ) -> AppRuntime:
@@ -257,8 +276,17 @@ def _build_app_runtime(
                 client=outbound_http_client,
                 deadline_seconds=settings.resolver_http_deadline_seconds,
             ),
-            git_remote_policy=git_remote_policy,
-            git_health_workdir=git_health_workdir,
+            rclone_probe=RcloneStoreHealthProbe(
+                policy=rclone_remote_policy,
+                executor=process_executor,
+                deadline_seconds=settings.resolver_subprocess_deadline_seconds,
+            ),
+            git_probe=GitStoreHealthProbe(
+                policy=git_remote_policy,
+                executor=process_executor,
+                workdir=git_health_workdir,
+                deadline_seconds=settings.resolver_subprocess_deadline_seconds,
+            ),
         ),
         max_entries=settings.store_health_cache_max_entries,
         ttl_seconds=settings.store_health_cache_ttl_seconds,
@@ -284,7 +312,9 @@ def _build_app_runtime(
         pat_rate_limiter=pat_rate_limiter,
         outbound_http_policy=outbound_http_policy,
         outbound_http_client=outbound_http_client,
+        rclone_remote_policy=rclone_remote_policy,
         git_remote_policy=git_remote_policy,
+        process_executor=process_executor,
         resolver_registry=resolver_registry,
         artifact_resolution_admission=artifact_resolution_admission,
         store_health_admission=store_health_admission,
@@ -563,7 +593,9 @@ def configure_app_state(app: FastAPI, runtime: AppRuntime) -> None:
     app.state.auth_rate_limiter = runtime.auth_rate_limiter
     app.state.pat_rate_limiter = runtime.pat_rate_limiter
     app.state.outbound_http_policy = runtime.outbound_http_policy
+    app.state.rclone_remote_policy = runtime.rclone_remote_policy
     app.state.git_remote_policy = runtime.git_remote_policy
+    app.state.process_executor = runtime.process_executor
     app.state.resolver_registry = runtime.resolver_registry
     app.state.artifact_resolution_admission = runtime.artifact_resolution_admission
     app.state.store_health_admission = runtime.store_health_admission

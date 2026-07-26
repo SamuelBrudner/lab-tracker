@@ -155,8 +155,10 @@ research record:
   on demand, gated by an operator remote allowlist
   (`LAB_TRACKER_GIT_ALLOWED_REMOTES`, deny-by-default), a protocol allowlist,
   a fetch size cap, and a bounded cache — never by cloning or polling. Rclone
-  resolution is likewise gated by an operator remote-name allowlist
-  (`LAB_TRACKER_RCLONE_ALLOWED_REMOTES`, deny-by-default). See
+  resolution and store health are likewise gated by one immutable exact
+  remote-name policy (`LAB_TRACKER_RCLONE_ALLOWED_REMOTES`, deny-by-default).
+  Rclone and Git health commands reuse resolution's bounded cross-platform
+  process executor and expose only static adapter-specific failures. See
   [external-artifact-resolution-design.md](external-artifact-resolution-design.md).
 - Read-only assistant and MCP decision-context endpoints over the retained
   graph. Assistants may inspect context through these surfaces, but retained v1

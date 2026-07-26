@@ -61,6 +61,8 @@ def _clear_auth_env(monkeypatch) -> None:
         raising=False,
     )
     for variable in (
+        "LAB_TRACKER_RCLONE_ALLOWED_REMOTES",
+        "LAB_TRACKER_GIT_ALLOWED_REMOTES",
         "LAB_TRACKER_STORE_HEALTH_GLOBAL_IN_FLIGHT_LIMIT",
         "LAB_TRACKER_STORE_HEALTH_PER_ACTOR_IN_FLIGHT_LIMIT",
         "LAB_TRACKER_STORE_HEALTH_CACHE_MAX_ENTRIES",
@@ -121,6 +123,7 @@ def test_dotenv_loads_resolver_settings(tmp_path, monkeypatch):
         "LAB_TRACKER_RESOLVER_HTTP_ALLOWED_NETWORKS=10.20.0.0/16\n"
         "LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS=12.5\n"
         "LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS=7.25\n"
+        "LAB_TRACKER_RCLONE_ALLOWED_REMOTES=lab-onedrive,archive-s3\n"
         "LAB_TRACKER_GIT_ALLOWED_REMOTES=https://git.example/lab\n",
         encoding="utf-8",
     )
@@ -134,7 +137,14 @@ def test_dotenv_loads_resolver_settings(tmp_path, monkeypatch):
     assert policy.authorize("http://10.20.1.7/artifact.bin").hostname == "10.20.1.7"
     assert settings.resolver_http_deadline_seconds == 12.5
     assert settings.resolver_subprocess_deadline_seconds == 7.25
+    assert settings.rclone_allowed_remotes == "lab-onedrive,archive-s3"
     assert settings.git_allowed_remotes == "https://git.example/lab"
+
+
+def test_rclone_remote_policy_defaults_to_deny_all(monkeypatch):
+    _clear_auth_env(monkeypatch)
+
+    assert _settings_from_environment().rclone_allowed_remotes == ""
 
 
 def test_git_remote_policy_defaults_to_deny_all(monkeypatch):
@@ -412,8 +422,38 @@ def test_invalid_git_policy_fails_before_workdir_or_database_without_secret_leak
     assert secret not in rendered
 
 
+def test_invalid_rclone_policy_fails_before_workdir_or_database_without_secret_leak(
+    monkeypatch,
+):
+    _clear_auth_env(monkeypatch)
+    secret = "startup-secret-must-not-leak"
+    settings = Settings(
+        _env_file=None,
+        database_url="sqlite+pysqlite:///:memory:",
+        rclone_allowed_remotes=f"valid,{secret}:invalid",
+    )
+
+    def unexpected_side_effect(*_args, **_kwargs):
+        pytest.fail("invalid rclone policy reached a runtime side effect")
+
+    monkeypatch.setattr(runtime_module, "mkdtemp", unexpected_side_effect)
+    monkeypatch.setattr(runtime_module, "get_engine", unexpected_side_effect)
+    monkeypatch.setattr(runtime_module, "SafeHttpClient", unexpected_side_effect)
+
+    with pytest.raises(ValueError) as exc_info:
+        build_app_runtime(settings)
+
+    rendered = f"{exc_info.value!s}\n{exc_info.value!r}"
+    assert "LAB_TRACKER_RCLONE_ALLOWED_REMOTES" in rendered
+    assert secret not in rendered
+
+
 def test_runtime_installs_one_validated_policy_graph_and_registry(monkeypatch):
     _clear_auth_env(monkeypatch)
+    monkeypatch.setenv(
+        "LAB_TRACKER_RCLONE_ALLOWED_REMOTES",
+        "environment-remote",
+    )
     monkeypatch.setenv(
         "LAB_TRACKER_GIT_ALLOWED_REMOTES",
         "https://environment.example/ignored",
@@ -422,6 +462,17 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(monkeypatch):
     captured: dict[str, object] = {}
     outbound_http_client = object()
     safe_http_client_timeouts: list[float] = []
+
+    class FalseyProcessExecutor:
+        def __bool__(self) -> bool:
+            return False
+
+    process_executor = FalseyProcessExecutor()
+    monkeypatch.setattr(
+        runtime_module,
+        "BoundedSubprocessExecutor",
+        lambda: process_executor,
+    )
 
     def recording_safe_http_client(*, timeout):
         safe_http_client_timeouts.append(timeout)
@@ -437,14 +488,18 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(monkeypatch):
         *,
         http_policy,
         http_client,
+        rclone_remote_policy,
         git_remote_policy,
+        process_executor,
         http_deadline_seconds,
         subprocess_deadline_seconds,
     ):
         assert safe_http_client_timeouts == [12.5]
         captured["registry_http_policy"] = http_policy
         captured["registry_http_client"] = http_client
+        captured["registry_rclone_remote_policy"] = rclone_remote_policy
         captured["registry_git_remote_policy"] = git_remote_policy
+        captured["registry_process_executor"] = process_executor
         captured["registry_http_deadline_seconds"] = http_deadline_seconds
         captured["registry_subprocess_deadline_seconds"] = (
             subprocess_deadline_seconds
@@ -479,15 +534,54 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(monkeypatch):
         recording_http_store_health_probe,
     )
 
-    def recording_check_store_health(
-        target,
+    def recording_rclone_store_health_probe(
         *,
-        git_remote_policy,
-        git_health_cwd,
+        policy,
+        executor,
+        deadline_seconds,
     ):
+        captured["health_rclone_policy"] = policy
+        captured["health_rclone_executor"] = executor
+        captured["health_rclone_deadline_seconds"] = deadline_seconds
+
+        def probe(target):
+            captured["rclone_health_target"] = target
+            return StoreHealth(StoreHealthStatus.HEALTHY)
+
+        return probe
+
+    monkeypatch.setattr(
+        runtime_module,
+        "RcloneStoreHealthProbe",
+        recording_rclone_store_health_probe,
+    )
+
+    def recording_git_store_health_probe(
+        *,
+        policy,
+        executor,
+        workdir,
+        deadline_seconds,
+    ):
+        captured["health_git_policy"] = policy
+        captured["health_git_executor"] = executor
+        captured["health_git_workdir"] = workdir
+        captured["health_git_deadline_seconds"] = deadline_seconds
+
+        def probe(target):
+            captured["git_health_target"] = target
+            return StoreHealth(StoreHealthStatus.HEALTHY)
+
+        return probe
+
+    monkeypatch.setattr(
+        runtime_module,
+        "GitStoreHealthProbe",
+        recording_git_store_health_probe,
+    )
+
+    def recording_check_store_health(target):
         captured["legacy_health_target"] = target
-        captured["legacy_health_git_remote_policy"] = git_remote_policy
-        captured["legacy_health_git_cwd"] = git_health_cwd
         return StoreHealth(StoreHealthStatus.HEALTHY)
 
     monkeypatch.setattr(
@@ -509,6 +603,7 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(monkeypatch):
         store_health_cache_max_entries=17,
         store_health_cache_ttl_seconds=4.5,
         store_health_singleflight_wait_seconds=2.25,
+        rclone_allowed_remotes="settings-remote",
         git_allowed_remotes="https://settings.example/lab",
     )
     runtime = build_app_runtime(settings)
@@ -519,7 +614,10 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(monkeypatch):
 
         assert app.state.outbound_http_policy is runtime.outbound_http_policy
         assert runtime.outbound_http_client is outbound_http_client
+        assert app.state.rclone_remote_policy is runtime.rclone_remote_policy
         assert app.state.git_remote_policy is runtime.git_remote_policy
+        assert app.state.process_executor is runtime.process_executor
+        assert runtime.process_executor is process_executor
         assert app.state.resolver_registry is resolver_registry
         assert (
             app.state.artifact_resolution_admission
@@ -541,10 +639,22 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(monkeypatch):
         assert captured["health_http_policy"] is runtime.outbound_http_policy
         assert captured["registry_http_client"] is runtime.outbound_http_client
         assert captured["health_http_client"] is runtime.outbound_http_client
+        assert (
+            captured["registry_rclone_remote_policy"]
+            is runtime.rclone_remote_policy
+        )
+        assert captured["health_rclone_policy"] is runtime.rclone_remote_policy
         assert captured["registry_git_remote_policy"] is runtime.git_remote_policy
+        assert captured["health_git_policy"] is runtime.git_remote_policy
+        assert captured["registry_process_executor"] is runtime.process_executor
+        assert captured["health_rclone_executor"] is runtime.process_executor
+        assert captured["health_git_executor"] is runtime.process_executor
+        assert captured["health_git_workdir"] is runtime.git_health_workdir
         assert captured["registry_http_deadline_seconds"] == 12.5
         assert captured["health_http_deadline_seconds"] == 12.5
         assert captured["registry_subprocess_deadline_seconds"] == 7.25
+        assert captured["health_rclone_deadline_seconds"] == 7.25
+        assert captured["health_git_deadline_seconds"] == 7.25
 
         http_health_target = StoreProbeTarget(
             store_id=UUID(int=1),
@@ -558,8 +668,20 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(monkeypatch):
         assert captured["http_health_target"] is http_health_target
         assert "legacy_health_target" not in captured
 
+        rclone_health_target = StoreProbeTarget(
+            store_id=UUID(int=2),
+            name="runtime-rclone-wiring",
+            kind=StoreKind.RCLONE,
+            root="/",
+            endpoint=None,
+            credential_ref="settings-remote",
+        )
+        assert runtime.store_health_checker(rclone_health_target).is_healthy
+        assert captured["rclone_health_target"] is rclone_health_target
+        assert "legacy_health_target" not in captured
+
         git_health_target = StoreProbeTarget(
-            store_id=UUID(int=1),
+            store_id=UUID(int=3),
             name="runtime-wiring",
             kind=StoreKind.GIT,
             root="https://settings.example/lab/repo.git",
@@ -567,17 +689,21 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(monkeypatch):
             credential_ref=None,
         )
         assert runtime.store_health_checker(git_health_target).is_healthy
-        assert captured["legacy_health_target"] is git_health_target
-        assert (
-            captured["legacy_health_git_remote_policy"]
-            is runtime.git_remote_policy
-        )
-        assert captured["legacy_health_git_cwd"] is runtime.git_health_workdir
+        assert captured["git_health_target"] is git_health_target
+        assert "legacy_health_target" not in captured
         assert git_health_workdir.is_dir()
         assert list(git_health_workdir.iterdir()) == []
         assert not (git_health_workdir / ".git").exists()
         if os.name != "nt":
             assert stat.S_IMODE(git_health_workdir.stat().st_mode) == 0o700
+        assert (
+            runtime.rclone_remote_policy.authorize("settings-remote")
+            is not None
+        )
+        assert (
+            runtime.rclone_remote_policy.authorize("environment-remote")
+            is None
+        )
         assert (
             runtime.git_remote_policy.authorize(
                 "https://settings.example/lab/repo.git"
@@ -612,14 +738,18 @@ def test_lifespan_removes_app_owned_git_health_workdir(monkeypatch):
         *,
         http_policy,
         http_client,
+        rclone_remote_policy,
         git_remote_policy,
+        process_executor,
         http_deadline_seconds,
         subprocess_deadline_seconds,
     ):
         del (
             http_policy,
             http_client,
+            rclone_remote_policy,
             git_remote_policy,
+            process_executor,
             http_deadline_seconds,
             subprocess_deadline_seconds,
         )
@@ -753,6 +883,10 @@ def test_compose_forwards_outbound_artifact_policy_settings():
     assert (
         "LAB_TRACKER_GIT_ALLOWED_REMOTES: "
         "${LAB_TRACKER_GIT_ALLOWED_REMOTES:-}"
+    ) in compose
+    assert (
+        "LAB_TRACKER_RCLONE_ALLOWED_REMOTES: "
+        "${LAB_TRACKER_RCLONE_ALLOWED_REMOTES:-}"
     ) in compose
 
 
