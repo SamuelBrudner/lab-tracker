@@ -71,10 +71,11 @@ that destination through your normal off-machine backup process.
   Uploads that exceed the limit are rejected and partial local files are
   cleaned up.
 
-### External HTTP artifact resolution
+### Outbound HTTP policy
 
-HTTP(S) external-artifact resolution has an outbound destination policy
-independent of the pointer's content hash and response-size limits. A public
+HTTP(S) external-artifact resolution and HTTP data-store health share one
+runtime destination policy and one pinned HTTP client. The policy is independent
+of an artifact pointer's content hash and response-size limits. A public
 destination is eligible only when every address returned for its hostname is
 globally routable. Malformed URLs, URLs containing user information,
 localhost/local/single-label names without an exact internal exception, unsafe
@@ -86,8 +87,9 @@ one of the already-vetted numeric addresses, so a second DNS answer cannot
 change its destination. Proxy environment variables are ignored. Redirects
 have a finite limit, and every redirect target goes through the same
 authorization and address-pinning process before the next request. One total
-wall-clock deadline covers DNS, connect and TLS setup, response headers, every
-redirect hop, body verification, and hashing.
+wall-clock deadline covers DNS, connect and TLS setup, response headers, and
+every redirect hop. Artifact resolution additionally includes body
+verification and hashing in that same deadline.
 DNS lookups use the host's configured DNS servers and search domains through
 dnspython so they can be cancelled at the deadline. Names available only
 through platform-specific NSS, mDNS, or local-hosts integrations may therefore
@@ -116,15 +118,16 @@ rather than weakening the policy.
 Request duration is controlled separately:
 
 - `LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS`: total wall-clock budget for one
-  HTTP artifact resolution, including DNS, connect and TLS setup, response
-  headers, redirects, body verification, and hashing (default: `30`). The value
-  must be finite, greater than zero, and no greater than `86400` seconds (one
-  day); invalid values fail application startup.
+  HTTP artifact resolution or HTTP store-health probe, including DNS, connect
+  and TLS setup, response headers, and redirects. Artifact resolution also
+  includes body verification and hashing (default: `30`). The value must be
+  finite, greater than zero, and no greater than `86400` seconds (one day);
+  invalid values fail application startup.
 
 This opt-in changes only whether the host may make the outbound connection. It
-does not bypass resolve-by-entity authorization or opaque not-found behavior,
-does not weaken full-content hash verification, and does not increase the
-configured fetch or returned-content bounds. See
+does not bypass resolve-by-entity or store-health authorization and opaque
+not-found behavior, does not weaken full-content hash verification, and does
+not increase the configured fetch or returned-content bounds. See
 [`external-artifact-resolution-design.md`](external-artifact-resolution-design.md)
 for the complete resolution contract.
 
@@ -161,6 +164,19 @@ probe inputs into an immutable value and closes the request database scope
 before cache lookup or host I/O. Authorization runs on every request, including
 cache hits. Hidden and absent stores therefore remain indistinguishable and
 never reach the cache or probe.
+
+HTTP stores use `endpoint` whenever it is present and use `root` only when
+`endpoint` is absent. A present blank, malformed, or structurally invalid
+endpoint therefore fails closed and never falls back to `root`; the selected
+initial URL must also pass the hardened registered-base structural grammar
+before host I/O. The health probe sends `HEAD` through the same
+outbound policy, pinned client, and total deadline as HTTP artifact resolution.
+Statuses `301`, `302`, `303`, `307`, and `308` are followed manually while
+preserving `HEAD`; every hop is reauthorized and repinned, safe cross-origin
+redirects may proceed, and an HTTPS-to-HTTP downgrade is denied. A terminal
+`2xx`, `403`, or `405` response counts as reachable. Policy denials, redirect
+loops or limit exhaustion, transport/deadline failures, and other terminal
+statuses all return the same static redacted health detail.
 
 - `LAB_TRACKER_STORE_HEALTH_GLOBAL_IN_FLIGHT_LIMIT`: maximum admitted health
   requests in one application process (default: `4`, maximum: `16`).

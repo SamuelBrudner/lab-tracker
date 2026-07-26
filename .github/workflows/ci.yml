@@ -151,9 +151,13 @@ jobs:
           tests/test_local_path_policy.py
           tests/test_local_file_access.py
           tests/test_windows_local_file.py
+          tests/test_outbound_http_deadline.py
+          tests/test_outbound_http_policy.py
+          tests/test_safe_http_client.py
           tests/test_artifact_resolution.py
           tests/test_actor_admission.py
           tests/test_store_health.py
+          tests/test_http_store_health.py
           tests/test_store_health_queries.py
           tests/test_store_health_admission.py
           tests/test_context_queries_prepared_resolution.py

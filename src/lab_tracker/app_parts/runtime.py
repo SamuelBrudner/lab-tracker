@@ -42,10 +42,15 @@ from lab_tracker.db import get_engine, get_session_factory
 from lab_tracker.file_storage import LocalFileStorageBackend
 from lab_tracker.git_remote_policy import GitRemotePolicy
 from lab_tracker.graph_drafting import GraphDraftClientFactory, make_graph_draft_client
+from lab_tracker.http_store_health import HttpStoreHealthProbe
 from lab_tracker.logging import configure_logging
-from lab_tracker.models import ReviewEmailDelivery
+from lab_tracker.models import ReviewEmailDelivery, StoreKind
 from lab_tracker.note_storage import LocalNoteStorage
-from lab_tracker.outbound_http import OutboundHttpPolicy
+from lab_tracker.outbound_http import (
+    OutboundHttpClient,
+    OutboundHttpPolicy,
+    SafeHttpClient,
+)
 from lab_tracker.process_lock import ProcessLock
 from lab_tracker.rate_limit import InMemoryRateLimiter
 from lab_tracker.review_email_transport import (
@@ -61,6 +66,7 @@ from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 from lab_tracker.store_health import (
     CachedStoreHealthProbe,
     StoreHealth,
+    StoreProbe,
     StoreProbeTarget,
 )
 from lab_tracker.store_health_admission import StoreHealthAdmission
@@ -93,13 +99,16 @@ class _OwnedGitHealthWorkdir:
 
 
 @dataclass(frozen=True)
-class _LegacyStoreHealthProbe:
-    """Adapt the legacy leaf probes to the detached control-plane target."""
+class _StoreHealthDispatchProbe:
+    """Route HTTP health through the hardened adapter and retain legacy leaves."""
 
+    http_probe: StoreProbe
     git_remote_policy: GitRemotePolicy
     git_health_workdir: Path
 
     def __call__(self, target: StoreProbeTarget) -> StoreHealth:
+        if target.kind is StoreKind.HTTP:
+            return self.http_probe(target)
         return check_store_health(
             target,
             git_remote_policy=self.git_remote_policy,
@@ -126,6 +135,7 @@ class AppRuntime:
     auth_rate_limiter: InMemoryRateLimiter
     pat_rate_limiter: InMemoryRateLimiter
     outbound_http_policy: OutboundHttpPolicy
+    outbound_http_client: OutboundHttpClient
     git_remote_policy: GitRemotePolicy
     resolver_registry: ResolverRegistry
     artifact_resolution_admission: ArtifactResolutionAdmission
@@ -153,10 +163,14 @@ def build_app_runtime(settings: Settings) -> AppRuntime:
         settings.git_allowed_remotes,
         variable=LAB_TRACKER_GIT_ALLOWED_REMOTES_ENV,
     )
+    outbound_http_client = SafeHttpClient(
+        timeout=settings.resolver_http_deadline_seconds,
+    )
     git_health_workdir_owner = _OwnedGitHealthWorkdir()
     try:
         resolver_registry = registry_from_env(
             http_policy=outbound_http_policy,
+            http_client=outbound_http_client,
             git_remote_policy=git_remote_policy,
             http_deadline_seconds=settings.resolver_http_deadline_seconds,
             subprocess_deadline_seconds=settings.resolver_subprocess_deadline_seconds,
@@ -164,6 +178,7 @@ def build_app_runtime(settings: Settings) -> AppRuntime:
         return _build_app_runtime(
             settings,
             outbound_http_policy=outbound_http_policy,
+            outbound_http_client=outbound_http_client,
             git_remote_policy=git_remote_policy,
             resolver_registry=resolver_registry,
             git_health_workdir_owner=git_health_workdir_owner,
@@ -177,6 +192,7 @@ def _build_app_runtime(
     settings: Settings,
     *,
     outbound_http_policy: OutboundHttpPolicy,
+    outbound_http_client: OutboundHttpClient,
     git_remote_policy: GitRemotePolicy,
     resolver_registry: ResolverRegistry,
     git_health_workdir_owner: _OwnedGitHealthWorkdir,
@@ -235,7 +251,12 @@ def _build_app_runtime(
         per_actor_in_flight_limit=settings.store_health_per_actor_in_flight_limit,
     )
     store_health_checker = CachedStoreHealthProbe(
-        _LegacyStoreHealthProbe(
+        _StoreHealthDispatchProbe(
+            http_probe=HttpStoreHealthProbe(
+                policy=outbound_http_policy,
+                client=outbound_http_client,
+                deadline_seconds=settings.resolver_http_deadline_seconds,
+            ),
             git_remote_policy=git_remote_policy,
             git_health_workdir=git_health_workdir,
         ),
@@ -262,6 +283,7 @@ def _build_app_runtime(
         auth_rate_limiter=auth_rate_limiter,
         pat_rate_limiter=pat_rate_limiter,
         outbound_http_policy=outbound_http_policy,
+        outbound_http_client=outbound_http_client,
         git_remote_policy=git_remote_policy,
         resolver_registry=resolver_registry,
         artifact_resolution_admission=artifact_resolution_admission,

@@ -41,8 +41,8 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import BinaryIO, Protocol, TypeAlias
-from urllib.parse import unquote, urljoin, urlsplit
+from typing import BinaryIO, TypeAlias
+from urllib.parse import unquote, urlsplit
 
 from lab_tracker.bounded_subprocess import (
     DEFAULT_PROCESS_DEADLINE_SECONDS,
@@ -83,7 +83,9 @@ from lab_tracker.local_store_locator import (
 )
 from lab_tracker.models import DataStore, ExternalArtifactReference, StoreKind
 from lab_tracker.outbound_http import (
+    DEFAULT_MAX_HTTP_REDIRECTS,
     DEFAULT_OUTBOUND_HTTP_DEADLINE_SECONDS,
+    HTTP_REDIRECT_STATUS_CODES,
     MAX_OUTBOUND_HTTP_DEADLINE_SECONDS,
     OutboundHttpClient,
     OutboundHttpDeadline,
@@ -92,12 +94,18 @@ from lab_tracker.outbound_http import (
     OutboundHttpTransportError,
     RegisteredHttpPrefix,
     SafeHttpClient,
+    resolve_direct_http_redirect,
 )
 from lab_tracker.rclone_store_locator import (
     RcloneRemoteName,
     RegisteredRcloneRoot,
 )
-from lab_tracker.store_health import StoreHealth, StoreHealthStatus, StoreProbeTarget
+from lab_tracker.store_health import (
+    HTTP_STORE_HEALTH_FAILURE_DETAIL,
+    StoreHealth,
+    StoreHealthStatus,
+    StoreProbeTarget,
+)
 
 # Default cap on the bytes returned inline to a caller. Bounds payload size, not
 # verification: the full artifact is always hashed regardless of this cap.
@@ -117,7 +125,6 @@ _HTTP_SCHEMES = frozenset({"http", "https"})
 # be hashed to certify it, so an artifact larger than this is refused
 # (UNRESOLVED) rather than returned uncertified.
 DEFAULT_MAX_FETCH_BYTES = 64 * 1024 * 1024
-DEFAULT_MAX_HTTP_REDIRECTS = 3
 DEFAULT_SUBPROCESS_DEADLINE_SECONDS = DEFAULT_PROCESS_DEADLINE_SECONDS
 MAX_SUBPROCESS_DEADLINE_SECONDS = MAX_PROCESS_DEADLINE_SECONDS
 
@@ -996,16 +1003,6 @@ def store_relative_reference(
     return None
 
 
-class _StoreHealthHttpResponse(Protocol):
-    status_code: int
-
-
-class _StoreHealthHttpClient(Protocol):
-    def head(self, url: str) -> _StoreHealthHttpResponse: ...
-
-    def close(self) -> None: ...
-
-
 def check_store_health(
     store: DataStore | StoreProbeTarget,
     *,
@@ -1018,15 +1015,16 @@ def check_store_health(
     git_allow_protocol: str | None = DEFAULT_GIT_ALLOW_PROTOCOL,
     git_deadline_seconds: float = DEFAULT_SUBPROCESS_DEADLINE_SECONDS,
     git_clock: Callable[[], float] = time.monotonic,
-    http_client: _StoreHealthHttpClient | None = None,
-    http_timeout: float = 10.0,
 ) -> StoreHealth:
     """Probe whether a registered store is reachable from this host.
 
-    Lightweight and read-only: a directory stat for ``local_fs``, an HTTP ``HEAD``
-    for ``http``, ``rclone lsf`` for the cloud/remote kinds, and ``git ls-remote``
-    for ``git``. ``object_table`` and ``database`` are reported ``unsupported``
-    until their adapters land.
+    This transitional legacy helper retains directory, rclone, and Git probes.
+    HTTP fails closed here and is handled only by the runtime's pinned,
+    policy-authorized adapter. ``object_table`` and ``database`` are reported
+    ``unsupported`` until their adapters land. The former ``http_client`` and
+    ``http_timeout`` keywords were intentionally removed so direct callers
+    cannot mistake this fail-closed compatibility path for an HTTP probe; use
+    :class:`lab_tracker.http_store_health.HttpStoreHealthProbe` explicitly.
     """
 
     kind = store.kind
@@ -1044,7 +1042,10 @@ def check_store_health(
         )
 
     if kind is StoreKind.HTTP:
-        return _check_http_store_health(store, http_client=http_client, timeout=http_timeout)
+        return StoreHealth(
+            StoreHealthStatus.UNREACHABLE,
+            HTTP_STORE_HEALTH_FAILURE_DETAIL,
+        )
 
     if kind in _RCLONE_STORE_KINDS:
         runner = rclone_runner or _subprocess_rclone_runner("rclone")
@@ -1134,34 +1135,6 @@ def check_store_health(
     return StoreHealth(
         StoreHealthStatus.UNSUPPORTED,
         f"Health checks for '{kind.value}' stores are not supported yet.",
-    )
-
-
-def _check_http_store_health(
-    store: DataStore | StoreProbeTarget,
-    *,
-    http_client: _StoreHealthHttpClient | None,
-    timeout: float,
-) -> StoreHealth:
-    import httpx
-
-    base = store.endpoint or store.root
-    owns_client = http_client is None
-    client: _StoreHealthHttpClient = (
-        http_client if http_client is not None else httpx.Client(timeout=timeout)
-    )
-    try:
-        response = client.head(base)
-    except httpx.HTTPError as exc:
-        return StoreHealth(StoreHealthStatus.UNREACHABLE, f"Cannot reach {base}: {exc}")
-    finally:
-        if owns_client:
-            client.close()
-    if response.status_code < 400 or response.status_code in (403, 405):
-        # 403/405 mean the endpoint answered but refused HEAD — still reachable.
-        return StoreHealth(StoreHealthStatus.HEALTHY)
-    return StoreHealth(
-        StoreHealthStatus.UNREACHABLE, f"HEAD {base} returned {response.status_code}."
     )
 
 
@@ -1515,20 +1488,6 @@ class LocalFilesystemResolver(ArtifactResolver, ScopedLocalStoreResolver):
                     yield os.path.join(dirpath, name)
 
 
-def _resolve_direct_http_redirect(current_url: str, location: str) -> str | None:
-    """Retain direct-reference redirect semantics outside registered stores."""
-
-    try:
-        next_url = urljoin(current_url, location)
-        current_scheme = urlsplit(current_url).scheme.lower()
-        next_scheme = urlsplit(next_url).scheme.lower()
-    except ValueError:
-        return None
-    if current_scheme == "https" and next_scheme == "http":
-        return None
-    return next_url
-
-
 class HttpResolver(ArtifactResolver, ScopedHttpStoreResolver):
     """Resolves artifacts addressed by ``http(s)`` URLs.
 
@@ -1568,8 +1527,12 @@ class HttpResolver(ArtifactResolver, ScopedHttpStoreResolver):
                 "HTTP deadline must be finite, positive, and no greater than "
                 f"{MAX_OUTBOUND_HTTP_DEADLINE_SECONDS:g} seconds."
             )
-        self._policy = policy or OutboundHttpPolicy()
-        self._client = client or SafeHttpClient(timeout=deadline_seconds)
+        self._policy = policy if policy is not None else OutboundHttpPolicy()
+        self._client = (
+            client
+            if client is not None
+            else SafeHttpClient(timeout=deadline_seconds)
+        )
         self._deadline_seconds = deadline_seconds
         self._clock = clock
         self._max_fetch_bytes = max_fetch_bytes
@@ -1591,7 +1554,7 @@ class HttpResolver(ArtifactResolver, ScopedHttpStoreResolver):
         return self._resolve_http_url(
             ref,
             initial_url=ref.uri,
-            redirect_resolver=_resolve_direct_http_redirect,
+            redirect_resolver=resolve_direct_http_redirect,
             max_bytes=max_bytes,
             byte_range=byte_range,
         )
@@ -1667,7 +1630,7 @@ class HttpResolver(ArtifactResolver, ScopedHttpStoreResolver):
                 deadline.check()
                 with self._client.open("GET", target, deadline=deadline) as response:
                     deadline.check()
-                    if response.status_code in {301, 302, 303, 307, 308}:
+                    if response.status_code in HTTP_REDIRECT_STATUS_CODES:
                         location = response.get_header("location")
                         deadline.check()
                         if not location or redirect_count >= self._max_redirects:
@@ -2836,8 +2799,9 @@ def default_registry(
     adapters degrade to UNRESOLVED when their binary is absent, so including them
     is safe by default. Native store-backed adapters (s3, ssh, database) register
     here as they land. ``recovery`` opts the local resolver into content-hash
-    recovery of missing files within ``allowed_roots``. ``http_policy`` is the
-    shared outbound destination policy later reused by store-health probes.
+    recovery of missing files within ``allowed_roots``. ``http_policy`` and
+    ``http_client`` are the outbound authority and pinned transport that runtime
+    composition shares exactly with HTTP store-health probes.
     ``subprocess_deadline_seconds`` is one shared execution/verification budget
     for every command in a single rclone or Git resolution.
     ``git_remote_policy`` is one immutable structural policy shared with health
@@ -2880,10 +2844,10 @@ LAB_TRACKER_RESOLVER_RECOVERY_MAX_FILES_ENV = "LAB_TRACKER_RESOLVER_RECOVERY_MAX
 LAB_TRACKER_RESOLVER_RECOVERY_MAX_BYTES_ENV = "LAB_TRACKER_RESOLVER_RECOVERY_MAX_BYTES"
 
 # Comma-separated exact HTTP(S) origins and IP networks for internal artifact
-# destinations. Both variables are required for an exception: the normalized
-# scheme/host/effective-port origin must match exactly and every DNS answer must
-# fall inside one configured CIDR. Without an exception, every answer must be a
-# globally routable public address.
+# resolution and store-health destinations. Both variables are required for an
+# exception: the normalized scheme/host/effective-port origin must match exactly
+# and every DNS answer must fall inside one configured CIDR. Without an
+# exception, every answer must be a globally routable public address.
 LAB_TRACKER_RESOLVER_HTTP_ALLOWED_AUTHORITIES_ENV = (
     "LAB_TRACKER_RESOLVER_HTTP_ALLOWED_AUTHORITIES"
 )
@@ -2992,6 +2956,7 @@ def _strict_comma_separated_values(
 def registry_from_env(
     *,
     http_policy: OutboundHttpPolicy | None = None,
+    http_client: OutboundHttpClient | None = None,
     http_deadline_seconds: float | None = None,
     subprocess_deadline_seconds: float | None = None,
     git_remote_policy: GitRemotePolicy | None = None,
@@ -3069,7 +3034,12 @@ def registry_from_env(
     return default_registry(
         allowed_roots=allowed_roots,
         recovery=recovery_from_env(),
-        http_policy=http_policy or outbound_http_policy_from_env(),
+        http_policy=(
+            http_policy
+            if http_policy is not None
+            else outbound_http_policy_from_env()
+        ),
+        http_client=http_client,
         http_deadline_seconds=http_deadline_seconds,
         subprocess_deadline_seconds=subprocess_deadline_seconds,
         rclone_allowed_remotes=rclone_allowed_remotes,

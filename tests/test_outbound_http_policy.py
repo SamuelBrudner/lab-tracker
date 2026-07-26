@@ -10,15 +10,61 @@ import pytest
 from http_security_fakes import FakeAddressResolver, FakeClock
 
 from lab_tracker.outbound_http import (
+    DEFAULT_MAX_HTTP_REDIRECTS,
+    HTTP_REDIRECT_STATUS_CODES,
     ApprovedSocketAddress,
     OutboundHttpDeadline,
     OutboundHttpPolicy,
     OutboundHttpPolicyError,
     SystemAddressResolver,
+    resolve_direct_http_redirect,
 )
 
 PUBLIC_IPV4 = "93.184.216.34"
 PUBLIC_IPV6 = "2606:2800:220:1:248:1893:25c8:1946"
+
+
+def test_shared_redirect_contract_is_explicit_and_finite() -> None:
+    assert DEFAULT_MAX_HTTP_REDIRECTS == 3
+    assert frozenset({301, 302, 303, 307, 308}) == HTTP_REDIRECT_STATUS_CODES
+
+
+@pytest.mark.parametrize(
+    ("current_url", "location", "expected"),
+    (
+        (
+            "https://files.example/start",
+            "/next",
+            "https://files.example/next",
+        ),
+        (
+            "https://files.example/start",
+            "https://archive.example/final",
+            "https://archive.example/final",
+        ),
+        (
+            "http://files.example/start",
+            "https://archive.example/final",
+            "https://archive.example/final",
+        ),
+        (
+            "https://files.example/start",
+            "http://archive.example/final",
+            None,
+        ),
+        (
+            "https://files.example/start",
+            "https://[::1",
+            None,
+        ),
+    ),
+)
+def test_direct_redirect_resolution_preserves_reauthorization_boundary(
+    current_url: str,
+    location: str,
+    expected: str | None,
+) -> None:
+    assert resolve_direct_http_redirect(current_url, location) == expected
 
 
 @pytest.mark.parametrize(
