@@ -14,6 +14,12 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validat
 from pydantic.json_schema import SkipJsonSchema
 
 from lab_tracker.auth import Role
+from lab_tracker.data_store_definition import (
+    DATA_STORE_CREDENTIAL_REF_MAX_LENGTH,
+    DATA_STORE_ENDPOINT_MAX_LENGTH,
+    DATA_STORE_NAME_MAX_LENGTH,
+    DATA_STORE_ROOT_MAX_LENGTH,
+)
 from lab_tracker.goals_attributes import validate_goal_attributes
 from lab_tracker.models import (
     Analysis,
@@ -917,12 +923,18 @@ GoalLinkRead = GoalLink
 class DataStoreCreate(RequestModel):
     project_id: UUID | None = None
     group_id: UUID | None = None
-    name: NonBlankStr
+    name: NonBlankStr = Field(max_length=DATA_STORE_NAME_MAX_LENGTH)
     kind: StoreKind
-    root: NonBlankStr
+    root: NonBlankStr = Field(max_length=DATA_STORE_ROOT_MAX_LENGTH)
     capabilities: list[StoreCapability] | None = None
-    endpoint: str | None = None
-    credential_ref: str | None = None
+    endpoint: str | None = Field(
+        default=None,
+        max_length=DATA_STORE_ENDPOINT_MAX_LENGTH,
+    )
+    credential_ref: str | None = Field(
+        default=None,
+        max_length=DATA_STORE_CREDENTIAL_REF_MAX_LENGTH,
+    )
     is_default: bool = False
 
     @model_validator(mode="after")

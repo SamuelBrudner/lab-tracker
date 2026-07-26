@@ -24,8 +24,10 @@ that can reach the store.
 
 - **It keeps Lab Tracker out of byte storage** while making resolution reliable.
 - **References become portable by construction.** Declare the store once;
-  every reference is relocatable and cross-machine, because the host-specific
-  part (mount root, endpoint, bucket) lives on the *store*, not the artifact.
+  every reference is relative to a named definition instead of embedding a
+  host path or provider URL. Portable remote stores retain a canonical root and
+  stable rclone remote-name handle while host authority/configuration remains
+  operator-owned; `local_fs` registrations are deliberately host-specific.
 - **One integrity story.** Every artifact has a content hash relative to a known
   store, so `verified` / `drifted` means something.
 - **It matches what good labs already do.** The scientist in the walkthrough
@@ -38,16 +40,18 @@ The single most important separation in this design:
 
 | Lab Tracker owns | The host / user owns |
 | --- | --- |
-| *Where* the store is: kind, endpoint, bucket/root, scope, a stable name | *How* to authenticate to it: OAuth token, SSH key, AWS profile, DB password |
+| *Where* the store is: kind, exact native or canonical remote root, scope, a stable name | *How* to authenticate to it: OAuth token, SSH key, AWS profile, DB password |
 | A **credential reference** (a name/handle), never a secret | The actual secret, in env / OS keychain / secret manager / `rclone` config / `ssh-agent` |
 
-A `DataStore` registration says "the lab archive is the S3 bucket
-`s3://lab-archive`, or the OneDrive remote `lab-onedrive`." It does **not** carry
-the access key or the OAuth token. Each host/user supplies access the way their
-OS and tools already do. This keeps Lab Tracker from becoming a secret store or
-an identity provider (explicit anti-scope in `build-vs-buy-boundaries.md`), and
-it lets a *shared* group store be declared once while each member authenticates
-as themselves.
+A `DataStore` registration says "the lab archive is the configured rclone
+remote `lab-archive` beneath `/experiments`, or the public HTTP prefix
+`https://files.example/archive/`." It does **not** carry an access key, password,
+or OAuth token. For rclone-backed kinds—including S3—the root is a decoded path
+*within* the named remote, not an `s3://bucket` URL. Each host/user supplies
+access through its rclone configuration or other operator-owned facilities.
+This keeps Lab Tracker from becoming a secret store or an identity provider
+(explicit anti-scope in `build-vs-buy-boundaries.md`), and it lets a *shared*
+group store be declared once while each member authenticates as themselves.
 
 ## The `DataStore` entity
 
@@ -67,7 +71,9 @@ class StoreKind(str, Enum):
     ONEDRIVE = "onedrive"
     OBJECT_TABLE = "object_table"  # lakehouse table format: Iceberg / Delta / Hudi
     DATABASE = "database"          # SQL / warehouse: Postgres, BigQuery, Snowflake, DuckDB
-    HTTP = "http"                  # read-only public/authenticated URLs
+    HTTP = "http"                  # read-only credential-free URLs
+    RCLONE = "rclone"              # generic rclone-configured backend
+    GIT = "git"                    # read-only pinned repository content
 
 class StoreCapability(str, Enum):
     BYTES_BY_PATH = "bytes_by_path"        # key/path -> bytes
@@ -83,9 +89,9 @@ class DataStore(_DomainModel):
     name: str                        # stable handle used in locators, e.g. "lab-onedrive"
     kind: StoreKind
     capabilities: list[StoreCapability]
-    root: str                        # bucket / prefix / base path / DB+schema
-    endpoint: str | None = None      # host, region, API base — when not implied by kind
-    credential_ref: str | None = None  # a NAME, resolved host-side; never a secret
+    root: str                        # exact native path or canonical remote root
+    endpoint: str | None = None      # legacy field; new registrations reject presence
+    credential_ref: str | None = None  # exact rclone remote name; never a secret
     is_default: bool = False         # the opinionated default for new artifacts
     # provenance/audit fields mirror other entities (created_by, created_at, ...)
 ```
@@ -97,6 +103,36 @@ adapter. Operators can run the separate, read-only health endpoint for a bounded
 advisory check of a local root, remote prefix, or configured credentials. A
 healthy result describes reachability at probe time; it is not a registration
 guarantee or a durable capability.
+
+### Canonical new-registration shapes
+
+`POST /data-stores` validates one complete kind-specific definition before
+persistence. It does not trim or repair identity fields:
+
+| Kind | `root` | `credential_ref` | `endpoint` |
+| --- | --- | --- | --- |
+| `local_fs` | Exact native absolute path | absent | absent |
+| `http` | Canonical credential-free HTTP(S) directory prefix | absent | absent |
+| `ssh`, `s3`, `gcs`, `azure_blob`, `dropbox`, `gdrive`, `box`, `onedrive`, `rclone` | Decoded relative or rooted path within an rclone remote | Optional exact rclone remote name; otherwise `name` selects the remote | absent |
+| `git` | Canonical credential-free HTTPS, SSH, `git://`, or SCP-style remote | absent | absent |
+| `object_table`, `database` | Unsupported until their adapters exist | absent | absent |
+
+Names with surrounding whitespace are rejected rather than silently changing
+their identity. Generic nonlocal names may retain supported interior spaces;
+local names use the stricter portable local-store grammar. Blank-present
+optionals, embedded credentials, control characters, malformed targets, and
+values beyond the database column limits are rejected with static diagnostics.
+HTTP and Git canonicalization is structural and rclone rootedness is preserved.
+The request model performs ordinary structural parsing—including identifiers,
+enum values, nonblank fields, and published storage-length bounds—before route
+authorization. Once a structurally valid request reaches the service, project
+or group authorization precedes kind-specific semantic validation. Semantic
+validation is pure, and an invalid definition performs no store lookup,
+persistence, DNS, filesystem access, credential lookup, or subprocess execution.
+
+Historical rows remain readable without mutation. Their legacy fields are
+interpreted only by the existing fail-closed health and resolution boundaries;
+they do not weaken the contract for new writes.
 
 ## Backends differ by capability, not brand
 
@@ -112,7 +148,7 @@ is what keeps the resolver honest.
 | dropbox / gdrive / box / onedrive | path or file-id | partial | rev/version id | yes (pin the rev) | OAuth (host-side) |
 | object_table (Iceberg/Delta/Hudi) | table @ snapshot | n/a | **yes** | yes (snapshot is immutable) | underlying object store |
 | database (live tables) | query / table @ as-of | n/a | only if temporal/versioned | **only against a snapshot** | connection string ref |
-| http | URL | yes (Range) | no | yes if content-addressed | none / bearer |
+| http | URL | yes (Range) | no | yes if content-addressed | none |
 
 ### The two hard cases the matrix forces into the open
 
@@ -186,7 +222,8 @@ This slots directly into
 the store registry is what its `ResolverRegistry` dispatches through:
 
 1. Reference → store name → look up the `DataStore` (kind, capabilities,
-   endpoint, host-local credential ref).
+   canonical root, and optional rclone remote-name handle). Historical rows may
+   additionally carry a legacy endpoint.
 2. Validate and detach a typed store target while the database scope is open,
    then release that scope before host I/O.
 3. Pick the adapter for that `kind`; assert the operation's required capability
@@ -214,10 +251,10 @@ is exactly the "credential/session plumbing" `build-vs-buy-boundaries.md` says t
   store. A single `RcloneResolver` adapter — `credential_ref` = an rclone remote
   name — covers most of the user's list at once, and the secrets live in
   `rclone.conf` on the host, never in Lab Tracker.
-- **Native adapters where it pays:** `local_fs` (no dependency), `s3`
-  (ubiquitous, version-aware), `ssh` (`paramiko`/`asyncssh`), and `database`
-  (a thin DB-API/SQLAlchemy read path with a hard row cap). These earn native
-  code because of versioning, range reads, or query semantics rclone doesn't model.
+- **Dedicated adapters where they already pay:** `local_fs` (no dependency),
+  credential-free HTTP prefixes, and immutable Git pins. Native S3 versioning,
+  SSH, and bounded database-query adapters remain future work; their enum values
+  do not imply that those adapters have shipped.
 - **Lab Tracker owns neither tokens nor refresh flows.** It stores the store
   definition and a credential *reference*; the host resolves it.
 
@@ -242,19 +279,19 @@ Unix-only:
   plain `local_fs` adapter with zero credentials. rclone is only the fallback
   for stores that are **not** locally mounted (a headless server, an HPC node, or
   an agent running where the drive isn't synced).
-- Native adapters are equally portable: `local_fs`, `s3`, and `database` are pure
-  Python; `ssh` via `paramiko`/`asyncssh` is cross-platform.
+- The native `local_fs` adapter is cross-platform. Any future native S3, SSH, or
+  database adapter must meet the same Windows and containment requirements
+  before replacing the current rclone path.
 
 ### Decision (locked)
 
-**rclone-first for the cloud drives, native adapters for S3 / SSH / database /
-local_fs.** rclone is the single adapter for Dropbox, Google Drive, Box, and
-OneDrive (when not locally synced); the four native adapters earn their own code
-because of versioning, byte-range, query, or zero-dependency needs that rclone
-doesn't model. Native-everywhere was rejected: more code and more credential
-surface for marginal gain on the cloud drives, and it duplicates plumbing
-`build-vs-buy-boundaries.md` says to offload. This is the design's committed
-adapter strategy, not an open question.
+**rclone-first for every currently supported remote-drive/object-store kind;
+native `local_fs`, HTTP, and Git where their semantics differ.** S3, SSH, GCS,
+Azure Blob, Dropbox, Google Drive, Box, and OneDrive registrations all use the
+bounded rclone adapter today. Native S3 versioning, SSH, and database-query
+adapters are deferred until their extra semantics justify the additional code
+and credential surface. Native-everywhere remains rejected because it
+duplicates plumbing `build-vs-buy-boundaries.md` says to offload.
 
 ## Capture writes store-relative references
 
@@ -288,6 +325,9 @@ Shipped:
   contributor/read RBAC and unique-name-per-project (`ConflictError`), and the
   `LabTrackerAPI` facade.
 - ✅ Routes `POST /data-stores`, `GET /data-stores`, `GET /data-stores/{id}`.
+- ✅ Pure kind-specific validation and canonicalization for new registrations,
+  applied after scope authorization and before lookup or persistence. Legacy
+  rows still hydrate without silent repair.
 - ✅ `store://<name>/<path>` resolution: the resolve endpoint authorizes and
   looks up the store before releasing its database scope. `local_fs` becomes a
   typed target that retains the logical URI, validated relative components, and
@@ -303,9 +343,9 @@ Shipped:
   cache access, detaches a frozen exact-value probe target, and releases the
   ordinary request database scope before cache or host I/O. Completed results
   use a hard-bounded process-local TTL/LRU cache with exact-key single-flight
-  and bounded follower waits. HTTP health treats a present `endpoint` as
-  authoritative (including blank or invalid values), never falls back to
-  `root`, and requires the selected initial URL to pass the hardened
+  and bounded follower waits. For historical HTTP rows, health treats a present
+  `endpoint` as authoritative (including blank or invalid values), never falls
+  back to `root`, and requires the selected initial URL to pass the hardened
   registered-base structural grammar before host I/O. It sends a bounded
   `HEAD` through the exact outbound policy and pinned client used by artifact
   resolution, reauthorizes and repins every redirect under one total deadline,
@@ -383,21 +423,24 @@ Shipped:
   HTTP origin and portable path components without DNS. A frozen, factory-only
   target crosses the database-scope boundary, and the resolver checks the
   initial URL and every raw redirect before the next DNS or socket operation.
-  Direct HTTP references retain their existing, broader redirect semantics.
+  Contributor-authored direct HTTP references are metadata only and fail closed
+  before this adapter is selected.
 - ✅ Registered rclone prefix confinement: typed remote names follow rclone's
   configured-name grammar, registered roots preserve `remote:path` versus
   `remote:/path`, and a frozen factory-only target crosses the database-scope
   boundary. Nominal dispatch composes one exact target token only after the
-  combined root/locator budget and exact remote allowlist pass. Direct
-  `rclone://` references retain their established parser and process behavior.
+  combined root/locator budget and exact remote allowlist pass.
+  Contributor-authored direct rclone references are metadata only and fail
+  closed before this adapter is selected.
 - ✅ Registered Git confinement: `GitObjectId` accepts only full lowercase,
   nonzero SHA-1 or SHA-256 IDs, and `PinnedGitPath` pairs that ID with a portable
   repository path. A frozen factory-only target carries the canonical logical
   identity and structurally parsed registered remote across the database-scope
   boundary. Nominal dispatch reauthorizes the remote before cache creation,
   separates cache namespaces by object format, and initializes Git explicitly
-  with `--object-format=sha1` or `--object-format=sha256`. Direct generic
-  `git+` behavior remains compatible pending its separate hardening.
+  with `--object-format=sha1` or `--object-format=sha256`.
+  Contributor-authored direct Git references are metadata only and fail closed
+  before this adapter is selected.
 
 Deferred:
 

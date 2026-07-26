@@ -6,14 +6,16 @@ from collections.abc import Iterable
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext
+from lab_tracker.data_store_definition import (
+    DataStoreDefinitionError,
+    ValidatedDataStoreDefinition,
+)
 from lab_tracker.errors import (
     ConflictError,
     NotFoundError,
     OpaqueTargetNotFoundError,
     ValidationError,
 )
-from lab_tracker.local_path_policy import is_supported_absolute_local_root
-from lab_tracker.local_store_locator import is_valid_local_store_name
 from lab_tracker.models import (
     DataStore,
     StoreCapability,
@@ -23,7 +25,7 @@ from lab_tracker.models import (
 from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.project_service import ProjectService
-from lab_tracker.services.shared import actor_user_fk, actor_user_id, ensure_non_empty
+from lab_tracker.services.shared import actor_user_fk, actor_user_id
 
 
 class DataStoreService(BaseService):
@@ -63,34 +65,31 @@ class DataStoreService(BaseService):
         else:
             self.authorization.require_group_owner(group_id, actor=actor)
             scope_label = "group"
-        ensure_non_empty(name, "name")
-        ensure_non_empty(root, "root")
-        if kind is StoreKind.LOCAL_FS and not is_valid_local_store_name(name):
-            raise ValidationError(
-                "Local filesystem store name must use 1-63 ASCII letters, digits, dots, "
-                "underscores, or hyphens and must start with a letter or digit."
+        try:
+            definition = ValidatedDataStoreDefinition.create(
+                name=name,
+                kind=kind,
+                root=root,
+                endpoint=endpoint,
+                credential_ref=credential_ref,
             )
-        if kind is StoreKind.LOCAL_FS and not is_supported_absolute_local_root(
-            root
-        ):
-            raise ValidationError(
-                "Local filesystem store root must be a supported absolute local path."
-            )
-        stored_name = name if kind is StoreKind.LOCAL_FS else name.strip()
-        stored_root = root if kind is StoreKind.LOCAL_FS else root.strip()
+        except DataStoreDefinitionError as exc:
+            raise ValidationError(str(exc)) from None
         resolved_capabilities = (
-            list(capabilities) if capabilities is not None else default_store_capabilities(kind)
+            list(capabilities)
+            if capabilities is not None
+            else default_store_capabilities(definition.kind)
         )
         store = DataStore(
             store_id=uuid4(),
             project_id=project_id,
             group_id=group_id,
-            name=stored_name,
-            kind=kind,
+            name=definition.name,
+            kind=definition.kind,
             capabilities=resolved_capabilities,
-            root=stored_root,
-            endpoint=endpoint.strip() if endpoint else None,
-            credential_ref=credential_ref.strip() if credential_ref else None,
+            root=definition.root,
+            endpoint=definition.endpoint,
+            credential_ref=definition.credential_ref,
             is_default=is_default,
             created_by=actor_user_id(actor),
             created_by_user_id=actor_user_fk(actor, self.repository),
