@@ -148,24 +148,28 @@ research record:
   URIs with the canonical URI echoed as `meta.iri` in plain envelopes, and a
   committed worked example under `docs/examples/` guarded by a drift test.
 - On-demand resolution of external artifact references (content hash is the
-  integrity gate). Local resolution and registered local-store health share one
-  immutable, namespace-transitive operator-root policy parsed from the
-  platform-path-separated `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS`; it grants the
-  subtree visible in the operator-controlled service namespace rather than one
-  device identity, and the application runtime denies all local roots when it
-  is unset or empty. Local resolution optionally recovers a moved/renamed file
-  by its content hash within those roots
+  integrity gate). Runtime parses the platform-path-separated
+  `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS` once. Registered local-store health uses
+  a lexical authority and bounded broker; direct resolution and recovery still
+  use a transitional policy derived from the same immutable root set. That
+  root authority grants the subtree visible in the operator-controlled service
+  namespace rather than one device identity, and the application runtime
+  denies all local roots when it is unset or empty. Local resolution optionally
+  recovers a moved/renamed file by its content hash within those roots
   (`LAB_TRACKER_RESOLVER_RECOVERY`, off by default, bounded, read-only).
-  Local health is a bounded, isolated, output-free directory probe whose
-  helper-side search/traversal and validation remain bound to no-follow
-  directory handles across link and junction substitution races. Helper-owned
-  close attempts are best effort and contained helper exit is the cleanup
-  backstop. The result is advisory rather than registration validation or a
-  durable filesystem lease. POSIX ordinary/bind mounts beneath a root are
-  allowed; unsupported Windows nested volume/UNC/device/GUID namespaces fail
-  closed; untrusted topology mutation makes the local surface unsupported.
-  Bounded pre-follow parent planning remains `lab-tracker-n5kp.71`; the mount
-  decision is normative in
+  Local health is a bounded, isolated, output-free directory operation behind
+  a narrow role. One deadline starts before lexical admission; the helper
+  anchors the trusted grant, resolves aliases component-by-component from
+  no-follow handles, and rejects an escape before target traversal. It never
+  returns or reopens a canonical pathname plan. Helper-owned close attempts are
+  best effort and contained helper exit is the cleanup backstop. The result is
+  advisory rather than registration validation or a durable filesystem lease.
+  POSIX ordinary/bind mounts beneath a root are allowed; unsupported Windows
+  nested volume/UNC/device/GUID namespaces fail closed; eligible Cloud
+  directories remain traversable; untrusted topology mutation makes the local
+  surface unsupported. Direct file and recovery operations remain the
+  `lab-tracker-n5kp.47` and `lab-tracker-n5kp.61` follow-ups. The mount decision
+  is normative in
   [`configuration.md`](configuration.md#mount-and-namespace-authority).
   Registered `git` data stores resolve `path@commit` locators read-only and
   on demand, gated by an operator remote allowlist

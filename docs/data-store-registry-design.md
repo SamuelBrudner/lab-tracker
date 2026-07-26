@@ -306,19 +306,21 @@ Shipped:
   preflight, redirect denial, sanitized environment, app-owned working
   directory, and one deadline across both bounded commands. Invalid targets
   perform no per-probe process work, and ordinary failures expose only one
-  static detail per adapter. Local health first restricts the object-identical
-  operator `LocalPathPolicy` to the complete registered root, then invokes one
-  fixed isolated, output-free Python helper under the shared process executor
-  and subprocess deadline. The platform helper opens each canonical component
-  relative to the retained preceding no-follow directory handle, requires
-  search/traverse permission, and validates the final handle, preventing helper
-  inspection from being redirected by a link or junction substitution race.
-  Helper-owned close attempts are best effort and contained helper exit is the
-  cleanup backstop. Policy narrowing and canonicalization occur in the parent
-  before that deadline. This remains a static, advisory point-in-time result
-  rather than a durable filesystem lease. The legacy helper now fails closed
-  for local, HTTP, rclone, and Git. `object_table` and `database` remain
-  unsupported.
+  static detail per adapter. Local health creates one deadline before invoking
+  a bounded directory-inspection role. Its filesystem-I/O-free authority
+  selects the most-specific lexical operator grant, then one fixed isolated,
+  output-free Python helper resolves the trusted root and lexically admitted
+  candidate component-by-component under retained no-follow handles. Windows
+  normalizes only safe separator aliases before this strict helper protocol.
+  Symlink and junction targets are parsed before traversal and must remain
+  inside that same grant;
+  unsupported namespace or mount targets fail closed, while eligible Cloud
+  directory placeholders remain traversable. No canonical pathname plan is
+  returned or reopened. Helper-owned close attempts are best effort and
+  contained helper exit is the cleanup backstop. This remains a static,
+  advisory point-in-time result rather than a durable filesystem lease. The
+  legacy helper now fails closed for local, HTTP, rclone, and Git.
+  `object_table` and `database` remain unsupported.
 - ✅ Group-scoped stores: a store is scoped to exactly one of a project or a
   group (migration `0050`, nullable `project_id` + `group_id`). A group store is
   inherited by every project in the group — `get_by_name` resolves a project's
@@ -343,10 +345,13 @@ Shipped:
   registered store root. A broader global root therefore cannot make sibling
   files addressable through that store. Application composition parses
   `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS` once as an `os.pathsep`-separated
-  operator list and shares one immutable policy with local resolution and local
-  health; unset or empty runtime configuration denies every local root. The
-  grant is namespace-transitive rather than device-bound; the trusted actor,
-  platform matrix, and point-in-time lifecycle are defined by the normative
+  operator list. Local health consumes a filesystem-I/O-free lexical authority
+  and bounded operations broker; direct resolution and recovery temporarily
+  derive the legacy policy from that same immutable root set until their
+  dedicated migrations land. Unset or empty runtime configuration denies every
+  local root. The grant is namespace-transitive rather than device-bound; the
+  trusted actor, platform matrix, and point-in-time lifecycle are defined by
+  the normative
   [mount and namespace authority](configuration.md#mount-and-namespace-authority)
   contract.
 - ✅ Registered HTTP prefix confinement: a pure value validates the canonical

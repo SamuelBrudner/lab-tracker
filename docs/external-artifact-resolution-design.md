@@ -234,9 +234,9 @@ output never resets the deadline.
 (default: `30`). It is independent from the HTTP deadline and must be finite,
 greater than zero, and no greater than `86400` seconds. It also gives each
 local, rclone, or Git store-health probe a fresh bounded execution budget; local
-health's parent-side policy narrowing and canonicalization happen before that
-budget begins. Metadata stdout and stderr are captured under separate fixed byte
-caps. Artifact stdout is streamed
+health creates that budget before its filesystem-I/O-free lexical admission and
+passes the exact deadline through its bounded filesystem broker. Metadata stdout
+and stderr are captured under separate fixed byte caps. Artifact stdout is streamed
 instead: actual bytes read, rather than advisory rclone or Git metadata, are
 enforced against the existing `max_fetch_bytes` limit while the full object is
 hashed. An object that grows after a size preflight therefore cannot bypass the
@@ -439,55 +439,58 @@ The result retains the canonical logical `store://` URI; concrete host paths are
 not exposed in store-scoped diagnostics.
 
 The raw-absolute rule applies to registered store roots, not operator
-configuration: global resolver roots preserve their established `~` expansion
-and relative-to-process-working-directory behavior. Non-local locator syntax is
-also unchanged here; each remote adapter owns a separate typed authority
-boundary.
+configuration: global resolver roots preserve current-user `~` expansion from
+the process environment and relative-to-process-working-directory behavior.
+Named-user tilde forms are rejected without account lookup. Non-local locator
+syntax is also unchanged here; each remote adapter owns a separate typed
+authority boundary.
 
 ### Bounded advisory local-store health
 
 Application composition parses `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS` once using
 the host's `os.pathsep` (`:` on POSIX, `;` on Windows). Unset, empty, and
-whitespace-only configuration creates a deny-all runtime policy. Empty or
-whitespace-only components are omitted; non-empty components retain their exact
-spelling for the operator-root normalization described above. The same frozen,
-slotted `LocalPathPolicy` object is shared by local resolution and local health.
-Explicit typed composition can override configuration without parsing it;
-direct resolver construction retains its historical unscoped compatibility
-mode, which is not the application's absent-setting behavior.
+whitespace-only configuration creates a deny-all runtime authority. The
+filesystem-I/O-free authority preserves unambiguous lexical components, expands
+the current-user `~` from the process environment, prefixes relative roots with
+the startup working directory, and rejects dot/dot-dot or unsupported platform
+spellings rather than canonicalizing them.
+One bounded filesystem broker serves local health. A transitional
+`LocalPathPolicy` derived from the same roots remains only for direct resolution
+and recovery until their broker roles land. Health admits only a configured
+lexical root spelling; the separate physical spelling behind an operator root
+alias must be configured explicitly if registered stores use it.
 
 Local-store health is an explicit read-only advisory probe, never a side effect
-of registration. The parent validates the registered root as native and
-absolute and restricts the shared policy to that complete root before allocating
-a deadline or starting a child. A rejected target performs no per-probe process
-work and returns only the static local-health failure detail. The accepted
-canonical root is passed in one dedicated minimal environment variable to a
-fixed absolute sibling stdlib-only Python helper launched as
-`sys.executable -I -S -B <helper>` with no caller-controlled argument or working
-directory. The helper emits no output and communicates reachability only by
-exit status. POSIX opens every canonical component descriptor-relatively with
-directory/no-follow flags, requires search permission through each retained
-descriptor, and classifies the retained final descriptor. Windows requests
-traverse permission, anchors a validated drive-root handle, opens one component
-at a time relative to the retained preceding handle without following reparse
-points, and validates the final path and directory metadata through that same
-handle. Explicit helper-owned close attempts are best effort; contained helper
-exit backstops failed closes and asynchronous interruption windows.
+of registration. It creates one absolute deadline before invoking the broker.
+Pure component comparison selects the most-specific containing grant; deny-all,
+malformed, disjoint, and sibling-prefix candidates return only the static
+failure and perform no target filesystem or process work. The broker passes the
+lexically admitted candidate and selected root in one compact, versioned,
+bounded ASCII
+JSON environment value to a fixed absolute sibling stdlib-only helper launched
+as `sys.executable -I -S -B <helper>`. Paths never appear in argv or output.
 
-The shared bounded executor contains the helper's descendants and applies the
-configured subprocess deadline to interpreter startup, helper-side opens and
-validation, and process output/drain, then checks the deadline again after the
-executor returns. Only an exact clean exit with zero output is healthy;
-timeout, containment failure, nonzero exit, output, and ordinary adapter errors
-collapse to the same static detail. Adapter-level `BaseException` still
-propagates after executor-owned cleanup. Policy restriction and canonicalization
-in the parent precede the deadline, so the setting does not bound that
-filesystem work. During helper validation, an intermediate or final
-link/junction substitution cannot redirect inspection, and replacement after
-open cannot redirect the retained handle. The result remains an advisory
-point-in-time snapshot rather than a durable lease. Pre-follow-safe parent
-planning remains `lab-tracker-n5kp.71`; mount crossings follow the normative
-namespace-transitive policy in
+Inside the deadline, the helper resolves the trusted operator root and retains
+its handle. It walks only one candidate component at a time relative to retained
+handles. POSIX reads symlink text no-follow and rewrites relative or absolute
+in-grant targets in a bounded state machine before opening target components.
+Windows reads and validates exact-handle symlink/junction reparse data before
+rewriting an in-grant target; nested volume-GUID mounts, unsupported
+UNC/device/GUID targets, malformed payloads, and escapes are denied before
+target traversal. Eligible D-bit/N-clear Cloud directories remain traversable.
+No canonical pathname plan crosses the process boundary, and no accepted object
+is closed and reopened by path.
+
+The shared bounded executor contains the helper's descendants. The exact
+deadline covers broker admission, protocol construction, interpreter startup,
+trusted-root anchoring, alias resolution, opens and validation, and process
+drain, then is checked again after the executor returns. Terminate/kill/reap has
+its separate fixed cleanup grace. Only the accessible exit with zero output is
+healthy; denial, timeout, containment failure, unknown/nonzero exit, output, and
+ordinary adapter errors collapse to the same static detail. Adapter-level
+`BaseException` still propagates after executor-owned cleanup. The result remains
+an advisory point-in-time snapshot rather than a durable lease. Mount crossings
+follow the normative namespace-transitive policy in
 [`configuration.md`](configuration.md#mount-and-namespace-authority).
 
 ## Recovering moved/renamed local artifacts
@@ -628,16 +631,14 @@ Shipped (`src/lab_tracker/artifact_resolution.py`, tested in
   recovery roots are narrowed to that store root while remaining conjunctive
   with the operator allowlist; invalid or mismatched logical store locators fail
   closed before candidate filesystem work.
-- ✅ Registered local-store health shares the resolver's object-identical
-  immutable `LocalPathPolicy`, restricts it to the complete registered root, and
-  runs one fixed isolated stdlib helper through the bounded process executor.
-  The helper is run with zero-byte stdout/stderr caps and emits no output.
-  POSIX and Windows each traverse through retained no-follow directory handles
-  and classify the final handle. Link or junction substitution before a
-  component open is rejected; replacement after open cannot redirect the
-  retained handle. Ordinary pre-open replacement remains part of the parent
-  planning work tracked by `lab-tracker-n5kp.71`. The helper deadline begins
-  after parent-side canonicalization. Results are static, redacted,
+- ✅ Registered local-store health consumes a narrow directory-inspection role
+  backed by one filesystem-I/O-free authority and bounded operations broker. It
+  creates one deadline before lexical admission and runs one fixed isolated
+  stdlib helper through the shared process executor with zero-byte output caps.
+  The helper anchors the selected operator grant, parses alias targets from
+  retained no-follow handles, and walks only proven in-grant components.
+  Escaping aliases are denied before target traversal; replacement after open
+  cannot redirect the retained handle. Results are static, redacted,
   point-in-time reachability hints rather than durable filesystem leases.
 - ✅ `HttpResolver` — `http(s)`, full-body verify with a `max_fetch_bytes` cap
   (oversized → `UNRESOLVED`, never uncertified bytes), plus a shared outbound

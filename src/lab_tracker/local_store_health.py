@@ -3,21 +3,19 @@
 from __future__ import annotations
 
 import math
-import os
-import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Final
 
 from lab_tracker.bounded_subprocess import (
     DEFAULT_PROCESS_DEADLINE_SECONDS,
     MAX_PROCESS_DEADLINE_SECONDS,
     ProcessDeadline,
-    ProcessExecutor,
 )
-from lab_tracker.local_path_policy import LocalPathPolicy
+from lab_tracker.local_filesystem_ports import (
+    LocalDirectoryInspection,
+    LocalDirectoryInspector,
+)
 from lab_tracker.models import StoreKind
 from lab_tracker.store_health import (
     LOCAL_STORE_HEALTH_FAILURE_DETAIL,
@@ -26,24 +24,12 @@ from lab_tracker.store_health import (
     StoreProbeTarget,
 )
 
-LOCAL_STORE_HEALTH_ROOT_ENV: Final = "LAB_TRACKER_INTERNAL_LOCAL_STORE_HEALTH_ROOT"
-_HELPER_FILENAME: Final = (
-    "_windows_local_store_health_helper.py"
-    if os.name == "nt"
-    else "_local_store_health_helper.py"
-)
-_HELPER_PATH: Final = Path(os.path.abspath(__file__)).with_name(_HELPER_FILENAME)
-_HELPER_OPTIONS: Final = ("-I", "-S", "-B")
-_POSIX_LOCALE_VARIABLES: Final = frozenset({"LANG", "LC_ALL", "LC_CTYPE"})
-_WINDOWS_RUNTIME_VARIABLES: Final = frozenset({"SYSTEMROOT", "WINDIR"})
-
 
 @dataclass(frozen=True, slots=True)
 class LocalStoreHealthProbe:
-    """Probe one statically authorized local root in a contained helper."""
+    """Map one bounded directory inspection to the redacted health contract."""
 
-    policy: LocalPathPolicy
-    executor: ProcessExecutor
+    inspector: LocalDirectoryInspector
     deadline_seconds: float = DEFAULT_PROCESS_DEADLINE_SECONDS
     clock: Callable[[], float] = field(
         default=time.monotonic,
@@ -69,61 +55,18 @@ class LocalStoreHealthProbe:
         if target.kind is not StoreKind.LOCAL_FS:
             return _unreachable()
 
-        restricted = self.policy.restricted_to_absolute_root(target.root)
-        if restricted is None:
-            return _unreachable()
-        roots = restricted.canonical_roots
-        if roots is None or len(roots) != 1:
-            return _unreachable()
-        canonical_root = roots[0]
-
-        python_executable = sys.executable
-        if (
-            not python_executable
-            or "\0" in python_executable
-            or not os.path.isabs(python_executable)
-        ):
-            return _unreachable()
-
         deadline = ProcessDeadline.after(
             self.deadline_seconds,
             clock=self.clock,
         )
-        result = self.executor.run(
-            [
-                python_executable,
-                *_HELPER_OPTIONS,
-                os.fspath(_HELPER_PATH),
-            ],
+        result = self.inspector.inspect_directory(
+            target.root,
             deadline=deadline,
-            stdout_limit_bytes=0,
-            stderr_limit_bytes=0,
-            cwd=None,
-            env=_helper_environment(canonical_root),
         )
         deadline.check()
-        if (
-            result.returncode == 0
-            and result.stdout == b""
-            and result.stdout_bytes == 0
-            and result.stderr_bytes == 0
-        ):
+        if result is LocalDirectoryInspection.ACCESSIBLE:
             return StoreHealth(StoreHealthStatus.HEALTHY)
         return _unreachable()
-
-
-def _helper_environment(canonical_root: str) -> dict[str, str]:
-    environment = {LOCAL_STORE_HEALTH_ROOT_ENV: canonical_root}
-    if os.name == "nt":
-        for name, value in os.environ.items():
-            if name.upper() in _WINDOWS_RUNTIME_VARIABLES:
-                environment[name] = value
-        return environment
-    if os.name == "posix":
-        for name, value in os.environ.items():
-            if name in _POSIX_LOCALE_VARIABLES:
-                environment[name] = value
-    return environment
 
 
 def _validate_deadline_seconds(value: object) -> float:

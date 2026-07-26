@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -8,6 +9,11 @@ import zipfile
 from pathlib import Path, PurePosixPath
 
 import pytest
+
+from lab_tracker.local_filesystem_operations import (
+    LOCAL_FILESYSTEM_PROTOCOL_VERSION,
+    LOCAL_FILESYSTEM_REQUEST_ENV,
+)
 
 try:
     import tomllib
@@ -18,7 +24,6 @@ _POSIX_LOCAL_STORE_HEALTH_HELPER = "lab_tracker/_local_store_health_helper.py"
 _WINDOWS_LOCAL_STORE_HEALTH_HELPER = (
     "lab_tracker/_windows_local_store_health_helper.py"
 )
-_LOCAL_STORE_HEALTH_ROOT_ENV = "LAB_TRACKER_INTERNAL_LOCAL_STORE_HEALTH_ROOT"
 
 
 def _packaged_files(package_root: Path, subdir: str) -> set[str]:
@@ -41,7 +46,18 @@ def _package_data_matches(file_path: str, patterns: list[str]) -> bool:
 
 
 def _isolated_helper_environment(root: Path) -> dict[str, str]:
-    environment = {_LOCAL_STORE_HEALTH_ROOT_ENV: os.fspath(root)}
+    request = json.dumps(
+        {
+            "v": LOCAL_FILESYSTEM_PROTOCOL_VERSION,
+            "op": "inspect-directory",
+            "candidate": os.fspath(root),
+            "roots": [os.fspath(root.parent)],
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    environment = {LOCAL_FILESYSTEM_REQUEST_ENV: request}
     if os.name == "nt":
         for name, value in os.environ.items():
             if name.upper() in {"SYSTEMROOT", "WINDIR"}:

@@ -2563,10 +2563,11 @@ def default_registry(
     for every command in a single rclone or Git resolution.
     ``rclone_remote_policy`` and ``git_remote_policy`` are immutable authorities
     shared with health composition; omission denies every corresponding remote.
-    ``local_path_policy`` is the typed local authority shared with health
-    composition; when supplied it takes precedence over compatibility
-    ``allowed_roots``. One process executor is shared by both subprocess
-    resolvers.
+    ``local_path_policy`` is the transitional typed authority for direct local
+    resolution and recovery only; when supplied it takes precedence over
+    compatibility ``allowed_roots``. Local health receives its separate bounded
+    broker at runtime composition. One process executor is shared by the
+    subprocess resolvers and health adapters.
     """
 
     shared_process_executor = (

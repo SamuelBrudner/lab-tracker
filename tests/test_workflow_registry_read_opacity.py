@@ -17,7 +17,8 @@ from read_opacity_inventory import (
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.auth import Role, utc_now
-from lab_tracker.local_path_policy import LocalPathPolicy
+from lab_tracker.local_filesystem_authority import LocalFilesystemAuthority
+from lab_tracker.local_filesystem_operations import BoundedLocalFilesystemOperations
 from lab_tracker.local_store_health import LocalStoreHealthProbe
 from lab_tracker.models import GraphChangeSet
 from lab_tracker.routes import graph_batches as graph_batch_routes
@@ -530,8 +531,10 @@ def test_store_health_cache_and_admission_preserve_browser_device_and_lpat_scope
 
     executor = RecordingExecutor()
     local_probe = LocalStoreHealthProbe(
-        policy=LocalPathPolicy([]),
-        executor=executor,
+        inspector=BoundedLocalFilesystemOperations(
+            authority=LocalFilesystemAuthority.from_roots([]),
+            executor=executor,
+        ),
     )
 
     def checker(target: StoreProbeTarget) -> StoreHealth:
