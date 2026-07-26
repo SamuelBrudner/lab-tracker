@@ -209,15 +209,24 @@ requirement.
 
 Rclone and Git adapters execute optional host binaries under a separate process
 budget. The configured budget is one monotonic deadline for the entire logical
-resolution: rclone metadata lookup, transfer, and verification share one
-deadline, as do Git fetch, object inspection, transfer, and verification.
-Progress or moving between subprocesses does not reset it.
+operation: rclone metadata lookup, transfer, and verification share one
+deadline, as do Git fetch, object inspection, transfer, and verification. A
+store-health probe receives a fresh deadline; Git's URL preflight and HEAD query
+share it. Progress or moving between subprocesses does not reset it.
 
 - `LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS`: execution and verification
-  budget for one rclone or Git artifact resolution (default: `30`). The value
-  must be finite, greater than zero, and no greater than `86400` seconds (one
-  day); invalid values fail application startup. This setting is independent of
-  `LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS`.
+  budget for one rclone or Git artifact resolution or store-health probe
+  (default: `30`). The value must be finite, greater than zero, and no greater
+  than `86400` seconds (one day); invalid values fail application startup. This
+  setting is independent of `LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS`.
+- `LAB_TRACKER_RCLONE_ALLOWED_REMOTES`: strict comma-separated exact remote
+  names for server-side rclone resolution and rclone store-health probes. The
+  unset or empty value denies every remote. Entries are not
+  whitespace-trimmed; an empty, malformed, NFKC-delimiter-unsafe, or exact
+  duplicate entry fails startup without echoing the configured value. Names
+  follow rclone's letters/numbers plus `_-.+@ ` grammar, but cannot begin with
+  `-` or space, end with space, contain a colon or separator, or be a
+  single-letter Windows drive alias.
 - `LAB_TRACKER_GIT_ALLOWED_REMOTES`: strict comma-separated structural grants
   for server-side Git resolution and Git store-health probes. The unset or empty
   value denies every Git remote. Entries are not whitespace-trimmed; an empty,
@@ -246,14 +255,21 @@ fragment components, percent escapes, and malformed paths or authorities are
 also rejected. Credentials belong in operator-controlled Git credential helpers
 or SSH facilities, never in this setting or a persisted store root.
 
-The policy is parsed once from `Settings` at startup. One immutable policy
-instance is shared by the resolver registry and the store-health checker; those
-components do not independently reread the process environment. Store-health
-Git commands run from an app-owned empty, non-repository directory, so an
-ambient checkout's repository-local Git configuration cannot affect them. The
-Git command environment clears inherited repository/object/work-tree selectors
-and sets the operation directory's parent as Git's discovery ceiling, preventing
-that parent or anything above it from supplying repository-local configuration.
+Both policies are parsed once from `Settings` at startup. One immutable instance
+of each policy and one bounded process executor are shared by the resolver
+registry and store-health checker; those components do not independently reread
+the process environment. Rclone health preserves the registered distinction
+between `remote:path`, `remote:/path`, and `remote:/`. A present
+`credential_ref` remains authoritative even when blank or invalid and never
+falls back to the store name. Its bounded `rclone lsf` intentionally reports a
+large/noisy root as unreachable when fixed metadata output limits are exceeded.
+
+Store-health Git commands run from an app-owned empty, non-repository directory,
+so an ambient checkout's repository-local Git configuration cannot affect them.
+The Git command environment clears inherited repository/object/work-tree
+selectors and sets the operation directory's parent as Git's discovery ceiling,
+preventing that parent or anything above it from supplying repository-local
+configuration.
 
 Authorization occurs before process creation. Git's effective remote is then
 preflighted with the same bounded command environment. Apart from its required
@@ -273,15 +289,16 @@ operator-controlled configuration; users who can modify them can change where
 Git connects or disclose Git credentials. Do not mount user-writable Git,
 credential-helper, proxy, or OpenSSH configuration into the service.
 
-Subprocess metadata output and stderr have independent fixed memory caps. Actual
+Every subprocess receives independent stdout and stderr memory caps. Actual
 artifact bytes are streamed and checked against the resolver's existing
 `max_fetch_bytes` limit as they arrive; a preflight size is advisory and cannot
 permit a growing object to exceed that limit. Timeout, output overflow,
-malformed metadata, or failed cleanup produces a generic unresolved result
-without exposing a remote, path, credential, or raw stderr. Pipes are closed and
-an uncooperative process is terminated, then killed and reaped within a separate
-fixed cleanup grace. A failed call can therefore exceed the configured
-execution deadline only by that bounded cleanup grace.
+malformed metadata, or failed cleanup produces a generic unresolved or
+adapter-specific unreachable result without exposing a remote, path, credential,
+exception, or raw stderr. Pipes are closed and an uncooperative process is
+terminated, then killed and reaped within a separate fixed cleanup grace. A
+failed call can therefore exceed the configured execution deadline only by that
+bounded cleanup grace.
 
 The bounded rclone/Git process boundary contains complete descendant trees on
 both supported process platforms. POSIX hosts use a dedicated process group.

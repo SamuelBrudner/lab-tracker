@@ -18,7 +18,6 @@ from lab_tracker.artifact_resolution import (
     ResolverRegistry,
     git_store_resolution_target,
     http_store_resolution_target,
-    is_rclone_store_kind,
     local_store_resolution_target,
     rclone_store_resolution_target,
     resolver_registry_for_prepared_target,
@@ -68,6 +67,7 @@ from lab_tracker.provenance import (
     build_claim_provenance_document,
     build_dataset_provenance_document,
 )
+from lab_tracker.rclone_store_definition import is_rclone_store_kind
 from lab_tracker.schemas import (
     AssistantDecisionContextRequest,
     PortfolioProjectGroupSummary,

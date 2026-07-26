@@ -296,11 +296,16 @@ Shipped:
   registered-base structural grammar before host I/O. It sends a bounded
   `HEAD` through the exact outbound policy and pinned client used by artifact
   resolution, reauthorizes and repins every redirect under one total deadline,
-  and returns one static failure detail. The remaining leaf adapters still use
-  `check_store_health` (directory stat for `local_fs`, `rclone lsf` for
-  cloud/remote kinds, `git ls-remote` for `git`, and `unsupported` for
-  `object_table`/`database`); their process/local-host hardening remains tracked
-  separately.
+  and returns one static failure detail. Rclone and Git use dedicated adapters
+  over the exact immutable remote policies and bounded process executor shared
+  with artifact resolution. Rclone preserves `remote:path`, `remote:/path`, and
+  `remote:/` while running one fixed bounded `lsf`; Git retains exact URL
+  preflight, redirect denial, sanitized environment, app-owned working
+  directory, and one deadline across both bounded commands. Invalid targets
+  perform no per-probe process work, and ordinary failures expose only one
+  static detail per adapter. The legacy helper now fails closed for HTTP,
+  rclone, and Git. Local directory containment remains tracked separately;
+  `object_table` and `database` remain unsupported.
 - ✅ Group-scoped stores: a store is scoped to exactly one of a project or a
   group (migration `0050`, nullable `project_id` + `group_id`). A group store is
   inherited by every project in the group — `get_by_name` resolves a project's

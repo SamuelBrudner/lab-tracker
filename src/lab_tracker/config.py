@@ -82,6 +82,7 @@ class Settings(BaseSettings):
     store_health_singleflight_wait_seconds: float = (
         DEFAULT_STORE_HEALTH_SINGLEFLIGHT_WAIT_SECONDS
     )
+    rclone_allowed_remotes: str = ""
     git_allowed_remotes: str = ""
     graph_draft_provider: str = "openai"
     graph_draft_background_enabled: bool = False

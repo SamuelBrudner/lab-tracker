@@ -29,10 +29,15 @@ from lab_tracker.artifact_resolution import (
 from lab_tracker.db_models import DataStoreModel
 from lab_tracker.git_remote_policy import GitRemotePolicy
 from lab_tracker.outbound_http import OutboundHttpPolicy
+from lab_tracker.rclone_remote_policy import RcloneRemotePolicy
 
 
 def _sha256(data: bytes) -> str:
     return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+def _rclone_policy(*grants: str) -> RcloneRemotePolicy:
+    return RcloneRemotePolicy.from_config(",".join(grants))
 
 
 def _install_local_registry(client: TestClient, allowed_root: Path) -> None:
@@ -137,7 +142,12 @@ def test_resolve_endpoint_redacts_rclone_process_failure(
         raise OSError(secret)
 
     client.app.state.resolver_registry = ResolverRegistry(
-        [RcloneResolver(runner=failing_runner)]
+        [
+            RcloneResolver(
+                runner=failing_runner,
+                remote_policy=_rclone_policy("private"),
+            )
+        ]
     )
     project_id = client.post(
         "/projects",
@@ -179,7 +189,12 @@ def test_resolve_endpoint_rejects_decoded_rclone_nul_without_500(
         raise AssertionError("invalid locator must be refused before spawn")
 
     client.app.state.resolver_registry = ResolverRegistry(
-        [RcloneResolver(runner=unexpected_runner)]
+        [
+            RcloneResolver(
+                runner=unexpected_runner,
+                remote_policy=_rclone_policy("private"),
+            )
+        ]
     )
     project_id = client.post(
         "/projects",
@@ -219,7 +234,12 @@ def test_resolve_endpoint_maps_malformed_rclone_metadata_to_unresolved(
         return RcloneCompleted(returncode=0, stdout=b"[]", stderr=b"private stderr")
 
     client.app.state.resolver_registry = ResolverRegistry(
-        [RcloneResolver(runner=malformed_runner)]
+        [
+            RcloneResolver(
+                runner=malformed_runner,
+                remote_policy=_rclone_policy("private"),
+            )
+        ]
     )
     project_id = client.post(
         "/projects",
@@ -572,7 +592,7 @@ def test_resolve_endpoint_uses_registered_rclone_root_and_logical_identity(
         [
             RcloneResolver(
                 runner=runner,
-                allowed_remotes=["lab-onedrive"],
+                remote_policy=_rclone_policy("lab-onedrive"),
             )
         ]
     )
@@ -686,14 +706,11 @@ def test_resolve_endpoint_rejects_invalid_registered_rclone_targets_before_proce
             raise AssertionError("invalid registered target reached process execution")
 
     process_spy = ZeroCallProcessSpy()
-    allowed_remotes = ["configured-remote-secret"]
-    if legacy_credential_ref is not None:
-        allowed_remotes.append(legacy_credential_ref)
     client.app.state.resolver_registry = ResolverRegistry(
         [
             RcloneResolver(
                 executor=process_spy,
-                allowed_remotes=allowed_remotes,
+                remote_policy=_rclone_policy("configured-remote-secret"),
             )
         ]
     )

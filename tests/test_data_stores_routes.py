@@ -11,10 +11,14 @@ from http_security_fakes import FakeAddressResolver, FakeSafeHttpClient
 from starlette.testclient import TestClient
 
 from lab_tracker.artifact_resolution import LocalFilesystemResolver, ResolverRegistry
+from lab_tracker.bounded_subprocess import ProcessResult
 from lab_tracker.http_store_health import HttpStoreHealthProbe
 from lab_tracker.outbound_http import OutboundHttpPolicy
+from lab_tracker.rclone_remote_policy import RcloneRemotePolicy
+from lab_tracker.rclone_store_health import RcloneStoreHealthProbe
 from lab_tracker.store_health import (
     HTTP_STORE_HEALTH_FAILURE_DETAIL,
+    RCLONE_STORE_HEALTH_FAILURE_DETAIL,
     CachedStoreHealthProbe,
 )
 
@@ -507,6 +511,58 @@ def test_git_store_health_uses_installed_policy_without_leaking_credentials(
     assert secret not in response.text
     assert list(workdir.iterdir()) == []
     assert not (workdir / ".git").exists()
+
+
+def test_rclone_store_health_route_denies_before_process_and_redacts_target(
+    client,
+    admin_auth_headers,
+):
+    project_id = _create_project(client, admin_auth_headers, "Rclone health project")
+    secret = "rclone-health-secret-must-not-leak"
+    store_id = client.post(
+        "/data-stores",
+        json=_store_payload(
+            project_id,
+            name="remote-archive",
+            kind="rclone",
+            root="/private/archive",
+            credential_ref=secret,
+        ),
+        headers=admin_auth_headers,
+    ).json()["data"]["store_id"]
+
+    class RecordingExecutor:
+        def __init__(self):
+            self.calls = []
+
+        def run(self, command, **kwargs):
+            self.calls.append((command, kwargs))
+            return ProcessResult(
+                returncode=0,
+                stdout=b"",
+                stdout_bytes=0,
+                stderr_bytes=0,
+            )
+
+    executor = RecordingExecutor()
+    client.app.state.store_health_checker = CachedStoreHealthProbe(
+        RcloneStoreHealthProbe(
+            policy=RcloneRemotePolicy.deny_all(),
+            executor=executor,
+        )
+    )
+
+    response = client.get(
+        f"/data-stores/{store_id}/health",
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200
+    body = response.json()["data"]
+    assert body["status"] == "unreachable"
+    assert body["detail"] == RCLONE_STORE_HEALTH_FAILURE_DETAIL
+    assert secret not in response.text
+    assert executor.calls == []
 
 
 def test_http_store_health_route_redacts_the_authoritative_selected_target(

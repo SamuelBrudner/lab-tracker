@@ -72,6 +72,7 @@ from lab_tracker.outbound_http import (
     OutboundHttpTransportError,
     RegisteredHttpPrefix,
 )
+from lab_tracker.rclone_remote_policy import RcloneRemotePolicy
 from lab_tracker.rclone_store_locator import RcloneRemoteName, RegisteredRcloneRoot
 
 
@@ -91,6 +92,10 @@ def _git_resolver(*, remote_policy: GitRemotePolicy | None = None, **kwargs):
         remote_policy=remote_policy or _git_policy(_GIT_REMOTE),
         **kwargs,
     )
+
+
+def _rclone_policy(*grants: str) -> RcloneRemotePolicy:
+    return RcloneRemotePolicy.from_config(",".join(grants))
 
 
 class _FakeProcessExecutor:
@@ -1211,7 +1216,10 @@ def _fake_rclone_runner(*, size_bytes: int | None, body: bytes, cat_returncode: 
 def test_rclone_resolver_verifies_object():
     data = b"object stored in onedrive via rclone"
     runner = _fake_rclone_runner(size_bytes=len(data), body=data)
-    resolver = RcloneResolver(runner=runner)
+    resolver = RcloneResolver(
+        runner=runner,
+        remote_policy=_rclone_policy("lab-onedrive"),
+    )
 
     result = resolver.resolve(
         _rclone_ref("rclone://lab-onedrive/experiments/001/x.bin", _sha256(data))
@@ -1232,7 +1240,7 @@ def test_rclone_resolver_uses_registered_target_without_generic_uri_reparse(
     runner = _fake_rclone_runner(size_bytes=len(data), body=data)
     resolver = RcloneResolver(
         runner=runner,
-        allowed_remotes=["Lab Team@org"],
+        remote_policy=_rclone_policy("Lab Team@org"),
     )
     target = _rclone_store_target(
         root="/experiments",
@@ -1257,13 +1265,13 @@ def test_rclone_resolver_uses_registered_target_without_generic_uri_reparse(
     ]
 
 
-def test_rclone_registered_target_denied_by_exact_allowlist_before_process():
+def test_rclone_registered_target_denied_by_exact_policy_before_process():
     runner = _fake_rclone_runner(size_bytes=1, body=b"x")
     target = _rclone_store_target(remote="lab+archive")
 
     result = RcloneResolver(
         runner=runner,
-        allowed_remotes=["LAB+archive"],
+        remote_policy=_rclone_policy("LAB+archive"),
     ).resolve_within_rclone_store(target)
 
     assert result.status is ResolutionStatus.UNRESOLVED
@@ -1276,7 +1284,10 @@ def test_rclone_registered_target_invalid_hash_does_no_process_work():
     runner = _fake_rclone_runner(size_bytes=1, body=b"x")
     target = _rclone_store_target(content_hash="datalad-key:opaque")
 
-    result = RcloneResolver(runner=runner).resolve_within_rclone_store(target)
+    result = RcloneResolver(
+        runner=runner,
+        remote_policy=_rclone_policy("lab-onedrive"),
+    ).resolve_within_rclone_store(target)
 
     assert result.status is ResolutionStatus.UNRESOLVED
     assert result.detail == "Cannot verify content hash with algorithm 'datalad-key'."
@@ -1286,9 +1297,12 @@ def test_rclone_registered_target_invalid_hash_does_no_process_work():
 def test_rclone_resolver_reports_drift():
     data = b"actual remote bytes"
     runner = _fake_rclone_runner(size_bytes=len(data), body=data)
-    resolver = RcloneResolver(runner=runner)
+    resolver = RcloneResolver(
+        runner=runner,
+        remote_policy=_rclone_policy("remote"),
+    )
 
-    result = resolver.resolve(_rclone_ref("rclone://r/x", _sha256(b"recorded")))
+    result = resolver.resolve(_rclone_ref("rclone://remote/x", _sha256(b"recorded")))
 
     assert result.status is ResolutionStatus.DRIFTED
     assert result.observed_hash == _sha256(data)
@@ -1299,9 +1313,12 @@ def test_rclone_resolver_reports_drift():
 
 def test_rclone_resolver_missing_object_is_unresolved():
     runner = _fake_rclone_runner(size_bytes=None, body=b"")
-    resolver = RcloneResolver(runner=runner)
+    resolver = RcloneResolver(
+        runner=runner,
+        remote_policy=_rclone_policy("remote"),
+    )
 
-    result = resolver.resolve(_rclone_ref("rclone://r/missing", _sha256(b"x")))
+    result = resolver.resolve(_rclone_ref("rclone://remote/missing", _sha256(b"x")))
 
     assert result.status is ResolutionStatus.UNRESOLVED
     # cat must not run when the object cannot be stat-ed.
@@ -1310,9 +1327,13 @@ def test_rclone_resolver_missing_object_is_unresolved():
 
 def test_rclone_resolver_refuses_oversized_object():
     runner = _fake_rclone_runner(size_bytes=1_000_000, body=b"x")
-    resolver = RcloneResolver(runner=runner, max_fetch_bytes=1024)
+    resolver = RcloneResolver(
+        runner=runner,
+        remote_policy=_rclone_policy("remote"),
+        max_fetch_bytes=1024,
+    )
 
-    result = resolver.resolve(_rclone_ref("rclone://r/big", _sha256(b"x")))
+    result = resolver.resolve(_rclone_ref("rclone://remote/big", _sha256(b"x")))
 
     assert result.status is ResolutionStatus.UNRESOLVED
     assert "limit" in (result.detail or "").lower()
@@ -1322,9 +1343,15 @@ def test_rclone_resolver_refuses_oversized_object():
 def test_rclone_resolver_truncates_payload_but_verifies():
     data = b"abcdefghij"
     runner = _fake_rclone_runner(size_bytes=len(data), body=data)
-    resolver = RcloneResolver(runner=runner)
+    resolver = RcloneResolver(
+        runner=runner,
+        remote_policy=_rclone_policy("remote"),
+    )
 
-    result = resolver.resolve(_rclone_ref("rclone://r/x", _sha256(data)), max_bytes=4)
+    result = resolver.resolve(
+        _rclone_ref("rclone://remote/x", _sha256(data)),
+        max_bytes=4,
+    )
 
     assert result.status is ResolutionStatus.VERIFIED
     assert result.content == b"abcd"
@@ -1334,9 +1361,12 @@ def test_rclone_resolver_truncates_payload_but_verifies():
 def test_rclone_resolver_cat_failure_is_unresolved():
     data = b"data"
     runner = _fake_rclone_runner(size_bytes=len(data), body=data, cat_returncode=1)
-    resolver = RcloneResolver(runner=runner)
+    resolver = RcloneResolver(
+        runner=runner,
+        remote_policy=_rclone_policy("remote"),
+    )
 
-    result = resolver.resolve(_rclone_ref("rclone://r/x", _sha256(data)))
+    result = resolver.resolve(_rclone_ref("rclone://remote/x", _sha256(data)))
 
     assert result.status is ResolutionStatus.UNRESOLVED
     assert result.detail == "rclone artifact resolution failed."
@@ -1346,9 +1376,10 @@ def test_rclone_resolver_missing_binary_is_unresolved():
     def runner(args):
         raise FileNotFoundError("rclone not installed")
 
-    result = RcloneResolver(runner=runner).resolve(
-        _rclone_ref("rclone://r/x", _sha256(b"x"))
-    )
+    result = RcloneResolver(
+        runner=runner,
+        remote_policy=_rclone_policy("remote"),
+    ).resolve(_rclone_ref("rclone://remote/x", _sha256(b"x")))
 
     assert result.status is ResolutionStatus.UNRESOLVED
     assert result.detail == "rclone artifact resolution failed."
@@ -1364,7 +1395,7 @@ def test_rclone_executor_streams_under_one_deadline_and_verifies():
     )
     resolver = RcloneResolver(
         executor=executor,
-        allowed_remotes=["lab"],
+        remote_policy=_rclone_policy("lab"),
         max_fetch_bytes=len(data),
     )
 
@@ -1387,6 +1418,7 @@ def test_rclone_actual_stream_growth_over_cap_discards_partial_result():
     )
     result = RcloneResolver(
         executor=executor,
+        remote_policy=_rclone_policy("private"),
         max_fetch_bytes=2,
     ).resolve(_rclone_ref("rclone://private/secret.bin", _sha256(b"ab")))
 
@@ -1413,7 +1445,10 @@ def test_rclone_actual_stream_growth_over_cap_discards_partial_result():
 def test_rclone_non_integer_or_non_object_size_metadata_is_rejected(metadata):
     executor = _FakeProcessExecutor([(0, (metadata,), b"")])
 
-    result = RcloneResolver(executor=executor).resolve(
+    result = RcloneResolver(
+        executor=executor,
+        remote_policy=_rclone_policy("private"),
+    ).resolve(
         _rclone_ref("rclone://private/x", _sha256(b"x"))
     )
 
@@ -1425,7 +1460,10 @@ def test_rclone_non_integer_or_non_object_size_metadata_is_rejected(metadata):
 def test_rclone_rejects_decoded_control_character_before_spawn():
     executor = _FakeProcessExecutor([])
 
-    result = RcloneResolver(executor=executor).resolve(
+    result = RcloneResolver(
+        executor=executor,
+        remote_policy=_rclone_policy("private"),
+    ).resolve(
         _rclone_ref("rclone://private/path%00secret", _sha256(b"x"))
     )
 
@@ -1438,7 +1476,10 @@ def test_rclone_rejects_decoded_control_character_before_spawn():
 def test_rclone_process_failure_redacts_target_credentials_and_stderr():
     secret = "remote-token-and-target"
     executor = _FakeProcessExecutor([OSError(secret)])
-    result = RcloneResolver(executor=executor).resolve(
+    result = RcloneResolver(
+        executor=executor,
+        remote_policy=_rclone_policy("private"),
+    ).resolve(
         _rclone_ref(f"rclone://private/{secret}.bin", _sha256(b"x"))
     )
 
@@ -1463,6 +1504,7 @@ def test_rclone_deadline_is_not_reset_between_stat_and_cat():
     )
     result = RcloneResolver(
         executor=executor,
+        remote_policy=_rclone_policy("private"),
         deadline_seconds=1.0,
         clock=clock,
     ).resolve(_rclone_ref("rclone://private/x", _sha256(b"x")))
@@ -1478,12 +1520,16 @@ def test_rclone_rejects_ambiguous_process_seams():
         RcloneResolver(
             runner=_fake_rclone_runner(size_bytes=1, body=b"x"),
             executor=_FakeProcessExecutor([]),
+            remote_policy=RcloneRemotePolicy.deny_all(),
         )
 
 
 def test_rclone_resolver_can_resolve_only_rclone_scheme():
-    resolver = RcloneResolver(runner=lambda args: RcloneCompleted(0, b"", b""))
-    assert resolver.can_resolve(_rclone_ref("rclone://r/x", _sha256(b"x"))) is True
+    resolver = RcloneResolver(
+        runner=lambda args: RcloneCompleted(0, b"", b""),
+        remote_policy=_rclone_policy("remote"),
+    )
+    assert resolver.can_resolve(_rclone_ref("rclone://remote/x", _sha256(b"x"))) is True
     assert (
         resolver.can_resolve(
             ExternalArtifactReference(
@@ -2252,40 +2298,23 @@ def test_check_store_health_rejects_invalid_local_root_before_probe(
     )
 
 
-def test_check_store_health_rclone_healthy_via_runner():
+def test_legacy_check_store_health_rclone_fails_closed_without_process_work(
+    monkeypatch,
+):
     store = _data_store(
         StoreKind.ONEDRIVE, "experiments", name="lab", credential_ref="lab-onedrive"
     )
-    calls = []
 
-    def runner(args):
-        calls.append(args)
-        return RcloneCompleted(0, b"001/\n002/\n", b"")
+    def unexpected_process(*_args, **_kwargs):
+        raise AssertionError("legacy rclone health path reached a process")
 
-    health = check_store_health(store, rclone_runner=runner)
-    assert health.status is StoreHealthStatus.HEALTHY
-    assert calls[0] == ["lsf", "--max-depth", "1", "lab-onedrive:experiments"]
+    monkeypatch.setattr(subprocess, "run", unexpected_process)
 
+    health = check_store_health(store)
 
-def test_check_store_health_rclone_unreachable_via_runner():
-    store = _data_store(StoreKind.S3, "lab-archive", name="arch", credential_ref="s3")
-
-    def runner(args):
-        return RcloneCompleted(1, b"", b"directory not found")
-
-    health = check_store_health(store, rclone_runner=runner)
     assert health.status is StoreHealthStatus.UNREACHABLE
-
-
-def test_check_store_health_rclone_missing_binary():
-    store = _data_store(StoreKind.BOX, "root", name="b", credential_ref="box")
-
-    def runner(args):
-        raise FileNotFoundError("rclone not installed")
-
-    health = check_store_health(store, rclone_runner=runner)
-    assert health.status is StoreHealthStatus.UNREACHABLE
-    assert "unavailable" in (health.detail or "").lower()
+    assert health.detail == "Rclone store health check failed."
+    assert "lab-onedrive" not in str(health.to_json_dict())
 
 
 def test_legacy_check_store_health_http_fails_closed_without_client_seam():
@@ -2311,247 +2340,53 @@ def test_check_store_health_database_is_unsupported():
     assert health.status is StoreHealthStatus.UNSUPPORTED
 
 
-def test_check_store_health_git_healthy_via_runner(tmp_path):
-    store = _data_store(StoreKind.GIT, "https://example.com/org/repo.git", name="repo")
-    calls = []
-
-    def runner(args):
-        calls.append(args)
-        if "--get-url" in args:
-            return GitCompleted(0, f"{store.root}\n".encode(), b"")
-        return GitCompleted(0, b"a" * 40 + b"\tHEAD\n", b"")
-
-    health = check_store_health(
-        store,
-        git_runner=runner,
-        git_remote_policy=_git_policy(store.root),
-        git_health_cwd=tmp_path,
-    )
-    assert health.status is StoreHealthStatus.HEALTHY
-    assert len(calls) == 2
-    expected_config = [
-        "-c",
-        "http.followRedirects=false",
-        "-c",
-        f"http.{store.root}.followRedirects=false",
-    ]
-    assert all(call[:4] == expected_config for call in calls)
-    assert calls[0][-4:] == ["ls-remote", "--get-url", "--", store.root]
-    assert calls[1][-4:] == ["ls-remote", "--", store.root, "HEAD"]
-
-
-def test_check_store_health_git_unreachable_via_runner(tmp_path):
-    store = _data_store(StoreKind.GIT, "https://example.com/org/missing.git", name="repo")
-
-    def runner(args):
-        if "--get-url" in args:
-            return GitCompleted(0, f"{store.root}\n".encode(), b"")
-        return GitCompleted(128, b"", b"fatal: repository not found")
-
-    health = check_store_health(
-        store,
-        git_runner=runner,
-        git_remote_policy=_git_policy(store.root),
-        git_health_cwd=tmp_path,
-    )
-    assert health.status is StoreHealthStatus.UNREACHABLE
-    assert health.detail == "Git store health check failed."
-
-
-def test_check_store_health_git_missing_binary(tmp_path):
-    store = _data_store(StoreKind.GIT, "https://example.com/org/repo.git", name="repo")
-
-    def runner(args):
-        raise OSError("git not found")
-
-    health = check_store_health(
-        store,
-        git_runner=runner,
-        git_remote_policy=_git_policy(store.root),
-        git_health_cwd=tmp_path,
-    )
-    assert health.status is StoreHealthStatus.UNREACHABLE
-    assert health.detail == "Git store health check failed."
-
-
-def test_check_store_health_git_denial_does_no_process_or_cwd_work(tmp_path):
-    store = _data_store(StoreKind.GIT, _GIT_REMOTE, name="repo")
-    calls = []
-
-    def runner(args):
-        calls.append(args)
-        raise AssertionError("denied health check must not invoke Git")
-
-    missing_cwd = tmp_path / "must-not-be-inspected"
-    health = check_store_health(
-        store,
-        git_runner=runner,
-        git_remote_policy=GitRemotePolicy.deny_all(),
-        git_health_cwd=missing_cwd,
+def test_legacy_check_store_health_git_fails_closed_without_process_or_cwd_work(
+    monkeypatch,
+):
+    secret = "legacy-git-target-must-not-escape"
+    store = _data_store(
+        StoreKind.GIT,
+        f"https://git.example/{secret}.git",
+        name="repo",
     )
 
-    assert health.status is StoreHealthStatus.UNREACHABLE
-    assert health.detail == "Git store health check failed."
-    assert calls == []
+    def unexpected_host_work(*_args, **_kwargs):
+        raise AssertionError("legacy Git health path reached host work")
 
+    monkeypatch.setattr(artifact_resolution.os.path, "realpath", unexpected_host_work)
+    monkeypatch.setattr(artifact_resolution.os.path, "isdir", unexpected_host_work)
+    monkeypatch.setattr(subprocess, "run", unexpected_host_work)
 
-def test_check_store_health_git_runner_exception_is_redacted(tmp_path):
-    secret = "private-runner-diagnostic"
-    store = _data_store(StoreKind.GIT, _GIT_REMOTE, name="repo")
-
-    def runner(args):
-        raise RuntimeError(secret)
-
-    health = check_store_health(
-        store,
-        git_runner=runner,
-        git_remote_policy=_git_policy(_GIT_REMOTE),
-        git_health_cwd=tmp_path,
-    )
+    health = check_store_health(store)
 
     assert health.status is StoreHealthStatus.UNREACHABLE
     assert health.detail == "Git store health check failed."
     assert secret not in str(health.to_json_dict())
 
 
-def test_check_store_health_git_preflight_mismatch_prevents_network_call(tmp_path):
-    store = _data_store(StoreKind.GIT, _GIT_REMOTE, name="repo")
-    calls = []
-
-    def runner(args):
-        calls.append(args)
-        if "--get-url" in args:
-            return GitCompleted(
-                0,
-                b"https://attacker.invalid/rewrite.git\n",
-                b"private preflight diagnostic",
-            )
-        raise AssertionError("health probe must stop before network-capable ls-remote")
-
-    health = check_store_health(
-        store,
-        git_runner=runner,
-        git_remote_policy=_git_policy(_GIT_REMOTE),
-        git_health_cwd=tmp_path,
-    )
-
-    assert health.status is StoreHealthStatus.UNREACHABLE
-    assert health.detail == "Git store health check failed."
-    assert len(calls) == 1
-    assert "--get-url" in calls[0]
-
-
-def test_check_store_health_git_does_not_inherit_parent_repository_config(
-    tmp_path,
-    monkeypatch,
+@pytest.mark.parametrize(
+    ("keyword", "value"),
+    (
+        ("http_timeout", 1.0),
+        ("rclone_runner", object()),
+        ("git_runner", object()),
+        ("git_executor", object()),
+        ("git_remote_policy", GitRemotePolicy.deny_all()),
+        ("git_health_cwd", Path(".")),
+        ("git_binary", "git"),
+        ("git_allow_protocol", "https"),
+        ("git_deadline_seconds", 1.0),
+        ("git_clock", lambda: 0.0),
+    ),
+)
+def test_legacy_check_store_health_rejects_removed_process_probe_kwargs(
+    keyword,
+    value,
 ):
-    git = shutil.which("git")
-    if git is None:
-        pytest.skip("git is unavailable")
-    _isolate_real_git_config(monkeypatch, tmp_path)
-    parent_repo = tmp_path / "parent-repository"
-    health_cwd = parent_repo / "health-cwd"
-    parent_repo.mkdir()
-    health_cwd.mkdir()
-    remote = "https://ceiling-regression.example/org/repo.git"
-    rewritten = "https://attacker.invalid/rewritten.git"
-    clean_env = dict(os.environ)
-    for variable in (
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-        "GIT_CEILING_DIRECTORIES",
-        "GIT_COMMON_DIR",
-        "GIT_DIR",
-        "GIT_INDEX_FILE",
-        "GIT_OBJECT_DIRECTORY",
-        "GIT_WORK_TREE",
-    ):
-        clean_env.pop(variable, None)
-    subprocess.run(  # noqa: S603 - fixed executable and controlled test path
-        [git, "init", "-q", os.fspath(parent_repo)],
-        check=True,
-        capture_output=True,
-        env=clean_env,
-    )
-    subprocess.run(  # noqa: S603 - fixed executable and controlled test values
-        [
-            git,
-            "-C",
-            os.fspath(parent_repo),
-            "config",
-            f"url.{rewritten}.insteadOf",
-            remote,
-        ],
-        check=True,
-        capture_output=True,
-        env=clean_env,
-    )
-    inherited = subprocess.run(  # noqa: S603 - no-network Git metadata query
-        [
-            git,
-            "-C",
-            os.fspath(health_cwd),
-            "ls-remote",
-            "--get-url",
-            "--",
-            remote,
-        ],
-        check=True,
-        capture_output=True,
-        env=clean_env,
-    )
-    assert inherited.stdout == f"{rewritten}\n".encode()
+    store = _data_store(StoreKind.GIT, _GIT_REMOTE, name="repo")
 
-    class RealPreflightExecutor:
-        def __init__(self):
-            self.calls = []
-            self.preflight_stdout = None
-
-        def run(
-            self,
-            command,
-            *,
-            deadline,
-            stdout_limit_bytes,
-            stderr_limit_bytes,
-            stdout_consumer=None,
-            cwd=None,
-            env=None,
-        ):
-            self.calls.append({"command": command, "cwd": cwd, "env": env})
-            if "--get-url" in command:
-                completed = subprocess.run(  # noqa: S603 - built Git argv
-                    command,
-                    check=False,
-                    capture_output=True,
-                    cwd=cwd,
-                    env=env,
-                )
-                self.preflight_stdout = completed.stdout
-                return SimpleNamespace(
-                    returncode=completed.returncode,
-                    stdout=completed.stdout,
-                    stderr=completed.stderr,
-                )
-            return SimpleNamespace(returncode=128, stdout=b"", stderr=b"intercepted")
-
-    executor = RealPreflightExecutor()
-    health = check_store_health(
-        _data_store(StoreKind.GIT, remote, name="repo"),
-        git_executor=executor,
-        git_remote_policy=_git_policy(remote),
-        git_health_cwd=health_cwd,
-        git_binary=git,
-    )
-
-    assert health.status is StoreHealthStatus.UNREACHABLE
-    assert health.detail == "Git store health check failed."
-    assert executor.preflight_stdout == f"{remote}\n".encode()
-    assert len(executor.calls) == 2
-    assert all(call["cwd"] == os.path.realpath(health_cwd) for call in executor.calls)
-    assert all(
-        call["env"]["GIT_CEILING_DIRECTORIES"] == os.path.realpath(parent_repo)
-        for call in executor.calls
-    )
+    with pytest.raises(TypeError):
+        check_store_health(store, **{keyword: value})
 
 
 # --- ResolverRegistry -----------------------------------------------------
@@ -4914,6 +4749,23 @@ def test_default_registry_preserves_explicit_git_policy_identity():
     assert resolver._remote_policy is policy
 
 
+def test_default_registry_preserves_even_a_falsey_git_policy_identity():
+    class FalseyGitPolicy(GitRemotePolicy):
+        def __bool__(self):
+            return False
+
+    policy = FalseyGitPolicy.from_config(_GIT_REMOTE)
+
+    registry = default_registry(git_remote_policy=policy)
+
+    resolver = next(
+        candidate
+        for candidate in registry._resolvers
+        if isinstance(candidate, GitResolver)
+    )
+    assert resolver._remote_policy is policy
+
+
 def test_registry_from_env_explicit_git_policy_overrides_environment(monkeypatch):
     policy = _git_policy(_GIT_REMOTE)
     monkeypatch.setenv(
@@ -5069,33 +4921,102 @@ def test_git_resolver_rejects_option_like_components(tmp_path):
     assert runner.calls == []
 
 
-# --- RcloneResolver remote allowlist ---------------------------------------
+# --- RcloneResolver remote policy ------------------------------------------
 
 
-def test_rclone_resolver_refuses_remote_not_in_allowlist():
+def test_rclone_resolver_denies_by_default_without_process_work():
     runner = _fake_rclone_runner(size_bytes=4, body=b"data")
-    resolver = RcloneResolver(runner=runner, allowed_remotes=["lab-onedrive"])
+    resolver = RcloneResolver(runner=runner)
+
+    result = resolver.resolve(
+        _rclone_ref("rclone://lab-onedrive/exp/x.bin", _sha256(b"data"))
+    )
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert "allowlist" in (result.detail or "")
+    assert runner.calls == []
+
+
+def test_rclone_resolver_refuses_remote_not_in_typed_policy():
+    runner = _fake_rclone_runner(size_bytes=4, body=b"data")
+    policy = _rclone_policy("lab-onedrive")
+    resolver = RcloneResolver(runner=runner, remote_policy=policy)
 
     result = resolver.resolve(
         _rclone_ref("rclone://other-remote/exp/x.bin", _sha256(b"data"))
     )
 
+    assert resolver._remote_policy is policy
     assert result.status is ResolutionStatus.UNRESOLVED
     assert "allowlist" in (result.detail or "")
-    assert runner.calls == []  # refused before any rclone subprocess
+    assert runner.calls == []
 
 
-def test_rclone_resolver_allows_listed_remote():
+def test_rclone_resolver_preserves_typed_policy_identity_and_allows_exact_remote():
     data = b"allowed remote payload"
     runner = _fake_rclone_runner(size_bytes=len(data), body=data)
-    resolver = RcloneResolver(runner=runner, allowed_remotes=["lab-onedrive"])
+    policy = _rclone_policy("lab-onedrive")
+    resolver = RcloneResolver(runner=runner, remote_policy=policy)
 
     result = resolver.resolve(
         _rclone_ref("rclone://lab-onedrive/exp/x.bin", _sha256(data))
     )
 
+    assert resolver._remote_policy is policy
     assert result.status is ResolutionStatus.VERIFIED
     assert result.content == data
+
+
+def test_default_registry_preserves_explicit_rclone_policy_identity():
+    policy = _rclone_policy("lab-onedrive")
+
+    registry = default_registry(rclone_remote_policy=policy)
+
+    resolver = next(
+        candidate
+        for candidate in registry._resolvers
+        if isinstance(candidate, RcloneResolver)
+    )
+    assert resolver._remote_policy is policy
+
+
+def test_default_registry_preserves_even_a_falsey_rclone_policy_identity():
+    class FalseyRclonePolicy(RcloneRemotePolicy):
+        def __bool__(self):
+            return False
+
+    policy = FalseyRclonePolicy.from_config("lab-onedrive")
+
+    registry = default_registry(rclone_remote_policy=policy)
+
+    resolver = next(
+        candidate
+        for candidate in registry._resolvers
+        if isinstance(candidate, RcloneResolver)
+    )
+    assert resolver._remote_policy is policy
+
+
+def test_default_registry_shares_even_a_falsey_process_executor():
+    class FalseyExecutor:
+        def __bool__(self):
+            return False
+
+    executor = FalseyExecutor()
+    registry = default_registry(process_executor=executor)  # type: ignore[arg-type]
+    rclone = next(
+        candidate
+        for candidate in registry._resolvers
+        if isinstance(candidate, RcloneResolver)
+    )
+    git = next(
+        candidate
+        for candidate in registry._resolvers
+        if isinstance(candidate, GitResolver)
+    )
+
+    assert rclone._executor is executor
+    assert git._executor is executor
 
 
 def test_registry_from_env_rclone_denies_remotes_by_default(monkeypatch):
@@ -5109,8 +5030,28 @@ def test_registry_from_env_rclone_denies_remotes_by_default(monkeypatch):
     assert "allowlist" in (result.detail or "")
 
 
+def test_registry_from_env_explicit_rclone_policy_overrides_environment(monkeypatch):
+    policy = _rclone_policy("lab-onedrive")
+    monkeypatch.setenv(
+        "LAB_TRACKER_RCLONE_ALLOWED_REMOTES",
+        "this/environment/value/is/intentionally/invalid",
+    )
+
+    registry = registry_from_env(
+        rclone_remote_policy=policy,
+        http_policy=OutboundHttpPolicy(),
+    )
+
+    resolver = next(
+        candidate
+        for candidate in registry._resolvers
+        if isinstance(candidate, RcloneResolver)
+    )
+    assert resolver._remote_policy is policy
+
+
 def test_registry_from_env_rclone_allowlist_admits_named_remote(monkeypatch):
-    monkeypatch.setenv("LAB_TRACKER_RCLONE_ALLOWED_REMOTES", "lab-onedrive, backup")
+    monkeypatch.setenv("LAB_TRACKER_RCLONE_ALLOWED_REMOTES", "lab-onedrive,backup")
 
     registry = registry_from_env()
     denied = registry.resolve(_rclone_ref("rclone://other/x.bin", _sha256(b"x")))

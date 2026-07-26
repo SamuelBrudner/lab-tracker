@@ -581,13 +581,15 @@ Shipped (`src/lab_tracker/artifact_resolution.py`, tested in
 - ✅ `RcloneResolver` — `rclone://<remote>/<path>`, the locked-in unifier for
   S3 / SFTP / Dropbox / Google Drive / Box / OneDrive; stats then fetches, and
   degrades to `UNRESOLVED` when the binary is absent. Gated by an operator
-  remote-name allowlist (`LAB_TRACKER_RCLONE_ALLOWED_REMOTES`, deny-by-default
-  when unset) so a reference cannot drive server-side `rclone cat` against
+  immutable exact remote-name policy (`LAB_TRACKER_RCLONE_ALLOWED_REMOTES`,
+  deny-by-default when unset) so a reference cannot drive server-side
+  `rclone cat` against
   arbitrary remotes in the host's rclone config — the same opt-in posture as
-  local allowed roots and the git remote allowlist. Metadata and stderr are
-  independently capped, content is streamed under the actual-byte fetch limit,
-  and one subprocess deadline covers stat, transfer, and verification; failed
-  process cleanup uses the separate fixed grace described above.
+  local allowed roots and the Git remote policy. The direct resolver default is
+  also deny-all. Metadata and stderr are independently capped, content is
+  streamed under the actual-byte fetch limit, and one subprocess deadline
+  covers stat, transfer, and verification; failed process cleanup uses the
+  separate fixed grace described above.
 - ✅ Registered rclone stores use a separate nominally dispatched target.
   `RcloneRemoteName` preserves one exact configured remote, while
   `RegisteredRcloneRoot` retains `remote:path` versus `remote:/path` as
@@ -598,6 +600,14 @@ Shipped (`src/lab_tracker/artifact_resolution.py`, tested in
   one exact positional token without URI decoding or path normalization.
   Results retain the logical `store://` identity. Ordinary direct
   `rclone://` references keep their existing parser and subprocess lifecycle.
+- ✅ Rclone and Git store-health subprocesses use dedicated adapters over the
+  same object-identical immutable policies and bounded process executor as
+  resolution. Rclone preserves relative, rooted, and sole-root registered
+  targets and runs one fixed bounded `lsf`; Git preserves its canonical URL
+  preflight, redirect denial, sanitized environment, app-owned working
+  directory, and one deadline across preflight plus `ls-remote HEAD`. Ordinary
+  failures return one static redacted detail per adapter, while adapter-level
+  `BaseException` propagates after executor-owned cleanup.
 - ✅ `GitResolver` — resolves a pinned repository object only after the remote
   allowlist check, with one subprocess deadline across fetch, object metadata,
   streamed content verification, and bounded cleanup. Metadata and stderr are
