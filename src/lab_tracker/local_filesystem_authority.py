@@ -246,7 +246,15 @@ def _join_relative_root(cwd: str, root: str) -> str:
 
 
 def _is_absolute(path: str) -> bool:
-    return ntpath.isabs(path) if os.name == "nt" else posixpath.isabs(path)
+    if os.name == "nt":
+        # Python 3.10 reports a bare UNC share (``\\server\share``) as
+        # non-absolute because ``ntpath.splitdrive`` consumes the whole value.
+        # Treat every drive- or separator-anchored spelling as absolute here
+        # so unsupported namespaces reach the strict Windows parser and fail
+        # closed instead of being joined beneath the captured working directory.
+        drive, tail = ntpath.splitdrive(path)
+        return bool(drive) or tail.startswith(("\\", "/"))
+    return posixpath.isabs(path)
 
 
 def _parse_absolute(path: str) -> _LexicalRoot:

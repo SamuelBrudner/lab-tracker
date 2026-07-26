@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ntpath
 import os
 from dataclasses import FrozenInstanceError
 from pathlib import Path
@@ -187,7 +188,6 @@ def test_named_user_tilde_roots_are_rejected_without_lookup() -> None:
         "link/..",
         "./store",
         "nested/./store",
-        "nested//store",
         "bad\0root",
         "bad\nroot",
     ),
@@ -205,15 +205,31 @@ def test_ambiguous_or_malformed_operator_roots_are_rejected_without_identity(
     assert "operator-secret" not in rendered
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX path semantics")
+def test_posix_repeated_separator_root_is_rejected_without_identity(
+    tmp_path: Path,
+) -> None:
+    secret = "operator-secret/nested//store"
+
+    with pytest.raises(ValueError) as exc_info:
+        LocalFilesystemAuthority.from_roots([secret], cwd=tmp_path)
+
+    rendered = f"{exc_info.value!s}\n{exc_info.value!r}"
+    assert "operator-secret" not in rendered
+
+
 def test_candidate_alias_parent_suffix_is_preserved_for_native_resolution(
     tmp_path: Path,
 ) -> None:
     allowed = tmp_path / "allowed"
     authority = LocalFilesystemAuthority.from_roots([allowed])
     candidate = f"{allowed}/link/.."
+    expected_candidate = (
+        str(allowed / "link" / "..") if os.name == "nt" else candidate
+    )
 
     assert _selected_request(authority, candidate) == (
-        candidate,
+        expected_candidate,
         (str(allowed),),
     )
 
@@ -317,6 +333,7 @@ def test_root_iterables_are_consumed_only_to_the_fixed_ceiling(tmp_path: Path) -
         "/" + "/".join(["a"] * (MAX_LOCAL_FILESYSTEM_PATH_COMPONENTS + 1)),
         "/" + "a" * (MAX_LOCAL_FILESYSTEM_COMPONENT_BYTES + 1),
     ),
+    ids=("characters", "bytes", "components", "component"),
 )
 def test_root_admission_has_pre_split_size_and_component_ceilings(root: str) -> None:
     with pytest.raises(ValueError, match="valid local paths"):
@@ -427,3 +444,19 @@ def test_windows_normalizes_safe_root_spelling_and_compares_components_exactly()
 def test_windows_unsupported_namespaces_and_components_fail_closed(root: str) -> None:
     with pytest.raises(ValueError):
         LocalFilesystemAuthority.from_roots([root])
+
+
+def test_windows_anchored_roots_fail_closed_when_legacy_isabs_says_relative(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    windows_os = SimpleNamespace(**vars(os))
+    windows_os.name = "nt"
+    windows_os.getcwd = lambda: r"C:\startup"
+    isolated_ntpath = SimpleNamespace(**vars(ntpath))
+    isolated_ntpath.isabs = lambda _path: False
+    monkeypatch.setattr(authority_module, "os", windows_os)
+    monkeypatch.setattr(authority_module, "ntpath", isolated_ntpath)
+
+    for root in (r"\\server\share", r"C:relative", r"\drive-relative"):
+        with pytest.raises(ValueError, match="valid local paths"):
+            LocalFilesystemAuthority.from_roots([root])

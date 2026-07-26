@@ -188,6 +188,7 @@ def test_broker_preserves_unresolved_alias_parent_suffix_for_helper(
 ) -> None:
     root = tmp_path / "allowed"
     candidate = f"{root}/link/.."
+    expected_candidate = str(root / "link" / "..") if os.name == "nt" else candidate
     executor = RecordingExecutor([_result(0)])
 
     result = _operations(root, executor).inspect_directory(
@@ -199,7 +200,7 @@ def test_broker_preserves_unresolved_alias_parent_suffix_for_helper(
     environment = executor.calls[0]["env"]
     assert isinstance(environment, dict)
     request = json.loads(environment[LOCAL_FILESYSTEM_REQUEST_ENV])
-    assert request["candidate"] == candidate
+    assert request["candidate"] == expected_candidate
     assert request["roots"] == [str(root)]
 
 
@@ -410,6 +411,7 @@ def test_oversized_candidate_is_denied_by_bounded_admission_without_spawning(
         "/allowed/../escape",
     ),
 )
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX path semantics")
 def test_malformed_or_provably_escaping_posix_candidates_do_not_spawn(
     candidate: str,
 ) -> None:
