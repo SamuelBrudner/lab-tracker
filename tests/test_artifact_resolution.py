@@ -2,9 +2,9 @@ import hashlib
 import os
 import shutil
 import subprocess
-from contextlib import contextmanager
+import time
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone, tzinfo
-from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -18,7 +18,6 @@ from http_security_fakes import (
 )
 
 import lab_tracker.artifact_resolution as artifact_resolution
-import lab_tracker.local_file_access as local_file_access
 from lab_tracker.artifact_resolution import (
     DEFAULT_MAX_BYTES,
     ArtifactResolver,
@@ -57,17 +56,28 @@ from lab_tracker.artifact_resolution_limits import (
     MAX_INLINE_ARTIFACT_BYTES,
     ArtifactContentBoundsError,
 )
+from lab_tracker.bounded_subprocess import StdoutConsumer
 from lab_tracker.git_remote_policy import (
     GitRemotePolicy,
     parse_git_remote_address,
 )
 from lab_tracker.git_store_locator import PinnedGitPath
-from lab_tracker.local_file_access import (
-    LocalOpenFailure,
-    LocalOpenFailureReason,
-    OpenedLocalFile,
+from lab_tracker.local_filesystem_operations import (
+    BoundedLocalFilesystemOperations,
+)
+from lab_tracker.local_filesystem_ports import (
+    DirectLocalRegularFileTarget,
+    LocalRegularFileReadOutcome,
+    LocalRegularFileReadResult,
+    LocalRegularFileTarget,
+    RegisteredLocalRegularFileTarget,
 )
 from lab_tracker.local_path_policy import LocalPathPolicy
+from lab_tracker.local_resolution_budget import (
+    MAX_LOCAL_RESOLUTION_MAX_READ_BYTES,
+    LocalResolutionBudget,
+    LocalResolutionLimits,
+)
 from lab_tracker.local_store_locator import LocalStoreLocator, PortableStorePath
 from lab_tracker.models import DataStore, ExternalArtifactReference, StoreKind
 from lab_tracker.outbound_http import (
@@ -107,6 +117,77 @@ def _git_resolver(*, remote_policy: GitRemotePolicy | None = None, **kwargs):
 
 def _rclone_policy(*grants: str) -> RcloneRemotePolicy:
     return RcloneRemotePolicy.from_config(",".join(grants))
+
+
+_LocalReadCallback = Callable[
+    [LocalRegularFileTarget, LocalResolutionBudget, StdoutConsumer],
+    LocalRegularFileReadResult,
+]
+
+
+class _CallbackLocalFileReader:
+    """Small port fake that leaves budget accounting visible to each test."""
+
+    def __init__(self, callback: _LocalReadCallback) -> None:
+        self._callback = callback
+        self.calls: list[LocalRegularFileTarget] = []
+
+    def read_regular_file(
+        self,
+        target: LocalRegularFileTarget,
+        *,
+        budget: LocalResolutionBudget,
+        stdout_consumer: StdoutConsumer,
+    ) -> LocalRegularFileReadResult:
+        self.calls.append(target)
+        return self._callback(target, budget, stdout_consumer)
+
+
+def _complete_local_read(
+    data: bytes,
+    budget: LocalResolutionBudget,
+    stdout_consumer: StdoutConsumer,
+    *,
+    chunks: tuple[bytes, ...] | None = None,
+) -> LocalRegularFileReadResult:
+    streamed = chunks if chunks is not None else (data,)
+    assert b"".join(streamed) == data
+    with budget.reserve() as reservation:
+        assert len(data) <= reservation.allowance_bytes
+        for chunk in streamed:
+            stdout_consumer(chunk)
+        reservation.settle_clean(payload_bytes=len(data))
+    return LocalRegularFileReadResult(
+        LocalRegularFileReadOutcome.COMPLETE,
+        len(data),
+    )
+
+
+def _clean_local_read(
+    outcome: LocalRegularFileReadOutcome,
+    budget: LocalResolutionBudget,
+) -> LocalRegularFileReadResult:
+    assert outcome in {
+        LocalRegularFileReadOutcome.MISSING,
+        LocalRegularFileReadOutcome.DENIED,
+    }
+    with budget.reserve() as reservation:
+        reservation.release_clean_zero(stdout_bytes=0)
+    return LocalRegularFileReadResult(outcome, 0)
+
+
+def _terminal_local_read(
+    budget: LocalResolutionBudget,
+    stdout_consumer: StdoutConsumer,
+    *,
+    partial: bytes = b"",
+) -> LocalRegularFileReadResult:
+    with budget.reserve() as reservation:
+        assert len(partial) <= reservation.allowance_bytes
+        if partial:
+            stdout_consumer(partial)
+        reservation.consume_terminal()
+    return LocalRegularFileReadResult(LocalRegularFileReadOutcome.FAILED, 0)
 
 
 class _FakeProcessExecutor:
@@ -333,27 +414,18 @@ def test_local_resolver_hashes_opened_stream_without_reopening_path(tmp_path):
     replacement = b"replacement pathname bytes"
     path = _write(tmp_path, "artifact.bin", recorded)
 
-    class SwappingReader:
-        @contextmanager
-        def open_regular_file(self, requested_path):
-            assert os.fspath(requested_path) == str(path)
-            stream = BytesIO(recorded)
-            path.write_bytes(replacement)
-            try:
-                yield OpenedLocalFile(
-                    stream=stream,
-                    display_path=str(path),
-                    size_hint_bytes=len(recorded),
-                )
-            finally:
-                stream.close()
+    def read_from_retained_handle(target, budget, stdout_consumer):
+        assert type(target) is DirectLocalRegularFileTarget
+        assert target.candidate == str(path)
+        path.write_bytes(replacement)
+        return _complete_local_read(recorded, budget, stdout_consumer)
 
-    result = LocalFilesystemResolver(
-        file_reader_factory=lambda _policy: SwappingReader()
-    ).resolve(
+    reader = _CallbackLocalFileReader(read_from_retained_handle)
+    result = LocalFilesystemResolver(file_reader=reader).resolve(
         _local_ref(path, _sha256(recorded))
     )
 
+    assert len(reader.calls) == 1
     assert path.read_bytes() == replacement
     assert result.status is ResolutionStatus.VERIFIED
     assert result.content == recorded
@@ -362,26 +434,12 @@ def test_local_resolver_hashes_opened_stream_without_reopening_path(tmp_path):
 def test_local_resolver_operational_read_failure_is_static(tmp_path):
     path = tmp_path / "sensitive-name.bin"
 
-    class FailingStream(BytesIO):
-        def read(self, _size=-1):
-            raise OSError(f"cannot read secret host path {path}")
+    def fail_read(target, budget, stdout_consumer):
+        assert type(target) is DirectLocalRegularFileTarget
+        assert target.candidate == str(path)
+        return _terminal_local_read(budget, stdout_consumer)
 
-    class FailingReader:
-        @contextmanager
-        def open_regular_file(self, _requested_path):
-            stream = FailingStream()
-            try:
-                yield OpenedLocalFile(
-                    stream=stream,
-                    display_path=str(path),
-                    size_hint_bytes=1,
-                )
-            finally:
-                stream.close()
-
-    result = LocalFilesystemResolver(
-        file_reader_factory=lambda _policy: FailingReader()
-    ).resolve(
+    result = LocalFilesystemResolver(file_reader=_CallbackLocalFileReader(fail_read)).resolve(
         _local_ref(path, _sha256(b"x"))
     )
 
@@ -390,22 +448,131 @@ def test_local_resolver_operational_read_failure_is_static(tmp_path):
     assert str(path) not in (result.detail or "")
 
 
+def test_local_resolver_terminally_aborts_after_late_clean_reader_result(tmp_path):
+    data = b"x"
+    path = _write(tmp_path, "artifact.bin", data)
+    seen_budgets: list[LocalResolutionBudget] = []
+
+    def return_after_deadline(_target, budget, stdout_consumer):
+        seen_budgets.append(budget)
+        result = _complete_local_read(data, budget, stdout_consumer)
+        time.sleep(0.02)
+        return result
+
+    result = LocalFilesystemResolver(
+        file_reader=_CallbackLocalFileReader(return_after_deadline),
+        limits=LocalResolutionLimits(max_read_bytes=4, deadline_seconds=0.001),
+    ).resolve(_local_ref(path, _sha256(data)))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.detail == "Failed to read local artifact."
+    assert len(seen_budgets) == 1
+    assert seen_budgets[0].remaining_bytes == 0
+    assert seen_budgets[0].terminal is True
+
+
+@pytest.mark.parametrize("failure", ["exception", "malformed", "count-mismatch"])
+def test_local_resolver_terminally_aborts_ambiguous_reader_endings(
+    failure,
+    tmp_path,
+):
+    data = b"x"
+    path = _write(tmp_path, "artifact.bin", data)
+    seen_budgets: list[LocalResolutionBudget] = []
+
+    def ambiguous_reader(_target, budget, stdout_consumer):
+        seen_budgets.append(budget)
+        _complete_local_read(data, budget, stdout_consumer)
+        if failure == "exception":
+            raise RuntimeError("private reader detail")
+        if failure == "malformed":
+            return object()
+        return LocalRegularFileReadResult(LocalRegularFileReadOutcome.COMPLETE, 0)
+
+    result = LocalFilesystemResolver(
+        file_reader=_CallbackLocalFileReader(ambiguous_reader),
+        limits=LocalResolutionLimits(max_read_bytes=4),
+    ).resolve(_local_ref(path, _sha256(data)))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.detail == "Failed to read local artifact."
+    assert len(seen_budgets) == 1
+    assert seen_budgets[0].remaining_bytes == 0
+    assert seen_budgets[0].terminal is True
+
+
+def test_local_resolver_terminally_aborts_complete_postprocessing_failure(
+    tmp_path,
+    monkeypatch,
+):
+    data = b"x"
+    path = _write(tmp_path, "artifact.bin", data)
+    seen_budgets: list[LocalResolutionBudget] = []
+
+    def complete_reader(_target, budget, stdout_consumer):
+        seen_budgets.append(budget)
+        return _complete_local_read(data, budget, stdout_consumer)
+
+    def fail_content_type(_path):
+        raise RuntimeError("private postprocessing detail")
+
+    monkeypatch.setattr(artifact_resolution.mimetypes, "guess_type", fail_content_type)
+    result = LocalFilesystemResolver(
+        file_reader=_CallbackLocalFileReader(complete_reader),
+        limits=LocalResolutionLimits(max_read_bytes=4),
+    ).resolve(_local_ref(path, _sha256(data)))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.detail == "Failed to read local artifact."
+    assert len(seen_budgets) == 1
+    assert seen_budgets[0].remaining_bytes == 0
+    assert seen_budgets[0].terminal is True
+
+
+def test_local_resolver_terminally_aborts_before_propagating_base_exception(tmp_path):
+    class FatalReaderSignal(BaseException):
+        pass
+
+    data = b"x"
+    path = _write(tmp_path, "artifact.bin", data)
+    seen_budgets: list[LocalResolutionBudget] = []
+    signal = FatalReaderSignal()
+
+    def abort_reader(_target, budget, stdout_consumer):
+        seen_budgets.append(budget)
+        _complete_local_read(data, budget, stdout_consumer)
+        raise signal
+
+    resolver = LocalFilesystemResolver(
+        file_reader=_CallbackLocalFileReader(abort_reader),
+        limits=LocalResolutionLimits(max_read_bytes=4),
+    )
+
+    with pytest.raises(FatalReaderSignal) as caught:
+        resolver.resolve(_local_ref(path, _sha256(data)))
+
+    assert caught.value is signal
+    assert len(seen_budgets) == 1
+    assert seen_budgets[0].remaining_bytes == 0
+    assert seen_budgets[0].terminal is True
+
+
 @pytest.mark.parametrize(
-    "reason",
-    [LocalOpenFailureReason.DENIED, LocalOpenFailureReason.IO_ERROR],
+    "outcome",
+    [LocalRegularFileReadOutcome.DENIED, LocalRegularFileReadOutcome.FAILED],
 )
-def test_local_resolver_only_recovers_after_missing(reason, tmp_path, monkeypatch):
+def test_local_resolver_only_recovers_after_missing(outcome, tmp_path, monkeypatch):
     path = tmp_path / "artifact.bin"
 
-    class FailingReader:
-        @contextmanager
-        def open_regular_file(self, _requested_path):
-            yield LocalOpenFailure(reason)
+    def fail_without_missing(_target, budget, stdout_consumer):
+        if outcome is LocalRegularFileReadOutcome.DENIED:
+            return _clean_local_read(outcome, budget)
+        return _terminal_local_read(budget, stdout_consumer)
 
     resolver = LocalFilesystemResolver(
         allowed_roots=[tmp_path],
         recovery=RecoveryPolicy(enabled=True),
-        file_reader_factory=lambda _policy: FailingReader(),
+        file_reader=_CallbackLocalFileReader(fail_without_missing),
     )
 
     def unexpected_recovery(*_args, **_kwargs):
@@ -427,26 +594,30 @@ def test_local_resolver_denied_detail_covers_in_root_unsupported_target(tmp_path
     )
 
     assert result.status is ResolutionStatus.UNRESOLVED
-    assert result.detail == (
-        "Local artifact is not an authorized readable regular file."
-    )
+    assert result.detail == ("Local artifact is not an authorized readable regular file.")
 
 
-def test_local_resolver_policy_cannot_be_bypassed_by_reader_miscomposition(tmp_path):
+def test_local_resolver_honors_broker_denial_for_an_outside_candidate(tmp_path):
     allowed = tmp_path / "allowed"
     allowed.mkdir()
     outside = _write(tmp_path, "outside.bin", b"secret")
 
+    def deny_outside(target, budget, _stdout_consumer):
+        assert type(target) is DirectLocalRegularFileTarget
+        assert target.candidate == str(outside)
+        return _clean_local_read(LocalRegularFileReadOutcome.DENIED, budget)
+
+    reader = _CallbackLocalFileReader(deny_outside)
     resolver = LocalFilesystemResolver(
         allowed_roots=[allowed],
-        file_reader_factory=lambda _policy: local_file_access.HandleBoundLocalFileAccess(
-            LocalPathPolicy()
-        ),
+        file_reader=reader,
     )
 
     result = resolver.resolve(_local_ref(outside, _sha256(b"secret")))
 
+    assert len(reader.calls) == 1
     assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.detail == ("Local artifact is not an authorized readable regular file.")
     assert result.content is None
 
 
@@ -484,9 +655,7 @@ def test_local_resolver_returns_byte_range_slice(tmp_path):
     data = b"0123456789"
     path = _write(tmp_path, "ranged.bin", data)
 
-    result = LocalFilesystemResolver().resolve(
-        _local_ref(path, _sha256(data)), byte_range=(2, 5)
-    )
+    result = LocalFilesystemResolver().resolve(_local_ref(path, _sha256(data)), byte_range=(2, 5))
 
     assert result.status is ResolutionStatus.VERIFIED
     assert result.content == b"234"
@@ -632,9 +801,7 @@ def test_local_resolver_rejects_invalid_byte_range(tmp_path):
         ArtifactContentBoundsError,
         match="greater than or equal to byte_start",
     ):
-        LocalFilesystemResolver().resolve(
-            _local_ref(path, _sha256(data)), byte_range=(5, 2)
-        )
+        LocalFilesystemResolver().resolve(_local_ref(path, _sha256(data)), byte_range=(5, 2))
 
 
 @pytest.mark.parametrize("invalid_max_bytes", [True, None])
@@ -672,18 +839,10 @@ def test_all_concrete_resolver_entrypoints_reject_invalid_views_before_io(
         lambda: http.resolve(reference, max_bytes=invalid_max_bytes),
         lambda: rclone.resolve(reference, max_bytes=invalid_max_bytes),
         lambda: git.resolve(reference, max_bytes=invalid_max_bytes),
-        lambda: local.resolve_within_root(
-            object(), max_bytes=invalid_max_bytes
-        ),
-        lambda: http.resolve_within_http_store(
-            object(), max_bytes=invalid_max_bytes
-        ),
-        lambda: rclone.resolve_within_rclone_store(
-            object(), max_bytes=invalid_max_bytes
-        ),
-        lambda: git.resolve_within_git_store(
-            object(), max_bytes=invalid_max_bytes
-        ),
+        lambda: local.resolve_within_root(object(), max_bytes=invalid_max_bytes),
+        lambda: http.resolve_within_http_store(object(), max_bytes=invalid_max_bytes),
+        lambda: rclone.resolve_within_rclone_store(object(), max_bytes=invalid_max_bytes),
+        lambda: git.resolve_within_git_store(object(), max_bytes=invalid_max_bytes),
     ):
         with pytest.raises(ArtifactContentBoundsError):
             call()
@@ -758,9 +917,7 @@ def _safe_http_resolver(
     max_fetch_bytes: int = 64 * 1024 * 1024,
     max_redirects: int = 3,
 ) -> tuple[HttpResolver, FakeSafeHttpClient, FakeAddressResolver]:
-    address_resolver = dns or FakeAddressResolver(
-        {"store.example": [_PUBLIC_HTTP_IP]}
-    )
+    address_resolver = dns or FakeAddressResolver({"store.example": [_PUBLIC_HTTP_IP]})
     client = FakeSafeHttpClient(outcomes)
     resolver = HttpResolver(
         policy=OutboundHttpPolicy(address_resolver=address_resolver),
@@ -790,9 +947,7 @@ def test_http_resolver_verifies_matching_body():
     assert response.closed is True
     assert dns.calls == [("store.example", 443)]
     assert client.calls[0][0] == "GET"
-    assert client.calls[0][1].addresses == (
-        ApprovedSocketAddress.from_ip(_PUBLIC_HTTP_IP, 443),
-    )
+    assert client.calls[0][1].addresses == (ApprovedSocketAddress.from_ip(_PUBLIC_HTTP_IP, 443),)
 
 
 def test_registered_http_store_resolves_beneath_prefix_with_logical_identity():
@@ -816,9 +971,7 @@ def test_registered_http_store_resolves_beneath_prefix_with_logical_identity():
     assert result.uri == "store://web/nested/file%20name.bin"
     assert result.to_json_dict()["uri"] == result.uri
     assert dns.calls == [("store.example", 443)]
-    assert client.calls[0][1].absolute_url == (
-        "https://store.example/base/nested/file%20name.bin"
-    )
+    assert client.calls[0][1].absolute_url == ("https://store.example/base/nested/file%20name.bin")
 
 
 def test_registered_http_store_allows_same_prefix_redirect_and_keeps_identity():
@@ -882,9 +1035,7 @@ def test_registered_http_store_rejects_redirect_escape_before_second_hop_io(
 
 
 def test_http_resolver_reports_drift_on_mismatch():
-    resolver, _, _ = _safe_http_resolver(
-        FakeHttpResponse(chunks=(b"actual bytes",))
-    )
+    resolver, _, _ = _safe_http_resolver(FakeHttpResponse(chunks=(b"actual bytes",)))
 
     result = resolver.resolve(_http_ref("https://store.example/x", _sha256(b"recorded bytes")))
 
@@ -929,9 +1080,7 @@ def test_http_resolver_rejects_declared_oversize_without_reading_body():
         max_fetch_bytes=16,
     )
 
-    result = resolver.resolve(
-        _http_ref("https://store.example/big.bin", _sha256(b"x"))
-    )
+    result = resolver.resolve(_http_ref("https://store.example/big.bin", _sha256(b"x")))
 
     assert result.status is ResolutionStatus.UNRESOLVED
     assert result.content is None
@@ -953,9 +1102,7 @@ def test_http_resolver_truncates_payload_but_verifies():
 
 def test_http_resolver_caps_a_requested_byte_range_but_verifies():
     body = b"0123456789"
-    resolver, _, _ = _safe_http_resolver(
-        FakeHttpResponse(chunks=(body[:3], body[3:7], body[7:]))
-    )
+    resolver, _, _ = _safe_http_resolver(FakeHttpResponse(chunks=(body[:3], body[3:7], body[7:])))
 
     result = resolver.resolve(
         _http_ref("https://store.example/x", _sha256(body)),
@@ -971,9 +1118,7 @@ def test_http_resolver_caps_a_requested_byte_range_but_verifies():
 
 def test_scoped_http_resolver_caps_a_requested_byte_range_but_verifies():
     body = b"0123456789"
-    resolver, _, _ = _safe_http_resolver(
-        FakeHttpResponse(chunks=(body[:3], body[3:7], body[7:]))
-    )
+    resolver, _, _ = _safe_http_resolver(FakeHttpResponse(chunks=(body[:3], body[3:7], body[7:])))
     target = _registered_http_target(content_hash=_sha256(body))
 
     result = resolver.resolve_within_http_store(
@@ -1010,16 +1155,12 @@ def test_http_resolver_read_error_is_unresolved_and_closes_response():
     response = FakeHttpResponse(
         chunks=(
             b"partial",
-            OutboundHttpTransportError(
-                f"socket error at store.example?token={secret}"
-            ),
+            OutboundHttpTransportError(f"socket error at store.example?token={secret}"),
         )
     )
     resolver, _, _ = _safe_http_resolver(response)
 
-    result = resolver.resolve(
-        _http_ref("https://store.example/x", _sha256(b"x"))
-    )
+    result = resolver.resolve(_http_ref("https://store.example/x", _sha256(b"x")))
 
     assert result.status is ResolutionStatus.UNRESOLVED
     assert result.content is None
@@ -1101,9 +1242,7 @@ def test_http_resolver_revalidates_and_pins_each_redirect_hop():
         deadline_seconds=5.0,
     )
 
-    result = resolver.resolve(
-        _http_ref("https://store.example/start", _sha256(body))
-    )
+    result = resolver.resolve(_http_ref("https://store.example/start", _sha256(body)))
 
     assert result.status is ResolutionStatus.VERIFIED
     assert result.content == body
@@ -1115,18 +1254,13 @@ def test_http_resolver_revalidates_and_pins_each_redirect_hop():
         "store.example",
         "archive.example",
     ]
-    assert client.calls[1][1].addresses == (
-        ApprovedSocketAddress.from_ip("142.250.72.14", 443),
-    )
+    assert client.calls[1][1].addresses == (ApprovedSocketAddress.from_ip("142.250.72.14", 443),)
     assert len(dns.deadlines) == 2
     assert len(client.deadlines) == 2
     shared_deadline = dns.deadlines[0]
     assert shared_deadline is not None
     assert shared_deadline.expires_at == 105.0
-    assert all(
-        deadline is shared_deadline
-        for deadline in (*dns.deadlines, *client.deadlines)
-    )
+    assert all(deadline is shared_deadline for deadline in (*dns.deadlines, *client.deadlines))
 
 
 def test_http_resolver_redirect_chain_expires_before_next_hop() -> None:
@@ -1237,9 +1371,7 @@ def test_http_resolver_unsafe_redirect_never_reaches_second_target():
     )
     resolver, client, dns = _safe_http_resolver(redirect)
 
-    result = resolver.resolve(
-        _http_ref("https://store.example/start", _sha256(b"x"))
-    )
+    result = resolver.resolve(_http_ref("https://store.example/start", _sha256(b"x")))
 
     assert result.status is ResolutionStatus.UNRESOLVED
     assert len(client.calls) == 1
@@ -1268,9 +1400,7 @@ def test_http_resolver_rejects_downgrade_and_credentialed_redirects_before_open(
     )
     resolver, client, _ = _safe_http_resolver(redirect, dns=dns)
 
-    result = resolver.resolve(
-        _http_ref("https://store.example/start", _sha256(b"x"))
-    )
+    result = resolver.resolve(_http_ref("https://store.example/start", _sha256(b"x")))
 
     assert result.status is ResolutionStatus.UNRESOLVED
     assert len(client.calls) == 1
@@ -1284,9 +1414,7 @@ def test_http_resolver_malformed_redirect_is_redacted_unresolved():
     )
     resolver, client, dns = _safe_http_resolver(redirect)
 
-    result = resolver.resolve(
-        _http_ref("https://store.example/start", _sha256(b"x"))
-    )
+    result = resolver.resolve(_http_ref("https://store.example/start", _sha256(b"x")))
 
     assert result.status is ResolutionStatus.UNRESOLVED
     assert result.content is None
@@ -1308,9 +1436,7 @@ def test_http_resolver_redirect_rebinding_is_denied_before_second_open():
     )
     resolver, client, _ = _safe_http_resolver(redirect, dns=dns)
 
-    result = resolver.resolve(
-        _http_ref("https://store.example/start", _sha256(b"x"))
-    )
+    result = resolver.resolve(_http_ref("https://store.example/start", _sha256(b"x")))
 
     assert result.status is ResolutionStatus.UNRESOLVED
     assert len(client.calls) == 1
@@ -1329,9 +1455,7 @@ def test_http_resolver_enforces_finite_redirect_limit():
         max_redirects=0,
     )
 
-    result = resolver.resolve(
-        _http_ref("https://store.example/start", _sha256(b"x"))
-    )
+    result = resolver.resolve(_http_ref("https://store.example/start", _sha256(b"x")))
 
     assert result.status is ResolutionStatus.UNRESOLVED
     assert "redirect" in (result.detail or "").lower()
@@ -1386,9 +1510,7 @@ def test_default_registry_dispatches_http():
     body = b"served over http"
     client = FakeSafeHttpClient((FakeHttpResponse(chunks=(body,)),))
     policy = OutboundHttpPolicy(
-        address_resolver=FakeAddressResolver(
-            {"store.example": [_PUBLIC_HTTP_IP]}
-        )
+        address_resolver=FakeAddressResolver({"store.example": [_PUBLIC_HTTP_IP]})
     )
     registry = default_registry(
         http_policy=policy,
@@ -1418,18 +1540,14 @@ def test_http_resolver_resolves_explicitly_approved_internal_destination():
 
     assert result.status is ResolutionStatus.VERIFIED
     assert result.content == body
-    assert client.calls[0][1].addresses == (
-        ApprovedSocketAddress.from_ip("10.20.1.7", 443),
-    )
+    assert client.calls[0][1].addresses == (ApprovedSocketAddress.from_ip("10.20.1.7", 443),)
 
 
 # --- RcloneResolver -------------------------------------------------------
 
 
 def _rclone_ref(uri: str, content_hash: str) -> ExternalArtifactReference:
-    return ExternalArtifactReference(
-        source_system="rclone", uri=uri, content_hash=content_hash
-    )
+    return ExternalArtifactReference(source_system="rclone", uri=uri, content_hash=content_hash)
 
 
 def _fake_rclone_runner(*, size_bytes: int | None, body: bytes, cat_returncode: int = 0):
@@ -1728,9 +1846,7 @@ def test_rclone_non_integer_or_non_object_size_metadata_is_rejected(metadata):
     result = RcloneResolver(
         executor=executor,
         remote_policy=_rclone_policy("private"),
-    ).resolve(
-        _rclone_ref("rclone://private/x", _sha256(b"x"))
-    )
+    ).resolve(_rclone_ref("rclone://private/x", _sha256(b"x")))
 
     assert result.status is ResolutionStatus.UNRESOLVED
     assert result.detail == "rclone artifact resolution failed."
@@ -1743,9 +1859,7 @@ def test_rclone_rejects_decoded_control_character_before_spawn():
     result = RcloneResolver(
         executor=executor,
         remote_policy=_rclone_policy("private"),
-    ).resolve(
-        _rclone_ref("rclone://private/path%00secret", _sha256(b"x"))
-    )
+    ).resolve(_rclone_ref("rclone://private/path%00secret", _sha256(b"x")))
 
     assert result.status is ResolutionStatus.UNRESOLVED
     assert result.detail == "Reference URI is not an rclone locator."
@@ -1759,9 +1873,7 @@ def test_rclone_process_failure_redacts_target_credentials_and_stderr():
     result = RcloneResolver(
         executor=executor,
         remote_policy=_rclone_policy("private"),
-    ).resolve(
-        _rclone_ref(f"rclone://private/{secret}.bin", _sha256(b"x"))
-    )
+    ).resolve(_rclone_ref(f"rclone://private/{secret}.bin", _sha256(b"x")))
 
     serialized = str(result.to_json_dict())
     assert result.status is ResolutionStatus.UNRESOLVED
@@ -1969,9 +2081,7 @@ def test_local_store_target_factory_rejects_mismatched_logical_identity(tmp_path
     wrong_store_reference = reference.model_copy(
         update={"store_name": "other", "uri": "store://other/nested/artifact.bin"}
     )
-    wrong_uri_reference = reference.model_copy(
-        update={"uri": "store://lab-fs/other/artifact.bin"}
-    )
+    wrong_uri_reference = reference.model_copy(update={"uri": "store://lab-fs/other/artifact.bin"})
 
     assert (
         local_store_resolution_target(
@@ -2278,9 +2388,7 @@ def test_http_store_target_factory_rejects_mismatched_logical_identity():
         http_store_resolution_target(
             store,
             locator=locator,
-            logical_reference=reference.model_copy(
-                update={"uri": "store://web/other.bin"}
-            ),
+            logical_reference=reference.model_copy(update={"uri": "store://web/other.bin"}),
         )
         is None
     )
@@ -2347,9 +2455,7 @@ def test_store_relative_reference_unsupported_kind_returns_none():
 
 
 def test_store_relative_reference_git_builds_scoped_logical_target():
-    store = _data_store(
-        StoreKind.GIT, "https://example.com/org/repo.git", name="repo"
-    )
+    store = _data_store(StoreKind.GIT, "https://example.com/org/repo.git", name="repo")
     commit = "a" * 40
     target = store_relative_reference(
         store, path=f"analysis/run.py@{commit}", content_hash=_sha256(b"x")
@@ -2379,18 +2485,13 @@ def test_store_relative_reference_git_retains_internal_at_and_sha256_pin():
     assert target.pin.path.path == "analysis/model@v2.py"
     assert target.pin.object_id.value == object_id
     assert target.pin.object_id.object_format == "sha256"
-    assert target.logical_reference.uri == (
-        f"store://repo/analysis/model@v2.py@{object_id}"
-    )
+    assert target.logical_reference.uri == (f"store://repo/analysis/model@v2.py@{object_id}")
 
 
 def test_store_relative_reference_git_without_commit_returns_none():
-    store = _data_store(
-        StoreKind.GIT, "https://example.com/org/repo.git", name="repo"
-    )
+    store = _data_store(StoreKind.GIT, "https://example.com/org/repo.git", name="repo")
     assert (
-        store_relative_reference(store, path="analysis/run.py", content_hash=_sha256(b"x"))
-        is None
+        store_relative_reference(store, path="analysis/run.py", content_hash=_sha256(b"x")) is None
     )
 
 
@@ -2490,9 +2591,7 @@ def test_git_store_target_factory_rejects_mismatched_logical_identity():
         git_store_resolution_target(
             store,
             pin=pin,
-            logical_reference=reference.model_copy(
-                update={"locator": other_pin.locator}
-            ),
+            logical_reference=reference.model_copy(update={"locator": other_pin.locator}),
         )
         is None
     )
@@ -2522,13 +2621,9 @@ def test_git_store_target_cannot_bypass_validated_factory():
 def test_store_relative_reference_git_resolves_end_to_end(tmp_path):
     # The typed target must reach GitResolver without becoming a generic git+ URI.
     data = b"pinned analysis code"
-    store = _data_store(
-        StoreKind.GIT, "https://example.com/org/repo.git", name="repo"
-    )
+    store = _data_store(StoreKind.GIT, "https://example.com/org/repo.git", name="repo")
     commit = "b" * 40
-    ref = store_relative_reference(
-        store, path=f"src/model.py@{commit}", content_hash=_sha256(data)
-    )
+    ref = store_relative_reference(store, path=f"src/model.py@{commit}", content_hash=_sha256(data))
     assert ref is not None
     registry = ResolverRegistry(
         [_git_resolver(runner=_fake_git_runner(blob=data), cache_root=tmp_path)]
@@ -3511,6 +3606,30 @@ def test_default_registry_preserves_explicit_local_policy_identity(tmp_path):
     assert result.status is ResolutionStatus.VERIFIED
 
 
+def test_default_registry_preserves_explicit_local_reader_limits_and_recovery_identity():
+    def unexpected_read(_target, _budget, _stdout_consumer):
+        raise AssertionError("identity test unexpectedly read a file")
+
+    reader = _CallbackLocalFileReader(unexpected_read)
+    limits = LocalResolutionLimits(max_read_bytes=1234, deadline_seconds=2.5)
+    recovery = RecoveryPolicy(enabled=True, max_files=7, max_bytes=1234)
+
+    registry = default_registry(
+        local_file_reader=reader,
+        local_resolution_limits=limits,
+        recovery=recovery,
+    )
+    resolver = next(
+        candidate
+        for candidate in registry._resolvers
+        if isinstance(candidate, LocalFilesystemResolver)
+    )
+
+    assert resolver._file_reader is reader
+    assert resolver._limits is limits
+    assert resolver._recovery is recovery
+
+
 def test_registry_never_falls_back_to_ordinary_resolve_for_local_store(tmp_path):
     store_root = tmp_path / "store"
     store_root.mkdir()
@@ -3628,13 +3747,12 @@ def test_local_store_recovery_can_find_match_inside_same_store(tmp_path):
     assert result.uri == "store://store/missing.bin"
     assert result.source_system == "store"
     assert result.detail == (
-        "Recovered within registered local store "
-        "(differs from reference locator)."
+        "Recovered within registered local store (differs from reference locator)."
     )
     assert str(moved) not in (result.detail or "")
 
 
-def test_scoped_reader_uses_exact_store_policy_and_opened_stream_identity(tmp_path):
+def test_scoped_reader_receives_exact_store_target_and_retained_handle_bytes(tmp_path):
     store_root = tmp_path / "store"
     store_root.mkdir()
     recorded = b"descriptor-owned store bytes"
@@ -3642,41 +3760,27 @@ def test_scoped_reader_uses_exact_store_policy_and_opened_stream_identity(tmp_pa
     path = _write(store_root, "artifact.bin", recorded)
     store = _data_store(StoreKind.LOCAL_FS, str(store_root))
     target = _local_store_target(store, path.name, _sha256(recorded))
-    seen_policies: list[LocalPathPolicy] = []
 
-    class SwappingReader:
-        @contextmanager
-        def open_regular_file(self, requested_path):
-            assert os.fspath(requested_path) == os.path.realpath(path)
-            stream = BytesIO(recorded)
-            path.write_bytes(replacement)
-            try:
-                yield OpenedLocalFile(
-                    stream=stream,
-                    display_path=str(path),
-                    size_hint_bytes=len(recorded),
-                )
-            finally:
-                stream.close()
+    def read_from_registered_handle(target, budget, stdout_consumer):
+        assert type(target) is RegisteredLocalRegularFileTarget
+        assert target.store_root == str(store_root)
+        assert target.locator == ("artifact.bin",)
+        path.write_bytes(replacement)
+        return _complete_local_read(recorded, budget, stdout_consumer)
 
-    def reader_factory(policy):
-        seen_policies.append(policy)
-        return SwappingReader()
-
+    reader = _CallbackLocalFileReader(read_from_registered_handle)
     registry = ResolverRegistry(
         [
             LocalFilesystemResolver(
                 allowed_roots=[tmp_path],
-                file_reader_factory=reader_factory,
+                file_reader=reader,
             )
         ]
     )
 
     result = registry.resolve_local_store(target)
 
-    assert len(seen_policies) == 2
-    assert seen_policies[0].canonical_roots == (os.path.realpath(tmp_path),)
-    assert seen_policies[1].canonical_roots == (os.path.realpath(store_root),)
+    assert len(reader.calls) == 1
     assert path.read_bytes() == replacement
     assert result.status is ResolutionStatus.VERIFIED
     assert result.content == recorded
@@ -3685,101 +3789,69 @@ def test_scoped_reader_uses_exact_store_policy_and_opened_stream_identity(tmp_pa
     assert result.detail is None
 
 
-def test_scoped_root_second_canonicalization_failure_is_opaque_and_never_reads(
+def test_scoped_resolution_leaves_canonicalization_to_broker_and_denies_opaquely(
     tmp_path, monkeypatch
 ):
     store_root = tmp_path / "store"
     store_root.mkdir()
     store = _data_store(StoreKind.LOCAL_FS, str(store_root))
     target = _local_store_target(store, "artifact.bin", _sha256(b"x"))
-    reader_policies: list[LocalPathPolicy] = []
 
-    class UnexpectedReader:
-        @contextmanager
-        def open_regular_file(self, _requested_path):
-            raise AssertionError("failed store scoping reached the byte reader")
-            yield  # pragma: no cover
+    def deny_registered_target(reader_target, budget, _stdout_consumer):
+        assert type(reader_target) is RegisteredLocalRegularFileTarget
+        assert reader_target.store_root == str(store_root)
+        assert reader_target.locator == ("artifact.bin",)
+        return _clean_local_read(LocalRegularFileReadOutcome.DENIED, budget)
 
-    def reader_factory(policy):
-        reader_policies.append(policy)
-        return UnexpectedReader()
-
+    reader = _CallbackLocalFileReader(deny_registered_target)
     resolver = LocalFilesystemResolver(
         allowed_roots=[tmp_path],
-        file_reader_factory=reader_factory,
+        file_reader=reader,
     )
-    original_realpath = artifact_resolution.os.path.realpath
-    calls = 0
-
-    def fail_second_store_realpath(path):
-        nonlocal calls
-        calls += 1
-        if calls == 2:
-            raise OSError("store root changed")
-        return original_realpath(path)
 
     monkeypatch.setattr(
         artifact_resolution.os.path,
         "realpath",
-        fail_second_store_realpath,
+        lambda _path: (_ for _ in ()).throw(
+            AssertionError("application canonicalized a broker-owned target")
+        ),
     )
 
     result = resolver.resolve_within_root(target)
 
-    assert calls == 2
-    assert len(reader_policies) == 1
+    assert len(reader.calls) == 1
     assert result.status is ResolutionStatus.UNRESOLVED
     assert result.uri == "store://store/artifact.bin"
     assert result.detail == "Local store artifact is not authorized."
     assert result.content is None
 
 
-def test_scoped_root_retarget_between_canonicalizations_never_changes_store(
-    tmp_path, monkeypatch
-):
+def test_scoped_resolution_passes_the_snapshotted_raw_store_target_to_broker(tmp_path):
     store_root = tmp_path / "store"
     sibling_root = tmp_path / "sibling"
     store_root.mkdir()
     sibling_root.mkdir()
     store = _data_store(StoreKind.LOCAL_FS, str(store_root))
     target = _local_store_target(store, "artifact.bin", _sha256(b"sibling"))
-    reader_policies: list[LocalPathPolicy] = []
 
-    class UnexpectedReader:
-        @contextmanager
-        def open_regular_file(self, _requested_path):
-            raise AssertionError("retargeted store root reached the byte reader")
-            yield  # pragma: no cover
+    def deny_snapshotted_target(reader_target, budget, _stdout_consumer):
+        assert type(reader_target) is RegisteredLocalRegularFileTarget
+        assert reader_target.store_root == str(store_root)
+        assert reader_target.locator == ("artifact.bin",)
+        return _clean_local_read(LocalRegularFileReadOutcome.DENIED, budget)
 
-    def reader_factory(policy):
-        reader_policies.append(policy)
-        return UnexpectedReader()
-
+    reader = _CallbackLocalFileReader(deny_snapshotted_target)
     resolver = LocalFilesystemResolver(
         allowed_roots=[tmp_path],
-        file_reader_factory=reader_factory,
+        file_reader=reader,
     )
-    original_realpath = artifact_resolution.os.path.realpath
-    sibling_canonical = original_realpath(sibling_root)
-    calls = 0
-
-    def retarget_store_root(path):
-        nonlocal calls
-        calls += 1
-        if calls == 2:
-            return sibling_canonical
-        return original_realpath(path)
-
-    monkeypatch.setattr(
-        artifact_resolution.os.path,
-        "realpath",
-        retarget_store_root,
-    )
+    moved_root = tmp_path / "moved-store"
+    store_root.rename(moved_root)
+    sibling_root.rename(store_root)
 
     result = resolver.resolve_within_root(target)
 
-    assert calls == 2
-    assert len(reader_policies) == 1
+    assert len(reader.calls) == 1
     assert result.status is ResolutionStatus.UNRESOLVED
     assert result.uri == "store://store/artifact.bin"
     assert result.detail == "Local store artifact is not authorized."
@@ -3920,6 +3992,175 @@ def test_resolved_artifact_sanitizes_non_bytes_without_calling_hostile_len():
 # --- content-hash recovery of moved/renamed local artifacts ---------------
 
 
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"enabled": 1},
+        {"max_files": True},
+        {"max_files": -1},
+        {"max_files": 1.5},
+        {"max_bytes": False},
+        {"max_bytes": 0},
+        {"max_bytes": 1.5},
+        {"max_bytes": MAX_LOCAL_RESOLUTION_MAX_READ_BYTES + 1},
+    ],
+)
+def test_recovery_policy_rejects_coercible_or_out_of_range_limits(overrides):
+    with pytest.raises(ValueError, match="Local recovery policy is invalid"):
+        RecoveryPolicy(**overrides)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_local_resolver_rejects_conflicting_recovery_and_read_byte_limits(enabled):
+    with pytest.raises(
+        ValueError,
+        match=r"^Local recovery and resolution byte limits must match\.$",
+    ):
+        LocalFilesystemResolver(
+            recovery=RecoveryPolicy(enabled=enabled, max_bytes=8),
+            limits=LocalResolutionLimits(max_read_bytes=9),
+        )
+
+
+def test_local_resolver_aligns_default_recovery_to_explicit_read_limits():
+    limits = LocalResolutionLimits(max_read_bytes=8)
+
+    resolver = LocalFilesystemResolver(recovery=None, limits=limits)
+
+    assert resolver._limits is limits
+    assert resolver._recovery.enabled is False
+    assert resolver._recovery.max_bytes == limits.max_read_bytes
+
+
+def test_local_resolver_derives_read_limits_from_explicit_recovery():
+    recovery = RecoveryPolicy(enabled=True, max_bytes=8)
+
+    resolver = LocalFilesystemResolver(recovery=recovery, limits=None)
+
+    assert resolver._recovery is recovery
+    assert resolver._limits.max_read_bytes == recovery.max_bytes
+
+
+def test_local_resolution_reuses_one_budget_and_deadline_across_recovery(tmp_path):
+    root = tmp_path / "store"
+    root.mkdir()
+    decoy = _write(root, "artifact.bin", b"bad")
+    expected = b"target"
+    match = _write(root, "match.bin", expected)
+    missing = root / "missing" / "artifact.bin"
+    seen_budgets: list[LocalResolutionBudget] = []
+    seen_deadlines = []
+    seen_allowances: list[int] = []
+
+    def read_in_order(target, budget, stdout_consumer):
+        assert type(target) is DirectLocalRegularFileTarget
+        seen_budgets.append(budget)
+        seen_deadlines.append(budget.deadline)
+        seen_allowances.append(budget.remaining_bytes)
+        if target.candidate == str(missing):
+            return _clean_local_read(LocalRegularFileReadOutcome.MISSING, budget)
+        if target.candidate == str(decoy):
+            return _complete_local_read(b"bad", budget, stdout_consumer)
+        assert target.candidate == str(match)
+        return _complete_local_read(expected, budget, stdout_consumer)
+
+    resolver = LocalFilesystemResolver(
+        allowed_roots=[root],
+        recovery=RecoveryPolicy(enabled=True, max_bytes=12),
+        limits=LocalResolutionLimits(
+            max_read_bytes=12,
+            deadline_seconds=5,
+        ),
+        file_reader=_CallbackLocalFileReader(read_in_order),
+    )
+
+    result = resolver.resolve(_local_ref(missing, _sha256(expected)))
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == expected
+    assert len(seen_budgets) == 3
+    assert all(budget is seen_budgets[0] for budget in seen_budgets)
+    assert all(deadline is seen_deadlines[0] for deadline in seen_deadlines)
+    assert seen_allowances == [12, 12, 9]
+    assert seen_budgets[0].remaining_bytes == 3
+
+
+def test_recovery_deadline_after_clean_missing_terminally_aborts_budget(tmp_path):
+    _write(tmp_path, "candidate.bin", b"candidate")
+    missing = tmp_path / "missing.bin"
+    seen_budgets: list[LocalResolutionBudget] = []
+
+    def miss_after_deadline(_target, budget, _stdout_consumer):
+        seen_budgets.append(budget)
+        result = _clean_local_read(LocalRegularFileReadOutcome.MISSING, budget)
+        time.sleep(0.02)
+        return result
+
+    result = LocalFilesystemResolver(
+        allowed_roots=[tmp_path],
+        recovery=RecoveryPolicy(enabled=True, max_bytes=8),
+        file_reader=_CallbackLocalFileReader(miss_after_deadline),
+        limits=LocalResolutionLimits(max_read_bytes=8, deadline_seconds=0.001),
+    ).resolve(_local_ref(missing, _sha256(b"expected")))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.detail == "Failed to read local artifact."
+    assert len(seen_budgets) == 1
+    assert seen_budgets[0].remaining_bytes == 0
+    assert seen_budgets[0].terminal is True
+
+
+def test_recovery_scandir_failure_terminally_aborts_budget(tmp_path, monkeypatch):
+    missing = tmp_path / "missing.bin"
+    seen_budgets: list[LocalResolutionBudget] = []
+
+    def clean_missing(_target, budget, _stdout_consumer):
+        seen_budgets.append(budget)
+        return _clean_local_read(LocalRegularFileReadOutcome.MISSING, budget)
+
+    resolver = LocalFilesystemResolver(
+        allowed_roots=[tmp_path],
+        recovery=RecoveryPolicy(enabled=True, max_bytes=8),
+        file_reader=_CallbackLocalFileReader(clean_missing),
+        limits=LocalResolutionLimits(max_read_bytes=8),
+    )
+
+    def denied_scandir(_path):
+        raise PermissionError("private enumeration detail")
+
+    monkeypatch.setattr(artifact_resolution.os, "scandir", denied_scandir)
+    result = resolver.resolve(_local_ref(missing, _sha256(b"expected")))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.detail == "Failed to read local artifact."
+    assert len(seen_budgets) == 1
+    assert seen_budgets[0].remaining_bytes == 0
+    assert seen_budgets[0].terminal is True
+
+
+def test_local_full_read_limit_is_distinct_from_returned_view_limit(tmp_path):
+    data = b"12345678"
+    path = _write(tmp_path, "exact-limit.bin", data)
+    resolver = LocalFilesystemResolver(
+        allowed_roots=[tmp_path],
+        limits=LocalResolutionLimits(max_read_bytes=len(data)),
+    )
+
+    exact = resolver.resolve(_local_ref(path, _sha256(data)), max_bytes=1)
+
+    assert exact.status is ResolutionStatus.VERIFIED
+    assert exact.content == b"1"
+    assert exact.size_bytes == len(data)
+    assert exact.truncated is True
+
+    path.write_bytes(data + b"9")
+    oversized = resolver.resolve(_local_ref(path, _sha256(data + b"9")), max_bytes=1)
+
+    assert oversized.status is ResolutionStatus.UNRESOLVED
+    assert oversized.content is None
+    assert oversized.detail == "Failed to read local artifact."
+
+
 def test_recovery_finds_moved_file_by_hash(tmp_path):
     root = tmp_path / "store"
     root.mkdir()
@@ -3928,16 +4169,16 @@ def test_recovery_finds_moved_file_by_hash(tmp_path):
     moved.parent.mkdir(parents=True)
     moved.write_bytes(data)
     missing = root / "old" / "result.csv"  # never existed here
-    resolver = LocalFilesystemResolver(
-        allowed_roots=[root], recovery=RecoveryPolicy(enabled=True)
-    )
+    resolver = LocalFilesystemResolver(allowed_roots=[root], recovery=RecoveryPolicy(enabled=True))
 
     result = resolver.resolve(_local_ref(missing, _sha256(data)))
 
     assert result.status is ResolutionStatus.VERIFIED
     assert result.content == data
     assert result.observed_hash == _sha256(data)
-    assert "Recovered from" in (result.detail or "")
+    assert result.detail == (
+        "Recovered within authorized local roots (differs from reference URI)."
+    )
 
 
 def test_recovery_caps_selected_range_while_verifying_full_moved_file(tmp_path):
@@ -3963,7 +4204,9 @@ def test_recovery_caps_selected_range_while_verifying_full_moved_file(tmp_path):
     assert result.observed_hash == _sha256(data)
     assert result.size_bytes == len(data)
     assert result.truncated is True
-    assert "Recovered from" in (result.detail or "")
+    assert result.detail == (
+        "Recovered within authorized local roots (differs from reference URI)."
+    )
 
 
 def test_recovery_finds_renamed_file_by_hash(tmp_path):
@@ -3972,9 +4215,7 @@ def test_recovery_finds_renamed_file_by_hash(tmp_path):
     data = b"same bytes, different name"
     (root / "result_final.csv").write_bytes(data)
     missing = root / "result.csv"
-    resolver = LocalFilesystemResolver(
-        allowed_roots=[root], recovery=RecoveryPolicy(enabled=True)
-    )
+    resolver = LocalFilesystemResolver(allowed_roots=[root], recovery=RecoveryPolicy(enabled=True))
 
     result = resolver.resolve(_local_ref(missing, _sha256(data)))
 
@@ -3989,43 +4230,37 @@ def test_recovery_starts_after_missing_reader_context_has_closed(tmp_path):
     candidate = root / "moved.bin"
     candidate.write_bytes(data)
     missing = root / "gone.bin"
+    active = False
 
-    class NonReentrantReader:
-        def __init__(self) -> None:
-            self.active = False
+    def non_reentrant_read(target, budget, stdout_consumer):
+        nonlocal active
+        assert active is False
+        assert type(target) is DirectLocalRegularFileTarget
+        active = True
+        try:
+            if target.candidate == str(missing):
+                return _clean_local_read(
+                    LocalRegularFileReadOutcome.MISSING,
+                    budget,
+                )
+            assert target.candidate == str(candidate)
+            return _complete_local_read(data, budget, stdout_consumer)
+        finally:
+            active = False
 
-        @contextmanager
-        def open_regular_file(self, requested_path):
-            assert self.active is False
-            self.active = True
-            requested = os.fspath(requested_path)
-            stream = BytesIO(data)
-            try:
-                if requested == str(missing):
-                    yield LocalOpenFailure(LocalOpenFailureReason.MISSING)
-                else:
-                    assert requested == str(candidate)
-                    yield OpenedLocalFile(
-                        stream=stream,
-                        display_path=requested,
-                        size_hint_bytes=len(data),
-                    )
-            finally:
-                stream.close()
-                self.active = False
-
-    reader = NonReentrantReader()
+    reader = _CallbackLocalFileReader(non_reentrant_read)
     resolver = LocalFilesystemResolver(
         allowed_roots=[root],
         recovery=RecoveryPolicy(enabled=True),
-        file_reader_factory=lambda _policy: reader,
+        file_reader=reader,
     )
 
     result = resolver.resolve(_local_ref(missing, _sha256(data)))
 
     assert result.status is ResolutionStatus.VERIFIED
     assert result.content == data
-    assert reader.active is False
+    assert len(reader.calls) == 2
+    assert active is False
 
 
 def test_recovery_disabled_by_default_stays_unresolved(tmp_path):
@@ -4062,9 +4297,7 @@ def test_recovery_never_reads_outside_allowed_roots(tmp_path):
     outside.parent.mkdir()
     outside.write_bytes(data)
     missing = root / "gone.bin"
-    resolver = LocalFilesystemResolver(
-        allowed_roots=[root], recovery=RecoveryPolicy(enabled=True)
-    )
+    resolver = LocalFilesystemResolver(allowed_roots=[root], recovery=RecoveryPolicy(enabled=True))
 
     result = resolver.resolve(_local_ref(missing, _sha256(data)))
 
@@ -4084,9 +4317,7 @@ def test_recovery_prunes_symlinked_directories_outside_allowed_roots(tmp_path):
     except (NotImplementedError, OSError) as exc:
         pytest.skip(f"directory symlinks are unavailable: {exc}")
     missing = root / "gone.bin"
-    resolver = LocalFilesystemResolver(
-        allowed_roots=[root], recovery=RecoveryPolicy(enabled=True)
-    )
+    resolver = LocalFilesystemResolver(allowed_roots=[root], recovery=RecoveryPolicy(enabled=True))
 
     result = resolver.resolve(_local_ref(missing, _sha256(data)))
 
@@ -4099,9 +4330,7 @@ def test_recovery_does_not_falsely_match_same_name_different_bytes(tmp_path):
     root.mkdir()
     (root / "result.csv").write_bytes(b"a decoy with the same name")
     missing = root / "sub" / "result.csv"
-    resolver = LocalFilesystemResolver(
-        allowed_roots=[root], recovery=RecoveryPolicy(enabled=True)
-    )
+    resolver = LocalFilesystemResolver(allowed_roots=[root], recovery=RecoveryPolicy(enabled=True))
 
     result = resolver.resolve(_local_ref(missing, _sha256(b"the real content")))
 
@@ -4167,72 +4396,6 @@ def test_windows_local_store_direct_safe_junction_verifies(tmp_path):
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires Windows directory junctions")
-def test_windows_local_store_direct_parent_swap_never_hashes_global_sibling(
-    tmp_path, monkeypatch
-):
-    store_root = tmp_path / "store"
-    parent = store_root / "victim-parent"
-    parent.mkdir(parents=True)
-    inside = _write(parent, "artifact.bin", b"in-store decoy")
-    moved_parent = store_root / "original-parent"
-    sibling_parent = tmp_path / "global-sibling"
-    sibling_parent.mkdir()
-    sibling_data = b"matching bytes outside registered store"
-    sibling = _write(sibling_parent, inside.name, sibling_data)
-    store = _data_store(StoreKind.LOCAL_FS, str(store_root))
-    target = _local_store_target(
-        store,
-        "victim-parent/artifact.bin",
-        _sha256(sibling_data),
-    )
-    resolver = LocalFilesystemResolver(allowed_roots=[tmp_path])
-    real_open = local_file_access._open_windows_descriptor
-    swapped = False
-
-    def swap_candidate_parent(planned_path):
-        nonlocal swapped
-        if not swapped and os.path.basename(planned_path) == inside.name:
-            parent.rename(moved_parent)
-            completed = subprocess.run(
-                [
-                    "cmd.exe",
-                    "/d",
-                    "/c",
-                    "mklink",
-                    "/J",
-                    str(parent),
-                    str(sibling_parent),
-                ],
-                capture_output=True,
-                check=False,
-                text=True,
-            )
-            assert completed.returncode == 0, (
-                f"mklink /J failed: stdout={completed.stdout!r} "
-                f"stderr={completed.stderr!r}"
-            )
-            swapped = True
-        return real_open(planned_path)
-
-    monkeypatch.setattr(
-        local_file_access,
-        "_open_windows_descriptor",
-        swap_candidate_parent,
-    )
-
-    result = ResolverRegistry([resolver]).resolve_local_store(target)
-
-    assert swapped is True
-    assert result.status is ResolutionStatus.UNRESOLVED
-    assert result.content is None
-    assert result.observed_hash is None
-    assert result.detail == (
-        "Local artifact is not an authorized readable regular file."
-    )
-    assert str(sibling) not in (result.detail or "")
-
-
-@pytest.mark.skipif(os.name != "nt", reason="requires Windows directory junctions")
 def test_windows_recovery_never_descends_through_junction_escape(tmp_path):
     root = tmp_path / "store"
     root.mkdir()
@@ -4251,9 +4414,7 @@ def test_windows_recovery_never_descends_through_junction_escape(tmp_path):
         f"mklink /J failed: stdout={completed.stdout!r} stderr={completed.stderr!r}"
     )
     missing = root / "gone.bin"
-    resolver = LocalFilesystemResolver(
-        allowed_roots=[root], recovery=RecoveryPolicy(enabled=True)
-    )
+    resolver = LocalFilesystemResolver(allowed_roots=[root], recovery=RecoveryPolicy(enabled=True))
 
     candidates = list(resolver._iter_candidate_files(outside_file.name, True))
     result = resolver.resolve(_local_ref(missing, _sha256(data)))
@@ -4261,130 +4422,6 @@ def test_windows_recovery_never_descends_through_junction_escape(tmp_path):
     assert candidates == []
     assert result.status is ResolutionStatus.UNRESOLVED
     assert result.content is None
-
-
-@pytest.mark.skipif(os.name != "nt", reason="requires Windows directory junctions")
-def test_windows_recovery_parent_swap_never_hashes_outside_target(
-    tmp_path, monkeypatch
-):
-    root = tmp_path / "store"
-    parent = root / "victim-parent"
-    parent.mkdir(parents=True)
-    candidate = parent / "moved.bin"
-    candidate.write_bytes(b"scan-visible inside decoy")
-    moved_parent = root / "original-parent"
-    outside_parent = tmp_path / "outside-parent"
-    outside_parent.mkdir()
-    outside = outside_parent / candidate.name
-    outside_data = b"matching outside bytes"
-    outside.write_bytes(outside_data)
-    missing = root / "gone.bin"
-    resolver = LocalFilesystemResolver(
-        allowed_roots=[root],
-        recovery=RecoveryPolicy(enabled=True),
-    )
-    real_open = local_file_access._open_windows_descriptor
-    swapped = False
-
-    def swap_candidate_parent(planned_path):
-        nonlocal swapped
-        if not swapped and os.path.basename(planned_path) == candidate.name:
-            parent.rename(moved_parent)
-            completed = subprocess.run(
-                [
-                    "cmd.exe",
-                    "/d",
-                    "/c",
-                    "mklink",
-                    "/J",
-                    str(parent),
-                    str(outside_parent),
-                ],
-                capture_output=True,
-                check=False,
-                text=True,
-            )
-            assert completed.returncode == 0, (
-                f"mklink /J failed: stdout={completed.stdout!r} "
-                f"stderr={completed.stderr!r}"
-            )
-            swapped = True
-        return real_open(planned_path)
-
-    monkeypatch.setattr(
-        local_file_access,
-        "_open_windows_descriptor",
-        swap_candidate_parent,
-    )
-
-    result = resolver.resolve(_local_ref(missing, _sha256(outside_data)))
-
-    assert swapped is True
-    assert result.status is ResolutionStatus.UNRESOLVED
-    assert result.content is None
-
-
-@pytest.mark.skipif(os.name != "nt", reason="requires Windows directory junctions")
-def test_windows_local_store_recovery_final_handle_uses_store_not_global_scope(
-    tmp_path, monkeypatch
-):
-    store_root = tmp_path / "store"
-    parent = store_root / "victim-parent"
-    parent.mkdir(parents=True)
-    candidate = parent / "moved.bin"
-    candidate.write_bytes(b"scan-visible in-store decoy")
-    moved_parent = store_root / "original-parent"
-    sibling_parent = tmp_path / "global-sibling"
-    sibling_parent.mkdir()
-    sibling = sibling_parent / candidate.name
-    sibling_data = b"matching bytes in global sibling"
-    sibling.write_bytes(sibling_data)
-    store = _data_store(StoreKind.LOCAL_FS, str(store_root))
-    target = _local_store_target(store, "gone.bin", _sha256(sibling_data))
-    resolver = LocalFilesystemResolver(
-        allowed_roots=[tmp_path],
-        recovery=RecoveryPolicy(enabled=True),
-    )
-    real_open = local_file_access._open_windows_descriptor
-    swapped = False
-
-    def swap_candidate_parent(planned_path):
-        nonlocal swapped
-        if not swapped and os.path.basename(planned_path) == candidate.name:
-            parent.rename(moved_parent)
-            completed = subprocess.run(
-                [
-                    "cmd.exe",
-                    "/d",
-                    "/c",
-                    "mklink",
-                    "/J",
-                    str(parent),
-                    str(sibling_parent),
-                ],
-                capture_output=True,
-                check=False,
-                text=True,
-            )
-            assert completed.returncode == 0, (
-                f"mklink /J failed: stdout={completed.stdout!r} "
-                f"stderr={completed.stderr!r}"
-            )
-            swapped = True
-        return real_open(planned_path)
-
-    monkeypatch.setattr(
-        local_file_access,
-        "_open_windows_descriptor",
-        swap_candidate_parent,
-    )
-
-    result = ResolverRegistry([resolver]).resolve_local_store(target)
-
-    assert swapped is True
-    assert result.status is ResolutionStatus.UNRESOLVED
-    assert result.content is None
-    assert str(sibling) not in (result.detail or "")
 
 
 def test_recovery_respects_byte_budget(tmp_path):
@@ -4403,9 +4440,7 @@ def test_recovery_respects_byte_budget(tmp_path):
     assert result.status is ResolutionStatus.UNRESOLVED
 
 
-def test_recovery_enforces_remaining_budget_when_open_file_grows(
-    tmp_path, monkeypatch
-):
+def test_recovery_enforces_remaining_budget_when_open_file_grows(tmp_path, monkeypatch):
     root = tmp_path / "store"
     root.mkdir()
     candidate = root / "moved.bin"
@@ -4413,23 +4448,13 @@ def test_recovery_enforces_remaining_budget_when_open_file_grows(
     missing = root / "gone.bin"
     grown = b"g" * 64
 
-    class GrowingReader:
-        @contextmanager
-        def open_regular_file(self, requested_path):
-            requested = os.fspath(requested_path)
-            if requested == str(missing):
-                yield LocalOpenFailure(LocalOpenFailureReason.MISSING)
-                return
-            assert requested == str(candidate)
-            stream = BytesIO(grown)
-            try:
-                yield OpenedLocalFile(
-                    stream=stream,
-                    display_path=str(candidate),
-                    size_hint_bytes=1,
-                )
-            finally:
-                stream.close()
+    def reject_growth_past_reservation(target, budget, stdout_consumer):
+        assert type(target) is DirectLocalRegularFileTarget
+        if target.candidate == str(missing):
+            return _clean_local_read(LocalRegularFileReadOutcome.MISSING, budget)
+        assert target.candidate == str(candidate)
+        assert len(grown) > budget.remaining_bytes
+        return _terminal_local_read(budget, stdout_consumer)
 
     def unexpected_pathname_size(_path):
         raise AssertionError("recovery used a pathname size preflight")
@@ -4438,14 +4463,16 @@ def test_recovery_enforces_remaining_budget_when_open_file_grows(
         "lab_tracker.artifact_resolution.os.path.getsize",
         unexpected_pathname_size,
     )
+    reader = _CallbackLocalFileReader(reject_growth_past_reservation)
     resolver = LocalFilesystemResolver(
         allowed_roots=[root],
         recovery=RecoveryPolicy(enabled=True, max_bytes=8),
-        file_reader_factory=lambda _policy: GrowingReader(),
+        file_reader=reader,
     )
 
     result = resolver.resolve(_local_ref(missing, _sha256(grown)))
 
+    assert len(reader.calls) == 2
     assert result.status is ResolutionStatus.UNRESOLVED
     assert result.content is None
 
@@ -4460,39 +4487,21 @@ def test_recovery_debits_partial_reads_that_end_in_io_failure(tmp_path):
     missing = root / "gone.bin"
     opened_candidates: list[str] = []
 
-    class PartialFailureStream(BytesIO):
-        def __init__(self) -> None:
-            super().__init__(b"x" * 8)
-            self._completed_read = False
-
-        def read(self, size=-1):
-            if self._completed_read:
-                raise OSError("candidate failed after a partial read")
-            self._completed_read = True
-            return super().read(size)
-
-    class PartialFailureReader:
-        @contextmanager
-        def open_regular_file(self, requested_path):
-            requested = os.fspath(requested_path)
-            if requested == str(missing):
-                yield LocalOpenFailure(LocalOpenFailureReason.MISSING)
-                return
-            opened_candidates.append(requested)
-            stream = PartialFailureStream()
-            try:
-                yield OpenedLocalFile(
-                    stream=stream,
-                    display_path=requested,
-                    size_hint_bytes=0,
-                )
-            finally:
-                stream.close()
+    def fail_after_partial_read(target, budget, stdout_consumer):
+        assert type(target) is DirectLocalRegularFileTarget
+        if target.candidate == str(missing):
+            return _clean_local_read(LocalRegularFileReadOutcome.MISSING, budget)
+        opened_candidates.append(target.candidate)
+        return _terminal_local_read(
+            budget,
+            stdout_consumer,
+            partial=b"x" * 8,
+        )
 
     resolver = LocalFilesystemResolver(
         allowed_roots=[root],
         recovery=RecoveryPolicy(enabled=True, max_files=2, max_bytes=8),
-        file_reader_factory=lambda _policy: PartialFailureReader(),
+        file_reader=_CallbackLocalFileReader(fail_after_partial_read),
     )
 
     result = resolver.resolve(_local_ref(missing, _sha256(b"not present")))
@@ -4510,34 +4519,25 @@ def test_recovery_hashes_opened_stream_without_reopening_candidate(tmp_path):
     candidate.write_bytes(recorded)
     missing = root / "gone.bin"
 
-    class SwappingRecoveryReader:
-        @contextmanager
-        def open_regular_file(self, requested_path):
-            requested = os.fspath(requested_path)
-            if requested == str(missing):
-                yield LocalOpenFailure(LocalOpenFailureReason.MISSING)
-                return
-            assert requested == str(candidate)
-            stream = BytesIO(recorded)
-            candidate.write_bytes(replacement)
-            try:
-                yield OpenedLocalFile(
-                    stream=stream,
-                    display_path=str(candidate),
-                    size_hint_bytes=len(recorded),
-                )
-            finally:
-                stream.close()
+    def read_retained_recovery_handle(target, budget, stdout_consumer):
+        assert type(target) is DirectLocalRegularFileTarget
+        if target.candidate == str(missing):
+            return _clean_local_read(LocalRegularFileReadOutcome.MISSING, budget)
+        assert target.candidate == str(candidate)
+        candidate.write_bytes(replacement)
+        return _complete_local_read(recorded, budget, stdout_consumer)
 
+    reader = _CallbackLocalFileReader(read_retained_recovery_handle)
     resolver = LocalFilesystemResolver(
         allowed_roots=[root],
         recovery=RecoveryPolicy(enabled=True),
-        file_reader_factory=lambda _policy: SwappingRecoveryReader(),
+        file_reader=reader,
     )
 
     result = resolver.resolve(_local_ref(missing, _sha256(recorded)))
 
     assert candidate.read_bytes() == replacement
+    assert len(reader.calls) == 2
     assert result.status is ResolutionStatus.VERIFIED
     assert result.content == recorded
 
@@ -4585,6 +4585,44 @@ def test_registry_from_env_recovery_off_by_default(tmp_path, monkeypatch):
     result = registry_from_env().resolve(_local_ref(missing, _sha256(data)))
 
     assert result.status is ResolutionStatus.UNRESOLVED
+
+
+@pytest.mark.parametrize(
+    ("variable", "value"),
+    [
+        ("LAB_TRACKER_RESOLVER_RECOVERY", "sometimes"),
+        ("LAB_TRACKER_RESOLVER_RECOVERY_MAX_FILES", "0"),
+        ("LAB_TRACKER_RESOLVER_RECOVERY_MAX_FILES", "1.5"),
+        ("LAB_TRACKER_RESOLVER_RECOVERY_MAX_BYTES", "0"),
+        (
+            "LAB_TRACKER_RESOLVER_RECOVERY_MAX_BYTES",
+            str(MAX_LOCAL_RESOLUTION_MAX_READ_BYTES + 1),
+        ),
+    ],
+)
+def test_registry_from_env_rejects_invalid_local_recovery_controls(
+    monkeypatch,
+    variable,
+    value,
+):
+    monkeypatch.setenv(variable, value)
+
+    with pytest.raises(ValueError, match=variable):
+        registry_from_env()
+
+
+def test_registry_from_env_rejects_conflicting_injected_local_byte_limits(
+    monkeypatch,
+):
+    monkeypatch.setenv("LAB_TRACKER_RESOLVER_RECOVERY_MAX_BYTES", "8")
+
+    with pytest.raises(
+        ValueError,
+        match=r"^Local recovery and resolution byte limits must match\.$",
+    ):
+        registry_from_env(
+            local_resolution_limits=LocalResolutionLimits(max_read_bytes=9),
+        )
 
 
 def test_registry_from_env_explicit_local_policy_overrides_environment_without_parsing(
@@ -4761,13 +4799,9 @@ def test_outbound_http_policy_from_env_allows_exact_internal_literal(
         "10.20.0.0/16",
     )
 
-    target = outbound_http_policy_from_env().authorize(
-        "http://10.20.1.7/artifact.bin"
-    )
+    target = outbound_http_policy_from_env().authorize("http://10.20.1.7/artifact.bin")
 
-    assert target.addresses == (
-        ApprovedSocketAddress.from_ip("10.20.1.7", 80),
-    )
+    assert target.addresses == (ApprovedSocketAddress.from_ip("10.20.1.7", 80),)
 
 
 def test_outbound_http_policy_from_env_rejects_empty_list_entries(
@@ -4909,12 +4943,16 @@ def test_scoped_git_resolver_uses_exact_object_format_and_separate_caches(
         "-q",
         "--object-format=sha256",
     ]
-    assert next(
-        call["command"] for call in sha1_calls if "fetch" in call["command"]
-    )[-3:] == ["--", _GIT_REMOTE, sha1_id]
-    assert next(
-        call["command"] for call in sha256_calls if "fetch" in call["command"]
-    )[-3:] == ["--", _GIT_REMOTE, sha256_id]
+    assert next(call["command"] for call in sha1_calls if "fetch" in call["command"])[-3:] == [
+        "--",
+        _GIT_REMOTE,
+        sha1_id,
+    ]
+    assert next(call["command"] for call in sha256_calls if "fetch" in call["command"])[-3:] == [
+        "--",
+        _GIT_REMOTE,
+        sha256_id,
+    ]
 
     def expected_cache(object_format: str) -> str:
         identity = f"{object_format}\0{_GIT_REMOTE}"
@@ -5055,10 +5093,7 @@ def test_direct_generic_head_retains_legacy_init_and_cache_identity(tmp_path):
     assert result.status is ResolutionStatus.VERIFIED
     init = next(call for call in executor.calls if "init" in call["command"])
     assert init["command"][-2:] == ["init", "-q"]
-    assert not any(
-        argument.startswith("--object-format=")
-        for argument in init["command"]
-    )
+    assert not any(argument.startswith("--object-format=") for argument in init["command"])
     fetch = next(call for call in executor.calls if "fetch" in call["command"])
     assert fetch["command"][-3:] == ["--", _GIT_REMOTE, "HEAD"]
     legacy_digest = hashlib.sha256(_GIT_REMOTE.encode()).hexdigest()[:16]
@@ -5141,9 +5176,7 @@ def test_git_resolver_missing_binary_is_unresolved(tmp_path):
     def runner(args):
         raise OSError("git not found")
 
-    result = _git_resolver(runner=runner, cache_root=tmp_path).resolve(
-        _git_ref(_sha256(b"x"))
-    )
+    result = _git_resolver(runner=runner, cache_root=tmp_path).resolve(_git_ref(_sha256(b"x")))
 
     assert result.status is ResolutionStatus.UNRESOLVED
     assert result.detail == "Git artifact resolution failed."
@@ -5173,10 +5206,7 @@ def test_git_executor_streams_blob_under_one_deadline(tmp_path):
     assert executor.calls[-1]["stdout_limit_bytes"] == len(data)
     assert len({id(call["deadline"]) for call in executor.calls}) == 1
     assert all(call["env"]["GIT_TERMINAL_PROMPT"] == "0" for call in executor.calls)
-    assert all(
-        call["env"]["GIT_ALLOW_PROTOCOL"] == "https:ssh:git"
-        for call in executor.calls
-    )
+    assert all(call["env"]["GIT_ALLOW_PROTOCOL"] == "https:ssh:git" for call in executor.calls)
     assert len({id(call["env"]) for call in executor.calls}) == 1
     assert len({call["cwd"] for call in executor.calls}) == 1
     operation_cwd = executor.calls[0]["cwd"]
@@ -5190,15 +5220,8 @@ def test_git_executor_streams_blob_under_one_deadline(tmp_path):
         "-c",
         f"http.{_GIT_REMOTE}.followRedirects=false",
     ]
-    assert all(
-        call["command"][: len(config_prefix)] == config_prefix
-        for call in executor.calls
-    )
-    preflight = next(
-        call["command"]
-        for call in executor.calls
-        if "ls-remote" in call["command"]
-    )
+    assert all(call["command"][: len(config_prefix)] == config_prefix for call in executor.calls)
+    preflight = next(call["command"] for call in executor.calls if "ls-remote" in call["command"])
     assert preflight[-4:] == ["ls-remote", "--get-url", "--", _GIT_REMOTE]
     fetch = next(call["command"] for call in executor.calls if "fetch" in call["command"])
     assert fetch[-3:] == ["--", _GIT_REMOTE, "a" * 40]
@@ -5227,20 +5250,12 @@ def test_git_executor_uses_one_environment_snapshot_across_preflight(
         on_run=mutate_ambient_environment,
     )
 
-    result = _git_resolver(executor=executor, cache_root=tmp_path).resolve(
-        _git_ref(_sha256(data))
-    )
+    result = _git_resolver(executor=executor, cache_root=tmp_path).resolve(_git_ref(_sha256(data)))
 
     assert result.status is ResolutionStatus.VERIFIED
     assert len({id(call["env"]) for call in executor.calls}) == 1
-    assert all(
-        call["env"]["GIT_TERMINAL_PROMPT"] == "0"
-        for call in executor.calls
-    )
-    assert all(
-        call["env"]["GIT_ALLOW_PROTOCOL"] == "https:ssh:git"
-        for call in executor.calls
-    )
+    assert all(call["env"]["GIT_TERMINAL_PROMPT"] == "0" for call in executor.calls)
+    assert all(call["env"]["GIT_ALLOW_PROTOCOL"] == "https:ssh:git" for call in executor.calls)
 
 
 def test_git_actual_blob_growth_over_cap_discards_partial_result(tmp_path):
@@ -5294,9 +5309,7 @@ def test_git_runner_arbitrary_exception_is_redacted(tmp_path):
     def runner(_args):
         raise KeyError(secret)
 
-    result = _git_resolver(runner=runner, cache_root=tmp_path).resolve(
-        _git_ref(_sha256(b"x"))
-    )
+    result = _git_resolver(runner=runner, cache_root=tmp_path).resolve(_git_ref(_sha256(b"x")))
 
     serialized = str(result.to_json_dict())
     assert result.status is ResolutionStatus.UNRESOLVED
@@ -5384,9 +5397,7 @@ def test_git_malformed_object_size_is_generic_unresolved(tmp_path, size_output):
             (0, (size_output,), b"private diagnostic"),
         ]
     )
-    result = _git_resolver(executor=executor, cache_root=tmp_path).resolve(
-        _git_ref(_sha256(b"x"))
-    )
+    result = _git_resolver(executor=executor, cache_root=tmp_path).resolve(_git_ref(_sha256(b"x")))
 
     assert result.status is ResolutionStatus.UNRESOLVED
     assert result.detail == "Git artifact resolution failed."
@@ -5403,9 +5414,7 @@ def test_git_excessive_integer_metadata_is_generic_unresolved(tmp_path):
         ]
     )
 
-    result = _git_resolver(executor=executor, cache_root=tmp_path).resolve(
-        _git_ref(_sha256(b"x"))
-    )
+    result = _git_resolver(executor=executor, cache_root=tmp_path).resolve(_git_ref(_sha256(b"x")))
 
     assert result.status is ResolutionStatus.UNRESOLVED
     assert result.detail == "Git artifact resolution failed."
@@ -5657,9 +5666,7 @@ def test_git_preflight_failure_prevents_fetch_and_is_redacted(
             return preflight
         raise AssertionError("preflight failure must prevent git fetch")
 
-    result = _git_resolver(runner=runner, cache_root=tmp_path).resolve(
-        _git_ref(_sha256(b"x"))
-    )
+    result = _git_resolver(runner=runner, cache_root=tmp_path).resolve(_git_ref(_sha256(b"x")))
 
     serialized = str(result.to_json_dict())
     assert result.status is ResolutionStatus.UNRESOLVED
@@ -5727,9 +5734,7 @@ def test_default_registry_preserves_explicit_git_policy_identity():
     registry = default_registry(git_remote_policy=policy)
 
     resolver = next(
-        candidate
-        for candidate in registry._resolvers
-        if isinstance(candidate, GitResolver)
+        candidate for candidate in registry._resolvers if isinstance(candidate, GitResolver)
     )
     assert resolver._remote_policy is policy
 
@@ -5744,9 +5749,7 @@ def test_default_registry_preserves_even_a_falsey_git_policy_identity():
     registry = default_registry(git_remote_policy=policy)
 
     resolver = next(
-        candidate
-        for candidate in registry._resolvers
-        if isinstance(candidate, GitResolver)
+        candidate for candidate in registry._resolvers if isinstance(candidate, GitResolver)
     )
     assert resolver._remote_policy is policy
 
@@ -5764,9 +5767,7 @@ def test_registry_from_env_explicit_git_policy_overrides_environment(monkeypatch
     )
 
     resolver = next(
-        candidate
-        for candidate in registry._resolvers
-        if isinstance(candidate, GitResolver)
+        candidate for candidate in registry._resolvers if isinstance(candidate, GitResolver)
     )
     assert resolver._remote_policy is policy
 
@@ -5913,9 +5914,7 @@ def test_rclone_resolver_denies_by_default_without_process_work():
     runner = _fake_rclone_runner(size_bytes=4, body=b"data")
     resolver = RcloneResolver(runner=runner)
 
-    result = resolver.resolve(
-        _rclone_ref("rclone://lab-onedrive/exp/x.bin", _sha256(b"data"))
-    )
+    result = resolver.resolve(_rclone_ref("rclone://lab-onedrive/exp/x.bin", _sha256(b"data")))
 
     assert result.status is ResolutionStatus.UNRESOLVED
     assert "allowlist" in (result.detail or "")
@@ -5927,9 +5926,7 @@ def test_rclone_resolver_refuses_remote_not_in_typed_policy():
     policy = _rclone_policy("lab-onedrive")
     resolver = RcloneResolver(runner=runner, remote_policy=policy)
 
-    result = resolver.resolve(
-        _rclone_ref("rclone://other-remote/exp/x.bin", _sha256(b"data"))
-    )
+    result = resolver.resolve(_rclone_ref("rclone://other-remote/exp/x.bin", _sha256(b"data")))
 
     assert resolver._remote_policy is policy
     assert result.status is ResolutionStatus.UNRESOLVED
@@ -5943,9 +5940,7 @@ def test_rclone_resolver_preserves_typed_policy_identity_and_allows_exact_remote
     policy = _rclone_policy("lab-onedrive")
     resolver = RcloneResolver(runner=runner, remote_policy=policy)
 
-    result = resolver.resolve(
-        _rclone_ref("rclone://lab-onedrive/exp/x.bin", _sha256(data))
-    )
+    result = resolver.resolve(_rclone_ref("rclone://lab-onedrive/exp/x.bin", _sha256(data)))
 
     assert resolver._remote_policy is policy
     assert result.status is ResolutionStatus.VERIFIED
@@ -5958,9 +5953,7 @@ def test_default_registry_preserves_explicit_rclone_policy_identity():
     registry = default_registry(rclone_remote_policy=policy)
 
     resolver = next(
-        candidate
-        for candidate in registry._resolvers
-        if isinstance(candidate, RcloneResolver)
+        candidate for candidate in registry._resolvers if isinstance(candidate, RcloneResolver)
     )
     assert resolver._remote_policy is policy
 
@@ -5975,9 +5968,7 @@ def test_default_registry_preserves_even_a_falsey_rclone_policy_identity():
     registry = default_registry(rclone_remote_policy=policy)
 
     resolver = next(
-        candidate
-        for candidate in registry._resolvers
-        if isinstance(candidate, RcloneResolver)
+        candidate for candidate in registry._resolvers if isinstance(candidate, RcloneResolver)
     )
     assert resolver._remote_policy is policy
 
@@ -5990,26 +5981,25 @@ def test_default_registry_shares_even_a_falsey_process_executor():
     executor = FalseyExecutor()
     registry = default_registry(process_executor=executor)  # type: ignore[arg-type]
     rclone = next(
-        candidate
-        for candidate in registry._resolvers
-        if isinstance(candidate, RcloneResolver)
+        candidate for candidate in registry._resolvers if isinstance(candidate, RcloneResolver)
     )
-    git = next(
+    git = next(candidate for candidate in registry._resolvers if isinstance(candidate, GitResolver))
+    local = next(
         candidate
         for candidate in registry._resolvers
-        if isinstance(candidate, GitResolver)
+        if isinstance(candidate, LocalFilesystemResolver)
     )
 
     assert rclone._executor is executor
     assert git._executor is executor
+    assert isinstance(local._file_reader, BoundedLocalFilesystemOperations)
+    assert local._file_reader.executor is executor
 
 
 def test_registry_from_env_rclone_denies_remotes_by_default(monkeypatch):
     monkeypatch.delenv("LAB_TRACKER_RCLONE_ALLOWED_REMOTES", raising=False)
 
-    result = registry_from_env().resolve(
-        _rclone_ref("rclone://any-remote/x.bin", _sha256(b"x"))
-    )
+    result = registry_from_env().resolve(_rclone_ref("rclone://any-remote/x.bin", _sha256(b"x")))
 
     assert result.status is ResolutionStatus.UNRESOLVED
     assert "allowlist" in (result.detail or "")
@@ -6028,9 +6018,7 @@ def test_registry_from_env_explicit_rclone_policy_overrides_environment(monkeypa
     )
 
     resolver = next(
-        candidate
-        for candidate in registry._resolvers
-        if isinstance(candidate, RcloneResolver)
+        candidate for candidate in registry._resolvers if isinstance(candidate, RcloneResolver)
     )
     assert resolver._remote_policy is policy
 

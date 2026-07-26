@@ -41,7 +41,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import BinaryIO, TypeAlias
+from typing import TypeAlias
 from urllib.parse import unquote, urlsplit
 
 from lab_tracker.artifact_resolution_limits import (
@@ -88,16 +88,29 @@ from lab_tracker.git_store_locator import (
     PinnedGitPath,
     canonical_git_store_uri,
 )
-from lab_tracker.local_file_access import (
-    HandleBoundLocalFileAccess,
-    LocalFileReader,
-    LocalOpenFailure,
-    LocalOpenFailureReason,
+from lab_tracker.local_filesystem_authority import LocalFilesystemAuthority
+from lab_tracker.local_filesystem_operations import (
+    BoundedLocalFilesystemOperations,
+)
+from lab_tracker.local_filesystem_ports import (
+    DirectLocalRegularFileTarget,
+    LocalRegularFileReader,
+    LocalRegularFileReadOutcome,
+    LocalRegularFileReadResult,
+    LocalRegularFileTarget,
+    RegisteredLocalRegularFileTarget,
 )
 from lab_tracker.local_path_policy import (
     LocalPathPolicy,
     is_supported_absolute_local_root,
     native_local_path_from_uri,
+)
+from lab_tracker.local_resolution_budget import (
+    DEFAULT_LOCAL_RECOVERY_MAX_FILES,
+    DEFAULT_LOCAL_RESOLUTION_MAX_READ_BYTES,
+    MAX_LOCAL_RESOLUTION_MAX_READ_BYTES,
+    LocalResolutionBudget,
+    LocalResolutionLimits,
 )
 from lab_tracker.local_store_locator import (
     LocalStoreLocator,
@@ -145,9 +158,7 @@ from lab_tracker.store_health import (
 # Hash algorithms we can recompute to verify a fetched artifact. A reference
 # whose hash uses anything else (e.g. ``datalad-key:``) cannot be certified by
 # recomputation and resolves as UNRESOLVED.
-_VERIFIABLE_ALGORITHMS = frozenset(
-    {"sha256", "sha1", "sha224", "sha384", "sha512", "md5"}
-)
+_VERIFIABLE_ALGORITHMS = frozenset({"sha256", "sha1", "sha224", "sha384", "sha512", "md5"})
 
 _LOCAL_SOURCE_SYSTEMS = frozenset({"local", "local_fs", "file"})
 _HTTP_SCHEMES = frozenset({"http", "https"})
@@ -167,14 +178,12 @@ _PROCESS_STDERR_LIMIT_BYTES = DEFAULT_PROCESS_STDERR_LIMIT_BYTES
 # former helper surface. Git execution itself now lives in ``git_process``.
 _GIT_GENERIC_HTTP_REDIRECT_CONFIG = GIT_GENERIC_HTTP_REDIRECT_CONFIG
 
-_STREAM_CHUNK_SIZE = 1024 * 1024
-
 # Recovery search: when a local artifact is missing at its URI (moved/renamed),
 # optionally scan the resolver's allowed roots for a file whose content hash
 # matches the reference, and return it VERIFIED instead of UNRESOLVED. Opt-in and
 # bounded — see :class:`RecoveryPolicy` and :class:`LocalFilesystemResolver`.
-DEFAULT_RECOVERY_MAX_FILES = 4096
-DEFAULT_RECOVERY_MAX_BYTES = 512 * 1024 * 1024
+DEFAULT_RECOVERY_MAX_FILES = DEFAULT_LOCAL_RECOVERY_MAX_FILES
+DEFAULT_RECOVERY_MAX_BYTES = DEFAULT_LOCAL_RESOLUTION_MAX_READ_BYTES
 
 
 def _uri_scheme(uri: str) -> str:
@@ -203,6 +212,19 @@ class RecoveryPolicy:
     enabled: bool = False
     max_files: int = DEFAULT_RECOVERY_MAX_FILES
     max_bytes: int = DEFAULT_RECOVERY_MAX_BYTES
+
+    def __post_init__(self) -> None:
+        """Reject coercible values before they can weaken recovery bounds."""
+
+        if type(self.enabled) is not bool:
+            raise ValueError("Local recovery policy is invalid.")
+        if type(self.max_files) is not int or self.max_files < 0:
+            raise ValueError("Local recovery policy is invalid.")
+        if (
+            type(self.max_bytes) is not int
+            or not 1 <= self.max_bytes <= MAX_LOCAL_RESOLUTION_MAX_READ_BYTES
+        ):
+            raise ValueError("Local recovery policy is invalid.")
 
 
 class ResolutionStatus(str, Enum):
@@ -239,8 +261,7 @@ class ResolvedArtifact:
         """Fail closed when an adapter marks uncertified bytes as verified."""
 
         if self.content is not None and (
-            type(self.content) is not bytes
-            or len(self.content) > MAX_INLINE_ARTIFACT_BYTES
+            type(self.content) is not bytes or len(self.content) > MAX_INLINE_ARTIFACT_BYTES
         ):
             object.__setattr__(self, "status", ResolutionStatus.UNRESOLVED)
             object.__setattr__(self, "source_system", "artifact")
@@ -262,9 +283,7 @@ class ResolvedArtifact:
         if self.status is ResolutionStatus.VERIFIED:
             if self.observed_hash is None or not is_verifiable_hash(self.expected_hash):
                 object.__setattr__(self, "status", ResolutionStatus.UNRESOLVED)
-            elif parse_content_hash(self.observed_hash) != parse_content_hash(
-                self.expected_hash
-            ):
+            elif parse_content_hash(self.observed_hash) != parse_content_hash(self.expected_hash):
                 object.__setattr__(self, "status", ResolutionStatus.DRIFTED)
 
         if self.status is not ResolutionStatus.VERIFIED and self.content is not None:
@@ -301,9 +320,10 @@ def _resolution_display_uri(result: ResolvedArtifact) -> str:
     if result.status is ResolutionStatus.UNRESOLVED:
         if scheme == "rclone" or result.source_system.strip().lower() == "rclone":
             return "rclone://[redacted]"
-        if result.uri.lstrip().lower().startswith(
-            "git+"
-        ) or result.source_system.strip().lower() == "git":
+        if (
+            result.uri.lstrip().lower().startswith("git+")
+            or result.source_system.strip().lower() == "git"
+        ):
             return "git+[redacted]"
     is_http = (
         scheme in _HTTP_SCHEMES
@@ -398,14 +418,10 @@ class LocalStoreResolutionTarget:
         _factory_token: object,
     ) -> None:
         if _factory_token is not _LOCAL_STORE_TARGET_FACTORY_TOKEN:
-            raise TypeError(
-                "LocalStoreResolutionTarget must be built by its validated factory."
-            )
+            raise TypeError("LocalStoreResolutionTarget must be built by its validated factory.")
         store_name = logical_reference.store_name
         canonical_uri = (
-            canonical_local_store_uri(store_name, locator)
-            if store_name is not None
-            else None
+            canonical_local_store_uri(store_name, locator) if store_name is not None else None
         )
         if (
             not is_supported_absolute_local_root(store_root)
@@ -456,15 +472,9 @@ class HttpStoreResolutionTarget:
         _factory_token: object,
     ) -> None:
         if _factory_token is not _HTTP_STORE_TARGET_FACTORY_TOKEN:
-            raise TypeError(
-                "HttpStoreResolutionTarget must be built by its validated factory."
-            )
+            raise TypeError("HttpStoreResolutionTarget must be built by its validated factory.")
         store_name = logical_reference.store_name
-        canonical_uri = (
-            canonical_store_uri(store_name, locator)
-            if store_name is not None
-            else None
-        )
+        canonical_uri = canonical_store_uri(store_name, locator) if store_name is not None else None
         initial_url = registered_prefix.compose(locator)
         if (
             logical_reference.source_system != "store"
@@ -513,15 +523,9 @@ class RcloneStoreResolutionTarget:
         _factory_token: object,
     ) -> None:
         if _factory_token is not _RCLONE_STORE_TARGET_FACTORY_TOKEN:
-            raise TypeError(
-                "RcloneStoreResolutionTarget must be built by its validated factory."
-            )
+            raise TypeError("RcloneStoreResolutionTarget must be built by its validated factory.")
         store_name = logical_reference.store_name
-        canonical_uri = (
-            canonical_store_uri(store_name, locator)
-            if store_name is not None
-            else None
-        )
+        canonical_uri = canonical_store_uri(store_name, locator) if store_name is not None else None
         if (
             logical_reference.source_system != "store"
             or logical_reference.locator != locator.path
@@ -576,15 +580,9 @@ class GitStoreResolutionTarget:
         _factory_token: object,
     ) -> None:
         if _factory_token is not _GIT_STORE_TARGET_FACTORY_TOKEN:
-            raise TypeError(
-                "GitStoreResolutionTarget must be built by its validated factory."
-            )
+            raise TypeError("GitStoreResolutionTarget must be built by its validated factory.")
         store_name = logical_reference.store_name
-        canonical_uri = (
-            canonical_git_store_uri(store_name, pin)
-            if store_name is not None
-            else None
-        )
+        canonical_uri = canonical_git_store_uri(store_name, pin) if store_name is not None else None
         if (
             not isinstance(remote, ApprovedGitRemote)
             or not isinstance(pin, PinnedGitPath)
@@ -696,9 +694,7 @@ class ResolverRegistry:
                 max_bytes=bounds.max_bytes,
                 byte_range=bounds.byte_range,
             )
-        return _sanitized_unresolved_result(
-            "Prepared artifact resolution target is unsupported."
-        )
+        return _sanitized_unresolved_result("Prepared artifact resolution target is unsupported.")
 
     def resolve(
         self,
@@ -710,9 +706,7 @@ class ResolverRegistry:
         bounds = ArtifactContentBounds.from_resolver(max_bytes, byte_range)
         identity = snapshot_artifact_resolution_identity(ref)
         if identity is None:
-            return _sanitized_unresolved_result(
-                "Artifact resolution target is invalid."
-            )
+            return _sanitized_unresolved_result("Artifact resolution target is invalid.")
         for resolver in self._resolvers:
             if resolver.can_resolve(ref):
                 result = resolver.resolve(
@@ -727,10 +721,7 @@ class ResolverRegistry:
                 )
         return _unresolved_for_identity(
             identity,
-            detail=(
-                "No resolver registered for source_system "
-                f"'{identity.source_system}'."
-            ),
+            detail=(f"No resolver registered for source_system '{identity.source_system}'."),
         )
 
     def resolve_local_store(
@@ -952,9 +943,7 @@ def sanitize_artifact_resolution_result(
     the returned view is the complete artifact, its digest is recomputed here too.
     """
 
-    invalid = _sanitized_unresolved_result(
-        "Artifact resolver result could not be returned safely."
-    )
+    invalid = _sanitized_unresolved_result("Artifact resolver result could not be returned safely.")
     snapshot = _detached_safe_result(result)
     if snapshot is None or identity is None:
         return invalid
@@ -1047,10 +1036,7 @@ def _detached_safe_result(result: object) -> ResolvedArtifact | None:
         and fetched_at.tzinfo is not None
         and (observed_hash is None or type(observed_hash) is str)
         and (content_type is None or type(content_type) is str)
-        and (
-            size_bytes is None
-            or (type(size_bytes) is int and size_bytes >= 0)
-        )
+        and (size_bytes is None or (type(size_bytes) is int and size_bytes >= 0))
         and (content is None or type(content) is bytes)
         and type(truncated) is bool
         and (detail is None or type(detail) is str)
@@ -1119,11 +1105,7 @@ def snapshot_artifact_resolution_identity(
         expected_hash = reference.content_hash
     except Exception:
         return None
-    if not (
-        type(source_system) is str
-        and type(uri) is str
-        and type(expected_hash) is str
-    ):
+    if not (type(source_system) is str and type(uri) is str and type(expected_hash) is str):
         return None
     return ArtifactResolutionIdentity(
         source_system=source_system,
@@ -1218,10 +1200,7 @@ def local_store_resolution_target(
 ) -> LocalStoreResolutionTarget | None:
     """Build one internally consistent, store-scoped local resolution target."""
 
-    if (
-        store.kind is not StoreKind.LOCAL_FS
-        or logical_reference.store_name != store.name
-    ):
+    if store.kind is not StoreKind.LOCAL_FS or logical_reference.store_name != store.name:
         return None
     try:
         return LocalStoreResolutionTarget(
@@ -1242,10 +1221,7 @@ def http_store_resolution_target(
 ) -> HttpStoreResolutionTarget | None:
     """Build one internally consistent, prefix-scoped HTTP resolution target."""
 
-    if (
-        store.kind is not StoreKind.HTTP
-        or logical_reference.store_name != store.name
-    ):
+    if store.kind is not StoreKind.HTTP or logical_reference.store_name != store.name:
         return None
     registered_base = store.endpoint if store.endpoint is not None else store.root
     registered_prefix = RegisteredHttpPrefix.parse(registered_base)
@@ -1270,10 +1246,7 @@ def rclone_store_resolution_target(
 ) -> RcloneStoreResolutionTarget | None:
     """Build one internally consistent, root-scoped rclone target."""
 
-    if (
-        not is_rclone_store_kind(store.kind)
-        or logical_reference.store_name != store.name
-    ):
+    if not is_rclone_store_kind(store.kind) or logical_reference.store_name != store.name:
         return None
     address = RegisteredRcloneStoreAddress.parse(
         kind=store.kind,
@@ -1303,10 +1276,7 @@ def git_store_resolution_target(
 ) -> GitStoreResolutionTarget | None:
     """Build one internally consistent immutable registered-Git target."""
 
-    if (
-        store.kind is not StoreKind.GIT
-        or logical_reference.store_name != store.name
-    ):
+    if store.kind is not StoreKind.GIT or logical_reference.store_name != store.name:
         return None
     remote = parse_git_remote_address(store.root)
     if remote is None:
@@ -1358,11 +1328,7 @@ def store_relative_reference(
 
     if store.kind is StoreKind.HTTP:
         locator = PortableStorePath.parse_decoded(path)
-        canonical_uri = (
-            canonical_store_uri(store.name, locator)
-            if locator is not None
-            else None
-        )
+        canonical_uri = canonical_store_uri(store.name, locator) if locator is not None else None
         if locator is None or canonical_uri is None:
             return None
         logical_reference = ExternalArtifactReference(
@@ -1380,11 +1346,7 @@ def store_relative_reference(
 
     if is_rclone_store_kind(store.kind):
         locator = PortableStorePath.parse_decoded(path)
-        canonical_uri = (
-            canonical_store_uri(store.name, locator)
-            if locator is not None
-            else None
-        )
+        canonical_uri = canonical_store_uri(store.name, locator) if locator is not None else None
         if locator is None or canonical_uri is None:
             return None
         logical_reference = ExternalArtifactReference(
@@ -1465,31 +1427,34 @@ def check_store_health(
 
 
 @dataclass(frozen=True)
-class _LocalResolutionScope:
-    """One immutable policy/reader/recovery authority used for a whole resolve."""
+class _LocalRecoveryScope:
+    """Transitional enumeration state; candidate bytes stay behind the broker."""
 
     path_policy: LocalPathPolicy
-    file_reader: LocalFileReader
     recovery_roots: tuple[str, ...] | None
+    registered_store_root: str | None = None
+
+
+class _RecoveryDisposition(Enum):
+    MATCHED = "matched"
+    EXHAUSTED = "exhausted"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class _RecoveryResult:
+    disposition: _RecoveryDisposition
+    artifact: ResolvedArtifact | None = None
+
+
+def _raise_recovery_walk_error(error: OSError) -> None:
+    """Make an incomplete recovery enumeration an explicit failed attempt."""
+
+    raise error
 
 
 class LocalFilesystemResolver(ArtifactResolver, ScopedLocalStoreResolver):
-    """Resolves artifacts stored on this host's filesystem.
-
-    Handles ``source_system`` of ``local``/``local_fs``/``file`` and ``file://``
-    URIs. ``allowed_roots`` constrains which directories may be read; when set, a
-    path that escapes every root (after symlink resolution) is refused as
-    UNRESOLVED, so resolution cannot be used to read arbitrary host files.
-
-    When ``recovery`` is enabled and allowed roots are configured, a reference
-    whose file is missing at its URI (moved/renamed) triggers a file/byte-bounded
-    content-hash search of those roots: a file whose recomputed digest matches
-    the reference is returned VERIFIED instead of UNRESOLVED. Canonical
-    pathname checks constrain the scan to the allowed roots and the content
-    hash remains mandatory. Direct and recovery reads retain one validated
-    descriptor through hashing, so a concurrent pathname replacement cannot
-    redirect the bytes being verified.
-    """
+    """Resolve local artifacts through one bounded, pre-follow-safe broker."""
 
     def __init__(
         self,
@@ -1497,26 +1462,57 @@ class LocalFilesystemResolver(ArtifactResolver, ScopedLocalStoreResolver):
         *,
         path_policy: LocalPathPolicy | None = None,
         recovery: RecoveryPolicy | None = None,
-        file_reader_factory: Callable[[LocalPathPolicy], LocalFileReader] | None = None,
+        file_reader: LocalRegularFileReader | None = None,
+        limits: LocalResolutionLimits | None = None,
+        process_executor: ProcessExecutor | None = None,
     ) -> None:
+        if recovery is not None and type(recovery) is not RecoveryPolicy:
+            raise TypeError("Local recovery policy is invalid.")
+        if limits is not None and type(limits) is not LocalResolutionLimits:
+            raise TypeError("Local resolution limits are invalid.")
+        resolved_recovery = (
+            recovery
+            if recovery is not None
+            else RecoveryPolicy(
+                max_bytes=(
+                    limits.max_read_bytes
+                    if limits is not None
+                    else DEFAULT_RECOVERY_MAX_BYTES
+                )
+            )
+        )
+        resolved_limits = (
+            limits
+            if limits is not None
+            else LocalResolutionLimits(max_read_bytes=resolved_recovery.max_bytes)
+        )
+        if resolved_recovery.max_bytes != resolved_limits.max_read_bytes:
+            raise ValueError("Local recovery and resolution byte limits must match.")
         self._operator_policy = (
-            path_policy
-            if path_policy is not None
-            else LocalPathPolicy(allowed_roots)
+            path_policy if path_policy is not None else LocalPathPolicy(allowed_roots)
         )
-        self._file_reader_factory = (
-            HandleBoundLocalFileAccess
-            if file_reader_factory is None
-            else file_reader_factory
-        )
-        self._scope = self._make_scope(self._operator_policy)
-        self._recovery = recovery or RecoveryPolicy()
-
-    def _make_scope(self, path_policy: LocalPathPolicy) -> _LocalResolutionScope:
-        return _LocalResolutionScope(
-            path_policy=path_policy,
-            file_reader=self._file_reader_factory(path_policy),
-            recovery_roots=path_policy.canonical_roots,
+        self._recovery = resolved_recovery
+        self._limits = resolved_limits
+        if file_reader is not None:
+            self._file_reader = file_reader
+        else:
+            lexical_roots = self._operator_policy.lexical_roots
+            authority = (
+                LocalFilesystemAuthority.for_unscoped_library_compatibility()
+                if lexical_roots is None
+                else LocalFilesystemAuthority.from_roots(lexical_roots)
+            )
+            self._file_reader = BoundedLocalFilesystemOperations(
+                authority=authority,
+                executor=(
+                    process_executor
+                    if process_executor is not None
+                    else BoundedSubprocessExecutor()
+                ),
+            )
+        self._scope = _LocalRecoveryScope(
+            path_policy=self._operator_policy,
+            recovery_roots=self._operator_policy.recovery_roots,
         )
 
     def can_resolve(self, ref: ExternalArtifactReference) -> bool:
@@ -1532,7 +1528,6 @@ class LocalFilesystemResolver(ArtifactResolver, ScopedLocalStoreResolver):
         byte_range: tuple[int, int] | None = None,
     ) -> ResolvedArtifact:
         bounds = ArtifactContentBounds.from_resolver(max_bytes, byte_range)
-
         if not is_verifiable_hash(ref.content_hash):
             algorithm, _ = parse_content_hash(ref.content_hash)
             return _unresolved(
@@ -1546,20 +1541,16 @@ class LocalFilesystemResolver(ArtifactResolver, ScopedLocalStoreResolver):
                 ref,
                 detail="Reference URI is not a local filesystem path.",
             )
-        planned_path = self._scope.path_policy.authorize_path(local_path)
-        if planned_path is None:
-            return _unresolved(
-                ref,
-                detail="Local artifact is not an authorized readable regular file.",
-            )
-        return self._resolve_planned_path(
+        budget = LocalResolutionBudget(self._limits)
+        return self._resolve_target(
             ref,
-            scope=self._scope,
-            planned_path=planned_path,
+            target=DirectLocalRegularFileTarget(local_path),
+            budget=budget,
             max_bytes=bounds.max_bytes,
             window=bounds.byte_range,
-            mime_path=None,
-            recovery_name=os.path.basename(planned_path) or None,
+            mime_path=local_path,
+            recovery_scope=self._scope,
+            recovery_name=os.path.basename(local_path) or None,
             opaque_store_detail=False,
         )
 
@@ -1570,7 +1561,7 @@ class LocalFilesystemResolver(ArtifactResolver, ScopedLocalStoreResolver):
         max_bytes: int = DEFAULT_MAX_BYTES,
         byte_range: tuple[int, int] | None = None,
     ) -> ResolvedArtifact:
-        """Resolve a logical locator through one store-restricted handle scope."""
+        """Resolve a store locator beneath a helper-retained nested scope."""
 
         bounds = ArtifactContentBounds.from_resolver(max_bytes, byte_range)
         ref = target.logical_reference
@@ -1581,224 +1572,280 @@ class LocalFilesystemResolver(ArtifactResolver, ScopedLocalStoreResolver):
                 detail=f"Cannot verify content hash with algorithm '{algorithm}'.",
             )
 
-        store_policy = self._operator_policy.restricted_to_absolute_root(
-            target.store_root
-        )
-        if store_policy is None:
-            return _unresolved(
-                ref,
-                detail="Local store artifact is not authorized.",
-            )
-        scope = self._make_scope(store_policy)
-        if not scope.recovery_roots:
-            return _unresolved(
-                ref,
-                detail="Local store artifact is not authorized.",
-            )
-
-        # LocalStoreLocator components are validated before this detached target
-        # is created. Join those components directly beneath the canonical store
-        # authority; never reinterpret a user-controlled native path.
-        candidate = os.path.join(
-            scope.recovery_roots[0],
-            *target.locator.components,
-        )
-        planned_path = scope.path_policy.authorize_path(candidate)
-        if planned_path is None:
-            return _unresolved(
-                ref,
-                detail="Local store artifact is not authorized.",
-            )
-        return self._resolve_planned_path(
+        budget = LocalResolutionBudget(self._limits)
+        return self._resolve_target(
             ref,
-            scope=scope,
-            planned_path=planned_path,
+            target=RegisteredLocalRegularFileTarget(
+                target.store_root,
+                target.locator.components,
+            ),
+            budget=budget,
             max_bytes=bounds.max_bytes,
             window=bounds.byte_range,
             mime_path=target.locator.path,
+            recovery_scope=None,
             recovery_name=target.locator.components[-1],
             opaque_store_detail=True,
         )
 
-    def _resolve_planned_path(
+    def _resolve_target(
         self,
         ref: ExternalArtifactReference,
         *,
-        scope: _LocalResolutionScope,
-        planned_path: str,
+        target: LocalRegularFileTarget,
+        budget: LocalResolutionBudget,
         max_bytes: int,
         window: tuple[int, int] | None,
-        mime_path: str | None,
+        mime_path: str,
+        recovery_scope: _LocalRecoveryScope | None,
         recovery_name: str | None,
         opaque_store_detail: bool,
     ) -> ResolvedArtifact:
-        algorithm, _ = parse_content_hash(ref.content_hash)
-        failure: LocalOpenFailure | None = None
-        with scope.file_reader.open_regular_file(planned_path) as opened:
-            if isinstance(opened, LocalOpenFailure):
-                failure = opened
-            else:
-                try:
-                    content, total, truncated, observed = _hash_and_collect(
-                        _read_stream_chunks(opened.stream),
-                        algorithm=algorithm,
-                        max_bytes=max_bytes,
-                        window=window,
-                    )
-                except OSError:
-                    return _unresolved(ref, detail="Failed to read local artifact.")
-
-                content_type, _ = mimetypes.guess_type(
-                    opened.display_path if mime_path is None else mime_path
-                )
-                return _build_resolved(
-                    ref,
-                    observed=observed,
-                    content=content,
-                    total=total,
-                    truncated=truncated,
-                    content_type=content_type or "application/octet-stream",
-                )
-
-        if failure is not None and failure.reason is LocalOpenFailureReason.MISSING:
-            recovered = self._recover_by_hash(
-                ref,
-                max_bytes=max_bytes,
-                window=window,
-                missing_path=planned_path,
-                scope=scope,
-                target_name=recovery_name,
-                opaque_store_detail=opaque_store_detail,
-            )
-            if recovered is not None:
-                return recovered
-            return _unresolved(ref, detail="Local artifact not found.")
-        if failure is not None and failure.reason is LocalOpenFailureReason.DENIED:
+        completed = self._read_and_collect(
+            ref,
+            target=target,
+            budget=budget,
+            max_bytes=max_bytes,
+            window=window,
+            mime_path=mime_path,
+        )
+        if isinstance(completed, ResolvedArtifact):
+            return completed
+        if completed is LocalRegularFileReadOutcome.DENIED:
             return _unresolved(
                 ref,
-                detail="Local artifact is not an authorized readable regular file.",
+                detail=(
+                    "Local store artifact is not authorized."
+                    if opaque_store_detail
+                    else "Local artifact is not an authorized readable regular file."
+                ),
             )
-        return _unresolved(ref, detail="Failed to read local artifact.")
+        if completed is not LocalRegularFileReadOutcome.MISSING:
+            return _unresolved(ref, detail="Failed to read local artifact.")
+
+        if opaque_store_detail:
+            assert isinstance(target, RegisteredLocalRegularFileTarget)
+            recovery_scope = self._registered_recovery_scope(target.store_root)
+        recovered = self._recover_by_hash(
+            ref,
+            budget=budget,
+            max_bytes=max_bytes,
+            window=window,
+            scope=recovery_scope,
+            target_name=recovery_name,
+            opaque_store_detail=opaque_store_detail,
+        )
+        if recovered.disposition is _RecoveryDisposition.MATCHED:
+            assert recovered.artifact is not None
+            return recovered.artifact
+        if recovered.disposition is _RecoveryDisposition.FAILED:
+            return _unresolved(ref, detail="Failed to read local artifact.")
+        return _unresolved(
+            ref,
+            detail=(
+                "Local store artifact not found."
+                if opaque_store_detail
+                else "Local artifact not found."
+            ),
+        )
+
+    def _read_and_collect(
+        self,
+        ref: ExternalArtifactReference,
+        *,
+        target: LocalRegularFileTarget,
+        budget: LocalResolutionBudget,
+        max_bytes: int,
+        window: tuple[int, int] | None,
+        mime_path: str,
+    ) -> ResolvedArtifact | LocalRegularFileReadOutcome:
+        algorithm, _ = parse_content_hash(ref.content_hash)
+        collector = _HashCollector(
+            algorithm=algorithm,
+            max_bytes=max_bytes,
+            window=window,
+            budget_check=budget.deadline.check,
+        )
+        try:
+            result = self._file_reader.read_regular_file(
+                target,
+                budget=budget,
+                stdout_consumer=collector.consume,
+            )
+        except Exception:
+            budget.abort_terminal()
+            return LocalRegularFileReadOutcome.FAILED
+        except BaseException:
+            budget.abort_terminal()
+            raise
+        if type(result) is not LocalRegularFileReadResult:
+            budget.abort_terminal()
+            return LocalRegularFileReadOutcome.FAILED
+        if result.outcome is not LocalRegularFileReadOutcome.COMPLETE:
+            if result.outcome is LocalRegularFileReadOutcome.FAILED:
+                budget.abort_terminal()
+            return result.outcome
+        try:
+            content, total, truncated, observed = collector.finish()
+            if total != result.bytes_read:
+                budget.abort_terminal()
+                return LocalRegularFileReadOutcome.FAILED
+            content_type, _ = mimetypes.guess_type(mime_path)
+            return _build_resolved(
+                ref,
+                observed=observed,
+                content=content,
+                total=total,
+                truncated=truncated,
+                content_type=content_type or "application/octet-stream",
+            )
+        except Exception:
+            budget.abort_terminal()
+            return LocalRegularFileReadOutcome.FAILED
+        except BaseException:
+            budget.abort_terminal()
+            raise
+
+    def _registered_recovery_scope(
+        self,
+        store_root: str,
+    ) -> _LocalRecoveryScope | None:
+        if not self._recovery.enabled:
+            return None
+        store_policy = self._operator_policy.restricted_to_absolute_root(store_root)
+        if store_policy is None:
+            return None
+        return _LocalRecoveryScope(
+            path_policy=store_policy,
+            recovery_roots=store_policy.recovery_roots,
+            registered_store_root=store_root,
+        )
 
     def _recover_by_hash(
         self,
         ref: ExternalArtifactReference,
         *,
+        budget: LocalResolutionBudget,
         max_bytes: int,
         window: tuple[int, int] | None,
-        missing_path: str,
-        scope: _LocalResolutionScope | None = None,
-        target_name: str | None = None,
-        opaque_store_detail: bool = False,
-    ) -> ResolvedArtifact | None:
-        """Search the allowed roots for a file whose content matches ``ref``.
+        scope: _LocalRecoveryScope | None,
+        target_name: str | None,
+        opaque_store_detail: bool,
+    ) -> _RecoveryResult:
+        if not self._recovery.enabled or scope is None or not scope.recovery_roots:
+            return _RecoveryResult(_RecoveryDisposition.EXHAUSTED)
 
-        Returns a VERIFIED result recovered from a different path, or ``None``
-        when recovery is disabled, unscoped (no allowed roots), or nothing
-        matches within the :class:`RecoveryPolicy` budget. Callers reach this
-        only after the hash was confirmed verifiable and the URI's own file was
-        missing, so a match is exactly as trustworthy as one found at the URI.
-        """
-
-        active_scope = self._scope if scope is None else scope
-        if not self._recovery.enabled or not active_scope.recovery_roots:
-            return None
-
-        algorithm, expected_digest = parse_content_hash(ref.content_hash)
-        if target_name is None:
-            target_name = os.path.basename(missing_path) or None
-
-        considered = 0
-        byte_budget = _CumulativeByteBudget(self._recovery.max_bytes)
-        # Two passes so a moved file that kept its name is found first and
-        # cheaply; skip the name-first pass when we have no basename to match.
-        passes = (True, False) if target_name is not None else (False,)
-        for prefer_name in passes:
-            for candidate in self._iter_candidate_files(
-                target_name,
-                prefer_name,
-                scope=active_scope,
-            ):
-                considered += 1
-                if considered > self._recovery.max_files:
-                    return None
-                remaining_bytes = byte_budget.remaining
-                if remaining_bytes <= 0:
-                    return None
-                planned_candidate = active_scope.path_policy.authorize_path(candidate)
-                if planned_candidate is None:
-                    continue
-                with active_scope.file_reader.open_regular_file(
-                    planned_candidate
-                ) as opened:
-                    if isinstance(opened, LocalOpenFailure):
-                        continue
-                    if opened.size_hint_bytes > remaining_bytes:
-                        continue
-                    try:
-                        content, total, truncated, observed = _hash_and_collect(
-                            _read_stream_chunks(
-                                opened.stream,
-                                byte_budget=byte_budget,
-                            ),
-                            algorithm=algorithm,
-                            max_bytes=max_bytes,
-                            window=window,
-                            max_total=remaining_bytes,
-                        )
-                    except _FetchTooLarge:
-                        # The candidate consumed the remaining logical budget
-                        # before changing/growing past its same-handle size hint.
-                        return None
-                    except OSError:
-                        continue
-                    if parse_content_hash(observed)[1] != expected_digest:
-                        continue
-                    content_type, _ = mimetypes.guess_type(opened.display_path)
-                    resolved = _build_resolved(
+        try:
+            _, expected_digest = parse_content_hash(ref.content_hash)
+            considered = 0
+            passes = (True, False) if target_name is not None else (False,)
+            for prefer_name in passes:
+                for candidate in self._iter_candidate_files(
+                    target_name,
+                    prefer_name,
+                    scope=scope,
+                    deadline=budget.deadline,
+                ):
+                    budget.deadline.check()
+                    considered += 1
+                    if considered > self._recovery.max_files:
+                        return _RecoveryResult(_RecoveryDisposition.EXHAUSTED)
+                    candidate_target = self._recovery_target(scope, candidate)
+                    if candidate_target is None:
+                        budget.abort_terminal()
+                        return _RecoveryResult(_RecoveryDisposition.FAILED)
+                    attempt = self._read_and_collect(
                         ref,
-                        observed=observed,
-                        content=content,
-                        total=total,
-                        truncated=truncated,
-                        content_type=content_type or "application/octet-stream",
+                        target=candidate_target,
+                        budget=budget,
+                        max_bytes=max_bytes,
+                        window=window,
+                        mime_path=os.path.basename(candidate),
                     )
-                    return replace(
-                        resolved,
-                        detail=(
-                            "Recovered within registered local store "
-                            "(differs from reference locator)."
-                            if opaque_store_detail
-                            else f"Recovered from {opened.display_path} "
-                            "(differs from reference URI)."
-                        ),
-                    )
-        return None
+                    if isinstance(attempt, ResolvedArtifact):
+                        if (
+                            attempt.observed_hash is not None
+                            and parse_content_hash(attempt.observed_hash)[1] == expected_digest
+                        ):
+                            return _RecoveryResult(
+                                _RecoveryDisposition.MATCHED,
+                                replace(
+                                    attempt,
+                                    detail=(
+                                        "Recovered within registered local store "
+                                        "(differs from reference locator)."
+                                        if opaque_store_detail
+                                        else "Recovered within authorized local roots "
+                                        "(differs from reference URI)."
+                                    ),
+                                ),
+                            )
+                        continue
+                    if attempt is LocalRegularFileReadOutcome.FAILED:
+                        budget.abort_terminal()
+                        return _RecoveryResult(_RecoveryDisposition.FAILED)
+                    budget.deadline.check()
+        except Exception:
+            budget.abort_terminal()
+            return _RecoveryResult(_RecoveryDisposition.FAILED)
+        except BaseException:
+            budget.abort_terminal()
+            raise
+        return _RecoveryResult(_RecoveryDisposition.EXHAUSTED)
+
+    def _recovery_target(
+        self,
+        scope: _LocalRecoveryScope,
+        candidate: str,
+    ) -> LocalRegularFileTarget | None:
+        if scope.registered_store_root is None:
+            return DirectLocalRegularFileTarget(candidate)
+        roots = scope.recovery_roots
+        if not roots or len(roots) != 1:
+            return None
+        try:
+            relative = os.path.relpath(candidate, roots[0])
+        except (OSError, ValueError):
+            return None
+        components = tuple(
+            component for component in relative.split(os.path.sep) if component not in ("", ".")
+        )
+        if not components or any(component == ".." for component in components):
+            return None
+        return RegisteredLocalRegularFileTarget(
+            scope.registered_store_root,
+            components,
+        )
 
     def _iter_candidate_files(
         self,
         target_name: str | None,
         prefer_name: bool,
         *,
-        scope: _LocalResolutionScope | None = None,
+        scope: _LocalRecoveryScope | None = None,
+        deadline: ProcessDeadline | None = None,
     ) -> Iterator[str]:
-        """Yield files under the allowed roots for one recovery pass.
-
-        ``prefer_name`` True yields only files whose basename equals
-        ``target_name`` (the fast common case of a rename that kept the name);
-        False yields the remainder. Symlinks are not followed during the walk.
-        """
+        """Yield transitional recovery candidates without opening their bytes."""
 
         active_scope = self._scope if scope is None else scope
         for root in active_scope.recovery_roots or ():
+            if deadline is not None:
+                deadline.check()
             for dirpath, directories, files in os.walk(
-                root, topdown=True, followlinks=False
+                root,
+                topdown=True,
+                onerror=_raise_recovery_walk_error,
+                followlinks=False,
             ):
+                if deadline is not None:
+                    deadline.check()
                 active_scope.path_policy.prune_walk_directories(dirpath, directories)
                 for name in files:
                     is_match = target_name is not None and name == target_name
                     if prefer_name != is_match:
                         continue
+                    if deadline is not None:
+                        deadline.check()
                     yield os.path.join(dirpath, name)
 
 
@@ -1828,9 +1875,7 @@ class HttpResolver(ArtifactResolver, ScopedHttpStoreResolver):
             raise ValueError("max_redirects must be non-negative.")
         if timeout is not None:
             if deadline_seconds != DEFAULT_OUTBOUND_HTTP_DEADLINE_SECONDS:
-                raise ValueError(
-                    "Configure either deadline_seconds or the legacy timeout alias."
-                )
+                raise ValueError("Configure either deadline_seconds or the legacy timeout alias.")
             deadline_seconds = timeout
         if (
             not math.isfinite(deadline_seconds)
@@ -1842,11 +1887,7 @@ class HttpResolver(ArtifactResolver, ScopedHttpStoreResolver):
                 f"{MAX_OUTBOUND_HTTP_DEADLINE_SECONDS:g} seconds."
             )
         self._policy = policy if policy is not None else OutboundHttpPolicy()
-        self._client = (
-            client
-            if client is not None
-            else SafeHttpClient(timeout=deadline_seconds)
-        )
+        self._client = client if client is not None else SafeHttpClient(timeout=deadline_seconds)
         self._deadline_seconds = deadline_seconds
         self._clock = clock
         self._max_fetch_bytes = max_fetch_bytes
@@ -1884,10 +1925,7 @@ class HttpResolver(ArtifactResolver, ScopedHttpStoreResolver):
 
         bounds = ArtifactContentBounds.from_resolver(max_bytes, byte_range)
         initial_url = target.registered_prefix.compose(target.locator)
-        if (
-            initial_url is None
-            or not target.registered_prefix.contains(initial_url)
-        ):
+        if initial_url is None or not target.registered_prefix.contains(initial_url):
             return _unresolved(
                 target.logical_reference,
                 detail="HTTP artifact fetch failed or was denied.",
@@ -1927,9 +1965,7 @@ class HttpResolver(ArtifactResolver, ScopedHttpStoreResolver):
                 target = self._policy.authorize(current_url, deadline=deadline)
                 deadline.check()
             except (OutboundHttpPolicyError, OutboundHttpTransportError):
-                return _unresolved(
-                    ref, detail="HTTP artifact fetch failed or was denied."
-                )
+                return _unresolved(ref, detail="HTTP artifact fetch failed or was denied.")
             if target.absolute_url in seen_targets:
                 return _unresolved(ref, detail="HTTP redirect loop was refused.")
             seen_targets.add(target.absolute_url)
@@ -1942,9 +1978,7 @@ class HttpResolver(ArtifactResolver, ScopedHttpStoreResolver):
                         location = response.get_header("location")
                         deadline.check()
                         if not location or redirect_count >= self._max_redirects:
-                            return _unresolved(
-                                ref, detail="HTTP redirect limit was exceeded."
-                            )
+                            return _unresolved(ref, detail="HTTP redirect limit was exceeded.")
                         next_url = redirect_resolver(
                             target.absolute_url,
                             location,
@@ -1960,17 +1994,10 @@ class HttpResolver(ArtifactResolver, ScopedHttpStoreResolver):
                     if not 200 <= response.status_code < 300:
                         return _unresolved(
                             ref,
-                            detail=(
-                                f"HTTP {response.status_code} fetching artifact."
-                            ),
+                            detail=(f"HTTP {response.status_code} fetching artifact."),
                         )
-                    declared_size = _http_content_length(
-                        response.get_header("content-length")
-                    )
-                    if (
-                        declared_size is not None
-                        and declared_size > self._max_fetch_bytes
-                    ):
+                    declared_size = _http_content_length(response.get_header("content-length"))
+                    if declared_size is not None and declared_size > self._max_fetch_bytes:
                         return _unresolved(
                             ref,
                             detail=str(_FetchTooLarge(self._max_fetch_bytes)),
@@ -1989,9 +2016,7 @@ class HttpResolver(ArtifactResolver, ScopedHttpStoreResolver):
             except _FetchTooLarge as exc:
                 return _unresolved(ref, detail=str(exc))
             except OutboundHttpTransportError:
-                return _unresolved(
-                    ref, detail="HTTP artifact fetch failed or was denied."
-                )
+                return _unresolved(ref, detail="HTTP artifact fetch failed or was denied.")
 
             if content_type:
                 content_type = content_type.split(";", 1)[0].strip()
@@ -2008,9 +2033,7 @@ class HttpResolver(ArtifactResolver, ScopedHttpStoreResolver):
                 deadline.check()
                 return resolved
             except OutboundHttpTransportError:
-                return _unresolved(
-                    ref, detail="HTTP artifact fetch failed or was denied."
-                )
+                return _unresolved(ref, detail="HTTP artifact fetch failed or was denied.")
         return _unresolved(ref, detail="HTTP redirect limit was exceeded.")
 
 
@@ -2032,11 +2055,7 @@ class _LegacyProcessOutputExceeded(Exception):
 
 
 def _validate_subprocess_deadline_seconds(value: float) -> float:
-    if (
-        not math.isfinite(value)
-        or value <= 0
-        or value > MAX_SUBPROCESS_DEADLINE_SECONDS
-    ):
+    if not math.isfinite(value) or value <= 0 or value > MAX_SUBPROCESS_DEADLINE_SECONDS:
         raise ValueError(
             "Subprocess deadline must be finite and greater than 0, and no greater "
             f"than {MAX_SUBPROCESS_DEADLINE_SECONDS:g} seconds."
@@ -2077,19 +2096,13 @@ class RcloneResolver(ArtifactResolver, ScopedRcloneStoreResolver):
         if runner is not None and executor is not None:
             raise ValueError("Configure either runner or executor, not both.")
         self._runner = runner
-        self._executor = (
-            executor if executor is not None else BoundedSubprocessExecutor()
-        )
+        self._executor = executor if executor is not None else BoundedSubprocessExecutor()
         self._binary = binary
         self._remote_policy = (
-            remote_policy
-            if remote_policy is not None
-            else RcloneRemotePolicy.deny_all()
+            remote_policy if remote_policy is not None else RcloneRemotePolicy.deny_all()
         )
         self._max_fetch_bytes = max_fetch_bytes
-        self._deadline_seconds = _validate_subprocess_deadline_seconds(
-            deadline_seconds
-        )
+        self._deadline_seconds = _validate_subprocess_deadline_seconds(deadline_seconds)
         self._clock = clock
 
     def can_resolve(self, ref: ExternalArtifactReference) -> bool:
@@ -2116,9 +2129,7 @@ class RcloneResolver(ArtifactResolver, ScopedRcloneStoreResolver):
             return _unresolved(ref, detail="Reference URI is not an rclone locator.")
         remote_name = target.partition(":")[0]
         if self._remote_policy.authorize(remote_name) is None:
-            return _unresolved(
-                ref, detail="Remote is not in the rclone resolver allowlist."
-            )
+            return _unresolved(ref, detail="Remote is not in the rclone resolver allowlist.")
 
         algorithm, _ = parse_content_hash(ref.content_hash)
         return self._resolve_validated_target(
@@ -2148,9 +2159,7 @@ class RcloneResolver(ArtifactResolver, ScopedRcloneStoreResolver):
                 detail=f"Cannot verify content hash with algorithm '{algorithm}'.",
             )
         if self._remote_policy.authorize_name(target.remote) is None:
-            return _unresolved(
-                ref, detail="Remote is not in the rclone resolver allowlist."
-            )
+            return _unresolved(ref, detail="Remote is not in the rclone resolver allowlist.")
 
         algorithm, _ = parse_content_hash(ref.content_hash)
         return self._resolve_validated_target(
@@ -2202,9 +2211,7 @@ class RcloneResolver(ArtifactResolver, ScopedRcloneStoreResolver):
                 stdout_consumer=collector.consume,
             )
             if cat.returncode != 0:
-                return _unresolved(
-                    ref, detail="rclone artifact resolution failed."
-                )
+                return _unresolved(ref, detail="rclone artifact resolution failed.")
             content, total, truncated, observed = collector.finish()
             deadline.check()
         except (
@@ -2399,9 +2406,7 @@ class GitResolver(ArtifactResolver, ScopedGitStoreResolver):
         )
         self._max_fetch_bytes = max_fetch_bytes
         self._max_cache_bytes = max_cache_bytes
-        self._deadline_seconds = _validate_subprocess_deadline_seconds(
-            deadline_seconds
-        )
+        self._deadline_seconds = _validate_subprocess_deadline_seconds(deadline_seconds)
         self._clock = clock
 
     def can_resolve(self, ref: ExternalArtifactReference) -> bool:
@@ -2431,9 +2436,7 @@ class GitResolver(ArtifactResolver, ScopedGitStoreResolver):
         remote, commit, path = locator
         approved = self._remote_policy.authorize(remote)
         if approved is None:
-            return _unresolved(
-                ref, detail="Remote is not in the git resolver allowlist."
-            )
+            return _unresolved(ref, detail="Remote is not in the git resolver allowlist.")
 
         algorithm, _ = parse_content_hash(ref.content_hash)
         return self._resolve_authorized_target(
@@ -2468,9 +2471,7 @@ class GitResolver(ArtifactResolver, ScopedGitStoreResolver):
 
         approved = self._remote_policy.authorize_address(target.remote)
         if approved is None:
-            return _unresolved(
-                ref, detail="Remote is not in the git resolver allowlist."
-            )
+            return _unresolved(ref, detail="Remote is not in the git resolver allowlist.")
 
         algorithm, _ = parse_content_hash(ref.content_hash)
         return self._resolve_authorized_target(
@@ -2503,11 +2504,7 @@ class GitResolver(ArtifactResolver, ScopedGitStoreResolver):
                 self._deadline_seconds,
                 clock=self._clock,
             )
-            executor = (
-                self._executor
-                if self._executor is not None
-                else BoundedSubprocessExecutor()
-            )
+            executor = self._executor if self._executor is not None else BoundedSubprocessExecutor()
             deadline.check()
             cache = self._repo_cache(
                 approved.subprocess_value,
@@ -2642,8 +2639,7 @@ class GitResolver(ArtifactResolver, ScopedGitStoreResolver):
             raise _GitReadError("Git artifact resolution failed.") from None
         if size > self._max_fetch_bytes:
             raise _GitReadError(
-                f"Artifact ({size} bytes) exceeds the "
-                f"{self._max_fetch_bytes}-byte fetch limit."
+                f"Artifact ({size} bytes) exceeds the {self._max_fetch_bytes}-byte fetch limit."
             )
         cat = self._run_command(
             ["cat-file", "blob", rev],
@@ -2690,8 +2686,10 @@ class GitResolver(ArtifactResolver, ScopedGitStoreResolver):
         *,
         object_format: GitObjectFormat | None = None,
     ) -> str:
-        base = os.fspath(self._cache_root) if self._cache_root else os.path.join(
-            tempfile.gettempdir(), "lab-tracker-git-cache"
+        base = (
+            os.fspath(self._cache_root)
+            if self._cache_root
+            else os.path.join(tempfile.gettempdir(), "lab-tracker-git-cache")
         )
         self._enforce_cache_quota(base)
         if object_format is None:
@@ -2747,33 +2745,13 @@ class _FetchTooLarge(Exception):
         self.limit = limit
 
 
-class _CumulativeByteBudget:
-    """Debit a shared logical byte allowance as candidate streams are read."""
-
-    def __init__(self, limit: int) -> None:
-        self._limit = limit
-        self._consumed = 0
-
-    @property
-    def remaining(self) -> int:
-        return self._limit - self._consumed
-
-    def debit(self, size: int) -> None:
-        next_consumed = self._consumed + size
-        if next_consumed > self._limit:
-            raise _FetchTooLarge(self._limit)
-        self._consumed = next_consumed
-
-
 def _http_content_length(value: str | None) -> int | None:
     if value is None:
         return None
     try:
         parsed = int(value)
     except ValueError:
-        raise OutboundHttpTransportError(
-            "Outbound HTTP request failed."
-        ) from None
+        raise OutboundHttpTransportError("Outbound HTTP request failed.") from None
     if parsed < 0:
         raise OutboundHttpTransportError("Outbound HTTP request failed.")
     return parsed
@@ -2850,9 +2828,7 @@ class _HashCollector:
         self._total = next_total
         if self._window is None:
             if len(self._collected) < self._max_bytes:
-                self._collected.extend(
-                    chunk[: self._max_bytes - len(self._collected)]
-                )
+                self._collected.extend(chunk[: self._max_bytes - len(self._collected)])
         else:
             start, end = self._window
             lo = max(start, chunk_start)
@@ -2873,20 +2849,6 @@ class _HashCollector:
     def _check_budget(self) -> None:
         if self._budget_check is not None:
             self._budget_check()
-
-
-def _read_stream_chunks(
-    handle: BinaryIO,
-    *,
-    byte_budget: _CumulativeByteBudget | None = None,
-) -> Iterable[bytes]:
-    while True:
-        chunk = handle.read(_STREAM_CHUNK_SIZE)
-        if not chunk:
-            break
-        if byte_budget is not None:
-            byte_budget.debit(len(chunk))
-        yield chunk
 
 
 def _build_resolved(
@@ -2921,6 +2883,8 @@ def default_registry(
     *,
     allowed_roots: Sequence[str | Path] | None = None,
     local_path_policy: LocalPathPolicy | None = None,
+    local_file_reader: LocalRegularFileReader | None = None,
+    local_resolution_limits: LocalResolutionLimits | None = None,
     recovery: RecoveryPolicy | None = None,
     http_policy: OutboundHttpPolicy | None = None,
     http_client: OutboundHttpClient | None = None,
@@ -2953,16 +2917,17 @@ def default_registry(
     """
 
     shared_process_executor = (
-        process_executor
-        if process_executor is not None
-        else BoundedSubprocessExecutor()
+        process_executor if process_executor is not None else BoundedSubprocessExecutor()
     )
     return ResolverRegistry(
         [
             LocalFilesystemResolver(
                 allowed_roots=allowed_roots,
                 path_policy=local_path_policy,
+                file_reader=local_file_reader,
+                limits=local_resolution_limits,
                 recovery=recovery,
+                process_executor=shared_process_executor,
             ),
             HttpResolver(
                 policy=http_policy,
@@ -3003,15 +2968,9 @@ LAB_TRACKER_RESOLVER_RECOVERY_MAX_BYTES_ENV = "LAB_TRACKER_RESOLVER_RECOVERY_MAX
 # exception: the normalized scheme/host/effective-port origin must match exactly
 # and every DNS answer must fall inside one configured CIDR. Without an
 # exception, every answer must be a globally routable public address.
-LAB_TRACKER_RESOLVER_HTTP_ALLOWED_AUTHORITIES_ENV = (
-    "LAB_TRACKER_RESOLVER_HTTP_ALLOWED_AUTHORITIES"
-)
-LAB_TRACKER_RESOLVER_HTTP_ALLOWED_NETWORKS_ENV = (
-    "LAB_TRACKER_RESOLVER_HTTP_ALLOWED_NETWORKS"
-)
-LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS_ENV = (
-    "LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS"
-)
+LAB_TRACKER_RESOLVER_HTTP_ALLOWED_AUTHORITIES_ENV = "LAB_TRACKER_RESOLVER_HTTP_ALLOWED_AUTHORITIES"
+LAB_TRACKER_RESOLVER_HTTP_ALLOWED_NETWORKS_ENV = "LAB_TRACKER_RESOLVER_HTTP_ALLOWED_NETWORKS"
+LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS_ENV = "LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS"
 LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS_ENV = (
     "LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS"
 )
@@ -3031,10 +2990,7 @@ LAB_TRACKER_GIT_CACHE_ROOT_ENV = "LAB_TRACKER_GIT_CACHE_ROOT"
 LAB_TRACKER_GIT_CACHE_MAX_BYTES_ENV = "LAB_TRACKER_GIT_CACHE_MAX_BYTES"
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
-
-
-def _env_flag(value: str | None) -> bool:
-    return value is not None and value.strip().lower() in _TRUTHY
+_FALSY = frozenset({"0", "false", "no", "off", ""})
 
 
 def _env_positive_int(value: str | None, default: int) -> int:
@@ -3051,28 +3007,59 @@ def recovery_from_env() -> RecoveryPolicy:
     """Build a :class:`RecoveryPolicy` from the resolver recovery env vars."""
 
     return RecoveryPolicy(
-        enabled=_env_flag(os.environ.get(LAB_TRACKER_RESOLVER_RECOVERY_ENV)),
-        max_files=_env_positive_int(
+        enabled=_strict_env_flag(
+            os.environ.get(LAB_TRACKER_RESOLVER_RECOVERY_ENV),
+            variable=LAB_TRACKER_RESOLVER_RECOVERY_ENV,
+        ),
+        max_files=_strict_env_positive_int(
             os.environ.get(LAB_TRACKER_RESOLVER_RECOVERY_MAX_FILES_ENV),
             DEFAULT_RECOVERY_MAX_FILES,
+            variable=LAB_TRACKER_RESOLVER_RECOVERY_MAX_FILES_ENV,
         ),
-        max_bytes=_env_positive_int(
+        max_bytes=_strict_env_positive_int(
             os.environ.get(LAB_TRACKER_RESOLVER_RECOVERY_MAX_BYTES_ENV),
             DEFAULT_RECOVERY_MAX_BYTES,
+            variable=LAB_TRACKER_RESOLVER_RECOVERY_MAX_BYTES_ENV,
+            maximum=MAX_LOCAL_RESOLUTION_MAX_READ_BYTES,
         ),
     )
+
+
+def _strict_env_flag(value: str | None, *, variable: str) -> bool:
+    if value is None:
+        return False
+    normalized = value.strip().lower()
+    if normalized in _TRUTHY:
+        return True
+    if normalized in _FALSY:
+        return False
+    raise ValueError(f"{variable} must be a boolean value.")
+
+
+def _strict_env_positive_int(
+    value: str | None,
+    default: int,
+    *,
+    variable: str,
+    maximum: int | None = None,
+) -> int:
+    if value is None:
+        return default
+    stripped = value.strip()
+    if not stripped or not stripped.isascii() or not stripped.isdecimal():
+        raise ValueError(f"{variable} must be a positive integer.")
+    parsed = int(stripped)
+    if parsed <= 0 or (maximum is not None and parsed > maximum):
+        raise ValueError(f"{variable} must be a positive integer within its limit.")
+    return parsed
 
 
 def outbound_http_policy_from_env() -> OutboundHttpPolicy:
     """Build and validate the outbound HTTP policy from environment variables."""
 
     return outbound_http_policy_from_config(
-        allowed_authorities=os.environ.get(
-            LAB_TRACKER_RESOLVER_HTTP_ALLOWED_AUTHORITIES_ENV
-        ),
-        allowed_networks=os.environ.get(
-            LAB_TRACKER_RESOLVER_HTTP_ALLOWED_NETWORKS_ENV
-        ),
+        allowed_authorities=os.environ.get(LAB_TRACKER_RESOLVER_HTTP_ALLOWED_AUTHORITIES_ENV),
+        allowed_networks=os.environ.get(LAB_TRACKER_RESOLVER_HTTP_ALLOWED_NETWORKS_ENV),
     )
 
 
@@ -3097,9 +3084,7 @@ def outbound_http_policy_from_config(
     )
 
 
-def _strict_comma_separated_values(
-    raw: str | None, *, variable: str
-) -> list[str]:
+def _strict_comma_separated_values(raw: str | None, *, variable: str) -> list[str]:
     if raw is None or not raw.strip():
         return []
     values = [part.strip() for part in raw.split(",")]
@@ -3111,6 +3096,9 @@ def _strict_comma_separated_values(
 def registry_from_env(
     *,
     local_path_policy: LocalPathPolicy | None = None,
+    local_file_reader: LocalRegularFileReader | None = None,
+    local_resolution_limits: LocalResolutionLimits | None = None,
+    recovery: RecoveryPolicy | None = None,
     http_policy: OutboundHttpPolicy | None = None,
     http_client: OutboundHttpClient | None = None,
     http_deadline_seconds: float | None = None,
@@ -3136,13 +3124,9 @@ def registry_from_env(
             variable=LAB_TRACKER_GIT_ALLOWED_REMOTES_ENV,
         )
     git_cache_root = os.environ.get(LAB_TRACKER_GIT_CACHE_ROOT_ENV) or None
-    git_max_cache_bytes = _env_positive_int(
-        os.environ.get(LAB_TRACKER_GIT_CACHE_MAX_BYTES_ENV), 0
-    )
+    git_max_cache_bytes = _env_positive_int(os.environ.get(LAB_TRACKER_GIT_CACHE_MAX_BYTES_ENV), 0)
     if http_deadline_seconds is None:
-        raw_deadline = os.environ.get(
-            LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS_ENV
-        )
+        raw_deadline = os.environ.get(LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS_ENV)
         try:
             http_deadline_seconds = (
                 float(raw_deadline)
@@ -3151,8 +3135,7 @@ def registry_from_env(
             )
         except ValueError:
             raise ValueError(
-                f"{LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS_ENV} must be "
-                "finite and positive."
+                f"{LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS_ENV} must be finite and positive."
             ) from None
     if (
         not math.isfinite(http_deadline_seconds)
@@ -3187,14 +3170,21 @@ def registry_from_env(
             f"{LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS_ENV} must be finite "
             f"and between 0 and {MAX_SUBPROCESS_DEADLINE_SECONDS:g} seconds."
         ) from None
+    recovery_policy = recovery if recovery is not None else recovery_from_env()
+    resolution_limits = (
+        local_resolution_limits
+        if local_resolution_limits is not None
+        else LocalResolutionLimits(
+            max_read_bytes=recovery_policy.max_bytes,
+            deadline_seconds=subprocess_deadline_seconds,
+        )
+    )
     return default_registry(
         local_path_policy=local_path_policy,
-        recovery=recovery_from_env(),
-        http_policy=(
-            http_policy
-            if http_policy is not None
-            else outbound_http_policy_from_env()
-        ),
+        local_file_reader=local_file_reader,
+        local_resolution_limits=resolution_limits,
+        recovery=recovery_policy,
+        http_policy=(http_policy if http_policy is not None else outbound_http_policy_from_env()),
         http_client=http_client,
         http_deadline_seconds=http_deadline_seconds,
         subprocess_deadline_seconds=subprocess_deadline_seconds,

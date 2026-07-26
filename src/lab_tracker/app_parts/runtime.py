@@ -23,6 +23,7 @@ from lab_tracker.app_parts.middleware import system_auth_context
 from lab_tracker.artifact_resolution import (
     LAB_TRACKER_GIT_ALLOWED_REMOTES_ENV,
     LAB_TRACKER_RCLONE_ALLOWED_REMOTES_ENV,
+    RecoveryPolicy,
     ResolverRegistry,
     check_store_health,
     outbound_http_policy_from_config,
@@ -51,6 +52,7 @@ from lab_tracker.local_filesystem_operations import (
     BoundedLocalFilesystemOperations,
 )
 from lab_tracker.local_path_policy import LocalPathPolicy
+from lab_tracker.local_resolution_budget import LocalResolutionLimits
 from lab_tracker.local_store_health import LocalStoreHealthProbe
 from lab_tracker.logging import configure_logging
 from lab_tracker.models import ReviewEmailDelivery, StoreKind
@@ -201,8 +203,20 @@ def build_app_runtime(settings: Settings) -> AppRuntime:
     )
     git_health_workdir_owner = _OwnedGitHealthWorkdir()
     try:
+        local_recovery = RecoveryPolicy(
+            enabled=settings.resolver_recovery,
+            max_files=settings.resolver_recovery_max_files,
+            max_bytes=settings.resolver_recovery_max_bytes,
+        )
+        local_resolution_limits = LocalResolutionLimits(
+            max_read_bytes=settings.resolver_recovery_max_bytes,
+            deadline_seconds=settings.resolver_subprocess_deadline_seconds,
+        )
         resolver_registry = registry_from_env(
             local_path_policy=local_path_policy,
+            local_file_reader=local_filesystem_operations,
+            local_resolution_limits=local_resolution_limits,
+            recovery=local_recovery,
             http_policy=outbound_http_policy,
             http_client=outbound_http_client,
             rclone_remote_policy=rclone_remote_policy,
@@ -256,9 +270,7 @@ def _build_app_runtime(
 
     auth_service = AuthService(session_factory=session_factory)
     device_auth_service = DeviceAuthService(session_factory=session_factory)
-    personal_access_token_service = PersonalAccessTokenService(
-        session_factory=session_factory
-    )
+    personal_access_token_service = PersonalAccessTokenService(session_factory=session_factory)
     token_service = TokenService(
         settings.auth_secret_key,
         ttl_minutes=settings.auth_token_ttl_minutes,
@@ -551,10 +563,7 @@ def _review_email_url(
     base_url = settings.public_base_url.rstrip("/")
     if delivery.event_type == "test":
         return f"{base_url}/app/"
-    if (
-        delivery.change_set_id is None
-        or delivery.recipient_user_id is None
-    ):
+    if delivery.change_set_id is None or delivery.recipient_user_id is None:
         raise ValueError("Review-ready delivery is missing its review binding.")
     token = sign_review_link(
         settings.auth_secret_key,

@@ -1,9 +1,11 @@
-"""Output-free, pre-follow-safe Windows directory inspection helper.
+"""Pre-follow-safe Windows directory inspection and bounded file-read helper.
 
 The application executes this file directly with ``python -I -S -B``.  Keep
 the module self-contained and standard-library-only.  The parent supplies one
-small, versioned JSON request in a dedicated environment variable; this helper
-communicates only through its exit status.
+small, versioned JSON request in a dedicated environment variable.  Directory
+inspection communicates only through its exit status.  File reads write only
+opaque bytes to stdout and still classify their result with a fixed exit
+status; stderr is never part of the protocol.
 
 Admission is deliberately lexical and performs no Windows API call.  Once a
 single operator grant has been selected, the helper anchors that root and
@@ -27,17 +29,33 @@ LOCAL_FILESYSTEM_REQUEST_ENV = "LAB_TRACKER_INTERNAL_LOCAL_FILESYSTEM_REQUEST"
 LOCAL_FILESYSTEM_PROTOCOL_VERSION = 1
 LOCAL_FILESYSTEM_REQUEST_VERSION = LOCAL_FILESYSTEM_PROTOCOL_VERSION
 LOCAL_FILESYSTEM_INSPECT_DIRECTORY_OP = "inspect-directory"
+LOCAL_FILESYSTEM_READ_FILE_OP = "read-file"
+LOCAL_FILESYSTEM_READ_REGISTERED_FILE_OP = "read-registered-file"
+INSPECT_DIRECTORY_OPERATION = LOCAL_FILESYSTEM_INSPECT_DIRECTORY_OP
+READ_FILE_OPERATION = LOCAL_FILESYSTEM_READ_FILE_OP
+READ_REGISTERED_FILE_OPERATION = LOCAL_FILESYSTEM_READ_REGISTERED_FILE_OP
+LOCAL_FILESYSTEM_COMPLETE_EXIT = 0
 LOCAL_FILESYSTEM_ACCESSIBLE_EXIT = 0
 LOCAL_FILESYSTEM_DENIED_EXIT = 2
 LOCAL_FILESYSTEM_FAILED_EXIT = 3
+LOCAL_FILESYSTEM_MISSING_EXIT = 4
+COMPLETE_EXIT = LOCAL_FILESYSTEM_COMPLETE_EXIT
+ACCESSIBLE_EXIT = LOCAL_FILESYSTEM_ACCESSIBLE_EXIT
+DENIED_EXIT = LOCAL_FILESYSTEM_DENIED_EXIT
+FAILED_EXIT = LOCAL_FILESYSTEM_FAILED_EXIT
+MISSING_EXIT = LOCAL_FILESYSTEM_MISSING_EXIT
 
 MAX_LOCAL_FILESYSTEM_REQUEST_BYTES = 24 * 1024
 MAX_LOCAL_FILESYSTEM_ROOTS = 64
 MAX_LOCAL_FILESYSTEM_SELECTED_ROOTS = MAX_LOCAL_FILESYSTEM_ROOTS
+MAX_LOCAL_FILESYSTEM_READ_BYTES = 512 * 1024 * 1024
 
 _GENERIC_FAILURE_DETAIL = "Windows local filesystem verification failed."
 
+_FILE_READ_ATTRIBUTES = 0x00000080
 _FILE_READ_ATTRIBUTES_AND_TRAVERSE = 0x000000A0
+_FILE_READ_DATA = 0x00000001
+_SYNCHRONIZE = 0x00100000
 _FILE_SHARE_READ_WRITE_DELETE = 0x00000007
 _OPEN_EXISTING = 3
 _FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
@@ -46,10 +64,16 @@ _CREATE_FILE_FLAGS = _FILE_FLAG_BACKUP_SEMANTICS | _FILE_FLAG_OPEN_REPARSE_POINT
 
 _FILE_ATTRIBUTE_DIRECTORY = 0x00000010
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
+_FILE_BASIC_INFO_CLASS = 0
+_FILE_STANDARD_INFO_CLASS = 1
 _FILE_OPEN = 1
 _FILE_OPEN_REPARSE_POINT = 0x00200000
+_FILE_SYNCHRONOUS_IO_NONALERT = 0x00000020
+_FILE_NON_DIRECTORY_FILE = 0x00000040
 _FILE_ATTRIBUTE_TAG_INFO_CLASS = 9
+_FILE_ID_INFO_CLASS = 18
 _FILE_NAME_NORMALIZED_AND_VOLUME_NAME_DOS = 0
+_FILE_TYPE_DISK = 0x0001
 _OBJ_DONT_REPARSE = 0x00001000
 _REPARSE_TAG_DIRECTORY = 0x10000000
 _REPARSE_TAG_NAME_SURROGATE = 0x20000000
@@ -58,6 +82,9 @@ _IO_REPARSE_TAG_SYMLINK = 0xA000000C
 _SYMLINK_FLAG_RELATIVE = 0x00000001
 _STATUS_INVALID_PARAMETER = 0xC000000D
 _STATUS_REPARSE_POINT_ENCOUNTERED = 0xC000050B
+_STATUS_NO_SUCH_FILE = 0xC000000F
+_STATUS_OBJECT_NAME_NOT_FOUND = 0xC0000034
+_STATUS_OBJECT_PATH_NOT_FOUND = 0xC000003A
 
 _FSCTL_GET_REPARSE_POINT = 0x000900A8
 _MAXIMUM_REPARSE_DATA_BUFFER_SIZE = 16 * 1024
@@ -71,6 +98,9 @@ _INITIAL_PATH_BUFFER_CHARS = 260
 _MAX_PATH_BUFFER_CHARS = 32_768
 _MAX_RESOLUTION_COMPONENTS = 4_096
 _MAX_NAME_SURROGATE_EXPANSIONS = 256
+_READ_CHUNK_BYTES = 64 * 1024
+_CLOUD_REPARSE_TAG_MASK = 0xFFFF0FFF
+_CLOUD_REPARSE_TAG_BASE = 0x9000001A
 
 _NATIVE_DOS_DRIVE_PATH = re.compile(r"^([A-Za-z]):\\")
 _NT_DOS_DRIVE_TARGET = re.compile(r"^\\\?\?\\([A-Za-z]):\\")
@@ -102,6 +132,8 @@ DeviceIoControl = Callable[
     [object, object, object, object, object, object, object, object],
     object,
 ]
+GetFileType = Callable[[object], object]
+ReadFile = Callable[[object, object, object, object, object], object]
 CloseHandle = Callable[[object], object]
 NtCreateFile = Callable[
     [
@@ -125,6 +157,37 @@ class _FILE_ATTRIBUTE_TAG_INFO(ctypes.Structure):
     _fields_ = [
         ("FileAttributes", _DWORD),
         ("ReparseTag", _DWORD),
+    ]
+
+
+class _FILE_BASIC_INFO(ctypes.Structure):
+    _fields_ = [
+        ("CreationTime", ctypes.c_int64),
+        ("LastAccessTime", ctypes.c_int64),
+        ("LastWriteTime", ctypes.c_int64),
+        ("ChangeTime", ctypes.c_int64),
+        ("FileAttributes", _DWORD),
+    ]
+
+
+class _FILE_STANDARD_INFO(ctypes.Structure):
+    _fields_ = [
+        ("AllocationSize", ctypes.c_int64),
+        ("EndOfFile", ctypes.c_int64),
+        ("NumberOfLinks", _DWORD),
+        ("DeletePending", ctypes.c_ubyte),
+        ("Directory", ctypes.c_ubyte),
+    ]
+
+
+class _FILE_ID_128(ctypes.Structure):
+    _fields_ = [("Identifier", ctypes.c_ubyte * 16)]
+
+
+class _FILE_ID_INFO(ctypes.Structure):
+    _fields_ = [
+        ("VolumeSerialNumber", ctypes.c_uint64),
+        ("FileId", _FILE_ID_128),
     ]
 
 
@@ -170,6 +233,10 @@ class WindowsLocalStoreHealthDenied(RuntimeError):
     """The requested directory could not be proven accessible and authorized."""
 
 
+class WindowsLocalStoreHealthMissing(RuntimeError):
+    """The requested file is absent within an otherwise valid read scope."""
+
+
 @dataclass(frozen=True)
 class _DosPath:
     drive: str
@@ -191,6 +258,24 @@ class _InspectionRequest:
 
 
 @dataclass(frozen=True)
+class _DirectReadRequest:
+    candidate: _DosPath
+    selected_root: _DosPath
+    max_bytes: int
+
+
+@dataclass(frozen=True)
+class _RegisteredReadRequest:
+    store_root: _DosPath
+    selected_root: _DosPath
+    locator: tuple[str, ...]
+    max_bytes: int
+
+
+_ProtocolRequest = _InspectionRequest | _DirectReadRequest | _RegisteredReadRequest
+
+
+@dataclass(frozen=True)
 class _ReparseTarget:
     absolute: _DosPath | None
     relative_tokens: tuple[str, ...]
@@ -203,6 +288,18 @@ class _OwnedDirectory:
     components: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class _RegularFileSnapshot:
+    volume_serial_number: int
+    file_id: bytes
+    end_of_file: int
+    last_write_time: int
+    change_time: int
+    file_type: int
+    file_attributes: int
+    reparse_tag: int
+
+
 class WindowsDirectoryApi(Protocol):
     """Minimal owned-handle operations used by the resolver."""
 
@@ -211,6 +308,9 @@ class WindowsDirectoryApi(Protocol):
 
     def open_component(self, parent: int, component: str) -> int:
         """Open one component relative to an owned parent handle."""
+
+    def open_file_component(self, parent: int, component: str) -> int:
+        """Open one final file component without implicitly following aliases."""
 
     def file_attributes_and_reparse_tag(self, handle: int) -> tuple[int, int]:
         """Return attributes and reparse tag for the exact borrowed handle."""
@@ -221,8 +321,22 @@ class WindowsDirectoryApi(Protocol):
     def normalized_dos_path(self, handle: int) -> str:
         """Return the normalized strict DOS path of a non-surrogate handle."""
 
+    def regular_file_snapshot(self, handle: int) -> _RegularFileSnapshot:
+        """Return one same-handle identity, size, timestamp, and type snapshot."""
+
+    def read_file(self, handle: int, byte_count: int) -> bytes:
+        """Perform one bounded synchronous binary ``ReadFile`` call."""
+
     def close(self, handle: int) -> None:
         """Close the supplied owned handle or raise."""
+
+
+class _BinaryWriter(Protocol):
+    def write(self, data: bytes) -> object:
+        """Write all opaque bytes or report a short write."""
+
+    def flush(self) -> object:
+        """Flush buffered opaque bytes."""
 
 
 class _CreateFileFunction(Protocol):
@@ -284,6 +398,27 @@ class _GetFinalPathFunction(Protocol):
     ) -> object: ...
 
 
+class _GetFileTypeFunction(Protocol):
+    argtypes: list[object]
+    restype: object
+
+    def __call__(self, handle: object) -> object: ...
+
+
+class _ReadFileFunction(Protocol):
+    argtypes: list[object]
+    restype: object
+
+    def __call__(
+        self,
+        handle: object,
+        buffer: object,
+        bytes_to_read: object,
+        bytes_read: object,
+        overlapped: object,
+    ) -> object: ...
+
+
 class _CloseHandleFunction(Protocol):
     argtypes: list[object]
     restype: object
@@ -321,6 +456,8 @@ class CtypesWindowsDirectoryApi:
         get_file_information_by_handle_ex: GetFileInformationByHandleEx | None = None,
         get_final_path_name_by_handle: GetFinalPathNameByHandle | None = None,
         device_io_control: DeviceIoControl | None = None,
+        get_file_type: GetFileType | None = None,
+        read_file: ReadFile | None = None,
         close_handle: CloseHandle | None = None,
         nt_create_file: NtCreateFile | None = None,
     ) -> None:
@@ -331,6 +468,8 @@ class CtypesWindowsDirectoryApi:
             or get_file_information_by_handle_ex is None
             or get_final_path_name_by_handle is None
             or device_io_control is None
+            or get_file_type is None
+            or read_file is None
             or close_handle is None
         ):
             kernel32 = _load_windows_library("kernel32")
@@ -356,6 +495,16 @@ class CtypesWindowsDirectoryApi:
             get_final_path_name_by_handle
             if get_final_path_name_by_handle is not None
             else self._bind_get_final_path(_required_library(kernel32))
+        )
+        self._get_file_type = (
+            get_file_type
+            if get_file_type is not None
+            else self._bind_get_file_type(_required_library(kernel32))
+        )
+        self._read_file_function = (
+            read_file
+            if read_file is not None
+            else self._bind_read_file(_required_library(kernel32))
         )
         self._close_handle = (
             close_handle
@@ -412,16 +561,81 @@ class CtypesWindowsDirectoryApi:
             parent,
             object_name,
             _OBJ_DONT_REPARSE,
+            desired_access=_FILE_READ_ATTRIBUTES_AND_TRAVERSE,
+            create_options=_FILE_OPEN_REPARSE_POINT,
         )
         if _status_code(status) in (
             _STATUS_INVALID_PARAMETER,
             _STATUS_REPARSE_POINT_ENCOUNTERED,
         ):
             self._close_failed_output(handle)
-            status, handle = self._nt_open_component(parent, object_name, 0)
+            status, handle = self._nt_open_component(
+                parent,
+                object_name,
+                0,
+                desired_access=_FILE_READ_ATTRIBUTES_AND_TRAVERSE,
+                create_options=_FILE_OPEN_REPARSE_POINT,
+            )
 
         if _status_code(status) != 0 or not _is_valid_handle(handle):
             self._close_failed_output(handle)
+            if _status_code(status) in (
+                _STATUS_NO_SUCH_FILE,
+                _STATUS_OBJECT_NAME_NOT_FOUND,
+                _STATUS_OBJECT_PATH_NOT_FOUND,
+            ):
+                raise WindowsLocalStoreHealthMissing(_GENERIC_FAILURE_DETAIL)
+            raise WindowsLocalStoreHealthDenied(_GENERIC_FAILURE_DETAIL)
+        return cast(int, handle)
+
+    def open_file_component(self, parent: int, component: str) -> int:
+        """Open one file relative to ``parent`` with final following disabled."""
+
+        if not _is_valid_handle(parent) or not _is_valid_component(component):
+            raise WindowsLocalStoreHealthError(_GENERIC_FAILURE_DETAIL)
+        encoded_component = component.encode("utf-16-le", errors="strict")
+        utf16_length = len(encoded_component)
+        if not (0 < utf16_length <= _MAX_UNICODE_STRING_BYTES):
+            raise WindowsLocalStoreHealthError(_GENERIC_FAILURE_DETAIL)
+        name_buffer = ctypes.create_string_buffer(encoded_component + b"\0\0")
+        object_name = _UNICODE_STRING(
+            Length=_USHORT(utf16_length),
+            MaximumLength=_USHORT(utf16_length + 2),
+            Buffer=ctypes.cast(name_buffer, ctypes.POINTER(ctypes.c_wchar)),
+        )
+        desired_access = _FILE_READ_DATA | _FILE_READ_ATTRIBUTES | _SYNCHRONIZE
+        create_options = (
+            _FILE_OPEN_REPARSE_POINT
+            | _FILE_SYNCHRONOUS_IO_NONALERT
+            | _FILE_NON_DIRECTORY_FILE
+        )
+        status, handle = self._nt_open_component(
+            parent,
+            object_name,
+            _OBJ_DONT_REPARSE,
+            desired_access=desired_access,
+            create_options=create_options,
+        )
+        if _status_code(status) in (
+            _STATUS_INVALID_PARAMETER,
+            _STATUS_REPARSE_POINT_ENCOUNTERED,
+        ):
+            self._close_failed_output(handle)
+            status, handle = self._nt_open_component(
+                parent,
+                object_name,
+                0,
+                desired_access=desired_access,
+                create_options=create_options,
+            )
+        if _status_code(status) != 0 or not _is_valid_handle(handle):
+            self._close_failed_output(handle)
+            if _status_code(status) in (
+                _STATUS_NO_SUCH_FILE,
+                _STATUS_OBJECT_NAME_NOT_FOUND,
+                _STATUS_OBJECT_PATH_NOT_FOUND,
+            ):
+                raise WindowsLocalStoreHealthMissing(_GENERIC_FAILURE_DETAIL)
             raise WindowsLocalStoreHealthDenied(_GENERIC_FAILURE_DETAIL)
         return cast(int, handle)
 
@@ -505,6 +719,63 @@ class CtypesWindowsDirectoryApi:
                 raise WindowsLocalStoreHealthDenied(_GENERIC_FAILURE_DETAIL)
             return _parse_dos_path(value[4:]).native
 
+    def regular_file_snapshot(self, handle: int) -> _RegularFileSnapshot:
+        """Read all stability fields from the exact borrowed file handle."""
+
+        if not _is_valid_handle(handle):
+            raise WindowsLocalStoreHealthError(_GENERIC_FAILURE_DETAIL)
+        basic = _FILE_BASIC_INFO()
+        standard = _FILE_STANDARD_INFO()
+        identity = _FILE_ID_INFO()
+        self._read_handle_information(handle, _FILE_BASIC_INFO_CLASS, basic)
+        self._read_handle_information(handle, _FILE_STANDARD_INFO_CLASS, standard)
+        self._read_handle_information(handle, _FILE_ID_INFO_CLASS, identity)
+        attributes, tag = self.file_attributes_and_reparse_tag(handle)
+        try:
+            file_type = _as_int(self._get_file_type(_HANDLE(handle)))
+        except Exception:
+            raise WindowsLocalStoreHealthError(_GENERIC_FAILURE_DETAIL) from None
+        if file_type == 0:
+            raise WindowsLocalStoreHealthDenied(_GENERIC_FAILURE_DETAIL)
+        return _RegularFileSnapshot(
+            volume_serial_number=int(identity.VolumeSerialNumber),
+            file_id=bytes(identity.FileId.Identifier),
+            end_of_file=int(standard.EndOfFile),
+            last_write_time=int(basic.LastWriteTime),
+            change_time=int(basic.ChangeTime),
+            file_type=file_type,
+            file_attributes=attributes,
+            reparse_tag=tag,
+        )
+
+    def read_file(self, handle: int, byte_count: int) -> bytes:
+        """Read at most ``byte_count`` bytes synchronously from ``handle``."""
+
+        if (
+            not _is_valid_handle(handle)
+            or type(byte_count) is not int
+            or not 0 < byte_count <= _READ_CHUNK_BYTES
+        ):
+            raise WindowsLocalStoreHealthError(_GENERIC_FAILURE_DETAIL)
+        buffer = ctypes.create_string_buffer(byte_count)
+        bytes_read = _DWORD()
+        try:
+            succeeded = self._read_file_function(
+                _HANDLE(handle),
+                buffer,
+                _DWORD(byte_count),
+                ctypes.byref(bytes_read),
+                None,
+            )
+        except Exception:
+            raise WindowsLocalStoreHealthError(_GENERIC_FAILURE_DETAIL) from None
+        if not _as_bool(succeeded):
+            raise WindowsLocalStoreHealthError(_GENERIC_FAILURE_DETAIL)
+        count = int(bytes_read.value)
+        if count < 0 or count > byte_count:
+            raise WindowsLocalStoreHealthError(_GENERIC_FAILURE_DETAIL)
+        return bytes(buffer.raw[:count])
+
     def close(self, handle: int) -> None:
         """Attempt exactly one ``CloseHandle`` call for ``handle``."""
 
@@ -522,6 +793,9 @@ class CtypesWindowsDirectoryApi:
         parent: int,
         object_name: _UNICODE_STRING,
         attributes: int,
+        *,
+        desired_access: int,
+        create_options: int,
     ) -> tuple[int, int | None]:
         output_handle = _HANDLE()
         io_status = _IO_STATUS_BLOCK()
@@ -536,14 +810,14 @@ class CtypesWindowsDirectoryApi:
         try:
             raw_status = self._nt_create_file(
                 ctypes.byref(output_handle),
-                _DWORD(_FILE_READ_ATTRIBUTES_AND_TRAVERSE),
+                _DWORD(desired_access),
                 ctypes.byref(object_attributes),
                 ctypes.byref(io_status),
                 None,
                 _ULONG(0),
                 _ULONG(_FILE_SHARE_READ_WRITE_DELETE),
                 _ULONG(_FILE_OPEN),
-                _ULONG(_FILE_OPEN_REPARSE_POINT),
+                _ULONG(create_options),
                 None,
                 _ULONG(0),
             )
@@ -552,6 +826,24 @@ class CtypesWindowsDirectoryApi:
             self._close_failed_output(output_handle.value)
             raise
         return status, output_handle.value
+
+    def _read_handle_information(
+        self,
+        handle: int,
+        information_class: int,
+        information: ctypes.Structure,
+    ) -> None:
+        try:
+            succeeded = self._get_file_information_by_handle_ex(
+                _HANDLE(handle),
+                _FILE_INFO_BY_HANDLE_CLASS(information_class),
+                ctypes.byref(information),
+                _DWORD(ctypes.sizeof(information)),
+            )
+        except Exception:
+            raise WindowsLocalStoreHealthError(_GENERIC_FAILURE_DETAIL) from None
+        if not _as_bool(succeeded):
+            raise WindowsLocalStoreHealthError(_GENERIC_FAILURE_DETAIL)
 
     def _close_failed_output(self, handle: int | None) -> None:
         if _is_valid_handle(handle):
@@ -624,6 +916,32 @@ class CtypesWindowsDirectoryApi:
             _DWORD,
         ]
         function.restype = _DWORD
+        return function
+
+    @staticmethod
+    def _bind_get_file_type(library: object) -> _GetFileTypeFunction:
+        function = cast(
+            _GetFileTypeFunction,
+            _library_function(library, "GetFileType"),
+        )
+        function.argtypes = [_HANDLE]
+        function.restype = _DWORD
+        return function
+
+    @staticmethod
+    def _bind_read_file(library: object) -> _ReadFileFunction:
+        function = cast(
+            _ReadFileFunction,
+            _library_function(library, "ReadFile"),
+        )
+        function.argtypes = [
+            _HANDLE,
+            ctypes.c_void_p,
+            _DWORD,
+            ctypes.POINTER(_DWORD),
+            ctypes.c_void_p,
+        ]
+        function.restype = _BOOL
         return function
 
     @staticmethod
@@ -769,7 +1087,7 @@ def _contains(root: _DosPath, candidate: _DosPath) -> bool:
     )
 
 
-def _parse_request(raw: str | None) -> _InspectionRequest:
+def _canonical_payload(raw: str | None) -> dict[str, object]:
     if not isinstance(raw, str) or not raw:
         raise WindowsLocalStoreHealthError(_GENERIC_FAILURE_DETAIL)
     try:
@@ -782,12 +1100,7 @@ def _parse_request(raw: str | None) -> _InspectionRequest:
         payload = json.loads(raw)
     except (json.JSONDecodeError, RecursionError):
         raise WindowsLocalStoreHealthError(_GENERIC_FAILURE_DETAIL) from None
-    if not isinstance(payload, dict) or set(payload) != {
-        "v",
-        "op",
-        "candidate",
-        "roots",
-    }:
+    if not isinstance(payload, dict):
         raise WindowsLocalStoreHealthError(_GENERIC_FAILURE_DETAIL)
     try:
         canonical = json.dumps(
@@ -800,20 +1113,25 @@ def _parse_request(raw: str | None) -> _InspectionRequest:
         raise WindowsLocalStoreHealthError(_GENERIC_FAILURE_DETAIL) from None
     if canonical != raw:
         raise WindowsLocalStoreHealthError(_GENERIC_FAILURE_DETAIL)
+    return cast(dict[str, object], payload)
+
+
+def _parse_roots(value: object, *, exact_one: bool) -> tuple[_DosPath, ...]:
     if (
-        type(payload["v"]) is not int
-        or payload["v"] != LOCAL_FILESYSTEM_REQUEST_VERSION
-        or payload["op"] != LOCAL_FILESYSTEM_INSPECT_DIRECTORY_OP
-        or not isinstance(payload["candidate"], str)
-        or not isinstance(payload["roots"], list)
-        or not payload["roots"]
-        or len(payload["roots"]) > MAX_LOCAL_FILESYSTEM_ROOTS
-        or any(not isinstance(root, str) for root in payload["roots"])
+        not isinstance(value, list)
+        or (exact_one and len(value) != 1)
+        or (not exact_one and not value)
+        or len(value) > MAX_LOCAL_FILESYSTEM_ROOTS
+        or any(not isinstance(root, str) for root in value)
     ):
         raise WindowsLocalStoreHealthError(_GENERIC_FAILURE_DETAIL)
+    return tuple(_parse_dos_path(cast(str, root)) for root in value)
 
-    candidate = _parse_candidate_dos_path(payload["candidate"])
-    roots = tuple(_parse_dos_path(root) for root in payload["roots"])
+
+def _selected_root(
+    candidate: _DosPath,
+    roots: tuple[_DosPath, ...],
+) -> _DosPath:
     containing = tuple(root for root in roots if _contains(root, candidate))
     if not containing:
         raise WindowsLocalStoreHealthDenied(_GENERIC_FAILURE_DETAIL)
@@ -822,7 +1140,94 @@ def _parse_request(raw: str | None) -> _InspectionRequest:
     first_effective = next((token for token in suffix if token != "."), None)
     if first_effective == "..":
         raise WindowsLocalStoreHealthDenied(_GENERIC_FAILURE_DETAIL)
-    return _InspectionRequest(candidate, selected)
+    return selected
+
+
+def _parse_max_bytes(value: object) -> int:
+    if (
+        type(value) is not int
+        or not 1 <= value <= MAX_LOCAL_FILESYSTEM_READ_BYTES
+    ):
+        raise WindowsLocalStoreHealthError(_GENERIC_FAILURE_DETAIL)
+    return value
+
+
+def _parse_protocol_request(raw: str | None) -> _ProtocolRequest:
+    payload = _canonical_payload(raw)
+    version = payload.get("v")
+    operation = payload.get("op")
+    if (
+        type(version) is not int
+        or version != LOCAL_FILESYSTEM_REQUEST_VERSION
+        or type(operation) is not str
+    ):
+        raise WindowsLocalStoreHealthError(_GENERIC_FAILURE_DETAIL)
+
+    if operation == LOCAL_FILESYSTEM_INSPECT_DIRECTORY_OP:
+        if set(payload) != {"v", "op", "candidate", "roots"}:
+            raise WindowsLocalStoreHealthError(_GENERIC_FAILURE_DETAIL)
+        candidate_value = payload["candidate"]
+        if not isinstance(candidate_value, str):
+            raise WindowsLocalStoreHealthError(_GENERIC_FAILURE_DETAIL)
+        candidate = _parse_candidate_dos_path(candidate_value)
+        roots = _parse_roots(payload["roots"], exact_one=False)
+        return _InspectionRequest(candidate, _selected_root(candidate, roots))
+
+    if operation == LOCAL_FILESYSTEM_READ_FILE_OP:
+        if set(payload) != {"v", "op", "candidate", "roots", "max_bytes"}:
+            raise WindowsLocalStoreHealthError(_GENERIC_FAILURE_DETAIL)
+        candidate_value = payload["candidate"]
+        if not isinstance(candidate_value, str):
+            raise WindowsLocalStoreHealthError(_GENERIC_FAILURE_DETAIL)
+        candidate = _parse_candidate_dos_path(candidate_value)
+        roots = _parse_roots(payload["roots"], exact_one=True)
+        return _DirectReadRequest(
+            candidate=candidate,
+            selected_root=_selected_root(candidate, roots),
+            max_bytes=_parse_max_bytes(payload["max_bytes"]),
+        )
+
+    if operation == LOCAL_FILESYSTEM_READ_REGISTERED_FILE_OP:
+        if set(payload) != {
+            "v",
+            "op",
+            "store_root",
+            "locator",
+            "roots",
+            "max_bytes",
+        }:
+            raise WindowsLocalStoreHealthError(_GENERIC_FAILURE_DETAIL)
+        store_root_value = payload["store_root"]
+        locator_value = payload["locator"]
+        if (
+            not isinstance(store_root_value, str)
+            or not isinstance(locator_value, list)
+            or not locator_value
+            or len(locator_value) > _MAX_RESOLUTION_COMPONENTS
+            or any(
+                not isinstance(component, str)
+                or not _is_valid_component(component)
+                for component in locator_value
+            )
+        ):
+            raise WindowsLocalStoreHealthError(_GENERIC_FAILURE_DETAIL)
+        store_root = _parse_dos_path(store_root_value)
+        roots = _parse_roots(payload["roots"], exact_one=True)
+        return _RegisteredReadRequest(
+            store_root=store_root,
+            selected_root=_selected_root(store_root, roots),
+            locator=tuple(cast(str, item) for item in locator_value),
+            max_bytes=_parse_max_bytes(payload["max_bytes"]),
+        )
+
+    raise WindowsLocalStoreHealthError(_GENERIC_FAILURE_DETAIL)
+
+
+def _parse_request(raw: str | None) -> _InspectionRequest:
+    request = _parse_protocol_request(raw)
+    if not isinstance(request, _InspectionRequest):
+        raise WindowsLocalStoreHealthError(_GENERIC_FAILURE_DETAIL)
+    return request
 
 
 def _read_u16(data: bytes, offset: int) -> int:
@@ -1004,6 +1409,58 @@ class _HandleResolver:
         self._walk_beneath_root(stack, suffix, equivalent_roots)
         return True
 
+    def read_direct(
+        self,
+        request: _DirectReadRequest,
+        output: _BinaryWriter,
+    ) -> bool:
+        """Read one direct path while retaining its selected grant boundary."""
+
+        root = self._bootstrap_root(request.selected_root)
+        configured = request.selected_root
+        resolved = _DosPath(root.drive, root.components)
+        suffix = request.candidate.components[len(configured.components) :]
+        return self._read_beneath_root(
+            [root],
+            suffix,
+            (configured, resolved),
+            request.max_bytes,
+            output,
+        )
+
+    def read_registered(
+        self,
+        request: _RegisteredReadRequest,
+        output: _BinaryWriter,
+    ) -> bool:
+        """Read a locator beneath one retained registered-store root handle."""
+
+        grant = self._bootstrap_root(request.selected_root)
+        configured_grant = request.selected_root
+        resolved_grant = _DosPath(grant.drive, grant.components)
+        stack = [grant]
+        store_suffix = request.store_root.components[
+            len(configured_grant.components) :
+        ]
+        self._walk_beneath_root(
+            stack,
+            store_suffix,
+            (configured_grant, resolved_grant),
+        )
+        store = stack[-1]
+        for ancestor in reversed(stack[:-1]):
+            self._close_owned(ancestor.handle)
+
+        configured_store = request.store_root
+        resolved_store = _DosPath(store.drive, store.components)
+        return self._read_beneath_root(
+            [store],
+            request.locator,
+            (configured_store, resolved_store),
+            request.max_bytes,
+            output,
+        )
+
     def close_all(self) -> bool:
         while self._owned:
             handle = self._owned.pop()
@@ -1129,6 +1586,182 @@ class _HandleResolver:
                 pending = list(target.relative_tokens) + pending
             self._expanded(pending)
 
+    def _read_beneath_root(
+        self,
+        stack: list[_OwnedDirectory],
+        components: tuple[str, ...],
+        equivalent_roots: tuple[_DosPath, ...],
+        max_bytes: int,
+        output: _BinaryWriter,
+    ) -> bool:
+        pending = list(components)
+        if not pending:
+            raise WindowsLocalStoreHealthDenied(_GENERIC_FAILURE_DETAIL)
+        while pending:
+            token = pending.pop(0)
+            if token == ".":
+                continue
+            if token == "..":
+                if len(stack) <= 1:
+                    raise WindowsLocalStoreHealthDenied(_GENERIC_FAILURE_DETAIL)
+                self._close_owned(stack.pop().handle)
+                continue
+            if pending:
+                child, surrogate, tag = self._open_child(stack[-1], token)
+                if not surrogate:
+                    stack.append(child)
+                    continue
+                target = self._read_target_and_close(child, tag)
+                pending = self._rewrite_pending_for_target(
+                    stack,
+                    pending,
+                    target,
+                    equivalent_roots,
+                )
+                self._expanded(pending)
+                continue
+
+            handle = self._api.open_file_component(stack[-1].handle, token)
+            self._take_ownership(handle)
+            attributes, tag = self._api.file_attributes_and_reparse_tag(handle)
+            if (
+                attributes & _FILE_ATTRIBUTE_REPARSE_POINT
+                and tag & _REPARSE_TAG_NAME_SURROGATE
+            ):
+                if tag not in (
+                    _IO_REPARSE_TAG_MOUNT_POINT,
+                    _IO_REPARSE_TAG_SYMLINK,
+                ):
+                    raise WindowsLocalStoreHealthDenied(_GENERIC_FAILURE_DETAIL)
+                child = _OwnedDirectory(
+                    handle,
+                    stack[-1].drive,
+                    stack[-1].components + (token,),
+                )
+                target = self._read_target_and_close(child, tag)
+                pending = self._rewrite_pending_for_target(
+                    stack,
+                    [],
+                    target,
+                    equivalent_roots,
+                )
+                if not pending:
+                    raise WindowsLocalStoreHealthDenied(_GENERIC_FAILURE_DETAIL)
+                self._expanded(pending)
+                continue
+
+            self._validate_regular_file_kind(attributes, tag)
+            return self._stream_stable_regular_file(
+                handle,
+                max_bytes=max_bytes,
+                output=output,
+            )
+        raise WindowsLocalStoreHealthDenied(_GENERIC_FAILURE_DETAIL)
+
+    def _rewrite_pending_for_target(
+        self,
+        stack: list[_OwnedDirectory],
+        remaining: list[str],
+        target: _ReparseTarget,
+        equivalent_roots: tuple[_DosPath, ...],
+    ) -> list[str]:
+        if target.absolute is not None:
+            relative = self._absolute_target_suffix(
+                target.absolute,
+                equivalent_roots,
+            )
+            while len(stack) > 1:
+                self._close_owned(stack.pop().handle)
+            return list(relative) + remaining
+        return list(target.relative_tokens) + remaining
+
+    @staticmethod
+    def _validate_regular_file_kind(attributes: int, tag: int) -> None:
+        if type(attributes) is not int or type(tag) is not int:
+            raise WindowsLocalStoreHealthError(_GENERIC_FAILURE_DETAIL)
+        if attributes & _FILE_ATTRIBUTE_DIRECTORY:
+            raise WindowsLocalStoreHealthDenied(_GENERIC_FAILURE_DETAIL)
+        if not attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
+            return
+        if tag & _REPARSE_TAG_NAME_SURROGATE or (
+            tag & _CLOUD_REPARSE_TAG_MASK
+        ) != _CLOUD_REPARSE_TAG_BASE:
+            raise WindowsLocalStoreHealthDenied(_GENERIC_FAILURE_DETAIL)
+
+    def _stream_stable_regular_file(
+        self,
+        handle: int,
+        *,
+        max_bytes: int,
+        output: _BinaryWriter,
+    ) -> bool:
+        before = self._api.regular_file_snapshot(handle)
+        self._validate_snapshot(before)
+        self._validate_regular_file_kind(
+            before.file_attributes,
+            before.reparse_tag,
+        )
+        if before.file_type != _FILE_TYPE_DISK:
+            raise WindowsLocalStoreHealthDenied(_GENERIC_FAILURE_DETAIL)
+        if before.end_of_file < 0 or before.end_of_file > max_bytes:
+            raise WindowsLocalStoreHealthError(_GENERIC_FAILURE_DETAIL)
+
+        remaining = before.end_of_file
+        while remaining:
+            requested = min(remaining, _READ_CHUNK_BYTES)
+            chunk = self._api.read_file(handle, requested)
+            if type(chunk) is not bytes or len(chunk) != requested:
+                raise WindowsLocalStoreHealthError(_GENERIC_FAILURE_DETAIL)
+            self._write_all(output, chunk)
+            remaining -= requested
+
+        proof = self._api.read_file(handle, 1)
+        if type(proof) is not bytes or len(proof) > 1:
+            raise WindowsLocalStoreHealthError(_GENERIC_FAILURE_DETAIL)
+        if proof:
+            self._write_all(output, proof)
+            raise WindowsLocalStoreHealthError(_GENERIC_FAILURE_DETAIL)
+        after = self._api.regular_file_snapshot(handle)
+        self._validate_snapshot(after)
+        self._validate_regular_file_kind(
+            after.file_attributes,
+            after.reparse_tag,
+        )
+        if before != after:
+            raise WindowsLocalStoreHealthError(_GENERIC_FAILURE_DETAIL)
+        try:
+            output.flush()
+        except BaseException:
+            raise WindowsLocalStoreHealthError(_GENERIC_FAILURE_DETAIL) from None
+        return True
+
+    @staticmethod
+    def _validate_snapshot(snapshot: object) -> None:
+        if (
+            type(snapshot) is not _RegularFileSnapshot
+            or type(snapshot.volume_serial_number) is not int
+            or snapshot.volume_serial_number < 0
+            or snapshot.volume_serial_number > 0xFFFFFFFFFFFFFFFF
+            or type(snapshot.file_id) is not bytes
+            or len(snapshot.file_id) != 16
+            or type(snapshot.end_of_file) is not int
+            or type(snapshot.last_write_time) is not int
+            or type(snapshot.change_time) is not int
+            or type(snapshot.file_type) is not int
+            or type(snapshot.file_attributes) is not int
+            or type(snapshot.reparse_tag) is not int
+        ):
+            raise WindowsLocalStoreHealthError(_GENERIC_FAILURE_DETAIL)
+
+    @staticmethod
+    def _write_all(output: _BinaryWriter, data: bytes) -> None:
+        try:
+            result = output.write(data)
+        except BaseException:
+            raise WindowsLocalStoreHealthError(_GENERIC_FAILURE_DETAIL) from None
+        if type(result) is not int or result != len(data):
+            raise WindowsLocalStoreHealthError(_GENERIC_FAILURE_DETAIL)
+
     def _absolute_target_suffix(
         self,
         target: _DosPath,
@@ -1192,6 +1825,8 @@ def inspect_directory_request(
         request = _parse_request(raw_request)
     except WindowsLocalStoreHealthDenied:
         return LOCAL_FILESYSTEM_DENIED_EXIT
+    except WindowsLocalStoreHealthMissing:
+        return LOCAL_FILESYSTEM_DENIED_EXIT
     except BaseException:
         return LOCAL_FILESYSTEM_FAILED_EXIT
 
@@ -1202,6 +1837,50 @@ def inspect_directory_request(
         resolver = _HandleResolver(directory_api)
         resolver.inspect(request)
         outcome = LOCAL_FILESYSTEM_ACCESSIBLE_EXIT
+    except WindowsLocalStoreHealthMissing:
+        outcome = LOCAL_FILESYSTEM_DENIED_EXIT
+    except WindowsLocalStoreHealthDenied:
+        outcome = LOCAL_FILESYSTEM_DENIED_EXIT
+    except BaseException:
+        outcome = LOCAL_FILESYSTEM_FAILED_EXIT
+    finally:
+        if resolver is not None and not resolver.close_all():
+            outcome = LOCAL_FILESYSTEM_FAILED_EXIT
+    return outcome
+
+
+def execute_request(
+    raw_request: str | None,
+    *,
+    api: WindowsDirectoryApi | None = None,
+    output: _BinaryWriter | None = None,
+) -> int:
+    """Execute any canonical helper request with fixed status semantics."""
+
+    try:
+        request = _parse_protocol_request(raw_request)
+    except WindowsLocalStoreHealthDenied:
+        return LOCAL_FILESYSTEM_DENIED_EXIT
+    except BaseException:
+        return LOCAL_FILESYSTEM_FAILED_EXIT
+
+    if isinstance(request, _InspectionRequest):
+        return inspect_directory_request(raw_request, api=api)
+    if output is None:
+        return LOCAL_FILESYSTEM_FAILED_EXIT
+
+    resolver: _HandleResolver | None = None
+    outcome = LOCAL_FILESYSTEM_FAILED_EXIT
+    try:
+        directory_api = CtypesWindowsDirectoryApi() if api is None else api
+        resolver = _HandleResolver(directory_api)
+        if isinstance(request, _DirectReadRequest):
+            resolver.read_direct(request, output)
+        else:
+            resolver.read_registered(request, output)
+        outcome = LOCAL_FILESYSTEM_COMPLETE_EXIT
+    except WindowsLocalStoreHealthMissing:
+        outcome = LOCAL_FILESYSTEM_MISSING_EXIT
     except WindowsLocalStoreHealthDenied:
         outcome = LOCAL_FILESYSTEM_DENIED_EXIT
     except BaseException:
@@ -1217,17 +1896,22 @@ def main(
     environ: Mapping[str, str] | None = None,
     *,
     api: WindowsDirectoryApi | None = None,
+    output: _BinaryWriter | None = None,
 ) -> int:
-    """Return only the fixed, output-free local-filesystem exit statuses."""
+    """Execute one helper request without ever writing protocol diagnostics."""
 
     try:
         arguments = sys.argv if argv is None else argv
         environment = os.environ if environ is None else environ
         if len(arguments) != 1:
             return LOCAL_FILESYSTEM_FAILED_EXIT
-        return inspect_directory_request(
+        selected_output = output
+        if selected_output is None:
+            selected_output = cast(_BinaryWriter | None, getattr(sys.stdout, "buffer", None))
+        return execute_request(
             environment.get(LOCAL_FILESYSTEM_REQUEST_ENV),
             api=api,
+            output=selected_output,
         )
     except BaseException:
         return LOCAL_FILESYSTEM_FAILED_EXIT

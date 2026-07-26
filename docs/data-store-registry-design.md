@@ -188,7 +188,10 @@ the store registry is what its `ResolverRegistry` dispatches through:
    (e.g. a byte-range read needs `BYTE_RANGE`; a query needs `QUERY`).
 4. Adapter resolves the in-store locator → bounded bytes / bounded result set.
    Artifact content has one 8 MiB hard/default decoded-byte ceiling; a byte
-   range narrows the selected view and can never enlarge that ceiling.
+   range narrows the selected view and can never enlarge that ceiling. For a
+   local file this is only the returned-view cap: integrity verification still
+   streams the complete object under the separate 512 MiB default/hard-max
+   logical read budget.
 5. Verify against `content_hash` → tri-state `verified` / `drifted` /
    `unresolved`, plus `unversioned` for mutable-DB reads that cannot be certified.
 
@@ -283,7 +286,7 @@ Shipped:
 - ✅ `store://<name>/<path>` resolution: the resolve endpoint authorizes and
   looks up the store before releasing its database scope. `local_fs` becomes a
   typed target that retains the logical URI, validated relative components, and
-  trusted registered root through the eventual handle-bound read. HTTP becomes
+  trusted registered root through the brokered retained-handle read. HTTP becomes
   a typed target that retains the same portable relative components and its
   canonical registered origin/path prefix through every redirect. Rclone kinds
   become a typed target that retains an exact configured remote, structural
@@ -308,8 +311,10 @@ Shipped:
   preflight, redirect denial, sanitized environment, app-owned working
   directory, and one deadline across both bounded commands. Invalid targets
   perform no per-probe process work, and ordinary failures expose only one
-  static detail per adapter. Local health creates one deadline before invoking
-  a bounded directory-inspection role. Its filesystem-I/O-free authority
+  static detail per adapter. Local health and local artifact reads use the exact
+  same authority, broker, and process executor. Health creates one deadline
+  before invoking a bounded directory-inspection role. The
+  filesystem-I/O-free authority
   selects the most-specific lexical operator grant, then one fixed isolated,
   output-free Python helper resolves the trusted root and lexically admitted
   candidate component-by-component under retained no-follow handles. Windows
@@ -343,17 +348,28 @@ Shipped:
   resolution.
 - ✅ Local-store confinement: a `local_fs` root must be a native absolute local
   path. Its effective read authority is conjunctive with the operator's global
-  local-root policy, and the exact reader plus recovery walk are scoped to the
-  registered store root. A broader global root therefore cannot make sibling
-  files addressable through that store. Application composition parses
+  local-root policy. The shared helper first retains the selected operator grant
+  and then retains the registered root as a nested scope before it traverses the
+  locator; direct and recovery candidate reads therefore cannot address sibling
+  files through a broader global root. Application composition parses
   `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS` once as an `os.pathsep`-separated
-  operator list. Local health consumes a filesystem-I/O-free lexical authority
-  and bounded operations broker; direct resolution and recovery temporarily
-  derive the legacy policy from that same immutable root set until their
-  dedicated migrations land. Unset or empty runtime configuration denies every
-  local root. The grant is namespace-transitive rather than device-bound; the
-  trusted actor, platform matrix, and point-in-time lifecycle are defined by
-  the normative
+  operator list and builds one filesystem-I/O-free lexical authority, bounded
+  operations broker, and process executor. Local health, direct reads, and all
+  recovery candidate reads receive those exact shared objects. One logical
+  local budget shares the configured subprocess deadline and a 512 MiB
+  default/hard-max cumulative full-read allowance across the direct attempt and
+  recovery; the API's 8 MiB `max_bytes` remains a separate returned-view cap.
+  Stable exact-limit files succeed after an empty one-byte EOF proof. Any proof
+  byte or ambiguous read fails terminally with a static path-free result.
+  Unset or empty runtime root configuration denies every local root.
+
+  Recovery enumeration/root metadata remain transitional application-side
+  operations scoped to the registered root; every yielded candidate's bytes
+  still cross the retained nested-store helper. The current `os.walk` deadline
+  checks cannot interrupt one blocked directory operation, and brokered bounded
+  enumeration remains `lab-tracker-n5kp.61`. The grant is
+  namespace-transitive rather than device-bound; the trusted actor, platform
+  matrix, and point-in-time lifecycle are defined by the normative
   [mount and namespace authority](configuration.md#mount-and-namespace-authority)
   contract.
 - ✅ Registered HTTP prefix confinement: a pure value validates the canonical

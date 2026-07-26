@@ -24,9 +24,8 @@ MAX_LOCAL_FILESYSTEM_PATH_CHARACTERS: Final = 16 * 1024
 MAX_LOCAL_FILESYSTEM_PATH_BYTES: Final = 16 * 1024
 MAX_LOCAL_FILESYSTEM_PATH_COMPONENTS: Final = 4_096
 MAX_LOCAL_FILESYSTEM_COMPONENT_BYTES: Final = 255
-_MAX_LOCAL_FILESYSTEM_CONFIG_CHARACTERS: Final = (
-    MAX_LOCAL_FILESYSTEM_AUTHORITY_ROOTS
-    * (MAX_LOCAL_FILESYSTEM_PATH_CHARACTERS + 1)
+_MAX_LOCAL_FILESYSTEM_CONFIG_CHARACTERS: Final = MAX_LOCAL_FILESYSTEM_AUTHORITY_ROOTS * (
+    MAX_LOCAL_FILESYSTEM_PATH_CHARACTERS + 1
 )
 
 
@@ -51,6 +50,7 @@ class LocalDirectoryGrant:
     _authority_token: object
     _root_index: int
     _candidate: str
+    _compatibility_root: str | None = None
 
 
 @dataclass(frozen=True, slots=True, init=False, eq=False, repr=False)
@@ -59,6 +59,7 @@ class LocalFilesystemAuthority:
 
     _roots: tuple[_LexicalRoot, ...]
     _token: object
+    _unscoped_library_compatibility: bool
 
     def __init__(
         self,
@@ -77,9 +78,7 @@ class LocalFilesystemAuthority:
         if isinstance(roots, (str, bytes)):
             raise TypeError("Local filesystem roots must be a sequence of paths.")
         try:
-            raw_roots = tuple(
-                islice(iter(roots), MAX_LOCAL_FILESYSTEM_AUTHORITY_ROOTS + 1)
-            )
+            raw_roots = tuple(islice(iter(roots), MAX_LOCAL_FILESYSTEM_AUTHORITY_ROOTS + 1))
         except TypeError:
             raise TypeError("Local filesystem roots must be a sequence of paths.") from None
         if len(raw_roots) > MAX_LOCAL_FILESYSTEM_AUTHORITY_ROOTS:
@@ -108,6 +107,7 @@ class LocalFilesystemAuthority:
 
         object.__setattr__(self, "_roots", tuple(parsed))
         object.__setattr__(self, "_token", object())
+        object.__setattr__(self, "_unscoped_library_compatibility", False)
 
     @classmethod
     def from_roots(
@@ -134,12 +134,24 @@ class LocalFilesystemAuthority:
         path_module = ntpath if os.name == "nt" else posixpath
         if raw and (
             len(raw) > _MAX_LOCAL_FILESYSTEM_CONFIG_CHARACTERS
-            or raw.count(path_module.pathsep)
-            >= MAX_LOCAL_FILESYSTEM_AUTHORITY_ROOTS
+            or raw.count(path_module.pathsep) >= MAX_LOCAL_FILESYSTEM_AUTHORITY_ROOTS
         ):
             raise ValueError(_GENERIC_ROOT_ERROR)
         roots = [part for part in raw.split(path_module.pathsep) if part.strip()] if raw else []
         return cls(roots, cwd=cwd)
+
+    @classmethod
+    def for_unscoped_library_compatibility(cls) -> LocalFilesystemAuthority:
+        """Build the explicit library-only authority for direct file reads.
+
+        Runtime composition must always use :meth:`from_config`.  This authority
+        intentionally owns no enumerable roots, so enabling recovery on a
+        compatibility resolver can never turn into a host-root scan.
+        """
+
+        authority = cls(())
+        object.__setattr__(authority, "_unscoped_library_compatibility", True)
+        return authority
 
     @property
     def legacy_roots(self) -> tuple[str, ...]:
@@ -165,6 +177,17 @@ class LocalFilesystemAuthority:
             parsed_candidate = _parse_candidate_absolute(rendered)
         except (OSError, RuntimeError, TypeError, ValueError):
             return None
+
+        if self._unscoped_library_compatibility:
+            compatibility_root = (
+                f"{parsed_candidate.anchor}\\" if os.name == "nt" else parsed_candidate.anchor
+            )
+            return LocalDirectoryGrant(
+                self._token,
+                -1,
+                parsed_candidate.rendered,
+                compatibility_root,
+            )
 
         selected_index: int | None = None
         selected_size = -1
@@ -194,12 +217,13 @@ class LocalFilesystemAuthority:
     ) -> tuple[str, tuple[str, ...]]:
         """Reveal one selected request only to the concrete broker."""
 
-        if (
-            not isinstance(grant, LocalDirectoryGrant)
-            or grant._authority_token is not self._token
-            or grant._root_index < 0
-            or grant._root_index >= len(self._roots)
-        ):
+        if not isinstance(grant, LocalDirectoryGrant) or grant._authority_token is not self._token:
+            raise ValueError("Local filesystem grant is invalid.")
+        if grant._root_index == -1:
+            if not self._unscoped_library_compatibility or grant._compatibility_root is None:
+                raise ValueError("Local filesystem grant is invalid.")
+            return grant._candidate, (grant._compatibility_root,)
+        if grant._root_index < 0 or grant._root_index >= len(self._roots):
             raise ValueError("Local filesystem grant is invalid.")
         return grant._candidate, (self._roots[grant._root_index].rendered,)
 
@@ -273,8 +297,7 @@ def _parse_candidate_absolute(path: str) -> _LexicalCandidate:
     components = tuple(path[1:].split("/"))
     if any(
         component not in {"", ".", ".."}
-        and _filesystem_path_bytes(component)
-        > MAX_LOCAL_FILESYSTEM_COMPONENT_BYTES
+        and _filesystem_path_bytes(component) > MAX_LOCAL_FILESYSTEM_COMPONENT_BYTES
         for component in components
     ):
         raise ValueError(_GENERIC_ROOT_ERROR)
@@ -337,8 +360,7 @@ def _validated_components(
 def _validate_lexical_path_budget(path: str, *, windows: bool) -> None:
     if (
         len(path) > MAX_LOCAL_FILESYSTEM_PATH_CHARACTERS
-        or path.count("\\" if windows else "/")
-        > MAX_LOCAL_FILESYSTEM_PATH_COMPONENTS
+        or path.count("\\" if windows else "/") > MAX_LOCAL_FILESYSTEM_PATH_COMPONENTS
     ):
         raise ValueError(_GENERIC_ROOT_ERROR)
     try:

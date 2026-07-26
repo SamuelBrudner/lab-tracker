@@ -152,27 +152,39 @@ research record:
   across ordinary, registered-store, ranged, HTTP, rclone, Git, and local
   resolution paths; ranges can only narrow that allowance. Runtime parses the
   platform-path-separated
-  `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS` once. Registered local-store health uses
-  a lexical authority and bounded broker; direct resolution and recovery still
-  use a transitional policy derived from the same immutable root set. That
-  root authority grants the subtree visible in the operator-controlled service
-  namespace rather than one device identity, and the application runtime
-  denies all local roots when it is unset or empty. Local resolution optionally
-  recovers a moved/renamed file by its content hash within those roots
-  (`LAB_TRACKER_RESOLVER_RECOVERY`, off by default, bounded, read-only).
-  Local health is a bounded, isolated, output-free directory operation behind
-  a narrow role. One deadline starts before lexical admission; the helper
-  anchors the trusted grant, resolves aliases component-by-component from
-  no-follow handles, and rejects an escape before target traversal. It never
-  returns or reopens a canonical pathname plan. Helper-owned close attempts are
-  best effort and contained helper exit is the cleanup backstop. The result is
-  advisory rather than registration validation or a durable filesystem lease.
-  POSIX ordinary/bind mounts beneath a root are allowed; unsupported Windows
-  nested volume/UNC/device/GUID namespaces fail closed; eligible Cloud
-  directories remain traversable; untrusted topology mutation makes the local
-  surface unsupported. Direct file and recovery operations remain the
-  `lab-tracker-n5kp.47` and `lab-tracker-n5kp.61` follow-ups. The mount decision
-  is normative in
+  `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS` once into one filesystem-I/O-free lexical
+  authority, bounded local-filesystem broker, and bounded process executor.
+  Registered local-store health, direct local reads, and every recovery
+  candidate read receive those exact shared objects. The helper anchors the
+  trusted grant, resolves aliases component-by-component from no-follow retained
+  descriptors/handles, and rejects an escape before target traversal. A
+  registered read adds the retained store root as a nested boundary before its
+  locator is traversed. It never returns or reopens a canonical pathname plan.
+  Helper-owned close attempts are best effort and contained helper exit is the
+  cleanup backstop.
+
+  One logical local resolution shares a single subprocess deadline and a
+  512 MiB default/hard-max cumulative full-file read budget across the direct
+  attempt and all recovery candidates. The 8 MiB API `max_bytes` remains a
+  separate returned-view cap. The helper's allowance-plus-one raw ceiling exists
+  only for a fatal EOF proof, so a stable exact-limit file succeeds but a proof
+  byte or any ambiguous read makes the budget terminal. Failures and recovery
+  results are path-free. Local resolution optionally recovers a moved/renamed
+  file by its content hash within those roots
+  (`LAB_TRACKER_RESOLVER_RECOVERY`, off by default; candidate-file default
+  `4096`; read-only). Recovery enumeration/root metadata remain transitional
+  application-side work until `lab-tracker-n5kp.61`; deadline checks cannot yet
+  interrupt one blocked directory operation.
+
+  The root authority grants the subtree visible in the operator-controlled
+  service namespace rather than one device identity, and the application
+  runtime denies all local roots when it is unset or empty. Local health remains
+  an isolated, output-free, point-in-time advisory operation rather than
+  registration validation or a durable filesystem lease. POSIX ordinary/bind
+  mounts beneath a root are allowed; unsupported Windows nested
+  volume/UNC/device/GUID namespaces fail closed; eligible Cloud directories
+  remain traversable; untrusted topology mutation makes the local surface
+  unsupported. The mount decision is normative in
   [`configuration.md`](configuration.md#mount-and-namespace-authority).
   Registered `git` data stores resolve `path@commit` locators read-only and
   on demand, gated by an operator remote allowlist

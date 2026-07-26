@@ -161,7 +161,7 @@ jobs:
           export LAB_TRACKER_TEST_BIND_MOUNT_ROOT="${bind_mount}"
           uv run pytest -q \
             tests/test_posix_pre_follow_local_store_health_helper.py \
-            -k native_mount_descendant
+            -k "native_mount_descendant or native_mount_regular_file"
 
   windows-containment:
     name: Windows containment and registered artifacts
@@ -202,8 +202,6 @@ jobs:
           tests/test_local_filesystem_operations.py
           tests/test_local_store_health.py
           tests/test_windows_local_store_health_helper.py
-          tests/test_local_file_access.py
-          tests/test_windows_local_file.py
           tests/test_outbound_http_deadline.py
           tests/test_outbound_http_policy.py
           tests/test_safe_http_client.py
