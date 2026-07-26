@@ -7,9 +7,24 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from http_security_fakes import FakeAddressResolver, FakeSafeHttpClient
 from starlette.testclient import TestClient
 
 from lab_tracker.artifact_resolution import LocalFilesystemResolver, ResolverRegistry
+from lab_tracker.bounded_subprocess import BoundedSubprocessExecutor, ProcessResult
+from lab_tracker.http_store_health import HttpStoreHealthProbe
+from lab_tracker.local_filesystem_authority import LocalFilesystemAuthority
+from lab_tracker.local_filesystem_operations import BoundedLocalFilesystemOperations
+from lab_tracker.local_store_health import LocalStoreHealthProbe
+from lab_tracker.outbound_http import OutboundHttpPolicy
+from lab_tracker.rclone_remote_policy import RcloneRemotePolicy
+from lab_tracker.rclone_store_health import RcloneStoreHealthProbe
+from lab_tracker.store_health import (
+    HTTP_STORE_HEALTH_FAILURE_DETAIL,
+    LOCAL_STORE_HEALTH_FAILURE_DETAIL,
+    RCLONE_STORE_HEALTH_FAILURE_DETAIL,
+    CachedStoreHealthProbe,
+)
 
 
 def _sha256(data: bytes) -> str:
@@ -19,6 +34,18 @@ def _sha256(data: bytes) -> str:
 def _install_local_registry(client: TestClient, allowed_root: Path) -> None:
     client.app.state.resolver_registry = ResolverRegistry(
         [LocalFilesystemResolver(allowed_roots=[allowed_root])]
+    )
+
+
+def _install_local_health(client: TestClient, allowed_root: Path) -> None:
+    operations = BoundedLocalFilesystemOperations(
+        authority=LocalFilesystemAuthority.from_roots([allowed_root]),
+        executor=BoundedSubprocessExecutor(),
+    )
+    client.app.state.store_health_checker = CachedStoreHealthProbe(
+        LocalStoreHealthProbe(
+            inspector=operations,
+        )
     )
 
 
@@ -439,6 +466,7 @@ def test_create_data_store_requires_contributor(client, scoped_project_member):
 
 
 def test_data_store_health_local_fs(client, admin_auth_headers, tmp_path):
+    _install_local_health(client, tmp_path)
     project_id = _create_project(client, admin_auth_headers, "Health project")
     store_id = client.post(
         "/data-stores",
@@ -452,6 +480,7 @@ def test_data_store_health_local_fs(client, admin_auth_headers, tmp_path):
 
 
 def test_data_store_health_local_fs_missing_root(client, admin_auth_headers, tmp_path):
+    _install_local_health(client, tmp_path)
     project_id = _create_project(client, admin_auth_headers, "Unhealthy project")
     missing = str(tmp_path / "does-not-exist")
     store_id = client.post(
@@ -465,6 +494,56 @@ def test_data_store_health_local_fs_missing_root(client, admin_auth_headers, tmp
     body = response.json()["data"]
     assert body["status"] == "unreachable"
     assert body["kind"] == "local_fs"
+
+
+def test_data_store_health_local_fs_defaults_to_denied_and_redacted(
+    client,
+    admin_auth_headers,
+    tmp_path,
+):
+    secret = "default-denied-local-root"
+    root = tmp_path / secret
+    project_id = _create_project(client, admin_auth_headers, "Denied local health")
+    store_id = client.post(
+        "/data-stores",
+        json=_store_payload(
+            project_id,
+            name="denied-local",
+            kind="local_fs",
+            root=str(root),
+        ),
+        headers=admin_auth_headers,
+    ).json()["data"]["store_id"]
+
+    class RecordingExecutor:
+        def __init__(self):
+            self.calls = []
+
+        def run(self, command, **kwargs):
+            self.calls.append((command, kwargs))
+            raise AssertionError("deny-all local health reached the process executor")
+
+    executor = RecordingExecutor()
+    operations = BoundedLocalFilesystemOperations(
+        authority=LocalFilesystemAuthority.from_roots([]),
+        executor=executor,
+    )
+    client.app.state.store_health_checker = CachedStoreHealthProbe(
+        LocalStoreHealthProbe(
+            inspector=operations,
+        )
+    )
+
+    response = client.get(
+        f"/data-stores/{store_id}/health",
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["status"] == "unreachable"
+    assert response.json()["data"]["detail"] == LOCAL_STORE_HEALTH_FAILURE_DETAIL
+    assert secret not in response.text
+    assert executor.calls == []
 
 
 def test_git_store_health_uses_installed_policy_without_leaking_credentials(
@@ -485,10 +564,7 @@ def test_git_store_health_uses_installed_policy_without_leaking_credentials(
         headers=admin_auth_headers,
     ).json()["data"]["store_id"]
 
-    checker = client.app.state.store_health_checker
     workdir = client.app.state.git_health_workdir
-    assert checker.git_remote_policy is client.app.state.git_remote_policy
-    assert checker.git_health_workdir is workdir
     assert workdir.is_dir()
     assert list(workdir.iterdir()) == []
     assert not (workdir / ".git").exists()
@@ -503,6 +579,104 @@ def test_git_store_health_uses_installed_policy_without_leaking_credentials(
     assert secret not in response.text
     assert list(workdir.iterdir()) == []
     assert not (workdir / ".git").exists()
+
+
+def test_rclone_store_health_route_denies_before_process_and_redacts_target(
+    client,
+    admin_auth_headers,
+):
+    project_id = _create_project(client, admin_auth_headers, "Rclone health project")
+    secret = "rclone-health-secret-must-not-leak"
+    store_id = client.post(
+        "/data-stores",
+        json=_store_payload(
+            project_id,
+            name="remote-archive",
+            kind="rclone",
+            root="/private/archive",
+            credential_ref=secret,
+        ),
+        headers=admin_auth_headers,
+    ).json()["data"]["store_id"]
+
+    class RecordingExecutor:
+        def __init__(self):
+            self.calls = []
+
+        def run(self, command, **kwargs):
+            self.calls.append((command, kwargs))
+            return ProcessResult(
+                returncode=0,
+                stdout=b"",
+                stdout_bytes=0,
+                stderr_bytes=0,
+            )
+
+    executor = RecordingExecutor()
+    client.app.state.store_health_checker = CachedStoreHealthProbe(
+        RcloneStoreHealthProbe(
+            policy=RcloneRemotePolicy.deny_all(),
+            executor=executor,
+        )
+    )
+
+    response = client.get(
+        f"/data-stores/{store_id}/health",
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200
+    body = response.json()["data"]
+    assert body["status"] == "unreachable"
+    assert body["detail"] == RCLONE_STORE_HEALTH_FAILURE_DETAIL
+    assert secret not in response.text
+    assert executor.calls == []
+
+
+def test_http_store_health_route_redacts_the_authoritative_selected_target(
+    client,
+    admin_auth_headers,
+):
+    project_id = _create_project(client, admin_auth_headers, "HTTP health project")
+    secret = "http-health-secret-must-not-leak"
+    store_id = client.post(
+        "/data-stores",
+        json=_store_payload(
+            project_id,
+            name="remote-http-store",
+            kind="http",
+            root="https://allowed.example/safe-root",
+            endpoint=f"https://operator:{secret}@denied.example/private",
+            credential_ref=f"vault:{secret}",
+        ),
+        headers=admin_auth_headers,
+    ).json()["data"]["store_id"]
+    dns = FakeAddressResolver({"allowed.example": ["93.184.216.34"]})
+    http_client = FakeSafeHttpClient(())
+    client.app.state.store_health_checker = CachedStoreHealthProbe(
+        HttpStoreHealthProbe(
+            policy=OutboundHttpPolicy(address_resolver=dns),
+            client=http_client,
+        )
+    )
+
+    response = client.get(
+        f"/data-stores/{store_id}/health",
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"] == {
+        "store_id": store_id,
+        "kind": "http",
+        "status": "unreachable",
+        "detail": HTTP_STORE_HEALTH_FAILURE_DETAIL,
+    }
+    assert secret not in response.text
+    assert "denied.example" not in response.text
+    assert "allowed.example" not in response.text
+    assert dns.calls == []
+    assert http_client.calls == []
 
 
 def test_data_store_health_denied_for_unauthorized_project(
@@ -570,6 +744,7 @@ def test_group_member_can_read_group_scoped_store(
     """A group-scoped store has project_id=None; authorization must check the
     group scope, not deny every non-admin via ensure_project_read(None)."""
 
+    _install_local_health(client, tmp_path)
     group_id = _create_group(client, admin_auth_headers, "Readable lab")
     store_id = client.post(
         "/data-stores",

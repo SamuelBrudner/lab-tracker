@@ -12,6 +12,29 @@ Use this for the Docker/Postgres path in `docker-compose.yml`.
 Back up before updating the image or pulling new code because startup can run
 schema migrations.
 
+## Local Filesystem Stores
+
+The normative local-root and mount contract is in
+[`configuration.md`](configuration.md#mount-and-namespace-authority). An
+allowed root grants the subtree visible in the app container's namespace,
+including operator-installed POSIX ordinary and bind mounts; it does not grant
+a stable device or volume identity.
+
+Keep that namespace under deployment-operator control:
+
+- mount configured roots read-only where the workflow permits it;
+- do not give the app container `CAP_SYS_ADMIN`, host device-map control, or an
+  untrusted FUSE or user-mount namespace;
+- do not let API users or ordinary data writers replace mounts or Windows DOS
+  device mappings beneath an allowed root; and
+- quiesce filesystem operations and restart the app around planned mount,
+  volume-map, or device-map changes.
+
+If an untrusted principal can mutate that topology, disable local resolution
+and local-store health or isolate the service in a namespace the principal
+cannot change. Directory handles make one operation resistant to pathname
+replacement; they are not a durable mount-topology lease.
+
 ## Backup
 
 From the repo root:

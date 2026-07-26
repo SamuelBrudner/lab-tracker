@@ -91,9 +91,12 @@ class DataStore(_DomainModel):
 ```
 
 A project's **effective store set** = its own stores plus inherited group stores;
-at most one is the **default** (a scope may have none). Registration validates stored configuration
-without initiating backend I/O. Operators can run the separate health endpoint
-to stat a local root, list a remote prefix, or test configured credentials.
+at most one is the **default** (a scope may have none). Registration validates
+stored configuration without initiating backend I/O or invoking a health
+adapter. Operators can run the separate, read-only health endpoint for a bounded
+advisory check of a local root, remote prefix, or configured credentials. A
+healthy result describes reachability at probe time; it is not a registration
+guarantee or a durable capability.
 
 ## Backends differ by capability, not brand
 
@@ -184,6 +187,8 @@ the store registry is what its `ResolverRegistry` dispatches through:
 3. Pick the adapter for that `kind`; assert the operation's required capability
    (e.g. a byte-range read needs `BYTE_RANGE`; a query needs `QUERY`).
 4. Adapter resolves the in-store locator → bounded bytes / bounded result set.
+   Artifact content has one 8 MiB hard/default decoded-byte ceiling; a byte
+   range narrows the selected view and can never enlarge that ceiling.
 5. Verify against `content_hash` → tri-state `verified` / `drifted` /
    `unresolved`, plus `unversioned` for mutable-DB reads that cannot be certified.
 
@@ -285,10 +290,39 @@ Shipped:
   rooted-versus-relative prefix, and portable locator until argv composition.
   Git becomes a typed target that retains a structurally parsed remote, portable
   repository path, and full immutable object ID. Credentials are never embedded.
-- ✅ Explicit health check: `check_store_health` probes reachability
-  (directory stat for `local_fs`, HTTP `HEAD` for `http`, `rclone lsf` for the
-  cloud/remote kinds; `object_table`/`database` report `unsupported`), exposed at
-  `GET /data-stores/{id}/health`.
+- ✅ Explicit health control plane: `GET /data-stores/{id}/health` has
+  independent no-wait admission, performs opaque authorization before every
+  cache access, detaches a frozen exact-value probe target, and releases the
+  ordinary request database scope before cache or host I/O. Completed results
+  use a hard-bounded process-local TTL/LRU cache with exact-key single-flight
+  and bounded follower waits. HTTP health treats a present `endpoint` as
+  authoritative (including blank or invalid values), never falls back to
+  `root`, and requires the selected initial URL to pass the hardened
+  registered-base structural grammar before host I/O. It sends a bounded
+  `HEAD` through the exact outbound policy and pinned client used by artifact
+  resolution, reauthorizes and repins every redirect under one total deadline,
+  and returns one static failure detail. Rclone and Git use dedicated adapters
+  over the exact immutable remote policies and bounded process executor shared
+  with artifact resolution. Rclone preserves `remote:path`, `remote:/path`, and
+  `remote:/` while running one fixed bounded `lsf`; Git retains exact URL
+  preflight, redirect denial, sanitized environment, app-owned working
+  directory, and one deadline across both bounded commands. Invalid targets
+  perform no per-probe process work, and ordinary failures expose only one
+  static detail per adapter. Local health creates one deadline before invoking
+  a bounded directory-inspection role. Its filesystem-I/O-free authority
+  selects the most-specific lexical operator grant, then one fixed isolated,
+  output-free Python helper resolves the trusted root and lexically admitted
+  candidate component-by-component under retained no-follow handles. Windows
+  normalizes only safe separator aliases before this strict helper protocol.
+  Symlink and junction targets are parsed before traversal and must remain
+  inside that same grant;
+  unsupported namespace or mount targets fail closed, while eligible Cloud
+  directory placeholders remain traversable. No canonical pathname plan is
+  returned or reopened. Helper-owned close attempts are best effort and
+  contained helper exit is the cleanup backstop. This remains a static,
+  advisory point-in-time result rather than a durable filesystem lease. The
+  legacy helper now fails closed for local, HTTP, rclone, and Git.
+  `object_table` and `database` remain unsupported.
 - ✅ Group-scoped stores: a store is scoped to exactly one of a project or a
   group (migration `0050`, nullable `project_id` + `group_id`). A group store is
   inherited by every project in the group — `get_by_name` resolves a project's
@@ -311,7 +345,17 @@ Shipped:
   path. Its effective read authority is conjunctive with the operator's global
   local-root policy, and the exact reader plus recovery walk are scoped to the
   registered store root. A broader global root therefore cannot make sibling
-  files addressable through that store.
+  files addressable through that store. Application composition parses
+  `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS` once as an `os.pathsep`-separated
+  operator list. Local health consumes a filesystem-I/O-free lexical authority
+  and bounded operations broker; direct resolution and recovery temporarily
+  derive the legacy policy from that same immutable root set until their
+  dedicated migrations land. Unset or empty runtime configuration denies every
+  local root. The grant is namespace-transitive rather than device-bound; the
+  trusted actor, platform matrix, and point-in-time lifecycle are defined by
+  the normative
+  [mount and namespace authority](configuration.md#mount-and-namespace-authority)
+  contract.
 - ✅ Registered HTTP prefix confinement: a pure value validates the canonical
   HTTP origin and portable path components without DNS. A frozen, factory-only
   target crosses the database-scope boundary, and the resolver checks the

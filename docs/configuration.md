@@ -71,10 +71,102 @@ that destination through your normal off-machine backup process.
   Uploads that exceed the limit are rejected and partial local files are
   cleaned up.
 
-### External HTTP artifact resolution
+### Local filesystem policy
 
-HTTP(S) external-artifact resolution has an outbound destination policy
-independent of the pointer's content hash and response-size limits. A public
+Local artifact resolution and registered `local_fs` store health share one
+operator authority:
+
+- `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS`: a list of host-local roots separated by
+  `os.pathsep` (`:` on POSIX, `;` on Windows). An unset, empty, or
+  whitespace-only value produces an explicit deny-all policy in the application
+  runtime. Empty or whitespace-only components are omitted. Other components
+  retain their exact spelling rather than being trimmed.
+
+Operator roots preserve the useful configuration semantics without inspecting
+their filesystem targets: the current-user `~` form is expanded only from
+`HOME` on POSIX or `USERPROFILE`/`HOMEDRIVE`+`HOMEPATH` on Windows; named-user
+forms are rejected so expansion never invokes an NSS or account lookup.
+Relative entries are prefixed with the service process's startup working
+directory. Use absolute paths in deployments so a working-directory change
+cannot change the grant. The resulting spelling must be unambiguous: dot or
+dot-dot components, NUL/control characters, and unsupported platform
+namespaces fail startup. POSIX repeated separators are rejected; Windows
+normalizes only slash direction plus redundant or trailing separators, which
+are native spelling aliases. A registered store root must be a native absolute
+local path, and a grant to one of its children cannot partially authorize the
+broader store.
+
+Health admission recognizes the configured lexical root spelling. If that root
+is itself an operator-installed alias, a registered store written with the
+alias's separate physical spelling is denied unless that spelling is configured
+as another root. This conservative rule lets a lexically disjoint candidate
+return without probing filesystem targets. Alias components inside an admitted
+candidate remain eligible when the bounded helper proves their destination is
+inside the selected grant.
+
+Application composition builds one filesystem-I/O-free
+`LocalFilesystemAuthority` and one bounded local-filesystem operations broker
+from these roots. Local-store health uses that broker and never canonicalizes a
+candidate in the application process. Direct artifact resolution and recovery
+temporarily retain the legacy `LocalPathPolicy`, derived from the same operator
+root spellings; those unmigrated flows still canonicalize their roots during
+startup until `lab-tracker-n5kp.47` and `lab-tracker-n5kp.61` move them behind
+the broker.
+
+#### Mount and namespace authority
+
+An allowed root grants the transitive subtree visible beneath that path in the
+service's host or container filesystem namespace. It is a namespace grant, not
+a grant to one device, filesystem, or volume identity. The supported cases are:
+
+| Namespace case | Decision |
+| --- | --- |
+| POSIX ordinary mount beneath an allowed root | Allowed |
+| Linux bind mount beneath an allowed root | Allowed |
+| Supported Windows drive-letter anchor | Allowed and trusted for that operation |
+| Windows nested volume mount point | Unsupported; fail closed |
+| Windows UNC, device, or GUID-volume namespace | Unsupported; fail closed |
+| Symlink or junction alias proven to resolve inside the same grant | Allowed as an alias |
+| Escaping or ambiguous name-surrogate alias | Denied |
+| Directory-capable, non-name-surrogate Cloud Files placeholder | Eligible; not a mount crossing |
+
+Consequently, POSIX traversal must not reject a descendant merely because it
+crosses a device boundary: `RESOLVE_NO_XDEV`, `st_dev` equality, and similar
+checks would incorrectly revoke an allowed ordinary or bind mount. On Windows,
+the configured drive mapping is part of the trusted deployment boundary.
+Network mappings that normalize outside the supported drive namespace, nested
+volume mount points, and unsupported final namespaces fail closed. Symlinks and
+junctions do not add authority; an operation may use one only after its bounded
+resolver proves that the destination remains inside the same root.
+
+The deployment operator is trusted to control this setting, the service mount
+namespace, bind and FUSE mounts, container volume mappings, and Windows DOS
+device mappings. API users and ordinary data writers are not trusted to mutate
+that topology. If an untrusted principal can change mount, FUSE, device-map, or
+volume-mapping topology beneath an allowed root, local artifact resolution,
+recovery, and health are unsupported and must be disabled or isolated from that
+principal.
+
+Mount and device-map changes are deployment changes and must not occur during a
+filesystem operation. Each operation observes a point-in-time namespace.
+Retained descriptors and handles bind the selected objects for that operation;
+they do not create a lease over later namespace state, and store health remains
+only a point-in-time reachability result. See
+[`self-hosted-operations.md`](self-hosted-operations.md#local-filesystem-stores)
+for deployment guidance.
+
+Runtime composition parses this setting once into one frozen, slotted authority
+and shares one broker with local health. It also derives one transitional
+`LocalPathPolicy` for local artifact resolution and recovery. Direct
+construction of `LocalFilesystemResolver()` and `default_registry()` retains
+an unscoped compatibility mode for library callers; the application runtime
+never selects that mode merely because the setting is absent.
+
+### Outbound HTTP policy
+
+HTTP(S) external-artifact resolution and HTTP data-store health share one
+runtime destination policy and one pinned HTTP client. The policy is independent
+of an artifact pointer's content hash and response-size limits. A public
 destination is eligible only when every address returned for its hostname is
 globally routable. Malformed URLs, URLs containing user information,
 localhost/local/single-label names without an exact internal exception, unsafe
@@ -86,8 +178,9 @@ one of the already-vetted numeric addresses, so a second DNS answer cannot
 change its destination. Proxy environment variables are ignored. Redirects
 have a finite limit, and every redirect target goes through the same
 authorization and address-pinning process before the next request. One total
-wall-clock deadline covers DNS, connect and TLS setup, response headers, every
-redirect hop, body verification, and hashing.
+wall-clock deadline covers DNS, connect and TLS setup, response headers, and
+every redirect hop. Artifact resolution additionally includes body
+verification and hashing in that same deadline.
 DNS lookups use the host's configured DNS servers and search domains through
 dnspython so they can be cancelled at the deadline. Names available only
 through platform-specific NSS, mDNS, or local-hosts integrations may therefore
@@ -116,15 +209,16 @@ rather than weakening the policy.
 Request duration is controlled separately:
 
 - `LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS`: total wall-clock budget for one
-  HTTP artifact resolution, including DNS, connect and TLS setup, response
-  headers, redirects, body verification, and hashing (default: `30`). The value
-  must be finite, greater than zero, and no greater than `86400` seconds (one
-  day); invalid values fail application startup.
+  HTTP artifact resolution or HTTP store-health probe, including DNS, connect
+  and TLS setup, response headers, and redirects. Artifact resolution also
+  includes body verification and hashing (default: `30`). The value must be
+  finite, greater than zero, and no greater than `86400` seconds (one day);
+  invalid values fail application startup.
 
 This opt-in changes only whether the host may make the outbound connection. It
-does not bypass resolve-by-entity authorization or opaque not-found behavior,
-does not weaken full-content hash verification, and does not increase the
-configured fetch or returned-content bounds. See
+does not bypass resolve-by-entity or store-health authorization and opaque
+not-found behavior, does not weaken full-content hash verification, and does
+not increase the configured fetch or returned-content bounds. See
 [`external-artifact-resolution-design.md`](external-artifact-resolution-design.md)
 for the complete resolution contract.
 
@@ -146,28 +240,142 @@ request database session or begin artifact resolution.
   (default: `2`). It must be a positive integer no greater than the configured
   global limit.
 
-The global limit is deliberately capped below the standard AnyIO shared worker
-capacity of 40 so accepted synchronous resolution work leaves worker capacity
-for authentication, cleanup, and ordinary requests. These limits are
-process-local, not distributed: each Uvicorn worker or replica has its own
-global and per-actor counters. The supported deployment therefore uses one
-Uvicorn worker per service process. Do not enable multiple workers/replicas
-while treating either value as a cluster-wide quota; distributed admission is a
-separate requirement.
+### Data-store health control plane
+
+`GET /data-stores/{store_id}/health` has its own no-wait admission policy.
+Authentication completes first. A matching request that cannot obtain both its
+process-wide and per-user slot returns one fixed generic `429` response with
+`Retry-After` before the ordinary request-scoped database session is allocated.
+Authentication services may use their own authoritative database scope before
+this point.
+
+An admitted request authorizes and loads the store through the same opaque
+project/group boundary as other targeted reads. It then copies only the exact
+probe inputs into an immutable value and closes the request database scope
+before cache lookup or host I/O. Authorization runs on every request, including
+cache hits. Hidden and absent stores therefore remain indistinguishable and
+never reach the cache or probe.
+
+HTTP stores use `endpoint` whenever it is present and use `root` only when
+`endpoint` is absent. A present blank, malformed, or structurally invalid
+endpoint therefore fails closed and never falls back to `root`; the selected
+initial URL must also pass the hardened registered-base structural grammar
+before host I/O. The health probe sends `HEAD` through the same
+outbound policy, pinned client, and total deadline as HTTP artifact resolution.
+Statuses `301`, `302`, `303`, `307`, and `308` are followed manually while
+preserving `HEAD`; every hop is reauthorized and repinned, safe cross-origin
+redirects may proceed, and an HTTPS-to-HTTP downgrade is denied. A terminal
+`2xx`, `403`, or `405` response counts as reachable. Policy denials, redirect
+loops or limit exhaustion, transport/deadline failures, and other terminal
+statuses all return the same static redacted health detail.
+
+Local-store health is a bounded, read-only reachability hint, not registration
+validation or a durable filesystem capability. Registration performs no host
+I/O. For an explicit health request, the probe creates one absolute process
+deadline before invoking its directory-inspection role. The broker then
+validates the native absolute candidate and selects the most-specific
+operator grant using side-effect-free component comparison. Deny-all,
+malformed, lexically disjoint, and sibling-prefix candidates return one static
+failure without starting a child or touching the candidate filesystem target.
+
+An admitted request is checked by a fixed isolated Python helper through the
+same bounded process executor used by rclone and Git. A compact, versioned,
+size-bounded ASCII JSON environment value carries only the lexically admitted
+candidate and its selected grant. POSIX spelling is preserved; Windows
+normalizes only drive letter, slash direction, and redundant separators before
+the strict helper protocol. Neither path appears in argv, output, or an
+exception. The remaining environment is limited to Python's required platform
+bootstrap and locale variables. The helper emits no stdout or stderr.
+
+Inside the deadline, the helper first resolves and retains the operator root as
+the trusted grant anchor. It then walks the candidate suffix one component at a
+time relative to retained directory descriptors or handles. On POSIX,
+no-follow metadata and `readlinkat` parse link text before any target component
+is opened; normal directories use no-follow `openat`, exact-descriptor `fstat`,
+and effective search checks. Relative and absolute alias targets are rewritten
+inside the same retained grant, and dot-dot pops the retained descriptor stack
+rather than being normalized over an unresolved link. On Windows, each
+component is opened no-follow relative to the retained preceding handle.
+Symlink and mount-point reparse payloads are read from that exact handle,
+strictly parsed, and rewritten only after their target is proven to remain in
+the same drive-root grant. A junction targeting an in-grant DOS path is
+eligible; nested volume-GUID mounts, UNC/device/GUID namespaces, malformed
+payloads, and escaping name surrogates fail before target traversal.
+Directory-capable non-name-surrogate Cloud Files placeholders remain eligible
+parents.
+
+Search-only POSIX directories remain eligible; an unsearchable directory fails
+closed. POSIX uses `O_SEARCH`, `O_PATH`, or the equivalent directory use of
+`O_EXEC`; it never falls back to a read-requiring `O_RDONLY` open. A macOS
+compatibility branch supplies the public Darwin `O_EXEC` ABI bit when an older
+CPython build omits that symbolic constant. Explicit helper-owned descriptor
+and handle cleanup is best effort, with contained helper exit as the backstop
+for failed closes and asynchronous interruption windows.
+
+The one deadline covers broker admission and serialization, interpreter
+startup, trusted-root anchoring, alias resolution, opens and validation,
+process exit, and output drainage and is checked again after the executor
+returns. Executor termination, kill, and reap retain their separate fixed
+cleanup grace. Only the accessible exit with zero output is healthy. Timeout,
+containment failure, denial, operational failure, unknown exit, output, or any
+ordinary adapter error returns the same static detail. Adapter-level
+`BaseException` still propagates after executor-owned cleanup. Health is a
+point-in-time result about the exact directory object retained when validation
+completes, not a durable capability or lease. Mount crossings follow the
+namespace-transitive authority above.
+
+- `LAB_TRACKER_STORE_HEALTH_GLOBAL_IN_FLIGHT_LIMIT`: maximum admitted health
+  requests in one application process (default: `4`, maximum: `16`).
+- `LAB_TRACKER_STORE_HEALTH_PER_ACTOR_IN_FLIGHT_LIMIT`: maximum admitted health
+  requests for one authenticated `actor.user_id` in that process (default:
+  `1`). Browser, paired-device, and LPAT credentials for one user share this
+  capacity.
+- `LAB_TRACKER_STORE_HEALTH_CACHE_MAX_ENTRIES`: hard LRU bound for completed
+  exact-store health results in one process (default: `256`, maximum: `4096`).
+- `LAB_TRACKER_STORE_HEALTH_CACHE_TTL_SECONDS`: monotonic lifetime of a
+  completed health result, measured from probe completion (default: `10`,
+  maximum: `300`).
+- `LAB_TRACKER_STORE_HEALTH_SINGLEFLIGHT_WAIT_SECONDS`: maximum time an
+  admitted same-store follower waits for the current probe (default: `10`,
+  maximum: `60`). A timeout does not cancel or replace the leader and is not
+  cached.
+
+The artifact-resolution and store-health global limits must add up to no more
+than `32`, below the standard AnyIO shared worker capacity of 40. This combined
+ceiling leaves capacity for authentication, cleanup, and ordinary requests even
+when both host-I/O surfaces are saturated.
+
+All admission limits and cache state are process-local, not distributed: each
+Uvicorn worker or replica owns independent counters and entries. The supported
+deployment therefore uses one Uvicorn worker per service process. Do not treat
+these values as cluster-wide quotas; distributed admission is a separate
+requirement.
 
 ### External rclone and Git artifact resolution
 
 Rclone and Git adapters execute optional host binaries under a separate process
 budget. The configured budget is one monotonic deadline for the entire logical
-resolution: rclone metadata lookup, transfer, and verification share one
-deadline, as do Git fetch, object inspection, transfer, and verification.
-Progress or moving between subprocesses does not reset it.
+operation: rclone metadata lookup, transfer, and verification share one
+deadline, as do Git fetch, object inspection, transfer, and verification. A
+local, rclone, or Git store-health probe receives a fresh deadline; Git's URL
+preflight and HEAD query share it. Progress or moving between subprocesses does
+not reset it. Local health creates the deadline before lexical admission and
+passes that exact deadline through the bounded filesystem broker.
 
 - `LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS`: execution and verification
-  budget for one rclone or Git artifact resolution (default: `30`). The value
-  must be finite, greater than zero, and no greater than `86400` seconds (one
-  day); invalid values fail application startup. This setting is independent of
+  budget for one rclone or Git artifact resolution, or one local, rclone, or Git
+  store-health probe (default: `30`). The value must be finite, greater than
+  zero, and no greater than `86400` seconds (one day); invalid values fail
+  application startup. This setting is independent of
   `LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS`.
+- `LAB_TRACKER_RCLONE_ALLOWED_REMOTES`: strict comma-separated exact remote
+  names for server-side rclone resolution and rclone store-health probes. The
+  unset or empty value denies every remote. Entries are not
+  whitespace-trimmed; an empty, malformed, NFKC-delimiter-unsafe, or exact
+  duplicate entry fails startup without echoing the configured value. Names
+  follow rclone's letters/numbers plus `_-.+@ ` grammar, but cannot begin with
+  `-` or space, end with space, contain a colon or separator, or be a
+  single-letter Windows drive alias.
 - `LAB_TRACKER_GIT_ALLOWED_REMOTES`: strict comma-separated structural grants
   for server-side Git resolution and Git store-health probes. The unset or empty
   value denies every Git remote. Entries are not whitespace-trimmed; an empty,
@@ -196,14 +404,25 @@ fragment components, percent escapes, and malformed paths or authorities are
 also rejected. Credentials belong in operator-controlled Git credential helpers
 or SSH facilities, never in this setting or a persisted store root.
 
-The policy is parsed once from `Settings` at startup. One immutable policy
-instance is shared by the resolver registry and the store-health checker; those
-components do not independently reread the process environment. Store-health
-Git commands run from an app-owned empty, non-repository directory, so an
-ambient checkout's repository-local Git configuration cannot affect them. The
-Git command environment clears inherited repository/object/work-tree selectors
-and sets the operation directory's parent as Git's discovery ceiling, preventing
-that parent or anything above it from supplying repository-local configuration.
+The local root list and the rclone and Git policies are parsed once from
+`Settings` at startup; no consumer independently rereads the process
+environment. Runtime builds the lexical local authority and health broker from
+that root list, while direct resolution and recovery temporarily receive a
+derived legacy local policy. Rclone and Git resolution and health share one
+immutable instance of their corresponding policy. All subprocess-backed
+adapters share one bounded process executor. Rclone health preserves the
+registered distinction
+between `remote:path`, `remote:/path`, and `remote:/`. A present
+`credential_ref` remains authoritative even when blank or invalid and never
+falls back to the store name. Its bounded `rclone lsf` intentionally reports a
+large/noisy root as unreachable when fixed metadata output limits are exceeded.
+
+Store-health Git commands run from an app-owned empty, non-repository directory,
+so an ambient checkout's repository-local Git configuration cannot affect them.
+The Git command environment clears inherited repository/object/work-tree
+selectors and sets the operation directory's parent as Git's discovery ceiling,
+preventing that parent or anything above it from supplying repository-local
+configuration.
 
 Authorization occurs before process creation. Git's effective remote is then
 preflighted with the same bounded command environment. Apart from its required
@@ -223,15 +442,16 @@ operator-controlled configuration; users who can modify them can change where
 Git connects or disclose Git credentials. Do not mount user-writable Git,
 credential-helper, proxy, or OpenSSH configuration into the service.
 
-Subprocess metadata output and stderr have independent fixed memory caps. Actual
+Every subprocess receives independent stdout and stderr memory caps. Actual
 artifact bytes are streamed and checked against the resolver's existing
 `max_fetch_bytes` limit as they arrive; a preflight size is advisory and cannot
 permit a growing object to exceed that limit. Timeout, output overflow,
-malformed metadata, or failed cleanup produces a generic unresolved result
-without exposing a remote, path, credential, or raw stderr. Pipes are closed and
-an uncooperative process is terminated, then killed and reaped within a separate
-fixed cleanup grace. A failed call can therefore exceed the configured
-execution deadline only by that bounded cleanup grace.
+malformed metadata, or failed cleanup produces a generic unresolved or
+adapter-specific unreachable result without exposing a remote, path, credential,
+exception, or raw stderr. Pipes are closed and an uncooperative process is
+terminated, then killed and reaped within a separate fixed cleanup grace. A
+failed call can therefore exceed the configured execution deadline only by that
+bounded cleanup grace.
 
 The bounded rclone/Git process boundary contains complete descendant trees on
 both supported process platforms. POSIX hosts use a dedicated process group.

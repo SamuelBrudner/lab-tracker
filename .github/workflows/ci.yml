@@ -2,7 +2,16 @@ name: ci
 
 on:
   push:
+    branches: [main]
   pull_request:
+
+# A PR branch push previously triggered both a `push` and a `pull_request` run
+# of this workflow on the same commit, doubling the exposure to any flaky job.
+# Restrict `push` to `main` so PR branches run exactly once (via pull_request),
+# and cancel superseded in-progress runs when a ref is updated again.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
@@ -118,6 +127,42 @@ jobs:
           LAB_TRACKER_POSTGRES_TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/postgres
         run: uv run pytest -q -m postgres
 
+  linux-local-filesystem-mounts:
+    name: Linux local filesystem mount authority
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v7
+      - name: Install frozen Python test dependencies
+        run: uv sync --frozen --extra test
+      - name: Test ordinary and bind mounts beneath one grant
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="${RUNNER_TEMP}/lab-tracker-local-mounts"
+          grant="${base}/grant"
+          ordinary_mount="${grant}/ordinary"
+          bind_mount="${grant}/bind"
+          bind_source="${base}/bind-source"
+          mkdir -p "${ordinary_mount}" "${bind_mount}" "${bind_source}"
+          cleanup() {
+            sudo umount "${bind_mount}" 2>/dev/null || true
+            sudo umount "${ordinary_mount}" 2>/dev/null || true
+          }
+          trap cleanup EXIT INT TERM
+          sudo mount -t tmpfs -o size=16m tmpfs "${ordinary_mount}"
+          sudo chown "$(id -u):$(id -g)" "${ordinary_mount}"
+          sudo mount --bind "${bind_source}" "${bind_mount}"
+          export LAB_TRACKER_TEST_ORDINARY_MOUNT_ROOT="${ordinary_mount}"
+          export LAB_TRACKER_TEST_BIND_MOUNT_ROOT="${bind_mount}"
+          uv run pytest -q \
+            tests/test_posix_pre_follow_local_store_health_helper.py \
+            -k native_mount_descendant
+
   windows-containment:
     name: Windows containment and registered artifacts
     runs-on: windows-latest
@@ -139,20 +184,78 @@ jobs:
           uv run pytest -q
           tests/test_bounded_subprocess.py
           tests/test_windows_job.py
-      # This focused gate runs complete artifact modules. The full Windows
-      # pytest suite remains owned by lab-tracker-n5kp.56.6.
-      - name: Test Windows registered-artifact resolution
+      # This focused gate runs complete host-I/O control-plane modules. The
+      # full Windows pytest suite remains owned by lab-tracker-n5kp.56.6.
+      - name: Test Windows registered artifacts and store health
         run: >-
           uv run pytest -q
           tests/test_local_store_locator.py
           tests/test_registered_http_prefix.py
           tests/test_rclone_store_locator.py
+          tests/test_rclone_remote_policy.py
+          tests/test_rclone_store_health.py
           tests/test_git_store_locator.py
+          tests/test_git_process.py
+          tests/test_git_store_health.py
           tests/test_local_path_policy.py
+          tests/test_local_filesystem_authority.py
+          tests/test_local_filesystem_operations.py
+          tests/test_local_store_health.py
+          tests/test_windows_local_store_health_helper.py
           tests/test_local_file_access.py
           tests/test_windows_local_file.py
+          tests/test_outbound_http_deadline.py
+          tests/test_outbound_http_policy.py
+          tests/test_safe_http_client.py
           tests/test_artifact_resolution.py
+          tests/test_actor_admission.py
+          tests/test_store_health.py
+          tests/test_http_store_health.py
+          tests/test_store_health_queries.py
+          tests/test_store_health_admission.py
           tests/test_context_queries_prepared_resolution.py
           tests/test_external_artifacts_routes.py
           tests/test_data_stores_routes.py
           tests/test_evidence_artifact_read_opacity.py
+
+  windows-local-store-health:
+    name: Windows handle-bound local store health (Python 3.10)
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.10"
+      - uses: astral-sh/setup-uv@v7
+      - name: Install frozen Python test dependencies
+        run: uv sync --frozen --extra test
+      - name: Test handle-bound local store health
+        run: >-
+          uv run pytest -q
+          tests/test_local_filesystem_authority.py
+          tests/test_local_filesystem_operations.py
+          tests/test_windows_local_store_health_helper.py
+          tests/test_local_store_health.py
+          tests/test_packaging.py::test_wheel_contains_and_runs_isolated_local_health_helper
+
+  macos-local-store-health:
+    name: macOS handle-bound local store health
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v7
+      - name: Install frozen Python test dependencies
+        run: uv sync --frozen --extra test
+      - name: Test O_SEARCH helper and wheel
+        run: >-
+          uv run pytest -q
+          tests/test_local_filesystem_authority.py
+          tests/test_local_filesystem_operations.py
+          tests/test_local_store_health.py
+          tests/test_posix_pre_follow_local_store_health_helper.py
+          tests/test_packaging.py

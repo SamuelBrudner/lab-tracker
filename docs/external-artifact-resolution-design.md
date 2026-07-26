@@ -96,7 +96,7 @@ class ResolvedArtifact:
     content_type: str | None
     size_bytes: int | None
     content: bytes | None           # bounded; present only when verified
-    truncated: bool                 # True if size exceeded max_bytes / a range was used
+    truncated: bool                 # bounded selected view is smaller than full artifact
     fetched_at: datetime
     detail: str | None              # reason when unresolved/drifted
 
@@ -220,7 +220,7 @@ multiply across Uvicorn workers and replicas. The supported deployment uses
 one Uvicorn worker per service process; this mechanism is not a cluster-wide
 admission system.
 
-## Bounded rclone and Git subprocesses
+## Bounded resolver and store-health subprocesses
 
 Rclone and Git resolution use optional host binaries, but a persisted artifact
 reference cannot be allowed to control an unbounded child process. The shared
@@ -232,8 +232,11 @@ output never resets the deadline.
 
 `LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS` controls that budget
 (default: `30`). It is independent from the HTTP deadline and must be finite,
-greater than zero, and no greater than `86400` seconds. Metadata stdout and
-stderr are captured under separate fixed byte caps. Artifact stdout is streamed
+greater than zero, and no greater than `86400` seconds. It also gives each
+local, rclone, or Git store-health probe a fresh bounded execution budget; local
+health creates that budget before its filesystem-I/O-free lexical admission and
+passes the exact deadline through its bounded filesystem broker. Metadata stdout
+and stderr are captured under separate fixed byte caps. Artifact stdout is streamed
 instead: actual bytes read, rather than advisory rclone or Git metadata, are
 enforced against the existing `max_fetch_bytes` limit while the full object is
 hashed. An object that grows after a size preflight therefore cannot bypass the
@@ -365,13 +368,26 @@ component case remains exact for case-sensitive NTFS directories; cross-drive
 comparisons fail closed. Canonicalization rejects static POSIX symlink and
 Windows-junction targets outside the configured roots.
 
+The normative mount and namespace contract is
+[`configuration.md`](configuration.md#mount-and-namespace-authority). In
+particular, an allowed root grants the transitive subtree visible in the
+service namespace: POSIX ordinary and bind mounts beneath it remain authorized,
+while unsupported Windows nested volume mounts and UNC/device/GUID namespaces
+fail closed. This authority is about namespace reachability, not device
+identity. Symlinks and junctions are aliases rather than mount grants and are
+eligible only when bounded resolution proves their destination remains inside
+the same root. Non-name-surrogate Cloud Files directory placeholders are not
+mount crossings.
+
 Recovery applies the same policy to traversal itself as well as to candidate
 files. Every symlink/reparse-point directory is pruned before recursive descent,
 and ordinary directory candidates whose canonical targets leave the root are
-also removed. The current recovery budget counts candidate files and hashed
-bytes; `lab-tracker-n5kp.61` separately owns pre-follow reparse inspection plus
-explicit directory-count and wall-clock budgets, so this slice does not
-overstate traversal availability.
+also removed. This current blanket rule conservatively makes recovery through a
+Cloud Files directory placeholder unavailable even though the placeholder is
+not itself a mount crossing. `lab-tracker-n5kp.47` owns the future single
+operation deadline and actual-byte budget; `lab-tracker-n5kp.61` will consume
+that budget while adding pre-follow-safe enumeration and an explicit
+directory-count limit, including the more precise Cloud Files classification.
 
 Canonical pathname authorization is a preliminary plan, not a capability that
 the resolver may later reopen. The local access boundary opens one file and
@@ -397,8 +413,10 @@ prevents unmatched bytes from being returned as `VERIFIED`.
 
 Windows may initiate target-side I/O while opening a path through a reparse
 point before the final handle path is authorized. The resolver never returns
-those outside bytes; pre-follow reparse inspection and traversal availability
-remain explicitly owned by `lab-tracker-n5kp.61`.
+those outside bytes. The bounded pre-follow capability is tracked by
+`lab-tracker-n5kp.71`; its direct-read role and total operation budget are
+tracked by `lab-tracker-n5kp.47`, while recovery enumeration remains
+`lab-tracker-n5kp.61`.
 
 ### Registered local-store confinement
 
@@ -421,10 +439,59 @@ The result retains the canonical logical `store://` URI; concrete host paths are
 not exposed in store-scoped diagnostics.
 
 The raw-absolute rule applies to registered store roots, not operator
-configuration: global resolver roots preserve their established `~` expansion
-and relative-to-process-working-directory behavior. Non-local locator syntax is
-also unchanged here; each remote adapter owns a separate typed authority
-boundary.
+configuration: global resolver roots preserve current-user `~` expansion from
+the process environment and relative-to-process-working-directory behavior.
+Named-user tilde forms are rejected without account lookup. Non-local locator
+syntax is also unchanged here; each remote adapter owns a separate typed
+authority boundary.
+
+### Bounded advisory local-store health
+
+Application composition parses `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS` once using
+the host's `os.pathsep` (`:` on POSIX, `;` on Windows). Unset, empty, and
+whitespace-only configuration creates a deny-all runtime authority. The
+filesystem-I/O-free authority preserves unambiguous lexical components, expands
+the current-user `~` from the process environment, prefixes relative roots with
+the startup working directory, and rejects dot/dot-dot or unsupported platform
+spellings rather than canonicalizing them.
+One bounded filesystem broker serves local health. A transitional
+`LocalPathPolicy` derived from the same roots remains only for direct resolution
+and recovery until their broker roles land. Health admits only a configured
+lexical root spelling; the separate physical spelling behind an operator root
+alias must be configured explicitly if registered stores use it.
+
+Local-store health is an explicit read-only advisory probe, never a side effect
+of registration. It creates one absolute deadline before invoking the broker.
+Pure component comparison selects the most-specific containing grant; deny-all,
+malformed, disjoint, and sibling-prefix candidates return only the static
+failure and perform no target filesystem or process work. The broker passes the
+lexically admitted candidate and selected root in one compact, versioned,
+bounded ASCII
+JSON environment value to a fixed absolute sibling stdlib-only helper launched
+as `sys.executable -I -S -B <helper>`. Paths never appear in argv or output.
+
+Inside the deadline, the helper resolves the trusted operator root and retains
+its handle. It walks only one candidate component at a time relative to retained
+handles. POSIX reads symlink text no-follow and rewrites relative or absolute
+in-grant targets in a bounded state machine before opening target components.
+Windows reads and validates exact-handle symlink/junction reparse data before
+rewriting an in-grant target; nested volume-GUID mounts, unsupported
+UNC/device/GUID targets, malformed payloads, and escapes are denied before
+target traversal. Eligible D-bit/N-clear Cloud directories remain traversable.
+No canonical pathname plan crosses the process boundary, and no accepted object
+is closed and reopened by path.
+
+The shared bounded executor contains the helper's descendants. The exact
+deadline covers broker admission, protocol construction, interpreter startup,
+trusted-root anchoring, alias resolution, opens and validation, and process
+drain, then is checked again after the executor returns. Terminate/kill/reap has
+its separate fixed cleanup grace. Only the accessible exit with zero output is
+healthy; denial, timeout, containment failure, unknown/nonzero exit, output, and
+ordinary adapter errors collapse to the same static detail. Adapter-level
+`BaseException` still propagates after executor-owned cleanup. The result remains
+an advisory point-in-time snapshot rather than a durable lease. Mount crossings
+follow the normative namespace-transitive policy in
+[`configuration.md`](configuration.md#mount-and-namespace-authority).
 
 ## Recovering moved/renamed local artifacts
 
@@ -474,9 +541,11 @@ makes one more call:
   `entity_type` (`dataset`, `analysis`, or `claim`), `entity_id`, and an optional
   `artifact_index` (default `0`). Optional `content_hash`, `max_bytes`,
   `byte_start`, and `byte_end` fields constrain and verify the selected
-  reference; byte-range bounds must be supplied together. The response contains
-  the `ResolvedArtifact` fields plus the selected entity type and ID, artifact
-  index, and base64-encoded content.
+  reference. `max_bytes` is an exact integer from `1` through 8 MiB; byte-range
+  bounds are exact integers from `0` through `2**53 - 1`, must be supplied
+  together, and use an exclusive end greater than or equal to the start. The
+  response contains the `ResolvedArtifact` fields plus the selected entity type
+  and ID, artifact index, and base64-encoded content.
 - **MCP read tool:** `lab_tracker_resolve_artifact(entity_type, entity_id,
   artifact_index=0, content_hash?, max_bytes?, byte_start?, byte_end?)`, sitting
   next to `lab_tracker_get_dataset_provenance` / `_analysis_provenance` /
@@ -497,10 +566,44 @@ artifacts or fetch bytes for a project the caller cannot read.
 Resolving arbitrary external content into an agent's context is a payload-size
 and prompt-injection surface, so the resolver is bounded by construction:
 
-- **Size cap.** `max_bytes` bounds the bytes returned in `content_base64`; the
-  whole artifact is still hashed for integrity and `truncated=True` reports
-  that the response omits bytes. Optional `byte_start`/`byte_end` fields request
-  a bounded slice and must be supplied together.
+- **One hard inline cap.** `max_bytes` defaults to, and cannot exceed,
+  `8 * 1024 * 1024` decoded content bytes. Booleans, coercible strings/floats,
+  zero, negatives, and larger values are invalid. Optional
+  `byte_start`/`byte_end` fields request `[start, end)` and must be supplied
+  together as exact, non-negative integers no greater than `2**53 - 1`, with
+  `end >= start`. These scalar bounds are validated before entity lookup or
+  resolver work. Only HTTP/MCP/application request boundaries interpret an
+  omitted value as the default; direct registry, resolver, and collector calls
+  require the selected limit as an exact integer and reject explicit `None`.
+- **Ranges never enlarge the response.** A ranged request retains only
+  `[start, min(end, start + max_bytes))` while streaming. It does not collect
+  the requested range and truncate afterward. The whole artifact is still
+  hashed for integrity and the adapters' independent fetch ceilings still
+  apply.
+- **Truthful view metadata.** `returned_bytes` counts decoded raw bytes and
+  `size_bytes` remains the full artifact size. `truncated` means the bounded
+  selected view is smaller than the full artifact, before integrity withholding;
+  merely supplying a full-covering range does not make it true. Ranged content
+  is the earliest capped prefix of the requested range. Base64 and JSON add
+  transport overhead but cannot increase the decoded-content allowance.
+- **Defense in depth.** Concrete resolvers validate before I/O. The registry and
+  application serialization boundary share one postcondition. It snapshots the
+  prepared logical identity before untrusted dispatch, anchors source, URI, and
+  expected hash to that snapshot, validates safe field types, integrity state,
+  full size, selected-view length, and truncation, and rechecks the effective
+  allowance. Accepted output is copied into a detached result before
+  serialization, so later adapter mutation cannot change it. A custom adapter
+  that violates any part fails closed to a content-free, redacted `unresolved`
+  result; its fields are never serialized or truncated and returned.
+  Precomputed prepared results are permitted only for the application's exact
+  content-free, redacted store failures.
+- **Adapter integrity responsibility.** Registered resolver implementations are
+  trusted application adapters and remain responsible for recomputing the full
+  artifact digest. The shared postcondition independently rehashes any complete,
+  untruncated returned artifact. It cannot reconstruct a full digest from a
+  bounded ranged/truncated view, so those results are accepted only after the
+  adapter reports the requested identity and matching observed hash; built-in
+  adapters obtain that value from the full stream, not from the returned prefix.
 - **Integrity before content.** Only `verified` results include
   `content_base64`. `drifted` results preserve the observed hash, full size,
   content type, truncation flag, and mismatch detail while returning
@@ -564,6 +667,15 @@ Shipped (`src/lab_tracker/artifact_resolution.py`, tested in
   recovery roots are narrowed to that store root while remaining conjunctive
   with the operator allowlist; invalid or mismatched logical store locators fail
   closed before candidate filesystem work.
+- ✅ Registered local-store health consumes a narrow directory-inspection role
+  backed by one filesystem-I/O-free authority and bounded operations broker. It
+  creates one deadline before lexical admission and runs one fixed isolated
+  stdlib helper through the shared process executor with zero-byte output caps.
+  The helper anchors the selected operator grant, parses alias targets from
+  retained no-follow handles, and walks only proven in-grant components.
+  Escaping aliases are denied before target traversal; replacement after open
+  cannot redirect the retained handle. Results are static, redacted,
+  point-in-time reachability hints rather than durable filesystem leases.
 - ✅ `HttpResolver` — `http(s)`, full-body verify with a `max_fetch_bytes` cap
   (oversized → `UNRESOLVED`, never uncertified bytes), plus a shared outbound
   destination policy that validates every IPv4/IPv6 answer, pins the vetted
@@ -581,13 +693,15 @@ Shipped (`src/lab_tracker/artifact_resolution.py`, tested in
 - ✅ `RcloneResolver` — `rclone://<remote>/<path>`, the locked-in unifier for
   S3 / SFTP / Dropbox / Google Drive / Box / OneDrive; stats then fetches, and
   degrades to `UNRESOLVED` when the binary is absent. Gated by an operator
-  remote-name allowlist (`LAB_TRACKER_RCLONE_ALLOWED_REMOTES`, deny-by-default
-  when unset) so a reference cannot drive server-side `rclone cat` against
+  immutable exact remote-name policy (`LAB_TRACKER_RCLONE_ALLOWED_REMOTES`,
+  deny-by-default when unset) so a reference cannot drive server-side
+  `rclone cat` against
   arbitrary remotes in the host's rclone config — the same opt-in posture as
-  local allowed roots and the git remote allowlist. Metadata and stderr are
-  independently capped, content is streamed under the actual-byte fetch limit,
-  and one subprocess deadline covers stat, transfer, and verification; failed
-  process cleanup uses the separate fixed grace described above.
+  local allowed roots and the Git remote policy. The direct resolver default is
+  also deny-all. Metadata and stderr are independently capped, content is
+  streamed under the actual-byte fetch limit, and one subprocess deadline
+  covers stat, transfer, and verification; failed process cleanup uses the
+  separate fixed grace described above.
 - ✅ Registered rclone stores use a separate nominally dispatched target.
   `RcloneRemoteName` preserves one exact configured remote, while
   `RegisteredRcloneRoot` retains `remote:path` versus `remote:/path` as
@@ -598,6 +712,14 @@ Shipped (`src/lab_tracker/artifact_resolution.py`, tested in
   one exact positional token without URI decoding or path normalization.
   Results retain the logical `store://` identity. Ordinary direct
   `rclone://` references keep their existing parser and subprocess lifecycle.
+- ✅ Rclone and Git store-health subprocesses use dedicated adapters over the
+  same object-identical immutable policies and bounded process executor as
+  resolution. Rclone preserves relative, rooted, and sole-root registered
+  targets and runs one fixed bounded `lsf`; Git preserves its canonical URL
+  preflight, redirect denial, sanitized environment, app-owned working
+  directory, and one deadline across preflight plus `ls-remote HEAD`. Ordinary
+  failures return one static redacted detail per adapter, while adapter-level
+  `BaseException` propagates after executor-owned cleanup.
 - ✅ `GitResolver` — resolves a pinned repository object only after the remote
   allowlist check, with one subprocess deadline across fetch, object metadata,
   streamed content verification, and bounded cleanup. Metadata and stderr are
@@ -627,13 +749,14 @@ Shipped (`src/lab_tracker/artifact_resolution.py`, tested in
   database-backed preparation and release their read scope before resolver I/O;
   returns the envelope plus base64 content. Registry comes from
   `request.app.state.resolver_registry` or
-  `registry_from_env()`; `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS` gates local roots
-  (unset → local artifacts resolve `UNRESOLVED`), HTTP(S) is constrained by the
-  outbound destination policy, and rclone is constrained by its configured
+  `registry_from_env()`; `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS` is parsed with the
+  host's `os.pathsep` and gates local roots (unset or empty → local artifacts
+  resolve `UNRESOLVED` and local health fails closed), HTTP(S) is constrained by
+  the outbound destination policy, and rclone is constrained by its configured
   remote-name allowlist. HTTP resolution additionally uses the single total
   deadline configured by `LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS`; rclone
-  and Git use the independent single total deadline configured by
-  `LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS`.
+  and Git resolution plus local, rclone, and Git health use the independent
+  deadline configured by `LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS`.
 - ✅ `lab_tracker_resolve_artifact` MCP read tool + `resolve_external_artifact`
   client method.
 
