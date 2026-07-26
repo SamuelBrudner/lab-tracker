@@ -562,12 +562,10 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(
 
     def recording_local_store_health_probe(
         *,
-        policy,
-        executor,
+        inspector,
         deadline_seconds,
     ):
-        captured["health_local_policy"] = policy
-        captured["health_local_executor"] = executor
+        captured["health_local_inspector"] = inspector
         captured["health_local_deadline_seconds"] = deadline_seconds
 
         def probe(target):
@@ -683,6 +681,8 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(
     try:
         configure_app_state(app, runtime)
 
+        assert not hasattr(app.state, "local_filesystem_authority")
+        assert not hasattr(app.state, "local_filesystem_operations")
         assert app.state.local_path_policy is runtime.local_path_policy
         assert app.state.outbound_http_policy is runtime.outbound_http_policy
         assert runtime.outbound_http_client is outbound_http_client
@@ -711,7 +711,18 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(
             captured["registry_local_path_policy"]
             is runtime.local_path_policy
         )
-        assert captured["health_local_policy"] is runtime.local_path_policy
+        assert (
+            captured["health_local_inspector"]
+            is runtime.local_filesystem_operations
+        )
+        assert (
+            runtime.local_filesystem_operations.authority
+            is runtime.local_filesystem_authority
+        )
+        assert (
+            runtime.local_filesystem_operations.executor
+            is runtime.process_executor
+        )
         assert captured["registry_http_policy"] is runtime.outbound_http_policy
         assert captured["health_http_policy"] is runtime.outbound_http_policy
         assert captured["registry_http_client"] is runtime.outbound_http_client
@@ -724,7 +735,6 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(
         assert captured["registry_git_remote_policy"] is runtime.git_remote_policy
         assert captured["health_git_policy"] is runtime.git_remote_policy
         assert captured["registry_process_executor"] is runtime.process_executor
-        assert captured["health_local_executor"] is runtime.process_executor
         assert captured["health_rclone_executor"] is runtime.process_executor
         assert captured["health_git_executor"] is runtime.process_executor
         assert captured["health_git_workdir"] is runtime.git_health_workdir

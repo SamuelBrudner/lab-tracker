@@ -31,6 +31,10 @@ from lab_tracker.graph_drafting import (
     OpenAIGraphDraftClient,
     make_graph_draft_client,
 )
+from lab_tracker.local_filesystem_operations import (
+    BoundedLocalFilesystemOperations,
+)
+from lab_tracker.local_filesystem_ports import LocalDirectoryInspector
 from lab_tracker.note_storage import LocalNoteStorage
 from lab_tracker.project_graph import ProjectGraphRepository
 from lab_tracker.repository import LabTrackerRepository
@@ -173,6 +177,18 @@ def provider_contracts(
 
 def runtime_factory_contract(runtime: AppRuntime) -> None:
     _requires_graph_client_factory(runtime.graph_draft_client_factory)
+
+
+def _requires_local_directory_inspector(value: LocalDirectoryInspector) -> None:
+    pass
+
+
+def local_filesystem_contracts(
+    operations: BoundedLocalFilesystemOperations,
+    runtime: AppRuntime,
+) -> None:
+    _requires_local_directory_inspector(operations)
+    _requires_local_directory_inspector(runtime.local_filesystem_operations)
 
 
 def _requires_file_storage(value: FileStorage) -> None:

@@ -13,7 +13,7 @@ import unicodedata
 from dataclasses import dataclass
 from urllib.parse import quote, unquote_to_bytes, urlsplit
 
-from lab_tracker.local_path_policy import is_reserved_windows_component
+from lab_tracker.local_path_syntax import is_reserved_windows_component
 
 _STORE_NAME_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]{0,62})\Z")
 _GENERIC_STORE_NAME_FORBIDDEN_CHARACTERS = frozenset(r"/\?#")

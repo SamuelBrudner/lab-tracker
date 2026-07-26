@@ -13,7 +13,8 @@ from starlette.testclient import TestClient
 from lab_tracker.artifact_resolution import LocalFilesystemResolver, ResolverRegistry
 from lab_tracker.bounded_subprocess import BoundedSubprocessExecutor, ProcessResult
 from lab_tracker.http_store_health import HttpStoreHealthProbe
-from lab_tracker.local_path_policy import LocalPathPolicy
+from lab_tracker.local_filesystem_authority import LocalFilesystemAuthority
+from lab_tracker.local_filesystem_operations import BoundedLocalFilesystemOperations
 from lab_tracker.local_store_health import LocalStoreHealthProbe
 from lab_tracker.outbound_http import OutboundHttpPolicy
 from lab_tracker.rclone_remote_policy import RcloneRemotePolicy
@@ -37,12 +38,13 @@ def _install_local_registry(client: TestClient, allowed_root: Path) -> None:
 
 
 def _install_local_health(client: TestClient, allowed_root: Path) -> None:
-    policy = LocalPathPolicy([allowed_root])
-    client.app.state.local_path_policy = policy
+    operations = BoundedLocalFilesystemOperations(
+        authority=LocalFilesystemAuthority.from_roots([allowed_root]),
+        executor=BoundedSubprocessExecutor(),
+    )
     client.app.state.store_health_checker = CachedStoreHealthProbe(
         LocalStoreHealthProbe(
-            policy=policy,
-            executor=BoundedSubprocessExecutor(),
+            inspector=operations,
         )
     )
 
@@ -522,12 +524,13 @@ def test_data_store_health_local_fs_defaults_to_denied_and_redacted(
             raise AssertionError("deny-all local health reached the process executor")
 
     executor = RecordingExecutor()
-    policy = client.app.state.local_path_policy
-    assert policy.canonical_roots == ()
+    operations = BoundedLocalFilesystemOperations(
+        authority=LocalFilesystemAuthority.from_roots([]),
+        executor=executor,
+    )
     client.app.state.store_health_checker = CachedStoreHealthProbe(
         LocalStoreHealthProbe(
-            policy=policy,
-            executor=executor,
+            inspector=operations,
         )
     )
 

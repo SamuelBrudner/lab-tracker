@@ -82,14 +82,36 @@ operator authority:
   runtime. Empty or whitespace-only components are omitted. Other components
   retain their exact spelling rather than being trimmed.
 
-Operator roots preserve the existing configuration semantics: `~` is expanded,
-relative entries are resolved against the service process's working directory,
-and each result is canonicalized with native filesystem semantics during
-application composition. Use absolute paths in deployments so a
-working-directory change cannot change the grant. Malformed or unsupported
-roots fail startup. The policy grants only complete contained roots: a
-registered store root must be a native absolute local path, and a grant to one
-of its children cannot partially authorize the broader store.
+Operator roots preserve the useful configuration semantics without inspecting
+their filesystem targets: the current-user `~` form is expanded only from
+`HOME` on POSIX or `USERPROFILE`/`HOMEDRIVE`+`HOMEPATH` on Windows; named-user
+forms are rejected so expansion never invokes an NSS or account lookup.
+Relative entries are prefixed with the service process's startup working
+directory. Use absolute paths in deployments so a working-directory change
+cannot change the grant. The resulting spelling must be unambiguous: dot or
+dot-dot components, NUL/control characters, and unsupported platform
+namespaces fail startup. POSIX repeated separators are rejected; Windows
+normalizes only slash direction plus redundant or trailing separators, which
+are native spelling aliases. A registered store root must be a native absolute
+local path, and a grant to one of its children cannot partially authorize the
+broader store.
+
+Health admission recognizes the configured lexical root spelling. If that root
+is itself an operator-installed alias, a registered store written with the
+alias's separate physical spelling is denied unless that spelling is configured
+as another root. This conservative rule lets a lexically disjoint candidate
+return without probing filesystem targets. Alias components inside an admitted
+candidate remain eligible when the bounded helper proves their destination is
+inside the selected grant.
+
+Application composition builds one filesystem-I/O-free
+`LocalFilesystemAuthority` and one bounded local-filesystem operations broker
+from these roots. Local-store health uses that broker and never canonicalizes a
+candidate in the application process. Direct artifact resolution and recovery
+temporarily retain the legacy `LocalPathPolicy`, derived from the same operator
+root spellings; those unmigrated flows still canonicalize their roots during
+startup until `lab-tracker-n5kp.47` and `lab-tracker-n5kp.61` move them behind
+the broker.
 
 #### Mount and namespace authority
 
@@ -133,13 +155,12 @@ only a point-in-time reachability result. See
 [`self-hosted-operations.md`](self-hosted-operations.md#local-filesystem-stores)
 for deployment guidance.
 
-Runtime composition parses this setting once into one frozen, slotted
-`LocalPathPolicy` instance and shares that same object between local artifact
-resolution and local store health. An explicitly injected typed policy takes
-precedence and does not parse the environment setting. Direct construction of
-`LocalFilesystemResolver()` and `default_registry()` retains an unscoped
-compatibility mode for library callers; the application runtime never selects
-that mode merely because the setting is absent.
+Runtime composition parses this setting once into one frozen, slotted authority
+and shares one broker with local health. It also derives one transitional
+`LocalPathPolicy` for local artifact resolution and recovery. Direct
+construction of `LocalFilesystemResolver()` and `default_registry()` retains
+an unscoped compatibility mode for library callers; the application runtime
+never selects that mode merely because the setting is absent.
 
 ### Outbound HTTP policy
 
@@ -250,37 +271,39 @@ statuses all return the same static redacted health detail.
 
 Local-store health is a bounded, read-only reachability hint, not registration
 validation or a durable filesystem capability. Registration performs no host
-I/O. For an explicit health request, the parent process first requires a native
-absolute registered root and narrows the shared operator policy to that whole
-root. A denial returns one static local-health failure detail without starting a
-child or disclosing the path. This policy narrowing and its filesystem
-canonicalization occur before the helper deadline starts.
+I/O. For an explicit health request, the probe creates one absolute process
+deadline before invoking its directory-inspection role. The broker then
+validates the native absolute candidate and selects the most-specific
+operator grant using side-effect-free component comparison. Deny-all,
+malformed, lexically disjoint, and sibling-prefix candidates return one static
+failure without starting a child or touching the candidate filesystem target.
 
-An admitted root is checked by a fixed isolated Python helper through the same
-bounded process executor used by rclone and Git. The root is the only
-application-controlled datum in a dedicated environment otherwise limited to
-the platform bootstrap and locale variables needed by Python. The helper emits
-no stdout or stderr. On POSIX it opens every canonical path component relative
-to the retained preceding directory descriptor with directory, no-follow, and
-close-on-exec flags, classifies each descriptor with `fstat`, and verifies
-search permission relative to that retained descriptor. On Windows it requests
-traverse permission while validating one plain, non-reparse drive-root handle
-and opens each remaining component relative to the preceding handle. Each
-component open disables final reparse processing. The helper then queries
-attributes and the reparse tag through that exact handle: symlinks, junctions,
-and other name-surrogate tags are rejected, while non-name-surrogate tags whose
-directory bit is set, such as OneDrive Files On-Demand Cloud Files
-placeholders, remain eligible. A reparse directory whose tag cannot be queried,
-lacks the directory bit, or sets the name-surrogate bit fails closed; the tag
-member is ignored when the reparse attribute is clear, as required by the
-Windows contract. This classification matters because [Windows implements
-every Files On-Demand-synced file and folder as a reparse
-point](https://learn.microsoft.com/en-us/troubleshoot/sharepoint/sync/delete-onedrive-synced-file-error).
-Rejecting the reparse attribute by itself would reject a locally synced
-OneDrive store.
+An admitted request is checked by a fixed isolated Python helper through the
+same bounded process executor used by rclone and Git. A compact, versioned,
+size-bounded ASCII JSON environment value carries only the lexically admitted
+candidate and its selected grant. POSIX spelling is preserved; Windows
+normalizes only drive letter, slash direction, and redundant separators before
+the strict helper protocol. Neither path appears in argv, output, or an
+exception. The remaining environment is limited to Python's required platform
+bootstrap and locale variables. The helper emits no stdout or stderr.
 
-A link or junction substituted before its component is opened is rejected; a
-rename after open cannot redirect later traversal or final inspection.
+Inside the deadline, the helper first resolves and retains the operator root as
+the trusted grant anchor. It then walks the candidate suffix one component at a
+time relative to retained directory descriptors or handles. On POSIX,
+no-follow metadata and `readlinkat` parse link text before any target component
+is opened; normal directories use no-follow `openat`, exact-descriptor `fstat`,
+and effective search checks. Relative and absolute alias targets are rewritten
+inside the same retained grant, and dot-dot pops the retained descriptor stack
+rather than being normalized over an unresolved link. On Windows, each
+component is opened no-follow relative to the retained preceding handle.
+Symlink and mount-point reparse payloads are read from that exact handle,
+strictly parsed, and rewritten only after their target is proven to remain in
+the same drive-root grant. A junction targeting an in-grant DOS path is
+eligible; nested volume-GUID mounts, UNC/device/GUID namespaces, malformed
+payloads, and escaping name surrogates fail before target traversal.
+Directory-capable non-name-surrogate Cloud Files placeholders remain eligible
+parents.
+
 Search-only POSIX directories remain eligible; an unsearchable directory fails
 closed. POSIX uses `O_SEARCH`, `O_PATH`, or the equivalent directory use of
 `O_EXEC`; it never falls back to a read-requiring `O_RDONLY` open. A macOS
@@ -289,16 +312,17 @@ CPython build omits that symbolic constant. Explicit helper-owned descriptor
 and handle cleanup is best effort, with contained helper exit as the backstop
 for failed closes and asynchronous interruption windows.
 
-The deadline covers interpreter startup, helper-side opens and validation,
+The one deadline covers broker admission and serialization, interpreter
+startup, trusted-root anchoring, alias resolution, opens and validation,
 process exit, and output drainage and is checked again after the executor
-returns; only exit code zero with zero output is healthy. Timeout, containment
-failure, nonzero exit, output, or any ordinary adapter error returns the same
-static detail. Adapter-level `BaseException` still propagates after
-executor-owned cleanup. Health is a point-in-time result about the exact
-directory object retained when validation completes, not a durable capability
-or lease. Parent-side canonicalization remains outside the helper deadline.
-Mount crossings follow the namespace-transitive authority above; bounded
-pre-follow-safe parent planning remains tracked by `lab-tracker-n5kp.71`.
+returns. Executor termination, kill, and reap retain their separate fixed
+cleanup grace. Only the accessible exit with zero output is healthy. Timeout,
+containment failure, denial, operational failure, unknown exit, output, or any
+ordinary adapter error returns the same static detail. Adapter-level
+`BaseException` still propagates after executor-owned cleanup. Health is a
+point-in-time result about the exact directory object retained when validation
+completes, not a durable capability or lease. Mount crossings follow the
+namespace-transitive authority above.
 
 - `LAB_TRACKER_STORE_HEALTH_GLOBAL_IN_FLIGHT_LIMIT`: maximum admitted health
   requests in one application process (default: `4`, maximum: `16`).
@@ -335,8 +359,8 @@ operation: rclone metadata lookup, transfer, and verification share one
 deadline, as do Git fetch, object inspection, transfer, and verification. A
 local, rclone, or Git store-health probe receives a fresh deadline; Git's URL
 preflight and HEAD query share it. Progress or moving between subprocesses does
-not reset it. Local health's parent-side policy narrowing and canonicalization
-precede this deadline as described above.
+not reset it. Local health creates the deadline before lexical admission and
+passes that exact deadline through the bounded filesystem broker.
 
 - `LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS`: execution and verification
   budget for one rclone or Git artifact resolution, or one local, rclone, or Git
@@ -380,10 +404,13 @@ fragment components, percent escapes, and malformed paths or authorities are
 also rejected. Credentials belong in operator-controlled Git credential helpers
 or SSH facilities, never in this setting or a persisted store root.
 
-The local, rclone, and Git policies are parsed once from `Settings` at startup.
-One immutable instance of each policy and one bounded process executor are
-shared by the resolver registry and store-health checker; those components do
-not independently reread the process environment. Rclone health preserves the
+The local root list and the rclone and Git policies are parsed once from
+`Settings` at startup; no consumer independently rereads the process
+environment. Runtime builds the lexical local authority and health broker from
+that root list, while direct resolution and recovery temporarily receive a
+derived legacy local policy. Rclone and Git resolution and health share one
+immutable instance of their corresponding policy. All subprocess-backed
+adapters share one bounded process executor. Rclone health preserves the
 registered distinction
 between `remote:path`, `remote:/path`, and `remote:/`. A present
 `credential_ref` remains authoritative even when blank or invalid and never

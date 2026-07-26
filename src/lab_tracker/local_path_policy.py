@@ -16,15 +16,15 @@ from pathlib import Path
 from urllib.parse import unquote_to_bytes, urlsplit
 from urllib.request import url2pathname
 
+from lab_tracker.local_path_syntax import (
+    is_reserved_windows_component as is_reserved_windows_component,
+)
+from lab_tracker.local_path_syntax import (
+    parse_windows_absolute_local_path,
+)
+
 _PERCENT_ESCAPE = re.compile(r"%[0-9A-Fa-f]{2}")
 _WINDOWS_FILE_URI_PATH = re.compile(r"^/[A-Za-z]:/")
-_WINDOWS_DEVICE_PREFIXES = ("\\\\?\\", "\\\\.\\", "\\??\\")
-_WINDOWS_RESERVED_CHARACTERS = frozenset('"*:<>?|')
-_WINDOWS_RESERVED_NAMES = frozenset(
-    {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"}
-    | {f"COM{suffix}" for suffix in "123456789¹²³"}
-    | {f"LPT{suffix}" for suffix in "123456789¹²³"}
-)
 
 
 def _has_control_characters(value: str) -> bool:
@@ -65,21 +65,10 @@ def _is_supported_absolute_path(path: str) -> bool:
         # closed rather than treating it as an authorityless UNC alias.
         return not path.startswith("//")
 
-    if path.startswith(_WINDOWS_DEVICE_PREFIXES):
-        return False
-    drive, tail = os.path.splitdrive(path)
-    if drive.startswith(("\\\\", "//")):
-        return False
-    if not (
-        len(drive) == 2
-        and drive[0].isascii()
-        and drive[0].isalpha()
-        and drive[1] == ":"
-        and tail.startswith(("\\", "/"))
-    ):
-        return False
-    components = re.split(r"[\\/]", tail)
-    return not any(is_reserved_windows_component(name) for name in components if name)
+    return (
+        parse_windows_absolute_local_path(path, allow_navigation=False)
+        is not None
+    )
 
 
 def is_supported_absolute_local_root(root: str | os.PathLike[str]) -> bool:
@@ -96,23 +85,6 @@ def is_supported_absolute_local_root(root: str | os.PathLike[str]) -> bool:
     except TypeError:
         return False
     return isinstance(raw_root, str) and _is_supported_absolute_path(raw_root)
-
-
-def is_reserved_windows_component(name: str) -> bool:
-    """Return whether one component has reserved Windows filesystem syntax.
-
-    This is deliberately platform-independent so logical local-store locators
-    and native Windows paths share one portable definition.
-    """
-
-    if not name:
-        return False
-    if name[-1:] in (".", " ") and name not in (".", ".."):
-        return True
-    if any(character in _WINDOWS_RESERVED_CHARACTERS for character in name):
-        return True
-    stem = name.partition(".")[0].rstrip(" ").upper()
-    return stem in _WINDOWS_RESERVED_NAMES
 
 
 def native_local_path_from_uri(uri: str) -> str | None:
