@@ -21,6 +21,8 @@ jobs:
         run: uv sync --frozen --extra test --extra lint
       - name: Install frontend dependencies
         run: npm ci
+      - name: Audit frontend dependencies
+        run: npm audit --audit-level=high
       - name: Lint
         run: uv run ruff check .
       - name: Typecheck Python architecture contracts

@@ -1,7 +1,29 @@
 import js from "@eslint/js";
 import globals from "globals";
-import react from "eslint-plugin-react";
 import reactHooks from "eslint-plugin-react-hooks";
+
+// ESLint 10 tracks JSX component references itself. The classic esbuild JSX
+// transform still consumes the React namespace implicitly, so model only that
+// remaining behavior instead of depending on the legacy React rules plugin.
+const classicJsxRuntime = {
+  rules: {
+    "uses-react": {
+      meta: {
+        type: "problem",
+        schema: [],
+      },
+      create(context) {
+        const markReactAsUsed = (node) => {
+          context.sourceCode.markVariableAsUsed("React", node);
+        };
+        return {
+          JSXOpeningElement: markReactAsUsed,
+          JSXOpeningFragment: markReactAsUsed,
+        };
+      },
+    },
+  },
+};
 
 const testGlobals = {
   ...globals.browser,
@@ -36,14 +58,13 @@ export default [
       },
     },
     plugins: {
-      react,
+      "classic-jsx-runtime": classicJsxRuntime,
       "react-hooks": reactHooks,
     },
     rules: {
       ...js.configs.recommended.rules,
+      "classic-jsx-runtime/uses-react": "error",
       "no-console": "warn",
-      "react/jsx-uses-react": "error",
-      "react/jsx-uses-vars": "error",
       ...reactHooks.configs.recommended.rules,
       "react-hooks/set-state-in-effect": "off",
     },
