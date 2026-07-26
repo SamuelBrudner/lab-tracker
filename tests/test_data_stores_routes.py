@@ -485,10 +485,7 @@ def test_git_store_health_uses_installed_policy_without_leaking_credentials(
         headers=admin_auth_headers,
     ).json()["data"]["store_id"]
 
-    checker = client.app.state.store_health_checker
     workdir = client.app.state.git_health_workdir
-    assert checker.git_remote_policy is client.app.state.git_remote_policy
-    assert checker.git_health_workdir is workdir
     assert workdir.is_dir()
     assert list(workdir.iterdir()) == []
     assert not (workdir / ".git").exists()

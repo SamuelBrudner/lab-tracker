@@ -285,10 +285,16 @@ Shipped:
   rooted-versus-relative prefix, and portable locator until argv composition.
   Git becomes a typed target that retains a structurally parsed remote, portable
   repository path, and full immutable object ID. Credentials are never embedded.
-- ✅ Explicit health check: `check_store_health` probes reachability
-  (directory stat for `local_fs`, HTTP `HEAD` for `http`, `rclone lsf` for the
-  cloud/remote kinds; `object_table`/`database` report `unsupported`), exposed at
-  `GET /data-stores/{id}/health`.
+- ✅ Explicit health control plane: `GET /data-stores/{id}/health` has
+  independent no-wait admission, performs opaque authorization before every
+  cache access, detaches a frozen exact-value probe target, and releases the
+  ordinary request database scope before cache or host I/O. Completed results
+  use a hard-bounded process-local TTL/LRU cache with exact-key single-flight
+  and bounded follower waits. The current leaf adapters remain
+  `check_store_health` (directory stat for `local_fs`, HTTP `HEAD` for `http`,
+  `rclone lsf` for cloud/remote kinds, `git ls-remote` for `git`, and
+  `unsupported` for `object_table`/`database`); their
+  destination/process/local-host hardening is tracked separately.
 - ✅ Group-scoped stores: a store is scoped to exactly one of a project or a
   group (migration `0050`, nullable `project_id` + `group_id`). A group store is
   inherited by every project in the group — `get_by_name` resolves a project's

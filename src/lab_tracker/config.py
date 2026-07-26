@@ -16,8 +16,22 @@ from lab_tracker.artifact_resolution_admission import (
 )
 from lab_tracker.bounded_subprocess import MAX_PROCESS_DEADLINE_SECONDS
 from lab_tracker.outbound_http import MAX_OUTBOUND_HTTP_DEADLINE_SECONDS
+from lab_tracker.store_health import (
+    DEFAULT_STORE_HEALTH_CACHE_MAX_ENTRIES,
+    DEFAULT_STORE_HEALTH_CACHE_TTL_SECONDS,
+    DEFAULT_STORE_HEALTH_SINGLEFLIGHT_WAIT_SECONDS,
+    MAX_STORE_HEALTH_CACHE_MAX_ENTRIES,
+    MAX_STORE_HEALTH_CACHE_TTL_SECONDS,
+    MAX_STORE_HEALTH_SINGLEFLIGHT_WAIT_SECONDS,
+)
+from lab_tracker.store_health_admission import (
+    DEFAULT_STORE_HEALTH_GLOBAL_IN_FLIGHT_LIMIT,
+    DEFAULT_STORE_HEALTH_PER_ACTOR_IN_FLIGHT_LIMIT,
+    MAX_STORE_HEALTH_GLOBAL_IN_FLIGHT_LIMIT,
+)
 
 DEFAULT_AUTH_SECRET_KEY = "dev-only-change-me"
+MAX_COMBINED_HOST_IO_IN_FLIGHT_LIMIT = 32
 INSECURE_AUTH_SECRET_KEYS = {
     DEFAULT_AUTH_SECRET_KEY,
     "replace-with-a-strong-secret",
@@ -56,6 +70,17 @@ class Settings(BaseSettings):
     )
     artifact_resolution_per_actor_in_flight_limit: int = (
         DEFAULT_ARTIFACT_RESOLUTION_PER_ACTOR_IN_FLIGHT_LIMIT
+    )
+    store_health_global_in_flight_limit: int = (
+        DEFAULT_STORE_HEALTH_GLOBAL_IN_FLIGHT_LIMIT
+    )
+    store_health_per_actor_in_flight_limit: int = (
+        DEFAULT_STORE_HEALTH_PER_ACTOR_IN_FLIGHT_LIMIT
+    )
+    store_health_cache_max_entries: int = DEFAULT_STORE_HEALTH_CACHE_MAX_ENTRIES
+    store_health_cache_ttl_seconds: float = DEFAULT_STORE_HEALTH_CACHE_TTL_SECONDS
+    store_health_singleflight_wait_seconds: float = (
+        DEFAULT_STORE_HEALTH_SINGLEFLIGHT_WAIT_SECONDS
     )
     git_allowed_remotes: str = ""
     graph_draft_provider: str = "openai"
@@ -134,6 +159,53 @@ class Settings(BaseSettings):
             maximum=MAX_PROCESS_DEADLINE_SECONDS,
         )
 
+    @field_validator(
+        "store_health_global_in_flight_limit",
+        "store_health_per_actor_in_flight_limit",
+        "store_health_cache_max_entries",
+        mode="before",
+    )
+    @classmethod
+    def _reject_boolean_store_health_integer(cls, value: object) -> object:
+        if isinstance(value, bool) or not isinstance(value, (int, str)):
+            raise ValueError(
+                "Store-health integer settings require integers and do not accept "
+                "booleans."
+            )
+        return value
+
+    @field_validator(
+        "store_health_cache_ttl_seconds",
+        "store_health_singleflight_wait_seconds",
+        mode="before",
+    )
+    @classmethod
+    def _reject_boolean_store_health_duration(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("Store-health duration settings do not accept booleans.")
+        return value
+
+    @field_validator("store_health_cache_ttl_seconds")
+    @classmethod
+    def _validate_store_health_cache_ttl_seconds(cls, value: float) -> float:
+        return _validate_store_health_duration_seconds(
+            value,
+            variable="LAB_TRACKER_STORE_HEALTH_CACHE_TTL_SECONDS",
+            maximum=MAX_STORE_HEALTH_CACHE_TTL_SECONDS,
+        )
+
+    @field_validator("store_health_singleflight_wait_seconds")
+    @classmethod
+    def _validate_store_health_singleflight_wait_seconds(
+        cls,
+        value: float,
+    ) -> float:
+        return _validate_store_health_duration_seconds(
+            value,
+            variable="LAB_TRACKER_STORE_HEALTH_SINGLEFLIGHT_WAIT_SECONDS",
+            maximum=MAX_STORE_HEALTH_SINGLEFLIGHT_WAIT_SECONDS,
+        )
+
     @model_validator(mode="after")
     def _validate_auth_secret_key(self) -> Settings:
         is_local = self.environment.strip().lower() == "local"
@@ -183,6 +255,49 @@ class Settings(BaseSettings):
             raise ValueError(
                 "LAB_TRACKER_ARTIFACT_RESOLUTION_PER_ACTOR_IN_FLIGHT_LIMIT must be "
                 "no greater than LAB_TRACKER_ARTIFACT_RESOLUTION_GLOBAL_IN_FLIGHT_LIMIT."
+            )
+        if self.store_health_global_in_flight_limit < 1:
+            raise ValueError(
+                "LAB_TRACKER_STORE_HEALTH_GLOBAL_IN_FLIGHT_LIMIT must be at least 1."
+            )
+        if (
+            self.store_health_global_in_flight_limit
+            > MAX_STORE_HEALTH_GLOBAL_IN_FLIGHT_LIMIT
+        ):
+            raise ValueError(
+                "LAB_TRACKER_STORE_HEALTH_GLOBAL_IN_FLIGHT_LIMIT must be no greater "
+                f"than {MAX_STORE_HEALTH_GLOBAL_IN_FLIGHT_LIMIT}."
+            )
+        if self.store_health_per_actor_in_flight_limit < 1:
+            raise ValueError(
+                "LAB_TRACKER_STORE_HEALTH_PER_ACTOR_IN_FLIGHT_LIMIT must be at least 1."
+            )
+        if (
+            self.store_health_per_actor_in_flight_limit
+            > self.store_health_global_in_flight_limit
+        ):
+            raise ValueError(
+                "LAB_TRACKER_STORE_HEALTH_PER_ACTOR_IN_FLIGHT_LIMIT must be no greater "
+                "than LAB_TRACKER_STORE_HEALTH_GLOBAL_IN_FLIGHT_LIMIT."
+            )
+        if self.store_health_cache_max_entries < 1:
+            raise ValueError(
+                "LAB_TRACKER_STORE_HEALTH_CACHE_MAX_ENTRIES must be at least 1."
+            )
+        if self.store_health_cache_max_entries > MAX_STORE_HEALTH_CACHE_MAX_ENTRIES:
+            raise ValueError(
+                "LAB_TRACKER_STORE_HEALTH_CACHE_MAX_ENTRIES must be no greater than "
+                f"{MAX_STORE_HEALTH_CACHE_MAX_ENTRIES}."
+            )
+        if (
+            self.artifact_resolution_global_in_flight_limit
+            + self.store_health_global_in_flight_limit
+            > MAX_COMBINED_HOST_IO_IN_FLIGHT_LIMIT
+        ):
+            raise ValueError(
+                "LAB_TRACKER_ARTIFACT_RESOLUTION_GLOBAL_IN_FLIGHT_LIMIT plus "
+                "LAB_TRACKER_STORE_HEALTH_GLOBAL_IN_FLIGHT_LIMIT must be no greater "
+                f"than {MAX_COMBINED_HOST_IO_IN_FLIGHT_LIMIT}."
             )
         if self.graph_draft_worker_poll_seconds <= 0:
             raise ValueError(
@@ -283,6 +398,20 @@ def _validate_resolver_deadline_seconds(
         or value <= 0
         or value > maximum
     ):
+        raise ValueError(
+            f"{variable} must be finite and greater than 0, and no greater than "
+            f"{maximum:g}."
+        )
+    return value
+
+
+def _validate_store_health_duration_seconds(
+    value: float,
+    *,
+    variable: str,
+    maximum: float,
+) -> float:
+    if not math.isfinite(value) or value <= 0 or value > maximum:
         raise ValueError(
             f"{variable} must be finite and greater than 0, and no greater than "
             f"{maximum:g}."

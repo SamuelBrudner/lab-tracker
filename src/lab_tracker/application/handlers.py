@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session as OrmSession
 
 from lab_tracker.artifact_resolution import ResolverRegistry
 from lab_tracker.config import Settings
+from lab_tracker.store_health import StoreProbe
 
 from .catalog_queries import CatalogAccess, CatalogQueries, CatalogRepository
 from .context_queries import ContextAccess, ContextQueries, ContextRepository
@@ -25,6 +26,7 @@ from .managed_deletions import (
     ManagedDeletionAccess,
     ManagedDeletionCommands,
 )
+from .store_health_queries import StoreHealthAccess, StoreHealthQueries
 
 
 class RequestHandlerApi(
@@ -32,6 +34,7 @@ class RequestHandlerApi(
     ContextAccess,
     FileCommandAccess,
     ManagedDeletionAccess,
+    StoreHealthAccess,
     Protocol,
 ):
     """Aggregate of the narrow API roles bound to one request."""
@@ -52,6 +55,7 @@ class RequestHandlers:
 
     catalogs: CatalogQueries
     context: ContextQueries
+    store_health: StoreHealthQueries
     dataset_files: DatasetFileCommands
     visualization_files: VisualizationFileCommands
     deletions: ManagedDeletionCommands
@@ -67,6 +71,7 @@ class RequestHandlers:
         raw_note_storage: DeleteStorage,
         settings: Settings,
         resolver_registry: ResolverRegistry | None,
+        store_health_checker: StoreProbe,
         release_read_scope: Callable[[], None],
     ) -> RequestHandlers:
         """Bind every handler to the middleware's existing request resources."""
@@ -79,6 +84,11 @@ class RequestHandlers:
                 session=session,
                 release_read_scope=release_read_scope,
                 resolver_registry=resolver_registry,
+            ),
+            store_health=StoreHealthQueries(
+                api=api,
+                checker=store_health_checker,
+                release_read_scope=release_read_scope,
             ),
             dataset_files=DatasetFileCommands(
                 api=api,

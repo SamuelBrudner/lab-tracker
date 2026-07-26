@@ -71,6 +71,7 @@ def test_batch_run_due_scoped_token_can_only_trigger_the_run(
         client.get("/batches/runs", headers=pat_headers),
         client.get(f"/goals/{goal_id}", headers=pat_headers),
         client.get(f"/goals/{goal_id}/ara-artifact", headers=pat_headers),
+        client.get(f"/data-stores/{uuid4()}/health", headers=pat_headers),
         client.get("/auth/me", headers=pat_headers),
         client.post(
             "/assistant/decision-context",
