@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from datetime import timedelta
 from pathlib import Path
 
 import httpx
 import pytest
+from fastapi.testclient import TestClient
 
 try:
     import tomllib
@@ -14,6 +16,7 @@ except ModuleNotFoundError:  # pragma: no cover - exercised by Python 3.10 CI
     import tomli as tomllib
 
 from lab_tracker import mcp_server
+from lab_tracker.auth import utc_now
 from lab_tracker.cli import _cursor_mcp_json, _mcp_json
 from lab_tracker.decision_context_constants import code_facing_idioms
 from lab_tracker.mcp_tools import READ_TOOLS, WRITE_TOOLS
@@ -1172,6 +1175,88 @@ def test_decision_context_posts_to_api_route() -> None:
 
     assert payload["data"]["task_kind"] == "research_writing"
     assert len(requests) == 1
+
+
+def test_read_only_viewer_lpat_reaches_decision_context_through_mcp_tool(
+    client: TestClient,
+    scoped_project_member,
+    monkeypatch,
+) -> None:
+    from lab_tracker.mcp_tools import read as read_tools
+
+    issued = client.post(
+        "/auth/tokens",
+        json={
+            "label": "MCP decision context",
+            "role": "viewer",
+            "read_only": True,
+            "scope": "all",
+            "expires_at": (utc_now() + timedelta(days=7)).isoformat(),
+        },
+        headers=scoped_project_member.member_headers,
+    )
+    assert issued.status_code == 201, issued.text
+    issued_token = issued.json()["data"]
+    assert issued_token["role"] == "viewer"
+    assert issued_token["read_only"] is True
+    assert issued_token["scope"] == "all"
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        forwarded_headers = {
+            name: value
+            for name, value in request.headers.items()
+            if name.lower() not in {"host", "content-length"}
+        }
+        response = client.request(
+            request.method,
+            request.url.path,
+            params=list(request.url.params.multi_items()),
+            content=request.content,
+            headers=forwarded_headers,
+        )
+        return httpx.Response(
+            response.status_code,
+            content=response.content,
+            headers=response.headers,
+            request=request,
+        )
+
+    def factory() -> mcp_server.LabTrackerAPIClient:
+        return mcp_server.LabTrackerAPIClient(
+            mcp_server.MCPSettings(
+                base_url="http://testserver",
+                api_key=issued_token["secret"],
+            ),
+            transport=httpx.MockTransport(handler),
+        )
+
+    read_tools.close_cached_read_client()
+    monkeypatch.setattr(read_tools, "client_from_env", factory)
+    try:
+        payload = read_tools.lab_tracker_get_decision_context(
+            task_kind="summary",
+            query="MCP scoped context",
+            project_id=scoped_project_member.visible_project_id,
+        )
+    finally:
+        read_tools.close_cached_read_client()
+
+    assert payload["data"]["scope"]["project"]["project_id"] == (
+        scoped_project_member.visible_project_id
+    )
+    assert len(requests) == 1
+    assert requests[0].method == "POST"
+    assert requests[0].url.path == "/assistant/decision-context"
+    assert requests[0].headers["authorization"].startswith("Bearer lpat_")
+    assert requests[0].headers["x-labtracker-surface"] == "mcp"
+    assert json.loads(requests[0].content) == {
+        "task_kind": "summary",
+        "query": "MCP scoped context",
+        "project_id": scoped_project_member.visible_project_id,
+        "limit": 20,
+    }
 
 
 def test_decision_context_returns_unavailable_when_api_read_fails() -> None:
