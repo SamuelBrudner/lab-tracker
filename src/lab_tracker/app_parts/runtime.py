@@ -76,6 +76,7 @@ from lab_tracker.review_email_transport import (
 )
 from lab_tracker.review_links import sign_review_link
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
+from lab_tracker.store_authority_registry import StoreAuthorityRegistry
 from lab_tracker.store_health import (
     CachedStoreHealthProbe,
     StoreHealth,
@@ -135,6 +136,7 @@ class _StoreHealthDispatchProbe:
 @dataclass(frozen=True)
 class AppRuntime:
     settings: Settings
+    store_authority_registry: StoreAuthorityRegistry = field(repr=False)
     engine: Engine
     session_factory: sessionmaker[Session]
     auth_enabled: bool
@@ -173,6 +175,9 @@ class AppRuntime:
 
 
 def build_app_runtime(settings: Settings) -> AppRuntime:
+    store_authority_registry = StoreAuthorityRegistry.from_json(
+        settings.store_authority_grants_json
+    )
     configure_logging(settings.log_level)
     outbound_http_policy = outbound_http_policy_from_config(
         allowed_authorities=settings.resolver_http_allowed_authorities,
@@ -223,6 +228,7 @@ def build_app_runtime(settings: Settings) -> AppRuntime:
         )
         return _build_app_runtime(
             settings,
+            store_authority_registry=store_authority_registry,
             local_filesystem_operations=local_filesystem_operations,
             outbound_http_policy=outbound_http_policy,
             outbound_http_client=outbound_http_client,
@@ -240,6 +246,7 @@ def build_app_runtime(settings: Settings) -> AppRuntime:
 def _build_app_runtime(
     settings: Settings,
     *,
+    store_authority_registry: StoreAuthorityRegistry,
     local_filesystem_operations: BoundedLocalFilesystemOperations,
     outbound_http_policy: OutboundHttpPolicy,
     outbound_http_client: OutboundHttpClient,
@@ -330,6 +337,7 @@ def _build_app_runtime(
     review_email_provider = _build_review_email_provider(settings)
     return AppRuntime(
         settings=settings,
+        store_authority_registry=store_authority_registry,
         engine=engine,
         session_factory=session_factory,
         auth_enabled=auth_enabled,
@@ -617,6 +625,7 @@ def configure_app_state(app: FastAPI, runtime: AppRuntime) -> None:
     app.state.invitation_token_service = runtime.invitation_token_service
     app.state.auth_enabled = runtime.auth_enabled
     app.state.settings = runtime.settings
+    app.state.store_authority_registry = runtime.store_authority_registry
     app.state.token_service = runtime.token_service
     app.state.file_storage_backend = runtime.file_storage_backend
     app.state.raw_note_storage = runtime.raw_note_storage

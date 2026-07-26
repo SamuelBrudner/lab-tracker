@@ -104,6 +104,37 @@ advisory check of a local root, remote prefix, or configured credentials. A
 healthy result describes reachability at probe time; it is not a registration
 guarantee or a durable capability.
 
+### Operator authority is a separate, deny-by-default input
+
+A syntactically valid `DataStore` definition is not permission to reach its
+target. Operators separately configure the immutable, versioned
+`StoreAuthorityRegistry` described in
+[`configuration.md`](configuration.md#scoped-store-authority-grants). Each
+grant has an opaque ID, exactly one canonical project or group UUID scope, one
+supported store kind, a non-empty typed capability ceiling, and a
+kind-specific structural boundary. Authorization requires callers to select
+the exact grant ID; the registry never enumerates or auto-selects grants.
+Scope, kind, structural containment, credential mode, and requested capability
+subset must all match, otherwise authorization returns only an opaque denial.
+The requested capability iterable must itself be non-empty and duplicate-free.
+Callers whose write schema uses an empty list to mean “use kind defaults” must
+resolve those effective defaults before asking the registry to authorize them.
+
+Grant fingerprints use a versioned, type-tagged canonical JSON payload and
+SHA-256 (`sag-v1-sha256:<64 lowercase hex digits>`). They cover every authority
+semantic, including ordered path components and rclone credential mode, while
+excluding the raw grant ID and input ordering. A persisted binding can
+therefore detect same-ID expansion without turning an operator label into
+authority.
+
+This foundation is not yet enforced by registration or use-time I/O; current
+registered-store behavior still relies on the global policies. During the
+following integration slices, its lexical local proof is registration-only and
+must produce an opaque I/O denial until the local-use slice retains the selected
+grant inside the bounded filesystem helper. Remote use likewise requires a
+persisted binding and use-time revalidation. Global resolver policies remain
+conjunctive ceilings and never imply a project/group grant.
+
 ### Canonical new-registration shapes
 
 `POST /data-stores` validates one complete kind-specific definition before
@@ -328,6 +359,13 @@ Shipped:
 - ✅ Pure kind-specific validation and canonicalization for new registrations,
   applied after scope authorization and before lookup or persistence. Legacy
   rows still hydrate without silent repair.
+- ✅ Pure operator-owned `StoreAuthorityRegistry`: strict versioned JSON,
+  deny-all default, exact project/group scopes, typed local/HTTP/rclone/Git
+  boundaries, capability subsets, stable semantic fingerprints, explicit-ID
+  opaque authorization, overlap rejection, and one startup-composed immutable
+  snapshot. It performs no database, filesystem, network, credential, or
+  subprocess work. Persistence and use-time enforcement remain the next
+  slices.
 - ✅ `store://<name>/<path>` resolution: the resolve endpoint authorizes and
   looks up the store before releasing its database scope. `local_fs` becomes a
   typed target that retains the logical URI, validated relative components, and
@@ -451,10 +489,12 @@ Deferred:
 
 ## Next slices
 
-The remaining work binds store registration to operator-approved authority
-grants, enforces declared capabilities during resolution, and adds the deferred
-snapshot/query adapters. Health remains an explicit operator action at
-`GET /data-stores/{id}/health`, not a side effect of registration.
+The remaining authority work persists a selected grant ID plus immutable
+fingerprint on each store, binds registration to the scoped proof, revalidates
+that binding before health/cache/resolution work, and retains local grant
+boundaries in the filesystem helper. Snapshot/query adapters remain deferred.
+Health stays an explicit operator action at `GET /data-stores/{id}/health`, not
+a side effect of registration.
 
 ## See also
 

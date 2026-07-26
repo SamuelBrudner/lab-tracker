@@ -71,6 +71,102 @@ that destination through your normal off-machine backup process.
   Uploads that exceed the limit are rejected and partial local files are
   cleaned up.
 
+### Scoped store-authority grants
+
+- `LAB_TRACKER_STORE_AUTHORITY_GRANTS_JSON`: the operator-owned, versioned
+  project/group store-authority registry. Unset or exactly empty means deny
+  all. Any other value must be the exact JSON envelope described below;
+  whitespace-only input is invalid. The raw value is treated as sensitive
+  configuration and is excluded from `Settings` representations and model
+  dumps.
+
+The top-level wire format is an object with exactly these two fields:
+
+```json
+{"schema":"lab-tracker/store-authority/v1","grants":[]}
+```
+
+The configured value must be compact on one line: raw control characters,
+including JSON formatting newlines and tabs, are rejected before decoding.
+
+Each non-rclone grant has exactly five fields:
+
+| Field | Contract |
+| --- | --- |
+| `grant_id` | Opaque 1–128-character ASCII selector matching `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`. It is not authority by itself and is excluded from the semantic fingerprint. |
+| `scope` | Exactly `{"project_id":"<canonical UUID>"}` or `{"group_id":"<canonical UUID>"}`. The keys are mutually exclusive and no database lookup occurs at startup. |
+| `kind` | One supported `StoreKind`: `local_fs`, `http`, or `git` for their native adapters, or one of the rclone-backed kinds below. `object_table` and `database` are rejected until their adapters and secret models exist. |
+| `root` | One kind-specific string boundary, parsed as described below. |
+| `capabilities` | A non-empty, duplicate-free list of known `StoreCapability` values. It may narrow but cannot exceed the kind's supported set. |
+
+Scope parsing is syntactic and side-effect free. A canonical UUID that does not
+exist in this deployment is accepted into the snapshot, performs no startup
+database lookup, and remains inert unless a later authorized operation selects
+it.
+
+Rclone-backed grants—`ssh`, `s3`, `gcs`, `azure_blob`, `dropbox`,
+`gdrive`, `box`, `onedrive`, and `rclone`—have those five fields plus exactly:
+
+| Field | Contract |
+| --- | --- |
+| `remote` | The exact effective rclone remote name. This is a handle, never a token, password, or connection string. |
+| `credential_mode` | Exactly `name_fallback` or `credential_ref`. `name_fallback` authorizes only a store with no `credential_ref` whose store name equals `remote`; `credential_ref` authorizes only an explicit `credential_ref` equal to `remote`. |
+
+All non-rclone kinds reject `remote` and `credential_mode`. The boundary
+grammar is kind-specific:
+
+| Kind | `root` boundary | Supported capability ceiling |
+| --- | --- | --- |
+| `local_fs` | Strict native absolute lexical path for the current platform; no home/cwd expansion, filesystem lookup, navigation component, or ambiguous POSIX separator | `bytes_by_path`, `byte_range`, `list` |
+| `http` | Canonical credential-free HTTP(S) directory prefix: exact origin plus ordered decoded path components | `bytes_by_path`, `byte_range` |
+| rclone-backed `ssh`, `dropbox`, `gdrive`, `box`, `onedrive`, `rclone` | Decoded relative or rooted path within `remote`; rootedness and ordered components are significant | `bytes_by_path`, `byte_range`, `list` |
+| rclone-backed `s3`, `gcs`, `azure_blob` | Same rclone boundary | `bytes_by_path`, `byte_range`, `list`, `versioned_snapshot` |
+| `git` | Full canonical credential-free Git remote: scheme, host, effective port, optional SSH user, path style, and ordered path components | `bytes_by_path`, `byte_range`, `versioned_snapshot` |
+
+For example, this grant uses an explicit rclone credential handle:
+
+```json
+{"schema":"lab-tracker/store-authority/v1","grants":[{"grant_id":"project-archive","scope":{"project_id":"123e4567-e89b-42d3-a456-426614174000"},"kind":"s3","root":"/experiments","capabilities":["bytes_by_path","byte_range","list","versioned_snapshot"],"remote":"archive-s3","credential_mode":"credential_ref"}]}
+```
+
+Within one exact scope, kind, and effective target family, equivalent or
+ancestor/descendant boundaries are rejected as ambiguous. Intentional
+overlap across different project/group scopes is allowed.
+
+The registry is parsed as the first step of application runtime composition,
+before logging, global resolver-policy parsing, database or storage
+construction, clients, caches, working directories, credential access, or
+subprocess owners. Invalid input therefore aborts startup with a static
+diagnostic and without echoing rejected configuration. JSON duplicate keys,
+unknown fields, non-standard numbers, controls, and invalid UTF-8 text fail
+closed. The raw value is bounded independently to 24,576 Unicode code points
+and 24,576 UTF-8 bytes, decoded JSON nesting is capped at depth 8, and at most
+64 grants are accepted.
+
+Every worker keeps the one immutable registry snapshot built at startup; no
+request or background task rereads the environment. Changing or revoking a
+grant requires restarting **all** workers that might retain the previous
+snapshot. A rolling deployment does not complete revocation until the last old
+worker has stopped.
+
+Global resolver settings remain independent, conjunctive outer ceilings:
+`LAB_TRACKER_RESOLVER_ALLOWED_ROOTS`,
+`LAB_TRACKER_RESOLVER_HTTP_ALLOWED_AUTHORITIES`,
+`LAB_TRACKER_RESOLVER_HTTP_ALLOWED_NETWORKS`,
+`LAB_TRACKER_RCLONE_ALLOWED_REMOTES`, and
+`LAB_TRACKER_GIT_ALLOWED_REMOTES` can further restrict a scoped grant, but they
+never create one or widen one. Project and group roles likewise never
+manufacture host, network, credential, or subprocess authority.
+
+This registry slice defines and composes the typed grant snapshot but does not
+yet enforce it at registration or use time; existing registered-store behavior
+still depends on the global policies above. The following authority slices bind
+registration and revalidate persisted bindings. During that staged integration,
+a local grant's lexical proof is registration-only and must produce an opaque
+denial at the I/O boundary until the retained-handle filesystem slice carries
+and revalidates the selected grant. Contributor-authored direct paths, URLs,
+rclone targets, and Git remotes remain inert metadata.
+
 ### Local filesystem policy
 
 Local artifact resolution and registered `local_fs` store health share one
