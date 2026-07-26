@@ -139,9 +139,9 @@ jobs:
           uv run pytest -q
           tests/test_bounded_subprocess.py
           tests/test_windows_job.py
-      # This focused gate runs complete artifact modules. The full Windows
-      # pytest suite remains owned by lab-tracker-n5kp.56.6.
-      - name: Test Windows registered-artifact resolution
+      # This focused gate runs complete host-I/O control-plane modules. The
+      # full Windows pytest suite remains owned by lab-tracker-n5kp.56.6.
+      - name: Test Windows registered artifacts and store health
         run: >-
           uv run pytest -q
           tests/test_local_store_locator.py
@@ -152,6 +152,10 @@ jobs:
           tests/test_local_file_access.py
           tests/test_windows_local_file.py
           tests/test_artifact_resolution.py
+          tests/test_actor_admission.py
+          tests/test_store_health.py
+          tests/test_store_health_queries.py
+          tests/test_store_health_admission.py
           tests/test_context_queries_prepared_resolution.py
           tests/test_external_artifacts_routes.py
           tests/test_data_stores_routes.py

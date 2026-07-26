@@ -23,7 +23,6 @@ from lab_tracker.app_parts.middleware import system_auth_context
 from lab_tracker.artifact_resolution import (
     LAB_TRACKER_GIT_ALLOWED_REMOTES_ENV,
     ResolverRegistry,
-    StoreHealth,
     check_store_health,
     outbound_http_policy_from_config,
     registry_from_env,
@@ -44,7 +43,7 @@ from lab_tracker.file_storage import LocalFileStorageBackend
 from lab_tracker.git_remote_policy import GitRemotePolicy
 from lab_tracker.graph_drafting import GraphDraftClientFactory, make_graph_draft_client
 from lab_tracker.logging import configure_logging
-from lab_tracker.models import DataStore, ReviewEmailDelivery
+from lab_tracker.models import ReviewEmailDelivery
 from lab_tracker.note_storage import LocalNoteStorage
 from lab_tracker.outbound_http import OutboundHttpPolicy
 from lab_tracker.process_lock import ProcessLock
@@ -59,6 +58,12 @@ from lab_tracker.review_email_transport import (
 )
 from lab_tracker.review_links import sign_review_link
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
+from lab_tracker.store_health import (
+    CachedStoreHealthProbe,
+    StoreHealth,
+    StoreProbeTarget,
+)
+from lab_tracker.store_health_admission import StoreHealthAdmission
 
 _logger = logging.getLogger(__name__)
 
@@ -88,15 +93,15 @@ class _OwnedGitHealthWorkdir:
 
 
 @dataclass(frozen=True)
-class StoreHealthChecker:
-    """Apply the runtime's immutable Git policy to every store health probe."""
+class _LegacyStoreHealthProbe:
+    """Adapt the legacy leaf probes to the detached control-plane target."""
 
     git_remote_policy: GitRemotePolicy
     git_health_workdir: Path
 
-    def __call__(self, store: DataStore) -> StoreHealth:
+    def __call__(self, target: StoreProbeTarget) -> StoreHealth:
         return check_store_health(
-            store,
+            target,
             git_remote_policy=self.git_remote_policy,
             git_health_cwd=self.git_health_workdir,
         )
@@ -124,8 +129,9 @@ class AppRuntime:
     git_remote_policy: GitRemotePolicy
     resolver_registry: ResolverRegistry
     artifact_resolution_admission: ArtifactResolutionAdmission
+    store_health_admission: StoreHealthAdmission
     git_health_workdir: Path
-    store_health_checker: StoreHealthChecker
+    store_health_checker: CachedStoreHealthProbe
     _git_health_workdir_owner: _OwnedGitHealthWorkdir = field(
         repr=False,
         compare=False,
@@ -224,9 +230,18 @@ def _build_app_runtime(
         global_in_flight_limit=settings.artifact_resolution_global_in_flight_limit,
         per_actor_in_flight_limit=settings.artifact_resolution_per_actor_in_flight_limit,
     )
-    store_health_checker = StoreHealthChecker(
-        git_remote_policy=git_remote_policy,
-        git_health_workdir=git_health_workdir,
+    store_health_admission = StoreHealthAdmission(
+        global_in_flight_limit=settings.store_health_global_in_flight_limit,
+        per_actor_in_flight_limit=settings.store_health_per_actor_in_flight_limit,
+    )
+    store_health_checker = CachedStoreHealthProbe(
+        _LegacyStoreHealthProbe(
+            git_remote_policy=git_remote_policy,
+            git_health_workdir=git_health_workdir,
+        ),
+        max_entries=settings.store_health_cache_max_entries,
+        ttl_seconds=settings.store_health_cache_ttl_seconds,
+        singleflight_wait_seconds=settings.store_health_singleflight_wait_seconds,
     )
     review_email_provider = _build_review_email_provider(settings)
     return AppRuntime(
@@ -250,6 +265,7 @@ def _build_app_runtime(
         git_remote_policy=git_remote_policy,
         resolver_registry=resolver_registry,
         artifact_resolution_admission=artifact_resolution_admission,
+        store_health_admission=store_health_admission,
         git_health_workdir=git_health_workdir,
         store_health_checker=store_health_checker,
         _git_health_workdir_owner=git_health_workdir_owner,
@@ -528,6 +544,7 @@ def configure_app_state(app: FastAPI, runtime: AppRuntime) -> None:
     app.state.git_remote_policy = runtime.git_remote_policy
     app.state.resolver_registry = runtime.resolver_registry
     app.state.artifact_resolution_admission = runtime.artifact_resolution_admission
+    app.state.store_health_admission = runtime.store_health_admission
     app.state.git_health_workdir = runtime.git_health_workdir
     app.state.store_health_checker = runtime.store_health_checker
     app.state.cleanup_git_health_workdir = runtime.cleanup_git_health_workdir

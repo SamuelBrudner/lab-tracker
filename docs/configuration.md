@@ -146,14 +146,48 @@ request database session or begin artifact resolution.
   (default: `2`). It must be a positive integer no greater than the configured
   global limit.
 
-The global limit is deliberately capped below the standard AnyIO shared worker
-capacity of 40 so accepted synchronous resolution work leaves worker capacity
-for authentication, cleanup, and ordinary requests. These limits are
-process-local, not distributed: each Uvicorn worker or replica has its own
-global and per-actor counters. The supported deployment therefore uses one
-Uvicorn worker per service process. Do not enable multiple workers/replicas
-while treating either value as a cluster-wide quota; distributed admission is a
-separate requirement.
+### Data-store health control plane
+
+`GET /data-stores/{store_id}/health` has its own no-wait admission policy.
+Authentication completes first. A matching request that cannot obtain both its
+process-wide and per-user slot returns one fixed generic `429` response with
+`Retry-After` before the ordinary request-scoped database session is allocated.
+Authentication services may use their own authoritative database scope before
+this point.
+
+An admitted request authorizes and loads the store through the same opaque
+project/group boundary as other targeted reads. It then copies only the exact
+probe inputs into an immutable value and closes the request database scope
+before cache lookup or host I/O. Authorization runs on every request, including
+cache hits. Hidden and absent stores therefore remain indistinguishable and
+never reach the cache or probe.
+
+- `LAB_TRACKER_STORE_HEALTH_GLOBAL_IN_FLIGHT_LIMIT`: maximum admitted health
+  requests in one application process (default: `4`, maximum: `16`).
+- `LAB_TRACKER_STORE_HEALTH_PER_ACTOR_IN_FLIGHT_LIMIT`: maximum admitted health
+  requests for one authenticated `actor.user_id` in that process (default:
+  `1`). Browser, paired-device, and LPAT credentials for one user share this
+  capacity.
+- `LAB_TRACKER_STORE_HEALTH_CACHE_MAX_ENTRIES`: hard LRU bound for completed
+  exact-store health results in one process (default: `256`, maximum: `4096`).
+- `LAB_TRACKER_STORE_HEALTH_CACHE_TTL_SECONDS`: monotonic lifetime of a
+  completed health result, measured from probe completion (default: `10`,
+  maximum: `300`).
+- `LAB_TRACKER_STORE_HEALTH_SINGLEFLIGHT_WAIT_SECONDS`: maximum time an
+  admitted same-store follower waits for the current probe (default: `10`,
+  maximum: `60`). A timeout does not cancel or replace the leader and is not
+  cached.
+
+The artifact-resolution and store-health global limits must add up to no more
+than `32`, below the standard AnyIO shared worker capacity of 40. This combined
+ceiling leaves capacity for authentication, cleanup, and ordinary requests even
+when both host-I/O surfaces are saturated.
+
+All admission limits and cache state are process-local, not distributed: each
+Uvicorn worker or replica owns independent counters and entries. The supported
+deployment therefore uses one Uvicorn worker per service process. Do not treat
+these values as cluster-wide quotas; distributed admission is a separate
+requirement.
 
 ### External rclone and Git artifact resolution
 

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -16,13 +16,18 @@ from read_opacity_inventory import (
 )
 
 from lab_tracker.api import LabTrackerAPI
-from lab_tracker.artifact_resolution import StoreHealth, StoreHealthStatus
 from lab_tracker.auth import Role, utc_now
-from lab_tracker.models import DataStore, GraphChangeSet
+from lab_tracker.models import GraphChangeSet
 from lab_tracker.routes import graph_batches as graph_batch_routes
 from lab_tracker.routes import graph_drafts as graph_draft_routes
 from lab_tracker.sqlalchemy_repository_parts.graph_drafts import (
     SQLAlchemyGraphChangeSetRepository,
+)
+from lab_tracker.store_health import (
+    CachedStoreHealthProbe,
+    StoreHealth,
+    StoreHealthStatus,
+    StoreProbeTarget,
 )
 
 
@@ -417,14 +422,22 @@ def test_store_health_authorizes_before_live_checker(
     scoped_project_member,
     workflow_registry_records: WorkflowRegistryRecords,
 ) -> None:
-    checked: list[DataStore] = []
+    checked: list[StoreProbeTarget] = []
 
-    def checker(store: DataStore) -> StoreHealth:
-        checked.append(store)
+    def checker(target: StoreProbeTarget) -> StoreHealth:
+        checked.append(target)
         return StoreHealth(StoreHealthStatus.HEALTHY)
 
-    client.app.state.store_health_checker = checker
+    client.app.state.store_health_checker = CachedStoreHealthProbe(checker)
     records = workflow_registry_records
+    authorized = client.get(
+        f"/data-stores/{records.store_id}/health",
+        headers=admin_auth_headers,
+    )
+    assert authorized.status_code == 200, authorized.text
+    assert authorized.json()["data"]["status"] == "healthy"
+    assert [str(target.store_id) for target in checked] == [records.store_id]
+
     hidden = client.get(
         f"/data-stores/{records.store_id}/health",
         headers=scoped_project_member.member_headers,
@@ -434,15 +447,137 @@ def test_store_health_authorizes_before_live_checker(
         headers=scoped_project_member.member_headers,
     )
     assert hidden.status_code == missing.status_code == 404
-    assert checked == []
+    assert [str(target.store_id) for target in checked] == [records.store_id]
 
-    authorized = client.get(
-        f"/data-stores/{records.store_id}/health",
+
+def test_store_health_cache_and_admission_preserve_browser_device_and_lpat_scope(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    scoped_project_member,
+    tmp_path: Path,
+) -> None:
+    visible_store = client.post(
+        "/data-stores",
+        json={
+            "project_id": scoped_project_member.visible_project_id,
+            "name": "visible-principal-health",
+            "kind": "local_fs",
+            "root": str(tmp_path / "visible"),
+        },
         headers=admin_auth_headers,
     )
-    assert authorized.status_code == 200, authorized.text
-    assert authorized.json()["data"]["status"] == "healthy"
-    assert [str(store.store_id) for store in checked] == [records.store_id]
+    hidden_store = client.post(
+        "/data-stores",
+        json={
+            "project_id": scoped_project_member.hidden_project_id,
+            "name": "hidden-principal-health",
+            "kind": "local_fs",
+            "root": str(tmp_path / "hidden"),
+        },
+        headers=admin_auth_headers,
+    )
+    assert visible_store.status_code == hidden_store.status_code == 201
+    visible_store_id = visible_store.json()["data"]["store_id"]
+    hidden_store_id = hidden_store.json()["data"]["store_id"]
+    missing_store_id = str(uuid4())
+
+    enrollment = client.post(
+        "/auth/devices/enrollment",
+        json={},
+        headers=scoped_project_member.member_headers,
+    )
+    assert enrollment.status_code == 201, enrollment.text
+    device = client.post(
+        "/auth/devices/consume",
+        json={
+            "offer_token": enrollment.json()["data"]["offer_token"],
+            "label": "Health scope device",
+        },
+    )
+    assert device.status_code == 201, device.text
+    device_headers = {
+        "Authorization": f"Bearer {device.json()['data']['secret']}"
+    }
+
+    personal_token = client.post(
+        "/auth/tokens",
+        json={
+            "label": "Health scope LPAT",
+            "role": "viewer",
+            "read_only": True,
+            "scope": "all",
+            "expires_at": (utc_now() + timedelta(days=1)).isoformat(),
+        },
+        headers=scoped_project_member.member_headers,
+    )
+    assert personal_token.status_code == 201, personal_token.text
+    lpat_headers = {
+        "Authorization": f"Bearer {personal_token.json()['data']['secret']}"
+    }
+
+    checked: list[StoreProbeTarget] = []
+
+    def checker(target: StoreProbeTarget) -> StoreHealth:
+        checked.append(target)
+        return StoreHealth(StoreHealthStatus.HEALTHY)
+
+    client.app.state.store_health_checker = CachedStoreHealthProbe(checker)
+    warmed_hidden = client.get(
+        f"/data-stores/{hidden_store_id}/health",
+        headers=admin_auth_headers,
+    )
+    assert warmed_hidden.status_code == 200, warmed_hidden.text
+
+    principal_headers = [
+        scoped_project_member.member_headers,
+        device_headers,
+        lpat_headers,
+    ]
+    hidden_responses = []
+    missing_responses = []
+    for headers in principal_headers:
+        visible = client.get(
+            f"/data-stores/{visible_store_id}/health",
+            headers=headers,
+        )
+        hidden = client.get(
+            f"/data-stores/{hidden_store_id}/health",
+            headers=headers,
+        )
+        missing = client.get(
+            f"/data-stores/{missing_store_id}/health",
+            headers=headers,
+        )
+        assert visible.status_code == 200, visible.text
+        assert hidden.status_code == missing.status_code == 404
+        assert hidden.content == missing.content
+        hidden_responses.append(hidden.content)
+        missing_responses.append(missing.content)
+
+    assert hidden_responses == missing_responses
+    assert [str(target.store_id) for target in checked] == [
+        hidden_store_id,
+        visible_store_id,
+    ]
+
+    held = client.app.state.store_health_admission.try_acquire(
+        UUID(scoped_project_member.member_user_id)
+    )
+    assert held is not None
+    try:
+        saturated = [
+            client.get(
+                f"/data-stores/{visible_store_id}/health",
+                headers=headers,
+            )
+            for headers in principal_headers
+        ]
+    finally:
+        held.release()
+
+    assert [response.status_code for response in saturated] == [429, 429, 429]
+    assert len({response.content for response in saturated}) == 1
+    assert all(response.headers["Retry-After"] == "1" for response in saturated)
 
 
 def test_project_and_group_inherited_readers_can_use_all_four_variants(
@@ -660,13 +795,20 @@ def test_group_store_health_authorizes_before_live_checker(
     )
     assert store.status_code == 201, store.text
     store_id = store.json()["data"]["store_id"]
-    checked: list[DataStore] = []
+    checked: list[StoreProbeTarget] = []
 
-    def checker(data_store: DataStore) -> StoreHealth:
-        checked.append(data_store)
+    def checker(target: StoreProbeTarget) -> StoreHealth:
+        checked.append(target)
         return StoreHealth(StoreHealthStatus.HEALTHY)
 
-    client.app.state.store_health_checker = checker
+    client.app.state.store_health_checker = CachedStoreHealthProbe(checker)
+    authorized = client.get(
+        f"/data-stores/{store_id}/health",
+        headers=member_headers,
+    )
+    assert authorized.status_code == 200, authorized.text
+    assert [str(target.store_id) for target in checked] == [store_id]
+
     hidden = client.get(
         f"/data-stores/{store_id}/health",
         headers=scoped_project_member.member_headers,
@@ -676,14 +818,7 @@ def test_group_store_health_authorizes_before_live_checker(
         headers=scoped_project_member.member_headers,
     )
     assert hidden.status_code == missing.status_code == 404
-    assert checked == []
-
-    authorized = client.get(
-        f"/data-stores/{store_id}/health",
-        headers=member_headers,
-    )
-    assert authorized.status_code == 200, authorized.text
-    assert [str(data_store.store_id) for data_store in checked] == [store_id]
+    assert [str(target.store_id) for target in checked] == [store_id]
 
 
 def test_workflow_registry_mutations_keep_permission_errors(

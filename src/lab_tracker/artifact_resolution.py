@@ -97,6 +97,7 @@ from lab_tracker.rclone_store_locator import (
     RcloneRemoteName,
     RegisteredRcloneRoot,
 )
+from lab_tracker.store_health import StoreHealth, StoreHealthStatus, StoreProbeTarget
 
 # Default cap on the bytes returned inline to a caller. Bounds payload size, not
 # verification: the full artifact is always hashed regardless of this cap.
@@ -995,27 +996,6 @@ def store_relative_reference(
     return None
 
 
-class StoreHealthStatus(str, Enum):
-    """Outcome of probing a registered store's reachability."""
-
-    HEALTHY = "healthy"
-    UNREACHABLE = "unreachable"
-    UNSUPPORTED = "unsupported"
-
-
-@dataclass(frozen=True)
-class StoreHealth:
-    status: StoreHealthStatus
-    detail: str | None = None
-
-    @property
-    def is_healthy(self) -> bool:
-        return self.status is StoreHealthStatus.HEALTHY
-
-    def to_json_dict(self) -> dict[str, object]:
-        return {"status": self.status.value, "detail": self.detail}
-
-
 class _StoreHealthHttpResponse(Protocol):
     status_code: int
 
@@ -1027,7 +1007,7 @@ class _StoreHealthHttpClient(Protocol):
 
 
 def check_store_health(
-    store: DataStore,
+    store: DataStore | StoreProbeTarget,
     *,
     rclone_runner: RcloneRunner | None = None,
     git_runner: GitRunner | None = None,
@@ -1158,7 +1138,7 @@ def check_store_health(
 
 
 def _check_http_store_health(
-    store: DataStore,
+    store: DataStore | StoreProbeTarget,
     *,
     http_client: _StoreHealthHttpClient | None,
     timeout: float,

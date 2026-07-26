@@ -6,6 +6,7 @@ import os
 import stat
 import warnings
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 from api_helpers import drain_test_resources, register_test_resources
@@ -28,6 +29,19 @@ from lab_tracker.artifact_resolution_admission import (
     DEFAULT_ARTIFACT_RESOLUTION_PER_ACTOR_IN_FLIGHT_LIMIT,
 )
 from lab_tracker.config import DEFAULT_AUTH_SECRET_KEY, Settings
+from lab_tracker.models import StoreKind
+from lab_tracker.store_health import (
+    DEFAULT_STORE_HEALTH_CACHE_MAX_ENTRIES,
+    DEFAULT_STORE_HEALTH_CACHE_TTL_SECONDS,
+    DEFAULT_STORE_HEALTH_SINGLEFLIGHT_WAIT_SECONDS,
+    StoreHealth,
+    StoreHealthStatus,
+    StoreProbeTarget,
+)
+from lab_tracker.store_health_admission import (
+    DEFAULT_STORE_HEALTH_GLOBAL_IN_FLIGHT_LIMIT,
+    DEFAULT_STORE_HEALTH_PER_ACTOR_IN_FLIGHT_LIMIT,
+)
 
 
 def _settings_from_environment() -> Settings:
@@ -46,6 +60,14 @@ def _clear_auth_env(monkeypatch) -> None:
         "LAB_TRACKER_ARTIFACT_RESOLUTION_PER_ACTOR_IN_FLIGHT_LIMIT",
         raising=False,
     )
+    for variable in (
+        "LAB_TRACKER_STORE_HEALTH_GLOBAL_IN_FLIGHT_LIMIT",
+        "LAB_TRACKER_STORE_HEALTH_PER_ACTOR_IN_FLIGHT_LIMIT",
+        "LAB_TRACKER_STORE_HEALTH_CACHE_MAX_ENTRIES",
+        "LAB_TRACKER_STORE_HEALTH_CACHE_TTL_SECONDS",
+        "LAB_TRACKER_STORE_HEALTH_SINGLEFLIGHT_WAIT_SECONDS",
+    ):
+        monkeypatch.delenv(variable, raising=False)
 
 
 def test_local_environment_allows_default_auth_secret(monkeypatch):
@@ -225,6 +247,110 @@ def test_artifact_resolution_actor_limit_cannot_exceed_global_limit(monkeypatch)
         _settings_from_environment()
 
 
+def test_store_health_control_plane_defaults_are_bounded(monkeypatch):
+    _clear_auth_env(monkeypatch)
+
+    settings = _settings_from_environment()
+
+    assert (
+        settings.store_health_global_in_flight_limit
+        == DEFAULT_STORE_HEALTH_GLOBAL_IN_FLIGHT_LIMIT
+    )
+    assert (
+        settings.store_health_per_actor_in_flight_limit
+        == DEFAULT_STORE_HEALTH_PER_ACTOR_IN_FLIGHT_LIMIT
+    )
+    assert (
+        settings.store_health_cache_max_entries
+        == DEFAULT_STORE_HEALTH_CACHE_MAX_ENTRIES
+    )
+    assert (
+        settings.store_health_cache_ttl_seconds
+        == DEFAULT_STORE_HEALTH_CACHE_TTL_SECONDS
+    )
+    assert (
+        settings.store_health_singleflight_wait_seconds
+        == DEFAULT_STORE_HEALTH_SINGLEFLIGHT_WAIT_SECONDS
+    )
+
+
+@pytest.mark.parametrize(
+    ("variable", "value"),
+    [
+        ("LAB_TRACKER_STORE_HEALTH_GLOBAL_IN_FLIGHT_LIMIT", "0"),
+        ("LAB_TRACKER_STORE_HEALTH_GLOBAL_IN_FLIGHT_LIMIT", "17"),
+        ("LAB_TRACKER_STORE_HEALTH_PER_ACTOR_IN_FLIGHT_LIMIT", "0"),
+        ("LAB_TRACKER_STORE_HEALTH_CACHE_MAX_ENTRIES", "0"),
+        ("LAB_TRACKER_STORE_HEALTH_CACHE_MAX_ENTRIES", "4097"),
+        ("LAB_TRACKER_STORE_HEALTH_CACHE_TTL_SECONDS", "0"),
+        ("LAB_TRACKER_STORE_HEALTH_CACHE_TTL_SECONDS", "301"),
+        ("LAB_TRACKER_STORE_HEALTH_CACHE_TTL_SECONDS", "nan"),
+        ("LAB_TRACKER_STORE_HEALTH_SINGLEFLIGHT_WAIT_SECONDS", "0"),
+        ("LAB_TRACKER_STORE_HEALTH_SINGLEFLIGHT_WAIT_SECONDS", "61"),
+        ("LAB_TRACKER_STORE_HEALTH_SINGLEFLIGHT_WAIT_SECONDS", "inf"),
+    ],
+)
+def test_store_health_control_plane_settings_are_validated(
+    monkeypatch,
+    variable,
+    value,
+):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv(variable, value)
+
+    with pytest.raises(ValidationError, match="STORE_HEALTH"):
+        _settings_from_environment()
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "store_health_global_in_flight_limit",
+        "store_health_per_actor_in_flight_limit",
+        "store_health_cache_max_entries",
+        "store_health_cache_ttl_seconds",
+        "store_health_singleflight_wait_seconds",
+    ],
+)
+def test_store_health_control_plane_settings_reject_booleans(field):
+    with pytest.raises(ValidationError, match="do not accept booleans"):
+        Settings(_env_file=None, **{field: True})
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "store_health_global_in_flight_limit",
+        "store_health_per_actor_in_flight_limit",
+        "store_health_cache_max_entries",
+    ],
+)
+def test_store_health_integer_settings_reject_non_integral_numbers(field):
+    with pytest.raises(ValidationError, match="require integers"):
+        Settings(_env_file=None, **{field: 1.5})
+
+
+def test_store_health_actor_limit_cannot_exceed_global_limit(monkeypatch):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv("LAB_TRACKER_STORE_HEALTH_GLOBAL_IN_FLIGHT_LIMIT", "2")
+    monkeypatch.setenv("LAB_TRACKER_STORE_HEALTH_PER_ACTOR_IN_FLIGHT_LIMIT", "3")
+
+    with pytest.raises(ValidationError, match="STORE_HEALTH_PER_ACTOR"):
+        _settings_from_environment()
+
+
+def test_host_io_admission_limits_share_one_worker_capacity_budget(monkeypatch):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv(
+        "LAB_TRACKER_ARTIFACT_RESOLUTION_GLOBAL_IN_FLIGHT_LIMIT",
+        "20",
+    )
+    monkeypatch.setenv("LAB_TRACKER_STORE_HEALTH_GLOBAL_IN_FLIGHT_LIMIT", "13")
+
+    with pytest.raises(ValidationError, match="plus"):
+        _settings_from_environment()
+
+
 @pytest.mark.parametrize(
     ("variable", "field"),
     [
@@ -312,6 +438,23 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(monkeypatch):
         "registry_from_env",
         recording_registry_from_env,
     )
+
+    def recording_check_store_health(
+        target,
+        *,
+        git_remote_policy,
+        git_health_cwd,
+    ):
+        captured["health_target"] = target
+        captured["health_git_remote_policy"] = git_remote_policy
+        captured["health_git_cwd"] = git_health_cwd
+        return StoreHealth(StoreHealthStatus.HEALTHY)
+
+    monkeypatch.setattr(
+        runtime_module,
+        "check_store_health",
+        recording_check_store_health,
+    )
     settings = Settings(
         _env_file=None,
         database_url="sqlite+pysqlite:///:memory:",
@@ -321,6 +464,11 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(monkeypatch):
         resolver_subprocess_deadline_seconds=7.25,
         artifact_resolution_global_in_flight_limit=5,
         artifact_resolution_per_actor_in_flight_limit=3,
+        store_health_global_in_flight_limit=3,
+        store_health_per_actor_in_flight_limit=2,
+        store_health_cache_max_entries=17,
+        store_health_cache_ttl_seconds=4.5,
+        store_health_singleflight_wait_seconds=2.25,
         git_allowed_remotes="https://settings.example/lab",
     )
     runtime = build_app_runtime(settings)
@@ -338,23 +486,36 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(monkeypatch):
         )
         assert runtime.artifact_resolution_admission.global_in_flight_limit == 5
         assert runtime.artifact_resolution_admission.per_actor_in_flight_limit == 3
+        assert app.state.store_health_admission is runtime.store_health_admission
+        assert runtime.store_health_admission.global_in_flight_limit == 3
+        assert runtime.store_health_admission.per_actor_in_flight_limit == 2
         assert app.state.git_health_workdir is runtime.git_health_workdir
         assert app.state.store_health_checker is runtime.store_health_checker
+        assert runtime.store_health_checker.max_entries == 17
+        assert runtime.store_health_checker.ttl_seconds == 4.5
+        assert runtime.store_health_checker.waiter_timeout_seconds == 2.25
         assert app.state.cleanup_git_health_workdir.__self__ is runtime
-        assert (
-            runtime.store_health_checker.git_remote_policy
-            is runtime.git_remote_policy
-        )
-        assert (
-            runtime.store_health_checker.git_health_workdir
-            is runtime.git_health_workdir
-        )
         assert captured == {
             "http_policy": runtime.outbound_http_policy,
             "git_remote_policy": runtime.git_remote_policy,
             "http_deadline_seconds": 12.5,
             "subprocess_deadline_seconds": 7.25,
         }
+        health_target = StoreProbeTarget(
+            store_id=UUID(int=1),
+            name="runtime-wiring",
+            kind=StoreKind.GIT,
+            root="https://settings.example/lab/repo.git",
+            endpoint=None,
+            credential_ref=None,
+        )
+        assert runtime.store_health_checker(health_target).is_healthy
+        assert captured["health_target"] is health_target
+        assert (
+            captured["health_git_remote_policy"]
+            is runtime.git_remote_policy
+        )
+        assert captured["health_git_cwd"] is runtime.git_health_workdir
         assert git_health_workdir.is_dir()
         assert list(git_health_workdir.iterdir()) == []
         assert not (git_health_workdir / ".git").exists()
@@ -534,6 +695,20 @@ def test_compose_forwards_outbound_artifact_policy_settings():
         "LAB_TRACKER_GIT_ALLOWED_REMOTES: "
         "${LAB_TRACKER_GIT_ALLOWED_REMOTES:-}"
     ) in compose
+
+
+def test_compose_forwards_store_health_control_plane_settings():
+    compose = Path("docker-compose.yml").read_text(encoding="utf-8")
+
+    expected = {
+        "LAB_TRACKER_STORE_HEALTH_GLOBAL_IN_FLIGHT_LIMIT": "4",
+        "LAB_TRACKER_STORE_HEALTH_PER_ACTOR_IN_FLIGHT_LIMIT": "1",
+        "LAB_TRACKER_STORE_HEALTH_CACHE_MAX_ENTRIES": "256",
+        "LAB_TRACKER_STORE_HEALTH_CACHE_TTL_SECONDS": "10",
+        "LAB_TRACKER_STORE_HEALTH_SINGLEFLIGHT_WAIT_SECONDS": "10",
+    }
+    for variable, default in expected.items():
+        assert f"{variable}: ${{{variable}:-{default}}}" in compose
 
 
 def test_default_openai_model_is_standard_account_model(monkeypatch):

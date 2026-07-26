@@ -230,6 +230,7 @@ def test_request_handlers_share_the_middleware_transaction_identity():
                 for handler in (
                     handlers.catalogs,
                     handlers.context,
+                    handlers.store_health,
                     handlers.dataset_files,
                     handlers.visualization_files,
                     handlers.deletions,

@@ -9,13 +9,13 @@ from starlette import status as http_status
 from starlette.requests import Request
 
 from lab_tracker.api import LabTrackerAPI
-from lab_tracker.artifact_resolution import check_store_health
 from lab_tracker.models import DataStore
 from lab_tracker.schemas import DataStoreCreate, Envelope, ListEnvelope
 
 from .shared import (
     actor_from_request,
     api_from_request,
+    handlers_from_request,
     list_response,
     paginate,
     validate_pagination,
@@ -72,17 +72,15 @@ def build_data_stores_router(api: LabTrackerAPI) -> APIRouter:
 
     @router.get("/data-stores/{store_id}/health")
     def data_store_health(store_id: UUID, request: Request):
-        store = api_from_request(request, api).get_data_store_for_read(
+        result = handlers_from_request(request).store_health.check(
             store_id,
             actor=actor_from_request(request),
         )
-        checker = getattr(request.app.state, "store_health_checker", None)
-        health = checker(store) if checker is not None else check_store_health(store)
         return Envelope(
             data={
-                "store_id": str(store.store_id),
-                "kind": store.kind.value,
-                **health.to_json_dict(),
+                "store_id": str(result.store_id),
+                "kind": result.kind.value,
+                **result.health.to_json_dict(),
             }
         )
 
