@@ -149,19 +149,24 @@ research record:
   committed worked example under `docs/examples/` guarded by a drift test.
 - On-demand resolution of external artifact references (content hash is the
   integrity gate). Local resolution and registered local-store health share one
-  immutable operator-root policy parsed from the platform-path-separated
-  `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS`; the application runtime denies all local
-  roots when it is unset or empty. Local resolution optionally recovers a
-  moved/renamed file by its content hash within those roots
+  immutable, namespace-transitive operator-root policy parsed from the
+  platform-path-separated `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS`; it grants the
+  subtree visible in the operator-controlled service namespace rather than one
+  device identity, and the application runtime denies all local roots when it
+  is unset or empty. Local resolution optionally recovers a moved/renamed file
+  by its content hash within those roots
   (`LAB_TRACKER_RESOLVER_RECOVERY`, off by default, bounded, read-only).
   Local health is a bounded, isolated, output-free directory probe whose
   helper-side search/traversal and validation remain bound to no-follow
   directory handles across link and junction substitution races. Helper-owned
   close attempts are best effort and contained helper exit is the cleanup
   backstop. The result is advisory rather than registration validation or a
-  durable filesystem lease; bounded pre-follow parent planning and
-  mount-crossing authority remain `lab-tracker-n5kp.71` and
-  `lab-tracker-n5kp.72`.
+  durable filesystem lease. POSIX ordinary/bind mounts beneath a root are
+  allowed; unsupported Windows nested volume/UNC/device/GUID namespaces fail
+  closed; untrusted topology mutation makes the local surface unsupported.
+  Bounded pre-follow parent planning remains `lab-tracker-n5kp.71`; the mount
+  decision is normative in
+  [`configuration.md`](configuration.md#mount-and-namespace-authority).
   Registered `git` data stores resolve `path@commit` locators read-only and
   on demand, gated by an operator remote allowlist
   (`LAB_TRACKER_GIT_ALLOWED_REMOTES`, deny-by-default), a protocol allowlist,
