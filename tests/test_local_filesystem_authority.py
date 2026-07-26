@@ -70,7 +70,10 @@ def test_unscoped_library_compatibility_selects_direct_root_without_enumerable_r
     candidate = tmp_path / "artifact.bin"
 
     assert authority.legacy_roots == ()
+    assert authority._recovery_roots() == ()
     assert _selected_request(authority, candidate) == (str(candidate), ("/",))
+    with pytest.raises(ValueError, match="grant is invalid"):
+        authority._request_for_root_index(0)
     assert authority.select_directory("//unsupported/namespace") is None
 
 
@@ -156,6 +159,15 @@ def test_configuration_preserves_path_list_parsing_and_omits_empty_parts(
     authority = LocalFilesystemAuthority.from_config(raw)
 
     assert authority.legacy_roots == (str(first), str(second))
+    assert authority._recovery_roots() == (str(first), str(second))
+    assert authority._request_for_root_index(1) == (
+        str(second),
+        (str(second),),
+    )
+    with pytest.raises(ValueError, match="grant is invalid"):
+        authority._request_for_root_index(True)
+    with pytest.raises(ValueError, match="grant is invalid"):
+        authority._request_for_root_index(2)
 
 
 def test_explicit_captured_working_directory_is_stable_after_chdir(

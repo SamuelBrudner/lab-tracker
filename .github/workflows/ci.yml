@@ -159,9 +159,7 @@ jobs:
           sudo mount --bind "${bind_source}" "${bind_mount}"
           export LAB_TRACKER_TEST_ORDINARY_MOUNT_ROOT="${ordinary_mount}"
           export LAB_TRACKER_TEST_BIND_MOUNT_ROOT="${bind_mount}"
-          uv run pytest -q \
-            tests/test_posix_pre_follow_local_store_health_helper.py \
-            -k "native_mount_descendant or native_mount_regular_file"
+          uv run pytest -q tests/test_posix_pre_follow_local_store_health_helper.py
 
   windows-containment:
     name: Windows containment and registered artifacts

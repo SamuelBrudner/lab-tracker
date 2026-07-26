@@ -16,8 +16,11 @@ from lab_tracker.artifact_resolution_admission import (
 )
 from lab_tracker.bounded_subprocess import MAX_PROCESS_DEADLINE_SECONDS
 from lab_tracker.local_resolution_budget import (
+    DEFAULT_LOCAL_RECOVERY_MAX_DIRECTORIES,
     DEFAULT_LOCAL_RECOVERY_MAX_FILES,
     DEFAULT_LOCAL_RESOLUTION_MAX_READ_BYTES,
+    MAX_LOCAL_RECOVERY_MAX_DIRECTORIES,
+    MAX_LOCAL_RECOVERY_MAX_FILES,
     MAX_LOCAL_RESOLUTION_MAX_READ_BYTES,
 )
 from lab_tracker.outbound_http import MAX_OUTBOUND_HTTP_DEADLINE_SECONDS
@@ -73,6 +76,7 @@ class Settings(BaseSettings):
     resolver_subprocess_deadline_seconds: float = 30.0
     resolver_recovery: bool = False
     resolver_recovery_max_files: int = DEFAULT_LOCAL_RECOVERY_MAX_FILES
+    resolver_recovery_max_directories: int = DEFAULT_LOCAL_RECOVERY_MAX_DIRECTORIES
     resolver_recovery_max_bytes: int = DEFAULT_LOCAL_RESOLUTION_MAX_READ_BYTES
     artifact_resolution_global_in_flight_limit: int = (
         DEFAULT_ARTIFACT_RESOLUTION_GLOBAL_IN_FLIGHT_LIMIT
@@ -187,6 +191,7 @@ class Settings(BaseSettings):
 
     @field_validator(
         "resolver_recovery_max_files",
+        "resolver_recovery_max_directories",
         "resolver_recovery_max_bytes",
         mode="before",
     )
@@ -208,8 +213,21 @@ class Settings(BaseSettings):
     @field_validator("resolver_recovery_max_files")
     @classmethod
     def _validate_resolver_recovery_max_files(cls, value: int) -> int:
-        if value < 1:
-            raise ValueError("LAB_TRACKER_RESOLVER_RECOVERY_MAX_FILES must be at least 1.")
+        if not 1 <= value <= MAX_LOCAL_RECOVERY_MAX_FILES:
+            raise ValueError(
+                "LAB_TRACKER_RESOLVER_RECOVERY_MAX_FILES must be between 1 and "
+                f"{MAX_LOCAL_RECOVERY_MAX_FILES}."
+            )
+        return value
+
+    @field_validator("resolver_recovery_max_directories")
+    @classmethod
+    def _validate_resolver_recovery_max_directories(cls, value: int) -> int:
+        if not 1 <= value <= MAX_LOCAL_RECOVERY_MAX_DIRECTORIES:
+            raise ValueError(
+                "LAB_TRACKER_RESOLVER_RECOVERY_MAX_DIRECTORIES must be between 1 and "
+                f"{MAX_LOCAL_RECOVERY_MAX_DIRECTORIES}."
+            )
         return value
 
     @field_validator("resolver_recovery_max_bytes")

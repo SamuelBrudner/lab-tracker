@@ -51,7 +51,6 @@ from lab_tracker.local_filesystem_authority import LocalFilesystemAuthority
 from lab_tracker.local_filesystem_operations import (
     BoundedLocalFilesystemOperations,
 )
-from lab_tracker.local_path_policy import LocalPathPolicy
 from lab_tracker.local_resolution_budget import LocalResolutionLimits
 from lab_tracker.local_store_health import LocalStoreHealthProbe
 from lab_tracker.logging import configure_logging
@@ -151,9 +150,7 @@ class AppRuntime:
     review_email_provider: ReviewEmailProvider | None
     auth_rate_limiter: InMemoryRateLimiter
     pat_rate_limiter: InMemoryRateLimiter
-    local_filesystem_authority: LocalFilesystemAuthority
     local_filesystem_operations: BoundedLocalFilesystemOperations
-    local_path_policy: LocalPathPolicy
     outbound_http_policy: OutboundHttpPolicy
     outbound_http_client: OutboundHttpClient
     rclone_remote_policy: RcloneRemotePolicy
@@ -177,10 +174,6 @@ class AppRuntime:
 
 def build_app_runtime(settings: Settings) -> AppRuntime:
     configure_logging(settings.log_level)
-    local_filesystem_authority = LocalFilesystemAuthority.from_config(
-        settings.resolver_allowed_roots,
-    )
-    local_path_policy = LocalPathPolicy(local_filesystem_authority.legacy_roots)
     outbound_http_policy = outbound_http_policy_from_config(
         allowed_authorities=settings.resolver_http_allowed_authorities,
         allowed_networks=settings.resolver_http_allowed_networks,
@@ -195,7 +188,9 @@ def build_app_runtime(settings: Settings) -> AppRuntime:
     )
     process_executor = BoundedSubprocessExecutor()
     local_filesystem_operations = BoundedLocalFilesystemOperations(
-        authority=local_filesystem_authority,
+        authority=LocalFilesystemAuthority.from_config(
+            settings.resolver_allowed_roots,
+        ),
         executor=process_executor,
     )
     outbound_http_client = SafeHttpClient(
@@ -206,6 +201,7 @@ def build_app_runtime(settings: Settings) -> AppRuntime:
         local_recovery = RecoveryPolicy(
             enabled=settings.resolver_recovery,
             max_files=settings.resolver_recovery_max_files,
+            max_directories=settings.resolver_recovery_max_directories,
             max_bytes=settings.resolver_recovery_max_bytes,
         )
         local_resolution_limits = LocalResolutionLimits(
@@ -213,8 +209,8 @@ def build_app_runtime(settings: Settings) -> AppRuntime:
             deadline_seconds=settings.resolver_subprocess_deadline_seconds,
         )
         resolver_registry = registry_from_env(
-            local_path_policy=local_path_policy,
             local_file_reader=local_filesystem_operations,
+            local_recovery_enumerator=local_filesystem_operations,
             local_resolution_limits=local_resolution_limits,
             recovery=local_recovery,
             http_policy=outbound_http_policy,
@@ -227,9 +223,7 @@ def build_app_runtime(settings: Settings) -> AppRuntime:
         )
         return _build_app_runtime(
             settings,
-            local_filesystem_authority=local_filesystem_authority,
             local_filesystem_operations=local_filesystem_operations,
-            local_path_policy=local_path_policy,
             outbound_http_policy=outbound_http_policy,
             outbound_http_client=outbound_http_client,
             rclone_remote_policy=rclone_remote_policy,
@@ -246,9 +240,7 @@ def build_app_runtime(settings: Settings) -> AppRuntime:
 def _build_app_runtime(
     settings: Settings,
     *,
-    local_filesystem_authority: LocalFilesystemAuthority,
     local_filesystem_operations: BoundedLocalFilesystemOperations,
-    local_path_policy: LocalPathPolicy,
     outbound_http_policy: OutboundHttpPolicy,
     outbound_http_client: OutboundHttpClient,
     rclone_remote_policy: RcloneRemotePolicy,
@@ -353,9 +345,7 @@ def _build_app_runtime(
         review_email_provider=review_email_provider,
         auth_rate_limiter=auth_rate_limiter,
         pat_rate_limiter=pat_rate_limiter,
-        local_filesystem_authority=local_filesystem_authority,
         local_filesystem_operations=local_filesystem_operations,
-        local_path_policy=local_path_policy,
         outbound_http_policy=outbound_http_policy,
         outbound_http_client=outbound_http_client,
         rclone_remote_policy=rclone_remote_policy,
@@ -635,7 +625,6 @@ def configure_app_state(app: FastAPI, runtime: AppRuntime) -> None:
     app.state.review_email_provider = runtime.review_email_provider
     app.state.auth_rate_limiter = runtime.auth_rate_limiter
     app.state.pat_rate_limiter = runtime.pat_rate_limiter
-    app.state.local_path_policy = runtime.local_path_policy
     app.state.outbound_http_policy = runtime.outbound_http_policy
     app.state.rclone_remote_policy = runtime.rclone_remote_policy
     app.state.git_remote_policy = runtime.git_remote_policy

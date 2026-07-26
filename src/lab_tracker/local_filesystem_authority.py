@@ -155,14 +155,40 @@ class LocalFilesystemAuthority:
 
     @property
     def legacy_roots(self) -> tuple[str, ...]:
-        """Return normalized roots for not-yet-migrated legacy consumers.
+        """Return normalized roots for compatibility-only library consumers.
 
         New filesystem consumers must depend on a narrow broker role instead.
-        This compatibility view exists only while artifact reading and recovery
-        still use :class:`~lab_tracker.local_path_policy.LocalPathPolicy`.
+        Runtime recovery enumeration uses the private broker request surface.
         """
 
         return tuple(root.rendered for root in self._roots)
+
+    def _recovery_roots(self) -> tuple[str, ...]:
+        """Reveal explicit roots only to the concrete bounded broker.
+
+        Unscoped library compatibility deliberately has no enumerable roots,
+        even though it can select a drive or POSIX anchor for one direct read.
+        """
+
+        if self._unscoped_library_compatibility:
+            return ()
+        return tuple(root.rendered for root in self._roots)
+
+    def _request_for_root_index(
+        self,
+        root_index: int,
+    ) -> tuple[str, tuple[str, ...]]:
+        """Reveal one configured root for an enumerated broker target."""
+
+        if (
+            self._unscoped_library_compatibility
+            or type(root_index) is not int
+            or root_index < 0
+            or root_index >= len(self._roots)
+        ):
+            raise ValueError("Local filesystem grant is invalid.")
+        rendered = self._roots[root_index].rendered
+        return rendered, (rendered,)
 
     def select_directory(
         self,

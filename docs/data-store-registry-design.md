@@ -363,13 +363,15 @@ Shipped:
   byte or ambiguous read fails terminally with a static path-free result.
   Unset or empty runtime root configuration denies every local root.
 
-  Recovery enumeration/root metadata remain transitional application-side
-  operations scoped to the registered root; every yielded candidate's bytes
-  still cross the retained nested-store helper. The current `os.walk` deadline
-  checks cannot interrupt one blocked directory operation, and brokered bounded
-  enumeration remains `lab-tracker-n5kp.61`. The grant is
-  namespace-transitive rather than device-bound; the trusted actor, platform
-  matrix, and point-in-time lifecycle are defined by the normative
+  Recovery enumeration is one brokered helper operation scoped to the retained
+  registered root. It visits at most the configured directory ceiling, returns
+  at most the configured number of path-free relative locators after complete
+  cleanup, and consumes the same absolute resolution deadline. Escaping aliases,
+  malformed/partial metadata, timeout, count mismatch, or ownership/cleanup
+  uncertainty fail closed; every candidate's bytes then cross the same retained
+  nested-store helper. The grant is namespace-transitive rather than
+  device-bound; the trusted actor, platform matrix, and point-in-time lifecycle
+  are defined by the normative
   [mount and namespace authority](configuration.md#mount-and-namespace-authority)
   contract.
 - ✅ Registered HTTP prefix confinement: a pure value validates the canonical

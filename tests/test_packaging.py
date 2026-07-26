@@ -93,6 +93,28 @@ def _isolated_read_helper_environment(
     )
 
 
+def _isolated_enumeration_helper_environment(
+    operator_root: Path,
+    *,
+    store_root: Path | None = None,
+) -> dict[str, str]:
+    payload: dict[str, object] = {
+        "v": LOCAL_FILESYSTEM_PROTOCOL_VERSION,
+        "op": (
+            "enumerate-registered-files"
+            if store_root is not None
+            else "enumerate-files"
+        ),
+        "roots": [os.fspath(operator_root)],
+        "target_name": "artifact.bin",
+        "max_files": 4,
+        "max_directories": 4,
+    }
+    if store_root is not None:
+        payload["store_root"] = os.fspath(store_root)
+    return _isolated_helper_environment_from_payload(payload)
+
+
 def _build_wheel(repo_root: Path, wheelhouse: Path) -> Path:
     uv = shutil.which("uv")
     if uv is None:
@@ -234,6 +256,34 @@ def test_wheel_contains_and_runs_isolated_local_health_helper(
     assert read_completed.returncode == 0
     assert read_completed.stdout == binary_payload
     assert read_completed.stderr == b""
+
+    for environment in (
+        _isolated_enumeration_helper_environment(store_root),
+        _isolated_enumeration_helper_environment(
+            store_root.parent,
+            store_root=store_root,
+        ),
+    ):
+        enumeration_completed = subprocess.run(  # noqa: S603 - fixed wheel member
+            [sys.executable, "-I", "-S", "-B", str(helper)],
+            check=False,
+            capture_output=True,
+            env=environment,
+        )
+
+        assert enumeration_completed.returncode == 0
+        assert enumeration_completed.stderr == b""
+        assert json.loads(enumeration_completed.stdout.decode("ascii")) == {
+            "v": LOCAL_FILESYSTEM_PROTOCOL_VERSION,
+            "status": "complete",
+            "directories": 1,
+            "candidates": [
+                {
+                    "root_index": 0,
+                    "locator": ["artifact.bin"],
+                }
+            ],
+        }
 
 
 def test_alembic_package_data_covers_all_migration_files():
