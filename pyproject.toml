@@ -5,12 +5,32 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "lab-tracker"
 version = "0.1.0"
-description = "Lab tracker project"
+description = "Human-gated research provenance for questions, evidence, analyses, claims, and figures"
+readme = "README.md"
 requires-python = ">=3.10"
+keywords = [
+  "research provenance",
+  "scientific workflows",
+  "research data",
+  "knowledge graph",
+  "human-in-the-loop",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "Framework :: FastAPI",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Topic :: Scientific/Engineering",
+]
 dependencies = [
   "alembic",
+  "dnspython>=2.7",
   "fastapi",
   "httpx>=0.27.1",
+  "idna>=3.7,<4",
   "mcp>=1.27,<2",
   "psycopg[binary]>=3.1",
   "pydantic-settings",
@@ -20,14 +40,22 @@ dependencies = [
   "uvicorn",
 ]
 
+[project.urls]
+Homepage = "https://github.com/SamuelBrudner/lab-tracker"
+Demo = "https://samuelbrudner.github.io/lab-tracker/app/"
+Documentation = "https://github.com/SamuelBrudner/lab-tracker/tree/main/docs"
+Issues = "https://github.com/SamuelBrudner/lab-tracker/issues"
+
 [project.optional-dependencies]
 test = [
   "pytest",
   "pytest-cov",
   "pytest-xdist",
   "pyld",
+  "tomli; python_version < '3.11'",
 ]
 lint = [
+  "mypy>=1.15,<2",
   "ruff",
 ]
 figure = [
@@ -71,6 +99,18 @@ addopts = ["--cov=lab_tracker", "-n", "auto"]
 markers = [
   "postgres: requires LAB_TRACKER_POSTGRES_TEST_DATABASE_URL and a reachable Postgres server",
 ]
+filterwarnings = [
+  # Fail on an unclosed database connection: SQLite emits a ResourceWarning when
+  # a connection is finalized without being closed, so a test that leaks an
+  # engine/session (the class of leak the test fixtures were fixed for) turns
+  # into an error instead of quiet warning noise. pytest surfaces it through its
+  # unraisable-exception hook at the owning test's teardown.
+  "error::ResourceWarning",
+  # FastAPI's TestClient re-exports starlette.testclient, which warns that using
+  # httpx (rather than httpx2) is deprecated — a third-party transition Lab
+  # Tracker does not drive. Scoped to this exact message only.
+  "ignore:Using .httpx. with .starlette.testclient. is deprecated",
+]
 
 [tool.ruff]
 line-length = 100
@@ -82,3 +122,51 @@ select = ["E", "F", "I", "B", "UP", "SIM"]
 
 [tool.ruff.lint.isort]
 known-third-party = ["alembic"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+follow_imports = "silent"
+warn_unused_configs = true
+show_error_codes = true
+files = [
+  "src/lab_tracker/patching.py",
+  "src/lab_tracker/repository.py",
+  "src/lab_tracker/decision_context_types.py",
+  "src/lab_tracker/decision_context_query.py",
+  "src/lab_tracker/decision_context_use_case.py",
+  "src/lab_tracker/project_graph.py",
+  "src/lab_tracker/provider_error_redaction.py",
+  "src/lab_tracker/outbound_http.py",
+  "src/lab_tracker/artifact_resolution.py",
+  "src/lab_tracker/git_remote_policy.py",
+  "src/lab_tracker/git_store_locator.py",
+  "src/lab_tracker/local_store_locator.py",
+  "src/lab_tracker/rclone_store_locator.py",
+  "src/lab_tracker/local_path_policy.py",
+  "src/lab_tracker/local_file_access.py",
+  "src/lab_tracker/_windows_local_file.py",
+  "src/lab_tracker/artifact_resolution_admission.py",
+  "src/lab_tracker/bounded_subprocess.py",
+  "src/lab_tracker/_windows_job.py",
+  "src/lab_tracker/application",
+  "src/lab_tracker/graph_drafting.py",
+  "src/lab_tracker/services/shared.py",
+  "src/lab_tracker/services/graph_draft_generation.py",
+  "src/lab_tracker/services/graph_draft_review.py",
+  "src/lab_tracker/services/graph_draft_commit.py",
+  "src/lab_tracker/services/graph_draft_scheduling.py",
+  "src/lab_tracker/services/graph_draft_scheduling_ports.py",
+  "src/lab_tracker/services/graph_draft_service.py",
+  "src/lab_tracker/api_parts/graph_drafts.py",
+  "src/lab_tracker/api_parts/projects.py",
+  "src/lab_tracker/api_parts/questions.py",
+  "src/lab_tracker/api_parts/datasets.py",
+  "src/lab_tracker/api_parts/sessions.py",
+  "src/lab_tracker/api_parts/analyses.py",
+  "src/lab_tracker/api_parts/goals.py",
+  "src/lab_tracker/api.py",
+  "src/lab_tracker/app_parts/runtime.py",
+  "src/lab_tracker/routes/graph_draft_clients.py",
+  "tests/typing/contracts.py",
+]

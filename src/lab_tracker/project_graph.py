@@ -2,32 +2,38 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-from typing import Any
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass
+from types import MappingProxyType
+from typing import Literal, Protocol, TypeVar
 from uuid import UUID
 
 from lab_tracker.models import (
     Analysis,
     Claim,
     ClaimEdge,
+    ClaimRelation,
     Dataset,
     EntityType,
     ExplorationNode,
     ExternalArtifactReference,
     Goal,
+    GoalLinkStatus,
+    GoalRelation,
     Note,
     Question,
     QuestionLink,
+    QuestionLinkRole,
     Session,
     Visualization,
 )
-from lab_tracker.repository import LabTrackerRepository
 from lab_tracker.schemas import (
     ProjectGraphEdge,
     ProjectGraphNode,
     ProjectGraphRead,
     ProjectGraphView,
 )
+from lab_tracker.vocabulary import concept_iri, term_iri
 
 _VIEW_VALUES = {"evidence", "questions", "full"}
 _NODE_TYPE_ORDER = {
@@ -44,10 +50,294 @@ _NODE_TYPE_ORDER = {
 }
 _QUESTION_LINK_ROLE_ORDER = {"primary": 0, "secondary": 1}
 _GRAPH_LABEL_LIMIT = 180
+EntityT = TypeVar("EntityT")
+
+# The project graph is a frontend projection. Its compact node and relationship
+# tokens stay wire-compatible presentation identifiers; these maps make their
+# public JSON-LD meaning explicit without turning the tokens into ontology IRIs.
+PROJECT_GRAPH_NODE_CLASS_IRIS: Mapping[str, str] = MappingProxyType(
+    {
+        "question": term_iri("ResearchQuestion"),
+        "dataset": term_iri("Dataset"),
+        "analysis": term_iri("Analysis"),
+        "claim": term_iri("Claim"),
+        "exploration_node": term_iri("ExplorationNode"),
+        "visualization": term_iri("Visualization"),
+        "goal": term_iri("Goal"),
+        "note": term_iri("Note"),
+        "session": term_iri("AcquisitionSession"),
+    }
+)
+PROJECT_GRAPH_CONDITIONAL_NODE_CLASS_IRIS: Mapping[str, Mapping[str, str]] = (
+    MappingProxyType(
+        {
+            # External artifacts preserve the persisted reference kind. The
+            # project graph displays both under one presentation token.
+            "external_artifact": MappingProxyType(
+                {
+                    "entity": "prov:Entity",
+                    "activity": "prov:Activity",
+                }
+            ),
+        }
+    )
+)
+PROJECT_GRAPH_PRESENTATION_ONLY_NODE_TYPES: Mapping[str, str] = MappingProxyType(
+    {
+        "project": (
+            "Project scopes ProjectGraphRead through project_id; it is excluded "
+            "from the semantic profile until projects have a first-class export."
+        ),
+    }
+)
+
+ProjectGraphSemanticDirection = Literal["source_to_target", "target_to_source"]
+
+
+@dataclass(frozen=True)
+class DirectRelationshipSemanticMapping:
+    """Semantic predicate represented by one direct presentation edge."""
+
+    predicate_iri: str
+    direction: ProjectGraphSemanticDirection = "source_to_target"
+
+
+@dataclass(frozen=True)
+class QualifiedRelationshipSemanticMapping:
+    """Qualified resource represented compactly by one presentation edge."""
+
+    class_iri: str
+    direction: ProjectGraphSemanticDirection = "source_to_target"
+    concept_iris: tuple[str, ...] = ()
+    additional_concept_schemes: tuple[str, ...] = ()
+    classification_predicate_iri: str = term_iri("classifiedAs")
+
+
+_DIRECT_RELATIONSHIP_SEMANTICS: dict[str, DirectRelationshipSemanticMapping] = {
+    "question_parent": DirectRelationshipSemanticMapping(
+        "prov:wasDerivedFrom",
+        "target_to_source",
+    ),
+    "question_superseded_by": DirectRelationshipSemanticMapping(
+        "prov:wasRevisionOf",
+        "target_to_source",
+    ),
+    "question_supersedes": DirectRelationshipSemanticMapping("prov:wasRevisionOf"),
+    "analysis_dataset": DirectRelationshipSemanticMapping("prov:used", "target_to_source"),
+    "claim_dataset_support": DirectRelationshipSemanticMapping(
+        term_iri("supportsDataset"),
+        "target_to_source",
+    ),
+    "claim_analysis_support": DirectRelationshipSemanticMapping(
+        term_iri("supportsAnalysis"),
+        "target_to_source",
+    ),
+    "claim_question_answers": DirectRelationshipSemanticMapping(term_iri("answersQuestion")),
+    "claim_cites": DirectRelationshipSemanticMapping(term_iri("cites")),
+    "exploration_target": DirectRelationshipSemanticMapping(
+        term_iri("target"),
+        "target_to_source",
+    ),
+    "exploration_evidence": DirectRelationshipSemanticMapping(
+        term_iri("evidence"),
+        "target_to_source",
+    ),
+    "exploration_parent": DirectRelationshipSemanticMapping(
+        "prov:wasDerivedFrom",
+        "target_to_source",
+    ),
+    "exploration_dependency": DirectRelationshipSemanticMapping(
+        term_iri("alsoDependsOn"),
+        "target_to_source",
+    ),
+    "exploration_invalidates_node": DirectRelationshipSemanticMapping(
+        term_iri("invalidates")
+    ),
+    "exploration_invalidates_claim": DirectRelationshipSemanticMapping(
+        term_iri("invalidates")
+    ),
+    "visualization_analysis": DirectRelationshipSemanticMapping(
+        "prov:wasGeneratedBy",
+        "target_to_source",
+    ),
+    "visualization_dataset": DirectRelationshipSemanticMapping(
+        "prov:wasDerivedFrom",
+        "target_to_source",
+    ),
+    "visualization_claim": DirectRelationshipSemanticMapping(
+        term_iri("relatedClaim"),
+        "target_to_source",
+    ),
+    "session_question": DirectRelationshipSemanticMapping(
+        term_iri("primaryQuestion"),
+        "target_to_source",
+    ),
+    "dataset_source_session": DirectRelationshipSemanticMapping(
+        term_iri("sourceSession"),
+        "target_to_source",
+    ),
+}
+_DIRECT_RELATIONSHIP_SEMANTICS.update(
+    {
+        f"note_target_{entity_type.value}": DirectRelationshipSemanticMapping(
+            term_iri("target")
+        )
+        for entity_type in EntityType
+        if entity_type is not EntityType.PROJECT
+    }
+)
+PROJECT_GRAPH_DIRECT_RELATIONSHIP_SEMANTICS: Mapping[
+    str, DirectRelationshipSemanticMapping
+] = MappingProxyType(_DIRECT_RELATIONSHIP_SEMANTICS)
+
+_QUALIFIED_RELATIONSHIP_SEMANTICS: dict[
+    str, QualifiedRelationshipSemanticMapping
+] = {
+    **{
+        f"dataset_question_{role.value}": QualifiedRelationshipSemanticMapping(
+            class_iri=term_iri("QuestionLink"),
+            direction="target_to_source",
+            concept_iris=(concept_iri("questionLinkRole", role.value),),
+            # Outcome is persisted on the qualified QuestionLink but is not
+            # encoded in the compact project-graph relationship token.
+            additional_concept_schemes=("outcomeStatus",),
+        )
+        for role in QuestionLinkRole
+    },
+    **{
+        f"claim_relation_{relation.value}": QualifiedRelationshipSemanticMapping(
+            class_iri=term_iri("ClaimRelation"),
+            concept_iris=(concept_iri("claimRelation", relation.value),),
+        )
+        for relation in ClaimRelation
+    },
+    **{
+        f"goal_{relation.value}_{status.value}": QualifiedRelationshipSemanticMapping(
+            class_iri=term_iri("GoalLink"),
+            direction="target_to_source",
+            concept_iris=(
+                concept_iri("goalRelation", relation.value),
+                concept_iri("goalLinkStatus", status.value),
+            ),
+        )
+        for relation in GoalRelation
+        for status in GoalLinkStatus
+    },
+}
+PROJECT_GRAPH_QUALIFIED_RELATIONSHIP_SEMANTICS: Mapping[
+    str, QualifiedRelationshipSemanticMapping
+] = MappingProxyType(_QUALIFIED_RELATIONSHIP_SEMANTICS)
+
+PROJECT_GRAPH_SUPPRESSED_RELATIONSHIP_TOKENS: Mapping[str, str] = MappingProxyType(
+    {
+        "note_target_project": (
+            "A project target is conveyed by ProjectGraphRead.project_id; no "
+            "project node or project-target edge is emitted."
+        ),
+    }
+)
+
+
+def project_graph_relationship_semantics(
+    relationship: str,
+) -> DirectRelationshipSemanticMapping | QualifiedRelationshipSemanticMapping:
+    """Resolve a presentation relationship token to its semantic profile entry."""
+
+    direct = PROJECT_GRAPH_DIRECT_RELATIONSHIP_SEMANTICS.get(relationship)
+    if direct is not None:
+        return direct
+    qualified = PROJECT_GRAPH_QUALIFIED_RELATIONSHIP_SEMANTICS.get(relationship)
+    if qualified is not None:
+        return qualified
+    raise ValueError(f"Unmapped project graph relationship: {relationship}")
+
+
+class ProjectGraphRepository(Protocol):
+    """Read capabilities needed to project one project's graph."""
+
+    def query_questions(
+        self,
+        *,
+        project_id: UUID,
+        limit: int | None,
+        offset: int,
+    ) -> tuple[list[Question], int]: ...
+
+    def query_datasets(
+        self,
+        *,
+        project_id: UUID,
+        limit: int | None,
+        offset: int,
+    ) -> tuple[list[Dataset], int]: ...
+
+    def query_analyses(
+        self,
+        *,
+        project_id: UUID,
+        limit: int | None,
+        offset: int,
+    ) -> tuple[list[Analysis], int]: ...
+
+    def query_claims(
+        self,
+        *,
+        project_id: UUID,
+        limit: int | None,
+        offset: int,
+    ) -> tuple[list[Claim], int]: ...
+
+    def query_visualizations(
+        self,
+        *,
+        project_id: UUID,
+        limit: int | None,
+        offset: int,
+    ) -> tuple[list[Visualization], int]: ...
+
+    def query_goals(
+        self,
+        *,
+        project_id: UUID,
+        limit: int | None,
+        offset: int,
+    ) -> tuple[list[Goal], int]: ...
+
+    def query_claim_edges(
+        self,
+        *,
+        project_id: UUID,
+        limit: int | None,
+        offset: int,
+    ) -> tuple[list[ClaimEdge], int]: ...
+
+    def query_exploration_nodes(
+        self,
+        *,
+        project_id: UUID,
+        limit: int | None,
+        offset: int,
+    ) -> tuple[list[ExplorationNode], int]: ...
+
+    def query_notes(
+        self,
+        *,
+        project_id: UUID,
+        limit: int | None,
+        offset: int,
+    ) -> tuple[list[Note], int]: ...
+
+    def query_sessions(
+        self,
+        *,
+        project_id: UUID,
+        limit: int | None,
+        offset: int,
+    ) -> tuple[list[Session], int]: ...
 
 
 def build_project_graph(
-    repository: LabTrackerRepository,
+    repository: ProjectGraphRepository,
     project_id: UUID,
     *,
     view: ProjectGraphView = "evidence",
@@ -160,12 +450,28 @@ class _ProjectGraphBuilder:
         self._edges: dict[str, ProjectGraphEdge] = {}
 
     def add_node(self, node: ProjectGraphNode) -> None:
+        if (
+            node.entity_type not in PROJECT_GRAPH_NODE_CLASS_IRIS
+            and node.entity_type not in PROJECT_GRAPH_CONDITIONAL_NODE_CLASS_IRIS
+        ):
+            raise ValueError(f"Unmapped project graph node type: {node.entity_type}")
         self._nodes[node.id] = node
 
-    def add_edge(self, source: str, target: str, label: str, relationship: str) -> None:
+    def add_edge(
+        self,
+        source: str,
+        target: str,
+        label: str,
+        relationship: str,
+        *,
+        identity: str | None = None,
+    ) -> None:
         if source not in self._nodes or target not in self._nodes:
             return
+        project_graph_relationship_semantics(relationship)
         edge_id = f"{relationship}:{source}->{target}"
+        if identity is not None:
+            edge_id = f"{edge_id}#{identity}"
         self._edges[edge_id] = ProjectGraphEdge(
             id=edge_id,
             label=label,
@@ -197,9 +503,13 @@ class _ProjectGraphBuilder:
 
 def _normalize_view(view: ProjectGraphView) -> ProjectGraphView:
     view_value = str(view)
-    if view_value not in _VIEW_VALUES:
-        raise ValueError(f"Unknown project graph view: {view_value}")
-    return view_value  # type: ignore[return-value]
+    if view_value == "evidence":
+        return "evidence"
+    if view_value == "questions":
+        return "questions"
+    if view_value == "full":
+        return "full"
+    raise ValueError(f"Unknown project graph view: {view_value}")
 
 
 def _entity_node_id(entity_type: str, entity_id: UUID | str) -> str:
@@ -227,7 +537,11 @@ def _short_id(value: UUID) -> str:
     return str(value).split("-", 1)[0]
 
 
-def _sort_entities(items: Iterable[Any], id_attr: str, label_getter) -> list[Any]:
+def _sort_entities(
+    items: Iterable[EntityT],
+    id_attr: str,
+    label_getter: Callable[[EntityT], str],
+) -> list[EntityT]:
     return sorted(
         items,
         key=lambda item: (
@@ -474,25 +788,25 @@ def _add_evidence_edges(
             )
     for analysis in _sort_entities(analyses, "analysis_id", _analysis_label):
         analysis_id = _entity_node_id("analysis", analysis.analysis_id)
-        for dataset_id in sorted(analysis.dataset_ids, key=str):
+        for analysis_dataset_id in sorted(analysis.dataset_ids, key=str):
             builder.add_edge(
-                _entity_node_id("dataset", dataset_id),
+                _entity_node_id("dataset", analysis_dataset_id),
                 analysis_id,
                 "used by",
                 "analysis_dataset",
             )
     for claim in _sort_entities(claims, "claim_id", _claim_label):
         claim_id = _entity_node_id("claim", claim.claim_id)
-        for dataset_id in sorted(claim.supported_by_dataset_ids, key=str):
+        for claim_dataset_id in sorted(claim.supported_by_dataset_ids, key=str):
             builder.add_edge(
-                _entity_node_id("dataset", dataset_id),
+                _entity_node_id("dataset", claim_dataset_id),
                 claim_id,
                 "supports",
                 "claim_dataset_support",
             )
-        for analysis_id in sorted(claim.supported_by_analysis_ids, key=str):
+        for supporting_analysis_id in sorted(claim.supported_by_analysis_ids, key=str):
             builder.add_edge(
-                _entity_node_id("analysis", analysis_id),
+                _entity_node_id("analysis", supporting_analysis_id),
                 claim_id,
                 "supports",
                 "claim_analysis_support",
@@ -531,23 +845,23 @@ def _add_evidence_edges(
             "generates",
             "visualization_analysis",
         )
-        for dataset_id in sorted(visualization.dataset_ids, key=str):
+        for visualization_dataset_id in sorted(visualization.dataset_ids, key=str):
             builder.add_edge(
-                _entity_node_id("dataset", dataset_id),
+                _entity_node_id("dataset", visualization_dataset_id),
                 visualization_id,
                 "grounds",
                 "visualization_dataset",
             )
-        for claim_id in sorted(visualization.related_claim_ids, key=str):
+        for related_claim_id in sorted(visualization.related_claim_ids, key=str):
             builder.add_edge(
-                _entity_node_id("claim", claim_id),
+                _entity_node_id("claim", related_claim_id),
                 visualization_id,
                 "related claim",
                 "visualization_claim",
             )
     for goal in _sort_entities(goals, "goal_id", _goal_label):
         goal_id = _entity_node_id("goal", goal.goal_id)
-        for link in sorted(
+        for goal_link in sorted(
             goal.links,
             key=lambda item: (
                 _enum_value(item.target.entity_type) or "",
@@ -556,16 +870,24 @@ def _add_evidence_edges(
                 item.slot or "",
             ),
         ):
-            relation = _enum_value(link.relation) or "linked"
-            status = _enum_value(link.link_status) or "candidate"
+            relation = _enum_value(goal_link.relation) or "linked"
+            status = _enum_value(goal_link.link_status) or "candidate"
             label = relation.replace("_", " ")
-            if link.slot:
-                label = f"{label}: {link.slot}"
+            if goal_link.slot:
+                label = f"{label}: {goal_link.slot}"
             builder.add_edge(
-                _entity_node_id(_entity_type_value(link.target.entity_type), link.target.entity_id),
+                _entity_node_id(
+                    _entity_type_value(goal_link.target.entity_type),
+                    goal_link.target.entity_id,
+                ),
                 goal_id,
                 label,
                 f"goal_{relation}_{status}",
+                identity=(
+                    f"goal-link={goal_link.link_id}"
+                    if goal_link.slot is not None
+                    else None
+                ),
             )
 
 
@@ -671,7 +993,7 @@ def _sorted_question_links(dataset: Dataset) -> list[QuestionLink]:
         return [
             QuestionLink(
                 question_id=dataset.primary_question_id,
-                role="primary",
+                role=QuestionLinkRole.PRIMARY,
             )
         ]
     return sorted(

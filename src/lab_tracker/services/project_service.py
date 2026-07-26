@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from uuid import UUID, uuid4
 
+from sqlalchemy.exc import IntegrityError
+
 from lab_tracker.auth import AuthContext, require_role
-from lab_tracker.errors import AuthError, NotFoundError, ValidationError
+from lab_tracker.errors import AuthError, ConflictError, NotFoundError, ValidationError
 from lab_tracker.models import (
     GroupMembership,
     Project,
@@ -16,7 +18,8 @@ from lab_tracker.models import (
     ProjectStatus,
     utc_now,
 )
-from lab_tracker.services.base import BaseService, ServiceContext
+from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
+from lab_tracker.services.base import BaseService, IdempotentCreateResult, ServiceContext
 from lab_tracker.services.goal_link_cleanup import remove_goal_links_to_project_contents
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.shared import (
@@ -24,9 +27,8 @@ from lab_tracker.services.shared import (
     actor_user_fk,
     actor_user_id,
     ensure_non_empty,
+    normalize_client_capture_id,
 )
-
-_GROUP_ID_UNSET = object()
 
 
 class ProjectService(BaseService):
@@ -46,38 +48,156 @@ class ProjectService(BaseService):
         status: ProjectStatus = ProjectStatus.ACTIVE,
         group_id: UUID | None = None,
         *,
+        client_capture_id: str | None = None,
         actor: AuthContext | None = None,
     ) -> Project:
+        return self.create_project_result(
+            name,
+            description,
+            status,
+            group_id,
+            client_capture_id=client_capture_id,
+            actor=actor,
+        ).entity
+
+    def create_project_result(
+        self,
+        name: str,
+        description: str = "",
+        status: ProjectStatus = ProjectStatus.ACTIVE,
+        group_id: UUID | None = None,
+        *,
+        client_capture_id: str | None = None,
+        actor: AuthContext | None = None,
+    ) -> IdempotentCreateResult[Project]:
         require_role(actor, WRITE_ROLES)
         if group_id is not None:
             self.authorization.require_group_owner(group_id, actor=actor)
             self.get_project_group(group_id)
         ensure_non_empty(name, "name")
+        resolved_name = name.strip()
+        resolved_description = description.strip()
+        creator_id = actor_user_id(actor)
+        resolved_client_capture_id = normalize_client_capture_id(client_capture_id)
+        if resolved_client_capture_id is not None:
+            existing = self._find_client_capture_project(
+                resolved_client_capture_id,
+                created_by=creator_id,
+            )
+            if existing is not None:
+                self._ensure_matching_capture_project(
+                    existing,
+                    name=resolved_name,
+                    description=resolved_description,
+                    status=status,
+                    group_id=group_id,
+                    client_capture_id=resolved_client_capture_id,
+                )
+                return IdempotentCreateResult("reused", existing)
         project = Project(
             project_id=uuid4(),
             group_id=group_id,
-            name=name.strip(),
-            description=description.strip(),
+            name=resolved_name,
+            description=resolved_description,
             status=status,
-            created_by=actor_user_id(actor),
+            client_capture_id=resolved_client_capture_id,
+            created_by=creator_id,
             created_by_user_id=actor_user_fk(actor, self.repository),
         )
-        with self.unit_of_work() as repository:
-            repository.projects.save(project)
-            # Flush the project before the request-managed owner membership insert.
-            repository.projects.get(project.project_id)
-        if actor is not None and not self.authorization.has_global_admin(actor):
-            membership = ProjectMembership(
-                membership_id=uuid4(),
-                project_id=project.project_id,
-                user_id=actor.user_id,
-                role=ProjectMembershipRole.OWNER,
-                created_by=actor_user_id(actor),
-                created_by_user_id=actor_user_fk(actor, self.repository),
+        with self.application_transaction():
+            try:
+                unit_of_work = (
+                    self.recoverable_unit_of_work
+                    if resolved_client_capture_id is not None
+                    else self.unit_of_work
+                )
+                with unit_of_work() as repository:
+                    repository.projects.save(project)
+                    # The generic project repository defers its flush until a read;
+                    # force it inside this try block so a uniqueness race can be
+                    # recovered before request finalization.
+                    repository.projects.get(project.project_id)
+            except IntegrityError as exc:
+                if resolved_client_capture_id is None:
+                    raise
+                existing = self._find_client_capture_project(
+                    resolved_client_capture_id,
+                    created_by=creator_id,
+                )
+                if existing is None:
+                    raise
+                self._ensure_matching_capture_project(
+                    existing,
+                    name=resolved_name,
+                    description=resolved_description,
+                    status=status,
+                    group_id=group_id,
+                    client_capture_id=resolved_client_capture_id,
+                    cause=exc,
+                )
+                return IdempotentCreateResult("reused", existing)
+            if actor is not None and not self.authorization.has_global_admin(actor):
+                membership = ProjectMembership(
+                    membership_id=uuid4(),
+                    project_id=project.project_id,
+                    user_id=actor.user_id,
+                    role=ProjectMembershipRole.OWNER,
+                    created_by=actor_user_id(actor),
+                    created_by_user_id=actor_user_fk(actor, self.repository),
+                )
+                with self.unit_of_work() as repository:
+                    repository.project_memberships.save(membership)
+        return IdempotentCreateResult("created", project)
+
+    def _find_client_capture_project(
+        self,
+        client_capture_id: str,
+        *,
+        created_by: str | None,
+    ) -> Project | None:
+        projects = self.query_from_repository(
+            loader=lambda repository: repository.query_projects(
+                client_capture_id=client_capture_id,
+                created_by=created_by,
+                limit=1,
+                offset=0,
+            ),
+        )
+        return projects[0] if projects else None
+
+    @staticmethod
+    def _ensure_matching_capture_project(
+        existing: Project,
+        *,
+        name: str,
+        description: str,
+        status: ProjectStatus,
+        group_id: UUID | None,
+        client_capture_id: str,
+        cause: Exception | None = None,
+    ) -> None:
+        supplied = {
+            "name": name,
+            "description": description,
+            "status": status,
+            "group_id": group_id,
+        }
+        stored = {
+            "name": existing.name,
+            "description": existing.description,
+            "status": existing.status,
+            "group_id": existing.group_id,
+        }
+        conflicts = [field for field, value in supplied.items() if stored[field] != value]
+        if conflicts:
+            error = ConflictError(
+                "Project client_capture_id "
+                f"{client_capture_id!r} was already used with different "
+                f"field(s): {', '.join(conflicts)}."
             )
-            with self.unit_of_work() as repository:
-                repository.project_memberships.save(membership)
-        return project
+            if cause is not None:
+                raise error from cause
+            raise error
 
     def get_project(self, project_id: UUID) -> Project:
         return self.get_from_repository(
@@ -85,6 +205,17 @@ class ProjectService(BaseService):
             label="Project",
             loader=lambda repository: repository.projects.get(project_id),
         )
+
+    def get_project_for_read(
+        self,
+        project_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> Project:
+        project = self.get_project(project_id)
+        if not self.authorization.can_read(project.project_id, actor=actor):
+            raise NotFoundError("Project does not exist.")
+        return project
 
     def list_projects(self) -> list[Project]:
         return self.list_from_repository(
@@ -95,26 +226,35 @@ class ProjectService(BaseService):
         self,
         project_id: UUID,
         *,
-        name: str | None = None,
-        description: str | None = None,
-        status: ProjectStatus | None = None,
-        group_id: UUID | None | object = _GROUP_ID_UNSET,
+        name: PatchValue[str | None] = NOT_PROVIDED,
+        description: PatchValue[str | None] = NOT_PROVIDED,
+        status: PatchValue[ProjectStatus | None] = NOT_PROVIDED,
+        group_id: PatchValue[UUID | None] = NOT_PROVIDED,
         actor: AuthContext | None = None,
     ) -> Project:
         self.authorization.require_owner(project_id, actor=actor)
         project = self.get_project(project_id)
-        if group_id is not _GROUP_ID_UNSET:
+        before = project.model_copy(deep=True)
+        if is_provided(group_id):
             if group_id is not None:
                 self.authorization.require_group_owner(group_id, actor=actor)
                 self.get_project_group(group_id)
             project.group_id = group_id
-        if name is not None:
+        if is_provided(name):
+            if name is None:
+                raise ValidationError("name must not be null.")
             ensure_non_empty(name, "name")
             project.name = name.strip()
-        if description is not None:
+        if is_provided(description):
+            if description is None:
+                raise ValidationError("description must not be null.")
             project.description = description.strip()
-        if status is not None:
+        if is_provided(status):
+            if status is None:
+                raise ValidationError("status must not be null.")
             project.status = status
+        if project == before:
+            return project
         project.updated_at = utc_now()
         with self.unit_of_work() as repository:
             repository.projects.save(project)
@@ -148,20 +288,21 @@ class ProjectService(BaseService):
             created_by=actor_user_id(actor),
             created_by_user_id=actor_user_fk(actor, self.repository),
         )
-        with self.unit_of_work() as repository:
-            repository.project_groups.save(group)
-            repository.project_groups.get(group.group_id)
-        if actor is not None and not self.authorization.has_global_admin(actor):
-            membership = GroupMembership(
-                membership_id=uuid4(),
-                group_id=group.group_id,
-                user_id=actor.user_id,
-                role=ProjectMembershipRole.OWNER,
-                created_by=actor_user_id(actor),
-                created_by_user_id=actor_user_fk(actor, self.repository),
-            )
+        with self.application_transaction():
             with self.unit_of_work() as repository:
-                repository.group_memberships.save(membership)
+                repository.project_groups.save(group)
+                repository.project_groups.get(group.group_id)
+            if actor is not None and not self.authorization.has_global_admin(actor):
+                membership = GroupMembership(
+                    membership_id=uuid4(),
+                    group_id=group.group_id,
+                    user_id=actor.user_id,
+                    role=ProjectMembershipRole.OWNER,
+                    created_by=actor_user_id(actor),
+                    created_by_user_id=actor_user_fk(actor, self.repository),
+                )
+                with self.unit_of_work() as repository:
+                    repository.group_memberships.save(membership)
         return group
 
     def get_project_group(self, group_id: UUID) -> ProjectGroup:
@@ -170,6 +311,17 @@ class ProjectService(BaseService):
             label="Project group",
             loader=lambda repository: repository.project_groups.get(group_id),
         )
+
+    def get_project_group_for_read(
+        self,
+        group_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> ProjectGroup:
+        group = self.get_project_group(group_id)
+        if not self.authorization.can_group_read(group_id, actor=actor):
+            raise NotFoundError("Project group does not exist.")
+        return group
 
     def list_project_groups(
         self,
@@ -200,23 +352,34 @@ class ProjectService(BaseService):
         self,
         group_id: UUID,
         *,
-        name: str | None = None,
-        description: str | None = None,
-        kind: ProjectGroupKind | None = None,
-        group_read_all: bool | None = None,
+        name: PatchValue[str | None] = NOT_PROVIDED,
+        description: PatchValue[str | None] = NOT_PROVIDED,
+        kind: PatchValue[ProjectGroupKind | None] = NOT_PROVIDED,
+        group_read_all: PatchValue[bool | None] = NOT_PROVIDED,
         actor: AuthContext | None = None,
     ) -> ProjectGroup:
         self.authorization.require_group_owner(group_id, actor=actor)
         group = self.get_project_group(group_id)
-        if name is not None:
+        before = group.model_copy(deep=True)
+        if is_provided(name):
+            if name is None:
+                raise ValidationError("name must not be null.")
             ensure_non_empty(name, "name")
             group.name = name.strip()
-        if description is not None:
+        if is_provided(description):
+            if description is None:
+                raise ValidationError("description must not be null.")
             group.description = description.strip()
-        if kind is not None:
+        if is_provided(kind):
+            if kind is None:
+                raise ValidationError("kind must not be null.")
             group.kind = kind
-        if group_read_all is not None:
+        if is_provided(group_read_all):
+            if group_read_all is None:
+                raise ValidationError("group_read_all must not be null.")
             group.group_read_all = group_read_all
+        if group == before:
+            return group
         group.updated_at = utc_now()
         with self.unit_of_work() as repository:
             repository.project_groups.save(group)
@@ -309,6 +472,8 @@ class ProjectService(BaseService):
             )
         else:
             membership = existing
+            if membership.role == role:
+                return membership
             membership.role = role
             membership.updated_at = utc_now()
         with self.unit_of_work() as repository:
@@ -573,6 +738,8 @@ class ProjectService(BaseService):
         membership: ProjectMembership,
         role: ProjectMembershipRole,
     ) -> ProjectMembership:
+        if membership.role == role:
+            return membership
         if membership.role == ProjectMembershipRole.OWNER and role != membership.role:
             repository.lock_project_owner_memberships(project_id)
             refreshed = repository.get_project_membership(

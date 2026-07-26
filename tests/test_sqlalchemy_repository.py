@@ -6,7 +6,7 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 
 from lab_tracker.db import Base
-from lab_tracker.db_models import DatasetFileModel, UserModel
+from lab_tracker.db_models import DatasetFileModel, DatasetModel, UserModel
 from lab_tracker.models import (
     AcquisitionOutput,
     Analysis,
@@ -17,6 +17,7 @@ from lab_tracker.models import (
     ClaimStatus,
     Dataset,
     DatasetCommitManifest,
+    DatasetFile,
     DatasetStatus,
     EntityRef,
     EntityType,
@@ -313,7 +314,13 @@ def test_dataset_repository_preserves_commit_manifest(db_session):
             )
         ],
         commit_manifest=DatasetCommitManifest(
-            files=[],
+            files=[
+                DatasetFile(
+                    path="raw/data.csv",
+                    checksum="sha256:dataset-file",
+                    size_bytes=12,
+                )
+            ],
             metadata={"run": "7"},
             nwb_metadata={"Session Description": "baseline"},
             bids_metadata={"Name": "Example"},
@@ -339,6 +346,7 @@ def test_dataset_repository_preserves_commit_manifest(db_session):
 
     loaded_dataset = repo.datasets.get(dataset.dataset_id)
     assert loaded_dataset is not None
+    assert loaded_dataset.commit_manifest.files == dataset.commit_manifest.files
     assert loaded_dataset.commit_manifest.metadata == {"run": "7"}
     assert loaded_dataset.commit_manifest.nwb_metadata == {"Session Description": "baseline"}
     assert loaded_dataset.commit_manifest.bids_metadata == {"Name": "Example"}
@@ -347,6 +355,78 @@ def test_dataset_repository_preserves_commit_manifest(db_session):
         loaded_dataset.commit_manifest.source_session_id
         == dataset.commit_manifest.source_session_id
     )
+    stored_dataset = db_session.get(DatasetModel, dataset.dataset_id)
+    assert stored_dataset is not None
+    assert stored_dataset.manifest_files[0]["size_bytes"] == 12
+
+
+def test_dataset_repository_reads_legacy_manifest_file_without_size(db_session):
+    repo = SQLAlchemyLabTrackerRepository(db_session)
+    project = Project(
+        project_id=uuid4(),
+        name="Legacy dataset",
+        status=ProjectStatus.ACTIVE,
+        created_at=_ts(),
+        updated_at=_ts(),
+    )
+    question = Question(
+        question_id=uuid4(),
+        project_id=project.project_id,
+        text="Does a legacy manifest remain readable?",
+        question_type=QuestionType.DESCRIPTIVE,
+        status=QuestionStatus.ACTIVE,
+        parent_question_ids=[],
+        created_at=_ts(1),
+        updated_at=_ts(1),
+    )
+    dataset = Dataset(
+        dataset_id=uuid4(),
+        project_id=project.project_id,
+        commit_hash="legacy-commit",
+        primary_question_id=question.question_id,
+        question_links=[
+            QuestionLink(
+                question_id=question.question_id,
+                role=QuestionLinkRole.PRIMARY,
+                outcome_status=OutcomeStatus.SUPPORTS,
+            )
+        ],
+        commit_manifest=DatasetCommitManifest(
+            files=[],
+            question_links=[
+                QuestionLink(
+                    question_id=question.question_id,
+                    role=QuestionLinkRole.PRIMARY,
+                    outcome_status=OutcomeStatus.SUPPORTS,
+                )
+            ],
+        ),
+        status=DatasetStatus.COMMITTED,
+        created_at=_ts(2),
+        updated_at=_ts(2),
+    )
+
+    repo.projects.save(project)
+    repo.questions.save(question)
+    repo.datasets.save(dataset)
+    repo.commit()
+    row = db_session.get(DatasetModel, dataset.dataset_id)
+    assert row is not None
+    row.manifest_files = [{"path": "legacy/data.csv", "checksum": "sha256:legacy"}]
+    db_session.commit()
+    db_session.expire_all()
+
+    loaded = repo.datasets.get(dataset.dataset_id)
+
+    assert loaded is not None
+    assert loaded.commit_hash == "legacy-commit"
+    assert loaded.commit_manifest.files == [
+        DatasetFile(
+            path="legacy/data.csv",
+            checksum="sha256:legacy",
+            size_bytes=None,
+        )
+    ]
 
 
 def test_acquisition_output_repository_crud(db_session):
@@ -488,6 +568,69 @@ def test_query_questions_applies_substring_search_in_database(db_session):
 
     assert total == 1
     assert [question.text for question in page] == ["What is the baseline distribution?"]
+
+
+def test_query_question_and_note_ids_filter_before_pagination(db_session):
+    repo = SQLAlchemyLabTrackerRepository(db_session)
+    project = Project(
+        project_id=uuid4(),
+        name="Goal-linked pagination",
+        status=ProjectStatus.ACTIVE,
+        created_at=_ts(),
+        updated_at=_ts(),
+    )
+    repo.projects.save(project)
+
+    questions = [
+        Question(
+            question_id=uuid4(),
+            project_id=project.project_id,
+            text=f"Ordered question {index}",
+            question_type=QuestionType.DESCRIPTIVE,
+            status=QuestionStatus.ACTIVE,
+            created_at=_ts(index + 1),
+            updated_at=_ts(index + 1),
+        )
+        for index in range(3)
+    ]
+    notes = [
+        Note(
+            note_id=uuid4(),
+            project_id=project.project_id,
+            raw_content=f"Ordered note {index}",
+            status=NoteStatus.COMMITTED,
+            created_at=_ts(index + 4),
+            updated_at=_ts(index + 4),
+        )
+        for index in range(3)
+    ]
+    for question in questions:
+        repo.questions.save(question)
+    for note in notes:
+        repo.notes.save(note)
+    repo.commit()
+
+    question_page, question_total = repo.query_questions(
+        project_id=project.project_id,
+        question_ids={questions[0].question_id, questions[2].question_id},
+        search="ordered",
+        limit=1,
+        offset=1,
+    )
+    note_page, note_total = repo.query_notes(
+        project_id=project.project_id,
+        note_ids={notes[0].note_id, notes[2].note_id},
+        search="ordered",
+        limit=1,
+        offset=1,
+    )
+
+    assert question_total == 2
+    assert [item.question_id for item in question_page] == [questions[2].question_id]
+    assert note_total == 2
+    assert [item.note_id for item in note_page] == [notes[2].note_id]
+    assert repo.query_questions(question_ids=set(), limit=1, offset=0) == ([], 0)
+    assert repo.query_notes(note_ids=set(), limit=1, offset=0) == ([], 0)
 
 
 def test_note_repository_list_batches_child_queries(db_session):

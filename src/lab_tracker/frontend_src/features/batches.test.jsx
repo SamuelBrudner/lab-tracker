@@ -156,7 +156,9 @@ describe("BatchReviewPage", () => {
     await waitFor(() => {
       expect(settingsBody).toEqual({
         cadence_minutes: 1440,
+        email_notifications_enabled: false,
         enabled: true,
+        notification_email: null,
         run_at_local_time: "18:00",
         timezone_name: "America/New_York",
       });

@@ -1,0 +1,12 @@
+.git
+.venv
+node_modules
+lab_tracker.db
+*.db
+.env
+deployments/shared-provider/.env
+__pycache__
+.pytest_cache
+.coverage
+.coverage.*
+htmlcov

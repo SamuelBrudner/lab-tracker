@@ -23,6 +23,7 @@ from lab_tracker.setup_guide import (
     setup_skill_markdown,
 )
 from lab_tracker_client import cli as lt_cli
+from lab_tracker_client import setup as setup_helpers
 
 
 @pytest.fixture
@@ -32,6 +33,23 @@ def isolated_homes(tmp_path, monkeypatch):
     for name in ("LAB_TRACKER_BASE_URL", "LAB_TRACKER_MCP_BASE_URL", "LAB_TRACKER_ACCESS_TOKEN"):
         monkeypatch.delenv(name, raising=False)
     return tmp_path
+
+
+@pytest.fixture
+def default_agent_home(tmp_path, monkeypatch):
+    """Isolate the default Claude+Codex homes without repurposing HOME."""
+
+    agent_home = tmp_path / "agent-home"
+    monkeypatch.delenv("LAB_TRACKER_SKILLS_HOME", raising=False)
+    monkeypatch.setenv("LAB_TRACKER_CONFIG_DIR", str(tmp_path / "lt-home"))
+    monkeypatch.setattr(
+        Path,
+        "home",
+        classmethod(lambda _path_cls: agent_home),
+    )
+    for name in ("LAB_TRACKER_BASE_URL", "LAB_TRACKER_MCP_BASE_URL", "LAB_TRACKER_ACCESS_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    return agent_home
 
 
 def test_repo_owned_setup_skill_matches_generator() -> None:
@@ -86,8 +104,11 @@ def test_install_skills_renders_refreshes_and_uninstalls(isolated_homes) -> None
     assert not skill_path.exists()
     assert any("--install-skills" in offer for offer in result.offers)
 
-    init_consumer_repo(repo, install_skills=True)
+    install_result = init_consumer_repo(repo, install_skills=True)
     assert skill_path.read_text(encoding="utf-8") == setup_skill_markdown()
+    assert [path for path in install_result.created if path.name == "SKILL.md"] == [
+        skill_path
+    ]
 
     # Refresh path: a stale copy is rewritten with the original backed up.
     skill_path.write_text("stale text", encoding="utf-8")
@@ -99,6 +120,62 @@ def test_install_skills_renders_refreshes_and_uninstalls(isolated_homes) -> None
     result = init_consumer_repo(repo, uninstall=True, install_skills=True)
     assert not skill_path.exists()
     assert any("SKILL.md" in str(path) for path in result.stripped)
+
+
+def test_default_install_skills_manages_claude_and_codex_targets(
+    default_agent_home,
+) -> None:
+    repo = default_agent_home.parent / "repo"
+    skill_paths = {
+        "claude": (
+            default_agent_home
+            / ".claude"
+            / "skills"
+            / "lab-tracker-setup"
+            / "SKILL.md"
+        ),
+        "codex": (
+            default_agent_home
+            / ".agents"
+            / "skills"
+            / "lab-tracker-setup"
+            / "SKILL.md"
+        ),
+    }
+
+    installed = init_consumer_repo(repo, install_skills=True)
+    assert set(skill_paths.values()).issubset(set(installed.created))
+    for path in skill_paths.values():
+        assert path.read_text(encoding="utf-8") == setup_skill_markdown()
+
+    # Each customized target gets its own refresh backup.
+    for name, path in skill_paths.items():
+        path.write_text(f"{name} customized skill", encoding="utf-8")
+    refreshed = update_consumer_repo(repo, install_skills=True)
+    for name, path in skill_paths.items():
+        backup = path.with_name(path.name + ".bak-lt-update")
+        assert path.read_text(encoding="utf-8") == setup_skill_markdown()
+        assert backup.read_text(encoding="utf-8") == f"{name} customized skill"
+        assert refreshed.backups[path] == backup
+
+    preview = init_consumer_repo(
+        repo,
+        uninstall=True,
+        install_skills=True,
+        dry_run=True,
+    )
+    for path in skill_paths.values():
+        assert path.exists()
+        assert path in preview.stripped
+        assert path in preview.diffs
+
+    removed = init_consumer_repo(repo, uninstall=True, install_skills=True)
+    for path in skill_paths.values():
+        backup = path.with_name(path.name + ".bak-lt-update")
+        assert not path.exists()
+        assert not backup.exists()
+        assert not path.parent.exists()
+        assert path in removed.stripped
 
 
 def test_version_only_skill_difference_is_not_stale_and_never_churns_backups(
@@ -124,6 +201,10 @@ def test_version_only_skill_difference_is_not_stale_and_never_churns_backups(
     payload = json.loads(capsys.readouterr().out)
     assert payload["skills"]["up_to_date"] is True
     assert payload["skills"]["version_in_sync"] is False
+    assert [target["name"] for target in payload["skills"]["targets"]] == ["custom"]
+    assert payload["skills"]["all_installed"] is True
+    assert payload["skills"]["all_up_to_date"] is True
+    assert payload["skills"]["all_version_in_sync"] is False
     assert not any("skill is stale" in item for item in payload["suggestions"])
 
     # A meaningful customization is preserved in the backup slot...
@@ -177,6 +258,78 @@ def test_install_skills_dry_run_writes_nothing(isolated_homes) -> None:
     result = init_consumer_repo(repo, install_skills=True, dry_run=True)
     assert not skill_path.exists()
     assert any("SKILL.md" in str(path) for path in result.diffs)
+
+
+def test_default_install_skills_dry_run_reports_both_targets(
+    default_agent_home,
+) -> None:
+    repo = default_agent_home.parent / "repo-dry-default"
+    expected = {
+        default_agent_home / ".claude" / "skills" / "lab-tracker-setup" / "SKILL.md",
+        default_agent_home / ".agents" / "skills" / "lab-tracker-setup" / "SKILL.md",
+    }
+
+    result = init_consumer_repo(repo, install_skills=True, dry_run=True)
+
+    assert expected.issubset(set(result.created))
+    assert expected.issubset(set(result.diffs))
+    assert all(not path.exists() for path in expected)
+
+
+def test_setup_status_exposes_and_checks_each_default_skill_target(
+    default_agent_home,
+    monkeypatch,
+) -> None:
+    repo = default_agent_home.parent / "repo-status-targets"
+    repo.mkdir()
+    claude_path = (
+        default_agent_home / ".claude" / "skills" / "lab-tracker-setup" / "SKILL.md"
+    )
+    codex_path = (
+        default_agent_home / ".agents" / "skills" / "lab-tracker-setup" / "SKILL.md"
+    )
+    claude_path.parent.mkdir(parents=True)
+    claude_path.write_text(setup_skill_markdown(), encoding="utf-8")
+    monkeypatch.setattr(setup_helpers, "probe_health", lambda _url: True)
+
+    partial = setup_helpers.setup_status(repo)
+    skills = partial["skills"]
+    assert skills["path"] == str(claude_path)
+    assert skills["installed"] is True
+    assert skills["up_to_date"] is True
+    assert [target["name"] for target in skills["targets"]] == ["claude", "codex"]
+    assert skills["targets"][1] == {
+        "name": "codex",
+        "path": str(codex_path),
+        "installed": False,
+    }
+    assert skills["all_installed"] is False
+    assert skills["all_up_to_date"] is False
+    assert any(
+        "missing from: codex" in suggestion
+        for suggestion in partial["suggestions"]
+    )
+
+    codex_path.parent.mkdir(parents=True)
+    codex_path.write_text("custom stale skill", encoding="utf-8")
+    stale = setup_helpers.setup_status(repo)
+    assert stale["skills"]["all_installed"] is True
+    assert stale["skills"]["all_up_to_date"] is False
+    assert stale["skills"]["targets"][1]["up_to_date"] is False
+    assert any(
+        "skills are stale" in suggestion
+        for suggestion in stale["suggestions"]
+    )
+
+    update_consumer_repo(repo, install_skills=True)
+    healthy = setup_helpers.setup_status(repo)
+    assert healthy["skills"]["all_installed"] is True
+    assert healthy["skills"]["all_up_to_date"] is True
+    assert healthy["skills"]["all_version_in_sync"] is True
+    assert not any(
+        "lab-tracker-setup skill" in suggestion
+        for suggestion in healthy["suggestions"]
+    )
 
 
 def test_doctor_content_only_drift(tmp_path) -> None:

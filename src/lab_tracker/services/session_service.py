@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext
-from lab_tracker.errors import ValidationError
+from lab_tracker.errors import NotFoundError, ValidationError
 from lab_tracker.models import (
     AcquisitionOutput,
     Dataset,
@@ -24,6 +24,7 @@ from lab_tracker.models import (
     decode_session_link_code,
     utc_now,
 )
+from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
 from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.goal_link_cleanup import remove_goal_links_to_entity
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
@@ -130,6 +131,17 @@ class SessionService(BaseService):
             loader=lambda repository: repository.sessions.get(session_id),
         )
 
+    def get_session_for_read(
+        self,
+        session_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> Session:
+        session = self.get_session(session_id)
+        if not self.authorization.can_read(session.project_id, actor=actor):
+            raise NotFoundError("Session does not exist.")
+        return session
+
     def get_session_by_link_code(self, link_code: str) -> Session:
         ensure_non_empty(link_code, "link_code")
         try:
@@ -137,6 +149,17 @@ class SessionService(BaseService):
         except ValueError as exc:
             raise ValidationError("Invalid session link code.") from exc
         return self.get_session(session_id)
+
+    def get_session_by_link_code_for_read(
+        self,
+        link_code: str,
+        *,
+        actor: AuthContext | None = None,
+    ) -> Session:
+        session = self.get_session_by_link_code(link_code)
+        if not self.authorization.can_read(session.project_id, actor=actor):
+            raise NotFoundError("Session does not exist.")
+        return session
 
     def list_sessions(self, *, project_id: UUID | None = None) -> list[Session]:
         return self.query_from_repository(
@@ -151,8 +174,8 @@ class SessionService(BaseService):
         self,
         session_id: UUID,
         *,
-        status: SessionStatus | None = None,
-        ended_at: datetime | None = None,
+        status: PatchValue[SessionStatus | None] = NOT_PROVIDED,
+        ended_at: PatchValue[datetime | None] = NOT_PROVIDED,
         actor: AuthContext | None = None,
         origin: EntityOrigin | None = None,
         change_set_id: UUID | None = None,
@@ -162,16 +185,27 @@ class SessionService(BaseService):
     ) -> Session:
         session = self.get_session(session_id)
         self.authorization.require_contributor(session.project_id, actor=actor)
-        next_status = status or session.status
-        if status is not None:
+        before = session.model_copy(deep=True)
+        if is_provided(status):
+            if status is None:
+                raise ValidationError("status must not be null.")
+            next_status = status
             _ensure_session_status_transition(session.status, status)
-        if ended_at is not None and next_status != SessionStatus.CLOSED:
+        else:
+            next_status = session.status
+        if is_provided(ended_at) and ended_at is not None and next_status != SessionStatus.CLOSED:
             raise ValidationError("ended_at can only be set when closing a session.")
-        if status is not None:
+        if is_provided(ended_at) and ended_at is None and next_status == SessionStatus.CLOSED:
+            raise ValidationError("ended_at must not be null for a closed session.")
+        if is_provided(status):
             session.status = status
         if next_status == SessionStatus.CLOSED:
-            session.ended_at = ended_at or session.ended_at or utc_now()
-        elif ended_at is not None:
+            session.ended_at = (
+                ended_at
+                if is_provided(ended_at)
+                else session.ended_at or utc_now()
+            )
+        elif is_provided(ended_at):
             session.ended_at = ended_at
         if origin is not None:
             session.origin = origin
@@ -183,6 +217,8 @@ class SessionService(BaseService):
             session.origin_model = origin_model
         if origin_prompt_version is not None:
             session.origin_prompt_version = origin_prompt_version
+        if session == before:
+            return session
         session.updated_at = utc_now()
         with self.unit_of_work() as repository:
             repository.sessions.save(session)

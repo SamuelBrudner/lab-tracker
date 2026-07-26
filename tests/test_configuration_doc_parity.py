@@ -29,10 +29,9 @@ _DOC_PATH = _REPO_ROOT / "docs" / "configuration.md"
 _BULLET_PATTERN = re.compile(r"(?m)^\s*-\s+`(LAB_TRACKER_[A-Z0-9_]+)`")
 _VAR_PATTERN = re.compile(r"\bLAB_TRACKER_[A-Z0-9_]+\b")
 
-_SCAN_ROOTS = ("src", "scripts", "deploy", "launchers")
+_SCAN_ROOTS = ("src", "scripts", "deploy")
 _SCAN_FILES = (
     "docker-compose.yml",
-    "docker-entrypoint.sh",
     "Dockerfile",
     ".env.example",
     "render.yaml",

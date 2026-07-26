@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext
-from lab_tracker.errors import ValidationError
+from lab_tracker.errors import NotFoundError, OpaqueTargetNotFoundError, ValidationError
 from lab_tracker.models import (
     Analysis,
     AnalysisStatus,
@@ -23,6 +23,7 @@ from lab_tracker.models import (
     external_artifact_uri_validation_error,
     utc_now,
 )
+from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
 from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.dataset_service import DatasetService
 from lab_tracker.services.goal_link_cleanup import remove_goal_links_to_targets
@@ -34,6 +35,7 @@ from lab_tracker.services.shared import (
     actor_user_fk,
     actor_user_id,
     ensure_non_empty,
+    terminal_reason_for_patch,
     terminal_reason_for_status,
     unique_ids,
 )
@@ -148,6 +150,20 @@ class AnalysisService(BaseService):
             loader=lambda repository: repository.analyses.get(analysis_id),
         )
 
+    def get_analysis_for_read(
+        self,
+        analysis_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> Analysis:
+        try:
+            analysis = self.get_analysis(analysis_id)
+        except NotFoundError as exc:
+            raise OpaqueTargetNotFoundError("Analysis does not exist.") from exc
+        if not self.authorization.can_read(analysis.project_id, actor=actor):
+            raise OpaqueTargetNotFoundError("Analysis does not exist.")
+        return analysis
+
     def list_analyses(
         self,
         *,
@@ -185,10 +201,12 @@ class AnalysisService(BaseService):
         self,
         analysis_id: UUID,
         *,
-        status: AnalysisStatus | None = None,
-        environment_hash: str | None = None,
-        external_artifacts: Iterable[ExternalArtifactReference] | None = None,
-        terminal_reason: str | None = None,
+        status: PatchValue[AnalysisStatus | None] = NOT_PROVIDED,
+        environment_hash: PatchValue[str | None] = NOT_PROVIDED,
+        external_artifacts: PatchValue[
+            Iterable[ExternalArtifactReference] | None
+        ] = NOT_PROVIDED,
+        terminal_reason: PatchValue[str | None] = NOT_PROVIDED,
         actor: AuthContext | None = None,
         origin: EntityOrigin | None = None,
         change_set_id: UUID | None = None,
@@ -198,33 +216,45 @@ class AnalysisService(BaseService):
     ) -> Analysis:
         analysis = self.get_analysis(analysis_id)
         self.authorization.require_contributor(analysis.project_id, actor=actor)
+        before = analysis.model_copy(deep=True)
         current_status = analysis.status
-        next_status = status or current_status
+        if is_provided(status):
+            if status is None:
+                raise ValidationError("status must not be null.")
+            next_status = status
+        else:
+            next_status = current_status
+        if is_provided(external_artifacts) and external_artifacts is None:
+            raise ValidationError("external_artifacts must not be null.")
         if current_status in _IMMUTABLE_ANALYSIS_STATUSES:
-            if environment_hash is not None:
+            if is_provided(environment_hash):
                 raise ValidationError("Committed analyses are immutable.")
-            if external_artifacts is not None:
+            if is_provided(external_artifacts):
                 raise ValidationError("Committed analyses are immutable.")
-        if current_status == AnalysisStatus.COMMITTED and status == AnalysisStatus.STAGED:
+        if (
+            current_status == AnalysisStatus.COMMITTED
+            and is_provided(status)
+            and status == AnalysisStatus.STAGED
+        ):
             raise ValidationError("Committed analyses cannot return to staged.")
-        if status is not None:
+        if is_provided(status):
             _ensure_analysis_status_transition(current_status, status)
             if status == AnalysisStatus.COMMITTED and current_status != AnalysisStatus.COMMITTED:
                 self._ensure_analysis_datasets_committed(analysis)
-        resolved_terminal_reason = terminal_reason_for_status(
+        resolved_terminal_reason = terminal_reason_for_patch(
             current_status,
             next_status,
             AnalysisStatus.ARCHIVED,
             terminal_reason,
             entity_name="Analysis",
         )
-        if status is not None:
+        if is_provided(status):
             analysis.status = status
-        if resolved_terminal_reason is not None:
+        if is_provided(resolved_terminal_reason):
             analysis.terminal_reason = resolved_terminal_reason
-        if environment_hash is not None:
+        if is_provided(environment_hash):
             analysis.environment_hash = environment_hash.strip() if environment_hash else None
-        if external_artifacts is not None:
+        if is_provided(external_artifacts):
             analysis.external_artifacts = _normalize_external_artifacts(external_artifacts)
         if origin is not None:
             analysis.origin = origin
@@ -236,6 +266,8 @@ class AnalysisService(BaseService):
             analysis.origin_model = origin_model
         if origin_prompt_version is not None:
             analysis.origin_prompt_version = origin_prompt_version
+        if analysis == before:
+            return analysis
         analysis.updated_at = utc_now()
         with self.unit_of_work() as repository:
             repository.analyses.save(analysis)
@@ -287,42 +319,43 @@ class AnalysisService(BaseService):
         if external_artifacts is not None:
             analysis.external_artifacts = _normalize_external_artifacts(external_artifacts)
         analysis.updated_at = utc_now()
-        with self.unit_of_work() as repository:
-            repository.analyses.save(analysis)
         created_claims: list[Claim] = []
-        for claim_input in claims or []:
-            supported_by_analysis_ids = list(claim_input.supported_by_analysis_ids)
-            if analysis.analysis_id not in supported_by_analysis_ids:
-                supported_by_analysis_ids.append(analysis.analysis_id)
-            created_claims.append(
-                self.claims.create_claim(
-                    project_id=analysis.project_id,
-                    statement=claim_input.statement,
-                    confidence=claim_input.confidence,
-                    status=claim_input.status,
-                    terminal_reason=claim_input.terminal_reason,
-                    falsification_criteria=claim_input.falsification_criteria,
-                    verification_plan=claim_input.verification_plan,
-                    refuting_outcome=claim_input.refuting_outcome,
-                    supported_by_dataset_ids=claim_input.supported_by_dataset_ids,
-                    supported_by_analysis_ids=supported_by_analysis_ids,
-                    answers_question_ids=claim_input.answers_question_ids,
-                    external_citations=claim_input.external_citations,
-                    actor=actor,
-                )
-            )
         created_visualizations: list[Visualization] = []
-        for viz_input in visualizations or []:
-            created_visualizations.append(
-                self.visualizations.create_visualization(
-                    analysis_id=analysis.analysis_id,
-                    viz_type=viz_input.viz_type,
-                    file_path=viz_input.file_path,
-                    caption=viz_input.caption,
-                    related_claim_ids=viz_input.related_claim_ids,
-                    actor=actor,
+        with self.application_transaction():
+            with self.unit_of_work() as repository:
+                repository.analyses.save(analysis)
+            for claim_input in claims or []:
+                supported_by_analysis_ids = list(claim_input.supported_by_analysis_ids)
+                if analysis.analysis_id not in supported_by_analysis_ids:
+                    supported_by_analysis_ids.append(analysis.analysis_id)
+                created_claims.append(
+                    self.claims.create_claim(
+                        project_id=analysis.project_id,
+                        statement=claim_input.statement,
+                        confidence=claim_input.confidence,
+                        status=claim_input.status,
+                        terminal_reason=claim_input.terminal_reason,
+                        falsification_criteria=claim_input.falsification_criteria,
+                        verification_plan=claim_input.verification_plan,
+                        refuting_outcome=claim_input.refuting_outcome,
+                        supported_by_dataset_ids=claim_input.supported_by_dataset_ids,
+                        supported_by_analysis_ids=supported_by_analysis_ids,
+                        answers_question_ids=claim_input.answers_question_ids,
+                        external_citations=claim_input.external_citations,
+                        actor=actor,
+                    )
                 )
-            )
+            for viz_input in visualizations or []:
+                created_visualizations.append(
+                    self.visualizations.create_visualization(
+                        analysis_id=analysis.analysis_id,
+                        viz_type=viz_input.viz_type,
+                        file_path=viz_input.file_path,
+                        caption=viz_input.caption,
+                        related_claim_ids=viz_input.related_claim_ids,
+                        actor=actor,
+                    )
+                )
         return analysis, created_claims, created_visualizations
 
     def _ensure_analysis_datasets_committed(self, analysis: Analysis) -> None:

@@ -228,6 +228,89 @@ def test_circuit_open_skips_env_client_construction(
     assert skipped.reason == "circuit_open"
 
 
+def _ok_upload_handler(request: httpx.Request) -> httpx.Response:
+    return _json_response(
+        201,
+        {
+            "data": {
+                "note_id": "note-ok",
+                "project_id": "project-1",
+                "status": "staged",
+                "metadata": {},
+            }
+        },
+    )
+
+
+def test_breaker_is_per_endpoint_and_does_not_skip_a_healthy_endpoint(
+    tmp_path: Path,
+) -> None:
+    """A transient outage of endpoint A must not skip a healthy explicit client
+
+    on endpoint B: the breaker is keyed by endpoint identity, not process-global.
+    """
+
+    def connect_handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("offline", request=request)
+
+    with LabTracker(
+        base_url="http://endpoint-a",
+        default_project_id="project-1",
+        transport=httpx.MockTransport(connect_handler),
+    ) as lt_a:
+        failed = savefig(FakeFigure(b"a"), tmp_path / "a.png", client=lt_a)
+    assert failed.action == "failed"
+
+    healthy_hits = 0
+
+    def ok_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal healthy_hits
+        healthy_hits += 1
+        return _ok_upload_handler(request)
+
+    with LabTracker(
+        base_url="http://endpoint-b",
+        default_project_id="project-1",
+        transport=httpx.MockTransport(ok_handler),
+    ) as lt_b:
+        healthy = savefig(FakeFigure(b"b"), tmp_path / "b.png", client=lt_b)
+
+    assert healthy.action in {"imported", "coalesced"}
+    assert healthy_hits == 1
+    assert set(figure_module._figure_circuit_state()) == {"http://endpoint-a"}
+
+
+def test_breaker_recovers_after_cooldown_with_half_open_probe(tmp_path: Path) -> None:
+    """After the cooldown elapses a half-open probe is allowed; success closes it."""
+
+    def connect_handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("offline", request=request)
+
+    with LabTracker(
+        base_url="http://testserver",
+        default_project_id="project-1",
+        transport=httpx.MockTransport(connect_handler),
+    ) as lt:
+        first = savefig(FakeFigure(b"one"), tmp_path / "one.png", client=lt)
+        second = savefig(FakeFigure(b"two"), tmp_path / "two.png", client=lt)
+    assert first.action == "failed"
+    assert second.action == "skipped" and second.reason == "circuit_open"
+
+    # Simulate the cooldown elapsing without touching the global clock.
+    for state in figure_module._BREAKERS.values():
+        state.open_until = figure_module.time.monotonic() - 1.0
+
+    with LabTracker(
+        base_url="http://testserver",
+        default_project_id="project-1",
+        transport=httpx.MockTransport(_ok_upload_handler),
+    ) as lt:
+        recovered = savefig(FakeFigure(b"three"), tmp_path / "three.png", client=lt)
+
+    assert recovered.action in {"imported", "coalesced"}
+    assert figure_module._figure_circuit_state() == {}
+
+
 def test_unconfigured_savefig_warns_once_without_network(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -454,6 +537,49 @@ def test_run_context_adds_scalar_metadata_and_expires(tmp_path: Path) -> None:
     assert metadata_payloads[0]["run_trial"] == 7
     assert isinstance(metadata_payloads[0]["run_git_dirty"], bool)
     assert "run_expired" not in metadata_payloads[1]
+
+
+def test_run_context_strips_credentials_from_repo_remote(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata_seen: dict[str, object] = {}
+
+    def fake_git_output(*args: str) -> str:
+        if args == ("config", "--get", "remote.origin.url"):
+            return (
+                "https://sam:ghp_secret@github.com/example/research.git"
+                "?access_token=query_secret#credential-fragment"
+            )
+        return ""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        metadata_seen.update(json.loads(_multipart_field(request.content, "metadata")))
+        return _json_response(
+            201,
+            {
+                "data": {
+                    "note_id": "note-credential-safe",
+                    "project_id": "project-1",
+                    "status": "staged",
+                    "metadata": metadata_seen,
+                }
+            },
+        )
+
+    monkeypatch.setattr(figure_module, "_git_output", fake_git_output)
+    with LabTracker(
+        base_url="http://testserver",
+        default_project_id="project-1",
+        transport=httpx.MockTransport(handler),
+    ) as lt, run_context():
+        savefig(FakeFigure(), tmp_path / "safe-remote.png", client=lt)
+
+    assert metadata_seen["run_repo_remote_url"] == "github.com/example/research"
+    assert "sam" not in str(metadata_seen["run_repo_remote_url"])
+    assert "ghp_secret" not in str(metadata_seen["run_repo_remote_url"])
+    assert "query_secret" not in str(metadata_seen["run_repo_remote_url"])
+    assert "credential-fragment" not in str(metadata_seen["run_repo_remote_url"])
 
 
 def test_capture_figures_captures_new_and_modified_files_after_body_exception(

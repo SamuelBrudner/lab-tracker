@@ -1,6 +1,8 @@
 import * as React from "react";
 
-import { AUTH_REJECTED_EVENT, apiFetch, apiRequest } from "../shared/api.js";
+import { AUTH_REJECTED_EVENT } from "../shared/api.js";
+import { auth as authGateway } from "../shared/gateways/index.js";
+import { createAuthStorage, persistAuthSession } from "../shared/auth-storage.js";
 import {
   TOKEN_EXPIRES_AT_STORAGE_KEY,
   TOKEN_STORAGE_KEY,
@@ -21,20 +23,12 @@ function readInitialInvitation() {
   };
 }
 
-function readInitialToken() {
-  try {
-    return localStorage.getItem(TOKEN_STORAGE_KEY) || (isStaticDemoEnabled() ? "demo-token" : "");
-  } catch {
-    return isStaticDemoEnabled() ? "demo-token" : "";
-  }
+function readInitialToken(storage) {
+  return storage.getItem(TOKEN_STORAGE_KEY) || (isStaticDemoEnabled() ? "demo-token" : "");
 }
 
-function readInitialTokenExpiresAt() {
-  try {
-    return localStorage.getItem(TOKEN_EXPIRES_AT_STORAGE_KEY) || "";
-  } catch {
-    return "";
-  }
+function readInitialTokenExpiresAt(storage) {
+  return storage.getItem(TOKEN_EXPIRES_AT_STORAGE_KEY) || "";
 }
 
 function parseExpiryMs(expiresAt) {
@@ -54,13 +48,19 @@ function sessionExpiredMessage(message) {
   return text;
 }
 
-function useAuthSession({ replace, setBusy, setFlash }) {
+function useAuthSession({ replace, setBusy, setFlash, storage }) {
+  // One injected storage adapter for the tab; guards every read/write/remove and
+  // falls back to memory so a persistence failure can never crash the session.
+  const authStorage = useMemo(() => storage ?? createAuthStorage(), [storage]);
   const initialInvitation = readInitialInvitation();
-  const [token, setToken] = useState(() => readInitialToken());
-  const [tokenExpiresAt, setTokenExpiresAt] = useState(() => readInitialTokenExpiresAt());
+  const [token, setToken] = useState(() => readInitialToken(authStorage));
+  const [tokenExpiresAt, setTokenExpiresAt] = useState(() =>
+    readInitialTokenExpiresAt(authStorage)
+  );
   const [user, setUser] = useState(null);
   const [authChecked, setAuthChecked] = useState(false);
   const [authEnabled, setAuthEnabled] = useState(true);
+  const [persistenceDegraded, setPersistenceDegraded] = useState(false);
 
   const [authMode, setAuthMode] = useState(initialInvitation.token ? "register" : "login");
   const [authUsername, setAuthUsername] = useState(initialInvitation.email);
@@ -88,19 +88,31 @@ function useAuthSession({ replace, setBusy, setFlash }) {
     setUser(payload?.user || null);
   }, []);
 
-  useEffect(() => {
-    if (token) {
-      localStorage.setItem(TOKEN_STORAGE_KEY, token);
-      if (tokenExpiresAt) {
-        localStorage.setItem(TOKEN_EXPIRES_AT_STORAGE_KEY, tokenExpiresAt);
-      } else {
-        localStorage.removeItem(TOKEN_EXPIRES_AT_STORAGE_KEY);
+  const persistTokenForReload = useCallback(
+    (nextToken, nextExpiresAt = "") => {
+      const persisted = persistAuthSession(authStorage, nextToken, nextExpiresAt);
+      if (authStorage.isDegraded()) {
+        setPersistenceDegraded(true);
       }
-      return;
+      return persisted;
+    },
+    [authStorage]
+  );
+
+  useEffect(() => {
+    // Route persistence through the adapter: these writes/removes can no longer
+    // throw into the error boundary. The in-memory state above stays the source
+    // of truth, so a degraded write never signs the user out.
+    if (token) {
+      persistTokenForReload(token, tokenExpiresAt);
+    } else {
+      authStorage.removeItem(TOKEN_STORAGE_KEY);
+      authStorage.removeItem(TOKEN_EXPIRES_AT_STORAGE_KEY);
     }
-    localStorage.removeItem(TOKEN_STORAGE_KEY);
-    localStorage.removeItem(TOKEN_EXPIRES_AT_STORAGE_KEY);
-  }, [token, tokenExpiresAt]);
+    if (authStorage.isDegraded()) {
+      setPersistenceDegraded(true);
+    }
+  }, [authStorage, persistTokenForReload, token, tokenExpiresAt]);
 
   useEffect(() => {
     function handleAuthRejected(event) {
@@ -121,10 +133,10 @@ function useAuthSession({ replace, setBusy, setFlash }) {
   useEffect(() => {
     let canceled = false;
 
-    apiFetch("/auth/bootstrap-status")
-      .then((payload) => {
+    authGateway
+      .getBootstrapStatus()
+      .then((status) => {
         if (!canceled) {
-          const status = payload?.data || null;
           setAuthBootstrapStatus(status);
           if (status?.bootstrap_token) {
             setAuthBootstrapToken((current) => current || status.bootstrap_token);
@@ -141,12 +153,12 @@ function useAuthSession({ replace, setBusy, setFlash }) {
     if (token) {
       setFlash("", "");
     }
-    apiFetch("/auth/me", token ? { notifyAuthRejected: false, token } : {})
-      .then((payload) => {
+    authGateway
+      .getCurrentUser(token ? { notifyAuthRejected: false, token } : {})
+      .then(({ authEnabled: nextAuthEnabled, user: nextUser }) => {
         if (!canceled) {
-          const nextAuthEnabled = payload?.meta?.auth_enabled !== false;
           setAuthEnabled(nextAuthEnabled);
-          setUser(payload?.data || null);
+          setUser(nextUser);
           if (!nextAuthEnabled && token) {
             setToken("");
             setTokenExpiresAt("");
@@ -195,8 +207,7 @@ function useAuthSession({ replace, setBusy, setFlash }) {
 
     async function refreshSession() {
       try {
-        const payload = await apiRequest("/auth/refresh", {
-          method: "POST",
+        const payload = await authGateway.refreshSession({
           notifyAuthRejected: false,
           token,
         });
@@ -260,8 +271,12 @@ function useAuthSession({ replace, setBusy, setFlash }) {
     setFlash("", "");
     try {
       const isRegistration = authMode === "register" || authMode === "setup";
-      const payload = await apiRequest(isRegistration ? "/auth/register" : "/auth/login", {
-        body: {
+      // The session-issuing response is validated at the gateway: a malformed
+      // token payload throws one ContractError instead of silently applying an
+      // empty token / null user.
+      const payload = await authGateway.authenticate(
+        isRegistration ? "/auth/register" : "/auth/login",
+        {
           ...(authMode === "setup"
             ? {
                 bootstrap_token: authBootstrapToken.trim(),
@@ -275,15 +290,14 @@ function useAuthSession({ replace, setBusy, setFlash }) {
             : {}),
           password: authPassword,
           username: authUsername.trim(),
-        },
-        method: "POST",
-      });
+        }
+      );
       applyAuthPayload(payload);
       setAuthBootstrapToken("");
       setAuthInviteToken("");
       setAuthPassword("");
       if (authInviteToken) {
-        replace("/app");
+        replace("/app/setup");
       }
       setFlash(
         authMode === "setup"
@@ -327,6 +341,8 @@ function useAuthSession({ replace, setBusy, setFlash }) {
     canWrite,
     handleAuthSubmit,
     handleLogout,
+    persistenceDegraded,
+    persistTokenForReload,
     setAuthMode,
     setAuthBootstrapToken,
     setAuthPassword,

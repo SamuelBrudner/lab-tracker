@@ -6,12 +6,13 @@ import logging
 import time
 from collections.abc import Callable
 from types import TracebackType
-from typing import Any, TypeVar
+from typing import Protocol, TypeVar
 from uuid import UUID
 
 from lab_tracker.api_parts import (
     AnalysesApiMixin,
     DatasetsApiMixin,
+    EvidenceBundlesApiMixin,
     ExplorationApiMixin,
     GoalsApiMixin,
     GraphDraftsApiMixin,
@@ -23,10 +24,13 @@ from lab_tracker.api_parts import (
     UsageApiMixin,
 )
 from lab_tracker.api_parts._base import _elapsed_ms, _uuid_attr
+from lab_tracker.auth import AuthContext
 from lab_tracker.config import Settings, get_settings
+from lab_tracker.errors import OpaqueTargetNotFoundError
 from lab_tracker.models import (
     UsageEventOutcome,
     UsageEventResourceType,
+    UsageEventSurface,
     UsageEventVerb,
 )
 from lab_tracker.note_storage import LocalNoteStorage
@@ -34,13 +38,21 @@ from lab_tracker.repository import LabTrackerRepository
 from lab_tracker.request_context import LabTrackerRequestContext
 from lab_tracker.services import (
     AnalysisService,
+    BatchSchedulingCoordinator,
     ClaimService,
     DatasetService,
     DataStoreService,
     EntityVersionService,
+    EvidenceBundleService,
     ExplorationService,
     GoalService,
+    GraphContextBuilder,
+    GraphDraftGenerationCoordinator,
+    GraphDraftRecords,
+    GraphDraftReviewCoordinator,
     GraphDraftService,
+    GraphPatchApplier,
+    GraphPatchValidator,
     NoteService,
     OwnershipReassignmentService,
     ProjectAuthorizationPolicy,
@@ -49,14 +61,23 @@ from lab_tracker.services import (
     PublicationReadinessService,
     QuestionService,
     RecordExportService,
+    ReviewEmailService,
     ServiceContext,
     SessionService,
     SupervisionService,
+    TransactionalDraftCommitCoordinator,
     VisualizationService,
 )
 
 _logger = logging.getLogger(__name__)
-ResponseT = TypeVar("ResponseT")
+
+
+class HttpResponse(Protocol):
+    status_code: int
+
+
+ResponseT = TypeVar("ResponseT", bound=HttpResponse)
+UsageResultT = TypeVar("UsageResultT")
 
 
 class LabTrackerAPI(
@@ -64,6 +85,7 @@ class LabTrackerAPI(
     QuestionsApiMixin,
     NotesApiMixin,
     DatasetsApiMixin,
+    EvidenceBundlesApiMixin,
     SessionsApiMixin,
     AnalysesApiMixin,
     GoalsApiMixin,
@@ -106,14 +128,9 @@ class LabTrackerAPI(
         self.ownership_reassignments: OwnershipReassignmentService = OwnershipReassignmentService(
             context
         )
-        self.record_exports: RecordExportService = RecordExportService(
-            context,
-            authorization=self.project_authorization,
-        )
         self.publication_readiness: PublicationReadinessService = PublicationReadinessService(
             context,
             projects=self.projects,
-            authorization=self.project_authorization,
         )
         self.entity_versions: EntityVersionService = EntityVersionService(context)
         self.questions: QuestionService = QuestionService(
@@ -180,6 +197,12 @@ class LabTrackerAPI(
             notes_provider=lambda: self.notes,
             authorization=self.project_authorization,
         )
+        self.record_exports: RecordExportService = RecordExportService(
+            context,
+            goals=self.goals,
+            questions=self.questions,
+            authorization=self.project_authorization,
+        )
         self.data_stores: DataStoreService = DataStoreService(
             context,
             projects=self.projects,
@@ -197,8 +220,18 @@ class LabTrackerAPI(
             goals_provider=lambda: self.goals,
             authorization=self.project_authorization,
         )
-        self.graph_drafts: GraphDraftService = GraphDraftService(
+        self.evidence_bundles: EvidenceBundleService = EvidenceBundleService(
             context,
+            projects=self.projects,
+            questions=self.questions,
+            datasets=self.datasets,
+            analyses=self.analyses,
+            claims=self.claims,
+            visualizations=self.visualizations,
+            notes=self.notes,
+            authorization=self.project_authorization,
+        )
+        graph_context_builder = GraphContextBuilder(
             projects=self.projects,
             questions=self.questions,
             notes=self.notes,
@@ -208,9 +241,69 @@ class LabTrackerAPI(
             claims=self.claims,
             visualizations=self.visualizations,
             goals=self.goals,
+        )
+        graph_patch_validator = GraphPatchValidator(
+            get_graph_entity=graph_context_builder.get_graph_entity,
+        )
+        graph_patch_applier = GraphPatchApplier(
+            projects=self.projects,
+            questions=self.questions,
+            notes=self.notes,
+            sessions=self.sessions,
+            datasets=self.datasets,
+            analyses=self.analyses,
+            claims=self.claims,
+            visualizations=self.visualizations,
+            goals=self.goals,
+        )
+        graph_draft_records = GraphDraftRecords(
+            context,
+            authorization=self.project_authorization,
+        )
+        self.review_emails: ReviewEmailService = ReviewEmailService(
+            context,
+            max_attempts=self._settings.review_email_max_attempts,
+        )
+        graph_draft_generation = GraphDraftGenerationCoordinator(
+            context,
+            records=graph_draft_records,
+            notes=self.notes,
+            authorization=self.project_authorization,
+            context_builder=graph_context_builder,
+            patch_validator=graph_patch_validator,
+            review_email_outbox=self.review_emails,
+        )
+        graph_draft_review = GraphDraftReviewCoordinator(
+            context,
+            records=graph_draft_records,
+            generation=graph_draft_generation,
+            patch_validator=graph_patch_validator,
+            authorization=self.project_authorization,
+        )
+        graph_draft_commit = TransactionalDraftCommitCoordinator(
+            context,
+            records=graph_draft_records,
+            patch_applier=graph_patch_applier,
             versions=self.entity_versions,
+            questions=self.questions,
+            datasets=self.datasets,
+            authorization=self.project_authorization,
+        )
+        graph_draft_scheduling = BatchSchedulingCoordinator(
+            context,
+            records=graph_draft_records,
+            generation=graph_draft_generation,
+            projects=self.projects,
+            notes=self.notes,
             authorization=self.project_authorization,
             provenance_links=self.provenance_links,
+        )
+        self.graph_drafts: GraphDraftService = GraphDraftService(
+            records=graph_draft_records,
+            generation=graph_draft_generation,
+            review=graph_draft_review,
+            commit=graph_draft_commit,
+            scheduling=graph_draft_scheduling,
         )
 
     def for_request(self, repository: LabTrackerRepository) -> LabTrackerAPI:
@@ -266,43 +359,71 @@ class LabTrackerAPI(
             return
         self._request_context.after_rollback_actions.append(action)
 
-    def record_usage_event(self, *args: Any, **kwargs: Any) -> Any:
-        return self.projects.record_usage_event(*args, **kwargs)
+    def record_usage_event(
+        self,
+        *,
+        verb: UsageEventVerb | str,
+        resource_type: UsageEventResourceType | str,
+        resource_id: UUID | None = None,
+        project_id: UUID | None = None,
+        actor: AuthContext | None = None,
+        outcome: UsageEventOutcome | str = UsageEventOutcome.OK,
+        duration_ms: int | None = None,
+        result_count: int | None = None,
+        surface: UsageEventSurface | str | None = None,
+    ) -> None:
+        self.projects.record_usage_event(
+            verb=verb,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            project_id=project_id,
+            actor=actor,
+            outcome=outcome,
+            duration_ms=duration_ms,
+            result_count=result_count,
+            surface=surface,
+        )
 
     def _with_usage_event(
         self,
-        action: Callable[[], Any],
+        action: Callable[[], UsageResultT],
         *,
         verb: UsageEventVerb,
         resource_type: UsageEventResourceType,
-        actor: Any = None,
+        actor: AuthContext | None = None,
         resource_id: UUID | None = None,
         project_id: UUID | None = None,
         resource_id_attr: str | None = None,
         project_id_attr: str | None = "project_id",
-    ) -> Any:
+        suppress_opaque_target_not_found: bool = False,
+    ) -> UsageResultT:
         start = time.perf_counter()
-        try:
-            result = action()
-        except Exception:
+        with self._service_context.application_transaction():
+            try:
+                result = action()
+            except Exception as exc:
+                if not (
+                    suppress_opaque_target_not_found
+                    and isinstance(exc, OpaqueTargetNotFoundError)
+                ):
+                    self.record_usage_event(
+                        verb=verb,
+                        resource_type=resource_type,
+                        resource_id=resource_id,
+                        project_id=project_id,
+                        actor=actor,
+                        outcome=UsageEventOutcome.ERROR,
+                        duration_ms=_elapsed_ms(start),
+                    )
+                raise
             self.record_usage_event(
                 verb=verb,
                 resource_type=resource_type,
-                resource_id=resource_id,
-                project_id=project_id,
+                resource_id=resource_id or _uuid_attr(result, resource_id_attr),
+                project_id=project_id or _uuid_attr(result, project_id_attr),
                 actor=actor,
-                outcome=UsageEventOutcome.ERROR,
                 duration_ms=_elapsed_ms(start),
             )
-            raise
-        self.record_usage_event(
-            verb=verb,
-            resource_type=resource_type,
-            resource_id=resource_id or _uuid_attr(result, resource_id_attr),
-            project_id=project_id or _uuid_attr(result, project_id_attr),
-            actor=actor,
-            duration_ms=_elapsed_ms(start),
-        )
         return result
 
 
@@ -319,6 +440,7 @@ class LabTrackerRequestScope:
         self._context = LabTrackerRequestContext(repository=repository, surface=surface)
         self._close = close
         self._completed = False
+        self._closed = False
         self.api = root_api._for_request_context(self._context)
 
     def __enter__(self) -> LabTrackerRequestScope:
@@ -334,8 +456,7 @@ class LabTrackerRequestScope:
             if not self._completed:
                 self.rollback()
         finally:
-            if self._close is not None:
-                self._close()
+            self._close_once()
 
     def complete_response(self, response: ResponseT) -> ResponseT:
         if response.status_code >= 400:
@@ -349,11 +470,21 @@ class LabTrackerRequestScope:
             return
         try:
             self._context.repository.commit()
-        except Exception:
-            self._context.repository.rollback()
-            self._complete_rollback()
+        except BaseException:
+            try:
+                self._context.repository.rollback()
+            finally:
+                self._complete_rollback()
             raise
         self._complete_commit()
+
+    def release_read_scope(self) -> None:
+        """Rollback and close a read-only scope before slow external work."""
+
+        try:
+            self.rollback()
+        finally:
+            self._close_once()
 
     def rollback(self) -> None:
         if self._completed:
@@ -380,3 +511,10 @@ class LabTrackerRequestScope:
                 label=label,
             ),
         )
+
+    def _close_once(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self._close is not None:
+            self._close()

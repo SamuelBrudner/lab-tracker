@@ -1,27 +1,79 @@
-"""Composite evidence-bundle orchestration for MCP clients."""
+"""Client-side adapter for the atomic evidence-bundle API command."""
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import hashlib
+import mimetypes
+import os
+import shutil
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol
+
+from pydantic import ValidationError as PydanticValidationError
+
+from lab_tracker.errors import ValidationError as DomainValidationError
+from lab_tracker.mcp_api_client import (
+    LabTrackerAPIError,
+    LabTrackerAPIValidationError,
+)
+from lab_tracker.schemas import Envelope, EvidenceBundleResultRead
+from lab_tracker.upload_security import validate_upload_content_type
+from lab_tracker_client.transport import (
+    MAX_UPLOAD_BYTES,
+    UploadTooLargeError,
+    preflight_upload_size,
+)
 
 JsonObject = dict[str, Any]
 
-IDEMPOTENCY_METADATA_KEY = "lab_tracker_evidence_bundle_idempotency_key"
+_COMPONENT_ID_FIELDS: dict[str, tuple[str, ...]] = {
+    "dataset": ("dataset_id",),
+    "analysis": ("analysis_id",),
+    "claim": ("claim_id",),
+    # The public MCP shape accepts both aliases, while the strict server union
+    # names the existing-visualization discriminator field ``viz_id``.
+    "visualization": ("viz_id", "visualization_id"),
+    "source_note": ("note_id", "source_note_id"),
+}
+
+_COMPONENT_RESULT_FIELDS: dict[str, tuple[str, str]] = {
+    "dataset": ("dataset_id", "datasets"),
+    "analysis": ("analysis_id", "analyses"),
+    "claim": ("claim_id", "claims"),
+    "visualization": ("visualization_id", "visualizations"),
+    "source_note": ("source_note_id", "notes"),
+}
 
 
 class EvidenceBundleClient(Protocol):
-    def list_notes(self, **kwargs: Any) -> JsonObject: ...
-    def list_datasets(self, **kwargs: Any) -> JsonObject: ...
-    def list_analyses(self, **kwargs: Any) -> JsonObject: ...
-    def list_claims(self, **kwargs: Any) -> JsonObject: ...
-    def list_visualizations(self, **kwargs: Any) -> JsonObject: ...
-    def create_note(self, **kwargs: Any) -> JsonObject: ...
-    def create_dataset(self, **kwargs: Any) -> JsonObject: ...
-    def create_analysis(self, **kwargs: Any) -> JsonObject: ...
-    def create_claim(self, **kwargs: Any) -> JsonObject: ...
-    def create_visualization(self, **kwargs: Any) -> JsonObject: ...
+    def record_evidence_bundle(self, **kwargs: Any) -> JsonObject: ...
+
+    def get_visualization(self, visualization_id: str) -> JsonObject: ...
+
     def upload_visualization_file(self, **kwargs: Any) -> JsonObject: ...
+
+
+@dataclass(frozen=True)
+class _VisualizationUpload:
+    path: Path
+    content_type: str
+    checksum_sha256: str
+    size_bytes: int
+    _temporary_directory: tempfile.TemporaryDirectory[str]
+
+    @property
+    def intent(self) -> JsonObject:
+        return {
+            "checksum_sha256": self.checksum_sha256,
+            "size_bytes": self.size_bytes,
+            "filename": self.path.name,
+            "content_type": self.content_type,
+        }
+
+    def cleanup(self) -> None:
+        self._temporary_directory.cleanup()
 
 
 def record_evidence_bundle(
@@ -37,551 +89,433 @@ def record_evidence_bundle(
     dry_run: bool = True,
     idempotency_key: str | None = None,
 ) -> JsonObject:
-    """Plan or record a dataset-analysis-claim-visualization evidence bundle."""
-    if not str(project_id or "").strip():
-        return _bundle_error("invalid_request", "project_id is required.")
-    context = _BundleContext(
-        client=client,
-        project_id=str(project_id),
-        primary_question_id=primary_question_id,
-        idempotency_key=_clean(idempotency_key),
-        dry_run=dry_run,
-    )
-    dataset = _object_or_none(dataset)
-    analysis = _object_or_none(analysis)
-    claim = _object_or_none(claim)
-    visualization = _object_or_none(visualization)
-    source_note = _object_or_none(source_note)
+    """Preview or atomically record one evidence bundle through the HTTP API.
 
-    if dataset:
-        _plan_dataset(context, dataset)
-    elif primary_question_id:
-        context.warnings.append(
-            "No dataset payload supplied; claims can only be supported by provided "
-            "or existing dataset/analysis IDs."
-        )
-    if analysis:
-        _plan_analysis(context, analysis)
-    if claim:
-        _plan_claim(context, claim)
-    if visualization:
-        _plan_visualization(context, visualization)
-    if source_note:
-        _plan_source_note(context, source_note)
-
-    return {
-        "data": {
-            "dry_run": dry_run,
-            "idempotency_key": context.idempotency_key,
-            "project_id": context.project_id,
-            "plan": context.plan,
-            "created": context.created,
-            "reused": context.reused,
-            "warnings": context.warnings,
+    The API owns component validation, transactionality, and idempotency. A local
+    visualization file remains on the MCP host: a private immutable snapshot is
+    checked and fingerprinted before the bundle request, then that exact snapshot
+    is uploaded only after a created/reused response.
+    """
+    upload = _snapshot_upload(visualization)
+    try:
+        server_components = {
+            "dataset": _component_request("dataset", dataset),
+            "analysis": _component_request("analysis", analysis),
+            "claim": _component_request("claim", claim),
+            "visualization": _component_request("visualization", visualization),
+            "source_note": _component_request("source_note", source_note),
         }
-    }
+        server_visualization = server_components["visualization"]
+        if server_visualization is not None and upload is not None:
+            server_visualization["upload_intent"] = upload.intent
 
-
-class _BundleContext:
-    def __init__(
-        self,
-        *,
-        client: EvidenceBundleClient,
-        project_id: str,
-        primary_question_id: str | None,
-        idempotency_key: str | None,
-        dry_run: bool,
-    ) -> None:
-        self.client = client
-        self.project_id = project_id
-        self.primary_question_id = _clean(primary_question_id)
-        self.idempotency_key = idempotency_key
-        self.dry_run = dry_run
-        self.plan: list[JsonObject] = []
-        self.created: dict[str, list[str]] = {
-            "notes": [],
-            "datasets": [],
-            "analyses": [],
-            "claims": [],
-            "visualizations": [],
-        }
-        self.reused: dict[str, list[str]] = {
-            "notes": [],
-            "datasets": [],
-            "analyses": [],
-            "claims": [],
-            "visualizations": [],
-        }
-        self.warnings: list[str] = []
-        self.dataset_id: str | None = None
-        self.analysis_id: str | None = None
-        self.claim_id: str | None = None
-        self.visualization_id: str | None = None
-
-
-def _plan_dataset(context: _BundleContext, payload: JsonObject) -> None:
-    explicit_id = _clean(payload.get("dataset_id"))
-    if explicit_id:
-        context.dataset_id = explicit_id
-        _reused(context, "datasets", explicit_id, reason="provided_dataset_id")
-        return
-    primary_question_id = _clean(payload.get("primary_question_id")) or context.primary_question_id
-    if not primary_question_id:
-        _create_planned(
-            context,
-            "dataset",
-            {},
-            warning="Dataset create requires primary_question_id.",
+        response = client.record_evidence_bundle(
+            project_id=project_id,
+            primary_question_id=primary_question_id,
+            dataset=server_components["dataset"],
+            analysis=server_components["analysis"],
+            claim=server_components["claim"],
+            visualization=server_visualization,
+            source_note=server_components["source_note"],
+            dry_run=dry_run,
+            idempotency_key=idempotency_key,
         )
-        return
-    request = {
-        "project_id": context.project_id,
-        "primary_question_id": primary_question_id,
-        "secondary_question_ids": _string_list(payload.get("secondary_question_ids")),
-        "commit_manifest": _dataset_manifest(payload, context.idempotency_key),
-        "commit_hash": _clean(payload.get("commit_hash")),
-        "status": _clean(payload.get("status")) or "staged",
-    }
-    existing = _find_existing_dataset(context, request)
-    if existing is not None:
-        dataset_id = str(existing["dataset_id"])
-        context.dataset_id = dataset_id
-        _reused(context, "datasets", dataset_id, reason="idempotency_or_commit_match")
-        return
-    if context.dry_run:
-        _create_planned(context, "dataset", request)
-        return
-    created = context.client.create_dataset(**request)
-    context.dataset_id = _created_id(context, "datasets", "dataset", created, "dataset_id")
-
-
-def _plan_analysis(context: _BundleContext, payload: JsonObject) -> None:
-    explicit_id = _clean(payload.get("analysis_id"))
-    if explicit_id:
-        context.analysis_id = explicit_id
-        _reused(context, "analyses", explicit_id, reason="provided_analysis_id")
-        return
-    dataset_ids = _string_list(payload.get("dataset_ids"))
-    if not dataset_ids and context.dataset_id:
-        dataset_ids = [context.dataset_id]
-    method_hash = _clean(payload.get("method_hash"))
-    code_version = _clean(payload.get("code_version"))
-    if not dataset_ids or method_hash is None or code_version is None:
-        _create_planned(
-            context,
-            "analysis",
-            {},
-            warning=(
-                "Analysis create requires dataset_ids or a bundle dataset plus "
-                "method_hash and code_version."
-            ),
+        validated = _validate_bundle_response(
+            response,
+            requested_components={
+                component for component, payload in server_components.items() if payload is not None
+            },
         )
-        return
-    if payload.get("derive_code_provenance") is True:
-        context.warnings.append(
-            "Code provenance derivation is not automatic in this tool; provide "
-            "method_hash, code_version, and environment_hash explicitly."
-        )
-    request = {
-        "project_id": context.project_id,
-        "dataset_ids": dataset_ids,
-        "method_hash": method_hash,
-        "code_version": code_version,
-        "environment_hash": _clean(payload.get("environment_hash")),
-        "status": _clean(payload.get("status")) or "staged",
-    }
-    existing = _find_existing_analysis(context, request)
-    if existing is not None:
-        analysis_id = str(existing["analysis_id"])
-        context.analysis_id = analysis_id
-        _reused(context, "analyses", analysis_id, reason="method_dataset_match")
-        return
-    if context.dry_run:
-        _create_planned(context, "analysis", request)
-        return
-    created = context.client.create_analysis(**request)
-    context.analysis_id = _created_id(context, "analyses", "analysis", created, "analysis_id")
+        response = _with_legacy_result_buckets(response, validated)
+        outcome = validated.outcome
 
+        if upload is None:
+            return response
+        if dry_run or outcome == "preview":
+            return _with_attachment_plan(
+                response,
+                {
+                    "action": "upload",
+                    "entity_type": "visualization_asset",
+                    "outcome": "preview",
+                    "upload_intent": upload.intent,
+                },
+            )
 
-def _plan_claim(context: _BundleContext, payload: JsonObject) -> None:
-    explicit_id = _clean(payload.get("claim_id"))
-    if explicit_id:
-        context.claim_id = explicit_id
-        _reused(context, "claims", explicit_id, reason="provided_claim_id")
-        return
-    statement = _clean(payload.get("statement"))
-    confidence = payload.get("confidence")
-    if statement is None or confidence is None:
-        _create_planned(
-            context,
-            "claim",
-            {},
-            warning="Claim create requires statement and confidence.",
-        )
-        return
-    dataset_ids = _string_list(payload.get("supported_by_dataset_ids"))
-    analysis_ids = _string_list(payload.get("supported_by_analysis_ids"))
-    answer_ids = _string_list(payload.get("answers_question_ids"))
-    if context.dataset_id and context.dataset_id not in dataset_ids:
-        dataset_ids.append(context.dataset_id)
-    if context.analysis_id and context.analysis_id not in analysis_ids:
-        analysis_ids.append(context.analysis_id)
-    if context.primary_question_id and context.primary_question_id not in answer_ids:
-        answer_ids.append(context.primary_question_id)
-    request = {
-        "project_id": context.project_id,
-        "statement": statement,
-        "confidence": confidence,
-        "status": _clean(payload.get("status")) or "proposed",
-        "supported_by_dataset_ids": dataset_ids or None,
-        "supported_by_analysis_ids": analysis_ids or None,
-        "answers_question_ids": answer_ids or None,
-    }
-    existing = _find_existing_claim(context, statement)
-    if existing is not None:
-        claim_id = str(existing["claim_id"])
-        context.claim_id = claim_id
-        _reused(context, "claims", claim_id, reason="statement_match")
-        return
-    if context.dry_run:
-        _create_planned(context, "claim", request)
-        return
-    created = context.client.create_claim(**request)
-    context.claim_id = _created_id(context, "claims", "claim", created, "claim_id")
+        visualization_id = _component_id(_bundle_data(response), "visualization_id")
+        if visualization_id is None:
+            _raise_attachment_failure(
+                outcome=outcome,
+                idempotency_key=idempotency_key,
+                detail="the server response did not include component_ids.visualization_id",
+            )
 
-
-def _plan_visualization(context: _BundleContext, payload: JsonObject) -> None:
-    explicit_id = _clean(payload.get("viz_id")) or _clean(payload.get("visualization_id"))
-    upload_file = payload.get("upload_file") is True
-    upload_file_path = _clean(payload.get("upload_file_path")) or _clean(payload.get("file_path"))
-    if explicit_id:
-        context.visualization_id = explicit_id
-        _reused(context, "visualizations", explicit_id, reason="provided_visualization_id")
-        if upload_file:
-            _plan_visualization_upload(context, explicit_id, upload_file_path, payload)
-        return
-    analysis_id = _clean(payload.get("analysis_id")) or context.analysis_id
-    viz_type = _clean(payload.get("viz_type"))
-    file_path = _clean(payload.get("file_path"))
-    if analysis_id is None or viz_type is None or file_path is None:
-        _create_planned(
-            context,
-            "visualization",
-            {},
-            warning="Visualization create requires analysis_id, viz_type, and file_path.",
-        )
-        return
-    related_claim_ids = _string_list(payload.get("related_claim_ids"))
-    if context.claim_id and context.claim_id not in related_claim_ids:
-        related_claim_ids.append(context.claim_id)
-    request = {
-        "analysis_id": analysis_id,
-        "viz_type": viz_type,
-        "file_path": file_path,
-        "caption": _clean(payload.get("caption")),
-        "related_claim_ids": related_claim_ids or None,
-    }
-    existing = _find_existing_visualization(context, request)
-    if existing is not None:
-        visualization_id = str(existing["viz_id"])
-        context.visualization_id = visualization_id
-        _reused(context, "visualizations", visualization_id, reason="analysis_file_match")
-        if upload_file:
-            if isinstance(existing.get("asset"), dict):
-                context.plan.append(
+        try:
+            existing = client.get_visualization(visualization_id)
+            asset = _visualization_asset(existing)
+            expected_current_storage_id = "absent"
+            if asset is not None:
+                expected_current_storage_id = _clean(asset.get("storage_id")) or ""
+                if not expected_current_storage_id:
+                    raise LabTrackerAPIError(
+                        "Visualization response included asset metadata without a storage_id.",
+                        code="invalid_visualization_response",
+                    )
+            uploaded = client.upload_visualization_file(
+                viz_id=visualization_id,
+                file_path=str(upload.path),
+                content_type=upload.content_type,
+                checksum_sha256=upload.checksum_sha256,
+                size_bytes=upload.size_bytes,
+                expected_current_storage_id=expected_current_storage_id,
+            )
+            uploaded_asset = _validated_uploaded_asset(uploaded, upload)
+            asset_outcome = _asset_upload_outcome(uploaded)
+            if asset_outcome == "reused":
+                return _with_attachment_plan(
+                    response,
                     {
                         "action": "reuse",
                         "entity_type": "visualization_asset",
-                        "entity_id": str(existing["asset"].get("storage_id") or ""),
-                        "reason": "existing_managed_asset",
-                    }
+                        "outcome": "reused",
+                        "visualization_id": visualization_id,
+                        "storage_id": uploaded_asset["storage_id"],
+                        "checksum_sha256": upload.checksum_sha256,
+                        "reason": "matching_checksum",
+                    },
                 )
-            else:
-                _plan_visualization_upload(context, visualization_id, upload_file_path, payload)
-        return
-    if context.dry_run:
-        _create_planned(context, "visualization", request)
-        if upload_file:
-            _plan_visualization_upload(context, "<new visualization>", upload_file_path, payload)
-        elif file_path and _looks_like_local_path(file_path):
-            context.warnings.append(
-                "Visualization file_path looks local; set upload_file=true to copy it "
-                "into managed Lab Tracker storage after creating the visualization."
+            return _with_attachment_plan(
+                response,
+                {
+                    "action": "uploaded",
+                    "entity_type": "visualization_asset",
+                    "outcome": "created",
+                    "visualization_id": visualization_id,
+                    "storage_id": uploaded_asset["storage_id"],
+                    "checksum_sha256": upload.checksum_sha256,
+                },
             )
-        return
-    created = context.client.create_visualization(**request)
-    context.visualization_id = _created_id(
-        context,
-        "visualizations",
-        "visualization",
-        created,
-        "viz_id",
-    )
-    if upload_file:
-        _plan_visualization_upload(context, context.visualization_id, upload_file_path, payload)
+        except Exception as exc:
+            _raise_attachment_failure(
+                outcome=outcome,
+                idempotency_key=idempotency_key,
+                detail=str(exc),
+                cause=exc,
+            )
+    finally:
+        if upload is not None:
+            upload.cleanup()
 
 
-def _plan_source_note(context: _BundleContext, payload: JsonObject) -> None:
-    explicit_id = _clean(payload.get("note_id"))
-    if explicit_id:
-        _reused(context, "notes", explicit_id, reason="provided_note_id")
-        return
-    raw_content = _clean(payload.get("raw_content"))
-    if raw_content is None:
-        _create_planned(
-            context,
-            "note",
-            {},
-            warning="Source note create requires raw_content.",
+def _component_request(
+    component: str,
+    payload: JsonObject | None,
+) -> JsonObject | None:
+    if payload is None:
+        return None
+    if not isinstance(payload, dict):
+        raise LabTrackerAPIValidationError(
+            f"{component} must be an object.",
+            code="validation_error",
         )
-        return
-    existing = _find_existing_note(context)
-    if existing is not None:
-        _reused(context, "notes", str(existing["note_id"]), reason="idempotency_match")
-        return
-    request = {
-        "project_id": context.project_id,
-        "raw_content": raw_content,
-        "transcribed_text": _clean(payload.get("transcribed_text")),
-        "targets": payload.get("targets") or _default_note_targets(context),
-        "metadata": _note_metadata(payload, context.idempotency_key),
-        "status": _clean(payload.get("status")) or "staged",
-    }
-    if context.dry_run:
-        _create_planned(context, "note", request)
-        return
-    created = context.client.create_note(**request)
-    _created_id(context, "notes", "note", created, "note_id")
+    public_payload = dict(payload)
+    public_payload.pop("kind", None)
+    id_fields = _COMPONENT_ID_FIELDS[component]
+    explicit_id = next(
+        (
+            cleaned
+            for field in id_fields
+            if (cleaned := _clean(public_payload.get(field))) is not None
+        ),
+        None,
+    )
+    for field in id_fields:
+        public_payload.pop(field, None)
+    if component == "visualization":
+        for field in ("upload_file", "upload_file_path", "content_type"):
+            public_payload.pop(field, None)
+    if explicit_id is not None:
+        canonical_id_field = id_fields[0]
+        return {"kind": "existing", canonical_id_field: explicit_id}
+    return {"kind": "create", **public_payload}
 
 
-def _plan_visualization_upload(
-    context: _BundleContext,
-    viz_id: str | None,
-    file_path: str | None,
-    payload: JsonObject,
-) -> None:
+def _snapshot_upload(visualization: JsonObject | None) -> _VisualizationUpload | None:
+    if not isinstance(visualization, dict) or visualization.get("upload_file") is not True:
+        return None
+    file_path = _clean(visualization.get("upload_file_path")) or _clean(
+        visualization.get("file_path")
+    )
     if file_path is None:
-        context.warnings.append("Visualization upload requested but no file path was supplied.")
-        return
-    request = {
-        "viz_id": viz_id,
-        "file_path": file_path,
-        "content_type": _clean(payload.get("content_type")),
-    }
-    if context.dry_run or not viz_id or viz_id == "<new visualization>":
-        context.plan.append(
-            {
-                "action": "upload",
-                "entity_type": "visualization_asset",
-                "request": request,
-            }
+        raise LabTrackerAPIValidationError(
+            "Visualization upload requested but no file path was supplied.",
+            code="validation_error",
         )
-        return
-    upload = context.client.upload_visualization_file(**request)
-    context.plan.append(
-        {
-            "action": "uploaded",
-            "entity_type": "visualization_asset",
-            "entity_id": _response_id(upload, "storage_id"),
-            "request": request,
-        }
+    source_path = Path(file_path).expanduser()
+    if not source_path.is_file():
+        raise LabTrackerAPIValidationError(
+            f"Visualization file does not exist: {file_path}",
+            code="validation_error",
+        )
+    try:
+        preflight_upload_size(source_path, max_bytes=MAX_UPLOAD_BYTES)
+    except UploadTooLargeError as exc:
+        raise LabTrackerAPIValidationError(str(exc), code="validation_error") from exc
+    requested_content_type = (
+        _clean(visualization.get("content_type"))
+        or mimetypes.guess_type(source_path.name)[0]
+        or "application/octet-stream"
+    )
+    try:
+        content_type = validate_upload_content_type(requested_content_type)
+    except DomainValidationError as exc:
+        raise LabTrackerAPIValidationError(str(exc), code="validation_error") from exc
+
+    temporary_directory = tempfile.TemporaryDirectory(
+        prefix="lab-tracker-evidence-upload-",
+        ignore_cleanup_errors=True,
+    )
+    snapshot_path = Path(temporary_directory.name) / source_path.name
+    try:
+        with source_path.open("rb") as source:
+            descriptor = os.open(
+                snapshot_path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+            with os.fdopen(descriptor, "wb") as snapshot:
+                shutil.copyfileobj(source, snapshot, length=1024 * 1024)
+        size_bytes = preflight_upload_size(snapshot_path, max_bytes=MAX_UPLOAD_BYTES)
+        if size_bytes <= 0:
+            raise LabTrackerAPIValidationError(
+                "Visualization file must not be empty.",
+                code="validation_error",
+            )
+        checksum_sha256 = _file_sha256(snapshot_path)
+    except (OSError, UploadTooLargeError, LabTrackerAPIValidationError) as exc:
+        temporary_directory.cleanup()
+        if isinstance(exc, LabTrackerAPIValidationError):
+            raise
+        raise LabTrackerAPIValidationError(
+            f"Could not snapshot visualization upload {file_path}: {exc}",
+            code="validation_error",
+        ) from exc
+
+    return _VisualizationUpload(
+        path=snapshot_path,
+        content_type=content_type,
+        checksum_sha256=checksum_sha256,
+        size_bytes=size_bytes,
+        _temporary_directory=temporary_directory,
     )
 
 
-def _find_existing_dataset(context: _BundleContext, request: JsonObject) -> JsonObject | None:
-    datasets = _items(context.client.list_datasets(project_id=context.project_id, limit=200))
-    commit_hash = _clean(request.get("commit_hash"))
-    for dataset in datasets:
-        if context.idempotency_key and _manifest_has_idempotency(dataset, context.idempotency_key):
-            return dataset
-        if commit_hash and _clean(dataset.get("commit_hash")) == commit_hash:
-            return dataset
-    return None
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
-def _find_existing_analysis(context: _BundleContext, request: JsonObject) -> JsonObject | None:
-    analyses = _items(context.client.list_analyses(project_id=context.project_id, limit=200))
-    dataset_ids = set(_string_list(request.get("dataset_ids")))
-    for analysis in analyses:
-        if (
-            set(_string_list(analysis.get("dataset_ids"))) == dataset_ids
-            and _clean(analysis.get("method_hash")) == request["method_hash"]
-            and _clean(analysis.get("code_version")) == request["code_version"]
-        ):
-            return analysis
-    return None
-
-
-def _find_existing_claim(context: _BundleContext, statement: str) -> JsonObject | None:
-    claims = _items(context.client.list_claims(project_id=context.project_id, limit=200))
-    normalized = statement.casefold().strip()
-    for claim in claims:
-        if _clean(claim.get("statement")) == statement:
-            return claim
-        existing = _clean(claim.get("statement"))
-        if existing is not None and existing.casefold().strip() == normalized:
-            return claim
-    return None
-
-
-def _find_existing_visualization(context: _BundleContext, request: JsonObject) -> JsonObject | None:
-    visualizations = _items(
-        context.client.list_visualizations(project_id=context.project_id, limit=200)
-    )
-    for visualization in visualizations:
-        if (
-            _clean(visualization.get("analysis_id")) == request["analysis_id"]
-            and _clean(visualization.get("viz_type")) == request["viz_type"]
-            and _clean(visualization.get("file_path")) == request["file_path"]
-        ):
-            return visualization
-    return None
-
-
-def _find_existing_note(context: _BundleContext) -> JsonObject | None:
-    if context.idempotency_key is None:
-        return None
-    notes = _items(context.client.list_notes(project_id=context.project_id, limit=200))
-    for note in notes:
-        metadata = note.get("metadata")
-        if (
-            isinstance(metadata, dict)
-            and metadata.get(IDEMPOTENCY_METADATA_KEY) == context.idempotency_key
-        ):
-            return note
-    return None
-
-
-def _dataset_manifest(payload: JsonObject, idempotency_key: str | None) -> JsonObject | None:
-    manifest = payload.get("commit_manifest")
-    if manifest is None:
-        manifest = {}
-    if not isinstance(manifest, dict):
-        return None
-    resolved = dict(manifest)
-    if idempotency_key:
-        metadata = dict(resolved.get("metadata") or {})
-        metadata.setdefault(IDEMPOTENCY_METADATA_KEY, idempotency_key)
-        resolved["metadata"] = metadata
-    return resolved
-
-
-def _note_metadata(payload: JsonObject, idempotency_key: str | None) -> JsonObject | None:
-    metadata = payload.get("metadata")
-    if metadata is None:
-        metadata = {}
-    if not isinstance(metadata, dict):
-        return None
-    resolved = dict(metadata)
-    if idempotency_key:
-        resolved.setdefault(IDEMPOTENCY_METADATA_KEY, idempotency_key)
-    return resolved
-
-
-def _manifest_has_idempotency(dataset: JsonObject, idempotency_key: str) -> bool:
-    manifest = dataset.get("commit_manifest")
-    if not isinstance(manifest, dict):
-        return False
-    metadata = manifest.get("metadata")
-    return isinstance(metadata, dict) and metadata.get(IDEMPOTENCY_METADATA_KEY) == idempotency_key
-
-
-def _default_note_targets(context: _BundleContext) -> list[JsonObject]:
-    if context.visualization_id:
-        return [{"entity_type": "visualization", "entity_id": context.visualization_id}]
-    if context.claim_id:
-        return [{"entity_type": "claim", "entity_id": context.claim_id}]
-    if context.analysis_id:
-        return [{"entity_type": "analysis", "entity_id": context.analysis_id}]
-    if context.dataset_id:
-        return [{"entity_type": "dataset", "entity_id": context.dataset_id}]
-    if context.primary_question_id:
-        return [{"entity_type": "question", "entity_id": context.primary_question_id}]
-    return []
-
-
-def _created_id(
-    context: _BundleContext,
-    bucket: str,
-    entity_type: str,
+def _validate_bundle_response(
     response: JsonObject,
-    id_key: str,
-) -> str:
-    entity_id = _response_id(response, id_key)
-    if entity_id is None:
-        context.warnings.append(f"{entity_type} create response did not include {id_key}.")
-        entity_id = ""
-    context.created[bucket].append(entity_id)
-    context.plan.append(
-        {
-            "action": "created",
-            "entity_type": entity_type,
-            "entity_id": entity_id,
-        }
-    )
-    return entity_id
-
-
-def _reused(
-    context: _BundleContext,
-    bucket: str,
-    entity_id: str,
     *,
-    reason: str,
-) -> None:
-    context.reused[bucket].append(entity_id)
-    context.plan.append(
-        {
-            "action": "reuse",
-            "entity_type": bucket[:-1] if bucket.endswith("s") else bucket,
-            "entity_id": entity_id,
-            "reason": reason,
-        }
-    )
+    requested_components: set[str],
+) -> EvidenceBundleResultRead:
+    try:
+        envelope = Envelope[EvidenceBundleResultRead].model_validate(response)
+    except PydanticValidationError as exc:
+        raise LabTrackerAPIError(
+            "Evidence-bundle response did not match the documented response schema.",
+            code="invalid_evidence_bundle_response",
+        ) from exc
+
+    result = envelope.data
+    if result.outcome != "preview":
+        missing_ids = [
+            result_field
+            for component, (result_field, _bucket) in _COMPONENT_RESULT_FIELDS.items()
+            if component in requested_components
+            and getattr(result.component_ids, result_field) is None
+        ]
+        if missing_ids:
+            raise LabTrackerAPIError(
+                "Evidence-bundle response omitted required component IDs: "
+                + ", ".join(missing_ids)
+                + ".",
+                code="invalid_evidence_bundle_response",
+            )
+    return result
 
 
-def _create_planned(
-    context: _BundleContext,
-    entity_type: str,
-    request: JsonObject,
-    *,
-    warning: str | None = None,
-) -> None:
-    if warning:
-        context.warnings.append(warning)
-    context.plan.append(
-        {
-            "action": "create" if context.dry_run else "skipped",
-            "entity_type": entity_type,
-            "request": request,
-        }
-    )
+def _with_legacy_result_buckets(
+    response: JsonObject,
+    result: EvidenceBundleResultRead,
+) -> JsonObject:
+    created: dict[str, list[str]] = {
+        "notes": [],
+        "datasets": [],
+        "analyses": [],
+        "claims": [],
+        "visualizations": [],
+    }
+    reused: dict[str, list[str]] = {
+        "notes": [],
+        "datasets": [],
+        "analyses": [],
+        "claims": [],
+        "visualizations": [],
+    }
+    for step in result.plan:
+        result_field, bucket = _COMPONENT_RESULT_FIELDS[step.entity_type]
+        entity_id = step.entity_id or getattr(result.component_ids, result_field)
+        if entity_id is None:
+            continue
+        entity_id_text = str(entity_id)
+        if step.action == "reuse":
+            if entity_id_text not in reused[bucket]:
+                reused[bucket].append(entity_id_text)
+        elif result.outcome != "preview" and entity_id_text not in created[bucket]:
+            created[bucket].append(entity_id_text)
+
+    enriched = dict(response)
+    data = dict(_bundle_data(response))
+    data["created"] = created
+    data["reused"] = reused
+    enriched["data"] = data
+    return enriched
 
 
-def _response_id(response: JsonObject, id_key: str) -> str | None:
+def _bundle_data(response: JsonObject) -> JsonObject:
     data = response.get("data")
-    if isinstance(data, dict) and data.get(id_key) is not None:
-        return str(data[id_key])
-    return None
+    if not isinstance(data, dict):
+        raise LabTrackerAPIError(
+            "Evidence-bundle response did not include object data.",
+            code="invalid_evidence_bundle_response",
+        )
+    return data
 
 
-def _items(payload: JsonObject) -> list[JsonObject]:
-    data = payload.get("data")
-    if not isinstance(data, list):
-        return []
-    return [dict(item) for item in data if isinstance(item, dict)]
+def _component_id(data: JsonObject, field: str) -> str | None:
+    component_ids = data.get("component_ids")
+    if not isinstance(component_ids, dict):
+        return None
+    return _clean(component_ids.get(field))
 
 
-def _object_or_none(value: object) -> JsonObject | None:
-    return dict(value) if isinstance(value, dict) else None
+def _visualization_asset(response: JsonObject) -> JsonObject | None:
+    data = response.get("data")
+    if not isinstance(data, dict):
+        raise LabTrackerAPIError(
+            "Visualization response did not include object data.",
+            code="invalid_visualization_response",
+        )
+    asset = data.get("asset")
+    return dict(asset) if isinstance(asset, dict) else None
 
 
-def _string_list(value: object) -> list[str]:
-    if value is None:
-        return []
-    if not isinstance(value, Sequence) or isinstance(value, str):
-        return []
-    return [str(item) for item in value if str(item).strip()]
+def _validated_uploaded_asset(
+    response: JsonObject,
+    upload: _VisualizationUpload,
+) -> JsonObject:
+    asset = _visualization_asset(response)
+    if asset is None:
+        raise LabTrackerAPIError(
+            "Visualization upload response did not include asset metadata.",
+            code="invalid_visualization_response",
+        )
+
+    mismatches: list[str] = []
+    if _clean(asset.get("storage_id")) is None:
+        mismatches.append("storage_id")
+    if _clean(asset.get("filename")) != upload.path.name:
+        mismatches.append("filename")
+    if (_clean(asset.get("content_type")) or "").casefold() != upload.content_type.casefold():
+        mismatches.append("content_type")
+    size_bytes = asset.get("size_bytes")
+    if (
+        isinstance(size_bytes, bool)
+        or not isinstance(size_bytes, int)
+        or size_bytes != upload.size_bytes
+    ):
+        mismatches.append("size_bytes")
+    if not _same_checksum(asset.get("checksum"), upload.checksum_sha256):
+        mismatches.append("checksum")
+    if mismatches:
+        raise LabTrackerAPIError(
+            "Visualization upload response did not match the fingerprinted snapshot "
+            f"({', '.join(dict.fromkeys(mismatches))}).",
+            code="invalid_visualization_response",
+        )
+    return asset
+
+
+def _asset_upload_outcome(response: JsonObject) -> str:
+    meta = response.get("meta")
+    if meta is None:
+        # Backward-compatible with servers predating atomic attachment outcomes.
+        return "created"
+    if not isinstance(meta, dict):
+        raise LabTrackerAPIError(
+            "Visualization upload response included malformed metadata.",
+            code="invalid_visualization_response",
+        )
+    outcome = meta.get("asset_outcome")
+    if outcome is None:
+        return "created"
+    if outcome not in {"created", "replaced", "reused"}:
+        raise LabTrackerAPIError(
+            "Visualization upload response included an unknown asset outcome.",
+            code="invalid_visualization_response",
+        )
+    return outcome
+
+
+def _same_checksum(value: object, expected: str) -> bool:
+    actual = _clean(value)
+    if actual is None:
+        return False
+    return actual.removeprefix("sha256:").casefold() == expected.casefold()
+
+
+def _with_attachment_plan(response: JsonObject, entry: JsonObject) -> JsonObject:
+    result = dict(response)
+    data = dict(_bundle_data(response))
+    plan = data.get("plan")
+    if not isinstance(plan, list):
+        raise LabTrackerAPIError(
+            "Evidence-bundle response did not include a reviewable plan.",
+            code="invalid_evidence_bundle_response",
+        )
+    data["plan"] = [*plan, entry]
+    data["attachment"] = entry
+    result["data"] = data
+    return result
+
+
+def _raise_attachment_failure(
+    *,
+    outcome: str,
+    idempotency_key: str | None,
+    detail: str,
+    cause: Exception | None = None,
+) -> None:
+    retry = (
+        f" Retry with the same idempotency_key ({idempotency_key!r}); the bundle "
+        "endpoint will reuse the committed graph records."
+        if idempotency_key
+        else " The graph records were not rolled back; inspect them before retrying the upload."
+    )
+    error = LabTrackerAPIError(
+        "Evidence bundle was "
+        f"{outcome}, but its visualization attachment failed: {detail}. Server graph "
+        f"records are already committed and were not rolled back.{retry}",
+        code="evidence_bundle_attachment_failed",
+    )
+    if cause is None:
+        raise error
+    raise error from cause
 
 
 def _clean(value: object) -> str | None:
@@ -589,11 +523,3 @@ def _clean(value: object) -> str | None:
         return None
     cleaned = str(value).strip()
     return cleaned or None
-
-
-def _looks_like_local_path(value: str) -> bool:
-    return value.startswith(("/", "./", "../", "~")) or ":" not in value
-
-
-def _bundle_error(code: str, message: str) -> JsonObject:
-    return {"error": {"code": code, "message": message}}

@@ -71,6 +71,180 @@ that destination through your normal off-machine backup process.
   Uploads that exceed the limit are rejected and partial local files are
   cleaned up.
 
+### External HTTP artifact resolution
+
+HTTP(S) external-artifact resolution has an outbound destination policy
+independent of the pointer's content hash and response-size limits. A public
+destination is eligible only when every address returned for its hostname is
+globally routable. Malformed URLs, URLs containing user information,
+localhost/local/single-label names without an exact internal exception, unsafe
+literal or resolved addresses, and DNS answers that mix public and non-public
+addresses are denied before an HTTP request is sent. Link-local
+metadata-service, unspecified, multicast, reserved, and IPv6 transition
+addresses cannot be enabled even by an internal exception. The connection uses
+one of the already-vetted numeric addresses, so a second DNS answer cannot
+change its destination. Proxy environment variables are ignored. Redirects
+have a finite limit, and every redirect target goes through the same
+authorization and address-pinning process before the next request. One total
+wall-clock deadline covers DNS, connect and TLS setup, response headers, every
+redirect hop, body verification, and hashing.
+DNS lookups use the host's configured DNS servers and search domains through
+dnspython so they can be cancelled at the deadline. Names available only
+through platform-specific NSS, mDNS, or local-hosts integrations may therefore
+need a normal DNS record.
+
+Private or otherwise non-public destinations are deny-by-default. Operators can
+opt in a destination only with both of these settings:
+
+- `LAB_TRACKER_RESOLVER_HTTP_ALLOWED_AUTHORITIES`: comma-separated exact
+  HTTP(S) authorities. Each entry is normalized to its scheme, hostname, and
+  effective port; for example, `https://files.lab.example` and
+  `https://files.lab.example:443` identify the same authority. Entries cannot
+  contain user information, paths, queries, fragments, wildcards, or suffix
+  patterns.
+- `LAB_TRACKER_RESOLVER_HTTP_ALLOWED_NETWORKS`: comma-separated IPv4 or IPv6
+  CIDRs containing the approved destination addresses, for example
+  `10.42.0.0/16,fd42:1234::/48`.
+
+The two settings are conjunctive: the normalized request authority must be an
+exact configured authority **and** every DNS answer (or the literal IP) must
+fall within a configured CIDR. An authority without a network, a network
+without an authority, or one unapproved address in a multi-address answer is
+denied. Invalid authority or CIDR configuration fails application startup
+rather than weakening the policy.
+
+Request duration is controlled separately:
+
+- `LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS`: total wall-clock budget for one
+  HTTP artifact resolution, including DNS, connect and TLS setup, response
+  headers, redirects, body verification, and hashing (default: `30`). The value
+  must be finite, greater than zero, and no greater than `86400` seconds (one
+  day); invalid values fail application startup.
+
+This opt-in changes only whether the host may make the outbound connection. It
+does not bypass resolve-by-entity authorization or opaque not-found behavior,
+does not weaken full-content hash verification, and does not increase the
+configured fetch or returned-content bounds. See
+[`external-artifact-resolution-design.md`](external-artifact-resolution-design.md)
+for the complete resolution contract.
+
+### External-artifact resolution admission
+
+`POST /external-artifacts/resolve` is admission-controlled independently of
+the resolver's HTTP and subprocess deadlines. Authentication completes first;
+then the service either obtains a slot immediately or returns one fixed generic
+`429` response with `Retry-After`. The response intentionally does not reveal
+whether the global or caller-specific limit was full, or anything about the
+requested project or entity. A rejected request does not create the ordinary
+request database session or begin artifact resolution.
+
+- `LAB_TRACKER_ARTIFACT_RESOLUTION_GLOBAL_IN_FLIGHT_LIMIT`: maximum concurrent
+  resolutions in one application process (default: `8`). It must be a positive
+  integer no greater than `32`.
+- `LAB_TRACKER_ARTIFACT_RESOLUTION_PER_ACTOR_IN_FLIGHT_LIMIT`: maximum
+  concurrent resolutions for one authenticated `actor.user_id` in that process
+  (default: `2`). It must be a positive integer no greater than the configured
+  global limit.
+
+The global limit is deliberately capped below the standard AnyIO shared worker
+capacity of 40 so accepted synchronous resolution work leaves worker capacity
+for authentication, cleanup, and ordinary requests. These limits are
+process-local, not distributed: each Uvicorn worker or replica has its own
+global and per-actor counters. The supported deployment therefore uses one
+Uvicorn worker per service process. Do not enable multiple workers/replicas
+while treating either value as a cluster-wide quota; distributed admission is a
+separate requirement.
+
+### External rclone and Git artifact resolution
+
+Rclone and Git adapters execute optional host binaries under a separate process
+budget. The configured budget is one monotonic deadline for the entire logical
+resolution: rclone metadata lookup, transfer, and verification share one
+deadline, as do Git fetch, object inspection, transfer, and verification.
+Progress or moving between subprocesses does not reset it.
+
+- `LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS`: execution and verification
+  budget for one rclone or Git artifact resolution (default: `30`). The value
+  must be finite, greater than zero, and no greater than `86400` seconds (one
+  day); invalid values fail application startup. This setting is independent of
+  `LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS`.
+- `LAB_TRACKER_GIT_ALLOWED_REMOTES`: strict comma-separated structural grants
+  for server-side Git resolution and Git store-health probes. The unset or empty
+  value denies every Git remote. Entries are not whitespace-trimmed; an empty,
+  malformed, or semantically duplicate normalized entry fails startup without
+  echoing the configured value.
+
+Each Git grant must use one of these forms:
+
+- `https://host[:port][/path]`
+- `ssh://[user@]host[:port][/path]`
+- `git://host[:port][/path]`
+- `[user@]host:path` or `[user@]host:/path` (SCP-relative and SCP-absolute
+  syntax are distinct)
+
+There are no wildcard or textual-prefix grants. Hostnames are case-normalized
+and strictly IDNA-canonicalized, IP literals and default ports are canonicalized,
+and a candidate must match the grant's scheme, canonical host, effective port,
+SSH user, and path style exactly. Terminal-dot hostnames are rejected rather
+than rewritten. A configured path is a case-sensitive prefix of whole path
+segments, so a grant for `/lab` permits `/lab/repository.git` but not
+`/laboratory/repository.git`. URL roots are valid grants. Non-root path segments
+use conservative ASCII letters, digits, and `._~+@-`; empty, repeated, trailing,
+dot, leading-dash, or other segments fail closed. Local and drive paths,
+remote-helper forms, unsupported schemes, embedded credentials, query or
+fragment components, percent escapes, and malformed paths or authorities are
+also rejected. Credentials belong in operator-controlled Git credential helpers
+or SSH facilities, never in this setting or a persisted store root.
+
+The policy is parsed once from `Settings` at startup. One immutable policy
+instance is shared by the resolver registry and the store-health checker; those
+components do not independently reread the process environment. Store-health
+Git commands run from an app-owned empty, non-repository directory, so an
+ambient checkout's repository-local Git configuration cannot affect them. The
+Git command environment clears inherited repository/object/work-tree selectors
+and sets the operation directory's parent as Git's discovery ceiling, preventing
+that parent or anything above it from supplying repository-local configuration.
+
+Authorization occurs before process creation. Git's effective remote is then
+preflighted with the same bounded command environment. Apart from its required
+terminal line ending, `git ls-remote --get-url` output must be byte-for-byte
+equal to the reconstructed canonical remote before a query or fetch proceeds;
+merely parsing to an equivalent structure is not enough. HTTP redirects are
+disabled both generically and for the approved URL. An operator grant therefore
+never implicitly approves a rewritten or redirected URL.
+
+The structural policy is an application boundary, not a network sandbox around
+Git. Git's system/global configuration remains available for credential
+helpers, HTTP proxy and TLS configuration, and SSH uses the host's agent, keys,
+and OpenSSH configuration. OpenSSH `HostName`, `ProxyJump`, and `ProxyCommand`,
+and Git/HTTP proxy settings can route an approved logical endpoint through
+other machines. Treat all of those facilities as trusted, immutable
+operator-controlled configuration; users who can modify them can change where
+Git connects or disclose Git credentials. Do not mount user-writable Git,
+credential-helper, proxy, or OpenSSH configuration into the service.
+
+Subprocess metadata output and stderr have independent fixed memory caps. Actual
+artifact bytes are streamed and checked against the resolver's existing
+`max_fetch_bytes` limit as they arrive; a preflight size is advisory and cannot
+permit a growing object to exceed that limit. Timeout, output overflow,
+malformed metadata, or failed cleanup produces a generic unresolved result
+without exposing a remote, path, credential, or raw stderr. Pipes are closed and
+an uncooperative process is terminated, then killed and reaped within a separate
+fixed cleanup grace. A failed call can therefore exceed the configured
+execution deadline only by that bounded cleanup grace.
+
+The bounded rclone/Git process boundary contains complete descendant trees on
+both supported process platforms. POSIX hosts use a dedicated process group.
+Windows hosts create an unnamed, non-inheritable Job Object configured with
+`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, start the leader suspended, assign and
+verify it in the Job Object, and only then resume its primary thread. If secure
+containment cannot be established, the child never executes and resolution
+fails closed as `UNRESOLVED`.
+
+The deadline and process-output caps bound one resolution, but they do not bound
+Git cache growth or concurrent cache mutation. Git fetch disk and cache
+containment remain a separate follow-up.
+
 ### Bootstrap (first admin)
 
 - `LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN`: one-time token for creating the first
@@ -110,6 +284,14 @@ credentials, MCP) is [`agent-setup.md`](agent-setup.md).
   OpenAI voice-note transcription
 - `LAB_TRACKER_OPENAI_MODEL`: OpenAI model for graph drafts (default:
   `gpt-4o-mini`; set another compatible model to override)
+- `LAB_TRACKER_OPENAI_REASONING_EFFORT`: optional Responses API reasoning
+  effort for graph drafts (`none`, `low`, `medium`, `high`, `xhigh`, or
+  `max`; omitted by default)
+- `LAB_TRACKER_OPENAI_REASONING_MODE`: optional Responses API reasoning mode
+  for graph drafts (`standard` or `pro`; omitted by default). For a
+  quality-first GPT-5.6 Sol deployment, use model `gpt-5.6-sol`, effort
+  `max`, and mode `pro`. Codex Ultra is a separate agent-orchestration mode,
+  not an API reasoning value.
 - `LAB_TRACKER_OPENAI_TRANSCRIPTION_MODEL`: OpenAI model for voice-note
   transcription (default: `gpt-4o-mini-transcribe`)
 - `LAB_TRACKER_OPENAI_BASE_URL`: OpenAI API base URL (default:
@@ -132,6 +314,53 @@ credentials, MCP) is [`agent-setup.md`](agent-setup.md).
   (default: `https://generativelanguage.googleapis.com/v1beta`)
 - `LAB_TRACKER_GOOGLE_TIMEOUT_SECONDS`: Google graph draft API timeout in
   seconds (default: `60`)
+
+### Daily-review email alerts
+
+Email alerts are per-user and opt-in. They are queued only when an assigned
+batch review reaches `ready`; generic graph changes, failed drafts, unassigned
+batches, and empty proposals do not send mail. The message deliberately omits
+the project name, note text, proposal summary, operation count, and all other
+research content. Its signed short-lived link remains a pointer, not an
+authorization grant: normal sign-in and project access are still required.
+
+- `LAB_TRACKER_REVIEW_EMAIL_ENABLED`: enable delivery processing (default:
+  `false`)
+- `LAB_TRACKER_REVIEW_EMAIL_TRANSPORT`: `external` for a mailbox-owned worker,
+  or `smtp` for the built-in worker (default: `external`)
+- `LAB_TRACKER_REVIEW_EMAIL_WORKER_POLL_SECONDS`: built-in SMTP worker idle
+  polling interval (default: `10`)
+- `LAB_TRACKER_REVIEW_EMAIL_CLAIM_LEASE_SECONDS`: time before a crashed
+  delivery worker's lease can be recovered (default: `300`)
+- `LAB_TRACKER_REVIEW_EMAIL_MAX_ATTEMPTS`: provider attempts before a delivery
+  becomes terminally failed (default: `8`)
+- `LAB_TRACKER_REVIEW_EMAIL_LINK_TTL_MINUTES`: signed review-link lifetime
+  (default: `1440`)
+- `LAB_TRACKER_REVIEW_EMAIL_SMTP_HOST`: SMTP server hostname
+- `LAB_TRACKER_REVIEW_EMAIL_SMTP_PORT`: SMTP server port (default: `587`)
+- `LAB_TRACKER_REVIEW_EMAIL_SMTP_USERNAME`: optional SMTP login username
+- `LAB_TRACKER_REVIEW_EMAIL_SMTP_PASSWORD`: optional SMTP login password;
+  configure it together with the username or configure neither
+- `LAB_TRACKER_REVIEW_EMAIL_SMTP_FROM_ADDRESS`: required sender for SMTP
+- `LAB_TRACKER_REVIEW_EMAIL_SMTP_TLS_MODE`: `none`, `starttls` (default), or
+  `implicit`
+- `LAB_TRACKER_REVIEW_EMAIL_SMTP_TIMEOUT_SECONDS`: bounded SMTP timeout
+  (default: `10`, maximum: `30`)
+
+Enabling alerts requires authentication and an HTTPS
+`LAB_TRACKER_PUBLIC_BASE_URL`. Delivery state is durable in
+`review_email_outbox`: unique idempotency keys prevent duplicate enqueue,
+leases recover after worker crashes, transient failures back off, and
+`accepted` means the provider accepted the message—not that it reached an
+inbox. See [daily-review-email-alerts.md](daily-review-email-alerts.md).
+
+For Docker deployments using `external`, invoke the bridge inside the primary
+app container or through the root Compose file's default-off
+`review-email-external` profile. A bare host invocation uses host defaults and
+does not target the deployed Postgres database. The optional
+`LAB_TRACKER_AUTH_SECRET_KEY_FILE` escape hatch is consumed only by the
+one-shot external bridge; it lets the profile read the app's existing runtime
+secret from a read-only volume rather than duplicating that secret in Compose.
 
 ### MCP service client (`lt-mcp`)
 

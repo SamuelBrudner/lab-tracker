@@ -24,12 +24,29 @@ def _repo_root() -> Path:
 
 
 @pytest.fixture(autouse=True)
+def _drain_test_db_resources() -> Iterator[None]:
+    """Close and dispose every test-owned engine/session after each test.
+
+    repository_backed_api (and the two hand-rolled builders) enroll their
+    in-memory SQLite engine/session in a registry; draining here on both success
+    and failure keeps connections from leaking as GC-time ResourceWarnings.
+    """
+
+    from api_helpers import drain_test_resources
+
+    try:
+        yield
+    finally:
+        drain_test_resources()
+
+
+@pytest.fixture(autouse=True)
 def _isolate_lab_tracker_home(tmp_path_factory, monkeypatch):
     """Keep every test away from the developer's real machine-level state.
 
     init/update/hooks record into ~/.lab-tracker/applied-repos.json,
     from_env reads ~/.lab-tracker/config.json, and --install-skills writes
-    into ~/.claude/skills — none of which a test run may touch or observe.
+    into agent skill homes — none of which a test run may touch or observe.
     Tests that care about these paths override the env vars themselves.
     """
 
@@ -190,9 +207,36 @@ def _normalize_postgres_url(value: str) -> str:
     return cleaned
 
 
+def _app_with_disposed_engine(application):
+    """Yield a created app and release its runtime resources on teardown.
+
+    create_app builds an engine that is only disposed by the app's lifespan
+    shutdown. Tests that use the `app` fixture directly (their own bare
+    TestClient, or app.state access) never run that shutdown, so dispose the
+    engine and remove the app-owned Git health directory here. Both operations
+    are idempotent with lifespan shutdown.
+    """
+
+    try:
+        yield application
+    finally:
+        engine = getattr(application.state, "db_engine", None)
+        cleanup_git_health_workdir = getattr(
+            application.state,
+            "cleanup_git_health_workdir",
+            None,
+        )
+        try:
+            if engine is not None:
+                engine.dispose()
+        finally:
+            if cleanup_git_health_workdir is not None:
+                cleanup_git_health_workdir()
+
+
 @pytest.fixture()
 def app(migrated_sqlite_database_url: str):
-    return create_app()
+    yield from _app_with_disposed_engine(create_app())
 
 
 @pytest.fixture()
@@ -203,7 +247,7 @@ def client(app):
 
 @pytest.fixture()
 def postgres_app(migrated_postgres_database_url: str):
-    return create_app()
+    yield from _app_with_disposed_engine(create_app())
 
 
 @pytest.fixture()

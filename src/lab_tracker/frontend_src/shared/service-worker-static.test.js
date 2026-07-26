@@ -70,6 +70,17 @@ describe("service worker source", () => {
     expect(serviceWorkerSource).toContain("cached || Response.error()");
   });
 
+  it("prompts capable clients while preserving automatic legacy rollout", () => {
+    expect(serviceWorkerSource).toContain("UPDATE_PROMPT_HANDSHAKE_MS");
+    expect(serviceWorkerSource).toContain(
+      'event.data?.type === "UPDATE_PROMPT_SUPPORTED"'
+    );
+    expect(serviceWorkerSource).toContain("updatePromptSupported = true");
+    expect(serviceWorkerSource).toContain("if (!updatePromptSupported)");
+    expect(serviceWorkerSource).toContain('event.data?.type === "SKIP_WAITING"');
+    expect(serviceWorkerSource).toContain("self.skipWaiting()");
+  });
+
   it("keeps cache and asset versions aligned across the shell files", () => {
     const cacheVersion = extractCacheVersion(serviceWorkerSource);
     const expectedAssetVersion = expectedStaticAssetVersion();

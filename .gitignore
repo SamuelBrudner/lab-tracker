@@ -2,12 +2,14 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 build/
+/outputs/
 docs/runs/
 node_modules/
 .env
 .env.*
 !.env.example
 note_storage/
+/backups/
 lab_tracker.db
 lab_tracker.db.backup-*
 lab_tracker.db.lock
@@ -28,3 +30,9 @@ lab_tracker.db.lock
 
 # Beads / Dolt files (added by bd init)
 .beads/proxieddb/
+
+# Playwright e2e
+/test-results/
+/playwright-report/
+/blob-report/
+/.playwright/

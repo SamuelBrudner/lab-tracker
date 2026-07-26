@@ -6,8 +6,9 @@ from collections.abc import Iterable
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext
-from lab_tracker.errors import ValidationError
+from lab_tracker.errors import NotFoundError, OpaqueTargetNotFoundError, ValidationError
 from lab_tracker.models import EntityOrigin, EntityType, Visualization, utc_now
+from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
 from lab_tracker.services.analysis_service import AnalysisService
 from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.claim_service import ClaimService
@@ -86,6 +87,26 @@ class VisualizationService(BaseService):
             loader=lambda repository: repository.visualizations.get(viz_id),
         )
 
+    def get_visualization_for_read(
+        self,
+        viz_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> tuple[Visualization, UUID]:
+        try:
+            visualization = self.get_visualization(viz_id)
+        except NotFoundError as exc:
+            raise OpaqueTargetNotFoundError("Visualization does not exist.") from exc
+        try:
+            analysis = self.analyses.get_analysis(visualization.analysis_id)
+        except NotFoundError as exc:
+            if not self.authorization.has_global_read(actor):
+                raise OpaqueTargetNotFoundError("Visualization does not exist.") from exc
+            raise
+        if not self.authorization.can_read(analysis.project_id, actor=actor):
+            raise OpaqueTargetNotFoundError("Visualization does not exist.")
+        return visualization, analysis.project_id
+
     def list_visualizations(
         self,
         *,
@@ -107,10 +128,10 @@ class VisualizationService(BaseService):
         self,
         viz_id: UUID,
         *,
-        viz_type: str | None = None,
-        file_path: str | None = None,
-        caption: str | None = None,
-        related_claim_ids: Iterable[UUID] | None = None,
+        viz_type: PatchValue[str | None] = NOT_PROVIDED,
+        file_path: PatchValue[str | None] = NOT_PROVIDED,
+        caption: PatchValue[str | None] = NOT_PROVIDED,
+        related_claim_ids: PatchValue[Iterable[UUID] | None] = NOT_PROVIDED,
         actor: AuthContext | None = None,
         origin: EntityOrigin | None = None,
         change_set_id: UUID | None = None,
@@ -121,15 +142,22 @@ class VisualizationService(BaseService):
         visualization = self.get_visualization(viz_id)
         analysis = self.analyses.get_analysis(visualization.analysis_id)
         self.authorization.require_contributor(analysis.project_id, actor=actor)
-        if viz_type is not None:
+        before = visualization.model_copy(deep=True)
+        if is_provided(viz_type):
+            if viz_type is None:
+                raise ValidationError("viz_type must not be null.")
             ensure_non_empty(viz_type, "viz_type")
             visualization.viz_type = viz_type.strip()
-        if file_path is not None:
+        if is_provided(file_path):
+            if file_path is None:
+                raise ValidationError("file_path must not be null.")
             ensure_non_empty(file_path, "file_path")
             visualization.file_path = file_path.strip()
-        if caption is not None:
+        if is_provided(caption):
             visualization.caption = caption.strip() if caption else None
-        if related_claim_ids is not None:
+        if is_provided(related_claim_ids):
+            if related_claim_ids is None:
+                raise ValidationError("related_claim_ids must not be null.")
             claim_ids = unique_ids(related_claim_ids)
             for claim_id in claim_ids:
                 claim = self.claims.get_claim(claim_id)
@@ -146,6 +174,8 @@ class VisualizationService(BaseService):
             visualization.origin_model = origin_model
         if origin_prompt_version is not None:
             visualization.origin_prompt_version = origin_prompt_version
+        if visualization == before:
+            return visualization
         visualization.updated_at = utc_now()
         with self.unit_of_work() as repository:
             repository.visualizations.save(visualization)

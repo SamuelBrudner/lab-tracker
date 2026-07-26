@@ -1,0 +1,857 @@
+"""Bounded, redacting subprocess execution for external artifact adapters.
+
+The executor in this module is deliberately narrower than ``subprocess.run``:
+one absolute monotonic deadline covers process execution and concurrent pipe
+drainage, stdout and stderr have independent hard caps, and failure cleanup
+targets the whole POSIX process group or private Windows Job Object.  Raw
+stderr and command arguments never cross the boundary.
+
+The execution deadline does not include containment cleanup.  Cleanup has its
+own small, fixed upper bound (terminate grace plus kill/reap grace), so a
+command can exceed its execution deadline only by that documented bound.
+"""
+
+from __future__ import annotations
+
+import errno
+import math
+import os
+import signal
+import subprocess
+import sys
+import threading
+import time
+from collections.abc import Callable, Mapping, Sequence
+from contextlib import suppress
+from dataclasses import dataclass, field
+from enum import Enum, auto
+from os import PathLike
+from typing import IO, Protocol
+
+from lab_tracker._windows_job import (
+    PopenFactory,
+    WindowsJobApi,
+    WindowsJobCleanupError,
+    WindowsJobLifecycle,
+    WindowsJobOperationError,
+    WindowsJobUnavailableError,
+    spawn_suspended_in_job,
+)
+
+DEFAULT_PROCESS_DEADLINE_SECONDS = 30.0
+MAX_PROCESS_DEADLINE_SECONDS = 86_400.0
+DEFAULT_PROCESS_STDERR_LIMIT_BYTES = 64 * 1024
+
+_DEFAULT_CHUNK_SIZE = 64 * 1024
+_DEFAULT_TERMINATE_GRACE_SECONDS = 0.25
+_DEFAULT_KILL_GRACE_SECONDS = 1.0
+_MAX_CLEANUP_PHASE_SECONDS = 5.0
+_MINIMUM_CLEANUP_SECONDS = 0.10
+_POLL_INTERVAL_SECONDS = 0.01
+
+_GENERIC_EXECUTION_DETAIL = "Subprocess execution failed."
+_GENERIC_DEADLINE_DETAIL = "Subprocess execution deadline exceeded."
+_GENERIC_OUTPUT_DETAIL = "Subprocess output limit exceeded."
+_GENERIC_CONSUMER_DETAIL = "Subprocess output consumer failed."
+_GENERIC_CLEANUP_DETAIL = "Subprocess cleanup failed."
+_GENERIC_PLATFORM_DETAIL = "Subprocess execution is unavailable on this platform."
+
+Clock = Callable[[], float]
+StdoutConsumer = Callable[[bytes], None]
+
+if sys.platform == "win32":
+    _POSIX_SIGKILL = 9
+
+    def _kill_process_group(process_group_id: int, signum: int) -> None:
+        raise OSError("POSIX process groups are unavailable.")
+
+else:
+    _POSIX_SIGKILL = signal.SIGKILL
+    _kill_process_group = os.killpg
+
+
+class ProcessExecutionError(RuntimeError):
+    """A child failed without exposing its command, target, or raw stderr."""
+
+
+class ProcessDeadlineExceeded(ProcessExecutionError):
+    """The absolute process execution deadline expired."""
+
+
+class ProcessOutputLimitExceeded(ProcessExecutionError):
+    """A child exceeded either independent pipe limit."""
+
+
+class ProcessConsumerError(ProcessExecutionError):
+    """The trusted streaming stdout consumer failed."""
+
+
+class ProcessCleanupError(ProcessExecutionError):
+    """A failed child could not be killed and reaped within the cleanup bound."""
+
+
+class ProcessUnsupportedPlatformError(ProcessExecutionError):
+    """The platform cannot provide the required descendant containment."""
+
+
+@dataclass(frozen=True)
+class ProcessDeadline:
+    """One immutable monotonic deadline shared across logical commands."""
+
+    expires_at: float
+    clock: Clock = field(default=time.monotonic, repr=False, compare=False)
+
+    @classmethod
+    def after(
+        cls,
+        seconds: float,
+        *,
+        clock: Clock = time.monotonic,
+    ) -> ProcessDeadline:
+        """Create a deadline after a finite positive duration of at most one day."""
+
+        _validate_deadline_seconds(seconds)
+        now = clock()
+        if not math.isfinite(now) or not math.isfinite(now + seconds):
+            raise ValueError("Process deadline clock must be finite.")
+        return cls(expires_at=now + seconds, clock=clock)
+
+    def remaining(self) -> float:
+        """Return remaining execution seconds, clamped to zero after expiry."""
+
+        remaining = self.expires_at - self.clock()
+        return remaining if math.isfinite(remaining) and remaining > 0 else 0.0
+
+    def check(self) -> None:
+        """Raise a redacted error once the absolute deadline has expired."""
+
+        if self.remaining() <= 0:
+            raise ProcessDeadlineExceeded(_GENERIC_DEADLINE_DETAIL)
+
+
+@dataclass(frozen=True)
+class ProcessResult:
+    """A completed child result containing no raw stderr.
+
+    ``stdout`` contains captured, bounded metadata output.  When a
+    ``stdout_consumer`` was supplied, bytes are delivered only to that consumer
+    and ``stdout`` is empty.  The byte counters remain available in both modes.
+    """
+
+    returncode: int
+    stdout: bytes
+    stdout_bytes: int
+    stderr_bytes: int
+
+
+class ProcessExecutor(Protocol):
+    """Port for one bounded subprocess invocation."""
+
+    def run(
+        self,
+        command: Sequence[str],
+        *,
+        deadline: ProcessDeadline,
+        stdout_limit_bytes: int,
+        stderr_limit_bytes: int,
+        stdout_consumer: StdoutConsumer | None = None,
+        cwd: str | PathLike[str] | None = None,
+        env: Mapping[str, str] | None = None,
+    ) -> ProcessResult: ...
+
+
+@dataclass
+class _PipeState:
+    limit: int
+    consumer: StdoutConsumer | None = None
+    count: int = 0
+    captured: bytearray = field(default_factory=bytearray)
+
+
+class _FailureState:
+    """Thread-safe first-failure slot; all stored exceptions are redacted."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._failure: ProcessExecutionError | None = None
+        self.event = threading.Event()
+
+    def set(self, failure: ProcessExecutionError) -> None:
+        with self._lock:
+            if self._failure is None:
+                self._failure = failure
+                self.event.set()
+
+    def get(self) -> ProcessExecutionError | None:
+        with self._lock:
+            return self._failure
+
+
+class _ProcessLifecycle(Protocol):
+    """Platform-specific ownership of process containment and pipes."""
+
+    process: subprocess.Popen[bytes]
+
+    def finish(self, *, cleanup_expires_at: float) -> None: ...
+
+    def stop(self, *, cleanup_expires_at: float) -> None: ...
+
+    def close_pipes(self) -> None: ...
+
+    def close_containment(self) -> None: ...
+
+
+class _ProcessGroupResult(Enum):
+    """Redacted result of one bounded POSIX process-group operation."""
+
+    OK = auto()
+    MISSING = auto()
+    DENIED = auto()
+    FAILED = auto()
+
+
+class _PosixProcessLifecycle:
+    """Idempotent, race-safe ownership of a POSIX process group and pipes."""
+
+    def __init__(
+        self,
+        process: subprocess.Popen[bytes],
+        *,
+        terminate_grace_seconds: float,
+        kill_grace_seconds: float,
+    ) -> None:
+        self.process = process
+        self._terminate_grace_seconds = terminate_grace_seconds
+        self._kill_grace_seconds = kill_grace_seconds
+        self._stop_lock = threading.Lock()
+        self._pipes_lock = threading.Lock()
+        self._stopped = False
+        self._stop_failed = False
+        self._pipes_closed = False
+
+    def finish(self, *, cleanup_expires_at: float) -> None:
+        """Kill any descendants left after the successfully reaped leader."""
+
+        self.stop(cleanup_expires_at=cleanup_expires_at)
+
+    def stop(self, *, cleanup_expires_at: float) -> None:
+        """Terminate, kill, and reap the full POSIX process group once."""
+
+        with self._stop_lock:
+            if self._stopped:
+                return
+            if self._stop_failed:
+                # A late child exit can still be reaped safely.  Never touch
+                # the numeric process-group ID again after terminal failure.
+                _poll_reaped_process(self.process)
+                raise ProcessCleanupError(_GENERIC_CLEANUP_DETAIL)
+
+            if os.name != "posix":
+                raise ProcessUnsupportedPlatformError(_GENERIC_PLATFORM_DETAIL)
+
+            try:
+                self._stop_once(cleanup_expires_at=cleanup_expires_at)
+            except BaseException:
+                # Never retry after partial cleanup.  Once the leader is
+                # reaped, its numeric process-group ID can be reused.
+                self._stop_failed = True
+                raise
+            self._stopped = True
+
+    def _stop_once(self, *, cleanup_expires_at: float) -> None:
+        """Establish the terminal invariants under one absolute cleanup bound."""
+
+        # Signal before polling the leader.  An unreaped leader keeps its PID
+        # reserved and narrows the unavoidable POSIX process-group reuse race.
+        term_result = _signal_process_group(
+            self.process.pid,
+            signal.SIGTERM,
+            expires_at=cleanup_expires_at,
+        )
+        group_missing = term_result is _ProcessGroupResult.MISSING
+        can_signal_group = term_result is _ProcessGroupResult.OK
+        terminate_expires_at = min(
+            cleanup_expires_at,
+            time.monotonic() + self._terminate_grace_seconds,
+        )
+        if not group_missing:
+            group_result, leader_reaped_during_wait = _wait_for_process_group_exit(
+                self.process.pid,
+                expires_at=terminate_expires_at,
+                process=self.process,
+            )
+            group_missing = group_result is _ProcessGroupResult.MISSING
+            if leader_reaped_during_wait:
+                can_signal_group = False
+            elif (
+                not can_signal_group
+                and group_result is _ProcessGroupResult.OK
+                and self.process.returncode is None
+            ):
+                # A live, unreaped leader keeps this observed PGID reserved.
+                can_signal_group = True
+
+        if not group_missing and can_signal_group:
+            kill_result = _signal_process_group(
+                self.process.pid,
+                _POSIX_SIGKILL,
+                expires_at=cleanup_expires_at,
+            )
+            group_missing = kill_result is _ProcessGroupResult.MISSING
+            if kill_result is _ProcessGroupResult.DENIED:
+                can_signal_group = False
+
+        leader_reaped = False
+        reap_failed = False
+        try:
+            self.process.wait(timeout=_remaining_cleanup(cleanup_expires_at))
+            leader_reaped = True
+        except subprocess.TimeoutExpired:
+            reap_failed = True
+            if not group_missing and can_signal_group:
+                kill_result = _signal_process_group(
+                    self.process.pid,
+                    _POSIX_SIGKILL,
+                    expires_at=cleanup_expires_at,
+                )
+                group_missing = kill_result is _ProcessGroupResult.MISSING
+            leader_reaped = _poll_reaped_process(self.process)
+        except (OSError, subprocess.SubprocessError):
+            reap_failed = True
+            leader_reaped = _poll_reaped_process(self.process)
+
+        if not group_missing:
+            final_group_result, _leader_reaped_during_wait = (
+                _wait_for_process_group_exit(
+                    self.process.pid,
+                    expires_at=cleanup_expires_at,
+                    process=self.process,
+                )
+            )
+            group_missing = final_group_result is _ProcessGroupResult.MISSING
+
+        if not leader_reaped:
+            # One final non-blocking reap avoids leaking a child that exited
+            # at the cleanup deadline.  Bound exhaustion still remains an
+            # observable cleanup failure.
+            leader_reaped = _poll_reaped_process(self.process)
+
+        if reap_failed or not leader_reaped or not group_missing:
+            raise ProcessCleanupError(_GENERIC_CLEANUP_DETAIL)
+
+    def close_pipes(self) -> None:
+        """Close both owned pipe objects once, suppressing redacted cleanup noise."""
+
+        with self._pipes_lock:
+            if self._pipes_closed:
+                return
+            self._pipes_closed = True
+        for pipe in (self.process.stdout, self.process.stderr):
+            if pipe is not None:
+                with suppress(OSError):
+                    pipe.close()
+
+    def close_containment(self) -> None:
+        """POSIX process groups do not own a separate containment handle."""
+
+
+class _WindowsProcessLifecycle:
+    """Translate private Windows lifecycle failures to the public boundary."""
+
+    def __init__(self, lifecycle: WindowsJobLifecycle) -> None:
+        self._lifecycle = lifecycle
+        self.process = lifecycle.process
+
+    def finish(self, *, cleanup_expires_at: float) -> None:
+        try:
+            self._lifecycle.finish(cleanup_expires_at=cleanup_expires_at)
+        except WindowsJobCleanupError:
+            raise ProcessCleanupError(_GENERIC_CLEANUP_DETAIL) from None
+
+    def stop(self, *, cleanup_expires_at: float) -> None:
+        try:
+            self._lifecycle.stop(cleanup_expires_at=cleanup_expires_at)
+        except WindowsJobCleanupError:
+            raise ProcessCleanupError(_GENERIC_CLEANUP_DETAIL) from None
+
+    def close_pipes(self) -> None:
+        self._lifecycle.close_pipes()
+
+    def close_containment(self) -> None:
+        try:
+            self._lifecycle.close_containment()
+        except WindowsJobCleanupError:
+            raise ProcessCleanupError(_GENERIC_CLEANUP_DETAIL) from None
+
+
+class BoundedSubprocessExecutor:
+    """Execute commands with bounded time, memory, and descendant containment."""
+
+    def __init__(
+        self,
+        *,
+        chunk_size: int = _DEFAULT_CHUNK_SIZE,
+        terminate_grace_seconds: float = _DEFAULT_TERMINATE_GRACE_SECONDS,
+        kill_grace_seconds: float = _DEFAULT_KILL_GRACE_SECONDS,
+        _platform_name: str | None = None,
+        _windows_api: WindowsJobApi | None = None,
+        _popen_factory: PopenFactory | None = None,
+    ) -> None:
+        _validate_positive_int(chunk_size, name="Process pipe chunk size")
+        _validate_cleanup_duration(
+            terminate_grace_seconds, name="Process terminate grace"
+        )
+        _validate_cleanup_duration(kill_grace_seconds, name="Process kill grace")
+        self._chunk_size = chunk_size
+        self._terminate_grace_seconds = terminate_grace_seconds
+        self._kill_grace_seconds = kill_grace_seconds
+        self._platform_name = _platform_name
+        self._windows_api = _windows_api
+        self._popen_factory = _popen_factory
+
+    @property
+    def maximum_cleanup_seconds(self) -> float:
+        """Maximum configured cleanup overrun after execution ends or fails."""
+
+        return max(
+            _MINIMUM_CLEANUP_SECONDS,
+            self._terminate_grace_seconds + self._kill_grace_seconds,
+        )
+
+    def run(
+        self,
+        command: Sequence[str],
+        *,
+        deadline: ProcessDeadline,
+        stdout_limit_bytes: int,
+        stderr_limit_bytes: int,
+        stdout_consumer: StdoutConsumer | None = None,
+        cwd: str | PathLike[str] | None = None,
+        env: Mapping[str, str] | None = None,
+    ) -> ProcessResult:
+        """Run one argument-vector command, redacting all operational failures."""
+
+        _validate_command(command)
+        _validate_nonnegative_int(stdout_limit_bytes, name="stdout byte limit")
+        _validate_nonnegative_int(stderr_limit_bytes, name="stderr byte limit")
+        platform_name = (
+            self._platform_name if self._platform_name is not None else os.name
+        )
+        if platform_name not in {"posix", "nt"}:
+            raise ProcessUnsupportedPlatformError(_GENERIC_PLATFORM_DETAIL)
+        deadline.check()
+
+        try:
+            lifecycle = self._spawn_lifecycle(
+                command,
+                platform_name=platform_name,
+                deadline=deadline,
+                cwd=cwd,
+                env=env,
+            )
+        except ProcessExecutionError:
+            raise
+        except WindowsJobUnavailableError:
+            raise ProcessUnsupportedPlatformError(_GENERIC_PLATFORM_DETAIL) from None
+        except WindowsJobCleanupError:
+            raise ProcessCleanupError(_GENERIC_CLEANUP_DETAIL) from None
+        except WindowsJobOperationError:
+            raise ProcessExecutionError(_GENERIC_EXECUTION_DETAIL) from None
+        except (OSError, ValueError, subprocess.SubprocessError):
+            raise ProcessExecutionError(_GENERIC_EXECUTION_DETAIL) from None
+        except Exception:
+            # Popen audit hooks may reject a launch with arbitrary exception
+            # types and sensitive details.  Cleanup has already run inside the
+            # Windows spawn helper when applicable.
+            raise ProcessExecutionError(_GENERIC_EXECUTION_DETAIL) from None
+        except KeyboardInterrupt:
+            # Preserve user-interrupt control flow without retaining a message
+            # supplied by an audit hook that can contain launch secrets.
+            raise KeyboardInterrupt from None
+        except BaseException:
+            # Audit hooks can also raise SystemExit, GeneratorExit, or a custom
+            # BaseException containing the executable, argv, or environment.
+            raise ProcessExecutionError(_GENERIC_EXECUTION_DETAIL) from None
+
+        process = lifecycle.process
+        stdout_pipe = process.stdout
+        stderr_pipe = process.stderr
+        threads: tuple[threading.Thread, ...] = ()
+        try:
+            if stdout_pipe is None or stderr_pipe is None:
+                raise ProcessExecutionError(_GENERIC_EXECUTION_DETAIL)
+            stdout_state = _PipeState(
+                limit=stdout_limit_bytes,
+                consumer=stdout_consumer,
+            )
+            stderr_state = _PipeState(
+                limit=stderr_limit_bytes,
+                consumer=_discard_output,
+            )
+            failure = _FailureState()
+            threads = (
+                self._reader_thread(
+                    name="lab-tracker-process-stdout",
+                    pipe=stdout_pipe,
+                    state=stdout_state,
+                    deadline=deadline,
+                    failure=failure,
+                ),
+                self._reader_thread(
+                    name="lab-tracker-process-stderr",
+                    pipe=stderr_pipe,
+                    state=stderr_state,
+                    deadline=deadline,
+                    failure=failure,
+                ),
+            )
+            for thread in threads:
+                thread.start()
+            returncode = self._wait_for_completion(
+                process,
+                threads=threads,
+                deadline=deadline,
+                failure=failure,
+            )
+            for thread in threads:
+                thread.join()
+            deadline.check()
+            cleanup_expires_at = time.monotonic() + self.maximum_cleanup_seconds
+            lifecycle.finish(cleanup_expires_at=cleanup_expires_at)
+        except ProcessExecutionError as primary:
+            self._cleanup_failure(lifecycle, threads=threads, primary=primary)
+            raise
+        except Exception:
+            generic_failure = ProcessExecutionError(_GENERIC_EXECUTION_DETAIL)
+            self._cleanup_failure(
+                lifecycle,
+                threads=threads,
+                primary=generic_failure,
+            )
+            raise generic_failure from None
+        except KeyboardInterrupt:
+            # A user interrupt keeps its control-flow semantics after cleanup.
+            self._cleanup_failure(
+                lifecycle,
+                threads=threads,
+                primary=ProcessExecutionError(_GENERIC_EXECUTION_DETAIL),
+            )
+            raise KeyboardInterrupt from None
+        except BaseException:
+            # Other control-flow exceptions can originate in audit hooks and
+            # include sensitive launch details, so clean up and redact them.
+            generic_failure = ProcessExecutionError(_GENERIC_EXECUTION_DETAIL)
+            self._cleanup_failure(
+                lifecycle,
+                threads=threads,
+                primary=generic_failure,
+            )
+            raise generic_failure from None
+        finally:
+            lifecycle.close_pipes()
+            lifecycle.close_containment()
+
+        return ProcessResult(
+            returncode=returncode,
+            stdout=bytes(stdout_state.captured),
+            stdout_bytes=stdout_state.count,
+            stderr_bytes=stderr_state.count,
+        )
+
+    def _spawn_lifecycle(
+        self,
+        command: Sequence[str],
+        *,
+        platform_name: str,
+        deadline: ProcessDeadline,
+        cwd: str | PathLike[str] | None,
+        env: Mapping[str, str] | None,
+    ) -> _ProcessLifecycle:
+        if platform_name == "nt":
+            return _WindowsProcessLifecycle(
+                spawn_suspended_in_job(
+                    command,
+                    cwd=cwd,
+                    env=env,
+                    deadline_check=deadline.check,
+                    cleanup_timeout_seconds=self.maximum_cleanup_seconds,
+                    api=self._windows_api,
+                    popen_factory=self._popen_factory,
+                )
+            )
+        if platform_name != "posix":
+            raise ProcessUnsupportedPlatformError(_GENERIC_PLATFORM_DETAIL)
+        factory = (
+            self._popen_factory
+            if self._popen_factory is not None
+            else subprocess.Popen
+        )
+        process = factory(  # noqa: S603 - never invokes a shell
+            list(command),
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            close_fds=True,
+            cwd=cwd,
+            env=None if env is None else dict(env),
+            start_new_session=True,
+        )
+        return _PosixProcessLifecycle(
+            process,
+            terminate_grace_seconds=self._terminate_grace_seconds,
+            kill_grace_seconds=self._kill_grace_seconds,
+        )
+
+    def _reader_thread(
+        self,
+        *,
+        name: str,
+        pipe: IO[bytes],
+        state: _PipeState,
+        deadline: ProcessDeadline,
+        failure: _FailureState,
+    ) -> threading.Thread:
+        return threading.Thread(
+            target=self._drain_pipe,
+            kwargs={
+                "pipe": pipe,
+                "state": state,
+                "deadline": deadline,
+                "failure": failure,
+            },
+            name=name,
+            daemon=False,
+        )
+
+    def _drain_pipe(
+        self,
+        *,
+        pipe: IO[bytes],
+        state: _PipeState,
+        deadline: ProcessDeadline,
+        failure: _FailureState,
+    ) -> None:
+        try:
+            while True:
+                deadline.check()
+                # Never allocate more than the remaining allowance plus the one
+                # byte needed to detect overflow.
+                read_size = min(self._chunk_size, state.limit - state.count + 1)
+                try:
+                    chunk = os.read(pipe.fileno(), read_size)
+                except OSError:
+                    failure.set(ProcessExecutionError(_GENERIC_EXECUTION_DETAIL))
+                    return
+                if not chunk:
+                    return
+                next_count = state.count + len(chunk)
+                if next_count > state.limit:
+                    failure.set(ProcessOutputLimitExceeded(_GENERIC_OUTPUT_DETAIL))
+                    return
+                state.count = next_count
+                if state.consumer is None:
+                    try:
+                        state.captured.extend(chunk)
+                    except BaseException:
+                        failure.set(
+                            ProcessExecutionError(_GENERIC_EXECUTION_DETAIL)
+                        )
+                        return
+                else:
+                    try:
+                        state.consumer(chunk)
+                    except BaseException:
+                        failure.set(ProcessConsumerError(_GENERIC_CONSUMER_DETAIL))
+                        return
+                deadline.check()
+        except ProcessDeadlineExceeded as exc:
+            failure.set(exc)
+        except BaseException:
+            failure.set(ProcessExecutionError(_GENERIC_EXECUTION_DETAIL))
+
+    def _wait_for_completion(
+        self,
+        process: subprocess.Popen[bytes],
+        *,
+        threads: Sequence[threading.Thread],
+        deadline: ProcessDeadline,
+        failure: _FailureState,
+    ) -> int:
+        while True:
+            current_failure = failure.get()
+            if current_failure is not None:
+                raise current_failure
+            try:
+                returncode = process.poll()
+            except (OSError, subprocess.SubprocessError):
+                raise ProcessExecutionError(_GENERIC_EXECUTION_DETAIL) from None
+            if returncode is not None and all(not thread.is_alive() for thread in threads):
+                deadline.check()
+                current_failure = failure.get()
+                if current_failure is not None:
+                    raise current_failure
+                return returncode
+            remaining = deadline.remaining()
+            if remaining <= 0:
+                raise ProcessDeadlineExceeded(_GENERIC_DEADLINE_DETAIL)
+            failure.event.wait(min(_POLL_INTERVAL_SECONDS, remaining))
+
+    def _cleanup_failure(
+        self,
+        lifecycle: _ProcessLifecycle,
+        *,
+        threads: Sequence[threading.Thread],
+        primary: ProcessExecutionError,
+    ) -> None:
+        cleanup_expires_at = time.monotonic() + self.maximum_cleanup_seconds
+        cleanup_error: ProcessExecutionError | None = None
+        try:
+            lifecycle.stop(cleanup_expires_at=cleanup_expires_at)
+        except ProcessExecutionError as error:
+            cleanup_error = error
+        lifecycle.close_pipes()
+        try:
+            self._join_readers(threads, cleanup_expires_at=cleanup_expires_at)
+        except ProcessCleanupError as error:
+            cleanup_error = error
+        try:
+            lifecycle.close_containment()
+        except ProcessCleanupError as error:
+            cleanup_error = error
+        if cleanup_error is not None:
+            raise cleanup_error from primary
+
+    def _join_readers(
+        self,
+        threads: Sequence[threading.Thread],
+        *,
+        cleanup_expires_at: float,
+    ) -> None:
+        for thread in threads:
+            if thread.ident is None:
+                continue
+            thread.join(timeout=_remaining_cleanup(cleanup_expires_at))
+        if any(thread.ident is not None and thread.is_alive() for thread in threads):
+            raise ProcessCleanupError(_GENERIC_CLEANUP_DETAIL)
+
+
+def _validate_deadline_seconds(seconds: float) -> None:
+    if (
+        not math.isfinite(seconds)
+        or seconds <= 0
+        or seconds > MAX_PROCESS_DEADLINE_SECONDS
+    ):
+        raise ValueError(
+            "Process deadline must be finite, positive, and no more than 86400 seconds."
+        )
+
+
+def _validate_cleanup_duration(value: float, *, name: str) -> None:
+    if not math.isfinite(value) or value < 0 or value > _MAX_CLEANUP_PHASE_SECONDS:
+        raise ValueError(f"{name} must be finite and between 0 and 5 seconds.")
+
+
+def _validate_positive_int(value: int, *, name: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{name} must be a positive integer.")
+
+
+def _validate_nonnegative_int(value: int, *, name: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{name} must be a non-negative integer.")
+
+
+def _validate_command(command: Sequence[str]) -> None:
+    if (
+        not command
+        or isinstance(command, (str, bytes))
+        or not isinstance(command[0], str)
+        or not command[0]
+        or any(not isinstance(part, str) or "\x00" in part for part in command)
+    ):
+        raise ValueError(
+            "Process command must have a non-empty executable and NUL-free string arguments."
+        )
+
+
+def _signal_process_group(
+    process_group_id: int,
+    signum: int,
+    *,
+    expires_at: float,
+) -> _ProcessGroupResult:
+    while True:
+        try:
+            _kill_process_group(process_group_id, signum)
+        except OSError as error:
+            if error.errno == errno.EINTR:
+                if _remaining_cleanup(expires_at) <= 0:
+                    return _ProcessGroupResult.FAILED
+                continue
+            if error.errno == errno.ESRCH:
+                return _ProcessGroupResult.MISSING
+            if error.errno == errno.EPERM:
+                return _ProcessGroupResult.DENIED
+            return _ProcessGroupResult.FAILED
+        return _ProcessGroupResult.OK
+
+
+def _process_group_state(
+    process_group_id: int,
+    *,
+    expires_at: float,
+) -> _ProcessGroupResult:
+    return _signal_process_group(process_group_id, 0, expires_at=expires_at)
+
+
+def _wait_for_process_group_exit(
+    process_group_id: int,
+    *,
+    expires_at: float,
+    process: subprocess.Popen[bytes],
+) -> tuple[_ProcessGroupResult, bool]:
+    while True:
+        group_result = _process_group_state(
+            process_group_id,
+            expires_at=expires_at,
+        )
+        if group_result in {
+            _ProcessGroupResult.MISSING,
+            _ProcessGroupResult.FAILED,
+        }:
+            return group_result, False
+        if (
+            group_result is _ProcessGroupResult.DENIED
+            and process.returncode is None
+            and _poll_reaped_process(process)
+        ):
+            # Darwin reports EPERM for a process group containing only an
+            # unreaped zombie.  Reap once, then require an authoritative
+            # missing-group result before treating cleanup as complete.
+            return (
+                _process_group_state(
+                    process_group_id,
+                    expires_at=expires_at,
+                ),
+                True,
+            )
+        remaining = expires_at - time.monotonic()
+        if remaining <= 0:
+            return group_result, False
+        threading.Event().wait(min(_POLL_INTERVAL_SECONDS, remaining))
+
+
+def _poll_reaped_process(process: subprocess.Popen[bytes]) -> bool:
+    try:
+        return process.poll() is not None
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _remaining_cleanup(expires_at: float) -> float:
+    return max(0.0, expires_at - time.monotonic())
+
+
+def _discard_output(_chunk: bytes) -> None:
+    """Drain a bounded stream without retaining potentially sensitive bytes."""

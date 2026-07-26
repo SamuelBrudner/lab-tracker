@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "deck_id": "lab-tracker-research-group-presentation",
-  "pptx_path": "outputs/019e93bf-5861-7ba2-af6a-d3677b8793cd/presentations/lab-tracker-research-group/output/lab-tracker-research-group-presentation.pptx",
+  "pptx_path": "docs/presentations/lab-tracker-research-group-presentation.pptx",
   "backend_alignment": {
     "node_entity_type_source": "lab_tracker.models.EntityType",
     "edge_relationship_source": "lab_tracker.presentation_graphs.PROJECT_GRAPH_RELATIONSHIP_ENDPOINTS",

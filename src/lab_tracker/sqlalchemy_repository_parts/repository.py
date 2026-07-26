@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from datetime import datetime
+from hashlib import blake2b
 from uuid import UUID
 
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, text
 from sqlalchemy.orm import Session as OrmSession
 
 from lab_tracker.db_models import (
@@ -42,6 +45,7 @@ from lab_tracker.models import (
     OwnershipReassignment,
     Project,
     ProjectGroup,
+    ProjectMembership,
     ProvenanceLink,
     Question,
     QuestionRefactor,
@@ -49,9 +53,9 @@ from lab_tracker.models import (
     RecordExportRecords,
     Session,
     SupervisionEdge,
+    UsageEvent,
     Visualization,
 )
-from lab_tracker.repository import LabTrackerRepository
 from lab_tracker.sqlalchemy_mappers import session_from_model
 
 from .analyses import (
@@ -71,11 +75,13 @@ from .core import (
 )
 from .data_stores import SQLAlchemyDataStoreRepository
 from .datasets import SQLAlchemyDatasetRepository
+from .evidence_bundles import SQLAlchemyEvidenceBundleRepository
 from .exploration import SQLAlchemyExplorationNodeRepository
 from .goals import SQLAlchemyGoalRepository
 from .graph_batches import (
     SQLAlchemyGraphDraftBatchRunRepository,
     SQLAlchemyGraphDraftBatchSettingsRepository,
+    SQLAlchemyReviewEmailOutboxRepository,
 )
 from .graph_drafts import SQLAlchemyGraphChangeSetRepository
 from .notes import SQLAlchemyNoteRepository
@@ -94,8 +100,37 @@ from .usage import (
 )
 from .versions import SQLAlchemyEntityVersionRepository
 
+_QUESTION_DAG_LOCK_DOMAIN = b"lab-tracker:question-dag:v1\0"
+_DATASET_FILE_PROJECT_LOCK_DOMAIN = b"lab-tracker:dataset-file-project:v1\0"
+_DATASET_FILE_DATASET_LOCK_DOMAIN = b"lab-tracker:dataset-file-dataset:v1\0"
 
-class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
+
+def _scoped_advisory_lock_key(domain: bytes, entity_id: UUID) -> int:
+    """Return a stable, domain-separated signed bigint lock key.
+
+    PostgreSQL advisory locks accept a signed 64-bit integer. Hashing all 128
+    UUID bits avoids coupling lock identity to a collision-prone UUID prefix,
+    while the domain prefix keeps this lock namespace separate from future
+    advisory-lock uses.
+    """
+
+    digest = blake2b(domain + entity_id.bytes, digest_size=8).digest()
+    return int.from_bytes(digest, byteorder="big", signed=True)
+
+
+def _project_question_dag_lock_key(project_id: UUID) -> int:
+    return _scoped_advisory_lock_key(_QUESTION_DAG_LOCK_DOMAIN, project_id)
+
+
+def _dataset_file_project_lock_key(project_id: UUID) -> int:
+    return _scoped_advisory_lock_key(_DATASET_FILE_PROJECT_LOCK_DOMAIN, project_id)
+
+
+def _dataset_file_dataset_lock_key(dataset_id: UUID) -> int:
+    return _scoped_advisory_lock_key(_DATASET_FILE_DATASET_LOCK_DOMAIN, dataset_id)
+
+
+class SQLAlchemyLabTrackerRepository:
     """Repository scaffold backed by a SQLAlchemy ORM session."""
 
     def __init__(self, session: OrmSession) -> None:
@@ -123,16 +158,35 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         self.entity_versions = SQLAlchemyEntityVersionRepository(session)
         self.goals = SQLAlchemyGoalRepository(session)
         self.data_stores = SQLAlchemyDataStoreRepository(session)
+        self.evidence_bundles = SQLAlchemyEvidenceBundleRepository(session)
         self.visualizations = SQLAlchemyVisualizationRepository(session)
         self.graph_change_sets = SQLAlchemyGraphChangeSetRepository(session)
         self.graph_draft_batch_settings = SQLAlchemyGraphDraftBatchSettingsRepository(session)
         self.graph_draft_batch_runs = SQLAlchemyGraphDraftBatchRunRepository(session)
+        self.review_email_outbox = SQLAlchemyReviewEmailOutboxRepository(session)
 
     def commit(self) -> None:
         self._session.commit()
 
     def rollback(self) -> None:
         self._session.rollback()
+
+    @contextmanager
+    def savepoint(self) -> Iterator[None]:
+        """Use a nested SQL transaction for an expected recoverable failure."""
+
+        bind = self._session.get_bind()
+        if bind.dialect.name == "sqlite":
+            connection = self._session.connection()
+            driver_connection = connection.connection.driver_connection
+            # Python's sqlite3 driver uses legacy transaction control: a
+            # SAVEPOINT issued before a real BEGIN becomes its own transaction,
+            # so RELEASE would make the isolated insert durable too early.
+            # Establish the outer DBAPI transaction explicitly when needed.
+            if not bool(getattr(driver_connection, "in_transaction", True)):
+                connection.exec_driver_sql("BEGIN")
+        with self._session.begin_nested():
+            yield
 
     def user_exists(self, user_id: UUID) -> bool:
         return self._session.get(UserModel, str(user_id)) is not None
@@ -169,6 +223,101 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         by_id = {note.note_id: note for note in self.notes.notes_from_rows(rows)}
         return [by_id[note_id] for note_id in note_ids if note_id in by_id]
 
+    def lock_project_question_dag(self, project_id: UUID) -> None:
+        """Hold the project's question-DAG lock until transaction completion.
+
+        SQLite remains a supported single-process development backend, where
+        this deliberately has no effect. PostgreSQL waits transactionally,
+        then expires ORM state so reads after a wait observe the winning
+        transaction before validating a proposed graph mutation.
+        """
+
+        if self._session.get_bind().dialect.name != "postgresql":
+            return
+        self._session.execute(
+            text("SELECT pg_advisory_xact_lock(:lock_key)"),
+            {"lock_key": _project_question_dag_lock_key(project_id)},
+        )
+        self._session.expire_all()
+
+    def _lock_dataset_file_scopes(
+        self,
+        locks: tuple[tuple[int, bool], ...],
+    ) -> None:
+        """Acquire a canonical dataset-file lock plan for this transaction."""
+
+        if self._session.get_bind().dialect.name != "postgresql":
+            return
+        for lock_key, shared in locks:
+            statement = (
+                text("SELECT pg_advisory_xact_lock_shared(:lock_key)")
+                if shared
+                else text("SELECT pg_advisory_xact_lock(:lock_key)")
+            )
+            self._session.execute(statement, {"lock_key": lock_key})
+        # A lock wait may have outlived rows already loaded into this identity
+        # map. Force every post-lock validation to observe the winning commit.
+        self._session.expire_all()
+
+    def lock_dataset_file_mutation(
+        self,
+        project_id: UUID,
+        dataset_id: UUID,
+    ) -> None:
+        """Let file writes coexist while excluding dataset/project deletion."""
+
+        self._lock_dataset_file_scopes(
+            (
+                (_dataset_file_project_lock_key(project_id), True),
+                (_dataset_file_dataset_lock_key(dataset_id), True),
+            )
+        )
+
+    def lock_dataset_deletion(
+        self,
+        project_id: UUID,
+        dataset_id: UUID,
+    ) -> None:
+        """Exclude file writes for one dataset without blocking sibling datasets."""
+
+        self.lock_dataset_updates(project_id, (dataset_id,))
+
+    def lock_dataset_updates(
+        self,
+        project_id: UUID,
+        dataset_ids: Iterable[UUID],
+    ) -> None:
+        """Lock a project's dataset snapshots in canonical UUID order.
+
+        Full-snapshot dataset writes exclude file writes to each affected
+        dataset, but retain a shared project scope so sibling datasets remain
+        concurrent and project deletion waits. Graph commits pass every update
+        target together so reverse D1/D2 operation order cannot deadlock.
+        """
+
+        ordered_dataset_ids = sorted(set(dataset_ids), key=str)
+        if not ordered_dataset_ids:
+            return
+        self._lock_dataset_file_scopes(
+            (
+                (_dataset_file_project_lock_key(project_id), True),
+                *(
+                    (_dataset_file_dataset_lock_key(locked_dataset_id), False)
+                    for locked_dataset_id in ordered_dataset_ids
+                ),
+            )
+        )
+
+    def lock_project_deletion_guard(self, project_id: UUID) -> None:
+        """Keep project-scoped graph rows alive while a command locks them."""
+
+        self._lock_dataset_file_scopes(((_dataset_file_project_lock_key(project_id), True),))
+
+    def lock_project_deletion(self, project_id: UUID) -> None:
+        """Exclude every dataset-file write below one project."""
+
+        self._lock_dataset_file_scopes(((_dataset_file_project_lock_key(project_id), False),))
+
     def list_dataset_files(self, dataset_id: UUID) -> list[DatasetFile]:
         return self.datasets.list_file_entities(dataset_id)
 
@@ -181,6 +330,8 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         group_id: UUID | None = None,
         project_ids: set[UUID] | None = None,
         status: str | None = None,
+        created_by: str | None = None,
+        client_capture_id: str | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> tuple[list[Project], int]:
@@ -188,6 +339,8 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
             group_id=group_id,
             project_ids=project_ids,
             status=status,
+            created_by=created_by,
+            client_capture_id=client_capture_id,
             limit=limit,
             offset=offset,
         )
@@ -208,7 +361,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         user_id: UUID | None = None,
         limit: int | None = None,
         offset: int = 0,
-    ):
+    ) -> tuple[list[ProjectMembership], int]:
         return self.project_memberships.query(
             project_id=project_id,
             user_id=user_id,
@@ -221,7 +374,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         *,
         project_id: UUID,
         user_id: UUID,
-    ):
+    ) -> ProjectMembership | None:
         return self.project_memberships.get_by_project_user(
             project_id=project_id,
             user_id=user_id,
@@ -338,7 +491,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         occurred_on_or_after: datetime | None = None,
         limit: int | None = None,
         offset: int = 0,
-    ):
+    ) -> tuple[list[UsageEvent], int]:
         return self.usage_events.query(
             project_id=project_id,
             verb=verb,
@@ -604,10 +757,12 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         *,
         project_id: UUID | None = None,
         project_ids: set[UUID] | None = None,
+        question_ids: set[UUID] | None = None,
         status: str | None = None,
         question_type: str | None = None,
         search: str | None = None,
         created_by: str | None = None,
+        client_capture_id: str | None = None,
         parent_question_id: UUID | None = None,
         ancestor_question_id: UUID | None = None,
         superseded_by_question_ids: set[UUID] | None = None,
@@ -619,10 +774,12 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         return self.questions.query(
             project_id=project_id,
             project_ids=project_ids,
+            question_ids=question_ids,
             status=status,
             question_type=question_type,
             search=search,
             created_by=created_by,
+            client_capture_id=client_capture_id,
             parent_question_id=parent_question_id,
             ancestor_question_id=ancestor_question_id,
             superseded_by_question_ids=superseded_by_question_ids,
@@ -675,6 +832,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         *,
         project_id: UUID | None = None,
         project_ids: set[UUID] | None = None,
+        note_ids: set[UUID] | None = None,
         status: str | None = None,
         search: str | None = None,
         created_by: str | None = None,
@@ -690,6 +848,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         return self.notes.query(
             project_id=project_id,
             project_ids=project_ids,
+            note_ids=note_ids,
             status=status,
             search=search,
             created_by=created_by,

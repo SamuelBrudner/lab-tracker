@@ -1,6 +1,6 @@
 import * as React from "react";
 
-import { apiListRequest, apiRequest } from "../shared/api.js";
+import { auth as authGateway } from "../shared/gateways/index.js";
 import { formatDate } from "../shared/formatters.js";
 
 const { useCallback, useEffect, useState } = React;
@@ -37,9 +37,10 @@ const ACCESS_LEVELS = [
   {
     value: "scheduler",
     label: "Scheduler trigger (admin)",
-    description: "Read-only plus the daily-review run-due trigger.",
+    description: "Only the daily-review run-due trigger — no reads, no other writes.",
     role: "admin",
     readOnly: true,
+    scope: "batch_run_due",
   },
 ];
 
@@ -63,21 +64,20 @@ function isPrivateHost(hostname) {
   );
 }
 
-/* No persistence lines beyond `lt setup connect --save-token` here: the saved
-   profile is the one consented, permission-hardened token store. The MCP
-   export is process-scoped; agents launched from other shells need it set
-   where they run. */
+/* `LAB_TRACKER_ACCESS_TOKEN` is only bootstrap input here. The consented
+   `--save-token` step writes the permission-hardened connection profile read
+   by both the CLI and lt-mcp, then the temporary shell variable is cleared. */
 function connectCommands(secret, baseUrl) {
   return {
     posix: [
       `export LAB_TRACKER_ACCESS_TOKEN='${secret}'`,
-      `export LAB_TRACKER_MCP_API_KEY="$LAB_TRACKER_ACCESS_TOKEN"`,
       `lt setup connect --base-url ${baseUrl} --save-token --yes`,
+      "unset LAB_TRACKER_ACCESS_TOKEN",
     ].join("\n"),
     powershell: [
       `$env:LAB_TRACKER_ACCESS_TOKEN = '${secret}'`,
-      `$env:LAB_TRACKER_MCP_API_KEY = $env:LAB_TRACKER_ACCESS_TOKEN`,
       `lt setup connect --base-url ${baseUrl} --save-token --yes`,
+      "Remove-Item Env:LAB_TRACKER_ACCESS_TOKEN",
     ].join("\n"),
   };
 }
@@ -86,14 +86,45 @@ function connectCommands(secret, baseUrl) {
    them from creating one, so only offer --create when the token can write. */
 function repoCommands(canCreateProjects) {
   return [
-    "lt setup init --yes",
-    canCreateProjects
-      ? 'lt project bind --name "My project" --create --yes'
-      : 'lt project bind --name "My project" --yes',
-  ].join("\n");
+    {
+      command: "lt setup init --install-skills --dry-run",
+      title: "1. Preview repository and skill setup",
+    },
+    {
+      command: "lt setup init --install-skills --yes",
+      title: "2. Apply repository and skill setup",
+    },
+    {
+      command: canCreateProjects
+        ? 'lt project bind --name "My project" --create --dry-run'
+        : 'lt project bind --name "My project" --dry-run',
+      title: "3. Preview project binding",
+    },
+    {
+      command: canCreateProjects
+        ? 'lt project bind --name "My project" --create --yes'
+        : 'lt project bind --name "My project" --yes',
+      title: "4. Apply project binding",
+    },
+    {
+      command: "lt setup status",
+      title: "5. Verify setup",
+    },
+  ];
 }
 
-const INSTALL_COMMAND = "uv tool install git+https://github.com/SamuelBrudner/lab-tracker";
+const INSTALL_COMMAND =
+  "uv tool install --upgrade git+https://github.com/SamuelBrudner/lab-tracker";
+const CODEX_MCP_COMMANDS = [
+  {
+    command: "codex mcp add lab-tracker -- lt-mcp",
+    title: "1. Register Lab Tracker MCP for Codex",
+  },
+  {
+    command: "codex mcp list",
+    title: "2. Verify Codex MCP registration",
+  },
+];
 
 function CommandSnippet({ title, command, onCopy }) {
   return (
@@ -139,8 +170,8 @@ function AgentAccessPage({ token, user, authEnabled, navigate, setBusy, setFlash
     }
     setLoading(true);
     try {
-      const page = await apiListRequest("/auth/tokens", { token });
-      setTokens(page.data || []);
+      const page = await authGateway.listPersonalAccessTokens({ token });
+      setTokens(page.data);
       setTokensFetchedAt(Date.now());
     } catch (err) {
       setFlash("", err.message || "Failed to load agent tokens.");
@@ -182,18 +213,18 @@ function AgentAccessPage({ token, user, authEnabled, navigate, setBusy, setFlash
     setBusy(true);
     setFlash("", "");
     try {
-      const issuedToken = await apiRequest("/auth/tokens", {
-        body: {
+      const issuedToken = await authGateway.createPersonalAccessToken(
+        {
           expires_at: new Date(
             Date.now() + Number(expiresDays) * DAY_MS - EXPIRY_SKEW_MARGIN_MS
           ).toISOString(),
           label: trimmedLabel,
           read_only: level.readOnly,
           role: level.role,
+          scope: level.scope || "all",
         },
-        method: "POST",
-        token,
-      });
+        { token }
+      );
       setIssued(issuedToken);
       await refresh();
       setFlash(`Token "${issuedToken.label}" created. It is shown only once — copy it now.`);
@@ -209,10 +240,7 @@ function AgentAccessPage({ token, user, authEnabled, navigate, setBusy, setFlash
     setRevokingId(tokenId);
     setFlash("", "");
     try {
-      await apiRequest(`/auth/tokens/${tokenId}`, {
-        method: "DELETE",
-        token,
-      });
+      await authGateway.revokePersonalAccessToken(tokenId, { token });
       setIssued((current) => (current?.token_id === tokenId ? null : current));
       setFlash("Token revoked.");
       await refresh();
@@ -224,7 +252,7 @@ function AgentAccessPage({ token, user, authEnabled, navigate, setBusy, setFlash
   }
 
   const commands = issued ? connectCommands(issued.secret, baseUrl) : null;
-  const issuedRepoCommands = issued ? repoCommands(issued.read_only === false) : "";
+  const issuedRepoCommands = issued ? repoCommands(issued.read_only === false) : [];
   const openRepoCommands = repoCommands(true);
   const openConnectCommand = `lt setup connect --base-url ${baseUrl} --yes`;
 
@@ -264,14 +292,31 @@ function AgentAccessPage({ token, user, authEnabled, navigate, setBusy, setFlash
             command={openConnectCommand}
             onCopy={() => copyText(openConnectCommand, "Connect command copied.")}
           />
-          <CommandSnippet
-            title="Inside each analysis repo"
-            command={openRepoCommands}
-            onCopy={() => copyText(openRepoCommands, "Repo setup commands copied.")}
-          />
+          {openRepoCommands.map((item) => (
+            <CommandSnippet
+              key={item.command}
+              title={item.title}
+              command={item.command}
+              onCopy={() => copyText(item.command, `${item.title} command copied.`)}
+            />
+          ))}
+          {CODEX_MCP_COMMANDS.map((item) => (
+            <CommandSnippet
+              key={item.command}
+              title={item.title}
+              command={item.command}
+              onCopy={() => copyText(item.command, `${item.title} command copied.`)}
+            />
+          ))}
           <p className="subtle">
             Missing the <code>lt</code> command? Install it once with{" "}
-            <code>{INSTALL_COMMAND}</code>.
+            <code>{INSTALL_COMMAND}</code>. The repo setup installs the Lab Tracker
+            setup skill into the Claude and Codex user skill homes and writes
+            repo-level MCP configuration for clients that support those files.
+            Codex requires the explicit one-time registration above, shared by its
+            app, CLI, and IDE extension. If <code>codex mcp list</code> already
+            shows <code>lab-tracker</code>, skip the add command. Restart Codex or
+            another MCP client after setup so it reloads its configuration.
           </p>
         </div>
       ) : (
@@ -324,13 +369,13 @@ function AgentAccessPage({ token, user, authEnabled, navigate, setBusy, setFlash
             <div className="card-inset agent-token-issued">
               <h3>Token created — shown only once</h3>
               <p className="subtle">
-                Paste the block for the agent machine&#39;s shell. It saves the token
-                for the <code>lt</code> client (<code>~/.lab-tracker/config.json</code>,
-                readable in any later shell) and sets{" "}
-                <code>LAB_TRACKER_MCP_API_KEY</code> for MCP agents{" "}
-                <strong>launched from that same shell</strong> — agents started
-                elsewhere (IDEs, new terminals) need that variable set where they
-                run, for example in your MCP client&#39;s <code>env</code> block.
+                Paste the block for the agent machine&#39;s shell.{" "}
+                <code>lt setup connect --save-token</code> saves the server URL and
+                token in the permission-hardened Lab Tracker connection profile (
+                <code>~/.lab-tracker/config.json</code>). Both the <code>lt</code>{" "}
+                CLI and <code>lt-mcp</code> read that profile in later shells and
+                IDE launches. Keep the one-time token private; the temporary shell
+                variable is cleared after the profile is saved.
               </p>
               <div className="enrollment-url">
                 <code>{issued.secret}</code>
@@ -352,11 +397,22 @@ function AgentAccessPage({ token, user, authEnabled, navigate, setBusy, setFlash
                 command={commands.posix}
                 onCopy={() => copyText(commands.posix, "Shell setup commands copied.")}
               />
-              <CommandSnippet
-                title="Then, inside each analysis repo"
-                command={issuedRepoCommands}
-                onCopy={() => copyText(issuedRepoCommands, "Repo setup commands copied.")}
-              />
+              {issuedRepoCommands.map((item) => (
+                <CommandSnippet
+                  key={item.command}
+                  title={item.title}
+                  command={item.command}
+                  onCopy={() => copyText(item.command, `${item.title} command copied.`)}
+                />
+              ))}
+              {CODEX_MCP_COMMANDS.map((item) => (
+                <CommandSnippet
+                  key={item.command}
+                  title={item.title}
+                  command={item.command}
+                  onCopy={() => copyText(item.command, `${item.title} command copied.`)}
+                />
+              ))}
               {issued.read_only !== false ? (
                 <p className="subtle">
                   <code>lt project bind</code> matches an existing project by
@@ -366,9 +422,17 @@ function AgentAccessPage({ token, user, authEnabled, navigate, setBusy, setFlash
               ) : null}
               <p className="subtle">
                 Missing the <code>lt</code> command? Install it once with{" "}
-                <code>{INSTALL_COMMAND}</code>. The repo scaffold writes{" "}
-                <code>.mcp.json</code>, <code>.cursor/mcp.json</code>,{" "}
-                <code>.gemini/settings.json</code>, and agent instruction files.
+                <code>{INSTALL_COMMAND}</code>. The repo setup installs the Lab
+                Tracker setup skill into the Claude and Codex user skill homes and
+                writes <code>.mcp.json</code>, <code>.cursor/mcp.json</code>,{" "}
+                <code>.gemini/settings.json</code>, and agent instruction files. It
+                scaffolds repo-level MCP configuration for other compatible clients.
+                Codex requires the explicit one-time registration above, shared by
+                its app, CLI, and IDE extension. If <code>codex mcp list</code>{" "}
+                already shows <code>lab-tracker</code>, skip the add command.
+                Restart Codex or another MCP client after setup so it reloads its
+                configuration.{" "}
+                <code>lt setup status</code> reports what is configured.
               </p>
               <button type="button" className="btn-link" onClick={() => setIssued(null)}>
                 Dismiss

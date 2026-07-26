@@ -12,14 +12,12 @@ from lab_tracker.models import ProvenanceLink, ProvenanceLinkStatus, UsageEventR
 from lab_tracker.schemas import Envelope, ListEnvelope, ProvenanceLinkStatusUpdate
 
 from .shared import (
-    accessible_project_ids_from_request,
     actor_from_request,
     api_from_request,
     ensure_project_contributor,
-    ensure_project_read,
+    handlers_from_request,
     list_response,
     record_usage_view,
-    repository_from_request,
     validate_pagination,
 )
 
@@ -36,24 +34,26 @@ def build_provenance_links_router(api: LabTrackerAPI) -> APIRouter:
         offset: int = 0,
     ):
         validate_pagination(limit, offset)
-        if project_id is not None:
-            ensure_project_read(request, project_id)
-            project_ids = None
-        else:
-            project_ids = accessible_project_ids_from_request(request)
-        links, total = repository_from_request(request).query_provenance_links(
+        page = handlers_from_request(request).catalogs.list_provenance_links(
+            actor=actor_from_request(request),
             project_id=project_id,
-            project_ids=project_ids,
             status=status.value if status is not None else None,
             limit=limit,
             offset=offset,
         )
-        return list_response(links, limit=limit, offset=offset, total=total)
+        return list_response(
+            page.items,
+            limit=limit,
+            offset=offset,
+            total=page.total,
+        )
 
     @router.get("/provenance-links/{link_id}", response_model=Envelope[ProvenanceLink])
     def get_provenance_link(link_id: UUID, request: Request):
-        link = api_from_request(request, api).get_provenance_link(link_id)
-        ensure_project_read(request, link.project_id)
+        link = api_from_request(request, api).get_provenance_link_for_read(
+            link_id,
+            actor=actor_from_request(request),
+        )
         record_usage_view(
             request,
             resource_type=UsageEventResourceType.PROVENANCE_LINK,

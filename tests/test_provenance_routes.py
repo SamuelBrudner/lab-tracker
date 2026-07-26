@@ -125,6 +125,14 @@ def test_dataset_provenance_route_exports_json_ld_graph(
     assert dataset_response.status_code == 200
     assert dataset_response.headers["content-type"].startswith("application/json")
     assert dataset_response.json()["data"]["dataset_id"] == dataset_id
+    assert dataset_response.json()["data"]["commit_manifest"]["files"] == [
+        {
+            "file_id": None,
+            "path": "raw/data.csv",
+            "checksum": "abc123",
+            "size_bytes": 12,
+        }
+    ]
 
     response = client.get(f"/datasets/{dataset_id}/provenance", headers=headers)
     assert response.status_code == 200
@@ -144,8 +152,12 @@ def test_dataset_provenance_route_exports_json_ld_graph(
     secondary_question_link = _node_by_id(payload, secondary_question_link_iri)
     creator_node = _node_by_id(payload, creator_iri)
     supervisor_node = _node_by_id(payload, supervisor_iri)
+    file_node = _node_by_id(
+        payload,
+        f"{dataset_iri}/provenance/files/raw%2Fdata.csv",
+    )
 
-    assert dataset_node["@type"] == "prov:Entity"
+    assert dataset_node["@type"] == "lab:Dataset"
     assert dataset_node["wasGeneratedBy"] == {"@id": commit_iri}
     assert dataset_node["wasAttributedTo"] == {"@id": creator_iri}
     assert dataset_node["commitHash"]
@@ -160,6 +172,7 @@ def test_dataset_provenance_route_exports_json_ld_graph(
         {"@id": primary_question_link_iri},
         {"@id": secondary_question_link_iri},
     ]
+    assert file_node["contentSize"] == 12
     assert primary_question_link["question"] == {
         "@id": f"http://testserver/questions/{primary_question_id}"
     }
@@ -303,7 +316,7 @@ def test_analysis_provenance_route_exports_related_entities(
     run_node = _node_by_id(payload, run["uri"])
     agent_node = _node_by_id(payload, analysis_node["wasAssociatedWith"]["@id"])
 
-    assert analysis_node["@type"] == "prov:Activity"
+    assert analysis_node["@type"] == "lab:Analysis"
     assert analysis_node["used"] == [{"@id": dataset_iri}]
     assert analysis_node["wasInformedBy"] == [{"@id": run["uri"]}]
     assert analysis_node["methodHash"] == "method-1"
@@ -311,8 +324,7 @@ def test_analysis_provenance_route_exports_related_entities(
     assert analysis_node["environmentHash"] == "env-1"
     assert analysis_node["status"] == "committed"
     assert analysis_node["executedAt"]
-    assert _node_type_includes(agent_node, "prov:Agent")
-    assert _node_type_includes(agent_node, "prov:Person")
+    assert agent_node["@type"] == "prov:Person"
     assert agent_node["userId"]
     assert run_node["@type"] == "prov:Activity"
     assert run_node["externalSourceSystem"] == "mlflow"
@@ -433,7 +445,7 @@ def test_canonical_base_url_roots_provenance_identifiers(
 
     assert document["@context"]["lab"] == f"{canonical}/terms#"
     dataset_node = _node_by_id(document, f"{canonical}/datasets/{dataset_id}")
-    assert _node_type_includes(dataset_node, "prov:Entity")
+    assert dataset_node["@type"] == "lab:Dataset"
     for node in document["@graph"]:
         node_id = node["@id"]
         assert not node_id.startswith("http://testserver"), node_id

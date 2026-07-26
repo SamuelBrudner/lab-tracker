@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import os
 from pathlib import Path
+from uuid import uuid4
 
+import pytest
 from starlette.testclient import TestClient
 
 from lab_tracker.artifact_resolution import LocalFilesystemResolver, ResolverRegistry
@@ -88,6 +91,16 @@ def _create_project_in_group(
     )
     assert response.status_code == 201, response.text
     return response.json()["data"]["project_id"]
+
+
+def _data_store_not_found_body() -> dict[str, object]:
+    return {
+        "error": {
+            "code": "not_found",
+            "message": "Data store does not exist.",
+            "issues": None,
+        }
+    }
 
 
 def test_create_and_get_data_store(client, admin_auth_headers):
@@ -254,6 +267,167 @@ def test_create_data_store_requires_exactly_one_scope(client, admin_auth_headers
     assert both.status_code == 422
 
 
+def test_create_local_fs_store_rejects_non_absolute_roots_before_persistence(
+    client,
+    admin_auth_headers,
+):
+    project_id = _create_project(client, admin_auth_headers, "Invalid local roots")
+    invalid_roots = (
+        "relative/path",
+        "../sibling",
+        "~/expanded-by-host",
+        "C:drive-relative",
+        r"\\server\share",
+        r"\\?\C:\device-path",
+        " /whitespace-repaired-root ",
+    )
+
+    for index, root in enumerate(invalid_roots):
+        name = f"invalid-local-{index}"
+        response = client.post(
+            "/data-stores",
+            json=_store_payload(
+                project_id,
+                name=name,
+                kind="local_fs",
+                root=root,
+                is_default=False,
+            ),
+            headers=admin_auth_headers,
+        )
+
+        assert response.status_code == 422, response.text
+        assert response.json()["error"]["message"] == (
+            "Local filesystem store root must be a supported absolute local path."
+        )
+
+    listed = client.get(
+        "/data-stores",
+        params={"project_id": project_id},
+        headers=admin_auth_headers,
+    )
+    assert listed.status_code == 200, listed.text
+    assert listed.json()["data"] == []
+
+
+@pytest.mark.parametrize(
+    "name",
+    (
+        "has space",
+        "-leading",
+        ".leading",
+        "_leading",
+        "unicode-é",
+        "a" * 64,
+        " valid",
+        "valid ",
+    ),
+)
+def test_create_data_store_rejects_noncanonical_names_without_persistence(
+    client,
+    admin_auth_headers,
+    tmp_path,
+    name,
+):
+    project_id = _create_project(client, admin_auth_headers, f"Invalid store {name!r}")
+
+    response = client.post(
+        "/data-stores",
+        json=_store_payload(
+            project_id,
+            name=name,
+            kind="local_fs",
+            root=str(tmp_path),
+            is_default=False,
+        ),
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 422, response.text
+    assert response.json()["error"]["message"].startswith(
+        "Local filesystem store name must use 1-63 ASCII"
+    )
+    listed = client.get(
+        "/data-stores",
+        params={"project_id": project_id},
+        headers=admin_auth_headers,
+    )
+    assert listed.status_code == 200, listed.text
+    assert listed.json()["data"] == []
+
+
+def test_local_root_validation_does_not_change_other_store_kinds(
+    client,
+    admin_auth_headers,
+):
+    project_id = _create_project(client, admin_auth_headers, "Remote root semantics")
+
+    response = client.post(
+        "/data-stores",
+        json=_store_payload(
+            project_id,
+            name=" legacy remote ",
+            kind="onedrive",
+            root="experiments/current",
+            is_default=False,
+        ),
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["data"]["name"] == "legacy remote"
+    assert response.json()["data"]["root"] == "experiments/current"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows aliases trailing root spaces")
+def test_local_root_is_persisted_exactly_without_whitespace_repair(
+    client,
+    admin_auth_headers,
+    tmp_path,
+):
+    root = tmp_path / "store with trailing space "
+    root.mkdir()
+    exact_data = b"bytes from the exact registered root"
+    (root / "artifact.bin").write_bytes(exact_data)
+    repaired_root = Path(str(root).rstrip())
+    repaired_root.mkdir()
+    (repaired_root / "artifact.bin").write_bytes(b"wrong trimmed-root bytes")
+    _install_local_registry(client, tmp_path)
+    project_id = _create_project(client, admin_auth_headers, "Exact local root")
+
+    response = client.post(
+        "/data-stores",
+        json=_store_payload(
+            project_id,
+            name="exact-local-root",
+            kind="local_fs",
+            root=str(root),
+            is_default=False,
+        ),
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["data"]["root"] == str(root)
+    dataset_id = _create_dataset_with_artifact(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        uri="store://exact-local-root/artifact.bin",
+        content_hash=_sha256(exact_data),
+    )
+
+    resolved = client.post(
+        "/external-artifacts/resolve",
+        json={"entity_type": "dataset", "entity_id": dataset_id},
+        headers=admin_auth_headers,
+    )
+
+    assert resolved.status_code == 200, resolved.text
+    assert resolved.json()["data"]["status"] == "verified"
+    assert base64.b64decode(resolved.json()["data"]["content_base64"]) == exact_data
+
+
 def test_create_data_store_requires_contributor(client, scoped_project_member):
     response = client.post(
         "/data-stores",
@@ -293,6 +467,44 @@ def test_data_store_health_local_fs_missing_root(client, admin_auth_headers, tmp
     assert body["kind"] == "local_fs"
 
 
+def test_git_store_health_uses_installed_policy_without_leaking_credentials(
+    client,
+    admin_auth_headers,
+):
+    project_id = _create_project(client, admin_auth_headers, "Git health project")
+    secret = "git-health-secret-must-not-leak"
+    store_id = client.post(
+        "/data-stores",
+        json=_store_payload(
+            project_id,
+            name="analysis-repository",
+            kind="git",
+            root=f"https://operator:{secret}@git.example/lab/repository.git",
+            credential_ref=None,
+        ),
+        headers=admin_auth_headers,
+    ).json()["data"]["store_id"]
+
+    checker = client.app.state.store_health_checker
+    workdir = client.app.state.git_health_workdir
+    assert checker.git_remote_policy is client.app.state.git_remote_policy
+    assert checker.git_health_workdir is workdir
+    assert workdir.is_dir()
+    assert list(workdir.iterdir()) == []
+    assert not (workdir / ".git").exists()
+
+    response = client.get(
+        f"/data-stores/{store_id}/health",
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["status"] == "unreachable"
+    assert secret not in response.text
+    assert list(workdir.iterdir()) == []
+    assert not (workdir / ".git").exists()
+
+
 def test_data_store_health_denied_for_unauthorized_project(
     client, scoped_project_member, admin_auth_headers, tmp_path
 ):
@@ -310,7 +522,8 @@ def test_data_store_health_denied_for_unauthorized_project(
     response = client.get(
         f"/data-stores/{store_id}/health", headers=scoped_project_member.member_headers
     )
-    assert response.status_code == 401
+    assert response.status_code == 404
+    assert response.json() == _data_store_not_found_body()
 
 
 def test_get_data_store_denied_for_unauthorized_project(
@@ -325,13 +538,12 @@ def test_get_data_store_denied_for_unauthorized_project(
     response = client.get(
         f"/data-stores/{store_id}", headers=scoped_project_member.member_headers
     )
-    assert response.status_code == 401
+    assert response.status_code == 404
+    assert response.json() == _data_store_not_found_body()
 
 
 def _register_group_member(client, admin_auth_headers, group_id: str) -> dict[str, str]:
     """Register a fresh viewer-role user and add them to the group."""
-
-    from uuid import uuid4
 
     from lab_tracker.auth import Role
 
@@ -404,6 +616,26 @@ def test_group_scoped_store_still_denied_for_non_member(
         f"/data-stores/{store_id}/health",
         headers=scoped_project_member.member_headers,
     )
+    missing_store_id = uuid4()
+    missing = client.get(
+        f"/data-stores/{missing_store_id}",
+        headers=scoped_project_member.member_headers,
+    )
+    missing_health = client.get(
+        f"/data-stores/{missing_store_id}/health",
+        headers=scoped_project_member.member_headers,
+    )
 
-    assert response.status_code == 401
-    assert health.status_code == 401
+    assert {
+        response.status_code,
+        health.status_code,
+        missing.status_code,
+        missing_health.status_code,
+    } == {404}
+    assert (
+        response.json()
+        == health.json()
+        == missing.json()
+        == missing_health.json()
+        == _data_store_not_found_body()
+    )

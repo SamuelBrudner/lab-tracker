@@ -75,7 +75,7 @@ def _quick_capture(
         files={"file": (filename, body, content_type)},
         headers=headers,
     )
-    assert response.status_code == 202, response.text
+    assert response.status_code == 201, response.text
     return response.json()["data"]["note_id"]
 
 
@@ -519,9 +519,9 @@ def test_batch_context_truncates_overflow_and_reports_count(
     admin_auth_headers: dict[str, str],
     monkeypatch,
 ):
-    from lab_tracker.services import graph_draft_service
+    from lab_tracker.services import graph_draft_batch_policy
 
-    monkeypatch.setattr(graph_draft_service, "_BATCH_NOTE_LIMIT", 3)
+    monkeypatch.setattr(graph_draft_batch_policy, "BATCH_NOTE_LIMIT", 3)
 
     project_id = _create_project(client, admin_auth_headers, "Truncation")
     note_ids: list[str] = []

@@ -21,6 +21,7 @@ def _create_token(
     label: str = "Copilot",
     role: str = "viewer",
     read_only: bool = True,
+    scope: str = "all",
 ) -> dict:
     response = client.post(
         "/auth/tokens",
@@ -28,12 +29,58 @@ def _create_token(
             "label": label,
             "role": role,
             "read_only": read_only,
+            "scope": scope,
             "expires_at": (utc_now() + timedelta(days=7)).isoformat(),
         },
         headers=headers,
     )
     assert response.status_code == 201, response.text
     return response.json()["data"]
+
+
+def test_batch_run_due_scoped_token_can_only_trigger_the_run(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    project = client.post(
+        "/projects",
+        json={"name": "Scheduler token forbidden reads"},
+        headers=admin_auth_headers,
+    )
+    assert project.status_code == 201, project.text
+    goal = client.post(
+        f"/projects/{project.json()['data']['project_id']}/goals",
+        json={"goal_type": "paper", "title": "Scheduler-hidden goal"},
+        headers=admin_auth_headers,
+    )
+    assert goal.status_code == 201, goal.text
+    goal_id = goal.json()["data"]["goal_id"]
+    issued = _create_token(
+        client, admin_auth_headers, role="admin", scope="batch_run_due"
+    )
+    assert issued["scope"] == "batch_run_due"
+    pat_headers = _bearer(issued["secret"])
+
+    # The scheduler token triggers the due-batch run...
+    run_due = client.post("/batches/run-due", headers=pat_headers)
+    assert run_due.status_code == 200, run_due.text
+
+    # ...but can do nothing else: not read, not other writes, not /auth.
+    denied = [
+        client.get("/projects", headers=pat_headers),
+        client.get("/batches/runs", headers=pat_headers),
+        client.get(f"/goals/{goal_id}", headers=pat_headers),
+        client.get(f"/goals/{goal_id}/ara-artifact", headers=pat_headers),
+        client.get("/auth/me", headers=pat_headers),
+        client.post(
+            "/assistant/decision-context",
+            json={"task_kind": "summary", "query": "hidden"},
+            headers=pat_headers,
+        ),
+        client.post("/projects", json={"name": "Blocked"}, headers=pat_headers),
+        client.post("/batches/run-now", json={}, headers=pat_headers),
+    ]
+    assert [response.status_code for response in denied] == [403] * len(denied)
 
 
 def test_create_list_and_revoke_personal_access_token(
@@ -123,6 +170,152 @@ def test_read_only_personal_access_token_can_read_but_not_write_or_auth(
         "service_forbidden"
     }
     assert forbidden_auth.status_code == 403
+
+
+def test_read_only_viewer_token_can_read_scoped_decision_context_opaquely(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    scoped_project_member,
+) -> None:
+    issued = _create_token(
+        client,
+        scoped_project_member.member_headers,
+        label="Read-only decision context",
+        role="viewer",
+        read_only=True,
+    )
+    pat_headers = _bearer(issued["secret"])
+
+    visible = client.post(
+        "/assistant/decision-context",
+        json={
+            "task_kind": "summary",
+            "query": "scoped context",
+            "project_id": scoped_project_member.visible_project_id,
+        },
+        headers=pat_headers,
+    )
+
+    assert visible.status_code == 200, visible.text
+    assert visible.json()["data"]["scope"]["project"]["project_id"] == (
+        scoped_project_member.visible_project_id
+    )
+
+    hidden = client.post(
+        "/assistant/decision-context",
+        json={
+            "task_kind": "summary",
+            "query": "scoped context",
+            "project_id": scoped_project_member.hidden_project_id,
+        },
+        headers=pat_headers,
+    )
+    missing = client.post(
+        "/assistant/decision-context",
+        json={
+            "task_kind": "summary",
+            "query": "scoped context",
+            "project_id": str(uuid4()),
+        },
+        headers=pat_headers,
+    )
+
+    assert hidden.status_code == missing.status_code == 401
+    assert hidden.json() == missing.json() == {
+        "error": {
+            "code": "auth_error",
+            "message": "Project access required.",
+            "issues": None,
+        }
+    }
+
+    hidden_question = client.post(
+        "/questions",
+        json={
+            "project_id": scoped_project_member.hidden_project_id,
+            "text": "A hidden decision-context anchor",
+            "question_type": "descriptive",
+            "status": "active",
+        },
+        headers=admin_auth_headers,
+    )
+    assert hidden_question.status_code == 201, hidden_question.text
+    hidden_question_id = hidden_question.json()["data"]["question_id"]
+    missing_question_id = str(uuid4())
+
+    hidden_anchor = client.post(
+        "/assistant/decision-context",
+        json={
+            "task_kind": "summary",
+            "query": "hidden anchor",
+            "question_id": hidden_question_id,
+        },
+        headers=pat_headers,
+    )
+    missing_anchor = client.post(
+        "/assistant/decision-context",
+        json={
+            "task_kind": "summary",
+            "query": "hidden anchor",
+            "question_id": missing_question_id,
+        },
+        headers=pat_headers,
+    )
+
+    assert hidden_anchor.status_code == missing_anchor.status_code == 200
+    normalized_anchor_errors = []
+    for response, supplied_id in (
+        (hidden_anchor, hidden_question_id),
+        (missing_anchor, missing_question_id),
+    ):
+        payload = response.json()
+        error = payload["error"]
+        assert error["code"] == "anchor_not_found"
+        assert error["anchor"] == {
+            "entity_type": "question",
+            "entity_id": supplied_id,
+        }
+        assert scoped_project_member.hidden_project_id not in response.text
+        assert "A hidden decision-context anchor" not in response.text
+        error["message"] = error["message"].replace(supplied_id, "<supplied-id>")
+        error["anchor"]["entity_id"] = "<supplied-id>"
+        normalized_anchor_errors.append(payload)
+    assert normalized_anchor_errors[0] == normalized_anchor_errors[1]
+
+    near_miss = client.post(
+        "/assistant/decision-context/",
+        json={"task_kind": "summary", "query": "scoped context"},
+        headers=pat_headers,
+        follow_redirects=False,
+    )
+    assert near_miss.status_code == 403
+    assert near_miss.json()["error"]["code"] == "service_forbidden"
+
+
+def test_write_enabled_viewer_token_does_not_inherit_decision_context_exception(
+    client: TestClient,
+    scoped_project_member,
+) -> None:
+    issued = _create_token(
+        client,
+        scoped_project_member.member_headers,
+        label="Write-enabled viewer",
+        role="viewer",
+        read_only=False,
+    )
+
+    response = client.post(
+        "/assistant/decision-context",
+        json={
+            "task_kind": "summary",
+            "query": "scoped context",
+            "project_id": scoped_project_member.visible_project_id,
+        },
+        headers=_bearer(issued["secret"]),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "service_forbidden"
 
 
 def test_write_enabled_token_uses_capped_role_not_live_user_role(

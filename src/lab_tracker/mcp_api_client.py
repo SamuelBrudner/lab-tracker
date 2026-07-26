@@ -28,6 +28,13 @@ from lab_tracker.models import (
     NoteStatus,
     QuestionStatus,
 )
+from lab_tracker_client.client import load_connection_profile
+from lab_tracker_client.transport import (
+    MAX_UPLOAD_BYTES,
+    HttpTransport,
+    UploadTooLargeError,
+    preflight_upload_size,
+)
 
 JsonObject = dict[str, Any]
 
@@ -54,6 +61,27 @@ GOAL_LINK_STATUS_VALUES = tuple(status.value for status in GoalLinkStatus)
 GOAL_LINK_STATUS_TEXT = ", ".join(GOAL_LINK_STATUS_VALUES)
 _BEARER_SECRET_RE = re.compile(r"Bearer\s+[^\s\"'\\,}\]]+", re.IGNORECASE)
 _LPAT_SECRET_RE = re.compile(r"lpat_[A-Za-z0-9_-]+")
+
+
+def suppress_unverified_artifact_content(payload: JsonObject) -> JsonObject:
+    """Fail closed if an artifact response carries content without verification."""
+
+    data = payload.get("data")
+    if data is None and isinstance(payload.get("error"), dict):
+        return payload
+    if not isinstance(data, dict):
+        raise LabTrackerAPIError(
+            "Lab Tracker API artifact response did not include object data."
+        )
+    if data.get("status") == "verified":
+        return payload
+
+    safe_data = dict(data)
+    safe_data["content_base64"] = None
+    safe_data["returned_bytes"] = 0
+    safe_payload = dict(payload)
+    safe_payload["data"] = safe_data
+    return safe_payload
 
 # Remediation guidance appended to auth failures so a rejected credential is
 # self-describing at the tool boundary rather than an opaque "Invalid
@@ -111,12 +139,31 @@ class MCPSettings:
 
     @classmethod
     def from_env(cls) -> MCPSettings:
+        """Build MCP settings with environment-first profile fallback.
+
+        ``lt setup connect --save-token`` persists a base URL and LPAT in the
+        machine connection profile. MCP hosts often launch without a shell, so
+        use that profile for values absent from their environment. Never carry
+        a profile token to an explicitly different server or combine it with
+        explicit username/password login.
+        """
+
+        profile = load_connection_profile()
+        env_base_url = os.getenv("LAB_TRACKER_MCP_BASE_URL")
+        env_username = os.getenv("LAB_TRACKER_MCP_USERNAME")
+        profile_base_url = profile.get("base_url") or DEFAULT_BASE_URL
+        profile_token = profile.get("access_token")
+        if env_username or (
+            env_base_url and env_base_url.rstrip("/") != profile_base_url.rstrip("/")
+        ):
+            profile_token = None
         return cls(
-            base_url=os.getenv("LAB_TRACKER_MCP_BASE_URL", DEFAULT_BASE_URL).rstrip("/"),
-            username=os.getenv("LAB_TRACKER_MCP_USERNAME"),
+            base_url=(env_base_url or profile_base_url).rstrip("/"),
+            username=env_username,
             password=os.getenv("LAB_TRACKER_MCP_PASSWORD"),
             api_key=os.getenv("LAB_TRACKER_MCP_API_KEY")
-            or os.getenv("LAB_TRACKER_MCP_TOKEN"),
+            or os.getenv("LAB_TRACKER_MCP_TOKEN")
+            or profile_token,
             timeout_seconds=float(
                 os.getenv("LAB_TRACKER_MCP_TIMEOUT_SECONDS", str(DEFAULT_TIMEOUT_SECONDS))
             ),
@@ -134,18 +181,54 @@ class LabTrackerAPIClient:
     ) -> None:
         self._settings = settings
         self._access_token: str | None = None
-        self._client = httpx.Client(
+        self._transport = HttpTransport(
             base_url=settings.base_url,
-            timeout=settings.timeout_seconds,
+            timeout_seconds=settings.timeout_seconds,
+            auth=self,
             transport=transport,
         )
+
+    @property
+    def _client(self) -> httpx.Client:
+        return self._transport.client
 
     @property
     def access_token(self) -> str | None:
         return self._access_token
 
     def close(self) -> None:
-        self._client.close()
+        self._transport.close()
+
+    # --- TransportAuth policy (injected into the shared HttpTransport) --------
+    @property
+    def surface(self) -> str:
+        return "mcp"
+
+    def initial_bearer(self) -> str | None:
+        static_key = self._static_api_key()
+        if static_key:
+            return static_key
+        if self._has_credentials():
+            return self._token()
+        return None
+
+    def refresh_bearer(self, response: httpx.Response) -> str:
+        if self._static_api_key():
+            raise _static_key_rejected_error(response, base_url=self._settings.base_url)
+        self._access_token = None
+        if not self._has_credentials():
+            raise LabTrackerAPIAuthError(
+                _NO_CREDENTIALS_MESSAGE,
+                status_code=response.status_code,
+                code="auth_error",
+            )
+        return self._token()
+
+    def wrap_transport_error(self, method: str, path: str, exc: Exception) -> Exception:
+        return LabTrackerAPIUnavailableError(
+            f"Lab Tracker request {method} {path} failed: {exc}",
+            code=UNAVAILABLE_CODE,
+        )
 
     def health(self) -> JsonObject:
         return self._request("GET", "/health", authenticated=False)
@@ -363,6 +446,9 @@ class LabTrackerAPIClient:
             },
         )
 
+    def get_visualization(self, visualization_id: str) -> JsonObject:
+        return self._request("GET", f"/visualizations/{visualization_id}")
+
     def list_goals(
         self,
         *,
@@ -423,9 +509,12 @@ class LabTrackerAPIClient:
             payload["byte_start"] = byte_start
         if byte_end is not None:
             payload["byte_end"] = byte_end
-        return self._request(
-            "POST", "/external-artifacts/resolve", json_payload=payload
+        response = self._request(
+            "POST",
+            "/external-artifacts/resolve",
+            json_payload=payload,
         )
+        return suppress_unverified_artifact_content(response)
 
     def export_goal_artifact(
         self,
@@ -506,9 +595,7 @@ class LabTrackerAPIClient:
                     limit=200,
                 )
                 questions.extend(_payload_items(payload))
-            claims.extend(
-                _payload_items(self.list_claims(project_id=lookup_project_id, limit=200))
-            )
+            claims.extend(_payload_items(self.list_claims(project_id=lookup_project_id, limit=200)))
 
         return build_next_questions_payload(goals, questions, claims, limit=limit)
 
@@ -752,6 +839,44 @@ class LabTrackerAPIClient:
             },
         )
 
+    def record_evidence_bundle(
+        self,
+        *,
+        project_id: str,
+        primary_question_id: str | None = None,
+        dataset: JsonObject | None = None,
+        analysis: JsonObject | None = None,
+        claim: JsonObject | None = None,
+        visualization: JsonObject | None = None,
+        source_note: JsonObject | None = None,
+        dry_run: bool = True,
+        idempotency_key: str | None = None,
+    ) -> JsonObject:
+        payload: JsonObject = {
+            "project_id": project_id,
+            "primary_question_id": primary_question_id,
+            "dry_run": dry_run,
+            "idempotency_key": idempotency_key,
+        }
+        payload.update(
+            {
+                name: component
+                for name, component in (
+                    ("dataset", dataset),
+                    ("analysis", analysis),
+                    ("claim", claim),
+                    ("visualization", visualization),
+                    ("source_note", source_note),
+                )
+                if component is not None
+            }
+        )
+        return self._request(
+            "POST",
+            "/evidence-bundles",
+            json_payload=payload,
+        )
+
     def create_goal(
         self,
         *,
@@ -789,19 +914,41 @@ class LabTrackerAPIClient:
         target_date: str | None = None,
         external_ref: str | None = None,
         attributes: JsonObject | None = None,
+        clear_target_date: bool = False,
+        clear_external_ref: bool = False,
     ) -> JsonObject:
+        if target_date is not None and clear_target_date:
+            raise LabTrackerAPIValidationError(
+                "target_date cannot be supplied when clear_target_date is true.",
+                code="validation_error",
+            )
+        if external_ref is not None and clear_external_ref:
+            raise LabTrackerAPIValidationError(
+                "external_ref cannot be supplied when clear_external_ref is true.",
+                code="validation_error",
+            )
+        payload: JsonObject = {
+            name: value
+            for name, value in (
+                ("goal_type", _validate_goal_type(goal_type)),
+                ("title", title),
+                ("summary", summary),
+                ("status", _validate_goal_status(status)),
+                ("target_date", target_date),
+                ("external_ref", external_ref),
+                ("attributes", attributes),
+            )
+            if value is not None
+        }
+        if clear_target_date:
+            payload["target_date"] = None
+        if clear_external_ref:
+            payload["external_ref"] = None
         return self._request(
             "PATCH",
             f"/goals/{goal_id}",
-            json_payload={
-                "goal_type": _validate_goal_type(goal_type),
-                "title": title,
-                "summary": summary,
-                "status": _validate_goal_status(status),
-                "target_date": target_date,
-                "external_ref": external_ref,
-                "attributes": attributes,
-            },
+            json_payload=payload,
+            preserve_json_nulls=clear_target_date or clear_external_ref,
         )
 
     def link_node_to_goal(
@@ -847,20 +994,42 @@ class LabTrackerAPIClient:
         viz_id: str,
         file_path: str,
         content_type: str | None = None,
+        checksum_sha256: str | None = None,
+        size_bytes: int | None = None,
+        expected_current_storage_id: str | None = None,
     ) -> JsonObject:
         path = Path(file_path).expanduser()
         if not path.is_file():
             raise LabTrackerAPIError(f"Visualization file does not exist: {file_path}")
+        try:
+            preflight_upload_size(path, max_bytes=MAX_UPLOAD_BYTES)
+        except UploadTooLargeError as exc:
+            raise LabTrackerAPIValidationError(str(exc), code="validation_error") from exc
         resolved_content_type = (
-            content_type
-            or mimetypes.guess_type(path.name)[0]
-            or "application/octet-stream"
+            content_type or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         )
-        return self._request(
+        # Stream the file handle instead of reading it all into memory; open_file
+        # re-opens per attempt so a 401 retry replays cleanly.
+        response = self._transport.upload(
             "POST",
             f"/visualizations/{viz_id}/file",
-            files={"file": (path.name, path.read_bytes(), resolved_content_type)},
+            field_name="file",
+            open_file=lambda: path.open("rb"),
+            filename=path.name,
+            content_type=resolved_content_type,
+            data={
+                key: str(value)
+                for key, value in {
+                    "checksum_sha256": checksum_sha256,
+                    "size_bytes": size_bytes,
+                    "expected_current_storage_id": expected_current_storage_id,
+                }.items()
+                if value is not None
+            },
         )
+        if response.status_code >= 400:
+            raise _api_error_from_response(response)
+        return _response_json(response)
 
     def _request(
         self,
@@ -872,55 +1041,21 @@ class LabTrackerAPIClient:
         json_payload: JsonObject | None = None,
         files: dict[str, Any] | None = None,
         retry_on_unauthorized: bool = True,
+        preserve_json_nulls: bool = False,
     ) -> JsonObject:
-        headers: dict[str, str] = {"X-LabTracker-Surface": "mcp"}
-        if authenticated:
-            static_key = self._static_api_key()
-            if static_key:
-                headers["Authorization"] = f"Bearer {static_key}"
-            elif self._has_credentials():
-                headers["Authorization"] = f"Bearer {self._token()}"
-        response = self._send(
+        response = self._transport.request(
             method,
             path,
-            params=_drop_empty(params),
-            json=_drop_empty(json_payload),
+            authenticated=authenticated,
+            params=params,
+            json=json_payload,
             files=files,
-            headers=headers,
+            retry_on_unauthorized=retry_on_unauthorized,
+            preserve_json_nulls=preserve_json_nulls,
         )
-        if response.status_code == 401 and authenticated and retry_on_unauthorized:
-            if self._static_api_key():
-                raise _static_key_rejected_error(
-                    response, base_url=self._settings.base_url
-                )
-            self._access_token = None
-            if not self._has_credentials():
-                raise LabTrackerAPIAuthError(
-                    _NO_CREDENTIALS_MESSAGE,
-                    status_code=response.status_code,
-                    code="auth_error",
-                )
-            headers["Authorization"] = f"Bearer {self._token()}"
-            response = self._send(
-                method,
-                path,
-                params=_drop_empty(params),
-                json=_drop_empty(json_payload),
-                files=files,
-                headers=headers,
-            )
         if response.status_code >= 400:
             raise _api_error_from_response(response)
         return _response_json(response)
-
-    def _send(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
-        try:
-            return self._client.request(method, path, **kwargs)
-        except httpx.HTTPError as exc:
-            raise LabTrackerAPIUnavailableError(
-                f"Lab Tracker request {method} {path} failed: {exc}",
-                code=UNAVAILABLE_CODE,
-            ) from exc
 
     def _has_credentials(self) -> bool:
         return bool((self._settings.username or "").strip() and self._settings.password)
@@ -949,7 +1084,7 @@ class LabTrackerAPIClient:
             file=sys.stderr,
             flush=True,
         )
-        response = self._send(
+        response = self._transport.send(
             "POST",
             "/auth/login",
             json={"username": username, "password": password},
@@ -969,12 +1104,6 @@ class LabTrackerAPIClient:
         return token
 
 
-def _drop_empty(payload: JsonObject | None) -> JsonObject | None:
-    if payload is None:
-        return None
-    return {key: value for key, value in payload.items() if value is not None}
-
-
 def _is_note_metadata_scalar(value: object) -> bool:
     return isinstance(value, (str, bool, int, float))
 
@@ -992,9 +1121,7 @@ def _validate_note_metadata(metadata: object) -> dict[str, NoteMetadataScalar] |
         if not isinstance(key, str) or not key.strip():
             raise LabTrackerAPIError("Note metadata keys must be non-empty strings.")
         if not _is_note_metadata_scalar(value):
-            raise LabTrackerAPIError(
-                "Note metadata values must be strings, numbers, or booleans."
-            )
+            raise LabTrackerAPIError("Note metadata values must be strings, numbers, or booleans.")
         validated[key] = value
     return validated
 
@@ -1162,11 +1289,7 @@ def _project_ids_for_next_question_lookup(
     if project_id is not None:
         return [project_id]
     goal_project_ids = sorted(
-        {
-            str(goal["project_id"])
-            for goal in goals
-            if goal.get("project_id") is not None
-        }
+        {str(goal["project_id"]) for goal in goals if goal.get("project_id") is not None}
     )
     return goal_project_ids or [None]
 

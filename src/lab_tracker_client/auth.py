@@ -120,6 +120,9 @@ def _config_sources(root: Path, home_dir: Path) -> list[_ConfigSource]:
         _ConfigSource("repo:.gemini/settings.json", root / ".gemini" / "settings.json"),
         # repo-local surfaces using the VS Code / Copilot `servers` schema.
         _ConfigSource("repo:.vscode/mcp.json", root / ".vscode" / "mcp.json"),
+        # Older checkouts used this root-level Visual Studio config. Keep
+        # scanning it so auth diagnostics still find credentials that need
+        # migration, even though new checkouts use `.vscode/mcp.json`.
         _ConfigSource("repo:mcp.visualstudio.json", root / "mcp.visualstudio.json"),
     ]
     for path in _desktop_config_paths(home_dir):

@@ -12,6 +12,7 @@ from typing import Any
 from uuid import UUID
 
 from lab_tracker.api_parts._base import _first_uuid
+from lab_tracker.auth import AuthContext
 from lab_tracker.models import (
     Note,
     UsageEventResourceType,
@@ -23,6 +24,15 @@ class NotesApiMixin:
     def create_note(self, *args: Any, **kwargs: Any) -> Any:
         return self._with_usage_event(
             lambda: self.notes.create_note(*args, **kwargs),
+            verb=UsageEventVerb.CREATE,
+            resource_type=UsageEventResourceType.NOTE,
+            actor=kwargs.get("actor"),
+            resource_id_attr="note_id",
+        )
+
+    def create_note_result(self, *args: Any, **kwargs: Any) -> Any:
+        return self._with_usage_event(
+            lambda: self.notes.create_note_result(*args, **kwargs),
             verb=UsageEventVerb.CREATE,
             resource_type=UsageEventResourceType.NOTE,
             actor=kwargs.get("actor"),
@@ -44,6 +54,15 @@ class NotesApiMixin:
             resource_id_attr="note_id",
         )
 
+    def upload_note_raw_result(self, *args: Any, **kwargs: Any) -> Any:
+        return self._with_usage_event(
+            lambda: self.notes.upload_note_raw_result(*args, **kwargs),
+            verb=UsageEventVerb.UPLOAD,
+            resource_type=UsageEventResourceType.NOTE,
+            actor=kwargs.get("actor"),
+            resource_id_attr="note_id",
+        )
+
     def transcribe_voice_note(self, *args: Any, **kwargs: Any) -> Any:
         return self._with_usage_event(
             lambda: self.notes.transcribe_voice_note(*args, **kwargs),
@@ -55,6 +74,14 @@ class NotesApiMixin:
 
     def get_note(self, *args: Any, **kwargs: Any) -> Any:
         return self.notes.get_note(*args, **kwargs)
+
+    def get_note_for_read(
+        self,
+        note_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> Note:
+        return self.notes.get_note_for_read(note_id, actor=actor)
 
     def list_notes(self, *args: Any, **kwargs: Any) -> Any:
         return self.notes.list_notes(*args, **kwargs)

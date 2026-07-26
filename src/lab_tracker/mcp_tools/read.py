@@ -14,6 +14,7 @@ from lab_tracker.mcp_api_client import (
     client_from_env,
     lab_tracker_api_error,
     lab_tracker_unavailable,
+    suppress_unverified_artifact_content,
 )
 from lab_tracker.mcp_tools.hints import next_action, with_next_action
 
@@ -499,25 +500,28 @@ def lab_tracker_resolve_artifact(
     byte_start: int | None = None,
     byte_end: int | None = None,
 ) -> JsonObject:
-    """Resolve an external artifact pointer to bounded, hash-verified content.
+    """Resolve an artifact pointer; only verified results include bounded content.
 
     Use when reasoning needs the actual content of a file that was referenced but
     not captured in the graph's metadata snapshot. entity_type is dataset,
     analysis, or claim; artifact_index selects which embedded reference. Returns a
     status of verified (bytes match the recorded content_hash), drifted (the
     artifact changed since capture — do not trust it as the captured evidence), or
-    unresolved (no adapter, unreachable, or unverifiable), plus base64 content.
+    unresolved (no adapter, unreachable, or unverifiable). Only verified results
+    include base64 content; drifted results retain diagnostics but withhold bytes.
     """
     return _read_tool(
         "lab_tracker_resolve_artifact",
-        lambda client: client.resolve_external_artifact(
-            entity_type=entity_type,
-            entity_id=entity_id,
-            artifact_index=artifact_index,
-            content_hash=content_hash,
-            max_bytes=max_bytes,
-            byte_start=byte_start,
-            byte_end=byte_end,
+        lambda client: suppress_unverified_artifact_content(
+            client.resolve_external_artifact(
+                entity_type=entity_type,
+                entity_id=entity_id,
+                artifact_index=artifact_index,
+                content_hash=content_hash,
+                max_bytes=max_bytes,
+                byte_start=byte_start,
+                byte_end=byte_end,
+            ),
         ),
         hint=next_action(
             "lab_tracker_get_claim_provenance",

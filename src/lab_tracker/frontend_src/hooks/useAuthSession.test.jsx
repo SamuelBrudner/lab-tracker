@@ -3,6 +3,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { apiRequest } from "../shared/api.js";
+import { createAuthStorage } from "../shared/auth-storage.js";
 import {
   TOKEN_EXPIRES_AT_STORAGE_KEY,
   TOKEN_STORAGE_KEY,
@@ -27,9 +28,10 @@ function AuthHarness({
   replace = noop,
   setBusy = noop,
   setFlash = noop,
+  storage = undefined,
   withProbe = false,
 }) {
-  const session = useAuthSession({ replace, setBusy, setFlash });
+  const session = useAuthSession({ replace, setBusy, setFlash, storage });
   async function probe() {
     try {
       await apiRequest("/protected", { token: session.token });
@@ -43,6 +45,7 @@ function AuthHarness({
       <span data-testid="expires-at">{session.tokenExpiresAt}</span>
       <span data-testid="auth-mode">{session.authMode}</span>
       <span data-testid="bootstrap-token">{session.authBootstrapToken}</span>
+      <span data-testid="degraded">{String(session.persistenceDegraded)}</span>
       {withProbe ? (
         <button type="button" onClick={probe}>
           Probe API
@@ -269,6 +272,71 @@ describe("useAuthSession", () => {
       "",
       "Your session expired. Please sign in again."
     );
+  });
+
+  it("keeps the token and expiry when a protected read returns an opaque 404", async () => {
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    localStorage.setItem(TOKEN_STORAGE_KEY, "stored-token");
+    localStorage.setItem(TOKEN_EXPIRES_AT_STORAGE_KEY, expiresAt);
+    const setBusy = vi.fn();
+    const setFlash = vi.fn();
+    const fetchMock = installFetchMock([
+      {
+        match: "/auth/me",
+        response: apiResponse(USER, 200, { auth_enabled: true }),
+      },
+      {
+        match: "/protected",
+        response: errorResponse("Project does not exist.", 404),
+      },
+    ]);
+
+    render(<AuthHarness setBusy={setBusy} setFlash={setFlash} withProbe />);
+
+    await waitFor(() => expect(setBusy).toHaveBeenLastCalledWith(false));
+    fireEvent.click(screen.getByRole("button", { name: "Probe API" }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/protected",
+        expect.objectContaining({ method: "GET" })
+      )
+    );
+    expect(localStorage.getItem(TOKEN_STORAGE_KEY)).toBe("stored-token");
+    expect(localStorage.getItem(TOKEN_EXPIRES_AT_STORAGE_KEY)).toBe(expiresAt);
+    expect(screen.getByTestId("token")).toHaveTextContent("stored-token");
+    expect(screen.getByTestId("expires-at")).toHaveTextContent(expiresAt);
+    expect(setFlash).not.toHaveBeenCalledWith(
+      "",
+      "Your session expired. Please sign in again."
+    );
+  });
+
+  it("keeps a valid session and reports degraded persistence when storage writes throw", async () => {
+    // Backing store rejects every write/remove (quota/SecurityError), but the
+    // live session must survive and the degradation must be surfaced, not crash.
+    const throwingStorage = createAuthStorage({
+      getItem: () => "stored-token",
+      setItem: () => {
+        throw new Error("QuotaExceededError");
+      },
+      removeItem: () => {
+        throw new Error("SecurityError");
+      },
+    });
+    const setBusy = vi.fn();
+    installFetchMock([
+      {
+        match: "/auth/me",
+        response: apiResponse(USER, 200, { auth_enabled: true }),
+      },
+    ]);
+
+    render(<AuthHarness setBusy={setBusy} storage={throwingStorage} />);
+
+    await waitFor(() => expect(setBusy).toHaveBeenLastCalledWith(false));
+    expect(screen.getByTestId("token")).toHaveTextContent("stored-token");
+    await waitFor(() => expect(screen.getByTestId("degraded")).toHaveTextContent("true"));
   });
 
   it("loads a surfaced first-admin token into setup mode", async () => {

@@ -16,6 +16,13 @@ services:
       LAB_TRACKER_AUTH_SECRET_KEY: ${LAB_TRACKER_AUTH_SECRET_KEY:-}
       LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES: ${LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES:-720}
       LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN: ${LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN:-}
+      LAB_TRACKER_RESOLVER_HTTP_ALLOWED_AUTHORITIES: ${LAB_TRACKER_RESOLVER_HTTP_ALLOWED_AUTHORITIES:-}
+      LAB_TRACKER_RESOLVER_HTTP_ALLOWED_NETWORKS: ${LAB_TRACKER_RESOLVER_HTTP_ALLOWED_NETWORKS:-}
+      LAB_TRACKER_GIT_ALLOWED_REMOTES: ${LAB_TRACKER_GIT_ALLOWED_REMOTES:-}
+      LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS: ${LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS:-30}
+      LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS: ${LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS:-30}
+      LAB_TRACKER_ARTIFACT_RESOLUTION_GLOBAL_IN_FLIGHT_LIMIT: ${LAB_TRACKER_ARTIFACT_RESOLUTION_GLOBAL_IN_FLIGHT_LIMIT:-8}
+      LAB_TRACKER_ARTIFACT_RESOLUTION_PER_ACTOR_IN_FLIGHT_LIMIT: ${LAB_TRACKER_ARTIFACT_RESOLUTION_PER_ACTOR_IN_FLIGHT_LIMIT:-2}
     ports:
       - "8000:8000"
     volumes:
@@ -52,6 +59,39 @@ services:
     ports:
       - "127.0.0.1:${LAB_TRACKER_MCP_HOST_PORT:-9000}:${LAB_TRACKER_MCP_PORT:-8000}"
     restart: unless-stopped
+
+  # One-shot control plane for a mailbox-owned automation. This profile is off
+  # by default and receives neither mailbox nor model-provider credentials.
+  # Set LAB_TRACKER_PUBLIC_BASE_URL and provision the runtime signing-secret
+  # file before invoking the profile.
+  review-email-control:
+    profiles:
+      - review-email-external
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      LAB_TRACKER_ENVIRONMENT: ${LAB_TRACKER_ENVIRONMENT:-production}
+      LAB_TRACKER_DATABASE_URL: ${LAB_TRACKER_DATABASE_URL:-postgresql+psycopg://lab_tracker:lab_tracker@postgres:5432/lab_tracker}
+      LAB_TRACKER_AUTH_SECRET_KEY_FILE: /app/data/runtime-env/auth-secret-key
+      LAB_TRACKER_PUBLIC_BASE_URL: ${LAB_TRACKER_PUBLIC_BASE_URL:-}
+      LAB_TRACKER_REVIEW_EMAIL_ENABLED: "true"
+      LAB_TRACKER_REVIEW_EMAIL_TRANSPORT: external
+      LAB_TRACKER_REVIEW_EMAIL_CLAIM_LEASE_SECONDS: ${LAB_TRACKER_REVIEW_EMAIL_CLAIM_LEASE_SECONDS:-300}
+      LAB_TRACKER_REVIEW_EMAIL_MAX_ATTEMPTS: ${LAB_TRACKER_REVIEW_EMAIL_MAX_ATTEMPTS:-8}
+      LAB_TRACKER_REVIEW_EMAIL_LINK_TTL_MINUTES: ${LAB_TRACKER_REVIEW_EMAIL_LINK_TTL_MINUTES:-1440}
+    entrypoint:
+      - python
+      - -m
+      - lab_tracker.review_email_external_worker
+    command:
+      - --help
+    volumes:
+      - app_data:/app/data:ro
+    restart: "no"
 
   postgres:
     image: postgres:16-alpine

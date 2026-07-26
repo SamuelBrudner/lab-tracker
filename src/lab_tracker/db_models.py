@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     Date,
     Float,
     ForeignKey,
@@ -46,6 +47,7 @@ from lab_tracker.models import (
     QuestionLinkRole,
     QuestionStatus,
     QuestionType,
+    ReviewEmailDeliveryStatus,
     SessionStatus,
     SessionType,
     StoreKind,
@@ -85,6 +87,18 @@ class ProjectGroupModel(Base):
 
 class ProjectModel(Base):
     __tablename__ = "projects"
+    __table_args__ = (
+        UniqueConstraint(
+            "created_by",
+            "client_capture_id",
+            name="uq_projects_creator_client_capture",
+        ),
+        CheckConstraint(
+            "client_capture_id IS NULL OR "
+            "(created_by IS NOT NULL AND TRIM(created_by) <> '')",
+            name="ck_projects_client_capture_creator",
+        ),
+    )
 
     project_id: Mapped[UUID] = mapped_column(
         GUID,
@@ -100,6 +114,7 @@ class ProjectModel(Base):
     status: Mapped[ProjectStatus] = mapped_column(
         EnumType(ProjectStatus, length=20), default="active"
     )
+    client_capture_id: Mapped[str | None] = mapped_column(String(120))
     created_by: Mapped[str | None] = mapped_column(String(255))
     created_by_user_id: Mapped[UUID | None] = mapped_column(
         GUID,
@@ -115,6 +130,13 @@ class ProjectModel(Base):
 
 class QuestionModel(Base):
     __tablename__ = "questions"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "client_capture_id",
+            name="uq_questions_project_client_capture",
+        ),
+    )
 
     question_id: Mapped[UUID] = mapped_column(
         GUID,
@@ -134,6 +156,7 @@ class QuestionModel(Base):
     status: Mapped[QuestionStatus] = mapped_column(
         EnumType(QuestionStatus, length=20), default="staged"
     )
+    client_capture_id: Mapped[str | None] = mapped_column(String(120))
     terminal_reason: Mapped[str | None] = mapped_column(Text)
     superseded_by_question_id: Mapped[UUID | None] = mapped_column(
         GUID,
@@ -571,6 +594,13 @@ class GraphDraftBatchSettingsModel(Base):
         default="America/New_York",
     )
     next_run_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    email_notifications_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+    notification_email: Mapped[str | None] = mapped_column(String(320))
+    notification_email_confirmed_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
     created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         UtcDateTime,
@@ -578,6 +608,81 @@ class GraphDraftBatchSettingsModel(Base):
         onupdate=_utc_now,
     )
     updated_by: Mapped[str | None] = mapped_column(String(255))
+
+
+class ReviewEmailOutboxModel(Base):
+    __tablename__ = "review_email_outbox"
+    __table_args__ = (
+        UniqueConstraint(
+            "idempotency_key",
+            name="uq_review_email_outbox_idempotency_key",
+        ),
+        CheckConstraint(
+            "event_type IN ('review_ready', 'test')",
+            name="ck_review_email_outbox_event_type",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'sending', 'retryable', 'accepted', 'failed')",
+            name="ck_review_email_outbox_status",
+        ),
+        CheckConstraint(
+            "attempt_count >= 0",
+            name="ck_review_email_outbox_attempt_count",
+        ),
+        CheckConstraint(
+            "TRIM(destination_email) <> ''",
+            name="ck_review_email_outbox_destination_email",
+        ),
+        CheckConstraint(
+            "TRIM(idempotency_key) <> ''",
+            name="ck_review_email_outbox_idempotency_key",
+        ),
+        CheckConstraint(
+            "(status = 'accepted' AND accepted_at IS NOT NULL) "
+            "OR (status <> 'accepted' AND accepted_at IS NULL)",
+            name="ck_review_email_outbox_accepted_at",
+        ),
+    )
+
+    delivery_id: Mapped[UUID] = mapped_column(
+        GUID,
+        primary_key=True,
+        default=uuid4,
+    )
+    change_set_id: Mapped[UUID | None] = mapped_column(
+        GUID,
+        ForeignKey("graph_change_sets.change_set_id", ondelete="SET NULL"),
+    )
+    recipient_user_id: Mapped[UUID | None] = mapped_column(
+        GUID,
+        ForeignKey("users.user_id", ondelete="SET NULL"),
+    )
+    event_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    destination_email: Mapped[str] = mapped_column(String(320), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    status: Mapped[ReviewEmailDeliveryStatus] = mapped_column(
+        EnumType(ReviewEmailDeliveryStatus, length=20),
+        nullable=False,
+        default=ReviewEmailDeliveryStatus.PENDING,
+    )
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(
+        UtcDateTime,
+        nullable=True,
+        default=_utc_now,
+    )
+    claim_token: Mapped[UUID | None] = mapped_column(GUID)
+    claimed_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    provider_message_id: Mapped[str | None] = mapped_column(String(500))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        UtcDateTime,
+        default=_utc_now,
+        onupdate=_utc_now,
+    )
+    accepted_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
 
 
 class GraphDraftBatchRunModel(Base):
@@ -764,6 +869,12 @@ class AnalysisDatasetModel(Base):
 
 class ClaimModel(Base):
     __tablename__ = "claims"
+    __table_args__ = (
+        CheckConstraint(
+            "confidence >= 0 AND confidence <= 100",
+            name="ck_claims_confidence_range",
+        ),
+    )
 
     claim_id: Mapped[UUID] = mapped_column(
         GUID,
@@ -1081,6 +1192,42 @@ class DataStoreModel(Base):
     )
 
 
+class EvidenceBundleModel(Base):
+    __tablename__ = "evidence_bundles"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "created_by",
+            "idempotency_key",
+            name="uq_evidence_bundles_project_creator_key",
+        ),
+    )
+
+    bundle_id: Mapped[UUID] = mapped_column(
+        GUID,
+        primary_key=True,
+        default=uuid4,
+    )
+    project_id: Mapped[UUID] = mapped_column(
+        GUID,
+        ForeignKey("projects.project_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    result: Mapped[dict[str, object]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        UtcDateTime,
+        nullable=False,
+        default=_utc_now,
+    )
+
+
 class GoalModel(Base):
     __tablename__ = "goals"
 
@@ -1281,6 +1428,9 @@ class PersonalAccessTokenModel(Base):
     token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     role: Mapped[str] = mapped_column(String(20), nullable=False)
     read_only: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    scope: Mapped[str] = mapped_column(
+        String(40), nullable=False, default="all", server_default="all"
+    )
     expires_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
     created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
     last_used_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
@@ -1579,6 +1729,21 @@ Index(
     unique=True,
     sqlite_where=GraphDraftBatchSettingsModel.user_id.is_(None),
     postgresql_where=GraphDraftBatchSettingsModel.user_id.is_(None),
+)
+Index(
+    "ix_review_email_outbox_claim",
+    ReviewEmailOutboxModel.status,
+    ReviewEmailOutboxModel.next_attempt_at,
+    ReviewEmailOutboxModel.lease_expires_at,
+    ReviewEmailOutboxModel.created_at,
+)
+Index(
+    "ix_review_email_outbox_change_set_id",
+    ReviewEmailOutboxModel.change_set_id,
+)
+Index(
+    "ix_review_email_outbox_recipient_user_id",
+    ReviewEmailOutboxModel.recipient_user_id,
 )
 Index("ix_sessions_created_by_user_id", SessionModel.created_by_user_id)
 Index("ix_analyses_executed_by_user_id", AnalysisModel.executed_by_user_id)

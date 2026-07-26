@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext
-from lab_tracker.errors import ValidationError
+from lab_tracker.errors import NotFoundError, OpaqueTargetNotFoundError, ValidationError
 from lab_tracker.models import (
     Dataset,
     DatasetCommitManifest,
@@ -21,22 +21,27 @@ from lab_tracker.models import (
     SessionType,
     utc_now,
 )
+from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
 from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.goal_link_cleanup import remove_goal_links_to_entity
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.question_service import QuestionService
 from lab_tracker.services.shared import (
-    _build_commit_manifest,
-    _compute_commit_hash,
     _ensure_dataset_status_transition,
-    _ensure_primary_question_active,
     _manifest_input_from_commit,
-    _validate_commit_hash,
+    _merge_normalized_dataset_file,
+    _normalize_dataset_file,
+    _normalize_dataset_files,
     actor_user_fk,
     actor_user_id,
+    build_commit_manifest,
+    compute_commit_hash,
+    ensure_primary_question_active,
+    terminal_reason_for_patch,
     terminal_reason_for_status,
     unique_ids,
+    validate_commit_hash,
 )
 
 if TYPE_CHECKING:
@@ -66,18 +71,17 @@ def _merge_manifest_files_with_attached_files(
     manifest_files: Iterable[DatasetFile],
     attached_files: Iterable[DatasetFile] | None,
 ) -> list[DatasetFile]:
-    merged = list(manifest_files)
-    seen = {file.path.strip(): file.checksum.strip() for file in merged}
+    merged = _normalize_dataset_files(manifest_files)
+    file_indexes = {file.path: index for index, file in enumerate(merged)}
     for file in attached_files or []:
-        path = file.path.strip()
-        checksum = file.checksum.strip()
-        existing = seen.get(path)
-        if existing is None:
-            merged.append(DatasetFile(path=path, checksum=checksum))
-            seen[path] = checksum
-            continue
-        if existing != checksum:
-            raise ValidationError("Attached file checksum conflict for file path.")
+        candidate = _normalize_dataset_file(file)
+        _merge_normalized_dataset_file(
+            merged,
+            file_indexes,
+            candidate,
+            checksum_conflict_message="Attached file checksum conflict for file path.",
+            size_conflict_message="Attached file size conflict for file path.",
+        )
     return merged
 
 
@@ -142,11 +146,11 @@ class DatasetService(BaseService):
                 for question_id in secondary_ids
             ],
         ]
-        resolved_manifest = _build_commit_manifest(
+        resolved_manifest = build_commit_manifest(
             commit_manifest,
             question_links,
         )
-        self._ensure_source_session_valid(resolved_manifest.source_session_id, project_id)
+        self.validate_source_session(resolved_manifest.source_session_id, project_id)
         if (
             status == DatasetStatus.COMMITTED
             and not resolved_manifest.files
@@ -155,8 +159,8 @@ class DatasetService(BaseService):
             raise ValidationError(
                 "At least one file or external artifact is required to commit a dataset."
             )
-        resolved_commit_hash = _compute_commit_hash(resolved_manifest)
-        _validate_commit_hash(commit_hash, resolved_commit_hash)
+        resolved_commit_hash = compute_commit_hash(resolved_manifest)
+        validate_commit_hash(commit_hash, resolved_commit_hash)
         resolved_terminal_reason = terminal_reason_for_status(
             None,
             status,
@@ -183,7 +187,7 @@ class DatasetService(BaseService):
             origin_prompt_version=origin_prompt_version,
         )
         if commit_requested:
-            _ensure_primary_question_active(primary_question)
+            ensure_primary_question_active(primary_question)
         with self.unit_of_work() as repository:
             repository.datasets.save(dataset)
         return dataset
@@ -194,6 +198,20 @@ class DatasetService(BaseService):
             label="Dataset",
             loader=lambda repository: repository.datasets.get(dataset_id),
         )
+
+    def get_dataset_for_read(
+        self,
+        dataset_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> Dataset:
+        try:
+            dataset = self.get_dataset(dataset_id)
+        except NotFoundError as exc:
+            raise OpaqueTargetNotFoundError("Dataset does not exist.") from exc
+        if not self.authorization.can_read(dataset.project_id, actor=actor):
+            raise OpaqueTargetNotFoundError("Dataset does not exist.")
+        return dataset
 
     def list_datasets(self, *, project_id: UUID | None = None) -> list[Dataset]:
         return self.query_from_repository(
@@ -208,11 +226,13 @@ class DatasetService(BaseService):
         self,
         dataset_id: UUID,
         *,
-        status: DatasetStatus | None = None,
-        terminal_reason: str | None = None,
-        question_links: Iterable[QuestionLink] | None = None,
-        commit_manifest: DatasetCommitManifestInput | DatasetCommitManifest | None = None,
-        commit_hash: str | None = None,
+        status: PatchValue[DatasetStatus | None] = NOT_PROVIDED,
+        terminal_reason: PatchValue[str | None] = NOT_PROVIDED,
+        question_links: PatchValue[Iterable[QuestionLink] | None] = NOT_PROVIDED,
+        commit_manifest: PatchValue[
+            DatasetCommitManifestInput | DatasetCommitManifest | None
+        ] = NOT_PROVIDED,
+        commit_hash: PatchValue[str | None] = NOT_PROVIDED,
         actor: AuthContext | None = None,
         origin: EntityOrigin | None = None,
         change_set_id: UUID | None = None,
@@ -220,25 +240,77 @@ class DatasetService(BaseService):
         origin_model: str | None = None,
         origin_prompt_version: str | None = None,
     ) -> Dataset:
-        dataset = self.get_dataset(dataset_id)
-        self.authorization.require_contributor(dataset.project_id, actor=actor)
+        with self.application_transaction():
+            located_dataset = self.get_dataset(dataset_id)
+            project_id = located_dataset.project_id
+            self.authorization.require_contributor(project_id, actor=actor)
+            self.repository.lock_dataset_updates(project_id, (dataset_id,))
+
+            # Dataset persistence writes a complete snapshot, including the
+            # provenance manifest and hash. Never mutate locator state after a
+            # lock wait: PostgreSQL expires the identity map so this read and
+            # every subsequent validation observe the winning file/status
+            # transaction.
+            dataset = self.get_dataset(dataset_id)
+            return self._update_dataset_in_transaction(
+                dataset,
+                status=status,
+                terminal_reason=terminal_reason,
+                question_links=question_links,
+                commit_manifest=commit_manifest,
+                commit_hash=commit_hash,
+                actor=actor,
+                origin=origin,
+                change_set_id=change_set_id,
+                origin_provider=origin_provider,
+                origin_model=origin_model,
+                origin_prompt_version=origin_prompt_version,
+            )
+
+    def _update_dataset_in_transaction(
+        self,
+        dataset: Dataset,
+        *,
+        status: PatchValue[DatasetStatus | None],
+        terminal_reason: PatchValue[str | None],
+        question_links: PatchValue[Iterable[QuestionLink] | None],
+        commit_manifest: PatchValue[DatasetCommitManifestInput | DatasetCommitManifest | None],
+        commit_hash: PatchValue[str | None],
+        actor: AuthContext | None,
+        origin: EntityOrigin | None,
+        change_set_id: UUID | None,
+        origin_provider: str | None,
+        origin_model: str | None,
+        origin_prompt_version: str | None,
+    ) -> Dataset:
+        before = dataset.model_copy(deep=True)
         current_status = dataset.status
-        next_status = status or current_status
-        if status is not None:
+        if is_provided(status):
+            if status is None:
+                raise ValidationError("status must not be null.")
+            next_status = status
             _ensure_dataset_status_transition(current_status, status)
-        resolved_terminal_reason = terminal_reason_for_status(
+        else:
+            next_status = current_status
+        resolved_terminal_reason = terminal_reason_for_patch(
             current_status,
             next_status,
             DatasetStatus.ARCHIVED,
             terminal_reason,
             entity_name="Dataset",
         )
+        if is_provided(question_links) and question_links is None:
+            raise ValidationError("question_links must not be null.")
+        if is_provided(commit_manifest) and commit_manifest is None:
+            raise ValidationError("commit_manifest must not be null.")
+        if is_provided(commit_hash) and commit_hash is None:
+            raise ValidationError("commit_hash must not be null.")
         was_committed = current_status == DatasetStatus.COMMITTED
         if was_committed and (
-            commit_hash is not None or question_links is not None or commit_manifest is not None
+            is_provided(commit_hash) or is_provided(question_links) or is_provided(commit_manifest)
         ):
             raise ValidationError("Committed datasets are immutable.")
-        if question_links is not None:
+        if is_provided(question_links):
             links = list(question_links)
             primary_links = [link for link in links if link.role == QuestionLinkRole.PRIMARY]
             if len(primary_links) != 1:
@@ -255,18 +327,20 @@ class DatasetService(BaseService):
             dataset.primary_question_id = primary_links[0].question_id
 
         commit_requested = (
-            status == DatasetStatus.COMMITTED and dataset.status != DatasetStatus.COMMITTED
+            is_provided(status)
+            and status == DatasetStatus.COMMITTED
+            and dataset.status != DatasetStatus.COMMITTED
         )
 
         if commit_requested:
             primary_question = self.questions.get_question(dataset.primary_question_id)
-            _ensure_primary_question_active(primary_question)
+            ensure_primary_question_active(primary_question)
 
         should_refresh_manifest = (
-            commit_manifest is not None or question_links is not None or commit_requested
+            is_provided(commit_manifest) or is_provided(question_links) or commit_requested
         )
         if should_refresh_manifest:
-            if commit_manifest is None:
+            if not is_provided(commit_manifest):
                 base_manifest = _manifest_input_from_commit(dataset.commit_manifest)
             elif isinstance(commit_manifest, DatasetCommitManifest):
                 base_manifest = _manifest_input_from_commit(commit_manifest)
@@ -295,13 +369,11 @@ class DatasetService(BaseService):
                     source_session_id=base_manifest.source_session_id,
                 )
 
-            resolved_manifest = _build_commit_manifest(
+            resolved_manifest = build_commit_manifest(
                 base_manifest,
                 dataset.question_links,
             )
-            self._ensure_source_session_valid(
-                resolved_manifest.source_session_id, dataset.project_id
-            )
+            self.validate_source_session(resolved_manifest.source_session_id, dataset.project_id)
             if (
                 commit_requested
                 and not resolved_manifest.files
@@ -310,15 +382,18 @@ class DatasetService(BaseService):
                 raise ValidationError(
                     "At least one file or external artifact is required to commit a dataset."
                 )
-            resolved_commit_hash = _compute_commit_hash(resolved_manifest)
-            _validate_commit_hash(commit_hash, resolved_commit_hash)
+            resolved_commit_hash = compute_commit_hash(resolved_manifest)
+            validate_commit_hash(
+                commit_hash if is_provided(commit_hash) else None,
+                resolved_commit_hash,
+            )
             dataset.commit_manifest = resolved_manifest
             dataset.commit_hash = resolved_commit_hash
-        else:
-            _validate_commit_hash(commit_hash, _compute_commit_hash(dataset.commit_manifest))
-        if status is not None:
+        elif is_provided(commit_hash):
+            validate_commit_hash(commit_hash, compute_commit_hash(dataset.commit_manifest))
+        if is_provided(status):
             dataset.status = status
-        if resolved_terminal_reason is not None:
+        if is_provided(resolved_terminal_reason):
             dataset.terminal_reason = resolved_terminal_reason
         if origin is not None:
             dataset.origin = origin
@@ -330,6 +405,8 @@ class DatasetService(BaseService):
             dataset.origin_model = origin_model
         if origin_prompt_version is not None:
             dataset.origin_prompt_version = origin_prompt_version
+        if dataset == before:
+            return dataset
         dataset.updated_at = utc_now()
         with self.unit_of_work() as repository:
             repository.datasets.save(dataset)
@@ -372,9 +449,8 @@ class DatasetService(BaseService):
         if analyses:
             raise ValidationError("Dataset cannot be deleted while analyses reference it.")
 
-    def _ensure_source_session_valid(
-        self, source_session_id: UUID | None, project_id: UUID
-    ) -> None:
+    def validate_source_session(self, source_session_id: UUID | None, project_id: UUID) -> None:
+        """Validate an optional dataset source session without writing."""
         if source_session_id is None:
             return
         session = self.sessions.get_session(source_session_id)

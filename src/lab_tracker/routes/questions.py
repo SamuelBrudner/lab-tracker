@@ -7,6 +7,7 @@ from uuid import UUID
 from fastapi import APIRouter
 from starlette import status as http_status
 from starlette.requests import Request
+from starlette.responses import Response
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.models import (
@@ -19,6 +20,7 @@ from lab_tracker.models import (
     QuestionType,
     UsageEventResourceType,
 )
+from lab_tracker.patching import provided_fields
 from lab_tracker.schemas import (
     Envelope,
     ListEnvelope,
@@ -30,15 +32,14 @@ from lab_tracker.schemas import (
 
 from .shared import (
     CreatedByFilter,
-    accessible_project_ids_from_request,
     actor_from_request,
     api_from_request,
     ensure_project_read,
+    handlers_from_request,
     list_response,
     paginate,
     question_default_status,
     record_usage_view,
-    repository_from_request,
     validate_pagination,
 )
 
@@ -51,19 +52,22 @@ def build_questions_router(api: LabTrackerAPI) -> APIRouter:
         response_model=Envelope[Question],
         status_code=http_status.HTTP_201_CREATED,
     )
-    def create_question(payload: QuestionCreate, request: Request):
+    def create_question(payload: QuestionCreate, request: Request, response: Response):
         actor = actor_from_request(request)
-        question = api_from_request(request, api).create_question(
+        result = api_from_request(request, api).create_question_result(
             project_id=payload.project_id,
             text=payload.text,
             question_type=payload.question_type,
             hypothesis=payload.hypothesis,
             status=payload.status or question_default_status(),
+            client_capture_id=payload.client_capture_id,
             terminal_reason=payload.terminal_reason,
             parent_question_ids=payload.parent_question_ids,
             actor=actor,
         )
-        return Envelope(data=question)
+        if result.reused:
+            response.status_code = http_status.HTTP_200_OK
+        return Envelope(data=result.entity)
 
     @router.get("/questions", response_model=ListEnvelope[Question])
     def list_questions(
@@ -81,14 +85,9 @@ def build_questions_router(api: LabTrackerAPI) -> APIRouter:
     ):
         validate_pagination(limit, offset)
         resolved_search = search or q
-        if project_id is not None:
-            ensure_project_read(request, project_id)
-            project_ids = None
-        else:
-            project_ids = accessible_project_ids_from_request(request)
-        questions, total = repository_from_request(request).query_questions(
+        page = handlers_from_request(request).catalogs.list_questions(
+            actor=actor_from_request(request),
             project_id=project_id,
-            project_ids=project_ids,
             status=status.value if status is not None else None,
             question_type=question_type.value if question_type is not None else None,
             search=resolved_search,
@@ -98,12 +97,19 @@ def build_questions_router(api: LabTrackerAPI) -> APIRouter:
             limit=limit,
             offset=offset,
         )
-        return list_response(questions, limit=limit, offset=offset, total=total)
+        return list_response(
+            page.items,
+            limit=limit,
+            offset=offset,
+            total=page.total,
+        )
 
     @router.get("/questions/{question_id}", response_model=Envelope[Question])
     def get_question(question_id: UUID, request: Request):
-        question = api_from_request(request, api).get_question(question_id)
-        ensure_project_read(request, question.project_id)
+        question = api_from_request(request, api).get_question_for_read(
+            question_id,
+            actor=actor_from_request(request),
+        )
         record_usage_view(
             request,
             resource_type=UsageEventResourceType.QUESTION,
@@ -120,8 +126,10 @@ def build_questions_router(api: LabTrackerAPI) -> APIRouter:
         offset: int = 0,
     ):
         validate_pagination(limit, offset)
-        question = api_from_request(request, api).get_question(question_id)
-        ensure_project_read(request, question.project_id)
+        api_from_request(request, api).get_question_for_read(
+            question_id,
+            actor=actor_from_request(request),
+        )
         versions = api_from_request(request, api).list_entity_versions(
             entity_type=EntityType.QUESTION,
             entity_id=question_id,
@@ -139,8 +147,10 @@ def build_questions_router(api: LabTrackerAPI) -> APIRouter:
         from_version: int,
         to_version: int,
     ):
-        question = api_from_request(request, api).get_question(question_id)
-        ensure_project_read(request, question.project_id)
+        api_from_request(request, api).get_question_for_read(
+            question_id,
+            actor=actor_from_request(request),
+        )
         diff = api_from_request(request, api).diff_entity_versions(
             entity_type=EntityType.QUESTION,
             entity_id=question_id,
@@ -156,13 +166,8 @@ def build_questions_router(api: LabTrackerAPI) -> APIRouter:
         ensure_project_read(request, existing.project_id)
         question = api_from_request(request, api).update_question(
             question_id,
-            text=payload.text,
-            question_type=payload.question_type,
-            hypothesis=payload.hypothesis,
-            status=payload.status,
-            terminal_reason=payload.terminal_reason,
-            parent_question_ids=payload.parent_question_ids,
             actor=actor,
+            **provided_fields(payload),
         )
         return Envelope(data=question)
 
@@ -206,8 +211,10 @@ def build_questions_router(api: LabTrackerAPI) -> APIRouter:
         offset: int = 0,
     ):
         validate_pagination(limit, offset)
-        question = api_from_request(request, api).get_question(question_id)
-        ensure_project_read(request, question.project_id)
+        api_from_request(request, api).get_question_for_read(
+            question_id,
+            actor=actor_from_request(request),
+        )
         refactors = api_from_request(request, api).list_question_refactors(
             question_id,
             limit=limit,

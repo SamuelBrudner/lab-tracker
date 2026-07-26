@@ -336,6 +336,17 @@ class SQLAlchemyGraphChangeSetRepository(EntityRepository[GraphChangeSet]):
             return None
         return self._from_rows([row])[0]
 
+    def project_id_for(self, change_set_id: UUID) -> UUID | None:
+        """Resolve read scope without hydrating operations or attribution."""
+
+        self._session.flush()
+        project_id = self._session.scalar(
+            select(GraphChangeSetModel.project_id).where(
+                GraphChangeSetModel.change_set_id == str(change_set_id)
+            )
+        )
+        return _uuid(project_id)
+
     def list(self) -> list[GraphChangeSet]:
         self._session.flush()
         rows = list(

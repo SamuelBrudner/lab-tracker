@@ -1747,7 +1747,7 @@ def test_delete_note_rejects_graph_draft_references():
         raw_content="Raw observation for graph review.",
         actor=actor,
     )
-    api.graph_drafts._save_graph_change_set(  # noqa: SLF001
+    api.graph_drafts.records.save_graph_change_set(
         GraphChangeSet(
             change_set_id=uuid4(),
             project_id=project.project_id,

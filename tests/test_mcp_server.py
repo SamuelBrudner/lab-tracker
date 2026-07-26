@@ -1,14 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+from datetime import timedelta
 from pathlib import Path
 
 import httpx
 import pytest
-import tomllib
+from fastapi.testclient import TestClient
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - exercised by Python 3.10 CI
+    import tomli as tomllib
 
 from lab_tracker import mcp_server
+from lab_tracker.auth import utc_now
 from lab_tracker.cli import _cursor_mcp_json, _mcp_json
 from lab_tracker.decision_context_constants import code_facing_idioms
 from lab_tracker.mcp_tools import READ_TOOLS, WRITE_TOOLS
@@ -55,9 +63,7 @@ def test_fastmcp_registers_lab_tracker_tools() -> None:
     assert "lab_tracker_record_evidence_bundle" in names
     assert "lab_tracker_list_question_refactors" in names
     assert mcp_server.server.instructions is not None
-    assert "CALL THIS FIRST before research-facing decisions" in (
-        mcp_server.server.instructions
-    )
+    assert "CALL THIS FIRST before research-facing decisions" in (mcp_server.server.instructions)
     assert "what to plot" in mcp_server.server.instructions
     assert "AI can suggest; only a person commits" in mcp_server.server.instructions
 
@@ -92,8 +98,9 @@ def test_fastmcp_tool_annotations_mark_reads_and_writes_for_copilot() -> None:
 
     evidence_bundle = tools_by_name["lab_tracker_record_evidence_bundle"]
     description = evidence_bundle.description or ""
-    assert description.startswith("Preview a dataset-analysis-claim-visualization evidence bundle")
+    assert description.startswith("Preview or atomically record an evidence bundle")
     assert "defaults to dry-run" in description
+    assert "idempotency_key is required" in description
 
 
 def test_fastmcp_registers_agent_consultation_policy_resource() -> None:
@@ -112,19 +119,18 @@ def test_code_conventions_resource_matches_package_generator() -> None:
         assert forbidden not in instructions
 
 
-def test_copilot_mcp_configs_use_servers_schema() -> None:
-    for config_path in (Path(".vscode/mcp.json"), Path("mcp.visualstudio.json")):
-        config = json.loads(config_path.read_text(encoding="utf-8"))
-        server = config["servers"]["lab-tracker"]
-        env = server["env"]
+def test_copilot_mcp_config_uses_servers_schema() -> None:
+    config = json.loads(Path(".vscode/mcp.json").read_text(encoding="utf-8"))
+    server = config["servers"]["lab-tracker"]
+    env = server["env"]
 
-        assert "mcpServers" not in config
-        assert server["type"] == "stdio"
-        assert server["command"] == "lt-mcp"
-        assert env["LAB_TRACKER_MCP_BASE_URL"] == "http://127.0.0.1:8000"
-        assert env["LAB_TRACKER_MCP_API_KEY"] == "${input:lt-token}"
-        assert env["LAB_TRACKER_MCP_USERNAME"] == "${input:lt-username}"
-        assert env["LAB_TRACKER_MCP_PASSWORD"] == "${input:lt-password}"
+    assert "mcpServers" not in config
+    assert server["type"] == "stdio"
+    assert server["command"] == "lt-mcp"
+    assert env["LAB_TRACKER_MCP_BASE_URL"] == "http://127.0.0.1:8000"
+    assert env["LAB_TRACKER_MCP_API_KEY"] == "${input:lt-token}"
+    assert env["LAB_TRACKER_MCP_USERNAME"] == "${input:lt-username}"
+    assert env["LAB_TRACKER_MCP_PASSWORD"] == "${input:lt-password}"
 
 
 def test_committed_mcp_json_matches_init_template() -> None:
@@ -146,9 +152,7 @@ def test_mcp_target_guard_allows_loopback_without_probe(monkeypatch) -> None:
 
     monkeypatch.setattr(mcp_server, "LabTrackerAPIClient", fail_client)
 
-    mcp_server._ensure_mcp_target_safe(
-        mcp_server.MCPSettings(base_url="http://127.0.0.1:8000")
-    )
+    mcp_server._ensure_mcp_target_safe(mcp_server.MCPSettings(base_url="http://127.0.0.1:8000"))
 
 
 def test_mcp_target_guard_refuses_remote_auth_disabled_target(monkeypatch) -> None:
@@ -427,9 +431,7 @@ def test_username_password_login_emits_deprecation_warning(capsys) -> None:
         return _json_response(200, {"data": [], "meta": {"total": 0}})
 
     client = mcp_server.LabTrackerAPIClient(
-        mcp_server.MCPSettings(
-            base_url="http://lab.example.test", username="svc", password="pw"
-        ),
+        mcp_server.MCPSettings(base_url="http://lab.example.test", username="svc", password="pw"),
         transport=httpx.MockTransport(handler),
     )
     try:
@@ -479,6 +481,142 @@ def test_mcp_settings_from_env_accepts_api_key_aliases(monkeypatch) -> None:
 
     monkeypatch.delenv("LAB_TRACKER_MCP_API_KEY")
     assert mcp_server.MCPSettings.from_env().api_key == "lpat_alias"
+
+
+def test_mcp_settings_from_env_falls_back_to_connection_profile(
+    monkeypatch, tmp_path
+) -> None:
+    config_dir = tmp_path / "lab-tracker"
+    config_dir.mkdir()
+    (config_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "base_url": "https://profile.lab.example.test/",
+                "access_token": "lpat_profile",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("LAB_TRACKER_CONFIG_DIR", str(config_dir))
+    for name in (
+        "LAB_TRACKER_MCP_BASE_URL",
+        "LAB_TRACKER_MCP_USERNAME",
+        "LAB_TRACKER_MCP_PASSWORD",
+        "LAB_TRACKER_MCP_API_KEY",
+        "LAB_TRACKER_MCP_TOKEN",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    settings = mcp_server.MCPSettings.from_env()
+
+    assert settings.base_url == "https://profile.lab.example.test"
+    assert settings.api_key == "lpat_profile"
+    assert settings.username is None
+    assert settings.password is None
+
+
+def test_mcp_settings_from_env_values_override_connection_profile(
+    monkeypatch, tmp_path
+) -> None:
+    config_dir = tmp_path / "lab-tracker"
+    config_dir.mkdir()
+    (config_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "base_url": "https://profile.lab.example.test",
+                "access_token": "lpat_profile",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("LAB_TRACKER_CONFIG_DIR", str(config_dir))
+    monkeypatch.setenv("LAB_TRACKER_MCP_BASE_URL", "https://env.lab.example.test/")
+    monkeypatch.setenv("LAB_TRACKER_MCP_API_KEY", "lpat_env")
+    monkeypatch.setenv("LAB_TRACKER_MCP_USERNAME", "env-user")
+    monkeypatch.setenv("LAB_TRACKER_MCP_PASSWORD", "env-password")
+
+    settings = mcp_server.MCPSettings.from_env()
+
+    assert settings.base_url == "https://env.lab.example.test"
+    assert settings.api_key == "lpat_env"
+    assert settings.username == "env-user"
+    assert settings.password == "env-password"
+
+
+def test_mcp_settings_from_env_suppresses_profile_token_for_username(
+    monkeypatch, tmp_path
+) -> None:
+    config_dir = tmp_path / "lab-tracker"
+    config_dir.mkdir()
+    (config_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "base_url": "https://profile.lab.example.test",
+                "access_token": "lpat_profile",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("LAB_TRACKER_CONFIG_DIR", str(config_dir))
+    monkeypatch.setenv("LAB_TRACKER_MCP_USERNAME", "legacy-user")
+    monkeypatch.delenv("LAB_TRACKER_MCP_API_KEY", raising=False)
+    monkeypatch.delenv("LAB_TRACKER_MCP_TOKEN", raising=False)
+
+    settings = mcp_server.MCPSettings.from_env()
+
+    assert settings.base_url == "https://profile.lab.example.test"
+    assert settings.username == "legacy-user"
+    assert settings.api_key is None
+
+
+def test_mcp_settings_from_env_suppresses_profile_token_for_different_server(
+    monkeypatch, tmp_path
+) -> None:
+    config_dir = tmp_path / "lab-tracker"
+    config_dir.mkdir()
+    (config_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "base_url": "https://profile.lab.example.test",
+                "access_token": "lpat_profile",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("LAB_TRACKER_CONFIG_DIR", str(config_dir))
+    monkeypatch.setenv("LAB_TRACKER_MCP_BASE_URL", "https://other.lab.example.test/")
+    monkeypatch.delenv("LAB_TRACKER_MCP_USERNAME", raising=False)
+    monkeypatch.delenv("LAB_TRACKER_MCP_API_KEY", raising=False)
+    monkeypatch.delenv("LAB_TRACKER_MCP_TOKEN", raising=False)
+
+    settings = mcp_server.MCPSettings.from_env()
+
+    assert settings.base_url == "https://other.lab.example.test"
+    assert settings.api_key is None
+
+
+@pytest.mark.parametrize("profile_text", [None, "{not valid json"])
+def test_mcp_settings_from_env_ignores_missing_or_malformed_profile(
+    monkeypatch, tmp_path, profile_text
+) -> None:
+    config_dir = tmp_path / "lab-tracker"
+    config_dir.mkdir()
+    if profile_text is not None:
+        (config_dir / "config.json").write_text(profile_text, encoding="utf-8")
+    monkeypatch.setenv("LAB_TRACKER_CONFIG_DIR", str(config_dir))
+    for name in (
+        "LAB_TRACKER_MCP_BASE_URL",
+        "LAB_TRACKER_MCP_USERNAME",
+        "LAB_TRACKER_MCP_PASSWORD",
+        "LAB_TRACKER_MCP_API_KEY",
+        "LAB_TRACKER_MCP_TOKEN",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    settings = mcp_server.MCPSettings.from_env()
+
+    assert settings.base_url == mcp_server.DEFAULT_BASE_URL
+    assert settings.api_key is None
 
 
 def test_mcp_api_error_redacts_bearer_and_lpat_secrets() -> None:
@@ -549,6 +687,8 @@ def test_client_low_level_read_tools_call_retained_routes() -> None:
             return _json_response(200, {"data": {"@id": "analysis-1"}})
         if request.url.path == "/claims/claim-1/provenance":
             return _json_response(200, {"data": {"@id": "claim-1"}})
+        if request.url.path == "/goals/goal-1":
+            return _json_response(200, {"data": {"goal_id": "goal-1"}})
         if request.url.path == "/goals/goal-1/ara-artifact/src":
             return _json_response(200, {"data": {"@id": "goal-src"}})
         if request.url.path == "/questions/question-1/ara-artifact":
@@ -575,33 +715,25 @@ def test_client_low_level_read_tools_call_retained_routes() -> None:
     )
 
     try:
-        assert client.list_sessions(
-            project_id="project-1",
-            session_type="scientific",
-        )["data"][0]["session_id"] == "session-1"
-        assert client.list_datasets(status="committed")["data"][0]["dataset_id"] == (
-            "dataset-1"
+        assert (
+            client.list_sessions(
+                project_id="project-1",
+                session_type="scientific",
+            )["data"][0]["session_id"]
+            == "session-1"
         )
+        assert client.list_datasets(status="committed")["data"][0]["dataset_id"] == ("dataset-1")
         assert client.list_analyses(dataset_id="dataset-1")["data"][0]["analysis_id"] == (
             "analysis-1"
         )
-        assert client.list_claims(analysis_id="analysis-1")["data"][0]["claim_id"] == (
-            "claim-1"
-        )
-        assert client.list_visualizations(claim_id="claim-1")["data"][0]["viz_id"] == (
-            "viz-1"
-        )
+        assert client.list_claims(analysis_id="analysis-1")["data"][0]["claim_id"] == ("claim-1")
+        assert client.list_visualizations(claim_id="claim-1")["data"][0]["viz_id"] == ("viz-1")
         assert client.get_dataset_provenance("dataset-1")["data"]["@id"] == "dataset-1"
-        assert client.get_analysis_provenance("analysis-1")["data"]["@id"] == (
-            "analysis-1"
-        )
+        assert client.get_analysis_provenance("analysis-1")["data"]["@id"] == ("analysis-1")
         assert client.get_claim_provenance("claim-1")["data"]["@id"] == "claim-1"
-        assert client.export_goal_artifact("goal-1", layer="src")["data"]["@id"] == (
-            "goal-src"
-        )
-        assert client.export_question_subtree("question-1")["data"]["@id"] == (
-            "question-artifact"
-        )
+        assert client.get_goal("goal-1")["data"]["goal_id"] == "goal-1"
+        assert client.export_goal_artifact("goal-1", layer="src")["data"]["@id"] == ("goal-src")
+        assert client.export_question_subtree("question-1")["data"]["@id"] == ("question-artifact")
         assert client.publication_readiness("project-1")["data"]["seal_level"] == "ara_l1"
     finally:
         client.close()
@@ -615,10 +747,49 @@ def test_client_low_level_read_tools_call_retained_routes() -> None:
         "/datasets/dataset-1/provenance",
         "/analyses/analysis-1/provenance",
         "/claims/claim-1/provenance",
+        "/goals/goal-1",
         "/goals/goal-1/ara-artifact/src",
         "/questions/question-1/ara-artifact",
         "/projects/project-1/publication-readiness",
     ]
+
+
+def test_client_serializes_json_bearing_association_filters() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/analyses":
+            assert request.url.params["project_id"] == "project-1"
+            assert request.url.params["dataset_id"] == "dataset-1"
+            assert request.url.params["question_id"] == "question-1"
+            return _json_response(200, {"data": []})
+        if request.url.path == "/notes":
+            assert request.url.params["project_id"] == "project-1"
+            assert request.url.params["target_entity_type"] == "dataset"
+            assert request.url.params["target_entity_id"] == "dataset-1"
+            return _json_response(200, {"data": []})
+        return _json_response(404, {"error": {"message": "not found"}})
+
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(base_url="http://testserver"),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        assert client.list_analyses(
+            project_id="project-1",
+            dataset_id="dataset-1",
+            question_id="question-1",
+        ) == {"data": []}
+        assert client.list_notes(
+            project_id="project-1",
+            target_entity_type="dataset",
+            target_entity_id="dataset-1",
+        ) == {"data": []}
+    finally:
+        client.close()
+
+    assert [request.url.path for request in requests] == ["/analyses", "/notes"]
 
 
 def test_client_resolve_artifact_posts_to_resolve_route() -> None:
@@ -632,7 +803,16 @@ def test_client_resolve_artifact_posts_to_resolve_route() -> None:
             assert body["entity_id"] == "dataset-1"
             assert body["artifact_index"] == 2
             assert body["max_bytes"] == 1024
-            return _json_response(200, {"data": {"status": "verified"}})
+            return _json_response(
+                200,
+                {
+                    "data": {
+                        "status": "verified",
+                        "content_base64": "dmVyaWZpZWQ=",
+                        "returned_bytes": 8,
+                    }
+                },
+            )
         return _json_response(404, {"error": {"message": "not found"}})
 
     client = mcp_server.LabTrackerAPIClient(
@@ -650,6 +830,8 @@ def test_client_resolve_artifact_posts_to_resolve_route() -> None:
         client.close()
 
     assert result["data"]["status"] == "verified"
+    assert result["data"]["content_base64"] == "dmVyaWZpZWQ="
+    assert result["data"]["returned_bytes"] == 8
     assert [request.url.path for request in captured] == ["/external-artifacts/resolve"]
     # Optional fields left unset are omitted, so extra="forbid" on the route is safe.
     body = json.loads(captured[0].content)
@@ -657,9 +839,260 @@ def test_client_resolve_artifact_posts_to_resolve_route() -> None:
     assert "byte_start" not in body
 
 
+@pytest.mark.parametrize("status", ["drifted", "unresolved", None, "future-status"])
+def test_client_suppresses_content_from_unverified_artifact_response(status) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/external-artifacts/resolve"
+        data = {
+            "observed_hash": "sha256:observed",
+            "size_bytes": 8,
+            "content_base64": "c2VudGluZWw=",
+            "returned_bytes": 8,
+            "detail": "Recomputed hash does not match content_hash.",
+        }
+        if status is not None:
+            data["status"] = status
+        return _json_response(
+            200,
+            {"data": data},
+        )
+
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(base_url="http://testserver"),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        result = client.resolve_external_artifact(
+            entity_type="dataset",
+            entity_id="dataset-1",
+        )
+    finally:
+        client.close()
+
+    if status is None:
+        assert "status" not in result["data"]
+    else:
+        assert result["data"]["status"] == status
+    assert result["data"]["observed_hash"] == "sha256:observed"
+    assert result["data"]["size_bytes"] == 8
+    assert result["data"]["content_base64"] is None
+    assert result["data"]["returned_bytes"] == 0
+
+
+def test_client_rejects_malformed_artifact_data_without_leaking_content() -> None:
+    sentinel = "c2VudGluZWw="
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/external-artifacts/resolve"
+        return _json_response(
+            200,
+            {
+                "data": [
+                    {
+                        "status": "drifted",
+                        "content_base64": sentinel,
+                        "returned_bytes": 8,
+                    }
+                ]
+            },
+        )
+
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(base_url="http://testserver"),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with pytest.raises(mcp_server.LabTrackerAPIError) as exc_info:
+            client.resolve_external_artifact(
+                entity_type="dataset",
+                entity_id="dataset-1",
+            )
+    finally:
+        client.close()
+
+    assert "object data" in str(exc_info.value)
+    assert sentinel not in str(exc_info.value)
+
+
+def test_artifact_content_filter_preserves_error_envelope() -> None:
+    from lab_tracker.mcp_api_client import suppress_unverified_artifact_content
+
+    payload = {
+        "error": {"code": "not_found", "message": "Dataset does not exist."},
+        "data": None,
+    }
+
+    assert suppress_unverified_artifact_content(payload) == payload
+
+
+def test_client_does_not_remint_credentials_after_opaque_resolver_not_found() -> None:
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        if request.url.path == "/auth/login":
+            return _json_response(
+                200,
+                {"data": {"access_token": "token-1"}},
+            )
+        if request.url.path == "/external-artifacts/resolve":
+            assert request.headers["authorization"] == "Bearer token-1"
+            return _json_response(
+                404,
+                {
+                    "error": {
+                        "code": "not_found",
+                        "message": "Dataset does not exist.",
+                        "issues": None,
+                    }
+                },
+            )
+        raise AssertionError(f"Unexpected request: {request.method} {request.url.path}")
+
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(
+            base_url="http://testserver",
+            username="service-user",
+            password="secret",
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with pytest.raises(mcp_server.LabTrackerAPIError) as captured_error:
+            client.resolve_external_artifact(
+                entity_type="dataset",
+                entity_id="hidden-dataset",
+            )
+    finally:
+        client.close()
+
+    error = captured_error.value
+    assert not isinstance(error, mcp_server.LabTrackerAPIAuthError)
+    assert error.status_code == 404
+    assert error.code == "not_found"
+    assert str(error) == "Dataset does not exist."
+    assert [request.url.path for request in captured] == [
+        "/auth/login",
+        "/external-artifacts/resolve",
+    ]
+
+
 def test_resolve_artifact_is_registered_read_tool() -> None:
     assert "lab_tracker_resolve_artifact" in {tool.__name__ for tool in READ_TOOLS}
     assert "lab_tracker_resolve_artifact" not in {tool.__name__ for tool in WRITE_TOOLS}
+
+
+@pytest.mark.parametrize("status", ["drifted", "unresolved", None, "future-status"])
+def test_resolve_artifact_tool_suppresses_unverified_content(monkeypatch, status) -> None:
+    from lab_tracker.mcp_tools import read as read_tools
+
+    class FakeClient:
+        def resolve_external_artifact(self, **_kwargs):
+            data = {
+                "observed_hash": "sha256:observed",
+                "size_bytes": 8,
+                "content_base64": "c2VudGluZWw=",
+                "returned_bytes": 8,
+            }
+            if status is not None:
+                data["status"] = status
+            return {"data": data}
+
+        def close(self) -> None:
+            pass
+
+    read_tools.close_cached_read_client()
+    monkeypatch.setattr(read_tools, "client_from_env", lambda: FakeClient())
+
+    try:
+        payload = read_tools.lab_tracker_resolve_artifact(
+            entity_type="dataset",
+            entity_id="dataset-1",
+        )
+    finally:
+        read_tools.close_cached_read_client()
+
+    if status is None:
+        assert "status" not in payload["data"]
+    else:
+        assert payload["data"]["status"] == status
+    assert payload["data"]["observed_hash"] == "sha256:observed"
+    assert payload["data"]["size_bytes"] == 8
+    assert payload["data"]["content_base64"] is None
+    assert payload["data"]["returned_bytes"] == 0
+    assert payload["next_action"]["tool"] == "lab_tracker_get_claim_provenance"
+
+
+def test_resolve_artifact_tool_preserves_verified_content(monkeypatch) -> None:
+    from lab_tracker.mcp_tools import read as read_tools
+
+    class FakeClient:
+        def resolve_external_artifact(self, **_kwargs):
+            return {
+                "data": {
+                    "status": "verified",
+                    "content_base64": "dmVyaWZpZWQ=",
+                    "returned_bytes": 8,
+                }
+            }
+
+        def close(self) -> None:
+            pass
+
+    read_tools.close_cached_read_client()
+    monkeypatch.setattr(read_tools, "client_from_env", lambda: FakeClient())
+
+    try:
+        payload = read_tools.lab_tracker_resolve_artifact(
+            entity_type="dataset",
+            entity_id="dataset-1",
+        )
+    finally:
+        read_tools.close_cached_read_client()
+
+    assert payload["data"]["status"] == "verified"
+    assert payload["data"]["content_base64"] == "dmVyaWZpZWQ="
+    assert payload["data"]["returned_bytes"] == 8
+    assert payload["next_action"]["tool"] == "lab_tracker_get_claim_provenance"
+
+
+def test_resolve_artifact_tool_rejects_malformed_data_without_leaking_content(
+    monkeypatch,
+) -> None:
+    from lab_tracker.mcp_tools import read as read_tools
+
+    sentinel = "c2VudGluZWw="
+
+    class FakeClient:
+        def resolve_external_artifact(self, **_kwargs):
+            return {
+                "data": [
+                    {
+                        "status": "drifted",
+                        "content_base64": sentinel,
+                        "returned_bytes": 8,
+                    }
+                ]
+            }
+
+        def close(self) -> None:
+            pass
+
+    read_tools.close_cached_read_client()
+    monkeypatch.setattr(read_tools, "client_from_env", lambda: FakeClient())
+
+    try:
+        payload = read_tools.lab_tracker_resolve_artifact(
+            entity_type="dataset",
+            entity_id="dataset-1",
+        )
+    finally:
+        read_tools.close_cached_read_client()
+
+    assert payload["data"] is None
+    assert payload["error"]["code"] == "lab_tracker_api_error"
+    assert "object data" in payload["error"]["message"]
+    assert sentinel not in json.dumps(payload)
 
 
 def test_client_describe_schema_calls_api_discovery_route() -> None:
@@ -675,9 +1108,7 @@ def test_client_describe_schema_calls_api_discovery_route() -> None:
                     "data": {
                         "entities": {
                             "claim": {
-                                "status": {
-                                    "allowed_values": ["proposed", "supported", "rejected"]
-                                }
+                                "status": {"allowed_values": ["proposed", "supported", "rejected"]}
                             }
                         }
                     }
@@ -744,6 +1175,88 @@ def test_decision_context_posts_to_api_route() -> None:
 
     assert payload["data"]["task_kind"] == "research_writing"
     assert len(requests) == 1
+
+
+def test_read_only_viewer_lpat_reaches_decision_context_through_mcp_tool(
+    client: TestClient,
+    scoped_project_member,
+    monkeypatch,
+) -> None:
+    from lab_tracker.mcp_tools import read as read_tools
+
+    issued = client.post(
+        "/auth/tokens",
+        json={
+            "label": "MCP decision context",
+            "role": "viewer",
+            "read_only": True,
+            "scope": "all",
+            "expires_at": (utc_now() + timedelta(days=7)).isoformat(),
+        },
+        headers=scoped_project_member.member_headers,
+    )
+    assert issued.status_code == 201, issued.text
+    issued_token = issued.json()["data"]
+    assert issued_token["role"] == "viewer"
+    assert issued_token["read_only"] is True
+    assert issued_token["scope"] == "all"
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        forwarded_headers = {
+            name: value
+            for name, value in request.headers.items()
+            if name.lower() not in {"host", "content-length"}
+        }
+        response = client.request(
+            request.method,
+            request.url.path,
+            params=list(request.url.params.multi_items()),
+            content=request.content,
+            headers=forwarded_headers,
+        )
+        return httpx.Response(
+            response.status_code,
+            content=response.content,
+            headers=response.headers,
+            request=request,
+        )
+
+    def factory() -> mcp_server.LabTrackerAPIClient:
+        return mcp_server.LabTrackerAPIClient(
+            mcp_server.MCPSettings(
+                base_url="http://testserver",
+                api_key=issued_token["secret"],
+            ),
+            transport=httpx.MockTransport(handler),
+        )
+
+    read_tools.close_cached_read_client()
+    monkeypatch.setattr(read_tools, "client_from_env", factory)
+    try:
+        payload = read_tools.lab_tracker_get_decision_context(
+            task_kind="summary",
+            query="MCP scoped context",
+            project_id=scoped_project_member.visible_project_id,
+        )
+    finally:
+        read_tools.close_cached_read_client()
+
+    assert payload["data"]["scope"]["project"]["project_id"] == (
+        scoped_project_member.visible_project_id
+    )
+    assert len(requests) == 1
+    assert requests[0].method == "POST"
+    assert requests[0].url.path == "/assistant/decision-context"
+    assert requests[0].headers["authorization"].startswith("Bearer lpat_")
+    assert requests[0].headers["x-labtracker-surface"] == "mcp"
+    assert json.loads(requests[0].content) == {
+        "task_kind": "summary",
+        "query": "MCP scoped context",
+        "project_id": scoped_project_member.visible_project_id,
+        "limit": 20,
+    }
 
 
 def test_decision_context_returns_unavailable_when_api_read_fails() -> None:
@@ -1078,6 +1591,55 @@ def test_client_retries_once_after_expired_token() -> None:
     ]
 
 
+def test_client_does_not_remint_or_retry_after_opaque_not_found() -> None:
+    calls: list[tuple[str, str, str | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path, request.headers.get("authorization")))
+        if request.url.path == "/auth/login":
+            return _json_response(200, {"data": {"access_token": "token-1"}})
+        if request.url.path == "/projects/project-1/publication-readiness":
+            return _json_response(
+                404,
+                {
+                    "error": {
+                        "code": "not_found",
+                        "message": "Project does not exist.",
+                        "issues": None,
+                    }
+                },
+            )
+        return _json_response(500, {"error": {"message": "unexpected request"}})
+
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(
+            base_url="http://testserver",
+            username="mcp-user",
+            password="mcp-pass",
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+
+    try:
+        with pytest.raises(mcp_server.LabTrackerAPIError) as excinfo:
+            client.publication_readiness("project-1")
+    finally:
+        client.close()
+
+    assert not isinstance(excinfo.value, mcp_server.LabTrackerAPIAuthError)
+    assert excinfo.value.status_code == 404
+    assert excinfo.value.code == "not_found"
+    assert str(excinfo.value) == "Project does not exist."
+    assert calls == [
+        ("POST", "/auth/login", None),
+        (
+            "GET",
+            "/projects/project-1/publication-readiness",
+            "Bearer token-1",
+        ),
+    ]
+
+
 def test_create_project_uses_api_validation_path() -> None:
     requests: list[httpx.Request] = []
 
@@ -1116,8 +1678,10 @@ def test_create_note_rejects_invalid_status_before_api_request() -> None:
     client = mcp_server.LabTrackerAPIClient(
         mcp_server.MCPSettings(base_url="http://testserver"),
         transport=httpx.MockTransport(
-            lambda request: requests.append(request)
-            or _json_response(500, {"error": {"message": "unexpected request"}})
+            lambda request: (
+                requests.append(request)
+                or _json_response(500, {"error": {"message": "unexpected request"}})
+            )
         ),
     )
 
@@ -1278,40 +1842,55 @@ def test_client_create_evidence_tools_send_api_payloads() -> None:
     )
 
     try:
-        assert client.create_dataset(
-            project_id="project-1",
-            primary_question_id="question-1",
-            secondary_question_ids=["question-2"],
-            commit_manifest={"metadata": {"source": "paper"}},
-            commit_hash="hash-1",
-            status="STAGED",
-        )["data"]["dataset_id"] == "dataset-1"
-        assert client.create_analysis(
-            project_id="project-1",
-            dataset_ids=["dataset-1"],
-            method_hash="publication:method",
-            code_version="published-pdf:v1",
-            environment_hash="env-1",
-        )["data"]["analysis_id"] == "analysis-1"
-        assert client.create_claim(
-            project_id="project-1",
-            statement="Interpretation only",
-            confidence=55.0,
-        )["data"]["claim_id"] == "claim-1"
-        assert client.create_claim(
-            project_id="project-1",
-            statement="Analysis supports the effect",
-            confidence=82.5,
-            status="SUPPORTED",
-            supported_by_analysis_ids=["analysis-1"],
-        )["data"]["claim_id"] == "claim-1"
-        assert client.create_visualization(
-            analysis_id="analysis-1",
-            viz_type="figure",
-            file_path="doi:10.1371/journal.pcbi.1011051#fig5",
-            caption="Paper figure 5",
-            related_claim_ids=["claim-1"],
-        )["data"]["viz_id"] == "viz-1"
+        assert (
+            client.create_dataset(
+                project_id="project-1",
+                primary_question_id="question-1",
+                secondary_question_ids=["question-2"],
+                commit_manifest={"metadata": {"source": "paper"}},
+                commit_hash="hash-1",
+                status="STAGED",
+            )["data"]["dataset_id"]
+            == "dataset-1"
+        )
+        assert (
+            client.create_analysis(
+                project_id="project-1",
+                dataset_ids=["dataset-1"],
+                method_hash="publication:method",
+                code_version="published-pdf:v1",
+                environment_hash="env-1",
+            )["data"]["analysis_id"]
+            == "analysis-1"
+        )
+        assert (
+            client.create_claim(
+                project_id="project-1",
+                statement="Interpretation only",
+                confidence=55.0,
+            )["data"]["claim_id"]
+            == "claim-1"
+        )
+        assert (
+            client.create_claim(
+                project_id="project-1",
+                statement="Analysis supports the effect",
+                confidence=82.5,
+                status="SUPPORTED",
+                supported_by_analysis_ids=["analysis-1"],
+            )["data"]["claim_id"]
+            == "claim-1"
+        )
+        assert (
+            client.create_visualization(
+                analysis_id="analysis-1",
+                viz_type="figure",
+                file_path="doi:10.1371/journal.pcbi.1011051#fig5",
+                caption="Paper figure 5",
+                related_claim_ids=["claim-1"],
+            )["data"]["viz_id"]
+            == "viz-1"
+        )
     finally:
         client.close()
 
@@ -1324,9 +1903,130 @@ def test_client_create_evidence_tools_send_api_payloads() -> None:
     ]
 
 
+def test_client_update_goal_omits_absent_fields_and_sends_explicit_clears() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.method == "PATCH"
+        assert request.url.path == "/goals/goal-1"
+        return _json_response(200, {"data": {"goal_id": "goal-1"}})
+
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(base_url="http://testserver"),
+        transport=httpx.MockTransport(handler),
+    )
+
+    try:
+        client.update_goal(goal_id="goal-1", title="Renamed goal")
+        client.update_goal(
+            goal_id="goal-1",
+            clear_target_date=True,
+            clear_external_ref=True,
+        )
+    finally:
+        client.close()
+
+    assert [json.loads(request.content) for request in requests] == [
+        {"title": "Renamed goal"},
+        {"target_date": None, "external_ref": None},
+    ]
+
+
+def test_client_update_goal_retries_401_without_dropping_explicit_nulls(
+    monkeypatch,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            return _json_response(401, {"error": {"message": "expired"}})
+        return _json_response(200, {"data": {"goal_id": "goal-1"}})
+
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(base_url="http://testserver"),
+        transport=httpx.MockTransport(handler),
+    )
+    monkeypatch.setattr(client, "initial_bearer", lambda: "expired-token")
+    monkeypatch.setattr(client, "refresh_bearer", lambda _response: "refreshed-token")
+
+    try:
+        client.update_goal(goal_id="goal-1", clear_target_date=True)
+    finally:
+        client.close()
+
+    assert [json.loads(request.content) for request in requests] == [
+        {"target_date": None},
+        {"target_date": None},
+    ]
+    assert [request.headers["authorization"] for request in requests] == [
+        "Bearer expired-token",
+        "Bearer refreshed-token",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "field"),
+    [
+        ({"target_date": "2026-12-01", "clear_target_date": True}, "target_date"),
+        ({"external_ref": "doi:10.1234/example", "clear_external_ref": True}, "external_ref"),
+    ],
+)
+def test_client_update_goal_rejects_value_and_clear_conflicts(
+    kwargs: dict[str, object],
+    field: str,
+) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("conflicting update must fail before an HTTP request")
+
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(base_url="http://testserver"),
+        transport=httpx.MockTransport(handler),
+    )
+
+    try:
+        with pytest.raises(mcp_server.LabTrackerAPIValidationError) as exc_info:
+            client.update_goal(goal_id="goal-1", **kwargs)
+    finally:
+        client.close()
+
+    assert exc_info.value.code == "validation_error"
+    assert field in str(exc_info.value)
+
+
+def test_update_goal_tool_forwards_explicit_clear_flags(monkeypatch) -> None:
+    from lab_tracker.mcp_tools import write as write_tools
+
+    captured: dict[str, object] = {}
+
+    class FakeClient:
+        def update_goal(self, **kwargs):
+            captured.update(kwargs)
+            return {"data": {"goal_id": "goal-1"}}
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(write_tools, "client_from_env", lambda: FakeClient())
+
+    payload = write_tools.lab_tracker_update_goal(
+        goal_id="goal-1",
+        title="Renamed goal",
+        clear_target_date=True,
+        clear_external_ref=True,
+    )
+
+    assert payload["data"]["goal_id"] == "goal-1"
+    assert captured["clear_target_date"] is True
+    assert captured["clear_external_ref"] is True
+
+
 def test_client_upload_visualization_file_posts_multipart(tmp_path) -> None:
     figure_path = tmp_path / "figure.png"
-    figure_path.write_bytes(b"figure-bytes")
+    figure_bytes = b"figure-bytes"
+    figure_path.write_bytes(figure_bytes)
+    checksum = hashlib.sha256(figure_bytes).hexdigest()
     seen: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -1336,6 +2036,9 @@ def test_client_upload_visualization_file_posts_multipart(tmp_path) -> None:
         assert request.headers["content-type"].startswith("multipart/form-data")
         assert b"figure.png" in request.content
         assert b"figure-bytes" in request.content
+        assert checksum.encode() in request.content
+        assert b"expected_current_storage_id" in request.content
+        assert b"absent" in request.content
         return _json_response(
             201,
             {
@@ -1355,6 +2058,9 @@ def test_client_upload_visualization_file_posts_multipart(tmp_path) -> None:
         payload = client.upload_visualization_file(
             viz_id="viz-1",
             file_path=str(figure_path),
+            checksum_sha256=checksum,
+            size_bytes=len(figure_bytes),
+            expected_current_storage_id="absent",
         )
     finally:
         client.close()
@@ -1407,8 +2113,10 @@ def test_create_evidence_tools_reject_invalid_status_before_api_request(
     client = mcp_server.LabTrackerAPIClient(
         mcp_server.MCPSettings(base_url="http://testserver"),
         transport=httpx.MockTransport(
-            lambda request: requests.append(request)
-            or _json_response(500, {"error": {"message": "unexpected request"}})
+            lambda request: (
+                requests.append(request)
+                or _json_response(500, {"error": {"message": "unexpected request"}})
+            )
         ),
     )
 
@@ -1427,8 +2135,10 @@ def test_create_note_rejects_nested_metadata_before_api_request() -> None:
     client = mcp_server.LabTrackerAPIClient(
         mcp_server.MCPSettings(base_url="http://testserver"),
         transport=httpx.MockTransport(
-            lambda request: requests.append(request)
-            or _json_response(500, {"error": {"message": "unexpected request"}})
+            lambda request: (
+                requests.append(request)
+                or _json_response(500, {"error": {"message": "unexpected request"}})
+            )
         ),
     )
 

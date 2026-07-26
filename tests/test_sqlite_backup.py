@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from contextlib import closing
 from pathlib import Path, PureWindowsPath
@@ -61,6 +62,10 @@ def test_backup_uses_online_api_and_captures_wal_commits(tmp_path: Path) -> None
 
     assert result.backup_path is not None
     assert result.backup_path.exists()
+    assert re.fullmatch(
+        rf"{re.escape(db_path.stem)}\.backup-\d{{8}}T\d{{12}}Z\.sqlite3",
+        result.backup_path.name,
+    )
     assert _read_values(result.backup_path) == ["committed"]
 
 

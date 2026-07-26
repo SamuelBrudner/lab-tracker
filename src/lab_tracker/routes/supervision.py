@@ -11,6 +11,7 @@ from starlette.requests import Request
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.models import SupervisionEdge, UsageEventResourceType
+from lab_tracker.patching import provided_fields
 from lab_tracker.schemas import (
     Envelope,
     ListEnvelope,
@@ -93,14 +94,10 @@ def build_supervision_router(api: LabTrackerAPI) -> APIRouter:
         request: Request,
     ):
         actor = actor_from_request(request)
-        updates = {
-            field_name: getattr(payload, field_name)
-            for field_name in payload.model_fields_set
-        }
         edge = api_from_request(request, api).update_supervision_edge(
             edge_id,
             actor=actor,
-            **updates,
+            **provided_fields(payload),
         )
         return Envelope(data=edge)
 

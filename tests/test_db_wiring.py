@@ -2,14 +2,17 @@ from __future__ import annotations
 
 from uuid import uuid4
 
+import pytest
 from fastapi import Request
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, delete, select
 from sqlalchemy.orm import Session
 from starlette.responses import JSONResponse
 
+from lab_tracker.api import LabTrackerAPI
 from lab_tracker.app import create_app
 from lab_tracker.app_parts.runtime import _log_startup_config_summary
+from lab_tracker.application import RequestHandlers
 from lab_tracker.config import Settings
 from lab_tracker.db import Base, get_engine
 from lab_tracker.db_models import ProjectModel, QuestionModel
@@ -41,6 +44,21 @@ class _SessionFactorySpy:
         session = _SessionSpy()
         self.sessions.append(session)
         return session
+
+
+class _RequestScopeRepositorySpy:
+    def __init__(self, *, commit_error: BaseException | None = None) -> None:
+        self.commit_error = commit_error
+        self.commits = 0
+        self.rollbacks = 0
+
+    def commit(self) -> None:
+        self.commits += 1
+        if self.commit_error is not None:
+            raise self.commit_error
+
+    def rollback(self) -> None:
+        self.rollbacks += 1
 
 
 class _LoggerSpy:
@@ -91,6 +109,49 @@ def test_db_session_middleware_rolls_back_and_closes_on_error():
     assert session.commits == 0
     assert session.rollbacks == 1
     assert session.closes == 1
+
+
+def test_read_scope_release_rolls_back_and_closes_exactly_once():
+    repository = _RequestScopeRepositorySpy()
+    closed: list[str] = []
+    events: list[str] = []
+    scope = LabTrackerAPI().request_scope(
+        repository,
+        close=lambda: closed.append("closed"),
+    )
+
+    scope.__enter__()
+    scope.api.run_after_commit(lambda: events.append("commit"))
+    scope.api.run_after_rollback(lambda: events.append("rollback"))
+    scope.release_read_scope()
+    scope.release_read_scope()
+    scope.__exit__(None, None, None)
+
+    assert repository.commits == 0
+    assert repository.rollbacks == 1
+    assert closed == ["closed"]
+    assert events == ["rollback"]
+
+
+def test_scope_commit_base_exception_rolls_back_before_close():
+    repository = _RequestScopeRepositorySpy(commit_error=KeyboardInterrupt("stop"))
+    closed: list[str] = []
+    events: list[str] = []
+    scope = LabTrackerAPI().request_scope(
+        repository,
+        close=lambda: closed.append("closed"),
+    )
+
+    scope.__enter__()
+    scope.api.run_after_rollback(lambda: events.append("rollback"))
+    with pytest.raises(KeyboardInterrupt, match="stop"):
+        scope.commit()
+    scope.__exit__(None, None, None)
+
+    assert repository.commits == 1
+    assert repository.rollbacks == 1
+    assert closed == ["closed"]
+    assert events == ["rollback"]
 
 
 def test_unhandled_exceptions_return_error_envelope_and_log(monkeypatch):
@@ -144,25 +205,59 @@ def test_handled_lab_tracker_errors_are_logged(monkeypatch):
     assert kwargs == {}
 
 
-def test_global_repository_dependency_is_wired():
+def test_request_handlers_share_the_middleware_transaction_identity():
     app = create_app()
 
-    @app.get("/_test/repository")
-    def repository_probe(request: Request):
-        repository = getattr(request.state, "lab_tracker_repository", None)
-        db_session = getattr(request.state, "db_session", None)
+    @app.get("/_test/handlers")
+    def handler_probe(request: Request):
+        handlers = getattr(request.state, "lab_tracker_handlers", None)
+        request_api = getattr(request.state, "lab_tracker_api", None)
+        repositories = [
+            handlers.catalogs.repository,
+            handlers.context.repository,
+            handlers.dataset_files.repository,
+        ]
+        sessions = [
+            handlers.context.session,
+            handlers.dataset_files.session,
+            handlers.visualization_files.session,
+            handlers.deletions.session,
+        ]
         return {
-            "has_repository": isinstance(repository, SQLAlchemyLabTrackerRepository),
-            "shares_session": repository is not None and repository._session is db_session,
+            "has_handlers": isinstance(handlers, RequestHandlers),
+            "shares_api": all(
+                handler.api is request_api
+                for handler in (
+                    handlers.catalogs,
+                    handlers.context,
+                    handlers.dataset_files,
+                    handlers.visualization_files,
+                    handlers.deletions,
+                )
+            ),
+            "shares_repository": (
+                isinstance(repositories[0], SQLAlchemyLabTrackerRepository)
+                and all(repository is repositories[0] for repository in repositories)
+            ),
+            "shares_session": all(
+                session is repositories[0]._session for session in sessions
+            ),
+            "raw_dependencies_hidden": (
+                not hasattr(request.state, "lab_tracker_repository")
+                and not hasattr(request.state, "db_session")
+            ),
         }
 
     with TestClient(app) as client:
-        response = client.get("/_test/repository")
+        response = client.get("/_test/handlers")
 
     payload = response.json()
     assert response.status_code == 200
-    assert payload["has_repository"] is True
+    assert payload["has_handlers"] is True
+    assert payload["shares_api"] is True
+    assert payload["shares_repository"] is True
     assert payload["shares_session"] is True
+    assert payload["raw_dependencies_hidden"] is True
 
 
 def test_sqlite_engine_enforces_foreign_keys_and_busy_wal_pragmas(tmp_path):
@@ -173,36 +268,39 @@ def test_sqlite_engine_enforces_foreign_keys_and_busy_wal_pragmas(tmp_path):
         _env_file=None,
     )
     engine = get_engine(settings)
-    Base.metadata.create_all(bind=engine)
+    try:
+        Base.metadata.create_all(bind=engine)
 
-    with engine.connect() as connection:
-        assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar_one() == 1
-        assert connection.exec_driver_sql("PRAGMA busy_timeout").scalar_one() == 5000
-        assert connection.exec_driver_sql("PRAGMA journal_mode").scalar_one() == "wal"
+        with engine.connect() as connection:
+            assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar_one() == 1
+            assert connection.exec_driver_sql("PRAGMA busy_timeout").scalar_one() == 5000
+            assert connection.exec_driver_sql("PRAGMA journal_mode").scalar_one() == "wal"
 
-    project_id = str(uuid4())
-    question_id = str(uuid4())
-    with Session(engine) as session:
-        session.add(ProjectModel(project_id=project_id, name="Cascade project"))
-        session.add(
-            QuestionModel(
-                question_id=question_id,
-                project_id=project_id,
-                text="Does SQLite enforce cascades?",
-                question_type="descriptive",
+        project_id = str(uuid4())
+        question_id = str(uuid4())
+        with Session(engine) as session:
+            session.add(ProjectModel(project_id=project_id, name="Cascade project"))
+            session.add(
+                QuestionModel(
+                    question_id=question_id,
+                    project_id=project_id,
+                    text="Does SQLite enforce cascades?",
+                    question_type="descriptive",
+                )
             )
-        )
-        session.commit()
+            session.commit()
 
-        session.execute(delete(ProjectModel).where(ProjectModel.project_id == project_id))
-        session.commit()
+            session.execute(delete(ProjectModel).where(ProjectModel.project_id == project_id))
+            session.commit()
 
-        assert (
-            session.scalar(
-                select(QuestionModel).where(QuestionModel.question_id == question_id)
+            assert (
+                session.scalar(
+                    select(QuestionModel).where(QuestionModel.question_id == question_id)
+                )
+                is None
             )
-            is None
-        )
+    finally:
+        engine.dispose()
 
 
 def test_startup_config_summary_logs_environment_db_backend_and_auth(

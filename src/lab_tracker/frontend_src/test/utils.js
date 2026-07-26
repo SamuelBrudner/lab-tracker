@@ -23,8 +23,17 @@ function createResponse(status, payload, extras = {}) {
   };
 }
 
-function apiResponse(data, status = 200, meta = null) {
-  return createResponse(status, meta ? { data, meta } : { data });
+function apiResponse(data, status = 200, meta = undefined) {
+  const resolvedMeta =
+    meta === undefined && Array.isArray(data)
+      ? { limit: Math.max(data.length, 1), offset: 0, total: data.length }
+      : meta;
+  return createResponse(
+    status,
+    resolvedMeta === null || resolvedMeta === undefined
+      ? { data }
+      : { data, meta: resolvedMeta }
+  );
 }
 
 function errorResponse(message, status = 400) {

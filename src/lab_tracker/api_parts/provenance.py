@@ -9,9 +9,12 @@ its own edit locality. These are mixins: LabTrackerAPI inherits them, so
 from __future__ import annotations
 
 from typing import Any
+from uuid import UUID
 
 from lab_tracker.api_parts._base import _first_uuid
+from lab_tracker.auth import AuthContext
 from lab_tracker.models import (
+    ProvenanceLink,
     UsageEventResourceType,
     UsageEventVerb,
 )
@@ -86,6 +89,7 @@ class ProvenanceApiMixin:
             actor=kwargs.get("actor"),
             resource_id=_first_uuid(args) or kwargs.get("goal_id"),
             project_id_attr="project_id",
+            suppress_opaque_target_not_found=True,
         )
 
     def export_question_subtree(self, *args: Any, **kwargs: Any) -> Any:
@@ -94,8 +98,9 @@ class ProvenanceApiMixin:
             verb=UsageEventVerb.EXPORT,
             resource_type=UsageEventResourceType.QUESTION,
             actor=kwargs.get("actor"),
-            resource_id=_first_uuid(args) or kwargs.get("question_id"),
+            resource_id=_first_uuid(args) or kwargs.get("root_id"),
             project_id_attr="project_id",
+            suppress_opaque_target_not_found=True,
         )
 
     def check_publication_readiness(self, *args: Any, **kwargs: Any) -> Any:
@@ -109,6 +114,17 @@ class ProvenanceApiMixin:
 
     def get_provenance_link(self, *args: Any, **kwargs: Any) -> Any:
         return self.provenance_links.get_provenance_link(*args, **kwargs)
+
+    def get_provenance_link_for_read(
+        self,
+        link_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> ProvenanceLink:
+        return self.provenance_links.get_provenance_link_for_read(
+            link_id,
+            actor=actor,
+        )
 
     def list_provenance_links(self, *args: Any, **kwargs: Any) -> Any:
         return self.provenance_links.list_provenance_links(*args, **kwargs)

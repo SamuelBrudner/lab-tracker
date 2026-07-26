@@ -18,6 +18,7 @@ from lab_tracker.models import (
     SessionType,
     UsageEventResourceType,
 )
+from lab_tracker.patching import provided_fields
 from lab_tracker.schemas import (
     AcquisitionOutputCreate,
     Envelope,
@@ -29,13 +30,12 @@ from lab_tracker.schemas import (
 )
 
 from .shared import (
-    accessible_project_ids_from_request,
     actor_from_request,
     api_from_request,
     ensure_project_read,
+    handlers_from_request,
     list_response,
     record_usage_view,
-    repository_from_request,
     validate_pagination,
 )
 
@@ -68,25 +68,27 @@ def build_sessions_router(api: LabTrackerAPI) -> APIRouter:
         offset: int = 0,
     ):
         validate_pagination(limit, offset)
-        if project_id is not None:
-            ensure_project_read(request, project_id)
-            project_ids = None
-        else:
-            project_ids = accessible_project_ids_from_request(request)
-        sessions, total = repository_from_request(request).query_sessions(
+        page = handlers_from_request(request).catalogs.list_sessions(
+            actor=actor_from_request(request),
             project_id=project_id,
-            project_ids=project_ids,
             status=status.value if status is not None else None,
             session_type=session_type.value if session_type is not None else None,
             limit=limit,
             offset=offset,
         )
-        return list_response(sessions, limit=limit, offset=offset, total=total)
+        return list_response(
+            page.items,
+            limit=limit,
+            offset=offset,
+            total=page.total,
+        )
 
     @router.get("/sessions/by-link/{link_code}", response_model=Envelope[Session])
     def get_session_by_link_code(link_code: str, request: Request):
-        session = api_from_request(request, api).get_session_by_link_code(link_code)
-        ensure_project_read(request, session.project_id)
+        session = api_from_request(request, api).get_session_by_link_code_for_read(
+            link_code,
+            actor=actor_from_request(request),
+        )
         record_usage_view(
             request,
             resource_type=UsageEventResourceType.SESSION,
@@ -97,8 +99,10 @@ def build_sessions_router(api: LabTrackerAPI) -> APIRouter:
 
     @router.get("/sessions/{session_id}", response_model=Envelope[Session])
     def get_session(session_id: UUID, request: Request):
-        session = api_from_request(request, api).get_session(session_id)
-        ensure_project_read(request, session.project_id)
+        session = api_from_request(request, api).get_session_for_read(
+            session_id,
+            actor=actor_from_request(request),
+        )
         record_usage_view(
             request,
             resource_type=UsageEventResourceType.SESSION,
@@ -114,9 +118,8 @@ def build_sessions_router(api: LabTrackerAPI) -> APIRouter:
         ensure_project_read(request, existing.project_id)
         session = api_from_request(request, api).update_session(
             session_id,
-            status=payload.status,
-            ended_at=payload.ended_at,
             actor=actor,
+            **provided_fields(payload),
         )
         return Envelope(data=session)
 
@@ -128,14 +131,18 @@ def build_sessions_router(api: LabTrackerAPI) -> APIRouter:
         offset: int = 0,
     ):
         validate_pagination(limit, offset)
-        session = api_from_request(request, api).get_session(session_id)
-        ensure_project_read(request, session.project_id)
-        outputs, total = repository_from_request(request).query_acquisition_outputs(
+        page = handlers_from_request(request).catalogs.list_acquisition_outputs(
+            actor=actor_from_request(request),
             session_id=session_id,
             limit=limit,
             offset=offset,
         )
-        return list_response(outputs, limit=limit, offset=offset, total=total)
+        return list_response(
+            page.items,
+            limit=limit,
+            offset=offset,
+            total=page.total,
+        )
 
     @router.post(
         "/sessions/{session_id}/outputs",

@@ -6,25 +6,29 @@ intentionally omitted unless they participate in the retained v1 runtime.
 
 ## Architecture at a Glance
 
-A request traverses five layers. Every route reaches the rest of the system
-through a single per-request `LabTrackerAPI` facade; entities are represented as
-Pydantic domain models and SQLAlchemy ORM rows with an explicit mapper seam
-between them.
+A request traverses an explicit HTTP-to-application seam. Routes use a
+request-scoped `RequestHandlers` aggregate for typed commands, optimized queries,
+file operations, and managed deletes. Retained rich domain commands continue to
+enter through the same per-request `LabTrackerAPI` facade. Entities are
+represented as Pydantic domain models and SQLAlchemy ORM rows with an explicit
+mapper seam between them.
 
 ```mermaid
 flowchart TD
     client(["HTTP client · PWA · MCP · lt CLI"])
 
     subgraph edge["Edge"]
-      mw["DB middleware<br/>app_parts/middleware.py<br/>opens request-scoped repo + LabTrackerRequestScope"]
+      mw["DB middleware<br/>app_parts/middleware.py<br/>opens one session, repository, and LabTrackerRequestScope"]
     end
 
     routes["33 route modules · 166 endpoints<br/>routes/*.py"]
 
+    handlers[["RequestHandlers<br/>application/*<br/>typed commands, queries, and results"]]
+
     facade[["LabTrackerAPI facade<br/>api.py + api_parts/ mixins<br/>composition root + request scope<br/>attached per request via api_from_request()"]]
 
     subgraph app["Application / domain services"]
-      services["26 services · ~11k LOC<br/>services/*.py"]
+      services["32 service modules · ~14.7k LOC<br/>services/*.py"]
     end
 
     subgraph data["Persistence"]
@@ -39,7 +43,12 @@ flowchart TD
     usage[("usage_events sink<br/>local telemetry")]
 
     client --> mw --> routes
-    routes -->|api_from_request| facade
+    mw --> handlers
+    mw --> facade
+    routes -->|handlers_from_request| handlers
+    routes -->|retained domain commands| facade
+    handlers --> facade
+    handlers -->|optimized reads only| repo
     facade --> services
     services --> repo
     repo --> orm
@@ -51,21 +60,29 @@ flowchart TD
 
     classDef chokepoint fill:#ffe0b2,stroke:#e65100,stroke-width:2px;
     classDef seam fill:#e1f5fe,stroke:#0277bd;
-    class facade chokepoint;
+    class handlers,facade chokepoint;
     class mappers,domain seam;
 ```
 
 Reading the diagram:
 
-- **`LabTrackerAPI` (orange) is the external boundary.** All 33 route modules
-  reach the services through this one per-request facade rather than importing
-  services directly. This is deliberate: the facade is the single place where
-  cross-cutting usage telemetry fires *exactly once per external call*. Services
-  call each other's methods directly for internal composition (e.g.
-  `graph_draft_applier` creating a claim), and those internal calls intentionally
-  do **not** emit usage events — so telemetry cannot be pushed down into the
-  service methods without double-counting. The scope machinery that owns the
-  facade is described under [Request Context Lifecycle](#request-context-lifecycle).
+- **`RequestHandlers` (orange) is the HTTP application boundary.** The aggregate
+  is composed once per request from the exact `LabTrackerAPI`, repository,
+  SQLAlchemy session, storage backends, settings, and deferred-action queues
+  already owned by middleware. Its focused owners (`CatalogQueries`,
+  `ContextQueries`, `DatasetFileCommands`, `VisualizationFileCommands`, and
+  `ManagedDeletionCommands`) return typed `Page`, `FileDownload`, and
+  `AssetMutationResult` values. Routes never obtain a concrete repository or
+  session.
+- **`LabTrackerAPI` remains the retained domain-command boundary.** Handler
+  commands use that same bound facade, and routes still use it for domain
+  operations that do not need an optimized read model or cross-resource storage
+  orchestration. The facade remains the single place where cross-cutting usage
+  telemetry fires *exactly once per external call*. Services call each other's
+  methods directly for internal composition (e.g. `graph_draft_applier`
+  creating a claim), and those internal calls intentionally do **not** emit
+  usage events. The scope machinery that owns both boundaries is described
+  under [Request Context Lifecycle](#request-context-lifecycle).
 - **The facade is composed, not monolithic.** `api.py` holds only the
   composition root (`_compose_services`) and the request-scope lifecycle. The
   ~150 delegation methods live in per-domain mixins under
@@ -74,6 +91,20 @@ Reading the diagram:
   one domain's surface touches that domain's mixin, not a single 1300-line file.
   The usage-telemetry helpers (`_with_usage_event`, `record_usage_event`) and the
   UUID/timing helpers in `api_parts/_base.py` are shared by all mixins.
+- **Graph drafting has lifecycle owners behind a compatibility façade.**
+  `GraphDraftService` preserves the flat method surface used by
+  `api_parts/graph_drafts.py`, but every method is an explicit one-hop delegate:
+  `GraphDraftGenerationCoordinator` builds and validates proposals,
+  `GraphDraftReviewCoordinator` owns editing and human review,
+  `TransactionalDraftCommitCoordinator` alone owns `GraphPatchApplier` and the
+  atomic canonical commit, and `BatchSchedulingCoordinator` owns settings,
+  workers, and due-run dispatch. `GraphDraftRecords` supplies their shared
+  change-set/run record operations, while `graph_draft_batch_policy.py` contains
+  deterministic batch identity, window, reviewer, and schedule rules. All five
+  owners receive the exact same `ServiceContext`; scheduling calls generation
+  directly, review calls a non-persisting generation seam for revisions, and no
+  coordinator calls `GraphDraftService` or `LabTrackerAPI`. Usage telemetry
+  therefore remains at the outer API façade and fires once.
 - **The mapper + domain-model seam (blue) is the largest structural multiplier.**
   Each retained entity exists as a Pydantic domain type (`models.py`) and a
   SQLAlchemy row (`db_models.py`), joined by hand-written translators in
@@ -103,14 +134,100 @@ The lifecycle is:
    - deferred `after_commit` and `after_rollback` actions
    - commit/rollback completion
    - session cleanup
-3. The middleware attaches `scope.api` to `request.state.lab_tracker_api`.
-4. Route handlers use `request.state.lab_tracker_api` via `api_from_request(...)`.
+3. The middleware composes `RequestHandlers` from that exact repository,
+   SQLAlchemy session, `scope.api`, storage backends, settings, and optional
+   resolver registry. It exposes only `scope.api` and the typed aggregate on
+   request state; raw session and repository dependencies are not exposed.
+4. Route adapters enter through `handlers_from_request(...)` for optimized
+   queries, read-model assembly, file operations, and managed deletes. Retained
+   domain calls use `api_from_request(...)`.
 5. On exit, `scope.complete_response(...)` commits successful responses and rolls back
    error responses. Unhandled exceptions roll back in `LabTrackerRequestScope.__exit__`.
 6. Deferred side effects run only from the matching explicit scope outcome. Failures
    are logged and do not reverse the already-decided commit or rollback result.
 
 Service logic should not depend on hidden globals or `ContextVar` state for request orchestration.
+
+## Opaque Targeted-Read Ordering
+
+Project- and group-scoped targeted reads follow one boundary order:
+
+1. Authenticate the principal and apply coarse service-token capabilities,
+   preserving `401` for missing or invalid credentials and `403` for a valid
+   token outside its capability.
+2. Validate the target locator, resolve only the scope needed for authorization,
+   and map both an absent target and a denied target to the same canonical
+   `404` response.
+3. Complete that authorization before selecting children, indices, or hashes;
+   hydrating the full record; attaching attribution; touching storage,
+   resolvers, or health probes; or recording usage.
+4. Only an authorized read may materialize and render the requested
+   representation or perform those downstream actions.
+
+Collection reads instead filter to accessible scopes, and mutations retain
+explicit permission errors. The frozen targeted-read inventory and behavioral
+suites are in [Read Opacity Inventory](read-opacity-inventory.md).
+
+Known scope-adjacent exceptions:
+
+- `GET /groups/{group_id}` is the equivalent group-scoped boundary.
+  `lab-tracker-n5kp.33` is closed, and the route now conforms.
+- `GET /projects/{project_id}/graph-draft-batch-settings` can still synthesize
+  defaults for a missing project. `lab-tracker-n5kp.32` remains open, and this
+  operation is outside the 37-variant inventory until that boundary is fixed.
+
+## Application Handler Boundary
+
+The request-scoped handlers live under
+[`src/lab_tracker/application`](../src/lab_tracker/application):
+
+- `catalog_queries.py` owns database-paged project-scoped catalogs. An empty
+  accessible-project set is preserved as “no access”; only `None` means global
+  access.
+- `context_queries.py` owns assistant context, portfolio SQL, project graphs,
+  provenance assembly, search, and bounded external-artifact resolution.
+- `file_commands.py` owns dataset and visualization blobs, including row locks,
+  compare-and-set behavior, and rollback/commit cleanup registration.
+- `managed_deletions.py` owns stable cascade lock ordering and post-commit
+  cleanup of dataset, note, and visualization storage.
+- `handlers.py` is the request composition root; `types.py` contains the
+  transport-neutral result types.
+
+This layer is intentionally allowed to use the optimized SQLAlchemy read models
+and repository query surface. HTTP route modules are not. The architecture
+guard in
+[`tests/test_route_application_boundary.py`](../tests/test_route_application_boundary.py)
+enforces that routes import neither SQLAlchemy nor persistence implementations,
+cannot recover raw request session/repository state, and use the typed boundary
+for the migrated surfaces.
+
+The application modules own narrow structural `Protocol` ports beside each
+consumer. `CatalogQueries`, `ContextQueries`, file commands, managed deletions,
+decision-context assembly, and project-graph projection name only the
+capabilities they call. The SQLAlchemy adapter satisfies those ports
+structurally; it does not inherit the broad `LabTrackerRepository` protocol.
+Broad entity-repository attributes are read-only protocol properties so focused
+implementations remain covariant. `tests/typing/contracts.py` makes the adapter,
+application facade, graph collaborators, and provider factories pass these
+ports at compile time.
+
+Graph generation, review, commit, and scheduling follow the same rule. Each
+coordinator receives lifecycle-specific roles, and only the commit coordinator
+receives the graph patch applier. Provider clients and their
+`Callable[[Settings], GraphDraftClient]` factory stay typed from app startup
+through request-state helpers and background dispatch. The compatibility API
+uses explicit signatures matching `GraphDraftService`, including keyword-only
+parameters and tri-state patch defaults.
+
+Run the incremental strict boundary locally with:
+
+```bash
+uv run mypy
+```
+
+CI runs this alongside Ruff. The target list is intentionally incremental:
+expand it as additional consumers acquire local ports rather than weakening
+strictness for the existing boundary.
 
 ## Repository Layout
 
@@ -191,6 +308,9 @@ Examples:
 - `auth.py`, `device_auth.py`, `assistant.py`, `schema.py`
 
 Routes keep their existing URLs, envelopes, pagination, and auth requirements.
+They translate HTTP inputs and outputs; database totals, authorization-aware
+scope, storage sequencing, and deferred cleanup belong to the application
+handlers.
 `search.py` is the retained query surface and stays on the simple substring
 behavior documented in
 [`docs/retained-v1-surface.md`](retained-v1-surface.md),

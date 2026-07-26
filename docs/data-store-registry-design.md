@@ -91,10 +91,9 @@ class DataStore(_DomainModel):
 ```
 
 A project's **effective store set** = its own stores plus inherited group stores;
-exactly one is the **default**. Registration runs a **health check** (can I stat
-the root / list the prefix / open a connection with the host's credentials?), so
-a misconfigured store fails *at registration*, not three weeks later when an
-agent tries to resolve an artifact.
+at most one is the **default** (a scope may have none). Registration validates stored configuration
+without initiating backend I/O. Operators can run the separate health endpoint
+to stat a local root, list a remote prefix, or test configured credentials.
 
 ## Backends differ by capability, not brand
 
@@ -142,19 +141,35 @@ store://<store-name>/<path-or-key>[@<version-or-snapshot>][?<selector>]
 - `store://lab-archive/runs/2026-06-28/raw.h5@v3`    (S3 versionId / Iceberg snapshot)
 - `store://lims/?q=SELECT … WHERE plate='001'&as_of=2026-06-28T12:00Z`  (database)
 
-`ExternalArtifactReference` gains an optional `store_id` and an in-store
+`ExternalArtifactReference` carries an optional `store_name` and an in-store
 `locator`; the absolute `uri` becomes **derived per host** by the store adapter,
 not the primary key. `content_hash` remains the stable cross-store, cross-machine
 identity — the same join key `build-vs-buy-boundaries.md` already relies on.
+
+For `local_fs`, the locator is a strict portable relative path, not a fragment
+that is normalized after joining. It is parsed into immutable components before
+any path or filesystem operation. Absolute, drive/UNC/device, backslash,
+empty/dot/dot-dot, control, reserved-device, and encoded separator/traversal
+forms are rejected rather than repaired. The structured `store_name`/`locator`
+fields and the logical `store://` URI must describe one canonical identity.
+Local-store names use 1–63 ASCII letters, digits, dots, underscores, or hyphens
+and start with a letter or digit. New registrations reject other names; legacy
+local rows with names or roots outside this contract fail closed at resolution.
+The `for_local_store(...)` constructor creates this canonical identity.
+
+The generic `for_store(...)` constructor remains a legacy compatibility surface.
+Kind-specific constructors and materialization boundaries enforce the portable
+grammar for local, HTTP, rclone, and registered Git references.
 
 ### Back-compat with today's references
 
 `ExternalArtifactReference` is unchanged for existing rows: a legacy reference
 with a free-form `source_system` (`s3`, `mlflow`, `doi`, `datalad`…) and an
 absolute `uri` still resolves through the generic local/http/kind adapters from
-the resolver design. New captures **prefer** store-relative locators; a
-`source_system` that names a registered store binds to it, and an unregistered
-one falls back to best-effort generic resolution. No migration is forced.
+the resolver design. New captures **prefer** explicit `store_name`/`locator`
+fields or a `store://` URI. Legacy source-system labels remain compatible; they
+do not independently name or authorize a registered store. No migration is
+forced.
 
 ## Resolution flow (extends the resolver design)
 
@@ -162,12 +177,14 @@ This slots directly into
 [`external-artifact-resolution-design.md`](external-artifact-resolution-design.md);
 the store registry is what its `ResolverRegistry` dispatches through:
 
-1. Reference → `store_id` → look up the `DataStore` (kind, capabilities,
+1. Reference → store name → look up the `DataStore` (kind, capabilities,
    endpoint, host-local credential ref).
-2. Pick the adapter for that `kind`; assert the operation's required capability
+2. Validate and detach a typed store target while the database scope is open,
+   then release that scope before host I/O.
+3. Pick the adapter for that `kind`; assert the operation's required capability
    (e.g. a byte-range read needs `BYTE_RANGE`; a query needs `QUERY`).
-3. Adapter resolves the in-store locator → bounded bytes / bounded result set.
-4. Verify against `content_hash` → tri-state `verified` / `drifted` /
+4. Adapter resolves the in-store locator → bounded bytes / bounded result set.
+5. Verify against `content_hash` → tri-state `verified` / `drifted` /
    `unresolved`, plus `unversioned` for mutable-DB reads that cannot be certified.
 
 The bounding, untrusted-content handling, RBAC gating, and optional
@@ -202,6 +219,11 @@ Unix-only:
   (`%APPDATA%\rclone\rclone.conf`) work the same across Windows, macOS, and
   Linux. This is the reason to prefer it over **`rsync`, which is *not* native on
   Windows** (it needs WSL/Cygwin/cwRsync). The design uses rclone, never rsync.
+  Lab Tracker's bounded rclone/Git process owner contains descendants with a
+  dedicated process group on POSIX and a kill-on-close Job Object on Windows.
+  The Windows leader remains suspended until Job Object assignment has been
+  verified, so inability to establish secure containment fails closed before
+  artifact resolver code executes.
 - **The common Windows case needs no rclone at all.** OneDrive on a Windows
   workstation is normally a *synced local folder*, so it resolves through the
   plain `local_fs` adapter with zero credentials. rclone is only the fallback
@@ -242,23 +264,28 @@ external URI and content-hash storage."
 
 ## Implementation status
 
-Shipped (project-scoped slice):
+Shipped:
 
 - ✅ `DataStore` domain model + `StoreKind`/`StoreCapability` enums, the
-  `data_stores` table, and Alembic migration `0049_data_stores`. Project-scoped;
-  group scope is a deferred additive column. Capabilities default from the store
-  kind (`default_store_capabilities`).
+  `data_stores` table, and Alembic migrations `0049_data_stores` and
+  `0050_data_store_group_scope`. Stores may be project- or group-scoped;
+  capabilities default from the store kind (`default_store_capabilities`).
 - ✅ `SQLAlchemyDataStoreRepository` (CRUD + `query`/`get_by_name`/`get_default`/
   `clear_default`, at most one default per project), `DataStoreService` with
   contributor/read RBAC and unique-name-per-project (`ConflictError`), and the
   `LabTrackerAPI` facade.
 - ✅ Routes `POST /data-stores`, `GET /data-stores`, `GET /data-stores/{id}`.
-- ✅ `store://<name>/<path>` resolution: `store_relative_reference` translates a
-  locator into a concrete reference (`local_fs → file://`, `http → URL`, and the
-  rclone kinds → `rclone://` with the remote from `credential_ref`), and the
-  resolve endpoint materializes it via `data_stores.get_by_name` before
-  dispatching to the resolver. Credentials are never embedded.
-- ✅ Registration health check: `check_store_health` probes reachability
+- ✅ `store://<name>/<path>` resolution: the resolve endpoint authorizes and
+  looks up the store before releasing its database scope. `local_fs` becomes a
+  typed target that retains the logical URI, validated relative components, and
+  trusted registered root through the eventual handle-bound read. HTTP becomes
+  a typed target that retains the same portable relative components and its
+  canonical registered origin/path prefix through every redirect. Rclone kinds
+  become a typed target that retains an exact configured remote, structural
+  rooted-versus-relative prefix, and portable locator until argv composition.
+  Git becomes a typed target that retains a structurally parsed remote, portable
+  repository path, and full immutable object ID. Credentials are never embedded.
+- ✅ Explicit health check: `check_store_health` probes reachability
   (directory stat for `local_fs`, HTTP `HEAD` for `http`, `rclone lsf` for the
   cloud/remote kinds; `object_table`/`database` report `unsupported`), exposed at
   `GET /data-stores/{id}/health`.
@@ -270,9 +297,40 @@ Shipped (project-scoped slice):
   returns its effective (own + inherited) set.
 - ✅ Structured field form: `ExternalArtifactReference` carries optional
   `store_name` + `locator` (paired) with a `for_store(...)` constructor, so a
-  store-relative artifact is addressed by explicit fields instead of a parsed
-  `store://` URI. Resolution prefers the fields and falls back to the URI; the
-  field is the store *name* (not a UUID), matching name-based resolution.
+  store-relative artifact has an explicit representation. For `local_fs` and
+  HTTP, resolution accepts the fields only when they agree with the canonical
+  logical `store://` identity; `for_local_store(...)` and
+  `for_http_store(...)` construct their canonical forms, and both kinds share
+  one immutable portable-path grammar. The generic `for_store(...)` constructor's
+  deterministic legacy display URI remains accepted for structured HTTP, rclone,
+  and Git references and is canonicalized during preparation. The specialized
+  `for_git_store(...)` constructor produces a portable path plus full immutable
+  object ID. The field is the store *name* (not a UUID), matching name-based
+  resolution.
+- ✅ Local-store confinement: a `local_fs` root must be a native absolute local
+  path. Its effective read authority is conjunctive with the operator's global
+  local-root policy, and the exact reader plus recovery walk are scoped to the
+  registered store root. A broader global root therefore cannot make sibling
+  files addressable through that store.
+- ✅ Registered HTTP prefix confinement: a pure value validates the canonical
+  HTTP origin and portable path components without DNS. A frozen, factory-only
+  target crosses the database-scope boundary, and the resolver checks the
+  initial URL and every raw redirect before the next DNS or socket operation.
+  Direct HTTP references retain their existing, broader redirect semantics.
+- ✅ Registered rclone prefix confinement: typed remote names follow rclone's
+  configured-name grammar, registered roots preserve `remote:path` versus
+  `remote:/path`, and a frozen factory-only target crosses the database-scope
+  boundary. Nominal dispatch composes one exact target token only after the
+  combined root/locator budget and exact remote allowlist pass. Direct
+  `rclone://` references retain their established parser and process behavior.
+- ✅ Registered Git confinement: `GitObjectId` accepts only full lowercase,
+  nonzero SHA-1 or SHA-256 IDs, and `PinnedGitPath` pairs that ID with a portable
+  repository path. A frozen factory-only target carries the canonical logical
+  identity and structurally parsed registered remote across the database-scope
+  boundary. Nominal dispatch reauthorizes the remote before cache creation,
+  separates cache namespaces by object format, and initializes Git explicitly
+  with `--object-format=sha1` or `--object-format=sha256`. Direct generic
+  `git+` behavior remains compatible pending its separate hardening.
 
 Deferred:
 
@@ -281,20 +339,12 @@ Deferred:
   adapter — `store_relative_reference` returns `None` for `object_table`/
   `database` today, surfacing as a clean `UNRESOLVED`.
 
-## Suggested first slice
+## Next slices
 
-1. `DataStore` model + migration; project/group scoping and a single default;
-   a registration health check.
-2. Store-relative `store://name/...` locator parsing; optional `store_id` +
-   `locator` on `ExternalArtifactReference` with legacy fallback intact.
-3. Adapters: `local_fs`, `s3` (version-aware), `ssh`, and an `rclone` adapter
-   covering Dropbox/GDrive/Box/OneDrive; a `database` adapter behind the
-   snapshot/`unversioned` semantics with a hard row cap.
-4. Resolution dispatches through the registry (extends the resolver first slice).
-5. Capture clients write store-relative references against the default store.
-6. Tests: registration health check; `verified` local/S3 read; `drifted` on a
-   mutated object; S3 `versionId` pin; `unversioned` DB read; capability
-   mismatch (range read on a no-range store) → clean `unresolved`.
+The remaining work binds store registration to operator-approved authority
+grants, enforces declared capabilities during resolution, and adds the deferred
+snapshot/query adapters. Health remains an explicit operator action at
+`GET /data-stores/{id}/health`, not a side effect of registration.
 
 ## See also
 

@@ -10,7 +10,6 @@ from starlette.requests import Request
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.config import get_settings
-from lab_tracker.graph_drafting import make_graph_draft_client
 from lab_tracker.models import (
     GraphChangeSet,
     GraphChangeSetStatus,
@@ -19,6 +18,7 @@ from lab_tracker.models import (
     GraphDraftBatchSettings,
     UsageEventResourceType,
 )
+from lab_tracker.patching import provided_fields
 from lab_tracker.schemas import (
     Envelope,
     GraphDraftBatchRunRequest,
@@ -26,6 +26,10 @@ from lab_tracker.schemas import (
     ListEnvelope,
 )
 
+from .graph_draft_clients import (
+    draft_client_factory_from_request as _draft_client_factory_from_request,
+)
+from .graph_draft_clients import draft_client_from_request as _draft_client_from_request
 from .graph_drafts import attach_graph_usernames
 from .shared import (
     actor_from_request,
@@ -81,8 +85,11 @@ def build_graph_batches_router(api: LabTrackerAPI) -> APIRouter:
 
     @router.get("/batches/{change_set_id:uuid}", response_model=Envelope[GraphChangeSet])
     def get_batch(change_set_id: UUID, request: Request):
-        change_set = api_from_request(request, api).get_graph_change_set(change_set_id)
-        ensure_project_read(request, change_set.project_id)
+        actor = actor_from_request(request)
+        change_set = api_from_request(request, api).get_graph_change_set_for_read(
+            change_set_id,
+            actor=actor,
+        )
         record_usage_view(
             request,
             resource_type=UsageEventResourceType.GRAPH_CHANGE_SET,
@@ -126,12 +133,8 @@ def build_graph_batches_router(api: LabTrackerAPI) -> APIRouter:
         actor = actor_from_request(request)
         settings = api_from_request(request, api).update_graph_draft_batch_settings(
             project_id,
-            enabled=payload.enabled,
-            cadence_minutes=payload.cadence_minutes,
-            run_at_local_time=payload.run_at_local_time,
-            timezone_name=payload.timezone_name,
-            user_id=payload.user_id,
             actor=actor,
+            **provided_fields(payload),
         )
         return Envelope(data=settings)
 
@@ -208,18 +211,6 @@ def build_graph_batches_router(api: LabTrackerAPI) -> APIRouter:
         return list_response(runs, limit=max(1, len(runs) or 1), offset=0, total=len(runs))
 
     return router
-
-
-def _draft_client_factory_from_request(request: Request):
-    factory = getattr(request.app.state, "graph_draft_client_factory", None)
-    if callable(factory):
-        return factory
-    return make_graph_draft_client
-
-
-def _draft_client_from_request(request: Request):
-    settings = getattr(request.app.state, "settings", None) or get_settings()
-    return _draft_client_factory_from_request(request)(settings)
 
 
 def _background_drafting_enabled(request: Request) -> bool:

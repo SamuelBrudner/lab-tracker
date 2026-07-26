@@ -13,7 +13,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 
@@ -35,6 +35,12 @@ from lab_tracker.models import (
     QuestionType,
     SessionStatus,
     SessionType,
+)
+from lab_tracker_client.transport import (
+    MAX_UPLOAD_BYTES,
+    HttpTransport,
+    UploadTooLargeError,
+    preflight_upload_size,
 )
 
 JsonObject = dict[str, Any]
@@ -169,6 +175,10 @@ class LTAPIError(LTError):
     """Raised when the Lab Tracker API returns an error or malformed response."""
 
 
+class LTConflictError(LTAPIError):
+    """Raised when an idempotency key is reused with conflicting intent."""
+
+
 class LTValidationError(LTError):
     """Raised when client-side validation catches a bad request shape."""
 
@@ -194,6 +204,41 @@ class LTRecord(dict[str, Any]):
 
 
 EvidenceNoteIndex = dict[EvidenceNoteKey, LTRecord]
+
+# Sentinel distinguishing "caller did not supply this field" from an explicit
+# empty/None value, so get_or_create only compares fields the caller actually
+# provided (and never silently discards conflicting intent).
+_UNSET: Any = object()
+
+
+@dataclass(frozen=True)
+class GetOrCreateResult:
+    """Outcome of a get_or_create_* call.
+
+    ``action`` is ``"created"``, ``"reused"``, or ``"updated"``. The result also
+    proxies the record's ``id`` / ``get`` so existing record-shaped call sites
+    keep working.
+    """
+
+    action: Literal["created", "reused", "updated"]
+    record: LTRecord
+
+    @property
+    def id(self) -> Any:
+        return self.record.id
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self.record.get(key, default)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"action": self.action, "record": self.record.to_dict()}
+
+
+def _derive_capture_id(*parts: str) -> str:
+    """Deterministic idempotency key for a natural key, bounded to <=120 chars."""
+
+    digest = hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()
+    return f"gc:{digest[:64]}"
 
 
 @dataclass(frozen=True)
@@ -275,11 +320,41 @@ class LabTracker:
         self.default_project_id = default_project_id
         self._access_token = access_token
         self._supplied_access_token = bool(access_token)
-        self._client = httpx.Client(
+        self._transport = HttpTransport(
             base_url=self.base_url,
-            timeout=timeout_seconds,
+            timeout_seconds=timeout_seconds,
+            auth=self,
             transport=transport,
         )
+
+    @property
+    def _client(self) -> httpx.Client:
+        # Retained for callers that read the underlying client (e.g. figure
+        # capture reads its configured timeout to compute a clamped value).
+        return self._transport.client
+
+    # --- TransportAuth policy (injected into the shared HttpTransport) --------
+    @property
+    def surface(self) -> str:
+        return "cli"
+
+    def initial_bearer(self) -> str | None:
+        return self._bearer_token(required=False)
+
+    def refresh_bearer(self, response: httpx.Response) -> str:
+        supplied_token_used = bool(self._access_token and self._supplied_access_token)
+        if supplied_token_used and not self._has_login_credentials():
+            raise LTAPIError(
+                "LAB_TRACKER_ACCESS_TOKEN was rejected by the Lab Tracker API. "
+                "Refresh the token or set LAB_TRACKER_USERNAME and "
+                "LAB_TRACKER_PASSWORD so the client can log in."
+            )
+        self._access_token = None
+        self._supplied_access_token = False
+        return self._bearer_token(required=True)
+
+    def wrap_transport_error(self, method: str, path: str, exc: Exception) -> Exception:
+        return LTAPIError(f"Lab Tracker request {method} {path} failed: {exc}")
 
     @classmethod
     def from_env(cls) -> LabTracker:
@@ -319,7 +394,7 @@ class LabTracker:
         return self._access_token
 
     def close(self) -> None:
-        self._client.close()
+        self._transport.close()
 
     def __enter__(self) -> LabTracker:
         return self
@@ -658,6 +733,85 @@ class LabTracker:
                 return project
         return None
 
+    def get_or_create_project(
+        self,
+        *,
+        name: str,
+        description: str | Any = _UNSET,
+        status: str | None | Any = _UNSET,
+        on_conflict: str = "error",
+    ) -> GetOrCreateResult:
+        """Find or create a project by name, honestly and atomically.
+
+        Returns a :class:`GetOrCreateResult` whose ``action`` distinguishes
+        ``created`` / ``reused`` / ``updated``. Only caller-supplied fields are
+        compared against an existing project; a divergence raises
+        ``LTValidationError`` (never a silent discard) unless
+        ``on_conflict="update"`` is passed, which PATCHes the record instead.
+
+        On create a deterministic ``client_capture_id`` derived from the name is
+        sent, so concurrent identical calls resolve to one canonical project
+        server-side rather than duplicating a graph node.
+        """
+
+        cleaned_name = _require_non_empty(name, "name")
+        resolved_status = (
+            _validate_optional_enum(
+                status,
+                field_name="project status",
+                allowed_values=PROJECT_STATUS_VALUES,
+            )
+            if status is not _UNSET
+            else _UNSET
+        )
+        existing = self.find_project_by_name(cleaned_name)
+        if existing is not None:
+            conflicts = _project_field_conflicts(
+                existing, description=description, status=resolved_status
+            )
+            if conflicts:
+                if on_conflict == "update":
+                    return GetOrCreateResult(
+                        "updated",
+                        self._patch_project(
+                            existing.id, description=description, status=resolved_status
+                        ),
+                    )
+                raise LTValidationError(
+                    f"Existing project {cleaned_name!r} differs from the supplied "
+                    f"fields ({_format_conflicts(conflicts)}). Pass on_conflict="
+                    "'update' to apply the change, or reconcile the inputs."
+                )
+            return GetOrCreateResult("reused", existing)
+        payload, status_code = self._request_with_status(
+            "POST",
+            "/projects",
+            json_payload={
+                "name": cleaned_name,
+                "description": "" if description is _UNSET else description,
+                "status": None if resolved_status is _UNSET else resolved_status,
+                "client_capture_id": _derive_capture_id("project", cleaned_name),
+            },
+        )
+        record = self._data_record(payload)
+        return GetOrCreateResult("created" if status_code == 201 else "reused", record)
+
+    def _patch_project(
+        self, project_id: Any, *, description: str | Any, status: str | None | Any
+    ) -> LTRecord:
+        payload: JsonObject = {}
+        if description is not _UNSET:
+            payload["description"] = description
+        if status is not _UNSET and status is not None:
+            payload["status"] = status
+        return self._data_record(
+            self._request(
+                "PATCH",
+                f"/projects/{_require_non_empty(str(project_id), 'project_id')}",
+                json_payload=payload,
+            )
+        )
+
     def upsert_project(
         self,
         *,
@@ -665,25 +819,19 @@ class LabTracker:
         description: str = "",
         status: str | None = None,
     ) -> LTRecord:
-        resolved_status = _validate_optional_enum(
-            status,
-            field_name="project status",
-            allowed_values=PROJECT_STATUS_VALUES,
-        )
-        existing = self.find_project_by_name(name)
-        if existing is not None:
-            return existing
-        return self._data_record(
-            self._request(
-                "POST",
-                "/projects",
-                json_payload={
-                    "name": _require_non_empty(name, "name"),
-                    "description": description,
-                    "status": resolved_status,
-                },
-            )
-        )
+        """Deprecated: use :meth:`get_or_create_project`.
+
+        Preserves the record-returning contract. Fields are compared only when
+        supplied (a non-empty description or an explicit status), so an existing
+        project is reused when they match and a conflict is raised when they do
+        not — the honesty fix. A bare ``upsert_project(name=...)`` still reuses.
+        """
+
+        return self.get_or_create_project(
+            name=name,
+            description=description if description != "" else _UNSET,
+            status=status if status is not None else _UNSET,
+        ).record
 
     def find_question_by_text(self, project_id: str, text: str) -> LTRecord | None:
         cleaned = _require_non_empty(text, "text")
@@ -692,42 +840,155 @@ class LabTracker:
                 return question
         return None
 
+    def get_or_create_question(
+        self,
+        *,
+        project_id: str,
+        text: str,
+        question_type: str | Any = _UNSET,
+        status: str | None | Any = _UNSET,
+        hypothesis: str | None | Any = _UNSET,
+        parent_question_ids: Sequence[str] | None | Any = _UNSET,
+        on_conflict: str = "error",
+    ) -> GetOrCreateResult:
+        """Find or create a question by text, honestly and atomically.
+
+        Returns a :class:`GetOrCreateResult` (``created`` / ``reused`` /
+        ``updated``). Only caller-supplied fields are compared against an
+        existing question; a divergence raises ``LTValidationError`` unless
+        ``on_conflict="update"``. When ``status`` is omitted the record inherits
+        the server's canonical staged default (``QuestionStatus.STAGED``);
+        promote deliberately with :meth:`activate_question`. On create a
+        deterministic ``client_capture_id`` derived from (project, text) is sent
+        so concurrent identical calls resolve to one canonical question.
+        """
+
+        cleaned_text = _require_non_empty(text, "text")
+        resolved_type = (
+            _validate_enum(
+                question_type,
+                field_name="question_type",
+                allowed_values=QUESTION_TYPE_VALUES,
+            )
+            if question_type is not _UNSET
+            else _UNSET
+        )
+        resolved_status = (
+            _validate_optional_enum(
+                status,
+                field_name="question status",
+                allowed_values=QUESTION_STATUS_VALUES,
+            )
+            if status is not _UNSET
+            else _UNSET
+        )
+        existing = self.find_question_by_text(project_id, cleaned_text)
+        if existing is not None:
+            conflicts = _question_field_conflicts(
+                existing,
+                question_type=resolved_type,
+                status=resolved_status,
+                hypothesis=hypothesis,
+                parent_question_ids=parent_question_ids,
+            )
+            if conflicts:
+                if on_conflict == "update":
+                    return GetOrCreateResult(
+                        "updated",
+                        self._patch_question(
+                            existing.id,
+                            status=resolved_status,
+                            hypothesis=hypothesis,
+                        ),
+                    )
+                raise LTValidationError(
+                    f"Existing question {cleaned_text!r} differs from the supplied "
+                    f"fields ({_format_conflicts(conflicts)}). Pass on_conflict="
+                    "'update' to apply the change, or reconcile the inputs."
+                )
+            return GetOrCreateResult("reused", existing)
+        payload, status_code = self._request_with_status(
+            "POST",
+            "/questions",
+            json_payload={
+                "project_id": str(project_id),
+                "text": cleaned_text,
+                "question_type": (
+                    QuestionType.OTHER.value if resolved_type is _UNSET else resolved_type
+                ),
+                "hypothesis": None if hypothesis is _UNSET else hypothesis,
+                "status": None if resolved_status is _UNSET else resolved_status,
+                "parent_question_ids": (
+                    [] if parent_question_ids is _UNSET else list(parent_question_ids or [])
+                ),
+                "client_capture_id": _derive_capture_id(
+                    "question", str(project_id), cleaned_text
+                ),
+            },
+        )
+        record = self._data_record(payload)
+        return GetOrCreateResult("created" if status_code == 201 else "reused", record)
+
+    def _patch_question(
+        self, question_id: Any, *, status: str | None | Any, hypothesis: str | None | Any
+    ) -> LTRecord:
+        payload: JsonObject = {}
+        if status is not _UNSET and status is not None:
+            payload["status"] = status
+        if hypothesis is not _UNSET:
+            payload["hypothesis"] = hypothesis
+        return self._data_record(
+            self._request(
+                "PATCH",
+                f"/questions/{_require_non_empty(str(question_id), 'question_id')}",
+                json_payload=payload,
+                preserve_json_nulls=True,
+            )
+        )
+
     def upsert_question(
         self,
         *,
         project_id: str,
         text: str,
         question_type: str = QuestionType.OTHER.value,
-        status: str = QuestionStatus.ACTIVE.value,
+        status: str | None = None,
         hypothesis: str | None = None,
         parent_question_ids: Sequence[str] | None = None,
     ) -> LTRecord:
-        cleaned_text = _require_non_empty(text, "text")
-        resolved_type = _validate_enum(
-            question_type,
-            field_name="question_type",
-            allowed_values=QUESTION_TYPE_VALUES,
-        )
-        resolved_status = _validate_enum(
-            status,
-            field_name="question status",
-            allowed_values=QUESTION_STATUS_VALUES,
-        )
-        existing = self.find_question_by_text(project_id, cleaned_text)
-        if existing is not None:
-            return existing
+        """Deprecated: use :meth:`get_or_create_question`.
+
+        Preserves the record-returning contract. Fields are compared only when
+        supplied (an explicit non-default question_type/status/hypothesis/
+        parents), so a matching existing question is reused and a conflicting one
+        raises — the honesty fix. When ``status`` is omitted the record stages.
+        """
+
+        return self.get_or_create_question(
+            project_id=project_id,
+            text=text,
+            question_type=(
+                question_type if question_type != QuestionType.OTHER.value else _UNSET
+            ),
+            status=status if status is not None else _UNSET,
+            hypothesis=hypothesis if hypothesis is not None else _UNSET,
+            parent_question_ids=(
+                parent_question_ids if parent_question_ids is not None else _UNSET
+            ),
+        ).record
+
+    def activate_question(self, question_id: str) -> LTRecord:
+        """Promote a staged question to active.
+
+        This crosses the human review gate deliberately; it is a named,
+        one-way promotion (the server rejects active -> staged). Consumers and
+        agents must call it explicitly rather than relying on a create default.
+        """
         return self._data_record(
             self._request(
-                "POST",
-                "/questions",
-                json_payload={
-                    "project_id": str(project_id),
-                    "text": cleaned_text,
-                    "question_type": resolved_type,
-                    "hypothesis": hypothesis,
-                    "status": resolved_status,
-                    "parent_question_ids": list(parent_question_ids or []),
-                },
+                "PATCH",
+                f"/questions/{_require_non_empty(str(question_id), 'question_id')}",
+                json_payload={"status": QuestionStatus.ACTIVE.value},
             )
         )
 
@@ -773,15 +1034,21 @@ class LabTracker:
         content: str,
         targets: Sequence[EntityRef | Mapping[str, Any] | tuple[str, str] | str] = (),
         metadata: Mapping[str, NoteMetadataScalar] | None = None,
-        status: str = NoteStatus.COMMITTED.value,
+        status: str | None = None,
         transcribed_text: str | None = None,
     ) -> LTRecord:
+        """Find or create a note by its first-line marker.
+
+        When ``status`` is omitted the record inherits the server's canonical
+        staged default (``NoteStatus.STAGED``); consumers and agents must not
+        commit implicitly. Commit deliberately with :meth:`commit_note`.
+        """
         marker = first_line_marker(content)
         if not marker:
             raise LTValidationError(
                 "Note content has no first non-blank line; cannot derive idempotency marker."
             )
-        resolved_status = _validate_enum(
+        resolved_status = _validate_optional_enum(
             status,
             field_name="note status",
             allowed_values=NOTE_STATUS_VALUES,
@@ -852,6 +1119,14 @@ class LabTracker:
             )
         )
 
+    def _preflight_upload(self, path: Path) -> int:
+        """Reject an empty or oversize file before any bytes are transferred."""
+
+        try:
+            return preflight_upload_size(path, max_bytes=MAX_UPLOAD_BYTES)
+        except UploadTooLargeError as exc:
+            raise LTValidationError(str(exc)) from exc
+
     def upload_note_file(
         self,
         *,
@@ -864,20 +1139,44 @@ class LabTracker:
         client_capture_id: str | None = None,
     ) -> LTRecord:
         path = Path(file_path).expanduser()
-        payload = _read_non_empty_file(
-            path,
-            empty_message="file_path must point to a non-empty file.",
+        self._preflight_upload(path)
+        resolved_status = _validate_enum(
+            status,
+            field_name="note status",
+            allowed_values=NOTE_STATUS_VALUES,
         )
-        return self._upload_note_file_payload(
-            project_id=project_id,
-            path=path,
-            payload=payload,
-            metadata=metadata,
-            status=status,
-            content_type=content_type,
-            transcribed_text=transcribed_text,
-            client_capture_id=client_capture_id,
+        resolved_metadata = _validate_metadata(metadata)
+        resolved_content_type = (
+            content_type or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         )
+        data: dict[str, str] = {
+            "project_id": _require_non_empty(str(project_id), "project_id"),
+            "status": resolved_status,
+        }
+        if client_capture_id:
+            data["client_capture_id"] = _require_non_empty(client_capture_id, "client_capture_id")
+        if resolved_metadata:
+            data["metadata"] = json.dumps(resolved_metadata, sort_keys=True)
+        if transcribed_text:
+            data["transcribed_text"] = transcribed_text
+        # Stream the file handle so a large upload never materializes in memory;
+        # open_file re-opens per attempt so a 401 retry replays cleanly.
+        response = self._transport.upload(
+            "POST",
+            "/notes/upload-file",
+            field_name="file",
+            open_file=lambda: path.open("rb"),
+            filename=path.name,
+            content_type=resolved_content_type,
+            data=data,
+        )
+        if response.status_code == 422:
+            raise LTValidationError(_response_error(response))
+        if response.status_code == 409:
+            raise LTConflictError(_response_error(response))
+        if response.status_code >= 400:
+            raise LTAPIError(_response_error(response))
+        return self._data_record(_response_json(response))
 
     def _upload_note_file_payload(
         self,
@@ -890,6 +1189,7 @@ class LabTracker:
         content_type: str | None = None,
         transcribed_text: str | None = None,
         client_capture_id: str | None = None,
+        timeout: Any = None,
     ) -> LTRecord:
         note, _status_code = self._upload_note_file_payload_with_status(
             project_id=project_id,
@@ -900,6 +1200,7 @@ class LabTracker:
             content_type=content_type,
             transcribed_text=transcribed_text,
             client_capture_id=client_capture_id,
+            timeout=timeout,
         )
         return note
 
@@ -914,6 +1215,7 @@ class LabTracker:
         content_type: str | None = None,
         transcribed_text: str | None = None,
         client_capture_id: str | None = None,
+        timeout: Any = None,
     ) -> tuple[LTRecord, int]:
         if not payload:
             raise LTValidationError("file_path must point to a non-empty file.")
@@ -944,6 +1246,7 @@ class LabTracker:
             "/notes/upload-file",
             data=data,
             files={"file": (path.name, payload, resolved_content_type)},
+            timeout=timeout,
         )
         return self._data_record(response_payload), status_code
 
@@ -953,6 +1256,7 @@ class LabTracker:
         metadata: Mapping[str, NoteMetadataScalar],
         *,
         status: str | None = None,
+        timeout: Any = None,
     ) -> LTRecord:
         payload: JsonObject = {"metadata": _validate_metadata(metadata) or {}}
         if status is not None:
@@ -966,6 +1270,21 @@ class LabTracker:
                 "PATCH",
                 f"/notes/{_require_non_empty(str(note_id), 'note_id')}",
                 json_payload=payload,
+                timeout=timeout,
+            )
+        )
+
+    def commit_note(self, note_id: str) -> LTRecord:
+        """Commit a staged note.
+
+        This crosses the human review gate deliberately. Consumers and agents
+        must call it explicitly rather than relying on a create default.
+        """
+        return self._data_record(
+            self._request(
+                "PATCH",
+                f"/notes/{_require_non_empty(str(note_id), 'note_id')}",
+                json_payload={"status": NoteStatus.COMMITTED.value},
             )
         )
 
@@ -998,6 +1317,11 @@ class LabTracker:
         path = Path(file_path).expanduser().resolve()
         if not path.is_file():
             raise LTValidationError(f"Evidence path is not a file: {path}")
+        # Reject an oversize file before reading it into memory. The bytes are
+        # then read exactly once: the same snapshot is hashed and uploaded, so a
+        # concurrent write between the read and the upload cannot desync the
+        # content hash from the transferred bytes.
+        self._preflight_upload(path)
         payload = _read_non_empty_file(
             path,
             empty_message="Evidence file must not be empty.",
@@ -1154,6 +1478,8 @@ class LabTracker:
         data: Mapping[str, str] | None = None,
         files: dict[str, Any] | None = None,
         retry_on_unauthorized: bool = True,
+        preserve_json_nulls: bool = False,
+        timeout: Any = None,
     ) -> JsonObject:
         payload, _status_code = self._request_with_status(
             method,
@@ -1164,6 +1490,8 @@ class LabTracker:
             data=data,
             files=files,
             retry_on_unauthorized=retry_on_unauthorized,
+            preserve_json_nulls=preserve_json_nulls,
+            timeout=timeout,
         )
         return payload
 
@@ -1178,53 +1506,28 @@ class LabTracker:
         data: Mapping[str, str] | None = None,
         files: dict[str, Any] | None = None,
         retry_on_unauthorized: bool = True,
+        preserve_json_nulls: bool = False,
+        timeout: Any = None,
     ) -> tuple[JsonObject, int]:
-        headers: dict[str, str] = {"X-LabTracker-Surface": "cli"}
-        supplied_token_used = bool(self._access_token and self._supplied_access_token)
-        if authenticated:
-            token = self._bearer_token(required=False)
-            if token is not None:
-                headers["Authorization"] = f"Bearer {token}"
-        response = self._send(
+        response = self._transport.request(
             method,
             path,
-            params=_drop_empty(params),
-            json=_drop_empty(json_payload),
+            authenticated=authenticated,
+            params=params,
+            json=json_payload,
             data=data,
             files=files,
-            headers=headers,
+            retry_on_unauthorized=retry_on_unauthorized,
+            preserve_json_nulls=preserve_json_nulls,
+            timeout=timeout,
         )
-        if response.status_code == 401 and authenticated and retry_on_unauthorized:
-            if supplied_token_used and not self._has_login_credentials():
-                raise LTAPIError(
-                    "LAB_TRACKER_ACCESS_TOKEN was rejected by the Lab Tracker API. "
-                    "Refresh the token or set LAB_TRACKER_USERNAME and "
-                    "LAB_TRACKER_PASSWORD so the client can log in."
-                )
-            self._access_token = None
-            self._supplied_access_token = False
-            token = self._bearer_token(required=True)
-            headers["Authorization"] = f"Bearer {token}"
-            response = self._send(
-                method,
-                path,
-                params=_drop_empty(params),
-                json=_drop_empty(json_payload),
-                data=data,
-                files=files,
-                headers=headers,
-            )
         if response.status_code == 422:
             raise LTValidationError(_response_error(response))
+        if response.status_code == 409:
+            raise LTConflictError(_response_error(response))
         if response.status_code >= 400:
             raise LTAPIError(_response_error(response))
         return _response_json(response), response.status_code
-
-    def _send(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
-        try:
-            return self._client.request(method, path, **kwargs)
-        except httpx.HTTPError as exc:
-            raise LTAPIError(f"Lab Tracker request {method} {path} failed: {exc}") from exc
 
     def _has_login_credentials(self) -> bool:
         return bool((self.username or "").strip() and self.password)
@@ -1241,13 +1544,15 @@ class LabTracker:
                     "when the Lab Tracker API has authentication enabled."
                 )
             return None
-        response = self._send(
+        response = self._transport.send(
             "POST",
             "/auth/login",
             json={"username": username, "password": password},
         )
         if response.status_code == 422:
             raise LTValidationError(_response_error(response))
+        if response.status_code == 409:
+            raise LTConflictError(_response_error(response))
         if response.status_code >= 400:
             raise LTAPIError(_response_error(response))
         payload = _response_json(response)
@@ -1399,14 +1704,39 @@ def _default_client() -> LabTracker:
 
 
 class _LazyLabTrackerClient:
+    """Module-level proxy over a lazily built, cached default client.
+
+    Attribute access delegates to a cached singleton so the module-level helper
+    functions share one client. Using the proxy as a context manager builds a
+    *fresh* client that owns its own lifetime, so ``with client as lt:`` closes
+    only that fresh client and never the shared singleton — later helper calls
+    can never end up attached to a closed httpx client.
+    """
+
     def __getattr__(self, name: str) -> Any:
         return getattr(_default_client(), name)
 
     def __enter__(self) -> LabTracker:
-        return _default_client().__enter__()
+        context_client = client_from_env()
+        self.__dict__.setdefault("_context_clients", []).append(context_client)
+        return context_client
 
     def __exit__(self, *exc_info: object) -> None:
-        return _default_client().__exit__(*exc_info)
+        context_clients = self.__dict__.get("_context_clients")
+        if context_clients:
+            context_clients.pop().close()
+
+    def close(self) -> None:
+        """Close and clear the cached singleton.
+
+        The next attribute access rebuilds it from the environment, so callers
+        can deterministically recycle the client (e.g. after changing env or
+        profile settings).
+        """
+        global _default_client_instance
+        if _default_client_instance is not None:
+            _default_client_instance.close()
+            _default_client_instance = None
 
 
 client = _LazyLabTrackerClient()
@@ -1476,6 +1806,14 @@ def find_note_by_marker(project_id: str, marker: str) -> LTRecord | None:
     return client.find_note_by_marker(project_id, marker)
 
 
+def get_or_create_project(**kwargs: Any) -> GetOrCreateResult:
+    return client.get_or_create_project(**kwargs)
+
+
+def get_or_create_question(**kwargs: Any) -> GetOrCreateResult:
+    return client.get_or_create_question(**kwargs)
+
+
 def upsert_project(**kwargs: Any) -> LTRecord:
     return client.upsert_project(**kwargs)
 
@@ -1486,6 +1824,14 @@ def upsert_question(**kwargs: Any) -> LTRecord:
 
 def upsert_note(**kwargs: Any) -> LTRecord:
     return client.upsert_note(**kwargs)
+
+
+def activate_question(question_id: str) -> LTRecord:
+    return client.activate_question(question_id)
+
+
+def commit_note(note_id: str) -> LTRecord:
+    return client.commit_note(note_id)
 
 
 def quick_capture(text: str | bytes, **kwargs: Any) -> LTRecord:
@@ -1514,10 +1860,60 @@ def _record(payload: Any) -> LTRecord:
     return LTRecord(payload)
 
 
-def _drop_empty(payload: JsonObject | None) -> JsonObject | None:
-    if payload is None:
-        return None
-    return {key: value for key, value in payload.items() if value is not None}
+def _format_conflicts(conflicts: dict[str, tuple[Any, Any]]) -> str:
+    return "; ".join(
+        f"{field}: existing={existing!r} supplied={supplied!r}"
+        for field, (existing, supplied) in conflicts.items()
+    )
+
+
+def _project_field_conflicts(
+    existing: LTRecord, *, description: str | Any, status: str | None | Any
+) -> dict[str, tuple[Any, Any]]:
+    conflicts: dict[str, tuple[Any, Any]] = {}
+    if description is not _UNSET:
+        existing_desc = str(existing.get("description") or "")
+        supplied_desc = str(description or "")
+        if existing_desc != supplied_desc:
+            conflicts["description"] = (existing_desc, supplied_desc)
+    if status is not _UNSET and status is not None:
+        existing_status = str(existing.get("status") or "")
+        if existing_status != status:
+            conflicts["status"] = (existing_status, status)
+    return conflicts
+
+
+def _question_field_conflicts(
+    existing: LTRecord,
+    *,
+    question_type: str | Any,
+    status: str | None | Any,
+    hypothesis: str | None | Any,
+    parent_question_ids: Sequence[str] | None | Any,
+) -> dict[str, tuple[Any, Any]]:
+    conflicts: dict[str, tuple[Any, Any]] = {}
+    if question_type is not _UNSET:
+        existing_type = str(existing.get("question_type") or "")
+        if existing_type != question_type:
+            conflicts["question_type"] = (existing_type, question_type)
+    if status is not _UNSET and status is not None:
+        existing_status = str(existing.get("status") or "")
+        if existing_status != status:
+            conflicts["status"] = (existing_status, status)
+    if hypothesis is not _UNSET:
+        existing_hyp = str(existing.get("hypothesis") or "").strip()
+        supplied_hyp = str(hypothesis or "").strip()
+        if existing_hyp != supplied_hyp:
+            conflicts["hypothesis"] = (existing_hyp, supplied_hyp)
+    if parent_question_ids is not _UNSET:
+        existing_parents = {str(item) for item in (existing.get("parent_question_ids") or [])}
+        supplied_parents = {str(item) for item in (parent_question_ids or [])}
+        if existing_parents != supplied_parents:
+            conflicts["parent_question_ids"] = (
+                sorted(existing_parents),
+                sorted(supplied_parents),
+            )
+    return conflicts
 
 
 def _validate_limit(limit: int) -> int:

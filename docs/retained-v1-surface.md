@@ -70,6 +70,11 @@ research record:
 - Per-(project, user) graph-draft batch settings and run history for configured
   cadence, run-now, and run-due drafting over staged notes, with a project-level
   default row and `review_assignee` attribution on scheduled user batches.
+- Opt-in, per-user review-ready email cues backed by a transactional delivery
+  outbox, retry leases, and signed short-lived links. Email contains no project
+  or research content, and links still require normal authentication and
+  project authorization. Provider acceptance is recorded separately from inbox
+  delivery.
 - Durable curation provenance that keeps the committed graph honest about
   itself: each accepted graph-draft operation records how it was accepted
   (`human_selected`, `bulk_accepted`, or `auto_accepted`) plus the accepting

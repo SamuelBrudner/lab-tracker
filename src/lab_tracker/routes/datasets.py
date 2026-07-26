@@ -6,31 +6,25 @@ from datetime import datetime
 from uuid import UUID
 
 from fastapi import APIRouter
-from sqlalchemy import select
 from starlette import status as http_status
 from starlette.requests import Request
 
 from lab_tracker.api import LabTrackerAPI
-from lab_tracker.db_models import DatasetFileModel
-from lab_tracker.db_types import ensure_uuid
 from lab_tracker.models import Dataset, DatasetStatus, UsageEventResourceType
+from lab_tracker.patching import provided_fields
 from lab_tracker.schemas import DatasetCreate, DatasetUpdate, Envelope, ListEnvelope
 
-from .dataset_files import _delete_stored_dataset_file
 from .provenance import dataset_provenance_payload, jsonld_response
 from .shared import (
     CreatedByFilter,
-    accessible_project_ids_from_request,
     actor_from_request,
     api_from_request,
     dataset_default_status,
-    db_session_from_request,
     ensure_project_read,
-    file_storage_from_request,
+    handlers_from_request,
     list_response,
     provenance_base_url,
     record_usage_view,
-    repository_from_request,
     validate_pagination,
     wants_jsonld,
 )
@@ -70,14 +64,9 @@ def build_datasets_router(api: LabTrackerAPI) -> APIRouter:
         offset: int = 0,
     ):
         validate_pagination(limit, offset)
-        if project_id is not None:
-            ensure_project_read(request, project_id)
-            project_ids = None
-        else:
-            project_ids = accessible_project_ids_from_request(request)
-        datasets, total = repository_from_request(request).query_datasets(
+        page = handlers_from_request(request).catalogs.list_datasets(
+            actor=actor_from_request(request),
             project_id=project_id,
-            project_ids=project_ids,
             status=status.value if status is not None else None,
             created_by=created_by,
             since=since,
@@ -85,12 +74,19 @@ def build_datasets_router(api: LabTrackerAPI) -> APIRouter:
             limit=limit,
             offset=offset,
         )
-        return list_response(datasets, limit=limit, offset=offset, total=total)
+        return list_response(
+            page.items,
+            limit=limit,
+            offset=offset,
+            total=page.total,
+        )
 
     @router.get("/datasets/{dataset_id}", response_model=Envelope[Dataset])
     def get_dataset(dataset_id: UUID, request: Request):
-        dataset = api_from_request(request, api).get_dataset(dataset_id)
-        ensure_project_read(request, dataset.project_id)
+        dataset = api_from_request(request, api).get_dataset_for_read(
+            dataset_id,
+            actor=actor_from_request(request),
+        )
         record_usage_view(
             request,
             resource_type=UsageEventResourceType.DATASET,
@@ -112,40 +108,18 @@ def build_datasets_router(api: LabTrackerAPI) -> APIRouter:
         ensure_project_read(request, existing.project_id)
         dataset = api_from_request(request, api).update_dataset(
             dataset_id,
-            status=payload.status,
-            terminal_reason=payload.terminal_reason,
-            question_links=payload.question_links,
-            commit_manifest=payload.commit_manifest,
-            commit_hash=payload.commit_hash,
             actor=actor,
+            **provided_fields(payload),
         )
         return Envelope(data=dataset)
 
     @router.delete("/datasets/{dataset_id}", response_model=Envelope[Dataset])
     def delete_dataset(dataset_id: UUID, request: Request):
-        request_api = api_from_request(request, api)
         actor = actor_from_request(request)
-        existing = request_api.get_dataset(dataset_id)
-        ensure_project_read(request, existing.project_id)
-        db_session = db_session_from_request(request)
-        storage_backend = file_storage_from_request(request)
-        storage_ids = [
-            ensure_uuid(value)
-            for value in db_session.scalars(
-                select(DatasetFileModel.storage_id).where(
-                    DatasetFileModel.dataset_id == str(dataset_id)
-                )
-            )
-        ]
-        dataset = request_api.delete_dataset(dataset_id, actor=actor)
-        db_session.flush()
-        for storage_id in storage_ids:
-            request_api.run_after_commit(
-                lambda storage_id=storage_id: _delete_stored_dataset_file(
-                    storage_backend,
-                    storage_id,
-                )
-            )
+        dataset = handlers_from_request(request).deletions.delete_dataset(
+            dataset_id,
+            actor=actor,
+        )
         return Envelope(data=dataset)
 
     return router

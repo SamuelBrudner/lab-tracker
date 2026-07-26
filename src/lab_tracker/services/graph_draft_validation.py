@@ -108,6 +108,10 @@ _ENTITY_ID_LIST_FIELDS = {
     "related_claim_ids": EntityType.CLAIM,
     "note_ids": EntityType.NOTE,
 }
+_SOURCE_NOTE_ID_KEYS = ("source_note_ids", "source_note_id", "note_id")
+_SOURCE_NOTE_IDS_RESOLUTION_EXPLICIT = "explicit"
+_SOURCE_NOTE_IDS_RESOLUTION_SINGLE_SOURCE_FALLBACK = "single_source_fallback"
+_SOURCE_NOTE_IDS_RESOLUTION_AMBIGUOUS_BUNDLE = "ambiguous_bundle"
 
 
 class GraphPatchValidator:
@@ -147,6 +151,10 @@ class GraphPatchValidator:
                 raise GraphDraftingError("GPT graph patch operation was not an object.")
             _validate_graph_patch_operation_shape(item)
             payload = _payload_from_json(item.get("payload_json"))
+            source_refs = _normalize_source_refs(
+                item["source_refs"],
+                change_set=change_set,
+            )
             try:
                 operation = GraphChangeOperation(
                     operation_id=uuid4(),
@@ -160,7 +168,7 @@ class GraphPatchValidator:
                     payload=payload,
                     rationale=str(item.get("rationale") or ""),
                     confidence=item.get("confidence"),
-                    source_refs=item.get("source_refs") or [],
+                    source_refs=source_refs,
                 )
             except Exception as exc:
                 raise GraphDraftingError("GPT graph patch operation was invalid.") from exc
@@ -230,6 +238,158 @@ def _payload_from_json(raw_payload: Any) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise GraphDraftingError("GPT graph patch payload_json must decode to an object.")
     return parsed
+
+
+def _normalize_source_refs(
+    raw_source_refs: list[Any],
+    *,
+    change_set: GraphChangeSet,
+) -> list[dict[str, Any]]:
+    """Return canonical, source-scoped refs for every graph-draft path.
+
+    New model responses identify their supporting notes explicitly. Older
+    providers and persisted test fixtures may omit those IDs or use one of the
+    historical singular keys. A single available source can be filled safely;
+    a multi-source draft cannot, so the complete bundle is retained and marked
+    ambiguous instead of selecting a primary note.
+    """
+
+    allowed_ids = _allowed_source_note_ids(change_set)
+    if not raw_source_refs:
+        return [_source_ref_fallback(allowed_ids)]
+
+    normalized: list[dict[str, Any]] = []
+    for index, raw_ref in enumerate(raw_source_refs, start=1):
+        if not isinstance(raw_ref, dict):
+            raise GraphDraftingError(
+                f"GPT graph patch source_ref #{index} must be an object."
+            )
+        normalized.append(
+            _normalize_source_ref(
+                raw_ref,
+                allowed_ids=allowed_ids,
+                ref_index=index,
+            )
+        )
+    return normalized
+
+
+def _allowed_source_note_ids(change_set: GraphChangeSet) -> list[str]:
+    # `source_note_id` predates the bundle-aware list and remains the canonical
+    # primary source, so retain it even if a historical row has a partial list.
+    raw_ids = [change_set.source_note_id, *change_set.source_note_ids]
+    allowed_ids: list[str] = []
+    seen: set[str] = set()
+    for raw_id in raw_ids:
+        note_id = str(raw_id)
+        if note_id in seen:
+            continue
+        seen.add(note_id)
+        allowed_ids.append(note_id)
+    return allowed_ids
+
+
+def _source_ref_fallback(allowed_ids: list[str]) -> dict[str, Any]:
+    is_single_source = len(allowed_ids) == 1
+    return {
+        "label": "source note" if is_single_source else "batch source notes",
+        "quote": "",
+        "region": None,
+        "source_note_ids": list(allowed_ids),
+        "source_note_ids_resolution": (
+            _SOURCE_NOTE_IDS_RESOLUTION_SINGLE_SOURCE_FALLBACK
+            if is_single_source
+            else _SOURCE_NOTE_IDS_RESOLUTION_AMBIGUOUS_BUNDLE
+        ),
+    }
+
+
+def _normalize_source_ref(
+    raw_ref: dict[str, Any],
+    *,
+    allowed_ids: list[str],
+    ref_index: int,
+) -> dict[str, Any]:
+    explicit_ids = _explicit_source_note_ids(raw_ref, ref_index=ref_index)
+    if explicit_ids is None:
+        source_note_ids = list(allowed_ids)
+        resolution = (
+            _SOURCE_NOTE_IDS_RESOLUTION_SINGLE_SOURCE_FALLBACK
+            if len(allowed_ids) == 1
+            else _SOURCE_NOTE_IDS_RESOLUTION_AMBIGUOUS_BUNDLE
+        )
+    else:
+        source_note_ids = explicit_ids
+        resolution = _SOURCE_NOTE_IDS_RESOLUTION_EXPLICIT
+        unknown_ids = [note_id for note_id in source_note_ids if note_id not in allowed_ids]
+        if unknown_ids:
+            raise GraphDraftingError(
+                f"GPT graph patch source_ref #{ref_index} contains source_note_ids "
+                f"outside this draft's source notes: {', '.join(unknown_ids)}."
+            )
+
+    normalized = {
+        key: value for key, value in raw_ref.items() if key not in _SOURCE_NOTE_ID_KEYS
+    }
+    normalized["source_note_ids"] = source_note_ids
+    normalized["source_note_ids_resolution"] = resolution
+    return normalized
+
+
+def _explicit_source_note_ids(
+    raw_ref: dict[str, Any],
+    *,
+    ref_index: int,
+) -> list[str] | None:
+    has_plural = "source_note_ids" in raw_ref
+    singular_keys = [key for key in ("source_note_id", "note_id") if key in raw_ref]
+    if not has_plural and not singular_keys:
+        return None
+
+    if has_plural:
+        raw_ids = raw_ref["source_note_ids"]
+        if not isinstance(raw_ids, list) or not raw_ids:
+            raise GraphDraftingError(
+                f"GPT graph patch source_ref #{ref_index} source_note_ids must be a "
+                "non-empty list."
+            )
+        source_note_ids = [
+            _canonical_source_note_id(raw_id, ref_index=ref_index) for raw_id in raw_ids
+        ]
+        if len(source_note_ids) != len(set(source_note_ids)):
+            raise GraphDraftingError(
+                f"GPT graph patch source_ref #{ref_index} source_note_ids must be unique."
+            )
+        for key in singular_keys:
+            singular_id = _canonical_source_note_id(raw_ref[key], ref_index=ref_index)
+            if singular_id not in source_note_ids:
+                raise GraphDraftingError(
+                    f"GPT graph patch source_ref #{ref_index} has conflicting {key} and "
+                    "source_note_ids values."
+                )
+        return source_note_ids
+
+    singular_ids = [
+        _canonical_source_note_id(raw_ref[key], ref_index=ref_index) for key in singular_keys
+    ]
+    if len(set(singular_ids)) != 1:
+        raise GraphDraftingError(
+            f"GPT graph patch source_ref #{ref_index} has conflicting legacy source note IDs."
+        )
+    return [singular_ids[0]]
+
+
+def _canonical_source_note_id(raw_id: Any, *, ref_index: int) -> str:
+    if isinstance(raw_id, bool) or not isinstance(raw_id, (str, UUID)):
+        raise GraphDraftingError(
+            f"GPT graph patch source_ref #{ref_index} contains an invalid source note ID."
+        )
+    try:
+        return str(UUID(str(raw_id).strip()))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise GraphDraftingError(
+            f"GPT graph patch source_ref #{ref_index} contains an invalid source note ID."
+        ) from exc
 
 
 def _validate_graph_patch_operation_shape(item: dict[str, Any]) -> None:
@@ -304,6 +464,8 @@ def _validate_graph_operation_payload(
         raise ValidationError("Operation payload must be a JSON object.")
     if operation.op == GraphChangeOp.UPDATE and operation.target_entity_id is None:
         raise ValidationError("Update operations require target_entity_id.")
+    if operation.op == GraphChangeOp.UPDATE and not candidate:
+        raise ValidationError("Update operation payload must include at least one field.")
     schema_map = _CREATE_SCHEMAS if operation.op == GraphChangeOp.CREATE else _UPDATE_SCHEMAS
     schema_type = schema_map.get(operation.entity_type)
     if schema_type is None:

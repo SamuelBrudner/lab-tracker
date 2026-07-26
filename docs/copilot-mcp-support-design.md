@@ -43,9 +43,9 @@ product (OpenAPI/declarative-agent integration) and is an explicit non-goal.
   one 401 retry (`mcp_api_client.py`). The MCP client sends
   `X-LabTracker-Surface: mcp`.
 - Committed client configs now include `.mcp.json` in **Claude/Codex shape**
-  (top-level `mcpServers`) plus Copilot-shaped examples `.vscode/mcp.json` and
-  `mcp.visualstudio.json` (top-level `servers`). GitHub Copilot IDEs read the
-  `servers` schema and will not read `.mcp.json`.
+  (top-level `mcpServers`) plus the Copilot-shaped `.vscode/mcp.json`
+  (top-level `servers`) shared by VS Code and Visual Studio. GitHub Copilot IDEs
+  read the `servers` schema and will not read `.mcp.json`.
 - Auth middleware (`app_parts/middleware.py`) branches on token prefix:
   `ldev_` → device principal; `lpat_` → service principal with capped role and
   `read_only`; otherwise JWT → user. When auth is disabled (the default for
@@ -71,9 +71,15 @@ mode and works today over stdio once a Copilot-shaped config file exists.
 ### Mode 2 — Shared private read-only hosted endpoint (optional)
 
 One hosted MCP server over the lab's VPN/tailnet, serving **read-only** decision
-context to many IDEs. Because it is read-only, inbound auth can be a single
+support to many IDEs. Because it is read-only, inbound auth can be a single
 shared read-only `lpat_` (or per-user read-only tokens for nicer revocation), and
 no token forwarding is required. Still fronted by TLS + Origin/Host validation.
+
+Read-only LPATs can use ordinary GET-backed read tools plus two explicitly
+reviewed semantic-read POSTs: `POST /assistant/decision-context` and
+`POST /external-artifacts/resolve`. Both retain their project/entity
+authorization and opaque-not-found behavior inside the endpoint. Neither exact
+exception is a generic permission for MCP POST reads.
 
 ```
   Mode 1 (stdio, per-user, writes OK)        Mode 2 (hosted, read-only)
@@ -124,12 +130,12 @@ launch:
 }
 ```
 
-Also: a Visual Studio-shaped repo-root config (same `servers` schema; flag that
-the existing `.mcp.json` uses `mcpServers` and VS will not read it — keep them as
-separate documented files); reconcile the committed `.mcp.json` with
-`cli.py::_mcp_json()` (they disagree today); a short `instructions=` string on
-`FastMCP(...)` carrying the two load-bearing rules (decision-context-first;
-"only a person commits") since Copilot has no skills system; and a new
+Also: use `.vscode/mcp.json` as the shared VS Code and Visual Studio config
+(`servers` schema), while documenting that `.mcp.json` serves Claude/Codex
+clients that expect `mcpServers`; keep the committed `.mcp.json` aligned with
+`cli.py::_mcp_json()`; add a short `instructions=` string on `FastMCP(...)`
+carrying the two load-bearing rules (decision-context-first; "only a person
+commits") since Copilot has no skills system; and add a
 `docs/lab-tracker-copilot.md` user doc + a README "Capture and integrate"
 pointer.
 
@@ -159,30 +165,49 @@ endpoints (`device_principal_can_access`), wrong for a read-everything assistant
 - **DB model** (`db_models.py`, new `personal_access_tokens` table): `id`,
   `user_id` FK, `label`, `token_hash` (unique, indexed; `_hash_token` only —
   never store raw), `role` (capped ≤ issuer's role at issuance), `read_only`
-  (bool, default **True**), `created_at`, `last_used_at` (throttled 5 min like
-  devices), `revoked_at`, **`expires_at` (REQUIRED, with a max TTL)**.
+  (bool, default **True**), `scope` (`all` or the scheduler-only
+  `batch_run_due`), `created_at`, `last_used_at` (throttled 5 min like devices),
+  `revoked_at`, **`expires_at` (REQUIRED, with a max TTL)**.
 - **Migration:** additive table. Per CLAUDE.md, run `uv run alembic heads` (must
   be 1), set `down_revision` to it, never renumber; rebase `down_revision` onto
   whatever head exists **at merge time** and run `test_alembic_has_single_head`
   post-merge.
 - **Service** `PersonalAccessTokenService`: `issue_token(user, *, label, role,
-  read_only, expires_at)` (returns raw secret once; caps role; rejects TTL beyond
-  max), `verify_token` (hash lookup; reject revoked/expired; throttled
-  `last_used_at`; **no caching of validity** so revocation is immediate),
-  `list_tokens`, `revoke_token`.
+  read_only, scope, expires_at)` (returns raw secret once; caps role; rejects TTL
+  beyond max and unknown scopes), `verify_token` (hash lookup; reject
+  revoked/expired; throttled `last_used_at`; **no caching of validity** so
+  revocation is immediate), `list_tokens`, `revoke_token`.
 - **Access policy** `service_principal_can_access(method, path, *, read_only,
-  role)` — the **single authorization decision point**: reads allowed everywhere
-  except `/auth/*`; writes **denied if `read_only`**, otherwise role-gated.
+  role, scope)` — the **single coarse-grained authorization decision point**:
+  unknown scopes fail closed, and `batch_run_due` scope permits only an admin
+  `POST /batches/run-due` (no reads, resolver access, other writes, or
+  `/auth/*`). For `scope=all`, `/auth/*` remains denied and ordinary
+  `GET`/`HEAD`/`OPTIONS` reads are allowed. Side-effect-free POST reads are
+  admitted only through explicit exact-path checks for
+  `POST /external-artifacts/resolve` and
+  `POST /assistant/decision-context` when `read_only=true`. The existing
+  admin-only `POST /batches/run-due` exception is handled separately. Every
+  other write is denied when `read_only=true`; write-enabled tokens remain
+  role-gated, so a write-enabled viewer does not inherit either semantic-read
+  exception.
 - **Middleware branch** (new `elif` before the JWT `else`):
 
   ```python
   elif token.startswith(LPAT_TOKEN_PREFIX):
-      principal = await run_in_threadpool(app.state.pat_service.verify_token, token)
+      principal = await run_in_threadpool(
+          app.state.personal_access_token_service.verify_token,
+          token,
+      )
       if principal is None:
           raise AuthError("Invalid personal access token.")
-      if not service_principal_can_access(request.method, request.url.path,
-                                          read_only=principal.read_only, role=principal.role):
-          return _device_forbidden_response("Not permitted for this token.")
+      if not service_principal_can_access(
+          request.method,
+          request.url.path,
+          read_only=principal.read_only,
+          role=principal.role,
+          scope=principal.scope,
+      ):
+          return _service_forbidden_response("Not permitted for this token.")
       user = await run_in_threadpool(app.state.auth_service.get_user_by_id, principal.user_id)
       if user is None:
           raise AuthError("Invalid personal access token.")
@@ -199,9 +224,11 @@ endpoints (`device_principal_can_access`), wrong for a read-everything assistant
 - **Endpoints** `/auth/tokens` (issue/list/revoke), mirroring device-management
   routes, with a **dedicated fail-closed throttle on `lpat_` 401/403** (the
   existing `auth_rate_limit_*` only guards `/auth/login`).
-- **Belt-and-suspenders:** the path-level `read_only` check is the first gate;
-  service-layer `require_role` is the independent second gate. Audit every write
-  service for uniform `require_role` before enabling any write.
+- **Belt-and-suspenders:** the path policy first fails closed on scope and
+  `/auth/*`, then distinguishes ordinary protocol reads, explicitly enumerated
+  semantic POST reads, and writes. Service-layer project authorization and
+  `require_role` remain independent gates. Audit every write service for uniform
+  `require_role` before enabling any write.
 
 ### B3 — MCP client static API key
 
@@ -293,10 +320,11 @@ not client config.
 
 ## Phased plan
 
-**P0a — Local Copilot IDE onboarding.** `.vscode/mcp.json` + VS config, portable
-launch, `instructions=` string, `docs/lab-tracker-copilot.md` + README pointer.
-No migration. Makes auth-disabled local + username/password stdio work in Copilot
-IDEs immediately. *Lowest risk; do first.*
+**P0a — Local Copilot IDE onboarding.** Shared `.vscode/mcp.json` for VS Code
+and Visual Studio, portable launch, `instructions=` string,
+`docs/lab-tracker-copilot.md` + README pointer. No migration. Makes
+auth-disabled local + username/password stdio work in Copilot IDEs immediately.
+*Lowest risk; do first.*
 
 **P0b — Tool annotations.** `readOnlyHint`/`destructiveHint`/`title` table +
 reclassify `list_question_refactors`. No migration. Reads auto-run; writes prompt.

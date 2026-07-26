@@ -19,6 +19,7 @@ from lab_tracker.models import (
     GoalType,
     UsageEventResourceType,
 )
+from lab_tracker.patching import provided_fields
 from lab_tracker.schemas import (
     Envelope,
     GoalCreate,
@@ -143,7 +144,7 @@ def build_goals_router(api: LabTrackerAPI) -> APIRouter:
         request_api = api_from_request(request, api)
         actor = actor_from_request(request)
         goal = request_api.get_goal(goal_id)
-        request_api.goals.require_goal_read(goal, actor=actor)
+        request_api.require_goal_read(goal, actor=actor)
         record_usage_view(
             request,
             resource_type=UsageEventResourceType.GOAL,
@@ -155,17 +156,13 @@ def build_goals_router(api: LabTrackerAPI) -> APIRouter:
     @router.patch("/goals/{goal_id}", response_model=Envelope[Goal])
     def update_goal(goal_id: UUID, payload: GoalUpdate, request: Request):
         actor = actor_from_request(request)
+        updates = provided_fields(payload)
+        if "links" in updates:
+            updates["links"] = goal_link_specs(updates["links"])
         goal = api_from_request(request, api).update_goal(
             goal_id,
-            goal_type=payload.goal_type,
-            title=payload.title,
-            summary=payload.summary,
-            status=payload.status,
-            target_date=payload.target_date,
-            external_ref=payload.external_ref,
-            attributes=payload.attributes,
-            links=goal_link_specs(payload.links),
             actor=actor,
+            **updates,
         )
         return Envelope(data=goal)
 
@@ -203,10 +200,8 @@ def build_goals_router(api: LabTrackerAPI) -> APIRouter:
         link = api_from_request(request, api).update_goal_link(
             goal_id,
             link_id,
-            relation=payload.relation,
-            link_status=payload.link_status,
-            slot=payload.slot,
             actor=actor,
+            **provided_fields(payload),
         )
         return Envelope(data=link)
 

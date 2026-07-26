@@ -24,6 +24,7 @@ from lab_tracker.models import (
     ProjectStatus,
     QuestionStatus,
 )
+from lab_tracker.patching import provided_fields
 from lab_tracker.schemas import (
     AnalysisCreate,
     AnalysisUpdate,
@@ -257,103 +258,70 @@ class GraphPatchApplier:
         actor: AuthContext | None,
         origin_kwargs: dict[str, Any],
     ) -> EntityResult:
+        if not payload:
+            raise ValidationError("Update operation payload must include at least one field.")
         if entity_type == EntityType.PROJECT:
             data = validate_payload(ProjectUpdate, payload)
             return self.projects.update_project(
                 entity_id,
-                name=data.name,
-                description=data.description,
-                status=data.status,
                 actor=actor,
+                **provided_fields(data),
             )
         if entity_type == EntityType.QUESTION:
             data = validate_payload(QuestionUpdate, payload)
             return self.questions.update_question(
                 entity_id,
-                text=data.text,
-                question_type=data.question_type,
-                hypothesis=data.hypothesis,
-                status=data.status,
-                terminal_reason=data.terminal_reason,
-                parent_question_ids=data.parent_question_ids,
                 actor=actor,
                 **origin_kwargs,
+                **provided_fields(data),
             )
         if entity_type == EntityType.NOTE:
             data = validate_payload(NoteUpdate, payload)
             return self.notes.update_note(
                 entity_id,
-                transcribed_text=data.transcribed_text,
-                targets=data.targets,
-                metadata=data.metadata,
-                status=data.status,
                 actor=actor,
                 **origin_kwargs,
+                **provided_fields(data),
             )
         if entity_type == EntityType.SESSION:
             data = validate_payload(SessionUpdate, payload)
             return self.sessions.update_session(
                 entity_id,
-                status=data.status,
-                ended_at=data.ended_at,
                 actor=actor,
                 **origin_kwargs,
+                **provided_fields(data),
             )
         if entity_type == EntityType.DATASET:
             data = validate_payload(DatasetUpdate, payload)
             return self.datasets.update_dataset(
                 entity_id,
-                status=data.status,
-                terminal_reason=data.terminal_reason,
-                question_links=data.question_links,
-                commit_manifest=data.commit_manifest,
-                commit_hash=data.commit_hash,
                 actor=actor,
                 **origin_kwargs,
+                **provided_fields(data),
             )
         if entity_type == EntityType.ANALYSIS:
             data = validate_payload(AnalysisUpdate, payload)
             return self.analyses.update_analysis(
                 entity_id,
-                status=data.status,
-                environment_hash=data.environment_hash,
-                external_artifacts=data.external_artifacts,
-                terminal_reason=data.terminal_reason,
                 actor=actor,
                 **origin_kwargs,
+                **provided_fields(data),
             )
         if entity_type == EntityType.CLAIM:
             data = validate_payload(ClaimUpdate, payload)
             return self.claims.update_claim(
                 entity_id,
-                statement=data.statement,
-                confidence=data.confidence,
-                status=data.status,
-                terminal_reason=data.terminal_reason,
-                falsification_criteria=data.falsification_criteria,
-                verification_plan=data.verification_plan,
-                refuting_outcome=data.refuting_outcome,
-                supported_by_dataset_ids=data.supported_by_dataset_ids,
-                supported_by_analysis_ids=data.supported_by_analysis_ids,
-                answers_question_ids=data.answers_question_ids,
-                external_citations=data.external_citations,
                 actor=actor,
                 **origin_kwargs,
+                **provided_fields(data),
             )
         if entity_type == EntityType.GOAL:
             if self.goals is None:
                 raise ValidationError("Goal service is not configured.")
             data = validate_payload(GoalUpdate, payload)
-            return self.goals.update_goal(
-                entity_id,
-                goal_type=data.goal_type,
-                title=data.title,
-                summary=data.summary,
-                status=data.status,
-                target_date=data.target_date,
-                external_ref=data.external_ref,
-                attributes=data.attributes,
-                links=[
+            updates = provided_fields(data)
+            if "links" in updates:
+                updates["links"] = [
                     GoalLinkSpec(
                         target=EntityRef(
                             entity_type=link.entity_type,
@@ -366,21 +334,21 @@ class GraphPatchApplier:
                         ),
                         slot=link.slot,
                     )
-                    for link in data.links or []
-                ],
+                    for link in data.links
+                ]
+            return self.goals.update_goal(
+                entity_id,
                 actor=actor,
                 **origin_kwargs,
+                **updates,
             )
         if entity_type == EntityType.VISUALIZATION:
             data = validate_payload(VisualizationUpdate, payload)
             return self.visualizations.update_visualization(
                 entity_id,
-                viz_type=data.viz_type,
-                file_path=data.file_path,
-                caption=data.caption,
-                related_claim_ids=data.related_claim_ids,
                 actor=actor,
                 **origin_kwargs,
+                **provided_fields(data),
             )
         raise ValidationError("Unsupported entity type.")
 

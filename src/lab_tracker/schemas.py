@@ -7,10 +7,11 @@ Envelope/ListEnvelope wrappers. Request payloads use purpose-built schemas below
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Annotated, Any, Generic, Literal, TypeVar
+from typing import Annotated, Any, ClassVar, Generic, Literal, TypeVar
 from uuid import UUID
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 from lab_tracker.auth import Role
 from lab_tracker.goals_attributes import validate_goal_attributes
@@ -18,6 +19,7 @@ from lab_tracker.models import (
     Analysis,
     AnalysisStatus,
     Claim,
+    ClaimConfidence,
     ClaimInput,
     ClaimRelation,
     ClaimStatus,
@@ -105,6 +107,22 @@ class RequestModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class PatchRequestModel(RequestModel):
+    """Request model whose subclasses declare fields that reject explicit null."""
+
+    non_nullable_fields: ClassVar[frozenset[str]] = frozenset()
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_explicit_null_for_non_nullable_fields(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        for field_name in cls.non_nullable_fields:
+            if field_name in value and value[field_name] is None:
+                raise ValueError(f"{field_name} must not be null.")
+        return value
+
+
 class Envelope(BaseModel, Generic[T]):
     data: T
     meta: dict[str, Any] | None = None
@@ -165,6 +183,13 @@ class AuthBootstrapStatus(BaseModel):
     bootstrap_token_warning: str | None = None
 
 
+class AuthSetupReadiness(BaseModel):
+    scheduler_enabled: bool
+    background_worker_enabled: bool
+    provider: str
+    provider_credential_configured: bool
+
+
 class AuthTokenRead(BaseModel):
     access_token: str
     token_type: str = "bearer"
@@ -176,6 +201,9 @@ class PersonalAccessTokenCreate(RequestModel):
     label: Annotated[str, Field(min_length=1, max_length=150), AfterValidator(_non_blank_string)]
     role: Role = Role.VIEWER
     read_only: bool = True
+    # "all" keeps the role-based service policy; "batch_run_due" narrows the token
+    # to POST /batches/run-due only (the daily-review scheduler credential).
+    scope: Literal["all", "batch_run_due"] = "all"
     expires_at: datetime
 
 
@@ -184,6 +212,7 @@ class PersonalAccessTokenRead(BaseModel):
     label: str
     role: Role
     read_only: bool
+    scope: str
     expires_at: datetime
     created_at: datetime
     last_used_at: datetime | None = None
@@ -202,9 +231,21 @@ class AuthRegisterRequest(RequestModel):
     invite_token: NonBlankStr | None = None
 
 
-class AuthUserUpdate(RequestModel):
-    password: NonBlankStr | None = None
-    role: Role | None = None
+class AuthUserUpdate(PatchRequestModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={"minProperties": 1},
+    )
+    non_nullable_fields = frozenset({"password", "role"})
+
+    password: NonBlankStr | SkipJsonSchema[None] = None
+    role: Role | SkipJsonSchema[None] = None
+
+    @model_validator(mode="after")
+    def _require_password_or_role(self) -> AuthUserUpdate:
+        if not self.model_fields_set:
+            raise ValueError("At least one of password or role must be provided.")
+        return self
 
 
 class AuthInvitationCreate(RequestModel):
@@ -263,12 +304,15 @@ class ProjectCreate(RequestModel):
     description: str | None = None
     status: ProjectStatus | None = None
     group_id: UUID | None = None
+    client_capture_id: str | None = None
 
 
-class ProjectUpdate(RequestModel):
-    name: NonBlankStr | None = None
-    description: str | None = None
-    status: ProjectStatus | None = None
+class ProjectUpdate(PatchRequestModel):
+    non_nullable_fields = frozenset({"name", "description", "status"})
+
+    name: NonBlankStr | SkipJsonSchema[None] = None
+    description: str | SkipJsonSchema[None] = None
+    status: ProjectStatus | SkipJsonSchema[None] = None
     group_id: UUID | None = None
 
 
@@ -279,11 +323,13 @@ class ProjectGroupCreate(RequestModel):
     group_read_all: bool | None = None
 
 
-class ProjectGroupUpdate(RequestModel):
-    name: NonBlankStr | None = None
-    description: str | None = None
-    kind: ProjectGroupKind | None = None
-    group_read_all: bool | None = None
+class ProjectGroupUpdate(PatchRequestModel):
+    non_nullable_fields = frozenset({"name", "description", "kind", "group_read_all"})
+
+    name: NonBlankStr | SkipJsonSchema[None] = None
+    description: str | SkipJsonSchema[None] = None
+    kind: ProjectGroupKind | SkipJsonSchema[None] = None
+    group_read_all: bool | SkipJsonSchema[None] = None
 
 
 class GroupMembershipCreate(RequestModel):
@@ -326,10 +372,14 @@ class SupervisionEdgeCreate(RequestModel):
     ended_at: datetime | None = None
 
 
-class SupervisionEdgeUpdate(RequestModel):
-    supervisor_user_id: UUID | None = None
-    supervisee_user_id: UUID | None = None
-    started_at: datetime | None = None
+class SupervisionEdgeUpdate(PatchRequestModel):
+    non_nullable_fields = frozenset(
+        {"supervisor_user_id", "supervisee_user_id", "started_at"}
+    )
+
+    supervisor_user_id: UUID | SkipJsonSchema[None] = None
+    supervisee_user_id: UUID | SkipJsonSchema[None] = None
+    started_at: datetime | SkipJsonSchema[None] = None
     ended_at: datetime | None = None
 
 
@@ -351,6 +401,7 @@ class QuestionCreate(RequestModel):
     question_type: QuestionType
     hypothesis: str | None = None
     status: QuestionStatus | None = None
+    client_capture_id: str | None = None
     terminal_reason: NonBlankStr | None = None
     parent_question_ids: list[UUID] | None = None
 
@@ -360,13 +411,17 @@ class QuestionCreate(RequestModel):
         return _unique_uuid_list(value)
 
 
-class QuestionUpdate(RequestModel):
-    text: NonBlankStr | None = None
-    question_type: QuestionType | None = None
+class QuestionUpdate(PatchRequestModel):
+    non_nullable_fields = frozenset(
+        {"text", "question_type", "status", "parent_question_ids"}
+    )
+
+    text: NonBlankStr | SkipJsonSchema[None] = None
+    question_type: QuestionType | SkipJsonSchema[None] = None
     hypothesis: str | None = None
-    status: QuestionStatus | None = None
+    status: QuestionStatus | SkipJsonSchema[None] = None
     terminal_reason: NonBlankStr | None = None
-    parent_question_ids: list[UUID] | None = None
+    parent_question_ids: list[UUID] | SkipJsonSchema[None] = None
 
     @field_validator("parent_question_ids")
     @classmethod
@@ -420,12 +475,16 @@ class DatasetCreate(RequestModel):
         return _unique_uuid_list(value)
 
 
-class DatasetUpdate(RequestModel):
-    commit_manifest: DatasetCommitManifestInput | None = None
-    commit_hash: str | None = None
-    status: DatasetStatus | None = None
+class DatasetUpdate(PatchRequestModel):
+    non_nullable_fields = frozenset(
+        {"commit_manifest", "commit_hash", "status", "question_links"}
+    )
+
+    commit_manifest: DatasetCommitManifestInput | SkipJsonSchema[None] = None
+    commit_hash: str | SkipJsonSchema[None] = None
+    status: DatasetStatus | SkipJsonSchema[None] = None
     terminal_reason: NonBlankStr | None = None
-    question_links: list[QuestionLink] | None = None
+    question_links: list[QuestionLink] | SkipJsonSchema[None] = None
 
 
 class NoteCreate(RequestModel):
@@ -446,11 +505,13 @@ class NoteCreate(RequestModel):
         return _normalize_note_metadata_for_request(value)
 
 
-class NoteUpdate(RequestModel):
+class NoteUpdate(PatchRequestModel):
+    non_nullable_fields = frozenset({"targets", "metadata", "status"})
+
     transcribed_text: str | None = None
-    targets: list[EntityRef] | None = None
-    metadata: dict[str, NoteMetadataScalar] | None = None
-    status: NoteStatus | None = None
+    targets: list[EntityRef] | SkipJsonSchema[None] = None
+    metadata: dict[str, NoteMetadataScalar] | SkipJsonSchema[None] = None
+    status: NoteStatus | SkipJsonSchema[None] = None
 
     @field_validator("metadata")
     @classmethod
@@ -469,9 +530,11 @@ class NoteArchiveRequest(RequestModel):
     reason: NoteArchiveReason = NoteArchiveReason.ARCHIVED_UNREVIEWED
 
 
-class GraphDraftOperationUpdate(RequestModel):
-    payload: dict[str, Any] | None = None
-    status: GraphChangeOperationStatus | None = None
+class GraphDraftOperationUpdate(PatchRequestModel):
+    non_nullable_fields = frozenset({"payload", "status"})
+
+    payload: dict[str, Any] | SkipJsonSchema[None] = None
+    status: GraphChangeOperationStatus | SkipJsonSchema[None] = None
     review_note: str | None = None
 
 
@@ -538,12 +601,25 @@ class GraphDraftListFilters(BaseModel):
     source_note_id: UUID | None = None
 
 
-class GraphDraftBatchSettingsUpdate(RequestModel):
-    enabled: bool | None = None
-    cadence_minutes: int | None = Field(default=None, ge=60)
-    run_at_local_time: str | None = None
-    timezone_name: str | None = None
-    user_id: UUID | None = None
+class GraphDraftBatchSettingsUpdate(PatchRequestModel):
+    non_nullable_fields = frozenset(
+        {
+            "enabled",
+            "cadence_minutes",
+            "run_at_local_time",
+            "timezone_name",
+            "user_id",
+            "email_notifications_enabled",
+        }
+    )
+
+    enabled: bool | SkipJsonSchema[None] = None
+    cadence_minutes: int | SkipJsonSchema[None] = Field(default=None, ge=60)
+    run_at_local_time: str | SkipJsonSchema[None] = None
+    timezone_name: str | SkipJsonSchema[None] = None
+    user_id: UUID | SkipJsonSchema[None] = None
+    email_notifications_enabled: bool | SkipJsonSchema[None] = None
+    notification_email: str | None = Field(default=None, max_length=254)
 
 
 class GraphDraftBatchRunRequest(RequestModel):
@@ -556,6 +632,11 @@ class GraphDraftBatchRunRequest(RequestModel):
 class GraphDraftBatchRunFilters(BaseModel):
     project_id: UUID | None = None
     status: GraphDraftBatchRunStatus | None = None
+
+
+class ReviewEmailTestRequest(RequestModel):
+    destination_email: str = Field(min_length=3, max_length=254)
+    recipient_user_id: UUID | None = None
 
 
 class AssistantDecisionContextRequest(RequestModel):
@@ -579,8 +660,10 @@ class SessionCreate(RequestModel):
     primary_question_id: UUID | None = None
 
 
-class SessionUpdate(RequestModel):
-    status: SessionStatus | None = None
+class SessionUpdate(PatchRequestModel):
+    non_nullable_fields = frozenset({"status"})
+
+    status: SessionStatus | SkipJsonSchema[None] = None
     ended_at: datetime | None = None
 
 
@@ -624,17 +707,19 @@ class AnalysisCreate(RequestModel):
         return _unique_uuid_list(value) or []
 
 
-class AnalysisUpdate(RequestModel):
-    status: AnalysisStatus | None = None
+class AnalysisUpdate(PatchRequestModel):
+    non_nullable_fields = frozenset({"status", "external_artifacts"})
+
+    status: AnalysisStatus | SkipJsonSchema[None] = None
     environment_hash: str | None = None
-    external_artifacts: list[ExternalArtifactReference] | None = None
+    external_artifacts: list[ExternalArtifactReference] | SkipJsonSchema[None] = None
     terminal_reason: NonBlankStr | None = None
 
 
 class ClaimCreate(RequestModel):
     project_id: UUID
     statement: NonBlankStr
-    confidence: float = Field(..., ge=0.0, le=100.0)
+    confidence: ClaimConfidence
     status: ClaimStatus | None = None
     terminal_reason: NonBlankStr | None = None
     falsification_criteria: NonBlankStr | None = None
@@ -653,18 +738,30 @@ class ClaimCreate(RequestModel):
         return _unique_uuid_list(value)
 
 
-class ClaimUpdate(RequestModel):
-    statement: NonBlankStr | None = None
-    confidence: float | None = Field(None, ge=0.0, le=100.0)
-    status: ClaimStatus | None = None
+class ClaimUpdate(PatchRequestModel):
+    non_nullable_fields = frozenset(
+        {
+            "statement",
+            "confidence",
+            "status",
+            "supported_by_dataset_ids",
+            "supported_by_analysis_ids",
+            "answers_question_ids",
+            "external_citations",
+        }
+    )
+
+    statement: NonBlankStr | SkipJsonSchema[None] = None
+    confidence: ClaimConfidence | SkipJsonSchema[None] = None
+    status: ClaimStatus | SkipJsonSchema[None] = None
     terminal_reason: NonBlankStr | None = None
     falsification_criteria: NonBlankStr | None = None
     verification_plan: NonBlankStr | None = None
     refuting_outcome: NonBlankStr | None = None
-    supported_by_dataset_ids: list[UUID] | None = None
-    supported_by_analysis_ids: list[UUID] | None = None
-    answers_question_ids: list[UUID] | None = None
-    external_citations: list[ExternalArtifactReference] | None = None
+    supported_by_dataset_ids: list[UUID] | SkipJsonSchema[None] = None
+    supported_by_analysis_ids: list[UUID] | SkipJsonSchema[None] = None
+    answers_question_ids: list[UUID] | SkipJsonSchema[None] = None
+    external_citations: list[ExternalArtifactReference] | SkipJsonSchema[None] = None
 
     @field_validator(
         "supported_by_dataset_ids", "supported_by_analysis_ids", "answers_question_ids"
@@ -705,13 +802,24 @@ class ExplorationNodeCreate(RequestModel):
         return _unique_uuid_list(value)
 
 
-class ExplorationNodeUpdate(RequestModel):
-    title: NonBlankStr | None = None
-    status: ExplorationNodeStatus | None = None
+class ExplorationNodeUpdate(PatchRequestModel):
+    non_nullable_fields = frozenset(
+        {
+            "title",
+            "status",
+            "alternatives_considered",
+            "evidence_refs",
+            "parent_node_ids",
+            "also_depends_on_node_ids",
+        }
+    )
+
+    title: NonBlankStr | SkipJsonSchema[None] = None
+    status: ExplorationNodeStatus | SkipJsonSchema[None] = None
     choice: NonBlankStr | None = None
-    alternatives_considered: list[NonBlankStr] | None = None
+    alternatives_considered: list[NonBlankStr] | SkipJsonSchema[None] = None
     rationale: NonBlankStr | None = None
-    evidence_refs: list[EntityRef] | None = None
+    evidence_refs: list[EntityRef] | SkipJsonSchema[None] = None
     hypothesis: NonBlankStr | None = None
     failure_mode: NonBlankStr | None = None
     lesson: NonBlankStr | None = None
@@ -719,8 +827,8 @@ class ExplorationNodeUpdate(RequestModel):
     trigger: NonBlankStr | None = None
     invalidates_node_id: UUID | None = None
     invalidates_claim_id: UUID | None = None
-    parent_node_ids: list[UUID] | None = None
-    also_depends_on_node_ids: list[UUID] | None = None
+    parent_node_ids: list[UUID] | SkipJsonSchema[None] = None
+    also_depends_on_node_ids: list[UUID] | SkipJsonSchema[None] = None
 
     @field_validator("parent_node_ids", "also_depends_on_node_ids")
     @classmethod
@@ -773,15 +881,19 @@ class GoalCreate(GoalCreateFields):
     links: list[GoalLinkCreate] | None = None
 
 
-class GoalUpdate(RequestModel):
-    goal_type: GoalType | None = None
-    title: NonBlankStr | None = None
-    summary: str | None = None
-    status: GoalStatus | None = None
+class GoalUpdate(PatchRequestModel):
+    non_nullable_fields = frozenset(
+        {"goal_type", "title", "summary", "status", "attributes", "links"}
+    )
+
+    goal_type: GoalType | SkipJsonSchema[None] = None
+    title: NonBlankStr | SkipJsonSchema[None] = None
+    summary: str | SkipJsonSchema[None] = None
+    status: GoalStatus | SkipJsonSchema[None] = None
     target_date: date | None = None
     external_ref: str | None = None
-    attributes: dict[str, Any] | None = None
-    links: list[GoalLinkCreate] | None = None
+    attributes: dict[str, Any] | SkipJsonSchema[None] = None
+    links: list[GoalLinkCreate] | SkipJsonSchema[None] = None
 
     @model_validator(mode="after")
     def _attributes_match_goal_type(self) -> GoalUpdate:
@@ -790,9 +902,11 @@ class GoalUpdate(RequestModel):
         return self
 
 
-class GoalLinkUpdate(RequestModel):
-    relation: GoalRelation | None = None
-    link_status: GoalLinkStatus | None = None
+class GoalLinkUpdate(PatchRequestModel):
+    non_nullable_fields = frozenset({"relation", "link_status"})
+
+    relation: GoalRelation | SkipJsonSchema[None] = None
+    link_status: GoalLinkStatus | SkipJsonSchema[None] = None
     slot: str | None = Field(default=None, max_length=120)
 
 
@@ -834,16 +948,249 @@ class VisualizationCreate(RequestModel):
         return _unique_uuid_list(value)
 
 
-class VisualizationUpdate(RequestModel):
-    viz_type: NonBlankStr | None = None
-    file_path: NonBlankStr | None = None
+class VisualizationUpdate(PatchRequestModel):
+    non_nullable_fields = frozenset({"viz_type", "file_path", "related_claim_ids"})
+
+    viz_type: NonBlankStr | SkipJsonSchema[None] = None
+    file_path: NonBlankStr | SkipJsonSchema[None] = None
     caption: str | None = None
-    related_claim_ids: list[UUID] | None = None
+    related_claim_ids: list[UUID] | SkipJsonSchema[None] = None
 
     @field_validator("related_claim_ids")
     @classmethod
     def _related_claim_ids_unique(cls, value: list[UUID] | None) -> list[UUID] | None:
         return _unique_uuid_list(value)
+
+
+class EvidenceBundleUploadIntent(RequestModel):
+    checksum_sha256: Annotated[str, Field(pattern=r"^[0-9a-fA-F]{64}$")]
+    size_bytes: int = Field(..., gt=0)
+    filename: NonBlankStr
+    content_type: NonBlankStr
+
+    @field_validator("checksum_sha256")
+    @classmethod
+    def _normalize_checksum(cls, value: str) -> str:
+        return value.lower()
+
+
+class EvidenceBundleExistingDataset(RequestModel):
+    kind: Literal["existing"]
+    dataset_id: UUID
+
+
+class EvidenceBundleCreateDataset(RequestModel):
+    kind: Literal["create"]
+    primary_question_id: UUID | None = None
+    secondary_question_ids: list[UUID] | None = None
+    commit_manifest: DatasetCommitManifestInput | None = None
+    commit_hash: str | None = None
+    status: DatasetStatus = DatasetStatus.STAGED
+    terminal_reason: NonBlankStr | None = None
+
+    @field_validator("secondary_question_ids")
+    @classmethod
+    def _secondary_ids_unique(cls, value: list[UUID] | None) -> list[UUID] | None:
+        return _unique_uuid_list(value)
+
+
+EvidenceBundleDataset = Annotated[
+    EvidenceBundleExistingDataset | EvidenceBundleCreateDataset,
+    Field(discriminator="kind"),
+]
+
+
+class EvidenceBundleExistingAnalysis(RequestModel):
+    kind: Literal["existing"]
+    analysis_id: UUID
+
+
+class EvidenceBundleCreateAnalysis(RequestModel):
+    kind: Literal["create"]
+    dataset_ids: list[UUID] | None = None
+    method_hash: NonBlankStr
+    code_version: NonBlankStr
+    environment_hash: str | None = None
+    external_artifacts: list[ExternalArtifactReference] | None = None
+    status: AnalysisStatus = AnalysisStatus.STAGED
+    terminal_reason: NonBlankStr | None = None
+    derive_code_provenance: bool = False
+
+    @field_validator("dataset_ids")
+    @classmethod
+    def _analysis_dataset_ids_unique(
+        cls,
+        value: list[UUID] | None,
+    ) -> list[UUID] | None:
+        return _unique_uuid_list(value)
+
+
+EvidenceBundleAnalysis = Annotated[
+    EvidenceBundleExistingAnalysis | EvidenceBundleCreateAnalysis,
+    Field(discriminator="kind"),
+]
+
+
+class EvidenceBundleExistingClaim(RequestModel):
+    kind: Literal["existing"]
+    claim_id: UUID
+
+
+class EvidenceBundleCreateClaim(RequestModel):
+    kind: Literal["create"]
+    statement: NonBlankStr
+    confidence: ClaimConfidence
+    status: ClaimStatus = ClaimStatus.PROPOSED
+    terminal_reason: NonBlankStr | None = None
+    falsification_criteria: NonBlankStr | None = None
+    verification_plan: NonBlankStr | None = None
+    refuting_outcome: NonBlankStr | None = None
+    supported_by_dataset_ids: list[UUID] | None = None
+    supported_by_analysis_ids: list[UUID] | None = None
+    answers_question_ids: list[UUID] | None = None
+    external_citations: list[ExternalArtifactReference] | None = None
+
+    @field_validator(
+        "supported_by_dataset_ids",
+        "supported_by_analysis_ids",
+        "answers_question_ids",
+    )
+    @classmethod
+    def _claim_link_ids_unique(cls, value: list[UUID] | None) -> list[UUID] | None:
+        return _unique_uuid_list(value)
+
+
+EvidenceBundleClaim = Annotated[
+    EvidenceBundleExistingClaim | EvidenceBundleCreateClaim,
+    Field(discriminator="kind"),
+]
+
+
+class EvidenceBundleExistingVisualization(RequestModel):
+    kind: Literal["existing"]
+    viz_id: UUID
+    upload_intent: EvidenceBundleUploadIntent | None = None
+
+
+class EvidenceBundleCreateVisualization(RequestModel):
+    kind: Literal["create"]
+    analysis_id: UUID | None = None
+    viz_type: NonBlankStr
+    file_path: NonBlankStr
+    caption: str | None = None
+    related_claim_ids: list[UUID] | None = None
+    upload_intent: EvidenceBundleUploadIntent | None = None
+
+    @field_validator("related_claim_ids")
+    @classmethod
+    def _bundle_claim_ids_unique(
+        cls,
+        value: list[UUID] | None,
+    ) -> list[UUID] | None:
+        return _unique_uuid_list(value)
+
+
+EvidenceBundleVisualization = Annotated[
+    EvidenceBundleExistingVisualization | EvidenceBundleCreateVisualization,
+    Field(discriminator="kind"),
+]
+
+
+class EvidenceBundleExistingSourceNote(RequestModel):
+    kind: Literal["existing"]
+    note_id: UUID
+
+
+class EvidenceBundleCreateSourceNote(RequestModel):
+    kind: Literal["create"]
+    raw_content: NonBlankStr
+    transcribed_text: str | None = None
+    targets: list[EntityRef] | None = None
+    metadata: dict[str, NoteMetadataScalar] | None = None
+    status: NoteStatus = NoteStatus.STAGED
+
+    @field_validator("metadata")
+    @classmethod
+    def _bundle_note_metadata_normalized(
+        cls,
+        value: dict[str, NoteMetadataScalar] | None,
+    ) -> dict[str, str] | None:
+        return _normalize_note_metadata_for_request(value)
+
+
+EvidenceBundleSourceNote = Annotated[
+    EvidenceBundleExistingSourceNote | EvidenceBundleCreateSourceNote,
+    Field(discriminator="kind"),
+]
+
+
+class EvidenceBundleRequest(RequestModel):
+    project_id: UUID
+    primary_question_id: UUID | None = None
+    dataset: EvidenceBundleDataset | SkipJsonSchema[None] = None
+    analysis: EvidenceBundleAnalysis | SkipJsonSchema[None] = None
+    claim: EvidenceBundleClaim | SkipJsonSchema[None] = None
+    visualization: EvidenceBundleVisualization | SkipJsonSchema[None] = None
+    source_note: EvidenceBundleSourceNote | SkipJsonSchema[None] = None
+    dry_run: bool = True
+    idempotency_key: Annotated[
+        str,
+        Field(min_length=1, max_length=200),
+        AfterValidator(_non_blank_string),
+    ] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_explicit_null_components(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        for field_name in ("dataset", "analysis", "claim", "visualization", "source_note"):
+            if field_name in value and value[field_name] is None:
+                raise ValueError(f"{field_name} must be omitted rather than null")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_bundle_boundary(self) -> EvidenceBundleRequest:
+        if not any(
+            component is not None
+            for component in (
+                self.dataset,
+                self.analysis,
+                self.claim,
+                self.visualization,
+                self.source_note,
+            )
+        ):
+            raise ValueError("At least one evidence-bundle component is required.")
+        if not self.dry_run and self.idempotency_key is None:
+            raise ValueError("idempotency_key is required when dry_run is false.")
+        return self
+
+
+class EvidenceBundleComponentIds(BaseModel):
+    dataset_id: UUID | None = None
+    analysis_id: UUID | None = None
+    claim_id: UUID | None = None
+    visualization_id: UUID | None = None
+    source_note_id: UUID | None = None
+
+
+class EvidenceBundlePlanStep(BaseModel):
+    action: Literal["create", "reuse"]
+    entity_type: Literal["dataset", "analysis", "claim", "visualization", "source_note"]
+    entity_id: UUID | None = None
+    reason: str | None = None
+    details: dict[str, Any] | None = None
+
+
+class EvidenceBundleResultRead(BaseModel):
+    outcome: Literal["preview", "created", "reused"]
+    dry_run: bool
+    project_id: UUID
+    idempotency_key: str | None = None
+    component_ids: EvidenceBundleComponentIds
+    plan: list[EvidenceBundlePlanStep]
+    warnings: list[str] = Field(default_factory=list)
 
 
 ProjectGraphView = Literal["evidence", "questions", "full"]

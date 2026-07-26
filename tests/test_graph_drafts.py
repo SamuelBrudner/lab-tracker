@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import logging
+import traceback
 from contextlib import contextmanager
 from datetime import timedelta
 from typing import Any
+from urllib.parse import quote
 from uuid import UUID, uuid4
 
 import httpx
@@ -13,7 +16,7 @@ from fastapi.testclient import TestClient
 from lab_tracker.app_parts.middleware import system_auth_context
 from lab_tracker.auth import AuthContext, PrincipalType, Role, utc_now
 from lab_tracker.config import Settings
-from lab_tracker.db_models import GraphChangeSetModel
+from lab_tracker.db_models import GraphChangeOperationModel, GraphChangeSetModel
 from lab_tracker.errors import AuthError, ValidationError
 from lab_tracker.graph_drafting import (
     AnthropicGraphDraftClient,
@@ -281,7 +284,9 @@ def test_openai_graph_draft_client_sends_responses_image_and_strict_schema() -> 
 
     client = OpenAIGraphDraftClient(
         api_key="test-key",
-        model="gpt-test",
+        model="gpt-5.6-sol",
+        reasoning_effort="max",
+        reasoning_mode="pro",
         transport=httpx.MockTransport(handler),
     )
 
@@ -298,7 +303,8 @@ def test_openai_graph_draft_client_sends_responses_image_and_strict_schema() -> 
         "operations": [],
     }
     request = requests[0]
-    assert request["model"] == "gpt-test"
+    assert request["model"] == "gpt-5.6-sol"
+    assert request["reasoning"] == {"effort": "max", "mode": "pro"}
     assert "parent_question_ids" in request["instructions"]
     assert request["input"][0]["content"][1]["type"] == "input_image"
     assert request["input"][0]["content"][1]["image_url"].startswith("data:image/png;base64,")
@@ -340,6 +346,7 @@ def test_openai_graph_draft_client_embeds_extra_reviewer_images() -> None:
     )
 
     content = requests[0]["input"][0]["content"]
+    assert "reasoning" not in requests[0]
     image_items = [item for item in content if item["type"] == "input_image"]
     assert len(image_items) == 1
     assert image_items[0]["image_url"].startswith("data:image/png;base64,")
@@ -485,7 +492,9 @@ def test_openai_graph_draft_client_drafts_from_batch_sends_packet() -> None:
 
     client = OpenAIGraphDraftClient(
         api_key="test-key",
-        model="gpt-batch-test",
+        model="gpt-5.6-sol",
+        reasoning_effort="max",
+        reasoning_mode="pro",
         transport=httpx.MockTransport(handler),
     )
 
@@ -504,7 +513,8 @@ def test_openai_graph_draft_client_drafts_from_batch_sends_packet() -> None:
 
     assert result["summary"] == "batch ok"
     request = requests[0]
-    assert request["model"] == "gpt-batch-test"
+    assert request["model"] == "gpt-5.6-sol"
+    assert request["reasoning"] == {"effort": "max", "mode": "pro"}
     assert "daily batch" in request["instructions"]
     user_text = request["input"][0]["content"][0]["text"]
     assert "Batch size: 2 notes" in user_text
@@ -562,7 +572,9 @@ def test_openai_graph_draft_client_drafts_from_analysis_evidence_sends_packet() 
 
     client = OpenAIGraphDraftClient(
         api_key="test-key",
-        model="gpt-analysis-test",
+        model="gpt-5.6-sol",
+        reasoning_effort="max",
+        reasoning_mode="pro",
         transport=httpx.MockTransport(handler),
     )
 
@@ -573,7 +585,8 @@ def test_openai_graph_draft_client_drafts_from_analysis_evidence_sends_packet() 
 
     assert result["summary"] == "analysis ok"
     request = requests[0]
-    assert request["model"] == "gpt-analysis-test"
+    assert request["model"] == "gpt-5.6-sol"
+    assert request["reasoning"] == {"effort": "max", "mode": "pro"}
     assert "analysis evidence" in request["instructions"]
     user_text = request["input"][0]["content"][0]["text"]
     assert "method_hash=abc123" in user_text
@@ -600,12 +613,16 @@ def test_make_graph_draft_client_returns_openai_by_default() -> None:
         auth_enabled=False,
         graph_draft_provider="openai",
         openai_api_key="test-key",
-        openai_model="gpt-test",
+        openai_model="gpt-5.6-sol",
+        openai_reasoning_effort="max",
+        openai_reasoning_mode="pro",
     )
     client = make_graph_draft_client(settings)
     try:
         assert isinstance(client, OpenAIGraphDraftClient)
-        assert client.model == "gpt-test"
+        assert client.model == "gpt-5.6-sol"
+        assert client.reasoning_effort == "max"
+        assert client.reasoning_mode == "pro"
     finally:
         client.close()
 
@@ -665,9 +682,11 @@ def test_anthropic_graph_draft_client_drafts_note_and_batch() -> None:
 
 def test_google_graph_draft_client_drafts_and_transcribes() -> None:
     requests: list[dict[str, Any]] = []
+    request_metadata: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/v1beta/models/gemini-test:generateContent"
+        request_metadata.append(request)
         requests.append(json.loads(request.content.decode("utf-8")))
         if len(requests) == 3:
             return httpx.Response(
@@ -720,12 +739,69 @@ def test_google_graph_draft_client_drafts_and_transcribes() -> None:
         filename="voice.webm",
         content_type="audio/webm",
     )
+    analysis_result = client.draft_from_analysis_evidence(
+        evidence_text="method_hash=abc123",
+        project_context={"project": {"id": "p1"}},
+    )
 
     assert note_result["summary"] == "google ok"
     assert batch_result["summary"] == "google ok"
     assert transcript["text"] == "Fly 12 tracked cleanly."
+    assert analysis_result["summary"] == "google ok"
+    assert all(request.url.query == b"" for request in request_metadata)
+    assert all(request.headers["x-goog-api-key"] == "google-key" for request in request_metadata)
     assert requests[0]["generationConfig"]["response_mime_type"] == "application/json"
     assert requests[2]["contents"][0]["parts"][1]["inline_data"]["mime_type"] == "audio/webm"
+    client.close()
+
+
+def test_google_request_info_log_contains_no_credential_url(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api_key = "nonstandard/google secret"
+    # Alembic's logging fileConfig disables already-created non-root loggers.
+    # Re-enable httpx explicitly so this remains a non-vacuous wire-log
+    # regression regardless of which migration-backed test ran first.
+    monkeypatch.setattr(logging.getLogger("httpx"), "disabled", False)
+    client = GoogleGraphDraftClient(
+        api_key=api_key,
+        model="gemini-test",
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                json={
+                    "candidates": [
+                        {
+                            "content": {
+                                "parts": [
+                                    {
+                                        "text": json.dumps(
+                                            {
+                                                "summary": "ok",
+                                                "uncertain_fields": [],
+                                                "clarification_requests": [],
+                                                "operations": [],
+                                            }
+                                        )
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                },
+            )
+        ),
+    )
+
+    with caplog.at_level(logging.INFO, logger="httpx"):
+        client.draft_from_batch(
+            batch_context={"mode": "graph_batch", "batch_notes": [{"id": "note-1"}]}
+        )
+
+    assert "models/gemini-test:generateContent" in caplog.text
+    assert api_key not in caplog.text
+    assert "?key=" not in caplog.text
     client.close()
 
 
@@ -783,6 +859,125 @@ def test_anthropic_and_google_clients_report_api_errors() -> None:
         )
     anthropic.close()
     google.close()
+
+
+@pytest.mark.parametrize(
+    "error_type",
+    [httpx.ReadTimeout, httpx.RemoteProtocolError],
+)
+def test_google_transport_failures_redact_url_header_and_exception_chain(
+    error_type: type[httpx.HTTPError],
+) -> None:
+    api_key = "nonstandard/google secret"
+    encoded_key = quote(api_key, safe="")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert not request.url.query
+        assert request.headers["x-goog-api-key"] == api_key
+        raise error_type(
+            "network stalled for "
+            f"{request.url}?key={encoded_key}; x-goog-api-key: {api_key}",
+            request=request,
+        )
+
+    client = GoogleGraphDraftClient(
+        api_key=api_key,
+        model="gemini-test",
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(GraphDraftingError, match="Google request failed") as raised:
+        client.draft_from_batch(
+            batch_context={"mode": "graph_batch", "batch_notes": [{"id": "note-1"}]}
+        )
+
+    rendered = "".join(
+        traceback.format_exception(
+            type(raised.value),
+            raised.value,
+            raised.value.__traceback__,
+        )
+    )
+    assert "network stalled" in rendered
+    assert api_key not in rendered
+    assert encoded_key not in rendered
+    assert "?key=" not in rendered
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+    client.close()
+
+
+def test_google_http_and_protocol_failures_redact_response_content() -> None:
+    api_key = "nonstandard/google secret"
+    encoded_key = quote(api_key, safe="")
+    responses = iter(
+        [
+            httpx.Response(
+                429,
+                json={
+                    "error": {
+                        "message": (
+                            "structured quota exceeded at "
+                            f"https://provider.test/v1?key={api_key}&retry=true"
+                        )
+                    }
+                },
+            ),
+            httpx.Response(
+                429,
+                text=(
+                    "quota exceeded at "
+                    f"https://provider.test/v1?key={api_key}&retry=true "
+                    f"https%3A%2F%2Fprovider.test%2Fv1%3Fkey%3D{encoded_key}"
+                ),
+            ),
+            httpx.Response(
+                200,
+                text=f"not-json response echoed ?key={api_key}",
+            ),
+        ]
+    )
+
+    client = GoogleGraphDraftClient(
+        api_key=api_key,
+        model="gemini-test",
+        transport=httpx.MockTransport(lambda request: next(responses)),
+    )
+
+    with pytest.raises(
+        GraphDraftingError,
+        match="structured quota exceeded",
+    ) as structured_http_failure:
+        client.transcribe_audio(
+            audio_bytes=b"audio",
+            filename="voice.webm",
+            content_type="audio/webm",
+        )
+    with pytest.raises(GraphDraftingError, match="quota exceeded") as text_http_failure:
+        client.transcribe_audio(
+            audio_bytes=b"audio",
+            filename="voice.webm",
+            content_type="audio/webm",
+        )
+    with pytest.raises(GraphDraftingError, match="non-JSON content") as protocol_failure:
+        client.draft_from_batch(
+            batch_context={"mode": "graph_batch", "batch_notes": [{"id": "note-1"}]}
+        )
+
+    for error in (
+        structured_http_failure.value,
+        text_http_failure.value,
+        protocol_failure.value,
+    ):
+        rendered = "".join(
+            traceback.format_exception(type(error), error, error.__traceback__)
+        )
+        assert api_key not in rendered
+        assert encoded_key not in rendered
+        assert "?key=" not in rendered
+        assert "%3Fkey%3D" not in rendered
+    assert "Google returned HTTP 429" in str(text_http_failure.value)
+    client.close()
 
 
 @pytest.mark.parametrize(
@@ -868,6 +1063,11 @@ def test_image_note_draft_stores_operations_and_context(
         "create_note",
     ]
     assert payload["operations"][0]["status"] == "proposed"
+    assert payload["operations"][0]["source_refs"][0]["source_note_ids"] == [note_id]
+    assert (
+        payload["operations"][0]["source_refs"][0]["source_note_ids_resolution"]
+        == "single_source_fallback"
+    )
     assert fake_client.calls[0]["content_type"] == "image/jpeg"
     assert fake_client.calls[0]["draft_mode"] == "graph_context"
     assert fake_client.calls[0]["graph_context"]["project"]["id"] == project_id
@@ -909,7 +1109,7 @@ def test_analysis_note_draft_stores_operations_and_context(
     payload = response.json()["data"]
     assert payload["status"] == "ready"
     assert payload["draft_mode"] == "graph_context"
-    assert payload["prompt_version"] == "analysis-graph-draft-v1"
+    assert payload["prompt_version"] == "analysis-graph-draft-v2"
     assert payload["source_note_id"] == note_id
     assert payload["source_content_type"] == "text/markdown"
     assert payload["context_packet"]["project"]["id"] == project_id
@@ -917,6 +1117,11 @@ def test_analysis_note_draft_stores_operations_and_context(
         "question",
         "note",
     ]
+    assert payload["operations"][0]["source_refs"][0]["source_note_ids"] == [note_id]
+    assert (
+        payload["operations"][0]["source_refs"][0]["source_note_ids_resolution"]
+        == "single_source_fallback"
+    )
     # The model receives the full note evidence text, not just a preview.
     assert "method_hash=abc123" in fake_client.calls[0]["evidence_text"]
     assert fake_client.calls[0]["project_context"]["project"]["id"] == project_id
@@ -1301,6 +1506,50 @@ def test_voice_note_transcription_stores_editable_transcript(
 
     assert edited.status_code == 200
     assert edited.json()["data"]["transcribed_text"] == "Edited transcript"
+
+
+def test_voice_note_transcription_failure_redacts_provider_error_response_and_log(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    api_key = "nonstandard/google secret"
+    project_id = _project(client, admin_auth_headers)
+    voice_note = client.post(
+        "/notes/upload-file",
+        data={"project_id": project_id},
+        files={"file": ("voice.webm", b"fake-audio-bytes", "audio/webm")},
+        headers=admin_auth_headers,
+    ).json()["data"]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert not request.url.query
+        assert request.headers["x-goog-api-key"] == api_key
+        return httpx.Response(
+            429,
+            text=(
+                "voice quota exceeded at "
+                f"https://provider.test/v1?key={api_key}&retry=true"
+            ),
+        )
+
+    client.app.state.graph_draft_client_factory = lambda settings: GoogleGraphDraftClient(
+        api_key=api_key,
+        model="gemini-test",
+        transport=httpx.MockTransport(handler),
+    )
+    caplog.clear()
+
+    response = client.post(
+        f"/notes/{voice_note['note_id']}/transcript",
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 422
+    rendered_failure = response.text + caplog.text
+    assert "voice quota exceeded" in rendered_failure
+    assert api_key not in rendered_failure
+    assert "?key=" not in rendered_failure
 
 
 def test_photo_voice_bundle_draft_uses_image_and_voice_transcript_context(
@@ -1821,7 +2070,7 @@ def test_edit_accept_and_commit_resolves_refs_into_canonical_records(
     assert question_payload["change_set_id"] == change_set_id
     assert question_payload["origin_provider"] == "openai"
     assert question_payload["origin_model"] == "fake-gpt"
-    assert question_payload["origin_prompt_version"] == "multimodal-graph-draft-v1"
+    assert question_payload["origin_prompt_version"] == "multimodal-graph-draft-v2"
 
     notes = client.get(
         f"/notes?project_id={project_id}&target_entity_type=question&target_entity_id={question_id}",
@@ -1908,6 +2157,105 @@ def test_operation_payload_edit_validates_without_mutating_canonical_records(
     assert questions.json()["data"] == []
 
 
+def test_commit_rejects_accepted_empty_update_without_rewriting_provenance(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    question_response = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Does an empty graph update change provenance?",
+            "question_type": "descriptive",
+            "hypothesis": "Canonical hypothesis",
+        },
+        headers=admin_auth_headers,
+    )
+    assert question_response.status_code == 201, question_response.text
+    question = question_response.json()["data"]
+    question_id = question["question_id"]
+    note_id = _image_note(client, admin_auth_headers, project_id)
+    update_patch = {
+        "summary": "Update one question.",
+        "uncertain_fields": [],
+        "clarification_requests": [],
+        "operations": [
+            {
+                "client_ref": "question-update",
+                "op": "update",
+                "entity_type": "question",
+                "semantic_type": "update_entity",
+                "target_entity_id": question_id,
+                "payload_json": json.dumps({"hypothesis": "Drafted hypothesis"}),
+                "rationale": "The source proposes a revised hypothesis.",
+                "confidence": 0.8,
+                "source_refs": [],
+            }
+        ],
+    }
+    client.app.state.graph_draft_client_factory = lambda settings: FakeDraftClient(
+        update_patch
+    )
+    draft_response = client.post(
+        f"/notes/{note_id}/graph-drafts",
+        headers=admin_auth_headers,
+    )
+    assert draft_response.status_code == 201, draft_response.text
+    draft = draft_response.json()["data"]
+    operation = draft["operations"][0]
+    accepted = client.patch(
+        f"/graph-drafts/{draft['change_set_id']}/operations/{operation['operation_id']}",
+        json={"payload": operation["payload"], "status": "accepted"},
+        headers=admin_auth_headers,
+    )
+    assert accepted.status_code == 200, accepted.text
+
+    # Simulate a stale/corrupt accepted row that bypassed review-time validation.
+    # The commit/applier boundary must still fail closed before touching the entity.
+    with client.app.state.db_session_factory() as session:
+        row = session.get(GraphChangeOperationModel, operation["operation_id"])
+        assert row is not None
+        row.payload = {}
+        session.commit()
+
+    versions_path = f"/questions/{question_id}/versions"
+    before = client.get(
+        f"/questions/{question_id}",
+        headers=admin_auth_headers,
+    ).json()["data"]
+    before_version_total = client.get(
+        versions_path,
+        headers=admin_auth_headers,
+    ).json()["meta"]["total"]
+
+    commit = client.post(
+        f"/graph-drafts/{draft['change_set_id']}/commit",
+        json={"message": "Must not apply an empty update"},
+        headers=admin_auth_headers,
+    )
+
+    assert commit.status_code == 422, commit.text
+    assert "must include at least one field" in commit.json()["error"]["message"]
+    after = client.get(
+        f"/questions/{question_id}",
+        headers=admin_auth_headers,
+    ).json()["data"]
+    assert after == before
+    assert after["origin"] == question["origin"]
+    assert after["change_set_id"] == question["change_set_id"]
+    assert (
+        client.get(versions_path, headers=admin_auth_headers).json()["meta"]["total"]
+        == before_version_total
+    )
+    persisted_draft = client.get(
+        f"/graph-drafts/{draft['change_set_id']}",
+        headers=admin_auth_headers,
+    ).json()["data"]
+    assert persisted_draft["status"] == "ready"
+    assert persisted_draft["operations"][0]["status"] == "accepted"
+
+
 def test_commit_failure_rolls_back_canonical_changes(
     client: TestClient,
     admin_auth_headers: dict[str, str],
@@ -1985,6 +2333,14 @@ def test_revise_graph_draft_regenerates_operations_from_feedback(
     change_set_id = created["change_set_id"]
     assert len(created["operations"]) == 2
 
+    # A revision is a new provider call and must refresh stale generation
+    # provenance on the persisted change set.
+    with client.app.state.db_session_factory() as session:
+        row = session.get(GraphChangeSetModel, change_set_id)
+        assert row is not None
+        row.prompt_version = "multimodal-graph-draft-v1"
+        session.commit()
+
     revised_client = FakeDraftClient(_revised_draft_patch(project_id))
     client.app.state.graph_draft_client_factory = lambda settings: revised_client
     feedback = "Drop the note operation; keep only the protocol question."
@@ -2001,6 +2357,12 @@ def test_revise_graph_draft_regenerates_operations_from_feedback(
     assert len(body["operations"]) == 1
     assert all(op["status"] == "proposed" for op in body["operations"])
     assert body["summary"].startswith("Revised per reviewer")
+    assert body["prompt_version"] == "multimodal-graph-draft-v2"
+    assert body["operations"][0]["source_refs"][0]["source_note_ids"] == [note_id]
+    assert (
+        body["operations"][0]["source_refs"][0]["source_note_ids_resolution"]
+        == "single_source_fallback"
+    )
 
     # The model was seeded with the feedback AND the prior operations.
     hint = revised_client.calls[0]["user_hint"]
@@ -2008,6 +2370,66 @@ def test_revise_graph_draft_regenerates_operations_from_feedback(
     assert feedback in hint
     assert "Previously proposed operations" in hint
     assert "suggest_new_question" in hint
+
+
+def test_revise_graph_draft_freezes_original_capture_bundle_sources(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    bundle_id = "revision-freeze-bundle"
+    image_note = client.post(
+        "/notes/upload-file",
+        data={
+            "project_id": project_id,
+            "metadata": json.dumps({"capture_bundle_id": bundle_id}),
+        },
+        files={"file": ("original.png", b"original-image", "image/png")},
+        headers=admin_auth_headers,
+    ).json()["data"]
+    client.app.state.graph_draft_client_factory = lambda settings: FakeDraftClient(
+        _draft_patch(project_id)
+    )
+    created = client.post(
+        f"/notes/{image_note['note_id']}/graph-drafts",
+        headers=admin_auth_headers,
+    ).json()["data"]
+    original_artifacts = created["context_packet"]["source_artifacts"]
+
+    late_note = client.post(
+        "/notes/upload-file",
+        data={
+            "project_id": project_id,
+            "metadata": json.dumps({"capture_bundle_id": bundle_id}),
+        },
+        files={"file": ("late.png", b"late-image", "image/png")},
+        headers=admin_auth_headers,
+    ).json()["data"]
+    revised_patch = _revised_draft_patch(project_id)
+    revised_patch["operations"][0]["source_refs"][0]["source_note_ids"] = [
+        image_note["note_id"]
+    ]
+    revised_client = FakeDraftClient(revised_patch)
+    client.app.state.graph_draft_client_factory = lambda settings: revised_client
+
+    response = client.post(
+        f"/graph-drafts/{created['change_set_id']}/revise",
+        data={"feedback": "Tighten the original proposal."},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200
+    assert revised_client.calls[0]["source_artifacts"] == original_artifacts
+    assert (
+        revised_client.calls[0]["graph_context"]["source_artifacts"]
+        == original_artifacts
+    )
+    assert response.json()["data"]["context_packet"]["source_artifacts"] == (
+        original_artifacts
+    )
+    assert late_note["note_id"] not in {
+        artifact["note_id"] for artifact in revised_client.calls[0]["source_artifacts"]
+    }
 
 
 def test_revise_graph_draft_requires_feedback(
@@ -2114,6 +2536,44 @@ def test_revise_graph_draft_passes_image_attachment_to_model(
     assert extra_images[0]["image_bytes"] == b"fake-png-bytes"
     # The attachment is referenced in the model hint for grounding.
     assert "schematic.png" in revised_client.calls[0]["user_hint"]
+    body = response.json()["data"]
+    marker = body["context_packet"]["review_attachment_evidence"]
+    assert marker == {
+        "status": "unavailable",
+        "reason": "revision_attachments_not_persisted",
+        "attachment_labels": ["schematic.png"],
+        "message": (
+            "Reviewer attachment previews are unavailable because revision "
+            "attachments are not persisted."
+        ),
+    }
+    assert (
+        body["operations"][0]["source_refs"][0]["source_note_ids_resolution"]
+        == "ambiguous_bundle"
+    )
+    assert (
+        body["context_packet"]["reviewer_revisions"][-1][
+            "review_attachment_evidence"
+        ]
+        == marker
+    )
+
+    # A later text-only revision still contains operations influenced by the
+    # unpersisted attachment, so it must preserve the warning and ambiguity.
+    follow_up = client.post(
+        f"/graph-drafts/{change_set_id}/revise",
+        data={"feedback": "Tighten the wording once more."},
+        headers=admin_auth_headers,
+    )
+    assert follow_up.status_code == 200
+    follow_up_body = follow_up.json()["data"]
+    assert follow_up_body["context_packet"]["review_attachment_evidence"] == marker
+    assert (
+        follow_up_body["operations"][0]["source_refs"][0][
+            "source_note_ids_resolution"
+        ]
+        == "ambiguous_bundle"
+    )
 
 
 def test_revise_graph_draft_image_only_attachment_without_text(
@@ -2208,6 +2668,7 @@ def test_revise_graph_draft_enforces_cumulative_cap_without_content_length(
 def test_revise_graph_draft_keeps_draft_on_model_failure(
     client: TestClient,
     admin_auth_headers: dict[str, str],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     project_id = _project(client, admin_auth_headers)
     note_id = _image_note(client, admin_auth_headers, project_id)
@@ -2220,14 +2681,25 @@ def test_revise_graph_draft_keeps_draft_on_model_failure(
     change_set_id = created["change_set_id"]
     assert len(created["operations"]) == 2
 
-    failing = FakeDraftClient(error="model exploded")
+    api_key = "AIza" + ("0" * 35)
+    failing = FakeDraftClient(
+        error=(
+            f"model exploded for {api_key} at "
+            f"https://provider.test/v1?key={api_key}&retry=true"
+        )
+    )
     client.app.state.graph_draft_client_factory = lambda settings: failing
+    caplog.clear()
     response = client.post(
         f"/graph-drafts/{change_set_id}/revise",
         data={"feedback": "Try again with fewer operations."},
         headers=admin_auth_headers,
     )
     assert response.status_code == 422
+    rendered_failure = response.text + caplog.text
+    assert "model exploded" in rendered_failure
+    assert api_key not in rendered_failure
+    assert "?key=" not in rendered_failure
 
     # The existing draft is left intact (operations + ready status preserved).
     after = client.get(
@@ -2481,6 +2953,125 @@ def test_system_actor_cannot_accept_single_operation(
             status=GraphChangeOperationStatus.ACCEPTED,
             actor=system_auth_context(),
         )
+
+
+def test_graph_operation_patch_empty_is_noop_and_null_clears_review_note(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    change_set_id, operation = _note_graph_draft(client, admin_auth_headers)
+    operation_id = operation["operation_id"]
+    path = f"/graph-drafts/{change_set_id}/operations/{operation_id}"
+    before = client.get(
+        f"/graph-drafts/{change_set_id}",
+        headers=admin_auth_headers,
+    ).json()["data"]
+    before_operation = next(
+        item for item in before["operations"] if item["operation_id"] == operation_id
+    )
+
+    no_op = client.patch(path, json={}, headers=admin_auth_headers)
+
+    assert no_op.status_code == 200, no_op.text
+    no_op_data = no_op.json()["data"]
+    no_op_operation = next(
+        item for item in no_op_data["operations"] if item["operation_id"] == operation_id
+    )
+    assert no_op_data["updated_at"] == before["updated_at"]
+    assert no_op_operation["updated_at"] == before_operation["updated_at"]
+    assert no_op_operation["acceptance_mode"] == before_operation["acceptance_mode"]
+
+    noted = client.patch(
+        path,
+        json={"review_note": "Needs one correction."},
+        headers=admin_auth_headers,
+    )
+    assert noted.status_code == 200, noted.text
+    assert next(
+        item
+        for item in noted.json()["data"]["operations"]
+        if item["operation_id"] == operation_id
+    )["review_note"] == "Needs one correction."
+
+    cleared = client.patch(
+        path,
+        json={"review_note": None},
+        headers=admin_auth_headers,
+    )
+    assert cleared.status_code == 200, cleared.text
+    assert (
+        next(
+            item
+            for item in cleared.json()["data"]["operations"]
+            if item["operation_id"] == operation_id
+        )["review_note"]
+        is None
+    )
+
+    rejected = client.patch(
+        path,
+        json={"status": "rejected", "review_note": "Not supported by the source."},
+        headers=admin_auth_headers,
+    )
+    assert rejected.status_code == 200, rejected.text
+    rejected_data = rejected.json()["data"]
+    rejected_operation = next(
+        item
+        for item in rejected_data["operations"]
+        if item["operation_id"] == operation_id
+    )
+
+    repeated_rejection = client.patch(
+        path,
+        json={"status": "rejected", "review_note": "Not supported by the source."},
+        headers=admin_auth_headers,
+    )
+    assert repeated_rejection.status_code == 200, repeated_rejection.text
+    repeated_data = repeated_rejection.json()["data"]
+    repeated_operation = next(
+        item
+        for item in repeated_data["operations"]
+        if item["operation_id"] == operation_id
+    )
+    assert repeated_data["updated_at"] == rejected_data["updated_at"]
+    assert repeated_operation["updated_at"] == rejected_operation["updated_at"]
+    assert (
+        repeated_operation["error_metadata"]["reviewed_at"]
+        == rejected_operation["error_metadata"]["reviewed_at"]
+    )
+
+    cleared_rejection_note = client.patch(
+        path,
+        json={"status": "rejected", "review_note": None},
+        headers=admin_auth_headers,
+    )
+    assert cleared_rejection_note.status_code == 200, cleared_rejection_note.text
+    cleared_rejection_data = cleared_rejection_note.json()["data"]
+    cleared_rejection_operation = next(
+        item
+        for item in cleared_rejection_data["operations"]
+        if item["operation_id"] == operation_id
+    )
+    assert cleared_rejection_operation["review_note"] is None
+
+    repeated_null = client.patch(
+        path,
+        json={"status": "rejected", "review_note": None},
+        headers=admin_auth_headers,
+    )
+    assert repeated_null.status_code == 200, repeated_null.text
+    repeated_null_data = repeated_null.json()["data"]
+    repeated_null_operation = next(
+        item
+        for item in repeated_null_data["operations"]
+        if item["operation_id"] == operation_id
+    )
+    assert repeated_null_data["updated_at"] == cleared_rejection_data["updated_at"]
+    assert repeated_null_operation["updated_at"] == cleared_rejection_operation["updated_at"]
+    assert (
+        repeated_null_operation["error_metadata"]["reviewed_at"]
+        == cleared_rejection_operation["error_metadata"]["reviewed_at"]
+    )
 
 
 def test_human_owner_can_still_commit_after_automation_is_blocked(

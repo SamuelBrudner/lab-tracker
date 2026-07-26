@@ -6,8 +6,15 @@ from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
+from sqlalchemy.exc import IntegrityError
+
 from lab_tracker.auth import AuthContext
-from lab_tracker.errors import ValidationError
+from lab_tracker.errors import (
+    ConflictError,
+    NotFoundError,
+    OpaqueTargetNotFoundError,
+    ValidationError,
+)
 from lab_tracker.models import (
     EntityOrigin,
     EntityRef,
@@ -19,7 +26,8 @@ from lab_tracker.models import (
     QuestionType,
     utc_now,
 )
-from lab_tracker.services.base import BaseService, ServiceContext
+from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
+from lab_tracker.services.base import BaseService, IdempotentCreateResult, ServiceContext
 from lab_tracker.services.goal_link_cleanup import remove_goal_links_to_entity
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.project_service import ProjectService
@@ -29,7 +37,9 @@ from lab_tracker.services.shared import (
     actor_user_fk,
     actor_user_id,
     ensure_non_empty,
+    normalize_client_capture_id,
     question_matches_substring,
+    terminal_reason_for_patch,
     terminal_reason_for_status,
     unique_ids,
 )
@@ -90,6 +100,7 @@ class QuestionService(BaseService):
         *,
         hypothesis: str | None = None,
         status: QuestionStatus = QuestionStatus.STAGED,
+        client_capture_id: str | None = None,
         terminal_reason: str | None = None,
         parent_question_ids: Iterable[UUID] | None = None,
         actor: AuthContext | None = None,
@@ -99,9 +110,47 @@ class QuestionService(BaseService):
         origin_model: str | None = None,
         origin_prompt_version: str | None = None,
     ) -> Question:
+        return self.create_question_result(
+            project_id,
+            text,
+            question_type,
+            hypothesis=hypothesis,
+            status=status,
+            client_capture_id=client_capture_id,
+            terminal_reason=terminal_reason,
+            parent_question_ids=parent_question_ids,
+            actor=actor,
+            origin=origin,
+            change_set_id=change_set_id,
+            origin_provider=origin_provider,
+            origin_model=origin_model,
+            origin_prompt_version=origin_prompt_version,
+        ).entity
+
+    def create_question_result(
+        self,
+        project_id: UUID,
+        text: str,
+        question_type: QuestionType,
+        *,
+        hypothesis: str | None = None,
+        status: QuestionStatus = QuestionStatus.STAGED,
+        client_capture_id: str | None = None,
+        terminal_reason: str | None = None,
+        parent_question_ids: Iterable[UUID] | None = None,
+        actor: AuthContext | None = None,
+        origin: EntityOrigin = EntityOrigin.USER,
+        change_set_id: UUID | None = None,
+        origin_provider: str | None = None,
+        origin_model: str | None = None,
+        origin_prompt_version: str | None = None,
+    ) -> IdempotentCreateResult[Question]:
         self.authorization.require_contributor(project_id, actor=actor)
         self.projects.get_project(project_id)
         ensure_non_empty(text, "text")
+        resolved_text = text.strip()
+        resolved_hypothesis = hypothesis.strip() if hypothesis else None
+        resolved_client_capture_id = normalize_client_capture_id(client_capture_id)
         question_id = uuid4()
         parent_ids = unique_ids(parent_question_ids)
         for parent_id in parent_ids:
@@ -120,13 +169,36 @@ class QuestionService(BaseService):
             terminal_reason,
             entity_name="Question",
         )
+        if resolved_client_capture_id is not None:
+            existing = self._find_client_capture_question(
+                project_id,
+                resolved_client_capture_id,
+            )
+            if existing is not None:
+                self._ensure_matching_capture_question(
+                    existing,
+                    text=resolved_text,
+                    question_type=question_type,
+                    hypothesis=resolved_hypothesis,
+                    status=status,
+                    terminal_reason=resolved_terminal_reason,
+                    parent_question_ids=parent_ids,
+                    origin=origin,
+                    change_set_id=change_set_id,
+                    origin_provider=origin_provider,
+                    origin_model=origin_model,
+                    origin_prompt_version=origin_prompt_version,
+                    client_capture_id=resolved_client_capture_id,
+                )
+                return IdempotentCreateResult("reused", existing)
         question = Question(
             question_id=question_id,
             project_id=project_id,
-            text=text.strip(),
+            text=resolved_text,
             question_type=question_type,
-            hypothesis=hypothesis.strip() if hypothesis else None,
+            hypothesis=resolved_hypothesis,
             status=status,
+            client_capture_id=resolved_client_capture_id,
             terminal_reason=resolved_terminal_reason,
             parent_question_ids=parent_ids,
             created_by=actor_user_id(actor),
@@ -137,16 +209,118 @@ class QuestionService(BaseService):
             origin_model=origin_model,
             origin_prompt_version=origin_prompt_version,
         )
-        with self.unit_of_work() as repository:
-            repository.questions.save(question)
-            self.versions.record_entity_version(
-                repository,
-                entity_type=EntityType.QUESTION,
-                entity_id=question.question_id,
-                entity=question,
-                actor=actor,
+        try:
+            unit_of_work = (
+                self.recoverable_unit_of_work
+                if resolved_client_capture_id is not None
+                else self.unit_of_work
             )
-        return question
+            with unit_of_work() as repository:
+                repository.questions.save(question)
+                self.versions.record_entity_version(
+                    repository,
+                    entity_type=EntityType.QUESTION,
+                    entity_id=question.question_id,
+                    entity=question,
+                    actor=actor,
+                )
+        except IntegrityError as exc:
+            if resolved_client_capture_id is None:
+                raise
+            existing = self._find_client_capture_question(
+                project_id,
+                resolved_client_capture_id,
+            )
+            if existing is None:
+                raise
+            self._ensure_matching_capture_question(
+                existing,
+                text=resolved_text,
+                question_type=question_type,
+                hypothesis=resolved_hypothesis,
+                status=status,
+                terminal_reason=resolved_terminal_reason,
+                parent_question_ids=parent_ids,
+                origin=origin,
+                change_set_id=change_set_id,
+                origin_provider=origin_provider,
+                origin_model=origin_model,
+                origin_prompt_version=origin_prompt_version,
+                client_capture_id=resolved_client_capture_id,
+                cause=exc,
+            )
+            return IdempotentCreateResult("reused", existing)
+        return IdempotentCreateResult("created", question)
+
+    def _find_client_capture_question(
+        self,
+        project_id: UUID,
+        client_capture_id: str,
+    ) -> Question | None:
+        questions = self.query_from_repository(
+            loader=lambda repository: repository.query_questions(
+                project_id=project_id,
+                client_capture_id=client_capture_id,
+                limit=1,
+                offset=0,
+            ),
+        )
+        return questions[0] if questions else None
+
+    @staticmethod
+    def _ensure_matching_capture_question(
+        existing: Question,
+        *,
+        text: str,
+        question_type: QuestionType,
+        hypothesis: str | None,
+        status: QuestionStatus,
+        terminal_reason: str | None,
+        parent_question_ids: Iterable[UUID],
+        origin: EntityOrigin,
+        change_set_id: UUID | None,
+        origin_provider: str | None,
+        origin_model: str | None,
+        origin_prompt_version: str | None,
+        client_capture_id: str,
+        cause: Exception | None = None,
+    ) -> None:
+        supplied = {
+            "text": text,
+            "question_type": question_type,
+            "hypothesis": hypothesis,
+            "status": status,
+            "terminal_reason": terminal_reason,
+            "parent_question_ids": sorted(str(value) for value in parent_question_ids),
+            "origin": origin,
+            "change_set_id": change_set_id,
+            "origin_provider": origin_provider,
+            "origin_model": origin_model,
+            "origin_prompt_version": origin_prompt_version,
+        }
+        stored = {
+            "text": existing.text,
+            "question_type": existing.question_type,
+            "hypothesis": existing.hypothesis,
+            "status": existing.status,
+            "terminal_reason": existing.terminal_reason,
+            "parent_question_ids": sorted(str(value) for value in existing.parent_question_ids),
+            "origin": existing.origin,
+            "change_set_id": existing.change_set_id,
+            "origin_provider": existing.origin_provider,
+            "origin_model": existing.origin_model,
+            "origin_prompt_version": existing.origin_prompt_version,
+        }
+        conflicts = [field for field, value in supplied.items() if stored[field] != value]
+        if conflicts:
+            error = ConflictError(
+                "Question client_capture_id "
+                f"{client_capture_id!r} was already used with different "
+                f"field(s): {', '.join(conflicts)}."
+            )
+            if cause is not None:
+                raise error from cause
+            raise error
 
     def get_question(self, question_id: UUID) -> Question:
         return self.get_from_repository(
@@ -154,6 +328,20 @@ class QuestionService(BaseService):
             label="Question",
             loader=lambda repository: repository.questions.get(question_id),
         )
+
+    def get_question_for_read(
+        self,
+        question_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> Question:
+        try:
+            question = self.get_question(question_id)
+        except NotFoundError as exc:
+            raise OpaqueTargetNotFoundError("Question does not exist.") from exc
+        if not self.authorization.can_read(question.project_id, actor=actor):
+            raise OpaqueTargetNotFoundError("Question does not exist.")
+        return question
 
     def list_questions(
         self,
@@ -206,12 +394,12 @@ class QuestionService(BaseService):
         self,
         question_id: UUID,
         *,
-        text: str | None = None,
-        question_type: QuestionType | None = None,
-        hypothesis: str | None = None,
-        status: QuestionStatus | None = None,
-        terminal_reason: str | None = None,
-        parent_question_ids: Iterable[UUID] | None = None,
+        text: PatchValue[str | None] = NOT_PROVIDED,
+        question_type: PatchValue[QuestionType | None] = NOT_PROVIDED,
+        hypothesis: PatchValue[str | None] = NOT_PROVIDED,
+        status: PatchValue[QuestionStatus | None] = NOT_PROVIDED,
+        terminal_reason: PatchValue[str | None] = NOT_PROVIDED,
+        parent_question_ids: PatchValue[Iterable[UUID] | None] = NOT_PROVIDED,
         actor: AuthContext | None = None,
         origin: EntityOrigin | None = None,
         change_set_id: UUID | None = None,
@@ -219,31 +407,86 @@ class QuestionService(BaseService):
         origin_model: str | None = None,
         origin_prompt_version: str | None = None,
     ) -> Question:
-        question = self.get_question(question_id)
-        self.authorization.require_contributor(question.project_id, actor=actor)
-        if text is not None:
+        with self.application_transaction():
+            located_question = self.get_question(question_id)
+            project_id = located_question.project_id
+            self.authorization.require_contributor(project_id, actor=actor)
+            self.repository.lock_project_question_dag(project_id)
+
+            # Question persistence writes a complete snapshot, including
+            # parent and supersession fields, even when a command only changes
+            # text or status. Every update must therefore serialize with DAG
+            # mutations. Never use locator state after the wait: the repository
+            # has refreshed its identity map so this read observes the winning
+            # transaction before validation or mutation.
+            question = self.get_question(question_id)
+            return self._update_question_in_transaction(
+                question,
+                text=text,
+                question_type=question_type,
+                hypothesis=hypothesis,
+                status=status,
+                terminal_reason=terminal_reason,
+                parent_question_ids=parent_question_ids,
+                actor=actor,
+                origin=origin,
+                change_set_id=change_set_id,
+                origin_provider=origin_provider,
+                origin_model=origin_model,
+                origin_prompt_version=origin_prompt_version,
+            )
+
+    def _update_question_in_transaction(
+        self,
+        question: Question,
+        *,
+        text: PatchValue[str | None],
+        question_type: PatchValue[QuestionType | None],
+        hypothesis: PatchValue[str | None],
+        status: PatchValue[QuestionStatus | None],
+        terminal_reason: PatchValue[str | None],
+        parent_question_ids: PatchValue[Iterable[UUID] | None],
+        actor: AuthContext | None,
+        origin: EntityOrigin | None,
+        change_set_id: UUID | None,
+        origin_provider: str | None,
+        origin_model: str | None,
+        origin_prompt_version: str | None,
+    ) -> Question:
+        before = question.model_copy(deep=True)
+        if is_provided(text):
+            if text is None:
+                raise ValidationError("text must not be null.")
             ensure_non_empty(text, "text")
             question.text = text.strip()
-        if question_type is not None:
+        if is_provided(question_type):
+            if question_type is None:
+                raise ValidationError("question_type must not be null.")
             question.question_type = question_type
-        if hypothesis is not None:
+        if is_provided(hypothesis):
             question.hypothesis = hypothesis.strip() if hypothesis else None
         current_status = question.status
-        next_status = status or current_status
-        if status is not None:
+        if is_provided(status):
+            if status is None:
+                raise ValidationError("status must not be null.")
+            next_status = status
             _ensure_question_status_transition(current_status, status)
-        resolved_terminal_reason = terminal_reason_for_status(
+        else:
+            next_status = current_status
+        resolved_terminal_reason = terminal_reason_for_patch(
             current_status,
             next_status,
             QuestionStatus.ABANDONED,
             terminal_reason,
             entity_name="Question",
         )
-        if status is not None:
+        if is_provided(status):
             question.status = status
-        if resolved_terminal_reason is not None:
+        if is_provided(resolved_terminal_reason):
             question.terminal_reason = resolved_terminal_reason
-        if parent_question_ids is not None:
+        if is_provided(parent_question_ids):
+            if parent_question_ids is None:
+                raise ValidationError("parent_question_ids must not be null.")
             parent_ids = unique_ids(parent_question_ids)
             for parent_id in parent_ids:
                 parent = self.get_question(parent_id)
@@ -265,6 +508,8 @@ class QuestionService(BaseService):
             question.origin_model = origin_model
         if origin_prompt_version is not None:
             question.origin_prompt_version = origin_prompt_version
+        if question == before:
+            return question
         question.updated_at = utc_now()
         with self.unit_of_work() as repository:
             repository.questions.save(question)
@@ -307,8 +552,42 @@ class QuestionService(BaseService):
         note_ids_to_retarget: Iterable[UUID] | None = None,
         actor: AuthContext | None = None,
     ) -> QuestionRefactorResult:
-        source = self.get_question(question_id)
-        self.authorization.require_contributor(source.project_id, actor=actor)
+        with self.application_transaction():
+            located_source = self.get_question(question_id)
+            project_id = located_source.project_id
+            self.authorization.require_contributor(project_id, actor=actor)
+            self.repository.lock_project_question_dag(project_id)
+
+            # Re-read after waiting for the project lock: another command may
+            # have superseded the source or changed the parent graph.
+            source = self.get_question(question_id)
+            return self._refactor_question_under_dag_lock(
+                source,
+                replacement_text=replacement_text,
+                replacement_question_type=replacement_question_type,
+                replacement_status=replacement_status,
+                reason=reason,
+                replacement_hypothesis=replacement_hypothesis,
+                replacement_parent_question_ids=replacement_parent_question_ids,
+                child_question_ids_to_reparent=child_question_ids_to_reparent,
+                note_ids_to_retarget=note_ids_to_retarget,
+                actor=actor,
+            )
+
+    def _refactor_question_under_dag_lock(
+        self,
+        source: Question,
+        *,
+        replacement_text: str,
+        replacement_question_type: QuestionType,
+        replacement_status: QuestionStatus,
+        reason: str,
+        replacement_hypothesis: str | None,
+        replacement_parent_question_ids: Iterable[UUID] | None,
+        child_question_ids_to_reparent: Iterable[UUID] | None,
+        note_ids_to_retarget: Iterable[UUID] | None,
+        actor: AuthContext | None,
+    ) -> QuestionRefactorResult:
         if source.status not in {QuestionStatus.STAGED, QuestionStatus.ACTIVE}:
             raise ValidationError("Only staged or active questions can be refactored.")
         if source.superseded_by_question_id is not None:

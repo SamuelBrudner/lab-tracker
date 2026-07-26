@@ -140,6 +140,7 @@ function AppNavigation({ activeKind, isAdmin = false, navigate }) {
     ["capture", "/app/capture", "Capture"],
     ["devices", "/app/devices", "Devices"],
     ["agents", "/app/agents", "Agents"],
+    ["setup", "/app/setup", "Setup"],
   ];
   if (isAdmin) {
     links.push(["users", "/app/users", "Users"]);
@@ -170,6 +171,21 @@ function FlashMessages({ message, error }) {
       {message ? <p className="flash ok">{message}</p> : null}
       {error ? <p className="flash error">{error}</p> : null}
     </>
+  );
+}
+
+function UpdateAvailableBanner({ onReload }) {
+  if (typeof onReload !== "function") {
+    return null;
+  }
+
+  return (
+    <div className="flash ok app-update-banner" role="status">
+      <span>An updated version of Lab Tracker is ready.</span>
+      <button type="button" className="btn-primary" onClick={onReload}>
+        Reload to update
+      </button>
+    </div>
   );
 }
 
@@ -338,6 +354,7 @@ export {
   FlashMessages,
   ProjectContextCard,
   RequestEditAccess,
+  UpdateAvailableBanner,
   UnknownRouteCard,
   WorkflowCoverageCard,
 };

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+from contextlib import AbstractContextManager
 from datetime import datetime
 from typing import Generic, Protocol, TypeVar
 from uuid import UUID
@@ -15,6 +17,7 @@ from lab_tracker.models import (
     DatasetFile,
     DataStore,
     EntityVersion,
+    EvidenceBundleRecord,
     ExplorationNode,
     Goal,
     GoalLink,
@@ -32,6 +35,7 @@ from lab_tracker.models import (
     QuestionRefactor,
     RecordExportEvent,
     RecordExportRecords,
+    ReviewEmailDelivery,
     Session,
     SupervisionEdge,
     UsageEvent,
@@ -40,6 +44,10 @@ from lab_tracker.models import (
 )
 
 EntityT = TypeVar("EntityT")
+
+
+class EvidenceBundleKeyRaceError(Exception):
+    """The scoped evidence-bundle idempotency key lost a concurrent insert race."""
 
 
 class EntityRepository(Protocol, Generic[EntityT]):
@@ -58,36 +66,156 @@ class EntityRepository(Protocol, Generic[EntityT]):
         """Delete one entity by ID and return the removed value."""
 
 
+class EvidenceBundleRepository(Protocol):
+    """Append-only persistence needed by the atomic evidence-bundle command."""
+
+    def get(self, entity_id: UUID) -> EvidenceBundleRecord | None:
+        """Return one durable idempotency record by ID."""
+
+    def list(self) -> list[EvidenceBundleRecord]:
+        """Return durable idempotency records for diagnostics."""
+
+    def insert(self, entity: EvidenceBundleRecord) -> None:
+        """Append a durable idempotency record; existing records are immutable."""
+
+    def get_by_key(
+        self,
+        *,
+        project_id: UUID,
+        created_by: str,
+        idempotency_key: str,
+    ) -> EvidenceBundleRecord | None:
+        """Return the record for one principal-scoped idempotency key."""
+
+
+class GraphChangeSetRepository(EntityRepository[GraphChangeSet], Protocol):
+    """Persistence operations specific to graph-draft change sets."""
+
+    def project_id_for(self, change_set_id: UUID) -> UUID | None:
+        """Resolve a draft's project without materializing its operations."""
+
+
+class ReviewEmailOutboxRepository(Protocol):
+    """Persistence contract for durable review-email delivery."""
+
+    def get(self, entity_id: UUID) -> ReviewEmailDelivery | None:
+        """Return one delivery by ID, or None when it does not exist."""
+
+    def list(self) -> list[ReviewEmailDelivery]:
+        """Return all deliveries for diagnostics."""
+
+    def save(self, entity: ReviewEmailDelivery) -> None:
+        """Persist a delivery create/update operation."""
+
+    def get_by_idempotency_key(
+        self,
+        idempotency_key: str,
+    ) -> ReviewEmailDelivery | None:
+        """Return the delivery for one globally unique idempotency key."""
+
+    def claim_next(
+        self,
+        *,
+        now: datetime,
+        lease_until: datetime,
+        claim_token: UUID,
+    ) -> ReviewEmailDelivery | None:
+        """Atomically lease the next due or stale delivery."""
+
+
 class LabTrackerRepository(Protocol):
     """Repository surface expected by the Lab Tracker domain layer."""
 
-    projects: EntityRepository[Project]
-    project_groups: EntityRepository[ProjectGroup]
-    project_memberships: EntityRepository[ProjectMembership]
-    group_memberships: EntityRepository[GroupMembership]
-    supervision_edges: EntityRepository[SupervisionEdge]
-    ownership_reassignments: EntityRepository[OwnershipReassignment]
-    record_export_events: EntityRepository[RecordExportEvent]
-    usage_events: EntityRepository[UsageEvent]
-    usage_event_rollups: EntityRepository[UsageEventRollup]
-    questions: EntityRepository[Question]
-    question_refactors: EntityRepository[QuestionRefactor]
-    datasets: EntityRepository[Dataset]
-    notes: EntityRepository[Note]
-    sessions: EntityRepository[Session]
-    acquisition_outputs: EntityRepository[AcquisitionOutput]
-    analyses: EntityRepository[Analysis]
-    claims: EntityRepository[Claim]
-    claim_edges: EntityRepository[ClaimEdge]
-    exploration_nodes: EntityRepository[ExplorationNode]
-    provenance_links: EntityRepository[ProvenanceLink]
-    entity_versions: EntityRepository[EntityVersion]
-    goals: EntityRepository[Goal]
-    data_stores: EntityRepository[DataStore]
-    visualizations: EntityRepository[Visualization]
-    graph_change_sets: EntityRepository[GraphChangeSet]
-    graph_draft_batch_settings: EntityRepository[GraphDraftBatchSettings]
-    graph_draft_batch_runs: EntityRepository[GraphDraftBatchRun]
+    # These are read-only protocol properties even though concrete repositories
+    # assign them once in ``__init__``. Read-only members are covariant, so a
+    # focused SQLAlchemy repository can satisfy an ``EntityRepository`` role
+    # structurally without inheriting this broad protocol nominally.
+    @property
+    def projects(self) -> EntityRepository[Project]: ...
+
+    @property
+    def project_groups(self) -> EntityRepository[ProjectGroup]: ...
+
+    @property
+    def project_memberships(self) -> EntityRepository[ProjectMembership]: ...
+
+    @property
+    def group_memberships(self) -> EntityRepository[GroupMembership]: ...
+
+    @property
+    def supervision_edges(self) -> EntityRepository[SupervisionEdge]: ...
+
+    @property
+    def ownership_reassignments(self) -> EntityRepository[OwnershipReassignment]: ...
+
+    @property
+    def record_export_events(self) -> EntityRepository[RecordExportEvent]: ...
+
+    @property
+    def usage_events(self) -> EntityRepository[UsageEvent]: ...
+
+    @property
+    def usage_event_rollups(self) -> EntityRepository[UsageEventRollup]: ...
+
+    @property
+    def questions(self) -> EntityRepository[Question]: ...
+
+    @property
+    def question_refactors(self) -> EntityRepository[QuestionRefactor]: ...
+
+    @property
+    def datasets(self) -> EntityRepository[Dataset]: ...
+
+    @property
+    def notes(self) -> EntityRepository[Note]: ...
+
+    @property
+    def sessions(self) -> EntityRepository[Session]: ...
+
+    @property
+    def acquisition_outputs(self) -> EntityRepository[AcquisitionOutput]: ...
+
+    @property
+    def analyses(self) -> EntityRepository[Analysis]: ...
+
+    @property
+    def claims(self) -> EntityRepository[Claim]: ...
+
+    @property
+    def claim_edges(self) -> EntityRepository[ClaimEdge]: ...
+
+    @property
+    def exploration_nodes(self) -> EntityRepository[ExplorationNode]: ...
+
+    @property
+    def provenance_links(self) -> EntityRepository[ProvenanceLink]: ...
+
+    @property
+    def entity_versions(self) -> EntityRepository[EntityVersion]: ...
+
+    @property
+    def goals(self) -> EntityRepository[Goal]: ...
+
+    @property
+    def data_stores(self) -> EntityRepository[DataStore]: ...
+
+    @property
+    def evidence_bundles(self) -> EvidenceBundleRepository: ...
+
+    @property
+    def visualizations(self) -> EntityRepository[Visualization]: ...
+
+    @property
+    def graph_change_sets(self) -> GraphChangeSetRepository: ...
+
+    @property
+    def graph_draft_batch_settings(self) -> EntityRepository[GraphDraftBatchSettings]: ...
+
+    @property
+    def graph_draft_batch_runs(self) -> EntityRepository[GraphDraftBatchRun]: ...
+
+    @property
+    def review_email_outbox(self) -> ReviewEmailOutboxRepository: ...
 
     def user_exists(self, user_id: UUID) -> bool:
         """Return whether a user exists for FK-backed attribution."""
@@ -98,12 +226,27 @@ class LabTrackerRepository(Protocol):
     def fetch_notes(self, note_ids: list[UUID]) -> list[Note]:
         """Fetch notes in the provided order."""
 
+    def lock_project_question_dag(self, project_id: UUID) -> None:
+        """Serialize question-DAG validation and mutation for one project."""
+
+    def lock_project_deletion_guard(self, project_id: UUID) -> None:
+        """Keep a project alive while a graph command locks its child rows."""
+
+    def lock_dataset_updates(
+        self,
+        project_id: UUID,
+        dataset_ids: Iterable[UUID],
+    ) -> None:
+        """Serialize full-snapshot dataset writes with file mutations."""
+
     def query_projects(
         self,
         *,
         group_id: UUID | None = None,
         project_ids: set[UUID] | None = None,
         status: str | None = None,
+        created_by: str | None = None,
+        client_capture_id: str | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> tuple[list[Project], int]:
@@ -241,10 +384,12 @@ class LabTrackerRepository(Protocol):
         *,
         project_id: UUID | None = None,
         project_ids: set[UUID] | None = None,
+        question_ids: set[UUID] | None = None,
         status: str | None = None,
         question_type: str | None = None,
         search: str | None = None,
         created_by: str | None = None,
+        client_capture_id: str | None = None,
         parent_question_id: UUID | None = None,
         ancestor_question_id: UUID | None = None,
         superseded_by_question_ids: set[UUID] | None = None,
@@ -271,6 +416,8 @@ class LabTrackerRepository(Protocol):
         project_ids: set[UUID] | None = None,
         status: str | None = None,
         created_by: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
         limit: int | None = None,
         offset: int = 0,
         recent_first: bool = False,
@@ -282,9 +429,12 @@ class LabTrackerRepository(Protocol):
         *,
         project_id: UUID | None = None,
         project_ids: set[UUID] | None = None,
+        note_ids: set[UUID] | None = None,
         status: str | None = None,
         search: str | None = None,
         created_by: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
         client_capture_id: str | None = None,
         target_entity_type: str | None = None,
         target_entity_id: UUID | None = None,
@@ -310,6 +460,9 @@ class LabTrackerRepository(Protocol):
         project_ids: set[UUID] | None = None,
         status: str | None = None,
         session_type: str | None = None,
+        created_by: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
         limit: int | None = None,
         offset: int = 0,
         recent_first: bool = False,
@@ -343,6 +496,8 @@ class LabTrackerRepository(Protocol):
         question_id: UUID | None = None,
         status: str | None = None,
         created_by: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
         limit: int | None = None,
         offset: int = 0,
         recent_first: bool = False,
@@ -358,6 +513,8 @@ class LabTrackerRepository(Protocol):
         dataset_id: UUID | None = None,
         analysis_id: UUID | None = None,
         created_by: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
         limit: int | None = None,
         offset: int = 0,
         recent_first: bool = False,
@@ -450,6 +607,9 @@ class LabTrackerRepository(Protocol):
         project_ids: set[UUID] | None = None,
         analysis_id: UUID | None = None,
         claim_id: UUID | None = None,
+        created_by: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
         limit: int | None = None,
         offset: int = 0,
         recent_first: bool = False,
@@ -558,3 +718,6 @@ class LabTrackerRepository(Protocol):
 
     def rollback(self) -> None:
         """Rollback the current unit of work."""
+
+    def savepoint(self) -> AbstractContextManager[None]:
+        """Isolate a recoverable write inside the current transaction."""

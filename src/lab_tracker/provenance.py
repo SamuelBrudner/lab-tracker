@@ -39,7 +39,7 @@ from lab_tracker.models import (
     Visualization,
 )
 from lab_tracker.provenance_ingestion import external_artifacts_from_metadata
-from lab_tracker.vocabulary import build_context
+from lab_tracker.vocabulary import build_context, concept_iri
 
 _logger = logging.getLogger(__name__)
 
@@ -110,7 +110,7 @@ def _unique_user_ids(user_ids: list[str | None]) -> list[str]:
 def _person_node(base_url: str, user_id: str) -> dict[str, object]:
     return {
         "@id": _agent_iri(base_url, user_id),
-        "@type": ["prov:Agent", "prov:Person"],
+        "@type": "prov:Person",
         "userId": user_id,
     }
 
@@ -149,6 +149,30 @@ def _append_id_ref_list(node: dict[str, object], key: str, ref: dict[str, str]) 
         node[key] = [existing, ref]
 
 
+_PROFILE_ACTIVITY_TYPES = frozenset(
+    {
+        "prov:Activity",
+        "lab:Analysis",
+        "lab:AcquisitionSession",
+    }
+)
+
+
+def _classify(node: dict[str, object], *classifications: tuple[str, str]) -> None:
+    """Attach stable controlled-concept IRIs without removing legacy literals."""
+
+    for scheme, value in classifications:
+        _append_id_ref_list(
+            node,
+            "classifiedAs",
+            {"@id": concept_iri(scheme, value)},
+        )
+
+
+def _node_is_activity(node: dict[str, object]) -> bool:
+    return any(_node_type_includes(node, node_type) for node_type in _PROFILE_ACTIVITY_TYPES)
+
+
 def _node_type_includes(node: dict[str, object], node_type: str) -> bool:
     raw_type = node.get("@type")
     if isinstance(raw_type, list):
@@ -173,6 +197,7 @@ _ORIGIN_ENTITY_RESOURCES = {
     "Visualization": ("viz_id", "visualizations"),
     "Question": ("question_id", "questions"),
     "Note": ("note_id", "notes"),
+    "Session": ("session_id", "sessions"),
     "Goal": ("goal_id", "goals"),
     "ExplorationNode": ("node_id", "exploration-nodes"),
 }
@@ -202,6 +227,7 @@ def _apply_origin_provenance(
 ) -> None:
     origin = _entity_origin_value(entity)
     node["origin"] = origin.value
+    _classify(node, ("entityOrigin", origin.value))
     change_set_id = getattr(entity, "change_set_id", None)
     if change_set_id is None:
         return
@@ -212,7 +238,7 @@ def _apply_origin_provenance(
         # this reference resolves within @graph.
         node["wasRevisionOf"] = {"@id": _before_revision_iri(str(node["@id"]), change_set_id)}
         _append_id_ref(node, "wasInformedBy", draft_activity)
-    elif _node_type_includes(node, "prov:Activity"):
+    elif _node_is_activity(node):
         _append_id_ref(node, "wasInformedBy", draft_activity)
     else:
         _append_id_ref(node, "wasGeneratedBy", draft_activity)
@@ -233,7 +259,7 @@ def _origin_provenance_nodes(base_url: str, entity: object) -> list[dict[str, ob
     }
     agent_node: dict[str, object] = {
         "@id": agent_iri,
-        "@type": ["prov:Agent", "prov:SoftwareAgent"],
+        "@type": "prov:SoftwareAgent",
     }
     if getattr(entity, "origin_provider", None):
         agent_node["aiProvider"] = entity.origin_provider
@@ -247,15 +273,15 @@ def _origin_provenance_nodes(base_url: str, entity: object) -> list[dict[str, ob
         # edge points at, so the JSON-LD graph is self-consistent.
         entity_iri = _entity_iri(base_url, entity)
         if entity_iri is not None:
-            nodes.append(
-                {
-                    "@id": _before_revision_iri(entity_iri, change_set_id),
-                    "@type": "prov:Entity",
-                    "origin": EntityOrigin.AI_SUGGESTED.value,
-                    "changeSet": {"@id": activity_iri},
-                    "wasGeneratedBy": {"@id": activity_iri},
-                }
-            )
+            before_node: dict[str, object] = {
+                "@id": _before_revision_iri(entity_iri, change_set_id),
+                "@type": "lab:EntityVersion",
+                "origin": EntityOrigin.AI_SUGGESTED.value,
+                "changeSet": {"@id": activity_iri},
+                "wasGeneratedBy": {"@id": activity_iri},
+            }
+            _classify(before_node, ("entityOrigin", EntityOrigin.AI_SUGGESTED.value))
+            nodes.append(before_node)
     return nodes
 
 
@@ -421,12 +447,19 @@ def _external_artifact_node(artifact: ExternalArtifactReference) -> dict[str, ob
 
 
 def _dataset_question_link_node(base_url: str, dataset: Dataset, link) -> dict[str, object]:
-    return {
+    node: dict[str, object] = {
         "@id": _question_link_id(base_url, dataset, link.question_id),
+        "@type": "lab:QuestionLink",
         "question": {"@id": _resource_iri(base_url, "questions", link.question_id)},
         "role": link.role.value,
         "outcomeStatus": link.outcome_status.value,
     }
+    _classify(
+        node,
+        ("questionLinkRole", link.role.value),
+        ("outcomeStatus", link.outcome_status.value),
+    )
+    return node
 
 
 def build_dataset_provenance_document(
@@ -447,11 +480,12 @@ def build_dataset_provenance_document(
 
     dataset_node: dict[str, object] = {
         "@id": dataset_iri,
-        "@type": "prov:Entity",
+        "@type": "lab:Dataset",
         "wasGeneratedBy": {"@id": commit_activity_iri},
         "commitHash": dataset.commit_hash,
         "status": dataset.status.value,
     }
+    _classify(dataset_node, ("datasetStatus", dataset.status.value))
     _apply_origin_provenance(base_url, dataset_node, dataset)
     if dataset.terminal_reason:
         dataset_node["terminalReason"] = dataset.terminal_reason
@@ -529,10 +563,11 @@ def build_dataset_provenance_document(
 def _dataset_summary_node(base_url: str, dataset: Dataset) -> dict[str, object]:
     node: dict[str, object] = {
         "@id": _resource_iri(base_url, "datasets", dataset.dataset_id),
-        "@type": "prov:Entity",
+        "@type": "lab:Dataset",
         "commitHash": dataset.commit_hash,
         "status": dataset.status.value,
     }
+    _classify(node, ("datasetStatus", dataset.status.value))
     if dataset.terminal_reason:
         node["terminalReason"] = dataset.terminal_reason
     _apply_origin_provenance(base_url, node, dataset)
@@ -547,12 +582,13 @@ def _analysis_summary_node(
 ) -> dict[str, object]:
     node: dict[str, object] = {
         "@id": _resource_iri(base_url, "analyses", analysis.analysis_id),
-        "@type": "prov:Activity",
+        "@type": "lab:Analysis",
         "methodHash": analysis.method_hash,
         "codeVersion": analysis.code_version,
         "executedAt": _isoformat(analysis.executed_at),
         "status": analysis.status.value,
     }
+    _classify(node, ("analysisStatus", analysis.status.value))
     if analysis.terminal_reason:
         node["terminalReason"] = analysis.terminal_reason
     _apply_origin_provenance(base_url, node, analysis)
@@ -697,11 +733,12 @@ def _claim_node(
 ) -> dict[str, object]:
     node: dict[str, object] = {
         "@id": _resource_iri(base_url, "claims", claim.claim_id),
-        "@type": "prov:Entity",
+        "@type": "lab:Claim",
         "statement": claim.statement,
         "confidence": claim.confidence,
         "status": claim.status.value,
     }
+    _classify(node, ("claimStatus", claim.status.value))
     if claim.terminal_reason:
         node["terminalReason"] = claim.terminal_reason
     if claim.falsification_criteria:
@@ -743,7 +780,7 @@ def _claim_relation_iri(base_url: str, edge: ClaimEdge) -> str:
 
 
 def _claim_relation_node(base_url: str, edge: ClaimEdge) -> dict[str, object]:
-    return {
+    node: dict[str, object] = {
         "@id": _claim_relation_iri(base_url, edge),
         "@type": "lab:ClaimRelation",
         "claimRelationSource": {"@id": _resource_iri(base_url, "claims", edge.claim_id)},
@@ -751,6 +788,8 @@ def _claim_relation_node(base_url: str, edge: ClaimEdge) -> dict[str, object]:
         "claimRelationType": edge.relation.value,
         "createdAt": _isoformat(edge.created_at),
     }
+    _classify(node, ("claimRelation", edge.relation.value))
+    return node
 
 
 def _exploration_node_iri(base_url: str, node_id: UUID) -> str:
@@ -767,7 +806,7 @@ def _exploration_node_node(
     node_iri = _exploration_node_iri(base_url, node.node_id)
     payload: dict[str, object] = {
         "@id": node_iri,
-        "@type": ["prov:Entity", "lab:ExplorationNode"],
+        "@type": "lab:ExplorationNode",
         "entityType": "exploration_node",
         "entityId": str(node.node_id),
         "explorationNodeType": node.node_type.value,
@@ -780,6 +819,11 @@ def _exploration_node_node(
             "entityId": str(node.target.entity_id),
         },
     }
+    _classify(
+        payload,
+        ("explorationNodeType", node.node_type.value),
+        ("explorationNodeStatus", node.status.value),
+    )
     if node.choice:
         payload["choice"] = node.choice
     if node.alternatives_considered:
@@ -843,7 +887,7 @@ def _visualization_node(
 ) -> dict[str, object]:
     node: dict[str, object] = {
         "@id": _resource_iri(base_url, "visualizations", visualization.viz_id),
-        "@type": "prov:Entity",
+        "@type": "lab:Visualization",
         "wasGeneratedBy": {
             "@id": _resource_iri(base_url, "analyses", visualization.analysis_id)
         },
@@ -904,12 +948,13 @@ def build_analysis_provenance_document(
 
     analysis_node: dict[str, object] = {
         "@id": analysis_iri,
-        "@type": "prov:Activity",
+        "@type": "lab:Analysis",
         "methodHash": analysis.method_hash,
         "codeVersion": analysis.code_version,
         "executedAt": _isoformat(analysis.executed_at),
         "status": analysis.status.value,
     }
+    _classify(analysis_node, ("analysisStatus", analysis.status.value))
     if analysis.terminal_reason:
         analysis_node["terminalReason"] = analysis.terminal_reason
     _apply_origin_provenance(base_url, analysis_node, analysis)
@@ -942,10 +987,11 @@ def build_analysis_provenance_document(
     for dataset in datasets:
         dataset_node: dict[str, object] = {
             "@id": _resource_iri(base_url, "datasets", dataset.dataset_id),
-            "@type": "prov:Entity",
+            "@type": "lab:Dataset",
             "commitHash": dataset.commit_hash,
             "status": dataset.status.value,
         }
+        _classify(dataset_node, ("datasetStatus", dataset.status.value))
         _apply_origin_provenance(base_url, dataset_node, dataset)
         if dataset.terminal_reason:
             dataset_node["terminalReason"] = dataset.terminal_reason
@@ -1054,12 +1100,17 @@ def _question_node(
 ) -> dict[str, object]:
     node: dict[str, object] = {
         "@id": _resource_iri(base_url, "questions", question.question_id),
-        "@type": "prov:Entity",
+        "@type": "lab:ResearchQuestion",
         "text": question.text,
         "questionType": question.question_type.value,
         "status": question.status.value,
         "createdAt": _isoformat(question.created_at),
     }
+    _classify(
+        node,
+        ("questionType", question.question_type.value),
+        ("questionStatus", question.status.value),
+    )
     if question.terminal_reason:
         node["terminalReason"] = question.terminal_reason
     _apply_origin_provenance(base_url, node, question)
@@ -1112,11 +1163,12 @@ def _note_node(
 ) -> dict[str, object]:
     node: dict[str, object] = {
         "@id": _resource_iri(base_url, "notes", note.note_id),
-        "@type": "prov:Entity",
+        "@type": "lab:Note",
         "rawContent": note.raw_content,
         "status": note.status.value,
         "createdAt": _isoformat(note.created_at),
     }
+    _classify(node, ("noteStatus", note.status.value))
     if derived_from_iris:
         node["wasDerivedFrom"] = [{"@id": iri} for iri in derived_from_iris]
     if note.transcribed_text:
@@ -1157,12 +1209,17 @@ def _session_node(
 ) -> dict[str, object]:
     node: dict[str, object] = {
         "@id": _resource_iri(base_url, "sessions", session.session_id),
-        "@type": "prov:Activity",
+        "@type": "lab:AcquisitionSession",
         "sessionType": session.session_type.value,
         "status": session.status.value,
         "startedAt": _isoformat(session.started_at),
         "updatedAt": _isoformat(session.updated_at),
     }
+    _classify(
+        node,
+        ("sessionType", session.session_type.value),
+        ("sessionStatus", session.status.value),
+    )
     if session.ended_at is not None:
         node["endedAt"] = _isoformat(session.ended_at)
     if session.primary_question_id is not None:
@@ -1308,7 +1365,7 @@ def _build_ara_layer_document(
     return {
         "@context": _context(base_url),
         "@id": _ara_layer_iri(base_url, scope_type, scope_id, layer_name),
-        "@type": ["prov:Bundle", "lab:AraLayer"],
+        "@type": "lab:AraLayer",
         "layer": layer_name,
         "scope": _scope_ref(base_url, scope_type, scope_id),
         "wasDerivedFrom": {"@id": artifact_iri},
@@ -1572,9 +1629,15 @@ def _goal_node(base_url: str, goal: Goal) -> dict[str, object]:
         "entityType": EntityType.GOAL.value,
         "entityId": str(goal.goal_id),
         "text": goal.title,
+        "goalType": goal.goal_type.value,
         "status": goal.status.value,
         "createdAt": _isoformat(goal.created_at),
     }
+    _classify(
+        node,
+        ("goalType", goal.goal_type.value),
+        ("goalStatus", goal.status.value),
+    )
     if goal.summary:
         node["summary"] = goal.summary
     if goal.external_ref:
@@ -1598,6 +1661,11 @@ def _goal_link_node(base_url: str, link: GoalLink) -> dict[str, object]:
         "status": link.link_status.value,
         "createdAt": _isoformat(link.created_at),
     }
+    _classify(
+        node,
+        ("goalRelation", link.relation.value),
+        ("goalLinkStatus", link.link_status.value),
+    )
     if link.slot is not None:
         node["slot"] = link.slot
     return node

@@ -138,7 +138,7 @@ Read tools:
 - `lab_tracker_get_dataset_provenance`: Get dataset provenance JSON-LD before reusing evidence.
 - `lab_tracker_get_analysis_provenance`: Get analysis provenance JSON-LD before reusing derived evidence.
 - `lab_tracker_get_claim_provenance`: Get claim-centric provenance JSON-LD with analysis/dataset/question ancestry.
-- `lab_tracker_resolve_artifact`: Resolve an external artifact pointer to bounded, hash-verified content.
+- `lab_tracker_resolve_artifact`: Resolve an artifact pointer; only verified results include bounded content.
 - `lab_tracker_export_goal_artifact`: Compile a goal into an Ara artifact; pass layer logic/src/trace/evidence for one layer.
 - `lab_tracker_export_question_subtree`: Compile a question subtree into layered Ara JSON-LD.
 - `lab_tracker_get_decision_context`: CALL THIS FIRST before research-facing decisions.
@@ -158,7 +158,7 @@ Write tools:
 - `lab_tracker_update_goal`: Update a Lab Tracker goal/output.
 - `lab_tracker_link_node_to_goal`: Tag an existing graph node in relation to a goal/output.
 - `lab_tracker_upload_visualization_file`: Upload a local file into managed storage for a visualization node.
-- `lab_tracker_record_evidence_bundle`: Preview a dataset-analysis-claim-visualization evidence bundle; defaults to dry-run.
+- `lab_tracker_record_evidence_bundle`: Preview or atomically record an evidence bundle; defaults to dry-run.
 <!-- END GENERATED MCP TOOL LIST -->
 
 Creation tools write through the API, using the configured service account when
@@ -264,6 +264,7 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 
 #### Projects: `ProjectCreate`
 - Required: `name`
+- `client_capture_id` (optional): string | null
 - `description` (optional): string | null
 - `group_id` (optional): string(uuid) | null
 - `name` (required): string; min length 1
@@ -271,6 +272,7 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 
 #### Questions: `QuestionCreate`
 - Required: `project_id`, `text`, `question_type`
+- `client_capture_id` (optional): string | null
 - `hypothesis` (optional): string | null
 - `parent_question_ids` (optional): list[string(uuid)] | null
 - `project_id` (required): string(uuid)
@@ -492,5 +494,5 @@ npm run build
 ## Boundaries
 
 The retained-v1 runtime is defined by `docs/retained-v1-surface.md`. Deferred
-ideas from `idea.md` should not be treated as active product requirements unless
-a bead explicitly says to implement them.
+ideas from `docs/archive/connected-lab-platform-v1.2.md` should not be treated
+as active product requirements unless a bead explicitly says to implement them.

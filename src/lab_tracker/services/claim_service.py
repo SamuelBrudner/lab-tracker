@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext
-from lab_tracker.errors import ValidationError
+from lab_tracker.errors import NotFoundError, OpaqueTargetNotFoundError, ValidationError
 from lab_tracker.models import (
     Claim,
     ClaimEdge,
@@ -19,6 +19,7 @@ from lab_tracker.models import (
     external_artifact_uri_validation_error,
     utc_now,
 )
+from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
 from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.dataset_service import DatasetService
 from lab_tracker.services.goal_link_cleanup import remove_goal_links_to_entity
@@ -32,6 +33,7 @@ from lab_tracker.services.shared import (
     actor_user_fk,
     actor_user_id,
     ensure_non_empty,
+    terminal_reason_for_patch,
     terminal_reason_for_status,
     unique_ids,
 )
@@ -146,6 +148,20 @@ class ClaimService(BaseService):
             loader=lambda repository: repository.claims.get(claim_id),
         )
 
+    def get_claim_for_read(
+        self,
+        claim_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> Claim:
+        try:
+            claim = self.get_claim(claim_id)
+        except NotFoundError as exc:
+            raise OpaqueTargetNotFoundError("Claim does not exist.") from exc
+        if not self.authorization.can_read(claim.project_id, actor=actor):
+            raise OpaqueTargetNotFoundError("Claim does not exist.")
+        return claim
+
     def list_claims(
         self,
         *,
@@ -169,17 +185,19 @@ class ClaimService(BaseService):
         self,
         claim_id: UUID,
         *,
-        statement: str | None = None,
-        confidence: float | None = None,
-        status: ClaimStatus | None = None,
-        terminal_reason: str | None = None,
-        falsification_criteria: str | None = None,
-        verification_plan: str | None = None,
-        refuting_outcome: str | None = None,
-        supported_by_dataset_ids: Iterable[UUID] | None = None,
-        supported_by_analysis_ids: Iterable[UUID] | None = None,
-        answers_question_ids: Iterable[UUID] | None = None,
-        external_citations: Iterable[ExternalArtifactReference] | None = None,
+        statement: PatchValue[str | None] = NOT_PROVIDED,
+        confidence: PatchValue[float | None] = NOT_PROVIDED,
+        status: PatchValue[ClaimStatus | None] = NOT_PROVIDED,
+        terminal_reason: PatchValue[str | None] = NOT_PROVIDED,
+        falsification_criteria: PatchValue[str | None] = NOT_PROVIDED,
+        verification_plan: PatchValue[str | None] = NOT_PROVIDED,
+        refuting_outcome: PatchValue[str | None] = NOT_PROVIDED,
+        supported_by_dataset_ids: PatchValue[Iterable[UUID] | None] = NOT_PROVIDED,
+        supported_by_analysis_ids: PatchValue[Iterable[UUID] | None] = NOT_PROVIDED,
+        answers_question_ids: PatchValue[Iterable[UUID] | None] = NOT_PROVIDED,
+        external_citations: PatchValue[
+            Iterable[ExternalArtifactReference] | None
+        ] = NOT_PROVIDED,
         actor: AuthContext | None = None,
         origin: EntityOrigin | None = None,
         change_set_id: UUID | None = None,
@@ -189,9 +207,25 @@ class ClaimService(BaseService):
     ) -> Claim:
         claim = self.get_claim(claim_id)
         self.authorization.require_contributor(claim.project_id, actor=actor)
-        next_status = status or claim.status
+        before = claim.model_copy(deep=True)
+        if is_provided(status):
+            if status is None:
+                raise ValidationError("status must not be null.")
+            next_status = status
+        else:
+            next_status = claim.status
+        for field_name, value in (
+            ("statement", statement),
+            ("confidence", confidence),
+            ("supported_by_dataset_ids", supported_by_dataset_ids),
+            ("supported_by_analysis_ids", supported_by_analysis_ids),
+            ("answers_question_ids", answers_question_ids),
+            ("external_citations", external_citations),
+        ):
+            if is_provided(value) and value is None:
+                raise ValidationError(f"{field_name} must not be null.")
         _ensure_claim_status_transition(claim.status, next_status)
-        resolved_terminal_reason = terminal_reason_for_status(
+        resolved_terminal_reason = terminal_reason_for_patch(
             claim.status,
             next_status,
             ClaimStatus.REJECTED,
@@ -199,53 +233,94 @@ class ClaimService(BaseService):
             entity_name="Claim",
         )
         if claim.status != ClaimStatus.PROPOSED and (
-            statement is not None
-            or confidence is not None
-            or supported_by_dataset_ids is not None
-            or supported_by_analysis_ids is not None
-            or answers_question_ids is not None
-            or external_citations is not None
-            or falsification_criteria is not None
-            or verification_plan is not None
-            or refuting_outcome is not None
+            is_provided(statement)
+            or is_provided(confidence)
+            or is_provided(supported_by_dataset_ids)
+            or is_provided(supported_by_analysis_ids)
+            or is_provided(answers_question_ids)
+            or is_provided(external_citations)
+            or is_provided(falsification_criteria)
+            or is_provided(verification_plan)
+            or is_provided(refuting_outcome)
         ):
             raise ValidationError("Only proposed claims can be edited.")
-        if statement is not None:
+        normalized_statement: str | None = None
+        if is_provided(statement):
             ensure_non_empty(statement, "statement")
-            claim.statement = statement.strip()
-        if confidence is not None:
+            normalized_statement = statement.strip()
+        if is_provided(confidence):
             _ensure_claim_confidence(confidence)
-            claim.confidence = confidence
-        if supported_by_dataset_ids is not None or supported_by_analysis_ids is not None:
-            dataset_ids, analysis_ids = self._resolve_claim_support_links(
+        support_links_changed = (
+            is_provided(supported_by_dataset_ids)
+            or is_provided(supported_by_analysis_ids)
+        )
+        next_dataset_ids = claim.supported_by_dataset_ids
+        next_analysis_ids = claim.supported_by_analysis_ids
+        if support_links_changed:
+            next_dataset_ids, next_analysis_ids = self._resolve_claim_support_links(
                 claim.project_id,
                 claim.supported_by_dataset_ids
-                if supported_by_dataset_ids is None
+                if not is_provided(supported_by_dataset_ids)
                 else supported_by_dataset_ids,
                 claim.supported_by_analysis_ids
-                if supported_by_analysis_ids is None
+                if not is_provided(supported_by_analysis_ids)
                 else supported_by_analysis_ids,
             )
-            claim.supported_by_dataset_ids = dataset_ids
-            claim.supported_by_analysis_ids = analysis_ids
-        if answers_question_ids is not None:
-            claim.answers_question_ids = self._resolve_claim_question_links(
+        next_question_ids: list[UUID] | None = None
+        if is_provided(answers_question_ids):
+            next_question_ids = self._resolve_claim_question_links(
                 claim.project_id, answers_question_ids
             )
-        if external_citations is not None:
-            claim.external_citations = _normalize_external_citations(external_citations)
-        if falsification_criteria is not None:
-            claim.falsification_criteria = _normalize_optional_text(falsification_criteria)
-        if verification_plan is not None:
-            claim.verification_plan = _normalize_optional_text(verification_plan)
-        if refuting_outcome is not None:
-            claim.refuting_outcome = _normalize_optional_text(refuting_outcome)
+        normalized_citations: list[ExternalArtifactReference] | None = None
+        if is_provided(external_citations):
+            normalized_citations = _normalize_external_citations(external_citations)
+        normalized_falsification_criteria: str | None = None
+        if is_provided(falsification_criteria):
+            normalized_falsification_criteria = (
+                _normalize_optional_text(falsification_criteria)
+                if falsification_criteria is not None
+                else None
+            )
+        normalized_verification_plan: str | None = None
+        if is_provided(verification_plan):
+            normalized_verification_plan = (
+                _normalize_optional_text(verification_plan)
+                if verification_plan is not None
+                else None
+            )
+        normalized_refuting_outcome: str | None = None
+        if is_provided(refuting_outcome):
+            normalized_refuting_outcome = (
+                _normalize_optional_text(refuting_outcome)
+                if refuting_outcome is not None
+                else None
+            )
         _ensure_claim_support_links(
-            next_status, claim.supported_by_dataset_ids, claim.supported_by_analysis_ids
+            next_status,
+            next_dataset_ids,
+            next_analysis_ids,
         )
-        if status is not None:
+
+        if is_provided(statement):
+            claim.statement = normalized_statement
+        if is_provided(confidence):
+            claim.confidence = confidence
+        if support_links_changed:
+            claim.supported_by_dataset_ids = next_dataset_ids
+            claim.supported_by_analysis_ids = next_analysis_ids
+        if next_question_ids is not None:
+            claim.answers_question_ids = next_question_ids
+        if normalized_citations is not None:
+            claim.external_citations = normalized_citations
+        if is_provided(falsification_criteria):
+            claim.falsification_criteria = normalized_falsification_criteria
+        if is_provided(verification_plan):
+            claim.verification_plan = normalized_verification_plan
+        if is_provided(refuting_outcome):
+            claim.refuting_outcome = normalized_refuting_outcome
+        if is_provided(status):
             claim.status = status
-        if resolved_terminal_reason is not None:
+        if is_provided(resolved_terminal_reason):
             claim.terminal_reason = resolved_terminal_reason
         if origin is not None:
             claim.origin = origin
@@ -257,6 +332,8 @@ class ClaimService(BaseService):
             claim.origin_model = origin_model
         if origin_prompt_version is not None:
             claim.origin_prompt_version = origin_prompt_version
+        if claim == before:
+            return claim
         claim.updated_at = utc_now()
         with self.unit_of_work() as repository:
             repository.claims.save(claim)

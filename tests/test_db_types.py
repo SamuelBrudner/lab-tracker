@@ -27,7 +27,11 @@ class _Color(str, Enum):
 
 @pytest.fixture()
 def engine():
-    return create_engine("sqlite+pysqlite:///:memory:", future=True)
+    eng = create_engine("sqlite+pysqlite:///:memory:", future=True)
+    try:
+        yield eng
+    finally:
+        eng.dispose()
 
 
 def _roundtrip(engine, coltype, value):

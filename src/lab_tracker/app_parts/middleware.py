@@ -6,9 +6,11 @@ import hashlib
 
 from fastapi import FastAPI, Request
 from starlette.concurrency import run_in_threadpool
-from starlette.responses import JSONResponse
+from starlette.middleware.base import RequestResponseEndpoint
+from starlette.responses import JSONResponse, Response
 
 from lab_tracker.api import LabTrackerAPI
+from lab_tracker.application import RequestHandlers
 from lab_tracker.auth import (
     DEVICE_TOKEN_PREFIX,
     LOCAL_AUTH_USER_ID,
@@ -66,6 +68,10 @@ _CSP_PATH_PREFIXES = (
     "/visualizations/",
 )
 
+_ARTIFACT_RESOLUTION_PATH = "/external-artifacts/resolve"
+_ARTIFACT_RESOLUTION_RETRY_AFTER_SECONDS = "1"
+_ARTIFACT_RESOLUTION_SATURATED_MESSAGE = "Artifact resolution is temporarily unavailable."
+
 
 def _auth_error_response(message: str) -> JSONResponse:
     payload = ErrorEnvelope(error=ErrorInfo(code="auth_error", message=message))
@@ -85,6 +91,14 @@ def _service_forbidden_response(message: str) -> JSONResponse:
 def _rate_limited_response(message: str) -> JSONResponse:
     payload = ErrorEnvelope(error=ErrorInfo(code="rate_limited", message=message))
     return JSONResponse(status_code=429, content=payload.model_dump())
+
+
+def _artifact_resolution_saturated_response() -> JSONResponse:
+    """Return the same opaque response for global and actor saturation."""
+
+    response = _rate_limited_response(_ARTIFACT_RESOLUTION_SATURATED_MESSAGE)
+    response.headers["Retry-After"] = _ARTIFACT_RESOLUTION_RETRY_AFTER_SECONDS
+    return response
 
 
 def local_auth_context() -> AuthContext:
@@ -114,6 +128,7 @@ def _is_public_path(path: str) -> bool:
         path.startswith("/docs/")
         or path.startswith("/redoc/")
         or path.startswith("/app/")
+        or path.startswith("/r/")
     )
 
 
@@ -165,6 +180,7 @@ def configure_auth_middleware(app: FastAPI) -> None:
                     request.url.path,
                     read_only=principal.read_only,
                     role=principal.role,
+                    scope=principal.scope,
                 ):
                     app.state.pat_rate_limiter.record_failure(pat_rate_key)
                     return _service_forbidden_response("Not permitted for this token.")
@@ -220,6 +236,38 @@ def configure_security_headers_middleware(app: FastAPI) -> None:
         return response
 
 
+async def _apply_artifact_resolution_admission(
+    request: Request,
+    call_next: RequestResponseEndpoint,
+) -> Response:
+    """Apply no-wait resolution capacity after authoritative authentication."""
+
+    if (
+        request.method != "POST"
+        or request.scope["path"] != _ARTIFACT_RESOLUTION_PATH
+    ):
+        return await call_next(request)
+    actor = getattr(request.state, "auth_context", None)
+    if not isinstance(actor, AuthContext):
+        return _auth_error_response("Authentication required.")
+    lease = request.app.state.artifact_resolution_admission.try_acquire(actor.user_id)
+    if lease is None:
+        return _artifact_resolution_saturated_response()
+    try:
+        return await call_next(request)
+    finally:
+        lease.release()
+
+
+def configure_artifact_resolution_admission_middleware(app: FastAPI) -> None:
+    @app.middleware("http")
+    async def artifact_resolution_admission_middleware(
+        request: Request,
+        call_next: RequestResponseEndpoint,
+    ) -> Response:
+        return await _apply_artifact_resolution_admission(request, call_next)
+
+
 def _should_apply_csp(path: str) -> bool:
     if path == "/" or path.startswith("/openapi"):
         return False
@@ -240,9 +288,7 @@ def configure_database_session_middleware(
     @app.middleware("http")
     async def db_session_middleware(request: Request, call_next):
         db_session = request.app.state.db_session_factory()
-        request.state.db_session = db_session
         repository = SQLAlchemyLabTrackerRepository(db_session)
-        request.state.lab_tracker_repository = repository
         request_scope = api.request_scope(
             repository,
             surface=_usage_surface_from_request(request),
@@ -251,6 +297,20 @@ def configure_database_session_middleware(
         request_scope.__enter__()
         try:
             request.state.lab_tracker_api = request_scope.api
+            request.state.lab_tracker_handlers = RequestHandlers.compose(
+                api=request_scope.api,
+                repository=repository,
+                session=db_session,
+                file_storage=request.app.state.file_storage_backend,
+                raw_note_storage=request.app.state.raw_note_storage,
+                settings=request.app.state.settings,
+                resolver_registry=getattr(
+                    request.app.state,
+                    "resolver_registry",
+                    None,
+                ),
+                release_read_scope=request_scope.release_read_scope,
+            )
             response = await call_next(request)
         except BaseException as exc:
             await run_in_threadpool(
