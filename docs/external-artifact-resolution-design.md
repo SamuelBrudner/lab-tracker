@@ -353,10 +353,12 @@ backstop.
 
 A registered store identity is portable, but its root may be host-specific:
 OneDrive mounts at a different local path on every machine
-(`C:\Users\…\OneDrive` vs `/Users/…/OneDrive`). The registered `DataStore`
-therefore supplies the project-scoped root or endpoint, while deployment
-configuration supplies the host-local authority under which that store may be
-reached. Raw captured locators never select this configuration.
+(`C:\Users\…\OneDrive` vs `/Users/…/OneDrive`). A new project- or group-scoped
+registered `DataStore` therefore supplies one exact native root or canonical
+remote root, while deployment configuration supplies the host-local authority
+under which that store may be reached. Historical rows can retain a legacy
+endpoint, interpreted only by the fail-closed read boundary. Raw captured
+locators never select this configuration.
 
 ```
 [registered store: project-onedrive]

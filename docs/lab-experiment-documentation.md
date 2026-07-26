@@ -74,11 +74,13 @@ So the rule for this workflow is:
   and every artifact becomes `store://lab-onedrive/experiments/001/flow/sample.fcs`
   + `content_hash` — an `ExternalArtifactReference` with paired `store_name` +
   `locator` fields. This is portable across your laptop, the core-facility PC,
-  and an HPC node (the host-specific mount root lives on the *store*, not the
-  artifact), and an assistant can pull bounded, hash-verified bytes on demand via
+  and an HPC node when the registration uses a host-independent remote. For
+  `local_fs`, the host-specific mount root lives on the *store*, not the
+  artifact, so that registration is intentionally single-host. An assistant can
+  pull bounded, hash-verified bytes on demand via
   `lab_tracker_resolve_artifact` (returns `verified` / `drifted` / `unresolved`).
   A synced OneDrive folder registers as `kind=local_fs` with **zero credentials**;
-  an unsynced/headless store uses the rclone adapter. See
+  an unsynced/headless or multi-host store uses the rclone adapter. See
   [`data-store-registry-design.md`](data-store-registry-design.md).
 - **Setup is per-host, and stores are meant to span a fleet.** Real work happens
   on more than one machine — her laptop, an instrument/experiment PC, the shared
@@ -89,7 +91,8 @@ So the rule for this workflow is:
     easiest (zero credentials).
   - For a **multi-machine lab**, prefer the **rclone form** (`kind=onedrive`,
     `credential_ref` = an rclone remote name each host maps in its own
-    `rclone.conf`): the store record is then host-independent and
+    `rclone.conf`, `root` = a decoded relative or rooted path within that
+    remote—not an `s3://` or provider URL): the store record is then host-independent and
     `store://lab-onedrive/...` resolves identically on every machine — including
     hosts where OneDrive isn't file-synced. A `local_fs` store's `root` is an
     absolute path, so it only resolves on the machine that registered it.

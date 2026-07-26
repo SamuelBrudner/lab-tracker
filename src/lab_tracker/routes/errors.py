@@ -110,11 +110,13 @@ def register_error_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(RequestValidationError)
     def _handle_request_validation_error(request: Request, exc: RequestValidationError):
-        _log_handled_error(
-            request,
-            status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
-            code="request_validation_error",
-            exc=exc,
+        _logger.warning(
+            "Handled HTTP error: method=%s path=%s status_code=%s code=%s "
+            "detail=Request validation failed.",
+            request.method,
+            request.url.path,
+            http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "request_validation_error",
         )
         return error_response(
             http_status.HTTP_422_UNPROCESSABLE_CONTENT,

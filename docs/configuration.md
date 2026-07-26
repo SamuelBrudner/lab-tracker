@@ -334,11 +334,13 @@ before cache lookup or host I/O. Authorization runs on every request, including
 cache hits. Hidden and absent stores therefore remain indistinguishable and
 never reach the cache or probe.
 
-HTTP stores use `endpoint` whenever it is present and use `root` only when
-`endpoint` is absent. A present blank, malformed, or structurally invalid
-endpoint therefore fails closed and never falls back to `root`; the selected
-initial URL must also pass the hardened registered-base structural grammar
-before host I/O. The health probe sends `HEAD` through the same
+New HTTP registrations store their canonical directory prefix in `root` and
+reject every present `endpoint`; they also reject embedded credentials.
+Historical rows may still contain `endpoint`. Health checks preserve the legacy
+interpretation exactly: a present endpoint is authoritative, including when it
+is blank or invalid, and never falls back to `root`. The selected initial URL
+must pass the hardened registered-base structural grammar before host I/O. The
+health probe sends `HEAD` through the same
 outbound policy, pinned client, and total deadline as HTTP artifact resolution.
 Statuses `301`, `302`, `303`, `307`, and `308` are followed manually while
 preserving `HEAD`; every hop is reauthorized and repinned, safe cross-origin
@@ -491,12 +493,15 @@ rereads the process environment. Runtime builds one local operations broker
 from that root list and passes the exact broker to health, artifact resolution,
 and bounded recovery enumeration. Rclone and Git resolution and health share
 one immutable instance of their corresponding policy. All subprocess-backed
-adapters share one bounded process executor. Rclone health preserves the
-registered distinction
-between `remote:path`, `remote:/path`, and `remote:/`. A present
-`credential_ref` remains authoritative even when blank or invalid and never
-falls back to the store name. Its bounded `rclone lsf` intentionally reports a
-large/noisy root as unreachable when fixed metadata output limits are exceeded.
+adapters share one bounded process executor. New rclone-backed registrations
+accept a decoded path within a remote and preserve the distinction between
+`remote:path`, `remote:/path`, and `remote:/`; an `s3://bucket` URL is not a
+registered rclone root. A present `credential_ref` must be one exact rclone
+remote name, while absence uses the store name. Historical rows can still
+contain a blank or invalid `credential_ref`; at health and resolution boundaries
+its presence remains authoritative and never falls back to the store name. The
+bounded `rclone lsf` intentionally reports a large/noisy root as unreachable
+when fixed metadata output limits are exceeded.
 
 Store-health Git commands run from an app-owned empty, non-repository directory,
 so an ambient checkout's repository-local Git configuration cannot affect them.
