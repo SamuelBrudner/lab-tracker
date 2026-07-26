@@ -402,6 +402,7 @@ def test_invalid_git_policy_fails_before_workdir_or_database_without_secret_leak
 
     monkeypatch.setattr(runtime_module, "mkdtemp", unexpected_side_effect)
     monkeypatch.setattr(runtime_module, "get_engine", unexpected_side_effect)
+    monkeypatch.setattr(runtime_module, "SafeHttpClient", unexpected_side_effect)
 
     with pytest.raises(ValueError) as exc_info:
         build_app_runtime(settings)
@@ -419,18 +420,35 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(monkeypatch):
     )
     resolver_registry = ResolverRegistry()
     captured: dict[str, object] = {}
+    outbound_http_client = object()
+    safe_http_client_timeouts: list[float] = []
+
+    def recording_safe_http_client(*, timeout):
+        safe_http_client_timeouts.append(timeout)
+        return outbound_http_client
+
+    monkeypatch.setattr(
+        runtime_module,
+        "SafeHttpClient",
+        recording_safe_http_client,
+    )
 
     def recording_registry_from_env(
         *,
         http_policy,
+        http_client,
         git_remote_policy,
         http_deadline_seconds,
         subprocess_deadline_seconds,
     ):
-        captured["http_policy"] = http_policy
-        captured["git_remote_policy"] = git_remote_policy
-        captured["http_deadline_seconds"] = http_deadline_seconds
-        captured["subprocess_deadline_seconds"] = subprocess_deadline_seconds
+        assert safe_http_client_timeouts == [12.5]
+        captured["registry_http_policy"] = http_policy
+        captured["registry_http_client"] = http_client
+        captured["registry_git_remote_policy"] = git_remote_policy
+        captured["registry_http_deadline_seconds"] = http_deadline_seconds
+        captured["registry_subprocess_deadline_seconds"] = (
+            subprocess_deadline_seconds
+        )
         return resolver_registry
 
     monkeypatch.setattr(
@@ -439,15 +457,37 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(monkeypatch):
         recording_registry_from_env,
     )
 
+    def recording_http_store_health_probe(
+        *,
+        policy,
+        client,
+        deadline_seconds,
+    ):
+        captured["health_http_policy"] = policy
+        captured["health_http_client"] = client
+        captured["health_http_deadline_seconds"] = deadline_seconds
+
+        def probe(target):
+            captured["http_health_target"] = target
+            return StoreHealth(StoreHealthStatus.HEALTHY)
+
+        return probe
+
+    monkeypatch.setattr(
+        runtime_module,
+        "HttpStoreHealthProbe",
+        recording_http_store_health_probe,
+    )
+
     def recording_check_store_health(
         target,
         *,
         git_remote_policy,
         git_health_cwd,
     ):
-        captured["health_target"] = target
-        captured["health_git_remote_policy"] = git_remote_policy
-        captured["health_git_cwd"] = git_health_cwd
+        captured["legacy_health_target"] = target
+        captured["legacy_health_git_remote_policy"] = git_remote_policy
+        captured["legacy_health_git_cwd"] = git_health_cwd
         return StoreHealth(StoreHealthStatus.HEALTHY)
 
     monkeypatch.setattr(
@@ -478,6 +518,7 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(monkeypatch):
         configure_app_state(app, runtime)
 
         assert app.state.outbound_http_policy is runtime.outbound_http_policy
+        assert runtime.outbound_http_client is outbound_http_client
         assert app.state.git_remote_policy is runtime.git_remote_policy
         assert app.state.resolver_registry is resolver_registry
         assert (
@@ -495,13 +536,29 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(monkeypatch):
         assert runtime.store_health_checker.ttl_seconds == 4.5
         assert runtime.store_health_checker.waiter_timeout_seconds == 2.25
         assert app.state.cleanup_git_health_workdir.__self__ is runtime
-        assert captured == {
-            "http_policy": runtime.outbound_http_policy,
-            "git_remote_policy": runtime.git_remote_policy,
-            "http_deadline_seconds": 12.5,
-            "subprocess_deadline_seconds": 7.25,
-        }
-        health_target = StoreProbeTarget(
+        assert safe_http_client_timeouts == [12.5]
+        assert captured["registry_http_policy"] is runtime.outbound_http_policy
+        assert captured["health_http_policy"] is runtime.outbound_http_policy
+        assert captured["registry_http_client"] is runtime.outbound_http_client
+        assert captured["health_http_client"] is runtime.outbound_http_client
+        assert captured["registry_git_remote_policy"] is runtime.git_remote_policy
+        assert captured["registry_http_deadline_seconds"] == 12.5
+        assert captured["health_http_deadline_seconds"] == 12.5
+        assert captured["registry_subprocess_deadline_seconds"] == 7.25
+
+        http_health_target = StoreProbeTarget(
+            store_id=UUID(int=1),
+            name="runtime-http-wiring",
+            kind=StoreKind.HTTP,
+            root="http://10.20.1.7/artifact.bin",
+            endpoint=None,
+            credential_ref=None,
+        )
+        assert runtime.store_health_checker(http_health_target).is_healthy
+        assert captured["http_health_target"] is http_health_target
+        assert "legacy_health_target" not in captured
+
+        git_health_target = StoreProbeTarget(
             store_id=UUID(int=1),
             name="runtime-wiring",
             kind=StoreKind.GIT,
@@ -509,13 +566,13 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(monkeypatch):
             endpoint=None,
             credential_ref=None,
         )
-        assert runtime.store_health_checker(health_target).is_healthy
-        assert captured["health_target"] is health_target
+        assert runtime.store_health_checker(git_health_target).is_healthy
+        assert captured["legacy_health_target"] is git_health_target
         assert (
-            captured["health_git_remote_policy"]
+            captured["legacy_health_git_remote_policy"]
             is runtime.git_remote_policy
         )
-        assert captured["health_git_cwd"] is runtime.git_health_workdir
+        assert captured["legacy_health_git_cwd"] is runtime.git_health_workdir
         assert git_health_workdir.is_dir()
         assert list(git_health_workdir.iterdir()) == []
         assert not (git_health_workdir / ".git").exists()
@@ -554,12 +611,14 @@ def test_lifespan_removes_app_owned_git_health_workdir(monkeypatch):
     def recording_registry_from_env(
         *,
         http_policy,
+        http_client,
         git_remote_policy,
         http_deadline_seconds,
         subprocess_deadline_seconds,
     ):
         del (
             http_policy,
+            http_client,
             git_remote_policy,
             http_deadline_seconds,
             subprocess_deadline_seconds,

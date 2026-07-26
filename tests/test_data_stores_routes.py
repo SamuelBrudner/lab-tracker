@@ -7,9 +7,16 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from http_security_fakes import FakeAddressResolver, FakeSafeHttpClient
 from starlette.testclient import TestClient
 
 from lab_tracker.artifact_resolution import LocalFilesystemResolver, ResolverRegistry
+from lab_tracker.http_store_health import HttpStoreHealthProbe
+from lab_tracker.outbound_http import OutboundHttpPolicy
+from lab_tracker.store_health import (
+    HTTP_STORE_HEALTH_FAILURE_DETAIL,
+    CachedStoreHealthProbe,
+)
 
 
 def _sha256(data: bytes) -> str:
@@ -500,6 +507,52 @@ def test_git_store_health_uses_installed_policy_without_leaking_credentials(
     assert secret not in response.text
     assert list(workdir.iterdir()) == []
     assert not (workdir / ".git").exists()
+
+
+def test_http_store_health_route_redacts_the_authoritative_selected_target(
+    client,
+    admin_auth_headers,
+):
+    project_id = _create_project(client, admin_auth_headers, "HTTP health project")
+    secret = "http-health-secret-must-not-leak"
+    store_id = client.post(
+        "/data-stores",
+        json=_store_payload(
+            project_id,
+            name="remote-http-store",
+            kind="http",
+            root="https://allowed.example/safe-root",
+            endpoint=f"https://operator:{secret}@denied.example/private",
+            credential_ref=f"vault:{secret}",
+        ),
+        headers=admin_auth_headers,
+    ).json()["data"]["store_id"]
+    dns = FakeAddressResolver({"allowed.example": ["93.184.216.34"]})
+    http_client = FakeSafeHttpClient(())
+    client.app.state.store_health_checker = CachedStoreHealthProbe(
+        HttpStoreHealthProbe(
+            policy=OutboundHttpPolicy(address_resolver=dns),
+            client=http_client,
+        )
+    )
+
+    response = client.get(
+        f"/data-stores/{store_id}/health",
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"] == {
+        "store_id": store_id,
+        "kind": "http",
+        "status": "unreachable",
+        "detail": HTTP_STORE_HEALTH_FAILURE_DETAIL,
+    }
+    assert secret not in response.text
+    assert "denied.example" not in response.text
+    assert "allowed.example" not in response.text
+    assert dns.calls == []
+    assert http_client.calls == []
 
 
 def test_data_store_health_denied_for_unauthorized_project(

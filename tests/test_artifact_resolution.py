@@ -9,7 +9,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
-import httpx
 import pytest
 from http_security_fakes import (
     FakeAddressResolver,
@@ -2289,27 +2288,21 @@ def test_check_store_health_rclone_missing_binary():
     assert "unavailable" in (health.detail or "").lower()
 
 
-def test_check_store_health_http_healthy_via_client():
-    store = _data_store(StoreKind.HTTP, "https://files.example/base", name="web")
+def test_legacy_check_store_health_http_fails_closed_without_client_seam():
+    secret = "legacy-http-target-must-not-escape"
+    store = _data_store(
+        StoreKind.HTTP,
+        f"https://user:{secret}@files.example/base",
+        name="web",
+    )
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert request.method == "HEAD"
-        return httpx.Response(200)
+    health = check_store_health(store)
 
-    client = httpx.Client(transport=httpx.MockTransport(handler))
-    health = check_store_health(store, http_client=client)
-    assert health.status is StoreHealthStatus.HEALTHY
-
-
-def test_check_store_health_http_unreachable_via_client():
-    store = _data_store(StoreKind.HTTP, "https://files.example/base", name="web")
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(500)
-
-    client = httpx.Client(transport=httpx.MockTransport(handler))
-    health = check_store_health(store, http_client=client)
     assert health.status is StoreHealthStatus.UNREACHABLE
+    assert health.detail == "HTTP store health check failed."
+    assert secret not in str(health.to_json_dict())
+    with pytest.raises(TypeError):
+        check_store_health(store, http_client=object())  # type: ignore[call-arg]
 
 
 def test_check_store_health_database_is_unsupported():
@@ -3856,16 +3849,19 @@ def test_registry_from_env_honors_http_deadline_without_runtime_settings(
         "2.5",
     )
 
+    http_client = FakeSafeHttpClient(())
     registry = registry_from_env(
         http_policy=OutboundHttpPolicy(
             address_resolver=FakeAddressResolver(),
-        )
+        ),
+        http_client=http_client,
     )
 
     http_resolver = next(
         resolver for resolver in registry._resolvers if isinstance(resolver, HttpResolver)
     )
     assert http_resolver._deadline_seconds == 2.5
+    assert http_resolver._client is http_client
 
 
 @pytest.mark.parametrize("value", ("0", "-1", "nan", "inf", "not-a-number"))

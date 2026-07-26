@@ -290,11 +290,17 @@ Shipped:
   cache access, detaches a frozen exact-value probe target, and releases the
   ordinary request database scope before cache or host I/O. Completed results
   use a hard-bounded process-local TTL/LRU cache with exact-key single-flight
-  and bounded follower waits. The current leaf adapters remain
-  `check_store_health` (directory stat for `local_fs`, HTTP `HEAD` for `http`,
-  `rclone lsf` for cloud/remote kinds, `git ls-remote` for `git`, and
-  `unsupported` for `object_table`/`database`); their
-  destination/process/local-host hardening is tracked separately.
+  and bounded follower waits. HTTP health treats a present `endpoint` as
+  authoritative (including blank or invalid values), never falls back to
+  `root`, and requires the selected initial URL to pass the hardened
+  registered-base structural grammar before host I/O. It sends a bounded
+  `HEAD` through the exact outbound policy and pinned client used by artifact
+  resolution, reauthorizes and repins every redirect under one total deadline,
+  and returns one static failure detail. The remaining leaf adapters still use
+  `check_store_health` (directory stat for `local_fs`, `rclone lsf` for
+  cloud/remote kinds, `git ls-remote` for `git`, and `unsupported` for
+  `object_table`/`database`); their process/local-host hardening remains tracked
+  separately.
 - ✅ Group-scoped stores: a store is scoped to exactly one of a project or a
   group (migration `0050`, nullable `project_id` + `group_id`). A group store is
   inherited by every project in the group — `get_by_name` resolves a project's
