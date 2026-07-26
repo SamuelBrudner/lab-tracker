@@ -96,7 +96,7 @@ class ResolvedArtifact:
     content_type: str | None
     size_bytes: int | None
     content: bytes | None           # bounded; present only when verified
-    truncated: bool                 # True if size exceeded max_bytes / a range was used
+    truncated: bool                 # bounded selected view is smaller than full artifact
     fetched_at: datetime
     detail: str | None              # reason when unresolved/drifted
 
@@ -541,9 +541,11 @@ makes one more call:
   `entity_type` (`dataset`, `analysis`, or `claim`), `entity_id`, and an optional
   `artifact_index` (default `0`). Optional `content_hash`, `max_bytes`,
   `byte_start`, and `byte_end` fields constrain and verify the selected
-  reference; byte-range bounds must be supplied together. The response contains
-  the `ResolvedArtifact` fields plus the selected entity type and ID, artifact
-  index, and base64-encoded content.
+  reference. `max_bytes` is an exact integer from `1` through 8 MiB; byte-range
+  bounds are exact integers from `0` through `2**53 - 1`, must be supplied
+  together, and use an exclusive end greater than or equal to the start. The
+  response contains the `ResolvedArtifact` fields plus the selected entity type
+  and ID, artifact index, and base64-encoded content.
 - **MCP read tool:** `lab_tracker_resolve_artifact(entity_type, entity_id,
   artifact_index=0, content_hash?, max_bytes?, byte_start?, byte_end?)`, sitting
   next to `lab_tracker_get_dataset_provenance` / `_analysis_provenance` /
@@ -564,10 +566,44 @@ artifacts or fetch bytes for a project the caller cannot read.
 Resolving arbitrary external content into an agent's context is a payload-size
 and prompt-injection surface, so the resolver is bounded by construction:
 
-- **Size cap.** `max_bytes` bounds the bytes returned in `content_base64`; the
-  whole artifact is still hashed for integrity and `truncated=True` reports
-  that the response omits bytes. Optional `byte_start`/`byte_end` fields request
-  a bounded slice and must be supplied together.
+- **One hard inline cap.** `max_bytes` defaults to, and cannot exceed,
+  `8 * 1024 * 1024` decoded content bytes. Booleans, coercible strings/floats,
+  zero, negatives, and larger values are invalid. Optional
+  `byte_start`/`byte_end` fields request `[start, end)` and must be supplied
+  together as exact, non-negative integers no greater than `2**53 - 1`, with
+  `end >= start`. These scalar bounds are validated before entity lookup or
+  resolver work. Only HTTP/MCP/application request boundaries interpret an
+  omitted value as the default; direct registry, resolver, and collector calls
+  require the selected limit as an exact integer and reject explicit `None`.
+- **Ranges never enlarge the response.** A ranged request retains only
+  `[start, min(end, start + max_bytes))` while streaming. It does not collect
+  the requested range and truncate afterward. The whole artifact is still
+  hashed for integrity and the adapters' independent fetch ceilings still
+  apply.
+- **Truthful view metadata.** `returned_bytes` counts decoded raw bytes and
+  `size_bytes` remains the full artifact size. `truncated` means the bounded
+  selected view is smaller than the full artifact, before integrity withholding;
+  merely supplying a full-covering range does not make it true. Ranged content
+  is the earliest capped prefix of the requested range. Base64 and JSON add
+  transport overhead but cannot increase the decoded-content allowance.
+- **Defense in depth.** Concrete resolvers validate before I/O. The registry and
+  application serialization boundary share one postcondition. It snapshots the
+  prepared logical identity before untrusted dispatch, anchors source, URI, and
+  expected hash to that snapshot, validates safe field types, integrity state,
+  full size, selected-view length, and truncation, and rechecks the effective
+  allowance. Accepted output is copied into a detached result before
+  serialization, so later adapter mutation cannot change it. A custom adapter
+  that violates any part fails closed to a content-free, redacted `unresolved`
+  result; its fields are never serialized or truncated and returned.
+  Precomputed prepared results are permitted only for the application's exact
+  content-free, redacted store failures.
+- **Adapter integrity responsibility.** Registered resolver implementations are
+  trusted application adapters and remain responsible for recomputing the full
+  artifact digest. The shared postcondition independently rehashes any complete,
+  untruncated returned artifact. It cannot reconstruct a full digest from a
+  bounded ranged/truncated view, so those results are accepted only after the
+  adapter reports the requested identity and matching observed hash; built-in
+  adapters obtain that value from the full stream, not from the returned prefix.
 - **Integrity before content.** Only `verified` results include
   `content_base64`. `drifted` results preserve the observed hash, full size,
   content type, truncation flag, and mismatch detail while returning

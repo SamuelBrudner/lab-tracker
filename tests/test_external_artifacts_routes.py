@@ -26,6 +26,10 @@ from lab_tracker.artifact_resolution import (
     RcloneResolver,
     ResolverRegistry,
 )
+from lab_tracker.artifact_resolution_limits import (
+    MAX_ARTIFACT_BYTE_OFFSET,
+    MAX_INLINE_ARTIFACT_BYTES,
+)
 from lab_tracker.db_models import DataStoreModel
 from lab_tracker.git_remote_policy import GitRemotePolicy
 from lab_tracker.outbound_http import OutboundHttpPolicy
@@ -96,6 +100,69 @@ def _create_dataset_with_artifact(
     )
     assert response.status_code == 201, response.text
     return response.json()["data"]["dataset_id"]
+
+
+@pytest.mark.parametrize(
+    "invalid_fields",
+    [
+        {"max_bytes": True},
+        {"max_bytes": False},
+        {"max_bytes": 1.0},
+        {"max_bytes": "1"},
+        {"max_bytes": 0},
+        {"max_bytes": -1},
+        {"max_bytes": MAX_INLINE_ARTIFACT_BYTES + 1},
+        {"byte_start": True, "byte_end": 1},
+        {"byte_start": 1.0, "byte_end": 2},
+        {"byte_start": "1", "byte_end": 2},
+        {"byte_start": -1, "byte_end": 2},
+        {
+            "byte_start": MAX_ARTIFACT_BYTE_OFFSET + 1,
+            "byte_end": MAX_ARTIFACT_BYTE_OFFSET + 1,
+        },
+        {"byte_start": 0, "byte_end": MAX_ARTIFACT_BYTE_OFFSET + 1},
+        {"byte_start": 1},
+        {"byte_end": 1},
+        {"byte_start": 2, "byte_end": 1},
+    ],
+)
+def test_resolve_endpoint_rejects_invalid_content_bounds(
+    client,
+    admin_auth_headers,
+    invalid_fields,
+):
+    response = client.post(
+        "/external-artifacts/resolve",
+        json={
+            "entity_type": "dataset",
+            "entity_id": "00000000-0000-0000-0000-000000000001",
+            **invalid_fields,
+        },
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 422, response.text
+
+
+def test_resolve_endpoint_openapi_publishes_portable_content_bounds(client):
+    schema = client.get("/openapi.json").json()["components"]["schemas"][
+        "ResolveExternalArtifactRequest"
+    ]
+
+    max_bytes_schema = schema["properties"]["max_bytes"]["anyOf"][0]
+    byte_start_schema = schema["properties"]["byte_start"]["anyOf"][0]
+    byte_end_schema = schema["properties"]["byte_end"]["anyOf"][0]
+    assert max_bytes_schema == {
+        "type": "integer",
+        "maximum": MAX_INLINE_ARTIFACT_BYTES,
+        "minimum": 1,
+    }
+    assert byte_start_schema == {
+        "type": "integer",
+        "maximum": MAX_ARTIFACT_BYTE_OFFSET,
+        "minimum": 0,
+    }
+    assert byte_end_schema == byte_start_schema
 
 
 def test_resolve_endpoint_redacts_denied_http_credentials_and_target(
@@ -499,6 +566,47 @@ def test_resolve_endpoint_returns_verified_content(client, admin_auth_headers, t
     assert body["observed_hash"] == _sha256(data)
     assert base64.b64decode(body["content_base64"]) == data
     assert body["entity_type"] == "dataset"
+
+
+def test_resolve_endpoint_caps_a_requested_range(client, admin_auth_headers, tmp_path):
+    data = b"0123456789"
+    artifact = tmp_path / "ranged-result.bin"
+    artifact.write_bytes(data)
+    _install_local_registry(client, tmp_path)
+
+    project_id = client.post(
+        "/projects",
+        json={"name": "Capped range project"},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    dataset_id = _create_dataset_with_artifact(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        uri=artifact.as_uri(),
+        content_hash=_sha256(data),
+    )
+
+    response = client.post(
+        "/external-artifacts/resolve",
+        json={
+            "entity_type": "dataset",
+            "entity_id": dataset_id,
+            "max_bytes": 3,
+            "byte_start": 2,
+            "byte_end": 9,
+        },
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()["data"]
+    assert body["status"] == "verified"
+    assert body["observed_hash"] == _sha256(data)
+    assert body["size_bytes"] == len(data)
+    assert body["returned_bytes"] == 3
+    assert body["truncated"] is True
+    assert base64.b64decode(body["content_base64"]) == b"234"
 
 
 def test_resolve_endpoint_uses_registered_http_store_prefix_and_logical_identity(

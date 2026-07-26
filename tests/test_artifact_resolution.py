@@ -3,7 +3,7 @@ import os
 import shutil
 import subprocess
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -52,6 +52,10 @@ from lab_tracker.artifact_resolution import (
     rclone_store_resolution_target,
     registry_from_env,
     store_relative_reference,
+)
+from lab_tracker.artifact_resolution_limits import (
+    MAX_INLINE_ARTIFACT_BYTES,
+    ArtifactContentBoundsError,
 )
 from lab_tracker.git_remote_policy import (
     GitRemotePolicy,
@@ -490,6 +494,99 @@ def test_local_resolver_returns_byte_range_slice(tmp_path):
     assert result.size_bytes == 10
 
 
+def test_local_resolver_caps_a_requested_byte_range_while_hashing_the_full_file(
+    tmp_path,
+):
+    data = b"0123456789"
+    path = _write(tmp_path, "capped-range.bin", data)
+
+    result = LocalFilesystemResolver().resolve(
+        _local_ref(path, _sha256(data)),
+        max_bytes=2,
+        byte_range=(2, 8),
+    )
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == b"23"
+    assert result.observed_hash == _sha256(data)
+    assert result.size_bytes == len(data)
+    assert result.truncated is True
+
+
+def test_scoped_local_resolver_caps_a_requested_byte_range_and_verifies(tmp_path):
+    data = b"0123456789"
+    store_root = tmp_path / "store"
+    store_root.mkdir()
+    _write(store_root, "artifact.bin", data)
+    target = _local_store_target(
+        _data_store(StoreKind.LOCAL_FS, str(store_root)),
+        "artifact.bin",
+        _sha256(data),
+    )
+
+    result = LocalFilesystemResolver(allowed_roots=[tmp_path]).resolve_within_root(
+        target,
+        max_bytes=2,
+        byte_range=(2, 8),
+    )
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == b"23"
+    assert result.observed_hash == _sha256(data)
+    assert result.size_bytes == len(data)
+    assert result.uri == target.logical_reference.uri
+
+
+@pytest.mark.parametrize(
+    ("chunks", "max_bytes", "byte_range", "expected_content", "truncated"),
+    (
+        ((b"012", b"345", b"6789"), 4, None, b"0123", True),
+        ((b"012", b"345", b"6789"), 3, (2, 8), b"234", True),
+        ((b"01234", b"56789"), 3, (4, 7), b"456", True),
+        ((b"012", b"345", b"6789"), 4, (8, 20), b"89", True),
+        ((b"0123",), 4, (8, 10), b"", True),
+        ((b"012", b"345"), 4, (3, 3), b"", True),
+        ((b"0123",), 4, (4, 4), b"", True),
+        ((b"012", b"345"), 8, (0, 8), b"012345", False),
+        ((b"", b"012345"), 8, None, b"012345", False),
+        ((), 4, None, b"", False),
+    ),
+)
+def test_hash_collector_chunk_range_and_cap_matrix(
+    chunks,
+    max_bytes,
+    byte_range,
+    expected_content,
+    truncated,
+):
+    data = b"".join(chunks)
+
+    content, total, was_truncated, observed = artifact_resolution._hash_and_collect(
+        chunks,
+        algorithm="sha256",
+        max_bytes=max_bytes,
+        window=byte_range,
+    )
+
+    assert content == expected_content
+    assert total == len(data)
+    assert was_truncated is truncated
+    assert observed == _sha256(data)
+
+
+def test_hash_collector_hashes_beyond_the_selected_view_and_honors_fetch_cap():
+    collector = artifact_resolution._HashCollector(
+        algorithm="sha256",
+        max_bytes=1,
+        window=(2, 8),
+        max_total=5,
+    )
+
+    collector.consume(b"012")
+    with pytest.raises(artifact_resolution._FetchTooLarge):
+        collector.consume(b"345")
+
+
 def test_local_resolver_withholds_byte_range_when_hash_drifts(tmp_path):
     data = b"0123456789"
     path = _write(tmp_path, "drifted-range.bin", data)
@@ -508,15 +605,94 @@ def test_local_resolver_withholds_byte_range_when_hash_drifts(tmp_path):
     assert result.detail == "Recomputed hash does not match content_hash."
 
 
+def test_capped_range_withholds_content_when_drift_occurs_after_retention(tmp_path):
+    recorded = b"0123456789"
+    actual = b"012345678X"
+    path = _write(tmp_path, "late-drift-range.bin", actual)
+
+    result = LocalFilesystemResolver().resolve(
+        _local_ref(path, _sha256(recorded)),
+        max_bytes=2,
+        byte_range=(2, 8),
+    )
+
+    assert result.status is ResolutionStatus.DRIFTED
+    assert result.observed_hash == _sha256(actual)
+    assert result.content is None
+    assert result.returned_bytes == 0
+    assert result.truncated is True
+    assert result.size_bytes == len(actual)
+
+
 def test_local_resolver_rejects_invalid_byte_range(tmp_path):
     data = b"0123456789"
     path = _write(tmp_path, "ranged.bin", data)
 
-    result = LocalFilesystemResolver().resolve(
-        _local_ref(path, _sha256(data)), byte_range=(5, 2)
+    with pytest.raises(
+        ArtifactContentBoundsError,
+        match="greater than or equal to byte_start",
+    ):
+        LocalFilesystemResolver().resolve(
+            _local_ref(path, _sha256(data)), byte_range=(5, 2)
+        )
+
+
+@pytest.mark.parametrize("invalid_max_bytes", [True, None])
+def test_all_concrete_resolver_entrypoints_reject_invalid_views_before_io(
+    tmp_path,
+    monkeypatch,
+    invalid_max_bytes,
+):
+    reference = ExternalArtifactReference(
+        source_system="custom",
+        uri="secret://artifact",
+        content_hash=_sha256(b"artifact"),
+    )
+    local = LocalFilesystemResolver()
+    http, http_client, dns = _safe_http_resolver()
+    rclone_runner = _fake_rclone_runner(size_bytes=1, body=b"x")
+    rclone = RcloneResolver(
+        runner=rclone_runner,
+        remote_policy=_rclone_policy("remote"),
+    )
+    git_runner = _fake_git_runner(blob=b"x")
+    git = _git_resolver(runner=git_runner, cache_root=tmp_path)
+
+    def unexpected_local_parse(_uri):
+        raise AssertionError("invalid view reached local path parsing")
+
+    monkeypatch.setattr(
+        artifact_resolution,
+        "native_local_path_from_uri",
+        unexpected_local_parse,
     )
 
-    assert result.status is ResolutionStatus.UNRESOLVED
+    for call in (
+        lambda: local.resolve(reference, max_bytes=invalid_max_bytes),
+        lambda: http.resolve(reference, max_bytes=invalid_max_bytes),
+        lambda: rclone.resolve(reference, max_bytes=invalid_max_bytes),
+        lambda: git.resolve(reference, max_bytes=invalid_max_bytes),
+        lambda: local.resolve_within_root(
+            object(), max_bytes=invalid_max_bytes
+        ),
+        lambda: http.resolve_within_http_store(
+            object(), max_bytes=invalid_max_bytes
+        ),
+        lambda: rclone.resolve_within_rclone_store(
+            object(), max_bytes=invalid_max_bytes
+        ),
+        lambda: git.resolve_within_git_store(
+            object(), max_bytes=invalid_max_bytes
+        ),
+    ):
+        with pytest.raises(ArtifactContentBoundsError):
+            call()
+
+    assert http_client.calls == []
+    assert dns.calls == []
+    assert rclone_runner.calls == []
+    assert git_runner.calls == []
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_local_resolver_can_resolve_by_source_system_and_scheme(tmp_path):
@@ -773,6 +949,44 @@ def test_http_resolver_truncates_payload_but_verifies():
     assert result.content == b"abcd"
     assert result.truncated is True
     assert result.size_bytes == 10
+
+
+def test_http_resolver_caps_a_requested_byte_range_but_verifies():
+    body = b"0123456789"
+    resolver, _, _ = _safe_http_resolver(
+        FakeHttpResponse(chunks=(body[:3], body[3:7], body[7:]))
+    )
+
+    result = resolver.resolve(
+        _http_ref("https://store.example/x", _sha256(body)),
+        max_bytes=2,
+        byte_range=(2, 8),
+    )
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == b"23"
+    assert result.observed_hash == _sha256(body)
+    assert result.size_bytes == len(body)
+
+
+def test_scoped_http_resolver_caps_a_requested_byte_range_but_verifies():
+    body = b"0123456789"
+    resolver, _, _ = _safe_http_resolver(
+        FakeHttpResponse(chunks=(body[:3], body[3:7], body[7:]))
+    )
+    target = _registered_http_target(content_hash=_sha256(body))
+
+    result = resolver.resolve_within_http_store(
+        target,
+        max_bytes=2,
+        byte_range=(2, 8),
+    )
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == b"23"
+    assert result.observed_hash == _sha256(body)
+    assert result.size_bytes == len(body)
+    assert result.uri == target.logical_reference.uri
 
 
 def test_http_resolver_transport_error_is_unresolved_and_redacted():
@@ -1380,6 +1594,48 @@ def test_rclone_resolver_truncates_payload_but_verifies():
     assert result.status is ResolutionStatus.VERIFIED
     assert result.content == b"abcd"
     assert result.truncated is True
+
+
+def test_rclone_resolver_caps_a_requested_byte_range_but_verifies():
+    data = b"0123456789"
+    runner = _fake_rclone_runner(size_bytes=len(data), body=data)
+    resolver = RcloneResolver(
+        runner=runner,
+        remote_policy=_rclone_policy("remote"),
+    )
+
+    result = resolver.resolve(
+        _rclone_ref("rclone://remote/x", _sha256(data)),
+        max_bytes=2,
+        byte_range=(2, 8),
+    )
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == b"23"
+    assert result.observed_hash == _sha256(data)
+    assert result.size_bytes == len(data)
+
+
+def test_scoped_rclone_resolver_caps_a_requested_byte_range_but_verifies():
+    data = b"0123456789"
+    runner = _fake_rclone_runner(size_bytes=len(data), body=data)
+    resolver = RcloneResolver(
+        runner=runner,
+        remote_policy=_rclone_policy("lab-onedrive"),
+    )
+    target = _rclone_store_target(content_hash=_sha256(data))
+
+    result = resolver.resolve_within_rclone_store(
+        target,
+        max_bytes=2,
+        byte_range=(2, 8),
+    )
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == b"23"
+    assert result.observed_hash == _sha256(data)
+    assert result.size_bytes == len(data)
+    assert result.uri == target.logical_reference.uri
 
 
 def test_rclone_resolver_cat_failure_is_unresolved():
@@ -2505,7 +2761,7 @@ def test_registry_returns_precomputed_prepared_result_without_resolver_work():
         uri="store://[redacted]",
         expected_hash=_sha256(b"artifact"),
         fetched_at=datetime.now(timezone.utc),
-        detail="already resolved",
+        detail="Store artifact could not be resolved.",
     )
 
     result = ResolverRegistry([resolver]).resolve_prepared(
@@ -2514,9 +2770,83 @@ def test_registry_returns_precomputed_prepared_result_without_resolver_work():
         byte_range=(2, 5),
     )
 
-    assert result is precomputed
+    assert result is not precomputed
+    assert result == precomputed
     assert resolver.can_resolve_references == []
     assert resolver.calls == []
+
+
+@pytest.mark.parametrize(
+    "status",
+    (ResolutionStatus.VERIFIED, ResolutionStatus.DRIFTED),
+)
+def test_registry_rejects_precomputed_integrity_results(status):
+    content = b"secret precomputed bytes"
+    precomputed = ResolvedArtifact(
+        status=status,
+        source_system="secret-source",
+        uri="secret://locator",
+        expected_hash=_sha256(content),
+        observed_hash=_sha256(content),
+        content=content,
+        size_bytes=len(content),
+        fetched_at=datetime.now(timezone.utc),
+        detail="secret detail",
+    )
+
+    result = ResolverRegistry().resolve_prepared(precomputed)
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.source_system == "artifact"
+    assert result.uri == "artifact://[redacted]"
+    assert result.expected_hash == "unavailable"
+    assert result.observed_hash is None
+    assert result.content_type is None
+    assert result.size_bytes is None
+    assert result.content is None
+    assert result.truncated is False
+    assert "secret" not in str(result.to_json_dict())
+
+
+def test_registry_rejects_a_mutated_content_bearing_precomputed_failure():
+    precomputed = ResolvedArtifact(
+        status=ResolutionStatus.UNRESOLVED,
+        source_system="secret-source",
+        uri="secret://locator",
+        expected_hash=_sha256(b"secret"),
+        fetched_at=datetime.now(timezone.utc),
+        detail="secret detail",
+    )
+    object.__setattr__(precomputed, "content", b"secret")
+
+    result = ResolverRegistry().resolve_prepared(precomputed)
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.source_system == "artifact"
+    assert result.uri == "artifact://[redacted]"
+    assert result.content is None
+    assert "secret" not in str(result.to_json_dict())
+
+
+def test_registry_rejects_a_precomputed_resolved_artifact_subclass():
+    class CustomResolvedArtifact(ResolvedArtifact):
+        pass
+
+    target = CustomResolvedArtifact(
+        status=ResolutionStatus.UNRESOLVED,
+        source_system="secret-source",
+        uri="secret://locator",
+        expected_hash=_sha256(b"secret"),
+        fetched_at=datetime.now(timezone.utc),
+        detail="secret detail",
+    )
+
+    result = ResolverRegistry().resolve_prepared(target)
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.source_system == "artifact"
+    assert result.uri == "artifact://[redacted]"
+    assert "secret" not in str(result.to_json_dict())
 
 
 def test_registry_dispatches_prepared_external_reference_to_ordinary_resolver():
@@ -2653,14 +2983,478 @@ def test_registry_rejects_unsupported_prepared_runtime_type_without_reflection()
     )
 
     assert result.status is ResolutionStatus.UNRESOLVED
-    assert result.source_system == "prepared"
-    assert result.uri == "prepared://[redacted]"
+    assert result.source_system == "artifact"
+    assert result.uri == "artifact://[redacted]"
     assert result.expected_hash == "unavailable"
     assert result.observed_hash is None
     assert result.content is None
     assert result.detail == "Prepared artifact resolution target is unsupported."
     assert resolver.can_resolve_references == []
     assert resolver.calls == []
+
+
+@pytest.mark.parametrize("invalid_max_bytes", [True, None])
+def test_registry_validates_view_before_dispatch_or_target_inspection(
+    invalid_max_bytes,
+):
+    resolver = _RecordingPreparedResolver()
+    registry = ResolverRegistry([resolver])
+    reference = ExternalArtifactReference(
+        source_system="test",
+        uri="test://artifact",
+        content_hash=_sha256(b"artifact"),
+    )
+
+    with pytest.raises(ArtifactContentBoundsError):
+        registry.resolve(reference, max_bytes=invalid_max_bytes)
+    for method_name in (
+        "resolve_prepared",
+        "resolve_local_store",
+        "resolve_http_store",
+        "resolve_rclone_store",
+        "resolve_git_store",
+    ):
+        with pytest.raises(ArtifactContentBoundsError):
+            getattr(registry, method_name)(
+                object(),
+                max_bytes=invalid_max_bytes,
+            )
+
+    assert resolver.can_resolve_references == []
+    assert resolver.calls == []
+
+
+def test_registry_rejects_an_exact_target_with_missing_identity_without_dispatch():
+    resolver = _RecordingPreparedResolver()
+    malformed = object.__new__(ExternalArtifactReference)
+
+    result = ResolverRegistry([resolver]).resolve(malformed)
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.source_system == "artifact"
+    assert result.uri == "artifact://[redacted]"
+    assert resolver.can_resolve_references == []
+    assert resolver.calls == []
+
+
+def test_hash_collector_rejects_missing_resolver_limit_before_consuming_chunks():
+    with pytest.raises(ArtifactContentBoundsError, match="must be an integer"):
+        artifact_resolution._HashCollector(  # type: ignore[attr-defined]
+            algorithm="sha256",
+            max_bytes=None,
+            window=None,
+        )
+
+
+def test_every_registry_dispatch_path_rejects_custom_output_overruns(tmp_path):
+    content = b"secret artifact content"
+    reference = ExternalArtifactReference(
+        source_system="custom",
+        uri="secret://ordinary-locator",
+        content_hash=_sha256(content),
+    )
+    local_root = tmp_path / "store"
+    local_root.mkdir()
+    targets = (
+        reference,
+        _local_store_target(
+            _data_store(StoreKind.LOCAL_FS, str(local_root)),
+            "artifact.bin",
+            _sha256(content),
+        ),
+        _registered_http_target(content_hash=_sha256(content)),
+        _rclone_store_target(content_hash=_sha256(content)),
+        _git_store_target(content_hash=_sha256(content)),
+    )
+
+    class OverproducingResolver(_RecordingPreparedResolver):
+        @staticmethod
+        def _result(ref):
+            return ResolvedArtifact(
+                status=ResolutionStatus.VERIFIED,
+                source_system="secret-source",
+                uri="secret://adapter-locator",
+                expected_hash=ref.content_hash,
+                observed_hash=ref.content_hash,
+                content_type="secret/type",
+                size_bytes=len(content),
+                content=content,
+                truncated=True,
+                fetched_at=datetime.now(timezone.utc),
+                detail="secret detail",
+            )
+
+    resolver = OverproducingResolver()
+    registry = ResolverRegistry([resolver])
+    calls = (
+        lambda: registry.resolve(targets[0], max_bytes=1),
+        lambda: registry.resolve_local_store(targets[1], max_bytes=1),
+        lambda: registry.resolve_http_store(targets[2], max_bytes=1),
+        lambda: registry.resolve_rclone_store(targets[3], max_bytes=1),
+        lambda: registry.resolve_git_store(targets[4], max_bytes=1),
+    )
+
+    for call in calls:
+        result = call()
+        assert result.status is ResolutionStatus.UNRESOLVED
+        assert result.source_system == "artifact"
+        assert result.uri == "artifact://[redacted]"
+        assert result.expected_hash == "unavailable"
+        assert result.observed_hash is None
+        assert result.content_type is None
+        assert result.size_bytes is None
+        assert result.content is None
+        assert result.truncated is False
+        assert "secret" not in str(result.to_json_dict())
+
+
+def test_registry_rejects_self_consistent_output_for_a_different_artifact():
+    requested = b"requested"
+    substituted = b"substituted secret"
+    reference = ExternalArtifactReference(
+        source_system="custom",
+        uri="custom://requested",
+        content_hash=_sha256(requested),
+    )
+
+    class SubstitutingResolver(_RecordingPreparedResolver):
+        @staticmethod
+        def _result(_ref):
+            substituted_hash = _sha256(substituted)
+            return ResolvedArtifact(
+                status=ResolutionStatus.VERIFIED,
+                source_system="secret-source",
+                uri="secret://different-artifact",
+                expected_hash=substituted_hash,
+                observed_hash=substituted_hash,
+                size_bytes=len(substituted),
+                content=substituted,
+                fetched_at=datetime.now(timezone.utc),
+            )
+
+    result = ResolverRegistry([SubstitutingResolver()]).resolve(reference)
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.source_system == "artifact"
+    assert result.uri == "artifact://[redacted]"
+    assert result.content is None
+    assert "secret" not in str(result.to_json_dict())
+
+
+def test_registry_rehashes_a_complete_verified_result_before_accepting_content():
+    requested = b"right"
+    substituted = b"wrong"
+    reference = ExternalArtifactReference(
+        source_system="custom",
+        uri="custom://requested",
+        content_hash=_sha256(requested),
+    )
+
+    class LyingResolver(ArtifactResolver):
+        def can_resolve(self, _ref):
+            return True
+
+        def resolve(self, ref, *, max_bytes=DEFAULT_MAX_BYTES, byte_range=None):
+            return ResolvedArtifact(
+                status=ResolutionStatus.VERIFIED,
+                source_system=ref.source_system,
+                uri=ref.uri,
+                expected_hash=ref.content_hash,
+                observed_hash=ref.content_hash,
+                size_bytes=len(substituted),
+                content=substituted,
+                fetched_at=datetime.now(timezone.utc),
+            )
+
+    result = ResolverRegistry([LyingResolver()]).resolve(reference)
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.source_system == "artifact"
+    assert result.content is None
+
+
+def test_registry_snapshots_identity_before_a_resolver_can_mutate_its_reference():
+    requested = b"requested"
+    substituted = b"substituted secret"
+    reference = ExternalArtifactReference(
+        source_system="custom",
+        uri="custom://requested",
+        content_hash=_sha256(requested),
+    )
+
+    class MutatingResolver(ArtifactResolver):
+        def can_resolve(self, ref):
+            object.__setattr__(ref, "source_system", "secret-source")
+            object.__setattr__(ref, "uri", "secret://different-artifact")
+            object.__setattr__(ref, "content_hash", _sha256(substituted))
+            return True
+
+        def resolve(self, ref, *, max_bytes=DEFAULT_MAX_BYTES, byte_range=None):
+            return ResolvedArtifact(
+                status=ResolutionStatus.VERIFIED,
+                source_system=ref.source_system,
+                uri=ref.uri,
+                expected_hash=ref.content_hash,
+                observed_hash=ref.content_hash,
+                size_bytes=len(substituted),
+                content=substituted,
+                fetched_at=datetime.now(timezone.utc),
+            )
+
+    result = ResolverRegistry([MutatingResolver()]).resolve(reference)
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.source_system == "artifact"
+    assert result.uri == "artifact://[redacted]"
+    assert result.content is None
+    assert "secret" not in str(result.to_json_dict())
+
+
+def test_registry_returns_a_detached_snapshot_of_an_accepted_result():
+    content = b"ok"
+    reference = ExternalArtifactReference(
+        source_system="custom",
+        uri="custom://requested",
+        content_hash=_sha256(content),
+    )
+
+    class RetainingResolver(ArtifactResolver):
+        def __init__(self):
+            self.returned = ResolvedArtifact(
+                status=ResolutionStatus.VERIFIED,
+                source_system=reference.source_system,
+                uri=reference.uri,
+                expected_hash=reference.content_hash,
+                observed_hash=reference.content_hash,
+                size_bytes=len(content),
+                content=content,
+                fetched_at=datetime.now(timezone.utc),
+            )
+
+        def can_resolve(self, _ref):
+            return True
+
+        def resolve(self, _ref, *, max_bytes=DEFAULT_MAX_BYTES, byte_range=None):
+            return self.returned
+
+    resolver = RetainingResolver()
+    result = ResolverRegistry([resolver]).resolve(reference)
+
+    assert result is not resolver.returned
+    object.__setattr__(resolver.returned, "content", b"mutated secret")
+    object.__setattr__(resolver.returned, "uri", "secret://mutated")
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.uri == reference.uri
+    assert result.content == content
+
+
+def test_registry_preserves_safe_unresolved_diagnostics_and_normalizes_timestamp():
+    reference = ExternalArtifactReference(
+        source_system="custom",
+        uri="custom://requested",
+        content_hash=_sha256(b"requested"),
+    )
+    offset = timezone(timedelta(hours=2))
+
+    class DiagnosticResolver(ArtifactResolver):
+        def can_resolve(self, _ref):
+            return True
+
+        def resolve(self, ref, *, max_bytes=DEFAULT_MAX_BYTES, byte_range=None):
+            return ResolvedArtifact(
+                status=ResolutionStatus.UNRESOLVED,
+                source_system=ref.source_system,
+                uri=ref.uri,
+                expected_hash=ref.content_hash,
+                observed_hash=_sha256(b"partial"),
+                content_type="application/octet-stream",
+                size_bytes=17,
+                truncated=True,
+                fetched_at=datetime.now(offset),
+                detail="Safe diagnostic metadata.",
+            )
+
+    result = ResolverRegistry([DiagnosticResolver()]).resolve(reference)
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.observed_hash == _sha256(b"partial")
+    assert result.content_type == "application/octet-stream"
+    assert result.size_bytes == 17
+    assert result.truncated is True
+    assert result.content is None
+    assert result.fetched_at.tzinfo is timezone.utc
+
+
+def test_registry_rejects_an_exact_result_with_missing_fields_without_raising():
+    reference = ExternalArtifactReference(
+        source_system="custom",
+        uri="custom://requested",
+        content_hash=_sha256(b"requested"),
+    )
+    malformed = object.__new__(ResolvedArtifact)
+
+    class MissingFieldsResolver(ArtifactResolver):
+        def can_resolve(self, _ref):
+            return True
+
+        def resolve(self, _ref, *, max_bytes=DEFAULT_MAX_BYTES, byte_range=None):
+            return malformed
+
+    result = ResolverRegistry([MissingFieldsResolver()]).resolve(reference)
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.source_system == "artifact"
+    assert result.uri == "artifact://[redacted]"
+
+
+def test_registry_rejects_a_semantically_naive_aware_datetime():
+    class SemanticallyNaiveTimezone(tzinfo):
+        def utcoffset(self, _dt):
+            return None
+
+        def dst(self, _dt):
+            return None
+
+    reference = ExternalArtifactReference(
+        source_system="custom",
+        uri="custom://requested",
+        content_hash=_sha256(b"requested"),
+    )
+
+    class NaiveTimestampResolver(ArtifactResolver):
+        def can_resolve(self, _ref):
+            return True
+
+        def resolve(self, ref, *, max_bytes=DEFAULT_MAX_BYTES, byte_range=None):
+            return ResolvedArtifact(
+                status=ResolutionStatus.UNRESOLVED,
+                source_system=ref.source_system,
+                uri=ref.uri,
+                expected_hash=ref.content_hash,
+                fetched_at=datetime(2026, 1, 1, tzinfo=SemanticallyNaiveTimezone()),
+            )
+
+    result = ResolverRegistry([NaiveTimestampResolver()]).resolve(reference)
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.source_system == "artifact"
+    assert result.uri == "artifact://[redacted]"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("status", "unresolved"),
+        ("source_system", object()),
+        ("observed_hash", object()),
+        ("content_type", object()),
+        ("size_bytes", True),
+        ("truncated", 0),
+        ("fetched_at", datetime.now()),
+        ("detail", object()),
+    ),
+)
+def test_registry_rejects_malformed_exact_result_fields_without_serializing_them(
+    field,
+    value,
+):
+    reference = ExternalArtifactReference(
+        source_system="custom",
+        uri="custom://requested",
+        content_hash=_sha256(b"requested"),
+    )
+    malformed = ResolvedArtifact(
+        status=ResolutionStatus.UNRESOLVED,
+        source_system=reference.source_system,
+        uri=reference.uri,
+        expected_hash=reference.content_hash,
+        fetched_at=datetime.now(timezone.utc),
+        detail="diagnostic",
+    )
+    object.__setattr__(malformed, field, value)
+
+    class MalformedResolver(_RecordingPreparedResolver):
+        @staticmethod
+        def _result(_ref):
+            return malformed
+
+    result = ResolverRegistry([MalformedResolver()]).resolve(reference)
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.source_system == "artifact"
+    assert result.uri == "artifact://[redacted]"
+    assert result.to_json_dict()["status"] == "unresolved"
+
+
+@pytest.mark.parametrize(
+    ("size_bytes", "truncated"),
+    (
+        (1, False),
+        (2, True),
+        (3, False),
+    ),
+)
+def test_registry_rejects_inconsistent_verified_size_and_truncation(
+    size_bytes,
+    truncated,
+):
+    content = b"ok"
+    reference = ExternalArtifactReference(
+        source_system="custom",
+        uri="custom://requested",
+        content_hash=_sha256(content),
+    )
+
+    class InconsistentResolver(_RecordingPreparedResolver):
+        @staticmethod
+        def _result(ref):
+            return ResolvedArtifact(
+                status=ResolutionStatus.VERIFIED,
+                source_system=ref.source_system,
+                uri=ref.uri,
+                expected_hash=ref.content_hash,
+                observed_hash=ref.content_hash,
+                size_bytes=size_bytes,
+                content=content,
+                truncated=truncated,
+                fetched_at=datetime.now(timezone.utc),
+            )
+
+    result = ResolverRegistry([InconsistentResolver()]).resolve(reference)
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.content is None
+
+
+def test_registry_rejects_a_resolver_result_subclass():
+    content = b"content"
+    reference = ExternalArtifactReference(
+        source_system="custom",
+        uri="secret://ordinary-locator",
+        content_hash=_sha256(content),
+    )
+
+    class CustomResolvedArtifact(ResolvedArtifact):
+        pass
+
+    class CustomResolver(ArtifactResolver):
+        def can_resolve(self, _ref):
+            return True
+
+        def resolve(self, ref, *, max_bytes=DEFAULT_MAX_BYTES, byte_range=None):
+            return CustomResolvedArtifact(
+                status=ResolutionStatus.UNRESOLVED,
+                source_system=ref.source_system,
+                uri=ref.uri,
+                expected_hash=ref.content_hash,
+                fetched_at=datetime.now(timezone.utc),
+            )
+
+    result = ResolverRegistry([CustomResolver()]).resolve(reference)
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.source_system == "artifact"
+    assert result.uri == "artifact://[redacted]"
 
 
 def test_registry_dispatches_to_matching_resolver(tmp_path):
@@ -3074,6 +3868,55 @@ def test_resolved_artifact_downgrades_false_verified_status():
     assert result.returned_bytes == 0
 
 
+def test_resolved_artifact_defensively_sanitizes_content_above_the_global_cap():
+    content = b"x" * (MAX_INLINE_ARTIFACT_BYTES + 1)
+    result = ResolvedArtifact(
+        status=ResolutionStatus.VERIFIED,
+        source_system="secret-source",
+        uri="secret://locator",
+        expected_hash=_sha256(content),
+        observed_hash=_sha256(content),
+        content_type="secret/type",
+        size_bytes=len(content),
+        content=content,
+        truncated=True,
+        fetched_at=datetime(2000, 1, 1, tzinfo=timezone.utc),
+        detail="secret detail",
+    )
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.source_system == "artifact"
+    assert result.uri == "artifact://[redacted]"
+    assert result.expected_hash == "unavailable"
+    assert result.observed_hash is None
+    assert result.content_type is None
+    assert result.size_bytes is None
+    assert result.content is None
+    assert result.truncated is False
+    assert result.fetched_at != datetime(2000, 1, 1, tzinfo=timezone.utc)
+    assert "secret" not in str(result.to_json_dict())
+
+
+def test_resolved_artifact_sanitizes_non_bytes_without_calling_hostile_len():
+    class HostileContent:
+        def __len__(self):
+            raise AssertionError("attacker-controlled __len__ was called")
+
+    result = ResolvedArtifact(
+        status=ResolutionStatus.VERIFIED,
+        source_system="secret-source",
+        uri="secret://locator",
+        expected_hash=_sha256(b"secret"),
+        observed_hash=_sha256(b"secret"),
+        content=HostileContent(),  # type: ignore[arg-type]
+        fetched_at=datetime.now(timezone.utc),
+    )
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.uri == "artifact://[redacted]"
+    assert result.content is None
+
+
 # --- content-hash recovery of moved/renamed local artifacts ---------------
 
 
@@ -3094,6 +3937,32 @@ def test_recovery_finds_moved_file_by_hash(tmp_path):
     assert result.status is ResolutionStatus.VERIFIED
     assert result.content == data
     assert result.observed_hash == _sha256(data)
+    assert "Recovered from" in (result.detail or "")
+
+
+def test_recovery_caps_selected_range_while_verifying_full_moved_file(tmp_path):
+    root = tmp_path / "store"
+    root.mkdir()
+    data = b"0123456789"
+    moved = _write(root, "moved.bin", data)
+    missing = root / "missing.bin"
+    resolver = LocalFilesystemResolver(
+        allowed_roots=[root],
+        recovery=RecoveryPolicy(enabled=True),
+    )
+
+    result = resolver.resolve(
+        _local_ref(missing, _sha256(data)),
+        max_bytes=2,
+        byte_range=(2, 8),
+    )
+
+    assert moved.exists()
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == b"23"
+    assert result.observed_hash == _sha256(data)
+    assert result.size_bytes == len(data)
+    assert result.truncated is True
     assert "Recovered from" in (result.detail or "")
 
 
@@ -4589,6 +5458,40 @@ def test_git_resolver_returns_byte_range_slice(tmp_path):
 
     assert result.status is ResolutionStatus.VERIFIED
     assert result.content == data[4:8]
+
+
+def test_git_resolver_caps_a_requested_byte_range_but_verifies(tmp_path):
+    data = b"0123456789abcdef"
+    resolver = _git_resolver(runner=_fake_git_runner(blob=data), cache_root=tmp_path)
+
+    result = resolver.resolve(
+        _git_ref(_sha256(data)),
+        max_bytes=2,
+        byte_range=(4, 10),
+    )
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == b"45"
+    assert result.observed_hash == _sha256(data)
+    assert result.size_bytes == len(data)
+
+
+def test_scoped_git_resolver_caps_a_requested_byte_range_but_verifies(tmp_path):
+    data = b"0123456789abcdef"
+    resolver = _git_resolver(runner=_fake_git_runner(blob=data), cache_root=tmp_path)
+    target = _git_store_target(content_hash=_sha256(data))
+
+    result = resolver.resolve_within_git_store(
+        target,
+        max_bytes=2,
+        byte_range=(4, 10),
+    )
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == b"45"
+    assert result.observed_hash == _sha256(data)
+    assert result.size_bytes == len(data)
+    assert result.uri == target.logical_reference.uri
 
 
 def test_git_resolver_can_resolve_by_source_system_and_scheme():

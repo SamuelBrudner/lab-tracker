@@ -44,6 +44,11 @@ from pathlib import Path
 from typing import BinaryIO, TypeAlias
 from urllib.parse import unquote, urlsplit
 
+from lab_tracker.artifact_resolution_limits import (
+    DEFAULT_MAX_BYTES,
+    MAX_INLINE_ARTIFACT_BYTES,
+    ArtifactContentBounds,
+)
 from lab_tracker.bounded_subprocess import (
     DEFAULT_PROCESS_DEADLINE_SECONDS,
     DEFAULT_PROCESS_STDERR_LIMIT_BYTES,
@@ -136,10 +141,6 @@ from lab_tracker.store_health import (
     StoreHealthStatus,
     StoreProbeTarget,
 )
-
-# Default cap on the bytes returned inline to a caller. Bounds payload size, not
-# verification: the full artifact is always hashed regardless of this cap.
-DEFAULT_MAX_BYTES = 8 * 1024 * 1024
 
 # Hash algorithms we can recompute to verify a fetched artifact. A reference
 # whose hash uses anything else (e.g. ``datalad-key:``) cannot be certified by
@@ -236,6 +237,27 @@ class ResolvedArtifact:
 
     def __post_init__(self) -> None:
         """Fail closed when an adapter marks uncertified bytes as verified."""
+
+        if self.content is not None and (
+            type(self.content) is not bytes
+            or len(self.content) > MAX_INLINE_ARTIFACT_BYTES
+        ):
+            object.__setattr__(self, "status", ResolutionStatus.UNRESOLVED)
+            object.__setattr__(self, "source_system", "artifact")
+            object.__setattr__(self, "uri", "artifact://[redacted]")
+            object.__setattr__(self, "expected_hash", "unavailable")
+            object.__setattr__(self, "observed_hash", None)
+            object.__setattr__(self, "content_type", None)
+            object.__setattr__(self, "size_bytes", None)
+            object.__setattr__(self, "content", None)
+            object.__setattr__(self, "truncated", False)
+            object.__setattr__(self, "fetched_at", _now())
+            object.__setattr__(
+                self,
+                "detail",
+                "Artifact content exceeded the inline byte limit.",
+            )
+            return
 
         if self.status is ResolutionStatus.VERIFIED:
             if self.observed_hash is None or not is_verifiable_hash(self.expected_hash):
@@ -601,6 +623,18 @@ PreparedArtifactResolutionTarget: TypeAlias = (
 )
 
 
+@dataclass(frozen=True, slots=True)
+class ArtifactResolutionIdentity:
+    """Immutable primitive identity captured before untrusted resolver work."""
+
+    source_system: str
+    uri: str
+    expected_hash: str
+    precomputed: bool = False
+    detail: str | None = None
+    fetched_at: datetime | None = None
+
+
 class ResolverRegistry:
     """Dispatches a reference to the first resolver that can handle it."""
 
@@ -619,46 +653,51 @@ class ResolverRegistry:
     ) -> ResolvedArtifact:
         """Resolve an application-prepared target through its narrow capability."""
 
+        bounds = ArtifactContentBounds.from_resolver(max_bytes, byte_range)
         runtime_target: object = target
-        if isinstance(runtime_target, ResolvedArtifact):
-            return runtime_target
-        if isinstance(runtime_target, LocalStoreResolutionTarget):
+        identity = snapshot_artifact_resolution_identity(runtime_target)
+        if identity is None:
+            return _sanitized_unresolved_result(
+                "Prepared artifact resolution target is unsupported."
+            )
+        if type(runtime_target) is ResolvedArtifact:
+            return sanitize_artifact_resolution_result(
+                runtime_target,
+                identity=identity,
+                bounds=bounds,
+            )
+        if type(runtime_target) is LocalStoreResolutionTarget:
             return self.resolve_local_store(
                 runtime_target,
-                max_bytes=max_bytes,
-                byte_range=byte_range,
+                max_bytes=bounds.max_bytes,
+                byte_range=bounds.byte_range,
             )
-        if isinstance(runtime_target, HttpStoreResolutionTarget):
+        if type(runtime_target) is HttpStoreResolutionTarget:
             return self.resolve_http_store(
                 runtime_target,
-                max_bytes=max_bytes,
-                byte_range=byte_range,
+                max_bytes=bounds.max_bytes,
+                byte_range=bounds.byte_range,
             )
-        if isinstance(runtime_target, RcloneStoreResolutionTarget):
+        if type(runtime_target) is RcloneStoreResolutionTarget:
             return self.resolve_rclone_store(
                 runtime_target,
-                max_bytes=max_bytes,
-                byte_range=byte_range,
+                max_bytes=bounds.max_bytes,
+                byte_range=bounds.byte_range,
             )
-        if isinstance(runtime_target, GitStoreResolutionTarget):
+        if type(runtime_target) is GitStoreResolutionTarget:
             return self.resolve_git_store(
                 runtime_target,
-                max_bytes=max_bytes,
-                byte_range=byte_range,
+                max_bytes=bounds.max_bytes,
+                byte_range=bounds.byte_range,
             )
-        if isinstance(runtime_target, ExternalArtifactReference):
+        if type(runtime_target) is ExternalArtifactReference:
             return self.resolve(
                 runtime_target,
-                max_bytes=max_bytes,
-                byte_range=byte_range,
+                max_bytes=bounds.max_bytes,
+                byte_range=bounds.byte_range,
             )
-        return ResolvedArtifact(
-            status=ResolutionStatus.UNRESOLVED,
-            source_system="prepared",
-            uri="prepared://[redacted]",
-            expected_hash="unavailable",
-            fetched_at=_now(),
-            detail="Prepared artifact resolution target is unsupported.",
+        return _sanitized_unresolved_result(
+            "Prepared artifact resolution target is unsupported."
         )
 
     def resolve(
@@ -668,12 +707,30 @@ class ResolverRegistry:
         max_bytes: int = DEFAULT_MAX_BYTES,
         byte_range: tuple[int, int] | None = None,
     ) -> ResolvedArtifact:
+        bounds = ArtifactContentBounds.from_resolver(max_bytes, byte_range)
+        identity = snapshot_artifact_resolution_identity(ref)
+        if identity is None:
+            return _sanitized_unresolved_result(
+                "Artifact resolution target is invalid."
+            )
         for resolver in self._resolvers:
             if resolver.can_resolve(ref):
-                return resolver.resolve(ref, max_bytes=max_bytes, byte_range=byte_range)
-        return _unresolved(
-            ref,
-            detail=f"No resolver registered for source_system '{ref.source_system}'.",
+                result = resolver.resolve(
+                    ref,
+                    max_bytes=bounds.max_bytes,
+                    byte_range=bounds.byte_range,
+                )
+                return sanitize_artifact_resolution_result(
+                    result,
+                    identity=identity,
+                    bounds=bounds,
+                )
+        return _unresolved_for_identity(
+            identity,
+            detail=(
+                "No resolver registered for source_system "
+                f"'{identity.source_system}'."
+            ),
         )
 
     def resolve_local_store(
@@ -685,15 +742,26 @@ class ResolverRegistry:
     ) -> ResolvedArtifact:
         """Dispatch only to a resolver that honors registered-store scoping."""
 
+        bounds = ArtifactContentBounds.from_resolver(max_bytes, byte_range)
+        identity = snapshot_artifact_resolution_identity(target)
+        if identity is None:
+            return _sanitized_unresolved_result(
+                "Prepared artifact resolution target is unsupported."
+            )
         for resolver in self._resolvers:
             if isinstance(resolver, ScopedLocalStoreResolver):
-                return resolver.resolve_within_root(
+                result = resolver.resolve_within_root(
                     target,
-                    max_bytes=max_bytes,
-                    byte_range=byte_range,
+                    max_bytes=bounds.max_bytes,
+                    byte_range=bounds.byte_range,
                 )
-        return _unresolved(
-            target.logical_reference,
+                return sanitize_artifact_resolution_result(
+                    result,
+                    identity=identity,
+                    bounds=bounds,
+                )
+        return _unresolved_for_identity(
+            identity,
             detail="No scoped local-store resolver is registered.",
         )
 
@@ -706,15 +774,26 @@ class ResolverRegistry:
     ) -> ResolvedArtifact:
         """Dispatch only to a resolver that honors registered HTTP scoping."""
 
+        bounds = ArtifactContentBounds.from_resolver(max_bytes, byte_range)
+        identity = snapshot_artifact_resolution_identity(target)
+        if identity is None:
+            return _sanitized_unresolved_result(
+                "Prepared artifact resolution target is unsupported."
+            )
         for resolver in self._resolvers:
             if isinstance(resolver, ScopedHttpStoreResolver):
-                return resolver.resolve_within_http_store(
+                result = resolver.resolve_within_http_store(
                     target,
-                    max_bytes=max_bytes,
-                    byte_range=byte_range,
+                    max_bytes=bounds.max_bytes,
+                    byte_range=bounds.byte_range,
                 )
-        return _unresolved(
-            target.logical_reference,
+                return sanitize_artifact_resolution_result(
+                    result,
+                    identity=identity,
+                    bounds=bounds,
+                )
+        return _unresolved_for_identity(
+            identity,
             detail="No scoped HTTP-store resolver is registered.",
         )
 
@@ -727,15 +806,26 @@ class ResolverRegistry:
     ) -> ResolvedArtifact:
         """Dispatch only to a resolver that honors registered rclone scoping."""
 
+        bounds = ArtifactContentBounds.from_resolver(max_bytes, byte_range)
+        identity = snapshot_artifact_resolution_identity(target)
+        if identity is None:
+            return _sanitized_unresolved_result(
+                "Prepared artifact resolution target is unsupported."
+            )
         for resolver in self._resolvers:
             if isinstance(resolver, ScopedRcloneStoreResolver):
-                return resolver.resolve_within_rclone_store(
+                result = resolver.resolve_within_rclone_store(
                     target,
-                    max_bytes=max_bytes,
-                    byte_range=byte_range,
+                    max_bytes=bounds.max_bytes,
+                    byte_range=bounds.byte_range,
                 )
-        return _unresolved(
-            target.logical_reference,
+                return sanitize_artifact_resolution_result(
+                    result,
+                    identity=identity,
+                    bounds=bounds,
+                )
+        return _unresolved_for_identity(
+            identity,
             detail="No scoped rclone-store resolver is registered.",
         )
 
@@ -748,15 +838,26 @@ class ResolverRegistry:
     ) -> ResolvedArtifact:
         """Dispatch only to a resolver for registered immutable Git objects."""
 
+        bounds = ArtifactContentBounds.from_resolver(max_bytes, byte_range)
+        identity = snapshot_artifact_resolution_identity(target)
+        if identity is None:
+            return _sanitized_unresolved_result(
+                "Prepared artifact resolution target is unsupported."
+            )
         for resolver in self._resolvers:
             if isinstance(resolver, ScopedGitStoreResolver):
-                return resolver.resolve_within_git_store(
+                result = resolver.resolve_within_git_store(
                     target,
-                    max_bytes=max_bytes,
-                    byte_range=byte_range,
+                    max_bytes=bounds.max_bytes,
+                    byte_range=bounds.byte_range,
                 )
-        return _unresolved(
-            target.logical_reference,
+                return sanitize_artifact_resolution_result(
+                    result,
+                    identity=identity,
+                    bounds=bounds,
+                )
+        return _unresolved_for_identity(
+            identity,
             detail="No scoped Git-store resolver is registered.",
         )
 
@@ -776,7 +877,7 @@ def resolver_registry_for_prepared_target(
 
     if configured is not None:
         return configured
-    if isinstance(target, ResolvedArtifact):
+    if type(target) is ResolvedArtifact:
         return ResolverRegistry()
     return registry_from_env()
 
@@ -796,6 +897,317 @@ def unresolved(ref: ExternalArtifactReference, *, detail: str) -> ResolvedArtifa
     """Public constructor for an UNRESOLVED result (e.g. a store lookup miss)."""
 
     return _unresolved(ref, detail=detail)
+
+
+def _sanitized_unresolved_result(detail: str) -> ResolvedArtifact:
+    """Build an opaque failure that cannot echo adapter-controlled fields."""
+
+    return ResolvedArtifact(
+        status=ResolutionStatus.UNRESOLVED,
+        source_system="artifact",
+        uri="artifact://[redacted]",
+        expected_hash="unavailable",
+        fetched_at=_now(),
+        detail=detail,
+    )
+
+
+def _unresolved_for_identity(
+    identity: ArtifactResolutionIdentity,
+    *,
+    detail: str,
+) -> ResolvedArtifact:
+    """Build a failure from the immutable pre-dispatch identity snapshot."""
+
+    return ResolvedArtifact(
+        status=ResolutionStatus.UNRESOLVED,
+        source_system=identity.source_system,
+        uri=identity.uri,
+        expected_hash=identity.expected_hash,
+        fetched_at=_now(),
+        detail=detail,
+    )
+
+
+_SAFE_PRECOMPUTED_DETAILS = frozenset(
+    {
+        "Store artifact reference is invalid.",
+        "Store artifact could not be resolved.",
+    }
+)
+
+
+def sanitize_artifact_resolution_result(
+    result: object,
+    *,
+    identity: ArtifactResolutionIdentity | None,
+    bounds: ArtifactContentBounds,
+) -> ResolvedArtifact:
+    """Fail closed unless a result exactly matches its target and selected view.
+
+    Registered adapters remain responsible for hashing the full artifact, which
+    cannot be reconstructed from a truncated view. Their result objects still
+    cross an application shape/identity boundary, so this postcondition is used
+    both after registry dispatch and immediately before serialization. Whenever
+    the returned view is the complete artifact, its digest is recomputed here too.
+    """
+
+    invalid = _sanitized_unresolved_result(
+        "Artifact resolver result could not be returned safely."
+    )
+    snapshot = _detached_safe_result(result)
+    if snapshot is None or identity is None:
+        return invalid
+
+    if identity.precomputed:
+        if _is_safe_precomputed_result(snapshot, identity):
+            return snapshot
+        return invalid
+
+    if (
+        snapshot.source_system != identity.source_system
+        or snapshot.uri != identity.uri
+        or snapshot.expected_hash != identity.expected_hash
+    ):
+        return invalid
+
+    if snapshot.status is ResolutionStatus.UNRESOLVED:
+        if snapshot.content is not None:
+            return invalid
+        return snapshot
+
+    if (
+        snapshot.observed_hash is None
+        or snapshot.size_bytes is None
+        or not is_verifiable_hash(identity.expected_hash)
+        or not is_verifiable_hash(snapshot.observed_hash)
+    ):
+        return invalid
+
+    observed_matches = parse_content_hash(snapshot.observed_hash) == parse_content_hash(
+        identity.expected_hash
+    )
+    expected_returned_bytes = _selected_view_size(snapshot.size_bytes, bounds)
+    expected_truncated = expected_returned_bytes < snapshot.size_bytes
+    if snapshot.truncated is not expected_truncated:
+        return invalid
+
+    if snapshot.status is ResolutionStatus.VERIFIED:
+        if (
+            not observed_matches
+            or snapshot.content is None
+            or len(snapshot.content) != expected_returned_bytes
+            or len(snapshot.content) > bounds.returned_allowance
+            or (
+                not snapshot.truncated
+                and not _content_matches_expected_hash(
+                    snapshot.content,
+                    identity.expected_hash,
+                )
+            )
+        ):
+            return invalid
+        return snapshot
+
+    if (
+        snapshot.status is not ResolutionStatus.DRIFTED
+        or observed_matches
+        or snapshot.content is not None
+    ):
+        return invalid
+    return snapshot
+
+
+def _detached_safe_result(result: object) -> ResolvedArtifact | None:
+    """Copy exact safe fields so adapters cannot mutate accepted output later."""
+
+    if type(result) is not ResolvedArtifact:
+        return None
+
+    try:
+        status = result.status
+        source_system = result.source_system
+        uri = result.uri
+        expected_hash = result.expected_hash
+        fetched_at = result.fetched_at
+        observed_hash = result.observed_hash
+        content_type = result.content_type
+        size_bytes = result.size_bytes
+        content = result.content
+        truncated = result.truncated
+        detail = result.detail
+    except Exception:
+        return None
+    if not (
+        type(status) is ResolutionStatus
+        and type(source_system) is str
+        and type(uri) is str
+        and type(expected_hash) is str
+        and type(fetched_at) is datetime
+        and fetched_at.tzinfo is not None
+        and (observed_hash is None or type(observed_hash) is str)
+        and (content_type is None or type(content_type) is str)
+        and (
+            size_bytes is None
+            or (type(size_bytes) is int and size_bytes >= 0)
+        )
+        and (content is None or type(content) is bytes)
+        and type(truncated) is bool
+        and (detail is None or type(detail) is str)
+    ):
+        return None
+
+    try:
+        if fetched_at.utcoffset() is None:
+            return None
+        normalized_fetched_at = fetched_at.astimezone(timezone.utc)
+    except Exception:
+        return None
+    snapshot = ResolvedArtifact(
+        status=status,
+        source_system=source_system,
+        uri=uri,
+        expected_hash=expected_hash,
+        fetched_at=normalized_fetched_at,
+        observed_hash=observed_hash,
+        content_type=content_type,
+        size_bytes=size_bytes,
+        content=content,
+        truncated=truncated,
+        detail=detail,
+    )
+    if (
+        snapshot.status is not status
+        or snapshot.source_system != source_system
+        or snapshot.uri != uri
+        or snapshot.expected_hash != expected_hash
+        or snapshot.observed_hash != observed_hash
+        or snapshot.content_type != content_type
+        or snapshot.size_bytes != size_bytes
+        or snapshot.content != content
+        or snapshot.truncated is not truncated
+        or snapshot.detail != detail
+    ):
+        return None
+    return snapshot
+
+
+def snapshot_artifact_resolution_identity(
+    target: object,
+) -> ArtifactResolutionIdentity | None:
+    """Copy a target's primitive identity before calling untrusted code."""
+
+    if type(target) is ResolvedArtifact:
+        precomputed = _detached_safe_result(target)
+        if precomputed is None or not _is_safe_precomputed_shape(precomputed):
+            return None
+        return ArtifactResolutionIdentity(
+            source_system=precomputed.source_system,
+            uri=precomputed.uri,
+            expected_hash=precomputed.expected_hash,
+            precomputed=True,
+            detail=precomputed.detail,
+            fetched_at=precomputed.fetched_at,
+        )
+
+    try:
+        reference = _logical_reference_for_resolution_target(target)
+        if reference is None:
+            return None
+        source_system = reference.source_system
+        uri = reference.uri
+        expected_hash = reference.content_hash
+    except Exception:
+        return None
+    if not (
+        type(source_system) is str
+        and type(uri) is str
+        and type(expected_hash) is str
+    ):
+        return None
+    return ArtifactResolutionIdentity(
+        source_system=source_system,
+        uri=uri,
+        expected_hash=expected_hash,
+    )
+
+
+def _logical_reference_for_resolution_target(
+    target: object,
+) -> ExternalArtifactReference | None:
+    if type(target) is ExternalArtifactReference:
+        assert isinstance(target, ExternalArtifactReference)
+        return target
+    if type(target) is LocalStoreResolutionTarget:
+        assert isinstance(target, LocalStoreResolutionTarget)
+        return target.logical_reference
+    if type(target) is HttpStoreResolutionTarget:
+        assert isinstance(target, HttpStoreResolutionTarget)
+        return target.logical_reference
+    if type(target) is RcloneStoreResolutionTarget:
+        assert isinstance(target, RcloneStoreResolutionTarget)
+        return target.logical_reference
+    if type(target) is GitStoreResolutionTarget:
+        assert isinstance(target, GitStoreResolutionTarget)
+        return target.logical_reference
+    return None
+
+
+def _is_safe_precomputed_shape(result: ResolvedArtifact) -> bool:
+    """Recognize the only content-free static result shape prepared by the app."""
+
+    return (
+        result.status is ResolutionStatus.UNRESOLVED
+        and result.source_system == "store"
+        and result.uri == "store://[redacted]"
+        and bool(result.expected_hash.strip())
+        and result.observed_hash is None
+        and result.content_type is None
+        and result.size_bytes is None
+        and result.content is None
+        and result.truncated is False
+        and result.detail in _SAFE_PRECOMPUTED_DETAILS
+    )
+
+
+def _is_safe_precomputed_result(
+    result: ResolvedArtifact,
+    identity: ArtifactResolutionIdentity,
+) -> bool:
+    """Tie a returned static failure to the exact pre-dispatch snapshot."""
+
+    return (
+        _is_safe_precomputed_shape(result)
+        and result.source_system == identity.source_system
+        and result.uri == identity.uri
+        and result.expected_hash == identity.expected_hash
+        and result.detail == identity.detail
+        and result.fetched_at == identity.fetched_at
+    )
+
+
+def _selected_view_size(
+    total_size: int,
+    bounds: ArtifactContentBounds,
+) -> int:
+    """Return the exact number of bytes retained from a full artifact stream."""
+
+    if bounds.byte_range is None:
+        return min(total_size, bounds.max_bytes)
+    start, end = bounds.byte_range
+    retained_end = min(end, start + bounds.max_bytes)
+    return max(0, min(total_size, retained_end) - start)
+
+
+def _content_matches_expected_hash(content: bytes, expected_hash: str) -> bool:
+    """Recheck integrity when the bounded response contains the full artifact."""
+
+    algorithm, expected_digest = parse_content_hash(expected_hash)
+    try:
+        observed_digest = hashlib.new(algorithm, content).hexdigest()
+    except ValueError:
+        return False
+    return observed_digest.lower() == expected_digest
 
 
 def local_store_resolution_target(
@@ -1052,17 +1464,6 @@ def check_store_health(
     )
 
 
-def _normalize_byte_range(byte_range: tuple[int, int] | None) -> tuple[int, int] | None:
-    if byte_range is None:
-        return None
-    start, end = byte_range
-    if start < 0 or end < 0:
-        raise ValueError("byte_range bounds must be non-negative.")
-    if end < start:
-        raise ValueError("byte_range end must be >= start.")
-    return start, end
-
-
 @dataclass(frozen=True)
 class _LocalResolutionScope:
     """One immutable policy/reader/recovery authority used for a whole resolve."""
@@ -1130,10 +1531,7 @@ class LocalFilesystemResolver(ArtifactResolver, ScopedLocalStoreResolver):
         max_bytes: int = DEFAULT_MAX_BYTES,
         byte_range: tuple[int, int] | None = None,
     ) -> ResolvedArtifact:
-        try:
-            window = _normalize_byte_range(byte_range)
-        except ValueError as exc:
-            return _unresolved(ref, detail=str(exc))
+        bounds = ArtifactContentBounds.from_resolver(max_bytes, byte_range)
 
         if not is_verifiable_hash(ref.content_hash):
             algorithm, _ = parse_content_hash(ref.content_hash)
@@ -1158,8 +1556,8 @@ class LocalFilesystemResolver(ArtifactResolver, ScopedLocalStoreResolver):
             ref,
             scope=self._scope,
             planned_path=planned_path,
-            max_bytes=max_bytes,
-            window=window,
+            max_bytes=bounds.max_bytes,
+            window=bounds.byte_range,
             mime_path=None,
             recovery_name=os.path.basename(planned_path) or None,
             opaque_store_detail=False,
@@ -1174,11 +1572,8 @@ class LocalFilesystemResolver(ArtifactResolver, ScopedLocalStoreResolver):
     ) -> ResolvedArtifact:
         """Resolve a logical locator through one store-restricted handle scope."""
 
+        bounds = ArtifactContentBounds.from_resolver(max_bytes, byte_range)
         ref = target.logical_reference
-        try:
-            window = _normalize_byte_range(byte_range)
-        except ValueError as exc:
-            return _unresolved(ref, detail=str(exc))
         if not is_verifiable_hash(ref.content_hash):
             algorithm, _ = parse_content_hash(ref.content_hash)
             return _unresolved(
@@ -1218,8 +1613,8 @@ class LocalFilesystemResolver(ArtifactResolver, ScopedLocalStoreResolver):
             ref,
             scope=scope,
             planned_path=planned_path,
-            max_bytes=max_bytes,
-            window=window,
+            max_bytes=bounds.max_bytes,
+            window=bounds.byte_range,
             mime_path=target.locator.path,
             recovery_name=target.locator.components[-1],
             opaque_store_detail=True,
@@ -1470,12 +1865,12 @@ class HttpResolver(ArtifactResolver, ScopedHttpStoreResolver):
         max_bytes: int = DEFAULT_MAX_BYTES,
         byte_range: tuple[int, int] | None = None,
     ) -> ResolvedArtifact:
+        bounds = ArtifactContentBounds.from_resolver(max_bytes, byte_range)
         return self._resolve_http_url(
             ref,
             initial_url=ref.uri,
             redirect_resolver=resolve_direct_http_redirect,
-            max_bytes=max_bytes,
-            byte_range=byte_range,
+            bounds=bounds,
         )
 
     def resolve_within_http_store(
@@ -1487,6 +1882,7 @@ class HttpResolver(ArtifactResolver, ScopedHttpStoreResolver):
     ) -> ResolvedArtifact:
         """Resolve through a registered prefix without exposing its concrete URL."""
 
+        bounds = ArtifactContentBounds.from_resolver(max_bytes, byte_range)
         initial_url = target.registered_prefix.compose(target.locator)
         if (
             initial_url is None
@@ -1500,8 +1896,7 @@ class HttpResolver(ArtifactResolver, ScopedHttpStoreResolver):
             target.logical_reference,
             initial_url=initial_url,
             redirect_resolver=target.registered_prefix.resolve_redirect,
-            max_bytes=max_bytes,
-            byte_range=byte_range,
+            bounds=bounds,
         )
 
     def _resolve_http_url(
@@ -1510,14 +1905,8 @@ class HttpResolver(ArtifactResolver, ScopedHttpStoreResolver):
         *,
         initial_url: str,
         redirect_resolver: Callable[[str, str], str | None],
-        max_bytes: int,
-        byte_range: tuple[int, int] | None,
+        bounds: ArtifactContentBounds,
     ) -> ResolvedArtifact:
-        try:
-            window = _normalize_byte_range(byte_range)
-        except ValueError as exc:
-            return _unresolved(ref, detail=str(exc))
-
         if not is_verifiable_hash(ref.content_hash):
             algorithm, _ = parse_content_hash(ref.content_hash)
             return _unresolved(
@@ -1589,8 +1978,8 @@ class HttpResolver(ArtifactResolver, ScopedHttpStoreResolver):
                     content, total, truncated, observed = _hash_and_collect(
                         response.iter_bytes(),
                         algorithm=algorithm,
-                        max_bytes=max_bytes,
-                        window=window,
+                        max_bytes=bounds.max_bytes,
+                        window=bounds.byte_range,
                         max_total=self._max_fetch_bytes,
                         budget_check=deadline.check,
                     )
@@ -1713,10 +2102,7 @@ class RcloneResolver(ArtifactResolver, ScopedRcloneStoreResolver):
         max_bytes: int = DEFAULT_MAX_BYTES,
         byte_range: tuple[int, int] | None = None,
     ) -> ResolvedArtifact:
-        try:
-            window = _normalize_byte_range(byte_range)
-        except ValueError as exc:
-            return _unresolved(ref, detail=str(exc))
+        bounds = ArtifactContentBounds.from_resolver(max_bytes, byte_range)
 
         if not is_verifiable_hash(ref.content_hash):
             algorithm, _ = parse_content_hash(ref.content_hash)
@@ -1739,8 +2125,8 @@ class RcloneResolver(ArtifactResolver, ScopedRcloneStoreResolver):
             ref,
             target=target,
             algorithm=algorithm,
-            window=window,
-            max_bytes=max_bytes,
+            window=bounds.byte_range,
+            max_bytes=bounds.max_bytes,
         )
 
     def resolve_within_rclone_store(
@@ -1752,11 +2138,8 @@ class RcloneResolver(ArtifactResolver, ScopedRcloneStoreResolver):
     ) -> ResolvedArtifact:
         """Resolve a prevalidated registered target without URI reparsing."""
 
+        bounds = ArtifactContentBounds.from_resolver(max_bytes, byte_range)
         ref = target.logical_reference
-        try:
-            window = _normalize_byte_range(byte_range)
-        except ValueError as exc:
-            return _unresolved(ref, detail=str(exc))
 
         if not is_verifiable_hash(ref.content_hash):
             algorithm, _ = parse_content_hash(ref.content_hash)
@@ -1774,8 +2157,8 @@ class RcloneResolver(ArtifactResolver, ScopedRcloneStoreResolver):
             ref,
             target=target.argv_target,
             algorithm=algorithm,
-            window=window,
-            max_bytes=max_bytes,
+            window=bounds.byte_range,
+            max_bytes=bounds.max_bytes,
         )
 
     def _resolve_validated_target(
@@ -2033,10 +2416,7 @@ class GitResolver(ArtifactResolver, ScopedGitStoreResolver):
         max_bytes: int = DEFAULT_MAX_BYTES,
         byte_range: tuple[int, int] | None = None,
     ) -> ResolvedArtifact:
-        try:
-            window = _normalize_byte_range(byte_range)
-        except ValueError as exc:
-            return _unresolved(ref, detail=str(exc))
+        bounds = ArtifactContentBounds.from_resolver(max_bytes, byte_range)
 
         if not is_verifiable_hash(ref.content_hash):
             algorithm, _ = parse_content_hash(ref.content_hash)
@@ -2063,8 +2443,8 @@ class GitResolver(ArtifactResolver, ScopedGitStoreResolver):
             path=path,
             object_format=None,
             algorithm=algorithm,
-            window=window,
-            max_bytes=max_bytes,
+            window=bounds.byte_range,
+            max_bytes=bounds.max_bytes,
         )
 
     def resolve_within_git_store(
@@ -2076,11 +2456,8 @@ class GitResolver(ArtifactResolver, ScopedGitStoreResolver):
     ) -> ResolvedArtifact:
         """Resolve a registered immutable object without generic URI parsing."""
 
+        bounds = ArtifactContentBounds.from_resolver(max_bytes, byte_range)
         ref = target.logical_reference
-        try:
-            window = _normalize_byte_range(byte_range)
-        except ValueError as exc:
-            return _unresolved(ref, detail=str(exc))
 
         if not is_verifiable_hash(ref.content_hash):
             algorithm, _ = parse_content_hash(ref.content_hash)
@@ -2103,8 +2480,8 @@ class GitResolver(ArtifactResolver, ScopedGitStoreResolver):
             path=target.pin.path.path,
             object_format=target.pin.object_id.object_format,
             algorithm=algorithm,
-            window=window,
-            max_bytes=max_bytes,
+            window=bounds.byte_range,
+            max_bytes=bounds.max_bytes,
         )
 
     def _resolve_authorized_target(
@@ -2415,9 +2792,9 @@ def _hash_and_collect(
 
     Returns ``(content, total_size, truncated, observed_hash)``. The whole stream
     is hashed; ``content`` is either the first ``max_bytes`` (no window) or the
-    requested ``[start, end)`` slice. Raises :class:`_FetchTooLarge` if the total
-    exceeds ``max_total`` (so an oversized artifact is refused rather than
-    returned uncertified).
+    capped ``[start, min(end, start + max_bytes))`` slice. Raises
+    :class:`_FetchTooLarge` if the total exceeds ``max_total`` (so an oversized
+    artifact is refused rather than returned uncertified).
     """
 
     collector = _HashCollector(
@@ -2444,12 +2821,17 @@ class _HashCollector:
         max_total: int | None = None,
         budget_check: Callable[[], None] | None = None,
     ) -> None:
+        bounds = ArtifactContentBounds.from_resolver(max_bytes, window)
         self._algorithm = algorithm
         self._hasher = hashlib.new(algorithm)
         self._collected = bytearray()
         self._total = 0
-        self._max_bytes = max_bytes
-        self._window = window
+        self._max_bytes = bounds.max_bytes
+        if bounds.byte_range is None:
+            self._window: tuple[int, int] | None = None
+        else:
+            start, end = bounds.byte_range
+            self._window = (start, min(end, start + bounds.max_bytes))
         self._max_total = max_total
         self._budget_check = budget_check
 

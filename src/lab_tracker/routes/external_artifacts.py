@@ -12,14 +12,20 @@ Design: ``docs/external-artifact-resolution-design.md``.
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from starlette.requests import Request
 
 from lab_tracker.api import LabTrackerAPI
+from lab_tracker.artifact_resolution_limits import (
+    MAX_ARTIFACT_BYTE_OFFSET,
+    MAX_INLINE_ARTIFACT_BYTES,
+    ArtifactContentBounds,
+    ArtifactContentBoundsError,
+)
 from lab_tracker.schemas import Envelope
 
 from .shared import actor_from_request, handlers_from_request
@@ -32,9 +38,39 @@ class ResolveExternalArtifactRequest(BaseModel):
     entity_id: UUID
     artifact_index: int = Field(default=0, ge=0)
     content_hash: str | None = None
-    max_bytes: int | None = Field(default=None, ge=1)
-    byte_start: int | None = Field(default=None, ge=0)
-    byte_end: int | None = Field(default=None, ge=0)
+    max_bytes: (
+        Annotated[
+            int,
+            Field(strict=True, ge=1, le=MAX_INLINE_ARTIFACT_BYTES),
+        ]
+        | None
+    ) = None
+    byte_start: (
+        Annotated[
+            int,
+            Field(strict=True, ge=0, le=MAX_ARTIFACT_BYTE_OFFSET),
+        ]
+        | None
+    ) = None
+    byte_end: (
+        Annotated[
+            int,
+            Field(strict=True, ge=0, le=MAX_ARTIFACT_BYTE_OFFSET),
+        ]
+        | None
+    ) = None
+
+    @model_validator(mode="after")
+    def validate_artifact_content_bounds(self) -> ResolveExternalArtifactRequest:
+        try:
+            ArtifactContentBounds.for_request(
+                self.max_bytes,
+                self.byte_start,
+                self.byte_end,
+            )
+        except ArtifactContentBoundsError as exc:
+            raise ValueError(str(exc)) from exc
+        return self
 
 
 def build_external_artifacts_router(api: LabTrackerAPI) -> APIRouter:

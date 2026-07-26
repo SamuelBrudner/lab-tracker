@@ -148,7 +148,10 @@ research record:
   URIs with the canonical URI echoed as `meta.iri` in plain envelopes, and a
   committed worked example under `docs/examples/` guarded by a drift test.
 - On-demand resolution of external artifact references (content hash is the
-  integrity gate). Runtime parses the platform-path-separated
+  integrity gate). Inline content has one 8 MiB hard/default decoded-byte cap
+  across ordinary, registered-store, ranged, HTTP, rclone, Git, and local
+  resolution paths; ranges can only narrow that allowance. Runtime parses the
+  platform-path-separated
   `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS` once. Registered local-store health uses
   a lexical authority and bounded broker; direct resolution and recovery still
   use a transitional policy derived from the same immutable root set. That

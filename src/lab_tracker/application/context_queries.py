@@ -12,7 +12,6 @@ from uuid import UUID
 from sqlalchemy.orm import Session as OrmSession
 
 from lab_tracker.artifact_resolution import (
-    DEFAULT_MAX_BYTES,
     PreparedArtifactResolutionTarget,
     ResolvedArtifact,
     ResolverRegistry,
@@ -21,7 +20,13 @@ from lab_tracker.artifact_resolution import (
     local_store_resolution_target,
     rclone_store_resolution_target,
     resolver_registry_for_prepared_target,
+    sanitize_artifact_resolution_result,
+    snapshot_artifact_resolution_identity,
     unresolved,
+)
+from lab_tracker.artifact_resolution_limits import (
+    ArtifactContentBounds,
+    ArtifactContentBoundsError,
 )
 from lab_tracker.auth import AuthContext
 from lab_tracker.decision_context import JsonObject, build_decision_context
@@ -493,15 +498,14 @@ class ContextQueries:
         byte_start: int | None,
         byte_end: int | None,
     ) -> PreparedExternalArtifactResolution:
-        byte_range: tuple[int, int] | None = None
-        if byte_start is not None or byte_end is not None:
-            if byte_start is None or byte_end is None:
-                raise ValidationError(
-                    "byte_start and byte_end must be provided together."
-                )
-            if byte_end < byte_start:
-                raise ValidationError("byte_end must be greater than or equal to byte_start.")
-            byte_range = (byte_start, byte_end)
+        try:
+            bounds = ArtifactContentBounds.for_request(
+                max_bytes,
+                byte_start,
+                byte_end,
+            )
+        except ArtifactContentBoundsError as exc:
+            raise ValidationError(str(exc)) from exc
 
         reference, project_id = self._locate_external_reference(
             actor=actor,
@@ -523,8 +527,8 @@ class ContextQueries:
             entity_id=entity_id,
             artifact_index=artifact_index,
             target=target,
-            max_bytes=max_bytes or DEFAULT_MAX_BYTES,
-            byte_range=byte_range,
+            max_bytes=bounds.max_bytes,
+            byte_range=bounds.byte_range,
         )
 
     def resolve_prepared_external_artifact(
@@ -533,15 +537,32 @@ class ContextQueries:
     ) -> dict[str, Any]:
         """Release SQLAlchemy resources, then resolve a detached target only."""
 
+        try:
+            bounds = ArtifactContentBounds.from_resolver(
+                prepared.max_bytes,
+                prepared.byte_range,
+            )
+        except ArtifactContentBoundsError as exc:
+            raise ValidationError(str(exc)) from exc
+
+        identity = snapshot_artifact_resolution_identity(prepared.target)
         self.release_read_scope()
-        registry = resolver_registry_for_prepared_target(
-            prepared.target,
-            configured=self.resolver_registry,
-        )
-        result = registry.resolve_prepared(
-            prepared.target,
-            max_bytes=prepared.max_bytes,
-            byte_range=prepared.byte_range,
+        if identity is None:
+            result: object = None
+        else:
+            registry = resolver_registry_for_prepared_target(
+                prepared.target,
+                configured=self.resolver_registry,
+            )
+            result = registry.resolve_prepared(
+                prepared.target,
+                max_bytes=bounds.max_bytes,
+                byte_range=bounds.byte_range,
+            )
+        result = sanitize_artifact_resolution_result(
+            result,
+            identity=identity,
+            bounds=bounds,
         )
         body = result.to_json_dict()
         body["entity_type"] = prepared.entity_type

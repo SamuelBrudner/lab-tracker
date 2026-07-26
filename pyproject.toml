@@ -151,6 +151,7 @@ files = [
   "src/lab_tracker/rclone_store_health.py",
   "src/lab_tracker/git_process.py",
   "src/lab_tracker/git_store_health.py",
+  "src/lab_tracker/artifact_resolution_limits.py",
   "src/lab_tracker/artifact_resolution.py",
   "src/lab_tracker/git_remote_policy.py",
   "src/lab_tracker/git_store_locator.py",
