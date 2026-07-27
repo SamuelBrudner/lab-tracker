@@ -2321,10 +2321,30 @@ def test_local_store_materialization_does_no_host_path_io_for_escaping_locator(
     )
 
 
-def test_relative_local_store_root_can_never_reach_a_use_time_proof():
+def test_relative_local_store_root_can_never_reach_a_use_time_proof(monkeypatch):
     # The old permissive path let a relative root reach store_relative_reference
     # and be rejected there.  A target now requires a use-time proof, and no
-    # proof can exist for a root the definition validator refuses.
+    # proof can exist for a root the definition validator refuses.  The refusal
+    # must still cost no host-path I/O, exactly as the old rejection did.
+    def unexpected_host_path_operation(*_args, **_kwargs):
+        raise AssertionError("rejecting a relative local root touched a host path")
+
+    monkeypatch.setattr(
+        artifact_resolution.Path,
+        "as_uri",
+        unexpected_host_path_operation,
+    )
+    monkeypatch.setattr(
+        artifact_resolution.os.path,
+        "realpath",
+        unexpected_host_path_operation,
+    )
+    monkeypatch.setattr(
+        artifact_resolution.os,
+        "open",
+        unexpected_host_path_operation,
+    )
+
     with pytest.raises(DataStoreDefinitionError) as excinfo:
         _store_proof(StoreKind.LOCAL_FS, "relative/store")
 
@@ -2390,9 +2410,17 @@ def test_rclone_store_target_uses_name_only_when_credential_ref_is_absent():
     assert fallback.argv_target == "lab:experiments/001/x.fcs"
 
 
-def test_empty_rclone_credential_ref_can_never_reach_a_use_time_proof():
+def test_empty_rclone_credential_ref_can_never_reach_a_use_time_proof(monkeypatch):
     # An empty credential reference used to reach store_relative_reference and
-    # be rejected there.  It can no longer mint the proof a target requires.
+    # be rejected there.  It can no longer mint the proof a target requires, and
+    # the refusal must still cost no host I/O.  A dispatched rclone process is
+    # unreachable by construction: no executor exists without a target.
+    def unexpected_host_operation(*_args, **_kwargs):
+        raise AssertionError("rejecting an empty rclone credential touched the host")
+
+    monkeypatch.setattr(artifact_resolution.os, "open", unexpected_host_operation)
+    monkeypatch.setattr(artifact_resolution.os, "makedirs", unexpected_host_operation)
+
     with pytest.raises(DataStoreDefinitionError) as excinfo:
         _store_proof(
             StoreKind.ONEDRIVE,
@@ -2651,10 +2679,23 @@ def test_invalid_http_store_materialization_returns_none_without_network_io(
         "https://user:secret@files.example/base",
     ),
 )
-def test_unsafe_http_store_base_can_never_reach_a_use_time_proof(base: str):
+def test_unsafe_http_store_base_can_never_reach_a_use_time_proof(
+    base: str,
+    monkeypatch,
+):
     # A query string or embedded credentials used to reach
     # store_relative_reference and be rejected there.  Such a base can no
-    # longer mint the proof a target requires.
+    # longer mint the proof a target requires, and the refusal must still cost
+    # no network I/O.
+    def unexpected_network_operation(*_args, **_kwargs):
+        raise AssertionError("rejecting an unsafe HTTP base performed network I/O")
+
+    monkeypatch.setattr(
+        artifact_resolution.OutboundHttpPolicy,
+        "authorize",
+        unexpected_network_operation,
+    )
+
     with pytest.raises(DataStoreDefinitionError) as excinfo:
         _store_proof(StoreKind.HTTP, base, name="web")
 
@@ -2761,9 +2802,15 @@ def test_store_relative_reference_rejects_invalid_git_target_without_host_io(
     ("https://user:secret@example.com/repo.git", "../local-repo.git"),
     ids=("credentialed-remote", "local-remote"),
 )
-def test_unsafe_git_remote_can_never_reach_a_use_time_proof(root: str):
+def test_unsafe_git_remote_can_never_reach_a_use_time_proof(root: str, monkeypatch):
     # A credentialed or local remote used to reach store_relative_reference and
-    # be rejected there.  It can no longer mint the proof a target requires.
+    # be rejected there.  It can no longer mint the proof a target requires, and
+    # the refusal must still create no working or cache directory.
+    def unexpected_cache_creation(*_args, **_kwargs):
+        raise AssertionError("rejecting an unsafe Git remote created a directory")
+
+    monkeypatch.setattr(artifact_resolution.os, "makedirs", unexpected_cache_creation)
+
     with pytest.raises(DataStoreDefinitionError) as excinfo:
         _store_proof(StoreKind.GIT, root, name="repo")
 

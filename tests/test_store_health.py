@@ -193,6 +193,25 @@ def test_probe_target_detaches_only_probe_fields_from_the_authority_proof() -> N
         assert not hasattr(target, persistence_only)
 
 
+def test_probe_target_exposes_no_factory_that_skips_authority() -> None:
+    """Keep the deleted raw-row factory deleted.
+
+    ``from_store`` built a probe target straight from a registered row, with no
+    proof that the operator still authorizes it.  The ``__post_init__`` guard
+    would now reject its result, so re-adding it could not reopen the hole --
+    but it would reintroduce an API whose entire purpose was to skip authority,
+    and nothing else in the suite notices it coming back.
+    ``from_authority_proof`` is deliberately the only way in.
+    """
+
+    factories = {
+        name
+        for name, attribute in vars(StoreProbeTarget).items()
+        if isinstance(attribute, classmethod)
+    }
+    assert factories == {"from_authority_proof"}
+
+
 def test_probe_target_cannot_be_built_without_a_sealed_authority_identity() -> None:
     probe_fields: dict[str, object] = {
         "store_id": UUID(int=7),
