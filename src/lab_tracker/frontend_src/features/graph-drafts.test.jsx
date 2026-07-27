@@ -4,7 +4,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { GraphDraftDetailCard, spokenReviewScript } from "./graph-drafts.jsx";
-import { apiResponse, installFetchMock } from "../test/utils.js";
+import { apiResponse, errorResponse, installFetchMock } from "../test/utils.js";
 
 function draftFixture(overrides = {}) {
   return {
@@ -222,7 +222,10 @@ describe("GraphDraftDetailCard accept all", () => {
     };
   }
 
-  function installAcceptAll(draft, { acceptAllResponse, setFlash = vi.fn() } = {}) {
+  function installAcceptAll(
+    draft,
+    { acceptAllResponse, patchResponse = null, setFlash = vi.fn() } = {}
+  ) {
     // One ordered log so tests can assert that edits are persisted *before* the
     // batch is accepted, not merely that both requests happened.
     const calls = [];
@@ -237,7 +240,7 @@ describe("GraphDraftDetailCard accept all", () => {
           response: (request) => {
             calls.push("patch");
             patchCalls.push(request);
-            return apiResponse(draft);
+            return apiResponse(patchResponse ? patchResponse(request) : draft);
           },
         },
         {
@@ -434,5 +437,295 @@ describe("GraphDraftDetailCard accept all", () => {
         "Accepted all valid proposals. 1 still needs editing before it can be accepted."
       )
     );
+  });
+
+  describe("undo", () => {
+    const HAND_ID = "55555555-5555-4555-8555-555555555555";
+    const BULK_ID = "66666666-6666-4666-8666-666666666666";
+    const INVALID_ID = "77777777-7777-4777-8777-777777777777";
+
+    // One operation of each kind the undo must tell apart.
+    function mixedDraft() {
+      const base = draftFixture();
+      const template = base.operations[0];
+      return {
+        ...base,
+        operations: [
+          {
+            ...template,
+            acceptance_mode: "human_selected",
+            operation_id: HAND_ID,
+            payload: { text: "Scrutinized by hand" },
+            status: "accepted",
+          },
+          {
+            ...template,
+            operation_id: BULK_ID,
+            payload: { text: "Swept up in the batch" },
+            status: "proposed",
+          },
+          {
+            ...template,
+            operation_id: INVALID_ID,
+            payload: { text: "Fails patch validation" },
+            status: "proposed",
+          },
+        ],
+      };
+    }
+
+    // What the endpoint returns: the hand-accepted op keeps its mark, one op is
+    // newly bulk-accepted, and the invalid one is left proposed for editing.
+    function mixedAccepted(draft) {
+      return {
+        ...draft,
+        operations: [
+          draft.operations[0],
+          { ...draft.operations[1], acceptance_mode: "bulk_accepted", status: "accepted" },
+          draft.operations[2],
+        ],
+      };
+    }
+
+    async function acceptAllThen(draft, options = {}) {
+      const handles = installAcceptAll(draft, {
+        acceptAllResponse: mixedAccepted(draft),
+        ...options,
+      });
+      fireEvent.click(await screen.findByRole("button", { name: "Accept all" }));
+      await waitFor(() => expect(handles.acceptAllCalls).toHaveLength(1));
+      return handles;
+    }
+
+    it("offers undo scoped to only the operations the batch flipped", async () => {
+      await acceptAllThen(mixedDraft());
+
+      expect(await screen.findByText("1 proposal accepted as a batch.")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Undo accept all" })).toBeInTheDocument();
+    });
+
+    it("reverts exactly the bulk-flipped operation, not the hand-accepted one", async () => {
+      const draft = mixedDraft();
+      const { patchCalls } = await acceptAllThen(draft, {
+        patchResponse: () => ({
+          ...draft,
+          operations: draft.operations.map((operation) => ({ ...operation })),
+        }),
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Undo accept all" }));
+
+      await waitFor(() => expect(patchCalls).toHaveLength(1));
+      // Only the bulk-flipped operation; the hand-accepted one keeps its
+      // human_selected mark and the invalid one was never accepted.
+      expect(patchCalls[0].url).toContain(BULK_ID);
+      expect(patchCalls[0].url).not.toContain(HAND_ID);
+      expect(patchCalls[0].url).not.toContain(INVALID_ID);
+      // Status-only, so the payload and decision note are left untouched and
+      // re-opening clears the acceptance stamp.
+      expect(JSON.parse(patchCalls[0].init.body)).toEqual({ status: "proposed" });
+    });
+
+    it("retires the offer once the operations are no longer accepted", async () => {
+      const draft = mixedDraft();
+      await acceptAllThen(draft, {
+        patchResponse: () => draft,
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Undo accept all" }));
+
+      await waitFor(() =>
+        expect(screen.queryByRole("button", { name: "Undo accept all" })).toBeNull()
+      );
+    });
+
+    it("drops an operation from the undo set once it is hand-accepted afterwards", async () => {
+      const draft = mixedDraft();
+      const accepted = mixedAccepted(draft);
+      renderDraft(draft, {
+        routes: [
+          {
+            match: `/graph-drafts/${draft.change_set_id}/accept-all`,
+            method: "POST",
+            response: apiResponse(accepted),
+          },
+          {
+            match: /\/graph-drafts\/[^/]+\/operations\//,
+            method: "PATCH",
+            // Scrutinizing the batch-accepted op re-stamps it human_selected.
+            response: apiResponse({
+              ...accepted,
+              operations: [
+                accepted.operations[0],
+                { ...accepted.operations[1], acceptance_mode: "human_selected" },
+                accepted.operations[2],
+              ],
+            }),
+          },
+        ],
+      });
+
+      fireEvent.click(await screen.findByRole("button", { name: "Accept all" }));
+      await screen.findByRole("button", { name: "Undo accept all" });
+
+      // Accept that one by hand — a real decision undo must not throw away.
+      fireEvent.click(screen.getAllByRole("button", { name: "Accept" })[1]);
+
+      await waitFor(() =>
+        expect(screen.queryByRole("button", { name: "Undo accept all" })).toBeNull()
+      );
+    });
+
+    it("ignores an operation accepted elsewhere while this client's view was stale", async () => {
+      const draft = mixedDraft();
+      // This client still shows it proposed, but it was hand-accepted from the
+      // phone; accept-all skipped it and the response says human_selected.
+      const accepted = {
+        ...draft,
+        operations: [
+          draft.operations[0],
+          { ...draft.operations[1], acceptance_mode: "human_selected", status: "accepted" },
+          { ...draft.operations[2], acceptance_mode: "bulk_accepted", status: "accepted" },
+        ],
+      };
+      const patchCalls = [];
+      renderDraft(draft, {
+        routes: [
+          {
+            match: `/graph-drafts/${draft.change_set_id}/accept-all`,
+            method: "POST",
+            response: apiResponse(accepted),
+          },
+          {
+            match: /\/graph-drafts\/[^/]+\/operations\//,
+            method: "PATCH",
+            response: (request) => {
+              patchCalls.push(request);
+              return apiResponse(accepted);
+            },
+          },
+        ],
+      });
+
+      fireEvent.click(await screen.findByRole("button", { name: "Accept all" }));
+      // Only the genuinely batch-accepted one is offered.
+      expect(await screen.findByText("1 proposal accepted as a batch.")).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("button", { name: "Undo accept all" }));
+
+      await waitFor(() => expect(patchCalls).toHaveLength(1));
+      expect(patchCalls[0].url).toContain(INVALID_ID);
+      expect(patchCalls[0].url).not.toContain(BULK_ID);
+    });
+
+    it("reports how far a failed undo got and keeps the confirmed state", async () => {
+      const draft = mixedDraft();
+      // Two operations to revert; the second PATCH fails.
+      draft.operations[2] = { ...draft.operations[2], status: "proposed" };
+      const accepted = {
+        ...draft,
+        operations: [
+          draft.operations[0],
+          { ...draft.operations[1], acceptance_mode: "bulk_accepted", status: "accepted" },
+          { ...draft.operations[2], acceptance_mode: "bulk_accepted", status: "accepted" },
+        ],
+      };
+      const setFlash = vi.fn();
+      let patched = 0;
+      renderDraft(draft, {
+        setFlash,
+        routes: [
+          {
+            match: `/graph-drafts/${draft.change_set_id}/accept-all`,
+            method: "POST",
+            response: apiResponse(accepted),
+          },
+          {
+            match: /\/graph-drafts\/[^/]+\/operations\//,
+            method: "PATCH",
+            response: () => {
+              patched += 1;
+              return patched === 1
+                ? apiResponse({
+                    ...accepted,
+                    operations: [
+                      accepted.operations[0],
+                      draft.operations[1],
+                      accepted.operations[2],
+                    ],
+                  })
+                : errorResponse("Operation is locked", 409);
+            },
+          },
+        ],
+      });
+
+      fireEvent.click(await screen.findByRole("button", { name: "Accept all" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Undo accept all" }));
+
+      await waitFor(() =>
+        expect(setFlash).toHaveBeenCalledWith(
+          "",
+          "Undo stopped after 1 of 2 proposals: Operation is locked"
+        )
+      );
+      // The one that did revert is reflected, so the screen is not stale.
+      await waitFor(() =>
+        expect(screen.getByText("1 proposal accepted as a batch.")).toBeInTheDocument()
+      );
+    });
+
+    it("does not offer undo when the batch flipped nothing", async () => {
+      const draft = mixedDraft();
+      // Everything already decided: accept-all has nothing left to flip.
+      draft.operations[1] = { ...draft.operations[1], status: "rejected" };
+      draft.operations[2] = { ...draft.operations[2], status: "rejected" };
+      installAcceptAll(draft, { acceptAllResponse: draft });
+
+      fireEvent.click(await screen.findByRole("button", { name: "Accept all" }));
+
+      await waitFor(() => expect(screen.getByText(/kept/)).toBeInTheDocument());
+      expect(screen.queryByRole("button", { name: "Undo accept all" })).toBeNull();
+    });
+
+    it("withdraws the offer once the draft is committed", async () => {
+      const draft = mixedDraft();
+      const accepted = mixedAccepted(draft);
+      // Committing applies the operations, which must retire undo — this is
+      // undo before commit, never a rollback of committed history.
+      renderDraft(draft, {
+        routes: [
+          {
+            match: `/graph-drafts/${draft.change_set_id}/accept-all`,
+            method: "POST",
+            response: apiResponse(accepted),
+          },
+          {
+            match: `/graph-drafts/${draft.change_set_id}/commit`,
+            method: "POST",
+            response: apiResponse({
+              ...accepted,
+              operations: accepted.operations.map((operation) => ({
+                ...operation,
+                status: "applied",
+              })),
+              status: "committed",
+            }),
+          },
+        ],
+      });
+
+      fireEvent.click(await screen.findByRole("button", { name: "Accept all" }));
+      await screen.findByRole("button", { name: "Undo accept all" });
+
+      fireEvent.change(screen.getByLabelText("Commit message"), {
+        target: { value: "Commit the batch" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Commit accepted changes" }));
+
+      await waitFor(() =>
+        expect(screen.queryByRole("button", { name: "Undo accept all" })).toBeNull()
+      );
+    });
   });
 });

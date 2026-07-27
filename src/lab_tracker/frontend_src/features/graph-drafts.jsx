@@ -309,6 +309,9 @@ function GraphDraftDetailCard({
   const [changeSet, setChangeSet] = useState(null);
   const [payloads, setPayloads] = useState({});
   const [operationReviewNotes, setOperationReviewNotes] = useState({});
+  // Operations the most recent "Accept all" actually flipped, so undo can put
+  // back exactly those and leave hand-accepted ones alone.
+  const [bulkAcceptedIds, setBulkAcceptedIds] = useState([]);
   const [draftProjectRole, setDraftProjectRole] = useState("");
   const [draftProjectId, setDraftProjectId] = useState("");
   const [loading, setLoading] = useState(false);
@@ -334,6 +337,29 @@ function GraphDraftDetailCard({
         .length,
     [changeSet]
   );
+  // Derived rather than manually cleared: an operation stops being undoable the
+  // moment it is no longer batch-accepted (rejected, re-opened, hand-accepted,
+  // or committed and applied), so committing or reloading retires the offer on
+  // its own.
+  //
+  // Keying on acceptance_mode rather than status is what keeps undo honest. A
+  // person who scrutinizes one of these afterwards — by accepting it by hand, or
+  // merely by saving an edit, which also re-stamps human_selected — has made a
+  // decision undo must not throw away. The server's mode is the only trustworthy
+  // signal here: this client's own before-snapshot can be stale (the same draft
+  // may have been accepted from a phone), so it is a scope limiter, never proof
+  // that this click is what accepted the operation.
+  const undoableOperationIds = useMemo(() => {
+    const stillBulkAccepted = new Set(
+      (changeSet?.operations || [])
+        .filter(
+          (operation) =>
+            operation.status === "accepted" && operation.acceptance_mode === "bulk_accepted"
+        )
+        .map((operation) => operation.operation_id)
+    );
+    return bulkAcceptedIds.filter((operationId) => stillBulkAccepted.has(operationId));
+  }, [bulkAcceptedIds, changeSet]);
   const visibleSourceRegions = useMemo(() => sourceRegions(changeSet), [changeSet]);
   const spokenReview = useMemo(
     () => spokenReviewScript(changeSet, payloads),
@@ -635,6 +661,16 @@ function GraphDraftDetailCard({
           }
         );
       }
+      // Snapshot what was still awaiting a decision, so undo stays scoped to
+      // this click rather than to every batch-accepted operation on the draft.
+      // This snapshot can be stale, so it only narrows the candidates — the
+      // acceptance_mode check above is what proves an operation is still an
+      // un-scrutinized rubber-stamp.
+      const proposedBefore = new Set(
+        (changeSet.operations || [])
+          .filter((operation) => operation.status === "proposed")
+          .map((operation) => operation.operation_id)
+      );
       // Deliberately the bulk endpoint, not a loop of per-operation accepts:
       // the per-operation path records human_selected, which would represent a
       // rubber-stamped batch as scrutinized, per-operation review.
@@ -644,6 +680,16 @@ function GraphDraftDetailCard({
           method: "POST",
           token,
         }
+      );
+      setBulkAcceptedIds(
+        (nextChangeSet?.operations || [])
+          .filter(
+            (operation) =>
+              operation.acceptance_mode === "bulk_accepted" &&
+              operation.status === "accepted" &&
+              proposedBefore.has(operation.operation_id)
+          )
+          .map((operation) => operation.operation_id)
       );
       setChangeSet(nextChangeSet);
       setPayloads(payloadText(nextChangeSet));
@@ -661,6 +707,58 @@ function GraphDraftDetailCard({
     } catch (err) {
       setFlash("", err.message || "Failed to accept all graph draft operations.");
     } finally {
+      setBusy(false);
+    }
+  }
+
+  async function undoAcceptAll() {
+    const targets = undoableOperationIds;
+    if (!changeSet || !canEditDraft || targets.length === 0) {
+      return;
+    }
+    setBusy(true);
+    setFlash("", "");
+    let latest = null;
+    let reverted = 0;
+    try {
+      for (const operationId of targets) {
+        // Status-only PATCH: payload and review_note are left untouched, and
+        // re-opening clears the acceptance stamp so nothing keeps a stale mark.
+        latest = await apiRequest(
+          `/graph-drafts/${changeSet.change_set_id}/operations/${operationId}`,
+          {
+            body: { status: "proposed" },
+            method: "PATCH",
+            token,
+          }
+        );
+        reverted += 1;
+      }
+      setBulkAcceptedIds([]);
+      setFlash(
+        targets.length === 1
+          ? "Undid the bulk accept. 1 proposal is awaiting your decision again."
+          : `Undid the bulk accept. ${targets.length} proposals are awaiting your decision again.`
+      );
+    } catch (err) {
+      // Report how far it got rather than implying nothing changed; a retry is
+      // safe because re-opening an already-proposed operation is a no-op.
+      setFlash(
+        "",
+        reverted > 0
+          ? `Undo stopped after ${reverted} of ${targets.length} proposals: ${
+              err.message || "the request failed."
+            }`
+          : err.message || "Failed to undo the bulk accept."
+      );
+    } finally {
+      // Adopt whatever the server last confirmed, so a partial undo leaves the
+      // screen showing what actually happened instead of stale accepted rows.
+      if (latest) {
+        setChangeSet(latest);
+        setPayloads(payloadText(latest));
+        setOperationReviewNotes(operationReviewNoteText(latest));
+      }
       setBusy(false);
     }
   }
@@ -1342,6 +1440,19 @@ function GraphDraftDetailCard({
                 Accept all
               </button>
             </div>
+
+            {canEditDraft && undoableOperationIds.length > 0 ? (
+              <div className="inline" role="status">
+                <span className="subtle">
+                  {undoableOperationIds.length === 1
+                    ? "1 proposal accepted as a batch."
+                    : `${undoableOperationIds.length} proposals accepted as a batch.`}
+                </span>
+                <button type="button" className="btn-secondary" onClick={undoAcceptAll}>
+                  Undo accept all
+                </button>
+              </div>
+            ) : null}
 
             <div className="inline">
               <button
