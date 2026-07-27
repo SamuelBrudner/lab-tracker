@@ -290,6 +290,7 @@ def _build_app_runtime(
     lab_tracker_api = LabTrackerAPI(
         raw_storage=raw_note_storage,
         settings=settings,
+        store_authority_registry=store_authority_registry,
     )
     auth_rate_limiter = InMemoryRateLimiter(
         max_attempts=settings.auth_rate_limit_attempts,
@@ -476,12 +477,7 @@ async def _review_email_worker_loop(app: FastAPI) -> None:
 
 def _process_one_graph_draft_batch_run(app: FastAPI) -> bool:
     with app.state.db_session_factory() as session:
-        api = LabTrackerAPI(
-            raw_storage=app.state.raw_note_storage,
-            repository=SQLAlchemyLabTrackerRepository(session),
-            settings=app.state.settings,
-            surface="background",
-        )
+        api = _background_api(app, session)
         run = api.process_next_graph_draft_batch_run(
             draft_client_factory=app.state.graph_draft_client_factory,
             app_settings=app.state.settings,
@@ -492,12 +488,7 @@ def _process_one_graph_draft_batch_run(app: FastAPI) -> bool:
 
 def _enqueue_due_graph_draft_batches(app: FastAPI) -> None:
     with app.state.db_session_factory() as session:
-        api = LabTrackerAPI(
-            raw_storage=app.state.raw_note_storage,
-            repository=SQLAlchemyLabTrackerRepository(session),
-            settings=app.state.settings,
-            surface="background",
-        )
+        api = _background_api(app, session)
         api.enqueue_due_graph_draft_batches(actor=system_auth_context())
 
 
@@ -506,12 +497,7 @@ def _process_one_review_email(app: FastAPI) -> bool:
     if provider is None:
         return False
     with app.state.db_session_factory() as session:
-        api = LabTrackerAPI(
-            raw_storage=app.state.raw_note_storage,
-            repository=SQLAlchemyLabTrackerRepository(session),
-            settings=app.state.settings,
-            surface="background",
-        )
+        api = _background_api(app, session)
         delivery = api.review_emails.claim_next(
             lease_seconds=app.state.settings.review_email_claim_lease_seconds
         )
@@ -552,6 +538,18 @@ def _process_one_review_email(app: FastAPI) -> bool:
                 provider_message_id=result.message_id,
             )
         return True
+
+
+def _background_api(app: FastAPI, session: Session) -> LabTrackerAPI:
+    """Compose one worker API from the process's immutable startup snapshot."""
+
+    return LabTrackerAPI(
+        raw_storage=app.state.raw_note_storage,
+        repository=SQLAlchemyLabTrackerRepository(session),
+        settings=app.state.settings,
+        store_authority_registry=app.state.store_authority_registry,
+        surface="background",
+    )
 
 
 def _review_email_url(

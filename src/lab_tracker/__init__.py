@@ -8,6 +8,7 @@ from lab_tracker.errors import (
     ConflictError,
     LabTrackerError,
     NotFoundError,
+    StoreAuthorityDeniedError,
     ValidationError,
 )
 from lab_tracker.models import (
@@ -83,6 +84,7 @@ __all__ = [
     "Session",
     "SessionStatus",
     "SessionType",
+    "StoreAuthorityDeniedError",
     "SupervisionEdge",
     "ValidationError",
     "Visualization",

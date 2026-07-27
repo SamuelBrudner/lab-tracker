@@ -10,6 +10,7 @@ from lab_tracker.auth import AuthContext, Role
 from lab_tracker.errors import OpaqueTargetNotFoundError
 from lab_tracker.models import DataStore, StoreKind
 from lab_tracker.store_health import (
+    STORE_HEALTH_PROBE_UNAVAILABLE_MESSAGE,
     StoreHealth,
     StoreHealthStatus,
     StoreProbeTarget,
@@ -80,13 +81,27 @@ def _actor() -> AuthContext:
     return AuthContext(user_id=uuid4(), role=Role.VIEWER)
 
 
-def test_store_health_query_authorizes_snapshots_releases_then_checks() -> None:
+def test_store_health_query_authorizes_snapshots_releases_then_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     source = _store()
     actor = _actor()
     events: list[str] = []
     access = _StoreHealthAccess(store=source, events=events)
     expected_health = StoreHealth(StoreHealthStatus.HEALTHY)
     checker = _StoreHealthChecker(health=expected_health, events=events)
+
+    def reject_target_construction(
+        _target_type: type[StoreProbeTarget],
+        _store: DataStore,
+    ) -> StoreProbeTarget:
+        raise AssertionError("fail-closed health constructed a probe target")
+
+    monkeypatch.setattr(
+        StoreProbeTarget,
+        "from_store",
+        classmethod(reject_target_construction),
+    )
 
     def release_read_scope() -> None:
         events.append("release")
@@ -103,21 +118,15 @@ def test_store_health_query_authorizes_snapshots_releases_then_checks() -> None:
 
     result = query.check(source.store_id, actor=actor)
 
-    assert events == ["authorize", "release", "check"]
+    assert events == ["authorize", "release"]
     assert access.calls == [(source.store_id, actor)]
-    assert checker.targets == [
-        StoreProbeTarget(
-            store_id=source.store_id,
-            name="analysis-http",
-            kind=StoreKind.HTTP,
-            root="https://files.example.test/original",
-            endpoint="https://cdn.example.test/original",
-            credential_ref="http-credential",
-        )
-    ]
+    assert checker.targets == []
     assert result.store_id == source.store_id
     assert result.kind is StoreKind.HTTP
-    assert result.health is expected_health
+    assert result.health == StoreHealth(
+        StoreHealthStatus.UNSUPPORTED,
+        STORE_HEALTH_PROBE_UNAVAILABLE_MESSAGE,
+    )
     with pytest.raises(FrozenInstanceError):
         result.kind = StoreKind.GIT  # type: ignore[misc]
 
@@ -174,7 +183,7 @@ def test_scope_release_base_exception_prevents_checker_work() -> None:
     assert checker.targets == []
 
 
-def test_checker_base_exception_runs_only_after_scope_release() -> None:
+def test_checker_base_exception_is_never_reached_after_scope_release() -> None:
     source = _store()
     events: list[str] = []
     checker = _StoreHealthChecker(
@@ -188,8 +197,45 @@ def test_checker_base_exception_runs_only_after_scope_release() -> None:
         release_read_scope=lambda: events.append("release"),
     )
 
-    with pytest.raises(KeyboardInterrupt, match="probe cancelled"):
-        query.check(source.store_id, actor=_actor())
+    result = query.check(source.store_id, actor=_actor())
 
-    assert events == ["authorize", "release", "check"]
-    assert len(checker.targets) == 1
+    assert events == ["authorize", "release"]
+    assert checker.targets == []
+    assert result.health.status is StoreHealthStatus.UNSUPPORTED
+    assert result.health.detail == STORE_HEALTH_PROBE_UNAVAILABLE_MESSAGE
+
+
+def test_every_authorized_store_returns_the_same_static_safe_health_result() -> None:
+    first = _store()
+    second = DataStore(
+        store_id=uuid4(),
+        project_id=uuid4(),
+        name="secret-local-name",
+        kind=StoreKind.LOCAL_FS,
+        root="/secret/local/root",
+        endpoint=None,
+        credential_ref="secret-local-credential",
+    )
+    events: list[str] = []
+    checker = _StoreHealthChecker(
+        health=StoreHealth(StoreHealthStatus.HEALTHY),
+        events=events,
+    )
+    access = _StoreHealthAccess(store=first, events=events)
+    query = StoreHealthQueries(
+        api=access,
+        checker=checker,
+        release_read_scope=lambda: events.append("release"),
+    )
+
+    first_result = query.check(first.store_id, actor=_actor())
+    access.store = second
+    second_result = query.check(second.store_id, actor=_actor())
+
+    assert first_result.health is second_result.health
+    assert first_result.health.to_json_dict() == {
+        "status": "unsupported",
+        "detail": STORE_HEALTH_PROBE_UNAVAILABLE_MESSAGE,
+    }
+    assert events == ["authorize", "release", "authorize", "release"]
+    assert checker.targets == []

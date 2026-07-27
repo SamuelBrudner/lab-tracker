@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from uuid import UUID, uuid4
 
+import sqlalchemy as sa
 from sqlalchemy import (
     JSON,
     Boolean,
@@ -56,6 +57,49 @@ from lab_tracker.models import (
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+_STORE_AUTHORITY_GRANT_ID_COLUMN = sa.column("authority_grant_id", String())
+_STORE_AUTHORITY_FINGERPRINT_COLUMN = sa.column(
+    "authority_grant_fingerprint",
+    String(),
+)
+_STORE_AUTHORITY_GRANT_ID_FIRST_CHARACTER_PATTERN = (
+    r"[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789]"
+)
+_STORE_AUTHORITY_GRANT_ID_INVALID_CHARACTER_PATTERN = (
+    r"[^ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]"
+)
+_DATA_STORE_AUTHORITY_GRANT_ID_FORMAT_EXPRESSION = sa.or_(
+    _STORE_AUTHORITY_GRANT_ID_COLUMN.is_(None),
+    sa.and_(
+        sa.func.length(_STORE_AUTHORITY_GRANT_ID_COLUMN).between(1, 128),
+        sa.func.substr(
+            _STORE_AUTHORITY_GRANT_ID_COLUMN,
+            1,
+            1,
+        ).regexp_match(_STORE_AUTHORITY_GRANT_ID_FIRST_CHARACTER_PATTERN),
+        sa.not_(
+            _STORE_AUTHORITY_GRANT_ID_COLUMN.regexp_match(
+                _STORE_AUTHORITY_GRANT_ID_INVALID_CHARACTER_PATTERN
+            )
+        ),
+    ),
+)
+_DATA_STORE_AUTHORITY_FINGERPRINT_FORMAT_EXPRESSION = sa.or_(
+    _STORE_AUTHORITY_FINGERPRINT_COLUMN.is_(None),
+    sa.and_(
+        sa.func.length(_STORE_AUTHORITY_FINGERPRINT_COLUMN) == 78,
+        sa.func.substr(_STORE_AUTHORITY_FINGERPRINT_COLUMN, 1, 14)
+        == "sag-v1-sha256:",
+        sa.not_(
+            sa.func.substr(
+                _STORE_AUTHORITY_FINGERPRINT_COLUMN,
+                15,
+            ).regexp_match(r"[^0123456789abcdef]")
+        ),
+    ),
+)
 
 
 class ProjectGroupModel(Base):
@@ -1155,6 +1199,25 @@ class DataStoreModel(Base):
     __table_args__ = (
         UniqueConstraint("project_id", "name", name="uq_data_stores_project_name"),
         UniqueConstraint("group_id", "name", name="uq_data_stores_group_name"),
+        CheckConstraint(
+            "((project_id IS NOT NULL AND group_id IS NULL) OR "
+            "(project_id IS NULL AND group_id IS NOT NULL))",
+            name="ck_data_stores_scope_xor",
+        ),
+        CheckConstraint(
+            "((authority_grant_id IS NULL AND authority_grant_fingerprint IS NULL) OR "
+            "(authority_grant_id IS NOT NULL AND "
+            "authority_grant_fingerprint IS NOT NULL))",
+            name="ck_data_stores_authority_binding_pair",
+        ),
+        CheckConstraint(
+            _DATA_STORE_AUTHORITY_GRANT_ID_FORMAT_EXPRESSION,
+            name="ck_data_stores_authority_grant_id_format",
+        ),
+        CheckConstraint(
+            _DATA_STORE_AUTHORITY_FINGERPRINT_FORMAT_EXPRESSION,
+            name="ck_data_stores_authority_fingerprint_format",
+        ),
         Index("ix_data_stores_project_default", "project_id", "is_default"),
         Index("ix_data_stores_group_default", "group_id", "is_default"),
     )
@@ -1178,6 +1241,8 @@ class DataStoreModel(Base):
     root: Mapped[str] = mapped_column(String(2000), nullable=False)
     endpoint: Mapped[str | None] = mapped_column(String(2000))
     credential_ref: Mapped[str | None] = mapped_column(String(255))
+    authority_grant_id: Mapped[str | None] = mapped_column(String(128))
+    authority_grant_fingerprint: Mapped[str | None] = mapped_column(String(78))
     is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_by: Mapped[str | None] = mapped_column(String(255))
     created_by_user_id: Mapped[UUID | None] = mapped_column(

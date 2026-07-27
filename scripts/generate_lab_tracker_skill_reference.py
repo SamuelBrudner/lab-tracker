@@ -17,6 +17,7 @@ REQUEST_SCHEMAS = (
     ("Notes", "NoteCreate"),
     ("Sessions", "SessionCreate"),
     ("Datasets", "DatasetCreate"),
+    ("Data Stores", "DataStoreCreate"),
     ("Analyses", "AnalysisCreate"),
     ("Claims", "ClaimCreate"),
     ("Goals", "GoalCreateFields"),
@@ -25,12 +26,23 @@ REQUEST_SCHEMAS = (
     ("Decision Context", "AssistantDecisionContextRequest"),
 )
 
+REQUEST_SCHEMA_NOTES = {
+    "DataStoreCreate": (
+        "Semantic requirement: provide exactly one of `project_id` or `group_id`.",
+        "Semantic requirement: provide `authority_grant_id`; it is structurally "
+        "optional only so missing and mismatched grants receive the same opaque 403.",
+        "`object_table` and `database` appear in the shared `StoreKind` enum, but "
+        "registration rejects them until their adapters and secret models exist.",
+    ),
+}
+
 LIST_ENDPOINTS = (
     "/projects",
     "/questions",
     "/notes",
     "/sessions",
     "/datasets",
+    "/data-stores",
     "/analyses",
     "/claims",
     "/projects/{project_id}/goals",
@@ -115,6 +127,8 @@ def generate_reference(openapi: dict[str, Any]) -> str:
             lines.append(f"- Required: {', '.join(f'`{field}`' for field in required)}")
         else:
             lines.append("- Required: none")
+        for note in REQUEST_SCHEMA_NOTES.get(schema_name, ()):
+            lines.append(f"- {note}")
         for field_name, field_schema in sorted((schema.get("properties") or {}).items()):
             description = describe_schema(field_schema, components)
             marker = "required" if field_name in required else "optional"

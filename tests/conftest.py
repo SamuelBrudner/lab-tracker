@@ -116,6 +116,11 @@ def raw_sqlite_test_engines_use_production_pragmas() -> Iterator[None]:
     def _set_sqlite_pragmas(dbapi_connection, _connection_record) -> None:  # noqa: ANN001
         if not isinstance(dbapi_connection, sqlite3.Connection):
             return
+        # Do not mask or precede the production listener when a focused test
+        # deliberately constructs a modern-mode connection. Raw test engines
+        # use the driver's supported legacy default.
+        if getattr(dbapi_connection, "autocommit", None) is False:
+            return
         cursor = dbapi_connection.cursor()
         try:
             cursor.execute("PRAGMA foreign_keys=ON")
@@ -241,6 +246,9 @@ def app(migrated_sqlite_database_url: str):
 
 @pytest.fixture()
 def client(app):
+    from api_helpers import install_exact_candidate_store_authority
+
+    install_exact_candidate_store_authority(app)
     with TestClient(app) as test_client:
         yield test_client
 
@@ -252,6 +260,9 @@ def postgres_app(migrated_postgres_database_url: str):
 
 @pytest.fixture()
 def postgres_client(postgres_app):
+    from api_helpers import install_exact_candidate_store_authority
+
+    install_exact_candidate_store_authority(postgres_app)
     with TestClient(postgres_app) as test_client:
         yield test_client
 

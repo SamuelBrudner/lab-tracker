@@ -1090,6 +1090,14 @@ def test_runtime_retains_one_store_authority_snapshot_without_environment_reread
         configure_app_state(app, runtime)
 
         assert app.state.store_authority_registry is runtime.store_authority_registry
+        assert (
+            runtime.lab_tracker_api._store_authority_registry
+            is runtime.store_authority_registry
+        )
+        assert (
+            runtime.lab_tracker_api.data_stores.store_authority_registry
+            is runtime.store_authority_registry
+        )
         assert "store_authority_registry=" not in repr(runtime)
     finally:
         runtime.engine.dispose()
