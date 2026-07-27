@@ -307,6 +307,22 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 - `status` (optional): DatasetStatus enum: staged, committed, archived | null
 - `terminal_reason` (optional): string; min length 1 | null
 
+#### Data Stores: `DataStoreCreate`
+- Required: `name`, `kind`, `root`
+- Semantic requirement: provide exactly one of `project_id` or `group_id`.
+- Semantic requirement: provide `authority_grant_id`; it is structurally optional only so missing and mismatched grants receive the same opaque 403.
+- `object_table` and `database` appear in the shared `StoreKind` enum, but registration rejects them until their adapters and secret models exist.
+- `authority_grant_id` (optional): string; min length 1, max length 128 | null
+- `capabilities` (optional): list[StoreCapability enum: bytes_by_path, byte_range, list, versioned_snapshot, query] | null
+- `credential_ref` (optional): string; max length 255 | null
+- `endpoint` (optional): string; max length 2000 | null
+- `group_id` (optional): string(uuid) | null
+- `is_default` (optional): boolean; default False
+- `kind` (required): StoreKind enum: local_fs, ssh, s3, gcs, azure_blob, dropbox, gdrive, box, onedrive, object_table, database, http, rclone, git
+- `name` (required): string; min length 1, max length 255
+- `project_id` (optional): string(uuid) | null
+- `root` (required): string; min length 1, max length 2000
+
 #### Analyses: `AnalysisCreate`
 - Required: `project_id`, `dataset_ids`, `method_hash`, `code_version`
 - `code_version` (required): string; min length 1
@@ -414,6 +430,12 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 - `created_by` (optional): string | null
 - `since` (optional): string(date-time) | null
 - `until` (optional): string(date-time) | null
+- `limit` (optional): integer; default 50; maximum 200 from shared route validation
+- `offset` (optional): integer; default 0; minimum 0 from shared route validation
+
+#### `GET /data-stores`
+- `project_id` (optional): string(uuid) | null
+- `group_id` (optional): string(uuid) | null
 - `limit` (optional): integer; default 50; maximum 200 from shared route validation
 - `offset` (optional): integer; default 0; minimum 0 from shared route validation
 

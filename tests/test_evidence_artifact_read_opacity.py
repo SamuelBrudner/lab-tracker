@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import hashlib
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -10,6 +9,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
+from api_helpers import TEST_STORE_AUTHORITY_GRANT_ID
 from fastapi.testclient import TestClient
 from read_opacity_inventory import (
     EVIDENCE_ARTIFACT_READ_OPACITY_VARIANTS,
@@ -145,6 +145,7 @@ def _create_evidence_artifact_records(
             "name": store_name,
             "kind": "local_fs",
             "root": str(artifact_root),
+            "authority_grant_id": TEST_STORE_AUTHORITY_GRANT_ID,
         },
         headers=headers,
     )
@@ -825,13 +826,13 @@ def test_resolver_entity_modes_are_opaque_before_index_hash_or_resolution(
     )
     assert authorized.status_code == 200, authorized.text
     body = authorized.json()["data"]
-    assert body["status"] == "verified"
+    assert body["status"] == "unresolved"
     assert body["entity_type"] == entity_type
     assert body["entity_id"] == case.existing_id
-    assert body["observed_hash"] == evidence_artifact_records.artifact_hash
-    assert base64.b64decode(body["content_base64"]) == (
-        evidence_artifact_records.artifact_content
-    )
+    assert body["uri"] == "store://[redacted]"
+    assert body["observed_hash"] is None
+    assert body["content_base64"] is None
+    assert body["detail"] == "Store artifact could not be resolved."
 
     outsider_payloads = (
         _resolver_payload(case),
@@ -1043,11 +1044,13 @@ def test_read_only_viewer_lpat_preserves_opaque_project_authorization(
     )
     assert authorized.status_code == 200, authorized.text
     body = authorized.json()["data"]
-    assert body["status"] == "verified"
+    assert body["status"] == "unresolved"
     assert body["entity_type"] == "dataset"
     assert body["entity_id"] == records.dataset_id
-    assert body["observed_hash"] == records.artifact_hash
-    assert base64.b64decode(body["content_base64"]) == records.artifact_content
+    assert body["uri"] == "store://[redacted]"
+    assert body["observed_hash"] is None
+    assert body["content_base64"] is None
+    assert body["detail"] == "Store artifact could not be resolved."
 
     write_viewer_headers = _issue_token(
         client,
@@ -1102,7 +1105,12 @@ def test_read_write_editor_and_admin_lpats_keep_resolver_access(
     )
 
     assert response.status_code == 200, response.text
-    assert response.json()["data"]["status"] == "verified"
+    body = response.json()["data"]
+    assert body["status"] == "unresolved"
+    assert body["uri"] == "store://[redacted]"
+    assert body["observed_hash"] is None
+    assert body["content_base64"] is None
+    assert body["detail"] == "Store artifact could not be resolved."
 
 
 def test_group_read_all_inheritance_authorizes_every_frozen_read_mode(
@@ -1162,6 +1170,12 @@ def test_group_read_all_inheritance_authorizes_every_frozen_read_mode(
         assert response.status_code == 200, (
             f"resolver-{case.entity_type}: {response.text}"
         )
+        body = response.json()["data"]
+        assert body["status"] == "unresolved"
+        assert body["uri"] == "store://[redacted]"
+        assert body["observed_hash"] is None
+        assert body["content_base64"] is None
+        assert body["detail"] == "Store artifact could not be resolved."
 
 
 def test_validation_precedence_is_visibility_independent(

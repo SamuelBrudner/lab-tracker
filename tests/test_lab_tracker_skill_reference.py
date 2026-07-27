@@ -27,6 +27,12 @@ def test_repo_owned_lab_tracker_skill_has_current_generated_reference(monkeypatc
     assert "`text` (required)" in _question_create_block(expected)
     assert "descriptive, hypothesis_driven, method_dev, other" in expected
     assert "limit` (optional): integer; default 50; maximum 200" in expected
+    data_store_block = _data_store_create_block(expected)
+    assert "provide exactly one of `project_id` or `group_id`" in data_store_block
+    assert "provide `authority_grant_id`" in data_store_block
+    assert "structurally optional only" in data_store_block
+    assert "`object_table` and `database` appear" in data_store_block
+    assert "registration rejects them" in data_store_block
 
 
 def test_skill_reference_check_mode_passes(monkeypatch) -> None:
@@ -40,4 +46,10 @@ def test_skill_reference_check_mode_passes(monkeypatch) -> None:
 def _question_create_block(reference: str) -> str:
     start = reference.index("#### Questions")
     end = reference.index("#### Notes")
+    return reference[start:end]
+
+
+def _data_store_create_block(reference: str) -> str:
+    start = reference.index("#### Data Stores")
+    end = reference.index("#### Analyses")
     return reference[start:end]

@@ -9,7 +9,17 @@ from uuid import UUID
 
 from lab_tracker.auth import AuthContext
 from lab_tracker.models import DataStore, StoreKind
-from lab_tracker.store_health import StoreHealth, StoreProbe, StoreProbeTarget
+from lab_tracker.store_health import (
+    STORE_HEALTH_PROBE_UNAVAILABLE_MESSAGE,
+    StoreHealth,
+    StoreHealthStatus,
+    StoreProbe,
+)
+
+_STORE_HEALTH_UNAVAILABLE = StoreHealth(
+    StoreHealthStatus.UNSUPPORTED,
+    STORE_HEALTH_PROBE_UNAVAILABLE_MESSAGE,
+)
 
 
 class StoreHealthAccess(Protocol):
@@ -34,7 +44,7 @@ class DataStoreHealthResult:
 
 @dataclass(frozen=True, slots=True)
 class StoreHealthQueries:
-    """Authorize and detach a store before invoking host-side probe work."""
+    """Authorize a store while registered-store probes remain fail-closed."""
 
     api: StoreHealthAccess
     checker: StoreProbe
@@ -47,11 +57,11 @@ class StoreHealthQueries:
         actor: AuthContext,
     ) -> DataStoreHealthResult:
         store = self.api.get_data_store_for_read(store_id, actor=actor)
-        target = StoreProbeTarget.from_store(store)
+        result_store_id = store.store_id
+        result_kind = store.kind
         self.release_read_scope()
-        health = self.checker(target)
         return DataStoreHealthResult(
-            store_id=target.store_id,
-            kind=target.kind,
-            health=health,
+            store_id=result_store_id,
+            kind=result_kind,
+            health=_STORE_HEALTH_UNAVAILABLE,
         )
