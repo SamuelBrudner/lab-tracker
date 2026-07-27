@@ -203,3 +203,236 @@ describe("GraphDraftDetailCard audio review", () => {
     expect(track.stop).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("GraphDraftDetailCard accept all", () => {
+  const SECOND_OPERATION_ID = "44444444-4444-4444-8444-444444444444";
+
+  function twoOperationDraft() {
+    const base = draftFixture();
+    return {
+      ...base,
+      operations: [
+        base.operations[0],
+        {
+          ...base.operations[0],
+          operation_id: SECOND_OPERATION_ID,
+          payload: { text: "Does sleep change locomotion?" },
+        },
+      ],
+    };
+  }
+
+  function installAcceptAll(draft, { acceptAllResponse, setFlash = vi.fn() } = {}) {
+    // One ordered log so tests can assert that edits are persisted *before* the
+    // batch is accepted, not merely that both requests happened.
+    const calls = [];
+    const patchCalls = [];
+    const acceptAllCalls = [];
+    renderDraft(draft, {
+      setFlash,
+      routes: [
+        {
+          match: /\/graph-drafts\/[^/]+\/operations\//,
+          method: "PATCH",
+          response: (request) => {
+            calls.push("patch");
+            patchCalls.push(request);
+            return apiResponse(draft);
+          },
+        },
+        {
+          match: `/graph-drafts/${draft.change_set_id}/accept-all`,
+          method: "POST",
+          response: (request) => {
+            calls.push("accept-all");
+            acceptAllCalls.push(request);
+            return apiResponse(acceptAllResponse);
+          },
+        },
+      ],
+    });
+    return { acceptAllCalls, calls, patchCalls, setFlash };
+  }
+
+  function allAccepted(draft) {
+    return {
+      ...draft,
+      operations: draft.operations.map((operation) => ({
+        ...operation,
+        acceptance_mode: "bulk_accepted",
+        status: "accepted",
+      })),
+    };
+  }
+
+  it("accepts through the bulk endpoint rather than looping per-operation accepts", async () => {
+    const draft = twoOperationDraft();
+    const { acceptAllCalls, patchCalls, setFlash } = installAcceptAll(draft, {
+      acceptAllResponse: {
+        ...draft,
+        operations: draft.operations.map((operation) => ({
+          ...operation,
+          acceptance_mode: "bulk_accepted",
+          status: "accepted",
+        })),
+      },
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Accept all" }));
+
+    await waitFor(() => expect(acceptAllCalls).toHaveLength(1));
+    // The per-operation PATCH records human_selected, which would represent a
+    // rubber-stamped batch as scrutinized review. It must not be used here.
+    expect(patchCalls).toHaveLength(0);
+    await waitFor(() =>
+      expect(setFlash).toHaveBeenCalledWith("Accepted all remaining proposals.")
+    );
+  });
+
+  it("leaves an already hand-accepted operation for the endpoint to preserve", async () => {
+    const draft = twoOperationDraft();
+    draft.operations[0] = {
+      ...draft.operations[0],
+      acceptance_mode: "human_selected",
+      status: "accepted",
+    };
+    const { acceptAllCalls, patchCalls } = installAcceptAll(draft, {
+      acceptAllResponse: {
+        ...draft,
+        operations: [
+          draft.operations[0],
+          { ...draft.operations[1], acceptance_mode: "bulk_accepted", status: "accepted" },
+        ],
+      },
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Accept all" }));
+
+    await waitFor(() => expect(acceptAllCalls).toHaveLength(1));
+    expect(patchCalls).toHaveLength(0);
+  });
+
+  it("persists an unsaved payload edit before accepting the batch", async () => {
+    const draft = draftFixture();
+    const { acceptAllCalls, calls, patchCalls } = installAcceptAll(draft, {
+      acceptAllResponse: allAccepted(draft),
+    });
+
+    fireEvent.change(await screen.findByLabelText("Edit JSON payload"), {
+      target: { value: JSON.stringify({ text: "Edited before accepting" }, null, 2) },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Accept all" }));
+
+    await waitFor(() => expect(acceptAllCalls).toHaveLength(1));
+    expect(patchCalls).toHaveLength(1);
+    const body = JSON.parse(patchCalls[0].init.body);
+    expect(body.payload).toEqual({ text: "Edited before accepting" });
+    // Saved as still-proposed so the bulk endpoint is what stamps acceptance.
+    expect(body.status).toBe("proposed");
+    // Order matters: persisting after the accept would not save anything.
+    expect(calls).toEqual(["patch", "accept-all"]);
+  });
+
+  it("persists an unsaved decision note even when the payload is untouched", async () => {
+    const draft = draftFixture();
+    const { acceptAllCalls, calls, patchCalls } = installAcceptAll(draft, {
+      acceptAllResponse: allAccepted(draft),
+    });
+
+    fireEvent.change(await screen.findByLabelText("Decision note"), {
+      target: { value: "Checked against the raw trace." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Accept all" }));
+
+    await waitFor(() => expect(acceptAllCalls).toHaveLength(1));
+    // The bulk endpoint never carries review_note, so the reviewer's own
+    // rationale is lost unless it is PATCHed first.
+    expect(patchCalls).toHaveLength(1);
+    const body = JSON.parse(patchCalls[0].init.body);
+    expect(body.review_note).toBe("Checked against the raw trace.");
+    expect(body.payload).toEqual(draft.operations[0].payload);
+    expect(body.status).toBe("proposed");
+    expect(calls).toEqual(["patch", "accept-all"]);
+  });
+
+  it("persists every dirty operation, not just the first", async () => {
+    const draft = twoOperationDraft();
+    const { acceptAllCalls, calls, patchCalls } = installAcceptAll(draft, {
+      acceptAllResponse: allAccepted(draft),
+    });
+
+    const editors = await screen.findAllByLabelText("Edit JSON payload");
+    fireEvent.change(editors[0], {
+      target: { value: JSON.stringify({ text: "First edit" }, null, 2) },
+    });
+    fireEvent.change(editors[1], {
+      target: { value: JSON.stringify({ text: "Second edit" }, null, 2) },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Accept all" }));
+
+    await waitFor(() => expect(acceptAllCalls).toHaveLength(1));
+    expect(patchCalls).toHaveLength(2);
+    expect(patchCalls.map((call) => JSON.parse(call.init.body).payload)).toEqual([
+      { text: "First edit" },
+      { text: "Second edit" },
+    ]);
+    expect(calls).toEqual(["patch", "patch", "accept-all"]);
+  });
+
+  it("does not PATCH when a payload is only reformatted", async () => {
+    const draft = draftFixture();
+    const { acceptAllCalls, patchCalls } = installAcceptAll(draft, {
+      acceptAllResponse: allAccepted(draft),
+    });
+
+    fireEvent.change(await screen.findByLabelText("Edit JSON payload"), {
+      target: { value: JSON.stringify(draft.operations[0].payload) },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Accept all" }));
+
+    await waitFor(() => expect(acceptAllCalls).toHaveLength(1));
+    expect(patchCalls).toHaveLength(0);
+  });
+
+  it("refuses to accept anything while a payload edit is invalid JSON", async () => {
+    const draft = draftFixture();
+    const { acceptAllCalls, patchCalls, setFlash } = installAcceptAll(draft, {
+      acceptAllResponse: draft,
+    });
+
+    fireEvent.change(await screen.findByLabelText("Edit JSON payload"), {
+      target: { value: "{ not valid json" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Accept all" }));
+
+    await waitFor(() =>
+      expect(setFlash).toHaveBeenCalledWith(
+        "",
+        "One proposal has invalid JSON. Fix or revert it before accepting all."
+      )
+    );
+    expect(acceptAllCalls).toHaveLength(0);
+    expect(patchCalls).toHaveLength(0);
+  });
+
+  it("reports operations the endpoint left proposed for editing", async () => {
+    const draft = twoOperationDraft();
+    const { setFlash } = installAcceptAll(draft, {
+      acceptAllResponse: {
+        ...draft,
+        operations: [
+          { ...draft.operations[0], acceptance_mode: "bulk_accepted", status: "accepted" },
+          draft.operations[1],
+        ],
+      },
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Accept all" }));
+
+    await waitFor(() =>
+      expect(setFlash).toHaveBeenCalledWith(
+        "Accepted all valid proposals. 1 still needs editing before it can be accepted."
+      )
+    );
+  });
+});

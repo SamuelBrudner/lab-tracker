@@ -559,15 +559,109 @@ function GraphDraftDetailCard({
     }
   }
 
-  async function acceptAll() {
-    if (!changeSet) {
-      return;
-    }
-    for (const operation of changeSet.operations || []) {
-      if (operation.status === "applied") {
+  // Payload and decision-note edits live in the textareas until something saves
+  // them. The bulk endpoint accepts what the server already holds and never
+  // touches review_note, so any unsaved edit has to be persisted first or it is
+  // silently discarded. The decision note especially: it is the reviewer's own
+  // rationale, which is exactly what acceptance provenance exists to keep.
+  function pendingOperationEdits() {
+    const dirty = [];
+    const invalid = [];
+    for (const operation of changeSet?.operations || []) {
+      // Only still-proposed operations are touched by the bulk endpoint, so an
+      // edit parked on an already-decided operation is not ours to save here.
+      if (operation.status !== "proposed") {
         continue;
       }
-      await saveOperation(operation, "accepted");
+      const text = payloads[operation.operation_id];
+      const stored = JSON.stringify(operation.payload || {}, null, 2);
+      const note = (operationReviewNotes[operation.operation_id] || "").trim();
+      const noteDirty = note !== (operation.review_note || "").trim();
+      const payloadEdited = text !== undefined && text !== stored;
+      if (!payloadEdited && !noteDirty) {
+        continue;
+      }
+      let parsed;
+      try {
+        parsed = JSON.parse(payloadEdited ? text : stored);
+      } catch {
+        invalid.push(operation);
+        continue;
+      }
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        invalid.push(operation);
+        continue;
+      }
+      if (!noteDirty && JSON.stringify(parsed) === JSON.stringify(operation.payload || {})) {
+        // Reformatted but semantically unchanged; nothing to persist.
+        continue;
+      }
+      dirty.push({ note: note || null, operation, parsed });
+    }
+    return { dirty, invalid };
+  }
+
+  async function acceptAll() {
+    if (!changeSet || !canEditDraft) {
+      return;
+    }
+    const { dirty, invalid } = pendingOperationEdits();
+    if (invalid.length > 0) {
+      setFlash(
+        "",
+        invalid.length === 1
+          ? "One proposal has invalid JSON. Fix or revert it before accepting all."
+          : `${invalid.length} proposals have invalid JSON. Fix or revert them before accepting all.`
+      );
+      return;
+    }
+    setBusy(true);
+    setFlash("", "");
+    try {
+      for (const { note, operation, parsed } of dirty) {
+        await apiRequest(
+          `/graph-drafts/${changeSet.change_set_id}/operations/${operation.operation_id}`,
+          {
+            body: {
+              payload: parsed,
+              review_note: note,
+              // Saved as still-proposed so the bulk endpoint below is what
+              // stamps acceptance; PATCHing with an accepted status here would
+              // record human_selected and defeat the point of this change.
+              status: "proposed",
+            },
+            method: "PATCH",
+            token,
+          }
+        );
+      }
+      // Deliberately the bulk endpoint, not a loop of per-operation accepts:
+      // the per-operation path records human_selected, which would represent a
+      // rubber-stamped batch as scrutinized, per-operation review.
+      const nextChangeSet = await apiRequest(
+        `/graph-drafts/${changeSet.change_set_id}/accept-all`,
+        {
+          method: "POST",
+          token,
+        }
+      );
+      setChangeSet(nextChangeSet);
+      setPayloads(payloadText(nextChangeSet));
+      setOperationReviewNotes(operationReviewNoteText(nextChangeSet));
+      const stillProposed = (nextChangeSet?.operations || []).filter(
+        (operation) => operation.status === "proposed"
+      ).length;
+      setFlash(
+        stillProposed > 0
+          ? stillProposed === 1
+            ? "Accepted all valid proposals. 1 still needs editing before it can be accepted."
+            : `Accepted all valid proposals. ${stillProposed} still need editing before they can be accepted.`
+          : "Accepted all remaining proposals."
+      );
+    } catch (err) {
+      setFlash("", err.message || "Failed to accept all graph draft operations.");
+    } finally {
+      setBusy(false);
     }
   }
 
