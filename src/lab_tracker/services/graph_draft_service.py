@@ -8,11 +8,11 @@ import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from lab_tracker.auth import AuthContext
+from lab_tracker.auth import AuthContext, Role
 from lab_tracker.errors import AuthError, NotFoundError, ValidationError
 from lab_tracker.graph_drafting import (
     ANALYSIS_PROMPT_VERSION,
@@ -41,6 +41,7 @@ from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.claim_service import ClaimService
 from lab_tracker.services.dataset_service import DatasetService
 from lab_tracker.services.entity_version_service import EntityVersionService
+from lab_tracker.services.experiment_service import ExperimentService
 from lab_tracker.services.goal_service import GoalService
 from lab_tracker.services.graph_draft_applier import GraphPatchApplier
 from lab_tracker.services.graph_draft_context import (
@@ -125,6 +126,7 @@ class GraphDraftService(BaseService):
         claims: ClaimService,
         visualizations: VisualizationService,
         goals: GoalService,
+        experiments: ExperimentService | None = None,
         versions: EntityVersionService,
         authorization: ProjectAuthorizationPolicy,
         provenance_links: ProvenanceLinkService | None = None,
@@ -148,6 +150,7 @@ class GraphDraftService(BaseService):
             notes=notes,
             sessions=sessions,
             datasets=datasets,
+            experiments=experiments,
             analyses=analyses,
             claims=claims,
             visualizations=visualizations,
@@ -465,6 +468,24 @@ class GraphDraftService(BaseService):
             "The configured graph draft client only runs inside the background worker."
         )
 
+    def _require_project_exists(self, project_id: UUID) -> None:
+        """Fail with the canonical project 404 before settings are synthesized.
+
+        Authorization alone does not prove the project exists: a global-read
+        actor short-circuits membership_role() to OWNER without ever touching
+        the projects table, so a missing project would otherwise be answered
+        with invented defaults (GET) or a raw foreign-key error (PATCH).
+
+        Deliberately called *after* authorization so an unauthorized caller
+        still gets an auth error rather than a probe for which projects exist.
+        """
+
+        self.get_from_repository(
+            entity_id=project_id,
+            label="Project",
+            loader=lambda repository: repository.projects.get(project_id),
+        )
+
     def get_graph_draft_batch_settings(
         self,
         project_id: UUID,
@@ -473,6 +494,7 @@ class GraphDraftService(BaseService):
         actor: AuthContext | None = None,
     ) -> GraphDraftBatchSettings:
         self.authorization.require_read(project_id, actor=actor)
+        self._require_project_exists(project_id)
         settings = self.repository.get_graph_draft_batch_settings_by_project(
             project_id,
             user_id=user_id,
@@ -498,54 +520,62 @@ class GraphDraftService(BaseService):
         user_id: UUID | None = None,
         actor: AuthContext | None = None,
     ) -> GraphDraftBatchSettings:
-        # Contributors may schedule their own project's daily batch -- the
-        # project-level default (user_id is None) and their own per-user
-        # settings (user_id == actor). Editing *another* user's per-user
-        # settings still requires owner.
+        # Contributors may schedule their own Daily Review. Project defaults
+        # and another user's settings are explicit owner/admin operations.
         editing_other_user = (
             user_id is not None
             and (actor is None or user_id != actor.user_id)
         )
-        if editing_other_user:
+        if user_id is None or editing_other_user:
             self.authorization.require_owner(project_id, actor=actor)
         else:
             self.authorization.require_contributor(project_id, actor=actor)
-        settings = self.repository.get_graph_draft_batch_settings_by_project(
-            project_id,
-            user_id=user_id,
-        )
-        if settings is None:
-            default = self.repository.get_graph_draft_batch_settings_by_project(project_id)
-            settings = _default_batch_settings(
-                project_id=project_id,
-                user_id=user_id,
-                actor=actor,
-                inherit_from=default,
-            )
-        if enabled is not None:
-            settings.enabled = enabled
-        if cadence_minutes is not None:
-            if cadence_minutes < 60:
-                raise ValidationError("cadence_minutes must be at least 60.")
-            settings.cadence_minutes = cadence_minutes
-        if run_at_local_time is not None:
-            _validate_run_at_local_time(run_at_local_time)
-            settings.run_at_local_time = run_at_local_time
-        if timezone_name is not None:
-            _zoneinfo(timezone_name)
-            settings.timezone_name = timezone_name
-        settings.next_run_at = (
-            _next_run_at(
-                cadence_minutes=settings.cadence_minutes,
-                run_at_local_time=settings.run_at_local_time,
-                timezone_name=settings.timezone_name,
-            )
-            if settings.enabled
-            else None
-        )
-        settings.updated_at = utc_now()
-        settings.updated_by = actor_user_id(actor)
+        self._require_project_exists(project_id)
         with self.unit_of_work() as repository:
+            repository.lock_daily_review_scope({project_id})
+            settings = repository.get_graph_draft_batch_settings_by_project(
+                project_id,
+                user_id=user_id,
+            )
+            if settings is None:
+                default = repository.get_graph_draft_batch_settings_by_project(
+                    project_id
+                )
+                settings = _default_batch_settings(
+                    project_id=project_id,
+                    user_id=user_id,
+                    actor=actor,
+                    inherit_from=default,
+                )
+            if enabled is not None:
+                settings.enabled = enabled
+            if cadence_minutes is not None:
+                if cadence_minutes < 60:
+                    raise ValidationError("cadence_minutes must be at least 60.")
+                settings.cadence_minutes = cadence_minutes
+            if run_at_local_time is not None:
+                _validate_run_at_local_time(run_at_local_time)
+                settings.run_at_local_time = run_at_local_time
+            if timezone_name is not None:
+                _zoneinfo(timezone_name)
+                settings.timezone_name = timezone_name
+            if settings.enabled and settings.user_id is not None:
+                self._ensure_reviewer_can_contribute(
+                    repository,
+                    project_id=project_id,
+                    reviewer_user_id=settings.user_id,
+                )
+            settings.next_run_at = (
+                _next_run_at(
+                    cadence_minutes=settings.cadence_minutes,
+                    run_at_local_time=settings.run_at_local_time,
+                    timezone_name=settings.timezone_name,
+                )
+                if settings.enabled
+                else None
+            )
+            settings.updated_at = utc_now()
+            settings.updated_by = actor_user_id(actor)
             repository.graph_draft_batch_settings.save(settings)
         return settings
 
@@ -577,25 +607,14 @@ class GraphDraftService(BaseService):
         existing = self.repository.get_graph_draft_batch_run_by_key(run.batch_key)
         if existing is not None:
             return existing
-        # Independent, best-effort deterministic stage: propose content-hash
-        # provenance links for human review. A failure here must never flip the
-        # LLM batch to FAILED or block drafting.
-        if self.provenance_links is not None:
-            try:
-                self.provenance_links.propose_links_from_content_hash(project_id, actor=actor)
-            except Exception:
-                logger.exception(
-                    "provenance-link detector failed for project %s", project_id
-                )
-        with self.unit_of_work() as repository:
-            repository.graph_draft_batch_runs.save(run)
+        self._propose_provenance_links(project_id, actor=actor)
+        self._save_graph_draft_batch_run(run)
         if not notes:
             run.status = GraphDraftBatchRunStatus.SKIPPED
             run.summary = "No staged notes landed in this batch window."
             run.finished_at = utc_now()
             run.updated_at = run.finished_at
-            with self.unit_of_work() as repository:
-                repository.graph_draft_batch_runs.save(run)
+            self._save_graph_draft_batch_run(run)
             return run
         try:
             change_set = self.create_batch_graph_draft(
@@ -617,8 +636,7 @@ class GraphDraftService(BaseService):
             }
             run.finished_at = utc_now()
             run.updated_at = run.finished_at
-            with self.unit_of_work() as repository:
-                repository.graph_draft_batch_runs.save(run)
+            self._save_graph_draft_batch_run(run)
             return run
         run.change_set_id = change_set.change_set_id
         run.summary = change_set.summary
@@ -630,9 +648,35 @@ class GraphDraftService(BaseService):
         )
         run.finished_at = utc_now()
         run.updated_at = run.finished_at
-        with self.unit_of_work() as repository:
-            repository.graph_draft_batch_runs.save(run)
+        self._save_graph_draft_batch_run(run)
         return run
+
+    def _propose_provenance_links(
+        self,
+        project_id: UUID,
+        *,
+        actor: AuthContext | None,
+    ) -> None:
+        """Independent, best-effort deterministic detector stage.
+
+        Proposes content-hash and tag-scan provenance links for human review.
+        Runs on both the synchronous and the queued/worker batch paths. A
+        failure here must never flip the LLM batch to FAILED or block
+        drafting, and one detector failing must not skip the other.
+        """
+
+        if self.provenance_links is None:
+            return
+        for propose_links in (
+            self.provenance_links.propose_links_from_content_hash,
+            self.provenance_links.propose_links_from_tag_slug,
+        ):
+            try:
+                propose_links(project_id, actor=actor)
+            except Exception:
+                logger.exception(
+                    "provenance-link detector failed for project %s", project_id
+                )
 
     def enqueue_graph_draft_batch_for_project(
         self,
@@ -661,8 +705,7 @@ class GraphDraftService(BaseService):
         existing = self.repository.get_graph_draft_batch_run_by_key(run.batch_key)
         if existing is not None:
             return existing
-        with self.unit_of_work() as repository:
-            repository.graph_draft_batch_runs.save(run)
+        self._save_graph_draft_batch_run(run)
         return run
 
     def _prepare_graph_draft_batch_run(
@@ -680,6 +723,16 @@ class GraphDraftService(BaseService):
     ) -> tuple[GraphDraftBatchRun, list[Note]]:
         self.projects.get_project(project_id)
         self._ensure_graph_draft_batch_settings_row(project_id, actor=actor)
+        if (
+            trigger == GraphDraftBatchTrigger.MANUAL
+            and review_assignee is None
+            and review_assignee_user_id is None
+        ):
+            # The ordinary Run now action is a personal review operation. Keep
+            # the human-readable identifier for auth-disabled/legacy installs,
+            # and use the FK whenever this request represents a persisted user.
+            review_assignee = actor_user_id(actor)
+            review_assignee_user_id = actor_user_fk(actor, self.repository)
         reviewer = BatchReviewer(
             reviewer=review_assignee,
             reviewer_user_id=review_assignee_user_id,
@@ -798,6 +851,7 @@ class GraphDraftService(BaseService):
         run = self.get_graph_draft_batch_run(run_id)
         if run.status == GraphDraftBatchRunStatus.PENDING:
             with self.unit_of_work() as repository:
+                repository.lock_daily_review_scope({run.project_id})
                 claimed = repository.graph_draft_batch_runs.get(run_id)
                 if claimed is None:
                     raise NotFoundError("Graph draft batch run does not exist.")
@@ -808,14 +862,17 @@ class GraphDraftService(BaseService):
                 run = claimed
         if run.status != GraphDraftBatchRunStatus.RUNNING:
             return run
+        # The queued/worker path runs the same deterministic detector stage as
+        # the synchronous path — before the note-window check, so detectors
+        # still run when the batch window is empty.
+        self._propose_provenance_links(run.project_id, actor=actor)
         notes = [self.notes.get_note(note_id) for note_id in run.source_note_ids]
         if not notes:
             run.status = GraphDraftBatchRunStatus.SKIPPED
             run.summary = "No staged notes landed in this batch window."
             run.finished_at = utc_now()
             run.updated_at = run.finished_at
-            with self.unit_of_work() as repository:
-                repository.graph_draft_batch_runs.save(run)
+            self._save_graph_draft_batch_run(run)
             return run
         try:
             change_set = self.create_batch_graph_draft(
@@ -845,8 +902,7 @@ class GraphDraftService(BaseService):
         )
         run.finished_at = utc_now()
         run.updated_at = run.finished_at
-        with self.unit_of_work() as repository:
-            repository.graph_draft_batch_runs.save(run)
+        self._save_graph_draft_batch_run(run)
         return run
 
     def get_graph_draft_batch_run(self, run_id: UUID) -> GraphDraftBatchRun:
@@ -854,6 +910,41 @@ class GraphDraftService(BaseService):
         if run is None:
             raise NotFoundError("Graph draft batch run does not exist.")
         return run
+
+    def _save_graph_draft_batch_run(
+        self,
+        run: GraphDraftBatchRun,
+    ) -> None:
+        with self.unit_of_work() as repository:
+            repository.lock_daily_review_scope({run.project_id})
+            current = repository.graph_draft_batch_runs.get(run.run_id)
+            if current is not None:
+                # Review assignment is mutable responsibility. Preserve a
+                # concurrent audited handoff when a worker saves a stale run
+                # object after LLM work completes.
+                run.review_assignee = current.review_assignee
+                run.review_assignee_user_id = current.review_assignee_user_id
+                if current.status in {
+                    GraphDraftBatchRunStatus.CANCELED,
+                    GraphDraftBatchRunStatus.ARCHIVED,
+                }:
+                    run.status = current.status
+                    run.summary = current.summary
+                    run.error_metadata = dict(current.error_metadata)
+                    run.finished_at = current.finished_at
+                    run.updated_at = current.updated_at
+                    return
+            elif run.status in {
+                GraphDraftBatchRunStatus.PENDING,
+                GraphDraftBatchRunStatus.RUNNING,
+                GraphDraftBatchRunStatus.READY,
+            }:
+                self._ensure_reviewer_can_contribute(
+                    repository,
+                    project_id=run.project_id,
+                    reviewer_user_id=run.review_assignee_user_id,
+                )
+            repository.graph_draft_batch_runs.save(run)
 
     def _fail_batch_run(
         self,
@@ -871,8 +962,7 @@ class GraphDraftService(BaseService):
         }
         run.finished_at = utc_now()
         run.updated_at = run.finished_at
-        with self.unit_of_work() as repository:
-            repository.graph_draft_batch_runs.save(run)
+        self._save_graph_draft_batch_run(run)
         return run
 
     def _ensure_graph_draft_batch_settings_row(
@@ -891,6 +981,21 @@ class GraphDraftService(BaseService):
         ):
             return
         with self.unit_of_work() as repository:
+            repository.lock_daily_review_scope({project_id})
+            if user_id is not None:
+                self._ensure_reviewer_can_contribute(
+                    repository,
+                    project_id=project_id,
+                    reviewer_user_id=user_id,
+                )
+            if (
+                repository.get_graph_draft_batch_settings_by_project(
+                    project_id,
+                    user_id=user_id,
+                )
+                is not None
+            ):
+                return
             repository.graph_draft_batch_settings.save(
                 _default_batch_settings(project_id=project_id, user_id=user_id, actor=actor)
             )
@@ -949,6 +1054,7 @@ class GraphDraftService(BaseService):
                 now=current_time,
             )
             with self.unit_of_work() as repository:
+                repository.lock_daily_review_scope({batch_settings.project_id})
                 claimed_settings = repository.claim_due_graph_draft_batch_settings(
                     batch_settings.settings_id,
                     observed_next_run_at=batch_settings.next_run_at,
@@ -959,6 +1065,21 @@ class GraphDraftService(BaseService):
             if claimed_settings is None:
                 continue
             batch_settings = claimed_settings
+            if (
+                batch_settings.user_id is not None
+                and not self._reviewer_can_contribute(
+                    batch_settings.project_id,
+                    batch_settings.user_id,
+                )
+            ):
+                batch_settings.enabled = False
+                batch_settings.next_run_at = None
+                batch_settings.updated_at = utc_now()
+                batch_settings.updated_by = actor_user_id(actor)
+                with self.unit_of_work() as repository:
+                    repository.lock_daily_review_scope({batch_settings.project_id})
+                    repository.graph_draft_batch_settings.save(batch_settings)
+                continue
             try:
                 self.projects.get_project(batch_settings.project_id)
             except NotFoundError:
@@ -976,7 +1097,33 @@ class GraphDraftService(BaseService):
             for reviewer in reviewers:
                 draft_client = None
                 try:
-                    if enqueue:
+                    # A handoff can disable or retarget personal settings after
+                    # the due row is claimed. Re-read the setting and create the
+                    # run while holding the same project lock; once the run is
+                    # stored, offboarding can see and disposition it normally.
+                    with self.unit_of_work() as repository:
+                        repository.lock_daily_review_scope(
+                            {batch_settings.project_id}
+                        )
+                        current_settings = (
+                            repository.graph_draft_batch_settings.get(
+                                batch_settings.settings_id
+                            )
+                        )
+                        if (
+                            current_settings is None
+                            or not current_settings.enabled
+                            or current_settings.user_id != batch_settings.user_id
+                        ):
+                            break
+                        if (
+                            reviewer.reviewer_user_id is not None
+                            and not self._reviewer_can_contribute(
+                                batch_settings.project_id,
+                                reviewer.reviewer_user_id,
+                            )
+                        ):
+                            break
                         run = self.enqueue_graph_draft_batch_for_project(
                             batch_settings.project_id,
                             until=current_time,
@@ -985,16 +1132,12 @@ class GraphDraftService(BaseService):
                             review_assignee=reviewer.reviewer,
                             review_assignee_user_id=reviewer.reviewer_user_id,
                         )
-                    else:
+                    if not enqueue:
                         draft_client = draft_client_factory(app_settings)
-                        run = self.run_graph_draft_batch_for_project(
-                            batch_settings.project_id,
+                        run = self.execute_graph_draft_batch_run(
+                            run.run_id,
                             draft_client=draft_client,
-                            until=current_time,
-                            trigger=GraphDraftBatchTrigger.SCHEDULED,
                             actor=actor,
-                            review_assignee=reviewer.reviewer,
-                            review_assignee_user_id=reviewer.reviewer_user_id,
                         )
                 except Exception as exc:
                     run = self._record_failed_scheduled_batch_run(
@@ -1067,6 +1210,11 @@ class GraphDraftService(BaseService):
                 reviewer=str(settings.user_id),
                 reviewer_user_id=settings.user_id,
             )
+            if not self._reviewer_can_contribute(
+                settings.project_id,
+                settings.user_id,
+            ):
+                return []
             if any(
                 _note_matches_reviewer(note, reviewer)
                 and note_is_new_for_reviewer(note, reviewer)
@@ -1087,6 +1235,14 @@ class GraphDraftService(BaseService):
                 continue
             reviewer = _reviewer_for_note(note)
             if reviewer.reviewer is None and reviewer.reviewer_user_id is None:
+                continue
+            if (
+                reviewer.reviewer_user_id is not None
+                and not self._reviewer_can_contribute(
+                    settings.project_id,
+                    reviewer.reviewer_user_id,
+                )
+            ):
                 continue
             if not note_is_new_for_reviewer(note, reviewer):
                 continue
@@ -1145,8 +1301,7 @@ class GraphDraftService(BaseService):
             review_assignee_user_id=review_assignee_user_id,
         )
         run.updated_at = run.finished_at
-        with self.unit_of_work() as repository:
-            repository.graph_draft_batch_runs.save(run)
+        self._save_graph_draft_batch_run(run)
         return run
 
     def list_graph_draft_batch_runs(
@@ -1294,7 +1449,11 @@ class GraphDraftService(BaseService):
         self._stamp_operation_acceptance(operation, acceptance_mode, actor)
         operation.updated_at = utc_now()
         change_set.updated_at = utc_now()
-        self._save_graph_change_set(change_set)
+        self._save_graph_change_set(
+            change_set,
+            actor=actor,
+            authorization_mode="author",
+        )
         return change_set
 
     def _stamp_operation_acceptance(
@@ -1363,7 +1522,11 @@ class GraphDraftService(BaseService):
             accepted_any = True
         if accepted_any:
             change_set.updated_at = utc_now()
-            self._save_graph_change_set(change_set)
+            self._save_graph_change_set(
+                change_set,
+                actor=actor,
+                authorization_mode="author",
+            )
         return change_set
 
     def submit_graph_change_set(
@@ -1392,7 +1555,11 @@ class GraphDraftService(BaseService):
         change_set.reviewed_by = None
         change_set.review_note = None
         change_set.updated_at = change_set.submitted_at
-        self._save_graph_change_set(change_set)
+        self._save_graph_change_set(
+            change_set,
+            actor=actor,
+            authorization_mode="author",
+        )
         return change_set
 
     def review_graph_change_set(
@@ -1417,7 +1584,11 @@ class GraphDraftService(BaseService):
         change_set.reviewed_by = actor_user_id(actor)
         change_set.review_note = note.strip() if note else None
         change_set.updated_at = change_set.reviewed_at
-        self._save_graph_change_set(change_set)
+        self._save_graph_change_set(
+            change_set,
+            actor=actor,
+            authorization_mode="owner",
+        )
         return change_set
 
     def revise_graph_change_set(
@@ -1524,7 +1695,11 @@ class GraphDraftService(BaseService):
         change_set.status = GraphChangeSetStatus.READY
         change_set.error_metadata = {}
         change_set.updated_at = utc_now()
-        self._save_graph_change_set(change_set)
+        self._save_graph_change_set(
+            change_set,
+            actor=actor,
+            authorization_mode="author",
+        )
         return change_set
 
     @staticmethod
@@ -1649,6 +1824,12 @@ class GraphDraftService(BaseService):
         self.authorization.require_interactive(
             actor, action="Committing graph changes"
         )
+        # Offboarding and handoff take this same lock before touching a draft.
+        # Take it before claiming the change-set row to keep one lock order and
+        # then repeat every decision against post-wait state.
+        self.repository.lock_daily_review_scope({change_set.project_id})
+        change_set = self.get_graph_change_set(change_set_id)
+        self.authorization.require_owner(change_set.project_id, actor=actor)
         if change_set.status == GraphChangeSetStatus.COMMITTING:
             raise ValidationError("This graph draft is already being committed.")
         if change_set.status not in {
@@ -1674,11 +1855,15 @@ class GraphDraftService(BaseService):
                 raise ValidationError("This graph draft is already being committed.")
             raise ValidationError("Only ready or submitted graph drafts can be committed.")
         change_set = claimed
+        self.authorization.require_owner(change_set.project_id, actor=actor)
         accepted = [
             operation
             for operation in sorted(change_set.operations, key=lambda item: item.sequence)
             if operation.status == GraphChangeOperationStatus.ACCEPTED
         ]
+        if not accepted:
+            raise ValidationError("At least one accepted operation is required to commit.")
+        _ensure_accepted_operation_refs_available(accepted)
         for operation in accepted:
             entity = self.patch_applier.apply_graph_operation(
                 operation,
@@ -1702,7 +1887,11 @@ class GraphDraftService(BaseService):
             change_set.change_set_id,
             change_set.committed_at,
         )
-        self._save_graph_change_set(change_set)
+        self._save_graph_change_set(
+            change_set,
+            actor=actor,
+            authorization_mode="owner",
+        )
         return change_set
 
     def _is_graph_change_set_author(
@@ -1728,6 +1917,7 @@ class GraphDraftService(BaseService):
         if change_set.status in {
             GraphChangeSetStatus.COMMITTED,
             GraphChangeSetStatus.COMMITTING,
+            GraphChangeSetStatus.ARCHIVED,
             GraphChangeSetStatus.REJECTED,
             GraphChangeSetStatus.FAILED,
         }:
@@ -1745,10 +1935,135 @@ class GraphDraftService(BaseService):
         }:
             raise ValidationError("Submitted graph drafts cannot be edited by contributors.")
 
-    def _save_graph_change_set(self, change_set: GraphChangeSet) -> None:
+    def _save_graph_change_set(
+        self,
+        change_set: GraphChangeSet,
+        *,
+        actor: AuthContext | None = None,
+        authorization_mode: Literal["author", "owner"] | None = None,
+    ) -> None:
         change_set.operation_count = len(change_set.operations)
         with self.unit_of_work() as repository:
+            repository.lock_daily_review_scope({change_set.project_id})
+            current_change_set = repository.graph_change_sets.get(
+                change_set.change_set_id
+            )
+            if authorization_mode is not None:
+                if current_change_set is None:
+                    raise NotFoundError("Graph change set does not exist.")
+                if current_change_set.error_metadata.get(
+                    "offboarding_disposition"
+                ) in {"cancel", "archive"}:
+                    raise ValidationError(
+                        "This graph draft changed while the request was in progress."
+                    )
+                if authorization_mode == "author":
+                    self._ensure_graph_change_set_editable(
+                        current_change_set,
+                        actor=actor,
+                    )
+                else:
+                    self.authorization.require_owner(
+                        current_change_set.project_id,
+                        actor=actor,
+                    )
+            if (
+                current_change_set is not None
+                and current_change_set.error_metadata.get(
+                    "offboarding_disposition"
+                )
+                in {"cancel", "archive"}
+            ):
+                change_set.status = current_change_set.status
+                change_set.error_metadata = dict(current_change_set.error_metadata)
+                change_set.review_assignee = current_change_set.review_assignee
+                change_set.review_assignee_user_id = (
+                    current_change_set.review_assignee_user_id
+                )
+                change_set.updated_at = current_change_set.updated_at
+                return
+            if change_set.batch_key is not None:
+                current_run = repository.get_graph_draft_batch_run_by_key(
+                    change_set.batch_key
+                )
+                if current_run is not None:
+                    change_set.review_assignee = current_run.review_assignee
+                    change_set.review_assignee_user_id = (
+                        current_run.review_assignee_user_id
+                    )
+                    if current_run.status in {
+                        GraphDraftBatchRunStatus.CANCELED,
+                        GraphDraftBatchRunStatus.ARCHIVED,
+                    }:
+                        change_set.status = (
+                            GraphChangeSetStatus.ARCHIVED
+                            if current_run.status
+                            == GraphDraftBatchRunStatus.ARCHIVED
+                            else GraphChangeSetStatus.REJECTED
+                        )
+                        change_set.error_metadata = dict(
+                            current_run.error_metadata
+                        )
+                        change_set.updated_at = current_run.updated_at
+                        return
+            self._ensure_reviewer_can_contribute(
+                repository,
+                project_id=change_set.project_id,
+                reviewer_user_id=change_set.review_assignee_user_id,
+            )
             repository.graph_change_sets.save(change_set)
+            if (
+                self.settings.is_web_push_enabled()
+                and change_set.draft_mode == GraphDraftMode.GRAPH_BATCH
+                and change_set.status == GraphChangeSetStatus.READY
+                and change_set.review_assignee_user_id is not None
+            ):
+                repository.enqueue_review_available_notification(
+                    change_set_id=change_set.change_set_id,
+                    user_id=change_set.review_assignee_user_id,
+                )
+
+    def _reviewer_can_contribute(
+        self,
+        project_id: UUID,
+        reviewer_user_id: UUID,
+    ) -> bool:
+        role_value = self.repository.user_role(reviewer_user_id)
+        if role_value is None:
+            return False
+        try:
+            reviewer = AuthContext(
+                user_id=reviewer_user_id,
+                role=Role(role_value),
+            )
+            self.authorization.require_contributor(project_id, actor=reviewer)
+        except (AuthError, ValueError):
+            return False
+        return True
+
+    def _ensure_reviewer_can_contribute(
+        self,
+        repository,  # noqa: ANN001
+        *,
+        project_id: UUID,
+        reviewer_user_id: UUID | None,
+    ) -> None:
+        if reviewer_user_id is None:
+            return
+        role_value = repository.user_role(reviewer_user_id)
+        if role_value is None:
+            raise ValidationError("Assigned Daily Review user no longer exists.")
+        try:
+            reviewer = AuthContext(
+                user_id=reviewer_user_id,
+                role=Role(role_value),
+            )
+            self.authorization.require_contributor(project_id, actor=reviewer)
+        except (AuthError, ValueError) as exc:
+            raise ValidationError(
+                "Assigned Daily Review user must have current project "
+                "contributor access."
+            ) from exc
 
     def _find_graph_operation(
         self,
@@ -2105,7 +2420,9 @@ def _note_matches_reviewer(note: Note, reviewer: BatchReviewer | None) -> bool:
     if reviewer.reviewer_user_id is not None:
         return note.created_by_user_id == reviewer.reviewer_user_id
     if reviewer.reviewer is not None:
-        return note.created_by == reviewer.reviewer
+        # String attribution is the legacy/auth-disabled bucket. Do not let a
+        # UUID-shaped legacy identifier overlap the FK-backed user bucket.
+        return note.created_by_user_id is None and note.created_by == reviewer.reviewer
     return note.created_by is None and note.created_by_user_id is None
 
 

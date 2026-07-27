@@ -1381,7 +1381,7 @@ function MobileCaptureCard({
                 try {
                   parsed = JSON.parse(restored);
                 } catch {
-                  parsed = null;
+                  // Corrupt entry; leave the composer as it is.
                 }
                 if (!Array.isArray(parsed)) {
                   return;
