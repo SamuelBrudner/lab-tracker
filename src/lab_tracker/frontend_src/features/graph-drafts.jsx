@@ -2,6 +2,8 @@ import * as React from "react";
 
 import { apiListRequest, apiRequest, buildApiPath } from "../shared/api.js";
 import { formatDate } from "../shared/formatters.js";
+import { DraftRecoveryNotice } from "../shared/ui.jsx";
+import { useLocalDraft } from "../hooks/useLocalDraft.js";
 
 const { useCallback, useEffect, useMemo, useRef, useState } = React;
 
@@ -166,6 +168,36 @@ function operationReviewNoteText(changeSet) {
     entries[operation.operation_id] = operation.review_note || "";
   }
   return entries;
+}
+
+// Deterministic (key-sorted) so an unchanged editor never looks dirty just
+// because two maps were built in a different order.
+function serializeEditorState(payloadsById, notesById) {
+  const ids = [
+    ...new Set([...Object.keys(payloadsById || {}), ...Object.keys(notesById || {})]),
+  ].sort();
+  return JSON.stringify(ids.map((id) => [id, payloadsById?.[id] ?? "", notesById?.[id] ?? ""]));
+}
+
+function deserializeEditorState(raw) {
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      return null;
+    }
+    const payloadsById = {};
+    const notesById = {};
+    for (const entry of parsed) {
+      if (!Array.isArray(entry) || typeof entry[0] !== "string") {
+        return null;
+      }
+      payloadsById[entry[0]] = typeof entry[1] === "string" ? entry[1] : "";
+      notesById[entry[0]] = typeof entry[2] === "string" ? entry[2] : "";
+    }
+    return { notesById, payloadsById };
+  } catch {
+    return null;
+  }
 }
 
 function imageDataUrl(raw) {
@@ -360,6 +392,18 @@ function GraphDraftDetailCard({
     );
     return bulkAcceptedIds.filter((operationId) => stillBulkAccepted.has(operationId));
   }, [bulkAcceptedIds, changeSet]);
+  // One draft for the whole editor rather than one per operation: hooks cannot
+  // be called per row, and payload edits and decision notes are saved together
+  // anyway. A restored payload only fills the editor — nothing is resubmitted,
+  // so half-edited JSON stays for the person to finish.
+  const editorState = useMemo(
+    () => serializeEditorState(payloads, operationReviewNotes),
+    [operationReviewNotes, payloads]
+  );
+  const savedEditorState = useMemo(
+    () => serializeEditorState(payloadText(changeSet), operationReviewNoteText(changeSet)),
+    [changeSet]
+  );
   const visibleSourceRegions = useMemo(() => sourceRegions(changeSet), [changeSet]);
   const spokenReview = useMemo(
     () => spokenReviewScript(changeSet, payloads),
@@ -383,6 +427,14 @@ function GraphDraftDetailCard({
   const canCommitDraft =
     effectiveCanManageGraph && ["ready", "submitted"].includes(changeSet?.status || "");
   const speechSupported = canSpeakReview();
+  // Declared after canEditDraft so a committed or read-only draft never offers
+  // to restore edits that could no longer be saved.
+  const editorDraft = useLocalDraft({
+    baseline: savedEditorState,
+    enabled: canEditDraft,
+    key: changeSetId ? `graph-draft:${changeSetId}` : "",
+    value: editorState,
+  });
 
   const loadDraft = useCallback(async () => {
     if (!changeSetId) {
@@ -575,8 +627,19 @@ function GraphDraftDetailCard({
         }
       );
       setChangeSet(nextChangeSet);
-      setPayloads(payloadText(nextChangeSet));
-      setOperationReviewNotes(operationReviewNoteText(nextChangeSet));
+      // Refresh only the operation that was saved. Replacing every editor from
+      // the response would discard unsaved payload edits and decision notes the
+      // person has in flight on the *other* proposals.
+      const savedPayloads = payloadText(nextChangeSet);
+      const savedNotes = operationReviewNoteText(nextChangeSet);
+      setPayloads((current) => ({
+        ...current,
+        [operation.operation_id]: savedPayloads[operation.operation_id],
+      }));
+      setOperationReviewNotes((current) => ({
+        ...current,
+        [operation.operation_id]: savedNotes[operation.operation_id],
+      }));
       setFlash("Graph draft operation updated.");
     } catch (err) {
       setFlash("", err.message || "Failed to update graph draft operation.");
@@ -1227,6 +1290,20 @@ function GraphDraftDetailCard({
               ))}
             </div>
           ) : null}
+
+          <DraftRecoveryNotice
+            label="unsaved edits to these proposals"
+            savedAt={editorDraft.recoveredAt}
+            onRestore={() => {
+              const restored = editorDraft.restore();
+              const parsed = restored === null ? null : deserializeEditorState(restored);
+              if (parsed) {
+                setPayloads(parsed.payloadsById);
+                setOperationReviewNotes(parsed.notesById);
+              }
+            }}
+            onDiscard={editorDraft.discard}
+          />
 
           <div className="review-report">
             {(changeSet.operations || []).map((operation) => {

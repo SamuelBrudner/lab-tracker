@@ -881,6 +881,63 @@ button.project-graph-legend-item:hover {
   min-height: 44px;
 }
 
+.capture-checkin {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.capture-checkin-status {
+  background: var(--accent-soft);
+  border: 1px solid #b9e2d4;
+  border-radius: 999px;
+  font-size: 0.82rem;
+  padding: 0.3rem 0.72rem;
+}
+
+.capture-voice-first {
+  display: grid;
+  gap: 0.5rem;
+  justify-items: center;
+  padding: 0.4rem 0;
+}
+
+.capture-voice-first-record {
+  align-items: center;
+  background: var(--accent);
+  border-radius: 50%;
+  color: #ffffff;
+  cursor: pointer;
+  display: inline-flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  height: 132px;
+  justify-content: center;
+  text-align: center;
+  width: 132px;
+}
+
+.capture-voice-first-record.disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.capture-voice-first-record .capture-icon {
+  height: 44px;
+  width: 44px;
+}
+
+.capture-voice-first-record span {
+  font-size: 0.78rem;
+  padding: 0 0.7rem;
+}
+
+.capture-voice-first-status {
+  margin: 0;
+  text-align: center;
+}
+
 .capture-pending {
   border: 1px solid var(--line);
   border-radius: 14px;
@@ -1233,6 +1290,15 @@ button.project-graph-legend-item:hover {
   align-items: center;
   flex-wrap: wrap;
   gap: 0.6rem;
+}
+
+.flash.draft-recovery {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  border-color: #b9e2d4;
+  background: var(--accent-soft);
 }
 
 .flash.error {
@@ -2055,5 +2121,58 @@ button.project-graph-legend-item:hover {
   .review-proposal-actions button {
     min-height: 46px;
     padding-inline: 0.45rem;
+  }
+}
+
+/* Bench tag print kit (lab-tracker-rr8x.3) */
+.bench-tags {
+  margin-top: 1rem;
+}
+
+.tag-print-sheet {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 0.9rem;
+  margin-top: 0.9rem;
+}
+
+.tag-print-item {
+  margin: 0;
+  padding: 0.7rem;
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+  text-align: center;
+  break-inside: avoid;
+  background: #ffffff;
+}
+
+.tag-print-item figcaption {
+  margin-top: 0.4rem;
+  overflow-wrap: anywhere;
+}
+
+.tag-print-qr svg {
+  width: 130px;
+  height: 130px;
+}
+
+@media print {
+  /* Only hijack printing when a tag sheet is on screen; normal Cmd+P on any
+     other page stays untouched. */
+  body:has(.tag-print-sheet) * {
+    visibility: hidden;
+  }
+
+  body:has(.tag-print-sheet) .tag-print-sheet,
+  body:has(.tag-print-sheet) .tag-print-sheet * {
+    visibility: visible;
+  }
+
+  body:has(.tag-print-sheet) .tag-print-sheet {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    margin: 0;
   }
 }

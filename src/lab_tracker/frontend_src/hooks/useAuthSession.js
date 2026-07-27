@@ -6,6 +6,11 @@ import {
   TOKEN_STORAGE_KEY,
 } from "../shared/constants.js";
 import { isStaticDemoEnabled } from "../shared/static-demo-api.js";
+import { clearAllLocalDrafts } from "./useLocalDraft.js";
+import {
+  disablePushNotifications,
+  rebindExistingPushSubscription,
+} from "../shared/push-notifications.js";
 
 const { useCallback, useEffect, useMemo, useState } = React;
 const REFRESH_MARGIN_MS = 5 * 60 * 1000;
@@ -147,6 +152,11 @@ function useAuthSession({ replace, setBusy, setFlash }) {
           const nextAuthEnabled = payload?.meta?.auth_enabled !== false;
           setAuthEnabled(nextAuthEnabled);
           setUser(payload?.data || null);
+          if (nextAuthEnabled && token && payload?.data) {
+            void rebindExistingPushSubscription({ token }).catch(() => {
+              // Push is optional; session verification must not depend on it.
+            });
+          }
           if (!nextAuthEnabled && token) {
             setToken("");
             setTokenExpiresAt("");
@@ -301,16 +311,23 @@ function useAuthSession({ replace, setBusy, setFlash }) {
     }
   }
 
-  function handleLogout() {
+  async function handleLogout() {
     if (!authEnabled) {
       replace("/app");
       return;
     }
-    clearSession();
-    setAuthBootstrapToken("");
-    setAuthPassword("");
-    replace("/app");
-    setFlash("Signed out.", "");
+    try {
+      await disablePushNotifications({ token, bestEffort: true });
+    } finally {
+      // localStorage is per-origin, so unsent research prose would otherwise be
+      // offered to whoever signs in next on a shared lab machine.
+      clearAllLocalDrafts();
+      clearSession();
+      setAuthBootstrapToken("");
+      setAuthPassword("");
+      replace("/app");
+      setFlash("Signed out.", "");
+    }
   }
 
   return {

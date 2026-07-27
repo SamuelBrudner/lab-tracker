@@ -729,3 +729,127 @@ describe("GraphDraftDetailCard accept all", () => {
     });
   });
 });
+
+describe("GraphDraftDetailCard draft recovery", () => {
+  const OPERATION_ID = "33333333-3333-4333-8333-333333333333";
+
+  afterEach(() => {
+    window.localStorage.clear();
+  });
+
+  it("offers editor text left behind by a closed tab, and never resubmits it", async () => {
+    const draft = draftFixture();
+    const editedPayload = JSON.stringify({ text: "Half-rewritten question" }, null, 2);
+    window.localStorage.setItem(
+      `lab-tracker:draft:graph-draft:${draft.change_set_id}`,
+      JSON.stringify({
+        savedAt: 1737000000000,
+        value: JSON.stringify([[OPERATION_ID, editedPayload, "Checked the raw trace"]]),
+      })
+    );
+    const fetchMock = installFetchMock([
+      { match: `/graph-drafts/${draft.change_set_id}`, response: apiResponse(draft) },
+    ]);
+    render(
+      <GraphDraftDetailCard
+        token="token-1"
+        changeSetId={draft.change_set_id}
+        navigate={vi.fn()}
+        canWrite={true}
+        canManageGraph={true}
+        user={{ role: "admin", user_id: "user-1", username: "sam" }}
+        setBusy={vi.fn()}
+        setFlash={vi.fn()}
+      />
+    );
+
+    // Offered, not applied: the stored text may be older than the server's.
+    expect(await screen.findByRole("button", { name: "Restore them" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Edit JSON payload")).toHaveValue(
+      JSON.stringify(draft.operations[0].payload, null, 2)
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Restore them" }));
+
+    expect(screen.getByLabelText("Edit JSON payload")).toHaveValue(editedPayload);
+    expect(screen.getByLabelText("Decision note")).toHaveValue("Checked the raw trace");
+    // A restored payload lands in the editor only. Nothing is sent on the
+    // person's behalf, so half-edited JSON is never auto-submitted.
+    const writes = fetchMock.mock.calls.filter(
+      ([, init]) => init && init.method && init.method !== "GET"
+    );
+    expect(writes).toHaveLength(0);
+  });
+
+  it("does not offer recovery once the draft can no longer be edited", async () => {
+    const draft = { ...draftFixture(), status: "committed" };
+    window.localStorage.setItem(
+      `lab-tracker:draft:graph-draft:${draft.change_set_id}`,
+      JSON.stringify({
+        savedAt: 1737000000000,
+        value: JSON.stringify([[OPERATION_ID, "{}", "stale"]]),
+      })
+    );
+    installFetchMock([
+      { match: `/graph-drafts/${draft.change_set_id}`, response: apiResponse(draft) },
+    ]);
+    render(
+      <GraphDraftDetailCard
+        token="token-1"
+        changeSetId={draft.change_set_id}
+        navigate={vi.fn()}
+        canWrite={true}
+        canManageGraph={true}
+        user={{ role: "admin", user_id: "user-1", username: "sam" }}
+        setBusy={vi.fn()}
+        setFlash={vi.fn()}
+      />
+    );
+
+    await screen.findByText(/kept/);
+    expect(screen.queryByRole("button", { name: "Restore them" })).toBeNull();
+  });
+});
+
+describe("GraphDraftDetailCard concurrent editing", () => {
+  it("keeps unsaved edits on other proposals when one is saved", async () => {
+    const base = draftFixture();
+    const SECOND = "44444444-4444-4444-8444-444444444444";
+    const draft = {
+      ...base,
+      operations: [
+        base.operations[0],
+        { ...base.operations[0], operation_id: SECOND, payload: { text: "Second proposal" } },
+      ],
+    };
+    renderDraft(draft, {
+      routes: [
+        {
+          match: /\/graph-drafts\/[^/]+\/operations\//,
+          method: "PATCH",
+          response: apiResponse({
+            ...draft,
+            operations: [
+              { ...draft.operations[0], status: "accepted" },
+              draft.operations[1],
+            ],
+          }),
+        },
+      ],
+    });
+
+    const notes = await screen.findAllByLabelText("Decision note");
+    // An in-flight note on the *second* proposal, which is not being saved.
+    fireEvent.change(notes[1], { target: { value: "Still thinking about this one" } });
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Accept" })[0]);
+
+    await waitFor(() =>
+      expect(screen.getAllByRole("button", { name: "Accept" })).toHaveLength(2)
+    );
+    // Refreshing every editor from the response would have wiped this.
+    expect(screen.getAllByLabelText("Decision note")[1]).toHaveValue(
+      "Still thinking about this one"
+    );
+  });
+});

@@ -10,12 +10,12 @@
  * one place.
  */
 
-const CACHE_VERSION = "v-c1eb8a9541b0";
+const CACHE_VERSION = "v-ceef1c750093";
 const CACHE_NAME = `lab-tracker-shell-${CACHE_VERSION}`;
 const SHELL_ASSETS = [
   "/app/",
-  "/app/static/app.js?v=c1eb8a9541b0",
-  "/app/static/styles.css?v=c1eb8a9541b0",
+  "/app/static/app.js?v=ceef1c750093",
+  "/app/static/styles.css?v=ceef1c750093",
   "/app/static/manifest.json",
   "/app/static/icon-180.png",
   "/app/static/icon-192.png",
@@ -47,6 +47,62 @@ self.addEventListener("activate", (event) => {
       .then(() => self.clients.claim())
   );
 });
+
+self.addEventListener("push", (event) => {
+  let payload = {};
+  try {
+    payload = event.data ? event.data.json() : {};
+  } catch {
+    payload = {};
+  }
+  const changeSetId = String(payload.change_set_id || "");
+  const url = reviewNotificationUrl(payload.url);
+  event.waitUntil(
+    self.registration.showNotification("Review available", {
+      body: "A daily review is ready for you.",
+      data: { url },
+      icon: "/app/static/icon-192.png",
+      badge: "/app/static/icon-192.png",
+      tag: changeSetId ? `review-${changeSetId}` : "review-available",
+      renotify: false,
+    })
+  );
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const url = reviewNotificationUrl(event.notification.data?.url);
+  event.waitUntil(
+    self.clients
+      .matchAll({ type: "window", includeUncontrolled: true })
+      .then(async (windows) => {
+        const existing = windows.find((client) => {
+          const clientUrl = new URL(client.url);
+          return clientUrl.origin === self.location.origin;
+        });
+        if (existing) {
+          await existing.navigate(url);
+          return existing.focus();
+        }
+        return self.clients.openWindow(url);
+      })
+  );
+});
+
+function reviewNotificationUrl(candidate) {
+  try {
+    const url = new URL(String(candidate || ""), self.location.origin);
+    if (
+      url.origin === self.location.origin &&
+      /^\/app\/batches\/[0-9a-f-]{36}$/i.test(url.pathname)
+    ) {
+      return `${url.pathname}${url.search}${url.hash}`;
+    }
+  } catch {
+    // Fall through to the safe queue route.
+  }
+  return "/app/batches";
+}
 
 self.addEventListener("fetch", (event) => {
   const request = event.request;

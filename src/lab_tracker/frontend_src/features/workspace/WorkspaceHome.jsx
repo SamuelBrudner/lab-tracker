@@ -3,6 +3,7 @@ import * as React from "react";
 import { Dashboard } from "../dashboard-projects.jsx";
 import { AnalysisPanel } from "../analysis/AnalysisPanel.jsx";
 import { DatasetPanel } from "../datasets/index.js";
+import { ExperimentPanel } from "../experiments/index.js";
 import { NotePanel } from "../notes.jsx";
 import { PortfolioHome } from "../portfolio-home.jsx";
 import { QuestionPanel } from "../questions/QuestionPanel.jsx";
@@ -69,6 +70,7 @@ function WorkspaceHome({
         onProjectDescriptionChange={(event) =>
           workspaceForms.setProjectDescription(event.target.value)
         }
+        onRestoreProjectDescription={workspaceForms.setProjectDescription}
         onCreateProject={projectActions.handleCreateProject}
         onOpenGraph={() => navigate("/app/graph")}
         onOpenBatches={() => navigate("/app/batches")}
@@ -95,6 +97,7 @@ function WorkspaceHome({
         questionHypothesis={workspaceForms.questionHypothesis}
         questionParentIds={workspaceForms.questionParentIds}
         onQuestionTextChange={(event) => workspaceForms.setQuestionText(event.target.value)}
+        onRestoreQuestionText={workspaceForms.setQuestionText}
         onQuestionTypeChange={(event) => workspaceForms.setQuestionType(event.target.value)}
         onQuestionHypothesisChange={(event) =>
           workspaceForms.setQuestionHypothesis(event.target.value)
@@ -134,6 +137,14 @@ function WorkspaceHome({
         navigate={navigate}
       />
 
+      <ExperimentPanel
+        token={auth.token}
+        canWrite={canContribute}
+        selectedProjectId={workspaceData.selectedProjectId}
+        questions={workspaceData.questions}
+        navigate={navigate}
+      />
+
       <NotePanel
         canWrite={canContribute}
         busy={busy}
@@ -142,6 +153,7 @@ function WorkspaceHome({
         selectedProjectId={workspaceData.selectedProjectId}
         noteText={workspaceForms.noteText}
         onNoteTextChange={(event) => workspaceForms.setNoteText(event.target.value)}
+        onRestoreNoteText={workspaceForms.setNoteText}
         onCreateTextNote={noteActions.handleCreateTextNote}
         onUploadNote={noteActions.handleUploadNote}
         onUploadFileChange={(event) => workspaceForms.setUploadFile(event.target.files?.[0] || null)}
@@ -226,6 +238,10 @@ function WorkspaceHome({
           <p>
             <strong>Question</strong>
             <span>A staged or active scientific question that records why data was collected.</span>
+          </p>
+          <p>
+            <strong>Experiment</strong>
+            <span>A lightweight grouping for the Sessions and Datasets in one scientific run.</span>
           </p>
           <p>
             <strong>Dataset</strong>

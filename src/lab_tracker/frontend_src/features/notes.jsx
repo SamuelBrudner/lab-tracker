@@ -2,7 +2,9 @@ import * as React from "react";
 
 import { apiRequest } from "../shared/api.js";
 import { formatDate } from "../shared/formatters.js";
+import { DraftRecoveryNotice } from "../shared/ui.jsx";
 import { useApiResource } from "../hooks/useApiResource.js";
+import { useLocalDraft } from "../hooks/useLocalDraft.js";
 
 const { useEffect, useMemo, useState } = React;
 
@@ -14,6 +16,7 @@ function NotePanel({
   selectedProjectId,
   noteText,
   onNoteTextChange,
+  onRestoreNoteText,
   onCreateTextNote,
   onUploadNote,
   onUploadFileChange,
@@ -25,6 +28,14 @@ function NotePanel({
   notes,
   navigate,
 }) {
+  // Scoped per project so switching projects never surfaces another project's
+  // half-written note.
+  const noteDraft = useLocalDraft({
+    baseline: "",
+    key: selectedProjectId ? `note-text:${selectedProjectId}` : "",
+    value: noteText,
+  });
+
   return (
     <article className="card span-6">
       <div className="item-head">
@@ -48,6 +59,19 @@ function NotePanel({
       </div>
       <form className="form" onSubmit={onCreateTextNote}>
         <h3>Quick text note</h3>
+        {/* Baseline is empty because a saved note clears the field, so the
+            stored draft disappears on its own once the note is committed. */}
+        <DraftRecoveryNotice
+          label="an unsaved note"
+          savedAt={noteDraft.recoveredAt}
+          onRestore={() => {
+            const restored = noteDraft.restore();
+            if (restored !== null && onRestoreNoteText) {
+              onRestoreNoteText(restored);
+            }
+          }}
+          onDiscard={noteDraft.discard}
+        />
         <label>
           Raw note text
           <textarea

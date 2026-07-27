@@ -5,11 +5,21 @@ import { formatDate } from "../shared/formatters.js";
 import { droppedUploadsMessage, getUploadQueue } from "../shared/register-sw.js";
 import { migrateIncomingShares } from "../shared/share-target-inbox.js";
 import { UPLOAD_FILE_PATH } from "../shared/upload-queue.js";
+import { DraftRecoveryNotice } from "../shared/ui.jsx";
+import { useLocalDraft } from "../hooks/useLocalDraft.js";
 
-const { useEffect, useMemo, useState } = React;
+const { useEffect, useMemo, useRef, useState } = React;
 
 const OFFLINE_QUEUED = Symbol("offline-queued");
 const INSTALL_PROMPT_DISMISSED_KEY = "lab-tracker-install-prompt-dismissed";
+const TAG_LOG_STORAGE_PREFIX = "lab-tracker:tag-log:";
+const TAG_LOG_DEDUPE_MS = 120000;
+const UNBOUND_TAG_MESSAGE = "This tag isn't bound yet — capture works as usual.";
+const BENCH_CHECKIN_STORAGE_KEY = "lab-tracker:bench-checkin";
+const BENCH_CHECKIN_DEFAULT_TTL_HOURS = 8;
+const BENCH_CHECKIN_MIN_TTL_HOURS = 1;
+const BENCH_CHECKIN_MAX_TTL_HOURS = 24;
+const HOUR_MS = 3600000;
 
 const VOICE_NOTE_TYPES = [
   "Observation",
@@ -120,6 +130,115 @@ function clearShareTargetStatus() {
     window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
   } catch {
     // Query cleanup is cosmetic; the inbox migration still runs independently.
+  }
+}
+
+function readCaptureUrlParams() {
+  // Unknown params are ignored so stale tag URLs keep working.
+  try {
+    const params = new URLSearchParams(window.location.search || "");
+    return {
+      checkin: params.get("checkin") === "1",
+      hint: params.get("hint") || "",
+      log: params.get("log") === "1",
+      mode: params.get("mode") || "",
+      projectId: params.get("project") || "",
+      sessionLink: params.get("session-link") || "",
+      tagSlug: params.get("tag") || "",
+      tagStatus: params.get("tag-status") || "",
+      ttlHours: params.get("ttl-hours") || "",
+    };
+  } catch {
+    return {
+      checkin: false,
+      hint: "",
+      log: false,
+      mode: "",
+      projectId: "",
+      sessionLink: "",
+      tagSlug: "",
+      tagStatus: "",
+      ttlHours: "",
+    };
+  }
+}
+
+function clampCheckinTtlHours(value) {
+  const hours = Number(value);
+  if (!Number.isFinite(hours)) {
+    return BENCH_CHECKIN_DEFAULT_TTL_HOURS;
+  }
+  return Math.min(BENCH_CHECKIN_MAX_TTL_HOURS, Math.max(BENCH_CHECKIN_MIN_TTL_HOURS, hours));
+}
+
+function readBenchCheckin() {
+  // Read path for the TTL sticky context; an expired or malformed entry is
+  // deleted so the next mount reverts to ask-on-arrival.
+  try {
+    const raw = localStorage.getItem(BENCH_CHECKIN_STORAGE_KEY);
+    if (!raw) {
+      return null;
+    }
+    const entry = JSON.parse(raw);
+    if (
+      !entry ||
+      typeof entry !== "object" ||
+      !entry.projectId ||
+      !Number.isFinite(entry.expiresAt) ||
+      entry.expiresAt <= Date.now()
+    ) {
+      localStorage.removeItem(BENCH_CHECKIN_STORAGE_KEY);
+      return null;
+    }
+    return {
+      expiresAt: entry.expiresAt,
+      hint: String(entry.hint || ""),
+      label: String(entry.label || ""),
+      projectId: String(entry.projectId),
+      sessionId: String(entry.sessionId || ""),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeBenchCheckin(entry) {
+  try {
+    localStorage.setItem(BENCH_CHECKIN_STORAGE_KEY, JSON.stringify(entry));
+  } catch {
+    // Storage may be unavailable in private browsing; the in-memory banner
+    // still reflects the check-in for this visit.
+  }
+}
+
+function clearBenchCheckin() {
+  try {
+    localStorage.removeItem(BENCH_CHECKIN_STORAGE_KEY);
+  } catch {
+    // Ignore storage failures; an unreadable entry is dropped on read.
+  }
+}
+
+function checkinTimeLabel(expiresAt) {
+  try {
+    return new Date(expiresAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  } catch {
+    return "";
+  }
+}
+
+function shouldFireTagBreadcrumb(slug) {
+  const key = `${TAG_LOG_STORAGE_PREFIX}${slug}`;
+  try {
+    const lastFired = Number(sessionStorage.getItem(key));
+    if (Number.isFinite(lastFired) && Date.now() - lastFired < TAG_LOG_DEDUPE_MS) {
+      return false;
+    }
+    sessionStorage.setItem(key, String(Date.now()));
+    return true;
+  } catch {
+    // Storage may be unavailable in private browsing; fire without dedupe.
+    return true;
   }
 }
 
@@ -290,6 +409,14 @@ function MobileCaptureCard({
   const [audioFile, setAudioFile] = useState(null);
   const [textNote, setTextNote] = useState("");
   const [hint, setHint] = useState("");
+  // Both fields are persisted, not just the visible one: attaching a photo
+  // switches the composer from textNote to hint, and storing only what is on
+  // screen would overwrite a long lab note with a short hint.
+  const captureDraft = useLocalDraft({
+    baseline: JSON.stringify(["", ""]),
+    key: selectedProjectId ? `capture-text:${selectedProjectId}` : "",
+    value: JSON.stringify([textNote, hint]),
+  });
   const [voiceNoteType, setVoiceNoteType] = useState("Observation");
   const [questionId, setQuestionId] = useState("");
   const [sessionId, setSessionId] = useState("");
@@ -306,6 +433,37 @@ function MobileCaptureCard({
   const [analyses, setAnalyses] = useState([]);
   const [claims, setClaims] = useState([]);
   const [pendingError, setPendingError] = useState("");
+  // Set once from the mount-time URL params; feeds capture_entry / tag_slug /
+  // tag_label into baseMetadata. Stays null on a param-less mount so metadata
+  // is byte-identical to a plain visit.
+  const [urlCaptureContext, setUrlCaptureContext] = useState(null);
+  const [pendingBreadcrumb, setPendingBreadcrumb] = useState(null);
+  // Voice-first layout (?mode=voice or a binding with mode "voice"): one big
+  // record control on top; the normal composer stays fully functional below.
+  const [voiceFirst, setVoiceFirst] = useState(false);
+  const [benchCheckin, setBenchCheckin] = useState(null);
+  // Flips true once the mount-time URL/check-in context has been applied (or
+  // there was none). Gates the share-inbox migration so shared captures land
+  // in the checked-in / tag-bound project, never the stale mount-time value.
+  const [captureContextReady, setCaptureContextReady] = useState(false);
+  // True while uploadCapture is in flight; disables the save controls so a
+  // second tap cannot start a duplicate upload.
+  const [uploading, setUploading] = useState(false);
+  const urlParamsAppliedRef = useRef(false);
+  // Unmount guard for the URL-param effect's async continuation. The effect
+  // legitimately re-runs when its own project apply changes
+  // selectedProjectId, so the flag is reset at the top of every run and only
+  // a final unmount leaves it set.
+  const urlParamsCanceledRef = useRef(false);
+  const breadcrumbFiredRef = useRef(false);
+  // Holds the recording that landed while the voice-first layout was active.
+  // Keyed to the file (not a boolean) so the auto-save decision is made
+  // exactly once, in the commit where that file reaches state.
+  const autoUploadFileRef = useRef(null);
+  // Synchronous re-entry guard for uploadCapture: a ref (not state) so a tap
+  // landing while an upload is already in flight is rejected before React
+  // re-renders the disabled buttons.
+  const uploadInFlightRef = useRef(false);
   const activeQuestions = useMemo(
     () => questions.filter((question) => question.status === "active"),
     [questions]
@@ -373,8 +531,14 @@ function MobileCaptureCard({
     // Pick up anything the OS share sheet handed off via the service worker
     // and route it through the standard offline upload queue. Runs only once
     // a project is selected so the migrated shares get attached to a real
-    // project. IndexedDB-less environments (jsdom in unit tests) silently
-    // no-op via the queue's null check.
+    // project, and only after the mount-time URL/check-in context has been
+    // applied so the first migration run targets the checked-in / tag-bound
+    // project rather than the stale localStorage selection. IndexedDB-less
+    // environments (jsdom in unit tests) silently no-op via the queue's null
+    // check.
+    if (!captureContextReady) {
+      return undefined;
+    }
     if (!selectedProjectId) {
       return undefined;
     }
@@ -425,7 +589,219 @@ function MobileCaptureCard({
     return () => {
       canceled = true;
     };
-  }, [selectedProjectId, token, setFlash]);
+  }, [captureContextReady, selectedProjectId, token, setFlash]);
+
+  useEffect(() => {
+    // Tag/QR entry: apply capture URL params exactly once per mount. Params
+    // stay in the URL so a refresh re-applies them. Order: parse -> apply
+    // check-in defaults -> resolve tag binding -> merge (explicit param beats
+    // binding field; both beat check-in) -> apply project -> resolve
+    // session-link -> set hint -> voice mode -> persist check-in ->
+    // breadcrumb.
+    //
+    // The async continuation below must never apply state after unmount:
+    // onSelectedProjectChange is an app-wide setter that outlives this card,
+    // so an un-canceled continuation would flip the workspace project after
+    // the user navigated away. Cancellation is keyed to unmount alone (see
+    // urlParamsCanceledRef): the effect re-runs — without cancelling the
+    // continuation — when its own project apply changes selectedProjectId.
+    urlParamsCanceledRef.current = false;
+    const cancelOnCleanup = () => {
+      urlParamsCanceledRef.current = true;
+    };
+    if (urlParamsAppliedRef.current) {
+      return cancelOnCleanup;
+    }
+    urlParamsAppliedRef.current = true;
+    const params = readCaptureUrlParams();
+    const hasPrefillParams = Boolean(
+      params.projectId ||
+        params.hint ||
+        params.sessionLink ||
+        params.log ||
+        params.checkin ||
+        params.mode === "voice"
+    );
+    if (params.tagStatus === "unbound") {
+      setFlash("", UNBOUND_TAG_MESSAGE);
+    }
+    // Bench check-in defaults apply first so explicit params and tag
+    // bindings override them field by field below. The hint box is always
+    // empty at mount, so the check-in hint never clobbers anything typed;
+    // the merge below only replaces the hint when it still holds the
+    // check-in value (or nothing), never text typed mid-flight.
+    const storedCheckin = readBenchCheckin();
+    const checkinHint = storedCheckin?.hint || "";
+    if (storedCheckin) {
+      setBenchCheckin(storedCheckin);
+      onSelectedProjectChange(storedCheckin.projectId);
+      if (storedCheckin.sessionId) {
+        setSessionId(storedCheckin.sessionId);
+      }
+      if (storedCheckin.hint) {
+        setHint(storedCheckin.hint);
+      }
+    }
+    if (!params.tagSlug && !hasPrefillParams) {
+      // No URL context to apply: the capture context is settled immediately.
+      setCaptureContextReady(true);
+      return cancelOnCleanup;
+    }
+    (async () => {
+      try {
+        let binding = null;
+        let tagUnbound = false;
+        if (params.tagSlug) {
+          try {
+            binding = await apiRequest(`/tags/${encodeURIComponent(params.tagSlug)}`, { token });
+          } catch (err) {
+            if (err?.status === 404) {
+              tagUnbound = true;
+              setFlash("", UNBOUND_TAG_MESSAGE);
+            }
+            // Any other failure (network blip, auth refresh) keeps the URL
+            // slug as best-effort witness context below; the tag is never a
+            // gate.
+          }
+          if (urlParamsCanceledRef.current) {
+            return;
+          }
+        }
+        setUrlCaptureContext({
+          entry: params.tagSlug ? "tag_tap" : "url_params",
+          tagLabel: binding?.label || "",
+          tagSlug: tagUnbound ? "" : binding?.slug || params.tagSlug || "",
+        });
+        const mergedProjectId = params.projectId || binding?.project_id || "";
+        let appliedProjectId = mergedProjectId || storedCheckin?.projectId || selectedProjectId;
+        if (mergedProjectId) {
+          onSelectedProjectChange(mergedProjectId);
+        }
+        let resolvedSessionId = params.sessionLink ? "" : binding?.session_id || "";
+        if (params.sessionLink) {
+          let linkedSession = null;
+          try {
+            linkedSession = await apiRequest(
+              `/sessions/by-link/${encodeURIComponent(params.sessionLink)}`,
+              { token }
+            );
+          } catch {
+            // Unresolvable link codes leave capture without a session link.
+          }
+          if (urlParamsCanceledRef.current) {
+            return;
+          }
+          if (linkedSession?.session_id) {
+            resolvedSessionId = linkedSession.session_id;
+            if (linkedSession.project_id && linkedSession.project_id !== appliedProjectId) {
+              // The session's own project wins over any earlier selection.
+              appliedProjectId = linkedSession.project_id;
+              onSelectedProjectChange(linkedSession.project_id);
+            }
+          }
+        }
+        if (resolvedSessionId) {
+          setSessionId(resolvedSessionId);
+        }
+        const mergedHint = params.hint || binding?.hint || "";
+        if (mergedHint) {
+          // Functional update: text typed while the tag/session fetches were
+          // in flight wins; the check-in hint applied at mount still yields
+          // to the merged param/binding hint.
+          setHint((prev) => (prev && prev !== checkinHint ? prev : mergedHint));
+        }
+        if (params.mode === "voice" || binding?.mode === "voice") {
+          setVoiceFirst(true);
+          setCaptureMode("voice");
+        }
+        if (params.checkin && appliedProjectId) {
+          const entry = {
+            expiresAt: Date.now() + clampCheckinTtlHours(params.ttlHours) * HOUR_MS,
+            hint: mergedHint,
+            label: binding?.label || "",
+            projectId: appliedProjectId,
+            sessionId: resolvedSessionId,
+          };
+          writeBenchCheckin(entry);
+          setBenchCheckin(entry);
+        }
+        // No slug means there is no physical tag to witness, so no
+        // breadcrumb — a plain ?log=1 URL must not fabricate a tag_tap note.
+        if ((params.log || binding?.log_breadcrumb) && params.tagSlug) {
+          setPendingBreadcrumb({
+            label: binding?.label || params.tagSlug,
+            projectId: appliedProjectId,
+            sessionId: resolvedSessionId,
+            slug: params.tagSlug,
+          });
+        }
+      } finally {
+        setCaptureContextReady(true);
+      }
+    })();
+    return cancelOnCleanup;
+  }, [onSelectedProjectChange, selectedProjectId, setFlash, token]);
+
+  useEffect(() => {
+    // Best-effort tag-tap breadcrumb: waits until token + write access are
+    // available, fires at most once per mount, and dedupes repeat taps
+    // across mounts via sessionStorage. The target project is the one the
+    // mount-time merge resolved — never a project the user picks later — so
+    // a breadcrumb can only land where the tag actually pointed. Failures
+    // stay silent.
+    if (!pendingBreadcrumb || breadcrumbFiredRef.current) {
+      return;
+    }
+    const projectId = pendingBreadcrumb.projectId;
+    if (!token || !canWrite || !projectId) {
+      return;
+    }
+    breadcrumbFiredRef.current = true;
+    if (!shouldFireTagBreadcrumb(pendingBreadcrumb.slug)) {
+      return;
+    }
+    const metadata = {
+      capture_kind: "tag_breadcrumb",
+      capture_review_status: "pending_review",
+      capture_source: "tag_tap",
+    };
+    if (pendingBreadcrumb.slug) {
+      metadata.tag_slug = pendingBreadcrumb.slug;
+    }
+    apiRequest("/notes", {
+      body: {
+        metadata,
+        project_id: projectId,
+        raw_content: pendingBreadcrumb.label
+          ? `Tag tap: ${pendingBreadcrumb.label}`
+          : "Tag tap",
+        targets: pendingBreadcrumb.sessionId
+          ? [{ entity_id: pendingBreadcrumb.sessionId, entity_type: "session" }]
+          : [],
+      },
+      method: "POST",
+      token,
+    }).catch(() => {
+      // Breadcrumbs are best-effort; a failed POST never disturbs capture.
+    });
+  }, [canWrite, pendingBreadcrumb, token]);
+
+  useEffect(() => {
+    // Voice-first auto-save: tap, talk, pocket. Deliberately no dependency
+    // list — the ref guard below makes every run a no-op except the single
+    // commit where a voice-first recording reaches state, and the decision
+    // must see that commit's fresh readyToUpload()/uploadCapture closures.
+    // If the capture is not ready at that moment (e.g. no project), the
+    // untouched manual flow takes over.
+    if (!audioFile || autoUploadFileRef.current !== audioFile) {
+      return;
+    }
+    autoUploadFileRef.current = null;
+    if (!canWrite || !readyToUpload()) {
+      return;
+    }
+    uploadCapture();
+  });
 
   function selectedTargets() {
     const targets = [];
@@ -474,9 +850,7 @@ function MobileCaptureCard({
     return photoFile || audioFile ? hint : textNote;
   }
 
-  function handleComposerTextChange(event) {
-    const value = event.target.value;
-    clearUploadProgress();
+  function applyComposerText(value) {
     if (photoFile || audioFile) {
       setHint(value);
       return;
@@ -487,8 +861,15 @@ function MobileCaptureCard({
     setTextNote(value);
   }
 
+  function handleComposerTextChange(event) {
+    clearUploadProgress();
+    applyComposerText(event.target.value);
+  }
+
   function handlePhotoFileChange(event) {
     const file = event.target.files?.[0] || null;
+    // Reset the input so re-selecting the same file fires another change.
+    event.target.value = "";
     clearUploadProgress();
     setPhotoFile(file);
     if (file) {
@@ -501,8 +882,13 @@ function MobileCaptureCard({
     }
   }
 
-  function handleAudioFileChange(event) {
+  // autoSave is only ever true for the dedicated voice-first record input:
+  // the shared mic / file-picker inputs stage the recording for a manual
+  // send even while the voice-first layout is active.
+  function handleAudioFileChange(event, { autoSave = false } = {}) {
     const file = event.target.files?.[0] || null;
+    // Reset the input so re-selecting the same file fires another change.
+    event.target.value = "";
     clearUploadProgress();
     setAudioFile(file);
     if (file) {
@@ -512,6 +898,9 @@ function MobileCaptureCard({
       }
       setCaptureMode(photoFile ? "bundle" : "voice");
       setAttachmentMenuOpen(false);
+      if (autoSave) {
+        autoUploadFileRef.current = file;
+      }
     }
   }
 
@@ -612,6 +1001,15 @@ function MobileCaptureCard({
     }
     if (hint.trim()) {
       metadata.capture_hint = hint.trim();
+    }
+    if (urlCaptureContext?.entry) {
+      metadata.capture_entry = urlCaptureContext.entry;
+    }
+    if (urlCaptureContext?.tagSlug) {
+      metadata.tag_slug = urlCaptureContext.tagSlug;
+      if (urlCaptureContext.tagLabel) {
+        metadata.tag_label = urlCaptureContext.tagLabel;
+      }
     }
     if (kind === "voice") {
       metadata.voice_note_type = voiceNoteType;
@@ -742,7 +1140,43 @@ function MobileCaptureCard({
     }
   }
 
+  function benchCheckinDisplayLabel(entry) {
+    if (entry.label) {
+      return entry.label;
+    }
+    const match = projects.find((item) => item.project_id === entry.projectId);
+    return match?.name || "this project";
+  }
+
+  function handleStayCheckedIn() {
+    // Manual check-in: persists the CURRENT selection, so it works with
+    // zero tags and no URL params.
+    if (!selectedProjectId) {
+      return;
+    }
+    const entry = {
+      expiresAt: Date.now() + BENCH_CHECKIN_DEFAULT_TTL_HOURS * HOUR_MS,
+      hint: hint.trim(),
+      label: "",
+      projectId: selectedProjectId,
+      sessionId,
+    };
+    writeBenchCheckin(entry);
+    setBenchCheckin(entry);
+  }
+
+  function handleCheckOut() {
+    clearBenchCheckin();
+    setBenchCheckin(null);
+  }
+
   async function uploadCapture() {
+    // Synchronous re-entry guard: a second tap (or the voice-first auto-fire
+    // racing a manual tap) while an upload is in flight must not POST the
+    // same capture again under a fresh client_capture_id.
+    if (uploadInFlightRef.current) {
+      return;
+    }
     if (!canWrite) {
       return;
     }
@@ -754,6 +1188,8 @@ function MobileCaptureCard({
       setFlash("", "Choose the required capture input before upload.");
       return;
     }
+    uploadInFlightRef.current = true;
+    setUploading(true);
     setBusy(true);
     setFlash("", "");
     try {
@@ -832,6 +1268,8 @@ function MobileCaptureCard({
     } catch (err) {
       setFlash("", err.message || "Capture failed.");
     } finally {
+      uploadInFlightRef.current = false;
+      setUploading(false);
       setBusy(false);
     }
   }
@@ -848,6 +1286,28 @@ function MobileCaptureCard({
               <button type="button" className="btn-secondary" onClick={() => navigate("/app")}>
                 Workspace
               </button>
+            </div>
+            <div aria-live="polite" className="capture-checkin">
+              {benchCheckin ? (
+                <>
+                  <span className="capture-checkin-status">
+                    Checked in: {benchCheckinDisplayLabel(benchCheckin)} until{" "}
+                    {checkinTimeLabel(benchCheckin.expiresAt)}
+                  </span>
+                  <button className="btn-secondary" onClick={handleCheckOut} type="button">
+                    Check out
+                  </button>
+                </>
+              ) : (
+                <button
+                  className="btn-secondary"
+                  disabled={!canWrite || !selectedProjectId}
+                  onClick={handleStayCheckedIn}
+                  type="button"
+                >
+                  Stay checked in
+                </button>
+              )}
             </div>
             <input
               accept="image/*"
@@ -876,6 +1336,68 @@ function MobileCaptureCard({
               id="capture-audio-record-input"
               onChange={handleAudioFileChange}
               type="file"
+            />
+            {voiceFirst ? (
+              <div className="capture-voice-first">
+                {/* Dedicated input so ONLY the big record control arms the
+                    auto-upload; the shared mic and file-picker inputs above
+                    always stage for a manual send. */}
+                <input
+                  accept="audio/*"
+                  aria-label="Record voice note (voice-first)"
+                  capture
+                  className="sr-only"
+                  disabled={!canWrite}
+                  id="capture-voice-first-record-input"
+                  onChange={(event) => handleAudioFileChange(event, { autoSave: true })}
+                  type="file"
+                />
+                <label
+                  aria-disabled={!canWrite}
+                  className={`capture-voice-first-record${canWrite ? "" : " disabled"}`}
+                  htmlFor="capture-voice-first-record-input"
+                >
+                  <CaptureIcon kind="voice" />
+                  <span>Record voice note</span>
+                </label>
+                <p className="capture-voice-first-status subtle" role="status">
+                  {selectedProjectId
+                    ? "Tap to record — capture saves automatically."
+                    : "Choose a project below, then record to save."}
+                </p>
+              </div>
+            ) : null}
+            {/* Only the typed text is recoverable; an attached photo or
+                recording cannot be held in local storage. */}
+            <DraftRecoveryNotice
+              label="an unsent capture"
+              savedAt={captureDraft.recoveredAt}
+              onRestore={() => {
+                const restored = captureDraft.restore();
+                if (restored === null) {
+                  return;
+                }
+                let parsed = null;
+                try {
+                  parsed = JSON.parse(restored);
+                } catch {
+                  parsed = null;
+                }
+                if (!Array.isArray(parsed)) {
+                  return;
+                }
+                const [restoredText, restoredHint] = parsed;
+                if (typeof restoredText === "string") {
+                  setTextNote(restoredText);
+                }
+                if (typeof restoredHint === "string") {
+                  setHint(restoredHint);
+                }
+                if (restoredText && !photoFile && !audioFile) {
+                  setCaptureMode("text");
+                }
+              }}
+              onDiscard={captureDraft.discard}
             />
             <div className="capture-composer">
               <button
@@ -913,7 +1435,7 @@ function MobileCaptureCard({
               <button
                 aria-label="Save capture"
                 className="capture-composer-send"
-                disabled={!canWrite || !readyToCapture()}
+                disabled={!canWrite || uploading || !readyToCapture()}
                 onClick={() => uploadCapture()}
                 title="Save capture"
                 type="button"
@@ -1027,7 +1549,7 @@ function MobileCaptureCard({
             <div className="capture-actions">
               <button
                 className="btn-secondary"
-                disabled={!canWrite || !readyToCapture()}
+                disabled={!canWrite || uploading || !readyToCapture()}
                 onClick={() => uploadCapture()}
                 type="button"
               >
@@ -1044,7 +1566,16 @@ function MobileCaptureCard({
               Project
               <select
                 disabled={!canWrite}
-                onChange={(event) => onSelectedProjectChange(event.target.value)}
+                onChange={(event) => {
+                  onSelectedProjectChange(event.target.value);
+                  // A manual re-aim invalidates the physical-anchor claim:
+                  // later captures keep the entry channel (capture_entry)
+                  // but must not carry the tag witness into a project the
+                  // tag never pointed at.
+                  setUrlCaptureContext((current) =>
+                    current?.tagSlug ? { ...current, tagLabel: "", tagSlug: "" } : current
+                  );
+                }}
                 value={selectedProjectId}
               >
                 <option value="">Choose project</option>
@@ -1078,6 +1609,13 @@ function MobileCaptureCard({
                 value={sessionId}
               >
                 <option value="">No session link</option>
+                {/* A prefilled session (tag binding, session link, or
+                    check-in) may no longer be in the active list; render it
+                    so the link is visible and clearable instead of silently
+                    attaching to captures. */}
+                {sessionId && !sessions.some((item) => item.session_id === sessionId) ? (
+                  <option value={sessionId}>Linked session (no longer active)</option>
+                ) : null}
                 {sessions.map((session) => (
                   <option key={session.session_id} value={session.session_id}>
                     {session.session_type} {formatDate(session.started_at)}

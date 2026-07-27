@@ -1,6 +1,8 @@
 import * as React from "react";
 
 import { QUESTION_TYPES } from "../../shared/constants.js";
+import { DraftRecoveryNotice } from "../../shared/ui.jsx";
+import { useLocalDraft } from "../../hooks/useLocalDraft.js";
 
 function getParentQuestionIds(question) {
   return Array.isArray(question.parent_question_ids) ? question.parent_question_ids : [];
@@ -161,6 +163,7 @@ function QuestionPanel({
   questionHypothesis,
   questionParentIds = [],
   onQuestionTextChange,
+  onRestoreQuestionText,
   onQuestionTypeChange,
   onQuestionHypothesisChange,
   onQuestionParentIdsChange,
@@ -170,6 +173,11 @@ function QuestionPanel({
   onActivateQuestion,
   navigate = () => {},
 }) {
+  const questionDraft = useLocalDraft({
+    baseline: "",
+    key: selectedProjectId ? `question-text:${selectedProjectId}` : "",
+    value: questionText,
+  });
   const { questionById } = buildQuestionHierarchy(questions);
   const parentSelectSize = Math.max(3, Math.min(6, questions.length || 3));
 
@@ -182,6 +190,17 @@ function QuestionPanel({
       </p>
 
       <form className="form" onSubmit={onCreateQuestion}>
+        <DraftRecoveryNotice
+          label="an unsaved question"
+          savedAt={questionDraft.recoveredAt}
+          onRestore={() => {
+            const restored = questionDraft.restore();
+            if (restored !== null && onRestoreQuestionText) {
+              onRestoreQuestionText(restored);
+            }
+          }}
+          onDiscard={questionDraft.discard}
+        />
         <label>
           Question text
           <textarea
