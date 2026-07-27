@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 from collections.abc import Iterable
 from contextlib import AbstractContextManager
 from datetime import datetime
@@ -50,6 +51,18 @@ class EvidenceBundleKeyRaceError(Exception):
     """The scoped evidence-bundle idempotency key lost a concurrent insert race."""
 
 
+class DataStoreNameRaceError(Exception):
+    """A data-store name was inserted concurrently within the same exact scope."""
+
+
+class DataStoreForeignKeyRaceError(Exception):
+    """A data-store registration target disappeared before its insert."""
+
+
+class DataStoreInsertError(Exception):
+    """A data-store insert failed for an unclassified persistence reason."""
+
+
 class EntityRepository(Protocol, Generic[EntityT]):
     """CRUD contract for a single entity type."""
 
@@ -86,6 +99,72 @@ class EvidenceBundleRepository(Protocol):
         idempotency_key: str,
     ) -> EvidenceBundleRecord | None:
         """Return the record for one principal-scoped idempotency key."""
+
+
+class DataStoreRepository(Protocol):
+    """Persistence operations for append-only registered data stores."""
+
+    def get(self, entity_id: UUID) -> DataStore | None:
+        """Return one registered store by ID."""
+
+    def list(self) -> list[DataStore]:
+        """Return all registered stores."""
+
+    def save(self, entity: DataStore) -> None:
+        """Accept only an exact no-op re-save of an existing registration."""
+
+    def insert(self, entity: DataStore) -> None:
+        """Append a store, translating persistence failures to safe port errors."""
+
+    def reserve_registration_write(self) -> None:
+        """Reserve backend write authority for an admitted registration."""
+
+    def query(
+        self,
+        *,
+        project_id: UUID | None = None,
+        group_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
+        kind: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[builtins.list[DataStore], int]:
+        """Query stores by their direct registration scope."""
+
+    def get_by_name(self, project_id: UUID, name: str) -> DataStore | None:
+        """Resolve a project store name, including inherited group stores."""
+
+    def scoped_store_by_name(
+        self,
+        *,
+        project_id: UUID | None = None,
+        group_id: UUID | None = None,
+        name: str,
+    ) -> DataStore | None:
+        """Resolve a store name in exactly one direct scope."""
+
+    def list_effective_for_project(
+        self,
+        project_id: UUID,
+    ) -> builtins.list[DataStore]:
+        """Return direct and inherited stores visible to a project."""
+
+    def get_default(
+        self,
+        project_id: UUID | None = None,
+        *,
+        group_id: UUID | None = None,
+    ) -> DataStore | None:
+        """Return the first default store in one exact scope."""
+
+    def clear_default(
+        self,
+        project_id: UUID | None = None,
+        *,
+        group_id: UUID | None = None,
+        except_store_id: UUID | None = None,
+    ) -> None:
+        """Clear default flags in one exact scope except for an optional store."""
 
 
 class GraphChangeSetRepository(EntityRepository[GraphChangeSet], Protocol):
@@ -197,7 +276,7 @@ class LabTrackerRepository(Protocol):
     def goals(self) -> EntityRepository[Goal]: ...
 
     @property
-    def data_stores(self) -> EntityRepository[DataStore]: ...
+    def data_stores(self) -> DataStoreRepository: ...
 
     @property
     def evidence_bundles(self) -> EvidenceBundleRepository: ...

@@ -14,10 +14,12 @@ from starlette.responses import JSONResponse
 from lab_tracker.errors import (
     AuthError,
     ConflictError,
+    DataStorePersistenceError,
     LabTrackerError,
     NotFoundError,
     PayloadTooLargeError,
     RateLimitError,
+    StoreAuthorityDeniedError,
     ValidationError,
 )
 from lab_tracker.schemas import ErrorEnvelope, ErrorInfo, ErrorIssue
@@ -26,6 +28,25 @@ _logger = logging.getLogger(__name__)
 
 
 def register_error_handlers(app: FastAPI) -> None:
+    @app.exception_handler(DataStorePersistenceError)
+    def _handle_data_store_persistence_error(
+        request: Request,
+        _exc: DataStorePersistenceError,
+    ):
+        _logger.error(
+            "Handled internal HTTP error: method=%s path=%s status_code=%s "
+            "code=%s detail=Data store registration could not be completed.",
+            request.method,
+            request.url.path,
+            http_status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "internal_server_error",
+        )
+        return error_response(
+            http_status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "internal_server_error",
+            "Internal server error.",
+        )
+
     @app.exception_handler(ValidationError)
     def _handle_validation_error(request: Request, exc: ValidationError):
         _log_handled_error(
@@ -73,6 +94,23 @@ def register_error_handlers(app: FastAPI) -> None:
             exc=exc,
         )
         return error_response(http_status.HTTP_401_UNAUTHORIZED, "auth_error", str(exc))
+
+    @app.exception_handler(StoreAuthorityDeniedError)
+    def _handle_store_authority_denied_error(
+        request: Request,
+        exc: StoreAuthorityDeniedError,
+    ):
+        _log_handled_error(
+            request,
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            code="store_authority_denied",
+            exc=exc,
+        )
+        return error_response(
+            http_status.HTTP_403_FORBIDDEN,
+            "store_authority_denied",
+            str(exc),
+        )
 
     @app.exception_handler(RateLimitError)
     def _handle_rate_limit_error(request: Request, exc: RateLimitError):

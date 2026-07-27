@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import hashlib
 import logging
 import os
@@ -8,6 +7,7 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
+from api_helpers import TEST_STORE_AUTHORITY_GRANT_ID
 from http_security_fakes import FakeAddressResolver, FakeSafeHttpClient
 from starlette.testclient import TestClient
 
@@ -24,15 +24,16 @@ from lab_tracker.http_store_health import HttpStoreHealthProbe
 from lab_tracker.local_filesystem_authority import LocalFilesystemAuthority
 from lab_tracker.local_filesystem_operations import BoundedLocalFilesystemOperations
 from lab_tracker.local_store_health import LocalStoreHealthProbe
-from lab_tracker.models import DataStore, StoreKind
+from lab_tracker.models import DataStore, StoreCapability, StoreKind
 from lab_tracker.outbound_http import OutboundHttpPolicy
 from lab_tracker.rclone_remote_policy import RcloneRemotePolicy
 from lab_tracker.rclone_store_health import RcloneStoreHealthProbe
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
+from lab_tracker.sqlalchemy_repository_parts.data_stores import (
+    SQLAlchemyDataStoreRepository,
+)
 from lab_tracker.store_health import (
-    HTTP_STORE_HEALTH_FAILURE_DETAIL,
-    LOCAL_STORE_HEALTH_FAILURE_DETAIL,
-    RCLONE_STORE_HEALTH_FAILURE_DETAIL,
+    STORE_HEALTH_PROBE_UNAVAILABLE_MESSAGE,
     CachedStoreHealthProbe,
 )
 
@@ -107,6 +108,7 @@ def _store_payload(project_id: str, **overrides) -> dict:
         "name": "lab-onedrive",
         "kind": "onedrive",
         "root": "/OneDrive/experiments",
+        "authority_grant_id": TEST_STORE_AUTHORITY_GRANT_ID,
         "is_default": True,
     }
     payload.update(overrides)
@@ -143,6 +145,16 @@ def _data_store_not_found_body() -> dict[str, object]:
     }
 
 
+def _store_authority_denied_body() -> dict[str, object]:
+    return {
+        "error": {
+            "code": "store_authority_denied",
+            "message": "Data store authority is unavailable.",
+            "issues": None,
+        }
+    }
+
+
 def _seed_legacy_data_store(
     client: TestClient,
     *,
@@ -166,7 +178,7 @@ def _seed_legacy_data_store(
     )
     with client.app.state.db_session_factory() as session:
         repository = SQLAlchemyLabTrackerRepository(session)
-        repository.data_stores.save(store)
+        repository.data_stores.insert(store)
         session.commit()
     return str(store.store_id)
 
@@ -182,13 +194,97 @@ def test_create_and_get_data_store(client, admin_auth_headers):
     assert body["name"] == "lab-onedrive"
     assert body["kind"] == "onedrive"
     assert body["is_default"] is True
+    assert body["authority_grant_id"] == TEST_STORE_AUTHORITY_GRANT_ID
+    assert body["authority_grant_fingerprint"].startswith("sag-v1-sha256:")
     # capabilities defaulted from kind
     assert "bytes_by_path" in body["capabilities"]
     store_id = body["store_id"]
 
     fetched = client.get(f"/data-stores/{store_id}", headers=admin_auth_headers)
     assert fetched.status_code == 200
-    assert fetched.json()["data"]["store_id"] == store_id
+    assert fetched.json()["data"] == body
+
+
+def test_legacy_unbound_store_remains_list_and_get_readable(
+    client,
+    admin_auth_headers,
+):
+    project_id = _create_project(
+        client,
+        admin_auth_headers,
+        "Legacy unbound metadata",
+    )
+    store_id = _seed_legacy_data_store(
+        client,
+        project_id=project_id,
+        name="legacy-unbound-http",
+        kind=StoreKind.HTTP,
+        root="https://legacy.example.test/metadata-only",
+    )
+
+    fetched = client.get(
+        f"/data-stores/{store_id}",
+        headers=admin_auth_headers,
+    )
+    listed = client.get(
+        "/data-stores",
+        params={"project_id": project_id},
+        headers=admin_auth_headers,
+    )
+
+    assert fetched.status_code == 200, fetched.text
+    fetched_store = fetched.json()["data"]
+    assert fetched_store["store_id"] == store_id
+    assert fetched_store["authority_grant_id"] is None
+    assert fetched_store["authority_grant_fingerprint"] is None
+    assert listed.status_code == 200, listed.text
+    [listed_store] = listed.json()["data"]
+    assert listed_store == fetched_store
+
+
+@pytest.mark.parametrize(
+    "capabilities",
+    (
+        [],
+        ["bytes_by_path", "bytes_by_path"],
+    ),
+)
+def test_create_data_store_returns_one_opaque_denial_for_missing_unknown_and_bad_caps(
+    client,
+    admin_auth_headers,
+    capabilities,
+):
+    project_id = _create_project(client, admin_auth_headers, "Denied store authority")
+    baseline = _store_payload(
+        project_id,
+        name="denied-authority",
+        kind="http",
+        root="https://files.example.test/base",
+        is_default=False,
+        capabilities=capabilities,
+    )
+    candidates = (
+        {key: value for key, value in baseline.items() if key != "authority_grant_id"},
+        {**baseline, "authority_grant_id": "unknown-authority"},
+        baseline,
+    )
+
+    for payload in candidates:
+        response = client.post(
+            "/data-stores",
+            json=payload,
+            headers=admin_auth_headers,
+        )
+        assert response.status_code == 403
+        assert response.json() == _store_authority_denied_body()
+
+    listed = client.get(
+        "/data-stores",
+        params={"project_id": project_id},
+        headers=admin_auth_headers,
+    )
+    assert listed.status_code == 200
+    assert listed.json()["data"] == []
 
 
 def test_create_data_store_defaults_capabilities_for_s3(client, admin_auth_headers):
@@ -259,6 +355,7 @@ def test_group_store_inherited_by_project_listing(client, admin_auth_headers):
             "name": "lab-shared-s3",
             "kind": "s3",
             "root": "/lab-shared",
+            "authority_grant_id": TEST_STORE_AUTHORITY_GRANT_ID,
         },
         headers=admin_auth_headers,
     )
@@ -281,11 +378,18 @@ def test_group_store_resolves_for_project(client, admin_auth_headers, tmp_path):
 
     group_id = _create_group(client, admin_auth_headers, "Resolving lab")
     project_id = _create_project_in_group(client, admin_auth_headers, "Lab project", group_id)
-    client.post(
+    created = client.post(
         "/data-stores",
-        json={"group_id": group_id, "name": "lab-fs", "kind": "local_fs", "root": str(tmp_path)},
+        json={
+            "group_id": group_id,
+            "name": "lab-fs",
+            "kind": "local_fs",
+            "root": str(tmp_path),
+            "authority_grant_id": TEST_STORE_AUTHORITY_GRANT_ID,
+        },
         headers=admin_auth_headers,
     )
+    assert created.status_code == 201, created.text
     dataset_id = _create_dataset_with_artifact(
         client,
         admin_auth_headers,
@@ -302,9 +406,90 @@ def test_group_store_resolves_for_project(client, admin_auth_headers, tmp_path):
 
     assert response.status_code == 200, response.text
     body = response.json()["data"]
-    # Resolved through the inherited group store.
-    assert body["status"] == "verified"
-    assert base64.b64decode(body["content_base64"]) == data
+    # Candidate selection still sees the inherited group store, but registered
+    # store use remains closed until grant revalidation and retained local
+    # authority land.
+    assert body["status"] == "unresolved"
+    assert body["source_system"] == "store"
+    assert body["uri"] == "store://[redacted]"
+    assert body["content_base64"] is None
+    assert body["detail"] == "Store artifact could not be resolved."
+
+
+def test_project_store_shadows_same_name_inherited_group_store_before_fail_closed(
+    client,
+    admin_auth_headers,
+    monkeypatch,
+):
+    group_id = _create_group(client, admin_auth_headers, "Shadowed store group")
+    project_id = _create_project_in_group(
+        client,
+        admin_auth_headers,
+        "Shadowing project",
+        group_id,
+    )
+    group_store = client.post(
+        "/data-stores",
+        json={
+            "group_id": group_id,
+            "name": "shared-name",
+            "kind": "http",
+            "root": "https://group-secret.example.test/base",
+            "authority_grant_id": TEST_STORE_AUTHORITY_GRANT_ID,
+        },
+        headers=admin_auth_headers,
+    )
+    project_store = client.post(
+        "/data-stores",
+        json={
+            "project_id": project_id,
+            "name": "shared-name",
+            "kind": "http",
+            "root": "https://project-secret.example.test/base",
+            "authority_grant_id": TEST_STORE_AUTHORITY_GRANT_ID,
+        },
+        headers=admin_auth_headers,
+    )
+    assert group_store.status_code == 201, group_store.text
+    assert project_store.status_code == 201, project_store.text
+    project_store_id = project_store.json()["data"]["store_id"]
+    dataset_id = _create_dataset_with_artifact(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        uri="store://shared-name/secret.bin",
+        content_hash=_sha256(b"unavailable"),
+    )
+    original_get_by_name = SQLAlchemyDataStoreRepository.get_by_name
+    selected_store_ids: list[str] = []
+
+    def tracked_get_by_name(self, selected_project_id, name):  # noqa: ANN001, ANN202
+        selected = original_get_by_name(self, selected_project_id, name)
+        if selected is not None:
+            selected_store_ids.append(str(selected.store_id))
+        return selected
+
+    monkeypatch.setattr(
+        SQLAlchemyDataStoreRepository,
+        "get_by_name",
+        tracked_get_by_name,
+    )
+
+    response = client.post(
+        "/external-artifacts/resolve",
+        json={"entity_type": "dataset", "entity_id": dataset_id},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert selected_store_ids == [project_store_id]
+    body = response.json()["data"]
+    assert body["status"] == "unresolved"
+    assert body["source_system"] == "store"
+    assert body["uri"] == "store://[redacted]"
+    assert body["detail"] == "Store artifact could not be resolved."
+    assert "group-secret" not in response.text
+    assert "project-secret" not in response.text
 
 
 def test_create_group_store_requires_group_owner(client, scoped_project_member, admin_auth_headers):
@@ -344,12 +529,24 @@ def test_create_data_store_requires_exactly_one_scope(client, admin_auth_headers
 
 
 def test_data_store_create_openapi_publishes_storage_bounds(client):
-    schema = client.get("/openapi.json").json()["components"]["schemas"][
-        "DataStoreCreate"
-    ]["properties"]
+    openapi = client.get("/openapi.json").json()
+    create_schema = openapi["components"]["schemas"]["DataStoreCreate"]
+    schema = create_schema["properties"]
 
     assert schema["name"]["maxLength"] == DATA_STORE_NAME_MAX_LENGTH
     assert schema["root"]["maxLength"] == DATA_STORE_ROOT_MAX_LENGTH
+    assert next(
+        item["maxItems"]
+        for item in schema["capabilities"]["anyOf"]
+        if "maxItems" in item
+    ) == len(StoreCapability)
+    assert next(
+        item["maxLength"]
+        for item in schema["authority_grant_id"]["anyOf"]
+        if "maxLength" in item
+    ) == 128
+    assert "authority_grant_id" not in create_schema.get("required", [])
+    assert "authority_grant_fingerprint" not in schema
     assert next(
         item["maxLength"]
         for item in schema["endpoint"]["anyOf"]
@@ -360,6 +557,9 @@ def test_data_store_create_openapi_publishes_storage_bounds(client):
         for item in schema["credential_ref"]["anyOf"]
         if "maxLength" in item
     ) == DATA_STORE_CREDENTIAL_REF_MAX_LENGTH
+    response_schema = openapi["components"]["schemas"]["DataStore"]["properties"]
+    assert "authority_grant_id" in response_schema
+    assert "authority_grant_fingerprint" in response_schema
 
 
 def test_request_validation_logging_never_records_oversized_store_secret(
@@ -439,6 +639,7 @@ def test_semantic_validation_precedes_duplicate_lookup_and_redacts_secret(
             "name": "remote-http",
             "kind": "http",
             "root": "https://files.example/base",
+            "authority_grant_id": TEST_STORE_AUTHORITY_GRANT_ID,
         },
         headers=admin_auth_headers,
     )
@@ -540,7 +741,11 @@ def test_supported_remote_definitions_round_trip_canonically(
     for submitted, expected in definitions:
         response = client.post(
             "/data-stores",
-            json={"project_id": project_id, **submitted},
+            json={
+                "project_id": project_id,
+                "authority_grant_id": TEST_STORE_AUTHORITY_GRANT_ID,
+                **submitted,
+            },
             headers=admin_auth_headers,
         )
 
@@ -776,8 +981,12 @@ def test_local_root_is_persisted_exactly_without_whitespace_repair(
     )
 
     assert resolved.status_code == 200, resolved.text
-    assert resolved.json()["data"]["status"] == "verified"
-    assert base64.b64decode(resolved.json()["data"]["content_base64"]) == exact_data
+    body = resolved.json()["data"]
+    assert body["status"] == "unresolved"
+    assert body["source_system"] == "store"
+    assert body["uri"] == "store://[redacted]"
+    assert body["content_base64"] is None
+    assert body["detail"] == "Store artifact could not be resolved."
 
 
 def test_create_data_store_requires_contributor(client, scoped_project_member):
@@ -801,7 +1010,10 @@ def test_data_store_health_local_fs(client, admin_auth_headers, tmp_path):
 
     healthy = client.get(f"/data-stores/{store_id}/health", headers=admin_auth_headers)
     assert healthy.status_code == 200, healthy.text
-    assert healthy.json()["data"]["status"] == "healthy"
+    assert healthy.json()["data"]["status"] == "unsupported"
+    assert (
+        healthy.json()["data"]["detail"] == STORE_HEALTH_PROBE_UNAVAILABLE_MESSAGE
+    )
 
 
 def test_data_store_health_local_fs_missing_root(client, admin_auth_headers, tmp_path):
@@ -817,8 +1029,9 @@ def test_data_store_health_local_fs_missing_root(client, admin_auth_headers, tmp
     response = client.get(f"/data-stores/{store_id}/health", headers=admin_auth_headers)
     assert response.status_code == 200
     body = response.json()["data"]
-    assert body["status"] == "unreachable"
+    assert body["status"] == "unsupported"
     assert body["kind"] == "local_fs"
+    assert body["detail"] == STORE_HEALTH_PROBE_UNAVAILABLE_MESSAGE
 
 
 def test_data_store_health_local_fs_defaults_to_denied_and_redacted(
@@ -865,8 +1078,10 @@ def test_data_store_health_local_fs_defaults_to_denied_and_redacted(
     )
 
     assert response.status_code == 200
-    assert response.json()["data"]["status"] == "unreachable"
-    assert response.json()["data"]["detail"] == LOCAL_STORE_HEALTH_FAILURE_DETAIL
+    assert response.json()["data"]["status"] == "unsupported"
+    assert (
+        response.json()["data"]["detail"] == STORE_HEALTH_PROBE_UNAVAILABLE_MESSAGE
+    )
     assert secret not in response.text
     assert executor.calls == []
 
@@ -896,7 +1111,10 @@ def test_git_store_health_uses_installed_policy_without_leaking_credentials(
     )
 
     assert response.status_code == 200
-    assert response.json()["data"]["status"] == "unreachable"
+    assert response.json()["data"]["status"] == "unsupported"
+    assert (
+        response.json()["data"]["detail"] == STORE_HEALTH_PROBE_UNAVAILABLE_MESSAGE
+    )
     assert secret not in response.text
     assert list(workdir.iterdir()) == []
     assert not (workdir / ".git").exists()
@@ -948,8 +1166,8 @@ def test_rclone_store_health_route_denies_before_process_and_redacts_target(
 
     assert response.status_code == 200
     body = response.json()["data"]
-    assert body["status"] == "unreachable"
-    assert body["detail"] == RCLONE_STORE_HEALTH_FAILURE_DETAIL
+    assert body["status"] == "unsupported"
+    assert body["detail"] == STORE_HEALTH_PROBE_UNAVAILABLE_MESSAGE
     assert secret not in response.text
     assert executor.calls == []
 
@@ -987,8 +1205,8 @@ def test_http_store_health_route_redacts_the_authoritative_selected_target(
     assert response.json()["data"] == {
         "store_id": store_id,
         "kind": "http",
-        "status": "unreachable",
-        "detail": HTTP_STORE_HEALTH_FAILURE_DETAIL,
+        "status": "unsupported",
+        "detail": STORE_HEALTH_PROBE_UNAVAILABLE_MESSAGE,
     }
     assert secret not in response.text
     assert "denied.example" not in response.text
@@ -1071,6 +1289,7 @@ def test_group_member_can_read_group_scoped_store(
             "name": "lab-fs",
             "kind": "local_fs",
             "root": str(tmp_path),
+            "authority_grant_id": TEST_STORE_AUTHORITY_GRANT_ID,
         },
         headers=admin_auth_headers,
     ).json()["data"]["store_id"]
@@ -1084,7 +1303,11 @@ def test_group_member_can_read_group_scoped_store(
     assert get_response.status_code == 200
     assert get_response.json()["data"]["group_id"] == group_id
     assert health_response.status_code == 200
-    assert health_response.json()["data"]["status"] == "healthy"
+    assert health_response.json()["data"]["status"] == "unsupported"
+    assert (
+        health_response.json()["data"]["detail"]
+        == STORE_HEALTH_PROBE_UNAVAILABLE_MESSAGE
+    )
 
 
 def test_group_scoped_store_still_denied_for_non_member(
@@ -1098,6 +1321,7 @@ def test_group_scoped_store_still_denied_for_non_member(
             "name": "lab-fs",
             "kind": "local_fs",
             "root": str(tmp_path),
+            "authority_grant_id": TEST_STORE_AUTHORITY_GRANT_ID,
         },
         headers=admin_auth_headers,
     ).json()["data"]["store_id"]

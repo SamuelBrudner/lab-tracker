@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from logging.config import fileConfig
 
+from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-from alembic import context
 from lab_tracker import db_models  # noqa: F401
 from lab_tracker.config import get_settings
-from lab_tracker.db import Base
+from lab_tracker.db import Base, configure_sqlite_engine
 
 config = context.config
 
@@ -46,6 +46,11 @@ def run_migrations_online() -> None:
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )
+    if connectable.dialect.name == "sqlite":
+        # Alembic constructs its own engine rather than using get_engine().
+        # Install the same mode pin before its first connection so migrations
+        # can acquire SQLite writer fences under modern sqlite3 defaults.
+        configure_sqlite_engine(connectable)
 
     with connectable.connect() as connection:
         configure_kwargs = {
