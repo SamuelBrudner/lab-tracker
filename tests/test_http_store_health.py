@@ -11,6 +11,7 @@ from http_security_fakes import (
     FakeSafeHttpClient,
     RecordingPinnedConnector,
 )
+from store_authority_fakes import sealed_binding_identity
 
 from lab_tracker.http_store_health import HttpStoreHealthProbe
 from lab_tracker.models import StoreKind
@@ -30,6 +31,7 @@ from lab_tracker.store_health import (
 
 _PUBLIC_IP = "93.184.216.34"
 _SECOND_PUBLIC_IP = "142.250.72.14"
+_SEALED_IDENTITY = sealed_binding_identity()
 
 
 def _target(
@@ -46,6 +48,7 @@ def _target(
         root=root,
         endpoint=endpoint,
         credential_ref=credential_ref,
+        authority_binding_identity=_SEALED_IDENTITY,
     )
 
 

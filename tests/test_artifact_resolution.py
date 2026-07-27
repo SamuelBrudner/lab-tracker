@@ -17,6 +17,7 @@ from http_security_fakes import (
     FakeHttpResponse,
     FakeSafeHttpClient,
 )
+from store_authority_fakes import bound_authority_proof, sealed_binding_identity
 
 import lab_tracker.artifact_resolution as artifact_resolution
 from lab_tracker.artifact_resolution import (
@@ -58,6 +59,11 @@ from lab_tracker.artifact_resolution_limits import (
     ArtifactContentBoundsError,
 )
 from lab_tracker.bounded_subprocess import StdoutConsumer
+from lab_tracker.data_store_definition import (
+    DataStoreDefinitionError,
+    DataStoreDefinitionErrorCode,
+    ValidatedDataStoreDefinition,
+)
 from lab_tracker.git_remote_policy import (
     GitRemotePolicy,
     parse_git_remote_address,
@@ -98,6 +104,10 @@ from lab_tracker.outbound_http import (
 )
 from lab_tracker.rclone_remote_policy import RcloneRemotePolicy
 from lab_tracker.rclone_store_locator import RcloneRemoteName, RegisteredRcloneRoot
+from lab_tracker.store_authority_use import (
+    StoreAuthorityBindingIdentity,
+    StoreAuthorityUseProof,
+)
 
 
 class _FalseyLocalPathPolicy(LocalPathPolicy):
@@ -767,7 +777,7 @@ def test_scoped_local_resolver_caps_a_requested_byte_range_and_verifies(tmp_path
     store_root.mkdir()
     _write(store_root, "artifact.bin", data)
     target = _local_store_target(
-        _data_store(StoreKind.LOCAL_FS, str(store_root)),
+        _store_proof(StoreKind.LOCAL_FS, str(store_root)),
         "artifact.bin",
         _sha256(data),
     )
@@ -972,15 +982,8 @@ def _registered_http_target(
     content_hash: str | None = None,
     name: str = "web",
 ) -> HttpStoreResolutionTarget:
-    store = DataStore(
-        store_id=uuid4(),
-        project_id=uuid4(),
-        name=name,
-        kind=StoreKind.HTTP,
-        root=base,
-    )
     target = store_relative_reference(
-        store,
+        bound_authority_proof(name=name, kind=StoreKind.HTTP, root=base),
         path=locator,
         content_hash=content_hash or _sha256(b"artifact"),
     )
@@ -2075,6 +2078,14 @@ def _data_store(kind: StoreKind, root: str, **overrides) -> DataStore:
     return DataStore(**fields)
 
 
+def _store_proof(kind: StoreKind, root: str, **overrides) -> StoreAuthorityUseProof:
+    """Mint the use-time proof a registered store of this shape would carry."""
+
+    fields: dict[str, object] = {"name": "store", "kind": kind, "root": root}
+    fields.update(overrides)
+    return bound_authority_proof(**fields)
+
+
 def _rclone_store_target(
     *,
     root: str = "experiments",
@@ -2082,14 +2093,14 @@ def _rclone_store_target(
     locator_path: str = "001/x.fcs",
     content_hash: str | None = None,
 ) -> RcloneStoreResolutionTarget:
-    store = _data_store(
+    proof = _store_proof(
         StoreKind.ONEDRIVE,
         root,
         name="lab",
         credential_ref=remote,
     )
     target = store_relative_reference(
-        store,
+        proof,
         path=locator_path,
         content_hash=content_hash or _sha256(b"x"),
     )
@@ -2105,9 +2116,9 @@ def _git_store_target(
     content_hash: str | None = None,
     name: str = "repo",
 ) -> GitStoreResolutionTarget:
-    store = _data_store(StoreKind.GIT, remote, name=name)
+    proof = _store_proof(StoreKind.GIT, remote, name=name)
     target = store_relative_reference(
-        store,
+        proof,
         path=f"{repository_path}@{object_id}",
         content_hash=content_hash or _sha256(b"artifact"),
     )
@@ -2116,19 +2127,19 @@ def _git_store_target(
 
 
 def _local_store_target(
-    store: DataStore,
+    proof: StoreAuthorityUseProof,
     locator_path: str,
     content_hash: str,
 ) -> LocalStoreResolutionTarget:
     locator = LocalStoreLocator.parse_decoded(locator_path)
     assert locator is not None
     logical_reference = ExternalArtifactReference.for_local_store(
-        store_name=store.name,
+        store_name=proof.definition.name,
         locator=locator.path,
         content_hash=content_hash,
     )
     target = local_store_resolution_target(
-        store,
+        proof,
         locator=locator,
         logical_reference=logical_reference,
     )
@@ -2136,11 +2147,53 @@ def _local_store_target(
     return target
 
 
+def test_no_store_target_can_be_built_from_a_row_without_a_use_time_proof(tmp_path):
+    # A registered row on its own used to be enough to mint a dispatchable
+    # target.  Every factory now demands a use-time proof, so "an authorized
+    # remote target that was never authorized" is not a representable state.
+    store = _data_store(StoreKind.LOCAL_FS, str(tmp_path))
+    row = cast(StoreAuthorityUseProof, store)
+    local_locator = LocalStoreLocator.parse_decoded("artifact.bin")
+    portable_locator = PortableStorePath.parse_decoded("artifact.bin")
+    pin = PinnedGitPath.parse_decoded(f"analysis/run.py@{'a' * 40}")
+    assert local_locator is not None
+    assert portable_locator is not None
+    assert pin is not None
+    reference = ExternalArtifactReference.for_local_store(
+        store_name=store.name,
+        locator=local_locator.path,
+        content_hash=_sha256(b"x"),
+    )
+
+    with pytest.raises(ValueError, match="use-time authority proof"):
+        store_relative_reference(row, path="artifact.bin", content_hash=_sha256(b"x"))
+    with pytest.raises(ValueError, match="use-time authority proof"):
+        local_store_resolution_target(
+            row,
+            locator=local_locator,
+            logical_reference=reference,
+        )
+    with pytest.raises(ValueError, match="use-time authority proof"):
+        http_store_resolution_target(
+            row,
+            locator=portable_locator,
+            logical_reference=reference,
+        )
+    with pytest.raises(ValueError, match="use-time authority proof"):
+        rclone_store_resolution_target(
+            row,
+            locator=portable_locator,
+            logical_reference=reference,
+        )
+    with pytest.raises(ValueError, match="use-time authority proof"):
+        git_store_resolution_target(row, pin=pin, logical_reference=reference)
+
+
 def test_store_relative_reference_local_builds_scoped_logical_target(tmp_path):
     root = tmp_path / "data store"
-    store = _data_store(StoreKind.LOCAL_FS, str(root))
+    proof = _store_proof(StoreKind.LOCAL_FS, str(root))
     target = store_relative_reference(
-        store,
+        proof,
         path="exp/001/x.txt",
         content_hash=_sha256(b"x"),
     )
@@ -2153,13 +2206,13 @@ def test_store_relative_reference_local_builds_scoped_logical_target(tmp_path):
 
 
 def test_local_store_target_factory_rejects_mismatched_logical_identity(tmp_path):
-    store = _data_store(StoreKind.LOCAL_FS, str(tmp_path), name="lab-fs")
+    proof = _store_proof(StoreKind.LOCAL_FS, str(tmp_path), name="lab-fs")
     locator = LocalStoreLocator.parse_decoded("nested/artifact.bin")
     other_locator = LocalStoreLocator.parse_decoded("other/artifact.bin")
     assert locator is not None
     assert other_locator is not None
     reference = ExternalArtifactReference.for_local_store(
-        store_name=store.name,
+        store_name=proof.definition.name,
         locator=locator.path,
         content_hash=_sha256(b"x"),
     )
@@ -2170,7 +2223,7 @@ def test_local_store_target_factory_rejects_mismatched_logical_identity(tmp_path
 
     assert (
         local_store_resolution_target(
-            store,
+            proof,
             locator=locator,
             logical_reference=wrong_store_reference,
         )
@@ -2178,7 +2231,7 @@ def test_local_store_target_factory_rejects_mismatched_logical_identity(tmp_path
     )
     assert (
         local_store_resolution_target(
-            store,
+            proof,
             locator=other_locator,
             logical_reference=reference,
         )
@@ -2186,7 +2239,7 @@ def test_local_store_target_factory_rejects_mismatched_logical_identity(tmp_path
     )
     assert (
         local_store_resolution_target(
-            store,
+            proof,
             locator=locator,
             logical_reference=wrong_uri_reference,
         )
@@ -2210,21 +2263,34 @@ def test_local_store_target_cannot_be_constructed_without_validated_factory(
             logical_reference=reference,
             store_root=str(tmp_path),
             locator=locator,
+            authority_binding_identity=sealed_binding_identity(),
             _factory_token=object(),
         )
 
 
-@pytest.mark.parametrize(
-    ("root_factory", "path"),
-    (
-        (lambda tmp_path: "relative/store", "exp/001/x.txt"),
-        (lambda tmp_path: str(tmp_path / "store"), "../sibling-secret.txt"),
-    ),
-)
-def test_invalid_local_store_materialization_does_no_host_path_io(
-    tmp_path, monkeypatch, root_factory, path
+def test_local_store_target_cannot_be_constructed_without_sealed_authority(tmp_path):
+    locator = LocalStoreLocator.parse_decoded("artifact.bin")
+    assert locator is not None
+    reference = ExternalArtifactReference.for_local_store(
+        store_name="lab-fs",
+        locator=locator.path,
+        content_hash=_sha256(b"x"),
+    )
+
+    with pytest.raises(ValueError, match="sealed authority identity"):
+        LocalStoreResolutionTarget(
+            logical_reference=reference,
+            store_root=str(tmp_path),
+            locator=locator,
+            authority_binding_identity=cast(StoreAuthorityBindingIdentity, None),
+            _factory_token=artifact_resolution._LOCAL_STORE_TARGET_FACTORY_TOKEN,
+        )
+
+
+def test_local_store_materialization_does_no_host_path_io_for_escaping_locator(
+    tmp_path, monkeypatch
 ):
-    store = _data_store(StoreKind.LOCAL_FS, root_factory(tmp_path))
+    proof = _store_proof(StoreKind.LOCAL_FS, str(tmp_path / "store"))
 
     def unexpected_host_path_operation(*_args, **_kwargs):
         raise AssertionError("invalid local materialization touched a host path")
@@ -2247,23 +2313,33 @@ def test_invalid_local_store_materialization_does_no_host_path_io(
 
     assert (
         store_relative_reference(
-            store,
-            path=path,
+            proof,
+            path="../sibling-secret.txt",
             content_hash=_sha256(b"x"),
         )
         is None
     )
 
 
+def test_relative_local_store_root_can_never_reach_a_use_time_proof():
+    # The old permissive path let a relative root reach store_relative_reference
+    # and be rejected there.  A target now requires a use-time proof, and no
+    # proof can exist for a root the definition validator refuses.
+    with pytest.raises(DataStoreDefinitionError) as excinfo:
+        _store_proof(StoreKind.LOCAL_FS, "relative/store")
+
+    assert excinfo.value.code is DataStoreDefinitionErrorCode.INVALID_ROOT
+
+
 def test_broader_global_root_does_not_make_sibling_escape_a_store_locator(tmp_path):
     store_root = tmp_path / "store"
     store_root.mkdir()
     sibling = _write(tmp_path, "sibling-secret.txt", b"secret")
-    store = _data_store(StoreKind.LOCAL_FS, str(store_root))
+    proof = _store_proof(StoreKind.LOCAL_FS, str(store_root))
     resolver = LocalFilesystemResolver(allowed_roots=[tmp_path])
 
     target = store_relative_reference(
-        store,
+        proof,
         path="../sibling-secret.txt",
         content_hash=_sha256(b"secret"),
     )
@@ -2274,11 +2350,11 @@ def test_broader_global_root_does_not_make_sibling_escape_a_store_locator(tmp_pa
 
 
 def test_store_relative_reference_rclone_uses_credential_ref_as_remote():
-    store = _data_store(
+    proof = _store_proof(
         StoreKind.ONEDRIVE, "experiments", name="lab", credential_ref="lab-onedrive"
     )
     target = store_relative_reference(
-        store,
+        proof,
         path="001/x.fcs",
         content_hash=_sha256(b"x"),
     )
@@ -2309,27 +2385,27 @@ def test_rclone_store_target_preserves_registered_root_mode(root, expected):
 
 def test_rclone_store_target_uses_name_only_when_credential_ref_is_absent():
     fallback = _rclone_store_target(remote=None)
-    empty = _data_store(
-        StoreKind.ONEDRIVE,
-        "experiments",
-        name="lab",
-        credential_ref="",
-    )
 
     assert fallback.remote.value == "lab"
     assert fallback.argv_target == "lab:experiments/001/x.fcs"
-    assert (
-        store_relative_reference(
-            empty,
-            path="001/x.fcs",
-            content_hash=_sha256(b"x"),
+
+
+def test_empty_rclone_credential_ref_can_never_reach_a_use_time_proof():
+    # An empty credential reference used to reach store_relative_reference and
+    # be rejected there.  It can no longer mint the proof a target requires.
+    with pytest.raises(DataStoreDefinitionError) as excinfo:
+        _store_proof(
+            StoreKind.ONEDRIVE,
+            "experiments",
+            name="lab",
+            credential_ref="",
         )
-        is None
-    )
+
+    assert excinfo.value.code is DataStoreDefinitionErrorCode.INVALID_CREDENTIAL_REF
 
 
 def test_rclone_store_target_factory_rejects_mismatched_logical_identity():
-    store = _data_store(
+    proof = _store_proof(
         StoreKind.ONEDRIVE,
         "experiments",
         name="lab",
@@ -2347,7 +2423,7 @@ def test_rclone_store_target_factory_rejects_mismatched_logical_identity():
 
     assert (
         rclone_store_resolution_target(
-            store,
+            proof,
             locator=locator,
             logical_reference=reference,
         )
@@ -2376,14 +2452,41 @@ def test_rclone_store_target_cannot_bypass_validated_factory():
             remote=remote,
             registered_root=root,
             locator=locator,
+            authority_binding_identity=sealed_binding_identity(),
             _factory_token=object(),
         )
 
 
+def test_rclone_store_target_cannot_be_constructed_without_sealed_authority():
+    locator = PortableStorePath.parse_decoded("001/x.fcs")
+    remote = RcloneRemoteName.parse("lab-onedrive")
+    root = RegisteredRcloneRoot.parse_decoded("experiments")
+    assert locator is not None
+    assert remote is not None
+    assert root is not None
+    reference = ExternalArtifactReference(
+        source_system="store",
+        uri="store://lab/001/x.fcs",
+        content_hash=_sha256(b"x"),
+        store_name="lab",
+        locator=locator.path,
+    )
+
+    with pytest.raises(ValueError, match="sealed authority identity"):
+        RcloneStoreResolutionTarget(
+            logical_reference=reference,
+            remote=remote,
+            registered_root=root,
+            locator=locator,
+            authority_binding_identity=cast(StoreAuthorityBindingIdentity, None),
+            _factory_token=artifact_resolution._RCLONE_STORE_TARGET_FACTORY_TOKEN,
+        )
+
+
 def test_store_relative_reference_http_builds_scoped_logical_target():
-    store = _data_store(StoreKind.HTTP, "https://files.example/base", name="web")
+    proof = _store_proof(StoreKind.HTTP, "https://files.example/base", name="web")
     target = store_relative_reference(
-        store,
+        proof,
         path="nested/x.bin",
         content_hash=_sha256(b"x"),
     )
@@ -2397,45 +2500,34 @@ def test_store_relative_reference_http_builds_scoped_logical_target():
     assert target.logical_reference.locator == "nested/x.bin"
 
 
-def test_http_store_target_factory_uses_endpoint_before_root():
-    store = _data_store(
-        StoreKind.HTTP,
-        "https://root.example/ignored",
-        endpoint="https://files.example/base",
-        name="web",
-    )
+def test_http_store_target_prefix_comes_from_the_proof_and_never_a_row_endpoint():
+    # A row endpoint used to take precedence over the registered root.  A
+    # use-time proof carries a validated definition that can never hold an
+    # endpoint, so the prefix is always the canonical authorized root.
+    proof = _store_proof(StoreKind.HTTP, "https://files.example/base", name="web")
     target = store_relative_reference(
-        store,
+        proof,
         path="x.bin",
         content_hash=_sha256(b"x"),
     )
 
+    assert proof.definition.endpoint is None
     assert isinstance(target, HttpStoreResolutionTarget)
     assert target.registered_prefix.canonical_url == "https://files.example/base/"
 
-    store.endpoint = "https://files.example/base?invalid=secret"
-    assert (
-        store_relative_reference(
-            store,
-            path="x.bin",
-            content_hash=_sha256(b"x"),
+    with pytest.raises(DataStoreDefinitionError) as excinfo:
+        ValidatedDataStoreDefinition.create(
+            name="web",
+            kind=StoreKind.HTTP,
+            root="https://root.example/ignored",
+            endpoint="https://files.example/base",
         )
-        is None
-    )
 
-    store.endpoint = ""
-    assert (
-        store_relative_reference(
-            store,
-            path="x.bin",
-            content_hash=_sha256(b"x"),
-        )
-        is None
-    )
+    assert excinfo.value.code is DataStoreDefinitionErrorCode.ENDPOINT_NOT_ALLOWED
 
 
 def test_http_store_target_factory_rejects_mismatched_logical_identity():
-    store = _data_store(
+    proof = _store_proof(
         StoreKind.HTTP,
         "https://files.example/base",
         name="web",
@@ -2450,7 +2542,7 @@ def test_http_store_target_factory_rejects_mismatched_logical_identity():
 
     assert (
         http_store_resolution_target(
-            store,
+            proof,
             locator=locator,
             logical_reference=reference.model_copy(
                 update={
@@ -2463,7 +2555,7 @@ def test_http_store_target_factory_rejects_mismatched_logical_identity():
     )
     assert (
         http_store_resolution_target(
-            store,
+            proof,
             locator=PortableStorePath(("other.bin",)),
             logical_reference=reference,
         )
@@ -2471,7 +2563,7 @@ def test_http_store_target_factory_rejects_mismatched_logical_identity():
     )
     assert (
         http_store_resolution_target(
-            store,
+            proof,
             locator=locator,
             logical_reference=reference.model_copy(update={"uri": "store://web/other.bin"}),
         )
@@ -2494,26 +2586,44 @@ def test_http_store_target_cannot_be_constructed_without_validated_factory():
             logical_reference=reference,
             registered_prefix=prefix,
             locator=locator,
+            authority_binding_identity=sealed_binding_identity(),
             _factory_token=object(),
         )
 
 
+def test_http_store_target_cannot_be_constructed_without_sealed_authority():
+    locator = PortableStorePath(("artifact.bin",))
+    prefix = RegisteredHttpPrefix.parse("https://files.example/base")
+    assert prefix is not None
+    reference = ExternalArtifactReference.for_store(
+        store_name="web",
+        locator=locator.path,
+        content_hash=_sha256(b"x"),
+    )
+
+    with pytest.raises(ValueError, match="sealed authority identity"):
+        HttpStoreResolutionTarget(
+            logical_reference=reference,
+            registered_prefix=prefix,
+            locator=locator,
+            authority_binding_identity=cast(StoreAuthorityBindingIdentity, None),
+            _factory_token=artifact_resolution._HTTP_STORE_TARGET_FACTORY_TOKEN,
+        )
+
+
 @pytest.mark.parametrize(
-    ("base", "locator"),
+    "locator",
     (
-        ("https://files.example/base?token=secret", "artifact.bin"),
-        ("https://user:secret@files.example/base", "artifact.bin"),
-        ("https://files.example/base", "../secret.bin"),
-        ("https://files.example/base", "nested/%2e%2e/secret.bin"),
-        ("https://files.example/base", "nested\\secret.bin"),
+        "../secret.bin",
+        "nested/%2e%2e/secret.bin",
+        "nested\\secret.bin",
     ),
 )
 def test_invalid_http_store_materialization_returns_none_without_network_io(
-    base: str,
     locator: str,
     monkeypatch,
 ):
-    store = _data_store(StoreKind.HTTP, base, name="web")
+    proof = _store_proof(StoreKind.HTTP, "https://files.example/base", name="web")
 
     def unexpected_network_operation(*_args, **_kwargs):
         raise AssertionError("invalid HTTP store materialization performed network I/O")
@@ -2526,7 +2636,7 @@ def test_invalid_http_store_materialization_returns_none_without_network_io(
 
     assert (
         store_relative_reference(
-            store,
+            proof,
             path=locator,
             content_hash=_sha256(b"x"),
         )
@@ -2534,16 +2644,39 @@ def test_invalid_http_store_materialization_returns_none_without_network_io(
     )
 
 
-def test_store_relative_reference_unsupported_kind_returns_none():
-    store = _data_store(StoreKind.DATABASE, "postgresql://lims", name="lims")
-    assert store_relative_reference(store, path="q", content_hash=_sha256(b"x")) is None
+@pytest.mark.parametrize(
+    "base",
+    (
+        "https://files.example/base?token=secret",
+        "https://user:secret@files.example/base",
+    ),
+)
+def test_unsafe_http_store_base_can_never_reach_a_use_time_proof(base: str):
+    # A query string or embedded credentials used to reach
+    # store_relative_reference and be rejected there.  Such a base can no
+    # longer mint the proof a target requires.
+    with pytest.raises(DataStoreDefinitionError) as excinfo:
+        _store_proof(StoreKind.HTTP, base, name="web")
+
+    assert excinfo.value.code is DataStoreDefinitionErrorCode.INVALID_ROOT
+
+
+def test_unsupported_store_kind_can_never_reach_a_use_time_proof():
+    # store_relative_reference used to be handed any registered row and fall
+    # through to None for an unsupported adapter.  Every kind a definition can
+    # validate is now one of the four adapter kinds, so the fall-through is not
+    # reachable: an unsupported kind cannot mint a proof at all.
+    with pytest.raises(DataStoreDefinitionError) as excinfo:
+        _store_proof(StoreKind.DATABASE, "postgresql://lims", name="lims")
+
+    assert excinfo.value.code is DataStoreDefinitionErrorCode.UNSUPPORTED_KIND
 
 
 def test_store_relative_reference_git_builds_scoped_logical_target():
-    store = _data_store(StoreKind.GIT, "https://example.com/org/repo.git", name="repo")
+    proof = _store_proof(StoreKind.GIT, "https://example.com/org/repo.git", name="repo")
     commit = "a" * 40
     target = store_relative_reference(
-        store, path=f"analysis/run.py@{commit}", content_hash=_sha256(b"x")
+        proof, path=f"analysis/run.py@{commit}", content_hash=_sha256(b"x")
     )
 
     assert isinstance(target, GitStoreResolutionTarget)
@@ -2561,7 +2694,7 @@ def test_store_relative_reference_git_retains_internal_at_and_sha256_pin():
     object_id = "b" * 64
 
     target = store_relative_reference(
-        _data_store(StoreKind.GIT, _GIT_REMOTE, name="repo"),
+        _store_proof(StoreKind.GIT, _GIT_REMOTE, name="repo"),
         path=f"analysis/model@v2.py@{object_id}",
         content_hash=_sha256(b"x"),
     )
@@ -2574,30 +2707,26 @@ def test_store_relative_reference_git_retains_internal_at_and_sha256_pin():
 
 
 def test_store_relative_reference_git_without_commit_returns_none():
-    store = _data_store(StoreKind.GIT, "https://example.com/org/repo.git", name="repo")
+    proof = _store_proof(StoreKind.GIT, "https://example.com/org/repo.git", name="repo")
     assert (
-        store_relative_reference(store, path="analysis/run.py", content_hash=_sha256(b"x")) is None
+        store_relative_reference(proof, path="analysis/run.py", content_hash=_sha256(b"x")) is None
     )
 
 
 @pytest.mark.parametrize(
-    ("root", "locator"),
+    "locator",
     (
-        ("https://user:secret@example.com/repo.git", f"analysis/run.py@{'a' * 40}"),
-        ("../local-repo.git", f"analysis/run.py@{'a' * 40}"),
-        (_GIT_REMOTE, "analysis/run.py@HEAD"),
-        (_GIT_REMOTE, f"analysis/run.py@{'A' * 40}"),
-        (_GIT_REMOTE, f"analysis/run.py@{'0' * 40}"),
-        (_GIT_REMOTE, "analysis/run.py@abcdef1"),
-        (_GIT_REMOTE, f"/analysis/run.py@{'a' * 40}"),
-        (_GIT_REMOTE, f"analysis/../secret.py@{'a' * 40}"),
-        (_GIT_REMOTE, f"analysis/run:1.py@{'a' * 40}"),
-        (_GIT_REMOTE, f"analysis\\run.py@{'a' * 40}"),
-        (_GIT_REMOTE, f"analysis/%72un.py@{'a' * 40}"),
+        "analysis/run.py@HEAD",
+        f"analysis/run.py@{'A' * 40}",
+        f"analysis/run.py@{'0' * 40}",
+        "analysis/run.py@abcdef1",
+        f"/analysis/run.py@{'a' * 40}",
+        f"analysis/../secret.py@{'a' * 40}",
+        f"analysis/run:1.py@{'a' * 40}",
+        f"analysis\\run.py@{'a' * 40}",
+        f"analysis/%72un.py@{'a' * 40}",
     ),
     ids=(
-        "credentialed-remote",
-        "local-remote",
         "symbolic-ref",
         "uppercase-object-id",
         "zero-object-id",
@@ -2610,7 +2739,6 @@ def test_store_relative_reference_git_without_commit_returns_none():
     ),
 )
 def test_store_relative_reference_rejects_invalid_git_target_without_host_io(
-    root,
     locator,
     monkeypatch,
 ):
@@ -2620,7 +2748,7 @@ def test_store_relative_reference_rejects_invalid_git_target_without_host_io(
     monkeypatch.setattr(artifact_resolution.os, "makedirs", unexpected_cache_creation)
 
     target = store_relative_reference(
-        _data_store(StoreKind.GIT, root, name="repo"),
+        _store_proof(StoreKind.GIT, _GIT_REMOTE, name="repo"),
         path=locator,
         content_hash=_sha256(b"x"),
     )
@@ -2628,14 +2756,28 @@ def test_store_relative_reference_rejects_invalid_git_target_without_host_io(
     assert target is None
 
 
+@pytest.mark.parametrize(
+    "root",
+    ("https://user:secret@example.com/repo.git", "../local-repo.git"),
+    ids=("credentialed-remote", "local-remote"),
+)
+def test_unsafe_git_remote_can_never_reach_a_use_time_proof(root: str):
+    # A credentialed or local remote used to reach store_relative_reference and
+    # be rejected there.  It can no longer mint the proof a target requires.
+    with pytest.raises(DataStoreDefinitionError) as excinfo:
+        _store_proof(StoreKind.GIT, root, name="repo")
+
+    assert excinfo.value.code is DataStoreDefinitionErrorCode.INVALID_ROOT
+
+
 def test_git_store_target_factory_rejects_mismatched_logical_identity():
-    store = _data_store(StoreKind.GIT, _GIT_REMOTE, name="repo")
+    proof = _store_proof(StoreKind.GIT, _GIT_REMOTE, name="repo")
     pin = PinnedGitPath.parse_decoded(f"analysis/run.py@{'a' * 40}")
     other_pin = PinnedGitPath.parse_decoded(f"analysis/other.py@{'a' * 40}")
     assert pin is not None
     assert other_pin is not None
     reference = ExternalArtifactReference.for_git_store(
-        store_name=store.name,
+        store_name=proof.definition.name,
         repository_path=pin.path.path,
         object_id=pin.object_id.value,
         content_hash=_sha256(b"x"),
@@ -2643,7 +2785,7 @@ def test_git_store_target_factory_rejects_mismatched_logical_identity():
 
     assert (
         git_store_resolution_target(
-            store,
+            proof,
             pin=pin,
             logical_reference=reference.model_copy(
                 update={
@@ -2656,7 +2798,7 @@ def test_git_store_target_factory_rejects_mismatched_logical_identity():
     )
     assert (
         git_store_resolution_target(
-            store,
+            proof,
             pin=other_pin,
             logical_reference=reference,
         )
@@ -2664,7 +2806,7 @@ def test_git_store_target_factory_rejects_mismatched_logical_identity():
     )
     assert (
         git_store_resolution_target(
-            store,
+            proof,
             pin=pin,
             logical_reference=reference.model_copy(
                 update={"uri": f"store://repo/{other_pin.uri_path}"}
@@ -2674,7 +2816,7 @@ def test_git_store_target_factory_rejects_mismatched_logical_identity():
     )
     assert (
         git_store_resolution_target(
-            store,
+            proof,
             pin=pin,
             logical_reference=reference.model_copy(update={"locator": other_pin.locator}),
         )
@@ -2699,16 +2841,39 @@ def test_git_store_target_cannot_bypass_validated_factory():
             logical_reference=reference,
             remote=remote,
             pin=pin,
+            authority_binding_identity=sealed_binding_identity(),
             _factory_token=object(),
+        )
+
+
+def test_git_store_target_cannot_be_constructed_without_sealed_authority():
+    pin = PinnedGitPath.parse_decoded(f"analysis/run.py@{'a' * 40}")
+    remote = parse_git_remote_address(_GIT_REMOTE)
+    assert pin is not None
+    assert remote is not None
+    reference = ExternalArtifactReference.for_git_store(
+        store_name="repo",
+        repository_path=pin.path.path,
+        object_id=pin.object_id.value,
+        content_hash=_sha256(b"x"),
+    )
+
+    with pytest.raises(ValueError, match="sealed authority identity"):
+        GitStoreResolutionTarget(
+            logical_reference=reference,
+            remote=remote,
+            pin=pin,
+            authority_binding_identity=cast(StoreAuthorityBindingIdentity, None),
+            _factory_token=artifact_resolution._GIT_STORE_TARGET_FACTORY_TOKEN,
         )
 
 
 def test_store_relative_reference_git_resolves_end_to_end(tmp_path):
     # The typed target must reach GitResolver without becoming a generic git+ URI.
     data = b"pinned analysis code"
-    store = _data_store(StoreKind.GIT, "https://example.com/org/repo.git", name="repo")
+    proof = _store_proof(StoreKind.GIT, "https://example.com/org/repo.git", name="repo")
     commit = "b" * 40
-    ref = store_relative_reference(store, path=f"src/model.py@{commit}", content_hash=_sha256(data))
+    ref = store_relative_reference(proof, path=f"src/model.py@{commit}", content_hash=_sha256(data))
     assert ref is not None
     registry = ResolverRegistry(
         [_git_resolver(runner=_fake_git_runner(blob=data), cache_root=tmp_path)]
@@ -3092,7 +3257,7 @@ def test_registry_dispatches_prepared_local_target_to_scoped_resolver(tmp_path):
     store_root = tmp_path / "store"
     store_root.mkdir()
     target = _local_store_target(
-        _data_store(StoreKind.LOCAL_FS, str(store_root)),
+        _store_proof(StoreKind.LOCAL_FS, str(store_root)),
         "artifact.bin",
         _sha256(b"artifact"),
     )
@@ -3272,7 +3437,7 @@ def test_every_scoped_registry_dispatch_path_rejects_custom_output_overruns(tmp_
     local_root.mkdir()
     targets = (
         _local_store_target(
-            _data_store(StoreKind.LOCAL_FS, str(local_root)),
+            _store_proof(StoreKind.LOCAL_FS, str(local_root)),
             "artifact.bin",
             _sha256(content),
         ),
@@ -3734,8 +3899,8 @@ def test_default_registry_preserves_explicit_local_reader_limits_and_recovery_id
 def test_registry_never_falls_back_to_ordinary_resolve_for_local_store(tmp_path):
     store_root = tmp_path / "store"
     store_root.mkdir()
-    store = _data_store(StoreKind.LOCAL_FS, str(store_root))
-    target = _local_store_target(store, "artifact.bin", _sha256(b"x"))
+    proof = _store_proof(StoreKind.LOCAL_FS, str(store_root))
+    target = _local_store_target(proof, "artifact.bin", _sha256(b"x"))
 
     class OrdinaryOnlyResolver(ArtifactResolver):
         def can_resolve(self, ref):
@@ -3783,14 +3948,14 @@ def test_local_store_scope_rejects_static_link_escape_but_allows_safe_link(
     except (NotImplementedError, OSError) as exc:
         pytest.skip(f"file symlinks are unavailable: {exc}")
 
-    store = _data_store(StoreKind.LOCAL_FS, str(store_root))
+    proof = _store_proof(StoreKind.LOCAL_FS, str(store_root))
     resolver = ResolverRegistry([LocalFilesystemResolver(allowed_roots=[tmp_path])])
 
     safe = resolver.resolve_local_store(
-        _local_store_target(store, safe_link.name, _sha256(b"inside"))
+        _local_store_target(proof, safe_link.name, _sha256(b"inside"))
     )
     escaped = resolver.resolve_local_store(
-        _local_store_target(store, escape_link.name, _sha256(b"outside"))
+        _local_store_target(proof, escape_link.name, _sha256(b"outside"))
     )
 
     assert safe.status is ResolutionStatus.VERIFIED
@@ -3808,8 +3973,8 @@ def test_local_store_recovery_never_searches_global_sibling(tmp_path):
     sibling_root.mkdir()
     data = b"same content outside registered store"
     _write(sibling_root, "moved.bin", data)
-    store = _data_store(StoreKind.LOCAL_FS, str(store_root))
-    target = _local_store_target(store, "missing.bin", _sha256(data))
+    proof = _store_proof(StoreKind.LOCAL_FS, str(store_root))
+    target = _local_store_target(proof, "missing.bin", _sha256(data))
     registry = ResolverRegistry(
         [
             LocalFilesystemResolver(
@@ -3830,8 +3995,8 @@ def test_local_store_recovery_can_find_match_inside_same_store(tmp_path):
     store_root.mkdir()
     data = b"same content moved within registered store"
     moved = _write(store_root, "moved.bin", data)
-    store = _data_store(StoreKind.LOCAL_FS, str(store_root))
-    target = _local_store_target(store, "missing.bin", _sha256(data))
+    proof = _store_proof(StoreKind.LOCAL_FS, str(store_root))
+    target = _local_store_target(proof, "missing.bin", _sha256(data))
     registry = ResolverRegistry(
         [
             LocalFilesystemResolver(
@@ -3859,8 +4024,8 @@ def test_scoped_reader_receives_exact_store_target_and_retained_handle_bytes(tmp
     recorded = b"descriptor-owned store bytes"
     replacement = b"replacement pathname bytes"
     path = _write(store_root, "artifact.bin", recorded)
-    store = _data_store(StoreKind.LOCAL_FS, str(store_root))
-    target = _local_store_target(store, path.name, _sha256(recorded))
+    proof = _store_proof(StoreKind.LOCAL_FS, str(store_root))
+    target = _local_store_target(proof, path.name, _sha256(recorded))
 
     def read_from_registered_handle(target, budget, stdout_consumer):
         assert type(target) is RegisteredLocalRegularFileTarget
@@ -3895,8 +4060,8 @@ def test_scoped_resolution_leaves_canonicalization_to_broker_and_denies_opaquely
 ):
     store_root = tmp_path / "store"
     store_root.mkdir()
-    store = _data_store(StoreKind.LOCAL_FS, str(store_root))
-    target = _local_store_target(store, "artifact.bin", _sha256(b"x"))
+    proof = _store_proof(StoreKind.LOCAL_FS, str(store_root))
+    target = _local_store_target(proof, "artifact.bin", _sha256(b"x"))
 
     def deny_registered_target(reader_target, budget, _stdout_consumer):
         assert type(reader_target) is RegisteredLocalRegularFileTarget
@@ -3932,8 +4097,8 @@ def test_scoped_resolution_passes_the_snapshotted_raw_store_target_to_broker(tmp
     sibling_root = tmp_path / "sibling"
     store_root.mkdir()
     sibling_root.mkdir()
-    store = _data_store(StoreKind.LOCAL_FS, str(store_root))
-    target = _local_store_target(store, "artifact.bin", _sha256(b"sibling"))
+    proof = _store_proof(StoreKind.LOCAL_FS, str(store_root))
+    target = _local_store_target(proof, "artifact.bin", _sha256(b"sibling"))
 
     def deny_snapshotted_target(reader_target, budget, _stdout_consumer):
         assert type(reader_target) is RegisteredLocalRegularFileTarget
@@ -4541,8 +4706,8 @@ def test_registered_recovery_uses_only_the_retained_store_scope(tmp_path):
     store_root = tmp_path / "store"
     store_root.mkdir()
     data = b"registered recovery candidate"
-    store = _data_store(StoreKind.LOCAL_FS, str(store_root))
-    target = _local_store_target(store, "old/result.bin", _sha256(data))
+    proof = _store_proof(StoreKind.LOCAL_FS, str(store_root))
+    target = _local_store_target(proof, "old/result.bin", _sha256(data))
     enumerator = _StaticLocalRecoveryEnumerator(
         _registered_recovery_result(
             str(store_root),
@@ -4586,8 +4751,8 @@ def test_registered_recovery_rejects_a_candidate_from_another_store_before_read(
     store_root.mkdir()
     sibling_root.mkdir()
     data = b"must remain store-confined"
-    store = _data_store(StoreKind.LOCAL_FS, str(store_root))
-    target = _local_store_target(store, "old/result.bin", _sha256(data))
+    proof = _store_proof(StoreKind.LOCAL_FS, str(store_root))
+    target = _local_store_target(proof, "old/result.bin", _sha256(data))
     enumerator = _StaticLocalRecoveryEnumerator(
         _registered_recovery_result(
             str(sibling_root),
@@ -4805,9 +4970,9 @@ def test_windows_local_store_direct_safe_junction_verifies(tmp_path):
     assert completed.returncode == 0, (
         f"mklink /J failed: stdout={completed.stdout!r} stderr={completed.stderr!r}"
     )
-    store = _data_store(StoreKind.LOCAL_FS, str(store_root))
+    proof = _store_proof(StoreKind.LOCAL_FS, str(store_root))
     target = _local_store_target(
-        store,
+        proof,
         "safe-junction/artifact.bin",
         _sha256(data),
     )

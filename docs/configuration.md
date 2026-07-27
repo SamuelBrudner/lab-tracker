@@ -143,11 +143,23 @@ closed. The raw value is bounded independently to 24,576 Unicode code points
 and 24,576 UTF-8 bytes, decoded JSON nesting is capped at depth 8, and at most
 64 grants are accepted.
 
-Every worker keeps the one immutable registry snapshot built at startup; no
-request or background task rereads the environment. Changing or revoking a
-grant requires restarting **all** workers that might retain the previous
-snapshot. A rolling deployment does not complete revocation until the last old
-worker has stopped.
+Every worker keeps the one immutable registry snapshot built at startup. The
+same object is used to authorize registration and is exposed through a fixed,
+redacted use-time snapshot provider; neither requests nor background tasks
+reread the environment. Changing or revoking a grant requires restarting
+**all** workers that might retain the previous snapshot. A rolling deployment
+does not complete revocation until the last old worker has stopped.
+
+Registered-store reads and health checks authorize graph access and detach the
+store definition, exact project or group scope, requested capability, persisted
+grant ID and fingerprint, and credential handle while the database scope is
+open. They then release that scope and capture the provider's registry exactly
+once. The detached binding must reauthorize against that captured snapshot
+before target construction, cache lookup, DNS, network, credential, filesystem,
+or subprocess work. One operation therefore has point-in-time semantics against
+one immutable worker snapshot; it does **not** imply configuration hot reload.
+The selected grant ID and semantic fingerprint are part of remote health-target
+and cache identity, so an earlier result cannot authorize a different binding.
 
 Global resolver settings remain independent, conjunctive outer ceilings:
 `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS`,
@@ -158,14 +170,14 @@ Global resolver settings remain independent, conjunctive outer ceilings:
 never create one or widen one. Project and group roles likewise never
 manufacture host, network, credential, or subprocess authority.
 
-This registry slice defines and composes the typed grant snapshot but does not
-yet enforce it at registration or use time; existing registered-store behavior
-still depends on the global policies above. The following authority slices bind
-registration and revalidate persisted bindings. During that staged integration,
-a local grant's lexical proof is registration-only and must produce an opaque
-denial at the I/O boundary until the retained-handle filesystem slice carries
-and revalidates the selected grant. Contributor-authored direct paths, URLs,
-rclone targets, and Git remotes remain inert metadata.
+Registration and remote registered-store use now both require this scoped
+authority in addition to the global policies above. HTTP, rclone-backed, and
+Git resolution and health can dispatch only after the persisted binding has
+been revalidated. A `local_fs` grant remains registration-only at this stage
+and produces an opaque denial at the I/O boundary until the retained-handle
+filesystem slice carries the selected boundary into the broker. Contributor-
+authored direct paths, URLs, rclone targets, and Git remotes remain inert
+metadata.
 
 ### Local filesystem policy
 

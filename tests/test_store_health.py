@@ -1,14 +1,26 @@
 from __future__ import annotations
 
+import json
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import FrozenInstanceError, fields, replace
 from uuid import UUID
 
 import pytest
+from store_authority_fakes import bound_authority_proof, sealed_binding_identity
 
 from lab_tracker.artifact_resolution import check_store_health
-from lab_tracker.models import DataStore, StoreKind
+from lab_tracker.data_store_definition import ValidatedDataStoreDefinition
+from lab_tracker.models import DataStore, StoreCapability, StoreKind
+from lab_tracker.store_authority_registry import (
+    STORE_AUTHORITY_CONFIG_SCHEMA,
+    ProjectStoreScope,
+    StoreAuthorityRegistry,
+)
+from lab_tracker.store_authority_use import (
+    detach_store_authority_binding,
+    revalidate_store_authority_binding,
+)
 from lab_tracker.store_health import (
     MAX_STORE_HEALTH_CACHE_MAX_ENTRIES,
     MAX_STORE_HEALTH_CACHE_TTL_SECONDS,
@@ -20,6 +32,12 @@ from lab_tracker.store_health import (
     StoreHealthStatus,
     StoreProbeTarget,
 )
+
+# One sealed identity shared by the synthetic targets below.  A probe target's
+# cache identity is the whole field tuple, so holding this constant is what lets
+# the cache-key tests prove that store_id/name/root/endpoint/credential_ref each
+# still discriminate on their own.
+PROBE_BINDING_IDENTITY = sealed_binding_identity()
 
 
 class _FakeClock:
@@ -73,7 +91,62 @@ def _target(number: int = 1) -> StoreProbeTarget:
         root=f"https://store-{number}.example/data",
         endpoint=f"https://store-{number}.example",
         credential_ref=f"credential-{number}",
+        authority_binding_identity=PROBE_BINDING_IDENTITY,
     )
+
+
+def _proof_backed_target(*, grant_id: str) -> StoreProbeTarget:
+    project_id = UUID(int=700)
+    store_id = UUID(int=701)
+    definition = ValidatedDataStoreDefinition.create(
+        name="proof-backed",
+        kind=StoreKind.HTTP,
+        root="https://proof.example.test/data/",
+    )
+    capabilities = [StoreCapability.BYTES_BY_PATH]
+    registry = StoreAuthorityRegistry.from_json(
+        json.dumps(
+            {
+                "schema": STORE_AUTHORITY_CONFIG_SCHEMA,
+                "grants": [
+                    {
+                        "grant_id": grant_id,
+                        "scope": {"project_id": str(project_id)},
+                        "kind": StoreKind.HTTP.value,
+                        "root": definition.root,
+                        "capabilities": [
+                            StoreCapability.BYTES_BY_PATH.value,
+                        ],
+                    }
+                ],
+            },
+            separators=(",", ":"),
+        )
+    )
+    registry_proof = registry.authorize(
+        grant_id=grant_id,
+        scope=ProjectStoreScope(project_id),
+        candidate=definition,
+        capabilities=capabilities,
+    )
+    assert registry_proof is not None
+    store = DataStore(
+        store_id=store_id,
+        project_id=project_id,
+        name=definition.name,
+        kind=definition.kind,
+        capabilities=capabilities,
+        root=definition.root,
+        endpoint=definition.endpoint,
+        credential_ref=definition.credential_ref,
+        authority_grant_id=grant_id,
+        authority_grant_fingerprint=registry_proof.fingerprint,
+    )
+    binding = detach_store_authority_binding(store)
+    assert binding is not None
+    use_proof = revalidate_store_authority_binding(registry, binding)
+    assert use_proof is not None
+    return StoreProbeTarget.from_authority_proof(use_proof)
 
 
 def test_probe_target_has_exact_immutable_hashable_snapshot_fields() -> None:
@@ -86,6 +159,7 @@ def test_probe_target_has_exact_immutable_hashable_snapshot_fields() -> None:
         "root",
         "endpoint",
         "credential_ref",
+        "authority_binding_identity",
     ]
     assert hash(target) == hash(replace(target))
     assert not hasattr(target, "__dict__")
@@ -93,27 +167,81 @@ def test_probe_target_has_exact_immutable_hashable_snapshot_fields() -> None:
         target.name = "changed"  # type: ignore[misc]
 
 
-def test_probe_target_detaches_only_probe_fields_from_data_store() -> None:
-    store = DataStore(
-        store_id=UUID(int=7),
-        project_id=UUID(int=8),
+def test_probe_target_detaches_only_probe_fields_from_the_authority_proof() -> None:
+    proof = bound_authority_proof(
         name="archive",
         kind=StoreKind.S3,
         root="/root",
-        endpoint="https://s3.example",
-        credential_ref="rclone:archive",
-        is_default=True,
-        created_by="owner@example.com",
+        credential_ref="archive-remote",
+        project_id=UUID(int=8),
+        store_id=UUID(int=7),
     )
 
-    assert StoreProbeTarget.from_store(store) == StoreProbeTarget(
+    target = StoreProbeTarget.from_authority_proof(proof)
+
+    assert target == StoreProbeTarget(
         store_id=UUID(int=7),
         name="archive",
         kind=StoreKind.S3,
         root="/root",
-        endpoint="https://s3.example",
-        credential_ref="rclone:archive",
+        endpoint=None,
+        credential_ref="archive-remote",
+        authority_binding_identity=proof.binding_identity,
     )
+    assert target.authority_binding_identity is proof.binding_identity
+    for persistence_only in ("project_id", "group_id", "is_default", "created_by"):
+        assert not hasattr(target, persistence_only)
+
+
+def test_probe_target_cannot_be_built_without_a_sealed_authority_identity() -> None:
+    probe_fields: dict[str, object] = {
+        "store_id": UUID(int=7),
+        "name": "archive",
+        "kind": StoreKind.S3,
+        "root": "/root",
+        "endpoint": None,
+        "credential_ref": "archive-remote",
+    }
+
+    with pytest.raises(TypeError):
+        StoreProbeTarget(**probe_fields)  # type: ignore[arg-type]
+    for unsealed in (None, object(), "sag-v1-sha256:forged"):
+        with pytest.raises(
+            ValueError,
+            match=r"^Store probe target requires a sealed authority identity\.$",
+        ):
+            StoreProbeTarget(  # type: ignore[arg-type]
+                **probe_fields,
+                authority_binding_identity=unsealed,
+            )
+
+
+def test_probe_target_factory_carries_authority_identity_and_redacts_repr() -> None:
+    target = _proof_backed_target(grant_id="secret-grant-a")
+
+    assert target.authority_binding_identity is not None
+    rendered = repr(target)
+    assert "secret-grant-a" not in rendered
+    assert "sag-v1-sha256:" not in rendered
+    assert "https://proof.example.test/data/" not in rendered
+    # Boundness is now a type invariant rather than a repr flag: every probe
+    # target carries a sealed identity, so the repr shows only classification.
+    assert rendered == (
+        f"StoreProbeTarget(store_id={target.store_id!r}, kind={target.kind!r})"
+    )
+
+
+def test_probe_target_factory_rejects_unsealed_proof_like_objects() -> None:
+    class FakeProof:
+        store_id = UUID(int=701)
+        definition = object()
+        binding_identity = object()
+
+    with pytest.raises(
+        TypeError,
+        match=r"^Store probe target requires an authority use proof\.$",
+    ):
+        StoreProbeTarget.from_authority_proof(FakeProof())  # type: ignore[arg-type]
 
 
 def test_store_health_is_immutable_hashable_and_serializes_canonically() -> None:
@@ -221,6 +349,7 @@ def test_exact_target_cache_hit_returns_same_result_and_makes_no_second_probe() 
         ("root", "/changed"),
         ("endpoint", None),
         ("credential_ref", None),
+        ("authority_binding_identity", sealed_binding_identity()),
     ],
 )
 def test_every_target_field_participates_in_the_exact_cache_key(
@@ -237,6 +366,51 @@ def test_every_target_field_participates_in_the_exact_cache_key(
 
     assert probe.targets == [original, changed]
     assert cache.entry_count == 2
+
+
+def test_authority_binding_identity_participates_in_cache_and_flight_keys() -> None:
+    first = _proof_backed_target(grant_id="grant-a")
+    second = _proof_backed_target(grant_id="grant-b")
+    probe = _RecordingProbe()
+    cache = CachedStoreHealthProbe(probe)
+
+    assert first.store_id == second.store_id
+    assert first.name == second.name
+    assert first.kind is second.kind
+    assert first.root == second.root
+    assert first.authority_binding_identity != second.authority_binding_identity
+
+    cache(first)
+    cache(second)
+
+    assert probe.targets == [first, second]
+    assert cache.entry_count == 2
+
+
+def test_different_authority_bindings_do_not_coalesce_in_flight() -> None:
+    first = _proof_backed_target(grant_id="grant-a")
+    second = _proof_backed_target(grant_id="grant-b")
+    both_entered = threading.Barrier(3)
+    targets: list[StoreProbeTarget] = []
+    targets_lock = threading.Lock()
+
+    def probe(target: StoreProbeTarget) -> StoreHealth:
+        with targets_lock:
+            targets.append(target)
+        both_entered.wait(timeout=10.0)
+        return StoreHealth(StoreHealthStatus.HEALTHY)
+
+    cache = CachedStoreHealthProbe(probe, singleflight_wait_seconds=2.0)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first_probe = pool.submit(cache, first)
+        second_probe = pool.submit(cache, second)
+        both_entered.wait(timeout=10.0)
+        assert first_probe.result(timeout=10.0).is_healthy
+        assert second_probe.result(timeout=10.0).is_healthy
+
+    assert set(targets) == {first, second}
+    assert cache.entry_count == 2
+    assert cache.in_flight_count == 0
 
 
 def test_ttl_starts_at_probe_completion_and_expires_at_exact_boundary() -> None:

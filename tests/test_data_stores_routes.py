@@ -8,11 +8,19 @@ from uuid import UUID, uuid4
 
 import pytest
 from api_helpers import TEST_STORE_AUTHORITY_GRANT_ID
-from http_security_fakes import FakeAddressResolver, FakeSafeHttpClient
+from http_security_fakes import (
+    FakeAddressResolver,
+    FakeHttpResponse,
+    FakeSafeHttpClient,
+)
 from starlette.testclient import TestClient
 
 import lab_tracker.routes.errors as route_errors
-from lab_tracker.artifact_resolution import LocalFilesystemResolver, ResolverRegistry
+from lab_tracker.artifact_resolution import (
+    HttpResolver,
+    LocalFilesystemResolver,
+    ResolverRegistry,
+)
 from lab_tracker.bounded_subprocess import BoundedSubprocessExecutor, ProcessResult
 from lab_tracker.data_store_definition import (
     DATA_STORE_CREDENTIAL_REF_MAX_LENGTH,
@@ -33,6 +41,7 @@ from lab_tracker.sqlalchemy_repository_parts.data_stores import (
     SQLAlchemyDataStoreRepository,
 )
 from lab_tracker.store_health import (
+    RCLONE_STORE_HEALTH_FAILURE_DETAIL,
     STORE_HEALTH_PROBE_UNAVAILABLE_MESSAGE,
     CachedStoreHealthProbe,
 )
@@ -370,7 +379,11 @@ def test_group_store_inherited_by_project_listing(client, admin_auth_headers):
     assert "lab-shared-s3" in names
 
 
-def test_group_store_resolves_for_project(client, admin_auth_headers, tmp_path):
+def test_inherited_group_local_store_fails_closed_until_bead_63_5(
+    client,
+    admin_auth_headers,
+    tmp_path,
+):
     data = b"shared lab object"
     (tmp_path / "exp").mkdir()
     (tmp_path / "exp" / "x.txt").write_bytes(data)
@@ -416,7 +429,7 @@ def test_group_store_resolves_for_project(client, admin_auth_headers, tmp_path):
     assert body["detail"] == "Store artifact could not be resolved."
 
 
-def test_project_store_shadows_same_name_inherited_group_store_before_fail_closed(
+def test_project_store_shadows_same_name_inherited_group_store(
     client,
     admin_auth_headers,
     monkeypatch,
@@ -453,12 +466,26 @@ def test_project_store_shadows_same_name_inherited_group_store_before_fail_close
     assert group_store.status_code == 201, group_store.text
     assert project_store.status_code == 201, project_store.text
     project_store_id = project_store.json()["data"]["store_id"]
+    payload = b"project store bytes"
     dataset_id = _create_dataset_with_artifact(
         client,
         admin_auth_headers,
         project_id=project_id,
         uri="store://shared-name/secret.bin",
-        content_hash=_sha256(b"unavailable"),
+        content_hash=_sha256(payload),
+    )
+    # Pin the DNS and transport seams so the assertions below prove which
+    # registered root was dispatched against, and so the suite never emits a
+    # real lookup for either *-secret.example.test name.
+    dns = FakeAddressResolver({"project-secret.example.test": ["93.184.216.34"]})
+    http_client = FakeSafeHttpClient((FakeHttpResponse(chunks=(payload,)),))
+    client.app.state.resolver_registry = ResolverRegistry(
+        [
+            HttpResolver(
+                policy=OutboundHttpPolicy(address_resolver=dns),
+                client=http_client,
+            )
+        ]
     )
     original_get_by_name = SQLAlchemyDataStoreRepository.get_by_name
     selected_store_ids: list[str] = []
@@ -482,12 +509,22 @@ def test_project_store_shadows_same_name_inherited_group_store_before_fail_close
     )
 
     assert response.status_code == 200, response.text
+    # Exact own-store shadowing: only the project row is ever selected, and the
+    # same-named inherited group store is never consulted as a fallback.
     assert selected_store_ids == [project_store_id]
+    # The dispatched host is the project store's root, never the group's, so
+    # shadowing held all the way through to the outbound boundary.
+    assert dns.calls == [("project-secret.example.test", 443)]
+    assert http_client.calls[0][1].absolute_url == (
+        "https://project-secret.example.test/base/secret.bin"
+    )
     body = response.json()["data"]
-    assert body["status"] == "unresolved"
+    assert body["status"] == "verified"
     assert body["source_system"] == "store"
-    assert body["uri"] == "store://[redacted]"
-    assert body["detail"] == "Store artifact could not be resolved."
+    # The caller's own logical store URI round-trips; no server-side registered
+    # root, endpoint, credential, scope, or grant material joins it.
+    assert body["uri"] == "store://shared-name/secret.bin"
+    assert body["detail"] is None
     assert "group-secret" not in response.text
     assert "project-secret" not in response.text
 
@@ -1165,10 +1202,18 @@ def test_rclone_store_health_route_denies_before_process_and_redacts_target(
     )
 
     assert response.status_code == 200
-    body = response.json()["data"]
-    assert body["status"] == "unsupported"
-    assert body["detail"] == STORE_HEALTH_PROBE_UNAVAILABLE_MESSAGE
+    # The store is operator-approved, so use-time revalidation passes and the
+    # request reaches the rclone probe; the deny-all remote allowlist is what
+    # refuses it, before any argv is composed or any process is spawned.
+    assert response.json()["data"] == {
+        "store_id": store_id,
+        "kind": "rclone",
+        "status": "unreachable",
+        "detail": RCLONE_STORE_HEALTH_FAILURE_DETAIL,
+    }
     assert secret not in response.text
+    assert "remote-archive" not in response.text
+    assert "/private/archive" not in response.text
     assert executor.calls == []
 
 

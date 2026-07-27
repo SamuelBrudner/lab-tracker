@@ -382,6 +382,9 @@ def configure_database_session_middleware(
                 ),
                 release_read_scope=request_scope.release_read_scope,
                 store_health_checker=_store_health_checker_from_app(request),
+                store_authority_snapshot_provider=(
+                    request.app.state.store_authority_snapshot_provider
+                ),
             )
             response = await call_next(request)
         except BaseException as exc:

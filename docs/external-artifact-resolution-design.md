@@ -98,24 +98,41 @@ does not grant any project access. Conversely, a scoped grant cannot widen a
 global ceiling. Role membership only controls graph access and likewise cannot
 manufacture host or network authority.
 
-The registry snapshot is immutable and restart-only. Revocation is complete
-only after every process retaining the old snapshot has stopped. This registry
-slice is not yet enforced by registration or I/O; persisted grant bindings and
-use-time fingerprint revalidation are separate follow-on slices. During that
-staged integration, a lexical local proof is registration-only and must produce
-an opaque I/O denial until the local-use slice carries the selected boundary
-into the retained-handle helper. Direct non-store references remain inert
-metadata throughout.
+The registry snapshot is immutable and restart-only. Registration uses that
+exact startup object, and use-time authorization receives it through a fixed,
+redacted provider. No request rereads configuration. Revocation is complete
+only after every process retaining the old snapshot has stopped; a rolling
+deployment does not provide hot-revocation semantics.
+
+Registration and remote registered-store I/O both enforce the scoped grant.
+HTTP, rclone-backed, and Git reads and health checks revalidate the persisted
+grant ID and semantic fingerprint after releasing their database scope and
+before target construction or external work. A lexical local proof remains
+registration-only and fails closed at the I/O boundary until the local-use
+slice carries the selected boundary into the retained-handle helper. Direct
+non-store references remain inert metadata throughout.
 
 ## Interface
 
-The application prepares an exact, detached target while its authorized
-database scope is open, then releases that scope before dispatch. Prepared plans
-are sealed to the producing application-query instance and single-use. The
-caller-visible handle is not the dispatch authority: resolution consumes a
-private detached record and never re-reads mutable handle contents. Callers
-therefore cannot forge, replace, race, or replay a typed target to skip the
-entity read. The essential surface in
+The application authorizes the entity and detaches an exact plan while its
+database scope is open. That plan carries the immutable store definition, exact
+project or group scope, requested capability, persisted grant ID and
+fingerprint, and credential handle; it performs no cache, DNS, network,
+credential, filesystem, or subprocess work. The application then releases the
+database scope, captures the use-time registry snapshot exactly once, and
+reauthorizes every detached field before constructing or dispatching a remote
+target. The single capture gives the operation point-in-time consistency
+against one worker snapshot. In production that provider always returns the
+startup snapshot, so configuration changes still require a restart of every
+worker.
+
+Prepared plans are sealed to the producing application-query instance and
+single-use. The caller-visible handle is not the dispatch authority: resolution
+consumes a private detached record and never re-reads mutable handle contents.
+Callers therefore cannot forge, replace, race, or replay a typed target to skip
+the entity read. Cache identity includes the revalidated grant ID and semantic
+fingerprint, so a warm result cannot bypass changed authority. The essential
+surface in
 `src/lab_tracker/artifact_resolution.py` is:
 
 ```python
@@ -637,8 +654,10 @@ content-free, redacted `unresolved` result. This denial is prepared only after
 the owning entity's opaque read boundary and occurs before adapter selection,
 cache access, filesystem work, DNS, network, credential lookup, working- or
 cache-directory creation, observed-hash calculation, or subprocess execution.
-Register the target as a data store and replace the pointer with its canonical
-`store_name`/`locator` or `store://` identity to make it resolvable.
+For a supported remote kind, register the target as a data store and replace
+the pointer with its canonical `store_name`/`locator` or `store://` identity to
+make it resolvable. Registered local stores remain fail-closed until the
+retained-handle authority boundary is restored.
 
 ## Bounding and untrusted content
 
@@ -726,9 +745,11 @@ Shipped (`src/lab_tracker/artifact_resolution.py`, tested in
   targets and fails closed for raw references.
 - ✅ One deny-by-default immutable `StoreAuthorityRegistry`, parsed from a
   strict versioned operator envelope before any other runtime composition and
-  retained by exact identity on runtime/app state. Its typed proofs and
-  fingerprints are pure foundations; registration binding and use-time
-  enforcement are not part of this slice.
+  retained by exact identity on runtime/app state. Registration persists its
+  typed grant ID and fingerprint. Remote resolution and health detach that
+  binding, release the database scope, capture the fixed startup snapshot once,
+  and revalidate before target, cache, credential, DNS, network, or subprocess
+  work.
 - ✅ `LocalFilesystemResolver` — `file://` and `local`/`local_fs` sources, with
   native `file:` URI conversion, an empty/`localhost`-only authority policy,
   and a shared filesystem-I/O-free lexical authority plus bounded broker.
@@ -747,22 +768,11 @@ Shipped (`src/lab_tracker/artifact_resolution.py`, tested in
   nonempty proof fails terminally. Clean zero-output misses/denials release a
   reservation, while ambiguous outcomes terminate the budget. Recovery is
   read-only, preserves the original URI, and emits path-free details.
-- ✅ Registered `local_fs` targets carry their validated locator and trusted
-  store root through database-scope release. The helper anchors the selected
-  operator grant and then the exact registered root as a retained nested scope
-  before traversing the locator. Direct and recovery candidate reads remain
-  conjunctive with both boundaries; invalid or mismatched logical locators fail
-  closed before candidate filesystem work.
-- ✅ Local-store health and local artifact reads consume narrow roles on the
-  exact same bounded operations broker, authority, and process executor.
-  Directory inspection has zero-byte output caps; file reads stream only opaque
-  bytes under the logical reservation. Results and ordinary failures stay
-  static, redacted, and point-in-time rather than durable filesystem leases.
-- ✅ Recovery enumeration is a narrow broker role implemented by the same
-  contained helper. One basename-prioritized pass consumes the existing
-  resolution deadline, visits no more than `4096` directories, returns no more
-  than `4096` path-free relative locators, and fails terminally on malformed,
-  partial, ambiguous, or cleanup-uncertain results.
+- ⏸️ The retained-handle local filesystem primitives and their bounded recovery
+  enumeration exist and remain tested, but registered `local_fs` resolution and
+  health currently fail closed before application I/O. Re-enabling them requires
+  the local-use slice to carry the revalidated scoped grant into that same
+  broker; a lexical registration proof alone is insufficient.
 - ✅ `HttpResolver` — `http(s)`, full-body verify with a `max_fetch_bytes` cap
   (oversized → `UNRESOLVED`, never uncertified bytes), plus a shared outbound
   destination policy that validates every IPv4/IPv6 answer, pins the vetted
@@ -837,17 +847,19 @@ Shipped (`src/lab_tracker/artifact_resolution.py`, tested in
   admitted under process-local global and per-actor no-wait limits.
   Saturated requests return the same generic `429` plus `Retry-After` without
   constructing the ordinary request session. Accepted calls complete all
-  database-backed preparation and release their read scope before resolver I/O;
-  returns the envelope plus base64 content. Registry comes from
+  database-backed preparation and release their read scope before resolver I/O.
+  Remote stores then revalidate the detached persisted grant binding against
+  one captured startup authority snapshot before constructing a target; returns
+  the envelope plus base64 content. Adapter registry comes from
   `request.app.state.resolver_registry` or
   `registry_from_env()`; `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS` is parsed with the
-  host's `os.pathsep` and gates local roots (unset or empty → local artifacts
-  resolve `UNRESOLVED` and local health fails closed), HTTP(S) is constrained by
-  the outbound destination policy, and rclone is constrained by its configured
-  remote-name allowlist. HTTP resolution additionally uses the single total
-  deadline configured by `LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS`; local,
-  rclone, and Git resolution plus local, rclone, and Git health use the
-  independent deadline configured by
+  host's `os.pathsep`, but application-level registered local resolution and
+  health currently remain fail-closed even when roots are configured. HTTP(S)
+  is constrained by the outbound destination policy, and rclone is constrained
+  by its configured remote-name allowlist. HTTP resolution additionally uses
+  the single total deadline configured by
+  `LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS`; rclone and Git resolution and
+  health use the independent deadline configured by
   `LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS`.
 - ✅ `lab_tracker_resolve_artifact` MCP read tool + `resolve_external_artifact`
   client method.

@@ -9,6 +9,7 @@ from typing import Any
 from uuid import UUID
 
 import pytest
+from store_authority_fakes import sealed_binding_identity
 
 from lab_tracker.bounded_subprocess import (
     MAX_PROCESS_DEADLINE_SECONDS,
@@ -32,6 +33,14 @@ from lab_tracker.store_health import (
 )
 
 _REMOTE = "https://example.com/org/repo.git"
+# One sealed use-time identity, held constant across every probe target: these
+# tests exercise git adapter mechanics, and a target can no longer exist without
+# proven authority.
+_BINDING_IDENTITY = sealed_binding_identity(
+    kind=StoreKind.GIT,
+    name="repository",
+    root=_REMOTE,
+)
 
 
 class FakeClock:
@@ -118,6 +127,7 @@ def _target(
         root=root,
         endpoint=None,
         credential_ref=None,
+        authority_binding_identity=_BINDING_IDENTITY,
     )
 
 

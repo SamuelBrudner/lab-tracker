@@ -7,7 +7,7 @@ from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass, field
 from threading import Lock
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, cast
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -16,11 +16,13 @@ from sqlalchemy.orm import Session as OrmSession
 from lab_tracker.artifact_resolution import (
     GitStoreResolutionTarget,
     HttpStoreResolutionTarget,
-    LocalStoreResolutionTarget,
     PreparedArtifactResolutionTarget,
     RcloneStoreResolutionTarget,
     ResolvedArtifact,
     ResolverRegistry,
+    git_store_resolution_target,
+    http_store_resolution_target,
+    rclone_store_resolution_target,
     resolver_registry_for_prepared_target,
     sanitize_artifact_resolution_result,
     snapshot_artifact_resolution_identity,
@@ -37,7 +39,13 @@ from lab_tracker.decision_context_query import (
     RepositoryDecisionContextReader,
 )
 from lab_tracker.errors import NotFoundError, ValidationError
+from lab_tracker.git_store_locator import (
+    PinnedGitPath,
+    canonical_git_store_uri,
+)
 from lab_tracker.local_store_locator import (
+    PortableStorePath,
+    canonical_store_uri,
     is_valid_store_name,
     parse_canonical_store_authority,
 )
@@ -54,6 +62,8 @@ from lab_tracker.models import (
     Project,
     ProjectStatus,
     Question,
+    StoreCapability,
+    StoreKind,
     SupervisionEdge,
     UsageEventResourceType,
     UsageEventVerb,
@@ -65,12 +75,20 @@ from lab_tracker.provenance import (
     build_claim_provenance_document,
     build_dataset_provenance_document,
 )
+from lab_tracker.rclone_store_definition import is_rclone_store_kind
 from lab_tracker.schemas import (
     AssistantDecisionContextRequest,
     PortfolioProjectGroupSummary,
     ProjectGraphRead,
     ProjectGraphView,
     SearchResults,
+)
+from lab_tracker.store_authority_use import (
+    DetachedStoreAuthorityBinding,
+    StoreAuthoritySnapshotProvider,
+    StoreAuthorityUseProof,
+    detach_store_authority_binding,
+    revalidate_store_authority_binding,
 )
 
 from .types import Page
@@ -96,14 +114,27 @@ class PreparedExternalArtifactResolution:
     _authorization: object | None = field(default=None, repr=False, compare=False)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, repr=False)
+class _PreparedRemoteStoreResolutionPlan:
+    """Pure detached inputs that are not yet a host-I/O capability."""
+
+    binding: DetachedStoreAuthorityBinding
+    logical_reference: ExternalArtifactReference
+    locator: PortableStorePath | PinnedGitPath
+    required_capabilities: tuple[StoreCapability, ...]
+    unavailable_result: ResolvedArtifact
+
+
+@dataclass(frozen=True, slots=True, repr=False)
 class _PreparedExternalArtifactResolutionRecord:
     """Private detached authority consumed instead of caller-visible plan data."""
 
     entity_type: ExternalArtifactEntityType
     entity_id: UUID
     artifact_index: int
-    target: PreparedArtifactResolutionTarget
+    materialized: (
+        PreparedArtifactResolutionTarget | _PreparedRemoteStoreResolutionPlan
+    )
     max_bytes: int
     byte_range: tuple[int, int] | None
 
@@ -236,6 +267,7 @@ class ContextQueries:
     session: OrmSession
     release_read_scope: Callable[[], None]
     resolver_registry: ResolverRegistry | None = None
+    store_authority_snapshot_provider: StoreAuthoritySnapshotProvider | None = None
     _prepared_external_artifact_resolutions: dict[
         object, _PreparedExternalArtifactResolutionRecord
     ] = field(default_factory=dict, init=False, repr=False, compare=False)
@@ -531,18 +563,24 @@ class ContextQueries:
         )
 
         detached_reference = reference.model_copy(deep=True)
-        materialized = self._materialize_reference(detached_reference, project_id)
-        target = (
-            materialized.model_copy(deep=True)
-            if isinstance(materialized, ExternalArtifactReference)
-            else materialized
+        materialized = self._materialize_reference(
+            detached_reference,
+            project_id,
+            required_capabilities=_resolution_capabilities(bounds.byte_range),
         )
+        public_target: PreparedArtifactResolutionTarget
+        if type(materialized) is _PreparedRemoteStoreResolutionPlan:
+            public_target = deepcopy(materialized.unavailable_result)
+        else:
+            public_target = deepcopy(
+                cast(PreparedArtifactResolutionTarget, materialized)
+            )
         authorization = object()
         prepared = PreparedExternalArtifactResolution(
             entity_type=entity_type,
             entity_id=entity_id,
             artifact_index=artifact_index,
-            target=target,
+            target=public_target,
             max_bytes=bounds.max_bytes,
             byte_range=bounds.byte_range,
             _authorization=authorization,
@@ -551,7 +589,7 @@ class ContextQueries:
             entity_type=entity_type,
             entity_id=entity_id,
             artifact_index=artifact_index,
-            target=deepcopy(target),
+            materialized=deepcopy(materialized),
             max_bytes=bounds.max_bytes,
             byte_range=bounds.byte_range,
         )
@@ -595,7 +633,11 @@ class ContextQueries:
                 )
             except ArtifactContentBoundsError as exc:
                 raise ValidationError(str(exc)) from exc
-            target = record.target
+            target = (
+                self._authorize_remote_store_plan(record.materialized)
+                if type(record.materialized) is _PreparedRemoteStoreResolutionPlan
+                else record.materialized
+            )
             entity_type = record.entity_type
             entity_id = record.entity_id
             artifact_index = record.artifact_index
@@ -609,8 +651,7 @@ class ContextQueries:
             # network, credential, or subprocess work.
             result = target
         elif (
-            type(target) is LocalStoreResolutionTarget
-            or type(target) is HttpStoreResolutionTarget
+            type(target) is HttpStoreResolutionTarget
             or type(target) is RcloneStoreResolutionTarget
             or type(target) is GitStoreResolutionTarget
         ):
@@ -642,6 +683,26 @@ class ContextQueries:
             else None
         )
         return body
+
+    def _authorize_remote_store_plan(
+        self,
+        plan: _PreparedRemoteStoreResolutionPlan,
+    ) -> PreparedArtifactResolutionTarget:
+        """Capture one post-release snapshot and mint a remote target or deny."""
+
+        if any(
+            capability not in plan.binding.capabilities
+            for capability in plan.required_capabilities
+        ):
+            return plan.unavailable_result
+        provider = self.store_authority_snapshot_provider
+        if provider is None:
+            return plan.unavailable_result
+        proof = revalidate_store_authority_binding(provider(), plan.binding)
+        if proof is None:
+            return plan.unavailable_result
+        target = _remote_store_resolution_target(plan, proof)
+        return target if target is not None else plan.unavailable_result
 
     def _locate_external_reference(
         self,
@@ -691,7 +752,11 @@ class ContextQueries:
         self,
         reference: ExternalArtifactReference,
         project_id: UUID,
-    ) -> PreparedArtifactResolutionTarget:
+        *,
+        required_capabilities: tuple[StoreCapability, ...],
+    ) -> (
+        PreparedArtifactResolutionTarget | _PreparedRemoteStoreResolutionPlan
+    ):
         if reference.store_name is not None and reference.locator is not None:
             return self._resolve_store(
                 reference,
@@ -699,6 +764,7 @@ class ContextQueries:
                 (reference.store_name,),
                 reference.locator,
                 locator_is_uri_path=False,
+                required_capabilities=required_capabilities,
             )
         parsed_store = _parse_store_reference_uri(reference.uri)
         if parsed_store is None:
@@ -717,6 +783,7 @@ class ContextQueries:
             parsed_store.name_candidates,
             parsed_store.locator,
             locator_is_uri_path=True,
+            required_capabilities=required_capabilities,
         )
 
     def _resolve_store(
@@ -724,11 +791,13 @@ class ContextQueries:
         reference: ExternalArtifactReference,
         project_id: UUID,
         name_candidates: tuple[str, ...],
-        _locator: str,
+        locator: str,
         *,
         locator_is_uri_path: bool,
-    ) -> PreparedArtifactResolutionTarget:
-        del locator_is_uri_path
+        required_capabilities: tuple[StoreCapability, ...],
+    ) -> (
+        PreparedArtifactResolutionTarget | _PreparedRemoteStoreResolutionPlan
+    ):
         matches: dict[UUID, tuple[str, DataStore]] = {}
         for candidate in dict.fromkeys(name_candidates):
             candidate_store = self.repository.data_stores.get_by_name(
@@ -741,13 +810,57 @@ class ContextQueries:
             return _unavailable_store_reference(reference)
         if len(matches) != 1:
             return _invalid_store_reference(reference)
-        # Registration authority is checked when a store is created, but
-        # use-time proof revalidation and retained local authority boundaries
-        # land in the next two slices. Preserve exact candidate lookup,
-        # project/group shadowing, and ambiguity classification here, then fail
-        # closed before parsing a target definition or constructing any
-        # filesystem, network, credential, cache, or subprocess capability.
-        return _unavailable_store_reference(reference)
+        _, store = next(iter(matches.values()))
+        binding = detach_store_authority_binding(store)
+        if binding is None or binding.definition.kind is StoreKind.LOCAL_FS:
+            # Local I/O remains disabled until a retained grant boundary is
+            # threaded into the handle-bound filesystem adapter in .63.5.
+            return _unavailable_store_reference(reference)
+        if any(
+            capability not in binding.capabilities
+            for capability in required_capabilities
+        ):
+            return _unavailable_store_reference(reference)
+
+        logical_reference: ExternalArtifactReference | None = None
+        parsed_locator: PortableStorePath | PinnedGitPath | None = None
+        kind = binding.definition.kind
+        name = binding.definition.name
+        if kind is StoreKind.HTTP or is_rclone_store_kind(kind):
+            portable_locator = (
+                PortableStorePath.parse_uri_path(locator)
+                if locator_is_uri_path
+                else PortableStorePath.parse_decoded(locator)
+            )
+            logical_reference = _nonlocal_store_logical_reference(
+                reference,
+                store_name=name,
+                locator=portable_locator,
+                locator_is_uri_path=locator_is_uri_path,
+            )
+            parsed_locator = portable_locator
+        elif kind is StoreKind.GIT:
+            pin = (
+                PinnedGitPath.parse_uri_path(locator)
+                if locator_is_uri_path
+                else PinnedGitPath.parse_decoded(locator)
+            )
+            logical_reference = _git_store_logical_reference(
+                reference,
+                store_name=name,
+                pin=pin,
+                locator_is_uri_path=locator_is_uri_path,
+            )
+            parsed_locator = pin
+        if logical_reference is None or parsed_locator is None:
+            return _invalid_store_reference(reference)
+        return _PreparedRemoteStoreResolutionPlan(
+            binding=binding,
+            logical_reference=logical_reference,
+            locator=parsed_locator,
+            required_capabilities=required_capabilities,
+            unavailable_result=_unavailable_store_reference(reference),
+        )
 
 
 def _goal_matches_project(
@@ -771,6 +884,112 @@ def _single_project_id(project_ids: set[UUID] | None) -> UUID | None:
 class _ParsedStoreReferenceUri:
     name_candidates: tuple[str, ...]
     locator: str
+
+
+def _resolution_capabilities(
+    byte_range: tuple[int, int] | None,
+) -> tuple[StoreCapability, ...]:
+    required = [StoreCapability.BYTES_BY_PATH]
+    if byte_range is not None:
+        required.append(StoreCapability.BYTE_RANGE)
+    return tuple(required)
+
+
+def _remote_store_resolution_target(
+    plan: _PreparedRemoteStoreResolutionPlan,
+    proof: StoreAuthorityUseProof,
+) -> (
+    HttpStoreResolutionTarget
+    | RcloneStoreResolutionTarget
+    | GitStoreResolutionTarget
+    | None
+):
+    kind = proof.definition.kind
+    if kind is StoreKind.HTTP and type(plan.locator) is PortableStorePath:
+        return http_store_resolution_target(
+            proof,
+            locator=plan.locator,
+            logical_reference=plan.logical_reference,
+        )
+    if is_rclone_store_kind(kind) and type(plan.locator) is PortableStorePath:
+        return rclone_store_resolution_target(
+            proof,
+            locator=plan.locator,
+            logical_reference=plan.logical_reference,
+        )
+    if kind is StoreKind.GIT and type(plan.locator) is PinnedGitPath:
+        return git_store_resolution_target(
+            proof,
+            pin=plan.locator,
+            logical_reference=plan.logical_reference,
+        )
+    return None
+
+
+def _nonlocal_store_logical_reference(
+    reference: ExternalArtifactReference,
+    *,
+    store_name: str,
+    locator: PortableStorePath | None,
+    locator_is_uri_path: bool,
+) -> ExternalArtifactReference | None:
+    """Canonicalize one validated nonlocal ``store://`` identity."""
+
+    canonical_uri = (
+        canonical_store_uri(store_name, locator) if locator is not None else None
+    )
+    if canonical_uri is None or locator is None:
+        return None
+    accepted_uris = {
+        canonical_uri,
+        f"store://{store_name}/{locator.uri_path}",
+    }
+    if not locator_is_uri_path:
+        accepted_uris.add(f"store://{store_name}/{locator.path}")
+    if reference.uri not in accepted_uris:
+        return None
+    return reference.model_copy(
+        update={
+            "source_system": "store",
+            "uri": canonical_uri,
+            "store_name": store_name,
+            "locator": locator.path,
+        },
+        deep=True,
+    )
+
+
+def _git_store_logical_reference(
+    reference: ExternalArtifactReference,
+    *,
+    store_name: str,
+    pin: PinnedGitPath | None,
+    locator_is_uri_path: bool,
+) -> ExternalArtifactReference | None:
+    """Canonicalize one validated immutable registered-Git identity."""
+
+    canonical_uri = (
+        canonical_git_store_uri(store_name, pin) if pin is not None else None
+    )
+    if canonical_uri is None or pin is None:
+        return None
+    accepted_uris = {
+        canonical_uri,
+        f"store://{store_name}/{pin.uri_path}",
+    }
+    if not locator_is_uri_path:
+        accepted_uris.add(f"store://{store_name}/{pin.locator}")
+    if reference.uri not in accepted_uris:
+        return None
+    return reference.model_copy(
+        update={
+            "source_system": "store",
+            "uri": canonical_uri,
+            "store_name": store_name,
+            "locator": pin.locator,
+        },
+        deep=True,
+    )
 
 
 def _parse_store_reference_uri(uri: str) -> _ParsedStoreReferenceUri | None:

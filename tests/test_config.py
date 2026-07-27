@@ -14,6 +14,7 @@ from api_helpers import drain_test_resources, register_test_resources
 from fastapi import FastAPI
 from pydantic import ValidationError
 from starlette.testclient import TestClient
+from store_authority_fakes import sealed_binding_identity
 
 from lab_tracker.app_parts import runtime as runtime_module
 from lab_tracker.app_parts.runtime import (
@@ -38,6 +39,8 @@ from lab_tracker.local_resolution_budget import (
     MAX_LOCAL_RESOLUTION_MAX_READ_BYTES,
 )
 from lab_tracker.models import StoreKind
+from lab_tracker.store_authority_registry import StoreAuthorityRegistry
+from lab_tracker.store_authority_use import FixedStoreAuthoritySnapshotProvider
 from lab_tracker.store_health import (
     DEFAULT_STORE_HEALTH_CACHE_MAX_ENTRIES,
     DEFAULT_STORE_HEALTH_CACHE_TTL_SECONDS,
@@ -984,6 +987,7 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(
         assert captured["health_rclone_deadline_seconds"] == 7.25
         assert captured["health_git_deadline_seconds"] == 7.25
 
+        binding_identity = sealed_binding_identity()
         local_health_target = StoreProbeTarget(
             store_id=UUID(int=4),
             name="runtime-local-wiring",
@@ -991,6 +995,7 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(
             root=str(settings_local_root),
             endpoint=None,
             credential_ref=None,
+            authority_binding_identity=binding_identity,
         )
         assert runtime.store_health_checker(local_health_target).is_healthy
         assert captured["local_health_target"] is local_health_target
@@ -1003,6 +1008,7 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(
             root="http://10.20.1.7/artifact.bin",
             endpoint=None,
             credential_ref=None,
+            authority_binding_identity=binding_identity,
         )
         assert runtime.store_health_checker(http_health_target).is_healthy
         assert captured["http_health_target"] is http_health_target
@@ -1015,6 +1021,7 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(
             root="/",
             endpoint=None,
             credential_ref="settings-remote",
+            authority_binding_identity=binding_identity,
         )
         assert runtime.store_health_checker(rclone_health_target).is_healthy
         assert captured["rclone_health_target"] is rclone_health_target
@@ -1027,6 +1034,7 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(
             root="https://settings.example/lab/repo.git",
             endpoint=None,
             credential_ref=None,
+            authority_binding_identity=binding_identity,
         )
         assert runtime.store_health_checker(git_health_target).is_healthy
         assert captured["git_health_target"] is git_health_target
@@ -1091,6 +1099,14 @@ def test_runtime_retains_one_store_authority_snapshot_without_environment_reread
 
         assert app.state.store_authority_registry is runtime.store_authority_registry
         assert (
+            app.state.store_authority_snapshot_provider
+            is runtime.store_authority_snapshot_provider
+        )
+        assert (
+            runtime.store_authority_snapshot_provider()
+            is runtime.store_authority_registry
+        )
+        assert (
             runtime.lab_tracker_api._store_authority_registry
             is runtime.store_authority_registry
         )
@@ -1099,9 +1115,21 @@ def test_runtime_retains_one_store_authority_snapshot_without_environment_reread
             is runtime.store_authority_registry
         )
         assert "store_authority_registry=" not in repr(runtime)
+        assert "store_authority_snapshot_provider=" not in repr(runtime)
     finally:
         runtime.engine.dispose()
         runtime.cleanup_git_health_workdir()
+
+
+def test_fixed_store_authority_provider_preserves_identity_and_redacts_repr():
+    registry = StoreAuthorityRegistry.deny_all()
+
+    provider = FixedStoreAuthoritySnapshotProvider(registry)
+
+    assert provider() is registry
+    rendered = repr(provider)
+    assert "_registry" not in rendered
+    assert "StoreAuthorityRegistry" not in rendered
 
 
 def test_lifespan_removes_app_owned_git_health_workdir(monkeypatch):
