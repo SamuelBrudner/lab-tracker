@@ -14,6 +14,12 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validat
 from pydantic.json_schema import SkipJsonSchema
 
 from lab_tracker.auth import Role
+from lab_tracker.data_store_definition import (
+    DATA_STORE_CREDENTIAL_REF_MAX_LENGTH,
+    DATA_STORE_ENDPOINT_MAX_LENGTH,
+    DATA_STORE_NAME_MAX_LENGTH,
+    DATA_STORE_ROOT_MAX_LENGTH,
+)
 from lab_tracker.goals_attributes import validate_goal_attributes
 from lab_tracker.models import (
     Analysis,
@@ -68,6 +74,7 @@ from lab_tracker.models import (
     Visualization,
     VisualizationInput,
 )
+from lab_tracker.store_authority_registry import MAX_STORE_AUTHORITY_GRANT_ID_LENGTH
 
 T = TypeVar("T")
 
@@ -181,6 +188,13 @@ class AuthBootstrapStatus(BaseModel):
     first_admin_available: bool
     bootstrap_token: str | None = None
     bootstrap_token_warning: str | None = None
+
+
+class AuthSetupReadiness(BaseModel):
+    scheduler_enabled: bool
+    background_worker_enabled: bool
+    provider: str
+    provider_credential_configured: bool
 
 
 class AuthTokenRead(BaseModel):
@@ -596,7 +610,14 @@ class GraphDraftListFilters(BaseModel):
 
 class GraphDraftBatchSettingsUpdate(PatchRequestModel):
     non_nullable_fields = frozenset(
-        {"enabled", "cadence_minutes", "run_at_local_time", "timezone_name", "user_id"}
+        {
+            "enabled",
+            "cadence_minutes",
+            "run_at_local_time",
+            "timezone_name",
+            "user_id",
+            "email_notifications_enabled",
+        }
     )
 
     enabled: bool | SkipJsonSchema[None] = None
@@ -604,6 +625,8 @@ class GraphDraftBatchSettingsUpdate(PatchRequestModel):
     run_at_local_time: str | SkipJsonSchema[None] = None
     timezone_name: str | SkipJsonSchema[None] = None
     user_id: UUID | SkipJsonSchema[None] = None
+    email_notifications_enabled: bool | SkipJsonSchema[None] = None
+    notification_email: str | None = Field(default=None, max_length=254)
 
 
 class GraphDraftBatchRunRequest(RequestModel):
@@ -616,6 +639,11 @@ class GraphDraftBatchRunRequest(RequestModel):
 class GraphDraftBatchRunFilters(BaseModel):
     project_id: UUID | None = None
     status: GraphDraftBatchRunStatus | None = None
+
+
+class ReviewEmailTestRequest(RequestModel):
+    destination_email: str = Field(min_length=3, max_length=254)
+    recipient_user_id: UUID | None = None
 
 
 class AssistantDecisionContextRequest(RequestModel):
@@ -896,12 +924,26 @@ GoalLinkRead = GoalLink
 class DataStoreCreate(RequestModel):
     project_id: UUID | None = None
     group_id: UUID | None = None
-    name: NonBlankStr
+    name: NonBlankStr = Field(max_length=DATA_STORE_NAME_MAX_LENGTH)
     kind: StoreKind
-    root: NonBlankStr
-    capabilities: list[StoreCapability] | None = None
-    endpoint: str | None = None
-    credential_ref: str | None = None
+    root: NonBlankStr = Field(max_length=DATA_STORE_ROOT_MAX_LENGTH)
+    capabilities: list[StoreCapability] | None = Field(
+        default=None,
+        max_length=len(StoreCapability),
+    )
+    endpoint: str | None = Field(
+        default=None,
+        max_length=DATA_STORE_ENDPOINT_MAX_LENGTH,
+    )
+    credential_ref: str | None = Field(
+        default=None,
+        max_length=DATA_STORE_CREDENTIAL_REF_MAX_LENGTH,
+    )
+    authority_grant_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=MAX_STORE_AUTHORITY_GRANT_ID_LENGTH,
+    )
     is_default: bool = False
 
     @model_validator(mode="after")

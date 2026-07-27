@@ -297,7 +297,7 @@ function useAuthSession({ replace, setBusy, setFlash, storage }) {
       setAuthInviteToken("");
       setAuthPassword("");
       if (authInviteToken) {
-        replace("/app");
+        replace("/app/setup");
       }
       setFlash(
         authMode === "setup"

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import hashlib
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -10,7 +9,13 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
+from api_helpers import TEST_STORE_AUTHORITY_GRANT_ID
 from fastapi.testclient import TestClient
+from read_opacity_inventory import (
+    EVIDENCE_ARTIFACT_READ_OPACITY_VARIANTS,
+    EVIDENCE_ARTIFACT_SUITE,
+    READ_OPACITY_VARIANTS_BY_ID,
+)
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.application.context_queries import ContextQueries
@@ -81,6 +86,17 @@ class ResolverCase:
     not_found_label: str
 
 
+EVIDENCE_ARTIFACT_READ_DOMAINS = (
+    "datasets",
+    "analyses",
+    "claims",
+    "visualizations",
+    "exploration",
+    "provenance-links",
+)
+RESOLVER_ENTITY_TYPES = ("dataset", "analysis", "claim")
+
+
 def _sha256(content: bytes) -> str:
     return f"sha256:{hashlib.sha256(content).hexdigest()}"
 
@@ -121,10 +137,25 @@ def _create_evidence_artifact_records(
     artifact = artifact_root / f"artifact-{uuid4().hex}.bin"
     artifact.write_bytes(artifact_content)
     artifact_hash = _sha256(artifact_content)
+    store_name = "opacity-artifacts"
+    store_response = client.post(
+        "/data-stores",
+        json={
+            "project_id": project_id,
+            "name": store_name,
+            "kind": "local_fs",
+            "root": str(artifact_root),
+            "authority_grant_id": TEST_STORE_AUTHORITY_GRANT_ID,
+        },
+        headers=headers,
+    )
+    assert store_response.status_code == 201, store_response.text
     artifact_reference = {
-        "source_system": "local",
-        "uri": artifact.as_uri(),
+        "source_system": "store",
+        "uri": f"store://{store_name}/{artifact.name}",
         "content_hash": artifact_hash,
+        "store_name": store_name,
+        "locator": artifact.name,
     }
     client.app.state.resolver_registry = ResolverRegistry(
         [LocalFilesystemResolver(allowed_roots=[artifact_root])]
@@ -643,14 +674,7 @@ def _resolver_payload(
 
 @pytest.mark.parametrize(
     "domain",
-    (
-        "datasets",
-        "analyses",
-        "claims",
-        "visualizations",
-        "exploration",
-        "provenance-links",
-    ),
+    EVIDENCE_ARTIFACT_READ_DOMAINS,
 )
 def test_evidence_artifact_read_variants_are_opaque_and_preserve_contracts(
     domain: str,
@@ -660,9 +684,33 @@ def test_evidence_artifact_read_variants_are_opaque_and_preserve_contracts(
     evidence_artifact_records: EvidenceArtifactRecords,
 ) -> None:
     cases_by_domain = _read_cases(evidence_artifact_records)
+    assert tuple(cases_by_domain) == EVIDENCE_ARTIFACT_READ_DOMAINS
     assert sum(len(cases) for cases in cases_by_domain.values()) == 15
+    inventory_coverage_ids = {
+        variant.coverage_id
+        for variant in EVIDENCE_ARTIFACT_READ_OPACITY_VARIANTS
+        if variant.method == "GET"
+    }
+    assert {
+        f"{EVIDENCE_ARTIFACT_SUITE}.{case.name}"
+        for cases in cases_by_domain.values()
+        for case in cases
+    } == inventory_coverage_ids
 
     for case in cases_by_domain[domain]:
+        coverage_id = f"{EVIDENCE_ARTIFACT_SUITE}.{case.name}"
+        assert coverage_id in inventory_coverage_ids
+        inventory_variant = READ_OPACITY_VARIANTS_BY_ID[coverage_id]
+        assert inventory_variant.matches_request(
+            method="GET",
+            request_target=case.existing_path,
+            variant="default",
+        )
+        assert inventory_variant.matches_request(
+            method="GET",
+            request_target=case.missing_path,
+            variant="default",
+        )
         authorized = client.get(
             case.existing_path,
             headers=_request_headers(admin_auth_headers, case),
@@ -740,7 +788,7 @@ def test_jsonld_negotiated_detail_reads_use_the_same_opaque_root_boundary(
     )
 
 
-@pytest.mark.parametrize("entity_type", ("dataset", "analysis", "claim"))
+@pytest.mark.parametrize("entity_type", RESOLVER_ENTITY_TYPES)
 def test_resolver_entity_modes_are_opaque_before_index_hash_or_resolution(
     entity_type: str,
     client: TestClient,
@@ -748,10 +796,28 @@ def test_resolver_entity_modes_are_opaque_before_index_hash_or_resolution(
     scoped_project_member,
     evidence_artifact_records: EvidenceArtifactRecords,
 ) -> None:
+    resolver_cases = _resolver_cases(evidence_artifact_records)
+    assert tuple(item.entity_type for item in resolver_cases) == RESOLVER_ENTITY_TYPES
     case = next(
         item
-        for item in _resolver_cases(evidence_artifact_records)
+        for item in resolver_cases
         if item.entity_type == entity_type
+    )
+    inventory_coverage_ids = {
+        variant.coverage_id
+        for variant in EVIDENCE_ARTIFACT_READ_OPACITY_VARIANTS
+        if variant.method == "POST"
+    }
+    assert {
+        f"{EVIDENCE_ARTIFACT_SUITE}.resolver-{item.entity_type}"
+        for item in resolver_cases
+    } == inventory_coverage_ids
+    coverage_id = f"{EVIDENCE_ARTIFACT_SUITE}.resolver-{case.entity_type}"
+    assert coverage_id in inventory_coverage_ids
+    assert READ_OPACITY_VARIANTS_BY_ID[coverage_id].matches_request(
+        method="POST",
+        request_target="/external-artifacts/resolve",
+        variant=f"entity_type={case.entity_type}",
     )
     authorized = client.post(
         "/external-artifacts/resolve",
@@ -760,13 +826,13 @@ def test_resolver_entity_modes_are_opaque_before_index_hash_or_resolution(
     )
     assert authorized.status_code == 200, authorized.text
     body = authorized.json()["data"]
-    assert body["status"] == "verified"
+    assert body["status"] == "unresolved"
     assert body["entity_type"] == entity_type
     assert body["entity_id"] == case.existing_id
-    assert body["observed_hash"] == evidence_artifact_records.artifact_hash
-    assert base64.b64decode(body["content_base64"]) == (
-        evidence_artifact_records.artifact_content
-    )
+    assert body["uri"] == "store://[redacted]"
+    assert body["observed_hash"] is None
+    assert body["content_base64"] is None
+    assert body["detail"] == "Store artifact could not be resolved."
 
     outsider_payloads = (
         _resolver_payload(case),
@@ -978,11 +1044,13 @@ def test_read_only_viewer_lpat_preserves_opaque_project_authorization(
     )
     assert authorized.status_code == 200, authorized.text
     body = authorized.json()["data"]
-    assert body["status"] == "verified"
+    assert body["status"] == "unresolved"
     assert body["entity_type"] == "dataset"
     assert body["entity_id"] == records.dataset_id
-    assert body["observed_hash"] == records.artifact_hash
-    assert base64.b64decode(body["content_base64"]) == records.artifact_content
+    assert body["uri"] == "store://[redacted]"
+    assert body["observed_hash"] is None
+    assert body["content_base64"] is None
+    assert body["detail"] == "Store artifact could not be resolved."
 
     write_viewer_headers = _issue_token(
         client,
@@ -1037,7 +1105,12 @@ def test_read_write_editor_and_admin_lpats_keep_resolver_access(
     )
 
     assert response.status_code == 200, response.text
-    assert response.json()["data"]["status"] == "verified"
+    body = response.json()["data"]
+    assert body["status"] == "unresolved"
+    assert body["uri"] == "store://[redacted]"
+    assert body["observed_hash"] is None
+    assert body["content_base64"] is None
+    assert body["detail"] == "Store artifact could not be resolved."
 
 
 def test_group_read_all_inheritance_authorizes_every_frozen_read_mode(
@@ -1097,6 +1170,12 @@ def test_group_read_all_inheritance_authorizes_every_frozen_read_mode(
         assert response.status_code == 200, (
             f"resolver-{case.entity_type}: {response.text}"
         )
+        body = response.json()["data"]
+        assert body["status"] == "unresolved"
+        assert body["uri"] == "store://[redacted]"
+        assert body["observed_hash"] is None
+        assert body["content_base64"] is None
+        assert body["detail"] == "Store artifact could not be resolved."
 
 
 def test_validation_precedence_is_visibility_independent(

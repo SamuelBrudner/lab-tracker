@@ -17,6 +17,9 @@ export interface paths {
   "/auth/me": {
     get: operations["auth_me_auth_me_get"];
   };
+  "/auth/setup-readiness": {
+    get: operations["auth_setup_readiness_auth_setup_readiness_get"];
+  };
   "/auth/users": {
     get: operations["list_auth_users_auth_users_get"];
   };
@@ -55,11 +58,18 @@ export interface paths {
   "/projects/{project_id}/members": {
     get: operations["list_project_members_projects__project_id__members_get"];
   };
+  "/projects/{project_id}/graph-draft-batch-settings": {
+    get: operations["get_batch_settings_projects__project_id__graph_draft_batch_settings_get"];
+    patch: operations["update_batch_settings_projects__project_id__graph_draft_batch_settings_patch"];
+  };
   "/datasets": {
     get: operations["list_datasets_datasets_get"];
   };
   "/datasets/{dataset_id}": {
     get: operations["get_dataset_datasets__dataset_id__get"];
+  };
+  "/data-stores": {
+    post: operations["create_data_store_data_stores_post"];
   };
   "/notes": {
     get: operations["list_notes_notes_get"];
@@ -69,6 +79,12 @@ export interface paths {
   };
   "/graph-drafts/{change_set_id}": {
     get: operations["get_graph_draft_graph_drafts__change_set_id__get"];
+  };
+  "/review-email/test": {
+    post: operations["enqueue_test_email_review_email_test_post"];
+  };
+  "/review-email/deliveries": {
+    get: operations["list_email_deliveries_review_email_deliveries_get"];
   };
 }
 
@@ -83,6 +99,11 @@ export interface operations {
     };
   };
   "register_auth_auth_register_post": {
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["AuthRegisterRequest"];
+      };
+    };
     responses: {
       201: {
         content: {
@@ -92,6 +113,11 @@ export interface operations {
     };
   };
   "login_auth_auth_login_post": {
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["AuthLoginRequest"];
+      };
+    };
     responses: {
       200: {
         content: {
@@ -118,6 +144,15 @@ export interface operations {
       };
     };
   };
+  "auth_setup_readiness_auth_setup_readiness_get": {
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["Envelope_AuthSetupReadiness_"];
+        };
+      };
+    };
+  };
   "list_auth_users_auth_users_get": {
     responses: {
       200: {
@@ -128,6 +163,11 @@ export interface operations {
     };
   };
   "update_auth_user_auth_users__user_id__patch": {
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["AuthUserUpdate"];
+      };
+    };
     responses: {
       200: {
         content: {
@@ -146,6 +186,11 @@ export interface operations {
     };
   };
   "create_auth_invitation_auth_invitations_post": {
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["AuthInvitationCreate"];
+      };
+    };
     responses: {
       201: {
         content: {
@@ -173,6 +218,11 @@ export interface operations {
     };
   };
   "create_enrollment_auth_devices_enrollment_post": {
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["DeviceEnrollmentCreate"];
+      };
+    };
     responses: {
       201: {
         content: {
@@ -182,6 +232,11 @@ export interface operations {
     };
   };
   "consume_enrollment_auth_devices_consume_post": {
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["DeviceConsumeRequest"];
+      };
+    };
     responses: {
       201: {
         content: {
@@ -209,6 +264,11 @@ export interface operations {
     };
   };
   "create_personal_access_token_auth_tokens_post": {
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["PersonalAccessTokenCreate"];
+      };
+    };
     responses: {
       201: {
         content: {
@@ -244,6 +304,29 @@ export interface operations {
       };
     };
   };
+  "get_batch_settings_projects__project_id__graph_draft_batch_settings_get": {
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["Envelope_GraphDraftBatchSettings_"];
+        };
+      };
+    };
+  };
+  "update_batch_settings_projects__project_id__graph_draft_batch_settings_patch": {
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["GraphDraftBatchSettingsUpdate"];
+      };
+    };
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["Envelope_GraphDraftBatchSettings_"];
+        };
+      };
+    };
+  };
   "list_datasets_datasets_get": {
     responses: {
       200: {
@@ -258,6 +341,20 @@ export interface operations {
       200: {
         content: {
           "application/json": components["schemas"]["Envelope_Dataset_"];
+        };
+      };
+    };
+  };
+  "create_data_store_data_stores_post": {
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["DataStoreCreate"];
+      };
+    };
+    responses: {
+      201: {
+        content: {
+          "application/json": components["schemas"]["Envelope_DataStore_"];
         };
       };
     };
@@ -289,6 +386,29 @@ export interface operations {
       };
     };
   };
+  "enqueue_test_email_review_email_test_post": {
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ReviewEmailTestRequest"];
+      };
+    };
+    responses: {
+      201: {
+        content: {
+          "application/json": components["schemas"]["Envelope_ReviewEmailDelivery_"];
+        };
+      };
+    };
+  };
+  "list_email_deliveries_review_email_deliveries_get": {
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["ListEnvelope_ReviewEmailDelivery_"];
+        };
+      };
+    };
+  };
 }
 
 export interface components {
@@ -300,6 +420,10 @@ export interface components {
       "bootstrap_token_warning"?: (string | null);
       "first_admin_available": boolean;
       "has_users": boolean;
+    };
+    "AuthInvitationCreate": {
+      "email": string;
+      "role"?: components["schemas"]["Role"];
     };
     "AuthInvitationRead": {
       "consumed_at"?: (string | null);
@@ -314,6 +438,23 @@ export interface components {
       "status": string;
       "warning"?: (string | null);
     };
+    "AuthLoginRequest": {
+      "password": string;
+      "username": string;
+    };
+    "AuthRegisterRequest": {
+      "bootstrap_token"?: (string | null);
+      "invite_token"?: (string | null);
+      "password": string;
+      "role"?: components["schemas"]["Role"];
+      "username": string;
+    };
+    "AuthSetupReadiness": {
+      "background_worker_enabled": boolean;
+      "provider": string;
+      "provider_credential_configured": boolean;
+      "scheduler_enabled": boolean;
+    };
     "AuthTokenRead": {
       "access_token": string;
       "expires_at": string;
@@ -325,6 +466,40 @@ export interface components {
       "role": components["schemas"]["Role"];
       "user_id": string;
       "username": string;
+    };
+    "AuthUserUpdate": {
+      "password"?: string;
+      "role"?: components["schemas"]["Role"];
+    };
+    "DataStore": {
+      "authority_grant_fingerprint"?: (string | null);
+      "authority_grant_id"?: (string | null);
+      "capabilities"?: Array<components["schemas"]["StoreCapability"]>;
+      "created_at"?: string;
+      "created_by"?: (string | null);
+      "created_by_user_id"?: (string | null);
+      "credential_ref"?: (string | null);
+      "endpoint"?: (string | null);
+      "group_id"?: (string | null);
+      "is_default"?: boolean;
+      "kind": components["schemas"]["StoreKind"];
+      "name": string;
+      "project_id"?: (string | null);
+      "root": string;
+      "store_id": string;
+      "updated_at"?: string;
+    };
+    "DataStoreCreate": {
+      "authority_grant_id"?: (string | null);
+      "capabilities"?: (Array<components["schemas"]["StoreCapability"]> | null);
+      "credential_ref"?: (string | null);
+      "endpoint"?: (string | null);
+      "group_id"?: (string | null);
+      "is_default"?: boolean;
+      "kind": components["schemas"]["StoreKind"];
+      "name": string;
+      "project_id"?: (string | null);
+      "root": string;
     };
     "Dataset": {
       "change_set_id"?: (string | null);
@@ -368,6 +543,13 @@ export interface components {
       "label": string;
       "secret": string;
     };
+    "DeviceConsumeRequest": {
+      "label": string;
+      "offer_token": string;
+    };
+    "DeviceEnrollmentCreate": {
+      "ttl_minutes"?: (number | null);
+    };
     "DeviceEnrollmentRead": {
       "enrollment_id": string;
       "enrollment_qr_svg": string;
@@ -396,12 +578,20 @@ export interface components {
       "data": components["schemas"]["AuthInvitationRead"];
       "meta"?: (Record<string, unknown> | null);
     };
+    "Envelope_AuthSetupReadiness_": {
+      "data": components["schemas"]["AuthSetupReadiness"];
+      "meta"?: (Record<string, unknown> | null);
+    };
     "Envelope_AuthTokenRead_": {
       "data": components["schemas"]["AuthTokenRead"];
       "meta"?: (Record<string, unknown> | null);
     };
     "Envelope_AuthUserRead_": {
       "data": components["schemas"]["AuthUserRead"];
+      "meta"?: (Record<string, unknown> | null);
+    };
+    "Envelope_DataStore_": {
+      "data": components["schemas"]["DataStore"];
       "meta"?: (Record<string, unknown> | null);
     };
     "Envelope_Dataset_": {
@@ -424,6 +614,10 @@ export interface components {
       "data": components["schemas"]["GraphChangeSet"];
       "meta"?: (Record<string, unknown> | null);
     };
+    "Envelope_GraphDraftBatchSettings_": {
+      "data": components["schemas"]["GraphDraftBatchSettings"];
+      "meta"?: (Record<string, unknown> | null);
+    };
     "Envelope_Note_": {
       "data": components["schemas"]["Note"];
       "meta"?: (Record<string, unknown> | null);
@@ -434,6 +628,10 @@ export interface components {
     };
     "Envelope_PersonalAccessTokenRead_": {
       "data": components["schemas"]["PersonalAccessTokenRead"];
+      "meta"?: (Record<string, unknown> | null);
+    };
+    "Envelope_ReviewEmailDelivery_": {
+      "data": components["schemas"]["ReviewEmailDelivery"];
       "meta"?: (Record<string, unknown> | null);
     };
     "ExternalArtifactKind": "entity" | "activity";
@@ -518,6 +716,31 @@ export interface components {
       "updated_at"?: string;
     };
     "GraphChangeSetStatus": "drafting" | "ready" | "submitted" | "changes_requested" | "committing" | "rejected" | "failed" | "committed";
+    "GraphDraftBatchSettings": {
+      "cadence_minutes"?: number;
+      "created_at"?: string;
+      "email_notifications_enabled"?: boolean;
+      "enabled"?: boolean;
+      "next_run_at"?: (string | null);
+      "notification_email"?: (string | null);
+      "notification_email_confirmed_at"?: (string | null);
+      "project_id": string;
+      "run_at_local_time"?: string;
+      "settings_id": string;
+      "timezone_name"?: string;
+      "updated_at"?: string;
+      "updated_by"?: (string | null);
+      "user_id"?: (string | null);
+    };
+    "GraphDraftBatchSettingsUpdate": {
+      "cadence_minutes"?: number;
+      "email_notifications_enabled"?: boolean;
+      "enabled"?: boolean;
+      "notification_email"?: (string | null);
+      "run_at_local_time"?: string;
+      "timezone_name"?: string;
+      "user_id"?: string;
+    };
     "GraphDraftMode": "graph_context" | "image_only" | "graph_batch";
     "GraphDraftSemanticType": "create_entity" | "update_entity" | "create_note" | "link_note_to_question" | "link_note_to_session" | "link_note_to_dataset" | "link_note_to_analysis" | "suggest_new_question" | "suggest_new_dataset" | "suggest_new_goal" | "link_node_to_goal" | "update_goal" | "suggest_followup" | "request_clarification";
     "ListEnvelope_AuthInvitationRead_": {
@@ -550,6 +773,10 @@ export interface components {
     };
     "ListEnvelope_Project_": {
       "data": Array<components["schemas"]["Project"]>;
+      "meta": components["schemas"]["PaginationMeta"];
+    };
+    "ListEnvelope_ReviewEmailDelivery_": {
+      "data": Array<components["schemas"]["ReviewEmailDelivery"]>;
       "meta": components["schemas"]["PaginationMeta"];
     };
     "Note": {
@@ -590,6 +817,13 @@ export interface components {
       "limit": number;
       "offset": number;
       "total": number;
+    };
+    "PersonalAccessTokenCreate": {
+      "expires_at": string;
+      "label": string;
+      "read_only"?: boolean;
+      "role"?: components["schemas"]["Role"];
+      "scope"?: "all" | "batch_run_due";
     };
     "PersonalAccessTokenIssuedRead": {
       "created_at": string;
@@ -646,6 +880,32 @@ export interface components {
       "role": components["schemas"]["QuestionLinkRole"];
     };
     "QuestionLinkRole": "primary" | "secondary";
+    "ReviewEmailDelivery": {
+      "accepted_at"?: (string | null);
+      "attempt_count"?: number;
+      "change_set_id"?: (string | null);
+      "claim_token"?: (string | null);
+      "claimed_at"?: (string | null);
+      "created_at"?: string;
+      "delivery_id": string;
+      "destination_email": string;
+      "event_type"?: "review_ready" | "test";
+      "idempotency_key": string;
+      "last_error"?: (string | null);
+      "lease_expires_at"?: (string | null);
+      "next_attempt_at"?: (string | null);
+      "provider_message_id"?: (string | null);
+      "recipient_user_id"?: (string | null);
+      "status"?: components["schemas"]["ReviewEmailDeliveryStatus"];
+      "updated_at"?: string;
+    };
+    "ReviewEmailDeliveryStatus": "pending" | "sending" | "retryable" | "accepted" | "failed";
+    "ReviewEmailTestRequest": {
+      "destination_email": string;
+      "recipient_user_id"?: (string | null);
+    };
     "Role": "admin" | "editor" | "viewer";
+    "StoreCapability": "bytes_by_path" | "byte_range" | "list" | "versioned_snapshot" | "query";
+    "StoreKind": "local_fs" | "ssh" | "s3" | "gcs" | "azure_blob" | "dropbox" | "gdrive" | "box" | "onedrive" | "object_table" | "database" | "http" | "rclone" | "git";
   };
 }

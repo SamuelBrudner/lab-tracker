@@ -284,7 +284,9 @@ def test_openai_graph_draft_client_sends_responses_image_and_strict_schema() -> 
 
     client = OpenAIGraphDraftClient(
         api_key="test-key",
-        model="gpt-test",
+        model="gpt-5.6-sol",
+        reasoning_effort="max",
+        reasoning_mode="pro",
         transport=httpx.MockTransport(handler),
     )
 
@@ -301,7 +303,8 @@ def test_openai_graph_draft_client_sends_responses_image_and_strict_schema() -> 
         "operations": [],
     }
     request = requests[0]
-    assert request["model"] == "gpt-test"
+    assert request["model"] == "gpt-5.6-sol"
+    assert request["reasoning"] == {"effort": "max", "mode": "pro"}
     assert "parent_question_ids" in request["instructions"]
     assert request["input"][0]["content"][1]["type"] == "input_image"
     assert request["input"][0]["content"][1]["image_url"].startswith("data:image/png;base64,")
@@ -343,6 +346,7 @@ def test_openai_graph_draft_client_embeds_extra_reviewer_images() -> None:
     )
 
     content = requests[0]["input"][0]["content"]
+    assert "reasoning" not in requests[0]
     image_items = [item for item in content if item["type"] == "input_image"]
     assert len(image_items) == 1
     assert image_items[0]["image_url"].startswith("data:image/png;base64,")
@@ -488,7 +492,9 @@ def test_openai_graph_draft_client_drafts_from_batch_sends_packet() -> None:
 
     client = OpenAIGraphDraftClient(
         api_key="test-key",
-        model="gpt-batch-test",
+        model="gpt-5.6-sol",
+        reasoning_effort="max",
+        reasoning_mode="pro",
         transport=httpx.MockTransport(handler),
     )
 
@@ -507,7 +513,8 @@ def test_openai_graph_draft_client_drafts_from_batch_sends_packet() -> None:
 
     assert result["summary"] == "batch ok"
     request = requests[0]
-    assert request["model"] == "gpt-batch-test"
+    assert request["model"] == "gpt-5.6-sol"
+    assert request["reasoning"] == {"effort": "max", "mode": "pro"}
     assert "daily batch" in request["instructions"]
     user_text = request["input"][0]["content"][0]["text"]
     assert "Batch size: 2 notes" in user_text
@@ -565,7 +572,9 @@ def test_openai_graph_draft_client_drafts_from_analysis_evidence_sends_packet() 
 
     client = OpenAIGraphDraftClient(
         api_key="test-key",
-        model="gpt-analysis-test",
+        model="gpt-5.6-sol",
+        reasoning_effort="max",
+        reasoning_mode="pro",
         transport=httpx.MockTransport(handler),
     )
 
@@ -576,7 +585,8 @@ def test_openai_graph_draft_client_drafts_from_analysis_evidence_sends_packet() 
 
     assert result["summary"] == "analysis ok"
     request = requests[0]
-    assert request["model"] == "gpt-analysis-test"
+    assert request["model"] == "gpt-5.6-sol"
+    assert request["reasoning"] == {"effort": "max", "mode": "pro"}
     assert "analysis evidence" in request["instructions"]
     user_text = request["input"][0]["content"][0]["text"]
     assert "method_hash=abc123" in user_text
@@ -603,12 +613,16 @@ def test_make_graph_draft_client_returns_openai_by_default() -> None:
         auth_enabled=False,
         graph_draft_provider="openai",
         openai_api_key="test-key",
-        openai_model="gpt-test",
+        openai_model="gpt-5.6-sol",
+        openai_reasoning_effort="max",
+        openai_reasoning_mode="pro",
     )
     client = make_graph_draft_client(settings)
     try:
         assert isinstance(client, OpenAIGraphDraftClient)
-        assert client.model == "gpt-test"
+        assert client.model == "gpt-5.6-sol"
+        assert client.reasoning_effort == "max"
+        assert client.reasoning_mode == "pro"
     finally:
         client.close()
 

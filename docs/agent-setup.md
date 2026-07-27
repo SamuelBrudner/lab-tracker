@@ -51,6 +51,18 @@ gateway. An `agentic` provider (a read-only tool-using drafting loop) also
 exists and requires the background worker — see
 [`server-resident-agentic-drafting-design.md`](server-resident-agentic-drafting-design.md).
 
+For quality-first OpenAI drafting with GPT-5.6 Sol, set:
+
+```dotenv
+LAB_TRACKER_OPENAI_MODEL=gpt-5.6-sol
+LAB_TRACKER_OPENAI_REASONING_EFFORT=max
+LAB_TRACKER_OPENAI_REASONING_MODE=pro
+```
+
+These are Responses API settings. Codex Ultra additionally uses agent
+orchestration; it is not a valid `reasoning.effort` value and is not enabled by
+this configuration.
+
 Two setup facts worth knowing up front:
 
 - A missing key is **not** detected at startup. It surfaces at the first draft

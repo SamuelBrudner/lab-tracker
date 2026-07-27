@@ -37,6 +37,7 @@ from lab_tracker.services.graph_draft_scheduling_ports import (
     SchedulingRecords,
     SchedulingRepository,
 )
+from lab_tracker.services.review_email_service import normalize_review_email
 from lab_tracker.services.shared import actor_user_fk, actor_user_id
 
 logger = logging.getLogger(__name__)
@@ -87,7 +88,13 @@ class BatchSchedulingCoordinator(BaseService):
         user_id: UUID | None = None,
         actor: AuthContext | None = None,
     ) -> GraphDraftBatchSettings:
-        self.authorization.require_read(project_id, actor=actor)
+        # Per-user settings now include a notification address. Keep another
+        # user's address owner-only while preserving ordinary read access to
+        # the project-level default and to one's own settings.
+        if user_id is not None and (actor is None or user_id != actor.user_id):
+            self.authorization.require_owner(project_id, actor=actor)
+        else:
+            self.authorization.require_read(project_id, actor=actor)
         settings = self.scheduling_repository.get_graph_draft_batch_settings_by_project(
             project_id,
             user_id=user_id,
@@ -111,6 +118,8 @@ class BatchSchedulingCoordinator(BaseService):
         run_at_local_time: PatchValue[str | None] = NOT_PROVIDED,
         timezone_name: PatchValue[str | None] = NOT_PROVIDED,
         user_id: PatchValue[UUID | None] = NOT_PROVIDED,
+        email_notifications_enabled: PatchValue[bool | None] = NOT_PROVIDED,
+        notification_email: PatchValue[str | None] = NOT_PROVIDED,
         actor: AuthContext | None = None,
     ) -> GraphDraftBatchSettings:
         enabled = _validated_setting_patch(enabled, "enabled")
@@ -121,6 +130,10 @@ class BatchSchedulingCoordinator(BaseService):
         )
         timezone_name = _validated_setting_patch(timezone_name, "timezone_name")
         user_id = _validated_setting_patch(user_id, "user_id")
+        email_notifications_enabled = _validated_setting_patch(
+            email_notifications_enabled,
+            "email_notifications_enabled",
+        )
         resolved_user_id = user_id if is_provided(user_id) else None
         # Contributors may schedule their own project's daily batch -- the
         # project-level default (user_id is None) and their own per-user
@@ -161,6 +174,31 @@ class BatchSchedulingCoordinator(BaseService):
         if is_provided(timezone_name):
             batch_policy.zoneinfo_for(timezone_name)
             settings.timezone_name = timezone_name
+        if is_provided(notification_email):
+            cleaned_email = (
+                normalize_review_email(notification_email)
+                if notification_email is not None and notification_email.strip()
+                else None
+            )
+            if cleaned_email != settings.notification_email:
+                settings.notification_email = cleaned_email
+                settings.notification_email_confirmed_at = (
+                    utc_now() if cleaned_email is not None else None
+                )
+        if is_provided(email_notifications_enabled):
+            settings.email_notifications_enabled = email_notifications_enabled
+        if settings.email_notifications_enabled:
+            if settings.user_id is None:
+                raise ValidationError(
+                    "Email alerts require per-user batch settings with user_id."
+                )
+            if (
+                not settings.notification_email
+                or settings.notification_email_confirmed_at is None
+            ):
+                raise ValidationError(
+                    "notification_email is required before email alerts can be enabled."
+                )
         scheduling_changed = any(
             (
                 settings.enabled != before.enabled,
@@ -169,17 +207,27 @@ class BatchSchedulingCoordinator(BaseService):
                 settings.timezone_name != before.timezone_name,
             )
         )
-        if not scheduling_changed:
-            return settings
-        settings.next_run_at = (
-            batch_policy.next_run_at(
-                cadence_minutes=settings.cadence_minutes,
-                run_at_local_time=settings.run_at_local_time,
-                timezone_name=settings.timezone_name,
+        notification_changed = any(
+            (
+                settings.email_notifications_enabled
+                != before.email_notifications_enabled,
+                settings.notification_email != before.notification_email,
+                settings.notification_email_confirmed_at
+                != before.notification_email_confirmed_at,
             )
-            if settings.enabled
-            else None
         )
+        if not scheduling_changed and not notification_changed:
+            return settings
+        if scheduling_changed:
+            settings.next_run_at = (
+                batch_policy.next_run_at(
+                    cadence_minutes=settings.cadence_minutes,
+                    run_at_local_time=settings.run_at_local_time,
+                    timezone_name=settings.timezone_name,
+                )
+                if settings.enabled
+                else None
+            )
         settings.updated_at = utc_now()
         settings.updated_by = actor_user_id(actor)
         with self.unit_of_work():

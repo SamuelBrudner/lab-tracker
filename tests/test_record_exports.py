@@ -484,9 +484,11 @@ def test_goal_ara_artifact_exposes_four_independently_retrievable_layers(
     artifact = response.json()
 
     assert artifact["@id"] == f"http://testserver/goals/{records['goal_id']}/ara-artifact"
+    assert artifact["@type"] == "lab:AraArtifact"
     assert set(artifact["layers"]) == {"logic", "src", "trace", "evidence"}
     for layer_name in ("logic", "src", "trace", "evidence"):
         layer = artifact["layers"][layer_name]
+        assert layer["@type"] == "lab:AraLayer"
         assert layer["@id"] == (
             f"http://testserver/goals/{records['goal_id']}/ara-artifact/{layer_name}"
         )
@@ -517,6 +519,7 @@ def test_goal_ara_artifact_exposes_four_independently_retrievable_layers(
     assert records["run_uri"] in src_ids
 
     binding = artifact["crossLayerBindings"][0]
+    assert binding["@type"] == "lab:ForensicBinding"
     assert binding["claim"] == {"@id": claim_iri}
     assert binding["analysis"] == [{"@id": analysis_iri}]
     assert binding["dataset"] == [{"@id": dataset_iri}]

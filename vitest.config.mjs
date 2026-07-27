@@ -4,6 +4,12 @@ const frontendTestDefaults = {
   environment: "jsdom",
   globals: true,
   setupFiles: ["src/lab_tracker/frontend_src/test/setup.js"],
+  // App.test.jsx drives full-App journeys (several mocked request/render
+  // cycles) under the "unit" project. Vitest's default 5s per-test budget is
+  // ample locally but intermittently too tight on a loaded two-core CI runner,
+  // producing spurious timeouts / "expected null" assertions. Give every
+  // frontend test real headroom; genuinely broken UI still fails, just later.
+  testTimeout: 15_000,
 };
 
 const allFrontendTests = "src/lab_tracker/frontend_src/**/*.test.{js,jsx}";
@@ -26,10 +32,6 @@ export default defineConfig({
           ...frontendTestDefaults,
           name: "feature-integration",
           include: [featureIntegrationTests],
-          // Full-App journeys perform several mocked request/render cycles. A
-          // loaded two-core CI runner needs scheduling headroom, while the
-          // unit project deliberately retains Vitest's normal 5s budget.
-          testTimeout: 15_000,
         },
       },
     ],

@@ -135,7 +135,7 @@ def test_analysis_fields_skip_artifacts_without_hash_or_uri() -> None:
 def test_git_code_pin_builds_store_locator() -> None:
     pin = git_code_pin(
         store_name="analysis-repo",
-        path="/src/model.py",
+        path="src/model.py",
         commit=COMMIT,
         content_hash="sha256:" + "e" * 64,
     )
@@ -145,11 +145,60 @@ def test_git_code_pin_builds_store_locator() -> None:
     assert pin.uri == f"store://analysis-repo/src/model.py@{COMMIT}"
 
 
+@pytest.mark.parametrize(
+    ("path", "commit"),
+    (
+        ("/src/model.py", COMMIT),
+        ("src/model.py ", COMMIT),
+        ("src/../secret.py", COMMIT),
+        ("src/run:1.py", COMMIT),
+        ("src/model.py", "HEAD"),
+        ("src/model.py", "A" * 40),
+        ("src/model.py", "0" * 40),
+        ("src/model.py", f" {COMMIT}"),
+    ),
+)
+def test_git_code_pin_rejects_invalid_inputs_without_repair(
+    path: str,
+    commit: str,
+) -> None:
+    with pytest.raises(ValueError, match="Invalid Git-store"):
+        git_code_pin(
+            store_name="analysis-repo",
+            path=path,
+            commit=commit,
+            content_hash="sha256:" + "e" * 64,
+        )
+
+
+def test_git_code_pin_canonicalizes_unicode_and_internal_at_identity() -> None:
+    object_id = "b" * 64
+
+    pin = git_code_pin(
+        store_name="user@analysis store",
+        path="Müller/@generated model.py",
+        commit=object_id,
+        content_hash="sha256:" + "e" * 64,
+    )
+
+    assert pin.source_system == "store"
+    assert pin.content_hash == "sha256:" + "e" * 64
+    assert pin.store_name == "user@analysis store"
+    assert pin.locator == f"Müller/@generated model.py@{object_id}"
+    assert pin.uri == (
+        "store://user%40analysis%20store/"
+        f"M%C3%BCller/@generated%20model.py@{object_id}"
+    )
+
+
 def test_git_code_pin_resolves_through_git_store() -> None:
     # The pin's locator must be exactly what store_relative_reference expects.
     from uuid import uuid4
 
-    from lab_tracker.artifact_resolution import store_relative_reference
+    from lab_tracker.artifact_resolution import (
+        GitStoreResolutionTarget,
+        store_relative_reference,
+    )
     from lab_tracker.models import DataStore, StoreKind
 
     store = DataStore(
@@ -170,9 +219,11 @@ def test_git_code_pin_resolves_through_git_store() -> None:
         store, path=pin.locator, content_hash=pin.content_hash
     )
 
-    assert concrete is not None
-    assert concrete.source_system == "git"
-    assert concrete.uri == f"git+https://example.com/org/repo.git#{COMMIT}:src/model.py"
+    assert isinstance(concrete, GitStoreResolutionTarget)
+    assert concrete.logical_reference == pin
+    assert concrete.remote.subprocess_value == "https://example.com/org/repo.git"
+    assert concrete.pin.path.path == "src/model.py"
+    assert concrete.pin.object_id.value == COMMIT
 
 
 # --- external-id contract: client adapter vs CI script -------------------------

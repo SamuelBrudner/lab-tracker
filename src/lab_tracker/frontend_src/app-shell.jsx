@@ -12,6 +12,7 @@ import { VisualizationDetailCard } from "./features/analysis/VisualizationDetail
 import { DatasetDetailCard } from "./features/datasets/index.js";
 import { MobileCaptureCard } from "./features/mobile-capture.jsx";
 import { NoteDetailCard } from "./features/notes.jsx";
+import { OnboardingPage } from "./features/onboarding.jsx";
 import { QuestionDetailCard } from "./features/questions/QuestionDetailCard.jsx";
 import { SessionDetailCard } from "./features/sessions/index.js";
 import { UsersPage } from "./features/users.jsx";
@@ -32,6 +33,7 @@ import {
   AppHeader,
   AuthForm,
   FlashMessages,
+  UpdateAvailableBanner,
   UnknownRouteCard,
   WorkflowCoverageCard,
 } from "./shared/ui.jsx";
@@ -40,7 +42,7 @@ import { droppedUploadsMessage, installOfflineRetry } from "./shared/register-sw
 import { PendingUploadsBadge } from "./shared/upload-status.jsx";
 import { apiRequest } from "./shared/api.js";
 
-function App() {
+function App({ onReloadForUpdate = null }) {
   const { navigate, replace, route } = useAppRoute();
   const isHomeRoute = route.kind === "home";
   const needsProjectData = isHomeRoute || route.kind === "capture" || route.kind === "batches";
@@ -288,6 +290,7 @@ function App() {
         onLogout={auth.handleLogout}
       />
 
+      <UpdateAvailableBanner onReload={onReloadForUpdate} />
       <FlashMessages message={message} error={error} />
       {auth.persistenceDegraded ? (
         <p className="flash warning" role="status">
@@ -385,12 +388,30 @@ function App() {
                 role: selectedProjectRole,
               }}
             />
-          ) : route.kind === "graph" || isFocusedReviewRoute ? null : (
+          ) : route.kind === "graph" ||
+            isFocusedReviewRoute ||
+            route.kind === "setup" ? null : (
             // The graph explorer has its own project picker and fills the
             // viewport; stacking the Dashboard card (second picker, New
             // Project + member forms) next to it just buries the canvas.
             <Dashboard {...dashboardProps} />
           )}
+
+          {route.kind === "setup" ? (
+            <OnboardingPage
+              token={auth.token}
+              user={auth.user}
+              projects={workspaceData.projects}
+              selectedProjectId={workspaceData.selectedProjectId}
+              setSelectedProjectId={workspaceData.setSelectedProjectId}
+              refreshProjects={workspaceData.refreshProjects}
+              canWrite={auth.canWrite}
+              canManageSchedule={canContributeToProject}
+              navigate={navigate}
+              setBusy={setBusy}
+              setFlash={setFlash}
+            />
+          ) : null}
 
           {route.kind === "devices" ? (
             <DevicesPage

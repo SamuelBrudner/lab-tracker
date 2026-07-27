@@ -2,19 +2,24 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
-from typing import Protocol, TypeVar
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass
+from types import MappingProxyType
+from typing import Literal, Protocol, TypeVar
 from uuid import UUID
 
 from lab_tracker.models import (
     Analysis,
     Claim,
     ClaimEdge,
+    ClaimRelation,
     Dataset,
     EntityType,
     ExplorationNode,
     ExternalArtifactReference,
     Goal,
+    GoalLinkStatus,
+    GoalRelation,
     Note,
     Question,
     QuestionLink,
@@ -28,6 +33,7 @@ from lab_tracker.schemas import (
     ProjectGraphRead,
     ProjectGraphView,
 )
+from lab_tracker.vocabulary import concept_iri, term_iri
 
 _VIEW_VALUES = {"evidence", "questions", "full"}
 _NODE_TYPE_ORDER = {
@@ -45,6 +51,205 @@ _NODE_TYPE_ORDER = {
 _QUESTION_LINK_ROLE_ORDER = {"primary": 0, "secondary": 1}
 _GRAPH_LABEL_LIMIT = 180
 EntityT = TypeVar("EntityT")
+
+# The project graph is a frontend projection. Its compact node and relationship
+# tokens stay wire-compatible presentation identifiers; these maps make their
+# public JSON-LD meaning explicit without turning the tokens into ontology IRIs.
+PROJECT_GRAPH_NODE_CLASS_IRIS: Mapping[str, str] = MappingProxyType(
+    {
+        "question": term_iri("ResearchQuestion"),
+        "dataset": term_iri("Dataset"),
+        "analysis": term_iri("Analysis"),
+        "claim": term_iri("Claim"),
+        "exploration_node": term_iri("ExplorationNode"),
+        "visualization": term_iri("Visualization"),
+        "goal": term_iri("Goal"),
+        "note": term_iri("Note"),
+        "session": term_iri("AcquisitionSession"),
+    }
+)
+PROJECT_GRAPH_CONDITIONAL_NODE_CLASS_IRIS: Mapping[str, Mapping[str, str]] = (
+    MappingProxyType(
+        {
+            # External artifacts preserve the persisted reference kind. The
+            # project graph displays both under one presentation token.
+            "external_artifact": MappingProxyType(
+                {
+                    "entity": "prov:Entity",
+                    "activity": "prov:Activity",
+                }
+            ),
+        }
+    )
+)
+PROJECT_GRAPH_PRESENTATION_ONLY_NODE_TYPES: Mapping[str, str] = MappingProxyType(
+    {
+        "project": (
+            "Project scopes ProjectGraphRead through project_id; it is excluded "
+            "from the semantic profile until projects have a first-class export."
+        ),
+    }
+)
+
+ProjectGraphSemanticDirection = Literal["source_to_target", "target_to_source"]
+
+
+@dataclass(frozen=True)
+class DirectRelationshipSemanticMapping:
+    """Semantic predicate represented by one direct presentation edge."""
+
+    predicate_iri: str
+    direction: ProjectGraphSemanticDirection = "source_to_target"
+
+
+@dataclass(frozen=True)
+class QualifiedRelationshipSemanticMapping:
+    """Qualified resource represented compactly by one presentation edge."""
+
+    class_iri: str
+    direction: ProjectGraphSemanticDirection = "source_to_target"
+    concept_iris: tuple[str, ...] = ()
+    additional_concept_schemes: tuple[str, ...] = ()
+    classification_predicate_iri: str = term_iri("classifiedAs")
+
+
+_DIRECT_RELATIONSHIP_SEMANTICS: dict[str, DirectRelationshipSemanticMapping] = {
+    "question_parent": DirectRelationshipSemanticMapping(
+        "prov:wasDerivedFrom",
+        "target_to_source",
+    ),
+    "question_superseded_by": DirectRelationshipSemanticMapping(
+        "prov:wasRevisionOf",
+        "target_to_source",
+    ),
+    "question_supersedes": DirectRelationshipSemanticMapping("prov:wasRevisionOf"),
+    "analysis_dataset": DirectRelationshipSemanticMapping("prov:used", "target_to_source"),
+    "claim_dataset_support": DirectRelationshipSemanticMapping(
+        term_iri("supportsDataset"),
+        "target_to_source",
+    ),
+    "claim_analysis_support": DirectRelationshipSemanticMapping(
+        term_iri("supportsAnalysis"),
+        "target_to_source",
+    ),
+    "claim_question_answers": DirectRelationshipSemanticMapping(term_iri("answersQuestion")),
+    "claim_cites": DirectRelationshipSemanticMapping(term_iri("cites")),
+    "exploration_target": DirectRelationshipSemanticMapping(
+        term_iri("target"),
+        "target_to_source",
+    ),
+    "exploration_evidence": DirectRelationshipSemanticMapping(
+        term_iri("evidence"),
+        "target_to_source",
+    ),
+    "exploration_parent": DirectRelationshipSemanticMapping(
+        "prov:wasDerivedFrom",
+        "target_to_source",
+    ),
+    "exploration_dependency": DirectRelationshipSemanticMapping(
+        term_iri("alsoDependsOn"),
+        "target_to_source",
+    ),
+    "exploration_invalidates_node": DirectRelationshipSemanticMapping(
+        term_iri("invalidates")
+    ),
+    "exploration_invalidates_claim": DirectRelationshipSemanticMapping(
+        term_iri("invalidates")
+    ),
+    "visualization_analysis": DirectRelationshipSemanticMapping(
+        "prov:wasGeneratedBy",
+        "target_to_source",
+    ),
+    "visualization_dataset": DirectRelationshipSemanticMapping(
+        "prov:wasDerivedFrom",
+        "target_to_source",
+    ),
+    "visualization_claim": DirectRelationshipSemanticMapping(
+        term_iri("relatedClaim"),
+        "target_to_source",
+    ),
+    "session_question": DirectRelationshipSemanticMapping(
+        term_iri("primaryQuestion"),
+        "target_to_source",
+    ),
+    "dataset_source_session": DirectRelationshipSemanticMapping(
+        term_iri("sourceSession"),
+        "target_to_source",
+    ),
+}
+_DIRECT_RELATIONSHIP_SEMANTICS.update(
+    {
+        f"note_target_{entity_type.value}": DirectRelationshipSemanticMapping(
+            term_iri("target")
+        )
+        for entity_type in EntityType
+        if entity_type is not EntityType.PROJECT
+    }
+)
+PROJECT_GRAPH_DIRECT_RELATIONSHIP_SEMANTICS: Mapping[
+    str, DirectRelationshipSemanticMapping
+] = MappingProxyType(_DIRECT_RELATIONSHIP_SEMANTICS)
+
+_QUALIFIED_RELATIONSHIP_SEMANTICS: dict[
+    str, QualifiedRelationshipSemanticMapping
+] = {
+    **{
+        f"dataset_question_{role.value}": QualifiedRelationshipSemanticMapping(
+            class_iri=term_iri("QuestionLink"),
+            direction="target_to_source",
+            concept_iris=(concept_iri("questionLinkRole", role.value),),
+            # Outcome is persisted on the qualified QuestionLink but is not
+            # encoded in the compact project-graph relationship token.
+            additional_concept_schemes=("outcomeStatus",),
+        )
+        for role in QuestionLinkRole
+    },
+    **{
+        f"claim_relation_{relation.value}": QualifiedRelationshipSemanticMapping(
+            class_iri=term_iri("ClaimRelation"),
+            concept_iris=(concept_iri("claimRelation", relation.value),),
+        )
+        for relation in ClaimRelation
+    },
+    **{
+        f"goal_{relation.value}_{status.value}": QualifiedRelationshipSemanticMapping(
+            class_iri=term_iri("GoalLink"),
+            direction="target_to_source",
+            concept_iris=(
+                concept_iri("goalRelation", relation.value),
+                concept_iri("goalLinkStatus", status.value),
+            ),
+        )
+        for relation in GoalRelation
+        for status in GoalLinkStatus
+    },
+}
+PROJECT_GRAPH_QUALIFIED_RELATIONSHIP_SEMANTICS: Mapping[
+    str, QualifiedRelationshipSemanticMapping
+] = MappingProxyType(_QUALIFIED_RELATIONSHIP_SEMANTICS)
+
+PROJECT_GRAPH_SUPPRESSED_RELATIONSHIP_TOKENS: Mapping[str, str] = MappingProxyType(
+    {
+        "note_target_project": (
+            "A project target is conveyed by ProjectGraphRead.project_id; no "
+            "project node or project-target edge is emitted."
+        ),
+    }
+)
+
+
+def project_graph_relationship_semantics(
+    relationship: str,
+) -> DirectRelationshipSemanticMapping | QualifiedRelationshipSemanticMapping:
+    """Resolve a presentation relationship token to its semantic profile entry."""
+
+    direct = PROJECT_GRAPH_DIRECT_RELATIONSHIP_SEMANTICS.get(relationship)
+    if direct is not None:
+        return direct
+    qualified = PROJECT_GRAPH_QUALIFIED_RELATIONSHIP_SEMANTICS.get(relationship)
+    if qualified is not None:
+        return qualified
+    raise ValueError(f"Unmapped project graph relationship: {relationship}")
 
 
 class ProjectGraphRepository(Protocol):
@@ -245,12 +450,28 @@ class _ProjectGraphBuilder:
         self._edges: dict[str, ProjectGraphEdge] = {}
 
     def add_node(self, node: ProjectGraphNode) -> None:
+        if (
+            node.entity_type not in PROJECT_GRAPH_NODE_CLASS_IRIS
+            and node.entity_type not in PROJECT_GRAPH_CONDITIONAL_NODE_CLASS_IRIS
+        ):
+            raise ValueError(f"Unmapped project graph node type: {node.entity_type}")
         self._nodes[node.id] = node
 
-    def add_edge(self, source: str, target: str, label: str, relationship: str) -> None:
+    def add_edge(
+        self,
+        source: str,
+        target: str,
+        label: str,
+        relationship: str,
+        *,
+        identity: str | None = None,
+    ) -> None:
         if source not in self._nodes or target not in self._nodes:
             return
+        project_graph_relationship_semantics(relationship)
         edge_id = f"{relationship}:{source}->{target}"
+        if identity is not None:
+            edge_id = f"{edge_id}#{identity}"
         self._edges[edge_id] = ProjectGraphEdge(
             id=edge_id,
             label=label,
@@ -662,6 +883,11 @@ def _add_evidence_edges(
                 goal_id,
                 label,
                 f"goal_{relation}_{status}",
+                identity=(
+                    f"goal-link={goal_link.link_id}"
+                    if goal_link.slot is not None
+                    else None
+                ),
             )
 
 

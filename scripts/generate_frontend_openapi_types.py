@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ SCOPED_OPERATIONS = (
     ("post", "/auth/login"),
     ("post", "/auth/refresh"),
     ("get", "/auth/me"),
+    ("get", "/auth/setup-readiness"),
     ("get", "/auth/users"),
     ("patch", "/auth/users/{user_id}"),
     ("get", "/auth/invitations"),
@@ -34,12 +36,27 @@ SCOPED_OPERATIONS = (
     ("delete", "/auth/tokens/{token_id}"),
     ("get", "/projects"),
     ("get", "/projects/{project_id}/members"),
+    ("get", "/projects/{project_id}/graph-draft-batch-settings"),
+    ("patch", "/projects/{project_id}/graph-draft-batch-settings"),
     ("get", "/datasets"),
     ("get", "/datasets/{dataset_id}"),
+    ("post", "/data-stores"),
     ("get", "/notes"),
     ("get", "/notes/{note_id}"),
     ("get", "/graph-drafts/{change_set_id}"),
+    ("post", "/review-email/test"),
+    ("get", "/review-email/deliveries"),
 )
+
+
+@dataclass(frozen=True, slots=True)
+class _SelectedOperation:
+    method: str
+    path: str
+    operation_id: str
+    request_body_required: bool
+    request_body: dict[str, dict[str, Any]] | None
+    responses: dict[str, dict[str, dict[str, Any]]]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -86,8 +103,7 @@ def generate_declaration(
     roots = {
         ref.rsplit("/", 1)[-1]
         for operation in operations
-        for response in operation[3].values()
-        for schema in response.values()
+        for schema in _operation_schemas(operation)
         for ref in _walk_refs(schema)
     }
     selected = _referenced_schemas(components, tuple(sorted(roots)))
@@ -98,17 +114,27 @@ def generate_declaration(
         "export interface paths {",
     ]
     path_operations: dict[str, list[tuple[str, str]]] = {}
-    for method, path, operation_id, _responses in operations:
-        path_operations.setdefault(path, []).append((method, operation_id))
+    for operation in operations:
+        path_operations.setdefault(operation.path, []).append(
+            (operation.method, operation.operation_id)
+        )
     for path, methods in path_operations.items():
         lines.append(f"  {json.dumps(path)}: {{")
         for method, operation_id in methods:
             lines.append(f"    {method}: operations[{json.dumps(operation_id)}];")
         lines.append("  };")
     lines.extend(["}", "", "export interface operations {"])
-    for _method, _path, operation_id, responses in operations:
-        lines.extend([f"  {json.dumps(operation_id)}: {{", "    responses: {"])
-        for status, content in responses.items():
+    for operation in operations:
+        lines.append(f"  {json.dumps(operation.operation_id)}: {{")
+        if operation.request_body is not None:
+            marker = "" if operation.request_body_required else "?"
+            lines.extend([f"    requestBody{marker}: {{", "      content: {"])
+            for media_type, schema in operation.request_body.items():
+                rendered = _schema_to_typescript(schema, 8)
+                lines.append(f"        {json.dumps(media_type)}: {rendered};")
+            lines.extend(["      };", "    };"])
+        lines.append("    responses: {")
+        for status, content in operation.responses.items():
             lines.extend([f"      {status}: {{", "        content: {"])
             for media_type, schema in content.items():
                 rendered = _schema_to_typescript(schema, 10)
@@ -131,7 +157,7 @@ def generate_declaration(
 
 def _select_operations(
     openapi: dict[str, Any], scoped_operations: tuple[tuple[str, str], ...]
-) -> list[tuple[str, str, str, dict[str, dict[str, dict[str, Any]]]]]:
+) -> list[_SelectedOperation]:
     paths = openapi.get("paths") or {}
     selected = []
     seen_ids: set[str] = set()
@@ -147,8 +173,53 @@ def _select_operations(
             raise ValueError(f"Duplicate OpenAPI operationId {operation_id!r}")
         seen_ids.add(operation_id)
         responses = _successful_response_schemas(operation, method=method, path=path)
-        selected.append((method, path, operation_id, responses))
+        request_body_required, request_body = _request_body_schemas(
+            operation,
+            method=method,
+            path=path,
+        )
+        selected.append(
+            _SelectedOperation(
+                method=method,
+                path=path,
+                operation_id=operation_id,
+                request_body_required=request_body_required,
+                request_body=request_body,
+                responses=responses,
+            )
+        )
     return selected
+
+
+def _request_body_schemas(
+    operation: dict[str, Any],
+    *,
+    method: str,
+    path: str,
+) -> tuple[bool, dict[str, dict[str, Any]] | None]:
+    request_body = operation.get("requestBody")
+    if request_body is None:
+        return False, None
+    if not isinstance(request_body, dict):
+        raise ValueError(f"OpenAPI operation {method.upper()} {path} has an invalid requestBody")
+    content = request_body.get("content") or {}
+    schemas = {
+        media_type: media["schema"]
+        for media_type, media in sorted(content.items())
+        if isinstance(media, dict) and isinstance(media.get("schema"), dict)
+    }
+    if not schemas:
+        raise ValueError(
+            f"OpenAPI operation {method.upper()} {path} has no typed request body"
+        )
+    return request_body.get("required") is True, schemas
+
+
+def _operation_schemas(operation: _SelectedOperation):
+    if operation.request_body is not None:
+        yield from operation.request_body.values()
+    for response in operation.responses.values():
+        yield from response.values()
 
 
 def _successful_response_schemas(

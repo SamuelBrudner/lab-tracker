@@ -88,6 +88,15 @@ describe("App", () => {
         match: projectsPath,
         response: apiResponse([]),
       },
+      {
+        match: "/auth/setup-readiness",
+        response: apiResponse({
+          background_worker_enabled: true,
+          provider: "openai",
+          provider_credential_configured: false,
+          scheduler_enabled: true,
+        }),
+      },
     ]);
 
     render(<App />);
@@ -103,7 +112,11 @@ describe("App", () => {
     await waitFor(() =>
       expect(localStorage.getItem(TOKEN_STORAGE_KEY)).toBe("invite-access-token")
     );
-    expect(await screen.findByText("Welcome to Lab Tracker")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "Set up your Lab Tracker" })
+    ).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/app/setup");
+    expect(screen.getByText(/automatic drafting is not ready/i)).toBeInTheDocument();
   });
 
   it("loads projects without a token when local auth is disabled", async () => {

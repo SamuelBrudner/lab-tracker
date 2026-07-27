@@ -108,16 +108,32 @@ fields (pure helpers; nothing auto-commits):
 
 - commit SHA → `Analysis.code_version` (commits are encoded as pins/version
   strings, per the project's provenance design — no commit-entity DAG),
-- declared artifact pointers → verifiable `ExternalArtifactReference`s
-  (`file://` URI + sha256), resolvable now and recoverable by content hash if
-  the file later moves,
+- declared artifact pointers → `ExternalArtifactReference` metadata
+  (`file://` URI + sha256). Direct host paths are not resolver authority; map
+  the pointer to a registered local or Git store before requesting bytes,
 - `repo_environment_hash` → `Analysis.environment_hash`.
 
 To pin a specific *code file* verifiably, register the repository as a `git`
-data store and use a `path@commit` locator (`repo_bridge.git_code_pin`); the
-GitResolver fetches the blob read-only and verifies its hash. Resolution is
-gated by `LAB_TRACKER_GIT_ALLOWED_REMOTES` (deny-by-default), a protocol
-allowlist, a size cap, and a bounded fetch cache — see
+data store and use `repo_bridge.git_code_pin` to construct a portable repository
+path plus a full lowercase, nonzero SHA-1 or SHA-256 object ID. Mutable refs,
+abbreviations, revspecs, traversal, and platform-specific path aliases are
+rejected rather than normalized. The GitResolver fetches the blob read-only and
+verifies its hash while retaining the logical `store://` identity. Resolution is
+gated by the strict structural `LAB_TRACKER_GIT_ALLOWED_REMOTES` policy
+(deny-by-default), a protocol allowlist, a size cap, and a bounded fetch cache.
+Grants match the scheme, normalized host, effective port, SSH user, URL/SCP path
+style, and case-sensitive whole path segments—not a raw string prefix. Git's
+effective URL must use the exact reconstructed canonical spelling before a
+query or fetch, and HTTP redirects are disabled.
+
+That policy approves a logical Git endpoint; it does not sandbox host-owned
+transport configuration. The service operator must exclusively control Git
+credential helpers, Git/HTTP proxy and TLS configuration, the SSH agent and
+keys, and OpenSSH routing such as `HostName`, `ProxyJump`, or `ProxyCommand`.
+Those facilities may route an approved name through another host, so do not
+mount researcher-writable Git, credential, proxy, or SSH configuration into the
+Lab Tracker service. Persisted roots and policy entries must never contain
+credentials. See
 [external-artifact-resolution-design.md](external-artifact-resolution-design.md).
 
 ## Boundaries

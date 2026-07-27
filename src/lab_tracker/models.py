@@ -21,6 +21,18 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
+from lab_tracker.git_store_locator import (
+    GitObjectId,
+    PinnedGitPath,
+    canonical_git_store_uri,
+)
+from lab_tracker.local_store_locator import (
+    LocalStoreLocator,
+    PortableStorePath,
+    canonical_local_store_uri,
+    canonical_store_uri,
+)
+
 NoteMetadataScalar = str | bool | int | float
 ClaimConfidence = Annotated[
     float,
@@ -62,7 +74,10 @@ def external_artifact_uri_validation_error(uri: str) -> str | None:
         return "External artifact URI must not be empty."
     if any(ch.isspace() or ord(ch) < 0x20 for ch in cleaned):
         return "External artifact URI must not contain spaces or control characters."
-    parsed = urlsplit(cleaned)
+    try:
+        parsed = urlsplit(cleaned)
+    except ValueError:
+        return "External artifact URI must be a well-formed IRI with a scheme."
     if not parsed.scheme or not _EXTERNAL_ARTIFACT_URI_SCHEME_RE.fullmatch(parsed.scheme):
         return "External artifact URI must be a well-formed IRI with a scheme."
     if not parsed.netloc and not parsed.path:
@@ -157,6 +172,7 @@ class UsageEventResourceType(str, Enum):
     NOTE = "note"
     SESSION = "session"
     DATASET = "dataset"
+    DATA_STORE = "data_store"
     ANALYSIS = "analysis"
     CLAIM = "claim"
     CLAIM_EDGE = "claim_edge"
@@ -407,6 +423,16 @@ class GraphDraftBatchTrigger(str, Enum):
     MANUAL = "manual"
 
 
+class ReviewEmailDeliveryStatus(str, Enum):
+    """Durable states for one review-email outbox delivery."""
+
+    PENDING = "pending"
+    SENDING = "sending"
+    RETRYABLE = "retryable"
+    ACCEPTED = "accepted"
+    FAILED = "failed"
+
+
 class GraphDraftSemanticType(str, Enum):
     CREATE_ENTITY = "create_entity"
     UPDATE_ENTITY = "update_entity"
@@ -523,11 +549,12 @@ class ExternalArtifactReference(_DomainModel):
         source_system: str = "store",
         metadata: Mapping[str, Any] | None = None,
     ) -> ExternalArtifactReference:
-        """Build a store-relative reference from explicit fields.
+        """Build a generic store-relative reference from explicit fields.
 
         The ``store://<store_name>/<locator>`` URI is derived for display and
         back-compatibility, while the structured ``store_name``/``locator`` fields
-        are what resolution reads — no URI string parsing required.
+        are what resolution reads. Store-kind-specific validation belongs at the
+        materialization boundary, where the registered store kind is known.
         """
 
         clean_locator = locator.strip().lstrip("/")
@@ -538,6 +565,97 @@ class ExternalArtifactReference(_DomainModel):
             content_hash=content_hash,
             store_name=store_name,
             locator=clean_locator,
+            metadata=dict(metadata or {}),
+        )
+
+    @classmethod
+    def for_local_store(
+        cls,
+        *,
+        store_name: str,
+        locator: str,
+        content_hash: str,
+        kind: ExternalArtifactKind = ExternalArtifactKind.ENTITY,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> ExternalArtifactReference:
+        """Build a canonical reference for a registered local filesystem store."""
+
+        parsed_locator = LocalStoreLocator.parse_decoded(locator)
+        canonical_uri = (
+            canonical_local_store_uri(store_name, parsed_locator)
+            if parsed_locator is not None
+            else None
+        )
+        if parsed_locator is None or canonical_uri is None:
+            raise ValueError("Invalid local-store name or locator.")
+        return cls(
+            kind=kind,
+            source_system="store",
+            uri=canonical_uri,
+            content_hash=content_hash,
+            store_name=store_name,
+            locator=parsed_locator.path,
+            metadata=dict(metadata or {}),
+        )
+
+    @classmethod
+    def for_http_store(
+        cls,
+        *,
+        store_name: str,
+        locator: str,
+        content_hash: str,
+        kind: ExternalArtifactKind = ExternalArtifactKind.ENTITY,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> ExternalArtifactReference:
+        """Build a canonical reference for a registered HTTP store."""
+
+        parsed_locator = PortableStorePath.parse_decoded(locator)
+        canonical_uri = (
+            canonical_store_uri(store_name, parsed_locator)
+            if parsed_locator is not None
+            else None
+        )
+        if parsed_locator is None or canonical_uri is None:
+            raise ValueError("Invalid HTTP-store name or locator.")
+        return cls(
+            kind=kind,
+            source_system="store",
+            uri=canonical_uri,
+            content_hash=content_hash,
+            store_name=store_name,
+            locator=parsed_locator.path,
+            metadata=dict(metadata or {}),
+        )
+
+    @classmethod
+    def for_git_store(
+        cls,
+        *,
+        store_name: str,
+        repository_path: str,
+        object_id: str,
+        content_hash: str,
+        kind: ExternalArtifactKind = ExternalArtifactKind.ENTITY,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> ExternalArtifactReference:
+        """Build a canonical immutable pin for a registered Git store."""
+
+        parsed_path = PortableStorePath.parse_decoded(repository_path)
+        parsed_object_id = GitObjectId.parse(object_id)
+        if parsed_path is None or parsed_object_id is None:
+            raise ValueError("Invalid Git-store name, path, or object ID.")
+        pin = PinnedGitPath(path=parsed_path, object_id=parsed_object_id)
+        canonical_uri = canonical_git_store_uri(store_name, pin)
+        if canonical_uri is None:
+            raise ValueError("Invalid Git-store name, path, or object ID.")
+        return cls(
+            kind=kind,
+            source_system="store",
+            uri=canonical_uri,
+            content_hash=content_hash,
+            store_name=store_name,
+            locator=pin.locator,
             metadata=dict(metadata or {}),
         )
 
@@ -670,9 +788,34 @@ class GraphDraftBatchSettings(_DomainModel):
     run_at_local_time: str = "18:00"
     timezone_name: str = "America/New_York"
     next_run_at: datetime | None = None
+    email_notifications_enabled: bool = False
+    notification_email: str | None = None
+    notification_email_confirmed_at: datetime | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
     updated_by: str | None = None
+
+
+class ReviewEmailDelivery(_DomainModel):
+    """One durable, recipient-scoped review-email delivery."""
+
+    delivery_id: UUID
+    change_set_id: UUID | None = None
+    recipient_user_id: UUID | None = None
+    event_type: Literal["review_ready", "test"] = "review_ready"
+    destination_email: str
+    idempotency_key: str
+    status: ReviewEmailDeliveryStatus = ReviewEmailDeliveryStatus.PENDING
+    attempt_count: int = Field(default=0, ge=0)
+    next_attempt_at: datetime | None = Field(default_factory=utc_now)
+    claim_token: UUID | None = None
+    claimed_at: datetime | None = None
+    lease_expires_at: datetime | None = None
+    provider_message_id: str | None = None
+    last_error: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+    accepted_at: datetime | None = None
 
 
 class GraphDraftBatchRun(_DomainModel):
@@ -1143,6 +1286,16 @@ class DataStore(_DomainModel):
     root: str
     endpoint: str | None = None
     credential_ref: str | None = None
+    authority_grant_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+    )
+    authority_grant_fingerprint: str | None = Field(
+        default=None,
+        pattern=r"^sag-v1-sha256:[0-9a-f]{64}$",
+    )
     is_default: bool = False
     created_at: datetime = Field(default_factory=utc_now)
     created_by: str | None = None
@@ -1153,6 +1306,12 @@ class DataStore(_DomainModel):
     def _exactly_one_scope(self) -> DataStore:
         if (self.project_id is None) == (self.group_id is None):
             raise ValueError("DataStore must be scoped to exactly one of project_id or group_id.")
+        if (self.authority_grant_id is None) != (
+            self.authority_grant_fingerprint is None
+        ):
+            raise ValueError(
+                "DataStore authority grant id and fingerprint must both be set or both be null."
+            )
         return self
 
 

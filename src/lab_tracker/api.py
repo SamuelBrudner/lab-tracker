@@ -61,12 +61,14 @@ from lab_tracker.services import (
     PublicationReadinessService,
     QuestionService,
     RecordExportService,
+    ReviewEmailService,
     ServiceContext,
     SessionService,
     SupervisionService,
     TransactionalDraftCommitCoordinator,
     VisualizationService,
 )
+from lab_tracker.store_authority_registry import StoreAuthorityRegistry
 
 _logger = logging.getLogger(__name__)
 
@@ -100,12 +102,18 @@ class LabTrackerAPI(
         repository: LabTrackerRepository | None = None,
         request_context: LabTrackerRequestContext | None = None,
         settings: Settings | None = None,
+        store_authority_registry: StoreAuthorityRegistry | None = None,
         surface: str | None = None,
     ) -> None:
         self._raw_storage = raw_storage
         self._repository = repository
         self._request_context = request_context
         self._settings = settings or get_settings()
+        self._store_authority_registry = (
+            store_authority_registry
+            if store_authority_registry is not None
+            else StoreAuthorityRegistry.deny_all()
+        )
         self._surface = surface
         self._service_context = ServiceContext(
             raw_storage=raw_storage,
@@ -206,6 +214,7 @@ class LabTrackerAPI(
             context,
             projects=self.projects,
             authorization=self.project_authorization,
+            store_authority_registry=self._store_authority_registry,
         )
         self.notes: NoteService = NoteService(
             context,
@@ -259,6 +268,10 @@ class LabTrackerAPI(
             context,
             authorization=self.project_authorization,
         )
+        self.review_emails: ReviewEmailService = ReviewEmailService(
+            context,
+            max_attempts=self._settings.review_email_max_attempts,
+        )
         graph_draft_generation = GraphDraftGenerationCoordinator(
             context,
             records=graph_draft_records,
@@ -266,6 +279,7 @@ class LabTrackerAPI(
             authorization=self.project_authorization,
             context_builder=graph_context_builder,
             patch_validator=graph_patch_validator,
+            review_email_outbox=self.review_emails,
         )
         graph_draft_review = GraphDraftReviewCoordinator(
             context,
@@ -312,6 +326,7 @@ class LabTrackerAPI(
             repository=request_context.repository,
             request_context=request_context,
             settings=self._settings,
+            store_authority_registry=self._store_authority_registry,
         )
 
     def request_scope(
@@ -434,6 +449,7 @@ class LabTrackerRequestScope:
         self._context = LabTrackerRequestContext(repository=repository, surface=surface)
         self._close = close
         self._completed = False
+        self._closed = False
         self.api = root_api._for_request_context(self._context)
 
     def __enter__(self) -> LabTrackerRequestScope:
@@ -449,8 +465,7 @@ class LabTrackerRequestScope:
             if not self._completed:
                 self.rollback()
         finally:
-            if self._close is not None:
-                self._close()
+            self._close_once()
 
     def complete_response(self, response: ResponseT) -> ResponseT:
         if response.status_code >= 400:
@@ -464,11 +479,21 @@ class LabTrackerRequestScope:
             return
         try:
             self._context.repository.commit()
-        except Exception:
-            self._context.repository.rollback()
-            self._complete_rollback()
+        except BaseException:
+            try:
+                self._context.repository.rollback()
+            finally:
+                self._complete_rollback()
             raise
         self._complete_commit()
+
+    def release_read_scope(self) -> None:
+        """Rollback and close a read-only scope before slow external work."""
+
+        try:
+            self.rollback()
+        finally:
+            self._close_once()
 
     def rollback(self) -> None:
         if self._completed:
@@ -495,3 +520,10 @@ class LabTrackerRequestScope:
                 label=label,
             ),
         )
+
+    def _close_once(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self._close is not None:
+            self._close()

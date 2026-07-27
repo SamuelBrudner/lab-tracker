@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import json
+from collections.abc import Callable
+from typing import Any
+
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -8,37 +12,140 @@ from sqlalchemy.pool import StaticPool
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.app import create_app
 from lab_tracker.db import Base
+from lab_tracker.models import StoreKind
 from lab_tracker.note_storage import LocalNoteStorage
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
+from lab_tracker.store_authority_registry import (
+    STORE_AUTHORITY_CONFIG_SCHEMA,
+    GroupStoreScope,
+    ProjectStoreScope,
+    StoreAuthorityRegistry,
+    StoreAuthorityRegistryError,
+)
 
-# Registry of test-owned (engine, session) pairs awaiting deterministic
+TEST_STORE_AUTHORITY_GRANT_ID = "test-store-authority"
+
+
+class ExactCandidateTestStoreAuthority:
+    """Test-only authority that grants only the exact candidate presented.
+
+    Existing feature tests exercise store behavior rather than operator
+    configuration. They still supply the explicit test grant ID required by
+    production, while this adapter builds a real one-candidate registry so the
+    registry remains the component that creates the sealed proof.
+    """
+
+    def authorize(
+        self,
+        *,
+        grant_id: str,
+        scope: ProjectStoreScope | GroupStoreScope,
+        candidate: Any,
+        capabilities: Any,
+    ):
+        if grant_id != TEST_STORE_AUTHORITY_GRANT_ID:
+            return None
+        scope_payload = (
+            {"project_id": str(scope.project_id)}
+            if isinstance(scope, ProjectStoreScope)
+            else {"group_id": str(scope.group_id)}
+        )
+        grant: dict[str, object] = {
+            "grant_id": TEST_STORE_AUTHORITY_GRANT_ID,
+            "scope": scope_payload,
+            "kind": candidate.kind.value,
+            "root": candidate.root,
+            "capabilities": [capability.value for capability in capabilities],
+        }
+        if candidate.kind in {
+            StoreKind.SSH,
+            StoreKind.S3,
+            StoreKind.GCS,
+            StoreKind.AZURE_BLOB,
+            StoreKind.DROPBOX,
+            StoreKind.GDRIVE,
+            StoreKind.BOX,
+            StoreKind.ONEDRIVE,
+            StoreKind.RCLONE,
+        }:
+            grant["remote"] = candidate.credential_ref or candidate.name
+            grant["credential_mode"] = (
+                "credential_ref"
+                if candidate.credential_ref is not None
+                else "name_fallback"
+            )
+        raw = json.dumps(
+            {
+                "schema": STORE_AUTHORITY_CONFIG_SCHEMA,
+                "grants": [grant],
+            },
+            separators=(",", ":"),
+        )
+        try:
+            registry = StoreAuthorityRegistry.from_json(raw)
+        except (AttributeError, StoreAuthorityRegistryError):
+            return None
+        return registry.authorize(
+            grant_id=grant_id,
+            scope=scope,
+            candidate=candidate,
+            capabilities=capabilities,
+        )
+
+
+def install_exact_candidate_store_authority(application) -> None:
+    """Install the test-only registration authority on an already-built app."""
+
+    authority = ExactCandidateTestStoreAuthority()
+    root_api = application.state.lab_tracker_api
+    root_api._store_authority_registry = authority
+    root_api.data_stores.store_authority_registry = authority
+
+# Registry of test-owned resources awaiting deterministic
 # teardown. Populated by the helpers here (and the two hand-rolled builders in
 # the suite) and drained by the autouse fixture in conftest after every test, so
 # SQLite connections close on both success and failure instead of leaking as
-# GC-time ResourceWarnings. Per-process, so xdist workers stay independent. A
-# None session marks an engine-only entry (e.g. an app engine whose lifespan
-# shutdown never ran).
-_TEST_RESOURCES: list[tuple[Engine, Session | None]] = []
+# GC-time ResourceWarnings. Per-process, so xdist workers stay independent.
+_TEST_RESOURCES: list[
+    tuple[Engine, Session | None, Callable[[], None] | None]
+] = []
 
 
-def register_test_resources(engine: Engine, session: Session | None) -> None:
-    """Enroll a test-owned engine/session for teardown by drain_test_resources."""
-    _TEST_RESOURCES.append((engine, session))
+def register_test_resources(
+    engine: Engine,
+    session: Session | None,
+    cleanup: Callable[[], None] | None = None,
+) -> None:
+    """Enroll test resources for teardown by :func:`drain_test_resources`."""
+
+    _TEST_RESOURCES.append((engine, session, cleanup))
 
 
 def drain_test_resources() -> None:
     """Close every registered session and dispose its engine.
 
-    Idempotent and defensive: a test that already closed its own session/engine
-    is harmless, and one failing close never blocks the rest.
+    Idempotent and defensive: a test that already closed its own resources is
+    harmless, and one failing close never blocks the remaining cleanup.
     """
+
+    failure: BaseException | None = None
     while _TEST_RESOURCES:
-        engine, session = _TEST_RESOURCES.pop()
-        try:
-            if session is not None:
-                session.close()
-        finally:
-            engine.dispose()
+        engine, session, cleanup = _TEST_RESOURCES.pop()
+        operations: tuple[Callable[[], None] | None, ...] = (
+            session.close if session is not None else None,
+            engine.dispose,
+            cleanup,
+        )
+        for operation in operations:
+            if operation is None:
+                continue
+            try:
+                operation()
+            except BaseException as exc:
+                if failure is None:
+                    failure = exc
+    if failure is not None:
+        raise failure
 
 
 def app_test_client(**client_kwargs) -> TestClient:
@@ -47,11 +154,16 @@ def app_test_client(**client_kwargs) -> TestClient:
     ``TestClient(create_app())`` used without a ``with`` block never runs the
     app's lifespan shutdown, so its DB engine is never disposed and leaks a
     connection. This preserves that no-lifespan behavior while enrolling the
-    engine for deterministic teardown via the autouse drain fixture.
+    engine and app-owned Git health directory for deterministic teardown via the
+    autouse drain fixture.
     """
 
     app = create_app()
-    register_test_resources(app.state.db_engine, None)
+    register_test_resources(
+        app.state.db_engine,
+        None,
+        app.state.cleanup_git_health_workdir,
+    )
     return TestClient(app, **client_kwargs)
 
 

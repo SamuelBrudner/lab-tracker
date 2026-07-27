@@ -235,21 +235,31 @@ class BaseService:
         return RepositoryUnitOfWork(self._context)
 
     @contextmanager
-    def recoverable_unit_of_work(self) -> Iterator[LabTrackerRepository]:
+    def recoverable_unit_of_work(
+        self,
+        *,
+        prepare: Callable[[LabTrackerRepository], None] | None = None,
+    ) -> Iterator[LabTrackerRepository]:
         """Isolate a write whose exception may be handled by its caller.
 
         A caught uniqueness error must not roll back unrelated writes already
         staged by an outer request/application transaction. Use a repository
         savepoint when such a boundary exists; standalone calls retain the
-        ordinary unit-of-work commit/rollback behavior.
+        ordinary unit-of-work commit/rollback behavior. An optional preparation
+        step runs inside the standalone unit of work but before an outer
+        savepoint, which lets backend write-intent fencing remain rollback-safe.
         """
 
         if not self._context.owns_active_boundary():
             with self.unit_of_work() as repository:
+                if prepare is not None:
+                    prepare(repository)
                 yield repository
             return
 
         repository = self._context.active_repository()
+        if prepare is not None:
+            prepare(repository)
         with repository.savepoint():
             yield repository
 

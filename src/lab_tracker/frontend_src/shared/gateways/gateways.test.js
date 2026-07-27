@@ -195,6 +195,27 @@ describe("auth gateway", () => {
     );
   });
 
+  it("validates setup readiness without exposing provider credentials", async () => {
+    installFetchMock([
+      {
+        match: "/auth/setup-readiness",
+        response: apiResponse({
+          background_worker_enabled: true,
+          provider: "anthropic",
+          provider_credential_configured: false,
+          scheduler_enabled: true,
+        }),
+      },
+    ]);
+
+    await expect(auth.getSetupReadiness({ token: "tok" })).resolves.toEqual({
+      background_worker_enabled: true,
+      provider: "anthropic",
+      provider_credential_configured: false,
+      scheduler_enabled: true,
+    });
+  });
+
   it("rejects malformed bootstrap and current-user metadata", async () => {
     installFetchMock([
       {

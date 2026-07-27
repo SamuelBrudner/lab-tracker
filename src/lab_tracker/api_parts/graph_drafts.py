@@ -370,6 +370,8 @@ class GraphDraftsApiMixin:
         run_at_local_time: PatchValue[str | None] = NOT_PROVIDED,
         timezone_name: PatchValue[str | None] = NOT_PROVIDED,
         user_id: PatchValue[UUID | None] = NOT_PROVIDED,
+        email_notifications_enabled: PatchValue[bool | None] = NOT_PROVIDED,
+        notification_email: PatchValue[str | None] = NOT_PROVIDED,
         actor: AuthContext | None = None,
     ) -> GraphDraftBatchSettings:
         return self._with_usage_event(
@@ -380,6 +382,8 @@ class GraphDraftsApiMixin:
                 run_at_local_time=run_at_local_time,
                 timezone_name=timezone_name,
                 user_id=user_id,
+                email_notifications_enabled=email_notifications_enabled,
+                notification_email=notification_email,
                 actor=actor,
             ),
             verb=UsageEventVerb.UPDATE,

@@ -70,6 +70,11 @@ research record:
 - Per-(project, user) graph-draft batch settings and run history for configured
   cadence, run-now, and run-due drafting over staged notes, with a project-level
   default row and `review_assignee` attribution on scheduled user batches.
+- Opt-in, per-user review-ready email cues backed by a transactional delivery
+  outbox, retry leases, and signed short-lived links. Email contains no project
+  or research content, and links still require normal authentication and
+  project authorization. Provider acceptance is recorded separately from inbox
+  delivery.
 - Durable curation provenance that keeps the committed graph honest about
   itself: each accepted graph-draft operation records how it was accepted
   (`human_selected`, `bulk_accepted`, or `auto_accepted`) plus the accepting
@@ -143,15 +148,58 @@ research record:
   URIs with the canonical URI echoed as `meta.iri` in plain envelopes, and a
   committed worked example under `docs/examples/` guarded by a drift test.
 - On-demand resolution of external artifact references (content hash is the
-  integrity gate). Local resolution optionally recovers a moved/renamed file by
-  its content hash within operator-configured `allowed_roots`
-  (`LAB_TRACKER_RESOLVER_RECOVERY`, off by default, bounded, read-only).
+  integrity gate). Project-authored direct references remain metadata only and
+  fail closed before resolver, cache, filesystem, network, credential, or
+  subprocess work; resolvable pointers use a registered `store://` identity.
+  Inline content has one 8 MiB hard/default decoded-byte cap across registered
+  store, ranged, HTTP, rclone, Git, and local resolution paths; ranges can only
+  narrow that allowance. Runtime parses the
+  platform-path-separated
+  `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS` once into one filesystem-I/O-free lexical
+  authority, bounded local-filesystem broker, and bounded process executor.
+  Registered local-store health, registered local reads, and every recovery
+  candidate read receive those exact shared objects. The helper anchors the
+  trusted grant, resolves aliases component-by-component from no-follow retained
+  descriptors/handles, and rejects an escape before target traversal. A
+  registered read adds the retained store root as a nested boundary before its
+  locator is traversed. It never returns or reopens a canonical pathname plan.
+  Helper-owned close attempts are best effort and contained helper exit is the
+  cleanup backstop.
+
+  One logical local resolution shares a single subprocess deadline and a
+  512 MiB default/hard-max cumulative full-file read budget across the direct
+  attempt and all recovery candidates. The 8 MiB API `max_bytes` remains a
+  separate returned-view cap. The helper's allowance-plus-one raw ceiling exists
+  only for a fatal EOF proof, so a stable exact-limit file succeeds but a proof
+  byte or any ambiguous read makes the budget terminal. Failures and recovery
+  results are path-free. Local resolution optionally recovers a moved/renamed
+  file by its content hash within those roots
+  (`LAB_TRACKER_RESOLVER_RECOVERY`, off by default; candidate-file default
+  and hard maximum `4096`; directory-attempt default and hard maximum `4096`;
+  read-only). Recovery enumeration is a single pre-follow-safe helper traversal
+  under the same absolute deadline. It returns only bounded path-free relative
+  locators after cleanup and fails terminally on malformed, partial, ambiguous,
+  timed-out, or cleanup-uncertain results.
+
+  The root authority grants the subtree visible in the operator-controlled
+  service namespace rather than one device identity, and the application
+  runtime denies all local roots when it is unset or empty. Local health remains
+  an isolated, output-free, point-in-time advisory operation rather than
+  registration validation or a durable filesystem lease. POSIX ordinary/bind
+  mounts beneath a root are allowed; unsupported Windows nested
+  volume/UNC/device/GUID namespaces fail closed; eligible Cloud directories
+  remain traversable; untrusted topology mutation makes the local surface
+  unsupported. The mount decision is normative in
+  [`configuration.md`](configuration.md#mount-and-namespace-authority).
   Registered `git` data stores resolve `path@commit` locators read-only and
   on demand, gated by an operator remote allowlist
   (`LAB_TRACKER_GIT_ALLOWED_REMOTES`, deny-by-default), a protocol allowlist,
   a fetch size cap, and a bounded cache — never by cloning or polling. Rclone
-  resolution is likewise gated by an operator remote-name allowlist
-  (`LAB_TRACKER_RCLONE_ALLOWED_REMOTES`, deny-by-default). See
+  resolution and store health are likewise gated by one immutable exact
+  remote-name policy (`LAB_TRACKER_RCLONE_ALLOWED_REMOTES`, deny-by-default).
+  Local, rclone, and Git health commands reuse resolution's bounded
+  cross-platform process executor and expose only static adapter-specific
+  failures. See
   [external-artifact-resolution-design.md](external-artifact-resolution-design.md).
 - Read-only assistant and MCP decision-context endpoints over the retained
   graph. Assistants may inspect context through these surfaces, but retained v1

@@ -97,7 +97,13 @@ class DatasetsApiMixin:
         )
 
     def create_data_store(self, *args: Any, **kwargs: Any) -> Any:
-        return self.data_stores.create_data_store(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.data_stores.create_data_store(*args, **kwargs),
+            verb=UsageEventVerb.CREATE,
+            resource_type=UsageEventResourceType.DATA_STORE,
+            actor=kwargs.get("actor"),
+            resource_id_attr="store_id",
+        )
 
     def get_data_store(self, store_id: UUID) -> DataStore:
         return self.data_stores.get_data_store(store_id)

@@ -20,6 +20,9 @@ from lab_tracker.sqlalchemy_repository_parts.exploration import (
     SQLAlchemyExplorationNodeRepository,
 )
 from lab_tracker.sqlalchemy_repository_parts.goals import SQLAlchemyGoalRepository
+from lab_tracker.sqlalchemy_repository_parts.graph_batches import (
+    SQLAlchemyReviewEmailOutboxRepository,
+)
 from lab_tracker.sqlalchemy_repository_parts.notes import SQLAlchemyNoteRepository
 from lab_tracker.sqlalchemy_repository_parts.ownership import (
     SQLAlchemyOwnershipReassignmentRepository,
@@ -55,6 +58,7 @@ __all__ = [
     "SQLAlchemyProjectRepository",
     "SQLAlchemyQuestionRepository",
     "SQLAlchemyRecordExportEventRepository",
+    "SQLAlchemyReviewEmailOutboxRepository",
     "SQLAlchemySessionRepository",
     "SQLAlchemySupervisionEdgeRepository",
     "SQLAlchemyVisualizationRepository",

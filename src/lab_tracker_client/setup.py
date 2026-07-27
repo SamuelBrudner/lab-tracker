@@ -244,7 +244,35 @@ def _suggestions(status: JsonObject) -> list[str]:
             "The commit hook points at a missing lt executable; "
             "`lt hooks install --yes` re-records the current path."
         )
-    if skills.get("installed") and skills.get("up_to_date") is False:
+    skill_targets = [
+        target
+        for target in skills.get("targets", [])
+        if isinstance(target, dict)
+    ]
+    missing_skill_targets = [
+        str(target.get("name") or target.get("path") or "unknown")
+        for target in skill_targets
+        if not target.get("installed")
+    ]
+    stale_skill_targets = [
+        str(target.get("name") or target.get("path") or "unknown")
+        for target in skill_targets
+        if target.get("installed") and target.get("up_to_date") is not True
+    ]
+    if missing_skill_targets:
+        names = ", ".join(missing_skill_targets)
+        suggestions.append(
+            f"The lab-tracker-setup skill is missing from: {names}; "
+            "`lt setup init --install-skills` installs it."
+        )
+    elif stale_skill_targets:
+        suggestions.append(
+            "One or more installed lab-tracker-setup skills are stale; "
+            "`lt update --install-skills` refreshes them."
+        )
+    elif not skill_targets and skills.get("installed") and skills.get("up_to_date") is False:
+        # Backward-compatible fallback for status payloads produced before
+        # multi-agent skill targets were exposed.
         suggestions.append(
             "The installed lab-tracker-setup skill is stale; "
             "`lt update --install-skills` refreshes it."
@@ -253,26 +281,50 @@ def _suggestions(status: JsonObject) -> list[str]:
 
 
 def _skills_status() -> JsonObject:
-    from lab_tracker.cli import _setup_skill_path
+    from lab_tracker.cli import _setup_skill_targets
     from lab_tracker.setup_guide import (
         setup_skill_markdown,
         skill_content_without_version_line,
     )
 
-    path = _setup_skill_path()
-    summary: JsonObject = {"path": str(path), "installed": path.exists()}
-    if summary["installed"]:
-        with suppress(Exception):
-            installed = path.read_text(encoding="utf-8")
-            generated = setup_skill_markdown()
-            # Staleness is a CONTENT verdict, mirroring doctor: a package
-            # bump with unchanged skill text must not cry wolf in every
-            # session's SessionStart hook. The raw version line stays
-            # informational.
-            summary["up_to_date"] = skill_content_without_version_line(
-                installed
-            ) == skill_content_without_version_line(generated)
-            summary["version_in_sync"] = installed == generated
+    generated = setup_skill_markdown()
+    targets: list[JsonObject] = []
+    for name, path in _setup_skill_targets():
+        target: JsonObject = {
+            "name": name,
+            "path": str(path),
+            "installed": path.exists(),
+        }
+        if target["installed"]:
+            with suppress(Exception):
+                installed = path.read_text(encoding="utf-8")
+                # Staleness is a CONTENT verdict, mirroring doctor: a package
+                # bump with unchanged skill text must not cry wolf in every
+                # session's SessionStart hook. The raw version line stays
+                # informational.
+                target["up_to_date"] = skill_content_without_version_line(
+                    installed
+                ) == skill_content_without_version_line(generated)
+                target["version_in_sync"] = installed == generated
+        targets.append(target)
+
+    # Keep the original scalar fields as the primary-target view so existing
+    # consumers do not need to change. The new target list and aggregate fields
+    # expose the complete Claude+Codex state.
+    primary = targets[0]
+    summary: JsonObject = {
+        key: primary[key]
+        for key in ("path", "installed", "up_to_date", "version_in_sync")
+        if key in primary
+    }
+    summary["targets"] = targets
+    summary["all_installed"] = all(bool(target["installed"]) for target in targets)
+    summary["all_up_to_date"] = all(
+        target.get("up_to_date") is True for target in targets
+    )
+    summary["all_version_in_sync"] = all(
+        target.get("version_in_sync") is True for target in targets
+    )
     return summary
 
 

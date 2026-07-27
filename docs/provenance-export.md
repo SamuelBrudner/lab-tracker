@@ -71,6 +71,9 @@ The documents are produced by the same builders that back the
 JSON-LD, including content hashes, commit hashes, and the semantic edges back to
 the questions each record answers.
 
+The normative class, controlled-concept, and qualified-edge choices are fixed
+by the [Lab Tracker public semantic profile](semantic-profile.md).
+
 The identifiers dereference: `GET` on a dataset, analysis, or claim URI with
 `Accept: application/ld+json` returns this same document, so a JSON-LD
 consumer can follow any `@id` in a sidecar straight to the live record. The

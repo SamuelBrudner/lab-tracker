@@ -12,6 +12,10 @@ from typing import Any
 
 import httpx
 
+from lab_tracker.artifact_resolution_limits import (
+    ArtifactContentBounds,
+    ArtifactContentBoundsError,
+)
 from lab_tracker.assistant_next_questions import (
     OPEN_GOAL_STATUSES,
     OPEN_QUESTION_STATUSES,
@@ -28,6 +32,7 @@ from lab_tracker.models import (
     NoteStatus,
     QuestionStatus,
 )
+from lab_tracker_client.client import load_connection_profile
 from lab_tracker_client.transport import (
     MAX_UPLOAD_BYTES,
     HttpTransport,
@@ -60,6 +65,27 @@ GOAL_LINK_STATUS_VALUES = tuple(status.value for status in GoalLinkStatus)
 GOAL_LINK_STATUS_TEXT = ", ".join(GOAL_LINK_STATUS_VALUES)
 _BEARER_SECRET_RE = re.compile(r"Bearer\s+[^\s\"'\\,}\]]+", re.IGNORECASE)
 _LPAT_SECRET_RE = re.compile(r"lpat_[A-Za-z0-9_-]+")
+
+
+def suppress_unverified_artifact_content(payload: JsonObject) -> JsonObject:
+    """Fail closed if an artifact response carries content without verification."""
+
+    data = payload.get("data")
+    if data is None and isinstance(payload.get("error"), dict):
+        return payload
+    if not isinstance(data, dict):
+        raise LabTrackerAPIError(
+            "Lab Tracker API artifact response did not include object data."
+        )
+    if data.get("status") == "verified":
+        return payload
+
+    safe_data = dict(data)
+    safe_data["content_base64"] = None
+    safe_data["returned_bytes"] = 0
+    safe_payload = dict(payload)
+    safe_payload["data"] = safe_data
+    return safe_payload
 
 # Remediation guidance appended to auth failures so a rejected credential is
 # self-describing at the tool boundary rather than an opaque "Invalid
@@ -117,11 +143,31 @@ class MCPSettings:
 
     @classmethod
     def from_env(cls) -> MCPSettings:
+        """Build MCP settings with environment-first profile fallback.
+
+        ``lt setup connect --save-token`` persists a base URL and LPAT in the
+        machine connection profile. MCP hosts often launch without a shell, so
+        use that profile for values absent from their environment. Never carry
+        a profile token to an explicitly different server or combine it with
+        explicit username/password login.
+        """
+
+        profile = load_connection_profile()
+        env_base_url = os.getenv("LAB_TRACKER_MCP_BASE_URL")
+        env_username = os.getenv("LAB_TRACKER_MCP_USERNAME")
+        profile_base_url = profile.get("base_url") or DEFAULT_BASE_URL
+        profile_token = profile.get("access_token")
+        if env_username or (
+            env_base_url and env_base_url.rstrip("/") != profile_base_url.rstrip("/")
+        ):
+            profile_token = None
         return cls(
-            base_url=os.getenv("LAB_TRACKER_MCP_BASE_URL", DEFAULT_BASE_URL).rstrip("/"),
-            username=os.getenv("LAB_TRACKER_MCP_USERNAME"),
+            base_url=(env_base_url or profile_base_url).rstrip("/"),
+            username=env_username,
             password=os.getenv("LAB_TRACKER_MCP_PASSWORD"),
-            api_key=os.getenv("LAB_TRACKER_MCP_API_KEY") or os.getenv("LAB_TRACKER_MCP_TOKEN"),
+            api_key=os.getenv("LAB_TRACKER_MCP_API_KEY")
+            or os.getenv("LAB_TRACKER_MCP_TOKEN")
+            or profile_token,
             timeout_seconds=float(
                 os.getenv("LAB_TRACKER_MCP_TIMEOUT_SECONDS", str(DEFAULT_TIMEOUT_SECONDS))
             ),
@@ -454,6 +500,14 @@ class LabTrackerAPIClient:
         byte_start: int | None = None,
         byte_end: int | None = None,
     ) -> JsonObject:
+        try:
+            ArtifactContentBounds.for_request(max_bytes, byte_start, byte_end)
+        except ArtifactContentBoundsError as exc:
+            raise LabTrackerAPIValidationError(
+                str(exc),
+                code="validation_error",
+            ) from exc
+
         payload: JsonObject = {
             "entity_type": entity_type,
             "entity_id": entity_id,
@@ -467,7 +521,12 @@ class LabTrackerAPIClient:
             payload["byte_start"] = byte_start
         if byte_end is not None:
             payload["byte_end"] = byte_end
-        return self._request("POST", "/external-artifacts/resolve", json_payload=payload)
+        response = self._request(
+            "POST",
+            "/external-artifacts/resolve",
+            json_payload=payload,
+        )
+        return suppress_unverified_artifact_content(response)
 
     def export_goal_artifact(
         self,

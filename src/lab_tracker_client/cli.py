@@ -132,7 +132,7 @@ def _build_parser() -> argparse.ArgumentParser:
     update_parser.add_argument(
         "--install-skills",
         action="store_true",
-        help="Also refresh the lab-tracker-setup skill in ~/.claude/skills.",
+        help="Also refresh the lab-tracker-setup skill in the Claude and Codex homes.",
     )
     update_parser.set_defaults(func=_cmd_update, needs_client=False)
 
@@ -348,8 +348,8 @@ def _add_setup_parsers(subcommands: argparse._SubParsersAction) -> None:
         "--install-skills",
         action="store_true",
         help=(
-            "Also render the lab-tracker-setup skill into ~/.claude/skills "
-            "(with --uninstall: remove it)."
+            "Also render the lab-tracker-setup skill into the Claude and Codex "
+            "skill homes (with --uninstall: remove it)."
         ),
     )
     init_parser.set_defaults(func=_cmd_setup_init, needs_client=False)

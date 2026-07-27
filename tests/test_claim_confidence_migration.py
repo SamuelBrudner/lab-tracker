@@ -236,9 +236,14 @@ def test_claim_model_declares_named_confidence_check() -> None:
     }
 
 
-def test_0056_is_the_single_alembic_head() -> None:
+def test_0056_remains_in_the_single_alembic_chain() -> None:
     script = ScriptDirectory.from_config(_alembic_config())
-    assert script.get_heads() == [_REVISION]
+    heads = script.get_heads()
+    assert len(heads) == 1
+    assert _REVISION in {
+        revision.revision
+        for revision in script.walk_revisions(base="base", head=heads[0])
+    }
 
 
 def test_0056_sqlite_cycle_preserves_claim_schema_rows_and_child_links(

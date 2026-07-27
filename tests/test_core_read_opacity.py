@@ -9,6 +9,11 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from read_opacity_inventory import (
+    CORE_READ_OPACITY_VARIANTS,
+    CORE_SUITE,
+    READ_OPACITY_VARIANTS_BY_ID,
+)
 from sqlalchemy import select
 
 from lab_tracker.auth import utc_now
@@ -42,6 +47,9 @@ class ReadCase:
     authorized_value: Callable[[Any], object]
     expected_value: object
     accept: str = "application/json"
+
+
+CORE_READ_DOMAINS = ("projects", "questions", "notes", "sessions")
 
 
 def _create_question(
@@ -337,7 +345,7 @@ def _not_found_body(label: str) -> dict[str, object]:
     }
 
 
-@pytest.mark.parametrize("domain", ("projects", "questions", "notes", "sessions"))
+@pytest.mark.parametrize("domain", CORE_READ_DOMAINS)
 def test_core_read_variants_are_opaque_and_preserve_authorized_contracts(
     domain: str,
     client: TestClient,
@@ -346,9 +354,31 @@ def test_core_read_variants_are_opaque_and_preserve_authorized_contracts(
     core_read_records: CoreReadRecords,
 ) -> None:
     cases_by_domain = _read_cases(core_read_records)
+    assert tuple(cases_by_domain) == CORE_READ_DOMAINS
     assert sum(len(cases) for cases in cases_by_domain.values()) == 15
+    inventory_coverage_ids = {
+        variant.coverage_id for variant in CORE_READ_OPACITY_VARIANTS
+    }
+    assert {
+        f"{CORE_SUITE}.{case.name}"
+        for cases in cases_by_domain.values()
+        for case in cases
+    } == inventory_coverage_ids
 
     for case in cases_by_domain[domain]:
+        coverage_id = f"{CORE_SUITE}.{case.name}"
+        assert coverage_id in inventory_coverage_ids
+        inventory_variant = READ_OPACITY_VARIANTS_BY_ID[coverage_id]
+        assert inventory_variant.matches_request(
+            method="GET",
+            request_target=case.existing_path,
+            variant="default",
+        )
+        assert inventory_variant.matches_request(
+            method="GET",
+            request_target=case.missing_path,
+            variant="default",
+        )
         authorized = client.get(
             case.existing_path,
             headers=_request_headers(admin_auth_headers, case),

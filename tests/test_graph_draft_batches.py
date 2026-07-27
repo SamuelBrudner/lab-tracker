@@ -289,6 +289,64 @@ def test_contributor_can_schedule_and_run_project_batch(
     assert run.json()["data"]["status"] == "ready"
 
 
+def test_per_user_batch_notification_address_is_private_to_user_and_owner(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    first_headers = _register_project_member(
+        client,
+        owner_headers=admin_auth_headers,
+        project_id=project_id,
+        role="contributor",
+        global_role=Role.EDITOR,
+    )
+    second_headers = _register_project_member(
+        client,
+        owner_headers=admin_auth_headers,
+        project_id=project_id,
+        role="contributor",
+        global_role=Role.EDITOR,
+    )
+    first_user_id = client.get("/auth/me", headers=first_headers).json()["data"][
+        "user_id"
+    ]
+
+    configured = client.patch(
+        f"/projects/{project_id}/graph-draft-batch-settings",
+        json={
+            "user_id": first_user_id,
+            "email_notifications_enabled": True,
+            "notification_email": "first.reviewer@example.org",
+        },
+        headers=first_headers,
+    )
+    assert configured.status_code == 200
+
+    own = client.get(
+        f"/projects/{project_id}/graph-draft-batch-settings",
+        params={"user_id": first_user_id},
+        headers=first_headers,
+    )
+    assert own.status_code == 200
+    assert own.json()["data"]["notification_email"] == "first.reviewer@example.org"
+
+    other = client.get(
+        f"/projects/{project_id}/graph-draft-batch-settings",
+        params={"user_id": first_user_id},
+        headers=second_headers,
+    )
+    assert other.status_code == 401
+
+    owner = client.get(
+        f"/projects/{project_id}/graph-draft-batch-settings",
+        params={"user_id": first_user_id},
+        headers=admin_auth_headers,
+    )
+    assert owner.status_code == 200
+    assert owner.json()["data"]["notification_email"] == "first.reviewer@example.org"
+
+
 def test_viewer_cannot_schedule_or_run_project_batch(
     client: TestClient,
     admin_auth_headers: dict[str, str],

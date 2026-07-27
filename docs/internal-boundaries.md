@@ -128,25 +128,61 @@ middleware that creates the request scope lives in
 
 The lifecycle is:
 
-1. The database middleware creates a request-scoped SQLAlchemy repository.
-2. `LabTrackerAPI.request_scope(...)` enters a `LabTrackerRequestScope` that owns:
+1. Authentication runs first. Exact host-I/O routes then pass independent,
+   no-wait admission controls before the ordinary request database scope is
+   allocated. Authentication services may use their own authoritative database
+   sessions.
+2. The database middleware creates a request-scoped SQLAlchemy repository.
+3. `LabTrackerAPI.request_scope(...)` enters a `LabTrackerRequestScope` that owns:
    - the active repository
    - deferred `after_commit` and `after_rollback` actions
    - commit/rollback completion
    - session cleanup
-3. The middleware composes `RequestHandlers` from that exact repository,
+4. The middleware composes `RequestHandlers` from that exact repository,
    SQLAlchemy session, `scope.api`, storage backends, settings, and optional
    resolver registry. It exposes only `scope.api` and the typed aggregate on
    request state; raw session and repository dependencies are not exposed.
-4. Route adapters enter through `handlers_from_request(...)` for optimized
+5. Route adapters enter through `handlers_from_request(...)` for optimized
    queries, read-model assembly, file operations, and managed deletes. Retained
    domain calls use `api_from_request(...)`.
-5. On exit, `scope.complete_response(...)` commits successful responses and rolls back
+6. Read-only handlers that perform slow host I/O may first authorize and detach
+   a value target, then call `release_read_scope()` to roll back and close the
+   session before cache or adapter work. Data-store health follows this pattern;
+   authorization still runs before every cache lookup.
+7. On exit, `scope.complete_response(...)` commits successful responses and rolls back
    error responses. Unhandled exceptions roll back in `LabTrackerRequestScope.__exit__`.
-6. Deferred side effects run only from the matching explicit scope outcome. Failures
+8. Deferred side effects run only from the matching explicit scope outcome. Failures
    are logged and do not reverse the already-decided commit or rollback result.
 
 Service logic should not depend on hidden globals or `ContextVar` state for request orchestration.
+
+## Opaque Targeted-Read Ordering
+
+Project- and group-scoped targeted reads follow one boundary order:
+
+1. Authenticate the principal and apply coarse service-token capabilities,
+   preserving `401` for missing or invalid credentials and `403` for a valid
+   token outside its capability.
+2. Validate the target locator, resolve only the scope needed for authorization,
+   and map both an absent target and a denied target to the same canonical
+   `404` response.
+3. Complete that authorization before selecting children, indices, or hashes;
+   hydrating the full record; attaching attribution; touching storage,
+   resolvers, or health probes; or recording usage.
+4. Only an authorized read may materialize and render the requested
+   representation or perform those downstream actions.
+
+Collection reads instead filter to accessible scopes, and mutations retain
+explicit permission errors. The frozen targeted-read inventory and behavioral
+suites are in [Read Opacity Inventory](read-opacity-inventory.md).
+
+Known scope-adjacent exceptions:
+
+- `GET /groups/{group_id}` is the equivalent group-scoped boundary.
+  `lab-tracker-n5kp.33` is closed, and the route now conforms.
+- `GET /projects/{project_id}/graph-draft-batch-settings` can still synthesize
+  defaults for a missing project. `lab-tracker-n5kp.32` remains open, and this
+  operation is outside the 37-variant inventory until that boundary is fixed.
 
 ## Application Handler Boundary
 
@@ -158,6 +194,10 @@ The request-scoped handlers live under
   access.
 - `context_queries.py` owns assistant context, portfolio SQL, project graphs,
   provenance assembly, search, and bounded external-artifact resolution.
+- `store_health_queries.py` owns opaque store authorization, immutable target
+  detachment, early read-scope release, and the mandatory cached health-check
+  port. The process-local cache contains completed probe results only; it never
+  caches authorization.
 - `file_commands.py` owns dataset and visualization blobs, including row locks,
   compare-and-set behavior, and rollback/commit cleanup registration.
 - `managed_deletions.py` owns stable cascade lock ordering and post-commit

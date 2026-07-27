@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -181,7 +181,7 @@ def restore_sqlite_backup(
 
 
 def _backup_filename(source_path: Path) -> str:
-    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     return f"{source_path.stem}.backup-{timestamp}.sqlite3"
 
 
