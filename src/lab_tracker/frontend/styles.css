@@ -11,10 +11,15 @@
                  registers (--pad, --measure, --shadow-surface). Components use
                  these wherever the two postures should diverge.
 
-   This tier split is deliberately pixel-identical: every legacy variable below
-   resolves to the exact value it held before, and no component rule changed.
-   design-tokens.test.js resolves the var() chains and asserts those values, so
+   The tier split itself was pixel-identical: every legacy variable resolves to
+   the value it held beforehand, verified by diffing computed styles against the
+   previous stylesheet in a browser. design-tokens.test.js pins those values, so
    an accidental colour shift fails the build rather than the eye.
+
+   The one deliberate colour change since is the jade split (--accent-text and
+   --accent-strong / --accent-on-strong), which fixes a WCAG AA failure rather
+   than restyling anything; contrast.test.js asserts every text/background pair
+   in both themes.
 
    Scales are derived from values already present in this file rather than
    invented, so migrating a rule to a token is a rename and not a redesign.
@@ -28,6 +33,9 @@
   --color-ink-500: #50555f;
   --color-line-200: #d6d2cb;
   --color-jade-600: #0d8b6f;
+  /* Jade dark enough to carry text: 6.21:1 on --card, 5.70:1 on --bg. The 600
+     step is only 4.25:1 and 3.90:1, i.e. below WCAG AA for normal text. */
+  --color-jade-700: #0a6e58;
   --color-jade-050: #daf4ec;
   --color-rust-700: #a4202f;
   --color-rust-050: #ffe6e7;
@@ -97,7 +105,17 @@
   --ink: var(--color-ink-900);
   --ink-soft: var(--color-ink-500);
   --line: var(--color-line-200);
+  /* --accent is for decorative fills and non-text UI only. Anything that
+     renders jade *as text*, or puts text *on* jade, must use the two tokens
+     below, because the 600 step fails WCAG AA in both roles. */
   --accent: var(--color-jade-600);
+  --accent-text: var(--color-jade-700);
+  /* A jade fill that carries a foreground, paired with the colour that sits on
+     it. They move together per theme: light uses white on dark jade, dark uses
+     dark ink on light jade, since white on the dark theme's jade is only
+     2.50:1. */
+  --accent-strong: var(--color-jade-700);
+  --accent-on-strong: var(--color-paper-1);
   --accent-soft: var(--color-jade-050);
   --danger: var(--color-rust-700);
   --danger-soft: var(--color-rust-050);
@@ -182,8 +200,8 @@ body {
 }
 
 .app-nav-link.active {
-  background: var(--accent);
-  color: #fff;
+  background: var(--accent-strong);
+  color: var(--accent-on-strong);
 }
 
 h1 {
@@ -356,8 +374,8 @@ button:disabled {
 }
 
 .btn-primary {
-  background: var(--accent);
-  color: #fff;
+  background: var(--accent-strong);
+  color: var(--accent-on-strong);
 }
 
 .btn-secondary {
@@ -496,8 +514,8 @@ button:disabled {
 }
 
 .tab.active {
-  background: var(--accent);
-  color: #fff;
+  background: var(--accent-strong);
+  color: var(--accent-on-strong);
 }
 
 .project-graph-card {
@@ -780,7 +798,7 @@ button.project-graph-legend-item:hover {
 }
 
 .capture-composer-mic {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .capture-composer-icon .capture-icon {
@@ -789,8 +807,8 @@ button.project-graph-legend-item:hover {
 }
 
 .capture-composer-send {
-  background: var(--accent);
-  color: #ffffff;
+  background: var(--accent-strong);
+  color: var(--accent-on-strong);
 }
 
 .capture-composer-send:disabled,
@@ -1007,9 +1025,9 @@ button.project-graph-legend-item:hover {
 
 .capture-voice-first-record {
   align-items: center;
-  background: var(--accent);
+  background: var(--accent-strong);
   border-radius: 50%;
-  color: #ffffff;
+  color: var(--accent-on-strong);
   cursor: pointer;
   display: inline-flex;
   flex-direction: column;
@@ -1588,7 +1606,7 @@ button.project-graph-legend-item:hover {
 .review-edit > summary {
   cursor: pointer;
   font-size: 0.85rem;
-  color: var(--accent);
+  color: var(--accent-text);
   font-weight: 600;
 }
 
@@ -1787,7 +1805,7 @@ button.project-graph-legend-item:hover {
 .btn-link {
   background: none;
   border: none;
-  color: var(--accent);
+  color: var(--accent-text);
   cursor: pointer;
   padding: 0.35rem 0.5rem;
   font: inherit;
@@ -1846,6 +1864,9 @@ button.project-graph-legend-item:hover {
   --muted: #9aa1ac;
   --line: #31353d;
   --accent: #28b896;
+  --accent-text: #28b896;
+  --accent-strong: #28b896;
+  --accent-on-strong: #14161a;
   --accent-soft: #103930;
   --danger: #e06a76;
   --danger-soft: #3a2025;
@@ -1978,6 +1999,9 @@ button.project-graph-legend-item:hover {
     --muted: #9aa1ac;
     --line: #31353d;
     --accent: #28b896;
+    --accent-text: #28b896;
+    --accent-strong: #28b896;
+    --accent-on-strong: #14161a;
     --accent-soft: #103930;
     --danger: #e06a76;
     --danger-soft: #3a2025;
