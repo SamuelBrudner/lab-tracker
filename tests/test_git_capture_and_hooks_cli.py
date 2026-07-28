@@ -9,6 +9,10 @@ from pathlib import Path
 
 import pytest
 
+from lab_tracker.repository_conventions import (
+    REPOSITORY_CONVENTIONS_HASH_METADATA_KEY,
+    REPOSITORY_CONVENTIONS_METADATA_KEY,
+)
 from lab_tracker_client import LTRecord
 from lab_tracker_client import cli as lt_cli
 from lab_tracker_client.hooks import HOOK_BLOCK_BEGIN, HOOK_BLOCK_END
@@ -111,6 +115,61 @@ def test_git_snapshot_queues_deterministic_event(git_repo, capsys) -> None:
     assert repeat["already_queued"] is True
     assert repeat["event_path"] == payload["event_path"]
     assert len(list(outbox.glob("*.json"))) == 1
+
+
+def test_agent_context_enrollment_flows_into_commit_snapshot_and_sync_metadata(
+    git_repo,
+    monkeypatch,
+    capsys,
+) -> None:
+    (git_repo / "AGENTS.md").write_text(
+        "# Analysis conventions\n\nCall genotype controls `parental_controls`.\n",
+        encoding="utf-8",
+    )
+    _git(git_repo, "add", "AGENTS.md")
+    _git(git_repo, "commit", "-q", "-m", "Add repository conventions")
+
+    with pytest.raises(SystemExit, match="--yes"):
+        lt_cli.main(["agent-context", "add", "AGENTS.md", "--repo", str(git_repo)])
+
+    lt_cli.main(
+        [
+            "agent-context",
+            "add",
+            "AGENTS.md",
+            "--repo",
+            str(git_repo),
+            "--yes",
+        ]
+    )
+    added = json.loads(capsys.readouterr().out)
+    assert added["action"] == "added"
+
+    lt_cli.main(
+        ["git", "snapshot", "--repo", str(git_repo), "--project", "p-1", "--no-sync"]
+    )
+    captured = json.loads(capsys.readouterr().out)
+    event = json.loads(Path(captured["event_path"]).read_text(encoding="utf-8"))
+    snapshot = json.loads(event["source"][REPOSITORY_CONVENTIONS_METADATA_KEY])
+    assert event["source"][REPOSITORY_CONVENTIONS_HASH_METADATA_KEY] == (
+        snapshot["snapshot_hash"]
+    )
+    assert snapshot["documents"][0]["paths"] == ["AGENTS.md"]
+    assert "parental_controls" in snapshot["documents"][0]["content"]
+
+    fake = _FakeSyncClient()
+    monkeypatch.setattr(
+        lt_cli.LabTracker,
+        "from_env",
+        classmethod(lambda cls: fake),  # noqa: ARG005
+    )
+    lt_cli.main(["outbox", "sync", "--repo", str(git_repo)])
+    synced = json.loads(capsys.readouterr().out)
+    assert synced["errors"] == []
+    assert fake.draft_requests == []
+    metadata = fake.uploads[0]["metadata"]
+    assert metadata[REPOSITORY_CONVENTIONS_HASH_METADATA_KEY] == snapshot["snapshot_hash"]
+    assert REPOSITORY_CONVENTIONS_METADATA_KEY in metadata
 
 
 def test_git_snapshot_resolves_project_from_lt_ids(git_repo, capsys) -> None:
