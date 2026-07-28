@@ -1243,6 +1243,15 @@ button.project-graph-legend-item:hover {
   gap: 0.6rem;
 }
 
+.flash.draft-recovery {
+  align-items: center;
+  background: var(--accent-soft);
+  border-color: #b9e2d4;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
 .flash.error {
   border-color: #e3b7bd;
   background: var(--danger-soft);

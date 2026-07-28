@@ -1,5 +1,8 @@
 import * as React from "react";
 
+import { DraftRecoveryNotice } from "../shared/ui.jsx";
+import { useLocalDraft } from "../hooks/useLocalDraft.js";
+
 function Dashboard({
   projects,
   questionCount,
@@ -13,6 +16,7 @@ function Dashboard({
   projectDescription,
   onProjectNameChange,
   onProjectDescriptionChange,
+  onRestoreProjectDescription,
   onCreateProject,
   onOpenGraph = () => {},
   onOpenBatches = () => {},
@@ -27,6 +31,11 @@ function Dashboard({
   onRemoveProjectMember = () => {},
   requestAccessNode = null,
 }) {
+  const descriptionDraft = useLocalDraft({
+    baseline: "",
+    key: "project-description",
+    value: projectDescription,
+  });
   return (
     <article className="card span-4 dashboard-card">
       <h2>Dashboard</h2>
@@ -85,6 +94,17 @@ function Dashboard({
             disabled={!canWrite}
           />
         </label>
+        <DraftRecoveryNotice
+          label="an unsaved project description"
+          savedAt={descriptionDraft.recoveredAt}
+          onRestore={() => {
+            const restored = descriptionDraft.restore();
+            if (restored !== null && onRestoreProjectDescription) {
+              onRestoreProjectDescription(restored);
+            }
+          }}
+          onDiscard={descriptionDraft.discard}
+        />
         <label>
           Description
           <textarea
