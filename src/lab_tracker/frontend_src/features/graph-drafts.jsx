@@ -2,7 +2,7 @@ import * as React from "react";
 
 import { apiListRequest, apiRequest, buildApiPath } from "../shared/api.js";
 import { formatDate } from "../shared/formatters.js";
-import { DraftRecoveryNotice } from "../shared/ui.jsx";
+import { DraftRecoveryNotice, StatusPill } from "../shared/ui.jsx";
 import { useLocalDraft } from "../hooks/useLocalDraft.js";
 
 const { useCallback, useEffect, useMemo, useRef, useState } = React;
@@ -32,16 +32,6 @@ function canRecordAudio() {
     Boolean(navigator.mediaDevices?.getUserMedia) &&
     typeof MediaRecorder !== "undefined"
   );
-}
-
-function statusClass(status) {
-  if (status === "accepted" || status === "applied" || status === "committed") {
-    return "pill review-approved";
-  }
-  if (status === "rejected" || status === "failed") {
-    return "pill review-rejected";
-  }
-  return "pill review-pending";
 }
 
 function operationTitle(operation) {
@@ -1457,7 +1447,7 @@ function GraphDraftDetailCard({
                     </details>
                   </div>
                   <aside className="review-proposal-actions">
-                    <span className={statusClass(operation.status)}>{operation.status}</span>
+                    <StatusPill family="review" value={operation.status} />
                     <button
                       type="button"
                       className="btn-primary"
@@ -1588,7 +1578,7 @@ function GraphDraftDetailCard({
             <summary>Details &amp; provenance</summary>
             <div className="stack">
               <div className="inline">
-                <span className={statusClass(changeSet.status)}>{changeSet.status}</span>
+                <StatusPill family="review" value={changeSet.status} />
                 <span className="pill">{changeSet.draft_mode || "graph_context"}</span>
                 <span className="pill">{changeSet.model}</span>
                 <span className="pill">{changeSet.provider}</span>

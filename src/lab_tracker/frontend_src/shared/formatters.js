@@ -100,19 +100,9 @@ function buildHighlightedSnippet(noteText, candidateText) {
   };
 }
 
-function roleClass(role) {
-  return `pill role-${role || "viewer"}`;
-}
-
-function sessionTypeClass(sessionType) {
-  return `pill session-type session-${sessionType || "scientific"}`;
-}
-
 export {
   buildHighlightedSnippet,
   formatBytes,
   formatConfidence,
   formatDate,
-  roleClass,
-  sessionTypeClass,
 };

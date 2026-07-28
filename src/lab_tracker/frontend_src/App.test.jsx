@@ -1126,14 +1126,14 @@ describe("App", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Accept" }));
 
-    expect(await screen.findByText("accepted")).toBeInTheDocument();
+    expect(await screen.findByText("Accepted")).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Commit message"), {
       target: { value: "Commit image draft" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Commit accepted changes" }));
 
     expect(await screen.findByText("Graph draft committed.")).toBeInTheDocument();
-    expect(await screen.findByText("applied")).toBeInTheDocument();
+    expect(await screen.findByText("Applied")).toBeInTheDocument();
     expect(await screen.findByText(questionId)).toBeInTheDocument();
   });
 

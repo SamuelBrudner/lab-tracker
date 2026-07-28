@@ -2,6 +2,12 @@ import * as React from "react";
 
 import { apiListRequest, apiRequest } from "../shared/api.js";
 import { formatDate } from "../shared/formatters.js";
+import {
+  disablePushNotifications,
+  enablePushNotifications,
+  getPushNotificationState,
+} from "../shared/push-notifications.js";
+import { BenchTagsCard } from "./tags.jsx";
 
 const { useCallback, useEffect, useState } = React;
 
@@ -11,8 +17,16 @@ function DevicesPage({ token, canWrite, navigate, setFlash }) {
   const [creating, setCreating] = useState(false);
   const [pendingOffer, setPendingOffer] = useState(null);
   const [revokingId, setRevokingId] = useState("");
+  const [pushState, setPushState] = useState(null);
+  const [pushBusy, setPushBusy] = useState(false);
+  const isPairedDevice = String(token || "").startsWith("ldev_");
 
   const refresh = useCallback(async () => {
+    if (isPairedDevice) {
+      setDevices([]);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     try {
       const page = await apiListRequest("/auth/devices", { token });
@@ -22,11 +36,52 @@ function DevicesPage({ token, canWrite, navigate, setFlash }) {
     } finally {
       setLoading(false);
     }
+  }, [isPairedDevice, setFlash, token]);
+
+  const refreshPushState = useCallback(async () => {
+    try {
+      setPushState(await getPushNotificationState({ token }));
+    } catch (err) {
+      setPushState(null);
+      setFlash("", err.message || "Failed to load review notification settings.");
+    }
   }, [setFlash, token]);
 
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    refreshPushState();
+  }, [refreshPushState]);
+
+  async function handleEnablePush() {
+    setPushBusy(true);
+    setFlash("", "");
+    try {
+      await enablePushNotifications({ token });
+      await refreshPushState();
+      setFlash("Review notifications enabled on this device.");
+    } catch (err) {
+      setFlash("", err.message || "Failed to enable review notifications.");
+    } finally {
+      setPushBusy(false);
+    }
+  }
+
+  async function handleDisablePush() {
+    setPushBusy(true);
+    setFlash("", "");
+    try {
+      await disablePushNotifications({ token });
+      await refreshPushState();
+      setFlash("Review notifications disabled on this device.");
+    } catch (err) {
+      setFlash("", err.message || "Failed to disable review notifications.");
+    } finally {
+      setPushBusy(false);
+    }
+  }
 
   async function handleCreate() {
     setCreating(true);
@@ -79,10 +134,10 @@ function DevicesPage({ token, canWrite, navigate, setFlash }) {
     <article className="card span-12">
       <div className="item-head">
         <div>
-          <h2>Paired devices</h2>
+          <h2>Devices &amp; notifications</h2>
           <p className="subtle">
-            Pair a phone once on this desktop; it will capture into Lab Tracker
-            without re-entering your password. Revoke any device any time.
+            Enable a generic alert when your daily review is ready. Notification
+            text never includes project names or scientific content.
           </p>
         </div>
         <button type="button" className="btn-secondary" onClick={() => navigate("/app")}>
@@ -90,7 +145,47 @@ function DevicesPage({ token, canWrite, navigate, setFlash }) {
         </button>
       </div>
 
-      <div className="form">
+      <div className="card-inset form">
+        <h3>Review notifications on this device</h3>
+        {!pushState ? (
+          <p className="subtle">Loading notification settings…</p>
+        ) : !pushState.configured ? (
+          <p className="subtle">Web Push is not configured on this Lab Tracker instance.</p>
+        ) : !pushState.secure ? (
+          <p className="subtle">Review notifications require HTTPS or localhost.</p>
+        ) : !pushState.supported ? (
+          <p className="subtle">This browser does not support Web Push notifications.</p>
+        ) : pushState.permission === "denied" ? (
+          <p className="subtle">
+            Notifications are blocked in browser settings for this site.
+          </p>
+        ) : pushState.subscribed ? (
+          <button
+            type="button"
+            className="btn-secondary"
+            disabled={pushBusy}
+            onClick={handleDisablePush}
+          >
+            {pushBusy ? "Disabling…" : "Disable review notifications"}
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="btn-primary"
+            disabled={pushBusy}
+            onClick={handleEnablePush}
+          >
+            {pushBusy ? "Enabling…" : "Enable review notifications"}
+          </button>
+        )}
+      </div>
+
+      {!isPairedDevice ? (
+        <div className="form">
+          <p className="subtle">
+            Pair a phone once on this desktop; it can capture without re-entering
+            your password. Revoke any device any time.
+          </p>
         <button
           type="button"
           className="btn-primary"
@@ -139,9 +234,10 @@ function DevicesPage({ token, canWrite, navigate, setFlash }) {
             </button>
           </div>
         ) : null}
-      </div>
+        </div>
+      ) : null}
 
-      {loading ? (
+      {isPairedDevice ? null : loading ? (
         <p className="subtle">Loading paired devices…</p>
       ) : devices.length === 0 ? (
         <p className="subtle">No devices paired yet.</p>
@@ -173,6 +269,10 @@ function DevicesPage({ token, canWrite, navigate, setFlash }) {
           ))}
         </ul>
       )}
+
+      {!isPairedDevice ? (
+        <BenchTagsCard token={token} canWrite={canWrite} setFlash={setFlash} />
+      ) : null}
     </article>
   );
 }

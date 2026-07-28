@@ -1,6 +1,7 @@
 import * as React from "react";
 
-import { formatDate, sessionTypeClass } from "../../shared/formatters.js";
+import { formatDate } from "../../shared/formatters.js";
+import { StatusPill } from "../../shared/ui.jsx";
 import { AppLink } from "../../shared/routing.jsx";
 
 const { useMemo } = React;
@@ -152,7 +153,7 @@ function SessionPanel({
                       {session.session_type === "scientific" ? "Scientific" : "Operational"} session
                     </strong>
                   </AppLink>
-                  <span className={sessionTypeClass(session.session_type)}>{session.session_type}</span>
+                  <StatusPill family="session" value={session.session_type} />
                 </div>
 
                 <div className="inline">

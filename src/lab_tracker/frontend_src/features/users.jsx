@@ -1,5 +1,7 @@
 import * as React from "react";
 
+import { StatusPill } from "../shared/ui.jsx";
+
 import { apiListRequest, apiRequest, buildApiPath } from "../shared/api.js";
 
 function UsersPage({ token, canManageUsers, setBusy, setFlash }) {
@@ -223,7 +225,7 @@ function UsersPage({ token, canManageUsers, setBusy, setFlash }) {
                 <strong>{user.username}</strong>
                 <p className="subtle">{user.user_id}</p>
               </div>
-              <span className={`pill role-${user.role}`}>{user.role}</span>
+              <StatusPill family="role" value={user.role} />
             </div>
             <div className="user-admin-row">
               <label>

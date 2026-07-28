@@ -10,7 +10,7 @@ describe("PendingBatchBanner", () => {
   it("nudges the user to flesh out a meeting when a pending batch has meeting notes", async () => {
     installFetchMock([
       {
-        match: "/batches?limit=5",
+        match: "/batches?limit=5&mine=true",
         response: apiResponse([
           {
             change_set_id: "cs-meeting",
@@ -32,7 +32,7 @@ describe("PendingBatchBanner", () => {
   it("shows the plain batch count when no meeting notes are present", async () => {
     installFetchMock([
       {
-        match: "/batches?limit=5",
+        match: "/batches?limit=5&mine=true",
         response: apiResponse([
           {
             change_set_id: "cs-1",
@@ -49,11 +49,35 @@ describe("PendingBatchBanner", () => {
     expect(await screen.findByText("1 daily review ready")).toBeInTheDocument();
   });
 
+  it("uses the server total when more personal reviews exist than the preview limit", async () => {
+    installFetchMock([
+      {
+        match: "/batches?limit=5&mine=true",
+        response: apiResponse(
+          [
+            {
+              change_set_id: "cs-1",
+              status: "ready",
+              source_note_count: 1,
+              meeting_note_count: 0,
+            },
+          ],
+          200,
+          { limit: 5, offset: 0, total: 8 }
+        ),
+      },
+    ]);
+
+    render(<PendingBatchBanner token="token-1" navigate={vi.fn()} />);
+
+    expect(await screen.findByText("8 daily reviews ready")).toBeInTheDocument();
+  });
+
   it("deep-links Review to the meeting batch even when it is not first", async () => {
     const navigate = vi.fn();
     installFetchMock([
       {
-        match: "/batches?limit=5",
+        match: "/batches?limit=5&mine=true",
         response: apiResponse([
           {
             change_set_id: "cs-plain",
@@ -83,11 +107,19 @@ describe("BatchReviewPage", () => {
     let settingsBody = null;
     const fetchMock = installFetchMock([
       {
-        match: "/batches?project_id=project-1&limit=100",
+        match: "/batches?project_id=project-1&mine=true&limit=100",
         response: apiResponse([], 200, { limit: 100, offset: 0, total: 0 }),
       },
       {
-        match: "/batches/runs?project_id=project-1&limit=20",
+        match: "/batches?project_id=project-1&mine=true&status=submitted&limit=100",
+        response: apiResponse([], 200, { limit: 100, offset: 0, total: 0 }),
+      },
+      {
+        match: "/batches?project_id=project-1&needs_commit=true&limit=100",
+        response: apiResponse([], 200, { limit: 100, offset: 0, total: 0 }),
+      },
+      {
+        match: "/batches/runs?project_id=project-1&mine=true&limit=20",
         response: apiResponse([], 200, { limit: 20, offset: 0, total: 0 }),
       },
       {
@@ -141,7 +173,10 @@ describe("BatchReviewPage", () => {
       />
     );
 
-    expect(await screen.findByRole("heading", { name: "Cadence" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Your cadence" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Ready for you" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Waiting on others" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Needs commit" })).toBeInTheDocument();
     // Wait for the settings GET to populate the form before interacting. The
     // "Enabled" checkbox defaults to checked but loads unchecked, so clicking
     // before the async load resolves lets the load clobber the toggle (the

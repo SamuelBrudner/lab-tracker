@@ -1,19 +1,30 @@
 import * as React from "react";
 
-import { fetchAllPages } from "../../shared/api.js";
+import { apiListRequest, buildApiPath } from "../../shared/api.js";
 import { formatBytes, formatDate } from "../../shared/formatters.js";
 import { AppLink } from "../../shared/routing.jsx";
-import { useApiResource } from "../../hooks/useApiResource.js";
+import { DatasetCollectionsSection } from "../collections/index.js";
+import { ExperimentChips } from "../experiments/index.js";
 
 const { useEffect, useMemo, useState } = React;
+const FILE_PAGE_SIZE = 100;
 
 function DatasetDetailCard({ token, datasetId, projects, navigate, onSetActiveProject }) {
-  const { data: dataset, error, loading } = useApiResource(
-    token && datasetId ? `/datasets/${datasetId}` : "",
-    token,
-    "Failed to load dataset."
-  );
-  const [fileState, setFileState] = useState({ loading: false, error: "", items: [] });
+  const [datasetState, setDatasetState] = useState({
+    data: null,
+    error: "",
+    loading: false,
+  });
+  const dataset = datasetState.data;
+  const { error, loading } = datasetState;
+  const [filesExpanded, setFilesExpanded] = useState(false);
+  const [fileState, setFileState] = useState({
+    loading: false,
+    loaded: false,
+    error: "",
+    items: [],
+    meta: { limit: FILE_PAGE_SIZE, offset: 0, total: 0 },
+  });
 
   const project = useMemo(() => {
     if (!dataset) {
@@ -24,38 +35,102 @@ function DatasetDetailCard({ token, datasetId, projects, navigate, onSetActivePr
 
   useEffect(() => {
     let canceled = false;
-    if (!token || !dataset || dataset.status === "committed") {
-      setFileState({ loading: false, error: "", items: [] });
+    if (!datasetId) {
+      setDatasetState({ data: null, error: "", loading: false });
       return () => {
         canceled = true;
       };
     }
-
-    setFileState((current) => ({ ...current, loading: true, error: "" }));
-    fetchAllPages(`/datasets/${dataset.dataset_id}/files`, { token })
-      .then((items) => {
-        if (!canceled) {
-          setFileState({ loading: false, error: "", items: Array.isArray(items) ? items : [] });
+    setDatasetState({ data: null, error: "", loading: true });
+    apiListRequest(
+      buildApiPath("/datasets/summaries", {
+        dataset_id: datasetId,
+        limit: 1,
+        offset: 0,
+      }),
+      { token }
+    )
+      .then(({ data }) => {
+        if (canceled) {
+          return;
         }
+        if (data.length === 0) {
+          setDatasetState({
+            data: null,
+            error: "Dataset not found.",
+            loading: false,
+          });
+          return;
+        }
+        setDatasetState({ data: data[0], error: "", loading: false });
       })
       .catch((err) => {
         if (!canceled) {
-          setFileState({
+          setDatasetState({
+            data: null,
+            error: err.message || "Failed to load dataset summary.",
             loading: false,
-            error: err.message || "Failed to load dataset files.",
-            items: [],
           });
         }
       });
-
     return () => {
       canceled = true;
     };
-  }, [dataset, token]);
+  }, [datasetId, token]);
 
-  const committedFiles = dataset?.commit_manifest?.files || [];
-  const stagedFiles = fileState.items || [];
-  const fileItems = dataset?.status === "committed" ? committedFiles : stagedFiles;
+  useEffect(() => {
+    setFilesExpanded(false);
+    setFileState({
+      loading: false,
+      loaded: false,
+      error: "",
+      items: [],
+      meta: { limit: FILE_PAGE_SIZE, offset: 0, total: 0 },
+    });
+  }, [datasetId, token]);
+
+  async function loadFiles(offset = 0) {
+    if (!datasetId) {
+      return;
+    }
+    setFileState((current) => ({ ...current, loading: true, error: "" }));
+    try {
+      const page = await apiListRequest(
+        buildApiPath(`/datasets/${datasetId}/manifest-files`, {
+          limit: FILE_PAGE_SIZE,
+          offset,
+        }),
+        { token }
+      );
+      setFileState({
+        loading: false,
+        loaded: true,
+        error: "",
+        items: page.data,
+        meta: page.meta,
+      });
+    } catch (err) {
+      setFileState({
+        loading: false,
+        loaded: true,
+        error: err.message || "Failed to load dataset files.",
+        items: [],
+        meta: { limit: FILE_PAGE_SIZE, offset: 0, total: 0 },
+      });
+    }
+  }
+
+  async function toggleFiles() {
+    const nextExpanded = !filesExpanded;
+    setFilesExpanded(nextExpanded);
+    if (nextExpanded && !fileState.loaded && !fileState.loading) {
+      await loadFiles(0);
+    }
+  }
+
+  const collectionSnapshots = dataset?.collection_snapshots || [];
+  const fileOffset = Number(fileState.meta?.offset || 0);
+  const fileTotal = Number(fileState.meta?.total ?? fileState.items.length);
 
   return (
     <article className="card span-8">
@@ -110,24 +185,49 @@ function DatasetDetailCard({ token, datasetId, projects, navigate, onSetActivePr
             )}
           </div>
 
+          <ExperimentChips
+            token={token}
+            entityType="dataset"
+            entityId={dataset.dataset_id}
+            navigate={navigate}
+          />
+
+          <DatasetCollectionsSection
+            token={token}
+            collectionSnapshots={collectionSnapshots}
+          />
+
           <div className="stack">
             <div className="item-head">
-              <h3>Files</h3>
-              <span className="pill">
-                {dataset.status === "committed" ? "committed" : "staged"} {fileItems.length}
-              </span>
+              <h3>Legacy Files</h3>
+              <span className="pill">{fileState.loaded ? fileTotal : "not loaded"}</span>
             </div>
-            {dataset.status !== "committed" && fileState.loading ? (
-              <p className="subtle">Loading attached files...</p>
-            ) : null}
-            {dataset.status !== "committed" && fileState.error ? (
-              <p className="flash error">{fileState.error}</p>
-            ) : null}
-            {fileItems.length === 0 ? (
-              <p className="subtle">(no files)</p>
-            ) : (
+            <p className="subtle">
+              Load individual legacy files only when needed. Collection members are browsed
+              separately in bounded pages above.
+            </p>
+            <button
+              type="button"
+              className="btn-secondary"
+              aria-expanded={filesExpanded}
+              disabled={fileState.loading}
+              onClick={toggleFiles}
+            >
+              {filesExpanded ? "Hide legacy files" : "Show legacy files"}
+            </button>
+            {filesExpanded ? (
               <div className="stack">
-                {fileItems.map((file) => (
+                {fileState.loading ? (
+                  <p className="subtle">Loading up to 100 files...</p>
+                ) : null}
+                {fileState.error ? <p className="flash error">{fileState.error}</p> : null}
+                {fileState.loaded &&
+                !fileState.loading &&
+                !fileState.error &&
+                fileState.items.length === 0 ? (
+                  <p className="subtle">(no legacy files)</p>
+                ) : null}
+                {fileState.items.map((file) => (
                   <div className="item" key={file.file_id || file.path}>
                     <div className="item-head">
                       <span className="mono">{file.path}</span>
@@ -136,8 +236,34 @@ function DatasetDetailCard({ token, datasetId, projects, navigate, onSetActivePr
                     <p className="mono">sha256: {file.checksum}</p>
                   </div>
                 ))}
+                {fileTotal > FILE_PAGE_SIZE ? (
+                  <div className="inline">
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      disabled={fileState.loading || fileOffset <= 0}
+                      onClick={() => loadFiles(Math.max(0, fileOffset - FILE_PAGE_SIZE))}
+                    >
+                      Previous files
+                    </button>
+                    <span className="subtle">
+                      {fileOffset + 1}-
+                      {Math.min(fileOffset + fileState.items.length, fileTotal)} of {fileTotal}
+                    </span>
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      disabled={
+                        fileState.loading || fileOffset + fileState.items.length >= fileTotal
+                      }
+                      onClick={() => loadFiles(fileOffset + FILE_PAGE_SIZE)}
+                    >
+                      Next files
+                    </button>
+                  </div>
+                ) : null}
               </div>
-            )}
+            ) : null}
           </div>
         </div>
       ) : null}

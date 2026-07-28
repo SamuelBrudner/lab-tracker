@@ -713,11 +713,38 @@ function demoPayload(url) {
   if (pathname === "/auth/tokens" || pathname === "/auth/devices") {
     return listResponse([], searchParams);
   }
+  if (pathname === "/notifications/push/config") {
+    return jsonResponse({
+      data: {
+        application_server_key: null,
+        enabled: false,
+        secure_context_required: true,
+      },
+    });
+  }
   if (pathname === `/questions/${QUESTION_LATERAL_ID}/refactors`) {
     return listResponse([], searchParams);
   }
   if (pathname === `/sessions/${SESSION_ID}/outputs`) {
     return listResponse([], searchParams);
+  }
+  if (
+    pathname === "/experiments" ||
+    pathname === `/sessions/${SESSION_ID}/experiments` ||
+    pathname === `/datasets/${DATASET_ID}/experiments` ||
+    pathname === `/sessions/${SESSION_ID}/collections`
+  ) {
+    return listResponse([], searchParams);
+  }
+  if (pathname === "/datasets/summaries") {
+    return listResponse(
+      DATASETS.map((dataset) => {
+        const summary = { ...dataset };
+        delete summary.commit_manifest;
+        return summary;
+      }),
+      searchParams
+    );
   }
   if (pathname === `/datasets/${DATASET_ID}/files`) {
     return listResponse(DATASETS[0].commit_manifest.files, searchParams);

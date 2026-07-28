@@ -1,6 +1,7 @@
 import * as React from "react";
 
-import { formatDate, roleClass } from "./formatters.js";
+import { formatDate } from "./formatters.js";
+import { statusPill } from "./status-registry.js";
 
 class ErrorBoundary extends React.Component {
   constructor(props) {
@@ -114,7 +115,7 @@ function AppHeader({ activeKind, authEnabled, navigate, user, onLogout }) {
           </p>
         </div>
         <div className="inline">
-          {user ? <span className={roleClass(user.role)}>{user.role}</span> : null}
+          {user ? <StatusPill family="role" value={user.role} /> : null}
           {user ? <span className="pill">{user.username}</span> : null}
           {authEnabled && user ? (
             <button className="btn-secondary" onClick={onLogout}>
@@ -157,6 +158,29 @@ function AppNavigation({ activeKind, isAdmin = false, navigate }) {
         </button>
       ))}
     </nav>
+  );
+}
+
+/**
+ * A status pill: glyph + word + colour, never colour alone.
+ *
+ * The glyph and the word both carry the meaning, so the pill still reads in
+ * greyscale or to someone who cannot separate the pastels. The aria-label
+ * names the family ("Status: Rejected") because "Rejected" on its own tells a
+ * screen-reader user nothing about what was rejected.
+ */
+function StatusPill({ family, value, children }) {
+  const { ariaLabel, className, glyph, label } = statusPill(family, value);
+  return (
+    <span className={className} aria-label={ariaLabel}>
+      <span aria-hidden="true" className="pill-glyph">
+        {glyph}
+      </span>
+      {/* The label lives in its own element so the glyph does not end up inside
+          the same text node — otherwise the pill's text reads "✓Accepted" and no
+          query can match the word on its own. */}
+      <span className="pill-label">{children ?? label}</span>
+    </span>
   );
 }
 
@@ -367,6 +391,7 @@ export {
   FlashMessages,
   ProjectContextCard,
   RequestEditAccess,
+  StatusPill,
   UnknownRouteCard,
   WorkflowCoverageCard,
 };

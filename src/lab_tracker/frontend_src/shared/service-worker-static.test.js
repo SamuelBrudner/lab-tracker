@@ -70,6 +70,16 @@ describe("service worker source", () => {
     expect(serviceWorkerSource).toContain("cached || Response.error()");
   });
 
+  it("shows privacy-safe review notifications and deep-links only to review routes", () => {
+    expect(serviceWorkerSource).toContain('addEventListener("push"');
+    expect(serviceWorkerSource).toContain('showNotification("Review available"');
+    expect(serviceWorkerSource).toContain("A daily review is ready for you.");
+    expect(serviceWorkerSource).toContain('addEventListener("notificationclick"');
+    expect(serviceWorkerSource).toContain("reviewNotificationUrl");
+    expect(serviceWorkerSource).not.toContain("payload.title");
+    expect(serviceWorkerSource).not.toContain("payload.body");
+  });
+
   it("keeps cache and asset versions aligned across the shell files", () => {
     const cacheVersion = extractCacheVersion(serviceWorkerSource);
     const expectedAssetVersion = expectedStaticAssetVersion();

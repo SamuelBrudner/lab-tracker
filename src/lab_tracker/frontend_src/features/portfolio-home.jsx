@@ -2,21 +2,12 @@ import * as React from "react";
 
 import { apiListRequest, buildApiPath } from "../shared/api.js";
 import { formatDate } from "../shared/formatters.js";
+import { StatusPill } from "../shared/ui.jsx";
 
 const { useCallback, useEffect, useMemo, useState } = React;
 
 function groupLabel(group) {
   return group?.project_group?.name || "Ungrouped projects";
-}
-
-function flagClass(flag) {
-  if (flag.severity === "critical") {
-    return "pill review-rejected";
-  }
-  if (flag.severity === "warning") {
-    return "pill review-pending";
-  }
-  return "pill";
 }
 
 function plural(count, singular, pluralLabel = `${singular}s`) {
@@ -136,12 +127,12 @@ function PortfolioHome({ authEnabled, enabled, token, onOpenProject }) {
                   </div>
                   <div className="inline">
                     {(project.triage_flags || []).length === 0 ? (
-                      <span className="pill review-approved">No triage flags</span>
+                      <StatusPill family="review" value="accepted">No triage flags</StatusPill>
                     ) : (
                       project.triage_flags.map((flag) => (
-                        <span className={flagClass(flag)} key={flag.key}>
+                        <StatusPill family="flag" key={flag.key} value={flag.severity}>
                           {flag.label}: {flag.count}
-                        </span>
+                        </StatusPill>
                       ))
                     )}
                   </div>

@@ -140,6 +140,26 @@
   --radius-surface: var(--radius-xl);
   --shadow-surface: var(--shadow-3);
 
+  /* --- Semantic: status tones --------------------------------------------
+     Five tones behind every status pill, replacing the same handful of pastel
+     pairs that were repeated across the role, session, review and flag
+     families. See shared/status-registry.js for which value maps to which. */
+  --tone-neutral-fg: inherit;
+  --tone-info-fg: inherit;
+  --tone-success-fg: inherit;
+  --tone-warning-fg: inherit;
+  --tone-danger-fg: inherit;
+  --tone-neutral-bg: #f5f1ea;
+  --tone-neutral-bd: #d8d0c6;
+  --tone-info-bg: #e8f5ff;
+  --tone-info-bd: #bfd7ea;
+  --tone-success-bg: #ebf9ef;
+  --tone-success-bd: #bedcc8;
+  --tone-warning-bg: #fff8e5;
+  --tone-warning-bd: #ecdcb0;
+  --tone-danger-bg: var(--danger-soft);
+  --tone-danger-bd: #e3b7bd;
+
   /* --- Semantic: entity types --------------------------------------------
      One source of truth for the nine graph entity types, so the project graph
      themes with the rest of the app instead of carrying its own palette in JS.
@@ -342,34 +362,49 @@ h1 {
   background: #f8faf8;
 }
 
-.pill.role-admin {
-  background: #e8f5ff;
-  border-color: #bfd7ea;
-}
-
-.pill.role-editor {
-  background: #ebf9ef;
-  border-color: #bedcc8;
-}
-
-.pill.role-viewer {
-  background: #fff8e5;
-  border-color: #ecdcb0;
-}
-
-.pill.session-type {
+/* One rule per tone, in place of seventeen per-value rules. The old
+   session-type and review-status families were bold; statuses stay emphasised
+   now that they are uniform, and the label supplies the capitalisation the old
+   text-transform used to. */
+.pill[class*="tone-"] {
   font-weight: 700;
-  text-transform: capitalize;
 }
 
-.pill.session-scientific {
-  background: var(--accent-soft);
-  border-color: #b9e2d4;
+.pill.tone-neutral {
+  background: var(--tone-neutral-bg);
+  border-color: var(--tone-neutral-bd);
+  color: var(--tone-neutral-fg);
 }
 
-.pill.session-operational {
-  background: #e8f5ff;
-  border-color: #bfd7ea;
+.pill.tone-info {
+  background: var(--tone-info-bg);
+  border-color: var(--tone-info-bd);
+  color: var(--tone-info-fg);
+}
+
+.pill.tone-success {
+  background: var(--tone-success-bg);
+  border-color: var(--tone-success-bd);
+  color: var(--tone-success-fg);
+}
+
+.pill.tone-warning {
+  background: var(--tone-warning-bg);
+  border-color: var(--tone-warning-bd);
+  color: var(--tone-warning-fg);
+}
+
+.pill.tone-danger {
+  background: var(--tone-danger-bg);
+  border-color: var(--tone-danger-bd);
+  color: var(--tone-danger-fg);
+}
+
+/* The glyph carries the status alongside the word, so meaning survives
+   greyscale and colour blindness. Typographic, not an icon font. */
+.pill-glyph {
+  font-weight: 700;
+  margin-right: 0.3em;
 }
 
 .session-item.session-scientific {
@@ -1212,30 +1247,6 @@ button.project-graph-legend-item:hover {
   background: #e8f5ff;
 }
 
-.pill.review-status {
-  font-weight: 700;
-  text-transform: capitalize;
-}
-
-.pill.review-pending {
-  background: #fff8e5;
-  border-color: #ecdcb0;
-}
-
-.pill.review-approved {
-  background: var(--accent-soft);
-  border-color: #b9e2d4;
-}
-
-.pill.review-changes_requested {
-  background: #fff3d2;
-  border-color: #e6d2a0;
-}
-
-.pill.review-rejected {
-  background: var(--danger-soft);
-  border-color: #e3b7bd;
-}
 
 .manifest-preview {
   margin: 0.55rem 0 0;
@@ -1603,29 +1614,6 @@ button.project-graph-legend-item:hover {
   margin-top: 0.85rem;
 }
 
-.pill.relevance {
-  font-weight: 700;
-}
-
-.pill.relevance-top {
-  background: #e8f5ff;
-  border-color: #bfd7ea;
-}
-
-.pill.relevance-high {
-  background: #ebf9ef;
-  border-color: #bedcc8;
-}
-
-.pill.relevance-med {
-  background: #fff8e5;
-  border-color: #ecdcb0;
-}
-
-.pill.relevance-low {
-  background: #f5f1ea;
-  border-color: #d8d0c6;
-}
 
 .detail-actions {
   margin-top: 0.85rem;
@@ -1987,6 +1975,17 @@ button.project-graph-legend-item:hover {
   --accent-strong: #28b896;
   --accent-on-strong: #14161a;
   --accent-soft: #103930;
+  --tone-neutral-bg: #262a32;
+  --tone-neutral-bd: #31353d;
+  --tone-info-bg: #16304a;
+  --tone-info-bd: #2f5577;
+  --tone-success-bg: #103930;
+  --tone-success-bd: #1f5a48;
+  --tone-warning-bg: #2e2616;
+  --tone-warning-bd: #5c4a1f;
+  --tone-warning-fg: #e6c878;
+  --tone-danger-bg: #2e1a1e;
+  --tone-danger-bd: #6a2f37;
   --danger: #e06a76;
   --danger-soft: #3a2025;
   --paper-2: #242832;
@@ -2050,30 +2049,21 @@ button.project-graph-legend-item:hover {
 }
 
 :root[data-theme="dark"] .item-error,
-:root[data-theme="dark"] .flash.error,
-:root[data-theme="dark"] .pill.review-rejected {
+:root[data-theme="dark"] .flash.error {
   background: #2e1a1e;
   border-color: #6a2f37;
 }
 
-:root[data-theme="dark"] .pill.role-admin,
-:root[data-theme="dark"] .pill.session-operational,
-:root[data-theme="dark"] .pill.relevance-top,
 :root[data-theme="dark"] .review-queue-item.selected {
   background: #16304a;
   border-color: #2f5577;
 }
 
 :root[data-theme="dark"] .flash.ok,
-:root[data-theme="dark"] .install-nudge,
-:root[data-theme="dark"] .pill.session-scientific,
-:root[data-theme="dark"] .pill.review-approved,
-:root[data-theme="dark"] .pill.relevance-high {
+:root[data-theme="dark"] .install-nudge {
   border-color: #1f5a48;
 }
 
-:root[data-theme="dark"] .pill.review-pending,
-:root[data-theme="dark"] .pill.relevance-med,
 :root[data-theme="dark"] .warn,
 :root[data-theme="dark"] .pending-uploads-badge {
   background: #2e2616;
@@ -2122,6 +2112,17 @@ button.project-graph-legend-item:hover {
     --accent-strong: #28b896;
     --accent-on-strong: #14161a;
     --accent-soft: #103930;
+    --tone-neutral-bg: #262a32;
+    --tone-neutral-bd: #31353d;
+    --tone-info-bg: #16304a;
+    --tone-info-bd: #2f5577;
+    --tone-success-bg: #103930;
+    --tone-success-bd: #1f5a48;
+    --tone-warning-bg: #2e2616;
+    --tone-warning-bd: #5c4a1f;
+    --tone-warning-fg: #e6c878;
+    --tone-danger-bg: #2e1a1e;
+    --tone-danger-bd: #6a2f37;
     --danger: #e06a76;
     --danger-soft: #3a2025;
     --paper-2: #242832;
@@ -2185,30 +2186,21 @@ button.project-graph-legend-item:hover {
   }
 
   .item-error,
-  .flash.error,
-  .pill.review-rejected {
+  .flash.error {
     background: #2e1a1e;
     border-color: #6a2f37;
   }
 
-  .pill.role-admin,
-  .pill.session-operational,
-  .pill.relevance-top,
   .review-queue-item.selected {
     background: #16304a;
     border-color: #2f5577;
   }
 
   .flash.ok,
-  .install-nudge,
-  .pill.session-scientific,
-  .pill.review-approved,
-  .pill.relevance-high {
+  .install-nudge {
     border-color: #1f5a48;
   }
 
-  .pill.review-pending,
-  .pill.relevance-med,
   .warn,
   .pending-uploads-badge {
     background: #2e2616;

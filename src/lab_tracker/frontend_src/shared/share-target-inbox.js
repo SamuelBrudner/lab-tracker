@@ -108,7 +108,7 @@ function shareTextContent(share) {
   return Array.from(new Set(parts)).join("\n\n");
 }
 
-async function migrateIncomingShares({
+async function doMigrateIncomingShares({
   createTextNote = null,
   projectId,
   token,
@@ -163,6 +163,19 @@ async function migrateIncomingShares({
     migrated += 1;
   }
   return { migrated, skipped };
+}
+
+// Runs are chained so a second invocation cannot list the inbox until the
+// previous run has finished its removes. list() and remove() are separate
+// IndexedDB transactions, so overlapping runs would otherwise both see the
+// same share and import it twice (e.g. when the selected project flips while
+// a migration is mid-flight). A failed run never blocks the chain.
+let migrationChain = Promise.resolve();
+
+function migrateIncomingShares(options) {
+  const run = migrationChain.then(() => doMigrateIncomingShares(options));
+  migrationChain = run.catch(() => {});
+  return run;
 }
 
 export {

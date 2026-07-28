@@ -5,7 +5,7 @@ import { formatDate } from "../shared/formatters.js";
 import { droppedUploadsMessage, getUploadQueue } from "../shared/register-sw.js";
 import { migrateIncomingShares } from "../shared/share-target-inbox.js";
 import { UPLOAD_FILE_PATH } from "../shared/upload-queue.js";
-import { DraftRecoveryNotice } from "../shared/ui.jsx";
+import { DraftRecoveryNotice, StatusPill } from "../shared/ui.jsx";
 import { useLocalDraft } from "../hooks/useLocalDraft.js";
 
 const { useEffect, useMemo, useRef, useState } = React;
@@ -1694,9 +1694,7 @@ function MobileCaptureCard({
                 onClick={() => navigate(`/app/graph-drafts/${draft.change_set_id}`)}
                 type="button"
               >
-                <span className={draft.status === "failed" ? "pill review-rejected" : "pill"}>
-                  {draft.status}
-                </span>
+                <StatusPill family="review" value={draft.status} />
                 <strong>{draft.summary || draft.source_filename || "Graph draft"}</strong>
                 <span className="subtle">{formatDate(draft.created_at)}</span>
               </button>
@@ -1711,12 +1709,15 @@ function MobileCaptureCard({
                   <div className="inline">
                     <span className="pill">{note.metadata?.capture_kind || "capture"}</span>
                     {audioCapture ? (
-                      <span className={transcriptReady ? "pill review-approved" : "pill"}>
+                      <StatusPill
+                        family="review"
+                        value={transcriptReady ? "accepted" : "pending"}
+                      >
                         {transcriptReady ? "transcript ready" : "needs transcript"}
-                      </span>
+                      </StatusPill>
                     ) : null}
                     {bundleBlocked && !audioCapture ? (
-                      <span className="pill review-pending">voice transcript needed</span>
+                      <StatusPill family="review" value="pending">voice transcript needed</StatusPill>
                     ) : null}
                   </div>
                   <strong>{note.raw_asset?.filename || note.raw_content || "Captured note"}</strong>

@@ -7,8 +7,8 @@ import { SessionDetailCard } from "./sessions.jsx";
 import { apiResponse, installFetchMock } from "../test/utils.js";
 
 describe("SessionDetailCard", () => {
-  it("loads paginated outputs and scoped linked notes", async () => {
-    installFetchMock([
+  it("loads bounded legacy outputs only after expansion and loads scoped linked notes", async () => {
+    const fetchMock = installFetchMock([
       {
         match: "/sessions/session-1",
         response: apiResponse({
@@ -35,7 +35,7 @@ describe("SessionDetailCard", () => {
         ]),
       },
       {
-        match: "/sessions/session-1/outputs?limit=200&offset=0",
+        match: "/sessions/session-1/outputs?limit=100&offset=0",
         response: apiResponse([
           {
             checksum: "sha256-output",
@@ -80,8 +80,15 @@ describe("SessionDetailCard", () => {
       />
     );
 
-    expect(await screen.findByText("rig/output-1.bin")).toBeInTheDocument();
     expect(await screen.findByText("Session-linked note")).toBeInTheDocument();
+    expect(
+      fetchMock.mock.calls.some(([input]) =>
+        String(input).includes("/sessions/session-1/outputs")
+      )
+    ).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Show legacy outputs" }));
+    expect(await screen.findByText("rig/output-1.bin")).toBeInTheDocument();
   });
 
   it("calls the close handler with the session and project ids", async () => {
@@ -239,7 +246,7 @@ describe("SessionDetailCard", () => {
     await waitFor(() => {
       expect(onPromoteSession).toHaveBeenCalledWith("session-1", "question-1", "project-1");
     });
-    expect(await screen.findByText("scientific")).toBeInTheDocument();
+    expect(await screen.findByText("Scientific")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Promote to scientific" })).not.toBeInTheDocument();
   });
 });

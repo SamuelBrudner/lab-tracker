@@ -307,4 +307,88 @@ describe("migrateIncomingShares", () => {
       share_text: "bench note",
     });
   });
+
+  it("serializes overlapping runs so a share cannot import twice", async () => {
+    const inner = createMemoryShareStorage([
+      {
+        file: makeFile("once.jpg"),
+        filename: "once.jpg",
+        contentType: "image/jpeg",
+        receivedAt: 1,
+      },
+    ]);
+    // Gate the FIRST list() so a second run has a real window to overlap in;
+    // list and remove are separate transactions, so an unserialized second
+    // run would list the same share before the first run removes it.
+    let releaseFirstList;
+    const firstListGate = new Promise((resolve) => {
+      releaseFirstList = resolve;
+    });
+    let listCalls = 0;
+    const storage = {
+      async list() {
+        listCalls += 1;
+        if (listCalls === 1) {
+          await firstListGate;
+        }
+        return inner.list();
+      },
+      remove: (id) => inner.remove(id),
+    };
+    const uploadQueue = makeQueue();
+
+    const first = migrateIncomingShares({
+      projectId: "proj-a",
+      token: "tok-1",
+      uploadQueue,
+      storage,
+    });
+    const second = migrateIncomingShares({
+      projectId: "proj-b",
+      token: "tok-1",
+      uploadQueue,
+      storage,
+    });
+    releaseFirstList();
+
+    expect(await first).toEqual({ migrated: 1, skipped: 0 });
+    expect(await second).toEqual({ migrated: 0, skipped: 0 });
+    expect(await uploadQueue.listPending()).toHaveLength(1);
+    expect(listCalls).toBe(2);
+  });
+
+  it("keeps the chain alive after a failed run", async () => {
+    const uploadQueue = makeQueue();
+    const failingStorage = {
+      list: vi.fn(async () => {
+        throw new Error("inbox unavailable");
+      }),
+      remove: vi.fn(),
+    };
+
+    await expect(
+      migrateIncomingShares({
+        projectId: "proj-a",
+        token: "tok-1",
+        uploadQueue,
+        storage: failingStorage,
+      })
+    ).rejects.toThrow("inbox unavailable");
+
+    const storage = createMemoryShareStorage([
+      {
+        file: makeFile("later.jpg"),
+        filename: "later.jpg",
+        contentType: "image/jpeg",
+        receivedAt: 2,
+      },
+    ]);
+    const result = await migrateIncomingShares({
+      projectId: "proj-a",
+      token: "tok-1",
+      uploadQueue,
+      storage,
+    });
+    expect(result).toEqual({ migrated: 1, skipped: 0 });
+  });
 });

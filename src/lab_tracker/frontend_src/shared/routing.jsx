@@ -53,6 +53,13 @@ function parseAppRoute(pathname) {
   if (routeParts.length >= 3 && routeParts[1] === "sessions" && UUID_RE.test(routeParts[2] || "")) {
     return { kind: "session", sessionId: routeParts[2] };
   }
+  if (
+    routeParts.length >= 3 &&
+    routeParts[1] === "experiments" &&
+    UUID_RE.test(routeParts[2] || "")
+  ) {
+    return { kind: "experiment", experimentId: routeParts[2] };
+  }
   if (routeParts.length >= 3 && routeParts[1] === "datasets" && UUID_RE.test(routeParts[2] || "")) {
     return { kind: "dataset", datasetId: routeParts[2] };
   }

@@ -102,6 +102,11 @@ function pairsFor(tokens) {
     { fg: "--danger", bg: "--card", min: AA_NORMAL },
     { fg: "--ink", bg: "--danger-soft", min: AA_NORMAL },
     { fg: "--ink", bg: "--accent-soft", min: AA_NORMAL },
+    // Status pills carry words, so their text must clear AA on every tone.
+    { fg: "--ink", bg: "--tone-neutral-bg", min: AA_NORMAL },
+    { fg: "--ink", bg: "--tone-info-bg", min: AA_NORMAL },
+    { fg: "--ink", bg: "--tone-success-bg", min: AA_NORMAL },
+    { fg: "--ink", bg: "--tone-danger-bg", min: AA_NORMAL },
     // Non-text UI only needs 3:1.
     { fg: "--accent", bg: "--bg", min: AA_LARGE },
     // A focus indicator must be discernible against whatever it rings. The
@@ -207,5 +212,20 @@ describe("entity type palette", () => {
     for (const type of TYPES) {
       expect(glyphBlock).toContain(`${type.replaceAll("-", "_")}:`);
     }
+  });
+});
+
+describe("status tones", () => {
+  // The warning tone is the one theme that overrides pill text colour, so it
+  // needs checking on its own rather than via --ink.
+  it.each([
+    ["light", LIGHT],
+    ["dark (data-theme)", DARK_ATTR],
+    ["dark (prefers-color-scheme)", DARK_MEDIA],
+  ])("warning pill text is legible in the %s theme", (_label, tokens) => {
+    const fg = tokens["--tone-warning-fg"] ?? colour(tokens, "--ink");
+    const resolved = fg === "inherit" ? colour(tokens, "--ink") : fg;
+    const ratio = contrast(resolved, colour(tokens, "--tone-warning-bg"));
+    expect(Number(ratio.toFixed(2))).toBeGreaterThanOrEqual(AA_NORMAL);
   });
 });

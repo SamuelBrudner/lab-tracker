@@ -1,7 +1,10 @@
 import * as React from "react";
 
-import { formatDate, sessionTypeClass } from "../../shared/formatters.js";
+import { formatDate } from "../../shared/formatters.js";
+import { StatusPill } from "../../shared/ui.jsx";
 import { AppLink } from "../../shared/routing.jsx";
+import { SessionCollectionsSection } from "../collections/index.js";
+import { ExperimentChips } from "../experiments/index.js";
 import { SessionLinkedNotesSection } from "./SessionLinkedNotesSection.jsx";
 import { SessionOutputsSection } from "./SessionOutputsSection.jsx";
 import { useSessionDetailData } from "./useSessionDetailData.js";
@@ -24,6 +27,7 @@ function SessionDetailCard({
   const {
     activeQuestionState,
     loadError,
+    loadOutputs,
     loading,
     noteState,
     outputsState,
@@ -118,7 +122,7 @@ function SessionDetailCard({
         <div className="stack">
           <div className="inline">
             <span className="pill">{session.status}</span>
-            <span className={sessionTypeClass(session.session_type)}>{session.session_type}</span>
+            <StatusPill family="session" value={session.session_type} />
             {project ? <span className="pill">{project.name}</span> : null}
           </div>
 
@@ -148,6 +152,13 @@ function SessionDetailCard({
               <div className="mono">{session.primary_question_id}</div>
             </div>
           ) : null}
+
+          <ExperimentChips
+            token={token}
+            entityType="session"
+            entityId={session.session_id}
+            navigate={navigate}
+          />
 
           {session.session_type === "operational" ? (
             <div className="stack">
@@ -195,7 +206,13 @@ function SessionDetailCard({
             </div>
           ) : null}
 
-          <SessionOutputsSection outputsState={outputsState} />
+          <SessionCollectionsSection token={token} sessionId={session.session_id} />
+
+          <SessionOutputsSection
+            key={session.session_id}
+            outputsState={outputsState}
+            onLoadOutputs={loadOutputs}
+          />
 
           <SessionLinkedNotesSection noteState={noteState} navigate={navigate} />
         </div>

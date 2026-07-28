@@ -26,6 +26,9 @@ function StagedDatasetItem({
 
   const attachedFiles = fileState?.items || [];
   const filesReady = fileState && fileState.loaded && !fileState.loading && !fileState.error;
+  const fileOffset = Number(fileState?.meta?.offset || 0);
+  const fileLimit = Number(fileState?.meta?.limit || 100);
+  const fileTotal = Number(fileState?.meta?.total ?? attachedFiles.length);
 
   return (
     <article className="item">
@@ -49,10 +52,10 @@ function StagedDatasetItem({
               <strong>Files</strong>
               <span className="subtle">
                 {!fileState || fileState.loading
-                  ? "loading..."
-                  : fileState.error
-                    ? "unavailable"
-                    : `${attachedFiles.length} attached`}
+                    ? "loading..."
+                    : fileState.error
+                      ? "unavailable"
+                    : `${fileTotal} attached`}
               </span>
             </div>
 
@@ -113,6 +116,41 @@ function StagedDatasetItem({
                 </div>
               ))}
             </div>
+
+            {filesReady && fileTotal > fileLimit ? (
+              <div className="inline">
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  disabled={busy || fileOffset === 0}
+                  onClick={() =>
+                    onLoadDatasetFiles(dataset.dataset_id, {
+                      force: true,
+                      offset: Math.max(0, fileOffset - fileLimit),
+                    })
+                  }
+                >
+                  Previous files
+                </button>
+                <span className="subtle">
+                  {fileOffset + 1}–{Math.min(fileOffset + attachedFiles.length, fileTotal)} of{" "}
+                  {fileTotal}
+                </span>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  disabled={busy || fileOffset + attachedFiles.length >= fileTotal}
+                  onClick={() =>
+                    onLoadDatasetFiles(dataset.dataset_id, {
+                      force: true,
+                      offset: fileOffset + fileLimit,
+                    })
+                  }
+                >
+                  Next files
+                </button>
+              </div>
+            ) : null}
 
             <button
               type="button"

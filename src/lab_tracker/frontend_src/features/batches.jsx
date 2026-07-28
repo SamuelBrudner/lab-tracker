@@ -2,6 +2,7 @@ import * as React from "react";
 
 import { apiListRequest, apiRequest, buildApiPath } from "../shared/api.js";
 import { formatDate } from "../shared/formatters.js";
+import { StatusPill } from "../shared/ui.jsx";
 
 const { useCallback, useEffect, useMemo, useState } = React;
 
@@ -15,36 +16,30 @@ function batchNoteCount(batch) {
   return batch?.source_note_count || batch?.source_note_ids?.length || 1;
 }
 
-function pendingBatchStatus(status) {
-  if (status === "ready" || status === "submitted" || status === "changes_requested") {
-    return "pill review-pending";
-  }
-  if (status === "failed" || status === "rejected") {
-    return "pill review-rejected";
-  }
-  return "pill";
-}
-
 function PendingBatchBanner({ enabled = true, token, navigate }) {
   const [batches, setBatches] = useState([]);
+  const [batchTotal, setBatchTotal] = useState(0);
 
   useEffect(() => {
     let canceled = false;
     if (!enabled) {
       setBatches([]);
+      setBatchTotal(0);
       return () => {
         canceled = true;
       };
     }
-    apiListRequest(buildApiPath("/batches", { limit: 5 }), { token })
-      .then(({ data }) => {
+    apiListRequest(buildApiPath("/batches", { limit: 5, mine: true }), { token })
+      .then(({ data, meta }) => {
         if (!canceled) {
           setBatches(data || []);
+          setBatchTotal(Number(meta?.total ?? data?.length ?? 0));
         }
       })
       .catch(() => {
         if (!canceled) {
           setBatches([]);
+          setBatchTotal(0);
         }
       });
     return () => {
@@ -52,16 +47,16 @@ function PendingBatchBanner({ enabled = true, token, navigate }) {
     };
   }, [enabled, token]);
 
-  if (batches.length === 0) {
+  if (batchTotal === 0 || batches.length === 0) {
     return null;
   }
 
   const meetingBatch = batches.find((batch) => (batch?.meeting_note_count || 0) > 0);
   const label = meetingBatch
     ? "A meeting is waiting to be fleshed out — review its scientific content"
-    : batches.length === 1
+    : batchTotal === 1
       ? "1 daily review ready"
-      : `${batches.length} daily reviews ready`;
+      : `${batchTotal} daily reviews ready`;
   const firstBatch = meetingBatch || batches[0];
   return (
     <div className="flash ok batch-banner" role="status">
@@ -80,6 +75,33 @@ function PendingBatchBanner({ enabled = true, token, navigate }) {
   );
 }
 
+function BatchCards({ batches, emptyMessage, navigate }) {
+  if (batches.length === 0) {
+    return <p className="subtle">{emptyMessage}</p>;
+  }
+  return batches.map((batch) => (
+    <article className="item" key={batch.change_set_id}>
+      <div className="item-head">
+        <strong className="summary-clamp">{batch.summary || "Pending review"}</strong>
+        <StatusPill family="review" value={batch.status} />
+      </div>
+      <div className="inline">
+        <span className="pill">{formatDate(batch.created_at)}</span>
+        <span className="pill">{batchNoteCount(batch)} notes</span>
+        <span className="pill">{(batch.operations || []).length} ops</span>
+        {batch.model ? <span className="pill">{batch.model}</span> : null}
+      </div>
+      <button
+        type="button"
+        className="btn-primary"
+        onClick={() => navigate(`/app/batches/${batch.change_set_id}`)}
+      >
+        Review batch
+      </button>
+    </article>
+  ));
+}
+
 function BatchReviewPage({
   token,
   projects,
@@ -91,6 +113,8 @@ function BatchReviewPage({
   setFlash,
 }) {
   const [batches, setBatches] = useState([]);
+  const [waitingBatches, setWaitingBatches] = useState([]);
+  const [needsCommitBatches, setNeedsCommitBatches] = useState([]);
   const [runs, setRuns] = useState([]);
   const [settings, setSettings] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -109,17 +133,39 @@ function BatchReviewPage({
     try {
       const batchPath = buildApiPath("/batches", {
         project_id: selectedProjectId,
+        mine: true,
+        limit: 100,
+      });
+      const waitingPath = buildApiPath("/batches", {
+        project_id: selectedProjectId,
+        mine: true,
+        status: "submitted",
+        limit: 100,
+      });
+      const needsCommitPath = buildApiPath("/batches", {
+        project_id: selectedProjectId,
+        needs_commit: true,
         limit: 100,
       });
       const runPath = buildApiPath("/batches/runs", {
         project_id: selectedProjectId,
+        mine: true,
         limit: 20,
       });
-      const [{ data: batchData }, { data: runData }] = await Promise.all([
+      const [
+        { data: batchData },
+        { data: waitingData },
+        { data: needsCommitData },
+        { data: runData },
+      ] = await Promise.all([
         apiListRequest(batchPath, { token }),
+        apiListRequest(waitingPath, { token }),
+        apiListRequest(needsCommitPath, { token }),
         apiListRequest(runPath, { token }),
       ]);
       setBatches(batchData || []);
+      setWaitingBatches(waitingData || []);
+      setNeedsCommitBatches(needsCommitData || []);
       setRuns(runData || []);
     } catch (err) {
       setFlash("", err.message || "Failed to load daily reviews.");
@@ -234,37 +280,30 @@ function BatchReviewPage({
           </label>
 
           <div className="stack">
-            {batches.length === 0 ? (
-              <p className="subtle">No daily reviews waiting.</p>
-            ) : (
-              batches.map((batch) => (
-                <article className="item" key={batch.change_set_id}>
-                  <div className="item-head">
-                    <strong className="summary-clamp">{batch.summary || "Pending review"}</strong>
-                    <span className={pendingBatchStatus(batch.status)}>{batch.status}</span>
-                  </div>
-                  <div className="inline">
-                    <span className="pill">{formatDate(batch.created_at)}</span>
-                    <span className="pill">{batchNoteCount(batch)} notes</span>
-                    <span className="pill">{(batch.operations || []).length} ops</span>
-                    {batch.model ? <span className="pill">{batch.model}</span> : null}
-                  </div>
-                  <button
-                    type="button"
-                    className="btn-primary"
-                    onClick={() => navigate(`/app/batches/${batch.change_set_id}`)}
-                  >
-                    Review batch
-                  </button>
-                </article>
-              ))
-            )}
+            <h3>Ready for you</h3>
+            <BatchCards
+              batches={batches}
+              emptyMessage="No daily reviews need your response."
+              navigate={navigate}
+            />
+            <h3>Waiting on others</h3>
+            <BatchCards
+              batches={waitingBatches}
+              emptyMessage="Nothing is waiting for project review."
+              navigate={navigate}
+            />
+            <h3>Needs commit</h3>
+            <BatchCards
+              batches={needsCommitBatches}
+              emptyMessage="No submitted reviews need your approval."
+              navigate={navigate}
+            />
           </div>
         </section>
 
         <section className="review-pane">
           <div className="item-head">
-            <h3>Cadence</h3>
+            <h3>Your cadence</h3>
             {activeProject ? <span className="pill">{activeProject.name}</span> : null}
           </div>
           <form className="form" onSubmit={saveSettings}>
@@ -321,9 +360,8 @@ function BatchReviewPage({
               </button>
             </div>
             <p className="subtle">
-              The server poller checks for due projects; this setting decides when this
-              project becomes due. Most labs pick evening to confirm the day&apos;s captures
-              while the work is fresh, but mornings work too.
+              This is your schedule for the selected project. Most people pick evening to
+              confirm the day&apos;s captures while the work is fresh, but mornings work too.
             </p>
             <label>
               Time zone
