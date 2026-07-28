@@ -139,6 +139,41 @@
   --gap: var(--sp-3);
   --radius-surface: var(--radius-xl);
   --shadow-surface: var(--shadow-3);
+
+  /* --- Semantic: entity types --------------------------------------------
+     One source of truth for the nine graph entity types, so the project graph
+     themes with the rest of the app instead of carrying its own palette in JS.
+     Every border clears 3:1 against both its own fill and the card behind it
+     (WCAG 1.4.11); the previous values sat at 1.98-3.20:1. Hue is preserved,
+     only lightness moved. Colour is never the sole carrier of type: each node
+     also renders a glyph, supplied per node as --entity-glyph and drawn by the
+     .react-flow__node-default::before rule. */
+  --entity-analysis-bg: #eef3f9;
+  --entity-analysis-bd: #788cab;
+  --entity-claim-bg: #f7f0f4;
+  --entity-claim-bd: #b17c95;
+  --entity-dataset-bg: #edf5ed;
+  --entity-dataset-bd: #749472;
+  --entity-exploration-node-bg: #eef6f7;
+  --entity-exploration-node-bd: #5597a2;
+  --entity-goal-bg: #fff4cf;
+  --entity-goal-bd: #b38620;
+  --entity-note-bg: #fbf3e7;
+  --entity-note-bd: #a98756;
+  --entity-question-bg: #f6f2eb;
+  --entity-question-bd: #998b68;
+  --entity-session-bg: #edf4f5;
+  --entity-session-bd: #67949b;
+  --entity-visualization-bg: #f1eef8;
+  --entity-visualization-bd: #8f81b9;
+  /* Fallback for an entity type the stylesheet does not know yet. */
+  --entity-unknown-bg: var(--card);
+  --entity-unknown-bd: var(--line);
+  /* Node label ink and edge strokes, kept here with the rest of the graph
+     palette rather than as literals in project-graph.jsx. */
+  --entity-ink: #1f2933;
+  --graph-edge: #c6ccd2;
+  --graph-edge-active: #6b7280;
 }
 
 * {
@@ -703,6 +738,15 @@ button.project-graph-legend-item:hover {
   border-radius: 8px;
   font-size: 0.78rem;
   line-height: 1.25;
+}
+
+/* Type glyph, so a node's entity type is legible in greyscale and to anyone
+   who cannot separate the pastel fills by hue. Set per node as an inline
+   custom property; empty for a type the stylesheet does not know. */
+.project-graph-canvas .react-flow__node-default::before {
+  content: var(--entity-glyph, "");
+  font-weight: 700;
+  margin-right: 0.3em;
 }
 
 /* Backstop for the JS-side label truncation: never let a node grow taller

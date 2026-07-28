@@ -48,17 +48,39 @@ const TYPE_LAYER_BY_VIEW = {
   },
 };
 
-const TYPE_STYLES = {
-  analysis: { background: "#eef3f9", borderColor: "#8ba3c7" },
-  claim: { background: "#f7f0f4", borderColor: "#c98da9" },
-  dataset: { background: "#edf5ed", borderColor: "#85aa83" },
-  exploration_node: { background: "#eef6f7", borderColor: "#579aa5" },
-  goal: { background: "#fff4cf", borderColor: "#c99724" },
-  note: { background: "#fbf3e7", borderColor: "#d3a96b" },
-  question: { background: "#f6f2eb", borderColor: "#b8a77d" },
-  session: { background: "#edf4f5", borderColor: "#75a8b0" },
-  visualization: { background: "#f1eef8", borderColor: "#9a8bc7" },
+// A typographic glyph per entity type so type is never carried by hue alone —
+// it survives greyscale, colour-blindness, and a printed page.
+const TYPE_GLYPHS = {
+  analysis: "\u2211",
+  claim: "\u201c",
+  dataset: "\u25a4",
+  exploration_node: "\u2234",
+  goal: "\u25c6",
+  note: "\u270e",
+  question: "?",
+  session: "\u25f7",
+  visualization: "\u25e9",
 };
+
+/**
+ * Colour for an entity type, as CSS custom properties rather than literals.
+ *
+ * The palette lives in styles.css so the graph themes with the rest of the app
+ * and cannot drift from it. Inline styles are unavoidable here because React
+ * Flow owns the node element, but a var() reference keeps the value in CSS.
+ */
+function entityTypeStyle(entityType) {
+  const known = Object.prototype.hasOwnProperty.call(TYPE_GLYPHS, entityType);
+  const slug = known ? String(entityType).replaceAll("_", "-") : "unknown";
+  return {
+    background: `var(--entity-${slug}-bg)`,
+    borderColor: `var(--entity-${slug}-bd)`,
+  };
+}
+
+function entityTypeGlyph(entityType) {
+  return TYPE_GLYPHS[entityType] || "\u25cb";
+}
 
 const VIEW_AXIS_LABELS = {
   evidence: "Evidence flow",
@@ -100,8 +122,8 @@ const ROW_HEIGHT = 118;
 const NODE_LABEL_DISPLAY_LIMIT = 110;
 // Edges read as background structure: light stroke and small arrowheads by
 // default, darker when hovered so the revealed label has a visible anchor.
-const EDGE_STROKE = "#c6ccd2";
-const EDGE_STROKE_ACTIVE = "#6b7280";
+const EDGE_STROKE = "var(--graph-edge)";
+const EDGE_STROKE_ACTIVE = "var(--graph-edge-active)";
 const DIMMED_OPACITY = 0.15;
 
 function truncateNodeLabel(label) {
@@ -311,7 +333,7 @@ function computeNodePositions(nodes, edges, view, layerByType, qLayout) {
 }
 
 function graphNodeToFlowNode(node, positions, selection) {
-  const style = TYPE_STYLES[node.entity_type] || {};
+  const style = entityTypeStyle(node.entity_type);
   const goalShape =
     node.entity_type === "goal"
       ? { clipPath: "polygon(8% 0, 92% 0, 100% 50%, 92% 100%, 8% 100%, 0 50%)" }
@@ -331,13 +353,16 @@ function graphNodeToFlowNode(node, positions, selection) {
     position: positions.get(node.id) || { x: 0, y: 0 },
     style: {
       ...style,
+      // Rendered by CSS ::before rather than folded into data.label, which has
+      // a tested contract (truncation length, astral-plane safety, fullLabel).
+      "--entity-glyph": `"${entityTypeGlyph(node.entity_type)}"`,
       borderWidth: isSelected ? 2 : 1,
-      color: "#1f2933",
+      color: "var(--entity-ink)",
       ...goalShape,
       maxWidth: 220,
       width: 220,
       ...(isSelected
-        ? { boxShadow: `0 0 0 2px ${style.borderColor || "#6b7280"}` }
+        ? { boxShadow: `0 0 0 2px ${style.borderColor}` }
         : {}),
       ...(isDimmed ? { opacity: DIMMED_OPACITY } : {}),
     },
@@ -676,7 +701,7 @@ function ProjectGraphExplorer({
             >
               <span className="project-graph-axis-label">{VIEW_AXIS_LABELS[view]}</span>
               {legendTypes.map((entityType, index) => {
-                const style = TYPE_STYLES[entityType] || {};
+                const style = entityTypeStyle(entityType);
                 const typeLabel = TYPE_LABELS[entityType] || entityType;
                 const hidden = hiddenTypes.has(entityType);
                 return (
@@ -697,12 +722,15 @@ function ProjectGraphExplorer({
                       onClick={() => toggleType(entityType)}
                     >
                       <span
+                        aria-hidden="true"
                         className="project-graph-legend-swatch"
                         style={{
                           background: style.background,
                           borderColor: style.borderColor,
                         }}
-                      />
+                      >
+                        {entityTypeGlyph(entityType)}
+                      </span>
                       {typeLabel}: {nodeGroups[entityType]?.length || 0}
                     </button>
                     {index < legendTypes.length - 1 ? (
@@ -756,11 +784,9 @@ function ProjectGraphExplorer({
                 <div className="project-graph-detail-head">
                   <span
                     className="project-graph-detail-type"
-                    style={{
-                      background: TYPE_STYLES[selectedNode.entity_type]?.background,
-                      borderColor: TYPE_STYLES[selectedNode.entity_type]?.borderColor,
-                    }}
+                    style={entityTypeStyle(selectedNode.entity_type)}
                   >
+                    <span aria-hidden="true">{entityTypeGlyph(selectedNode.entity_type)}</span>{" "}
                     {TYPE_LABELS[selectedNode.entity_type] || selectedNode.entity_type}
                   </span>
                   <button

@@ -162,3 +162,50 @@ describe("jade regression guards", () => {
     expect(ratio).toBeLessThan(AAA_NORMAL);
   });
 });
+
+describe("entity type palette", () => {
+  const TYPES = [
+    "analysis",
+    "claim",
+    "dataset",
+    "exploration-node",
+    "goal",
+    "note",
+    "question",
+    "session",
+    "visualization",
+  ];
+
+  it.each(TYPES)("%s border clears 3:1 against its own fill and the card", (type) => {
+    // A node's edge is the thing separating it from the canvas and from its own
+    // fill, so it is non-text UI under WCAG 1.4.11. These sat at 1.98-3.20:1
+    // before lab-tracker-83m2.5.
+    const border = colour(LIGHT, `--entity-${type}-bd`);
+    const fill = colour(LIGHT, `--entity-${type}-bg`);
+    expect(Number(contrast(border, fill).toFixed(2))).toBeGreaterThanOrEqual(AA_LARGE);
+    expect(Number(contrast(border, colour(LIGHT, "--card")).toFixed(2))).toBeGreaterThanOrEqual(
+      AA_LARGE
+    );
+  });
+
+  it("keeps entity colours out of JavaScript", () => {
+    // The palette drifted from the app for as long as it lived in JS literals.
+    const source = readFileSync(
+      resolvePath(process.cwd(), "src/lab_tracker/frontend_src/features/project-graph.jsx"),
+      "utf8"
+    );
+    expect(source).not.toMatch(/#[0-9a-fA-F]{6}/);
+    expect(source).toContain("var(--entity-");
+  });
+
+  it("gives every entity type a glyph so type is never hue-alone", () => {
+    const source = readFileSync(
+      resolvePath(process.cwd(), "src/lab_tracker/frontend_src/features/project-graph.jsx"),
+      "utf8"
+    );
+    const glyphBlock = source.slice(source.indexOf("const TYPE_GLYPHS"));
+    for (const type of TYPES) {
+      expect(glyphBlock).toContain(`${type.replaceAll("-", "_")}:`);
+    }
+  });
+});
