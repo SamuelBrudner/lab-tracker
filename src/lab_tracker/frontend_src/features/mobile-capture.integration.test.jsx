@@ -387,6 +387,19 @@ describe("App", () => {
 
     expect(await screen.findByRole("heading", { name: "Capture" })).toBeInTheDocument();
     await waitFor(() => expect(screen.getByLabelText("Project")).toHaveValue("project-1"));
+    await waitFor(() => {
+      expect(
+        screen
+          .getByLabelText("Active question (optional)")
+          .querySelector('option[value="question-1"]')
+      ).toBeInTheDocument();
+      expect(
+        screen.getByLabelText("Session (optional)").querySelector('option[value="session-1"]')
+      ).toBeInTheDocument();
+      expect(
+        screen.getByLabelText("Dataset (optional)").querySelector('option[value="dataset-1"]')
+      ).toBeInTheDocument();
+    });
 
     const file = new File(["phone-bytes"], "phone-capture.jpg", {
       lastModified: 1769904000000,
