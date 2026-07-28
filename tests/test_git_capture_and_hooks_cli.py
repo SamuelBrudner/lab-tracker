@@ -94,6 +94,7 @@ def test_git_snapshot_queues_deterministic_event(git_repo, capsys) -> None:
     event = json.loads(event_path.read_text(encoding="utf-8"))
     assert event["sink"] == "staged-note"
     assert event["capture_kind"] == "git_commit"
+    assert "request_draft" not in event["payload"]
     assert event["context"]["project_id"] == "p-1"
     assert event["source"]["provider"] == "git"
     assert event["source"]["git_commit"] == payload["commit"]
@@ -278,6 +279,7 @@ def test_outbox_sync_drains_queue_without_watch_json(git_repo, monkeypatch, caps
     assert not payload["errors"]
     assert payload["results"][0]["action"] == "imported"
     assert payload["results"][0]["note_id"] == "note-1"
+    assert fake.draft_requests == []
 
     # The queue is now drained: a follow-up status shows the event synced.
     lt_cli.main(["outbox", "status", "--repo", str(git_repo)])
@@ -360,7 +362,9 @@ def test_hooks_install_writes_posix_hook(git_repo, capsys) -> None:
     assert content.startswith("#!/usr/bin/env sh\n")
     assert HOOK_BLOCK_BEGIN in content
     assert HOOK_BLOCK_END in content
-    assert "git snapshot --request-draft >/dev/null" in content
+    assert "git snapshot >/dev/null" in content
+    assert "--request-draft" not in content
+    assert "LAB_TRACKER_GIT_CAPTURE_ENABLED" in content
     # Suppress stdout only, not stderr, so lt's cause+remediation line survives
     # (GH #77); and the fallback warning points at the drain commands.
     assert ">/dev/null 2>&1" not in content
@@ -378,10 +382,22 @@ def test_hooks_install_writes_posix_hook(git_repo, capsys) -> None:
 
 
 def test_hooks_install_dry_run_writes_nothing(git_repo, capsys) -> None:
-    lt_cli.main(["hooks", "install", "--repo", str(git_repo), "--dry-run"])
+    # The old opt-out flag remains accepted (but hidden) so existing setup
+    # automation does not fail now that capture-only is unconditional.
+    lt_cli.main(
+        [
+            "hooks",
+            "install",
+            "--repo",
+            str(git_repo),
+            "--no-request-draft",
+            "--dry-run",
+        ]
+    )
     payload = json.loads(capsys.readouterr().out)
     assert payload["dry_run"] is True
     assert payload["diff"]
+    assert "--request-draft" not in payload["diff"]
     assert not (git_repo / ".git" / "hooks" / "post-commit").exists()
 
 
@@ -443,6 +459,7 @@ def test_hooks_install_upgrades_legacy_ps1_block_in_place(git_repo, capsys) -> N
     content = hook_path.read_text(encoding="utf-8")
     assert "create-analysis-graph-draft.py" not in content
     assert "git snapshot" in content
+    assert "--request-draft" not in content
     assert 'LAB_TRACKER_PROJECT_ID="${LAB_TRACKER_PROJECT_ID:-legacy-project}"' in content
     assert 'LAB_TRACKER_BASE_URL="${LAB_TRACKER_BASE_URL:-http://192.168.1.5:8000}"' in content
     assert content.count(HOOK_BLOCK_BEGIN) == 1
@@ -451,6 +468,17 @@ def test_hooks_install_upgrades_legacy_ps1_block_in_place(git_repo, capsys) -> N
     lt_cli.main(["hooks", "status", "--repo", str(git_repo)])
     status = json.loads(capsys.readouterr().out)
     assert status["baked_project_id"] == "legacy-project"
+
+
+def test_legacy_powershell_installer_is_capture_only() -> None:
+    script = (
+        Path(__file__).parents[1] / "scripts" / "install-git-graph-draft-hook.ps1"
+    ).read_text(encoding="utf-8")
+
+    assert "-m lab_tracker_client git snapshot" in script
+    assert "create-analysis-graph-draft.py" not in script
+    assert "--request-draft" not in script
+    assert "could not create a proposal" not in script
 
 
 def test_hooks_refuse_unpaired_markers(git_repo) -> None:

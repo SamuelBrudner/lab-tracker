@@ -45,7 +45,9 @@ host-local scratch). `install-hook` writes a managed block into the repo's
 Every `git commit` records a `commit` event: commit SHA, branch, remote, commit
 subject/author, dirty-tree flag, and the environment fingerprint. Events are
 idempotent per commit — a re-fired hook updates nothing and creates no
-duplicates.
+duplicates. The hook only lands the capture in the staged-note inbox; graph
+proposal generation waits for the configured daily-review schedule or an
+explicit on-demand review trigger.
 
 ### Annotation
 
