@@ -85,29 +85,33 @@ self-hosted runner on that machine or network.
 ## Git Post-Commit Hook
 
 For local analysis repositories, install a `post-commit` hook that sends each new
-commit to Lab Tracker as analysis evidence and asks for a reviewable graph draft:
+commit to Lab Tracker as staged analysis evidence:
 
-```powershell
-.\scripts\install-git-graph-draft-hook.ps1 `
-  -TargetRepo C:\path\to\analysis-repo `
-  -ProjectId "$PROJECT_ID"
+```bash
+cd /path/to/analysis-repo
+lt hooks install --project "$PROJECT_ID" --dry-run
+lt hooks install --project "$PROJECT_ID" --yes
 ```
 
-The hook calls `scripts/create-analysis-graph-draft.py --git-commit HEAD` after a
-commit succeeds. It does not block or rewrite the commit: if Lab Tracker is down,
-credentials are missing, or graph drafting fails, the hook prints a warning and
-exits successfully. The installer writes a single managed block (delimited by
-`# --- BEGIN/END LAB TRACKER GRAPH DRAFT HOOK ---`) and re-running it updates that
-block in place; pass `-Force` to append the block to a pre-existing unmanaged hook.
+The hook calls the packaged `lt git snapshot` after a commit succeeds. It only
+lands the capture in the evidence inbox; proposal generation waits for the
+configured daily-review schedule (or an explicit on-demand review trigger). It
+does not block or rewrite the commit: if Lab Tracker is down or credentials are
+missing, the evidence remains in the local outbox and the hook prints a warning
+before exiting successfully. The installer writes a single managed block
+(delimited by `# --- BEGIN/END LAB TRACKER GRAPH DRAFT HOOK ---`) and re-running
+it updates that block in place; pass `--force` to append the block to a
+pre-existing unmanaged hook. The older PowerShell installer upgrades in place
+because it uses the same markers.
 
 Set these environment variables to override the installed defaults without editing
 the hook:
 
-- `LAB_TRACKER_GIT_DRAFT_ENABLED=0` disables the hook temporarily
+- `LAB_TRACKER_GIT_CAPTURE_ENABLED=0` disables the hook temporarily
+- `LAB_TRACKER_GIT_DRAFT_ENABLED=0` is the legacy alias for disabling it
 - `LAB_TRACKER_BASE_URL` points at a different Lab Tracker API
 - `LAB_TRACKER_PROJECT_ID` changes the target project
-- `LAB_TRACKER_ROOT` points at a different Lab Tracker checkout
-- `LAB_TRACKER_PYTHON` chooses the Python interpreter used by the hook
+- `LAB_TRACKER_LT` chooses the `lt` executable used by the hook
 
 ## Relationship to the evidence inbox
 

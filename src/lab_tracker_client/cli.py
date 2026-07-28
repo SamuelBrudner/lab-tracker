@@ -540,7 +540,7 @@ def _add_hooks_parsers(subcommands: argparse._SubParsersAction) -> None:
     install_parser.add_argument(
         "--no-request-draft",
         action="store_true",
-        help="Do not request an analysis graph draft when snapshots sync.",
+        help=argparse.SUPPRESS,
     )
     install_parser.add_argument(
         "--force",
@@ -1374,7 +1374,6 @@ def _cmd_hooks_install(args: argparse.Namespace) -> Any:
         repo=args.repo,
         project_id=args.project,
         base_url=args.base_url,
-        request_draft=not args.no_request_draft,
         lt_path=args.lt_path,
         force=args.force,
         dry_run=args.dry_run,
