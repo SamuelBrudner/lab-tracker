@@ -21,6 +21,11 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 import lab_tracker_client.watch as watch_capture
+from lab_tracker.repository_conventions import (
+    REPOSITORY_CONVENTIONS_HASH_METADATA_KEY,
+    capture_repository_conventions,
+    repository_conventions_metadata,
+)
 from lab_tracker_client.client import LTValidationError
 from lab_tracker_client.repo import normalize_remote
 
@@ -69,6 +74,19 @@ def snapshot_commit(
         max_diff_lines=resolved_max,
         context_lines=resolved_context,
     )
+    agent_context_error = ""
+    remote_for_id = normalize_remote(str(facts.get("git_remote_origin_url") or ""))
+    try:
+        convention_snapshot = capture_repository_conventions(
+            repo_root,
+            commit=str(facts["git_commit"]),
+            repository=remote_for_id or f"local:{repo_root.name}",
+        )
+    except ValueError as exc:
+        # A malformed optional enrollment must never lose the commit itself.
+        convention_snapshot = None
+        agent_context_error = str(exc)
+    facts.update(repository_conventions_metadata(convention_snapshot))
     config, config_error = resolve_watch_config(repo_root, config_path)
     # The repo's own lt_ids.json binding outranks a (possibly parent-dir)
     # watch config: repo-local intent wins.
@@ -89,7 +107,6 @@ def snapshot_commit(
     # Shared git-evidence identity (lt-81s6.8/.17): <normalized-remote>@<commit>,
     # owned by lab_tracker_client.repo, so hook-, CLI-, and CI-captured evidence
     # for one commit dedup to a single identity instead of parallel note streams.
-    remote_for_id = normalize_remote(str(facts.get("git_remote_origin_url") or ""))
     source_external_id = f"{remote_for_id or 'local'}@{commit_sha}"
     event = watch_capture.make_event(
         capture_id=f"git-{repo_name}-{commit_sha[:12]}",
@@ -122,14 +139,24 @@ def snapshot_commit(
     event_file = watch_capture.event_path(event, outbox)
     already_queued = event_file.exists()
     context_ignored = False
+    stored_conventions_hash = ""
     if already_queued:
         # write_event is a no-op for an existing file (preserving its sync
         # state), so report the STORED context rather than pretending the
         # newly resolved flags were applied.
         with suppress(Exception):
             existing = watch_capture.read_event(event_file)
+            stored_conventions_hash = str(
+                existing["source"].get(REPOSITORY_CONVENTIONS_HASH_METADATA_KEY) or ""
+            )
             if existing["context"] != event["context"] or (
                 bool(existing["payload"].get("request_draft")) != request_draft
+            ) or (
+                stored_conventions_hash
+                != str(
+                    event["source"].get(REPOSITORY_CONVENTIONS_HASH_METADATA_KEY)
+                    or ""
+                )
             ):
                 context_ignored = True
             resolved_project = existing["context"].get("project_id") or resolved_project
@@ -150,6 +177,18 @@ def snapshot_commit(
         payload["context_ignored"] = True
     if config_error:
         payload["config_error"] = config_error
+    if convention_snapshot is not None:
+        requested_hash = convention_snapshot["snapshot_hash"]
+        payload["repository_conventions_hash"] = (
+            stored_conventions_hash if already_queued else requested_hash
+        )
+        if already_queued and stored_conventions_hash != requested_hash:
+            payload["requested_repository_conventions_hash"] = requested_hash
+        payload["repository_convention_files"] = sum(
+            len(document["paths"]) for document in convention_snapshot["documents"]
+        )
+    if agent_context_error:
+        payload["agent_context_error"] = agent_context_error
     return payload
 
 
