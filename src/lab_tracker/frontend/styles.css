@@ -120,6 +120,14 @@
   --danger: var(--color-rust-700);
   --danger-soft: var(--color-rust-050);
   --shadow: var(--shadow-3);
+  /* One focus ring for the whole app, applied through :focus-visible so it
+     reaches keyboard users without boxing every mouse click. Points at
+     --accent-text rather than a fixed jade so it flips with the theme: the
+     light step is only 2.32-2.92:1 on dark surfaces, under the 3:1 WCAG asks
+     of a focus indicator. */
+  --focus-ring-color: var(--accent-text);
+  --focus-ring-width: 2px;
+  --focus-ring-offset: 2px;
 
   /* --- Register: Work (default) ------------------------------------------
      Read overrides these in lab-tracker-83m2.8; defining them here means the
@@ -135,6 +143,69 @@
 
 * {
   box-sizing: border-box;
+}
+
+/* --- Accessibility floor ----------------------------------------------------
+   Global keyboard focus. :focus-visible rather than :focus so the ring appears
+   for keyboard and assistive-tech users without boxing every mouse click.
+   Component rules that set their own outline must not remove this one. */
+:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: var(--focus-ring-offset);
+}
+
+/* First focusable element on the page, visible only once focused. */
+.skip-link {
+  position: absolute;
+  left: var(--sp-3);
+  top: var(--sp-3);
+  z-index: var(--z-toast);
+  padding: var(--sp-2) var(--sp-4);
+  border-radius: var(--radius-sm);
+  background: var(--accent-strong);
+  color: var(--accent-on-strong);
+  font-weight: 600;
+  text-decoration: none;
+  /* Kept in the accessibility tree and focusable, but off-screen until used.
+     display:none or visibility:hidden would make it unreachable by keyboard. */
+  transform: translateY(-200%);
+}
+
+.skip-link:focus-visible,
+.skip-link:focus {
+  transform: translateY(0);
+}
+
+/* The main landmark receives focus on route change; it is a scroll/announce
+   target, not an interactive control, so it gets no persistent ring. */
+main:focus {
+  outline: none;
+}
+
+main:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: var(--focus-ring-offset);
+}
+
+/* Motion is decorative here: every entrance keyframe ends at opacity 1 and
+   zero offset, so collapsing duration leaves content visible and in place
+   rather than hiding it. Honours the OS-level request rather than an in-app
+   toggle, which is what assistive users actually set. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  /* Hover lift and entrance offsets are pure decoration; remove the movement
+     itself, not just its duration. */
+  button:hover {
+    transform: none;
+  }
 }
 
 html,
@@ -843,7 +914,11 @@ button.project-graph-legend-item:hover {
   width: 100%;
 }
 
-.capture-composer-input:focus {
+/* Mouse focus keeps the composer's clean look, but a keyboard user must still
+   get a ring: the wrapper's :focus-within glow is only 1.21:1 and its border
+   2.23:1, both under the 3:1 WCAG asks of a focus indicator. Scoping this to
+   :not(:focus-visible) lets the global ring through. */
+.capture-composer-input:focus:not(:focus-visible) {
   outline: none;
 }
 

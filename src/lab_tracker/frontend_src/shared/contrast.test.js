@@ -75,7 +75,11 @@ const DARK_MEDIA = (() => {
 })();
 
 function colour(tokens, name) {
-  const raw = tokens[name];
+  // A theme block overrides only some tokens; the rest inherit from :root, so
+  // fall back the way the cascade does. Resolution still prefers the theme's
+  // values, which is what lets a token like --focus-ring-color point at
+  // --accent-text once and follow the theme automatically.
+  const raw = tokens[name] ?? LIGHT[name];
   expect(raw, `token ${name}`).toBeDefined();
   return resolveToken(raw, { ...LIGHT, ...tokens }, 0);
 }
@@ -100,6 +104,11 @@ function pairsFor(tokens) {
     { fg: "--ink", bg: "--accent-soft", min: AA_NORMAL },
     // Non-text UI only needs 3:1.
     { fg: "--accent", bg: "--bg", min: AA_LARGE },
+    // A focus indicator must be discernible against whatever it rings. The
+    // light jade step is only ~2.3-2.9:1 on dark surfaces, so this pair is what
+    // forces the ring colour to follow the theme.
+    { fg: "--focus-ring-color", bg: "--bg", min: AA_LARGE },
+    { fg: "--focus-ring-color", bg: "--card", min: AA_LARGE },
     // Deliberately NOT asserted here: --line on --card is 1.51:1 in light and
     // 1.31:1 in dark, and --card is only 1.09:1 against --bg, so container
     // edges lean on a very low-contrast border plus a shadow. That is a real

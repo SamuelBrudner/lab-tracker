@@ -23,7 +23,7 @@ function questionCountPath(projectId) {
 }
 
 function datasetListPath(projectId, { limit = 200, offset = 0, ...rest } = {}) {
-  return buildApiPath("/datasets", {
+  return buildApiPath("/datasets/summaries", {
     project_id: projectId,
     ...rest,
     limit,
@@ -32,7 +32,11 @@ function datasetListPath(projectId, { limit = 200, offset = 0, ...rest } = {}) {
 }
 
 function datasetCountPath(projectId) {
-  return buildApiPath("/datasets", { project_id: projectId, limit: 1, offset: 0 });
+  return buildApiPath("/datasets/summaries", {
+    project_id: projectId,
+    limit: 1,
+    offset: 0,
+  });
 }
 
 function noteCountPath(projectId) {
@@ -93,7 +97,7 @@ function captureClaimsPath(projectId) {
 }
 
 function datasetFilesPath(datasetId) {
-  return buildApiPath(`/datasets/${datasetId}/files`, { limit: 200, offset: 0 });
+  return buildApiPath(`/datasets/${datasetId}/files`, { limit: 100, offset: 0 });
 }
 
 function visualizationsPath(analysisId) {
@@ -497,7 +501,7 @@ describe("App", () => {
         response: paged([]),
       },
       {
-        match: buildApiPath("/batches", { limit: 5 }),
+        match: buildApiPath("/batches", { limit: 5, mine: true }),
         response: paged([], { limit: 5, offset: 0, total: 0 }),
       },
       {
@@ -626,7 +630,7 @@ describe("App", () => {
         ]),
       },
       {
-        match: buildApiPath("/batches", { limit: 5 }),
+        match: buildApiPath("/batches", { limit: 5, mine: true }),
         response: paged([], { limit: 5, offset: 0, total: 0 }),
       },
     ]);
@@ -806,12 +810,19 @@ describe("App", () => {
         response: textResponse("graph LR\n  n0[\"question\"]\n", 200, "text/vnd.mermaid"),
       },
       {
-        match: `/datasets/${datasetId}`,
-        response: apiResponse(
-          dataset({
-            datasetId,
-            status: "committed",
-          })
+        match: buildApiPath("/datasets/summaries", {
+          dataset_id: datasetId,
+          limit: 1,
+          offset: 0,
+        }),
+        response: paged(
+          [
+            dataset({
+              datasetId,
+              status: "committed",
+            }),
+          ],
+          { limit: 1, offset: 0, total: 1 }
         ),
       },
     ]);
@@ -1559,19 +1570,60 @@ describe("App", () => {
         ]),
       },
       {
-        match: buildApiPath("/batches", { limit: 5 }),
+        match: buildApiPath("/batches", { limit: 5, mine: true }),
         response: paged([pendingBatch], { limit: 5, offset: 0, total: 1 }),
       },
       {
-        match: buildApiPath("/batches", { limit: 100 }),
+        match: buildApiPath("/batches", { mine: true, limit: 100 }),
         response: paged([pendingBatch], { limit: 100, offset: 0, total: 1 }),
       },
       {
-        match: buildApiPath("/batches", { project_id: "project-1", limit: 100 }),
+        match: buildApiPath("/batches", {
+          mine: true,
+          status: "submitted",
+          limit: 100,
+        }),
+        response: paged([], { limit: 100, offset: 0, total: 0 }),
+      },
+      {
+        match: buildApiPath("/batches", { needs_commit: true, limit: 100 }),
+        response: paged([], { limit: 100, offset: 0, total: 0 }),
+      },
+      {
+        match: buildApiPath("/batches/runs", { mine: true, limit: 20 }),
+        response: paged([], { limit: 20, offset: 0, total: 0 }),
+      },
+      {
+        match: buildApiPath("/batches", {
+          project_id: "project-1",
+          mine: true,
+          limit: 100,
+        }),
         response: paged([pendingBatch], { limit: 100, offset: 0, total: 1 }),
       },
       {
-        match: buildApiPath("/batches/runs", { project_id: "project-1", limit: 20 }),
+        match: buildApiPath("/batches", {
+          project_id: "project-1",
+          mine: true,
+          status: "submitted",
+          limit: 100,
+        }),
+        response: paged([], { limit: 100, offset: 0, total: 0 }),
+      },
+      {
+        match: buildApiPath("/batches", {
+          project_id: "project-1",
+          needs_commit: true,
+          limit: 100,
+        }),
+        response: paged([], { limit: 100, offset: 0, total: 0 }),
+      },
+      {
+        match: buildApiPath("/batches/runs", {
+          project_id: "project-1",
+          mine: true,
+          limit: 20,
+        }),
         response: paged([
           {
             batch_key: "batch:test",
@@ -1661,7 +1713,7 @@ describe("App", () => {
         ]),
       },
       {
-        match: buildApiPath("/batches", { limit: 5 }),
+        match: buildApiPath("/batches", { limit: 5, mine: true }),
         response: paged([], { limit: 5, offset: 0, total: 0 }),
       },
     ]);
@@ -3636,5 +3688,80 @@ describe("App", () => {
     await waitFor(() => {
       expect(screen.queryByText("analysis-committed")).not.toBeInTheDocument();
     });
+  });
+});
+
+describe("App accessibility floor", () => {
+  function localAuthRoutes() {
+    return [
+      {
+        match: "/auth/me",
+        response: apiResponse({ role: "admin", username: "local-tester" }, 200, {
+          auth_enabled: false,
+        }),
+      },
+      { match: projectsPath, response: apiResponse([]) },
+    ];
+  }
+
+  it("offers a skip link as the first focusable element, targeting the main landmark", async () => {
+    window.history.replaceState({}, "", "/app");
+    installFetchMock(localAuthRoutes());
+
+    const { container } = render(<App />);
+    await screen.findByRole("main");
+
+    const skipLink = screen.getByRole("link", { name: "Skip to main content" });
+    expect(skipLink).toHaveAttribute("href", "#main-content");
+    // Must be genuinely first in the tab order, otherwise it cannot do its job.
+    const focusables = container.querySelectorAll(
+      'a[href], button, input, select, textarea, [tabindex]:not([tabindex="-1"])'
+    );
+    expect(focusables[0]).toBe(skipLink);
+  });
+
+  it("exposes a main landmark that accepts programmatic focus but stays out of the tab order", async () => {
+    window.history.replaceState({}, "", "/app");
+    installFetchMock(localAuthRoutes());
+
+    render(<App />);
+
+    const main = await screen.findByRole("main");
+    expect(main).toHaveAttribute("id", "main-content");
+    expect(main).toHaveAttribute("tabindex", "-1");
+    main.focus();
+    expect(document.activeElement).toBe(main);
+  });
+
+  it("moves focus to the main landmark and announces the view on route change", async () => {
+    window.history.replaceState({}, "", "/app");
+    installFetchMock(localAuthRoutes());
+
+    render(<App />);
+    const main = await screen.findByRole("main");
+
+    // A client-side route change leaves focus where it was unless we move it.
+    const announcer = screen.getByTestId("route-announcer");
+    expect(announcer).toHaveTextContent("");
+    expect(announcer).toHaveAttribute("aria-live", "polite");
+
+    window.history.pushState({}, "", "/app/not-a-real-route");
+    fireEvent.popState(window);
+
+    await waitFor(() => expect(document.activeElement).toBe(main));
+    expect(screen.getByTestId("route-announcer")).toHaveTextContent("Page not found");
+  });
+
+  it("does not steal focus on first render", async () => {
+    window.history.replaceState({}, "", "/app");
+    installFetchMock(localAuthRoutes());
+
+    render(<App />);
+    const main = await screen.findByRole("main");
+
+    // The initial load already starts the user at the top of a fresh document;
+    // grabbing focus here would fight the browser rather than help.
+    expect(document.activeElement).not.toBe(main);
+    expect(screen.getByTestId("route-announcer")).toHaveTextContent("");
   });
 });
