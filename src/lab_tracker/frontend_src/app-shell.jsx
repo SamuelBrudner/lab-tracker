@@ -66,6 +66,21 @@ function routeLabel(kind) {
   return ROUTE_LABELS[kind] || "Page";
 }
 
+/**
+ * Which posture a route is read in: "work" for doing, "read" for sitting with
+ * the science. A surface declares this once at the shell and keeps it, so text
+ * never changes font when someone starts editing.
+ *
+ * No route opts into "read" yet. The Morning Read surface that was meant to be
+ * the first consumer is lab-tracker-udv1.3, which does not exist; that half of
+ * lab-tracker-83m2.8 moved there, and it opts in by adding an entry here.
+ */
+const ROUTE_REGISTERS = {};
+
+function routeRegister(kind) {
+  return ROUTE_REGISTERS[kind] === "read" ? "read" : "work";
+}
+
 function App() {
   const { navigate, replace, route } = useAppRoute();
   const isHomeRoute = route.kind === "home";
@@ -343,6 +358,7 @@ function App() {
       className={`app-shell${isCaptureRoute ? " capture-app-shell" : ""}${
         isFocusedReviewRoute ? " review-app-shell" : ""
       }`}
+      data-register={routeRegister(route.kind)}
     >
       <a className="skip-link" href="#main-content">
         Skip to main content

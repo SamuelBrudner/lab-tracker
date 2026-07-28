@@ -200,6 +200,52 @@
   box-sizing: border-box;
 }
 
+/* --- Read register ----------------------------------------------------------
+   The second of the two postures. Work (the default, defined in :root) is for
+   doing; Read is for sitting with the day's science — calmer type, more air,
+   a flatter surface.
+
+   Deliberately a token swap on a container rather than a second set of
+   components: every rule below reads a register token, so a Read surface is
+   the same components at different values. Nothing here touches Work, because
+   every selector is scoped under [data-register="read"].
+
+   The serif is a system stack with no @import — a reading surface should not
+   wait on a webfont, and these ship on the platforms Lab Tracker targets.
+
+   Registers are static per surface. A surface picks one at the route shell and
+   keeps it; text must not change font when a person starts editing. */
+[data-register="read"] {
+  --font-body: Charter, "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  --leading-body: 1.65;
+  --measure: 66ch;
+  --pad: var(--sp-7);
+  --gap: var(--sp-5);
+  --radius-surface: var(--radius-2xl);
+  --shadow-surface: var(--shadow-0);
+}
+
+[data-register="read"] {
+  font-family: var(--font-body);
+  line-height: var(--leading-body);
+}
+
+[data-register="read"] .card {
+  border-radius: var(--radius-surface);
+  box-shadow: var(--shadow-surface);
+  padding: var(--pad);
+}
+
+[data-register="read"] .stack {
+  gap: var(--gap);
+}
+
+/* Prose gets a measure; controls and tables must not be narrowed. */
+[data-register="read"] p,
+[data-register="read"] li {
+  max-width: var(--measure);
+}
+
 /* --- Accessibility floor ----------------------------------------------------
    Global keyboard focus. :focus-visible rather than :focus so the ring appears
    for keyboard and assistive-tech users without boxing every mouse click.
