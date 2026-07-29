@@ -70,6 +70,22 @@ diff. Use `LAB_TRACKER_GIT_MAX_DIFF_LINES` or `--git-max-diff-lines` to adjust t
 diff cap, and `LAB_TRACKER_GIT_CONTEXT_LINES` or `--git-context-lines` for the
 unified diff context.
 
+### Optional repository conventions
+
+The packaged commit-capture path can attach explicitly enrolled convention
+files as bounded metadata:
+
+```bash
+lt agent-context status
+lt agent-context add AGENTS.md --dry-run
+lt agent-context add AGENTS.md --yes
+```
+
+Snapshots come from the exact captured commit and never trigger proposal
+generation themselves. See
+[Analysis Repo Capture](repo-report-capture.md#optional-repository-conventions)
+for enrollment, removal, bounds, and trust behavior.
+
 Required environment:
 
 - `LAB_TRACKER_BASE_URL` or `LAB_TRACKER_MCP_BASE_URL`

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import os
 import sys
@@ -17,6 +18,7 @@ import lab_tracker_client.repo as repo_capture
 import lab_tracker_client.schedule as schedule_helpers
 import lab_tracker_client.setup as setup_helpers
 import lab_tracker_client.watch as watch_capture
+from lab_tracker import repository_conventions as repo_context
 from lab_tracker.assistant_next_questions import is_research_facing_prompt
 from lab_tracker_client.client import (
     NOTE_STATUS_VALUES,
@@ -141,6 +143,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_project_parsers(subcommands)
     _add_git_parsers(subcommands)
     _add_hooks_parsers(subcommands)
+    _add_agent_context_parsers(subcommands)
 
     prime_parser = subcommands.add_parser(
         "prime",
@@ -587,6 +590,52 @@ def _add_hooks_parsers(subcommands: argparse._SubParsersAction) -> None:
         help="Suppress errors for hook/scheduler invocations.",
     )
     status_parser.set_defaults(func=_cmd_hooks_status, needs_client=False)
+
+
+def _add_agent_context_parsers(subcommands: argparse._SubParsersAction) -> None:
+    context_parser = subcommands.add_parser(
+        "agent-context",
+        help="Select repo convention files for Lab Tracker draft context.",
+    )
+    context_commands = context_parser.add_subparsers(
+        dest="agent_context_command",
+        required=True,
+    )
+
+    status_parser = context_commands.add_parser(
+        "status",
+        help="Discover convention files and show the enrolled selection (read-only).",
+    )
+    status_parser.add_argument("--repo", default=".", help="Repository path. Defaults to cwd.")
+    status_parser.set_defaults(func=_cmd_agent_context_status, needs_client=False)
+
+    add_parser = context_commands.add_parser(
+        "add",
+        help="Enroll one tracked UTF-8 convention file.",
+    )
+    add_parser.add_argument("path", help="Repository-relative convention file path.")
+    add_parser.add_argument("--repo", default=".", help="Repository path. Defaults to cwd.")
+    add_parser.add_argument("--dry-run", action="store_true", help="Preview without writing.")
+    add_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Consent to storing this repo-local context selection.",
+    )
+    add_parser.set_defaults(func=_cmd_agent_context_add, needs_client=False)
+
+    remove_parser = context_commands.add_parser(
+        "remove",
+        help="Stop including one enrolled convention file.",
+    )
+    remove_parser.add_argument("path", help="Repository-relative convention file path.")
+    remove_parser.add_argument("--repo", default=".", help="Repository path. Defaults to cwd.")
+    remove_parser.add_argument("--dry-run", action="store_true", help="Preview without writing.")
+    remove_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Consent to changing the repo-local context selection.",
+    )
+    remove_parser.set_defaults(func=_cmd_agent_context_remove, needs_client=False)
 
 
 def _add_watch_parsers(subcommands: argparse._SubParsersAction) -> None:
@@ -1391,6 +1440,144 @@ def _cmd_hooks_uninstall(args: argparse.Namespace) -> Any:
 
 def _cmd_hooks_status(args: argparse.Namespace) -> Any:
     return hook_install.hook_status(repo=args.repo)
+
+
+def _cmd_agent_context_status(args: argparse.Namespace) -> Any:
+    root = git_capture.repo_toplevel(args.repo)
+    try:
+        config = repo_context.load_agent_context_config(root)
+    except ValueError as exc:
+        raise LTValidationError(str(exc)) from exc
+    discovered = repo_context.discover_repository_convention_files(root)
+    hook = hook_install.hook_status(repo=root)
+    automatic_refresh = bool(
+        hook.get("managed_block_present") or hook.get("legacy_repo_block_present")
+    )
+    return {
+        "command": "agent-context-status",
+        "repo": str(root),
+        "config": str(config.config_path),
+        "configured": list(config.paths),
+        "discovered": [
+            {"path": path, "enrolled": path in config.paths} for path in discovered
+        ],
+        "refresh": {
+            "automatic": automatic_refresh,
+            "hook_path": hook.get("hook_path"),
+            "detail": (
+                "The installed post-commit hook snapshots enrolled files from each "
+                "new commit."
+                if automatic_refresh
+                else "No Lab Tracker post-commit hook is installed; preview with "
+                "`lt hooks install --dry-run`, then enable automatic refresh with "
+                "`lt hooks install --yes`."
+            ),
+        },
+    }
+
+
+def _cmd_agent_context_add(args: argparse.Namespace) -> Any:
+    if not (args.yes or args.dry_run):
+        raise SystemExit(
+            "lt agent-context add writes .lab-tracker/agent-context.json; "
+            "pass --yes to consent or --dry-run to preview."
+        )
+    root = git_capture.repo_toplevel(args.repo)
+    try:
+        config = repo_context.load_agent_context_config(root)
+        relative = repo_context.validate_enrolled_convention_path(root, args.path)
+    except ValueError as exc:
+        raise LTValidationError(str(exc)) from exc
+    paths = sorted({*config.paths, relative})
+    if len(paths) > repo_context.MAX_REPOSITORY_CONVENTION_FILES:
+        raise LTValidationError(
+            "Agent context may enroll at most "
+            f"{repo_context.MAX_REPOSITORY_CONVENTION_FILES} convention files."
+        )
+    proposed = repo_context.AgentContextConfig(
+        paths=paths,
+        config_path=config.config_path,
+    )
+    payload = _agent_context_change_payload(
+        command="agent-context-add",
+        root=root,
+        before=config,
+        after=proposed,
+        path=relative,
+        dry_run=args.dry_run,
+    )
+    payload["action"] = "unchanged" if paths == config.paths else "added"
+    if not args.dry_run and paths != config.paths:
+        try:
+            repo_context.save_agent_context_config(proposed)
+        except ValueError as exc:
+            raise LTValidationError(str(exc)) from exc
+    return payload
+
+
+def _cmd_agent_context_remove(args: argparse.Namespace) -> Any:
+    if not (args.yes or args.dry_run):
+        raise SystemExit(
+            "lt agent-context remove writes .lab-tracker/agent-context.json; "
+            "pass --yes to consent or --dry-run to preview."
+        )
+    root = git_capture.repo_toplevel(args.repo)
+    try:
+        config = repo_context.load_agent_context_config(root)
+        relative = repo_context.normalize_enrolled_convention_path(args.path)
+    except ValueError as exc:
+        raise LTValidationError(str(exc)) from exc
+    paths = [path for path in config.paths if path != relative]
+    proposed = repo_context.AgentContextConfig(
+        paths=paths,
+        config_path=config.config_path,
+    )
+    payload = _agent_context_change_payload(
+        command="agent-context-remove",
+        root=root,
+        before=config,
+        after=proposed,
+        path=relative,
+        dry_run=args.dry_run,
+    )
+    payload["action"] = "removed" if paths != config.paths else "absent"
+    if not args.dry_run and paths != config.paths:
+        try:
+            repo_context.save_agent_context_config(proposed)
+        except ValueError as exc:
+            raise LTValidationError(str(exc)) from exc
+    return payload
+
+
+def _agent_context_change_payload(
+    *,
+    command: str,
+    root: Path,
+    before: repo_context.AgentContextConfig,
+    after: repo_context.AgentContextConfig,
+    path: str,
+    dry_run: bool,
+) -> dict[str, Any]:
+    before_text = json.dumps(before.to_dict(), indent=2, sort_keys=True) + "\n"
+    after_text = json.dumps(after.to_dict(), indent=2, sort_keys=True) + "\n"
+    config_path = after.config_path or repo_context.default_agent_context_config_path(root)
+    return {
+        "command": command,
+        "repo": str(root),
+        "config": str(config_path),
+        "path": path,
+        "dry_run": dry_run,
+        "diff": "\n".join(
+            difflib.unified_diff(
+                before_text.splitlines(),
+                after_text.splitlines(),
+                fromfile=f"{config_path} (current)",
+                tofile=f"{config_path} (proposed)",
+                lineterm="",
+            )
+        ),
+        "configured": list(after.paths),
+    }
 
 
 def _cmd_watch_run(client: LabTracker, args: argparse.Namespace) -> Any:
