@@ -168,6 +168,8 @@ lt hpc status
   `lt hpc sync`; failed events are retryable.
 - Draft creation fails: the evidence note may still be synced. Configure the
   graph draft provider, then rerun `lt hpc sync --request-draft`.
-- Artifact paths are not readable from the Lab Tracker workstation: use stable
-  URIs that your lab can resolve, or include a short artifact summary in the
-  manifest.
+- Artifact paths are not readable from the Lab Tracker workstation: register
+  the shared filesystem or remote as a data store and capture a canonical
+  `store://<name>/<locator>` identity, or include a short artifact summary in
+  the manifest. Bare `file://` and remote URIs remain provenance metadata and
+  are never dereferenced by project-authored resolution.

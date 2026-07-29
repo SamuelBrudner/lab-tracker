@@ -748,7 +748,7 @@ def test_invited_registration_validation_never_logs_request_secrets(
 
     assert response.status_code == 422
     assert "request_validation_error" in rendered_logs
-    assert "validation_errors=1" in rendered_logs
+    assert "detail=Request validation failed." in rendered_logs
     assert invite_token not in rendered_logs
     assert password not in rendered_logs
     assert "different-sensitive-value" not in rendered_logs

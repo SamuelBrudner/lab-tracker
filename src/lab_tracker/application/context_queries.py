@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import base64
 from collections.abc import Callable
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, field
+from threading import Lock
 from typing import Any, Literal, Protocol
 from urllib.parse import urlsplit
 from uuid import UUID
@@ -12,12 +14,21 @@ from uuid import UUID
 from sqlalchemy.orm import Session as OrmSession
 
 from lab_tracker.artifact_resolution import (
-    DEFAULT_MAX_BYTES,
+    GitStoreResolutionTarget,
+    HttpStoreResolutionTarget,
+    LocalStoreResolutionTarget,
+    PreparedArtifactResolutionTarget,
+    RcloneStoreResolutionTarget,
     ResolvedArtifact,
     ResolverRegistry,
-    registry_from_env,
-    store_relative_reference,
+    resolver_registry_for_prepared_target,
+    sanitize_artifact_resolution_result,
+    snapshot_artifact_resolution_identity,
     unresolved,
+)
+from lab_tracker.artifact_resolution_limits import (
+    ArtifactContentBounds,
+    ArtifactContentBoundsError,
 )
 from lab_tracker.auth import AuthContext
 from lab_tracker.decision_context import JsonObject, build_decision_context
@@ -26,6 +37,10 @@ from lab_tracker.decision_context_query import (
     RepositoryDecisionContextReader,
 )
 from lab_tracker.errors import NotFoundError, ValidationError
+from lab_tracker.local_store_locator import (
+    is_valid_store_name,
+    parse_canonical_store_authority,
+)
 from lab_tracker.models import (
     Analysis,
     Claim,
@@ -65,16 +80,30 @@ ExternalArtifactEntityType = Literal["analysis", "claim", "dataset"]
 
 @dataclass(frozen=True)
 class PreparedExternalArtifactResolution:
-    """A database-free external-artifact resolution plan.
+    """A caller-visible handle for a database-free resolution plan.
 
-    Preparation authorizes and materializes the target while the request scope is
-    open. Resolution then releases that scope before invoking an external resolver.
+    ``target`` is an inspectable detached view, never the dispatch authority.
+    Resolution consumes a separate private record created while the authorized
+    request scope is open, releases that scope, then invokes an external resolver.
     """
 
     entity_type: ExternalArtifactEntityType
     entity_id: UUID
     artifact_index: int
-    target: ExternalArtifactReference | ResolvedArtifact
+    target: PreparedArtifactResolutionTarget
+    max_bytes: int
+    byte_range: tuple[int, int] | None
+    _authorization: object | None = field(default=None, repr=False, compare=False)
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedExternalArtifactResolutionRecord:
+    """Private detached authority consumed instead of caller-visible plan data."""
+
+    entity_type: ExternalArtifactEntityType
+    entity_id: UUID
+    artifact_index: int
+    target: PreparedArtifactResolutionTarget
     max_bytes: int
     byte_range: tuple[int, int] | None
 
@@ -207,6 +236,15 @@ class ContextQueries:
     session: OrmSession
     release_read_scope: Callable[[], None]
     resolver_registry: ResolverRegistry | None = None
+    _prepared_external_artifact_resolutions: dict[
+        object, _PreparedExternalArtifactResolutionRecord
+    ] = field(default_factory=dict, init=False, repr=False, compare=False)
+    _prepared_external_artifact_resolution_lock: Lock = field(
+        default_factory=Lock,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def decision_context(
         self,
@@ -475,15 +513,14 @@ class ContextQueries:
         byte_start: int | None,
         byte_end: int | None,
     ) -> PreparedExternalArtifactResolution:
-        byte_range: tuple[int, int] | None = None
-        if byte_start is not None or byte_end is not None:
-            if byte_start is None or byte_end is None:
-                raise ValidationError(
-                    "byte_start and byte_end must be provided together."
-                )
-            if byte_end < byte_start:
-                raise ValidationError("byte_end must be greater than or equal to byte_start.")
-            byte_range = (byte_start, byte_end)
+        try:
+            bounds = ArtifactContentBounds.for_request(
+                max_bytes,
+                byte_start,
+                byte_end,
+            )
+        except ArtifactContentBoundsError as exc:
+            raise ValidationError(str(exc)) from exc
 
         reference, project_id = self._locate_external_reference(
             actor=actor,
@@ -500,14 +537,27 @@ class ContextQueries:
             if isinstance(materialized, ExternalArtifactReference)
             else materialized
         )
-        return PreparedExternalArtifactResolution(
+        authorization = object()
+        prepared = PreparedExternalArtifactResolution(
             entity_type=entity_type,
             entity_id=entity_id,
             artifact_index=artifact_index,
             target=target,
-            max_bytes=max_bytes or DEFAULT_MAX_BYTES,
-            byte_range=byte_range,
+            max_bytes=bounds.max_bytes,
+            byte_range=bounds.byte_range,
+            _authorization=authorization,
         )
+        record = _PreparedExternalArtifactResolutionRecord(
+            entity_type=entity_type,
+            entity_id=entity_id,
+            artifact_index=artifact_index,
+            target=deepcopy(target),
+            max_bytes=bounds.max_bytes,
+            byte_range=bounds.byte_range,
+        )
+        with self._prepared_external_artifact_resolution_lock:
+            self._prepared_external_artifact_resolutions[authorization] = record
+        return prepared
 
     def resolve_prepared_external_artifact(
         self,
@@ -515,20 +565,77 @@ class ContextQueries:
     ) -> dict[str, Any]:
         """Release SQLAlchemy resources, then resolve a detached target only."""
 
-        self.release_read_scope()
-        if isinstance(prepared.target, ResolvedArtifact):
-            result = prepared.target
-        else:
-            registry = self.resolver_registry or registry_from_env()
-            result = registry.resolve(
-                prepared.target,
-                max_bytes=prepared.max_bytes,
-                byte_range=prepared.byte_range,
+        authorization = (
+            prepared._authorization
+            if type(prepared) is PreparedExternalArtifactResolution
+            else None
+        )
+        with self._prepared_external_artifact_resolution_lock:
+            record = (
+                self._prepared_external_artifact_resolutions.pop(authorization, None)
+                if type(authorization) is object
+                else None
             )
+            # The request scope itself is not a concurrent primitive. Serialize
+            # repeated/forged plan cleanup while keeping external resolver work
+            # outside this lock.
+            self.release_read_scope()
+
+        if record is None:
+            bounds = ArtifactContentBounds.from_resolver(1, None)
+            target: object = None
+            entity_type: ExternalArtifactEntityType = "dataset"
+            entity_id = UUID(int=0)
+            artifact_index = 0
+        else:
+            try:
+                bounds = ArtifactContentBounds.from_resolver(
+                    record.max_bytes,
+                    record.byte_range,
+                )
+            except ArtifactContentBoundsError as exc:
+                raise ValidationError(str(exc)) from exc
+            target = record.target
+            entity_type = record.entity_type
+            entity_id = record.entity_id
+            artifact_index = record.artifact_index
+
+        identity = snapshot_artifact_resolution_identity(target)
+        if record is None or identity is None:
+            result: object = None
+        elif type(target) is ResolvedArtifact:
+            # Static application denials never cross an injected resolver
+            # boundary: a custom registry could otherwise perform cache, host,
+            # network, credential, or subprocess work.
+            result = target
+        elif (
+            type(target) is LocalStoreResolutionTarget
+            or type(target) is HttpStoreResolutionTarget
+            or type(target) is RcloneStoreResolutionTarget
+            or type(target) is GitStoreResolutionTarget
+        ):
+            registry = resolver_registry_for_prepared_target(
+                target,
+                configured=self.resolver_registry,
+            )
+            result = registry.resolve_prepared(
+                target,
+                max_bytes=bounds.max_bytes,
+                byte_range=bounds.byte_range,
+            )
+        else:
+            # Raw references and unknown targets are not prepared capabilities.
+            # Fail closed before touching resolver configuration or adapters.
+            result = None
+        result = sanitize_artifact_resolution_result(
+            result,
+            identity=identity,
+            bounds=bounds,
+        )
         body = result.to_json_dict()
-        body["entity_type"] = prepared.entity_type
-        body["entity_id"] = str(prepared.entity_id)
-        body["artifact_index"] = prepared.artifact_index
+        body["entity_type"] = entity_type
+        body["entity_id"] = str(entity_id)
+        body["artifact_index"] = artifact_index
         body["content_base64"] = (
             base64.b64encode(result.content).decode("ascii")
             if result.is_verified and result.content is not None
@@ -584,57 +691,63 @@ class ContextQueries:
         self,
         reference: ExternalArtifactReference,
         project_id: UUID,
-    ) -> ExternalArtifactReference | ResolvedArtifact:
+    ) -> PreparedArtifactResolutionTarget:
         if reference.store_name is not None and reference.locator is not None:
             return self._resolve_store(
                 reference,
                 project_id,
-                reference.store_name,
+                (reference.store_name,),
                 reference.locator,
+                locator_is_uri_path=False,
             )
-        try:
-            parsed = urlsplit(reference.uri)
-        except ValueError:
-            return reference
-        if parsed.scheme.lower() != "store":
-            return reference
-        name = parsed.netloc
-        if not name:
-            return unresolved(
-                reference,
-                detail="Store locator is missing a store name.",
-            )
+        parsed_store = _parse_store_reference_uri(reference.uri)
+        if parsed_store is None:
+            if (
+                reference.source_system.lower() == "store"
+                or _looks_like_store_uri(reference.uri)
+            ):
+                return _invalid_store_reference(reference)
+            # Project-authored direct references are metadata only. A project
+            # role does not confer authority over the process-wide filesystem,
+            # network, credential, or subprocess resolver configuration.
+            return _unavailable_store_reference(reference)
         return self._resolve_store(
             reference,
             project_id,
-            name,
-            parsed.path.lstrip("/"),
+            parsed_store.name_candidates,
+            parsed_store.locator,
+            locator_is_uri_path=True,
         )
 
     def _resolve_store(
         self,
         reference: ExternalArtifactReference,
         project_id: UUID,
-        name: str,
-        path: str,
-    ) -> ExternalArtifactReference | ResolvedArtifact:
-        store = self.repository.data_stores.get_by_name(project_id, name)
-        if store is None:
-            return unresolved(
-                reference,
-                detail=f"No data store named '{name}' in this project.",
+        name_candidates: tuple[str, ...],
+        _locator: str,
+        *,
+        locator_is_uri_path: bool,
+    ) -> PreparedArtifactResolutionTarget:
+        del locator_is_uri_path
+        matches: dict[UUID, tuple[str, DataStore]] = {}
+        for candidate in dict.fromkeys(name_candidates):
+            candidate_store = self.repository.data_stores.get_by_name(
+                project_id, candidate
             )
-        concrete = store_relative_reference(
-            store,
-            path=path,
-            content_hash=reference.content_hash,
-        )
-        if concrete is None:
-            return unresolved(
-                reference,
-                detail=f"Store kind '{store.kind.value}' is not resolvable yet.",
-            )
-        return concrete
+            if candidate_store is None or candidate_store.name != candidate:
+                continue
+            matches[candidate_store.store_id] = (candidate, candidate_store)
+        if not matches:
+            return _unavailable_store_reference(reference)
+        if len(matches) != 1:
+            return _invalid_store_reference(reference)
+        # Registration authority is checked when a store is created, but
+        # use-time proof revalidation and retained local authority boundaries
+        # land in the next two slices. Preserve exact candidate lookup,
+        # project/group shadowing, and ambiguity classification here, then fail
+        # closed before parsing a target definition or constructing any
+        # filesystem, network, credential, cache, or subprocess capability.
+        return _unavailable_store_reference(reference)
 
 
 def _goal_matches_project(
@@ -652,3 +765,68 @@ def _single_project_id(project_ids: set[UUID] | None) -> UUID | None:
     if project_ids is None or len(project_ids) != 1:
         return None
     return next(iter(project_ids))
+
+
+@dataclass(frozen=True, slots=True)
+class _ParsedStoreReferenceUri:
+    name_candidates: tuple[str, ...]
+    locator: str
+
+
+def _parse_store_reference_uri(uri: str) -> _ParsedStoreReferenceUri | None:
+    """Retain legacy non-local URI parsing until kind-specific hardening lands."""
+
+    try:
+        parsed = urlsplit(uri)
+    except ValueError:
+        return None
+    if parsed.scheme.lower() != "store" or not parsed.netloc:
+        return None
+    canonical_name = parse_canonical_store_authority(parsed.netloc)
+    name_candidates = tuple(
+        dict.fromkeys(
+            candidate
+            for candidate in (
+                canonical_name,
+                parsed.netloc if is_valid_store_name(parsed.netloc) else None,
+            )
+            if candidate is not None
+        )
+    )
+    if not name_candidates:
+        return None
+    return _ParsedStoreReferenceUri(
+        name_candidates=name_candidates,
+        locator=parsed.path.lstrip("/"),
+    )
+
+
+def _looks_like_store_uri(uri: str) -> bool:
+    """Classify malformed store-shaped input without reflecting its contents."""
+
+    return isinstance(uri, str) and uri.lstrip().lower().startswith("store:")
+
+
+def _safe_store_reference(reference: ExternalArtifactReference) -> ExternalArtifactReference:
+    """Keep store failures static without reflecting a locator or registered root."""
+
+    return ExternalArtifactReference(
+        kind=reference.kind,
+        source_system="store",
+        uri="store://[redacted]",
+        content_hash=reference.content_hash,
+    )
+
+
+def _invalid_store_reference(reference: ExternalArtifactReference) -> ResolvedArtifact:
+    return unresolved(
+        _safe_store_reference(reference),
+        detail="Store artifact reference is invalid.",
+    )
+
+
+def _unavailable_store_reference(reference: ExternalArtifactReference) -> ResolvedArtifact:
+    return unresolved(
+        _safe_store_reference(reference),
+        detail="Store artifact could not be resolved.",
+    )

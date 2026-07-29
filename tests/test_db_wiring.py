@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from uuid import uuid4
 
 import pytest
@@ -11,13 +12,17 @@ from starlette.responses import JSONResponse
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.app import create_app
-from lab_tracker.app_parts.runtime import _log_startup_config_summary
+from lab_tracker.app_parts.runtime import (
+    _background_api,
+    _log_startup_config_summary,
+)
 from lab_tracker.application import RequestHandlers
 from lab_tracker.config import Settings
-from lab_tracker.db import Base, get_engine
+from lab_tracker.db import Base, configure_sqlite_connection, get_engine
 from lab_tracker.db_models import ProjectModel, QuestionModel
 from lab_tracker.errors import ValidationError
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
+from lab_tracker.store_authority_registry import StoreAuthorityRegistry
 
 
 class _SessionSpy:
@@ -133,6 +138,28 @@ def test_read_scope_release_rolls_back_and_closes_exactly_once():
     assert events == ["rollback"]
 
 
+def test_request_scope_preserves_the_exact_store_authority_snapshot() -> None:
+    repository = _RequestScopeRepositorySpy()
+    registry = StoreAuthorityRegistry.deny_all()
+    root_api = LabTrackerAPI(store_authority_registry=registry)
+
+    scope = root_api.request_scope(repository)
+
+    assert scope.api._store_authority_registry is registry
+    assert scope.api.data_stores.store_authority_registry is registry
+
+
+def test_background_api_preserves_the_exact_startup_store_authority_snapshot(
+    app,
+) -> None:
+    registry = app.state.store_authority_registry
+    with Session() as session:
+        api = _background_api(app, session)
+
+    assert api._store_authority_registry is registry
+    assert api.data_stores.store_authority_registry is registry
+
+
 def test_scope_commit_base_exception_rolls_back_before_close():
     repository = _RequestScopeRepositorySpy(commit_error=KeyboardInterrupt("stop"))
     closed: list[str] = []
@@ -230,6 +257,7 @@ def test_request_handlers_share_the_middleware_transaction_identity():
                 for handler in (
                     handlers.catalogs,
                     handlers.context,
+                    handlers.store_health,
                     handlers.dataset_files,
                     handlers.visualization_files,
                     handlers.deletions,
@@ -239,9 +267,7 @@ def test_request_handlers_share_the_middleware_transaction_identity():
                 isinstance(repositories[0], SQLAlchemyLabTrackerRepository)
                 and all(repository is repositories[0] for repository in repositories)
             ),
-            "shares_session": all(
-                session is repositories[0]._session for session in sessions
-            ),
+            "shares_session": all(session is repositories[0]._session for session in sessions),
             "raw_dependencies_hidden": (
                 not hasattr(request.state, "lab_tracker_repository")
                 and not hasattr(request.state, "db_session")
@@ -275,6 +301,16 @@ def test_sqlite_engine_enforces_foreign_keys_and_busy_wal_pragmas(tmp_path):
             assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar_one() == 1
             assert connection.exec_driver_sql("PRAGMA busy_timeout").scalar_one() == 5000
             assert connection.exec_driver_sql("PRAGMA journal_mode").scalar_one() == "wal"
+            driver_connection = connection.connection.driver_connection
+            legacy_transaction_control = getattr(
+                sqlite3,
+                "LEGACY_TRANSACTION_CONTROL",
+                None,
+            )
+            if legacy_transaction_control is not None:
+                assert driver_connection.autocommit == legacy_transaction_control
+            connection.exec_driver_sql("SELECT 1")
+            assert driver_connection.in_transaction is False
 
         project_id = str(uuid4())
         question_id = str(uuid4())
@@ -301,6 +337,24 @@ def test_sqlite_engine_enforces_foreign_keys_and_busy_wal_pragmas(tmp_path):
             )
     finally:
         engine.dispose()
+
+
+@pytest.mark.skipif(
+    not hasattr(sqlite3.Connection, "autocommit"),
+    reason="sqlite3 modern transaction control starts in Python 3.12",
+)
+def test_sqlite_connection_configuration_overrides_modern_transaction_mode() -> None:
+    connection = sqlite3.connect(":memory:", autocommit=False)
+    try:
+        assert connection.autocommit is False
+
+        configure_sqlite_connection(connection)
+
+        assert connection.autocommit == sqlite3.LEGACY_TRANSACTION_CONTROL
+        connection.execute("SELECT 1").fetchone()
+        assert connection.in_transaction is False
+    finally:
+        connection.close()
 
 
 def test_startup_config_summary_logs_environment_db_backend_and_auth(

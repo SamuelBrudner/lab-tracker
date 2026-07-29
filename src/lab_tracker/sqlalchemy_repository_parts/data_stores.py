@@ -2,24 +2,130 @@
 
 from __future__ import annotations
 
+import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from uuid import UUID
 
 from sqlalchemy import or_, select
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session as OrmSession
 
 from lab_tracker.db_models import DataStoreModel, ProjectModel
 from lab_tracker.models import DataStore
-from lab_tracker.repository import EntityRepository
+from lab_tracker.repository import (
+    DataStoreForeignKeyRaceError,
+    DataStoreInsertError,
+    DataStoreNameRaceError,
+    DataStoreRepository,
+)
 from lab_tracker.sqlalchemy_mappers import (
-    apply_data_store_to_model,
     data_store_from_model,
     data_store_to_model,
 )
 
 from .common import apply_pagination, count_from_statement
 
+DATA_STORE_PROJECT_NAME_CONSTRAINT = "uq_data_stores_project_name"
+DATA_STORE_GROUP_NAME_CONSTRAINT = "uq_data_stores_group_name"
+DATA_STORE_PRIMARY_KEY_CONSTRAINT = "data_stores_pkey"
+DATA_STORE_FOREIGN_KEY_CONSTRAINTS = frozenset(
+    {
+        "data_stores_project_id_fkey",
+        "fk_data_stores_group_id",
+        "data_stores_group_id_fkey",
+        "data_stores_created_by_user_id_fkey",
+    }
+)
+_DATA_STORE_NAME_CONSTRAINTS = frozenset(
+    {
+        DATA_STORE_PROJECT_NAME_CONSTRAINT,
+        DATA_STORE_GROUP_NAME_CONSTRAINT,
+    }
+)
+_SQLITE_DATA_STORE_NAME_COLUMNS = frozenset(
+    {
+        ("data_stores.project_id", "data_stores.name"),
+        ("data_stores.group_id", "data_stores.name"),
+    }
+)
+_SQLITE_DATA_STORE_PRIMARY_KEY_COLUMNS = ("data_stores.store_id",)
 
-class SQLAlchemyDataStoreRepository(EntityRepository[DataStore]):
+
+def _is_data_store_name_race(exc: IntegrityError) -> bool:
+    """Identify only the two exact-scope data-store name constraints."""
+
+    diagnostic = getattr(exc.orig, "diag", None)
+    constraint_name = getattr(diagnostic, "constraint_name", None)
+    if constraint_name is not None:
+        return constraint_name in _DATA_STORE_NAME_CONSTRAINTS
+
+    if not isinstance(exc.orig, sqlite3.IntegrityError):
+        return False
+    prefix = "unique constraint failed:"
+    message = str(exc.orig).strip().lower()
+    if not message.startswith(prefix):
+        return False
+    columns = tuple(column.strip() for column in message.removeprefix(prefix).strip().split(","))
+    return columns in _SQLITE_DATA_STORE_NAME_COLUMNS
+
+
+def _is_data_store_primary_key_conflict(exc: IntegrityError) -> bool:
+    """Identify the exact data-store primary-key constraint."""
+
+    diagnostic = getattr(exc.orig, "diag", None)
+    constraint_name = getattr(diagnostic, "constraint_name", None)
+    if constraint_name is not None:
+        return constraint_name == DATA_STORE_PRIMARY_KEY_CONSTRAINT
+
+    if not isinstance(exc.orig, sqlite3.IntegrityError):
+        return False
+    prefix = "unique constraint failed:"
+    message = str(exc.orig).strip().lower()
+    if not message.startswith(prefix):
+        return False
+    columns = tuple(column.strip() for column in message.removeprefix(prefix).strip().split(","))
+    return columns == _SQLITE_DATA_STORE_PRIMARY_KEY_COLUMNS
+
+
+def _is_data_store_foreign_key_race(exc: IntegrityError) -> bool:
+    """Identify only foreign keys owned by the data-store insert."""
+
+    diagnostic = getattr(exc.orig, "diag", None)
+    constraint_name = getattr(diagnostic, "constraint_name", None)
+    if constraint_name is not None:
+        return constraint_name in DATA_STORE_FOREIGN_KEY_CONSTRAINTS
+
+    return (
+        isinstance(exc.orig, sqlite3.IntegrityError)
+        and str(exc.orig).strip().lower() == "foreign key constraint failed"
+    )
+
+
+def _reserve_sqlite_registration_write(session: OrmSession) -> None:
+    """Reserve SQLite's writer after admission and before any savepoint."""
+
+    bind = session.get_bind()
+    if bind.dialect.name != "sqlite":
+        return
+    connection = session.connection()
+    driver_connection = connection.connection.driver_connection
+    if not bool(getattr(driver_connection, "in_transaction", True)):
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
+
+
+@contextmanager
+def _insert_savepoint(session: OrmSession) -> Iterator[None]:
+    """Keep a failed insert recoverable before inspecting its exact cause."""
+
+    # Service registration reserves the writer before its outer recoverable
+    # savepoint. Retain this idempotent fallback for direct repository inserts.
+    _reserve_sqlite_registration_write(session)
+    with session.begin_nested():
+        yield
+
+
+class SQLAlchemyDataStoreRepository(DataStoreRepository):
     def __init__(self, session: OrmSession) -> None:
         self._session = session
 
@@ -32,30 +138,77 @@ class SQLAlchemyDataStoreRepository(EntityRepository[DataStore]):
         self._session.flush()
         rows = list(
             self._session.scalars(
-                select(DataStoreModel).order_by(
-                    DataStoreModel.created_at, DataStoreModel.store_id
-                )
+                select(DataStoreModel).order_by(DataStoreModel.created_at, DataStoreModel.store_id)
             )
         )
         return [data_store_from_model(row) for row in rows]
 
     def save(self, entity: DataStore) -> None:
+        """Accept only an exact no-op re-save of an existing registration."""
+
         entity_id = str(entity.store_id)
         row = self._session.get(DataStoreModel, entity_id)
         if row is None:
-            self._session.add(data_store_to_model(entity))
-        else:
-            apply_data_store_to_model(row, entity)
-        self._session.flush()
+            raise ValueError("Data-store registration must already exist.")
+        persisted = data_store_from_model(row)
+        if persisted != entity:
+            raise ValueError("Data-store registrations are immutable.")
 
-    def delete(self, entity_id: UUID) -> DataStore | None:
-        entity = self.get(entity_id)
-        if entity is None:
-            return None
-        row = self._session.get(DataStoreModel, str(entity_id))
-        if row is not None:
-            self._session.delete(row)
-        return entity
+    def reserve_registration_write(self) -> None:
+        """Reserve SQLite's writer; other SQL backends rely on constraints."""
+
+        try:
+            _reserve_sqlite_registration_write(self._session)
+        except SQLAlchemyError:
+            raise DataStoreInsertError from None
+
+    def insert(self, entity: DataStore) -> None:
+        """Append one store and expose only classified, parameter-free failures."""
+
+        append_only_conflict = False
+        name_race = False
+        foreign_key_race = False
+        insert_failure = False
+        try:
+            with _insert_savepoint(self._session):
+                self._session.add(data_store_to_model(entity))
+                self._session.flush()
+        except IntegrityError as exc:
+            if _is_data_store_primary_key_conflict(exc):
+                append_only_conflict = True
+            elif _is_data_store_name_race(exc):
+                # SQLite may report the scoped-name constraint when one row
+                # violates both that key and the primary key. The failed write
+                # has already rolled back to the insertion savepoint, so this
+                # exact post-write lookup is safe and preserves the distinction.
+                try:
+                    append_only_conflict = (
+                        self._session.get(
+                            DataStoreModel,
+                            str(entity.store_id),
+                        )
+                        is not None
+                    )
+                except SQLAlchemyError:
+                    insert_failure = True
+                else:
+                    name_race = not append_only_conflict
+            elif _is_data_store_foreign_key_race(exc):
+                foreign_key_race = True
+            else:
+                insert_failure = True
+        except SQLAlchemyError:
+            insert_failure = True
+        if append_only_conflict:
+            raise ValueError("Data-store registrations are append-only.")
+        if name_race:
+            raise DataStoreNameRaceError(
+                "A data-store name was inserted concurrently in this scope."
+            )
+        if foreign_key_race:
+            raise DataStoreForeignKeyRaceError
+        if insert_failure:
+            raise DataStoreInsertError
 
     def query(
         self,
@@ -169,16 +322,25 @@ class SQLAlchemyDataStoreRepository(EntityRepository[DataStore]):
     ) -> None:
         """Unset is_default within a scope, keeping at most one default."""
 
-        self._session.flush()
-        clause = self._scope_clause(project_id=project_id, group_id=group_id)
-        rows = self._session.scalars(
-            select(DataStoreModel).where(clause, DataStoreModel.is_default.is_(True))
-        )
-        keep = str(except_store_id) if except_store_id is not None else None
-        for row in rows:
-            if str(row.store_id) != keep:
-                row.is_default = False
-        self._session.flush()
+        update_failure = False
+        try:
+            self._session.flush()
+            clause = self._scope_clause(project_id=project_id, group_id=group_id)
+            rows = self._session.scalars(
+                select(DataStoreModel).where(
+                    clause,
+                    DataStoreModel.is_default.is_(True),
+                )
+            )
+            keep = str(except_store_id) if except_store_id is not None else None
+            for row in rows:
+                if str(row.store_id) != keep:
+                    row.is_default = False
+            self._session.flush()
+        except SQLAlchemyError:
+            update_failure = True
+        if update_failure:
+            raise DataStoreInsertError
 
     @staticmethod
     def _scope_clause(*, project_id: UUID | None, group_id: UUID | None):

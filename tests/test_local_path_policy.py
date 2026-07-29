@@ -1,11 +1,16 @@
 import os
 import subprocess
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 
 import pytest
 
 import lab_tracker.local_path_policy as local_path_policy
-from lab_tracker.local_path_policy import LocalPathPolicy, native_local_path_from_uri
+from lab_tracker.local_path_policy import (
+    LocalPathPolicy,
+    is_supported_absolute_local_root,
+    native_local_path_from_uri,
+)
 
 
 def _uri_with_authority(path: Path, authority: str) -> str:
@@ -115,9 +120,7 @@ def test_double_encoded_separator_is_decoded_exactly_once(tmp_path):
     assert native_local_path_from_uri(path.as_uri()) == str(path)
 
 
-def test_empty_root_policy_denies_without_candidate_canonicalization(
-    tmp_path, monkeypatch
-):
+def test_empty_root_policy_denies_without_candidate_canonicalization(tmp_path, monkeypatch):
     policy = LocalPathPolicy([])
 
     def unexpected_realpath(_path):
@@ -126,6 +129,193 @@ def test_empty_root_policy_denies_without_candidate_canonicalization(
     monkeypatch.setattr(local_path_policy.os.path, "realpath", unexpected_realpath)
 
     assert policy.authorize_path(tmp_path / "artifact.bin") is None
+
+
+def test_policy_is_frozen_slotted_and_uses_identity_semantics() -> None:
+    policy = LocalPathPolicy([])
+    equivalent = LocalPathPolicy([])
+
+    assert policy is not equivalent
+    assert policy != equivalent
+    assert not hasattr(policy, "__dict__")
+    with pytest.raises(FrozenInstanceError):
+        policy._canonical_roots = None  # type: ignore[misc]
+
+
+@pytest.mark.parametrize("raw", (None, "", " \t "))
+def test_configured_empty_roots_are_deny_all(raw: str | None) -> None:
+    policy = LocalPathPolicy.from_config(raw)
+
+    assert policy.canonical_roots == ()
+    assert policy.lexical_roots == ()
+    assert policy.recovery_roots == ()
+
+
+def test_configured_roots_preserve_pathsep_parsing(tmp_path: Path) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    raw = os.pathsep.join((str(first), "", str(second)))
+
+    policy = LocalPathPolicy.from_config(raw)
+
+    assert policy.canonical_roots == (
+        os.path.realpath(first),
+        os.path.realpath(second),
+    )
+    assert policy.lexical_roots == (str(first), str(second))
+    assert policy.recovery_roots == (str(first), str(second))
+
+
+def test_configured_roots_reject_non_string_values() -> None:
+    with pytest.raises(TypeError, match="must be a string"):
+        LocalPathPolicy.from_config(1)  # type: ignore[arg-type]
+
+
+def test_configured_root_normalization_failure_is_redacted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "operator-root-secret"
+
+    def fail_expansion(_path: Path) -> Path:
+        raise RuntimeError(secret)
+
+    monkeypatch.setattr(Path, "expanduser", fail_expansion)
+
+    with pytest.raises(ValueError) as exc_info:
+        LocalPathPolicy.from_config("~/private")
+
+    assert secret not in str(exc_info.value)
+    assert secret not in repr(exc_info.value)
+    assert exc_info.value.__cause__ is None
+
+
+@pytest.mark.parametrize(
+    "root",
+    (
+        "relative/store",
+        "~/store",
+        "C:store",
+        r"\\server\share",
+        r"\\?\C:\store",
+        r"\\.\PhysicalDrive0",
+    ),
+)
+def test_registered_root_predicate_rejects_non_native_absolute_root_without_io(root, monkeypatch):
+    def unexpected_path_operation(_path):
+        raise AssertionError("invalid raw root reached a host-path operation")
+
+    monkeypatch.setattr(local_path_policy.os.path, "realpath", unexpected_path_operation)
+    monkeypatch.setattr(local_path_policy.os.path, "abspath", unexpected_path_operation)
+
+    assert is_supported_absolute_local_root(root) is False
+
+
+def test_operator_policy_preserves_relative_and_tilde_root_normalization(tmp_path, monkeypatch):
+    relative_root = tmp_path / "relative-store"
+    tilde_root = tmp_path / "tilde-store"
+    relative_root.mkdir()
+    tilde_root.mkdir()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+
+    relative_policy = LocalPathPolicy(["relative-store"])
+    tilde_policy = LocalPathPolicy(["~/tilde-store"])
+
+    assert relative_policy.canonical_roots == (os.path.realpath(relative_root),)
+    assert tilde_policy.canonical_roots == (os.path.realpath(tilde_root),)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX symbolic links")
+def test_operator_policy_preserves_link_parent_traversal_semantics(tmp_path):
+    allowed = tmp_path / "allowed"
+    physical_root = allowed / "narrow"
+    link_target = physical_root / "nested"
+    link_target.mkdir(parents=True)
+    link = allowed / "link"
+    try:
+        link.symlink_to(link_target, target_is_directory=True)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"directory symbolic links are unavailable: {exc}")
+    configured_root = os.path.join(os.fspath(link), os.pardir)
+
+    policy = LocalPathPolicy([configured_root])
+
+    assert policy.canonical_roots == (os.path.realpath(configured_root),)
+    assert policy.canonical_roots == (os.fspath(physical_root),)
+    assert policy.canonical_roots != (os.fspath(allowed),)
+
+
+def test_absolute_root_predicate_is_lexical_and_side_effect_free(tmp_path, monkeypatch):
+    def unexpected_realpath(_path):
+        raise AssertionError("root predicate canonicalized the filesystem")
+
+    monkeypatch.setattr(local_path_policy.os.path, "realpath", unexpected_realpath)
+
+    assert is_supported_absolute_local_root(tmp_path / "store") is True
+
+
+def test_unscoped_policy_restricts_to_exact_store_root(tmp_path):
+    store = tmp_path / "store"
+    store.mkdir()
+
+    restricted = LocalPathPolicy().restricted_to_absolute_root(store)
+
+    assert restricted is not None
+    assert restricted.canonical_roots == (os.path.realpath(store),)
+
+
+def test_deny_all_policy_cannot_delegate_store_root(tmp_path):
+    store = tmp_path / "store"
+    store.mkdir()
+
+    assert LocalPathPolicy([]).restricted_to_absolute_root(store) is None
+
+
+def test_broad_operator_root_restricts_to_whole_store_root(tmp_path):
+    operator_root = tmp_path / "allowed"
+    store = operator_root / "registered-store"
+    store.mkdir(parents=True)
+
+    restricted = LocalPathPolicy([operator_root]).restricted_to_absolute_root(store)
+
+    assert restricted is not None
+    assert restricted.canonical_roots == (os.path.realpath(store),)
+
+
+def test_equal_operator_and_store_root_is_authorized(tmp_path):
+    store = tmp_path / "store"
+    store.mkdir()
+
+    restricted = LocalPathPolicy([store]).restricted_to_absolute_root(store)
+
+    assert restricted is not None
+    assert restricted.canonical_roots == (os.path.realpath(store),)
+
+
+def test_narrow_operator_root_does_not_partially_authorize_broader_store(tmp_path):
+    store = tmp_path / "store"
+    granted_child = store / "granted"
+    granted_child.mkdir(parents=True)
+
+    assert LocalPathPolicy([granted_child]).restricted_to_absolute_root(store) is None
+
+
+def test_disjoint_operator_and_store_roots_do_not_intersect(tmp_path, monkeypatch):
+    operator_root = tmp_path / "allowed"
+    store = tmp_path / "store"
+    operator_root.mkdir()
+    store.mkdir()
+    policy = LocalPathPolicy([operator_root])
+
+    def unexpected_realpath(_path):
+        raise AssertionError("disjoint store root reached filesystem canonicalization")
+
+    monkeypatch.setattr(local_path_policy.os.path, "realpath", unexpected_realpath)
+
+    assert policy.restricted_to_absolute_root(store) is None
 
 
 def test_sibling_prefix_is_not_contained(tmp_path):
@@ -184,6 +374,8 @@ def test_canonical_roots_collapse_aliases_and_overlapping_children(tmp_path):
     policy = LocalPathPolicy([alias, child, root])
 
     assert policy.canonical_roots == (os.path.realpath(root),)
+    assert policy.lexical_roots == (str(alias), str(child), str(root))
+    assert policy.recovery_roots == (str(alias),)
 
 
 def test_walk_pruning_removes_linked_directory(tmp_path):
@@ -301,9 +493,7 @@ def test_windows_final_containment_does_not_fold_component_case(tmp_path):
 @pytest.mark.skipif(os.name != "nt", reason="requires Windows drive anchors")
 def test_windows_cross_drive_candidate_fails_before_realpath(tmp_path, monkeypatch):
     current_drive = Path(tmp_path).drive.upper()
-    other_drive = next(
-        drive for drive in ("Z:", "Y:", "X:", "W:") if drive != current_drive
-    )
+    other_drive = next(drive for drive in ("Z:", "Y:", "X:", "W:") if drive != current_drive)
     policy = LocalPathPolicy([tmp_path])
 
     def unexpected_realpath(_path):

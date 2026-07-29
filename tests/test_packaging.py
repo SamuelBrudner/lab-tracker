@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -8,7 +9,19 @@ import zipfile
 from pathlib import Path, PurePosixPath
 
 import pytest
-import tomllib
+
+from lab_tracker.local_filesystem_operations import (
+    LOCAL_FILESYSTEM_PROTOCOL_VERSION,
+    LOCAL_FILESYSTEM_REQUEST_ENV,
+)
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - exercised by Python 3.10 CI
+    import tomli as tomllib
+
+_POSIX_LOCAL_STORE_HEALTH_HELPER = "lab_tracker/_local_store_health_helper.py"
+_WINDOWS_LOCAL_STORE_HEALTH_HELPER = "lab_tracker/_windows_local_store_health_helper.py"
 
 
 def _packaged_files(package_root: Path, subdir: str) -> set[str]:
@@ -28,6 +41,78 @@ def _package_data_patterns(repo_root: Path) -> list[str]:
 def _package_data_matches(file_path: str, patterns: list[str]) -> bool:
     path = PurePosixPath(file_path)
     return any(path.match(pattern) for pattern in patterns)
+
+
+def _isolated_helper_environment(root: Path) -> dict[str, str]:
+    return _isolated_helper_environment_from_payload(
+        {
+            "v": LOCAL_FILESYSTEM_PROTOCOL_VERSION,
+            "op": "inspect-directory",
+            "candidate": os.fspath(root),
+            "roots": [os.fspath(root.parent)],
+        }
+    )
+
+
+def _isolated_helper_environment_from_payload(
+    payload: dict[str, object],
+) -> dict[str, str]:
+    request = json.dumps(
+        payload,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    environment = {LOCAL_FILESYSTEM_REQUEST_ENV: request}
+    if os.name == "nt":
+        for name, value in os.environ.items():
+            if name.upper() in {"SYSTEMROOT", "WINDIR"}:
+                environment[name] = value
+        return environment
+    if os.name == "posix":
+        for name, value in os.environ.items():
+            if name in {"LANG", "LC_ALL", "LC_CTYPE"}:
+                environment[name] = value
+    return environment
+
+
+def _isolated_read_helper_environment(
+    root: Path,
+    candidate: Path,
+    *,
+    max_bytes: int,
+) -> dict[str, str]:
+    return _isolated_helper_environment_from_payload(
+        {
+            "v": LOCAL_FILESYSTEM_PROTOCOL_VERSION,
+            "op": "read-file",
+            "candidate": os.fspath(candidate),
+            "roots": [os.fspath(root)],
+            "max_bytes": max_bytes,
+        }
+    )
+
+
+def _isolated_enumeration_helper_environment(
+    operator_root: Path,
+    *,
+    store_root: Path | None = None,
+) -> dict[str, str]:
+    payload: dict[str, object] = {
+        "v": LOCAL_FILESYSTEM_PROTOCOL_VERSION,
+        "op": (
+            "enumerate-registered-files"
+            if store_root is not None
+            else "enumerate-files"
+        ),
+        "roots": [os.fspath(operator_root)],
+        "target_name": "artifact.bin",
+        "max_files": 4,
+        "max_directories": 4,
+    }
+    if store_root is not None:
+        payload["store_root"] = os.fspath(store_root)
+    return _isolated_helper_environment_from_payload(payload)
 
 
 def _build_wheel(repo_root: Path, wheelhouse: Path) -> Path:
@@ -91,9 +176,7 @@ def test_dockerfile_runs_app_as_non_root_user():
 
 def test_docker_entrypoint_has_short_migration_retry_budget():
     repo_root = Path(__file__).resolve().parent.parent
-    entrypoint = (repo_root / "deploy" / "docker-entrypoint.sh").read_text(
-        encoding="utf-8"
-    )
+    entrypoint = (repo_root / "deploy" / "docker-entrypoint.sh").read_text(encoding="utf-8")
 
     assert 'max_attempts="${MIGRATION_MAX_ATTEMPTS:-3}"' in entrypoint
     assert "fix the migration or database before restarting the container" in entrypoint
@@ -106,9 +189,7 @@ def test_frontend_package_data_covers_all_bundle_files():
 
     bundle_files = _packaged_files(package_root, "frontend")
     packaged_files = {
-        file_path
-        for file_path in bundle_files
-        if _package_data_matches(file_path, patterns)
+        file_path for file_path in bundle_files if _package_data_matches(file_path, patterns)
     }
 
     assert packaged_files == bundle_files
@@ -129,6 +210,82 @@ def test_wheel_contains_all_frontend_bundle_files(built_wheel: Path):
     assert wheel_files == bundle_files
 
 
+def test_wheel_contains_and_runs_isolated_local_health_helper(
+    tmp_path: Path,
+    built_wheel: Path,
+) -> None:
+    target = tmp_path / "wheel"
+    with zipfile.ZipFile(built_wheel) as archive:
+        assert _POSIX_LOCAL_STORE_HEALTH_HELPER in archive.namelist()
+        assert _WINDOWS_LOCAL_STORE_HEALTH_HELPER in archive.namelist()
+        active_helper = (
+            _WINDOWS_LOCAL_STORE_HEALTH_HELPER
+            if os.name == "nt"
+            else _POSIX_LOCAL_STORE_HEALTH_HELPER
+        )
+        archive.extract(active_helper, target)
+
+    store_root = tmp_path / "store"
+    store_root.mkdir()
+    helper = target / active_helper
+    completed = subprocess.run(  # noqa: S603 - fixed interpreter and wheel member
+        [sys.executable, "-I", "-S", "-B", str(helper)],
+        check=False,
+        capture_output=True,
+        env=_isolated_helper_environment(store_root),
+    )
+
+    assert completed.returncode == 0
+    assert completed.stdout == b""
+    assert completed.stderr == b""
+
+    binary_payload = b"\x00\r\n\x1a\xffwheel-read"
+    artifact = store_root / "artifact.bin"
+    artifact.write_bytes(binary_payload)
+    read_completed = subprocess.run(  # noqa: S603 - fixed interpreter and wheel member
+        [sys.executable, "-I", "-S", "-B", str(helper)],
+        check=False,
+        capture_output=True,
+        env=_isolated_read_helper_environment(
+            store_root,
+            artifact,
+            max_bytes=len(binary_payload),
+        ),
+    )
+
+    assert read_completed.returncode == 0
+    assert read_completed.stdout == binary_payload
+    assert read_completed.stderr == b""
+
+    for environment in (
+        _isolated_enumeration_helper_environment(store_root),
+        _isolated_enumeration_helper_environment(
+            store_root.parent,
+            store_root=store_root,
+        ),
+    ):
+        enumeration_completed = subprocess.run(  # noqa: S603 - fixed wheel member
+            [sys.executable, "-I", "-S", "-B", str(helper)],
+            check=False,
+            capture_output=True,
+            env=environment,
+        )
+
+        assert enumeration_completed.returncode == 0
+        assert enumeration_completed.stderr == b""
+        assert json.loads(enumeration_completed.stdout.decode("ascii")) == {
+            "v": LOCAL_FILESYSTEM_PROTOCOL_VERSION,
+            "status": "complete",
+            "directories": 1,
+            "candidates": [
+                {
+                    "root_index": 0,
+                    "locator": ["artifact.bin"],
+                }
+            ],
+        }
+
+
 def test_alembic_package_data_covers_all_migration_files():
     repo_root = Path(__file__).resolve().parent.parent
     package_root = repo_root / "src" / "lab_tracker"
@@ -136,9 +293,7 @@ def test_alembic_package_data_covers_all_migration_files():
 
     migration_files = _packaged_files(package_root, "alembic")
     packaged_files = {
-        file_path
-        for file_path in migration_files
-        if _package_data_matches(file_path, patterns)
+        file_path for file_path in migration_files if _package_data_matches(file_path, patterns)
     }
 
     assert packaged_files == migration_files
@@ -150,8 +305,7 @@ def test_wheel_installed_migrations_can_upgrade_sqlite(tmp_path: Path, built_whe
         names = set(archive.namelist())
     assert "lab_tracker/alembic/env.py" in names
     assert any(
-        name.startswith("lab_tracker/alembic/versions/") and name.endswith(".py")
-        for name in names
+        name.startswith("lab_tracker/alembic/versions/") and name.endswith(".py") for name in names
     )
 
     with zipfile.ZipFile(built_wheel) as archive:

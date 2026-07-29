@@ -63,6 +63,9 @@ def test_admission_rejects_out_of_range_or_inconsistent_limits(kwargs, message):
 def _request_for_actor(
     admission: ArtifactResolutionAdmission,
     actor: AuthContext,
+    *,
+    path: str = "/external-artifacts/resolve",
+    root_path: str = "",
 ) -> Request:
     app = FastAPI()
     app.state.artifact_resolution_admission = admission
@@ -73,10 +76,10 @@ def _request_for_actor(
             "http_version": "1.1",
             "method": "POST",
             "scheme": "http",
-            "path": "/external-artifacts/resolve",
-            "raw_path": b"/external-artifacts/resolve",
+            "path": path,
+            "raw_path": path.encode(),
             "query_string": b"",
-            "root_path": "",
+            "root_path": root_path,
             "headers": [],
             "client": ("testclient", 50000),
             "server": ("testserver", 80),
@@ -186,6 +189,34 @@ def test_admission_releases_lease_after_successful_response():
     _assert_capacity_recovered(admission, actor.user_id)
 
 
+def test_artifact_admission_matches_the_route_relative_to_root_path():
+    admission = ArtifactResolutionAdmission(
+        global_in_flight_limit=1,
+        per_actor_in_flight_limit=1,
+    )
+    actor = AuthContext(user_id=uuid4(), role=Role.VIEWER)
+    held = admission.try_acquire(actor.user_id)
+    assert held is not None
+    request = _request_for_actor(
+        admission,
+        actor,
+        path="/prefix/external-artifacts/resolve",
+        root_path="/prefix",
+    )
+
+    async def unexpected_next(_request: Request) -> JSONResponse:
+        raise AssertionError("root-path artifact request bypassed admission")
+
+    try:
+        response = asyncio.run(
+            _apply_artifact_resolution_admission(request, unexpected_next)
+        )
+    finally:
+        held.release()
+
+    assert response.status_code == 429
+
+
 def _actor_id(client: TestClient, headers: dict[str, str]) -> UUID:
     token = headers["Authorization"].removeprefix("Bearer ")
     return client.app.state.token_service.verify_access_token(token).user_id
@@ -270,3 +301,51 @@ def test_saturated_resolution_is_opaque_and_bypasses_request_scope(
     assert actor_saturated.headers["X-Content-Type-Options"] == "nosniff"
     assert globally_saturated.headers["X-Content-Type-Options"] == "nosniff"
     assert unauthenticated.status_code == 401
+
+
+def test_saturated_root_path_artifact_never_reaches_the_request_scope(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    actor_id = _actor_id(client, admin_auth_headers)
+    admission = ArtifactResolutionAdmission(
+        global_in_flight_limit=1,
+        per_actor_in_flight_limit=1,
+    )
+    held = admission.try_acquire(actor_id)
+    assert held is not None
+    original_admission = client.app.state.artifact_resolution_admission
+    original_factory = client.app.state.db_session_factory
+    original_registry = client.app.state.resolver_registry
+
+    def unexpected_request_scope():
+        raise AssertionError(
+            "root-path artifact saturation must precede the request session"
+        )
+
+    class UnexpectedRegistry:
+        def resolve(self, *_args, **_kwargs):
+            raise AssertionError("root-path artifact saturation reached resolution")
+
+    client.app.state.artifact_resolution_admission = admission
+    client.app.state.db_session_factory = unexpected_request_scope
+    client.app.state.resolver_registry = UnexpectedRegistry()
+    try:
+        with TestClient(
+            client.app,
+            root_path="/prefix",
+            raise_server_exceptions=False,
+        ) as prefixed_client:
+            response = prefixed_client.post(
+                "/prefix/external-artifacts/resolve",
+                content=b"deliberately malformed",
+                headers=admin_auth_headers,
+            )
+    finally:
+        client.app.state.artifact_resolution_admission = original_admission
+        client.app.state.db_session_factory = original_factory
+        client.app.state.resolver_registry = original_registry
+        held.release()
+
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "1"

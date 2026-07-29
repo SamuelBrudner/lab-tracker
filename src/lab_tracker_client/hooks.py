@@ -1,11 +1,12 @@
-"""Cross-platform enrollment of the Lab Tracker post-commit snapshot hook.
+"""Cross-platform enrollment of the Lab Tracker post-commit capture hook.
 
 Pure-Python replacement for ``scripts/install-git-graph-draft-hook.ps1``. The
 managed block keeps the exact same BEGIN/END markers, so repos enrolled by the
 legacy PowerShell installer upgrade in place. The new hook body invokes the
-packaged ``lt git snapshot --fail-silent`` (outbox-backed, so unreachable-server
+packaged ``lt git snapshot`` (outbox-backed, so unreachable-server
 commits queue instead of being lost) rather than a source-checkout script, and
-always exits 0 so a commit is never blocked.
+always exits 0 so a commit is never blocked. Proposal generation is deliberately
+left to the configured daily-review schedule or an explicit on-demand command.
 """
 
 from __future__ import annotations
@@ -61,14 +62,16 @@ def managed_hook_block(
     lt_path: str,
     project_id: str | None = None,
     base_url: str | None = None,
-    request_draft: bool = True,
 ) -> str:
     """Render the POSIX-sh managed block (LF only; runs under Git-for-Windows sh)."""
 
     lines = [
         HOOK_BLOCK_BEGIN,
-        'LAB_TRACKER_GIT_DRAFT_ENABLED="${LAB_TRACKER_GIT_DRAFT_ENABLED:-1}"',
-        'if [ "$LAB_TRACKER_GIT_DRAFT_ENABLED" != "0" ]; then',
+        (
+            'LAB_TRACKER_GIT_CAPTURE_ENABLED="${LAB_TRACKER_GIT_CAPTURE_ENABLED'
+            ':-${LAB_TRACKER_GIT_DRAFT_ENABLED:-1}}"'
+        ),
+        'if [ "$LAB_TRACKER_GIT_CAPTURE_ENABLED" != "0" ]; then',
         f'  LAB_TRACKER_LT="${{LAB_TRACKER_LT:-{_hook_path_text(lt_path)}}}"',
     ]
     if base_url:
@@ -85,7 +88,6 @@ def managed_hook_block(
                 "  export LAB_TRACKER_PROJECT_ID",
             ]
         )
-    draft_flag = " --request-draft" if request_draft else ""
     # No --fail-silent here: a nonzero lt exit (snapshot failed, or queued but
     # not yet synced) must reach the || so the one-line warning stays
     # reachable. post-commit hooks are advisory — git never blocks the commit
@@ -100,7 +102,7 @@ def managed_hook_block(
     )
     lines.extend(
         [
-            f'  "$LAB_TRACKER_LT" git snapshot{draft_flag} >/dev/null || \\',
+            '  "$LAB_TRACKER_LT" git snapshot >/dev/null || \\',
             f'    echo "{warning}" >&2',
             "fi",
             HOOK_BLOCK_END,
@@ -114,7 +116,6 @@ def install_hook(
     repo: str | Path = ".",
     project_id: str | None = None,
     base_url: str | None = None,
-    request_draft: bool = True,
     lt_path: str | None = None,
     force: bool = False,
     dry_run: bool = False,
@@ -141,7 +142,6 @@ def install_hook(
         lt_path=resolved_lt,
         project_id=project_id,
         base_url=base_url,
-        request_draft=request_draft,
     )
     if REPO_HOOK_BLOCK_BEGIN in existing and not has_block and not force:
         # Both Lab Tracker capture hooks in one repo record two staged notes
@@ -179,7 +179,6 @@ def install_hook(
         "hook_path": str(hook_path),
         "action": action,
         "lt_path": resolved_lt,
-        "request_draft": request_draft,
         "dry_run": dry_run,
         "diff": _text_diff(hook_path, existing, updated),
     }

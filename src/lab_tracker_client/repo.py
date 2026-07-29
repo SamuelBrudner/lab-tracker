@@ -26,6 +26,12 @@ from pathlib import Path
 from typing import Any
 
 from lab_tracker.models import NoteMetadataScalar
+from lab_tracker.repository_conventions import (
+    REPOSITORY_CONVENTIONS_HASH_METADATA_KEY,
+    REPOSITORY_CONVENTIONS_METADATA_KEY,
+    capture_repository_conventions,
+    repository_conventions_metadata,
+)
 from lab_tracker_client import outbox as _outbox
 from lab_tracker_client.client import (
     CAPTURE_HOST_METADATA_KEYS,
@@ -347,7 +353,13 @@ _CAPTURE_CONTENT_KEYS = (
     "artifacts",
     "summary",
 )
-_CAPTURE_SOURCE_KEYS = ("git_commit", "git_dirty", "repo_remote_url", "git_branch")
+_CAPTURE_SOURCE_KEYS = (
+    "git_commit",
+    "git_dirty",
+    "repo_remote_url",
+    "git_branch",
+    REPOSITORY_CONVENTIONS_HASH_METADATA_KEY,
+)
 
 
 def _capture_content(event: Mapping[str, Any]) -> str:
@@ -814,6 +826,19 @@ def git_context(cwd: str | Path | None = None) -> JsonObject:
         value = _git_output(root, *args)
         if value:
             context[key] = value
+    if commit:
+        toplevel = _git_output(root, "rev-parse", "--show-toplevel") or str(root)
+        remote = normalize_remote(str(context.get("repo_remote_url") or ""))
+        try:
+            snapshot = capture_repository_conventions(
+                toplevel,
+                commit=commit,
+                repository=remote or f"local:{Path(toplevel).name}",
+            )
+        except ValueError:
+            # Optional context never prevents durable commit provenance capture.
+            snapshot = None
+        context.update(repository_conventions_metadata(snapshot))
     return context
 
 
@@ -999,6 +1024,12 @@ def event_metadata(
         # Structured (JSON-encoded scalar) so the curation bridge can lift the
         # pointers into ExternalArtifactReferences without re-parsing markdown.
         metadata["repo_artifacts"] = json.dumps(payload["artifacts"], sort_keys=True)
+    for key in (
+        REPOSITORY_CONVENTIONS_METADATA_KEY,
+        REPOSITORY_CONVENTIONS_HASH_METADATA_KEY,
+    ):
+        if source.get(key):
+            metadata[key] = str(source[key])
     host = payload.get("host") if isinstance(payload.get("host"), Mapping) else {}
     for key in CAPTURE_HOST_METADATA_KEYS:
         if host.get(key):

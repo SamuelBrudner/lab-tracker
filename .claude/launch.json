@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "lab-tracker-api",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": ["run", "uvicorn", "lab_tracker.asgi:app", "--port", "8123"],
+      "port": 8123
+    }
+  ]
+}

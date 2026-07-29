@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import re
+from typing import cast
 
 from fastapi import FastAPI, Request
 from starlette.concurrency import run_in_threadpool
@@ -25,6 +27,12 @@ from lab_tracker.auth import (
 from lab_tracker.errors import AuthError, RateLimitError
 from lab_tracker.schemas import ErrorEnvelope, ErrorInfo
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
+from lab_tracker.store_health import (
+    StoreHealth,
+    StoreHealthProbeUnavailable,
+    StoreProbe,
+    StoreProbeTarget,
+)
 
 _APP_CONTENT_SECURITY_POLICY = "; ".join(
     [
@@ -71,6 +79,9 @@ _CSP_PATH_PREFIXES = (
 _ARTIFACT_RESOLUTION_PATH = "/external-artifacts/resolve"
 _ARTIFACT_RESOLUTION_RETRY_AFTER_SECONDS = "1"
 _ARTIFACT_RESOLUTION_SATURATED_MESSAGE = "Artifact resolution is temporarily unavailable."
+_STORE_HEALTH_PATH = re.compile(r"/data-stores/[^/]+/health\Z")
+_STORE_HEALTH_RETRY_AFTER_SECONDS = "1"
+_STORE_HEALTH_SATURATED_MESSAGE = "Store health is temporarily unavailable."
 
 
 def _auth_error_response(message: str) -> JSONResponse:
@@ -98,6 +109,14 @@ def _artifact_resolution_saturated_response() -> JSONResponse:
 
     response = _rate_limited_response(_ARTIFACT_RESOLUTION_SATURATED_MESSAGE)
     response.headers["Retry-After"] = _ARTIFACT_RESOLUTION_RETRY_AFTER_SECONDS
+    return response
+
+
+def _store_health_saturated_response() -> JSONResponse:
+    """Return the same opaque response for global and actor saturation."""
+
+    response = _rate_limited_response(_STORE_HEALTH_SATURATED_MESSAGE)
+    response.headers["Retry-After"] = _STORE_HEALTH_RETRY_AFTER_SECONDS
     return response
 
 
@@ -244,7 +263,7 @@ async def _apply_artifact_resolution_admission(
 
     if (
         request.method != "POST"
-        or request.scope["path"] != _ARTIFACT_RESOLUTION_PATH
+        or _route_relative_path(request) != _ARTIFACT_RESOLUTION_PATH
     ):
         return await call_next(request)
     actor = getattr(request.state, "auth_context", None)
@@ -266,6 +285,58 @@ def configure_artifact_resolution_admission_middleware(app: FastAPI) -> None:
         call_next: RequestResponseEndpoint,
     ) -> Response:
         return await _apply_artifact_resolution_admission(request, call_next)
+
+
+async def _apply_store_health_admission(
+    request: Request,
+    call_next: RequestResponseEndpoint,
+) -> Response:
+    """Apply no-wait health capacity before the ordinary request DB scope."""
+
+    path = _route_relative_path(request)
+    if (
+        request.method != "GET"
+        or not isinstance(path, str)
+        or _STORE_HEALTH_PATH.fullmatch(path) is None
+    ):
+        return await call_next(request)
+    actor = getattr(request.state, "auth_context", None)
+    if not isinstance(actor, AuthContext):
+        return _auth_error_response("Authentication required.")
+    lease = request.app.state.store_health_admission.try_acquire(actor.user_id)
+    if lease is None:
+        return _store_health_saturated_response()
+    try:
+        return await call_next(request)
+    finally:
+        lease.release()
+
+
+def _route_relative_path(request: Request) -> object:
+    """Mirror Starlette's root-path removal before matching an API route."""
+
+    path = request.scope["path"]
+    root_path = request.scope.get("root_path", "")
+    if (
+        not isinstance(path, str)
+        or not isinstance(root_path, str)
+        or not root_path
+        or not path.startswith(root_path)
+        or (path != root_path and path[len(root_path)] != "/")
+    ):
+        return path
+    if path == root_path:
+        return ""
+    return path[len(root_path) :]
+
+
+def configure_store_health_admission_middleware(app: FastAPI) -> None:
+    @app.middleware("http")
+    async def store_health_admission_middleware(
+        request: Request,
+        call_next: RequestResponseEndpoint,
+    ) -> Response:
+        return await _apply_store_health_admission(request, call_next)
 
 
 def _should_apply_csp(path: str) -> bool:
@@ -310,6 +381,7 @@ def configure_database_session_middleware(
                     None,
                 ),
                 release_read_scope=request_scope.release_read_scope,
+                store_health_checker=_store_health_checker_from_app(request),
             )
             response = await call_next(request)
         except BaseException as exc:
@@ -328,6 +400,27 @@ def _complete_request_scope_response(request_scope, response):
         return request_scope.complete_response(response)
     finally:
         request_scope.__exit__(None, None, None)
+
+
+def _unavailable_store_health_checker(
+    _target: StoreProbeTarget,
+) -> StoreHealth:
+    """Fail closed when the composition root omitted mandatory health wiring."""
+
+    raise StoreHealthProbeUnavailable()
+
+
+def _store_health_checker_from_app(request: Request) -> StoreProbe:
+    """Capture the configured checker or an explicit fail-closed sentinel."""
+
+    return cast(
+        StoreProbe,
+        getattr(
+            request.app.state,
+            "store_health_checker",
+            _unavailable_store_health_checker,
+        ),
+    )
 
 
 def _usage_surface_from_request(request: Request) -> str:

@@ -2,15 +2,23 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
 
 import httpx
 from mcp.types import ToolAnnotations
+from pydantic import Field
 
+from lab_tracker.artifact_resolution_limits import (
+    MAX_ARTIFACT_BYTE_OFFSET,
+    MAX_INLINE_ARTIFACT_BYTES,
+    ArtifactContentBounds,
+    ArtifactContentBoundsError,
+)
 from lab_tracker.mcp_api_client import (
     JsonObject,
     LabTrackerAPIError,
     LabTrackerAPIUnavailableError,
+    LabTrackerAPIValidationError,
     client_from_env,
     lab_tracker_api_error,
     lab_tracker_unavailable,
@@ -496,20 +504,50 @@ def lab_tracker_resolve_artifact(
     entity_id: str,
     artifact_index: int = 0,
     content_hash: str | None = None,
-    max_bytes: int | None = None,
-    byte_start: int | None = None,
-    byte_end: int | None = None,
+    max_bytes: (
+        Annotated[
+            int,
+            Field(strict=True, ge=1, le=MAX_INLINE_ARTIFACT_BYTES),
+        ]
+        | None
+    ) = None,
+    byte_start: (
+        Annotated[
+            int,
+            Field(strict=True, ge=0, le=MAX_ARTIFACT_BYTE_OFFSET),
+        ]
+        | None
+    ) = None,
+    byte_end: (
+        Annotated[
+            int,
+            Field(strict=True, ge=0, le=MAX_ARTIFACT_BYTE_OFFSET),
+        ]
+        | None
+    ) = None,
 ) -> JsonObject:
-    """Resolve an artifact pointer; only verified results include bounded content.
+    """Resolve a registered store pointer; direct locators remain metadata.
 
-    Use when reasoning needs the actual content of a file that was referenced but
-    not captured in the graph's metadata snapshot. entity_type is dataset,
-    analysis, or claim; artifact_index selects which embedded reference. Returns a
-    status of verified (bytes match the recorded content_hash), drifted (the
-    artifact changed since capture — do not trust it as the captured evidence), or
-    unresolved (no adapter, unreachable, or unverifiable). Only verified results
-    include base64 content; drifted results retain diagnostics but withhold bytes.
+    Use when reasoning needs the actual content of a registered ``store://``
+    artifact that was referenced but not captured in the graph's metadata
+    snapshot. Direct file, HTTP, rclone, Git, and other non-store references are
+    provenance metadata only and return unresolved without resolver work.
+    entity_type is dataset, analysis, or claim; artifact_index selects which
+    embedded reference. Returns verified (bytes match content_hash), drifted (do
+    not trust the changed bytes), or unresolved. Only verified results include
+    base64 content.
     """
+    try:
+        ArtifactContentBounds.for_request(max_bytes, byte_start, byte_end)
+    except ArtifactContentBoundsError as exc:
+        return lab_tracker_api_error(
+            "lab_tracker_resolve_artifact",
+            LabTrackerAPIValidationError(
+                str(exc),
+                code="validation_error",
+            ),
+        )
+
     return _read_tool(
         "lab_tracker_resolve_artifact",
         lambda client: suppress_unverified_artifact_content(

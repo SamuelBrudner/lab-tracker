@@ -17,15 +17,18 @@ import math
 import socket
 import ssl
 import time
+import unicodedata
 from collections.abc import Awaitable, Callable, Iterable, Iterator, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Protocol, cast
-from urllib.parse import SplitResult, quote, urlsplit
+from typing import Final, Protocol, cast
+from urllib.parse import SplitResult, quote, urljoin, urlsplit
 
 import dns.asyncresolver
 import dns.exception
+
+from lab_tracker.local_store_locator import PortableStorePath
 
 _HTTP_SCHEMES = frozenset({"http", "https"})
 _DEFAULT_PORTS = {"http": 80, "https": 443}
@@ -33,6 +36,8 @@ _MAX_URL_LENGTH = 8192
 _STREAM_CHUNK_SIZE = 1024 * 1024
 DEFAULT_OUTBOUND_HTTP_DEADLINE_SECONDS = 30.0
 MAX_OUTBOUND_HTTP_DEADLINE_SECONDS = 86_400.0
+DEFAULT_MAX_HTTP_REDIRECTS = 3
+HTTP_REDIRECT_STATUS_CODES: Final = frozenset({301, 302, 303, 307, 308})
 _GENERIC_POLICY_DETAIL = "Outbound HTTP destination is not allowed."
 _GENERIC_TRANSPORT_DETAIL = "Outbound HTTP request failed."
 _PATH_SAFE_CHARACTERS = "/:@!$&'()*+,;=-._~%"
@@ -68,6 +73,28 @@ class OutboundHttpTransportError(RuntimeError):
 
 class OutboundHttpDeadlineExceeded(OutboundHttpTransportError):
     """The request-wide outbound HTTP budget expired."""
+
+
+def resolve_direct_http_redirect(
+    current_url: str,
+    location: str,
+) -> str | None:
+    """Resolve one direct-reference redirect without permitting TLS downgrade.
+
+    This helper does not authorize the resulting destination. Callers must pass
+    every returned URL through :class:`OutboundHttpPolicy` before opening a
+    connection, including cross-origin redirects.
+    """
+
+    try:
+        next_url = urljoin(current_url, location)
+        current_scheme = urlsplit(current_url).scheme.lower()
+        next_scheme = urlsplit(next_url).scheme.lower()
+    except (TypeError, UnicodeError, ValueError):
+        return None
+    if current_scheme == "https" and next_scheme == "http":
+        return None
+    return next_url
 
 
 Clock = Callable[[], float]
@@ -176,6 +203,109 @@ class ApprovedHttpTarget:
         return f"{host}:{self.port}"
 
 
+@dataclass(frozen=True, slots=True)
+class RegisteredHttpPrefix:
+    """One canonical HTTP directory prefix for a registered artifact store.
+
+    ``origin`` is the normalized scheme/host/effective-port tuple.
+    ``path_components`` are decoded exactly once and compared structurally.
+    ``canonical_url`` is directory-form and always ends in exactly one slash.
+    """
+
+    origin: str
+    path_components: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if _canonical_registered_http_prefix_url(
+            self.origin,
+            self.path_components,
+        ) is None:
+            raise ValueError("Registered HTTP prefix is invalid.")
+
+    @property
+    def canonical_url(self) -> str:
+        """Return the derived canonical directory-form URL."""
+
+        canonical_url = _canonical_registered_http_prefix_url(
+            self.origin,
+            self.path_components,
+        )
+        if canonical_url is None:  # pragma: no cover - guarded by frozen construction
+            raise RuntimeError("Registered HTTP prefix invariant was violated.")
+        return canonical_url
+
+    @classmethod
+    def parse(cls, value: str) -> RegisteredHttpPrefix | None:
+        """Parse a registered base URL without DNS or network access."""
+
+        parsed = _parse_registered_http_absolute_url(value)
+        if parsed is None:
+            return None
+        try:
+            return cls(
+                origin=parsed.origin,
+                path_components=parsed.path_components,
+            )
+        except ValueError:
+            return None
+
+    def compose(self, locator: PortableStorePath) -> str | None:
+        """Compose a portable locator beneath this prefix exactly once."""
+
+        if not isinstance(locator, PortableStorePath):
+            return None
+        combined_components = self.path_components + locator.components
+        combined_path = _canonical_registered_http_path(
+            combined_components,
+            trailing_slash=False,
+        )
+        if combined_path is None:
+            return None
+        candidate = f"{self.origin}{combined_path}"
+        if len(candidate) > _MAX_URL_LENGTH or not self.contains(candidate):
+            return None
+        return candidate
+
+    def contains(self, url: str) -> bool:
+        """Return whether an absolute URL is structurally inside this prefix."""
+
+        parsed = _parse_registered_http_absolute_url(url)
+        if parsed is None or parsed.origin != self.origin:
+            return False
+        prefix_length = len(self.path_components)
+        return parsed.path_components[:prefix_length] == self.path_components
+
+    def resolve_redirect(self, current_url: str, location: str) -> str | None:
+        """Resolve one safe redirect that remains inside this prefix.
+
+        The raw ``Location`` is validated before relative resolution so
+        ``urljoin`` never receives dot segments, encoded separators, or other
+        path-normalization ambiguities.
+        """
+
+        current = _parse_registered_http_absolute_url(current_url)
+        if (
+            current is None
+            or not self.contains(current.canonical_url)
+            or not _raw_registered_redirect_is_safe(location)
+        ):
+            return None
+
+        try:
+            raw_location = urlsplit(location)
+            joined = (
+                location
+                if raw_location.scheme
+                else urljoin(current.canonical_url, location)
+            )
+        except (TypeError, UnicodeError, ValueError):
+            return None
+        candidate = _parse_registered_http_absolute_url(joined)
+        if candidate is None or not self.contains(candidate.canonical_url):
+            return None
+        return candidate.canonical_url
+
+
 class AddressResolver(Protocol):
     """Resolve one logical hostname without making a connection."""
 
@@ -225,7 +355,11 @@ class SystemAddressResolver:
         *,
         deadline: OutboundHttpDeadline | None = None,
     ) -> Sequence[ApprovedSocketAddress]:
-        active_deadline = deadline or OutboundHttpDeadline.after(self._default_timeout)
+        active_deadline = (
+            deadline
+            if deadline is not None
+            else OutboundHttpDeadline.after(self._default_timeout)
+        )
         active_deadline.check()
         try:
             asyncio.get_running_loop()
@@ -308,7 +442,11 @@ class OutboundHttpPolicy:
     ) -> ApprovedHttpTarget:
         """Parse, resolve, and authorize one URL without sending request bytes."""
 
-        active_deadline = deadline or OutboundHttpDeadline.after(self._default_timeout)
+        active_deadline = (
+            deadline
+            if deadline is not None
+            else OutboundHttpDeadline.after(self._default_timeout)
+        )
         try:
             active_deadline.check()
         except OutboundHttpTransportError:
@@ -390,17 +528,21 @@ class SystemPinnedSocketConnector:
                 peer_ip = ipaddress.ip_address(str(peer[0]).split("%", 1)[0])
                 peer_port = int(peer[1])
                 if peer_ip != address.ip or peer_port != address.sockaddr[1]:
-                    candidate.close()
+                    _close_quietly(candidate)
                     continue
                 _set_socket_deadline(candidate, active_deadline)
                 return candidate
             except OutboundHttpDeadlineExceeded:
                 if candidate is not None:
-                    candidate.close()
+                    _close_quietly(candidate)
                 raise
             except (OSError, ValueError, OutboundHttpTransportError):
                 if candidate is not None:
-                    candidate.close()
+                    _close_quietly(candidate)
+            except BaseException:
+                if candidate is not None:
+                    _close_preserving_active_exception(candidate)
+                raise
         raise OutboundHttpTransportError(_GENERIC_TRANSPORT_DETAIL)
 
 
@@ -515,6 +657,32 @@ def _close_quietly(resource: _Closable) -> None:
         resource.close()
 
 
+def _close_preserving_active_exception(resource: _Closable) -> None:
+    """Attempt cleanup without replacing an exception already in flight."""
+
+    with suppress(BaseException):
+        resource.close()
+
+
+def _close_resources(*resources: _Closable) -> None:
+    """Close all resources, redacting ordinary failures and preserving interrupts."""
+
+    ordinary_failure = False
+    base_failure: BaseException | None = None
+    for resource in resources:
+        try:
+            resource.close()
+        except Exception:
+            ordinary_failure = True
+        except BaseException as exc:
+            if base_failure is None:
+                base_failure = exc
+    if base_failure is not None:
+        raise base_failure
+    if ordinary_failure:
+        raise OutboundHttpTransportError(_GENERIC_TRANSPORT_DETAIL) from None
+
+
 class OutboundHttpResponse(Protocol):
     """Narrow streaming response consumed by artifact and health adapters."""
 
@@ -581,10 +749,7 @@ class _StreamingResponse:
             raise OutboundHttpTransportError(_GENERIC_TRANSPORT_DETAIL) from None
 
     def close(self) -> None:
-        try:
-            self._response.close()
-        finally:
-            self._connection.close()
+        _close_resources(self._response, self._connection)
 
     def __enter__(self) -> _StreamingResponse:
         return self
@@ -595,7 +760,10 @@ class _StreamingResponse:
         exc: BaseException | None,
         traceback: object | None,
     ) -> None:
-        self.close()
+        if exc is None:
+            self.close()
+            return
+        _close_preserving_active_exception(self)
 
 
 class _PinnedHttpConnection(http.client.HTTPConnection):
@@ -612,7 +780,11 @@ class _PinnedHttpConnection(http.client.HTTPConnection):
 
     def connect(self) -> None:
         raw_socket = self._connector.connect(self._approved_addresses, self._deadline)
-        self.sock = cast(socket.socket, _DeadlineSocket(raw_socket, self._deadline))
+        try:
+            self.sock = cast(socket.socket, _DeadlineSocket(raw_socket, self._deadline))
+        except BaseException:
+            _close_preserving_active_exception(raw_socket)
+            raise
 
 
 class _PinnedHttpsConnection(http.client.HTTPSConnection):
@@ -653,8 +825,8 @@ class _PinnedHttpsConnection(http.client.HTTPSConnection):
             )
         except BaseException:
             if wrapped_socket is not None and wrapped_socket is not raw_socket:
-                _close_quietly(wrapped_socket)
-            _close_quietly(raw_socket)
+                _close_preserving_active_exception(wrapped_socket)
+            _close_preserving_active_exception(raw_socket)
             raise
 
 
@@ -670,8 +842,12 @@ class SafeHttpClient:
     ) -> None:
         _validate_timeout(timeout, name="HTTP timeout")
         self._timeout = timeout
-        self._connector = connector or SystemPinnedSocketConnector()
-        self._ssl_context = ssl_context or ssl.create_default_context()
+        self._connector = (
+            connector if connector is not None else SystemPinnedSocketConnector()
+        )
+        self._ssl_context = (
+            ssl_context if ssl_context is not None else ssl.create_default_context()
+        )
 
     def open(
         self,
@@ -683,7 +859,11 @@ class SafeHttpClient:
         normalized_method = method.upper()
         if normalized_method not in {"GET", "HEAD"}:
             raise ValueError("SafeHttpClient supports only GET and HEAD.")
-        active_deadline = deadline or OutboundHttpDeadline.after(self._timeout)
+        active_deadline = (
+            deadline
+            if deadline is not None
+            else OutboundHttpDeadline.after(self._timeout)
+        )
         active_deadline.check()
         connection: http.client.HTTPConnection
         if target.scheme == "https":
@@ -699,6 +879,7 @@ class SafeHttpClient:
                 self._connector,
                 active_deadline,
             )
+        response: http.client.HTTPResponse | None = None
         try:
             active_deadline.check()
             connection.request(
@@ -713,19 +894,27 @@ class SafeHttpClient:
             response = connection.getresponse()
             active_deadline.check()
             content_encoding = response.getheader("content-encoding")
-            if content_encoding and content_encoding.strip().lower() != "identity":
-                _close_quietly(response)
-                _close_quietly(connection)
+            if (
+                normalized_method != "HEAD"
+                and content_encoding
+                and content_encoding.strip().lower() != "identity"
+            ):
                 raise OutboundHttpTransportError(_GENERIC_TRANSPORT_DETAIL)
             return _StreamingResponse(connection, response, active_deadline)
-        except (
-            OSError,
-            UnicodeError,
-            http.client.HTTPException,
-            OutboundHttpTransportError,
-        ):
+        except Exception:
+            if response is not None:
+                try:
+                    _close_quietly(response)
+                except BaseException:
+                    _close_preserving_active_exception(connection)
+                    raise
             _close_quietly(connection)
             raise OutboundHttpTransportError(_GENERIC_TRANSPORT_DETAIL) from None
+        except BaseException:
+            if response is not None:
+                _close_preserving_active_exception(response)
+            _close_preserving_active_exception(connection)
+            raise
 
 
 @dataclass(frozen=True)
@@ -791,6 +980,184 @@ def _parse_http_url(url: str) -> _ParsedHttpUrl:
         request_target=request_target,
         absolute_url=absolute_url,
         origin=origin,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _ParsedRegisteredHttpUrl:
+    origin: str
+    path_components: tuple[str, ...]
+    has_trailing_slash: bool
+
+    @property
+    def canonical_url(self) -> str:
+        canonical_url = _canonical_registered_http_url(
+            self.origin,
+            self.path_components,
+            trailing_slash=self.has_trailing_slash,
+        )
+        if canonical_url is None:  # pragma: no cover - private parser establishes this
+            raise RuntimeError("Parsed registered HTTP URL invariant was violated.")
+        return canonical_url
+
+
+def _parse_registered_http_absolute_url(
+    value: object,
+) -> _ParsedRegisteredHttpUrl | None:
+    if not _registered_http_text_is_safe(value) or not isinstance(value, str):
+        return None
+    if "?" in value or "#" in value:
+        return None
+    try:
+        split = urlsplit(value)
+        parsed = _parse_http_url(value)
+    except (OutboundHttpPolicyError, UnicodeError, ValueError):
+        return None
+    if split.query or split.fragment:
+        return None
+
+    parsed_path = _parse_registered_http_path(split.path, absolute=True)
+    if parsed_path is None:
+        return None
+    path_components, has_trailing_slash = parsed_path
+    canonical_url = _canonical_registered_http_url(
+        parsed.origin,
+        path_components,
+        trailing_slash=has_trailing_slash,
+    )
+    if canonical_url is None:
+        return None
+    return _ParsedRegisteredHttpUrl(
+        origin=parsed.origin,
+        path_components=path_components,
+        has_trailing_slash=has_trailing_slash,
+    )
+
+
+def _canonical_registered_http_prefix_url(
+    origin: object,
+    path_components: object,
+) -> str | None:
+    if not isinstance(origin, str) or not isinstance(path_components, tuple):
+        return None
+    try:
+        parsed_origin = _parse_http_url(origin)
+    except OutboundHttpPolicyError:
+        return None
+    if parsed_origin.origin != origin or parsed_origin.absolute_url != f"{origin}/":
+        return None
+    return _canonical_registered_http_url(
+        origin,
+        path_components,
+        trailing_slash=True,
+    )
+
+
+def _canonical_registered_http_url(
+    origin: str,
+    path_components: tuple[str, ...],
+    *,
+    trailing_slash: bool,
+) -> str | None:
+    canonical_path = _canonical_registered_http_path(
+        path_components,
+        trailing_slash=trailing_slash,
+    )
+    if canonical_path is None:
+        return None
+    canonical_url = f"{origin}{canonical_path}"
+    return canonical_url if len(canonical_url) <= _MAX_URL_LENGTH else None
+
+
+def _canonical_registered_http_path(
+    components: tuple[str, ...],
+    *,
+    trailing_slash: bool,
+) -> str | None:
+    if not isinstance(components, tuple):
+        return None
+    if not components:
+        return "/"
+    try:
+        portable_path = PortableStorePath(components)
+    except (TypeError, ValueError):
+        return None
+    if any(
+        ";" in unicodedata.normalize("NFKC", component)
+        for component in portable_path.components
+    ):
+        return None
+    suffix = "/" if trailing_slash else ""
+    return f"/{portable_path.uri_path}{suffix}"
+
+
+def _parse_registered_http_path(
+    raw_path: str,
+    *,
+    absolute: bool,
+) -> tuple[tuple[str, ...], bool] | None:
+    if not isinstance(raw_path, str) or (
+        raw_path and not _registered_http_text_is_safe(raw_path)
+    ):
+        return None
+    if "//" in raw_path:
+        return None
+    if absolute:
+        if raw_path and not raw_path.startswith("/"):
+            return None
+        path = raw_path[1:] if raw_path.startswith("/") else ""
+    else:
+        path = raw_path[1:] if raw_path.startswith("/") else raw_path
+
+    has_trailing_slash = not path or path.endswith("/")
+    if path.endswith("/"):
+        path = path[:-1]
+    if not path:
+        return (), has_trailing_slash
+
+    portable_path = PortableStorePath.parse_uri_path(path)
+    if portable_path is None:
+        return None
+    canonical_path = _canonical_registered_http_path(
+        portable_path.components,
+        trailing_slash=False,
+    )
+    if canonical_path != f"/{path}":
+        return None
+    return portable_path.components, has_trailing_slash
+
+
+def _raw_registered_redirect_is_safe(location: object) -> bool:
+    if (
+        not _registered_http_text_is_safe(location)
+        or not isinstance(location, str)
+        or not location
+        or "?" in location
+        or "#" in location
+        or location.startswith("//")
+    ):
+        return False
+    try:
+        split = urlsplit(location)
+    except (UnicodeError, ValueError):
+        return False
+    if split.query or split.fragment:
+        return False
+    if split.scheme:
+        return _parse_registered_http_absolute_url(location) is not None
+    if split.netloc:
+        return False
+    return _parse_registered_http_path(split.path, absolute=False) is not None
+
+
+def _registered_http_text_is_safe(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and len(value) <= _MAX_URL_LENGTH
+        and "\\" not in value
+        and ";" not in value
+        and not any(unicodedata.category(character) == "Cc" for character in value)
     )
 
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import sqlalchemy as sa
-
 from alembic import op
 
 revision = "0013_retained_v1_cleanup"
@@ -35,23 +34,48 @@ def downgrade() -> None:
         )
 
     with op.batch_alter_table("questions") as batch_op:
-        batch_op.add_column(sa.Column("created_from", sa.String(length=40), nullable=True))
+        batch_op.add_column(
+            sa.Column(
+                "created_from",
+                sa.String(length=40),
+                nullable=False,
+                server_default="manual",
+            )
+        )
         batch_op.add_column(sa.Column("source_provenance", sa.String(length=255), nullable=True))
 
     with op.batch_alter_table("projects") as batch_op:
-        batch_op.add_column(sa.Column("review_policy", sa.String(length=20), nullable=True))
+        batch_op.add_column(
+            sa.Column(
+                "review_policy",
+                sa.String(length=20),
+                nullable=False,
+                server_default="none",
+            )
+        )
 
     op.create_table(
         "dataset_reviews",
         sa.Column("review_id", sa.String(length=36), nullable=False),
         sa.Column("dataset_id", sa.String(length=36), nullable=False),
         sa.Column("reviewer_user_id", sa.String(length=36), nullable=True),
-        sa.Column("status", sa.String(length=30), nullable=False),
+        sa.Column(
+            "status",
+            sa.String(length=30),
+            nullable=False,
+            server_default="pending",
+        ),
         sa.Column("comments", sa.Text(), nullable=True),
-        sa.Column("requested_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("requested_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("resolved_at", sa.DateTime(timezone=True), nullable=True),
         sa.ForeignKeyConstraint(["dataset_id"], ["datasets.dataset_id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("review_id"),
+    )
+    op.create_index(
+        "ix_dataset_reviews_dataset_id",
+        "dataset_reviews",
+        ["dataset_id"],
+        unique=False,
     )
     op.create_index(
         "ix_dataset_reviews_dataset_requested_at",
@@ -87,7 +111,12 @@ def downgrade() -> None:
         sa.Column("term_label", sa.String(length=255), nullable=False),
         sa.Column("confidence", sa.Float(), nullable=False),
         sa.Column("provenance", sa.String(length=255), nullable=False),
-        sa.Column("status", sa.String(length=20), nullable=False),
+        sa.Column(
+            "status",
+            sa.String(length=20),
+            nullable=False,
+            server_default="staged",
+        ),
         sa.Column("reviewed_by", sa.String(length=255), nullable=True),
         sa.Column("reviewed_at", sa.DateTime(timezone=True), nullable=True),
         sa.ForeignKeyConstraint(["note_id"], ["notes.note_id"], ondelete="CASCADE"),

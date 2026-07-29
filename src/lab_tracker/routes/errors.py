@@ -14,10 +14,12 @@ from starlette.responses import JSONResponse
 from lab_tracker.errors import (
     AuthError,
     ConflictError,
+    DataStorePersistenceError,
     LabTrackerError,
     NotFoundError,
     PayloadTooLargeError,
     RateLimitError,
+    StoreAuthorityDeniedError,
     ValidationError,
 )
 from lab_tracker.schemas import ErrorEnvelope, ErrorInfo, ErrorIssue
@@ -26,6 +28,25 @@ _logger = logging.getLogger(__name__)
 
 
 def register_error_handlers(app: FastAPI) -> None:
+    @app.exception_handler(DataStorePersistenceError)
+    def _handle_data_store_persistence_error(
+        request: Request,
+        _exc: DataStorePersistenceError,
+    ):
+        _logger.error(
+            "Handled internal HTTP error: method=%s path=%s status_code=%s "
+            "code=%s detail=Data store registration could not be completed.",
+            request.method,
+            request.url.path,
+            http_status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "internal_server_error",
+        )
+        return error_response(
+            http_status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "internal_server_error",
+            "Internal server error.",
+        )
+
     @app.exception_handler(ValidationError)
     def _handle_validation_error(request: Request, exc: ValidationError):
         _log_handled_error(
@@ -74,6 +95,23 @@ def register_error_handlers(app: FastAPI) -> None:
         )
         return error_response(http_status.HTTP_401_UNAUTHORIZED, "auth_error", str(exc))
 
+    @app.exception_handler(StoreAuthorityDeniedError)
+    def _handle_store_authority_denied_error(
+        request: Request,
+        exc: StoreAuthorityDeniedError,
+    ):
+        _log_handled_error(
+            request,
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            code="store_authority_denied",
+            exc=exc,
+        )
+        return error_response(
+            http_status.HTTP_403_FORBIDDEN,
+            "store_authority_denied",
+            str(exc),
+        )
+
     @app.exception_handler(RateLimitError)
     def _handle_rate_limit_error(request: Request, exc: RateLimitError):
         _log_handled_error(
@@ -110,11 +148,13 @@ def register_error_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(RequestValidationError)
     def _handle_request_validation_error(request: Request, exc: RequestValidationError):
-        _log_handled_error(
-            request,
-            status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
-            code="request_validation_error",
-            detail=_request_validation_log_detail(exc.errors()),
+        _logger.warning(
+            "Handled HTTP error: method=%s path=%s status_code=%s code=%s "
+            "detail=Request validation failed.",
+            request.method,
+            request.url.path,
+            http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "request_validation_error",
         )
         return error_response(
             http_status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -144,17 +184,15 @@ def _log_handled_error(
     *,
     status_code: int,
     code: str,
-    exc: Exception | None = None,
-    detail: str | None = None,
+    exc: Exception,
 ) -> None:
-    safe_detail = detail if detail is not None else str(exc or "")
     _logger.warning(
         "Handled HTTP error: method=%s path=%s status_code=%s code=%s detail=%s",
         request.method,
         request.url.path,
         status_code,
         code,
-        safe_detail,
+        exc,
     )
 
 
@@ -176,19 +214,3 @@ def issues_from_validation_errors(errors: list[dict[str, Any]]) -> list[ErrorIss
         field = ".".join(loc_parts) if loc_parts else None
         issues.append(ErrorIssue(field=field, message=error.get("msg", "Invalid value")))
     return issues
-
-
-def _request_validation_log_detail(errors: list[dict[str, Any]]) -> str:
-    """Summarize validation shape without logging request-body input values."""
-
-    fields: set[str] = set()
-    error_types: set[str] = set()
-    for error in errors:
-        loc_parts = [str(part) for part in error.get("loc", []) if part != "body"]
-        fields.add(".".join(loc_parts) if loc_parts else "<body>")
-        error_types.add(str(error.get("type") or "unknown"))
-    return (
-        f"validation_errors={len(errors)} "
-        f"fields={','.join(sorted(fields))} "
-        f"types={','.join(sorted(error_types))}"
-    )

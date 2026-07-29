@@ -289,6 +289,36 @@ def test_contributor_can_schedule_and_run_project_batch(
     assert run.json()["data"]["status"] == "ready"
 
 
+def test_batch_settings_for_missing_project_return_not_found(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    missing_project_id = uuid4()
+
+    personal = client.get(
+        f"/projects/{missing_project_id}/graph-draft-batch-settings",
+        headers=admin_auth_headers,
+    )
+    project_default = client.get(
+        f"/projects/{missing_project_id}/graph-draft-batch-settings",
+        params={"user_id": str(UUID(int=0))},
+        headers=admin_auth_headers,
+    )
+    update = client.patch(
+        f"/projects/{missing_project_id}/graph-draft-batch-settings",
+        json={"enabled": True},
+        headers=admin_auth_headers,
+    )
+
+    for response in (personal, project_default, update):
+        assert response.status_code == 404
+        assert response.json()["error"] == {
+            "code": "not_found",
+            "message": "Project does not exist.",
+            "issues": None,
+        }
+
+
 def test_per_user_batch_notification_address_is_private_to_user_and_owner(
     client: TestClient,
     admin_auth_headers: dict[str, str],

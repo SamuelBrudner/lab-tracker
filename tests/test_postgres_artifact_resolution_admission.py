@@ -2,25 +2,21 @@
 
 from __future__ import annotations
 
-import base64
 import hashlib
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Event, Lock
 
 import pytest
+from api_helpers import TEST_STORE_AUTHORITY_GRANT_ID
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import QueuePool
 
 from lab_tracker.artifact_resolution import (
-    DEFAULT_MAX_BYTES,
     LocalFilesystemResolver,
-    ResolvedArtifact,
     ResolverRegistry,
 )
-from lab_tracker.models import ExternalArtifactReference
 
 pytestmark = pytest.mark.postgres
 
@@ -29,41 +25,9 @@ def _sha256(data: bytes) -> str:
     return "sha256:" + hashlib.sha256(data).hexdigest()
 
 
-class _BlockingLocalResolver(LocalFilesystemResolver):
-    def __init__(
-        self,
-        *,
-        allowed_root: Path,
-        expected_uri: str,
-        first_connection_released: Event,
-        first_session_closed: Event,
-        entered: Event,
-        release: Event,
-    ) -> None:
-        super().__init__(allowed_roots=[allowed_root])
-        self._expected_uri = expected_uri
-        self._first_connection_released = first_connection_released
-        self._first_session_closed = first_session_closed
-        self._entered = entered
-        self._release = release
-
-    def resolve(
-        self,
-        ref: ExternalArtifactReference,
-        *,
-        max_bytes: int = DEFAULT_MAX_BYTES,
-        byte_range: tuple[int, int] | None = None,
-    ) -> ResolvedArtifact:
-        # The store lookup and materialization must finish before the request
-        # releases its database scope and reaches any external resolver.
-        assert ref.source_system == "local"
-        assert ref.uri == self._expected_uri
-        assert self._first_connection_released.is_set()
-        assert self._first_session_closed.is_set()
-        self._entered.set()
-        if not self._release.wait(timeout=10):
-            raise AssertionError("Timed out waiting to release the test resolver.")
-        return super().resolve(ref, max_bytes=max_bytes, byte_range=byte_range)
+class _FailingLocalResolver(LocalFilesystemResolver):
+    def resolve_within_root(self, *_args, **_kwargs):
+        raise AssertionError("registered-store gate reached filesystem resolution")
 
 
 def test_postgres_store_resolution_releases_one_slot_pool_before_external_io(
@@ -90,6 +54,7 @@ def test_postgres_store_resolution_releases_one_slot_pool_before_external_io(
             "name": "lab-fs",
             "kind": "local_fs",
             "root": str(tmp_path),
+            "authority_grant_id": TEST_STORE_AUTHORITY_GRANT_ID,
         },
         headers=postgres_admin_auth_headers,
     )
@@ -128,20 +93,9 @@ def test_postgres_store_resolution_releases_one_slot_pool_before_external_io(
 
     first_connection_released = Event()
     first_session_closed = Event()
-    resolver_entered = Event()
-    release_resolver = Event()
     original_registry = postgres_client.app.state.resolver_registry
     postgres_client.app.state.resolver_registry = ResolverRegistry(
-        [
-            _BlockingLocalResolver(
-                allowed_root=tmp_path,
-                expected_uri=artifact.as_uri(),
-                first_connection_released=first_connection_released,
-                first_session_closed=first_session_closed,
-                entered=resolver_entered,
-                release=release_resolver,
-            )
-        ]
+        [_FailingLocalResolver(allowed_roots=[tmp_path])]
     )
 
     original_factory = postgres_client.app.state.db_session_factory
@@ -211,41 +165,32 @@ def test_postgres_store_resolution_releases_one_slot_pool_before_external_io(
         return session
 
     postgres_client.app.state.db_session_factory = tracking_session_factory
-    executor = ThreadPoolExecutor(max_workers=2)
     try:
-        resolve_future = executor.submit(
-            postgres_client.post,
+        resolve_response = postgres_client.post(
             "/external-artifacts/resolve",
             json={"entity_type": "dataset", "entity_id": dataset_id},
             headers=postgres_admin_auth_headers,
         )
-        assert resolver_entered.wait(timeout=10)
         assert first_connection_released.wait(timeout=10)
+        assert first_session_closed.wait(timeout=10)
 
-        follow_up_future = executor.submit(
-            postgres_client.get,
+        follow_up_response = postgres_client.get(
             f"/projects/{project_id}",
             headers=postgres_admin_auth_headers,
         )
-        follow_up_response = follow_up_future.result(timeout=10)
         assert follow_up_response.status_code == 200, follow_up_response.text
         assert unrelated_connection_acquired.is_set()
-        assert resolve_future.done() is False
-
-        release_resolver.set()
-        resolve_response = resolve_future.result(timeout=10)
     finally:
-        release_resolver.set()
-        executor.shutdown(wait=True)
         postgres_client.app.state.db_session_factory = original_factory
         postgres_client.app.state.resolver_registry = original_registry
         bounded_engine.dispose()
 
     assert resolve_response.status_code == 200, resolve_response.text
     body = resolve_response.json()["data"]
-    assert body["status"] == "verified"
-    assert body["uri"] == artifact.as_uri()
-    assert base64.b64decode(body["content_base64"]) == data
+    assert body["status"] == "unresolved"
+    assert body["uri"] == "store://[redacted]"
+    assert body["content_base64"] is None
+    assert body["detail"] == "Store artifact could not be resolved."
     assert first_connection_released.is_set()
     assert first_session_closed.is_set()
     assert unrelated_connection_acquired.is_set()
