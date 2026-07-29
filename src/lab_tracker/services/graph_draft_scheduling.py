@@ -95,6 +95,11 @@ class BatchSchedulingCoordinator(BaseService):
             self.authorization.require_owner(project_id, actor=actor)
         else:
             self.authorization.require_read(project_id, actor=actor)
+        # Global-read authorization can succeed without consulting the project
+        # repository. Resolve the target only after authorization so missing
+        # projects return the canonical 404 without becoming an existence
+        # oracle for unauthorized callers.
+        self.projects.get_project(project_id)
         settings = self.scheduling_repository.get_graph_draft_batch_settings_by_project(
             project_id,
             user_id=user_id,
@@ -147,6 +152,7 @@ class BatchSchedulingCoordinator(BaseService):
             self.authorization.require_owner(project_id, actor=actor)
         else:
             self.authorization.require_contributor(project_id, actor=actor)
+        self.projects.get_project(project_id)
         settings = self.scheduling_repository.get_graph_draft_batch_settings_by_project(
             project_id,
             user_id=resolved_user_id,

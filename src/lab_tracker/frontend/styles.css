@@ -1,16 +1,118 @@
 @import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap");
 
+/* =============================================================================
+   Design tokens — three tiers.
+
+   1. PRIMITIVE  raw values. Referenced only by the semantic tier below; never
+                 by a component rule.
+   2. SEMANTIC   what a value means (--ink, --line, --shadow-2). Components use
+                 these.
+   3. REGISTER   posture-scoped values that differ between the Work and Read
+                 registers (--pad, --measure, --shadow-surface). Components use
+                 these wherever the two postures should diverge.
+
+   This tier split is deliberately pixel-identical: every legacy variable below
+   resolves to the exact value it held before, and no component rule changed.
+   design-tokens.test.js resolves the var() chains and asserts those values, so
+   an accidental colour shift fails the build rather than the eye.
+
+   Scales are derived from values already present in this file rather than
+   invented, so migrating a rule to a token is a rename and not a redesign.
+   ============================================================================= */
+
 :root {
-  --bg: #f6f5f3;
-  --card: #ffffff;
-  --ink: #1b1d21;
-  --ink-soft: #50555f;
-  --line: #d6d2cb;
-  --accent: #0d8b6f;
-  --accent-soft: #daf4ec;
-  --danger: #a4202f;
-  --danger-soft: #ffe6e7;
-  --shadow: 0 14px 30px rgba(21, 23, 30, 0.08);
+  /* --- Primitive: colour ------------------------------------------------- */
+  --color-paper-0: #f6f5f3;
+  --color-paper-1: #ffffff;
+  --color-ink-900: #1b1d21;
+  --color-ink-500: #50555f;
+  --color-line-200: #d6d2cb;
+  --color-jade-600: #0d8b6f;
+  --color-jade-050: #daf4ec;
+  --color-rust-700: #a4202f;
+  --color-rust-050: #ffe6e7;
+  /* Shared channel for the shadow ramp, so elevation tints stay consistent. */
+  --color-shadow-rgb: 21, 23, 30;
+
+  /* --- Primitive: type (7 steps, anchored at 16px = --text-base) ---------- */
+  --text-2xs: 0.73rem;
+  --text-xs: 0.78rem;
+  --text-sm: 0.82rem;
+  --text-md: 0.88rem;
+  --text-base: 1rem;
+  --text-lg: 1.1rem;
+  --text-xl: 1.6rem;
+  --leading-tight: 1.25;
+  --leading-normal: 1.45;
+  --leading-loose: 1.6;
+
+  /* --- Primitive: spacing ------------------------------------------------ */
+  --sp-1: 0.25rem;
+  --sp-2: 0.4rem;
+  --sp-3: 0.6rem;
+  --sp-4: 0.8rem;
+  --sp-5: 1rem;
+  --sp-6: 1.2rem;
+  --sp-7: 1.6rem;
+
+  /* --- Primitive: radius ------------------------------------------------- */
+  --radius-xs: 6px;
+  --radius-sm: 8px;
+  --radius-md: 11px;
+  --radius-lg: 14px;
+  --radius-xl: 18px;
+  --radius-2xl: 24px;
+  --radius-pill: 999px;
+  --radius-circle: 50%;
+
+  /* --- Primitive: elevation ---------------------------------------------- */
+  --shadow-0: none;
+  --shadow-1: 0 4px 14px rgba(var(--color-shadow-rgb), 0.06);
+  --shadow-2: 0 8px 16px rgba(var(--color-shadow-rgb), 0.1);
+  --shadow-3: 0 14px 30px rgba(var(--color-shadow-rgb), 0.08);
+
+  /* --- Primitive: motion -------------------------------------------------
+     Honour prefers-reduced-motion at the point of use; the accessibility floor
+     lands in lab-tracker-83m2.6. */
+  --duration-fast: 120ms;
+  --duration-base: 200ms;
+  --duration-slow: 420ms;
+  --ease-standard: ease;
+  --ease-out: ease-out;
+  --ease-emphasized: cubic-bezier(0.2, 0, 0, 1);
+
+  /* --- Primitive: z-index ------------------------------------------------
+     Five named layers so stacking is declared rather than discovered. */
+  --z-base: 0;
+  --z-sticky: 10;
+  --z-overlay: 100;
+  --z-sheet: 200;
+  --z-toast: 300;
+
+  /* --- Semantic ----------------------------------------------------------
+     The legacy variable names, kept verbatim so no component rule changes.
+     Each resolves to the identical value it held before this tier existed. */
+  --bg: var(--color-paper-0);
+  --card: var(--color-paper-1);
+  --ink: var(--color-ink-900);
+  --ink-soft: var(--color-ink-500);
+  --line: var(--color-line-200);
+  --accent: var(--color-jade-600);
+  --accent-soft: var(--color-jade-050);
+  --danger: var(--color-rust-700);
+  --danger-soft: var(--color-rust-050);
+  --shadow: var(--shadow-3);
+
+  /* --- Register: Work (default) ------------------------------------------
+     Read overrides these in lab-tracker-83m2.8; defining them here means the
+     Read register is a token swap rather than a second set of components. */
+  --font-body: "Space Grotesk", "Segoe UI", sans-serif;
+  --leading-body: var(--leading-normal);
+  --measure: 68ch;
+  --pad: var(--sp-6);
+  --gap: var(--sp-3);
+  --radius-surface: var(--radius-xl);
+  --shadow-surface: var(--shadow-3);
 }
 
 * {
