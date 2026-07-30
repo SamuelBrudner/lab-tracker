@@ -19,6 +19,8 @@ suitable for local development.
 
 - `LAB_TRACKER_APP_NAME`: FastAPI title (default: `lab-tracker`)
 - `LAB_TRACKER_ENVIRONMENT`: environment label (default: `local`)
+- `LAB_TRACKER_SOURCE_REVISION`: full immutable Git revision embedded by a
+  reviewed deployment build and reported by health checks (default: `unknown`).
 - `LAB_TRACKER_LOG_LEVEL`: logging level (default: `INFO`)
 
 ### Database and storage

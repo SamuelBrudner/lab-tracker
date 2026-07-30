@@ -52,6 +52,7 @@ INSECURE_AUTH_SECRET_KEYS = {
 class Settings(BaseSettings):
     app_name: str = "lab-tracker"
     environment: str = "local"
+    source_revision: str = "unknown"
     log_level: str = "INFO"
     database_url: str = "sqlite+pysqlite:///./lab_tracker.db"
     backup_path: str = "~/.lab-tracker/backups"
@@ -150,6 +151,18 @@ class Settings(BaseSettings):
             return f"postgresql+psycopg://{cleaned.removeprefix('postgres://')}"
         if cleaned.startswith("postgresql://"):
             return f"postgresql+psycopg://{cleaned.removeprefix('postgresql://')}"
+        return cleaned
+
+    @field_validator("source_revision")
+    @classmethod
+    def _normalize_source_revision(cls, value: str) -> str:
+        cleaned = str(value or "").strip().lower() or "unknown"
+        if cleaned == "unknown":
+            return cleaned
+        if len(cleaned) != 40 or any(character not in "0123456789abcdef" for character in cleaned):
+            raise ValueError(
+                "LAB_TRACKER_SOURCE_REVISION must be 'unknown' or a full 40-character Git SHA."
+            )
         return cleaned
 
     @field_validator(
