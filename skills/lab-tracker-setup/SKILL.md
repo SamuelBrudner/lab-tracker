@@ -1,7 +1,7 @@
 ---
 name: lab-tracker-setup
 description: Guide a user through setting up Lab Tracker capture in a consumer repo or on a new machine. Use when the user asks to set up Lab Tracker, connect a repo, configure watch folders, enroll commit hooks, bind a project, or when `lt setup status` / a session hook reports unconfigured or drifted capture. Covers the consent-gated `lt` setup verbs and their choreography.
-allowed-tools: "Read,Bash(lt setup status:*),Bash(lt doctor:*)"
+allowed-tools: "Read,Bash(lt setup status:*),Bash(lt setup verify-client:*),Bash(lt setup verify-mcp:*),Bash(lt doctor:*)"
 version: "0.1.0"
 compatible-with: claude-code,codex
 tags: [lab-tracker, setup, onboarding, capture]
@@ -28,9 +28,13 @@ short, consent-gated sequence on the `lt` CLI.
 
 ## Consent rules (hard requirements)
 
-- `lt setup status` is read-only and safe to consult at any time.
-- Every write command below takes a `--dry-run` preview; previews are
-  safe to show.
+- `lt setup status` and `lt setup verify-client` are local read-only
+  checks. `lt setup verify-mcp` launches the configured executable but
+  makes only health and project-list reads.
+- Repository setup writes that support `--dry-run` are previewed
+  before applying. Package installs (`uv tool install`, `uv add`) do
+  not have a Lab Tracker dry run, so a person reviews and runs each
+  exact server-pinned command separately.
 - A person approves each applying command. `lt setup connect`,
   `lt project bind`, and `lt hooks install` additionally require an
   explicit `--yes`.
@@ -40,40 +44,60 @@ short, consent-gated sequence on the `lt` CLI.
 
 ## The staged sequence
 
-1. **Inventory** — `lt setup status` reports server reachability, the
+1. **Matching client** — the web app's Setup page supplies an install
+   requirement pinned to the running server's full Git revision. If the
+   server cannot report that revision, setup stops instead of falling
+   back to a moving branch. `lt setup verify-client
+   --expected-revision <revision>` checks the PEP 610 install metadata.
+2. **Inventory** — `lt setup status` reports server reachability, the
    connection profile, repo scaffolding, project binding, watch
    folders, and commit-hook enrollment in one JSON payload, with
    suggestions for whatever is missing.
-2. **Connectivity** — when no server is reachable, `lab-tracker serve`
+3. **Connectivity** — when no server is reachable, `lab-tracker serve`
    starts a local instance; a lab usually shares one instance and its
    URL comes from whoever operates it.
-3. **Connection profile** — `lt setup connect --base-url <url> --yes`
-   persists the server URL (and optionally a default project) in
+4. **Connection profile** — `lt setup connect --base-url <url>
+   --project <project-id> --yes` persists the server URL and exact
+   default project in
    `~/.lab-tracker/config.json` so hooks and schedulers work without
    per-shell environment variables. Token storage is a separate
-   consent (`--save-token`).
-4. **Repo scaffolding** — `lt setup init` writes the integration files
+   consent (`--save-token`). Commit and figure capture need the web
+   app's least-privilege **Read + stage evidence** token; read-only
+   tokens cannot sync captures.
+5. **Project Python dependency** — the Setup page supplies a pinned
+   `uv add` command for each analysis repository. Verify that `uv run
+   python` can import `lab_tracker_client` before relying on figure
+   capture from that project environment.
+6. **Repo scaffolding** — `lt setup init --install-skills` writes the
+   integration files
    (MCP config, prompt hooks, `lt_ids.json`). The MCP files use the
    saved/env Lab Tracker URL when one exists, otherwise localhost;
+   the setup skill is installed in both Claude and Codex user homes;
    `lt update` refreshes them after a package upgrade.
-5. **Project binding** — `lt project bind --name <project> --yes`
-   resolves or creates the project and records its id in
-   `lt_ids.json` (`--create` when it does not exist yet).
-6. **Watch folders** — `lt watch add <folder> --include <glob>`
+7. **Project binding** — `lt project bind --project-id <project-id>
+   --yes` verifies the selected project and records its exact id in
+   `lt_ids.json`.
+8. **Watch folders** — `lt watch add <folder> --include <glob>`
    registers a narrow results folder; broad roots such as `artifacts/`
    are usually skipped or narrowed to a run-specific subfolder. `lt
    watch scan` and `lt watch sync` capture and upload on demand or
    from a scheduler.
-7. **Commit hooks** — `lt hooks install --yes` enrolls the current
-   repository: each commit queues durable evidence that syncs when
-   the server is reachable. Repos are enrolled one consented command
-   at a time.
+9. **Commit hooks** — `lt hooks install --project <project-id> --yes`
+   enrolls the current repository: each commit queues durable staged
+   evidence that syncs when the server is reachable. Repos are enrolled
+   one consented command at a time.
+10. **MCP launch verification** — after Codex registration, `lt setup
+    verify-mcp --expected-revision <revision>` launches `lt-mcp` over
+    stdio, initializes the protocol, calls health, and performs an
+    authenticated project read through the saved profile.
 
 ## After setup
 
 Captures stage for human review — nothing commits to the research
-graph automatically. `lt doctor` and `lt setup status` surface drift
-after package upgrades, and `lt update` is the refresh path.
+graph automatically. Server-side AI drafting uses the operator's
+configured provider credential; no local OpenAI key is needed for Lab
+Tracker. `lt doctor` and `lt setup status` surface drift after package
+upgrades, and `lt update` is the refresh path.
 <!-- END GENERATED SETUP GUIDE -->
 
 ## Conversation shape
@@ -92,4 +116,4 @@ after package upgrades, and `lt update` is the refresh path.
 If Lab Tracker is unreachable and the user does not operate a server, point
 them at whoever runs their lab's instance instead of standing one up ad hoc.
 
-<!-- lab-tracker-setup-guide version=0.1.0 sha256=06f89c82ad9c -->
+<!-- lab-tracker-setup-guide version=0.1.0 sha256=1a17fae93102 -->

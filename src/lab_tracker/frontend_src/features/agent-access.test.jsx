@@ -3,10 +3,35 @@ import * as React from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import { apiResponse, installFetchMock } from "../test/utils.js";
+import {
+  apiResponse,
+  installFetchMock as installBaseFetchMock,
+} from "../test/utils.js";
 import { AgentAccessPage } from "./agent-access.jsx";
 
 const TOKEN_ID = "22222222-2222-4222-8222-222222222222";
+const SOURCE_REVISION = "0123456789abcdef0123456789abcdef01234567";
+const PROJECT = {
+  name: "Deerhake lab",
+  project_id: "11111111-1111-4111-8111-111111111111",
+};
+
+function installFetchMock(routes, readinessOverrides = {}) {
+  return installBaseFetchMock([
+    {
+      match: "/auth/setup-readiness",
+      response: apiResponse({
+        background_worker_enabled: true,
+        provider: "openai",
+        provider_credential_configured: true,
+        scheduler_enabled: true,
+        source_revision: SOURCE_REVISION,
+        ...readinessOverrides,
+      }),
+    },
+    ...routes,
+  ]);
+}
 
 function issuedTokenPayload(overrides = {}) {
   return {
@@ -29,6 +54,7 @@ function renderPage(props = {}) {
       token="user-token"
       user={{ role: "admin", username: "sam" }}
       authEnabled
+      selectedProject={PROJECT}
       navigate={vi.fn()}
       setBusy={vi.fn()}
       setFlash={vi.fn()}
@@ -54,7 +80,12 @@ describe("AgentAccessPage", () => {
         response: (request) => {
           mintBody = JSON.parse(request.init.body);
           return apiResponse(
-            issuedTokenPayload({ label: mintBody.label, secret: "lpat_test-secret" }),
+            issuedTokenPayload({
+              label: mintBody.label,
+              read_only: mintBody.read_only,
+              role: mintBody.role,
+              secret: "lpat_test-secret",
+            }),
             201
           );
         },
@@ -76,6 +107,11 @@ describe("AgentAccessPage", () => {
 
   it("mints a token and shows one-time setup commands", async () => {
     const setFlash = vi.fn();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window.navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
     let mintBody = null;
     const fetchMock = installFetchMock([
       {
@@ -91,7 +127,12 @@ describe("AgentAccessPage", () => {
         response: (request) => {
           mintBody = JSON.parse(request.init.body);
           return apiResponse(
-            issuedTokenPayload({ label: mintBody.label, secret: "lpat_test-secret" }),
+            issuedTokenPayload({
+              label: mintBody.label,
+              read_only: mintBody.read_only,
+              role: mintBody.role,
+              secret: "lpat_test-secret",
+            }),
             201
           );
         },
@@ -114,8 +155,8 @@ describe("AgentAccessPage", () => {
     );
 
     expect(mintBody.label).toBe("Laptop agent");
-    expect(mintBody.role).toBe("viewer");
-    expect(mintBody.read_only).toBe(true);
+    expect(mintBody.role).toBe("editor");
+    expect(mintBody.read_only).toBe(false);
     expect(mintBody.scope).toBe("all");
     const deltaDays = (new Date(mintBody.expires_at).getTime() - Date.now()) / 86400000;
     expect(deltaDays).toBeGreaterThan(29);
@@ -127,18 +168,53 @@ describe("AgentAccessPage", () => {
     const commandText = Array.from(commandBlocks)
       .map((node) => node.textContent)
       .join("\n");
-    expect(commandText).toContain(`lt setup connect --base-url ${origin} --save-token --yes`);
-    expect(commandText).toContain("LAB_TRACKER_ACCESS_TOKEN = 'lpat_test-secret'");
-    expect(commandText).toContain("Remove-Item Env:LAB_TRACKER_ACCESS_TOKEN");
+    expect(commandText).toContain(
+      `lt setup connect --base-url ${origin} --project ${PROJECT.project_id} ` +
+        "--save-token --yes"
+    );
+    expect(commandText).not.toContain("lpat_test-secret");
+    expect(commandText).toContain(
+      'Read-Host "Lab Tracker one-time token" -AsSecureString'
+    );
+    expect(commandText).toContain("stty -echo < /dev/tty");
+    expect(commandText).toContain(
+      "IFS= read -r LAB_TRACKER_ACCESS_TOKEN < /dev/tty"
+    );
+    expect(commandText).toContain(
+      "Remove-Item Env:LAB_TRACKER_ACCESS_TOKEN -ErrorAction SilentlyContinue"
+    );
     expect(commandText).toContain("unset LAB_TRACKER_ACCESS_TOKEN");
+    expect(commandText).toContain("try {");
+    expect(commandText).toContain("} finally {");
     expect(commandText).not.toContain("LAB_TRACKER_MCP_API_KEY");
+
+    const snippets = Array.from(document.querySelectorAll(".command-snippet"));
+    for (const title of ["Windows (PowerShell)", "macOS / Linux"]) {
+      const snippet = snippets.find(
+        (node) => node.querySelector("strong")?.textContent === title
+      );
+      expect(snippet).toBeDefined();
+      fireEvent.click(snippet.querySelector("button"));
+    }
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(2));
+    for (const [copiedSetupBlock] of writeText.mock.calls) {
+      expect(copiedSetupBlock).not.toContain("lpat_test-secret");
+      expect(copiedSetupBlock).toContain("--save-token --yes");
+    }
+
     expect(commandText).toContain("lt setup init --install-skills --dry-run");
     expect(commandText).toContain("lt setup init --install-skills --yes");
     expect(commandText).toContain(
-      'lt project bind --name "My project" --dry-run'
+      `lt project bind --project-id ${PROJECT.project_id} --dry-run`
+    );
+    expect(commandText).toContain(
+      `lt hooks install --project ${PROJECT.project_id} --yes`
     );
     expect(commandText).toContain("lt setup status");
     expect(commandText).toContain("codex mcp add lab-tracker -- lt-mcp");
+    expect(commandText).toContain(
+      `lt setup verify-mcp --expected-revision ${SOURCE_REVISION}`
+    );
     expect(commandText).toContain("codex mcp list");
     const applyingBlocks = Array.from(commandBlocks).filter(
       (node) =>
@@ -148,21 +224,24 @@ describe("AgentAccessPage", () => {
     );
     expect(applyingBlocks.every((node) => !node.textContent.includes("\n"))).toBe(true);
     expect(document.body.textContent).toContain(
-      "uv tool install --upgrade git+https://github.com/SamuelBrudner/lab-tracker"
+      `uv tool install --force "lab-tracker @ git+https://github.com/` +
+        `SamuelBrudner/lab-tracker.git@${SOURCE_REVISION}"`
+    );
+    expect(commandText).toContain("import lab_tracker_client");
+    expect(document.body.textContent).toContain(
+      "used by both lt and lt-mcp"
     );
     expect(document.body.textContent).toContain(
-      "Both the lt CLI and lt-mcp read that profile"
+      "paste the token at its hidden prompt"
     );
-    expect(document.body.textContent).toContain("Claude and Codex user skill homes");
+    expect(document.body.textContent).toContain("both Claude and Codex user homes");
     expect(document.body.textContent).toContain(
-      "Codex requires the explicit one-time registration above"
+      "Server-side AI drafting uses the Lab Tracker operator"
     );
-    expect(document.body.textContent).toContain(
-      "shared by its app, CLI, and IDE extension"
-    );
-    // Read-only tokens cannot create projects, so the repo block must not
-    // suggest --create.
+    // The known selected project is bound directly; setup never guesses a name
+    // or creates a duplicate.
     expect(commandText).not.toContain("--create");
+    expect(commandText).not.toContain("My project");
 
     expect(fetchMock).toHaveBeenCalledWith(
       "/auth/tokens",
@@ -173,7 +252,7 @@ describe("AgentAccessPage", () => {
     );
   });
 
-  it("suggests project creation only for read-write tokens", async () => {
+  it("uses the exact selected project and offers hooks for a staging token", async () => {
     installFetchMock([
       {
         match: "/auth/tokens",
@@ -201,7 +280,6 @@ describe("AgentAccessPage", () => {
     renderPage();
 
     await waitFor(() => expect(screen.getByText("No agent tokens yet.")).toBeInTheDocument());
-    fireEvent.change(screen.getByLabelText("Access"), { target: { value: "stage" } });
     fireEvent.click(screen.getByRole("button", { name: "Create agent token" }));
 
     await waitFor(() =>
@@ -210,7 +288,13 @@ describe("AgentAccessPage", () => {
     const commandText = Array.from(document.querySelectorAll(".command-block"))
       .map((node) => node.textContent)
       .join("\n");
-    expect(commandText).toContain('lt project bind --name "My project" --create --yes');
+    expect(commandText).toContain(
+      `lt project bind --project-id ${PROJECT.project_id} --yes`
+    );
+    expect(commandText).toContain(
+      `lt hooks install --project ${PROJECT.project_id} --yes`
+    );
+    expect(commandText).not.toContain("--create");
   });
 
   it("disables the submit button while a mint is in flight", async () => {
@@ -264,8 +348,8 @@ describe("AgentAccessPage", () => {
     await waitFor(() => expect(screen.getByText("No agent tokens yet.")).toBeInTheDocument());
     const options = screen.getByLabelText("Access").querySelectorAll("option");
     expect(Array.from(options).map((option) => option.value)).toEqual([
-      "read",
       "stage",
+      "read",
       "scheduler",
     ]);
   });
@@ -335,7 +419,7 @@ describe("AgentAccessPage", () => {
     expect(writeText).toHaveBeenCalledWith("lpat_copy-me");
   });
 
-  it("shows tokenless setup commands when auth is disabled", () => {
+  it("shows tokenless setup commands when auth is disabled", async () => {
     installFetchMock([]);
 
     renderPage({ authEnabled: false });
@@ -343,25 +427,59 @@ describe("AgentAccessPage", () => {
     expect(
       screen.getByText("Authentication is disabled on this server")
     ).toBeInTheDocument();
+    await screen.findByText(
+      `Install matching lt and lt-mcp (${SOURCE_REVISION.slice(0, 12)})`
+    );
     const commandText = Array.from(document.querySelectorAll(".command-block"))
       .map((node) => node.textContent)
       .join("\n");
     expect(commandText).toContain(
-      `lt setup connect --base-url ${window.location.origin} --yes`
+      `lt setup connect --base-url ${window.location.origin} --project ` +
+        `${PROJECT.project_id} --yes`
     );
     expect(commandText).not.toContain("LAB_TRACKER_ACCESS_TOKEN");
     expect(commandText).toContain("lt setup init --install-skills --dry-run");
     expect(commandText).toContain("lt setup init --install-skills --yes");
+    expect(commandText).toContain(
+      `lt project bind --project-id ${PROJECT.project_id} --yes`
+    );
+    expect(commandText).toContain(
+      `lt hooks install --project ${PROJECT.project_id} --yes`
+    );
     expect(commandText).toContain("lt setup status");
     expect(commandText).toContain("codex mcp add lab-tracker -- lt-mcp");
+    expect(commandText).toContain(
+      `lt setup verify-mcp --expected-revision ${SOURCE_REVISION}`
+    );
     expect(commandText).toContain("codex mcp list");
     expect(document.body.textContent).toContain(
-      "uv tool install --upgrade git+https://github.com/SamuelBrudner/lab-tracker"
+      `uv tool install --force "lab-tracker @ git+https://github.com/` +
+        `SamuelBrudner/lab-tracker.git@${SOURCE_REVISION}"`
     );
     expect(document.body.textContent).toContain("Claude and Codex user skill homes");
-    expect(document.body.textContent).toContain(
-      "Codex requires the explicit one-time registration above"
-    );
+    expect(document.body.textContent).toContain("checks health");
     expect(screen.queryByRole("button", { name: "Create agent token" })).toBeNull();
+  });
+
+  it("withholds every local setup command for an unpinned deployment", async () => {
+    installFetchMock([], { source_revision: "unknown" });
+
+    renderPage({ authEnabled: false });
+
+    expect(
+      await screen.findByText(/Matching client installation is unavailable/)
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Local connection and repository commands are withheld/)
+    ).toBeInTheDocument();
+    const commandText = Array.from(document.querySelectorAll(".command-block"))
+      .map((node) => node.textContent)
+      .join("\n");
+    expect(commandText).not.toContain("uv tool install");
+    expect(commandText).not.toContain("lt setup connect");
+    expect(commandText).not.toContain("lt setup init");
+    expect(commandText).not.toContain("lt project bind");
+    expect(commandText).not.toContain("lt hooks install");
+    expect(commandText).not.toContain("codex mcp add");
   });
 });

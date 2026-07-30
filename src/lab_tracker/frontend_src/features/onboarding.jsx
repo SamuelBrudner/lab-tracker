@@ -2,12 +2,10 @@ import * as React from "react";
 
 import { apiRequest } from "../shared/api.js";
 import { auth as authGateway } from "../shared/gateways/index.js";
+import { matchingClientSetup } from "./client-setup.js";
 import { DailyReviewScheduleForm } from "./daily-review-schedule.jsx";
 
 const { useEffect, useMemo, useState } = React;
-
-const INSTALL_COMMAND =
-  "uv tool install --upgrade git+https://github.com/SamuelBrudner/lab-tracker";
 
 function SetupCommand({ command, label, setFlash }) {
   async function copyCommand() {
@@ -102,6 +100,10 @@ function OnboardingPage({
     () => projects.find((project) => project.project_id === selectedProjectId) || null,
     [projects, selectedProjectId]
   );
+  const clientSetup = useMemo(
+    () => matchingClientSetup(readiness?.source_revision),
+    [readiness?.source_revision]
+  );
 
   useEffect(() => {
     let canceled = false;
@@ -160,28 +162,40 @@ function OnboardingPage({
     }
   }
 
-  const repoSetupCommands = [
-    {
-      command: "lt setup init --install-skills --dry-run",
-      label: "1. Preview repository and skill setup",
-    },
-    {
-      command: "lt setup init --install-skills --yes",
-      label: "2. Apply after reviewing the preview",
-    },
-    {
-      command: 'lt project bind --name "YOUR PROJECT NAME" --dry-run',
-      label: "3. Preview the project binding",
-    },
-    {
-      command: 'lt project bind --name "YOUR PROJECT NAME" --yes',
-      label: "4. Bind after reviewing the preview",
-    },
-    {
-      command: "lt setup status",
-      label: "5. Verify setup",
-    },
-  ];
+  const repoSetupCommands = activeProject
+    ? [
+        {
+          command: "lt setup init --install-skills --dry-run",
+          label: "1. Preview repository and skill setup",
+        },
+        {
+          command: "lt setup init --install-skills --yes",
+          label: "2. Apply after reviewing the preview",
+        },
+        {
+          command:
+            `lt project bind --project-id ${activeProject.project_id} --dry-run`,
+          label: `3. Preview binding to ${activeProject.name}`,
+        },
+        {
+          command: `lt project bind --project-id ${activeProject.project_id} --yes`,
+          label: `4. Bind to ${activeProject.name}`,
+        },
+        {
+          command:
+            `lt hooks install --project ${activeProject.project_id} --dry-run`,
+          label: "5. Preview commit capture hook",
+        },
+        {
+          command: `lt hooks install --project ${activeProject.project_id} --yes`,
+          label: "6. Install commit capture hook",
+        },
+        {
+          command: "lt setup status",
+          label: "7. Verify repository setup",
+        },
+      ]
+    : [];
 
   return (
     <article className="card span-12 setup-page">
@@ -307,15 +321,47 @@ function OnboardingPage({
             <span className="pill">On your computer</span>
           </div>
           <p>
-            Install the current client, then open <strong>Agents</strong> here to create
-            a personal token. The one-time connection command saves one local profile
-            used by both <code>lt</code> and <code>lt-mcp</code>.
+            Install the client revision that matches this server, then open{" "}
+            <strong>Agents</strong> here to create a personal token. The one-time
+            connection command saves one local profile used by both <code>lt</code>{" "}
+            and <code>lt-mcp</code>.
           </p>
-          <SetupCommand
-            label="Install or upgrade Lab Tracker"
-            command={INSTALL_COMMAND}
-            setFlash={setFlash}
-          />
+          {clientSetup ? (
+            <>
+              <SetupCommand
+                label={`Install matching lt and lt-mcp (${clientSetup.revision.slice(0, 12)})`}
+                command={clientSetup.toolInstallCommand}
+                setFlash={setFlash}
+              />
+              <p className="subtle">
+                This exact Git revision matches the running server. It does not track
+                a moving branch. If <code>uv --version</code> is unavailable, install{" "}
+                <a href="https://docs.astral.sh/uv/getting-started/installation/">
+                  uv from its official installation guide
+                </a>{" "}
+                first.
+              </p>
+            </>
+          ) : readinessError ? (
+            <p className="warn">
+              This server’s matching client revision could not be checked (
+              {readinessError}). Do not install from a moving branch.
+            </p>
+          ) : readiness ? (
+            <p className="warn">
+              Matching client installation is unavailable because this deployment
+              does not report a full immutable source revision. Do not install from
+              GitHub <code>main</code>; ask the Lab Tracker operator to deploy with
+              revision metadata.
+            </p>
+          ) : (
+            <p className="subtle">Waiting for this server’s client revision…</p>
+          )}
+          <p className="subtle">
+            Server-side AI drafting uses the Lab Tracker operator’s configured
+            provider credential. You do not need to enter an OpenAI key locally for
+            Lab Tracker.
+          </p>
           <button type="button" className="btn-primary" onClick={() => navigate("/app/agents")}>
             Create an agent token
           </button>
@@ -325,28 +371,57 @@ function OnboardingPage({
           <div className="item-head">
             <div>
               <p className="eyebrow">Step 4</p>
-              <h3>Install the skill and bind your repository</h3>
+              <h3>Install Python support, skills, and commit capture</h3>
             </div>
             <span className="pill">Review before apply</span>
           </div>
           <p className="subtle">
-            Run these inside each analysis repository. Inspect each dry run before its
-            matching <code>--yes</code> command. Replace{" "}
-            <code>YOUR PROJECT NAME</code> with the project selected above.
+            Run these inside each analysis repository. First add the same pinned
+            package to the project’s Python environment so figure capture can import{" "}
+            <code>lab_tracker_client</code>. Then inspect each dry run before its
+            matching <code>--yes</code> command. The commands bind the exact project
+            selected above—there is no placeholder to replace.
           </p>
-          {repoSetupCommands.map((item) => (
-            <SetupCommand
-              key={item.command}
-              label={item.label}
-              command={item.command}
-              setFlash={setFlash}
-            />
-          ))}
-          <p className="subtle">
-            The skill installer covers Claude and Codex user skill homes. Codex usually
-            detects skill changes automatically; use <code>/skills</code> to verify and
-            restart Codex if the skill does not appear.
-          </p>
+          {clientSetup ? (
+            <>
+              <SetupCommand
+                label="Add matching Lab Tracker dependency to this Python project"
+                command={clientSetup.projectInstallCommand}
+                setFlash={setFlash}
+              />
+              <SetupCommand
+                label="Verify lab_tracker_client imports in the project environment"
+                command={clientSetup.projectImportCommand}
+                setFlash={setFlash}
+              />
+              <SetupCommand
+                label="Verify the project package matches this server"
+                command={clientSetup.verifyClientCommand}
+                setFlash={setFlash}
+              />
+              {repoSetupCommands.map((item) => (
+                <SetupCommand
+                  key={item.command}
+                  label={item.label}
+                  command={item.command}
+                  setFlash={setFlash}
+                />
+              ))}
+              <p className="subtle">
+                The skill installer covers Claude and Codex user skill homes.
+                Codex usually detects skill changes automatically; use{" "}
+                <code>/skills</code> to verify and restart Codex if the skill
+                does not appear. Commit capture needs the{" "}
+                <strong>Read + stage evidence</strong> token recommended on the
+                Agents page; a read-only token cannot sync staged notes.
+              </p>
+            </>
+          ) : (
+            <p className="warn">
+              Local repository commands are withheld until this deployment
+              reports a valid immutable source revision.
+            </p>
+          )}
         </li>
 
         <li className="card-inset setup-step">
@@ -358,21 +433,37 @@ function OnboardingPage({
             <span className="pill">Run once</span>
           </div>
           <p className="subtle">
-            Repository scaffolding also writes MCP files for supported clients. Current
-            Codex clients share MCP configuration through <code>config.toml</code>, so
-            register the local <code>lt-mcp</code> server once, confirm it is listed,
-            then restart the Codex app, CLI, or IDE extension.
+            Repository scaffolding also writes MCP files for supported clients.
+            Current Codex clients share MCP configuration through{" "}
+            <code>config.toml</code>, so register the local <code>lt-mcp</code>{" "}
+            server once. Then launch the executable through the setup verifier: it
+            performs an MCP initialize exchange, calls health, and makes an
+            authenticated project read using the saved profile.
           </p>
-          <SetupCommand
-            label="1. Register Lab Tracker MCP for Codex"
-            command="codex mcp add lab-tracker -- lt-mcp"
-            setFlash={setFlash}
-          />
-          <SetupCommand
-            label="2. Confirm it is configured"
-            command="codex mcp list"
-            setFlash={setFlash}
-          />
+          {clientSetup ? (
+            <>
+              <SetupCommand
+                label="1. Register Lab Tracker MCP for Codex"
+                command="codex mcp add lab-tracker -- lt-mcp"
+                setFlash={setFlash}
+              />
+              <SetupCommand
+                label="2. Launch MCP and verify health, auth, and client revision"
+                command={clientSetup.verifyMcpCommand}
+                setFlash={setFlash}
+              />
+              <SetupCommand
+                label="3. Confirm Codex registration"
+                command="codex mcp list"
+                setFlash={setFlash}
+              />
+            </>
+          ) : (
+            <p className="warn">
+              MCP verification is blocked until the server reports its immutable
+              source revision.
+            </p>
+          )}
           <p className="subtle">
             In Codex, <code>/mcp</code> shows connected servers. If your organization
             manages MCP policy, an administrator may need to allow this server.
@@ -408,4 +499,4 @@ function OnboardingPage({
   );
 }
 
-export { INSTALL_COMMAND, OnboardingPage, ReadinessStatus, SetupCommand };
+export { OnboardingPage, ReadinessStatus, SetupCommand };
