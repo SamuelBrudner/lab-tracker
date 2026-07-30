@@ -60,6 +60,26 @@ function operationIntent(operation) {
   return `Proposed ${operation.entity_type} update`;
 }
 
+function operationNarrativeAction(operation) {
+  const semanticType = operation.semantic_type || "";
+  if (semanticType.startsWith("link_note_to_")) {
+    return `link the capture to an existing ${semanticType.replace("link_note_to_", "")}`;
+  }
+  if (semanticType === "suggest_new_question" || semanticType === "suggest_new_dataset") {
+    return `add a new ${operation.entity_type}`;
+  }
+  if (semanticType === "create_note" || semanticType === "suggest_followup") {
+    return "add a research note";
+  }
+  if (semanticType === "request_clarification") {
+    return "record a clarification request";
+  }
+  if (operation.op === "create") {
+    return `add a new ${operation.entity_type}`;
+  }
+  return `update the ${operation.entity_type}`;
+}
+
 function normalizeSpeechText(value) {
   return String(value || "")
     .replace(/[`*_#>]/g, "")
@@ -346,6 +366,8 @@ function GraphDraftDetailCard({
   const [reviseAudio, setReviseAudio] = useState(null);
   const [isRecording, setIsRecording] = useState(false);
   const [speechStatus, setSpeechStatus] = useState("idle");
+  const [reviewView, setReviewView] = useState("proposals");
+  const [openCitationId, setOpenCitationId] = useState("");
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
   const audioStreamRef = useRef(null);
@@ -1231,7 +1253,7 @@ function GraphDraftDetailCard({
 
       {changeSet ? (
         <div className="daily-review-report">
-          {changeSet.summary ? (
+          {changeSet.summary && reviewView === "proposals" ? (
             <div className="review-summary">
               {String(changeSet.summary)
                 .split(/\n{2,}/)
@@ -1295,188 +1317,353 @@ function GraphDraftDetailCard({
             onDiscard={editorDraft.discard}
           />
 
-          <div className="review-report">
-            {(changeSet.operations || []).map((operation) => {
-              const parsed =
-                parsedPayloadFromText(payloads[operation.operation_id]) || operation.payload || {};
-              const proposed =
-                parsed.text ||
-                parsed.raw_content ||
-                parsed.label ||
-                parsed.prompt ||
-                parsed.statement ||
-                "";
-              const linkType = semanticLinkTargetType(operation);
-              return (
-                <div className="review-proposal" key={operation.operation_id}>
-                  <div className="review-proposal-body">
-                    <p className="review-proposal-intent subtle">{operationIntent(operation)}</p>
-                    <p className="review-proposal-text">
-                      {proposed || operationTitle(operation)}
-                    </p>
-                    {operation.rationale ? (
-                      <p className="review-because">
-                        <span className="subtle">Model inference</span> {operation.rationale}
-                        {operation.confidence !== null && operation.confidence !== undefined
-                          ? ` · ${Math.round(operation.confidence * 100)}% confident`
-                          : ""}
-                      </p>
-                    ) : null}
-                    {(operation.source_refs || []).length > 0 ? (
-                      <div className="review-evidence">
-                        <div className="subtle">Source evidence</div>
-                        {(operation.source_refs || []).map((ref, index) => (
-                          <p
-                            className="source-snippet"
-                            key={`${operation.operation_id}-${index}`}
-                          >
-                            {sourceRefText(ref)}
-                          </p>
-                        ))}
-                      </div>
-                    ) : null}
-                    {operation.error_metadata?.message ? (
-                      <p className="flash error">{operation.error_metadata.message}</p>
-                    ) : null}
-                    {operation.result_entity_id ? (
-                      <p className="review-result subtle">
-                        Created <span className="mono">{operation.result_entity_id}</span>
-                      </p>
-                    ) : null}
-                    <details className="context-details review-edit">
-                      <summary>Edit this proposal</summary>
-                      <div className="stack">
-                        {linkType ? (
-                          <label>
-                            Link target
-                            <select
-                              disabled={!canEditDraft}
-                              onChange={(event) =>
-                                patchOperationPayload(operation, (payload) =>
-                                  nextPayloadWithTarget(payload, linkType, event.target.value)
-                                )
-                              }
-                              value={payloadTargetId(
-                                parsedPayloadFromText(payloads[operation.operation_id]) || {},
-                                linkType
-                              )}
-                            >
-                              <option value="">No linked {linkType}</option>
-                              {contextOptions(changeSet, linkType).map((item) => (
-                                <option key={item.id} value={item.id}>
-                                  {item.label || item.id}
-                                </option>
-                              ))}
-                            </select>
-                          </label>
-                        ) : null}
-                        {Object.prototype.hasOwnProperty.call(operation.payload || {}, "text") ? (
-                          <label>
-                            Text
-                            <textarea
-                              value={
-                                parsedPayloadFromText(payloads[operation.operation_id])?.text || ""
-                              }
-                              disabled={!canEditDraft}
-                              onChange={(event) =>
-                                patchOperationPayload(operation, (payload) => ({
-                                  ...payload,
-                                  text: event.target.value,
-                                }))
-                              }
-                            />
-                          </label>
-                        ) : null}
-                        {Object.prototype.hasOwnProperty.call(
-                          operation.payload || {},
-                          "raw_content"
-                        ) ? (
-                          <label>
-                            Note text
-                            <textarea
-                              value={
-                                parsedPayloadFromText(payloads[operation.operation_id])
-                                  ?.raw_content || ""
-                              }
-                              disabled={!canEditDraft}
-                              onChange={(event) =>
-                                patchOperationPayload(operation, (payload) => ({
-                                  ...payload,
-                                  raw_content: event.target.value,
-                                }))
-                              }
-                            />
-                          </label>
-                        ) : null}
-                        <details className="context-details advanced-json">
-                          <summary>Payload JSON (advanced)</summary>
-                          <label>
-                            Edit JSON payload
-                            <textarea
-                              className="mono"
-                              value={payloads[operation.operation_id] || ""}
-                              onChange={(event) =>
-                                updatePayloadText(operation.operation_id, event.target.value)
-                              }
-                              disabled={!canEditDraft}
-                            />
-                          </label>
-                        </details>
-                        <label>
-                          Decision note
-                          <textarea
-                            value={operationReviewNotes[operation.operation_id] || ""}
-                            disabled={!canEditDraft}
-                            onChange={(event) =>
-                              updateOperationReviewNote(operation.operation_id, event.target.value)
-                            }
-                          />
-                        </label>
-                        <div className="inline">
-                          <button
-                            type="button"
-                            className="btn-secondary"
-                            disabled={!canEditDraft}
-                            onClick={() => saveOperation(operation)}
-                            title="Save your edits to this proposal without changing its decision"
-                          >
-                            Save edit
-                          </button>
-                        </div>
-                      </div>
-                    </details>
-                  </div>
-                  <aside className="review-proposal-actions">
-                    <StatusPill family="review" value={operation.status} />
-                    <button
-                      type="button"
-                      className="btn-primary"
-                      disabled={!canEditDraft}
-                      onClick={() => saveOperation(operation, "accepted")}
-                    >
-                      Accept
-                    </button>
-                    <button
-                      type="button"
-                      className="btn-secondary"
-                      disabled={!canEditDraft}
-                      onClick={() => saveOperation(operation, "proposed")}
-                    >
-                      Defer
-                    </button>
-                    <button
-                      type="button"
-                      className="btn-danger"
-                      disabled={!canEditDraft}
-                      onClick={() => saveOperation(operation, "rejected")}
-                    >
-                      Reject
-                    </button>
-                  </aside>
-                </div>
-              );
-            })}
+          <div className="review-view-switch">
+            <span className="subtle">Review as</span>
+            <div className="review-view-toggle" role="group" aria-label="Review view">
+              <button
+                type="button"
+                className={reviewView === "narrative" ? "active" : ""}
+                aria-pressed={reviewView === "narrative"}
+                onClick={() => {
+                  setOpenCitationId("");
+                  setReviewView("narrative");
+                }}
+              >
+                Narrative
+              </button>
+              <button
+                type="button"
+                className={reviewView === "proposals" ? "active" : ""}
+                aria-pressed={reviewView === "proposals"}
+                onClick={() => {
+                  setOpenCitationId("");
+                  setReviewView("proposals");
+                }}
+              >
+                Proposals
+              </button>
+            </div>
           </div>
+
+          {reviewView === "narrative" ? (
+            <section className="review-narrative" aria-label="Narrative review">
+              <p className="review-narrative-intro">
+                Read this as an account of the day. Each numbered citation is a proposed edit to
+                the graph; hover, focus, or click it to make a decision or leave a note.
+              </p>
+              {changeSet.summary ? (
+                <div className="review-narrative-summary">
+                  {String(changeSet.summary)
+                    .split(/\n{2,}/)
+                    .map((para) => para.trim())
+                    .filter(Boolean)
+                    .map((para, index) => (
+                      <p key={index}>{para}</p>
+                    ))}
+                </div>
+              ) : null}
+              <div className="review-narrative-prose">
+                {(changeSet.operations || []).map((operation, index) => {
+                  const citationIsOpen = openCitationId === operation.operation_id;
+                  const citationPanelId = `proposal-citation-${operation.operation_id}`;
+                  const proposalText =
+                    operationProposalText(operation, payloads) || operationTitle(operation);
+                  return (
+                    <p key={operation.operation_id}>
+                      {index === 0 ? "In the graph, the draft would " : "It would also "}
+                      {operationNarrativeAction(operation)}
+                      {" — "}
+                      <span className="review-narrative-proposal">
+                        &ldquo;{proposalText}&rdquo;
+                      </span>
+                      {operation.rationale ? (
+                        <>
+                          {" "}
+                          The model connects this to the day because {operation.rationale}
+                        </>
+                      ) : null}{" "}
+                      <span
+                        className="proposal-citation-wrap"
+                        onBlur={(event) => {
+                          if (!event.currentTarget.contains(event.relatedTarget)) {
+                            setOpenCitationId("");
+                          }
+                        }}
+                        onMouseEnter={() => setOpenCitationId(operation.operation_id)}
+                        onMouseLeave={() => setOpenCitationId("")}
+                      >
+                        <button
+                          type="button"
+                          className="proposal-citation"
+                          aria-controls={citationPanelId}
+                          aria-expanded={citationIsOpen}
+                          aria-label={`Proposed edit ${index + 1}: ${operationIntent(operation)}`}
+                          onClick={() => setOpenCitationId(operation.operation_id)}
+                          onFocus={() => setOpenCitationId(operation.operation_id)}
+                        >
+                          [{index + 1}]
+                        </button>
+                        {citationIsOpen ? (
+                          <span
+                            className="proposal-citation-card"
+                            id={citationPanelId}
+                            role="group"
+                            aria-label={`Proposed edit ${index + 1} details`}
+                          >
+                            <span className="proposal-citation-heading">
+                              <strong>Proposed edit {index + 1}</strong>
+                              <StatusPill family="review" value={operation.status} />
+                            </span>
+                            <span className="proposal-citation-intent">
+                              {operationIntent(operation)}
+                            </span>
+                            <span className="proposal-citation-text">{proposalText}</span>
+                            {(operation.source_refs || []).length > 0 ? (
+                              <span className="proposal-citation-evidence">
+                                <span className="subtle">Source evidence</span>
+                                {(operation.source_refs || []).map((ref, refIndex) => (
+                                  <span
+                                    className="source-snippet"
+                                    key={`${operation.operation_id}-${refIndex}`}
+                                  >
+                                    {sourceRefText(ref)}
+                                  </span>
+                                ))}
+                              </span>
+                            ) : null}
+                            <label className="proposal-citation-note">
+                              Note
+                              <textarea
+                                value={operationReviewNotes[operation.operation_id] || ""}
+                                disabled={!canEditDraft}
+                                onChange={(event) =>
+                                  updateOperationReviewNote(
+                                    operation.operation_id,
+                                    event.target.value
+                                  )
+                                }
+                              />
+                            </label>
+                            <span className="proposal-citation-actions">
+                              <button
+                                type="button"
+                                className="btn-primary"
+                                disabled={!canEditDraft}
+                                onClick={() => saveOperation(operation, "accepted")}
+                              >
+                                Accept edit
+                              </button>
+                              <button
+                                type="button"
+                                className="btn-danger"
+                                disabled={!canEditDraft}
+                                onClick={() => saveOperation(operation, "rejected")}
+                              >
+                                Reject edit
+                              </button>
+                              <button
+                                type="button"
+                                className="btn-secondary"
+                                disabled={!canEditDraft}
+                                onClick={() => saveOperation(operation)}
+                              >
+                                Save note
+                              </button>
+                            </span>
+                          </span>
+                        ) : null}
+                      </span>
+                    </p>
+                  );
+                })}
+              </div>
+            </section>
+          ) : (
+            <div className="review-report">
+              {(changeSet.operations || []).map((operation) => {
+                const parsed =
+                  parsedPayloadFromText(payloads[operation.operation_id]) ||
+                  operation.payload ||
+                  {};
+                const proposed =
+                  parsed.text ||
+                  parsed.raw_content ||
+                  parsed.label ||
+                  parsed.prompt ||
+                  parsed.statement ||
+                  "";
+                const linkType = semanticLinkTargetType(operation);
+                return (
+                  <div className="review-proposal" key={operation.operation_id}>
+                    <div className="review-proposal-body">
+                      <p className="review-proposal-intent subtle">{operationIntent(operation)}</p>
+                      <p className="review-proposal-text">
+                        {proposed || operationTitle(operation)}
+                      </p>
+                      {operation.rationale ? (
+                        <p className="review-because">
+                          <span className="subtle">Model inference</span> {operation.rationale}
+                          {operation.confidence !== null && operation.confidence !== undefined
+                            ? ` · ${Math.round(operation.confidence * 100)}% confident`
+                            : ""}
+                        </p>
+                      ) : null}
+                      {(operation.source_refs || []).length > 0 ? (
+                        <div className="review-evidence">
+                          <div className="subtle">Source evidence</div>
+                          {(operation.source_refs || []).map((ref, index) => (
+                            <p
+                              className="source-snippet"
+                              key={`${operation.operation_id}-${index}`}
+                            >
+                              {sourceRefText(ref)}
+                            </p>
+                          ))}
+                        </div>
+                      ) : null}
+                      {operation.error_metadata?.message ? (
+                        <p className="flash error">{operation.error_metadata.message}</p>
+                      ) : null}
+                      {operation.result_entity_id ? (
+                        <p className="review-result subtle">
+                          Created <span className="mono">{operation.result_entity_id}</span>
+                        </p>
+                      ) : null}
+                      <details className="context-details review-edit">
+                        <summary>Edit this proposal</summary>
+                        <div className="stack">
+                          {linkType ? (
+                            <label>
+                              Link target
+                              <select
+                                disabled={!canEditDraft}
+                                onChange={(event) =>
+                                  patchOperationPayload(operation, (payload) =>
+                                    nextPayloadWithTarget(payload, linkType, event.target.value)
+                                  )
+                                }
+                                value={payloadTargetId(
+                                  parsedPayloadFromText(payloads[operation.operation_id]) || {},
+                                  linkType
+                                )}
+                              >
+                                <option value="">No linked {linkType}</option>
+                                {contextOptions(changeSet, linkType).map((item) => (
+                                  <option key={item.id} value={item.id}>
+                                    {item.label || item.id}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                          ) : null}
+                          {Object.prototype.hasOwnProperty.call(operation.payload || {}, "text") ? (
+                            <label>
+                              Text
+                              <textarea
+                                value={
+                                  parsedPayloadFromText(payloads[operation.operation_id])?.text || ""
+                                }
+                                disabled={!canEditDraft}
+                                onChange={(event) =>
+                                  patchOperationPayload(operation, (payload) => ({
+                                    ...payload,
+                                    text: event.target.value,
+                                  }))
+                                }
+                              />
+                            </label>
+                          ) : null}
+                          {Object.prototype.hasOwnProperty.call(
+                            operation.payload || {},
+                            "raw_content"
+                          ) ? (
+                            <label>
+                              Note text
+                              <textarea
+                                value={
+                                  parsedPayloadFromText(payloads[operation.operation_id])
+                                    ?.raw_content || ""
+                                }
+                                disabled={!canEditDraft}
+                                onChange={(event) =>
+                                  patchOperationPayload(operation, (payload) => ({
+                                    ...payload,
+                                    raw_content: event.target.value,
+                                  }))
+                                }
+                              />
+                            </label>
+                          ) : null}
+                          <details className="context-details advanced-json">
+                            <summary>Payload JSON (advanced)</summary>
+                            <label>
+                              Edit JSON payload
+                              <textarea
+                                className="mono"
+                                value={payloads[operation.operation_id] || ""}
+                                onChange={(event) =>
+                                  updatePayloadText(operation.operation_id, event.target.value)
+                                }
+                                disabled={!canEditDraft}
+                              />
+                            </label>
+                          </details>
+                          <label>
+                            Decision note
+                            <textarea
+                              value={operationReviewNotes[operation.operation_id] || ""}
+                              disabled={!canEditDraft}
+                              onChange={(event) =>
+                                updateOperationReviewNote(operation.operation_id, event.target.value)
+                              }
+                            />
+                          </label>
+                          <div className="inline">
+                            <button
+                              type="button"
+                              className="btn-secondary"
+                              disabled={!canEditDraft}
+                              onClick={() => saveOperation(operation)}
+                              title="Save your edits to this proposal without changing its decision"
+                            >
+                              Save edit
+                            </button>
+                          </div>
+                        </div>
+                      </details>
+                    </div>
+                    <aside className="review-proposal-actions">
+                      <StatusPill family="review" value={operation.status} />
+                      <button
+                        type="button"
+                        className="btn-primary"
+                        disabled={!canEditDraft}
+                        onClick={() => saveOperation(operation, "accepted")}
+                      >
+                        Accept
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        disabled={!canEditDraft}
+                        onClick={() => saveOperation(operation, "proposed")}
+                      >
+                        Defer
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-danger"
+                        disabled={!canEditDraft}
+                        onClick={() => saveOperation(operation, "rejected")}
+                      >
+                        Reject
+                      </button>
+                    </aside>
+                  </div>
+                );
+              })}
+            </div>
+          )}
 
           {(changeSet.uncertain_fields || []).length > 0 ||
           (changeSet.clarification_requests || []).length > 0 ? (

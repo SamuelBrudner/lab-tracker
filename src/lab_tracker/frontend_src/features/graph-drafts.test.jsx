@@ -104,6 +104,108 @@ describe("spokenReviewScript", () => {
   });
 });
 
+describe("GraphDraftDetailCard narrative review", () => {
+  it("keeps the proposal cards and offers a cited prose view of the same edits", async () => {
+    const base = draftFixture();
+    const secondOperation = {
+      ...base.operations[0],
+      entity_type: "note",
+      operation_id: "44444444-4444-4444-8444-444444444444",
+      op: "create",
+      payload: { raw_content: "Sleep-deprived flies courted less often." },
+      rationale: "The capture describes this result directly.",
+      semantic_type: "create_note",
+    };
+    renderDraft({ ...base, operations: [base.operations[0], secondOperation] });
+
+    expect(await screen.findAllByLabelText("Edit JSON payload")).toHaveLength(2);
+    expect(screen.getByRole("button", { name: "Proposals" })).toHaveAttribute(
+      "aria-pressed",
+      "true"
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Narrative" }));
+
+    expect(screen.getByRole("region", { name: "Narrative review" })).toHaveTextContent(
+      "In the graph, the draft would add a new question"
+    );
+    expect(screen.getByRole("region", { name: "Narrative review" })).toHaveTextContent(
+      "It would also add a research note"
+    );
+    expect(
+      screen.getByRole("button", { name: /Proposed edit 1: Proposed new question/ })
+    ).toHaveTextContent("[1]");
+    expect(
+      screen.getByRole("button", { name: /Proposed edit 2: Proposed research note/ })
+    ).toHaveTextContent("[2]");
+    expect(screen.queryByLabelText("Edit JSON payload")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Proposals" }));
+    expect(await screen.findAllByLabelText("Edit JSON payload")).toHaveLength(2);
+  });
+
+  it("reveals accept, reject, and note actions when a citation is hovered", async () => {
+    const draft = draftFixture();
+    const patchCalls = [];
+    let currentDraft = draft;
+    renderDraft(draft, {
+      routes: [
+        {
+          match: /\/graph-drafts\/[^/]+\/operations\//,
+          method: "PATCH",
+          response: (request) => {
+            patchCalls.push(request);
+            const body = JSON.parse(request.init.body);
+            currentDraft = {
+              ...currentDraft,
+              operations: currentDraft.operations.map((operation) =>
+                operation.operation_id === draft.operations[0].operation_id
+                  ? {
+                      ...operation,
+                      payload: body.payload,
+                      review_note: body.review_note,
+                      status: body.status,
+                    }
+                  : operation
+              ),
+            };
+            return apiResponse(currentDraft);
+          },
+        },
+      ],
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Narrative" }));
+    const citation = screen.getByRole("button", {
+      name: /Proposed edit 1: Proposed new question/,
+    });
+    fireEvent.mouseEnter(citation.parentElement);
+
+    const details = await screen.findByRole("group", { name: "Proposed edit 1 details" });
+    expect(details).toHaveTextContent("Does sleep change courtship behavior?");
+    expect(screen.getByRole("button", { name: "Accept edit" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reject edit" })).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Note"), {
+      target: { value: "Checked against the raw capture." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save note" }));
+
+    await waitFor(() => expect(patchCalls).toHaveLength(1));
+    expect(JSON.parse(patchCalls[0].init.body)).toMatchObject({
+      review_note: "Checked against the raw capture.",
+      status: "proposed",
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Reject edit" }));
+    await waitFor(() => expect(patchCalls).toHaveLength(2));
+    expect(JSON.parse(patchCalls[1].init.body)).toMatchObject({
+      review_note: "Checked against the raw capture.",
+      status: "rejected",
+    });
+  });
+});
+
 describe("GraphDraftDetailCard audio review", () => {
   it("plays, pauses, resumes, stops, and cancels narration on navigation", async () => {
     const speechSynthesis = installSpeechSynthesis();
