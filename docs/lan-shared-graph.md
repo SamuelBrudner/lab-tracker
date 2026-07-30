@@ -93,7 +93,7 @@ On another computer connected to the same LAN or VPN:
 For MCP clients on other computers, set:
 
 ```powershell
-$env:LAB_TRACKER_MCP_BASE_URL = "http://<lan-ip>:8000"
+$env:LAB_TRACKER_BASE_URL = "http://<lan-ip>:8000"
 ```
 
 When authentication is enabled, set `LAB_TRACKER_MCP_API_KEY` to a Lab Tracker

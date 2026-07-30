@@ -140,7 +140,7 @@ def export_project_provenance(
         result.identifier_note = (
             f"Provenance @id identifiers are rooted at {result.identifier_root}, the URL "
             "this export connected to. If that is not your lab's permanent URL, set "
-            "LAB_TRACKER_CANONICAL_BASE_URL on the server before archiving sidecars so "
+            "LAB_TRACKER_BASE_URL on the server before archiving sidecars so "
             "identifiers stay stable across hosts."
         )
     return result
