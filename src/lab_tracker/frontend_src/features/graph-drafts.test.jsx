@@ -252,6 +252,164 @@ describe("GraphDraftDetailCard accept all", () => {
     resolveAccept(apiResponse(draft));
     await waitFor(() => expect(button).not.toBeDisabled());
   });
+
+  it("persists buffered payload and decision-note edits before bulk acceptance", async () => {
+    const draft = draftFixture();
+    const accepted = {
+      ...draft,
+      operations: [
+        {
+          ...draft.operations[0],
+          acceptance_mode: "bulk_accepted",
+          payload: { text: "Edited before accepting" },
+          review_note: "Checked against the trace.",
+          status: "accepted",
+        },
+      ],
+    };
+    const calls = [];
+    const patchBodies = [];
+    renderDraft(draft, {
+      routes: [
+        {
+          match: `/graph-drafts/${draft.change_set_id}/operations/${draft.operations[0].operation_id}`,
+          method: "PATCH",
+          response: (request) => {
+            calls.push("patch");
+            patchBodies.push(JSON.parse(request.init.body));
+            return apiResponse(draft);
+          },
+        },
+        {
+          match: `/graph-drafts/${draft.change_set_id}/accept-all`,
+          method: "POST",
+          response: () => {
+            calls.push("accept-all");
+            return apiResponse(accepted);
+          },
+        },
+      ],
+    });
+
+    fireEvent.change(await screen.findByLabelText("Text"), {
+      target: { value: "Edited before accepting" },
+    });
+    fireEvent.change(screen.getByLabelText("Decision note"), {
+      target: { value: "Checked against the trace." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Accept all" }));
+
+    await screen.findByRole("button", { name: "Undo accept all" });
+    expect(calls).toEqual(["patch", "accept-all"]);
+    expect(patchBodies).toEqual([
+      {
+        payload: { text: "Edited before accepting" },
+        review_note: "Checked against the trace.",
+        status: "proposed",
+      },
+    ]);
+  });
+
+  it("blocks bulk acceptance when a buffered payload is invalid JSON", async () => {
+    const draft = draftFixture();
+    let acceptAllCalls = 0;
+    const setFlash = vi.fn();
+    renderDraft(draft, {
+      setFlash,
+      routes: [
+        {
+          match: `/graph-drafts/${draft.change_set_id}/accept-all`,
+          method: "POST",
+          response: () => {
+            acceptAllCalls += 1;
+            return apiResponse(draft);
+          },
+        },
+      ],
+    });
+
+    fireEvent.change(await screen.findByLabelText("Edit JSON payload"), {
+      target: { value: "{" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Accept all" }));
+
+    await waitFor(() =>
+      expect(setFlash).toHaveBeenCalledWith(
+        "",
+        "One proposal has invalid JSON. Fix or revert it before accepting all."
+      )
+    );
+    expect(acceptAllCalls).toBe(0);
+  });
+
+  it("undoes only operations newly accepted by the latest bulk action", async () => {
+    const draft = draftFixture();
+    const handAcceptedId = "44444444-4444-4444-8444-444444444444";
+    const handAccepted = {
+      ...draft.operations[0],
+      acceptance_mode: "human_selected",
+      operation_id: handAcceptedId,
+      status: "accepted",
+    };
+    const before = {
+      ...draft,
+      operations: [handAccepted, draft.operations[0]],
+    };
+    const afterAccept = {
+      ...before,
+      operations: [
+        handAccepted,
+        {
+          ...draft.operations[0],
+          acceptance_mode: "bulk_accepted",
+          status: "accepted",
+        },
+      ],
+    };
+    const afterUndo = {
+      ...afterAccept,
+      operations: [
+        handAccepted,
+        {
+          ...draft.operations[0],
+          acceptance_mode: null,
+          status: "proposed",
+        },
+      ],
+    };
+    const patchedUrls = [];
+    const patchedBodies = [];
+    renderDraft(before, {
+      routes: [
+        {
+          match: `/graph-drafts/${draft.change_set_id}/accept-all`,
+          method: "POST",
+          response: apiResponse(afterAccept),
+        },
+        {
+          match: `/graph-drafts/${draft.change_set_id}/operations/${draft.operations[0].operation_id}`,
+          method: "PATCH",
+          response: (request) => {
+            patchedUrls.push(request.url);
+            patchedBodies.push(JSON.parse(request.init.body));
+            return apiResponse(afterUndo);
+          },
+        },
+      ],
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Accept all" }));
+    expect(await screen.findByText("1 proposal accepted as a batch.")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Undo accept all" }));
+
+    await waitFor(() => expect(patchedUrls).toHaveLength(1));
+    expect(patchedUrls[0]).toContain(draft.operations[0].operation_id);
+    expect(patchedUrls[0]).not.toContain(handAcceptedId);
+    expect(patchedBodies).toEqual([{ status: "proposed" }]);
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Undo accept all" })).toBeNull()
+    );
+  });
 });
 
 describe("GraphDraftDetailCard figure evidence", () => {
