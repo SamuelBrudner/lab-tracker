@@ -46,7 +46,10 @@ RCLONE_STORE_HEALTH_FAILURE_DETAIL: Final = "Rclone store health check failed."
 GIT_STORE_HEALTH_FAILURE_DETAIL: Final = "Git store health check failed."
 
 
-@dataclass(frozen=True, slots=True, repr=False)
+_STORE_PROBE_TARGET_FACTORY_TOKEN = object()
+
+
+@dataclass(frozen=True, slots=True, init=False, repr=False)
 class StoreProbeTarget:
     """Complete immutable identity and adapter input for one health probe."""
 
@@ -58,15 +61,36 @@ class StoreProbeTarget:
     credential_ref: str | None
     authority_binding_identity: StoreAuthorityBindingIdentity
 
-    def __post_init__(self) -> None:
-        """Reject any probe target that does not carry a sealed identity.
+    def __init__(
+        self,
+        proof: StoreAuthorityUseProof,
+        *,
+        _factory_token: object,
+    ) -> None:
+        """Bind every probe field to one sealed use-time authority proof.
 
-        A registered store row on its own can no longer mint a probe target, so
-        an unauthorized target cannot reach an adapter or seed a cache entry.
+        The constructor is intentionally incompatible with the dataclass field
+        signature.  Normal direct construction and ``dataclasses.replace`` therefore
+        cannot pair a valid authority identity with unrelated adapter inputs.
         """
 
-        if type(self.authority_binding_identity) is not StoreAuthorityBindingIdentity:
-            raise ValueError("Store probe target requires a sealed authority identity.")
+        if (
+            _factory_token is not _STORE_PROBE_TARGET_FACTORY_TOKEN
+            or type(proof) is not StoreAuthorityUseProof
+        ):
+            raise TypeError("Store probe target requires an authority use proof.")
+        definition = proof.definition
+        object.__setattr__(self, "store_id", proof.store_id)
+        object.__setattr__(self, "name", definition.name)
+        object.__setattr__(self, "kind", definition.kind)
+        object.__setattr__(self, "root", definition.root)
+        object.__setattr__(self, "endpoint", definition.endpoint)
+        object.__setattr__(self, "credential_ref", definition.credential_ref)
+        object.__setattr__(
+            self,
+            "authority_binding_identity",
+            proof.binding_identity,
+        )
 
     @classmethod
     def from_authority_proof(
@@ -75,17 +99,9 @@ class StoreProbeTarget:
     ) -> StoreProbeTarget:
         """Build an exact cache/probe target from a use-time authority proof."""
 
-        if type(proof) is not StoreAuthorityUseProof:
-            raise TypeError("Store probe target requires an authority use proof.")
-        definition = proof.definition
         return cls(
-            store_id=proof.store_id,
-            name=definition.name,
-            kind=definition.kind,
-            root=definition.root,
-            endpoint=definition.endpoint,
-            credential_ref=definition.credential_ref,
-            authority_binding_identity=proof.binding_identity,
+            proof,
+            _factory_token=_STORE_PROBE_TARGET_FACTORY_TOKEN,
         )
 
     def __repr__(self) -> str:

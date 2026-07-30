@@ -36,6 +36,7 @@ from lab_tracker.store_authority_use import (
     detach_store_authority_binding,
     revalidate_store_authority_binding,
 )
+from lab_tracker.store_health import StoreProbeTarget
 
 BOUND_STORE_GRANT_ID = "use-time-authority"
 
@@ -214,12 +215,43 @@ def bound_authority_proof(**kwargs: object) -> StoreAuthorityUseProof:
 
 
 def sealed_binding_identity(**kwargs: object) -> StoreAuthorityBindingIdentity:
-    """Return one sealed binding identity suitable for any target or probe key.
+    """Return one sealed binding identity for tests of identity values themselves.
 
-    The identity is deliberately independent of the surrounding target's other
-    fields: a probe target's cache identity is the whole tuple, so a test that
-    varies ``root`` or ``name`` can hold one identity constant and still prove
-    those fields participate in the key.
+    Production probe targets must be built from the complete proof so the
+    identity cannot be paired with unrelated adapter fields.
     """
 
     return bound_authority_proof(**kwargs).binding_identity
+
+
+def unsafe_probe_target_for_adapter_test(
+    *,
+    store_id: UUID,
+    name: str,
+    kind: StoreKind,
+    root: str,
+    endpoint: str | None,
+    credential_ref: str | None,
+    authority_binding_identity: StoreAuthorityBindingIdentity | None = None,
+) -> StoreProbeTarget:
+    """Bypass construction solely to test downstream defensive adapter behavior.
+
+    Python code can always subvert a class with ``object.__new__``. Production
+    never does this; the helper is explicit so unit tests can still feed malformed
+    legacy-shaped values to an adapter without weakening the normal construction
+    API that application code sees.
+    """
+
+    target = object.__new__(StoreProbeTarget)
+    object.__setattr__(target, "store_id", store_id)
+    object.__setattr__(target, "name", name)
+    object.__setattr__(target, "kind", kind)
+    object.__setattr__(target, "root", root)
+    object.__setattr__(target, "endpoint", endpoint)
+    object.__setattr__(target, "credential_ref", credential_ref)
+    object.__setattr__(
+        target,
+        "authority_binding_identity",
+        authority_binding_identity or sealed_binding_identity(),
+    )
+    return target

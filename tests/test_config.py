@@ -14,7 +14,7 @@ from api_helpers import drain_test_resources, register_test_resources
 from fastapi import FastAPI
 from pydantic import ValidationError
 from starlette.testclient import TestClient
-from store_authority_fakes import sealed_binding_identity
+from store_authority_fakes import unsafe_probe_target_for_adapter_test
 
 from lab_tracker.app_parts import runtime as runtime_module
 from lab_tracker.app_parts.runtime import (
@@ -47,7 +47,6 @@ from lab_tracker.store_health import (
     DEFAULT_STORE_HEALTH_SINGLEFLIGHT_WAIT_SECONDS,
     StoreHealth,
     StoreHealthStatus,
-    StoreProbeTarget,
 )
 from lab_tracker.store_health_admission import (
     DEFAULT_STORE_HEALTH_GLOBAL_IN_FLIGHT_LIMIT,
@@ -987,54 +986,49 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(
         assert captured["health_rclone_deadline_seconds"] == 7.25
         assert captured["health_git_deadline_seconds"] == 7.25
 
-        binding_identity = sealed_binding_identity()
-        local_health_target = StoreProbeTarget(
+        local_health_target = unsafe_probe_target_for_adapter_test(
             store_id=UUID(int=4),
             name="runtime-local-wiring",
             kind=StoreKind.LOCAL_FS,
             root=str(settings_local_root),
             endpoint=None,
             credential_ref=None,
-            authority_binding_identity=binding_identity,
         )
         assert runtime.store_health_checker(local_health_target).is_healthy
         assert captured["local_health_target"] is local_health_target
         assert "legacy_health_target" not in captured
 
-        http_health_target = StoreProbeTarget(
+        http_health_target = unsafe_probe_target_for_adapter_test(
             store_id=UUID(int=1),
             name="runtime-http-wiring",
             kind=StoreKind.HTTP,
             root="http://10.20.1.7/artifact.bin",
             endpoint=None,
             credential_ref=None,
-            authority_binding_identity=binding_identity,
         )
         assert runtime.store_health_checker(http_health_target).is_healthy
         assert captured["http_health_target"] is http_health_target
         assert "legacy_health_target" not in captured
 
-        rclone_health_target = StoreProbeTarget(
+        rclone_health_target = unsafe_probe_target_for_adapter_test(
             store_id=UUID(int=2),
             name="runtime-rclone-wiring",
             kind=StoreKind.RCLONE,
             root="/",
             endpoint=None,
             credential_ref="settings-remote",
-            authority_binding_identity=binding_identity,
         )
         assert runtime.store_health_checker(rclone_health_target).is_healthy
         assert captured["rclone_health_target"] is rclone_health_target
         assert "legacy_health_target" not in captured
 
-        git_health_target = StoreProbeTarget(
+        git_health_target = unsafe_probe_target_for_adapter_test(
             store_id=UUID(int=3),
             name="runtime-wiring",
             kind=StoreKind.GIT,
             root="https://settings.example/lab/repo.git",
             endpoint=None,
             credential_ref=None,
-            authority_binding_identity=binding_identity,
         )
         assert runtime.store_health_checker(git_health_target).is_healthy
         assert captured["git_health_target"] is git_health_target

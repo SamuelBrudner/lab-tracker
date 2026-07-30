@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError, fields, replace
+from dataclasses import FrozenInstanceError, fields
 from uuid import UUID
 
 import pytest
@@ -11,7 +11,7 @@ from http_security_fakes import (
     FakeSafeHttpClient,
     RecordingPinnedConnector,
 )
-from store_authority_fakes import sealed_binding_identity
+from store_authority_fakes import unsafe_probe_target_for_adapter_test
 
 from lab_tracker.http_store_health import HttpStoreHealthProbe
 from lab_tracker.models import StoreKind
@@ -31,9 +31,6 @@ from lab_tracker.store_health import (
 
 _PUBLIC_IP = "93.184.216.34"
 _SECOND_PUBLIC_IP = "142.250.72.14"
-_SEALED_IDENTITY = sealed_binding_identity()
-
-
 def _target(
     *,
     root: str = "https://store.example/base",
@@ -41,14 +38,13 @@ def _target(
     kind: StoreKind = StoreKind.HTTP,
     credential_ref: str | None = "vault:store-secret",
 ) -> StoreProbeTarget:
-    return StoreProbeTarget(
+    return unsafe_probe_target_for_adapter_test(
         store_id=UUID(int=1),
         name="web",
         kind=kind,
         root=root,
         endpoint=endpoint,
         credential_ref=credential_ref,
-        authority_binding_identity=_SEALED_IDENTITY,
     )
 
 
@@ -647,8 +643,7 @@ def test_non_http_target_fails_closed_without_dns_or_client() -> None:
     probe, client, dns = _probe()
 
     result = probe(
-        replace(
-            _target(),
+        _target(
             kind=StoreKind.LOCAL_FS,
             root="https://store.example/base",
         )

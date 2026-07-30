@@ -5,7 +5,7 @@ from dataclasses import FrozenInstanceError, fields
 from uuid import UUID
 
 import pytest
-from store_authority_fakes import sealed_binding_identity
+from store_authority_fakes import unsafe_probe_target_for_adapter_test
 
 from lab_tracker.bounded_subprocess import (
     MAX_PROCESS_DEADLINE_SECONDS,
@@ -75,17 +75,15 @@ def _target(
     *,
     kind: StoreKind = StoreKind.LOCAL_FS,
 ) -> StoreProbeTarget:
-    # The sealed identity is deliberately independent of ``root``: these tests
-    # hand the probe raw, uncanonicalized operator paths, which is exactly what
-    # a definition validator would refuse to mint an identity from.
-    return StoreProbeTarget(
+    # These downstream adapter tests deliberately cover malformed legacy-shaped
+    # values that the normal proof-bound target factory refuses to construct.
+    return unsafe_probe_target_for_adapter_test(
         store_id=UUID(int=3),
         name="local-store",
         kind=kind,
         root=root,
         endpoint=None,
         credential_ref=None,
-        authority_binding_identity=sealed_binding_identity(),
     )
 
 

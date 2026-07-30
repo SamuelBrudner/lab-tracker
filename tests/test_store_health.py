@@ -7,7 +7,7 @@ from dataclasses import FrozenInstanceError, fields, replace
 from uuid import UUID
 
 import pytest
-from store_authority_fakes import bound_authority_proof, sealed_binding_identity
+from store_authority_fakes import bound_authority_proof
 
 from lab_tracker.artifact_resolution import check_store_health
 from lab_tracker.data_store_definition import ValidatedDataStoreDefinition
@@ -32,12 +32,6 @@ from lab_tracker.store_health import (
     StoreHealthStatus,
     StoreProbeTarget,
 )
-
-# One sealed identity shared by the synthetic targets below.  A probe target's
-# cache identity is the whole field tuple, so holding this constant is what lets
-# the cache-key tests prove that store_id/name/root/endpoint/credential_ref each
-# still discriminate on their own.
-PROBE_BINDING_IDENTITY = sealed_binding_identity()
 
 
 class _FakeClock:
@@ -84,15 +78,14 @@ class _ObservedCache(CachedStoreHealthProbe):
 
 
 def _target(number: int = 1) -> StoreProbeTarget:
-    return StoreProbeTarget(
+    proof = bound_authority_proof(
         store_id=UUID(int=number),
         name=f"store-{number}",
         kind=StoreKind.HTTP,
-        root=f"https://store-{number}.example/data",
-        endpoint=f"https://store-{number}.example",
-        credential_ref=f"credential-{number}",
-        authority_binding_identity=PROBE_BINDING_IDENTITY,
+        root=f"https://store-{number}.example/data/",
+        project_id=UUID(int=10_000 + number),
     )
+    return StoreProbeTarget.from_authority_proof(proof)
 
 
 def _proof_backed_target(*, grant_id: str) -> StoreProbeTarget:
@@ -151,6 +144,7 @@ def _proof_backed_target(*, grant_id: str) -> StoreProbeTarget:
 
 def test_probe_target_has_exact_immutable_hashable_snapshot_fields() -> None:
     target = _target()
+    matching = _target()
 
     assert [field.name for field in fields(StoreProbeTarget)] == [
         "store_id",
@@ -161,7 +155,8 @@ def test_probe_target_has_exact_immutable_hashable_snapshot_fields() -> None:
         "credential_ref",
         "authority_binding_identity",
     ]
-    assert hash(target) == hash(replace(target))
+    assert target == matching
+    assert hash(target) == hash(matching)
     assert not hasattr(target, "__dict__")
     with pytest.raises(FrozenInstanceError):
         target.name = "changed"  # type: ignore[misc]
@@ -179,29 +174,24 @@ def test_probe_target_detaches_only_probe_fields_from_the_authority_proof() -> N
 
     target = StoreProbeTarget.from_authority_proof(proof)
 
-    assert target == StoreProbeTarget(
-        store_id=UUID(int=7),
-        name="archive",
-        kind=StoreKind.S3,
-        root="/root",
-        endpoint=None,
-        credential_ref="archive-remote",
-        authority_binding_identity=proof.binding_identity,
-    )
+    assert target.store_id == UUID(int=7)
+    assert target.name == "archive"
+    assert target.kind is StoreKind.S3
+    assert target.root == "/root"
+    assert target.endpoint is None
+    assert target.credential_ref == "archive-remote"
     assert target.authority_binding_identity is proof.binding_identity
     for persistence_only in ("project_id", "group_id", "is_default", "created_by"):
         assert not hasattr(target, persistence_only)
 
 
-def test_probe_target_exposes_no_factory_that_skips_authority() -> None:
-    """Keep the deleted raw-row factory deleted.
+def test_probe_target_exposes_only_the_authority_proof_factory() -> None:
+    """Keep every normal construction path bound to a complete use-time proof.
 
     ``from_store`` built a probe target straight from a registered row, with no
-    proof that the operator still authorizes it.  The ``__post_init__`` guard
-    would now reject its result, so re-adding it could not reopen the hole --
-    but it would reintroduce an API whose entire purpose was to skip authority,
-    and nothing else in the suite notices it coming back.
-    ``from_authority_proof`` is deliberately the only way in.
+    proof that the operator still authorizes it. The dataclass constructor is
+    deliberately incompatible with the target fields as well, so a sealed
+    identity cannot be copied onto unrelated adapter inputs.
     """
 
     factories = {
@@ -212,7 +202,16 @@ def test_probe_target_exposes_no_factory_that_skips_authority() -> None:
     assert factories == {"from_authority_proof"}
 
 
-def test_probe_target_cannot_be_built_without_a_sealed_authority_identity() -> None:
+def test_probe_target_cannot_be_directly_built_or_retargeted() -> None:
+    proof = bound_authority_proof(
+        name="archive",
+        kind=StoreKind.S3,
+        root="/root",
+        credential_ref="archive-remote",
+        project_id=UUID(int=8),
+        store_id=UUID(int=7),
+    )
+    target = StoreProbeTarget.from_authority_proof(proof)
     probe_fields: dict[str, object] = {
         "store_id": UUID(int=7),
         "name": "archive",
@@ -220,19 +219,24 @@ def test_probe_target_cannot_be_built_without_a_sealed_authority_identity() -> N
         "root": "/root",
         "endpoint": None,
         "credential_ref": "archive-remote",
+        "authority_binding_identity": proof.binding_identity,
     }
 
     with pytest.raises(TypeError):
         StoreProbeTarget(**probe_fields)  # type: ignore[arg-type]
-    for unsealed in (None, object(), "sag-v1-sha256:forged"):
-        with pytest.raises(
-            ValueError,
-            match=r"^Store probe target requires a sealed authority identity\.$",
-        ):
-            StoreProbeTarget(  # type: ignore[arg-type]
-                **probe_fields,
-                authority_binding_identity=unsealed,
-            )
+    with pytest.raises(
+        TypeError,
+        match=r"^Store probe target requires an authority use proof\.$",
+    ):
+        StoreProbeTarget(proof, _factory_token=object())
+    with pytest.raises(TypeError):
+        replace(target)
+    with pytest.raises(TypeError):
+        replace(
+            target,
+            kind=StoreKind.GIT,
+            root="ssh://git@unapproved.example/repository",
+        )
 
 
 def test_probe_target_factory_carries_authority_identity_and_redacts_repr() -> None:
@@ -277,15 +281,16 @@ def test_store_health_is_immutable_hashable_and_serializes_canonically() -> None
 
 
 def test_legacy_adapter_accepts_the_detached_structural_target() -> None:
-    target = replace(
-        _target(),
+    store = DataStore(
+        store_id=UUID(int=55),
+        project_id=UUID(int=56),
+        name="database-reference",
         kind=StoreKind.DATABASE,
         root="database-reference",
-        endpoint=None,
-        credential_ref=None,
+        capabilities=[StoreCapability.QUERY],
     )
 
-    assert check_store_health(target) == StoreHealth(
+    assert check_store_health(store) == StoreHealth(
         StoreHealthStatus.UNSUPPORTED,
         "Health checks for 'database' stores are not supported yet.",
     )
@@ -359,26 +364,11 @@ def test_exact_target_cache_hit_returns_same_result_and_makes_no_second_probe() 
     assert cache.in_flight_count == 0
 
 
-@pytest.mark.parametrize(
-    ("field_name", "changed_value"),
-    [
-        ("store_id", UUID(int=99)),
-        ("name", "renamed"),
-        ("kind", StoreKind.GIT),
-        ("root", "/changed"),
-        ("endpoint", None),
-        ("credential_ref", None),
-        ("authority_binding_identity", sealed_binding_identity()),
-    ],
-)
-def test_every_target_field_participates_in_the_exact_cache_key(
-    field_name: str,
-    changed_value: object,
-) -> None:
+def test_distinct_proof_bound_targets_do_not_share_cache_entries() -> None:
     probe = _RecordingProbe()
     cache = CachedStoreHealthProbe(probe)
-    original = _target()
-    changed = replace(original, **{field_name: changed_value})
+    original = _target(1)
+    changed = _target(99)
 
     cache(original)
     cache(changed)

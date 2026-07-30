@@ -7,7 +7,7 @@ from typing import Any
 from uuid import UUID
 
 import pytest
-from store_authority_fakes import sealed_binding_identity
+from store_authority_fakes import unsafe_probe_target_for_adapter_test
 
 from lab_tracker.bounded_subprocess import (
     DEFAULT_PROCESS_STDERR_LIMIT_BYTES,
@@ -40,18 +40,6 @@ _RCLONE_BACKED_KINDS = (
     StoreKind.ONEDRIVE,
     StoreKind.RCLONE,
 )
-# One sealed use-time identity, held constant across every probe target: these
-# tests exercise rclone adapter mechanics -- including deliberately malformed
-# remotes and roots -- and a target can no longer exist without proven
-# authority.
-_BINDING_IDENTITY = sealed_binding_identity(
-    kind=StoreKind.RCLONE,
-    name="lab-remote",
-    root="experiments",
-    credential_ref="lab-remote",
-)
-
-
 class FakeClock:
     def __init__(self, now: float = 100.0) -> None:
         self.now = now
@@ -130,14 +118,13 @@ def _target(
     root: str = "experiments",
     credential_ref: str | None = "lab-remote",
 ) -> StoreProbeTarget:
-    return StoreProbeTarget(
+    return unsafe_probe_target_for_adapter_test(
         store_id=UUID(int=1),
         name=name,
         kind=kind,
         root=root,
         endpoint=None,
         credential_ref=credential_ref,
-        authority_binding_identity=_BINDING_IDENTITY,
     )
 
 
