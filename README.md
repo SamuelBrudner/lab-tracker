@@ -8,9 +8,10 @@ only at the bench or in your head, add a one-line note or photo; a voice memo is
 an option, not a prerequisite.
 
 Everything lands staged. AI proposes how it fits among your questions, data,
-claims, and figures; you decide what it means. The system takes on the filing
-without taking away the judgment, so next week's meeting and next year's report
-can begin with the scientific thread already assembled.
+claims, and figures; you simply tell it if it got anything wrong. Nothing enters
+the durable record until you approve it. The system takes on the filing without
+taking away the judgment, so next week's meeting and next year's report can
+begin with the scientific thread already assembled.
 
 A file named `2025_12_10_Rig2_session001.nwb` says when and where it was
 collected. It rarely says *why* it exists, what you expected, or what you
