@@ -22,6 +22,7 @@ from lab_tracker.store_authority_registry import (
     StoreAuthorityRegistry,
     StoreAuthorityRegistryError,
 )
+from lab_tracker.store_authority_use import FixedStoreAuthoritySnapshotProvider
 
 TEST_STORE_AUTHORITY_GRANT_ID = "test-store-authority"
 
@@ -34,6 +35,11 @@ class ExactCandidateTestStoreAuthority:
     production, while this adapter builds a real one-candidate registry so the
     registry remains the component that creates the sealed proof.
     """
+
+    def __call__(self) -> ExactCandidateTestStoreAuthority:
+        """Provide this test-only dynamic authority at the use-time boundary."""
+
+        return self
 
     def authorize(
         self,
@@ -100,6 +106,26 @@ def install_exact_candidate_store_authority(application) -> None:
     root_api = application.state.lab_tracker_api
     root_api._store_authority_registry = authority
     root_api.data_stores.store_authority_registry = authority
+    application.state.store_authority_snapshot_provider = authority
+
+
+def install_use_time_store_authority(
+    application,
+    registry: StoreAuthorityRegistry,
+) -> None:
+    """Replace only the *use-time* provider with a real fixed snapshot.
+
+    Registration keeps the permissive exact-candidate authority so a test can
+    still create the store it wants to exercise, while the use-time boundary
+    sees exactly ``registry``.  Passing a registry that does not cover a store
+    expresses operator revocation or a narrowed boundary -- the case the shared
+    fixture's self-authorizing provider cannot represent.
+    """
+
+    application.state.store_authority_snapshot_provider = (
+        FixedStoreAuthoritySnapshotProvider(registry)
+    )
+
 
 # Registry of test-owned resources awaiting deterministic
 # teardown. Populated by the helpers here (and the two hand-rolled builders in

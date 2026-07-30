@@ -2,17 +2,26 @@ from __future__ import annotations
 
 import hashlib
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, dataclass, replace
 from datetime import datetime, timezone
 from threading import Barrier
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
+from store_authority_fakes import (
+    ExplodingSnapshotProvider,
+    RecordingSnapshotProvider,
+    bound_data_store,
+    empty_registry,
+    grant_payload,
+    registry_from_grants,
+)
 
 from lab_tracker.application.context_queries import (
     ContextQueries,
     PreparedExternalArtifactResolution,
+    _PreparedRemoteStoreResolutionPlan,
 )
 from lab_tracker.artifact_resolution import (
     GitStoreResolutionTarget,
@@ -28,12 +37,21 @@ from lab_tracker.artifact_resolution_limits import (
     MAX_INLINE_ARTIFACT_BYTES,
 )
 from lab_tracker.auth import AuthContext, Role
+from lab_tracker.data_store_definition import ValidatedDataStoreDefinition
 from lab_tracker.errors import NotFoundError, ValidationError
 from lab_tracker.models import (
     DataStore,
     ExternalArtifactReference,
+    StoreCapability,
     StoreKind,
 )
+from lab_tracker.store_authority_registry import (
+    GroupStoreScope,
+    ProjectStoreScope,
+    StoreAuthorityRegistry,
+    StoreAuthorityScope,
+)
+from lab_tracker.store_authority_use import detach_store_authority_binding
 
 
 def _sha256(content: bytes) -> str:
@@ -439,6 +457,15 @@ def _registered_store_fixture(
     tmp_path,
     store_kind: StoreKind,
 ) -> tuple[UUID, ExternalArtifactReference, DataStore]:
+    """Build one deliberately *unbound* legacy row for every store kind.
+
+    The row carries no stored capabilities, no persisted grant identifier, no
+    persisted grant fingerprint, and (for HTTP) a separate endpoint, so
+    ``detach_store_authority_binding`` fails closed on it.  This is the
+    pre-lab-tracker-n5kp.63.3 shape, not the bound shape that reaches the
+    use-time revalidation boundary -- see ``_bound_remote_store`` below.
+    """
+
     project_id = uuid4()
     store_name = f"registered-{store_kind.value}"
     roots = {
@@ -536,7 +563,7 @@ def _assert_registered_store_is_statically_unavailable(
     "store_kind",
     (StoreKind.LOCAL_FS, StoreKind.HTTP, StoreKind.RCLONE, StoreKind.GIT),
 )
-def test_every_registered_store_kind_fails_closed_before_target_or_resolver_work(
+def test_every_unbound_legacy_store_row_fails_closed_before_target_or_resolver_work(
     tmp_path,
     store_kind: StoreKind,
 ):
@@ -544,6 +571,12 @@ def test_every_registered_store_kind_fails_closed_before_target_or_resolver_work
         _prepare_registered_store(tmp_path, store_kind)
     )
 
+    # Every row here is legacy/unbound by construction, so none of these cases
+    # claims anything about a bound remote store. LOCAL_FS additionally stays
+    # statically fail-closed while bound, which
+    # ``test_bound_local_store_stays_statically_fail_closed_for_bead_63_5``
+    # pins for lab-tracker-n5kp.63.5.
+    assert detach_store_authority_binding(store) is None
     _assert_registered_store_is_statically_unavailable(prepared)
     assert lookup.names == [store.name]
 
@@ -923,3 +956,544 @@ def test_scope_release_base_exception_prevents_result_and_resolver_work(tmp_path
 
     assert calls == ["release"]
     assert registry.prepared_targets == []
+
+
+_BOUND_STORE_NAME = "bound-remote"
+_BOUND_GIT_COMMIT = "0123456789abcdef" * 4
+_FULL_REMOTE_CAPABILITIES = (
+    StoreCapability.BYTES_BY_PATH,
+    StoreCapability.BYTE_RANGE,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _BoundRemoteStoreShape:
+    """Canonical registered-definition inputs for one remote store kind."""
+
+    root: str
+    credential_ref: str | None
+    locator: str
+
+
+_BOUND_REMOTE_STORE_SHAPES = {
+    StoreKind.HTTP: _BoundRemoteStoreShape(
+        root="https://bound.example.test/base/",
+        credential_ref=None,
+        locator="artifact.bin",
+    ),
+    StoreKind.S3: _BoundRemoteStoreShape(
+        root="/bound/base",
+        credential_ref="bound-remote-credential",
+        locator="artifact.bin",
+    ),
+    StoreKind.GIT: _BoundRemoteStoreShape(
+        root="https://git.example.test/repository.git",
+        credential_ref=None,
+        locator=f"artifact.bin@{_BOUND_GIT_COMMIT}",
+    ),
+}
+
+
+class _RevokingSnapshotProvider(RecordingSnapshotProvider):
+    """Revoke every grant immediately after the one in-flight capture.
+
+    The registry handed back is still the granting snapshot, so a request that
+    already captured it must complete; the next request must see the revocation.
+    """
+
+    def __call__(self) -> StoreAuthorityRegistry:
+        captured = super().__call__()
+        self.registry = empty_registry()
+        return captured
+
+
+def _exploding_snapshot_provider(_registry, *, events):
+    """Ignore the granting registry: this path must never capture a snapshot."""
+
+    return ExplodingSnapshotProvider()
+
+
+def _unwired_snapshot_provider(_registry, *, events):
+    """Leave the use-time provider composition seam empty."""
+
+    return None
+
+
+@dataclass(frozen=True, slots=True)
+class _BoundRemoteStoreHarness:
+    """One genuinely bound remote store wired to a use-time authority provider.
+
+    Unlike ``_registered_store_fixture``, the persisted row carries the canonical
+    definition, the complete stored capability set, and the exact grant
+    identifier and fingerprint a real registry minted, so resolution reaches the
+    post-release revalidation boundary instead of short-circuiting on the legacy
+    unbound branch.
+    """
+
+    queries: ContextQueries
+    project_id: UUID
+    reference: ExternalArtifactReference
+    store: DataStore
+    scope: StoreAuthorityScope
+    registry: StoreAuthorityRegistry
+    provider: object
+    resolver: _ResolverRegistry
+    lookup: _DataStoreLookup
+    events: list[str]
+
+    def prepare(
+        self,
+        *,
+        byte_start: int | None = None,
+        byte_end: int | None = None,
+    ) -> PreparedExternalArtifactResolution:
+        return self.queries.prepare_external_artifact_resolution(
+            actor=AuthContext(user_id="reader", role=Role.VIEWER),
+            entity_type="dataset",
+            entity_id=uuid4(),
+            artifact_index=0,
+            content_hash=None,
+            max_bytes=64,
+            byte_start=byte_start,
+            byte_end=byte_end,
+        )
+
+    def resolve(
+        self,
+        *,
+        byte_start: int | None = None,
+        byte_end: int | None = None,
+    ) -> dict[str, object]:
+        return self.queries.resolve_prepared_external_artifact(
+            self.prepare(byte_start=byte_start, byte_end=byte_end)
+        )
+
+
+def _bound_remote_store(
+    *,
+    store_kind: StoreKind = StoreKind.HTTP,
+    capabilities: tuple[StoreCapability, ...] = _FULL_REMOTE_CAPABILITIES,
+    locator: str | None = None,
+    group_scoped: bool = False,
+    snapshot_provider_factory=RecordingSnapshotProvider,
+) -> _BoundRemoteStoreHarness:
+    """Mint one bound remote store and the queries that must revalidate it."""
+
+    shape = _BOUND_REMOTE_STORE_SHAPES[store_kind]
+    project_id = uuid4()
+    store, registry, scope = bound_data_store(
+        name=_BOUND_STORE_NAME,
+        kind=store_kind,
+        root=shape.root,
+        credential_ref=shape.credential_ref,
+        capabilities=capabilities,
+        project_id=None if group_scoped else project_id,
+        group_id=uuid4() if group_scoped else None,
+    )
+    reference = ExternalArtifactReference.for_store(
+        store_name=_BOUND_STORE_NAME,
+        locator=shape.locator if locator is None else locator,
+        content_hash=_sha256(b"ok"),
+    )
+    events: list[str] = []
+    lookup = _DataStoreLookup(store)
+    resolver = _ResolverRegistry(events)
+    provider = snapshot_provider_factory(registry, events=events)
+    return _BoundRemoteStoreHarness(
+        queries=ContextQueries(
+            api=_ContextApi(project_id=project_id, reference=reference),
+            repository=_ContextRepository(lookup),
+            session=object(),
+            release_read_scope=lambda: events.append("release"),
+            resolver_registry=resolver,
+            store_authority_snapshot_provider=provider,
+        ),
+        project_id=project_id,
+        reference=reference,
+        store=store,
+        scope=scope,
+        registry=registry,
+        provider=provider,
+        resolver=resolver,
+        lookup=lookup,
+        events=events,
+    )
+
+
+def _assert_opaque_store_denial(result: dict[str, object]) -> None:
+    """Assert the one static shape every use-time denial must return."""
+
+    assert result["status"] == "unresolved"
+    assert result["source_system"] == "store"
+    assert result["uri"] == "store://[redacted]"
+    assert result["observed_hash"] is None
+    assert result["content_base64"] is None
+    assert result["returned_bytes"] == 0
+    assert result["detail"] == "Store artifact could not be resolved."
+
+
+@pytest.mark.parametrize("store_kind", (StoreKind.HTTP, StoreKind.S3, StoreKind.GIT))
+def test_bound_remote_store_captures_one_authority_snapshot_after_scope_release(
+    store_kind: StoreKind,
+):
+    harness = _bound_remote_store(store_kind=store_kind)
+
+    prepared = harness.prepare()
+
+    # The caller-visible handle stays the opaque static result even when the
+    # private plan is a real remote capability.
+    _assert_registered_store_is_statically_unavailable(prepared)
+
+    result = harness.queries.resolve_prepared_external_artifact(prepared)
+
+    # Exactly one capture, strictly after the database scope is released and
+    # strictly before the resolver registry is dispatched.
+    assert harness.events == ["release", "authority", "resolve-prepared"]
+    assert harness.provider.calls == 1
+    assert harness.resolver.parameters == [(64, None)]
+    assert result["status"] == "verified"
+
+    # The target can only have been minted from the captured proof, which pins
+    # construction after the capture rather than before it.
+    target = harness.resolver.prepared_targets[0]
+    identity = target.authority_binding_identity
+    assert identity.store_id == harness.store.store_id
+    assert identity.grant_id == harness.store.authority_grant_id
+    assert identity.fingerprint == harness.store.authority_grant_fingerprint
+    assert harness.store.authority_grant_fingerprint not in repr(target)
+    assert harness.store.authority_grant_fingerprint not in str(result)
+
+
+def test_revoked_bound_remote_store_denies_before_any_resolver_work():
+    harness = _bound_remote_store()
+    harness.provider.registry = empty_registry()
+
+    result = harness.resolve()
+
+    assert harness.events == ["release", "authority"]
+    assert harness.provider.calls == 1
+    assert harness.resolver.prepared_targets == []
+    assert harness.resolver.http_targets == []
+    _assert_opaque_store_denial(result)
+
+
+def test_widened_grant_keeps_the_grant_id_but_denies_the_stored_fingerprint():
+    harness = _bound_remote_store()
+    binding = detach_store_authority_binding(harness.store)
+    assert binding is not None
+    widened = registry_from_grants(
+        [
+            grant_payload(
+                scope=harness.scope,
+                definition=ValidatedDataStoreDefinition.create(
+                    name=_BOUND_STORE_NAME,
+                    kind=StoreKind.HTTP,
+                    root="https://bound.example.test/",
+                    endpoint=None,
+                    credential_ref=None,
+                ),
+                capabilities=_FULL_REMOTE_CAPABILITIES,
+                grant_id=harness.store.authority_grant_id,
+            )
+        ]
+    )
+
+    # The widened grant still authorizes the persisted definition under the same
+    # grant identifier, so the only thing that can deny the request is the
+    # fingerprint comparison.
+    reauthorized = widened.authorize(
+        grant_id=harness.store.authority_grant_id,
+        scope=harness.scope,
+        candidate=binding.definition,
+        capabilities=binding.capabilities,
+    )
+    assert reauthorized is not None
+    assert reauthorized.grant_id == harness.store.authority_grant_id
+    assert reauthorized.fingerprint != harness.store.authority_grant_fingerprint
+
+    harness.provider.registry = widened
+    result = harness.resolve()
+
+    assert harness.events == ["release", "authority"]
+    assert harness.provider.calls == 1
+    assert harness.resolver.prepared_targets == []
+    _assert_opaque_store_denial(result)
+
+
+@pytest.mark.parametrize("group_scoped", (False, True))
+def test_equivalent_opposite_scope_grant_denies_the_bound_remote_store(
+    group_scoped: bool,
+):
+    harness = _bound_remote_store(group_scoped=group_scoped)
+    binding = detach_store_authority_binding(harness.store)
+    assert binding is not None
+    mirrored_scope = (
+        ProjectStoreScope(harness.scope.group_id)
+        if group_scoped
+        else GroupStoreScope(harness.scope.project_id)
+    )
+    harness.provider.registry = registry_from_grants(
+        [
+            grant_payload(
+                scope=mirrored_scope,
+                definition=binding.definition,
+                capabilities=_FULL_REMOTE_CAPABILITIES,
+                grant_id=harness.store.authority_grant_id,
+            )
+        ]
+    )
+
+    result = harness.resolve()
+
+    assert harness.events == ["release", "authority"]
+    assert harness.provider.calls == 1
+    assert harness.resolver.prepared_targets == []
+    _assert_opaque_store_denial(result)
+
+
+def test_bound_store_without_bytes_by_path_denies_before_capture_or_resolver_work():
+    harness = _bound_remote_store(
+        capabilities=(StoreCapability.BYTE_RANGE,),
+        snapshot_provider_factory=_exploding_snapshot_provider,
+    )
+
+    result = harness.resolve()
+
+    assert harness.events == ["release"]
+    assert harness.resolver.prepared_targets == []
+    assert harness.lookup.names == [_BOUND_STORE_NAME]
+    _assert_opaque_store_denial(result)
+
+
+def test_bound_store_without_byte_range_denies_only_the_range_request():
+    harness = _bound_remote_store(capabilities=(StoreCapability.BYTES_BY_PATH,))
+
+    ranged = harness.resolve(byte_start=0, byte_end=1)
+
+    assert harness.events == ["release"]
+    assert harness.provider.calls == 0
+    assert harness.resolver.prepared_targets == []
+    _assert_opaque_store_denial(ranged)
+
+    whole = harness.resolve()
+
+    assert harness.events == ["release", "release", "authority", "resolve-prepared"]
+    assert harness.provider.calls == 1
+    assert harness.resolver.parameters == [(64, None)]
+    assert whole["status"] == "verified"
+
+
+def test_bound_store_with_byte_range_capability_resolves_the_range_request():
+    harness = _bound_remote_store()
+
+    result = harness.resolve(byte_start=0, byte_end=1)
+
+    assert harness.events == ["release", "authority", "resolve-prepared"]
+    assert harness.provider.calls == 1
+    assert harness.resolver.parameters == [(64, (0, 1))]
+    assert result["status"] == "verified"
+
+
+def test_authority_change_is_point_in_time_around_the_single_capture():
+    harness = _bound_remote_store(
+        snapshot_provider_factory=_RevokingSnapshotProvider,
+    )
+
+    in_flight = harness.resolve()
+
+    # The revocation landed after this request captured its snapshot, so the
+    # captured snapshot -- not a reread -- decided it.
+    assert harness.events == ["release", "authority", "resolve-prepared"]
+    assert harness.provider.calls == 1
+    assert in_flight["status"] == "verified"
+
+    after_revocation = harness.resolve()
+
+    # The same revocation is visible before the next capture and denies it.
+    assert harness.events == [
+        "release",
+        "authority",
+        "resolve-prepared",
+        "release",
+        "authority",
+    ]
+    assert harness.provider.calls == 2
+    assert len(harness.resolver.prepared_targets) == 1
+    _assert_opaque_store_denial(after_revocation)
+
+
+def test_unwired_authority_provider_denies_bound_remote_store_resolution():
+    harness = _bound_remote_store(
+        snapshot_provider_factory=_unwired_snapshot_provider,
+    )
+
+    result = harness.resolve()
+
+    assert harness.queries.store_authority_snapshot_provider is None
+    assert harness.events == ["release"]
+    assert harness.resolver.prepared_targets == []
+    _assert_opaque_store_denial(result)
+
+
+def test_bound_remote_store_has_one_concurrent_winner_and_one_capture():
+    harness = _bound_remote_store()
+    prepared = harness.prepare()
+    start = Barrier(2)
+
+    def resolve() -> dict[str, object]:
+        start.wait()
+        return harness.queries.resolve_prepared_external_artifact(prepared)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = [
+            future.result()
+            for future in (executor.submit(resolve), executor.submit(resolve))
+        ]
+
+    assert harness.provider.calls == 1
+    assert len(harness.resolver.prepared_targets) == 1
+    assert sorted(result["source_system"] for result in results) == [
+        "artifact",
+        "store",
+    ]
+    winner = next(result for result in results if result["source_system"] == "store")
+    loser = next(result for result in results if result["source_system"] == "artifact")
+    assert winner["status"] == "verified"
+    assert loser["status"] == "unresolved"
+    assert loser["uri"] == "artifact://[redacted]"
+    assert loser["content_base64"] is None
+
+
+def test_malformed_locator_on_a_granted_store_is_distinguishable_from_denial():
+    """Pin the shipped invalid/unavailable split at the granted-store boundary.
+
+    Bead lab-tracker-n5kp.63.4 asks for indistinguishable opaque failures.  Today
+    a malformed locator against a store that exists, is granted, and declares the
+    required capability still reports ``Store artifact reference is invalid.``
+    while both an authority denial and a missing store report ``Store artifact
+    could not be resolved.``, so ``detail`` remains a registered-store existence
+    oracle.  This records the shipped behavior, not the intended behavior.
+    """
+
+    granted = _bound_remote_store(
+        locator="../secret.bin",
+        snapshot_provider_factory=_exploding_snapshot_provider,
+    )
+    missing = _bound_remote_store(
+        locator="../secret.bin",
+        snapshot_provider_factory=_exploding_snapshot_provider,
+    )
+    missing.lookup.store = None
+    denied = _bound_remote_store()
+    denied.provider.registry = empty_registry()
+
+    invalid = granted.resolve()
+    unregistered = missing.resolve()
+    unavailable = denied.resolve()
+
+    assert granted.events == ["release"]
+    assert granted.resolver.prepared_targets == []
+    assert missing.resolver.prepared_targets == []
+    assert denied.resolver.prepared_targets == []
+    for result in (invalid, unregistered, unavailable):
+        assert result["status"] == "unresolved"
+        assert result["source_system"] == "store"
+        assert result["uri"] == "store://[redacted]"
+        assert result["content_base64"] is None
+    assert "secret.bin" not in str(invalid)
+
+    # The one field that still separates "this store exists and is granted" from
+    # every other outcome.
+    assert invalid["detail"] == "Store artifact reference is invalid."
+    _assert_opaque_store_denial(unregistered)
+    _assert_opaque_store_denial(unavailable)
+
+
+def test_bound_local_store_stays_statically_fail_closed_for_bead_63_5(tmp_path):
+    project_id = uuid4()
+    store, _registry, _scope = bound_data_store(
+        name="bound-local",
+        kind=StoreKind.LOCAL_FS,
+        root=str(tmp_path / "operator-secret-local-root"),
+        project_id=project_id,
+    )
+    reference = ExternalArtifactReference.for_store(
+        store_name="bound-local",
+        locator="artifact.bin",
+        content_hash=_sha256(b"ok"),
+    )
+    events: list[str] = []
+    resolver = _ResolverRegistry(events)
+    queries = ContextQueries(
+        api=_ContextApi(project_id=project_id, reference=reference),
+        repository=_ContextRepository(_DataStoreLookup(store)),
+        session=object(),
+        release_read_scope=lambda: events.append("release"),
+        resolver_registry=resolver,
+        store_authority_snapshot_provider=ExplodingSnapshotProvider(),
+    )
+
+    prepared = queries.prepare_external_artifact_resolution(
+        actor=AuthContext(user_id="reader", role=Role.VIEWER),
+        entity_type="dataset",
+        entity_id=uuid4(),
+        artifact_index=0,
+        content_hash=None,
+        max_bytes=64,
+        byte_start=None,
+        byte_end=None,
+    )
+    result = queries.resolve_prepared_external_artifact(prepared)
+
+    assert detach_store_authority_binding(store) is not None
+    _assert_registered_store_is_statically_unavailable(prepared)
+    assert events == ["release"]
+    assert resolver.prepared_targets == []
+    assert resolver.local_targets == []
+    _assert_opaque_store_denial(result)
+    assert "operator-secret-local-root" not in str(result)
+
+
+def test_post_release_capability_recheck_denies_a_plan_it_did_not_authorize():
+    """Pin the defense-in-depth capability gate inside the post-release boundary.
+
+    ``_resolve_store`` already refuses an undeclared capability before a plan
+    exists, so through the public API the second check in
+    ``_authorize_remote_store_plan`` is unreachable and can be deleted without
+    any test noticing.  Its whole value is re-proving the requirement on the
+    far side of the database release, where the plan is the only surviving
+    input, so drive that boundary directly with a plan whose required
+    capabilities exceed what the binding declares.
+    """
+
+    harness = _bound_remote_store(
+        capabilities=(StoreCapability.BYTES_BY_PATH,),
+        snapshot_provider_factory=_exploding_snapshot_provider,
+    )
+    prepared = harness.prepare()
+    record = harness.queries._prepared_external_artifact_resolutions[
+        prepared._authorization
+    ]
+    plan = record.materialized
+    assert type(plan) is _PreparedRemoteStoreResolutionPlan
+    assert plan.required_capabilities == (StoreCapability.BYTES_BY_PATH,)
+
+    widened = replace(
+        plan,
+        required_capabilities=(
+            StoreCapability.BYTES_BY_PATH,
+            StoreCapability.BYTE_RANGE,
+        ),
+    )
+    result = harness.queries._authorize_remote_store_plan(widened)
+
+    # The exploding provider proves the denial precedes the snapshot capture,
+    # and the opaque static result proves no target was ever minted.
+    assert result is widened.unavailable_result
+    assert type(result) is ResolvedArtifact
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.source_system == "store"
+    assert result.uri == "store://[redacted]"
+    assert result.content is None
+    assert result.detail == "Store artifact could not be resolved."
+    assert harness.resolver.prepared_targets == []

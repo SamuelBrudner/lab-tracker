@@ -7,6 +7,7 @@ from typing import Any
 from uuid import UUID
 
 import pytest
+from store_authority_fakes import unsafe_probe_target_for_adapter_test
 
 from lab_tracker.bounded_subprocess import (
     DEFAULT_PROCESS_STDERR_LIMIT_BYTES,
@@ -39,8 +40,6 @@ _RCLONE_BACKED_KINDS = (
     StoreKind.ONEDRIVE,
     StoreKind.RCLONE,
 )
-
-
 class FakeClock:
     def __init__(self, now: float = 100.0) -> None:
         self.now = now
@@ -119,7 +118,7 @@ def _target(
     root: str = "experiments",
     credential_ref: str | None = "lab-remote",
 ) -> StoreProbeTarget:
-    return StoreProbeTarget(
+    return unsafe_probe_target_for_adapter_test(
         store_id=UUID(int=1),
         name=name,
         kind=kind,

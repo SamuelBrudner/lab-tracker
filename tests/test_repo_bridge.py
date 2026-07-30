@@ -193,17 +193,15 @@ def test_git_code_pin_canonicalizes_unicode_and_internal_at_identity() -> None:
 
 def test_git_code_pin_resolves_through_git_store() -> None:
     # The pin's locator must be exactly what store_relative_reference expects.
-    from uuid import uuid4
+    from store_authority_fakes import bound_authority_proof
 
     from lab_tracker.artifact_resolution import (
         GitStoreResolutionTarget,
         store_relative_reference,
     )
-    from lab_tracker.models import DataStore, StoreKind
+    from lab_tracker.models import StoreKind
 
-    store = DataStore(
-        store_id=uuid4(),
-        project_id=uuid4(),
+    proof = bound_authority_proof(
         name="analysis-repo",
         kind=StoreKind.GIT,
         root="https://example.com/org/repo.git",
@@ -216,7 +214,7 @@ def test_git_code_pin_resolves_through_git_store() -> None:
     )
 
     concrete = store_relative_reference(
-        store, path=pin.locator, content_hash=pin.content_hash
+        proof, path=pin.locator, content_hash=pin.content_hash
     )
 
     assert isinstance(concrete, GitStoreResolutionTarget)

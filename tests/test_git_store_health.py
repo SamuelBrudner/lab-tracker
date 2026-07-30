@@ -9,6 +9,7 @@ from typing import Any
 from uuid import UUID
 
 import pytest
+from store_authority_fakes import unsafe_probe_target_for_adapter_test
 
 from lab_tracker.bounded_subprocess import (
     MAX_PROCESS_DEADLINE_SECONDS,
@@ -111,7 +112,7 @@ def _target(
     root: str = _REMOTE,
     kind: StoreKind = StoreKind.GIT,
 ) -> StoreProbeTarget:
-    return StoreProbeTarget(
+    return unsafe_probe_target_for_adapter_test(
         store_id=UUID(int=2),
         name="repository",
         kind=kind,
