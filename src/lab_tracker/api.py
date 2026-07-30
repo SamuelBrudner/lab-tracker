@@ -11,8 +11,10 @@ from uuid import UUID
 
 from lab_tracker.api_parts import (
     AnalysesApiMixin,
+    CollectionsApiMixin,
     DatasetsApiMixin,
     EvidenceBundlesApiMixin,
+    ExperimentsApiMixin,
     ExplorationApiMixin,
     GoalsApiMixin,
     GraphDraftsApiMixin,
@@ -37,6 +39,7 @@ from lab_tracker.note_storage import LocalNoteStorage
 from lab_tracker.repository import LabTrackerRepository
 from lab_tracker.request_context import LabTrackerRequestContext
 from lab_tracker.services import (
+    AcquisitionCollectionService,
     AnalysisService,
     BatchSchedulingCoordinator,
     ClaimService,
@@ -44,6 +47,7 @@ from lab_tracker.services import (
     DataStoreService,
     EntityVersionService,
     EvidenceBundleService,
+    ExperimentService,
     ExplorationService,
     GoalService,
     GraphContextBuilder,
@@ -86,8 +90,10 @@ class LabTrackerAPI(
     QuestionsApiMixin,
     NotesApiMixin,
     DatasetsApiMixin,
+    ExperimentsApiMixin,
     EvidenceBundlesApiMixin,
     SessionsApiMixin,
+    CollectionsApiMixin,
     AnalysesApiMixin,
     GoalsApiMixin,
     GraphDraftsApiMixin,
@@ -160,6 +166,21 @@ class LabTrackerAPI(
             questions=self.questions,
             datasets_provider=lambda: self.datasets,
             authorization=self.project_authorization,
+        )
+        self.experiments: ExperimentService = ExperimentService(
+            context,
+            projects=self.projects,
+            questions=self.questions,
+            sessions_provider=lambda: self.sessions,
+            datasets_provider=lambda: self.datasets,
+            authorization=self.project_authorization,
+        )
+        self.acquisition_collections: AcquisitionCollectionService = (
+            AcquisitionCollectionService(
+                context,
+                sessions=self.sessions,
+                authorization=self.project_authorization,
+            )
         )
         self.analyses: AnalysisService = AnalysisService(
             context,

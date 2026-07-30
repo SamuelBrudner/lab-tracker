@@ -89,6 +89,7 @@ class GraphPatchApplier:
         ref_map: dict[str, UUID],
         actor: AuthContext | None,
         change_set: GraphChangeSet,
+        dataset_locks_held: bool = False,
     ) -> EntityResult:
         payload = resolve_refs(operation.payload, ref_map)
         if not isinstance(payload, dict):
@@ -110,6 +111,7 @@ class GraphPatchApplier:
             operation_semantic=operation.semantic_type,
             actor=actor,
             origin_kwargs=origin_kwargs,
+            dataset_locks_held=dataset_locks_held,
         )
 
     def _create_graph_entity(
@@ -257,6 +259,7 @@ class GraphPatchApplier:
         operation_semantic: GraphDraftSemanticType | None,
         actor: AuthContext | None,
         origin_kwargs: dict[str, Any],
+        dataset_locks_held: bool,
     ) -> EntityResult:
         if not payload:
             raise ValidationError("Update operation payload must include at least one field.")
@@ -296,6 +299,7 @@ class GraphPatchApplier:
             return self.datasets.update_dataset(
                 entity_id,
                 actor=actor,
+                experiment_dataset_locks_held=dataset_locks_held,
                 **origin_kwargs,
                 **provided_fields(data),
             )

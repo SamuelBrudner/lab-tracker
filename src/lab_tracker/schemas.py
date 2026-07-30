@@ -34,6 +34,7 @@ from lab_tracker.models import (
     DataStore,
     EntityRef,
     EntityType,
+    ExperimentStatus,
     ExplorationNode,
     ExplorationNodeStatus,
     ExplorationNodeType,
@@ -465,6 +466,21 @@ class QuestionRefactorResult(BaseModel):
     source_question: Question
     replacement_question: Question
     refactor: QuestionRefactor
+
+
+class ExperimentCreate(RequestModel):
+    project_id: UUID
+    name: NonBlankStr
+    primary_question_id: UUID
+    description: str | None = None
+
+
+class ExperimentUpdate(PatchRequestModel):
+    non_nullable_fields = frozenset({"name", "status"})
+
+    name: NonBlankStr | SkipJsonSchema[None] = None
+    description: str | None = None
+    status: ExperimentStatus | SkipJsonSchema[None] = None
 
 
 class DatasetCreate(RequestModel):

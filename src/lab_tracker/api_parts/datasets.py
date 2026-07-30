@@ -86,9 +86,14 @@ class DatasetsApiMixin:
         dataset_id: UUID,
         *,
         actor: AuthContext | None = None,
+        experiment_dataset_locks_held: bool = False,
     ) -> Dataset:
         return self._with_usage_event(
-            lambda: self.datasets.delete_dataset(dataset_id, actor=actor),
+            lambda: self.datasets.delete_dataset(
+                dataset_id,
+                actor=actor,
+                experiment_dataset_locks_held=experiment_dataset_locks_held,
+            ),
             verb=UsageEventVerb.DELETE,
             resource_type=UsageEventResourceType.DATASET,
             actor=actor,
