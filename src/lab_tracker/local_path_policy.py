@@ -11,19 +11,20 @@ import os
 import re
 import stat
 from collections.abc import MutableSequence, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import unquote_to_bytes, urlsplit
 from urllib.request import url2pathname
 
+from lab_tracker.local_path_syntax import (
+    is_reserved_windows_component as is_reserved_windows_component,
+)
+from lab_tracker.local_path_syntax import (
+    parse_windows_absolute_local_path,
+)
+
 _PERCENT_ESCAPE = re.compile(r"%[0-9A-Fa-f]{2}")
 _WINDOWS_FILE_URI_PATH = re.compile(r"^/[A-Za-z]:/")
-_WINDOWS_DEVICE_PREFIXES = ("\\\\?\\", "\\\\.\\", "\\??\\")
-_WINDOWS_RESERVED_CHARACTERS = frozenset('"*:<>?|')
-_WINDOWS_RESERVED_NAMES = frozenset(
-    {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"}
-    | {f"COM{suffix}" for suffix in "123456789¹²³"}
-    | {f"LPT{suffix}" for suffix in "123456789¹²³"}
-)
 
 
 def _has_control_characters(value: str) -> bool:
@@ -64,21 +65,7 @@ def _is_supported_absolute_path(path: str) -> bool:
         # closed rather than treating it as an authorityless UNC alias.
         return not path.startswith("//")
 
-    if path.startswith(_WINDOWS_DEVICE_PREFIXES):
-        return False
-    drive, tail = os.path.splitdrive(path)
-    if drive.startswith(("\\\\", "//")):
-        return False
-    if not (
-        len(drive) == 2
-        and drive[0].isascii()
-        and drive[0].isalpha()
-        and drive[1] == ":"
-        and tail.startswith(("\\", "/"))
-    ):
-        return False
-    components = re.split(r"[\\/]", tail)
-    return not any(is_reserved_windows_component(name) for name in components if name)
+    return parse_windows_absolute_local_path(path, allow_navigation=False) is not None
 
 
 def is_supported_absolute_local_root(root: str | os.PathLike[str]) -> bool:
@@ -95,23 +82,6 @@ def is_supported_absolute_local_root(root: str | os.PathLike[str]) -> bool:
     except TypeError:
         return False
     return isinstance(raw_root, str) and _is_supported_absolute_path(raw_root)
-
-
-def is_reserved_windows_component(name: str) -> bool:
-    """Return whether one component has reserved Windows filesystem syntax.
-
-    This is deliberately platform-independent so logical local-store locators
-    and native Windows paths share one portable definition.
-    """
-
-    if not name:
-        return False
-    if name[-1:] in (".", " ") and name not in (".", ".."):
-        return True
-    if any(character in _WINDOWS_RESERVED_CHARACTERS for character in name):
-        return True
-    stem = name.partition(".")[0].rstrip(" ").upper()
-    return stem in _WINDOWS_RESERVED_NAMES
 
 
 def native_local_path_from_uri(uri: str) -> str | None:
@@ -144,15 +114,9 @@ def native_local_path_from_uri(uri: str) -> str | None:
     if parsed.netloc and parsed.netloc.lower() != "localhost":
         return None
     raw_path = parsed.path
-    if (
-        not raw_path
-        or _has_malformed_percent_escape(raw_path)
-        or _has_encoded_separator(raw_path)
-    ):
+    if not raw_path or _has_malformed_percent_escape(raw_path) or _has_encoded_separator(raw_path):
         return None
-    if os.name == "nt" and (
-        "\\" in raw_path or _WINDOWS_FILE_URI_PATH.match(raw_path) is None
-    ):
+    if os.name == "nt" and ("\\" in raw_path or _WINDOWS_FILE_URI_PATH.match(raw_path) is None):
         # Python 3.10/3.11 nturl2path scans backward from the first colon and
         # would alias malformed paths such as /garbageC:/x to C:\x.  Accept
         # only the slash-separated drive-path shape emitted by
@@ -197,9 +161,7 @@ def _is_contained(candidate: str, root: str, *, canonical: bool) -> bool:
         root_drive, root_tail = os.path.splitdrive(root_key)
         if candidate_drive != root_drive:
             return False
-        candidate_parts = tuple(
-            part for part in re.split(r"[\\/]", candidate_tail) if part
-        )
+        candidate_parts = tuple(part for part in re.split(r"[\\/]", candidate_tail) if part)
         root_parts = tuple(part for part in re.split(r"[\\/]", root_tail) if part)
         return (
             len(candidate_parts) >= len(root_parts)
@@ -224,6 +186,7 @@ def _is_link_or_reparse_point(path: str) -> bool:
     return bool(reparse_flag and attributes & reparse_flag)
 
 
+@dataclass(frozen=True, slots=True, init=False, eq=False, repr=False)
 class LocalPathPolicy:
     """Prepare native local paths against optional canonical allowed roots.
 
@@ -233,26 +196,36 @@ class LocalPathPolicy:
     byte readers must still bind final authorization to the opened descriptor.
     """
 
+    _lexical_roots: tuple[str, ...] | None
+    _canonical_roots: tuple[str, ...] | None
+    _recovery_roots: tuple[str, ...] | None
+
     def __init__(self, allowed_roots: Sequence[str | Path] | None = None) -> None:
         if allowed_roots is None:
-            self._lexical_roots: tuple[str, ...] | None = None
-            self._canonical_roots: tuple[str, ...] | None = None
+            object.__setattr__(self, "_lexical_roots", None)
+            object.__setattr__(self, "_canonical_roots", None)
+            object.__setattr__(self, "_recovery_roots", None)
             return
 
         lexical_roots: list[str] = []
         canonical_roots: list[str] = []
+        recovery_roots: list[str] = []
         seen_lexical: set[str] = set()
         for root in allowed_roots:
             try:
-                lexical = os.path.abspath(os.fspath(Path(root).expanduser()))
-            except (OSError, TypeError, ValueError) as exc:
-                raise ValueError("Local resolver roots must be valid local paths.") from exc
+                expanded = os.fspath(Path(root).expanduser())
+                lexical = os.path.abspath(expanded)
+            except (OSError, RuntimeError, TypeError, ValueError):
+                raise ValueError("Local resolver roots must be valid local paths.") from None
             if not _is_supported_absolute_path(lexical):
                 raise ValueError("Local resolver roots must be absolute local paths.")
             try:
-                canonical = os.path.realpath(lexical)
-            except (OSError, ValueError) as exc:
-                raise ValueError("Local resolver roots could not be canonicalized.") from exc
+                # Preserve unresolved ``..`` components until realpath follows
+                # preceding links. Lexically collapsing ``link/..`` first can
+                # authorize a different directory from native path traversal.
+                canonical = os.path.realpath(expanded)
+            except (OSError, RuntimeError, ValueError):
+                raise ValueError("Local resolver roots could not be canonicalized.") from None
             if not _is_supported_absolute_path(canonical):
                 raise ValueError("Local resolver roots must resolve to local paths.")
             lexical_key = _lexical_path_key(lexical)
@@ -263,28 +236,56 @@ class LocalPathPolicy:
             # Recovery must not walk one canonical tree twice through aliases
             # or overlapping roots.  Keep the broadest unique authorities.
             if any(
-                _is_contained(canonical, existing, canonical=True)
-                for existing in canonical_roots
+                _is_contained(canonical, existing, canonical=True) for existing in canonical_roots
             ):
                 continue
-            canonical_roots = [
-                existing
-                for existing in canonical_roots
+            retained_indexes = [
+                index
+                for index, existing in enumerate(canonical_roots)
                 if not _is_contained(existing, canonical, canonical=True)
             ]
+            canonical_roots = [canonical_roots[index] for index in retained_indexes]
+            recovery_roots = [recovery_roots[index] for index in retained_indexes]
             canonical_roots.append(canonical)
-        self._lexical_roots = tuple(lexical_roots)
-        self._canonical_roots = tuple(canonical_roots)
+            recovery_roots.append(lexical)
+        object.__setattr__(self, "_lexical_roots", tuple(lexical_roots))
+        object.__setattr__(self, "_canonical_roots", tuple(canonical_roots))
+        object.__setattr__(self, "_recovery_roots", tuple(recovery_roots))
+
+    @classmethod
+    def from_config(cls, raw: str | None) -> LocalPathPolicy:
+        """Parse an ``os.pathsep``-separated operator root configuration.
+
+        This preserves the historical environment parser: unset, empty, and
+        whitespace-only values deny every local path; empty components are
+        omitted; and non-empty components retain their exact spelling for the
+        constructor's existing relative/tilde normalization.
+        """
+
+        if raw is not None and not isinstance(raw, str):
+            raise TypeError("Local resolver root configuration must be a string.")
+        allowed_roots = [part for part in raw.split(os.pathsep) if part.strip()] if raw else []
+        return cls(allowed_roots)
 
     @property
     def canonical_roots(self) -> tuple[str, ...] | None:
-        """Unique broadest canonical roots suitable for recovery walking."""
+        """Return unique broadest physical roots for containment comparisons."""
 
         return self._canonical_roots
 
-    def restricted_to_absolute_root(
-        self, root: str | os.PathLike[str]
-    ) -> LocalPathPolicy | None:
+    @property
+    def lexical_roots(self) -> tuple[str, ...] | None:
+        """Return every unique operator spelling for helper authority."""
+
+        return self._lexical_roots
+
+    @property
+    def recovery_roots(self) -> tuple[str, ...] | None:
+        """Return one authorized spelling per broadest canonical walk root."""
+
+        return self._recovery_roots
+
+    def restricted_to_absolute_root(self, root: str | os.PathLike[str]) -> LocalPathPolicy | None:
         """Return this authority narrowed to one complete registered-store root.
 
         An unscoped operator policy delegates exactly the store root.  An
@@ -294,13 +295,17 @@ class LocalPathPolicy:
         registered store.
         """
 
-        if not is_supported_absolute_local_root(root):
-            return None
         if self._canonical_roots == ():
             return None
         try:
-            lexical_root = os.path.normpath(os.fspath(root))
+            raw_root = os.fspath(root)
         except (OSError, TypeError, ValueError):
+            return None
+        if not is_supported_absolute_local_root(raw_root):
+            return None
+        try:
+            lexical_root = os.path.normpath(raw_root)
+        except (OSError, ValueError):
             return None
         if self._canonical_roots is not None:
             precheck_roots = (
@@ -313,8 +318,10 @@ class LocalPathPolicy:
             ):
                 return None
         try:
-            canonical_root = os.path.realpath(lexical_root)
-        except (OSError, ValueError):
+            # Canonicalize the original spelling so a link followed by ``..``
+            # retains native filesystem traversal semantics.
+            canonical_root = os.path.realpath(raw_root)
+        except (OSError, RuntimeError, ValueError):
             return None
         if not is_supported_absolute_local_root(canonical_root):
             return None
@@ -384,10 +391,7 @@ class LocalPathPolicy:
         if self._canonical_roots is not None:
             lexical_roots = self._lexical_roots or ()
             precheck_roots = (*lexical_roots, *self._canonical_roots)
-            if not any(
-                _is_contained(native, root, canonical=False)
-                for root in precheck_roots
-            ):
+            if not any(_is_contained(native, root, canonical=False) for root in precheck_roots):
                 return None
         try:
             canonical = os.path.realpath(native)
@@ -404,14 +408,9 @@ class LocalPathPolicy:
 
         if self._canonical_roots is None:
             return True
-        return any(
-            _is_contained(path, root, canonical=True)
-            for root in self._canonical_roots
-        )
+        return any(_is_contained(path, root, canonical=True) for root in self._canonical_roots)
 
-    def prune_walk_directories(
-        self, directory: str, children: MutableSequence[str]
-    ) -> None:
+    def prune_walk_directories(self, directory: str, children: MutableSequence[str]) -> None:
         """Prune link/reparse and escaping children from a top-down ``os.walk``."""
 
         kept: list[str] = []

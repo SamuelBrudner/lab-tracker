@@ -1,6 +1,7 @@
 # Build-vs-Buy Boundaries
 
 Validated: June 1, 2026. Pipeline and lineage boundary added June 26, 2026.
+Agentic-data tool landscape appended July 6, 2026.
 
 This document records the Lab Tracker responsibility boundary decisions from
 `lab-tracker-m3l`. It extends the retained-v1 surface rather than replacing it.
@@ -175,3 +176,44 @@ decisions:
 - eLabFTW, Benchling, RSpace, and LabArchives remain active ELN references:
   https://doc.elabftw.net/, https://www.benchling.com/notebook,
   https://www.researchspace.com/features, and https://www.labarchives.com/
+
+### Agentic-Data Tool Landscape (checked July 6, 2026)
+
+Six agentic-data-stack tools were evaluated against the server-resident
+drafting design. None was adopted — the deployment topology (SQLite solo,
+zero-sidecar desktop launcher) excludes every external engine among them —
+but the facts are recorded here and the fit reasoning lives in
+`server-resident-agentic-drafting-design.md` ("Adjacent tool landscape").
+
+- PuppyGraph is a proprietary zero-ETL graph query engine (openCypher/Gremlin)
+  over relational sources including Postgres; no SQLite connector, no embedded
+  mode, Docker-server-only with an 8 GB developer minimum, free developer
+  edition capped at two sources:
+  https://docs.puppygraph.com/ and https://www.puppygraph.com/pricing
+- Upriver is an enterprise agentic data-engineering SaaS over cloud warehouses
+  (Snowflake, Databricks, BigQuery; $14M seed announced June 11, 2026); no
+  self-hosted or Postgres/SQLite path:
+  https://upriverdata.com/
+- Compass (Dagster Labs) is a closed-SaaS, Slack-native, governed text-to-SQL
+  analyst (GA November 13, 2025); read-only against the warehouse with a
+  human-approved context store:
+  https://compass.dagster.io/
+- Malloy remains MIT-licensed and actively released (core v0.0.421, July
+  2026); Malloy Publisher serves semantic models to agents over MCP with
+  read-only grounding tools. TypeScript/Node runtime, no SQLite connector,
+  and `malloy-py` stale since February 2025 keep it a design reference
+  rather than a dependency:
+  https://github.com/malloydata/malloy and
+  https://github.com/malloydata/publisher
+- fenic (typedef) is an Apache-2.0 Python dataframe framework for batch LLM
+  inference — typed structured extraction, rate limiting, caching, row-level
+  lineage; embeds in-process with no sidecar. Pre-1.0 (v0.10.0, June 25,
+  2026) from a seed-stage vendor:
+  https://github.com/typedef-ai/fenic and https://docs.fenic.ai/latest/
+- Ascend.io is winding down operations as of mid-2026 (site replaced by a
+  shutdown notice; changelog stopped April 21, 2026), a year after its
+  "agentic data engineering" relaunch and roughly $54M raised. Removed from
+  consideration as a pipeline defer target — the Kedro/DVC/Snakemake
+  references above are unaffected — and retained as a cautionary example of
+  why adapters to venture-backed platforms must stay thin and optional:
+  https://www.ascend.io/

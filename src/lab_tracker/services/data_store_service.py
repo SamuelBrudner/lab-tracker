@@ -3,27 +3,51 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from itertools import islice
+from typing import cast
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext
+from lab_tracker.data_store_definition import (
+    DataStoreDefinitionError,
+    ValidatedDataStoreDefinition,
+)
 from lab_tracker.errors import (
     ConflictError,
+    DataStorePersistenceError,
     NotFoundError,
     OpaqueTargetNotFoundError,
+    StoreAuthorityDeniedError,
     ValidationError,
 )
-from lab_tracker.local_path_policy import is_supported_absolute_local_root
-from lab_tracker.local_store_locator import is_valid_local_store_name
 from lab_tracker.models import (
     DataStore,
     StoreCapability,
     StoreKind,
     default_store_capabilities,
 )
+from lab_tracker.repository import (
+    DataStoreForeignKeyRaceError,
+    DataStoreInsertError,
+    DataStoreNameRaceError,
+)
 from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.project_service import ProjectService
-from lab_tracker.services.shared import actor_user_fk, actor_user_id, ensure_non_empty
+from lab_tracker.services.shared import actor_user_fk, actor_user_id
+from lab_tracker.store_authority_registry import (
+    GroupStoreScope,
+    ProjectStoreScope,
+    StoreAuthorityRegistry,
+)
+
+STORE_AUTHORITY_DENIED_MESSAGE = "Data store authority is unavailable."
+DATA_STORE_NAME_CONFLICT_MESSAGE = (
+    "A data store with this name already exists in the selected scope."
+)
+DATA_STORE_CONTEXT_CONFLICT_MESSAGE = (
+    "Data store registration context changed before it could be saved."
+)
 
 
 class DataStoreService(BaseService):
@@ -33,10 +57,12 @@ class DataStoreService(BaseService):
         *,
         projects: ProjectService,
         authorization: ProjectAuthorizationPolicy,
+        store_authority_registry: StoreAuthorityRegistry,
     ) -> None:
         super().__init__(context)
         self.projects = projects
         self.authorization = authorization
+        self.store_authority_registry = store_authority_registry
 
     def create_data_store(
         self,
@@ -49,6 +75,7 @@ class DataStoreService(BaseService):
         capabilities: Iterable[StoreCapability] | None = None,
         endpoint: str | None = None,
         credential_ref: str | None = None,
+        authority_grant_id: str | None = None,
         is_default: bool = False,
         actor: AuthContext | None = None,
     ) -> DataStore:
@@ -56,65 +83,93 @@ class DataStoreService(BaseService):
             raise ValidationError(
                 "A data store must be scoped to exactly one of project_id or group_id."
             )
+        authority_scope: ProjectStoreScope | GroupStoreScope
         if project_id is not None:
-            self.projects.get_project(project_id)
             self.authorization.require_contributor(project_id, actor=actor)
-            scope_label = "project"
+            self.projects.get_project(project_id)
+            authority_scope = ProjectStoreScope(project_id)
         else:
+            if group_id is None:  # pragma: no cover - guarded by the XOR above
+                raise RuntimeError("Data-store scope invariant was violated.")
             self.authorization.require_group_owner(group_id, actor=actor)
-            scope_label = "group"
-        ensure_non_empty(name, "name")
-        ensure_non_empty(root, "root")
-        if kind is StoreKind.LOCAL_FS and not is_valid_local_store_name(name):
-            raise ValidationError(
-                "Local filesystem store name must use 1-63 ASCII letters, digits, dots, "
-                "underscores, or hyphens and must start with a letter or digit."
+            self.projects.get_project_group(group_id)
+            authority_scope = GroupStoreScope(group_id)
+        try:
+            definition = ValidatedDataStoreDefinition.create(
+                name=name,
+                kind=kind,
+                root=root,
+                endpoint=endpoint,
+                credential_ref=credential_ref,
             )
-        if kind is StoreKind.LOCAL_FS and not is_supported_absolute_local_root(
-            root
-        ):
-            raise ValidationError(
-                "Local filesystem store root must be a supported absolute local path."
-            )
-        stored_name = name if kind is StoreKind.LOCAL_FS else name.strip()
-        stored_root = root if kind is StoreKind.LOCAL_FS else root.strip()
-        resolved_capabilities = (
-            list(capabilities) if capabilities is not None else default_store_capabilities(kind)
+        except DataStoreDefinitionError as exc:
+            raise ValidationError(str(exc)) from None
+        resolved_capabilities = _bounded_effective_capabilities(
+            capabilities,
+            kind=definition.kind,
         )
+        proof = (
+            self.store_authority_registry.authorize(
+                grant_id=authority_grant_id,
+                scope=authority_scope,
+                candidate=definition,
+                capabilities=resolved_capabilities,
+            )
+            if authority_grant_id is not None
+            else None
+        )
+        if proof is None:
+            raise StoreAuthorityDeniedError(STORE_AUTHORITY_DENIED_MESSAGE)
         store = DataStore(
             store_id=uuid4(),
             project_id=project_id,
             group_id=group_id,
-            name=stored_name,
-            kind=kind,
-            capabilities=resolved_capabilities,
-            root=stored_root,
-            endpoint=endpoint.strip() if endpoint else None,
-            credential_ref=credential_ref.strip() if credential_ref else None,
+            name=definition.name,
+            kind=definition.kind,
+            capabilities=list(resolved_capabilities),
+            root=definition.root,
+            endpoint=definition.endpoint,
+            credential_ref=definition.credential_ref,
+            authority_grant_id=proof.grant_id,
+            authority_grant_fingerprint=proof.fingerprint,
             is_default=is_default,
             created_by=actor_user_id(actor),
             created_by_user_id=actor_user_fk(actor, self.repository),
         )
-        with self.unit_of_work() as repository:
-            existing = repository.data_stores.scoped_store_by_name(
-                project_id=project_id, group_id=group_id, name=store.name
-            )
-            if existing is not None:
-                raise ConflictError(
-                    f"A data store named '{store.name}' already exists in this {scope_label}."
-                )
-            repository.data_stores.save(store)
-            if is_default:
-                repository.data_stores.clear_default(
-                    project_id, group_id=group_id, except_store_id=store.store_id
-                )
+        mapped_error: ConflictError | DataStorePersistenceError | None = None
+        try:
+            # Reserve SQLite's single writer only after RBAC, semantic
+            # validation, and exact operator-grant authorization have passed.
+            # The preparation hook runs before the generic SQLite savepoint,
+            # while keeping direct-service failures inside rollback ownership.
+            with self.recoverable_unit_of_work(
+                prepare=lambda repository: repository.data_stores.reserve_registration_write(),
+            ) as repository:
+                repository.data_stores.insert(store)
+                if is_default:
+                    repository.data_stores.clear_default(
+                        project_id,
+                        group_id=group_id,
+                        except_store_id=store.store_id,
+                    )
+        except DataStoreNameRaceError:
+            mapped_error = ConflictError(DATA_STORE_NAME_CONFLICT_MESSAGE)
+        except DataStoreForeignKeyRaceError:
+            mapped_error = ConflictError(DATA_STORE_CONTEXT_CONFLICT_MESSAGE)
+        except DataStoreInsertError:
+            mapped_error = DataStorePersistenceError()
+        if mapped_error is not None:
+            raise mapped_error
         return store
 
     def get_data_store(self, store_id: UUID) -> DataStore:
-        return self.get_from_repository(
-            entity_id=store_id,
-            label="Data store",
-            loader=lambda repository: repository.data_stores.get(store_id),
+        return cast(
+            DataStore,
+            self.get_from_repository(
+                entity_id=store_id,
+                label="Data store",
+                loader=lambda repository: repository.data_stores.get(store_id),
+            ),
         )
 
     def get_data_store_for_read(
@@ -162,3 +217,19 @@ class DataStoreService(BaseService):
             return []
         stores, _ = self.repository.data_stores.query(project_ids=project_ids)
         return stores
+
+
+def _bounded_effective_capabilities(
+    capabilities: Iterable[StoreCapability] | None,
+    *,
+    kind: StoreKind,
+) -> tuple[StoreCapability, ...]:
+    if capabilities is None:
+        return tuple(default_store_capabilities(kind))
+    try:
+        values = tuple(islice(iter(capabilities), len(StoreCapability) + 1))
+    except Exception:
+        raise StoreAuthorityDeniedError(STORE_AUTHORITY_DENIED_MESSAGE) from None
+    if len(values) > len(StoreCapability):
+        raise StoreAuthorityDeniedError(STORE_AUTHORITY_DENIED_MESSAGE)
+    return values

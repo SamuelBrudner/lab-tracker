@@ -75,13 +75,11 @@ support to many IDEs. Because it is read-only, inbound auth can be a single
 shared read-only `lpat_` (or per-user read-only tokens for nicer revocation), and
 no token forwarding is required. Still fronted by TLS + Origin/Host validation.
 
-Current limitation: `lab_tracker_get_decision_context` calls the semantic-read
-`POST /assistant/decision-context`, which is not yet in the LPAT policy's
-explicit allowlist. A read-only LPAT can use ordinary GET-backed read tools and
-the explicitly allowed artifact resolver, but receives `service_forbidden` for
-decision context until that operation is separately reviewed and allowlisted.
-The resolver exception must not be treated as a generic permission for MCP POST
-reads.
+Read-only LPATs can use ordinary GET-backed read tools plus two explicitly
+reviewed semantic-read POSTs: `POST /assistant/decision-context` and
+`POST /external-artifacts/resolve`. Both retain their project/entity
+authorization and opaque-not-found behavior inside the endpoint. Neither exact
+exception is a generic permission for MCP POST reads.
 
 ```
   Mode 1 (stdio, per-user, writes OK)        Mode 2 (hosted, read-only)
@@ -185,12 +183,13 @@ endpoints (`device_principal_can_access`), wrong for a read-everything assistant
   `POST /batches/run-due` (no reads, resolver access, other writes, or
   `/auth/*`). For `scope=all`, `/auth/*` remains denied and ordinary
   `GET`/`HEAD`/`OPTIONS` reads are allowed. Side-effect-free POST reads are
-  admitted only through an explicit semantic-read allowlist; currently that
-  allowlist contains the exact `POST /external-artifacts/resolve` path for
-  `read_only=true` tokens. The existing admin-only `POST /batches/run-due`
-  exception is handled separately. Every other write is denied when
-  `read_only=true`; write-enabled tokens remain role-gated, so a write-enabled
-  viewer does not inherit the resolver exception.
+  admitted only through explicit exact-path checks for
+  `POST /external-artifacts/resolve` and
+  `POST /assistant/decision-context` when `read_only=true`. The existing
+  admin-only `POST /batches/run-due` exception is handled separately. Every
+  other write is denied when `read_only=true`; write-enabled tokens remain
+  role-gated, so a write-enabled viewer does not inherit either semantic-read
+  exception.
 - **Middleware branch** (new `elif` before the JWT `else`):
 
   ```python

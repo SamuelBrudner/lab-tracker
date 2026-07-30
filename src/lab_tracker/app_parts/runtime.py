@@ -22,8 +22,9 @@ from lab_tracker.api import LabTrackerAPI
 from lab_tracker.app_parts.middleware import system_auth_context
 from lab_tracker.artifact_resolution import (
     LAB_TRACKER_GIT_ALLOWED_REMOTES_ENV,
+    LAB_TRACKER_RCLONE_ALLOWED_REMOTES_ENV,
+    RecoveryPolicy,
     ResolverRegistry,
-    StoreHealth,
     check_store_health,
     outbound_http_policy_from_config,
     registry_from_env,
@@ -38,17 +39,33 @@ from lab_tracker.auth import (
     ensure_local_auth_user,
 )
 from lab_tracker.backup import database_lock_path
+from lab_tracker.bounded_subprocess import BoundedSubprocessExecutor, ProcessExecutor
 from lab_tracker.config import Settings
 from lab_tracker.db import get_engine, get_session_factory
 from lab_tracker.file_storage import LocalFileStorageBackend
 from lab_tracker.git_remote_policy import GitRemotePolicy
+from lab_tracker.git_store_health import GitStoreHealthProbe
 from lab_tracker.graph_drafting import GraphDraftClientFactory, make_graph_draft_client
+from lab_tracker.http_store_health import HttpStoreHealthProbe
+from lab_tracker.local_filesystem_authority import LocalFilesystemAuthority
+from lab_tracker.local_filesystem_operations import (
+    BoundedLocalFilesystemOperations,
+)
+from lab_tracker.local_resolution_budget import LocalResolutionLimits
+from lab_tracker.local_store_health import LocalStoreHealthProbe
 from lab_tracker.logging import configure_logging
-from lab_tracker.models import DataStore, ReviewEmailDelivery
+from lab_tracker.models import ReviewEmailDelivery, StoreKind
 from lab_tracker.note_storage import LocalNoteStorage
-from lab_tracker.outbound_http import OutboundHttpPolicy
+from lab_tracker.outbound_http import (
+    OutboundHttpClient,
+    OutboundHttpPolicy,
+    SafeHttpClient,
+)
 from lab_tracker.process_lock import ProcessLock
 from lab_tracker.rate_limit import InMemoryRateLimiter
+from lab_tracker.rclone_remote_policy import RcloneRemotePolicy
+from lab_tracker.rclone_store_definition import is_rclone_store_kind
+from lab_tracker.rclone_store_health import RcloneStoreHealthProbe
 from lab_tracker.review_email_transport import (
     ReviewEmailDeliveryError,
     ReviewEmailProvider,
@@ -59,6 +76,18 @@ from lab_tracker.review_email_transport import (
 )
 from lab_tracker.review_links import sign_review_link
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
+from lab_tracker.store_authority_registry import StoreAuthorityRegistry
+from lab_tracker.store_authority_use import (
+    FixedStoreAuthoritySnapshotProvider,
+    StoreAuthoritySnapshotProvider,
+)
+from lab_tracker.store_health import (
+    CachedStoreHealthProbe,
+    StoreHealth,
+    StoreProbe,
+    StoreProbeTarget,
+)
+from lab_tracker.store_health_admission import StoreHealthAdmission
 
 _logger = logging.getLogger(__name__)
 
@@ -88,23 +117,33 @@ class _OwnedGitHealthWorkdir:
 
 
 @dataclass(frozen=True)
-class StoreHealthChecker:
-    """Apply the runtime's immutable Git policy to every store health probe."""
+class _StoreHealthDispatchProbe:
+    """Dispatch external probes explicitly; retain only safe legacy leaves."""
 
-    git_remote_policy: GitRemotePolicy
-    git_health_workdir: Path
+    local_probe: StoreProbe
+    http_probe: StoreProbe
+    rclone_probe: StoreProbe
+    git_probe: StoreProbe
 
-    def __call__(self, store: DataStore) -> StoreHealth:
-        return check_store_health(
-            store,
-            git_remote_policy=self.git_remote_policy,
-            git_health_cwd=self.git_health_workdir,
-        )
+    def __call__(self, target: StoreProbeTarget) -> StoreHealth:
+        if target.kind is StoreKind.LOCAL_FS:
+            return self.local_probe(target)
+        if target.kind is StoreKind.HTTP:
+            return self.http_probe(target)
+        if is_rclone_store_kind(target.kind):
+            return self.rclone_probe(target)
+        if target.kind is StoreKind.GIT:
+            return self.git_probe(target)
+        return check_store_health(target)
 
 
 @dataclass(frozen=True)
 class AppRuntime:
     settings: Settings
+    store_authority_registry: StoreAuthorityRegistry = field(repr=False)
+    store_authority_snapshot_provider: StoreAuthoritySnapshotProvider = field(
+        repr=False
+    )
     engine: Engine
     session_factory: sessionmaker[Session]
     auth_enabled: bool
@@ -120,12 +159,17 @@ class AppRuntime:
     review_email_provider: ReviewEmailProvider | None
     auth_rate_limiter: InMemoryRateLimiter
     pat_rate_limiter: InMemoryRateLimiter
+    local_filesystem_operations: BoundedLocalFilesystemOperations
     outbound_http_policy: OutboundHttpPolicy
+    outbound_http_client: OutboundHttpClient
+    rclone_remote_policy: RcloneRemotePolicy
     git_remote_policy: GitRemotePolicy
+    process_executor: ProcessExecutor
     resolver_registry: ResolverRegistry
     artifact_resolution_admission: ArtifactResolutionAdmission
+    store_health_admission: StoreHealthAdmission
     git_health_workdir: Path
-    store_health_checker: StoreHealthChecker
+    store_health_checker: CachedStoreHealthProbe
     _git_health_workdir_owner: _OwnedGitHealthWorkdir = field(
         repr=False,
         compare=False,
@@ -138,6 +182,12 @@ class AppRuntime:
 
 
 def build_app_runtime(settings: Settings) -> AppRuntime:
+    store_authority_registry = StoreAuthorityRegistry.from_json(
+        settings.store_authority_grants_json
+    )
+    store_authority_snapshot_provider = FixedStoreAuthoritySnapshotProvider(
+        store_authority_registry
+    )
     configure_logging(settings.log_level)
     outbound_http_policy = outbound_http_policy_from_config(
         allowed_authorities=settings.resolver_http_allowed_authorities,
@@ -147,18 +197,55 @@ def build_app_runtime(settings: Settings) -> AppRuntime:
         settings.git_allowed_remotes,
         variable=LAB_TRACKER_GIT_ALLOWED_REMOTES_ENV,
     )
+    rclone_remote_policy = RcloneRemotePolicy.from_config(
+        settings.rclone_allowed_remotes,
+        variable=LAB_TRACKER_RCLONE_ALLOWED_REMOTES_ENV,
+    )
+    process_executor = BoundedSubprocessExecutor()
+    local_filesystem_operations = BoundedLocalFilesystemOperations(
+        authority=LocalFilesystemAuthority.from_config(
+            settings.resolver_allowed_roots,
+        ),
+        executor=process_executor,
+    )
+    outbound_http_client = SafeHttpClient(
+        timeout=settings.resolver_http_deadline_seconds,
+    )
     git_health_workdir_owner = _OwnedGitHealthWorkdir()
     try:
+        local_recovery = RecoveryPolicy(
+            enabled=settings.resolver_recovery,
+            max_files=settings.resolver_recovery_max_files,
+            max_directories=settings.resolver_recovery_max_directories,
+            max_bytes=settings.resolver_recovery_max_bytes,
+        )
+        local_resolution_limits = LocalResolutionLimits(
+            max_read_bytes=settings.resolver_recovery_max_bytes,
+            deadline_seconds=settings.resolver_subprocess_deadline_seconds,
+        )
         resolver_registry = registry_from_env(
+            local_file_reader=local_filesystem_operations,
+            local_recovery_enumerator=local_filesystem_operations,
+            local_resolution_limits=local_resolution_limits,
+            recovery=local_recovery,
             http_policy=outbound_http_policy,
+            http_client=outbound_http_client,
+            rclone_remote_policy=rclone_remote_policy,
             git_remote_policy=git_remote_policy,
+            process_executor=process_executor,
             http_deadline_seconds=settings.resolver_http_deadline_seconds,
             subprocess_deadline_seconds=settings.resolver_subprocess_deadline_seconds,
         )
         return _build_app_runtime(
             settings,
+            store_authority_registry=store_authority_registry,
+            store_authority_snapshot_provider=store_authority_snapshot_provider,
+            local_filesystem_operations=local_filesystem_operations,
             outbound_http_policy=outbound_http_policy,
+            outbound_http_client=outbound_http_client,
+            rclone_remote_policy=rclone_remote_policy,
             git_remote_policy=git_remote_policy,
+            process_executor=process_executor,
             resolver_registry=resolver_registry,
             git_health_workdir_owner=git_health_workdir_owner,
         )
@@ -170,8 +257,14 @@ def build_app_runtime(settings: Settings) -> AppRuntime:
 def _build_app_runtime(
     settings: Settings,
     *,
+    store_authority_registry: StoreAuthorityRegistry,
+    store_authority_snapshot_provider: StoreAuthoritySnapshotProvider,
+    local_filesystem_operations: BoundedLocalFilesystemOperations,
     outbound_http_policy: OutboundHttpPolicy,
+    outbound_http_client: OutboundHttpClient,
+    rclone_remote_policy: RcloneRemotePolicy,
     git_remote_policy: GitRemotePolicy,
+    process_executor: ProcessExecutor,
     resolver_registry: ResolverRegistry,
     git_health_workdir_owner: _OwnedGitHealthWorkdir,
 ) -> AppRuntime:
@@ -188,9 +281,7 @@ def _build_app_runtime(
 
     auth_service = AuthService(session_factory=session_factory)
     device_auth_service = DeviceAuthService(session_factory=session_factory)
-    personal_access_token_service = PersonalAccessTokenService(
-        session_factory=session_factory
-    )
+    personal_access_token_service = PersonalAccessTokenService(session_factory=session_factory)
     token_service = TokenService(
         settings.auth_secret_key,
         ttl_minutes=settings.auth_token_ttl_minutes,
@@ -211,6 +302,7 @@ def _build_app_runtime(
     lab_tracker_api = LabTrackerAPI(
         raw_storage=raw_note_storage,
         settings=settings,
+        store_authority_registry=store_authority_registry,
     )
     auth_rate_limiter = InMemoryRateLimiter(
         max_attempts=settings.auth_rate_limit_attempts,
@@ -224,13 +316,42 @@ def _build_app_runtime(
         global_in_flight_limit=settings.artifact_resolution_global_in_flight_limit,
         per_actor_in_flight_limit=settings.artifact_resolution_per_actor_in_flight_limit,
     )
-    store_health_checker = StoreHealthChecker(
-        git_remote_policy=git_remote_policy,
-        git_health_workdir=git_health_workdir,
+    store_health_admission = StoreHealthAdmission(
+        global_in_flight_limit=settings.store_health_global_in_flight_limit,
+        per_actor_in_flight_limit=settings.store_health_per_actor_in_flight_limit,
+    )
+    store_health_checker = CachedStoreHealthProbe(
+        _StoreHealthDispatchProbe(
+            local_probe=LocalStoreHealthProbe(
+                inspector=local_filesystem_operations,
+                deadline_seconds=settings.resolver_subprocess_deadline_seconds,
+            ),
+            http_probe=HttpStoreHealthProbe(
+                policy=outbound_http_policy,
+                client=outbound_http_client,
+                deadline_seconds=settings.resolver_http_deadline_seconds,
+            ),
+            rclone_probe=RcloneStoreHealthProbe(
+                policy=rclone_remote_policy,
+                executor=process_executor,
+                deadline_seconds=settings.resolver_subprocess_deadline_seconds,
+            ),
+            git_probe=GitStoreHealthProbe(
+                policy=git_remote_policy,
+                executor=process_executor,
+                workdir=git_health_workdir,
+                deadline_seconds=settings.resolver_subprocess_deadline_seconds,
+            ),
+        ),
+        max_entries=settings.store_health_cache_max_entries,
+        ttl_seconds=settings.store_health_cache_ttl_seconds,
+        singleflight_wait_seconds=settings.store_health_singleflight_wait_seconds,
     )
     review_email_provider = _build_review_email_provider(settings)
     return AppRuntime(
         settings=settings,
+        store_authority_registry=store_authority_registry,
+        store_authority_snapshot_provider=store_authority_snapshot_provider,
         engine=engine,
         session_factory=session_factory,
         auth_enabled=auth_enabled,
@@ -246,10 +367,15 @@ def _build_app_runtime(
         review_email_provider=review_email_provider,
         auth_rate_limiter=auth_rate_limiter,
         pat_rate_limiter=pat_rate_limiter,
+        local_filesystem_operations=local_filesystem_operations,
         outbound_http_policy=outbound_http_policy,
+        outbound_http_client=outbound_http_client,
+        rclone_remote_policy=rclone_remote_policy,
         git_remote_policy=git_remote_policy,
+        process_executor=process_executor,
         resolver_registry=resolver_registry,
         artifact_resolution_admission=artifact_resolution_admission,
+        store_health_admission=store_health_admission,
         git_health_workdir=git_health_workdir,
         store_health_checker=store_health_checker,
         _git_health_workdir_owner=git_health_workdir_owner,
@@ -364,12 +490,7 @@ async def _review_email_worker_loop(app: FastAPI) -> None:
 
 def _process_one_graph_draft_batch_run(app: FastAPI) -> bool:
     with app.state.db_session_factory() as session:
-        api = LabTrackerAPI(
-            raw_storage=app.state.raw_note_storage,
-            repository=SQLAlchemyLabTrackerRepository(session),
-            settings=app.state.settings,
-            surface="background",
-        )
+        api = _background_api(app, session)
         run = api.process_next_graph_draft_batch_run(
             draft_client_factory=app.state.graph_draft_client_factory,
             app_settings=app.state.settings,
@@ -380,12 +501,7 @@ def _process_one_graph_draft_batch_run(app: FastAPI) -> bool:
 
 def _enqueue_due_graph_draft_batches(app: FastAPI) -> None:
     with app.state.db_session_factory() as session:
-        api = LabTrackerAPI(
-            raw_storage=app.state.raw_note_storage,
-            repository=SQLAlchemyLabTrackerRepository(session),
-            settings=app.state.settings,
-            surface="background",
-        )
+        api = _background_api(app, session)
         api.enqueue_due_graph_draft_batches(actor=system_auth_context())
 
 
@@ -394,12 +510,7 @@ def _process_one_review_email(app: FastAPI) -> bool:
     if provider is None:
         return False
     with app.state.db_session_factory() as session:
-        api = LabTrackerAPI(
-            raw_storage=app.state.raw_note_storage,
-            repository=SQLAlchemyLabTrackerRepository(session),
-            settings=app.state.settings,
-            surface="background",
-        )
+        api = _background_api(app, session)
         delivery = api.review_emails.claim_next(
             lease_seconds=app.state.settings.review_email_claim_lease_seconds
         )
@@ -442,6 +553,18 @@ def _process_one_review_email(app: FastAPI) -> bool:
         return True
 
 
+def _background_api(app: FastAPI, session: Session) -> LabTrackerAPI:
+    """Compose one worker API from the process's immutable startup snapshot."""
+
+    return LabTrackerAPI(
+        raw_storage=app.state.raw_note_storage,
+        repository=SQLAlchemyLabTrackerRepository(session),
+        settings=app.state.settings,
+        store_authority_registry=app.state.store_authority_registry,
+        surface="background",
+    )
+
+
 def _review_email_url(
     settings: Settings,
     delivery: ReviewEmailDelivery,
@@ -449,10 +572,7 @@ def _review_email_url(
     base_url = settings.public_base_url.rstrip("/")
     if delivery.event_type == "test":
         return f"{base_url}/app/"
-    if (
-        delivery.change_set_id is None
-        or delivery.recipient_user_id is None
-    ):
+    if delivery.change_set_id is None or delivery.recipient_user_id is None:
         raise ValueError("Review-ready delivery is missing its review binding.")
     token = sign_review_link(
         settings.auth_secret_key,
@@ -516,6 +636,10 @@ def configure_app_state(app: FastAPI, runtime: AppRuntime) -> None:
     app.state.invitation_token_service = runtime.invitation_token_service
     app.state.auth_enabled = runtime.auth_enabled
     app.state.settings = runtime.settings
+    app.state.store_authority_registry = runtime.store_authority_registry
+    app.state.store_authority_snapshot_provider = (
+        runtime.store_authority_snapshot_provider
+    )
     app.state.token_service = runtime.token_service
     app.state.file_storage_backend = runtime.file_storage_backend
     app.state.raw_note_storage = runtime.raw_note_storage
@@ -525,9 +649,12 @@ def configure_app_state(app: FastAPI, runtime: AppRuntime) -> None:
     app.state.auth_rate_limiter = runtime.auth_rate_limiter
     app.state.pat_rate_limiter = runtime.pat_rate_limiter
     app.state.outbound_http_policy = runtime.outbound_http_policy
+    app.state.rclone_remote_policy = runtime.rclone_remote_policy
     app.state.git_remote_policy = runtime.git_remote_policy
+    app.state.process_executor = runtime.process_executor
     app.state.resolver_registry = runtime.resolver_registry
     app.state.artifact_resolution_admission = runtime.artifact_resolution_admission
+    app.state.store_health_admission = runtime.store_health_admission
     app.state.git_health_workdir = runtime.git_health_workdir
     app.state.store_health_checker = runtime.store_health_checker
     app.state.cleanup_git_health_workdir = runtime.cleanup_git_health_workdir

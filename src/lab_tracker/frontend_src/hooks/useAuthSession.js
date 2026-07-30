@@ -8,6 +8,7 @@ import {
   TOKEN_STORAGE_KEY,
 } from "../shared/constants.js";
 import { isStaticDemoEnabled } from "../shared/static-demo-api.js";
+import { clearAllLocalDrafts } from "./useLocalDraft.js";
 
 const { useCallback, useEffect, useMemo, useState } = React;
 const REFRESH_MARGIN_MS = 5 * 60 * 1000;
@@ -320,6 +321,9 @@ function useAuthSession({ replace, setBusy, setFlash, storage }) {
       replace("/app");
       return;
     }
+    // localStorage is per-origin, so unsent research prose would otherwise be
+    // offered to whoever signs in next on a shared lab machine.
+    clearAllLocalDrafts();
     clearSession();
     setAuthBootstrapToken("");
     setAuthPassword("");

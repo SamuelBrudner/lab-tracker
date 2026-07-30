@@ -1238,6 +1238,8 @@ def data_store_to_model(store: DataStore) -> DataStoreModel:
         root=store.root,
         endpoint=store.endpoint,
         credential_ref=store.credential_ref,
+        authority_grant_id=store.authority_grant_id,
+        authority_grant_fingerprint=store.authority_grant_fingerprint,
         is_default=store.is_default,
         created_by=store.created_by,
         created_by_user_id=(
@@ -1261,30 +1263,14 @@ def data_store_from_model(row: DataStoreModel) -> DataStore:
         root=row.root,
         endpoint=row.endpoint,
         credential_ref=row.credential_ref,
+        authority_grant_id=row.authority_grant_id,
+        authority_grant_fingerprint=row.authority_grant_fingerprint,
         is_default=bool(row.is_default),
         created_by=row.created_by,
         created_by_user_id=(row.created_by_user_id if row.created_by_user_id else None),
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
-
-
-def apply_data_store_to_model(row: DataStoreModel, store: DataStore) -> None:
-    row.project_id = store.project_id if store.project_id is not None else None
-    row.group_id = store.group_id if store.group_id is not None else None
-    row.name = store.name
-    row.kind = store.kind.value
-    row.capabilities = [capability.value for capability in store.capabilities]
-    row.root = store.root
-    row.endpoint = store.endpoint
-    row.credential_ref = store.credential_ref
-    row.is_default = store.is_default
-    row.created_by = store.created_by
-    row.created_by_user_id = (
-        store.created_by_user_id if store.created_by_user_id is not None else None
-    )
-    row.created_at = store.created_at
-    row.updated_at = store.updated_at
 
 
 def evidence_bundle_record_to_model(record: EvidenceBundleRecord) -> EvidenceBundleModel:

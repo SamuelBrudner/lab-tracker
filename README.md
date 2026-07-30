@@ -1,10 +1,17 @@
 # Lab Tracker
 
-**Lab Tracker turns the notes, photos, voice memos, and figures you already
-produce into a connected account of what changed, why it mattered, and what
-evidence supports it—so next week's meeting and next year's report start from a
-scientific thread already assembled.** Capture evidence while you work, let AI
-propose where it belongs, and decide what enters the durable record yourself.
+**Lab Tracker captures the work your lab already does—with as little extra
+effort as possible—and preserves the reasoning behind it.** Figures can register
+when you save them, analysis runs can carry their exact code version, and
+existing output folders can be watched for new evidence. When context exists
+only at the bench or in your head, add a one-line note or photo; a voice memo is
+an option, not a prerequisite.
+
+Everything lands staged. AI proposes how it fits among your questions, data,
+claims, and figures; you simply tell it if it got anything wrong. Nothing enters
+the durable record until you approve it. The system takes on the filing without
+taking away the judgment, so next week's meeting and next year's report can
+begin with the scientific thread already assembled.
 
 A file named `2025_12_10_Rig2_session001.nwb` says when and where it was
 collected. It rarely says *why* it exists, what you expected, or what you

@@ -1,20 +1,26 @@
 import base64
 import hashlib
-import threading
-from concurrent.futures import ThreadPoolExecutor
+import json
 from pathlib import Path
+from uuid import UUID
 
 import pytest
+from api_helpers import (
+    TEST_STORE_AUTHORITY_GRANT_ID,
+    install_use_time_store_authority,
+)
 from http_security_fakes import (
     FakeAddressResolver,
-    FakeClock,
     FakeHttpResponse,
     FakeSafeHttpClient,
 )
-from sqlalchemy import create_engine, event
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import QueuePool
 from starlette.testclient import TestClient
+from store_authority_fakes import (
+    ExplodingSnapshotProvider,
+    empty_registry,
+    grant_payload,
+    registry_from_grants,
+)
 
 from lab_tracker.artifact_resolution import (
     ArtifactResolver,
@@ -25,14 +31,27 @@ from lab_tracker.artifact_resolution import (
     RcloneCompleted,
     RcloneResolver,
     ResolverRegistry,
+    registry_from_env,
 )
+from lab_tracker.artifact_resolution_limits import (
+    MAX_ARTIFACT_BYTE_OFFSET,
+    MAX_INLINE_ARTIFACT_BYTES,
+)
+from lab_tracker.data_store_definition import ValidatedDataStoreDefinition
 from lab_tracker.db_models import DataStoreModel
 from lab_tracker.git_remote_policy import GitRemotePolicy
+from lab_tracker.models import StoreCapability, StoreKind
 from lab_tracker.outbound_http import OutboundHttpPolicy
+from lab_tracker.rclone_remote_policy import RcloneRemotePolicy
+from lab_tracker.store_authority_registry import ProjectStoreScope
 
 
 def _sha256(data: bytes) -> str:
     return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+def _rclone_policy(*grants: str) -> RcloneRemotePolicy:
+    return RcloneRemotePolicy.from_config(",".join(grants))
 
 
 def _install_local_registry(client: TestClient, allowed_root: Path) -> None:
@@ -93,6 +112,205 @@ def _create_dataset_with_artifact(
     return response.json()["data"]["dataset_id"]
 
 
+@pytest.mark.parametrize(
+    "invalid_fields",
+    [
+        {"max_bytes": True},
+        {"max_bytes": False},
+        {"max_bytes": 1.0},
+        {"max_bytes": "1"},
+        {"max_bytes": 0},
+        {"max_bytes": -1},
+        {"max_bytes": MAX_INLINE_ARTIFACT_BYTES + 1},
+        {"byte_start": True, "byte_end": 1},
+        {"byte_start": 1.0, "byte_end": 2},
+        {"byte_start": "1", "byte_end": 2},
+        {"byte_start": -1, "byte_end": 2},
+        {
+            "byte_start": MAX_ARTIFACT_BYTE_OFFSET + 1,
+            "byte_end": MAX_ARTIFACT_BYTE_OFFSET + 1,
+        },
+        {"byte_start": 0, "byte_end": MAX_ARTIFACT_BYTE_OFFSET + 1},
+        {"byte_start": 1},
+        {"byte_end": 1},
+        {"byte_start": 2, "byte_end": 1},
+    ],
+)
+def test_resolve_endpoint_rejects_invalid_content_bounds(
+    client,
+    admin_auth_headers,
+    invalid_fields,
+):
+    response = client.post(
+        "/external-artifacts/resolve",
+        json={
+            "entity_type": "dataset",
+            "entity_id": "00000000-0000-0000-0000-000000000001",
+            **invalid_fields,
+        },
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 422, response.text
+
+
+def test_resolve_endpoint_openapi_publishes_portable_content_bounds(client):
+    schema = client.get("/openapi.json").json()["components"]["schemas"][
+        "ResolveExternalArtifactRequest"
+    ]
+
+    max_bytes_schema = schema["properties"]["max_bytes"]["anyOf"][0]
+    byte_start_schema = schema["properties"]["byte_start"]["anyOf"][0]
+    byte_end_schema = schema["properties"]["byte_end"]["anyOf"][0]
+    assert max_bytes_schema == {
+        "type": "integer",
+        "maximum": MAX_INLINE_ARTIFACT_BYTES,
+        "minimum": 1,
+    }
+    assert byte_start_schema == {
+        "type": "integer",
+        "maximum": MAX_ARTIFACT_BYTE_OFFSET,
+        "minimum": 0,
+    }
+    assert byte_end_schema == byte_start_schema
+
+
+@pytest.mark.parametrize(
+    ("source_system", "uri_factory"),
+    [
+        ("local", lambda artifact: artifact.as_uri()),
+        ("http", lambda _artifact: "https://files.example/private.bin"),
+        ("rclone", lambda _artifact: "rclone://private/private.bin"),
+        (
+            "git",
+            lambda _artifact: (
+                "git+https://git.example/private.git"
+                "#private.bin@1111111111111111111111111111111111111111"
+            ),
+        ),
+    ],
+)
+def test_resolve_endpoint_treats_direct_references_as_metadata_without_dispatch(
+    client,
+    admin_auth_headers,
+    tmp_path,
+    source_system,
+    uri_factory,
+):
+    secret = b"operator-owned artifact"
+    artifact = tmp_path / "private.bin"
+    artifact.write_bytes(secret)
+    direct_uri = uri_factory(artifact)
+    project_id = client.post(
+        "/projects",
+        json={"name": f"Direct {source_system} metadata"},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+
+    class UnexpectedRegistry:
+        def resolve_prepared(self, *_args, **_kwargs):
+            raise AssertionError("direct reference reached resolver dispatch")
+
+    client.app.state.resolver_registry = UnexpectedRegistry()
+
+    for expected_hash in (_sha256(b"bogus"), _sha256(secret)):
+        dataset_id = _create_dataset_with_artifact(
+            client,
+            admin_auth_headers,
+            project_id=project_id,
+            source_system=source_system,
+            uri=direct_uri,
+            content_hash=expected_hash,
+        )
+
+        response = client.post(
+            "/external-artifacts/resolve",
+            json={"entity_type": "dataset", "entity_id": dataset_id},
+            headers=admin_auth_headers,
+        )
+
+        assert response.status_code == 200, response.text
+        body = response.json()["data"]
+        assert body["status"] == "unresolved"
+        assert body["source_system"] == "store"
+        assert body["uri"] == "store://[redacted]"
+        assert body["expected_hash"] == expected_hash
+        assert body["observed_hash"] is None
+        assert body["content_base64"] is None
+        assert body["returned_bytes"] == 0
+        assert body["detail"] == "Store artifact could not be resolved."
+        assert direct_uri not in response.text
+        assert secret.decode() not in response.text
+
+
+def test_resolve_endpoint_denies_direct_reference_from_legacy_manifest_metadata(
+    client,
+    admin_auth_headers,
+):
+    project_id = client.post(
+        "/projects",
+        json={"name": "Legacy direct-reference metadata"},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    question_id = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Does legacy metadata bypass registered stores?",
+            "question_type": "descriptive",
+            "status": "active",
+        },
+        headers=admin_auth_headers,
+    ).json()["data"]["question_id"]
+    direct_uri = "https://files.example/private-legacy.bin"
+    expected_hash = _sha256(b"legacy")
+    dataset_response = client.post(
+        "/datasets",
+        json={
+            "project_id": project_id,
+            "primary_question_id": question_id,
+            "status": "committed",
+            "commit_manifest": {
+                "metadata": {
+                    "external_artifacts": json.dumps(
+                        [
+                            {
+                                "source_system": "http",
+                                "uri": direct_uri,
+                                "content_hash": expected_hash,
+                            }
+                        ]
+                    )
+                }
+            },
+        },
+        headers=admin_auth_headers,
+    )
+    assert dataset_response.status_code == 201, dataset_response.text
+    dataset_id = dataset_response.json()["data"]["dataset_id"]
+
+    class UnexpectedRegistry:
+        def resolve_prepared(self, *_args, **_kwargs):
+            raise AssertionError("legacy direct reference reached resolver dispatch")
+
+    client.app.state.resolver_registry = UnexpectedRegistry()
+    response = client.post(
+        "/external-artifacts/resolve",
+        json={"entity_type": "dataset", "entity_id": dataset_id},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()["data"]
+    assert body["status"] == "unresolved"
+    assert body["source_system"] == "store"
+    assert body["uri"] == "store://[redacted]"
+    assert body["expected_hash"] == expected_hash
+    assert body["observed_hash"] is None
+    assert body["content_base64"] is None
+    assert direct_uri not in response.text
+
+
 def test_resolve_endpoint_redacts_denied_http_credentials_and_target(
     client,
     admin_auth_headers,
@@ -121,13 +339,15 @@ def test_resolve_endpoint_redacts_denied_http_credentials_and_target(
     assert response.status_code == 200, response.text
     body = response.json()["data"]
     assert body["status"] == "unresolved"
-    assert body["uri"] == "http(s)://[redacted]"
+    assert body["source_system"] == "store"
+    assert body["uri"] == "store://[redacted]"
+    assert body["detail"] == "Store artifact could not be resolved."
     assert body["content_base64"] is None
     assert secret not in response.text
     assert "169.254.169.254" not in response.text
 
 
-def test_resolve_endpoint_redacts_rclone_process_failure(
+def test_resolve_endpoint_denies_direct_rclone_before_process_failure(
     client,
     admin_auth_headers,
 ):
@@ -137,7 +357,12 @@ def test_resolve_endpoint_redacts_rclone_process_failure(
         raise OSError(secret)
 
     client.app.state.resolver_registry = ResolverRegistry(
-        [RcloneResolver(runner=failing_runner)]
+        [
+            RcloneResolver(
+                runner=failing_runner,
+                remote_policy=_rclone_policy("private"),
+            )
+        ]
     )
     project_id = client.post(
         "/projects",
@@ -162,8 +387,9 @@ def test_resolve_endpoint_redacts_rclone_process_failure(
     assert response.status_code == 200, response.text
     body = response.json()["data"]
     assert body["status"] == "unresolved"
-    assert body["uri"] == "rclone://[redacted]"
-    assert body["detail"] == "rclone artifact resolution failed."
+    assert body["source_system"] == "store"
+    assert body["uri"] == "store://[redacted]"
+    assert body["detail"] == "Store artifact could not be resolved."
     assert body["content_base64"] is None
     assert body["observed_hash"] is None
     assert secret not in response.text
@@ -179,7 +405,12 @@ def test_resolve_endpoint_rejects_decoded_rclone_nul_without_500(
         raise AssertionError("invalid locator must be refused before spawn")
 
     client.app.state.resolver_registry = ResolverRegistry(
-        [RcloneResolver(runner=unexpected_runner)]
+        [
+            RcloneResolver(
+                runner=unexpected_runner,
+                remote_policy=_rclone_policy("private"),
+            )
+        ]
     )
     project_id = client.post(
         "/projects",
@@ -204,12 +435,14 @@ def test_resolve_endpoint_rejects_decoded_rclone_nul_without_500(
     assert response.status_code == 200, response.text
     body = response.json()["data"]
     assert body["status"] == "unresolved"
-    assert body["uri"] == "rclone://[redacted]"
+    assert body["source_system"] == "store"
+    assert body["uri"] == "store://[redacted]"
+    assert body["detail"] == "Store artifact could not be resolved."
     assert body["content_base64"] is None
     assert secret not in response.text
 
 
-def test_resolve_endpoint_maps_malformed_rclone_metadata_to_unresolved(
+def test_resolve_endpoint_denies_direct_rclone_before_metadata_subprocess(
     client,
     admin_auth_headers,
 ):
@@ -219,7 +452,12 @@ def test_resolve_endpoint_maps_malformed_rclone_metadata_to_unresolved(
         return RcloneCompleted(returncode=0, stdout=b"[]", stderr=b"private stderr")
 
     client.app.state.resolver_registry = ResolverRegistry(
-        [RcloneResolver(runner=malformed_runner)]
+        [
+            RcloneResolver(
+                runner=malformed_runner,
+                remote_policy=_rclone_policy("private"),
+            )
+        ]
     )
     project_id = client.post(
         "/projects",
@@ -244,42 +482,45 @@ def test_resolve_endpoint_maps_malformed_rclone_metadata_to_unresolved(
     assert response.status_code == 200, response.text
     body = response.json()["data"]
     assert body["status"] == "unresolved"
-    assert body["uri"] == "rclone://[redacted]"
-    assert body["detail"] == "rclone artifact resolution failed."
+    assert body["source_system"] == "store"
+    assert body["uri"] == "store://[redacted]"
+    assert body["detail"] == "Store artifact could not be resolved."
     assert body["content_base64"] is None
     assert secret not in response.text
     assert "private stderr" not in response.text
 
 
-def test_resolve_endpoint_deadline_discards_partial_body_and_closes_session(
+def test_registered_http_revalidates_authority_before_dns_and_stream_work(
     client,
     admin_auth_headers,
 ):
-    clock = FakeClock()
-    stream_entered = threading.Event()
-    expire_stream = threading.Event()
-
-    def wait_then_expire(_index: int) -> None:
-        stream_entered.set()
-        assert expire_stream.wait(timeout=5.0)
-        clock.advance(2.0)
-
+    data = b"ordered registered bytes"
+    events: list[str] = []
     response = FakeHttpResponse(
-        chunks=(b"partial secret bytes",),
-        on_chunk=wait_then_expire,
+        chunks=(data,),
+        on_chunk=lambda _index: events.append("stream"),
     )
     http_client = FakeSafeHttpClient((response,))
+    address_resolver = FakeAddressResolver(
+        {"slow.example": ["93.184.216.34"]}
+    )
+
+    class _OrderedAddressResolver:
+        """Ordering spy that satisfies the outbound AddressResolver protocol."""
+
+        def resolve(self, hostname, port, *, deadline=None):
+            events.append("dns")
+            return address_resolver.resolve(hostname, port, deadline=deadline)
+
+    ordered_address_resolver = _OrderedAddressResolver()
+
     client.app.state.resolver_registry = ResolverRegistry(
         [
             HttpResolver(
                 policy=OutboundHttpPolicy(
-                    address_resolver=FakeAddressResolver(
-                        {"slow.example": ["93.184.216.34"]}
-                    )
+                    address_resolver=ordered_address_resolver
                 ),
                 client=http_client,
-                deadline_seconds=1.0,
-                clock=clock,
             )
         ]
     )
@@ -288,124 +529,55 @@ def test_resolve_endpoint_deadline_discards_partial_body_and_closes_session(
         json={"name": "Deadline cleanup project"},
         headers=admin_auth_headers,
     ).json()["data"]["project_id"]
+    _create_store(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        name="slow-store",
+        kind="http",
+        root="https://slow.example",
+    )
     dataset_id = _create_dataset_with_artifact(
         client,
         admin_auth_headers,
         project_id=project_id,
-        source_system="http",
-        uri="https://slow.example/private-result.bin",
-        content_hash=_sha256(b"partial secret bytes"),
+        source_system="store",
+        uri="store://slow-store/private-result.bin",
+        content_hash=_sha256(data),
     )
+    original_provider = client.app.state.store_authority_snapshot_provider
 
-    original_factory = client.app.state.db_session_factory
-    pool_lock = threading.Lock()
-    unrelated_connection_acquired = threading.Event()
-    first_connection_released = threading.Event()
-    checkout_attempts = 0
+    def ordered_authority_provider():
+        events.append("authority")
+        return original_provider()
 
-    class OneSlotSignalingPool(QueuePool):
-        def _do_get(self):
-            nonlocal checkout_attempts
-            with pool_lock:
-                checkout_attempts += 1
-                attempt = checkout_attempts
-            connection = super()._do_get()
-            if attempt == 2:
-                assert first_connection_released.is_set()
-                unrelated_connection_acquired.set()
-            return connection
+    client.app.state.store_authority_snapshot_provider = ordered_authority_provider
 
-    bounded_engine = create_engine(
-        client.app.state.settings.database_url,
-        future=True,
-        pool_pre_ping=True,
-        poolclass=OneSlotSignalingPool,
-        pool_size=1,
-        max_overflow=0,
-        pool_timeout=5.0,
-        connect_args={"check_same_thread": False},
+    resolve_response = client.post(
+        "/external-artifacts/resolve",
+        json={"entity_type": "dataset", "entity_id": dataset_id},
+        headers=admin_auth_headers,
     )
-    bounded_factory = sessionmaker(
-        bind=bounded_engine,
-        autoflush=False,
-        autocommit=False,
-        future=True,
-    )
-    connection_checkins = 0
-
-    @event.listens_for(bounded_engine, "checkin")
-    def record_connection_release(*_args) -> None:
-        nonlocal connection_checkins
-        with pool_lock:
-            connection_checkins += 1
-            checkin = connection_checkins
-        if checkin == 1:
-            first_connection_released.set()
-
-    factory_lock = threading.Lock()
-    factory_calls = 0
-    closed_session_indexes: list[int] = []
-
-    def tracking_session_factory():
-        nonlocal factory_calls
-        with factory_lock:
-            factory_calls += 1
-            session_index = factory_calls
-        session = bounded_factory()
-        original_close = session.close
-
-        def tracked_close() -> None:
-            try:
-                original_close()
-            finally:
-                closed_session_indexes.append(session_index)
-
-        session.close = tracked_close
-        return session
-
-    client.app.state.db_session_factory = tracking_session_factory
-    executor = ThreadPoolExecutor(max_workers=2)
-    try:
-        resolve_future = executor.submit(
-            client.post,
-            "/external-artifacts/resolve",
-            json={"entity_type": "dataset", "entity_id": dataset_id},
-            headers=admin_auth_headers,
-        )
-        assert stream_entered.wait(timeout=5.0)
-        # The resolver remains deliberately blocked, but its read scope must
-        # already have returned this sole connection to the pool.
-        assert first_connection_released.wait(timeout=5.0)
-
-        follow_up_future = executor.submit(
-            client.get,
-            f"/projects/{project_id}",
-            headers=admin_auth_headers,
-        )
-        follow_up = follow_up_future.result(timeout=5.0)
-        assert unrelated_connection_acquired.is_set()
-        assert resolve_future.done() is False
-
-        expire_stream.set()
-        resolve_response = resolve_future.result(timeout=5.0)
-    finally:
-        expire_stream.set()
-        executor.shutdown(wait=True)
-        client.app.state.db_session_factory = original_factory
-        bounded_engine.dispose()
 
     assert resolve_response.status_code == 200, resolve_response.text
     body = resolve_response.json()["data"]
-    assert body["status"] == "unresolved"
-    assert body["content_base64"] is None
-    assert body["returned_bytes"] == 0
-    assert "partial secret bytes" not in resolve_response.text
+    assert body["status"] == "verified"
+    assert body["source_system"] == "store"
+    assert body["uri"] == "store://slow-store/private-result.bin"
+    assert body["expected_hash"] == _sha256(data)
+    assert body["observed_hash"] == _sha256(data)
+    assert body["detail"] is None
+    assert body["returned_bytes"] == len(data)
+    assert base64.b64decode(body["content_base64"]) == data
+    assert data.decode() not in resolve_response.text
     assert "slow.example" not in resolve_response.text
+    assert events == ["authority", "dns", "stream"]
+    assert address_resolver.calls == [("slow.example", 443)]
+    assert http_client.calls[0][1].absolute_url == (
+        "https://slow.example/private-result.bin"
+    )
+    assert response.iterated_chunks == 1
     assert response.closed is True
-    assert first_connection_released.is_set()
-    assert unrelated_connection_acquired.is_set()
-    assert sorted(closed_session_indexes) == [1, 2]
-    assert follow_up.status_code == 200, follow_up.text
 
 
 def test_dataset_write_rejects_malformed_http_uri_without_server_error(
@@ -450,7 +622,11 @@ def test_dataset_write_rejects_malformed_http_uri_without_server_error(
     assert "well-formed IRI" in response.json()["error"]["message"]
 
 
-def test_resolve_endpoint_returns_verified_content(client, admin_auth_headers, tmp_path):
+def test_resolve_endpoint_fails_local_store_closed_until_bead_63_5(
+    client,
+    admin_auth_headers,
+    tmp_path,
+):
     data = b"differential expression matrix"
     artifact = tmp_path / "result.txt"
     artifact.write_bytes(data)
@@ -459,11 +635,20 @@ def test_resolve_endpoint_returns_verified_content(client, admin_auth_headers, t
     project_id = client.post(
         "/projects", json={"name": "Resolve project"}, headers=admin_auth_headers
     ).json()["data"]["project_id"]
+    _create_store(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        name="local-results",
+        kind="local_fs",
+        root=str(tmp_path),
+    )
     dataset_id = _create_dataset_with_artifact(
         client,
         admin_auth_headers,
         project_id=project_id,
-        uri=artifact.as_uri(),
+        source_system="store",
+        uri="store://local-results/result.txt",
         content_hash=_sha256(data),
     )
 
@@ -475,10 +660,65 @@ def test_resolve_endpoint_returns_verified_content(client, admin_auth_headers, t
 
     assert response.status_code == 200, response.text
     body = response.json()["data"]
-    assert body["status"] == "verified"
-    assert body["observed_hash"] == _sha256(data)
-    assert base64.b64decode(body["content_base64"]) == data
+    assert body["status"] == "unresolved"
+    assert body["source_system"] == "store"
+    assert body["uri"] == "store://[redacted]"
+    assert body["observed_hash"] is None
+    assert body["content_base64"] is None
+    assert body["detail"] == "Store artifact could not be resolved."
     assert body["entity_type"] == "dataset"
+
+
+def test_resolve_endpoint_caps_a_requested_range(client, admin_auth_headers, tmp_path):
+    data = b"0123456789"
+    artifact = tmp_path / "ranged-result.bin"
+    artifact.write_bytes(data)
+    _install_local_registry(client, tmp_path)
+
+    project_id = client.post(
+        "/projects",
+        json={"name": "Capped range project"},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    _create_store(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        name="local-results",
+        kind="local_fs",
+        root=str(tmp_path),
+    )
+    dataset_id = _create_dataset_with_artifact(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        source_system="store",
+        uri="store://local-results/ranged-result.bin",
+        content_hash=_sha256(data),
+    )
+
+    response = client.post(
+        "/external-artifacts/resolve",
+        json={
+            "entity_type": "dataset",
+            "entity_id": dataset_id,
+            "max_bytes": 3,
+            "byte_start": 2,
+            "byte_end": 9,
+        },
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()["data"]
+    assert body["status"] == "unresolved"
+    assert body["uri"] == "store://[redacted]"
+    assert body["observed_hash"] is None
+    assert body["size_bytes"] is None
+    assert body["returned_bytes"] == 0
+    assert body["truncated"] is False
+    assert body["content_base64"] is None
+    assert body["detail"] == "Store artifact could not be resolved."
 
 
 def test_resolve_endpoint_uses_registered_http_store_prefix_and_logical_identity(
@@ -512,6 +752,7 @@ def test_resolve_endpoint_uses_registered_http_store_prefix_and_logical_identity
             "name": "web",
             "kind": "http",
             "root": "https://store.example/base",
+            "authority_grant_id": TEST_STORE_AUTHORITY_GRANT_ID,
         },
         headers=admin_auth_headers,
     )
@@ -542,6 +783,11 @@ def test_resolve_endpoint_uses_registered_http_store_prefix_and_logical_identity
     assert body["status"] == "verified"
     assert body["source_system"] == "store"
     assert body["uri"] == "store://web/nested/artifact.bin"
+    assert body["expected_hash"] == _sha256(data)
+    assert body["observed_hash"] == _sha256(data)
+    assert body["size_bytes"] == len(data)
+    assert body["returned_bytes"] == len(data)
+    assert body["detail"] is None
     assert base64.b64decode(body["content_base64"]) == data
     assert address_resolver.calls == [("store.example", 443)]
     assert http_client.calls[0][1].absolute_url == (
@@ -572,7 +818,7 @@ def test_resolve_endpoint_uses_registered_rclone_root_and_logical_identity(
         [
             RcloneResolver(
                 runner=runner,
-                allowed_remotes=["lab-onedrive"],
+                remote_policy=_rclone_policy("lab-onedrive"),
             )
         ]
     )
@@ -589,6 +835,7 @@ def test_resolve_endpoint_uses_registered_rclone_root_and_logical_identity(
             "kind": "onedrive",
             "root": "/experiments",
             "credential_ref": "lab-onedrive",
+            "authority_grant_id": TEST_STORE_AUTHORITY_GRANT_ID,
         },
         headers=admin_auth_headers,
     )
@@ -619,6 +866,11 @@ def test_resolve_endpoint_uses_registered_rclone_root_and_logical_identity(
     assert body["status"] == "verified"
     assert body["source_system"] == "store"
     assert body["uri"] == "store://cloud/nested/artifact.bin"
+    assert body["expected_hash"] == _sha256(data)
+    assert body["observed_hash"] == _sha256(data)
+    assert body["size_bytes"] == len(data)
+    assert body["returned_bytes"] == len(data)
+    assert body["detail"] is None
     assert base64.b64decode(body["content_base64"]) == data
     assert calls == [
         ["size", "--json", "lab-onedrive:/experiments/nested/artifact.bin"],
@@ -686,14 +938,11 @@ def test_resolve_endpoint_rejects_invalid_registered_rclone_targets_before_proce
             raise AssertionError("invalid registered target reached process execution")
 
     process_spy = ZeroCallProcessSpy()
-    allowed_remotes = ["configured-remote-secret"]
-    if legacy_credential_ref is not None:
-        allowed_remotes.append(legacy_credential_ref)
     client.app.state.resolver_registry = ResolverRegistry(
         [
             RcloneResolver(
                 executor=process_spy,
-                allowed_remotes=allowed_remotes,
+                remote_policy=_rclone_policy("configured-remote-secret"),
             )
         ]
     )
@@ -710,6 +959,7 @@ def test_resolve_endpoint_rejects_invalid_registered_rclone_targets_before_proce
             "kind": "rclone",
             "root": "/configured-root-secret",
             "credential_ref": "configured-remote-secret",
+            "authority_grant_id": TEST_STORE_AUTHORITY_GRANT_ID,
         },
         headers=admin_auth_headers,
     )
@@ -817,6 +1067,7 @@ def test_resolve_endpoint_uses_registered_git_pin_and_logical_identity(
             "name": "analysis-repo",
             "kind": "git",
             "root": remote,
+            "authority_grant_id": TEST_STORE_AUTHORITY_GRANT_ID,
         },
         headers=admin_auth_headers,
     )
@@ -848,6 +1099,11 @@ def test_resolve_endpoint_uses_registered_git_pin_and_logical_identity(
     assert body["status"] == "verified"
     assert body["source_system"] == "store"
     assert body["uri"] == logical_uri
+    assert body["expected_hash"] == _sha256(data)
+    assert body["observed_hash"] == _sha256(data)
+    assert body["size_bytes"] == len(data)
+    assert body["returned_bytes"] == len(data)
+    assert body["detail"] is None
     assert base64.b64decode(body["content_base64"]) == data
     assert len(calls) == 5
     cache_dirs = {args[args.index("-C") + 1] for args in calls}
@@ -922,6 +1178,7 @@ def test_resolve_endpoint_rejects_invalid_registered_git_targets_before_cache_or
             "name": "analysis-repo",
             "kind": "git",
             "root": valid_remote,
+            "authority_grant_id": TEST_STORE_AUTHORITY_GRANT_ID,
         },
         headers=admin_auth_headers,
     )
@@ -963,7 +1220,11 @@ def test_resolve_endpoint_rejects_invalid_registered_git_targets_before_cache_or
     assert all(value not in response.text for value in forbidden_values)
 
 
-def test_resolve_endpoint_reports_drift(client, admin_auth_headers, tmp_path):
+def test_registered_store_gate_returns_before_drift_check(
+    client,
+    admin_auth_headers,
+    tmp_path,
+):
     recorded_hash = _sha256(b"what was recorded at capture")
     artifact = tmp_path / "result.txt"
     artifact.write_bytes(b"actual bytes on disk")
@@ -972,11 +1233,20 @@ def test_resolve_endpoint_reports_drift(client, admin_auth_headers, tmp_path):
     project_id = client.post(
         "/projects", json={"name": "Drift project"}, headers=admin_auth_headers
     ).json()["data"]["project_id"]
+    _create_store(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        name="local-results",
+        kind="local_fs",
+        root=str(tmp_path),
+    )
     dataset_id = _create_dataset_with_artifact(
         client,
         admin_auth_headers,
         project_id=project_id,
-        uri=artifact.as_uri(),
+        source_system="store",
+        uri="store://local-results/result.txt",
         content_hash=recorded_hash,
     )
 
@@ -988,16 +1258,16 @@ def test_resolve_endpoint_reports_drift(client, admin_auth_headers, tmp_path):
 
     assert response.status_code == 200
     body = response.json()["data"]
-    assert body["status"] == "drifted"
-    assert body["uri"] == artifact.as_uri()
+    assert body["status"] == "unresolved"
+    assert body["uri"] == "store://[redacted]"
     assert body["expected_hash"] == recorded_hash
-    assert body["observed_hash"] == _sha256(b"actual bytes on disk")
-    assert body["content_type"] == "text/plain"
-    assert body["size_bytes"] == len(b"actual bytes on disk")
+    assert body["observed_hash"] is None
+    assert body["content_type"] is None
+    assert body["size_bytes"] is None
     assert body["content_base64"] is None
     assert body["returned_bytes"] == 0
     assert body["truncated"] is False
-    assert body["detail"] == "Recomputed hash does not match content_hash."
+    assert body["detail"] == "Store artifact could not be resolved."
     assert base64.b64encode(b"actual bytes on disk").decode("ascii") not in response.text
 
 
@@ -1063,13 +1333,23 @@ def test_resolve_endpoint_rejects_unauthorized_caller(
 def _create_store(client, headers, *, project_id, name, kind, root) -> None:
     response = client.post(
         "/data-stores",
-        json={"project_id": project_id, "name": name, "kind": kind, "root": root},
+        json={
+            "project_id": project_id,
+            "name": name,
+            "kind": kind,
+            "root": root,
+            "authority_grant_id": TEST_STORE_AUTHORITY_GRANT_ID,
+        },
         headers=headers,
     )
     assert response.status_code == 201, response.text
 
 
-def test_resolve_endpoint_resolves_store_locator(client, admin_auth_headers, tmp_path):
+def test_resolve_endpoint_fails_local_store_locator_closed_until_bead_63_5(
+    client,
+    admin_auth_headers,
+    tmp_path,
+):
     data = b"object addressed relative to a store"
     (tmp_path / "exp").mkdir()
     (tmp_path / "exp" / "x.txt").write_bytes(data)
@@ -1102,9 +1382,11 @@ def test_resolve_endpoint_resolves_store_locator(client, admin_auth_headers, tmp
 
     assert response.status_code == 200, response.text
     body = response.json()["data"]
-    assert body["status"] == "verified"
-    assert base64.b64decode(body["content_base64"]) == data
-    assert body["uri"] == "store://lab-fs/exp/x.txt"
+    assert body["status"] == "unresolved"
+    assert body["source_system"] == "store"
+    assert body["uri"] == "store://[redacted]"
+    assert body["content_base64"] is None
+    assert body["detail"] == "Store artifact could not be resolved."
 
 
 def test_resolve_endpoint_rejects_mismatched_structured_store_identity(
@@ -1169,7 +1451,7 @@ def test_resolve_endpoint_rejects_mismatched_structured_store_identity(
     body = response.json()["data"]
     assert body["status"] == "unresolved"
     assert body["uri"] == "store://[redacted]"
-    assert body["detail"] == "Store artifact reference is invalid."
+    assert body["detail"] == "Store artifact could not be resolved."
     assert body["content_base64"] is None
     assert "wrong-store" not in response.text
     assert str(tmp_path) not in response.text
@@ -1235,9 +1517,11 @@ def test_resolve_endpoint_uses_matching_structured_store_identity(
 
     assert response.status_code == 200, response.text
     body = response.json()["data"]
-    assert body["status"] == "verified"
-    assert body["uri"] == "store://lab-fs/exp/x.txt"
-    assert base64.b64decode(body["content_base64"]) == data
+    assert body["status"] == "unresolved"
+    assert body["source_system"] == "store"
+    assert body["uri"] == "store://[redacted]"
+    assert body["content_base64"] is None
+    assert body["detail"] == "Store artifact could not be resolved."
 
 
 def test_local_store_locator_cannot_escape_registered_root_with_uri_or_fields(
@@ -1362,22 +1646,16 @@ def test_malformed_store_uri_matrix_never_reaches_resolver(
 
     client.app.state.resolver_registry = ResolverRegistry([UnexpectedResolver()])
     malformed_cases = (
-        ("store://lab-fs//absolute-alias.txt", "Store artifact reference is invalid."),
-        ("store://lab-fs/../sibling.txt", "Store artifact reference is invalid."),
-        (
-            "store://lab-fs/path.txt?download=1",
-            "Store artifact reference is invalid.",
-        ),
-        ("store://lab-fs/path.txt#fragment", "Store artifact reference is invalid."),
-        (
-            "store://user@lab-fs/path.txt",
-            "Store artifact could not be resolved.",
-        ),
-        ("store://lab-fs/%2e%2e/sibling.txt", "Store artifact reference is invalid."),
-        ("store://lab-fs/%70ath.txt", "Store artifact reference is invalid."),
+        "store://lab-fs//absolute-alias.txt",
+        "store://lab-fs/../sibling.txt",
+        "store://lab-fs/path.txt?download=1",
+        "store://lab-fs/path.txt#fragment",
+        "store://user@lab-fs/path.txt",
+        "store://lab-fs/%2e%2e/sibling.txt",
+        "store://lab-fs/%70ath.txt",
     )
 
-    for index, (uri, expected_detail) in enumerate(malformed_cases):
+    for index, uri in enumerate(malformed_cases):
         dataset_id = _create_dataset_with_artifact(
             client,
             admin_auth_headers,
@@ -1397,7 +1675,7 @@ def test_malformed_store_uri_matrix_never_reaches_resolver(
         body = response.json()["data"]
         assert body["status"] == "unresolved"
         assert body["uri"] == "store://[redacted]"
-        assert body["detail"] == expected_detail
+        assert body["detail"] == "Store artifact could not be resolved."
         assert body["content_base64"] is None
 
 
@@ -1430,23 +1708,38 @@ def test_resolve_endpoint_unknown_store_is_unresolved(client, admin_auth_headers
     assert body["returned_bytes"] == 0
 
 
-def test_resolve_endpoint_denies_local_paths_without_configured_roots(
-    client, admin_auth_headers, tmp_path
+def test_resolve_endpoint_denies_registered_local_store_without_configured_roots(
+    client,
+    admin_auth_headers,
+    tmp_path,
+    monkeypatch,
 ):
     data = b"unconfigured"
     artifact = tmp_path / "result.txt"
     artifact.write_bytes(data)
-    # No resolver_registry installed -> registry_from_env with no allowed roots.
+    monkeypatch.delenv("LAB_TRACKER_RESOLVER_ALLOWED_ROOTS", raising=False)
+    client.app.state.resolver_registry = registry_from_env()
 
     project_id = client.post(
         "/projects", json={"name": "Default-deny project"}, headers=admin_auth_headers
     ).json()["data"]["project_id"]
+    _create_store(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        name="unconfigured-local",
+        kind="local_fs",
+        root=str(tmp_path),
+    )
     dataset_id = _create_dataset_with_artifact(
         client,
         admin_auth_headers,
         project_id=project_id,
-        uri=artifact.as_uri(),
+        uri="store://unconfigured-local/result.txt",
         content_hash=_sha256(data),
+        source_system="store",
+        store_name="unconfigured-local",
+        locator="result.txt",
     )
 
     response = client.post(
@@ -1458,5 +1751,664 @@ def test_resolve_endpoint_denies_local_paths_without_configured_roots(
     assert response.status_code == 200
     body = response.json()["data"]
     assert body["status"] == "unresolved"
+    assert body["uri"] == "store://[redacted]"
+    assert body["detail"] == "Store artifact could not be resolved."
     assert body["content_base64"] is None
     assert body["returned_bytes"] == 0
+
+
+class _ZeroCallProcessSpy:
+    """Process seam that records every attempted command and never runs one."""
+
+    def __init__(self):
+        self.calls: list[tuple[list[str], object]] = []
+
+    def run(self, command, *, cwd=None, **_kwargs):
+        self.calls.append((list(command), cwd))
+        raise AssertionError("a denied registered store reached process execution")
+
+
+def _create_remote_store(client, headers, *, project_id, **fields) -> dict:
+    """Register one operator-approved remote store and return its record."""
+
+    response = client.post(
+        "/data-stores",
+        json={
+            "project_id": project_id,
+            "authority_grant_id": TEST_STORE_AUTHORITY_GRANT_ID,
+            **fields,
+        },
+        headers=headers,
+    )
+    assert response.status_code == 201, response.text
+    return response.json()["data"]
+
+
+def test_registered_http_denies_revoked_authority_before_dns_and_connection(
+    client,
+    admin_auth_headers,
+):
+    data = b"revoked HTTP bytes"
+    address_resolver = FakeAddressResolver({"store.example": ["93.184.216.34"]})
+    http_client = FakeSafeHttpClient((FakeHttpResponse(chunks=(data,)),))
+    client.app.state.resolver_registry = ResolverRegistry(
+        [
+            HttpResolver(
+                policy=OutboundHttpPolicy(address_resolver=address_resolver),
+                client=http_client,
+            )
+        ]
+    )
+    project_id = client.post(
+        "/projects",
+        json={"name": "Revoked HTTP authority project"},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    _create_remote_store(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        name="web",
+        kind="http",
+        root="https://store.example/base",
+    )
+    dataset_id = _create_dataset_with_artifact(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        source_system="store",
+        uri="store://web/nested/artifact.bin",
+        store_name="web",
+        locator="nested/artifact.bin",
+        content_hash=_sha256(data),
+    )
+    # The store was registered under a live grant; the operator revokes it at
+    # the use-time boundary only, exactly as a running deployment would.
+    install_use_time_store_authority(client.app, empty_registry())
+
+    response = client.post(
+        "/external-artifacts/resolve",
+        json={
+            "entity_type": "dataset",
+            "entity_id": dataset_id,
+            "artifact_index": 0,
+        },
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()["data"]
+    assert body["status"] == "unresolved"
+    assert body["uri"] == "store://[redacted]"
+    assert body["detail"] == "Store artifact could not be resolved."
+    assert body["content_base64"] is None
+    assert body["returned_bytes"] == 0
+    assert address_resolver.calls == []  # No DNS lookup.
+    assert http_client.calls == []  # No connection.
+    assert "store.example" not in response.text
+
+
+def test_registered_rclone_denies_revoked_authority_before_subprocess(
+    client,
+    admin_auth_headers,
+):
+    data = b"revoked rclone bytes"
+    process_spy = _ZeroCallProcessSpy()
+    client.app.state.resolver_registry = ResolverRegistry(
+        [
+            RcloneResolver(
+                executor=process_spy,
+                remote_policy=_rclone_policy("lab-onedrive"),
+            )
+        ]
+    )
+    project_id = client.post(
+        "/projects",
+        json={"name": "Revoked rclone authority project"},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    _create_remote_store(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        name="cloud",
+        kind="onedrive",
+        root="/experiments",
+        credential_ref="lab-onedrive",
+    )
+    dataset_id = _create_dataset_with_artifact(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        source_system="store",
+        uri="store://cloud/nested/artifact.bin",
+        store_name="cloud",
+        locator="nested/artifact.bin",
+        content_hash=_sha256(data),
+    )
+    install_use_time_store_authority(client.app, empty_registry())
+
+    response = client.post(
+        "/external-artifacts/resolve",
+        json={
+            "entity_type": "dataset",
+            "entity_id": dataset_id,
+            "artifact_index": 0,
+        },
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()["data"]
+    assert body["status"] == "unresolved"
+    assert body["uri"] == "store://[redacted]"
+    assert body["detail"] == "Store artifact could not be resolved."
+    assert body["content_base64"] is None
+    assert process_spy.calls == []  # No subprocess and no composed argv.
+    assert "lab-onedrive" not in response.text
+    assert "/experiments" not in response.text
+
+
+def test_registered_git_denies_revoked_authority_before_cache_and_subprocess(
+    client,
+    admin_auth_headers,
+    tmp_path,
+):
+    data = b"revoked git bytes"
+    object_id = "b" * 40
+    remote = "https://git.example/lab/repo.git"
+    workdir = tmp_path / "git-workdir"
+    workdir.mkdir()
+    cache_root = workdir / "git-cache"
+    process_spy = _ZeroCallProcessSpy()
+    client.app.state.resolver_registry = ResolverRegistry(
+        [
+            GitResolver(
+                executor=process_spy,
+                cache_root=cache_root,
+                remote_policy=GitRemotePolicy.from_config(remote),
+            )
+        ]
+    )
+    project_id = client.post(
+        "/projects",
+        json={"name": "Revoked git authority project"},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    _create_remote_store(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        name="analysis-repo",
+        kind="git",
+        root=remote,
+    )
+    dataset_id = _create_dataset_with_artifact(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        source_system="store",
+        uri=f"store://analysis-repo/src/model.py@{object_id}",
+        store_name="analysis-repo",
+        locator=f"src/model.py@{object_id}",
+        content_hash=_sha256(data),
+    )
+    install_use_time_store_authority(client.app, empty_registry())
+
+    response = client.post(
+        "/external-artifacts/resolve",
+        json={
+            "entity_type": "dataset",
+            "entity_id": dataset_id,
+            "artifact_index": 0,
+        },
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()["data"]
+    assert body["status"] == "unresolved"
+    assert body["uri"] == "store://[redacted]"
+    assert body["detail"] == "Store artifact could not be resolved."
+    assert body["content_base64"] is None
+    assert process_spy.calls == []  # No subprocess and no working directory.
+    assert not cache_root.exists()
+    assert list(workdir.iterdir()) == []
+    assert remote not in response.text
+
+
+def test_registered_http_denies_authority_narrowed_to_another_boundary(
+    client,
+    admin_auth_headers,
+):
+    data = b"narrowed boundary bytes"
+    address_resolver = FakeAddressResolver({"store.example": ["93.184.216.34"]})
+    http_client = FakeSafeHttpClient((FakeHttpResponse(chunks=(data,)),))
+    client.app.state.resolver_registry = ResolverRegistry(
+        [
+            HttpResolver(
+                policy=OutboundHttpPolicy(address_resolver=address_resolver),
+                client=http_client,
+            )
+        ]
+    )
+    project_id = client.post(
+        "/projects",
+        json={"name": "Narrowed HTTP boundary project"},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    _create_remote_store(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        name="web",
+        kind="http",
+        root="https://store.example/base",
+    )
+    dataset_id = _create_dataset_with_artifact(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        source_system="store",
+        uri="store://web/nested/artifact.bin",
+        store_name="web",
+        locator="nested/artifact.bin",
+        content_hash=_sha256(data),
+    )
+    # The grant ID survives; the operator moved its boundary to another prefix,
+    # so the persisted binding no longer matches the live snapshot.
+    narrowed_registry = registry_from_grants(
+        [
+            grant_payload(
+                scope=ProjectStoreScope(UUID(project_id)),
+                definition=ValidatedDataStoreDefinition.create(
+                    name="web",
+                    kind=StoreKind.HTTP,
+                    root="https://store.example/other",
+                    endpoint=None,
+                    credential_ref=None,
+                ),
+                capabilities=(
+                    StoreCapability.BYTES_BY_PATH,
+                    StoreCapability.BYTE_RANGE,
+                ),
+                grant_id=TEST_STORE_AUTHORITY_GRANT_ID,
+            )
+        ]
+    )
+    install_use_time_store_authority(client.app, narrowed_registry)
+
+    response = client.post(
+        "/external-artifacts/resolve",
+        json={
+            "entity_type": "dataset",
+            "entity_id": dataset_id,
+            "artifact_index": 0,
+        },
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()["data"]
+    assert body["status"] == "unresolved"
+    assert body["uri"] == "store://[redacted]"
+    assert body["detail"] == "Store artifact could not be resolved."
+    assert body["content_base64"] is None
+    assert address_resolver.calls == []  # No DNS lookup.
+    assert http_client.calls == []  # No connection.
+    assert "store.example" not in response.text
+
+
+def test_registered_http_without_range_capability_denies_a_ranged_request(
+    client,
+    admin_auth_headers,
+):
+    data = b"0123456789"
+    address_resolver = FakeAddressResolver({"store.example": ["93.184.216.34"]})
+    http_client = FakeSafeHttpClient((FakeHttpResponse(chunks=(data,)),))
+    client.app.state.resolver_registry = ResolverRegistry(
+        [
+            HttpResolver(
+                policy=OutboundHttpPolicy(address_resolver=address_resolver),
+                client=http_client,
+            )
+        ]
+    )
+    project_id = client.post(
+        "/projects",
+        json={"name": "Undeclared range capability project"},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    _create_remote_store(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        name="web",
+        kind="http",
+        root="https://store.example/base",
+        capabilities=["bytes_by_path"],
+    )
+    dataset_id = _create_dataset_with_artifact(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        source_system="store",
+        uri="store://web/nested/artifact.bin",
+        store_name="web",
+        locator="nested/artifact.bin",
+        content_hash=_sha256(data),
+    )
+    # An undeclared operation is refused before the authority snapshot is even
+    # captured, so this provider must never run.
+    client.app.state.store_authority_snapshot_provider = ExplodingSnapshotProvider()
+
+    response = client.post(
+        "/external-artifacts/resolve",
+        json={
+            "entity_type": "dataset",
+            "entity_id": dataset_id,
+            "artifact_index": 0,
+            "byte_start": 2,
+            "byte_end": 9,
+        },
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()["data"]
+    assert body["status"] == "unresolved"
+    assert body["uri"] == "store://[redacted]"
+    assert body["detail"] == "Store artifact could not be resolved."
+    assert body["content_base64"] is None
+    assert body["returned_bytes"] == 0
+    assert body["truncated"] is False
+    assert address_resolver.calls == []  # No DNS lookup.
+    assert http_client.calls == []  # No connection.
+    assert "store.example" not in response.text
+
+
+def test_registered_http_without_range_capability_serves_an_unranged_request(
+    client,
+    admin_auth_headers,
+):
+    data = b"0123456789"
+    address_resolver = FakeAddressResolver({"store.example": ["93.184.216.34"]})
+    http_client = FakeSafeHttpClient((FakeHttpResponse(chunks=(data,)),))
+    client.app.state.resolver_registry = ResolverRegistry(
+        [
+            HttpResolver(
+                policy=OutboundHttpPolicy(address_resolver=address_resolver),
+                client=http_client,
+            )
+        ]
+    )
+    project_id = client.post(
+        "/projects",
+        json={"name": "Declared path capability project"},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    store = _create_remote_store(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        name="web",
+        kind="http",
+        root="https://store.example/base",
+        capabilities=["bytes_by_path"],
+    )
+    assert store["capabilities"] == ["bytes_by_path"]
+    dataset_id = _create_dataset_with_artifact(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        source_system="store",
+        uri="store://web/nested/artifact.bin",
+        store_name="web",
+        locator="nested/artifact.bin",
+        content_hash=_sha256(data),
+    )
+
+    response = client.post(
+        "/external-artifacts/resolve",
+        json={
+            "entity_type": "dataset",
+            "entity_id": dataset_id,
+            "artifact_index": 0,
+        },
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()["data"]
+    assert body["status"] == "verified"
+    assert body["uri"] == "store://web/nested/artifact.bin"
+    assert body["observed_hash"] == _sha256(data)
+    assert body["returned_bytes"] == len(data)
+    assert base64.b64decode(body["content_base64"]) == data
+    assert address_resolver.calls == [("store.example", 443)]
+    assert http_client.calls[0][1].absolute_url == (
+        "https://store.example/base/nested/artifact.bin"
+    )
+
+
+def test_registered_http_with_range_capability_serves_a_ranged_request(
+    client,
+    admin_auth_headers,
+):
+    data = b"0123456789"
+    address_resolver = FakeAddressResolver({"store.example": ["93.184.216.34"]})
+    http_client = FakeSafeHttpClient((FakeHttpResponse(chunks=(data,)),))
+    client.app.state.resolver_registry = ResolverRegistry(
+        [
+            HttpResolver(
+                policy=OutboundHttpPolicy(address_resolver=address_resolver),
+                client=http_client,
+            )
+        ]
+    )
+    project_id = client.post(
+        "/projects",
+        json={"name": "Declared range capability project"},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    store = _create_remote_store(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        name="web",
+        kind="http",
+        root="https://store.example/base",
+        capabilities=["bytes_by_path", "byte_range"],
+    )
+    assert store["capabilities"] == ["bytes_by_path", "byte_range"]
+    dataset_id = _create_dataset_with_artifact(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        source_system="store",
+        uri="store://web/nested/artifact.bin",
+        store_name="web",
+        locator="nested/artifact.bin",
+        content_hash=_sha256(data),
+    )
+
+    response = client.post(
+        "/external-artifacts/resolve",
+        json={
+            "entity_type": "dataset",
+            "entity_id": dataset_id,
+            "artifact_index": 0,
+            "max_bytes": 3,
+            "byte_start": 2,
+            "byte_end": 9,
+        },
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()["data"]
+    assert body["status"] == "verified"
+    assert body["uri"] == "store://web/nested/artifact.bin"
+    assert body["observed_hash"] == _sha256(data)
+    assert body["size_bytes"] == len(data)
+    assert body["returned_bytes"] == 3
+    assert body["truncated"] is True
+    assert base64.b64decode(body["content_base64"]) == b"234"
+    assert address_resolver.calls == [("store.example", 443)]
+    assert http_client.calls[0][1].absolute_url == (
+        "https://store.example/base/nested/artifact.bin"
+    )
+
+
+def test_registered_http_reports_drift_against_the_recorded_hash(
+    client,
+    admin_auth_headers,
+):
+    recorded_hash = _sha256(b"what was recorded at capture")
+    served = b"actual bytes behind the prefix"
+    address_resolver = FakeAddressResolver({"store.example": ["93.184.216.34"]})
+    http_client = FakeSafeHttpClient((FakeHttpResponse(chunks=(served,)),))
+    client.app.state.resolver_registry = ResolverRegistry(
+        [
+            HttpResolver(
+                policy=OutboundHttpPolicy(address_resolver=address_resolver),
+                client=http_client,
+            )
+        ]
+    )
+    project_id = client.post(
+        "/projects",
+        json={"name": "Registered drift project"},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    _create_remote_store(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        name="web",
+        kind="http",
+        root="https://store.example/base",
+    )
+    dataset_id = _create_dataset_with_artifact(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        source_system="store",
+        uri="store://web/nested/artifact.bin",
+        store_name="web",
+        locator="nested/artifact.bin",
+        content_hash=recorded_hash,
+    )
+
+    response = client.post(
+        "/external-artifacts/resolve",
+        json={
+            "entity_type": "dataset",
+            "entity_id": dataset_id,
+            "artifact_index": 0,
+        },
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()["data"]
+    assert body["status"] == "drifted"
+    assert body["uri"] == "store://web/nested/artifact.bin"
+    assert body["expected_hash"] == recorded_hash
+    assert body["observed_hash"] == _sha256(served)
+    assert body["size_bytes"] == len(served)
+    assert body["content_base64"] is None
+    assert body["returned_bytes"] == 0
+    assert body["truncated"] is False
+    assert body["detail"] == "Recomputed hash does not match content_hash."
+    assert base64.b64encode(served).decode("ascii") not in response.text
+    assert address_resolver.calls == [("store.example", 443)]
+
+
+def test_registered_http_resolution_never_exposes_its_sealed_binding_identity(
+    client,
+    admin_auth_headers,
+):
+    data = b"sealed identity bytes"
+    address_resolver = FakeAddressResolver({"store.example": ["93.184.216.34"]})
+    http_client = FakeSafeHttpClient((FakeHttpResponse(chunks=(data,)),))
+    client.app.state.resolver_registry = ResolverRegistry(
+        [
+            HttpResolver(
+                policy=OutboundHttpPolicy(address_resolver=address_resolver),
+                client=http_client,
+            )
+        ]
+    )
+    project_id = client.post(
+        "/projects",
+        json={"name": "Sealed identity project"},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    store = _create_remote_store(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        name="web",
+        kind="http",
+        root="https://store.example/base",
+    )
+    # The sealed values are whatever a real registry minted for this exact
+    # binding, never a literal this test invented.
+    definition = ValidatedDataStoreDefinition.create(
+        name=store["name"],
+        kind=StoreKind(store["kind"]),
+        root=store["root"],
+        endpoint=None,
+        credential_ref=None,
+    )
+    capabilities = tuple(
+        StoreCapability(capability) for capability in store["capabilities"]
+    )
+    registry = registry_from_grants(
+        [
+            grant_payload(
+                scope=ProjectStoreScope(UUID(project_id)),
+                definition=definition,
+                capabilities=capabilities,
+                grant_id=TEST_STORE_AUTHORITY_GRANT_ID,
+            )
+        ]
+    )
+    proof = registry.authorize(
+        grant_id=TEST_STORE_AUTHORITY_GRANT_ID,
+        scope=ProjectStoreScope(UUID(project_id)),
+        candidate=definition,
+        capabilities=capabilities,
+    )
+    assert proof is not None
+    assert store["authority_grant_fingerprint"] == proof.fingerprint
+    dataset_id = _create_dataset_with_artifact(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        source_system="store",
+        uri="store://web/nested/artifact.bin",
+        store_name="web",
+        locator="nested/artifact.bin",
+        content_hash=_sha256(data),
+    )
+
+    response = client.post(
+        "/external-artifacts/resolve",
+        json={
+            "entity_type": "dataset",
+            "entity_id": dataset_id,
+            "artifact_index": 0,
+        },
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["status"] == "verified"
+    headers = "\n".join(f"{name}: {value}" for name, value in response.headers.items())
+    for sealed in (proof.grant_id, proof.fingerprint):
+        assert sealed not in response.text
+        assert sealed not in headers
+    assert "sag-v1-sha256" not in response.text
+    assert "sag-v1-sha256" not in headers

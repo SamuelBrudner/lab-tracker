@@ -35,6 +35,8 @@ from lab_tracker.models import (
     QuestionType,
     SessionStatus,
     SessionType,
+    StoreCapability,
+    StoreKind,
 )
 from lab_tracker_client.transport import (
     MAX_UPLOAD_BYTES,
@@ -61,6 +63,11 @@ DATASET_STATUS_VALUES = tuple(status.value for status in DatasetStatus)
 ANALYSIS_STATUS_VALUES = tuple(status.value for status in AnalysisStatus)
 CLAIM_STATUS_VALUES = tuple(status.value for status in ClaimStatus)
 GOAL_STATUS_VALUES = tuple(status.value for status in GoalStatus)
+STORE_KIND_VALUES = tuple(kind.value for kind in StoreKind)
+STORE_CAPABILITY_VALUES = tuple(capability.value for capability in StoreCapability)
+
+_STORE_AUTHORITY_DENIED_ERROR_CODE = "store_authority_denied"
+_MAX_STORE_AUTHORITY_GRANT_ID_LENGTH = 128
 
 _ID_FIELDS = (
     "question_id",
@@ -73,6 +80,7 @@ _ID_FIELDS = (
     "claim_id",
     "change_set_id",
     "output_id",
+    "store_id",
     "project_id",
     "goal_id",
 )
@@ -177,6 +185,10 @@ class LTAPIError(LTError):
 
 class LTConflictError(LTAPIError):
     """Raised when an idempotency key is reused with conflicting intent."""
+
+
+class LTStoreAuthorityDeniedError(LTAPIError):
+    """Raised when a data-store authority grant cannot authorize registration."""
 
 
 class LTValidationError(LTError):
@@ -527,6 +539,79 @@ class LabTracker:
             },
             limit=limit,
             offset=offset,
+        )
+
+    def create_data_store(
+        self,
+        *,
+        authority_grant_id: str,
+        name: str,
+        kind: str,
+        root: str,
+        project_id: str | None = None,
+        group_id: str | None = None,
+        capabilities: Sequence[str] | None = None,
+        endpoint: str | None = None,
+        credential_ref: str | None = None,
+        is_default: bool = False,
+    ) -> LTRecord:
+        """Register one explicitly authorized project- or group-scoped store.
+
+        ``authority_grant_id`` names operator-owned authority; it is required
+        even though the wire schema accepts omission so every server-side
+        authority mismatch can remain opaque. Exactly one scope must be
+        supplied. Omitting ``capabilities`` delegates kind defaults to the
+        server, while an explicit sequence is validated without rewriting it.
+        """
+
+        if (project_id is None) == (group_id is None):
+            raise LTValidationError("Provide exactly one of project_id or group_id.")
+        resolved_scope: JsonObject
+        if project_id is not None:
+            resolved_scope = {
+                "project_id": _require_non_empty(str(project_id), "project_id"),
+                "group_id": None,
+            }
+        else:
+            resolved_scope = {
+                "project_id": None,
+                "group_id": _require_non_empty(str(group_id), "group_id"),
+            }
+
+        resolved_capabilities: list[str] | None = None
+        if capabilities is not None:
+            if isinstance(capabilities, (str, bytes)):
+                raise LTValidationError("capabilities must be a sequence of capability names.")
+            resolved_capabilities = [
+                _validate_enum(
+                    capability,
+                    field_name="store capability",
+                    allowed_values=STORE_CAPABILITY_VALUES,
+                )
+                for capability in capabilities
+            ]
+
+        payload: JsonObject = {
+            **resolved_scope,
+            "authority_grant_id": _validate_store_authority_grant_id(authority_grant_id),
+            "name": _require_non_empty_preserved(name, "name"),
+            "kind": _validate_enum(
+                kind,
+                field_name="store kind",
+                allowed_values=STORE_KIND_VALUES,
+            ),
+            "root": _require_non_empty_preserved(root, "root"),
+            "capabilities": resolved_capabilities,
+            "endpoint": endpoint,
+            "credential_ref": credential_ref,
+            "is_default": is_default,
+        }
+        return self._data_record(
+            self._request(
+                "POST",
+                "/data-stores",
+                json_payload=payload,
+            )
         )
 
     def register_acquisition_output(
@@ -1525,6 +1610,11 @@ class LabTracker:
             raise LTValidationError(_response_error(response))
         if response.status_code == 409:
             raise LTConflictError(_response_error(response))
+        if (
+            response.status_code == 403
+            and _response_error_code(response) == _STORE_AUTHORITY_DENIED_ERROR_CODE
+        ):
+            raise LTStoreAuthorityDeniedError(_response_error(response))
         if response.status_code >= 400:
             raise LTAPIError(_response_error(response))
         return _response_json(response), response.status_code
@@ -1766,6 +1856,10 @@ def list_sessions(**kwargs: Any) -> list[LTRecord]:
     return client.list_sessions(**kwargs)
 
 
+def create_data_store(**kwargs: Any) -> LTRecord:
+    return client.create_data_store(**kwargs)
+
+
 def register_acquisition_output(session_id: str, **kwargs: Any) -> LTRecord:
     return client.register_acquisition_output(session_id, **kwargs)
 
@@ -1954,6 +2048,19 @@ def _require_non_empty_preserved(value: str, field_name: str) -> str:
     return resolved
 
 
+def _validate_store_authority_grant_id(value: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > _MAX_STORE_AUTHORITY_GRANT_ID_LENGTH
+    ):
+        raise LTValidationError(
+            "authority_grant_id must be a non-empty string of at most "
+            f"{_MAX_STORE_AUTHORITY_GRANT_ID_LENGTH} characters."
+        )
+    return value
+
+
 def _validate_optional_enum(
     value: str | None,
     *,
@@ -2040,3 +2147,17 @@ def _response_error(response: httpx.Response) -> str:
         if detail:
             return str(detail)
     return f"Lab Tracker API returned HTTP {response.status_code}: {payload}"
+
+
+def _response_error_code(response: httpx.Response) -> str | None:
+    try:
+        payload = response.json()
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        return None
+    code = error.get("code")
+    return code if isinstance(code, str) else None

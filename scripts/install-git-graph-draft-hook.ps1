@@ -79,27 +79,26 @@ $pythonForHook = Convert-ToHookPath $PythonPath
 
 $managedBlock = @"
 $beginMarker
-LAB_TRACKER_GIT_DRAFT_ENABLED="`${LAB_TRACKER_GIT_DRAFT_ENABLED:-1}"
-if [ "`$LAB_TRACKER_GIT_DRAFT_ENABLED" != "0" ]; then
+LAB_TRACKER_GIT_CAPTURE_ENABLED="`${LAB_TRACKER_GIT_CAPTURE_ENABLED:-}"
+if [ -z "`$LAB_TRACKER_GIT_CAPTURE_ENABLED" ]; then
+  LAB_TRACKER_GIT_CAPTURE_ENABLED="`${LAB_TRACKER_GIT_DRAFT_ENABLED:-1}"
+fi
+if [ "`$LAB_TRACKER_GIT_CAPTURE_ENABLED" != "0" ]; then
   LAB_TRACKER_ROOT="`${LAB_TRACKER_ROOT:-$labTrackerRootForHook}"
   LAB_TRACKER_BASE_URL="`${LAB_TRACKER_BASE_URL:-$BaseUrl}"
   LAB_TRACKER_PROJECT_ID="`${LAB_TRACKER_PROJECT_ID:-$ProjectId}"
   LAB_TRACKER_PYTHON="`${LAB_TRACKER_PYTHON:-$pythonForHook}"
-  LAB_TRACKER_SCRIPT="`$LAB_TRACKER_ROOT/scripts/create-analysis-graph-draft.py"
 
-  if [ -n "`$LAB_TRACKER_PROJECT_ID" ] && [ -f "`$LAB_TRACKER_SCRIPT" ]; then
+  if [ -n "`$LAB_TRACKER_PROJECT_ID" ]; then
     repo_root="`$(git rev-parse --show-toplevel 2>/dev/null)"
-    commit_sha="`$(git rev-parse HEAD 2>/dev/null)"
-    if [ -n "`$repo_root" ] && [ -n "`$commit_sha" ]; then
-      "`$LAB_TRACKER_PYTHON" "`$LAB_TRACKER_SCRIPT" \
-        --project-id "`$LAB_TRACKER_PROJECT_ID" \
-        --git-repo "`$repo_root" \
-        --git-commit "`$commit_sha" \
-        --base-url "`$LAB_TRACKER_BASE_URL" \
-        >/dev/null 2>&1 || echo "lab-tracker: graph draft hook could not create a proposal; commit kept." >&2
+    if [ -n "`$repo_root" ]; then
+      export LAB_TRACKER_BASE_URL LAB_TRACKER_PROJECT_ID
+      "`$LAB_TRACKER_PYTHON" -m lab_tracker_client git snapshot \
+        --repo "`$repo_root" \
+        >/dev/null 2>&1 || echo "lab-tracker: commit capture did not fully sync; queued capture kept." >&2
     fi
   else
-    echo "lab-tracker: graph draft hook is not configured; set LAB_TRACKER_PROJECT_ID and LAB_TRACKER_ROOT." >&2
+    echo "lab-tracker: commit capture hook is not configured; set LAB_TRACKER_PROJECT_ID." >&2
   fi
 fi
 $endMarker
@@ -125,7 +124,7 @@ if (Test-Path $hookPath) {
 $utf8NoBom = New-Object System.Text.UTF8Encoding $false
 [System.IO.File]::WriteAllText($hookPath, $updated.Replace("`r`n", "`n"), $utf8NoBom)
 
-Write-Host "Installed Lab Tracker graph draft post-commit hook:"
+Write-Host "Installed Lab Tracker capture-only post-commit hook:"
 Write-Host "  Repo: $repoRoot"
 Write-Host "  Hook: $hookPath"
 Write-Host "  Project: $ProjectId"

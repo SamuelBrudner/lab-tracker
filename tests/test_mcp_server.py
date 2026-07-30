@@ -3,10 +3,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from datetime import timedelta
 from pathlib import Path
 
 import httpx
 import pytest
+from fastapi.testclient import TestClient
+from mcp.server.fastmcp.exceptions import ToolError
 
 try:
     import tomllib
@@ -14,6 +17,11 @@ except ModuleNotFoundError:  # pragma: no cover - exercised by Python 3.10 CI
     import tomli as tomllib
 
 from lab_tracker import mcp_server
+from lab_tracker.artifact_resolution_limits import (
+    MAX_ARTIFACT_BYTE_OFFSET,
+    MAX_INLINE_ARTIFACT_BYTES,
+)
+from lab_tracker.auth import utc_now
 from lab_tracker.cli import _cursor_mcp_json, _mcp_json
 from lab_tracker.decision_context_constants import code_facing_idioms
 from lab_tracker.mcp_tools import READ_TOOLS, WRITE_TOOLS
@@ -63,6 +71,61 @@ def test_fastmcp_registers_lab_tracker_tools() -> None:
     assert "CALL THIS FIRST before research-facing decisions" in (mcp_server.server.instructions)
     assert "what to plot" in mcp_server.server.instructions
     assert "AI can suggest; only a person commits" in mcp_server.server.instructions
+
+
+def test_fastmcp_artifact_tool_schema_publishes_portable_content_bounds() -> None:
+    tools = asyncio.run(mcp_server.server.list_tools())
+    tool = {item.name: item for item in tools}["lab_tracker_resolve_artifact"]
+
+    max_bytes_schema = tool.inputSchema["properties"]["max_bytes"]["anyOf"][0]
+    byte_start_schema = tool.inputSchema["properties"]["byte_start"]["anyOf"][0]
+    byte_end_schema = tool.inputSchema["properties"]["byte_end"]["anyOf"][0]
+    assert max_bytes_schema == {
+        "type": "integer",
+        "maximum": MAX_INLINE_ARTIFACT_BYTES,
+        "minimum": 1,
+    }
+    assert byte_start_schema == {
+        "type": "integer",
+        "maximum": MAX_ARTIFACT_BYTE_OFFSET,
+        "minimum": 0,
+    }
+    assert byte_end_schema == byte_start_schema
+
+
+@pytest.mark.parametrize(
+    "invalid_max_bytes",
+    [True, 1.0, "1", 0, MAX_INLINE_ARTIFACT_BYTES + 1],
+)
+def test_fastmcp_artifact_call_rejects_coercion_before_client_acquisition(
+    monkeypatch,
+    invalid_max_bytes,
+) -> None:
+    from lab_tracker.mcp_tools import read as read_tools
+
+    acquisitions = 0
+
+    def unexpected_client():
+        nonlocal acquisitions
+        acquisitions += 1
+        raise AssertionError("invalid FastMCP input acquired an API client")
+
+    read_tools.close_cached_read_client()
+    monkeypatch.setattr(read_tools, "client_from_env", unexpected_client)
+
+    with pytest.raises(ToolError, match="validation error"):
+        asyncio.run(
+            mcp_server.server.call_tool(
+                "lab_tracker_resolve_artifact",
+                {
+                    "entity_type": "dataset",
+                    "entity_id": "dataset-1",
+                    "max_bytes": invalid_max_bytes,
+                },
+            )
+        )
+
+    assert acquisitions == 0
 
 
 def test_fastmcp_tool_annotations_mark_reads_and_writes_for_copilot() -> None:
@@ -836,6 +899,57 @@ def test_client_resolve_artifact_posts_to_resolve_route() -> None:
     assert "byte_start" not in body
 
 
+@pytest.mark.parametrize(
+    "invalid_fields",
+    [
+        {"max_bytes": True},
+        {"max_bytes": False},
+        {"max_bytes": 1.0},
+        {"max_bytes": "1"},
+        {"max_bytes": 0},
+        {"max_bytes": -1},
+        {"max_bytes": MAX_INLINE_ARTIFACT_BYTES + 1},
+        {"byte_start": True, "byte_end": 1},
+        {"byte_start": 1.0, "byte_end": 2},
+        {"byte_start": "1", "byte_end": 2},
+        {"byte_start": -1, "byte_end": 2},
+        {
+            "byte_start": MAX_ARTIFACT_BYTE_OFFSET + 1,
+            "byte_end": MAX_ARTIFACT_BYTE_OFFSET + 1,
+        },
+        {"byte_start": 0, "byte_end": MAX_ARTIFACT_BYTE_OFFSET + 1},
+        {"byte_start": 1},
+        {"byte_end": 1},
+        {"byte_start": 2, "byte_end": 1},
+    ],
+)
+def test_client_rejects_invalid_artifact_bounds_before_api_request(
+    invalid_fields,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        raise AssertionError("invalid artifact bounds reached the network")
+
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(base_url="http://testserver"),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with pytest.raises(mcp_server.LabTrackerAPIValidationError) as exc_info:
+            client.resolve_external_artifact(
+                entity_type="dataset",
+                entity_id="dataset-1",
+                **invalid_fields,
+            )
+    finally:
+        client.close()
+
+    assert exc_info.value.code == "validation_error"
+    assert requests == []
+
+
 @pytest.mark.parametrize("status", ["drifted", "unresolved", None, "future-status"])
 def test_client_suppresses_content_from_unverified_artifact_response(status) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
@@ -977,6 +1091,148 @@ def test_client_does_not_remint_credentials_after_opaque_resolver_not_found() ->
 def test_resolve_artifact_is_registered_read_tool() -> None:
     assert "lab_tracker_resolve_artifact" in {tool.__name__ for tool in READ_TOOLS}
     assert "lab_tracker_resolve_artifact" not in {tool.__name__ for tool in WRITE_TOOLS}
+
+
+@pytest.mark.parametrize(
+    "invalid_fields",
+    [
+        {"max_bytes": True},
+        {"max_bytes": False},
+        {"max_bytes": 1.0},
+        {"max_bytes": "1"},
+        {"max_bytes": 0},
+        {"max_bytes": -1},
+        {"max_bytes": MAX_INLINE_ARTIFACT_BYTES + 1},
+        {"byte_start": True, "byte_end": 1},
+        {"byte_start": 1.0, "byte_end": 2},
+        {"byte_start": "1", "byte_end": 2},
+        {"byte_start": -1, "byte_end": 2},
+        {
+            "byte_start": MAX_ARTIFACT_BYTE_OFFSET + 1,
+            "byte_end": MAX_ARTIFACT_BYTE_OFFSET + 1,
+        },
+        {"byte_start": 0, "byte_end": MAX_ARTIFACT_BYTE_OFFSET + 1},
+        {"byte_start": 1},
+        {"byte_end": 1},
+        {"byte_start": 2, "byte_end": 1},
+    ],
+)
+def test_resolve_artifact_tool_rejects_invalid_bounds_before_client_acquisition(
+    monkeypatch,
+    invalid_fields,
+) -> None:
+    from lab_tracker.mcp_tools import read as read_tools
+
+    acquisitions = 0
+
+    def unexpected_client():
+        nonlocal acquisitions
+        acquisitions += 1
+        raise AssertionError("invalid artifact bounds acquired an API client")
+
+    read_tools.close_cached_read_client()
+    monkeypatch.setattr(read_tools, "client_from_env", unexpected_client)
+
+    payload = read_tools.lab_tracker_resolve_artifact(
+        entity_type="dataset",
+        entity_id="dataset-1",
+        **invalid_fields,
+    )
+
+    assert acquisitions == 0
+    assert payload["data"] is None
+    assert payload["error"]["code"] == "validation_error"
+    assert payload["error"]["operation"] == "lab_tracker_resolve_artifact"
+
+
+def test_resolve_artifact_tool_denies_direct_reference_through_http_application(
+    client,
+    admin_auth_headers,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from lab_tracker.mcp_tools import read as read_tools
+
+    content = b"operator-owned bytes"
+    artifact = tmp_path / "private.bin"
+    artifact.write_bytes(content)
+    project_id = client.post(
+        "/projects",
+        json={"name": "MCP direct-reference denial"},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    question_id = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Can MCP bypass registered stores?",
+            "question_type": "descriptive",
+            "status": "active",
+        },
+        headers=admin_auth_headers,
+    ).json()["data"]["question_id"]
+    dataset_response = client.post(
+        "/datasets",
+        json={
+            "project_id": project_id,
+            "primary_question_id": question_id,
+            "status": "committed",
+            "commit_manifest": {
+                "external_artifacts": [
+                    {
+                        "source_system": "local",
+                        "uri": artifact.as_uri(),
+                        "content_hash": (
+                            "sha256:" + hashlib.sha256(content).hexdigest()
+                        ),
+                    }
+                ]
+            },
+        },
+        headers=admin_auth_headers,
+    )
+    assert dataset_response.status_code == 201, dataset_response.text
+    dataset_id = dataset_response.json()["data"]["dataset_id"]
+
+    class UnexpectedRegistry:
+        def resolve_prepared(self, *_args, **_kwargs):
+            raise AssertionError("MCP direct reference reached resolver dispatch")
+
+    client.app.state.resolver_registry = UnexpectedRegistry()
+
+    def bridge_to_application(request: httpx.Request) -> httpx.Response:
+        response = client.request(
+            request.method,
+            request.url.path,
+            json=json.loads(request.content),
+            headers=admin_auth_headers,
+        )
+        return httpx.Response(response.status_code, json=response.json())
+
+    api_client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(base_url="http://testserver"),
+        transport=httpx.MockTransport(bridge_to_application),
+    )
+    read_tools.close_cached_read_client()
+    monkeypatch.setattr(read_tools, "client_from_env", lambda: api_client)
+
+    try:
+        payload = read_tools.lab_tracker_resolve_artifact(
+            entity_type="dataset",
+            entity_id=dataset_id,
+        )
+    finally:
+        read_tools.close_cached_read_client()
+
+    data = payload["data"]
+    assert data["status"] == "unresolved"
+    assert data["source_system"] == "store"
+    assert data["uri"] == "store://[redacted]"
+    assert data["observed_hash"] is None
+    assert data["content_base64"] is None
+    assert data["returned_bytes"] == 0
+    assert artifact.as_uri() not in json.dumps(payload)
+    assert content.decode() not in json.dumps(payload)
 
 
 @pytest.mark.parametrize("status", ["drifted", "unresolved", None, "future-status"])
@@ -1172,6 +1428,88 @@ def test_decision_context_posts_to_api_route() -> None:
 
     assert payload["data"]["task_kind"] == "research_writing"
     assert len(requests) == 1
+
+
+def test_read_only_viewer_lpat_reaches_decision_context_through_mcp_tool(
+    client: TestClient,
+    scoped_project_member,
+    monkeypatch,
+) -> None:
+    from lab_tracker.mcp_tools import read as read_tools
+
+    issued = client.post(
+        "/auth/tokens",
+        json={
+            "label": "MCP decision context",
+            "role": "viewer",
+            "read_only": True,
+            "scope": "all",
+            "expires_at": (utc_now() + timedelta(days=7)).isoformat(),
+        },
+        headers=scoped_project_member.member_headers,
+    )
+    assert issued.status_code == 201, issued.text
+    issued_token = issued.json()["data"]
+    assert issued_token["role"] == "viewer"
+    assert issued_token["read_only"] is True
+    assert issued_token["scope"] == "all"
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        forwarded_headers = {
+            name: value
+            for name, value in request.headers.items()
+            if name.lower() not in {"host", "content-length"}
+        }
+        response = client.request(
+            request.method,
+            request.url.path,
+            params=list(request.url.params.multi_items()),
+            content=request.content,
+            headers=forwarded_headers,
+        )
+        return httpx.Response(
+            response.status_code,
+            content=response.content,
+            headers=response.headers,
+            request=request,
+        )
+
+    def factory() -> mcp_server.LabTrackerAPIClient:
+        return mcp_server.LabTrackerAPIClient(
+            mcp_server.MCPSettings(
+                base_url="http://testserver",
+                api_key=issued_token["secret"],
+            ),
+            transport=httpx.MockTransport(handler),
+        )
+
+    read_tools.close_cached_read_client()
+    monkeypatch.setattr(read_tools, "client_from_env", factory)
+    try:
+        payload = read_tools.lab_tracker_get_decision_context(
+            task_kind="summary",
+            query="MCP scoped context",
+            project_id=scoped_project_member.visible_project_id,
+        )
+    finally:
+        read_tools.close_cached_read_client()
+
+    assert payload["data"]["scope"]["project"]["project_id"] == (
+        scoped_project_member.visible_project_id
+    )
+    assert len(requests) == 1
+    assert requests[0].method == "POST"
+    assert requests[0].url.path == "/assistant/decision-context"
+    assert requests[0].headers["authorization"].startswith("Bearer lpat_")
+    assert requests[0].headers["x-labtracker-surface"] == "mcp"
+    assert json.loads(requests[0].content) == {
+        "task_kind": "summary",
+        "query": "MCP scoped context",
+        "project_id": scoped_project_member.visible_project_id,
+        "limit": 20,
+    }
 
 
 def test_decision_context_returns_unavailable_when_api_read_fails() -> None:

@@ -135,3 +135,14 @@ class RegisteredRcloneRoot:
             return None
         rooted_prefix = "/" if self.rooted else ""
         return f"{remote.value}:{rooted_prefix}{combined.path}"
+
+    def compose_root(self, remote: RcloneRemoteName) -> str | None:
+        """Compose this registered root itself as one exact argv target."""
+
+        if not isinstance(remote, RcloneRemoteName):
+            return None
+        if not self.components:
+            return f"{remote.value}:/"
+        rooted_prefix = "/" if self.rooted else ""
+        path = PortableStorePath(self.components).path
+        return f"{remote.value}:{rooted_prefix}{path}"
