@@ -29,6 +29,10 @@ function useGraphDraftWorkflow({
   const [changeSet, setChangeSet] = useState(null);
   const [payloads, setPayloads] = useState({});
   const [operationReviewNotes, setOperationReviewNotes] = useState({});
+  // Scope undo to operations changed by this client's most recent bulk action.
+  // The server's acceptance_mode remains the authority for whether each one is
+  // still an unreviewed bulk acceptance.
+  const [bulkAcceptedIds, setBulkAcceptedIds] = useState([]);
   const [draftProjectRole, setDraftProjectRole] = useState("");
   const [draftProjectId, setDraftProjectId] = useState("");
   const [loading, setLoading] = useState(false);
@@ -63,6 +67,17 @@ function useGraphDraftWorkflow({
       (changeSet?.operations || []).filter((operation) => operation.status === "accepted").length,
     [changeSet]
   );
+  const undoableOperationIds = useMemo(() => {
+    const stillBulkAccepted = new Set(
+      (changeSet?.operations || [])
+        .filter(
+          (operation) =>
+            operation.status === "accepted" && operation.acceptance_mode === "bulk_accepted"
+        )
+        .map((operation) => operation.operation_id)
+    );
+    return bulkAcceptedIds.filter((operationId) => stillBulkAccepted.has(operationId));
+  }, [bulkAcceptedIds, changeSet]);
   const spokenReview = useMemo(() => spokenReviewScript(changeSet, payloads), [changeSet, payloads]);
 
   const isAdmin = user?.role === "admin";
@@ -135,6 +150,7 @@ function useGraphDraftWorkflow({
       setChangeSet(null);
       setPayloads({});
       setOperationReviewNotes({});
+      setBulkAcceptedIds([]);
       setCommitMessage("");
       setReviewNote("");
       setError("");
@@ -255,22 +271,90 @@ function useGraphDraftWorkflow({
   }
 
   async function acceptAll() {
-    if (!changeSet || !isCurrent) {
+    if (!changeSet || !canEditDraft) {
       return;
     }
-    // One atomic server request replaces the old per-operation client loop: no
-    // partial-failure window and no per-iteration flash clobbering. Invalid
-    // proposals are left "proposed" and reported so the user can fix them.
+    const dirty = [];
+    const invalid = [];
+    for (const operation of changeSet.operations || []) {
+      if (operation.status !== "proposed") {
+        continue;
+      }
+      const text = payloads[operation.operation_id];
+      const stored = JSON.stringify(operation.payload || {}, null, 2);
+      const note = (operationReviewNotes[operation.operation_id] || "").trim();
+      const noteDirty = note !== (operation.review_note || "").trim();
+      const payloadEdited = text !== undefined && text !== stored;
+      if (!payloadEdited && !noteDirty) {
+        continue;
+      }
+      let parsed;
+      try {
+        parsed = JSON.parse(payloadEdited ? text : stored);
+      } catch {
+        invalid.push(operation);
+        continue;
+      }
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        invalid.push(operation);
+        continue;
+      }
+      if (!noteDirty && JSON.stringify(parsed) === JSON.stringify(operation.payload || {})) {
+        continue;
+      }
+      dirty.push({ note: note || null, operation, parsed });
+    }
+    if (invalid.length > 0) {
+      setFlash(
+        "",
+        invalid.length === 1
+          ? "One proposal has invalid JSON. Fix or revert it before accepting all."
+          : `${invalid.length} proposals have invalid JSON. Fix or revert them before accepting all.`
+      );
+      return;
+    }
     if (!beginCommand("acceptAll")) {
       return;
     }
     setBusy(true);
     setFlash("", "");
     try {
+      // Persist buffered payload and decision-note edits while operations are
+      // still proposed. The bulk endpoint can then stamp the decision honestly
+      // as bulk_accepted without discarding the reviewer's text.
+      for (const { note, operation, parsed } of dirty) {
+        await apiRequest(
+          `/graph-drafts/${changeSetId}/operations/${operation.operation_id}`,
+          {
+            body: {
+              payload: parsed,
+              review_note: note,
+              status: "proposed",
+            },
+            method: "PATCH",
+            token,
+          }
+        );
+      }
+      const proposedBefore = new Set(
+        (changeSet.operations || [])
+          .filter((operation) => operation.status === "proposed")
+          .map((operation) => operation.operation_id)
+      );
       const nextChangeSet = await apiRequest(`/graph-drafts/${changeSetId}/accept-all`, {
         method: "POST",
         token,
       });
+      setBulkAcceptedIds(
+        (nextChangeSet.operations || [])
+          .filter(
+            (operation) =>
+              operation.status === "accepted" &&
+              operation.acceptance_mode === "bulk_accepted" &&
+              proposedBefore.has(operation.operation_id)
+          )
+          .map((operation) => operation.operation_id)
+      );
       setChangeSet(nextChangeSet);
       setPayloads(payloadText(nextChangeSet));
       setOperationReviewNotes(operationReviewNoteText(nextChangeSet));
@@ -286,6 +370,56 @@ function useGraphDraftWorkflow({
       setFlash("", err.message || "Failed to accept all proposals.");
     } finally {
       endCommand("acceptAll");
+      setBusy(false);
+    }
+  }
+
+  async function undoAcceptAll() {
+    const targets = undoableOperationIds;
+    if (!changeSet || !canEditDraft || targets.length === 0) {
+      return;
+    }
+    if (!beginCommand("undoAcceptAll")) {
+      return;
+    }
+    setBusy(true);
+    setFlash("", "");
+    let latest = null;
+    let reverted = 0;
+    try {
+      for (const operationId of targets) {
+        latest = await apiRequest(
+          `/graph-drafts/${changeSetId}/operations/${operationId}`,
+          {
+            body: { status: "proposed" },
+            method: "PATCH",
+            token,
+          }
+        );
+        reverted += 1;
+      }
+      setBulkAcceptedIds([]);
+      setFlash(
+        targets.length === 1
+          ? "Undid the bulk accept. 1 proposal is awaiting your decision again."
+          : `Undid the bulk accept. ${targets.length} proposals are awaiting your decision again.`
+      );
+    } catch (err) {
+      setFlash(
+        "",
+        reverted > 0
+          ? `Undo stopped after ${reverted} of ${targets.length} proposals: ${
+              err.message || "the request failed."
+            }`
+          : err.message || "Failed to undo the bulk accept."
+      );
+    } finally {
+      if (latest) {
+        setChangeSet(latest);
+        setPayloads(payloadText(latest));
+        setOperationReviewNotes(operationReviewNoteText(latest));
+      }
+      endCommand("undoAcceptAll");
       setBusy(false);
     }
   }
@@ -433,6 +567,7 @@ function useGraphDraftWorkflow({
     setReviewNote,
     pendingCommands,
     acceptedCount,
+    undoableOperationIds,
     spokenReview,
     canEditDraft,
     canSubmitDraft,
@@ -443,6 +578,7 @@ function useGraphDraftWorkflow({
     patchOperationPayload,
     saveOperation,
     acceptAll,
+    undoAcceptAll,
     commitDraft,
     submitDraft,
     reviewDraft,
