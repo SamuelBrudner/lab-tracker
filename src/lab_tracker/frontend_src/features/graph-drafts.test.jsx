@@ -109,6 +109,127 @@ describe("spokenReviewScript", () => {
   });
 });
 
+describe("GraphDraftDetailCard narrative review", () => {
+  it("keeps proposal cards as the default and offers a cited prose view of the same edits", async () => {
+    const base = draftFixture();
+    const secondOperation = {
+      ...base.operations[0],
+      entity_type: "note",
+      operation_id: "44444444-4444-4444-8444-444444444444",
+      payload: { raw_content: "Sleep-deprived flies courted less often." },
+      rationale: "The capture describes this result directly.",
+      semantic_type: "create_note",
+    };
+    renderDraft({ ...base, operations: [base.operations[0], secondOperation] });
+
+    expect(await screen.findAllByLabelText("Edit JSON payload")).toHaveLength(2);
+    expect(screen.getByRole("button", { name: "Proposals" })).toHaveAttribute(
+      "aria-pressed",
+      "true"
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Narrative" }));
+
+    const narrative = screen.getByRole("region", { name: "Narrative review" });
+    expect(narrative).toHaveTextContent("The draft proposes to add a new question");
+    expect(narrative).toHaveTextContent("It also proposes to add a research note");
+    expect(narrative).toHaveTextContent("One new question was drafted from today's captures.");
+    expect(
+      screen.getByRole("button", { name: /Proposed edit 1: Proposed new question/ })
+    ).toHaveTextContent("[1]");
+    expect(
+      screen.getByRole("button", { name: /Proposed edit 2: Proposed research note/ })
+    ).toHaveTextContent("[2]");
+    expect(screen.queryByLabelText("Edit JSON payload")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Proposals" }));
+    expect(await screen.findAllByLabelText("Edit JSON payload")).toHaveLength(2);
+  });
+
+  it("opens citations by hover, focus, and click and routes every decision through the workflow", async () => {
+    const draft = draftFixture({
+      operations: [
+        {
+          ...draftFixture().operations[0],
+          source_refs: [{ label: "voice memo", quote: "courtship dropped after deprivation" }],
+        },
+      ],
+    });
+    const patchBodies = [];
+    let currentDraft = draft;
+    renderDraft(draft, {
+      routes: [
+        {
+          match: /\/graph-drafts\/[^/]+\/operations\//,
+          method: "PATCH",
+          response: (request) => {
+            const body = JSON.parse(request.init.body);
+            patchBodies.push(body);
+            currentDraft = {
+              ...currentDraft,
+              operations: currentDraft.operations.map((operation) => ({
+                ...operation,
+                payload: body.payload,
+                review_note: body.review_note,
+                status: body.status,
+              })),
+            };
+            return apiResponse(currentDraft);
+          },
+        },
+      ],
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Narrative" }));
+    const citation = screen.getByRole("button", {
+      name: /Proposed edit 1: Proposed new question/,
+    });
+
+    fireEvent.focus(citation);
+    expect(
+      screen.getByRole("group", { name: "Proposed edit 1 details" })
+    ).toHaveTextContent("courtship dropped after deprivation");
+    fireEvent.keyDown(citation, { key: "Escape" });
+    expect(
+      screen.queryByRole("group", { name: "Proposed edit 1 details" })
+    ).not.toBeInTheDocument();
+
+    fireEvent.mouseEnter(citation.parentElement);
+    expect(
+      screen.getByRole("group", { name: "Proposed edit 1 details" })
+    ).toBeInTheDocument();
+    fireEvent.mouseLeave(citation.parentElement);
+    expect(
+      screen.queryByRole("group", { name: "Proposed edit 1 details" })
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(citation);
+    fireEvent.change(screen.getByLabelText("Note for proposed edit 1"), {
+      target: { value: "Checked against the raw capture." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save note" }));
+    await waitFor(() => expect(patchBodies).toHaveLength(1));
+    expect(patchBodies[0]).toMatchObject({
+      review_note: "Checked against the raw capture.",
+      status: "proposed",
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Accept edit" }));
+    await waitFor(() => expect(patchBodies).toHaveLength(2));
+    expect(patchBodies[1]).toMatchObject({
+      review_note: "Checked against the raw capture.",
+      status: "accepted",
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Reject edit" }));
+    await waitFor(() => expect(patchBodies).toHaveLength(3));
+    expect(patchBodies[2]).toMatchObject({
+      review_note: "Checked against the raw capture.",
+      status: "rejected",
+    });
+  });
+});
+
 describe("GraphDraftDetailCard route identity", () => {
   const ID_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
   const ID_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
