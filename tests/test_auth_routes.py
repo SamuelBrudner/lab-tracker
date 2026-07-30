@@ -92,6 +92,10 @@ def test_setup_readiness_requires_auth_and_never_returns_provider_secret(
     monkeypatch.setenv("LAB_TRACKER_OPENAI_API_KEY", "super-secret-provider-key")
     monkeypatch.setenv("LAB_TRACKER_GRAPH_DRAFT_SCHEDULER_ENABLED", "true")
     monkeypatch.setenv("LAB_TRACKER_GRAPH_DRAFT_BACKGROUND_ENABLED", "false")
+    monkeypatch.setenv(
+        "LAB_TRACKER_SOURCE_REVISION",
+        "0123456789abcdef0123456789abcdef01234567",
+    )
 
     with TestClient(create_app()) as client:
         denied_response = client.get("/auth/setup-readiness")
@@ -110,6 +114,7 @@ def test_setup_readiness_requires_auth_and_never_returns_provider_secret(
         "background_worker_enabled": True,
         "provider": "openai",
         "provider_credential_configured": True,
+        "source_revision": "0123456789abcdef0123456789abcdef01234567",
     }
     assert "super-secret-provider-key" not in response.text
 
@@ -185,6 +190,10 @@ def test_setup_readiness_normalizes_provider_and_reports_runtime_flags(
         "LAB_TRACKER_GRAPH_DRAFT_BACKGROUND_ENABLED",
         str(background_enabled).lower(),
     )
+    monkeypatch.setenv(
+        "LAB_TRACKER_SOURCE_REVISION",
+        "0123456789abcdef0123456789abcdef01234567",
+    )
 
     with TestClient(create_app()) as client:
         _seed_admin(client, username="sam", password="secret")
@@ -200,6 +209,7 @@ def test_setup_readiness_normalizes_provider_and_reports_runtime_flags(
         "background_worker_enabled": expected_background_worker_enabled,
         "provider": expected_provider,
         "provider_credential_configured": expected_credential_configured,
+        "source_revision": "0123456789abcdef0123456789abcdef01234567",
     }
     assert credential_value not in response.text or credential_value == ""
 
