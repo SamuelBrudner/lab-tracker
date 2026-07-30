@@ -34,6 +34,12 @@ generation in the worker instead of inside the HTTP request. The **Run now**
 button and `POST /batches/run-due` also enqueue work rather than blocking on
 model calls.
 
+With authentication enabled, **Run now** is personal: it drafts only staged
+notes attributed to the signed-in user, assigns the resulting review to that
+user, and advances only that user's review window. A teammate's run cannot
+consume or redraft your capture window. Auth-disabled local instances retain
+one explicit legacy-unassigned bucket.
+
 ## External scheduler fallback
 
 Suggested fallback configuration: a local Lab Tracker
@@ -73,12 +79,15 @@ secret values never appear in the crontab or launchd plist.
 ### One thing to turn on first
 
 The job does nothing until at least one project has the daily review **enabled**.
-Open the **Batches** page at `/app/batches`, pick a project, and set the cadence
-for the project default or for a specific user (default: daily at **18:00** —
-early evening — so each person confirms the day's captures before heading out;
-switch it to `06:00` for a next-morning review instead). The cadence row's
-timezone starts as `America/New_York` — set yours when you enable it.
-That per-(project, user) setting decides when each review actually runs; the
+Open the **Batches** page at `/app/batches`, pick a project, and set **Your
+cadence** (default: daily at **18:00** — early evening — or switch it to `06:00`
+for a next-morning review). The ordinary settings endpoint always resolves the
+signed-in user; clients cannot select a different beneficiary by omitting an
+identifier, and personal-setting updates reject a `user_id` field (including
+`null`). Owners can manage the fallback template separately at
+`/projects/{project_id}/graph-draft-batch-settings/project-default`. The
+cadence row's timezone starts as `America/New_York` — set yours when you enable
+it. That per-(project, user) setting decides when each review actually runs; the
 scheduler is just a frequent, cheap poll.
 
 ### Try it without waiting
@@ -89,6 +98,10 @@ scheduler is just a frequent, cheap poll.
 
 With background drafting enabled, those triggers enqueue a pending run and the
 worker fills the queue shortly after. Then review the queue at `/app/batches`.
+The page separates **Ready for you** from your submitted work that is
+**Waiting on others**, while project owners get a distinct **Needs commit**
+projection. The home-page count and recent run history use only the signed-in
+reviewer's assignment.
 
 ### Remove it
 
@@ -189,10 +202,11 @@ rules as above.
 
 `POST /batches/run-due` and the built-in ticker both examine enabled cadence rows
 that are due, then advance each row's `next_run_at`. The default project row
-partitions staged notes by note author; a user-specific row runs only that user's
-new staged notes. Each generated change set keeps `created_by` as the triggering
-principal (`SYSTEM` for the built-in scheduler) and sets `review_assignee` to the
-person expected to review it.
+partitions staged notes by note author; a user-specific row runs only that
+user's new staged notes. Manual runs use the same author filter and a
+reviewer-specific cursor. Each generated change set keeps `created_by` as the
+triggering principal (`SYSTEM` for the built-in scheduler) and sets
+`review_assignee` to the person expected to review it.
 
 The operation is idempotent: a compare-and-set (`claim_due`) plus deterministic
 batch keys mean concurrent or redundant calls never double-fire the same review,

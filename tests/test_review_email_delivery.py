@@ -86,7 +86,6 @@ def _configure_email(
     response = client.patch(
         f"/projects/{project_id}/graph-draft-batch-settings",
         json={
-            "user_id": user_id,
             "enabled": True,
             "cadence_minutes": 1440,
             "run_at_local_time": "17:00",
@@ -98,6 +97,7 @@ def _configure_email(
     )
     assert response.status_code == 200
     settings = response.json()["data"]
+    assert settings["user_id"] == user_id
     assert settings["notification_email"] == email
     assert settings["notification_email_confirmed_at"] is not None
 

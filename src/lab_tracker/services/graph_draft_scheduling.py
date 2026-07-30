@@ -371,6 +371,19 @@ class BatchSchedulingCoordinator(BaseService):
     ) -> tuple[GraphDraftBatchRun, list[Note]]:
         self.projects.get_project(project_id)
         self._ensure_graph_draft_batch_settings_row(project_id, actor=actor)
+        if (
+            trigger == GraphDraftBatchTrigger.MANUAL
+            and review_assignee is None
+            and review_assignee_user_id is None
+        ):
+            # The ordinary Run now action is a personal review operation. Keep
+            # the string identifier for auth-disabled/legacy installs, and use
+            # the FK whenever this request represents a persisted user.
+            review_assignee = actor_user_id(actor)
+            review_assignee_user_id = actor_user_fk(
+                actor,
+                self.scheduling_repository,
+            )
         reviewer = batch_policy.BatchReviewer(
             reviewer=review_assignee,
             reviewer_user_id=review_assignee_user_id,

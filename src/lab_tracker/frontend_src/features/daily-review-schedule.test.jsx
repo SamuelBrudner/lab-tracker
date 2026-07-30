@@ -7,15 +7,14 @@ import { apiResponse, installFetchMock } from "../test/utils.js";
 import { DailyReviewScheduleForm } from "./daily-review-schedule.jsx";
 
 describe("DailyReviewScheduleForm", () => {
-  it("loads per-user settings and retains user_id when saving a preset", async () => {
+  it("loads and saves the authenticated user's personal settings", async () => {
     let settingsBody = null;
     const onSaved = vi.fn();
     const setBusy = vi.fn();
     const setFlash = vi.fn();
     const fetchMock = installFetchMock([
       {
-        match:
-          "/projects/project-1/graph-draft-batch-settings?user_id=user-1",
+        match: "/projects/project-1/graph-draft-batch-settings",
         response: apiResponse({
           cadence_minutes: 720,
           email_notifications_enabled: true,
@@ -39,6 +38,7 @@ describe("DailyReviewScheduleForm", () => {
             next_run_at: "2026-07-24T10:00:00Z",
             project_id: "project-1",
             settings_id: "settings-1",
+            user_id: "user-1",
           });
         },
       },
@@ -48,7 +48,6 @@ describe("DailyReviewScheduleForm", () => {
       <DailyReviewScheduleForm
         token="token-1"
         projectId="project-1"
-        userId="user-1"
         canManage={true}
         setBusy={setBusy}
         setFlash={setFlash}
@@ -72,7 +71,7 @@ describe("DailyReviewScheduleForm", () => {
     );
     expect(screen.getByText(/^Next run:/)).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledWith(
-      "/projects/project-1/graph-draft-batch-settings?user_id=user-1",
+      "/projects/project-1/graph-draft-batch-settings",
       expect.objectContaining({
         headers: expect.objectContaining({
           Authorization: "Bearer token-1",
@@ -102,7 +101,6 @@ describe("DailyReviewScheduleForm", () => {
         notification_email: "reviewer@example.edu",
         run_at_local_time: "06:00",
         timezone_name: "America/New_York",
-        user_id: "user-1",
       });
     });
     expect(onSaved).toHaveBeenCalledWith(
@@ -118,7 +116,7 @@ describe("DailyReviewScheduleForm", () => {
     );
   });
 
-  it("uses the detected time zone and omits user_id for project-default settings", async () => {
+  it("uses the detected time zone and lets the server resolve the personal target", async () => {
     vi.spyOn(Intl, "DateTimeFormat").mockImplementation(() => ({
       resolvedOptions: () => ({ timeZone: "America/Chicago" }),
     }));

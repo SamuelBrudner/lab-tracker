@@ -281,7 +281,6 @@ function OnboardingPage({
             <DailyReviewScheduleForm
               token={token}
               projectId={activeProject.project_id}
-              userId={user?.user_id || ""}
               canManage={canManageSchedule}
               setBusy={setBusy}
               setFlash={setFlash}

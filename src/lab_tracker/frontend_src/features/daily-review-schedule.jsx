@@ -1,6 +1,6 @@
 import * as React from "react";
 
-import { apiRequest, buildApiPath } from "../shared/api.js";
+import { apiRequest } from "../shared/api.js";
 import { formatDate } from "../shared/formatters.js";
 
 const { useCallback, useEffect, useState } = React;
@@ -22,7 +22,6 @@ function detectedTimeZone() {
 function DailyReviewScheduleForm({
   token,
   projectId,
-  userId = "",
   canManage,
   setBusy,
   setFlash,
@@ -46,11 +45,10 @@ function DailyReviewScheduleForm({
     }
     setLoading(true);
     try {
-      const path = buildApiPath(
+      const nextSettings = await apiRequest(
         `/projects/${projectId}/graph-draft-batch-settings`,
-        userId ? { user_id: userId } : {}
+        { token }
       );
-      const nextSettings = await apiRequest(path, { token });
       setSettings(nextSettings);
       setEnabled(Boolean(nextSettings.enabled));
       setCadenceMinutes(String(nextSettings.cadence_minutes || 1440));
@@ -66,7 +64,7 @@ function DailyReviewScheduleForm({
     } finally {
       setLoading(false);
     }
-  }, [projectId, setFlash, token, userId]);
+  }, [projectId, setFlash, token]);
 
   useEffect(() => {
     loadSettings();
@@ -90,7 +88,6 @@ function DailyReviewScheduleForm({
             notification_email: notificationEmail.trim() || null,
             run_at_local_time: runAtLocalTime,
             timezone_name: timezoneName,
-            ...(userId ? { user_id: userId } : {}),
           },
           method: "PATCH",
           token,

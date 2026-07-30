@@ -151,7 +151,7 @@ describe("OnboardingPage", () => {
     );
   });
 
-  it("loads and saves the invitee's per-user daily review schedule", async () => {
+  it("loads and saves the invitee's authenticated daily review schedule", async () => {
     let settingsBody = null;
     const fetchMock = installFetchMock([
       {
@@ -159,8 +159,7 @@ describe("OnboardingPage", () => {
         response: apiResponse(READY_RUNTIME),
       },
       {
-        match:
-          "/projects/project-1/graph-draft-batch-settings?user_id=user-1",
+        match: "/projects/project-1/graph-draft-batch-settings",
         response: apiResponse({
           cadence_minutes: 1440,
           enabled: true,
@@ -216,12 +215,11 @@ describe("OnboardingPage", () => {
         notification_email: null,
         run_at_local_time: "06:30",
         timezone_name: "America/New_York",
-        user_id: "user-1",
       });
       expect(screen.getByText("Saved")).toBeInTheDocument();
     });
     expect(fetchMock).toHaveBeenCalledWith(
-      "/projects/project-1/graph-draft-batch-settings?user_id=user-1",
+      "/projects/project-1/graph-draft-batch-settings",
       expect.objectContaining({
         headers: expect.objectContaining({
           Authorization: "Bearer user-token",

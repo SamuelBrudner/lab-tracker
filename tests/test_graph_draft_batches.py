@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from lab_tracker.api import LabTrackerAPI
+from lab_tracker.app import create_app
 from lab_tracker.app_parts.middleware import system_auth_context
 from lab_tracker.auth import Role
 from lab_tracker.db_models import (
@@ -187,6 +188,8 @@ def test_run_now_persists_pending_batch_with_source_traceability(
     assert run["status"] == "ready"
     assert run["note_count"] == 2
     assert run["change_set_id"]
+    assert run["review_assignee_user_id"] is not None
+    assert run["review_assignee"] == run["review_assignee_user_id"]
     assert fake_client.closed is True
     assert fake_client.calls[0]["user_hint"] == "merge gel notes"
 
@@ -289,6 +292,426 @@ def test_contributor_can_schedule_and_run_project_batch(
     assert run.json()["data"]["status"] == "ready"
 
 
+def test_manual_runs_keep_notes_cursors_and_dedup_scoped_to_each_reviewer(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    first_headers, first_user_id = _registered_user(client, role=Role.EDITOR)
+    second_headers, second_user_id = _registered_user(client, role=Role.EDITOR)
+    for user_id in (first_user_id, second_user_id):
+        added = client.post(
+            f"/projects/{project_id}/members",
+            json={"user_id": user_id, "role": "contributor"},
+            headers=admin_auth_headers,
+        )
+        assert added.status_code == 201
+
+    first_note = _note(client, first_headers, project_id, "First user's earlier note.")
+    second_note = _note(client, second_headers, project_id, "Second user's earlier note.")
+    fake_client = FakeBatchDraftClient(_batch_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda _settings: fake_client
+
+    first_response = client.post(
+        "/batches/run-now",
+        json={"project_id": project_id},
+        headers=first_headers,
+    )
+    second_response = client.post(
+        "/batches/run-now",
+        json={"project_id": project_id},
+        headers=second_headers,
+    )
+
+    assert first_response.status_code == 201
+    assert second_response.status_code == 201
+    first_run = first_response.json()["data"]
+    second_run = second_response.json()["data"]
+    assert first_run["source_note_ids"] == [first_note]
+    assert second_run["source_note_ids"] == [second_note]
+    assert first_run["review_assignee_user_id"] == first_user_id
+    assert second_run["review_assignee_user_id"] == second_user_id
+    assert first_run["review_assignee"] == first_user_id
+    assert second_run["review_assignee"] == second_user_id
+    first_draft = client.get(
+        f"/batches/{first_run['change_set_id']}",
+        headers=first_headers,
+    )
+    second_draft = client.get(
+        f"/batches/{second_run['change_set_id']}",
+        headers=second_headers,
+    )
+    assert first_draft.status_code == 200
+    assert second_draft.status_code == 200
+    assert first_draft.json()["data"]["review_assignee_user_id"] == first_user_id
+    assert second_draft.json()["data"]["review_assignee_user_id"] == second_user_id
+
+    # Interleave another pair after both cursors have advanced. Running the
+    # second reviewer first must not consume or hide the first reviewer's note.
+    later_first_note = _note(client, first_headers, project_id, "First user's later note.")
+    later_second_note = _note(client, second_headers, project_id, "Second user's later note.")
+    later_second = client.post(
+        "/batches/run-now",
+        json={"project_id": project_id},
+        headers=second_headers,
+    )
+    later_first = client.post(
+        "/batches/run-now",
+        json={"project_id": project_id},
+        headers=first_headers,
+    )
+    assert later_second.status_code == 201
+    assert later_first.status_code == 201
+    assert later_second.json()["data"]["source_note_ids"] == [later_second_note]
+    assert later_first.json()["data"]["source_note_ids"] == [later_first_note]
+
+    # A query with no reviewer is the legacy unassigned bucket, not a wildcard
+    # over both reviewers' successful runs or source-note dedup records.
+    with client.app.state.db_session_factory() as session:
+        repository = SQLAlchemyLabTrackerRepository(session)
+        assert repository.latest_successful_graph_draft_batch_run(UUID(project_id)) is None
+        assert (
+            repository.successful_graph_draft_batch_source_note_ids_at_window_end(
+                UUID(project_id),
+                _api_datetime(first_run["window_end"]),
+            )
+            == set()
+        )
+        assert (
+            repository.latest_successful_graph_draft_batch_run(
+                UUID(project_id),
+                review_assignee_user_id=UUID(first_user_id),
+            )
+            is not None
+        )
+        assert (
+            repository.latest_successful_graph_draft_batch_run(
+                UUID(project_id),
+                review_assignee_user_id=UUID(second_user_id),
+            )
+            is not None
+        )
+
+
+def test_personal_views_honor_reassignment_before_creator_fallback(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    creator_headers, creator_user_id = _registered_user(client, role=Role.EDITOR)
+    assignee_headers, assignee_user_id = _registered_user(client, role=Role.EDITOR)
+    for user_id in (creator_user_id, assignee_user_id):
+        added = client.post(
+            f"/projects/{project_id}/members",
+            json={"user_id": user_id, "role": "contributor"},
+            headers=admin_auth_headers,
+        )
+        assert added.status_code == 201
+    _note(client, creator_headers, project_id, "A review that will be reassigned.")
+    client.app.state.graph_draft_client_factory = lambda _settings: FakeBatchDraftClient(
+        _batch_patch(project_id)
+    )
+    response = client.post(
+        "/batches/run-now",
+        json={"project_id": project_id},
+        headers=creator_headers,
+    )
+    assert response.status_code == 201
+    run = response.json()["data"]
+
+    with client.app.state.db_session_factory() as session:
+        run_row = session.get(GraphDraftBatchRunModel, run["run_id"])
+        change_set_row = session.get(GraphChangeSetModel, run["change_set_id"])
+        assert run_row is not None
+        assert change_set_row is not None
+        assert str(run_row.created_by_user_id) == creator_user_id
+        assert str(change_set_row.created_by_user_id) == creator_user_id
+        run_row.review_assignee = assignee_user_id
+        run_row.review_assignee_user_id = assignee_user_id
+        change_set_row.review_assignee = assignee_user_id
+        change_set_row.review_assignee_user_id = assignee_user_id
+        session.commit()
+
+    creator_queue = client.get("/batches?mine=true", headers=creator_headers)
+    assignee_queue = client.get("/batches?mine=true", headers=assignee_headers)
+    creator_runs = client.get("/batches/runs?mine=true", headers=creator_headers)
+    assignee_runs = client.get("/batches/runs?mine=true", headers=assignee_headers)
+    assert creator_queue.json()["data"] == []
+    assert creator_runs.json()["data"] == []
+    assert [item["change_set_id"] for item in assignee_queue.json()["data"]] == [
+        run["change_set_id"]
+    ]
+    assert [item["run_id"] for item in assignee_runs.json()["data"]] == [
+        run["run_id"]
+    ]
+
+
+def test_personal_daily_review_views_are_separate_from_project_oversight(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    first_project_id = _project(client, admin_auth_headers)
+    second_project_id = _project(client, admin_auth_headers)
+    first_headers, first_user_id = _registered_user(client, role=Role.EDITOR)
+    second_headers, second_user_id = _registered_user(client, role=Role.EDITOR)
+    for project_id, user_id in (
+        (first_project_id, first_user_id),
+        (first_project_id, second_user_id),
+        (second_project_id, first_user_id),
+    ):
+        added = client.post(
+            f"/projects/{project_id}/members",
+            json={"user_id": user_id, "role": "contributor"},
+            headers=admin_auth_headers,
+        )
+        assert added.status_code == 201
+
+    _note(client, first_headers, first_project_id, "First reviewer's project-one note.")
+    _note(client, second_headers, first_project_id, "Second reviewer's project-one note.")
+    _note(client, first_headers, second_project_id, "First reviewer's project-two note.")
+    client.app.state.graph_draft_client_factory = lambda _settings: FakeBatchDraftClient(
+        _batch_patch(first_project_id)
+    )
+    first_project_response = client.post(
+        "/batches/run-now",
+        json={"project_id": first_project_id},
+        headers=first_headers,
+    )
+    second_user_response = client.post(
+        "/batches/run-now",
+        json={"project_id": first_project_id},
+        headers=second_headers,
+    )
+    client.app.state.graph_draft_client_factory = lambda _settings: FakeBatchDraftClient(
+        _batch_patch(second_project_id)
+    )
+    second_project_response = client.post(
+        "/batches/run-now",
+        json={"project_id": second_project_id},
+        headers=first_headers,
+    )
+    assert first_project_response.status_code == 201
+    assert second_user_response.status_code == 201
+    assert second_project_response.status_code == 201
+    first_project_run = first_project_response.json()["data"]
+    second_user_run = second_user_response.json()["data"]
+    second_project_run = second_project_response.json()["data"]
+
+    first_queue = client.get("/batches?mine=true", headers=first_headers)
+    filtered_queue = client.get(
+        f"/batches?mine=true&project_id={first_project_id}",
+        headers=first_headers,
+    )
+    second_queue = client.get("/batches?mine=true", headers=second_headers)
+    first_history = client.get("/batches/runs?mine=true", headers=first_headers)
+    assert first_queue.status_code == 200
+    assert filtered_queue.status_code == 200
+    assert second_queue.status_code == 200
+    assert first_history.status_code == 200
+    assert {item["change_set_id"] for item in first_queue.json()["data"]} == {
+        first_project_run["change_set_id"],
+        second_project_run["change_set_id"],
+    }
+    assert [item["change_set_id"] for item in filtered_queue.json()["data"]] == [
+        first_project_run["change_set_id"]
+    ]
+    assert [item["change_set_id"] for item in second_queue.json()["data"]] == [
+        second_user_run["change_set_id"]
+    ]
+    assert {item["run_id"] for item in first_history.json()["data"]} == {
+        first_project_run["run_id"],
+        second_project_run["run_id"],
+    }
+
+    first_draft = client.get(
+        f"/batches/{first_project_run['change_set_id']}",
+        headers=first_headers,
+    ).json()["data"]
+    operation = first_draft["operations"][0]
+    accepted = client.patch(
+        "/graph-drafts/"
+        f"{first_project_run['change_set_id']}/operations/{operation['operation_id']}",
+        json={"payload": operation["payload"], "status": "accepted"},
+        headers=first_headers,
+    )
+    assert accepted.status_code == 200
+    submitted = client.post(
+        f"/graph-drafts/{first_project_run['change_set_id']}/submit",
+        headers=first_headers,
+    )
+    assert submitted.status_code == 200
+
+    actionable = client.get(
+        f"/batches?mine=true&project_id={first_project_id}",
+        headers=first_headers,
+    )
+    waiting = client.get(
+        f"/batches?mine=true&status=submitted&project_id={first_project_id}",
+        headers=first_headers,
+    )
+    contributor_oversight = client.get(
+        f"/batches?needs_commit=true&project_id={first_project_id}",
+        headers=first_headers,
+    )
+    owner_oversight = client.get(
+        f"/batches?needs_commit=true&project_id={first_project_id}",
+        headers=admin_auth_headers,
+    )
+    complete_project_queue = client.get(
+        f"/batches?project_id={first_project_id}",
+        headers=admin_auth_headers,
+    )
+    assert actionable.json()["data"] == []
+    assert [item["change_set_id"] for item in waiting.json()["data"]] == [
+        first_project_run["change_set_id"]
+    ]
+    assert contributor_oversight.json()["data"] == []
+    assert [item["change_set_id"] for item in owner_oversight.json()["data"]] == [
+        first_project_run["change_set_id"]
+    ]
+    assert {item["change_set_id"] for item in complete_project_queue.json()["data"]} == {
+        first_project_run["change_set_id"],
+        second_user_run["change_set_id"],
+    }
+    assert (
+        client.get(
+            "/batches?mine=true&needs_commit=true",
+            headers=admin_auth_headers,
+        ).status_code
+        == 422
+    )
+    assert (
+        client.get(
+            "/batches?needs_commit=true&status=ready",
+            headers=admin_auth_headers,
+        ).status_code
+        == 422
+    )
+
+
+def test_personal_cadence_and_owner_project_template_are_independent(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    first_headers, first_user_id = _registered_user(client, role=Role.EDITOR)
+    second_headers, second_user_id = _registered_user(client, role=Role.EDITOR)
+    for user_id in (first_user_id, second_user_id):
+        added = client.post(
+            f"/projects/{project_id}/members",
+            json={"user_id": user_id, "role": "contributor"},
+            headers=admin_auth_headers,
+        )
+        assert added.status_code == 201
+
+    default_path = f"/projects/{project_id}/graph-draft-batch-settings/project-default"
+    personal_path = f"/projects/{project_id}/graph-draft-batch-settings"
+    project_default = client.patch(
+        default_path,
+        json={"enabled": True, "cadence_minutes": 720},
+        headers=admin_auth_headers,
+    )
+    assert project_default.status_code == 200
+    assert project_default.json()["data"]["user_id"] is None
+
+    inherited_first = client.get(personal_path, headers=first_headers)
+    inherited_second = client.get(personal_path, headers=second_headers)
+    assert inherited_first.json()["data"]["user_id"] == first_user_id
+    assert inherited_second.json()["data"]["user_id"] == second_user_id
+    assert inherited_first.json()["data"]["cadence_minutes"] == 720
+    assert inherited_second.json()["data"]["cadence_minutes"] == 720
+
+    updated_first = client.patch(
+        personal_path,
+        json={"enabled": True, "cadence_minutes": 1440},
+        headers=first_headers,
+    )
+    assert updated_first.status_code == 200
+    assert updated_first.json()["data"]["user_id"] == first_user_id
+    assert updated_first.json()["data"]["cadence_minutes"] == 1440
+    assert (
+        client.get(personal_path, headers=second_headers).json()["data"]["cadence_minutes"] == 720
+    )
+    assert (
+        client.get(default_path, headers=admin_auth_headers).json()["data"]["cadence_minutes"]
+        == 720
+    )
+
+    forbidden_default = client.patch(
+        default_path,
+        json={"cadence_minutes": 10080},
+        headers=first_headers,
+    )
+    spoofed_beneficiary = client.patch(
+        personal_path,
+        json={"enabled": True, "user_id": second_user_id},
+        headers=first_headers,
+    )
+    spoofed_read = client.get(
+        personal_path,
+        params={"user_id": second_user_id},
+        headers=first_headers,
+    )
+    null_beneficiary = client.patch(
+        personal_path,
+        json={"enabled": True, "user_id": None},
+        headers=first_headers,
+    )
+    default_with_user = client.patch(
+        default_path,
+        json={"enabled": True, "user_id": first_user_id},
+        headers=admin_auth_headers,
+    )
+    assert forbidden_default.status_code == 401
+    assert spoofed_beneficiary.status_code == 422
+    assert spoofed_read.status_code == 401
+    assert null_beneficiary.status_code == 422
+    assert default_with_user.status_code == 422
+
+
+def test_auth_disabled_cadence_keeps_the_single_legacy_reviewer_bucket(
+    monkeypatch,
+    migrated_sqlite_database_url: str,
+) -> None:
+    monkeypatch.setenv("LAB_TRACKER_AUTH_ENABLED", "false")
+    with TestClient(create_app()) as local_client:
+        project = local_client.post("/projects", json={"name": "Local Daily Review"})
+        project_id = project.json()["data"]["project_id"]
+        settings_path = f"/projects/{project_id}/graph-draft-batch-settings"
+        settings = local_client.patch(settings_path, json={"enabled": True})
+        assert settings.status_code == 200
+        assert settings.json()["data"]["user_id"] is None
+        synthetic_user_id = str(uuid4())
+        assert (
+            local_client.get(settings_path, params={"user_id": synthetic_user_id}).status_code
+            == 422
+        )
+        assert (
+            local_client.patch(
+                settings_path,
+                json={"enabled": True, "user_id": synthetic_user_id},
+            ).status_code
+            == 422
+        )
+        _note(local_client, {}, project_id, "Local staged note.")
+        with local_client.app.state.db_session_factory() as session:
+            row = session.scalar(
+                select(GraphDraftBatchSettingsModel).where(
+                    GraphDraftBatchSettingsModel.project_id == project_id
+                )
+            )
+            assert row.user_id is None
+            row.next_run_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+            session.commit()
+        fake_client = FakeBatchDraftClient(_batch_patch(project_id))
+        local_client.app.state.graph_draft_client_factory = lambda _settings: fake_client
+        due = local_client.post("/batches/run-due")
+        assert due.status_code == 200
+        assert len(due.json()["data"]) == 1
+        assert due.json()["data"][0]["review_assignee_user_id"] is None
+        assert due.json()["data"][0]["review_assignee"] is not None
+
+
 def test_batch_settings_for_missing_project_return_not_found(
     client: TestClient,
     admin_auth_headers: dict[str, str],
@@ -300,8 +723,7 @@ def test_batch_settings_for_missing_project_return_not_found(
         headers=admin_auth_headers,
     )
     project_default = client.get(
-        f"/projects/{missing_project_id}/graph-draft-batch-settings",
-        params={"user_id": str(UUID(int=0))},
+        f"/projects/{missing_project_id}/graph-draft-batch-settings/project-default",
         headers=admin_auth_headers,
     )
     update = client.patch(
@@ -338,14 +760,11 @@ def test_per_user_batch_notification_address_is_private_to_user_and_owner(
         role="contributor",
         global_role=Role.EDITOR,
     )
-    first_user_id = client.get("/auth/me", headers=first_headers).json()["data"][
-        "user_id"
-    ]
+    first_user_id = client.get("/auth/me", headers=first_headers).json()["data"]["user_id"]
 
     configured = client.patch(
         f"/projects/{project_id}/graph-draft-batch-settings",
         json={
-            "user_id": first_user_id,
             "email_notifications_enabled": True,
             "notification_email": "first.reviewer@example.org",
         },
@@ -355,7 +774,6 @@ def test_per_user_batch_notification_address_is_private_to_user_and_owner(
 
     own = client.get(
         f"/projects/{project_id}/graph-draft-batch-settings",
-        params={"user_id": first_user_id},
         headers=first_headers,
     )
     assert own.status_code == 200
@@ -450,8 +868,7 @@ def test_background_worker_redacts_configured_provider_secret_from_failed_run(
 
     def failing_factory(settings):  # noqa: ANN001
         raise RuntimeError(
-            f"provider factory unavailable for {api_key} at "
-            f"https://provider.test/v1?key={api_key}"
+            f"provider factory unavailable for {api_key} at https://provider.test/v1?key={api_key}"
         )
 
     client.app.state.graph_draft_client_factory = failing_factory
@@ -879,8 +1296,7 @@ def test_run_due_isolates_project_errors_and_continues(
         calls += 1
         if calls == 1:
             raise RuntimeError(
-                f"factory down for {api_key} at "
-                f"https://provider.test/v1?key={api_key}&retry=true"
+                f"factory down for {api_key} at https://provider.test/v1?key={api_key}&retry=true"
             )
         return healthy_client
 
@@ -929,7 +1345,7 @@ def test_background_run_due_partitions_by_note_author_and_assigns_reviewers(
     first_note = _note(client, first_headers, project_id, "First user's staged note.")
     second_note = _note(client, second_headers, project_id, "Second user's staged note.")
     settings = client.patch(
-        f"/projects/{project_id}/graph-draft-batch-settings",
+        f"/projects/{project_id}/graph-draft-batch-settings/project-default",
         json={"enabled": True},
         headers=admin_auth_headers,
     )

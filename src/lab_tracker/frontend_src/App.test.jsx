@@ -223,7 +223,7 @@ describe("App", () => {
         response: paged([]),
       },
       {
-        match: buildApiPath("/batches", { limit: 5 }),
+        match: buildApiPath("/batches", { limit: 5, mine: true }),
         response: paged([], { limit: 5, offset: 0, total: 0 }),
       },
       {
@@ -352,7 +352,7 @@ describe("App", () => {
         ]),
       },
       {
-        match: buildApiPath("/batches", { limit: 5 }),
+        match: buildApiPath("/batches", { limit: 5, mine: true }),
         response: paged([], { limit: 5, offset: 0, total: 0 }),
       },
     ]);

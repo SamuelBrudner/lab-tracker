@@ -757,7 +757,11 @@ class LabTrackerRepository(Protocol):
         review_assignee_user_id: UUID | None = None,
         review_assignee: str | None = None,
     ) -> GraphDraftBatchRun | None:
-        """Return the latest successful/skipped batch run for a project."""
+        """Return the latest successful/skipped run in one reviewer bucket.
+
+        Supplying neither reviewer field selects only legacy unassigned rows;
+        it never means all reviewers.
+        """
 
     def successful_graph_draft_batch_source_note_ids_at_window_end(
         self,
@@ -767,7 +771,10 @@ class LabTrackerRepository(Protocol):
         review_assignee_user_id: UUID | None = None,
         review_assignee: str | None = None,
     ) -> set[UUID]:
-        """Return source note IDs from successful batch runs ending at a window boundary."""
+        """Return source note IDs for one reviewer at a window boundary.
+
+        Supplying neither reviewer field selects only legacy unassigned rows.
+        """
 
     def query_graph_draft_batch_runs(
         self,

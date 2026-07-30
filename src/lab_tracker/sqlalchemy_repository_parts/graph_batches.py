@@ -515,7 +515,18 @@ class SQLAlchemyGraphDraftBatchRunRepository(EntityRepository[GraphDraftBatchRun
                 == str(review_assignee_user_id)
             )
         elif review_assignee is not None:
-            stmt = stmt.where(GraphDraftBatchRunModel.review_assignee == review_assignee)
+            stmt = stmt.where(
+                GraphDraftBatchRunModel.review_assignee_user_id.is_(None),
+                GraphDraftBatchRunModel.review_assignee == review_assignee,
+            )
+        else:
+            # Legacy unassigned runs are their own bucket. Historically this
+            # branch omitted the reviewer predicate and therefore allowed one
+            # user's cursor to advance another user's review window.
+            stmt = stmt.where(
+                GraphDraftBatchRunModel.review_assignee_user_id.is_(None),
+                GraphDraftBatchRunModel.review_assignee.is_(None),
+            )
         row = self._session.scalar(
             stmt.order_by(GraphDraftBatchRunModel.window_end.desc()).limit(1)
         )
@@ -546,7 +557,15 @@ class SQLAlchemyGraphDraftBatchRunRepository(EntityRepository[GraphDraftBatchRun
                 == str(review_assignee_user_id)
             )
         elif review_assignee is not None:
-            stmt = stmt.where(GraphDraftBatchRunModel.review_assignee == review_assignee)
+            stmt = stmt.where(
+                GraphDraftBatchRunModel.review_assignee_user_id.is_(None),
+                GraphDraftBatchRunModel.review_assignee == review_assignee,
+            )
+        else:
+            stmt = stmt.where(
+                GraphDraftBatchRunModel.review_assignee_user_id.is_(None),
+                GraphDraftBatchRunModel.review_assignee.is_(None),
+            )
         rows = self._session.execute(stmt)
         note_ids: set[UUID] = set()
         for (source_note_ids,) in rows:

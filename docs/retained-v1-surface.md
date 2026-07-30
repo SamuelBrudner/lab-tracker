@@ -71,8 +71,12 @@ research record:
   operation requires human edit/accept/reject before commit through normal API
   validation.
 - Per-(project, user) graph-draft batch settings and run history for configured
-  cadence, run-now, and run-due drafting over staged notes, with a project-level
-  default row and `review_assignee` attribution on scheduled user batches.
+  cadence, run-now, and run-due drafting over staged notes. The ordinary
+  settings endpoint and **Run now** action resolve the authenticated user
+  server-side; owners manage the project-level template through an explicit
+  project-default endpoint. Manual and scheduled batches carry
+  `review_assignee` attribution, and the personal queue, waiting, and
+  owner-commit projections remain distinct.
 - Opt-in, per-user review-ready email cues backed by a transactional delivery
   outbox, retry leases, and signed short-lived links. Email contains no project
   or research content, and links still require normal authentication and
