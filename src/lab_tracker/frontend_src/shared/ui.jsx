@@ -1,6 +1,6 @@
 import * as React from "react";
 
-import { roleClass } from "./formatters.js";
+import { formatDate, roleClass } from "./formatters.js";
 
 class ErrorBoundary extends React.Component {
   constructor(props) {
@@ -171,6 +171,34 @@ function FlashMessages({ message, error }) {
       {message ? <p className="flash ok">{message}</p> : null}
       {error ? <p className="flash error">{error}</p> : null}
     </>
+  );
+}
+
+/**
+ * Offers text recovered from local storage after a tab closed mid-edit.
+ *
+ * Deliberately an offer rather than an automatic restore: the recovered text may
+ * be older than what the server now holds, so the person decides. `onRestore`
+ * only fills the editor — nothing is submitted on their behalf.
+ */
+function DraftRecoveryNotice({ label = "unsaved changes", savedAt, onRestore, onDiscard }) {
+  if (!savedAt) {
+    return null;
+  }
+
+  return (
+    <div className="flash draft-recovery" role="status">
+      <span>
+        You have {label} from {formatDate(new Date(savedAt).toISOString())} that were never
+        saved.
+      </span>
+      <button type="button" className="btn-secondary" onClick={onRestore}>
+        Restore them
+      </button>
+      <button type="button" className="btn-secondary" onClick={onDiscard}>
+        Discard them
+      </button>
+    </div>
   );
 }
 
@@ -350,6 +378,7 @@ export {
   AppNavigation,
   AppHeader,
   AuthForm,
+  DraftRecoveryNotice,
   ErrorBoundary,
   FlashMessages,
   ProjectContextCard,

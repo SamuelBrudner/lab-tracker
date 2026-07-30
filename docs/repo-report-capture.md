@@ -38,6 +38,29 @@ host-local scratch). `install-hook` writes a managed block into the repo's
 - A post-commit hook can never block the commit; on capture failure it prints a
   one-line warning and the commit proceeds.
 
+### Optional repository conventions
+
+If repository-specific names or layouts help interpret later review proposals,
+explicitly enroll the relevant tracked text files:
+
+```bash
+lt agent-context status
+lt agent-context add AGENTS.md --dry-run
+lt agent-context add AGENTS.md --yes
+```
+
+Enrollment writes only `.lab-tracker/agent-context.json`. Each future commit
+capture reads the enrolled files from that exact Git tree—not from dirty
+working-tree edits—strips Lab Tracker's own managed prompt blocks, and attaches
+a bounded, hashed snapshot to the staged note metadata. The commit hook still
+does capture only; scheduled or explicit review remains responsible for proposal
+generation.
+
+Use `lt agent-context remove AGENTS.md --dry-run` followed by `--yes` to stop
+including a file. Repository conventions are untrusted descriptive context, not
+instructions or scientific evidence, and every proposed graph operation still
+requires human review.
+
 ## Capture Modes
 
 ### Post-Commit Hook
@@ -45,7 +68,9 @@ host-local scratch). `install-hook` writes a managed block into the repo's
 Every `git commit` records a `commit` event: commit SHA, branch, remote, commit
 subject/author, dirty-tree flag, and the environment fingerprint. Events are
 idempotent per commit — a re-fired hook updates nothing and creates no
-duplicates.
+duplicates. The hook only lands the capture in the staged-note inbox; graph
+proposal generation waits for the configured daily-review schedule or an
+explicit on-demand review trigger.
 
 ### Annotation
 
