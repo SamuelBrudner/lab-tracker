@@ -413,13 +413,10 @@ def _maybe_schedule_auto_transcription(
         return
     if note.transcribed_text:
         return
-    capture_hint = note.metadata.get("capture_hint")
-    prompt = str(capture_hint).strip() if capture_hint is not None else ""
     background_tasks.add_task(
         _auto_transcribe_uploaded_note,
         app,
         note_id=note.note_id,
-        prompt=prompt or None,
         actor=actor,
     )
 
@@ -428,7 +425,6 @@ def _auto_transcribe_uploaded_note(
     app: FastAPI,
     *,
     note_id: UUID,
-    prompt: str | None,
     actor: AuthContext,
 ) -> None:
     """Transcribe after upload commit without making capture depend on ASR."""
@@ -445,12 +441,10 @@ def _auto_transcribe_uploaded_note(
                 session,
                 surface="http",
             )
-            background_api.transcribe_voice_note(
+            background_api.auto_transcribe_voice_note(
                 note_id,
                 transcription_client=transcription_client,
-                prompt=prompt,
                 actor=actor,
-                skip_if_transcribed=True,
             )
     except Exception:
         _logger.exception(

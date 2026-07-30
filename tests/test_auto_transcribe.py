@@ -13,6 +13,7 @@ from lab_tracker.api import LabTrackerAPI
 from lab_tracker.app_parts.middleware import system_auth_context
 from lab_tracker.db_models import UsageEventModel
 from lab_tracker.graph_drafting import GraphDraftingError
+from lab_tracker.routes.notes import _auto_transcribe_uploaded_note
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 
 
@@ -85,6 +86,26 @@ class RacingTranscriptionClient(FakeTranscriptionClient):
                 note.note_id,
                 actor=system_auth_context(),
                 **update,
+            )
+        return super().transcribe_audio(**kwargs)
+
+
+class ReentrantTranscriptionClient(FakeTranscriptionClient):
+    """Start a duplicate background task while the first provider call is live."""
+
+    def __init__(self, app: Any, note_id: UUID) -> None:
+        super().__init__()
+        self._app = app
+        self._note_id = note_id
+        self._reentered = False
+
+    def transcribe_audio(self, **kwargs: Any) -> dict[str, Any]:
+        if not self._reentered:
+            self._reentered = True
+            _auto_transcribe_uploaded_note(
+                self._app,
+                note_id=self._note_id,
+                actor=system_auth_context(),
             )
         return super().transcribe_audio(**kwargs)
 
@@ -171,6 +192,7 @@ def test_failed_auto_transcription_is_fail_soft_and_manual_path_still_works(
     admin_auth_headers: dict[str, str],
 ) -> None:
     _enable_auto_transcription(client)
+    client.app.state.settings.usage_events = True
     project_id = _project(client, admin_auth_headers)
     failing_client = FakeTranscriptionClient(error="provider unavailable")
     client.app.state.graph_draft_client_factory = lambda _settings: failing_client
@@ -190,8 +212,23 @@ def test_failed_auto_transcription_is_fail_soft_and_manual_path_still_works(
     note = _get_note(client, admin_auth_headers, note_id)
     assert note["transcribed_text"] is None
     assert note["metadata"]["transcript_status"] == "pending"
+    assert "auto_transcription_claim_id" not in note["metadata"]
+    assert "auto_transcription_claimed_at" not in note["metadata"]
     assert failing_client.transcription_calls != []
     assert failing_client.closed is True
+
+    with client.app.state.db_session_factory() as session:
+        failed_events = list(
+            session.scalars(
+                select(UsageEventModel).where(
+                    UsageEventModel.verb == "transcribe",
+                    UsageEventModel.resource_id == note_id,
+                )
+            )
+        )
+    assert len(failed_events) == 1
+    assert failed_events[0].outcome == "error"
+    assert failed_events[0].surface == "http"
 
     working_client = FakeTranscriptionClient()
     client.app.state.graph_draft_client_factory = lambda _settings: working_client
@@ -322,6 +359,107 @@ def test_non_audio_and_pretranscribed_uploads_do_not_call_provider(
     assert image.status_code == 201
     assert audio.status_code == 201
     assert fake_client.transcription_calls == []
+
+
+def test_human_transcript_before_background_task_skips_provider(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    created = client.post(
+        "/notes/upload-file",
+        data={"project_id": project_id},
+        files={"file": ("voice.webm", b"fake-audio-bytes", "audio/webm")},
+        headers=admin_auth_headers,
+    )
+    assert created.status_code == 201
+    note_id = created.json()["data"]["note_id"]
+    edited = client.patch(
+        f"/notes/{note_id}",
+        json={"transcribed_text": "Human transcript before task."},
+        headers=admin_auth_headers,
+    )
+    assert edited.status_code == 200
+
+    fake_client = FakeTranscriptionClient()
+    client.app.state.graph_draft_client_factory = lambda _settings: fake_client
+    _auto_transcribe_uploaded_note(
+        client.app,
+        note_id=UUID(note_id),
+        actor=system_auth_context(),
+    )
+
+    note = _get_note(client, admin_auth_headers, note_id)
+    assert note["transcribed_text"] == "Human transcript before task."
+    assert fake_client.transcription_calls == []
+
+
+def test_background_task_uses_latest_redacted_capture_hint(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    created = client.post(
+        "/notes/upload-file",
+        data={
+            "project_id": project_id,
+            "metadata": json.dumps(
+                {
+                    "capture_hint": "sensitive rig label",
+                    "transcript_status": "pending",
+                }
+            ),
+        },
+        files={"file": ("voice.webm", b"fake-audio-bytes", "audio/webm")},
+        headers=admin_auth_headers,
+    )
+    assert created.status_code == 201
+    note_id = created.json()["data"]["note_id"]
+    redacted = client.patch(
+        f"/notes/{note_id}",
+        json={"metadata": {"transcript_status": "pending"}},
+        headers=admin_auth_headers,
+    )
+    assert redacted.status_code == 200
+
+    fake_client = FakeTranscriptionClient()
+    client.app.state.graph_draft_client_factory = lambda _settings: fake_client
+    _auto_transcribe_uploaded_note(
+        client.app,
+        note_id=UUID(note_id),
+        actor=system_auth_context(),
+    )
+
+    note = _get_note(client, admin_auth_headers, note_id)
+    assert note["transcribed_text"] == "Fly 12 tracked better after pulse onset."
+    assert fake_client.transcription_calls[0]["prompt"] is None
+
+
+def test_duplicate_background_tasks_make_one_provider_call(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    created = client.post(
+        "/notes/upload-file",
+        data={"project_id": project_id},
+        files={"file": ("voice.webm", b"fake-audio-bytes", "audio/webm")},
+        headers=admin_auth_headers,
+    )
+    assert created.status_code == 201
+    note_id = UUID(created.json()["data"]["note_id"])
+    racing_client = ReentrantTranscriptionClient(client.app, note_id)
+    client.app.state.graph_draft_client_factory = lambda _settings: racing_client
+
+    _auto_transcribe_uploaded_note(
+        client.app,
+        note_id=note_id,
+        actor=system_auth_context(),
+    )
+
+    note = _get_note(client, admin_auth_headers, str(note_id))
+    assert note["transcribed_text"] == "Fly 12 tracked better after pulse onset."
+    assert len(racing_client.transcription_calls) == 1
 
 
 def test_idempotent_audio_replay_does_not_schedule_a_second_paid_call(
