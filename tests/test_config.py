@@ -14,6 +14,7 @@ from api_helpers import drain_test_resources, register_test_resources
 from fastapi import FastAPI
 from pydantic import ValidationError
 from starlette.testclient import TestClient
+from store_authority_fakes import unsafe_probe_target_for_adapter_test
 
 from lab_tracker.app_parts import runtime as runtime_module
 from lab_tracker.app_parts.runtime import (
@@ -38,13 +39,14 @@ from lab_tracker.local_resolution_budget import (
     MAX_LOCAL_RESOLUTION_MAX_READ_BYTES,
 )
 from lab_tracker.models import StoreKind
+from lab_tracker.store_authority_registry import StoreAuthorityRegistry
+from lab_tracker.store_authority_use import FixedStoreAuthoritySnapshotProvider
 from lab_tracker.store_health import (
     DEFAULT_STORE_HEALTH_CACHE_MAX_ENTRIES,
     DEFAULT_STORE_HEALTH_CACHE_TTL_SECONDS,
     DEFAULT_STORE_HEALTH_SINGLEFLIGHT_WAIT_SECONDS,
     StoreHealth,
     StoreHealthStatus,
-    StoreProbeTarget,
 )
 from lab_tracker.store_health_admission import (
     DEFAULT_STORE_HEALTH_GLOBAL_IN_FLIGHT_LIMIT,
@@ -984,7 +986,7 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(
         assert captured["health_rclone_deadline_seconds"] == 7.25
         assert captured["health_git_deadline_seconds"] == 7.25
 
-        local_health_target = StoreProbeTarget(
+        local_health_target = unsafe_probe_target_for_adapter_test(
             store_id=UUID(int=4),
             name="runtime-local-wiring",
             kind=StoreKind.LOCAL_FS,
@@ -996,7 +998,7 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(
         assert captured["local_health_target"] is local_health_target
         assert "legacy_health_target" not in captured
 
-        http_health_target = StoreProbeTarget(
+        http_health_target = unsafe_probe_target_for_adapter_test(
             store_id=UUID(int=1),
             name="runtime-http-wiring",
             kind=StoreKind.HTTP,
@@ -1008,7 +1010,7 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(
         assert captured["http_health_target"] is http_health_target
         assert "legacy_health_target" not in captured
 
-        rclone_health_target = StoreProbeTarget(
+        rclone_health_target = unsafe_probe_target_for_adapter_test(
             store_id=UUID(int=2),
             name="runtime-rclone-wiring",
             kind=StoreKind.RCLONE,
@@ -1020,7 +1022,7 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(
         assert captured["rclone_health_target"] is rclone_health_target
         assert "legacy_health_target" not in captured
 
-        git_health_target = StoreProbeTarget(
+        git_health_target = unsafe_probe_target_for_adapter_test(
             store_id=UUID(int=3),
             name="runtime-wiring",
             kind=StoreKind.GIT,
@@ -1091,6 +1093,14 @@ def test_runtime_retains_one_store_authority_snapshot_without_environment_reread
 
         assert app.state.store_authority_registry is runtime.store_authority_registry
         assert (
+            app.state.store_authority_snapshot_provider
+            is runtime.store_authority_snapshot_provider
+        )
+        assert (
+            runtime.store_authority_snapshot_provider()
+            is runtime.store_authority_registry
+        )
+        assert (
             runtime.lab_tracker_api._store_authority_registry
             is runtime.store_authority_registry
         )
@@ -1099,9 +1109,21 @@ def test_runtime_retains_one_store_authority_snapshot_without_environment_reread
             is runtime.store_authority_registry
         )
         assert "store_authority_registry=" not in repr(runtime)
+        assert "store_authority_snapshot_provider=" not in repr(runtime)
     finally:
         runtime.engine.dispose()
         runtime.cleanup_git_health_workdir()
+
+
+def test_fixed_store_authority_provider_preserves_identity_and_redacts_repr():
+    registry = StoreAuthorityRegistry.deny_all()
+
+    provider = FixedStoreAuthoritySnapshotProvider(registry)
+
+    assert provider() is registry
+    rendered = repr(provider)
+    assert "_registry" not in rendered
+    assert "StoreAuthorityRegistry" not in rendered
 
 
 def test_lifespan_removes_app_owned_git_health_workdir(monkeypatch):

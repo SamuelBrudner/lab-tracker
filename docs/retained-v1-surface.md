@@ -51,8 +51,11 @@ research record:
   durable local outbox records that sync as `provider=git` staged notes under
   the shared `<normalized-remote>@<commit>` evidence identity. Capture is
   event-based — Lab Tracker never clones or continuously monitors
-  repositories — and the staged-note sink works under today's device-token
-  allowlist while draft requests need a user or personal-access token. See
+  repositories — and the post-commit hook only lands staged notes in the inbox;
+  proposal generation is deferred to the configured daily-review cadence or an
+  explicit on-demand trigger. The staged-note sink works under today's
+  device-token allowlist while draft requests need a user or personal-access
+  token. See
   [repo-report-capture.md](repo-report-capture.md).
 - Package-pinned code-facing idiom teaching rendered from one generator into
   consent-gated managed agent surfaces, with the advisory

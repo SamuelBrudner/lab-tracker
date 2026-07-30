@@ -5,6 +5,7 @@ from dataclasses import FrozenInstanceError, fields
 from uuid import UUID
 
 import pytest
+from store_authority_fakes import unsafe_probe_target_for_adapter_test
 
 from lab_tracker.bounded_subprocess import (
     MAX_PROCESS_DEADLINE_SECONDS,
@@ -74,7 +75,9 @@ def _target(
     *,
     kind: StoreKind = StoreKind.LOCAL_FS,
 ) -> StoreProbeTarget:
-    return StoreProbeTarget(
+    # These downstream adapter tests deliberately cover malformed legacy-shaped
+    # values that the normal proof-bound target factory refuses to construct.
+    return unsafe_probe_target_for_adapter_test(
         store_id=UUID(int=3),
         name="local-store",
         kind=kind,
