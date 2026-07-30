@@ -62,6 +62,49 @@ def test_auth_doctor_passes_lpat_and_flags_username_password(tmp_path: Path) -> 
     assert any("reopen" in note.lower() for note in payload["notes"])
 
 
+def test_auth_doctor_reports_canonical_base_url_before_legacy(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _write_json(
+        repo / ".mcp.json",
+        _mcp_servers(
+            {
+                "LAB_TRACKER_BASE_URL": "https://canonical.example.test",
+                "LAB_TRACKER_MCP_BASE_URL": "https://legacy.example.test",
+                "LAB_TRACKER_MCP_API_KEY": "lpat_good",
+            }
+        ),
+    )
+
+    payload = auth_helpers.auth_doctor(repo, home=tmp_path / "home")
+
+    assert payload["registrations"][0]["base_url"] == "https://canonical.example.test"
+
+
+def test_auth_doctor_reads_codex_toml_registration(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    codex_config = home / ".codex" / "config.toml"
+    codex_config.parent.mkdir(parents=True)
+    codex_config.write_text(
+        """
+[mcp_servers.lab_tracker]
+command = "lt-mcp"
+
+[mcp_servers.lab_tracker.env]
+LAB_TRACKER_BASE_URL = "https://canonical.example.test"
+LAB_TRACKER_MCP_API_KEY = "lpat_good"
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = auth_helpers.auth_doctor(tmp_path / "repo", home=home)
+
+    registration = next(
+        item for item in payload["registrations"] if item["surface"] == "codex"
+    )
+    assert registration["base_url"] == "https://canonical.example.test"
+    assert registration["auth_mode"] == "api_key"
+
+
 def test_auth_doctor_reads_claude_code_user_and_project_scopes(tmp_path: Path) -> None:
     home = tmp_path / "home"
     _write_json(

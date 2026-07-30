@@ -23,9 +23,13 @@ PY
 
 mkdir -p "$runtime_env_dir"
 
-if [ -z "${LAB_TRACKER_PUBLIC_BASE_URL:-}" ] && [ -n "${RENDER_EXTERNAL_URL:-}" ]; then
-    LAB_TRACKER_PUBLIC_BASE_URL="$RENDER_EXTERNAL_URL"
-    export LAB_TRACKER_PUBLIC_BASE_URL
+if [ -z "${LAB_TRACKER_BASE_URL:-}" ]; then
+    if [ -n "${LAB_TRACKER_PUBLIC_BASE_URL:-}" ]; then
+        LAB_TRACKER_BASE_URL="$LAB_TRACKER_PUBLIC_BASE_URL"
+    elif [ -n "${RENDER_EXTERNAL_URL:-}" ]; then
+        LAB_TRACKER_BASE_URL="$RENDER_EXTERNAL_URL"
+    fi
+    export LAB_TRACKER_BASE_URL
 fi
 
 if [ -z "${LAB_TRACKER_AUTH_SECRET_KEY:-}" ]; then

@@ -19,7 +19,7 @@ manual debugging.
 Environment for read/write tools:
 
 ```bash
-LAB_TRACKER_MCP_BASE_URL=http://127.0.0.1:8000
+LAB_TRACKER_BASE_URL=http://127.0.0.1:8000
 LAB_TRACKER_MCP_API_KEY=<lpat-personal-access-token>
 LAB_TRACKER_MCP_USERNAME=<service-account-username>
 LAB_TRACKER_MCP_PASSWORD=<service-account-password>
@@ -29,7 +29,7 @@ For agents that are not running on the graph workstation, use the current
 workstation HTTPS base URL:
 
 ```bash
-LAB_TRACKER_MCP_BASE_URL=https://mwcppc01ysbc155.tail79f9d8.ts.net
+LAB_TRACKER_BASE_URL=https://lab-tracker.example.org
 LAB_TRACKER_MCP_API_KEY=<read-only-lpat-token>
 LAB_TRACKER_MCP_USERNAME=<service-account-username>
 LAB_TRACKER_MCP_PASSWORD=<service-account-password>
@@ -62,7 +62,7 @@ than a hardcoded absolute Python path:
     "lab-tracker": {
       "command": "lt-mcp",
       "env": {
-        "LAB_TRACKER_MCP_BASE_URL": "http://127.0.0.1:8000",
+        "LAB_TRACKER_BASE_URL": "http://127.0.0.1:8000",
         "LAB_TRACKER_MCP_API_KEY": "<lpat-personal-access-token>",
         "LAB_TRACKER_MCP_USERNAME": "<service-account-username>",
         "LAB_TRACKER_MCP_PASSWORD": "<service-account-password>"
@@ -83,7 +83,7 @@ interpreter:
       "command": "${LAB_TRACKER_PYTHON:-python}",
       "args": ["-m", "lab_tracker.mcp_server"],
       "env": {
-        "LAB_TRACKER_MCP_BASE_URL": "http://127.0.0.1:8000"
+        "LAB_TRACKER_BASE_URL": "http://127.0.0.1:8000"
       }
     }
   }
@@ -199,13 +199,13 @@ For MCP clients on other computers, use the reachable shared-server URL instead
 of localhost, for example:
 
 ```powershell
-$env:LAB_TRACKER_MCP_BASE_URL = "http://<host-or-tailnet-ip>:8000"
+$env:LAB_TRACKER_BASE_URL = "http://<host-or-tailnet-ip>:8000"
 ```
 
 For off-network agents, prefer the durable Tailscale Funnel endpoint:
 
 ```powershell
-$env:LAB_TRACKER_MCP_BASE_URL = "https://mwcppc01ysbc155.tail79f9d8.ts.net"
+$env:LAB_TRACKER_BASE_URL = "https://lab-tracker.example.org"
 ```
 
 See [`docs/lan-shared-graph.md`](lan-shared-graph.md) for same-LAN, VPN, and
