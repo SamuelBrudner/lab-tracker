@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import base64
+import logging
 from datetime import datetime, timezone
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, File, Form, UploadFile
+from fastapi import APIRouter, BackgroundTasks, FastAPI, File, Form, UploadFile
 from starlette import status as http_status
 from starlette.requests import Request
 from starlette.responses import Response
 
 from lab_tracker.api import LabTrackerAPI
+from lab_tracker.auth import AuthContext
+from lab_tracker.config import get_settings
 from lab_tracker.errors import ValidationError
+from lab_tracker.graph_drafting import make_graph_draft_client
 from lab_tracker.models import (
     EntityType,
     Note,
@@ -33,6 +37,7 @@ from lab_tracker.schemas import (
     NoteTranscriptRequest,
     NoteUpdate,
 )
+from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 from lab_tracker.upload_security import (
     enforce_request_content_length_limit,
     validate_upload_content_type,
@@ -53,6 +58,8 @@ from .shared import (
     record_usage_view,
     validate_pagination,
 )
+
+_logger = logging.getLogger(__name__)
 
 
 def build_notes_router(api: LabTrackerAPI) -> APIRouter:
@@ -88,6 +95,7 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
     def upload_note_file(
         request: Request,
         response: Response,
+        background_tasks: BackgroundTasks,
         file: Annotated[UploadFile, File()],
         project_id: Annotated[UUID, Form()],
         transcribed_text: Annotated[str | None, Form()] = None,
@@ -128,6 +136,13 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         )
         if result.reused:
             response.status_code = http_status.HTTP_200_OK
+        else:
+            _maybe_schedule_auto_transcription(
+                background_tasks,
+                request.app,
+                note=result.entity,
+                actor=actor,
+            )
         return Envelope(data=result.entity)
 
     @router.post(
@@ -138,6 +153,7 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
     def quick_capture_note(
         request: Request,
         response: Response,
+        background_tasks: BackgroundTasks,
         file: Annotated[UploadFile, File()],
         project_id: Annotated[UUID, Form()],
         metadata: Annotated[str | None, Form()] = None,
@@ -171,6 +187,13 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         )
         if result.reused:
             response.status_code = http_status.HTTP_200_OK
+        else:
+            _maybe_schedule_auto_transcription(
+                background_tasks,
+                request.app,
+                note=result.entity,
+                actor=actor,
+            )
         return Envelope(data=result.entity)
 
     @router.get("/notes", response_model=ListEnvelope[Note])
@@ -372,3 +395,78 @@ def _optional_epoch_ms(value: object) -> str | None:
     if milliseconds < 0:
         raise ValidationError("source_file_last_modified_ms must be non-negative.")
     return str(milliseconds)
+
+
+def _maybe_schedule_auto_transcription(
+    background_tasks: BackgroundTasks,
+    app: FastAPI,
+    *,
+    note: Note,
+    actor: AuthContext,
+) -> None:
+    """Queue opt-in, best-effort transcription for a new audio upload."""
+
+    settings = getattr(app.state, "settings", None) or get_settings()
+    if not settings.auto_transcribe_voice_captures:
+        return
+    raw_asset = note.raw_asset
+    if raw_asset is None or not raw_asset.content_type.lower().startswith("audio/"):
+        return
+    if note.transcribed_text:
+        return
+    capture_hint = note.metadata.get("capture_hint")
+    prompt = str(capture_hint).strip() if capture_hint is not None else ""
+    background_tasks.add_task(
+        _auto_transcribe_uploaded_note,
+        app,
+        note_id=note.note_id,
+        prompt=prompt or None,
+        actor=actor,
+    )
+
+
+def _auto_transcribe_uploaded_note(
+    app: FastAPI,
+    *,
+    note_id: UUID,
+    prompt: str | None,
+    actor: AuthContext,
+) -> None:
+    """Transcribe after upload commit without making capture depend on ASR."""
+
+    transcription_client = None
+    try:
+        settings = getattr(app.state, "settings", None) or get_settings()
+        factory = getattr(app.state, "graph_draft_client_factory", None)
+        transcription_client = (
+            factory(settings) if callable(factory) else make_graph_draft_client(settings)
+        )
+        with app.state.db_session_factory() as session:
+            background_api = LabTrackerAPI(
+                raw_storage=app.state.raw_note_storage,
+                repository=SQLAlchemyLabTrackerRepository(session),
+                settings=settings,
+                surface="http",
+            )
+            background_api.transcribe_voice_note(
+                note_id,
+                transcription_client=transcription_client,
+                prompt=prompt,
+                actor=actor,
+                skip_if_transcribed=True,
+            )
+    except Exception:
+        _logger.exception(
+            "Automatic voice transcription failed for note %s; transcript stays pending.",
+            note_id,
+        )
+    finally:
+        close = getattr(transcription_client, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                _logger.exception(
+                    "Closing the transcription client for note %s failed.",
+                    note_id,
+                )

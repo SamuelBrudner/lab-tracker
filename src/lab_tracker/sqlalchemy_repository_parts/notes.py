@@ -9,7 +9,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session as OrmSession
 
 from lab_tracker.db_models import NoteModel, NoteTargetModel
-from lab_tracker.models import Note
+from lab_tracker.models import Note, NoteMetadataScalar
 from lab_tracker.repository import EntityRepository
 from lab_tracker.sqlalchemy_mappers import (
     apply_note_to_model,
@@ -89,6 +89,45 @@ class SQLAlchemyNoteRepository(EntityRepository[Note]):
             entity_id,
             note_target_models(entity),
         )
+
+    def apply_transcription_result(
+        self,
+        note_id: UUID,
+        *,
+        text: str,
+        metadata_updates: dict[str, NoteMetadataScalar],
+        updated_at: datetime,
+        expected_updated_at: datetime | None = None,
+        only_if_unchanged: bool = False,
+    ) -> Note | None:
+        """Merge a provider transcript without restoring a stale note snapshot."""
+
+        self._session.flush()
+        row = self._session.scalars(
+            select(NoteModel)
+            .where(NoteModel.note_id == str(note_id))
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).one_or_none()
+        if row is None:
+            return None
+
+        if only_if_unchanged and (
+            bool((row.transcribed_text or "").strip())
+            or (
+                expected_updated_at is not None
+                and row.updated_at != expected_updated_at
+            )
+        ):
+            return self.notes_from_rows([row])[0]
+
+        metadata = dict(row.note_metadata or {})
+        metadata.update(metadata_updates)
+        row.transcribed_text = text
+        row.note_metadata = metadata
+        row.updated_at = updated_at
+        self._session.flush()
+        return self.notes_from_rows([row])[0]
 
     def delete(self, entity_id: UUID) -> Note | None:
         entity = self.get(entity_id)

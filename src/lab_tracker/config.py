@@ -151,6 +151,7 @@ class Settings(BaseSettings):
             "LAB_TRACKER_CANONICAL_BASE_URL",
         ),
     )
+    auto_transcribe_voice_captures: bool = False
     review_email_enabled: bool = False
     review_email_transport: Literal["external", "smtp"] = "external"
     review_email_worker_poll_seconds: float = 10.0

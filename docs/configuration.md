@@ -685,6 +685,19 @@ startup; it surfaces at the first draft as a `failed` change set whose error
 names the variable to set. The step-by-step walkthrough (scheduling, agent
 credentials, MCP) is [`agent-setup.md`](agent-setup.md).
 
+Automatic upload transcription is a separate, explicit operator opt-in. When
+enabled, every newly created audio upload—including tagless phone captures and
+quick captures—is sent to the configured OpenAI or Google provider after the
+upload commits. The raw audio bytes and optional `capture_hint` leave the Lab
+Tracker instance; provider terms, retention, institutional approval, and
+charges therefore apply. The upload itself remains successful if transcription
+fails, and the manual Transcribe action remains available.
+
+There is currently no per-principal rate limit or daily transcription budget.
+Keep the setting disabled on public or untrusted deployments unless access is
+otherwise bounded and provider-side spending limits are acceptable. Exact
+`client_capture_id` replays do not schedule a second provider call.
+
 - `LAB_TRACKER_GRAPH_DRAFT_PROVIDER`: active drafting provider (default:
   `openai`; accepted values are `openai`, `anthropic`/`claude`, and
   `google`/`gemini`; `agentic`/`agentic-openai` enables the read-only agentic
@@ -699,6 +712,11 @@ credentials, MCP) is [`agent-setup.md`](agent-setup.md).
   for pending graph-draft batch jobs (default: `5`)
 - `LAB_TRACKER_GRAPH_DRAFT_SCHEDULER_INTERVAL_SECONDS`: scheduler tick interval
   for checking due cadence rows (default: `60`)
+- `LAB_TRACKER_AUTO_TRANSCRIBE_VOICE_CAPTURES`: after a new audio upload
+  commits, transcribe it in a best-effort background task using its
+  `capture_hint` as the optional provider prompt (default: `false`). This is a
+  paid, privacy-sensitive provider call and has no built-in rate or daily
+  budget control.
 - `LAB_TRACKER_OPENAI_API_KEY`: required when the provider is `openai` and for
   OpenAI voice-note transcription
 - `LAB_TRACKER_OPENAI_MODEL`: OpenAI model for graph drafts (default:

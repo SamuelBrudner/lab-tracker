@@ -49,6 +49,14 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger(__name__)
 
+_TRANSCRIPTION_MUTATION_METADATA_KEYS = {
+    "transcript_generated_at",
+    "transcript_model",
+    "transcript_provider",
+    "transcript_source_storage_id",
+    "transcript_status",
+}
+
 
 def _canonical_raw_asset(asset: NoteRawAsset | None) -> tuple[str, str, int, str] | None:
     if asset is None:
@@ -66,15 +74,29 @@ def _canonical_targets(targets: Iterable[EntityRef]) -> list[tuple[str, str]]:
     )
 
 
-def _canonical_capture_metadata(metadata: dict[str, str]) -> dict[str, str]:
+def _canonical_capture_metadata(
+    metadata: dict[str, NoteMetadataScalar],
+) -> dict[str, NoteMetadataScalar]:
     # The upload route stamps ingestion time after storing each physical copy.
-    # It is intentionally excluded; all caller-controlled and content-derived
-    # metadata remains part of conflict detection.
+    # Transcription fields are a later server-derived mutation, so neither can
+    # turn an exact replay of the original upload into a conflict.
     return {
         key: value
         for key, value in metadata.items()
         if key != "source_file_ingested_at"
+        and key not in _TRANSCRIPTION_MUTATION_METADATA_KEYS
     }
+
+
+def _has_provider_transcript(note: Note) -> bool:
+    source_storage_id = note.metadata.get("transcript_source_storage_id")
+    return bool(
+        note.raw_asset is not None
+        and (note.transcribed_text or "").strip()
+        and note.metadata.get("transcript_generated_at")
+        and source_storage_id
+        and str(source_storage_id) == str(note.raw_asset.storage_id)
+    )
 
 
 class NoteService(BaseService):
@@ -416,7 +438,7 @@ class NoteService(BaseService):
         raw_asset: NoteRawAsset | None,
         transcribed_text: str | None,
         targets: Iterable[EntityRef],
-        metadata: dict[str, str],
+        metadata: dict[str, NoteMetadataScalar],
         status: NoteStatus,
         origin: EntityOrigin,
         change_set_id: UUID | None,
@@ -442,7 +464,11 @@ class NoteService(BaseService):
         stored = {
             "raw_content": existing.raw_content,
             "raw_asset": _canonical_raw_asset(existing.raw_asset),
-            "transcribed_text": existing.transcribed_text,
+            "transcribed_text": (
+                None
+                if transcribed_text is None and _has_provider_transcript(existing)
+                else existing.transcribed_text
+            ),
             "targets": _canonical_targets(existing.targets),
             "metadata": _canonical_capture_metadata(existing.metadata),
             "status": existing.status,
@@ -470,7 +496,18 @@ class NoteService(BaseService):
         transcription_client: Any,
         prompt: str | None = None,
         actor: AuthContext | None = None,
+        skip_if_transcribed: bool = False,
     ) -> Note:
+        """Transcribe one audio note without restoring stale note state.
+
+        Provider calls can be slow. The result is therefore merged into the
+        latest persisted note instead of saving the snapshot loaded before the
+        call. Automatic post-upload transcription sets
+        ``skip_if_transcribed`` so any concurrent human edit wins; the manual
+        endpoint keeps its existing transcript-overwrite semantics while still
+        preserving unrelated edits.
+        """
+
         note = self.get_note(note_id)
         self.authorization.require_contributor(note.project_id, actor=actor)
         if note.raw_asset is None:
@@ -502,28 +539,32 @@ class NoteService(BaseService):
         text = _transcript_text(transcript)
         if not text:
             raise ValidationError("Voice transcription response did not include text.")
-        metadata = dict(note.metadata)
-        metadata.update(
-            {
-                "transcript_status": "ready",
-                "transcript_provider": str(getattr(transcription_client, "provider", PROVIDER)),
-                "transcript_model": str(
-                    getattr(
-                        transcription_client,
-                        "transcription_model",
-                        getattr(transcription_client, "model", "unknown"),
-                    )
-                ),
-                "transcript_generated_at": utc_now().isoformat(),
-                "transcript_source_storage_id": str(raw_asset.storage_id),
-            }
-        )
-        note.transcribed_text = text
-        note.metadata = metadata
-        note.updated_at = utc_now()
+        completed_at = utc_now()
+        transcript_metadata: dict[str, NoteMetadataScalar] = {
+            "transcript_status": "ready",
+            "transcript_provider": str(getattr(transcription_client, "provider", PROVIDER)),
+            "transcript_model": str(
+                getattr(
+                    transcription_client,
+                    "transcription_model",
+                    getattr(transcription_client, "model", "unknown"),
+                )
+            ),
+            "transcript_generated_at": completed_at.isoformat(),
+            "transcript_source_storage_id": str(raw_asset.storage_id),
+        }
         with self.unit_of_work() as repository:
-            repository.notes.save(note)
-        return note
+            current = repository.notes.apply_transcription_result(
+                note_id,
+                text=text,
+                metadata_updates=transcript_metadata,
+                updated_at=completed_at,
+                expected_updated_at=note.updated_at,
+                only_if_unchanged=skip_if_transcribed,
+            )
+        if current is None:
+            raise NotFoundError("Note does not exist.")
+        return current
 
     def get_note(self, note_id: UUID) -> Note:
         return self.get_from_repository(
