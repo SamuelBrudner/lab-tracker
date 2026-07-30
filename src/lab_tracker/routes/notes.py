@@ -37,7 +37,6 @@ from lab_tracker.schemas import (
     NoteTranscriptRequest,
     NoteUpdate,
 )
-from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 from lab_tracker.upload_security import (
     enforce_request_content_length_limit,
     validate_upload_content_type,
@@ -442,10 +441,8 @@ def _auto_transcribe_uploaded_note(
             factory(settings) if callable(factory) else make_graph_draft_client(settings)
         )
         with app.state.db_session_factory() as session:
-            background_api = LabTrackerAPI(
-                raw_storage=app.state.raw_note_storage,
-                repository=SQLAlchemyLabTrackerRepository(session),
-                settings=settings,
+            background_api = app.state.session_api_factory(
+                session,
                 surface="http",
             )
             background_api.transcribe_voice_note(
