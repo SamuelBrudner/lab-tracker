@@ -271,6 +271,7 @@ class LabTrackerAPI(
         self.review_emails: ReviewEmailService = ReviewEmailService(
             context,
             max_attempts=self._settings.review_email_max_attempts,
+            delivery_enabled=self._settings.review_email_enabled,
         )
         graph_draft_generation = GraphDraftGenerationCoordinator(
             context,
@@ -305,6 +306,7 @@ class LabTrackerAPI(
             notes=self.notes,
             authorization=self.project_authorization,
             provenance_links=self.provenance_links,
+            review_email_available=self._settings.review_email_enabled,
         )
         self.graph_drafts: GraphDraftService = GraphDraftService(
             records=graph_draft_records,

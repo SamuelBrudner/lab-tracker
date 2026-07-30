@@ -704,6 +704,7 @@ function demoPayload(url) {
       run_at_local_time: "18:00",
       timezone_name: "America/New_York",
       next_run_at: null,
+      review_email_available: false,
       updated_at: "2026-06-05T10:10:03.260000Z",
     });
   }

@@ -68,6 +68,7 @@ class BatchSchedulingCoordinator(BaseService):
         notes: SchedulingNotes,
         authorization: SchedulingAuthorization,
         provenance_links: SchedulingProvenanceLinks | None = None,
+        review_email_available: bool = False,
     ) -> None:
         super().__init__(context)
         self.records = records
@@ -76,6 +77,7 @@ class BatchSchedulingCoordinator(BaseService):
         self.notes = notes
         self.authorization = authorization
         self.provenance_links = provenance_links
+        self.review_email_available = bool(review_email_available)
 
     @property
     def scheduling_repository(self) -> SchedulingRepository:
@@ -105,14 +107,17 @@ class BatchSchedulingCoordinator(BaseService):
             user_id=user_id,
         )
         if settings is not None:
+            settings.review_email_available = self.review_email_available
             return settings
         default = self.scheduling_repository.get_graph_draft_batch_settings_by_project(project_id)
-        return batch_policy.default_batch_settings(
+        settings = batch_policy.default_batch_settings(
             project_id=project_id,
             user_id=user_id,
             actor=actor,
             inherit_from=default,
         )
+        settings.review_email_available = self.review_email_available
+        return settings
 
     def update_graph_draft_batch_settings(
         self,
@@ -167,6 +172,7 @@ class BatchSchedulingCoordinator(BaseService):
                 actor=actor,
                 inherit_from=default,
             )
+        settings.review_email_available = self.review_email_available
         before = settings.model_copy(deep=True)
         if is_provided(enabled):
             settings.enabled = enabled
@@ -192,6 +198,10 @@ class BatchSchedulingCoordinator(BaseService):
                     utc_now() if cleaned_email is not None else None
                 )
         if is_provided(email_notifications_enabled):
+            if email_notifications_enabled and not self.review_email_available:
+                raise ValidationError(
+                    "Review email delivery is not enabled on this Lab Tracker host."
+                )
             settings.email_notifications_enabled = email_notifications_enabled
         if settings.email_notifications_enabled:
             if settings.user_id is None:

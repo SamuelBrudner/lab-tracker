@@ -725,6 +725,7 @@ export interface components {
       "notification_email"?: (string | null);
       "notification_email_confirmed_at"?: (string | null);
       "project_id": string;
+      "review_email_available"?: boolean;
       "run_at_local_time"?: string;
       "settings_id": string;
       "timezone_name"?: string;

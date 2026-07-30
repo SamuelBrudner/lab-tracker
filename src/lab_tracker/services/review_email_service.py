@@ -49,9 +49,11 @@ class ReviewEmailService(BaseService):
         context: ServiceContext,
         *,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+        delivery_enabled: bool = False,
     ) -> None:
         super().__init__(context)
         self.max_attempts = max(1, max_attempts)
+        self.delivery_enabled = bool(delivery_enabled)
 
     def enqueue_ready_review(
         self,
@@ -60,7 +62,8 @@ class ReviewEmailService(BaseService):
         """Queue one opted-in assigned batch review without performing I/O."""
 
         if (
-            change_set.draft_mode != GraphDraftMode.GRAPH_BATCH
+            not self.delivery_enabled
+            or change_set.draft_mode != GraphDraftMode.GRAPH_BATCH
             or change_set.status != GraphChangeSetStatus.READY
             or change_set.review_assignee_user_id is None
             or not any(
@@ -114,6 +117,8 @@ class ReviewEmailService(BaseService):
     ) -> ReviewEmailDelivery:
         """Queue a fixed test cue without creating any graph record."""
 
+        if not self.delivery_enabled:
+            raise ValidationError("Review email delivery is not enabled.")
         now = utc_now()
         delivery_id = uuid4()
         delivery = ReviewEmailDelivery(
@@ -142,6 +147,8 @@ class ReviewEmailService(BaseService):
     ) -> ReviewEmailDelivery | None:
         """Lease the next due delivery for one provider attempt."""
 
+        if not self.delivery_enabled:
+            return None
         claimed_at = now or utc_now()
         while True:
             claim_token = uuid4()
