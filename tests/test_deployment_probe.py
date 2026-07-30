@@ -42,7 +42,7 @@ def _ready_settings(tmp_path: Path, *, with_user: bool = True) -> Settings:
     engine.dispose()
     return Settings(
         _env_file=None,
-        app_name="marion-lab-tracker",
+        app_name="deployment-test-lab-tracker",
         environment="production",
         source_revision=SOURCE_REVISION,
         database_url=database_url,
@@ -58,7 +58,7 @@ def _ready_settings(tmp_path: Path, *, with_user: bool = True) -> Settings:
 def _probe(settings: Settings) -> dict:
     return probe_deployment(
         settings,
-        expected_app_name="marion-lab-tracker",
+        expected_app_name="deployment-test-lab-tracker",
         expected_environment="production",
         expected_source_revision=SOURCE_REVISION,
         require_provider_credential=True,
@@ -91,7 +91,7 @@ def test_deployment_probe_rejects_wrong_revision(tmp_path: Path) -> None:
     with pytest.raises(DeploymentProbeError, match="source revision"):
         probe_deployment(
             settings,
-            expected_app_name="marion-lab-tracker",
+            expected_app_name="deployment-test-lab-tracker",
             expected_environment="production",
             expected_source_revision="f" * 40,
             require_provider_credential=True,
