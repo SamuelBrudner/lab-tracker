@@ -45,8 +45,12 @@ def _multipart_field(body: bytes, name: str) -> str:
 
 
 @pytest.fixture(autouse=True)
-def reset_figure_capture_state(monkeypatch: pytest.MonkeyPatch) -> None:
+def reset_figure_capture_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     _reset_figure_capture_state_for_tests()
+    monkeypatch.setenv("LAB_TRACKER_CONFIG_DIR", str(tmp_path / "lt-config"))
     for key in (
         "LAB_TRACKER_PROJECT_ID",
         "LAB_TRACKER_BASE_URL",
@@ -60,6 +64,33 @@ def reset_figure_capture_state(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(key, raising=False)
     yield
     _reset_figure_capture_state_for_tests()
+
+
+def test_capture_client_uses_saved_connection_profile(tmp_path: Path) -> None:
+    config_dir = tmp_path / "lt-config"
+    config_dir.mkdir()
+    (config_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "base_url": "https://lab.example.test/app",
+                "default_project_id": "project-profile",
+                "access_token": "profile-token",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    client, project_id, should_close = figure_module._resolve_capture_client(
+        client=None,
+        project_id=None,
+    )
+
+    assert client is not None
+    assert client.base_url == "https://lab.example.test"
+    assert client.access_token == "profile-token"
+    assert project_id == "project-profile"
+    assert should_close is True
+    client.close()
 
 
 def test_savefig_forwards_kwargs_and_uploads_under_cap(tmp_path: Path) -> None:

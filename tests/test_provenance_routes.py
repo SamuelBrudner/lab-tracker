@@ -427,7 +427,7 @@ def test_provenance_routes_return_not_found_for_missing_resources(
     assert claim_response.status_code == 404
 
 
-def test_canonical_base_url_roots_provenance_identifiers(
+def test_instance_base_url_roots_provenance_identifiers(
     client: TestClient,
     admin_auth_headers: dict[str, str],
 ):
@@ -436,12 +436,12 @@ def test_canonical_base_url_roots_provenance_identifiers(
     canonical = "https://lab.example.org/tracker"
 
     settings = client.app.state.settings
-    original = settings.canonical_base_url
-    settings.canonical_base_url = canonical
+    original = settings.base_url
+    settings.base_url = canonical
     try:
         document = client.get(f"/datasets/{dataset_id}/provenance", headers=headers).json()
     finally:
-        settings.canonical_base_url = original
+        settings.base_url = original
 
     assert document["@context"]["lab"] == f"{canonical}/terms#"
     dataset_node = _node_by_id(document, f"{canonical}/datasets/{dataset_id}")
@@ -451,7 +451,7 @@ def test_canonical_base_url_roots_provenance_identifiers(
         assert not node_id.startswith("http://testserver"), node_id
 
 
-def test_unset_canonical_base_url_falls_back_to_request_host(
+def test_unset_instance_base_url_falls_back_to_request_host(
     client: TestClient,
     admin_auth_headers: dict[str, str],
 ):
@@ -525,12 +525,12 @@ def test_single_resource_envelopes_carry_the_canonical_iri(
     canonical = "https://lab.example.org"
 
     settings = client.app.state.settings
-    original = settings.canonical_base_url
-    settings.canonical_base_url = canonical
+    original = settings.base_url
+    settings.base_url = canonical
     try:
         envelope = client.get(f"/datasets/{dataset_id}", headers=headers).json()
     finally:
-        settings.canonical_base_url = original
+        settings.base_url = original
 
     assert envelope["meta"]["iri"] == f"{canonical}/datasets/{dataset_id}"
     assert envelope["data"]["dataset_id"] == dataset_id

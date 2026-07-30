@@ -47,6 +47,7 @@ from lab_tracker.git_remote_policy import GitRemotePolicy
 from lab_tracker.git_store_health import GitStoreHealthProbe
 from lab_tracker.graph_drafting import GraphDraftClientFactory, make_graph_draft_client
 from lab_tracker.http_store_health import HttpStoreHealthProbe
+from lab_tracker.instance_url import build_instance_url
 from lab_tracker.local_filesystem_authority import LocalFilesystemAuthority
 from lab_tracker.local_filesystem_operations import (
     BoundedLocalFilesystemOperations,
@@ -569,9 +570,9 @@ def _review_email_url(
     settings: Settings,
     delivery: ReviewEmailDelivery,
 ) -> str:
-    base_url = settings.public_base_url.rstrip("/")
+    base_url = settings.resolved_base_url()
     if delivery.event_type == "test":
-        return f"{base_url}/app/"
+        return f"{build_instance_url(base_url, '/app')}/"
     if delivery.change_set_id is None or delivery.recipient_user_id is None:
         raise ValueError("Review-ready delivery is missing its review binding.")
     token = sign_review_link(
@@ -581,7 +582,7 @@ def _review_email_url(
         delivery_id=delivery.delivery_id,
         ttl_minutes=settings.review_email_link_ttl_minutes,
     )
-    return f"{base_url}/r/{token}"
+    return build_instance_url(base_url, f"/r/{token}")
 
 
 def _build_review_email_provider(settings: Settings) -> ReviewEmailProvider | None:

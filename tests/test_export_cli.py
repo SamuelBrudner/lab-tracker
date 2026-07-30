@@ -122,7 +122,7 @@ def test_export_notes_host_relative_identifiers(tmp_path) -> None:
 
     assert result.identifier_root == "http://testserver"
     assert result.identifier_note is not None
-    assert "LAB_TRACKER_CANONICAL_BASE_URL" in result.identifier_note
+    assert "LAB_TRACKER_BASE_URL" in result.identifier_note
     assert result.to_dict()["identifier_note"] == result.identifier_note
 
 
