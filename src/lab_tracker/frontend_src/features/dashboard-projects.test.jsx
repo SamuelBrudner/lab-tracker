@@ -1,7 +1,7 @@
 import * as React from "react";
 
 import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { Dashboard } from "./dashboard-projects.jsx";
 
@@ -85,5 +85,50 @@ describe("Dashboard project members", () => {
 
     expect(screen.queryByRole("button", { name: "Add member" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Remove" })).toBeDisabled();
+  });
+});
+
+describe("Dashboard draft recovery", () => {
+  const DRAFT_KEY = "lab-tracker:draft:project-description";
+
+  afterEach(() => {
+    window.localStorage.clear();
+  });
+
+  it("persists a half-written description as it is typed", () => {
+    const { rerender } = render(<Dashboard {...baseProps()} />);
+
+    rerender(<Dashboard {...baseProps({ projectDescription: "Half a rationale" })} />);
+
+    expect(JSON.parse(window.localStorage.getItem(DRAFT_KEY)).value).toBe("Half a rationale");
+  });
+
+  it("offers a description left behind by a closed tab and restores it on request", () => {
+    window.localStorage.setItem(
+      DRAFT_KEY,
+      JSON.stringify({ savedAt: 1737000000000, value: "Recovered rationale" })
+    );
+    const onRestoreProjectDescription = vi.fn();
+    render(<Dashboard {...baseProps({ onRestoreProjectDescription })} />);
+
+    // Offered, not silently applied.
+    expect(screen.getByRole("textbox", { name: "Description" })).toHaveValue("");
+
+    fireEvent.click(screen.getByRole("button", { name: "Restore them" }));
+
+    expect(onRestoreProjectDescription).toHaveBeenCalledWith("Recovered rationale");
+  });
+
+  it("discards a recovered description and stops offering it", () => {
+    window.localStorage.setItem(
+      DRAFT_KEY,
+      JSON.stringify({ savedAt: 1737000000000, value: "Recovered rationale" })
+    );
+    render(<Dashboard {...baseProps()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Discard them" }));
+
+    expect(window.localStorage.getItem(DRAFT_KEY)).toBeNull();
+    expect(screen.queryByRole("button", { name: "Restore them" })).not.toBeInTheDocument();
   });
 });
