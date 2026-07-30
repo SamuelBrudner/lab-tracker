@@ -268,6 +268,12 @@ def test_request_handlers_share_the_middleware_transaction_identity():
                 and all(repository is repositories[0] for repository in repositories)
             ),
             "shares_session": all(session is repositories[0]._session for session in sessions),
+            "shares_store_authority_snapshot_provider": (
+                handlers.context.store_authority_snapshot_provider
+                is request.app.state.store_authority_snapshot_provider
+                and handlers.store_health.store_authority_snapshot_provider
+                is request.app.state.store_authority_snapshot_provider
+            ),
             "raw_dependencies_hidden": (
                 not hasattr(request.state, "lab_tracker_repository")
                 and not hasattr(request.state, "db_session")
@@ -283,6 +289,7 @@ def test_request_handlers_share_the_middleware_transaction_identity():
     assert payload["shares_api"] is True
     assert payload["shares_repository"] is True
     assert payload["shares_session"] is True
+    assert payload["shares_store_authority_snapshot_provider"] is True
     assert payload["raw_dependencies_hidden"] is True
 
 

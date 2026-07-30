@@ -3,7 +3,9 @@ import * as React from "react";
 import { apiRequest } from "../shared/api.js";
 import { noteShape } from "../shared/gateways/notes.js";
 import { formatDate } from "../shared/formatters.js";
+import { DraftRecoveryNotice } from "../shared/ui.jsx";
 import { useApiResource } from "../hooks/useApiResource.js";
+import { useLocalDraft } from "../hooks/useLocalDraft.js";
 import { useProjectAccess } from "../hooks/useProjectAccess.js";
 
 const { useEffect, useMemo, useState } = React;
@@ -16,6 +18,7 @@ function NotePanel({
   selectedProjectId,
   noteText,
   onNoteTextChange,
+  onRestoreNoteText,
   onCreateTextNote,
   onUploadNote,
   onUploadFileChange,
@@ -27,6 +30,12 @@ function NotePanel({
   notes,
   navigate,
 }) {
+  const noteDraft = useLocalDraft({
+    baseline: "",
+    key: selectedProjectId ? `note-text:${selectedProjectId}` : "",
+    value: noteText,
+  });
+
   return (
     <article className="card span-6">
       <div className="item-head">
@@ -50,6 +59,17 @@ function NotePanel({
       </div>
       <form className="form" onSubmit={onCreateTextNote}>
         <h3>Quick text note</h3>
+        <DraftRecoveryNotice
+          label="an unsaved note"
+          savedAt={noteDraft.recoveredAt}
+          onRestore={() => {
+            const restored = noteDraft.restore();
+            if (restored !== null && onRestoreNoteText) {
+              onRestoreNoteText(restored);
+            }
+          }}
+          onDiscard={noteDraft.discard}
+        />
         <label>
           Raw note text
           <textarea

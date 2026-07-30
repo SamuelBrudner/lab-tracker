@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session as OrmSession
 
 from lab_tracker.artifact_resolution import ResolverRegistry
 from lab_tracker.config import Settings
+from lab_tracker.store_authority_use import StoreAuthoritySnapshotProvider
 from lab_tracker.store_health import StoreProbe
 
 from .catalog_queries import CatalogAccess, CatalogQueries, CatalogRepository
@@ -73,6 +74,7 @@ class RequestHandlers:
         resolver_registry: ResolverRegistry | None,
         store_health_checker: StoreProbe,
         release_read_scope: Callable[[], None],
+        store_authority_snapshot_provider: StoreAuthoritySnapshotProvider,
     ) -> RequestHandlers:
         """Bind every handler to the middleware's existing request resources."""
 
@@ -84,11 +86,13 @@ class RequestHandlers:
                 session=session,
                 release_read_scope=release_read_scope,
                 resolver_registry=resolver_registry,
+                store_authority_snapshot_provider=store_authority_snapshot_provider,
             ),
             store_health=StoreHealthQueries(
                 api=api,
                 checker=store_health_checker,
                 release_read_scope=release_read_scope,
+                store_authority_snapshot_provider=store_authority_snapshot_provider,
             ),
             dataset_files=DatasetFileCommands(
                 api=api,
