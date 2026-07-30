@@ -63,6 +63,37 @@ def make_batch_key(
     return f"batch:{digest[:48]}"
 
 
+def make_reserved_batch_key(
+    *,
+    project_id: UUID,
+    note_ids: list[UUID],
+    review_assignee: str | None,
+    review_assignee_user_id: UUID | None,
+    generation_run_id: UUID | None,
+) -> str:
+    """Return a stable key for one reviewer-note reservation generation.
+
+    Wall-clock window ends are intentionally absent: concurrent preparations
+    that observe the same note set and generation must collide on one key. The
+    caller advances ``generation_run_id`` only for a failed retry or an empty
+    cursor window; successful non-empty explicit windows remain idempotent.
+    """
+
+    payload = {
+        "project_id": str(project_id),
+        "note_ids": [str(note_id) for note_id in note_ids],
+        "review_assignee": review_assignee,
+        "review_assignee_user_id": (
+            str(review_assignee_user_id) if review_assignee_user_id is not None else None
+        ),
+        "generation_run_id": (
+            str(generation_run_id) if generation_run_id is not None else None
+        ),
+    }
+    digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+    return f"batch:{digest[:48]}"
+
+
 def default_batch_settings(
     *,
     project_id: UUID,

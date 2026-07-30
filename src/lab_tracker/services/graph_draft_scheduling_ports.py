@@ -139,6 +139,32 @@ class SchedulingRepository(Protocol):
         batch_key: str,
     ) -> GraphDraftBatchRun | None: ...
 
+    def lock_graph_draft_batch_settings(self, project_id: UUID) -> None: ...
+
+    def lock_graph_draft_batch_reviewer(
+        self,
+        project_id: UUID,
+        *,
+        review_assignee_user_id: UUID | None = None,
+        review_assignee: str | None = None,
+    ) -> None: ...
+
+    def latest_graph_draft_batch_run(
+        self,
+        project_id: UUID,
+        *,
+        review_assignee_user_id: UUID | None = None,
+        review_assignee: str | None = None,
+    ) -> GraphDraftBatchRun | None: ...
+
+    def active_graph_draft_batch_runs(
+        self,
+        project_id: UUID,
+        *,
+        review_assignee_user_id: UUID | None = None,
+        review_assignee: str | None = None,
+    ) -> list[GraphDraftBatchRun]: ...
+
     def latest_successful_graph_draft_batch_run(
         self,
         project_id: UUID,

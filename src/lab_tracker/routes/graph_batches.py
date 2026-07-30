@@ -68,15 +68,29 @@ def build_graph_batches_router(api: LabTrackerAPI) -> APIRouter:
         status: GraphChangeSetStatus | None = None,
         mine: bool = False,
         needs_commit: bool = False,
+        unassigned_oversight: bool = False,
         limit: int = 50,
         offset: int = 0,
     ):
         validate_pagination(limit, offset)
-        if mine and needs_commit:
-            raise ValidationError("mine and needs_commit are separate Daily Review views.")
+        if sum((mine, needs_commit, unassigned_oversight)) > 1:
+            raise ValidationError(
+                "mine, needs_commit, and unassigned_oversight are separate "
+                "Daily Review views."
+            )
         if needs_commit and status not in {None, GraphChangeSetStatus.SUBMITTED}:
             raise ValidationError("needs_commit only applies to submitted Daily Reviews.")
-        if project_id is not None:
+        if unassigned_oversight and status not in {
+            None,
+            GraphChangeSetStatus.READY,
+            GraphChangeSetStatus.CHANGES_REQUESTED,
+        }:
+            raise ValidationError(
+                "unassigned_oversight only applies to actionable Daily Reviews."
+            )
+        if project_id is not None and unassigned_oversight:
+            ensure_project_owner(request, project_id)
+        elif project_id is not None:
             ensure_project_read(request, project_id)
         effective_status = GraphChangeSetStatus.SUBMITTED if needs_commit else status
         change_sets = api_from_request(request, api).list_batch_graph_drafts(
@@ -84,7 +98,11 @@ def build_graph_batches_router(api: LabTrackerAPI) -> APIRouter:
             status=effective_status,
         )
         if effective_status is None:
-            default_statuses = _PERSONAL_ACTION_STATUSES if mine else _PENDING_BATCH_STATUSES
+            default_statuses = (
+                _PERSONAL_ACTION_STATUSES
+                if mine or unassigned_oversight
+                else _PENDING_BATCH_STATUSES
+            )
             change_sets = [
                 change_set for change_set in change_sets if change_set.status in default_statuses
             ]
@@ -102,6 +120,21 @@ def build_graph_batches_router(api: LabTrackerAPI) -> APIRouter:
                 for change_set in visible
                 if request_api.project_membership_role(change_set.project_id, actor)
                 == ProjectMembershipRole.OWNER
+            ]
+        if unassigned_oversight:
+            actor = actor_from_request(request)
+            request_api = api_from_request(request, api)
+            owner_visible = [
+                change_set
+                for change_set in visible
+                if request_api.project_membership_role(change_set.project_id, actor)
+                == ProjectMembershipRole.OWNER
+            ]
+            visible = [
+                change_set
+                for change_set in owner_visible
+                if change_set.review_assignee_user_id is None
+                and change_set.review_assignee is None
             ]
         items, total = paginate(visible, limit, offset)
         return list_response(
@@ -309,10 +342,9 @@ def _assigned_to_actor(
     actor_id = str(actor.user_id)
     if item.review_assignee is not None:
         return item.review_assignee == actor_id
-    return (
-        item.created_by_user_id == actor.user_id
-        or item.created_by == actor_id
-    )
+    # Rows with no assignee are legacy project-oversight work. Creator
+    # attribution (often SYSTEM/admin for scheduled drafts) is not assignment.
+    return False
 
 
 def _personal_settings_user_id(

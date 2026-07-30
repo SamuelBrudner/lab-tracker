@@ -129,6 +129,20 @@ describe("BatchReviewPage", () => {
         ]),
       },
       {
+        match:
+          "/batches?project_id=project-1&unassigned_oversight=true&limit=100",
+        response: apiResponse([
+          {
+            change_set_id: "legacy-1",
+            created_at: "2026-07-16T12:00:00Z",
+            operations: [],
+            source_note_count: 1,
+            status: "changes_requested",
+            summary: "Legacy unassigned review",
+          },
+        ]),
+      },
+      {
         match: "/batches/runs?project_id=project-1&mine=true&limit=20",
         response: apiResponse([]),
       },
@@ -157,6 +171,7 @@ describe("BatchReviewPage", () => {
         onSelectedProjectChange={vi.fn()}
         navigate={vi.fn()}
         canManageGraph={true}
+        canManageProject={true}
         setBusy={vi.fn()}
         setFlash={vi.fn()}
       />
@@ -165,9 +180,13 @@ describe("BatchReviewPage", () => {
     expect(await screen.findByText("Ready for this reviewer")).toBeInTheDocument();
     expect(screen.getByText("Waiting for project review")).toBeInTheDocument();
     expect(screen.getAllByText("Needs owner commit")).toHaveLength(1);
+    expect(screen.getByText("Legacy unassigned review")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Ready for you" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Waiting on others" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Needs commit" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Unassigned project oversight" })
+    ).toBeInTheDocument();
   });
 
   it("saves cadence as the reviewer's personal run-due settings", async () => {
@@ -183,6 +202,11 @@ describe("BatchReviewPage", () => {
       },
       {
         match: "/batches?project_id=project-1&needs_commit=true&limit=100",
+        response: apiResponse([], 200, { limit: 100, offset: 0, total: 0 }),
+      },
+      {
+        match:
+          "/batches?project_id=project-1&unassigned_oversight=true&limit=100",
         response: apiResponse([], 200, { limit: 100, offset: 0, total: 0 }),
       },
       {
@@ -235,6 +259,7 @@ describe("BatchReviewPage", () => {
         onSelectedProjectChange={vi.fn()}
         navigate={vi.fn()}
         canManageGraph={true}
+        canManageProject={true}
         setBusy={vi.fn()}
         setFlash={vi.fn()}
       />

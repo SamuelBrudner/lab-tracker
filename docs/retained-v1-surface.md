@@ -76,7 +76,8 @@ research record:
   server-side; owners manage the project-level template through an explicit
   project-default endpoint. Manual and scheduled batches carry
   `review_assignee` attribution, and the personal queue, waiting, and
-  owner-commit projections remain distinct.
+  owner-commit projections remain distinct. Legacy drafts with no assignee are
+  recoverable only through an explicit owner oversight projection.
 - Opt-in, per-user review-ready email cues backed by a transactional delivery
   outbox, retry leases, and signed short-lived links. Email contains no project
   or research content, and links still require normal authentication and

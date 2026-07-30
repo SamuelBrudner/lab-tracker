@@ -103,6 +103,8 @@ from .versions import SQLAlchemyEntityVersionRepository
 _QUESTION_DAG_LOCK_DOMAIN = b"lab-tracker:question-dag:v1\0"
 _DATASET_FILE_PROJECT_LOCK_DOMAIN = b"lab-tracker:dataset-file-project:v1\0"
 _DATASET_FILE_DATASET_LOCK_DOMAIN = b"lab-tracker:dataset-file-dataset:v1\0"
+_GRAPH_DRAFT_SETTINGS_LOCK_DOMAIN = b"lab-tracker:graph-draft-settings:v1\0"
+_GRAPH_DRAFT_REVIEWER_LOCK_DOMAIN = b"lab-tracker:graph-draft-reviewer:v1\0"
 
 
 def _scoped_advisory_lock_key(domain: bytes, entity_id: UUID) -> int:
@@ -128,6 +130,29 @@ def _dataset_file_project_lock_key(project_id: UUID) -> int:
 
 def _dataset_file_dataset_lock_key(dataset_id: UUID) -> int:
     return _scoped_advisory_lock_key(_DATASET_FILE_DATASET_LOCK_DOMAIN, dataset_id)
+
+
+def _graph_draft_settings_lock_key(project_id: UUID) -> int:
+    return _scoped_advisory_lock_key(_GRAPH_DRAFT_SETTINGS_LOCK_DOMAIN, project_id)
+
+
+def _graph_draft_reviewer_lock_key(
+    project_id: UUID,
+    *,
+    review_assignee_user_id: UUID | None,
+    review_assignee: str | None,
+) -> int:
+    if review_assignee_user_id is not None:
+        reviewer_key = f"user:{review_assignee_user_id}"
+    elif review_assignee is not None:
+        reviewer_key = f"legacy:{review_assignee}"
+    else:
+        reviewer_key = "legacy:unassigned"
+    digest = blake2b(
+        _GRAPH_DRAFT_REVIEWER_LOCK_DOMAIN + project_id.bytes + b"\0" + reviewer_key.encode("utf-8"),
+        digest_size=8,
+    ).digest()
+    return int.from_bytes(digest, byteorder="big", signed=True)
 
 
 class SQLAlchemyLabTrackerRepository:
@@ -238,6 +263,55 @@ class SQLAlchemyLabTrackerRepository:
             text("SELECT pg_advisory_xact_lock(:lock_key)"),
             {"lock_key": _project_question_dag_lock_key(project_id)},
         )
+        self._session.expire_all()
+
+    def lock_graph_draft_batch_reviewer(
+        self,
+        project_id: UUID,
+        *,
+        review_assignee_user_id: UUID | None = None,
+        review_assignee: str | None = None,
+    ) -> None:
+        """Serialize reviewer-note reservation until transaction completion.
+
+        PostgreSQL uses a reviewer-scoped transaction advisory lock. SQLite is
+        a single-writer local backend, so a harmless project-row update obtains
+        its coarse write fence before any reservation reads.
+        """
+
+        dialect = self._session.get_bind().dialect.name
+        if dialect == "postgresql":
+            self._session.execute(
+                text("SELECT pg_advisory_xact_lock(:lock_key)"),
+                {
+                    "lock_key": _graph_draft_reviewer_lock_key(
+                        project_id,
+                        review_assignee_user_id=review_assignee_user_id,
+                        review_assignee=review_assignee,
+                    )
+                },
+            )
+        elif dialect == "sqlite":
+            self._session.execute(
+                text("UPDATE projects SET project_id = project_id WHERE project_id = :project_id"),
+                {"project_id": str(project_id)},
+            )
+        self._session.expire_all()
+
+    def lock_graph_draft_batch_settings(self, project_id: UUID) -> None:
+        """Serialize lazy creation of one project's shared settings row."""
+
+        dialect = self._session.get_bind().dialect.name
+        if dialect == "postgresql":
+            self._session.execute(
+                text("SELECT pg_advisory_xact_lock(:lock_key)"),
+                {"lock_key": _graph_draft_settings_lock_key(project_id)},
+            )
+        elif dialect == "sqlite":
+            self._session.execute(
+                text("UPDATE projects SET project_id = project_id WHERE project_id = :project_id"),
+                {"project_id": str(project_id)},
+            )
         self._session.expire_all()
 
     def _lock_dataset_file_scopes(
@@ -1233,6 +1307,32 @@ class SQLAlchemyLabTrackerRepository:
 
     def get_graph_draft_batch_run_by_key(self, batch_key: str) -> GraphDraftBatchRun | None:
         return self.graph_draft_batch_runs.get_by_batch_key(batch_key)
+
+    def latest_graph_draft_batch_run(
+        self,
+        project_id: UUID,
+        *,
+        review_assignee_user_id: UUID | None = None,
+        review_assignee: str | None = None,
+    ) -> GraphDraftBatchRun | None:
+        return self.graph_draft_batch_runs.latest_for_project(
+            project_id,
+            review_assignee_user_id=review_assignee_user_id,
+            review_assignee=review_assignee,
+        )
+
+    def active_graph_draft_batch_runs(
+        self,
+        project_id: UUID,
+        *,
+        review_assignee_user_id: UUID | None = None,
+        review_assignee: str | None = None,
+    ) -> list[GraphDraftBatchRun]:
+        return self.graph_draft_batch_runs.active_for_project(
+            project_id,
+            review_assignee_user_id=review_assignee_user_id,
+            review_assignee=review_assignee,
+        )
 
     def latest_successful_graph_draft_batch_run(
         self,

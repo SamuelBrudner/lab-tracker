@@ -124,6 +124,13 @@ describe("App", () => {
         response: paged([], { limit: 100, offset: 0, total: 0 }),
       },
       {
+        match: buildApiPath("/batches", {
+          unassigned_oversight: true,
+          limit: 100,
+        }),
+        response: paged([], { limit: 100, offset: 0, total: 0 }),
+      },
+      {
         match: buildApiPath("/batches/runs", { mine: true, limit: 20 }),
         response: paged([], { limit: 20, offset: 0, total: 0 }),
       },
@@ -148,6 +155,14 @@ describe("App", () => {
         match: buildApiPath("/batches", {
           project_id: "project-1",
           needs_commit: true,
+          limit: 100,
+        }),
+        response: paged([], { limit: 100, offset: 0, total: 0 }),
+      },
+      {
+        match: buildApiPath("/batches", {
+          project_id: "project-1",
+          unassigned_oversight: true,
           limit: 100,
         }),
         response: paged([], { limit: 100, offset: 0, total: 0 }),

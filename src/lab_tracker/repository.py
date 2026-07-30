@@ -750,6 +750,36 @@ class LabTrackerRepository(Protocol):
     def get_graph_draft_batch_run_by_key(self, batch_key: str) -> GraphDraftBatchRun | None:
         """Return one batch run by idempotency key."""
 
+    def lock_graph_draft_batch_settings(self, project_id: UUID) -> None:
+        """Serialize creation of the project's shared batch settings row."""
+
+    def lock_graph_draft_batch_reviewer(
+        self,
+        project_id: UUID,
+        *,
+        review_assignee_user_id: UUID | None = None,
+        review_assignee: str | None = None,
+    ) -> None:
+        """Serialize one project's reviewer-scoped batch preparation."""
+
+    def latest_graph_draft_batch_run(
+        self,
+        project_id: UUID,
+        *,
+        review_assignee_user_id: UUID | None = None,
+        review_assignee: str | None = None,
+    ) -> GraphDraftBatchRun | None:
+        """Return the latest run in exactly one reviewer bucket."""
+
+    def active_graph_draft_batch_runs(
+        self,
+        project_id: UUID,
+        *,
+        review_assignee_user_id: UUID | None = None,
+        review_assignee: str | None = None,
+    ) -> list[GraphDraftBatchRun]:
+        """Return pending/running reservations in exactly one reviewer bucket."""
+
     def latest_successful_graph_draft_batch_run(
         self,
         project_id: UUID,

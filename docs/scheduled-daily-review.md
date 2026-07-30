@@ -38,7 +38,12 @@ With authentication enabled, **Run now** is personal: it drafts only staged
 notes attributed to the signed-in user, assigns the resulting review to that
 user, and advances only that user's review window. A teammate's run cannot
 consume or redraft your capture window. Auth-disabled local instances retain
-one explicit legacy-unassigned bucket.
+one explicit legacy-unassigned bucket. Concurrent **Run now** requests reserve
+note IDs under a reviewer-scoped lock: a redundant request rejoins the active
+run, while notes captured after that reservation can enter a separate,
+non-overlapping run. An explicit `since` window is still idempotent after a
+successful run; a failed run advances the retry generation so the same window
+can be attempted again.
 
 ## External scheduler fallback
 
@@ -100,8 +105,10 @@ With background drafting enabled, those triggers enqueue a pending run and the
 worker fills the queue shortly after. Then review the queue at `/app/batches`.
 The page separates **Ready for you** from your submitted work that is
 **Waiting on others**, while project owners get a distinct **Needs commit**
-projection. The home-page count and recent run history use only the signed-in
-reviewer's assignment.
+projection. Legacy rows with no assignee appear only in **Unassigned project
+oversight**, where an owner can recover them; creator attribution never makes
+them personal work. The home-page count and recent run history use only the
+signed-in reviewer's assignment.
 
 ### Remove it
 

@@ -113,12 +113,14 @@ function BatchReviewPage({
   onSelectedProjectChange,
   navigate,
   canManageGraph,
+  canManageProject = false,
   setBusy,
   setFlash,
 }) {
   const [batches, setBatches] = useState([]);
   const [waitingBatches, setWaitingBatches] = useState([]);
   const [needsCommitBatches, setNeedsCommitBatches] = useState([]);
+  const [unassignedOversightBatches, setUnassignedOversightBatches] = useState([]);
   const [runs, setRuns] = useState([]);
   const [loading, setLoading] = useState(false);
 
@@ -154,6 +156,11 @@ function BatchReviewPage({
         needs_commit: true,
         limit: 100,
       });
+      const unassignedOversightPath = buildApiPath("/batches", {
+        project_id: selectedProjectId,
+        unassigned_oversight: true,
+        limit: 100,
+      });
       const runPath = buildApiPath("/batches/runs", {
         project_id: selectedProjectId,
         mine: true,
@@ -163,23 +170,28 @@ function BatchReviewPage({
         { data: batchData },
         { data: waitingData },
         { data: needsCommitData },
+        { data: unassignedOversightData },
         { data: runData },
       ] = await Promise.all([
         apiListRequest(batchPath, { token }),
         apiListRequest(waitingPath, { token }),
         apiListRequest(needsCommitPath, { token }),
+        canManageProject || !selectedProjectId
+          ? apiListRequest(unassignedOversightPath, { token })
+          : Promise.resolve({ data: [] }),
         apiListRequest(runPath, { token }),
       ]);
       setBatches(batchData || []);
       setWaitingBatches(waitingData || []);
       setNeedsCommitBatches(needsCommitData || []);
+      setUnassignedOversightBatches(unassignedOversightData || []);
       setRuns(runData || []);
     } catch (err) {
       setFlash("", err.message || "Failed to load daily reviews.");
     } finally {
       setLoading(false);
     }
-  }, [selectedProjectId, setFlash, token]);
+  }, [canManageProject, selectedProjectId, setFlash, token]);
 
   useEffect(() => {
     loadBatches();
@@ -250,6 +262,16 @@ function BatchReviewPage({
               emptyMessage="No submitted reviews need your approval."
               navigate={navigate}
             />
+            {canManageProject || !selectedProjectId ? (
+              <>
+                <h3>Unassigned project oversight</h3>
+                <BatchCards
+                  batches={unassignedOversightBatches}
+                  emptyMessage="No legacy unassigned reviews need owner recovery."
+                  navigate={navigate}
+                />
+              </>
+            ) : null}
           </div>
         </section>
 

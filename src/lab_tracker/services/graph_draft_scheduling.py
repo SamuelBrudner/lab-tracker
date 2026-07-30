@@ -7,6 +7,8 @@ from datetime import datetime
 from typing import TypeVar
 from uuid import UUID, uuid4
 
+from sqlalchemy.exc import IntegrityError
+
 from lab_tracker.auth import AuthContext
 from lab_tracker.config import Settings
 from lab_tracker.errors import AuthError, NotFoundError, ValidationError
@@ -144,9 +146,8 @@ class BatchSchedulingCoordinator(BaseService):
         # project-level default (user_id is None) and their own per-user
         # settings (user_id == actor). Editing *another* user's per-user
         # settings still requires owner.
-        editing_other_user = (
-            resolved_user_id is not None
-            and (actor is None or resolved_user_id != actor.user_id)
+        editing_other_user = resolved_user_id is not None and (
+            actor is None or resolved_user_id != actor.user_id
         )
         if editing_other_user:
             self.authorization.require_owner(project_id, actor=actor)
@@ -195,13 +196,8 @@ class BatchSchedulingCoordinator(BaseService):
             settings.email_notifications_enabled = email_notifications_enabled
         if settings.email_notifications_enabled:
             if settings.user_id is None:
-                raise ValidationError(
-                    "Email alerts require per-user batch settings with user_id."
-                )
-            if (
-                not settings.notification_email
-                or settings.notification_email_confirmed_at is None
-            ):
+                raise ValidationError("Email alerts require per-user batch settings with user_id.")
+            if not settings.notification_email or settings.notification_email_confirmed_at is None:
                 raise ValidationError(
                     "notification_email is required before email alerts can be enabled."
                 )
@@ -215,11 +211,9 @@ class BatchSchedulingCoordinator(BaseService):
         )
         notification_changed = any(
             (
-                settings.email_notifications_enabled
-                != before.email_notifications_enabled,
+                settings.email_notifications_enabled != before.email_notifications_enabled,
                 settings.notification_email != before.notification_email,
-                settings.notification_email_confirmed_at
-                != before.notification_email_confirmed_at,
+                settings.notification_email_confirmed_at != before.notification_email_confirmed_at,
             )
         )
         if not scheduling_changed and not notification_changed:
@@ -254,20 +248,26 @@ class BatchSchedulingCoordinator(BaseService):
         review_assignee_user_id: UUID | None = None,
     ) -> GraphDraftBatchRun:
         self.authorization.require_contributor(project_id, actor=actor)
-        run, notes = self._prepare_graph_draft_batch_run(
+        reservation_requested_at = batch_policy.as_utc(utc_now())
+        reviewer = self._resolve_batch_reviewer(
+            trigger=trigger,
+            actor=actor,
+            review_assignee=review_assignee,
+            review_assignee_user_id=review_assignee_user_id,
+        )
+        run, notes, created = self._reserve_graph_draft_batch_run(
             project_id,
             since=since,
             until=until,
             trigger=trigger,
             user_hint=user_hint,
             actor=actor,
-            review_assignee=review_assignee,
-            review_assignee_user_id=review_assignee_user_id,
+            reviewer=reviewer,
             initial_status=GraphDraftBatchRunStatus.RUNNING,
+            reservation_requested_at=reservation_requested_at,
         )
-        existing = self.scheduling_repository.get_graph_draft_batch_run_by_key(run.batch_key)
-        if existing is not None:
-            return existing
+        if not created:
+            return run
         # Independent, best-effort deterministic stage: propose content-hash
         # provenance links for human review. A failure here must never flip the
         # LLM batch to FAILED or block drafting.
@@ -275,11 +275,7 @@ class BatchSchedulingCoordinator(BaseService):
             try:
                 self.provenance_links.propose_links_from_content_hash(project_id, actor=actor)
             except Exception:
-                logger.exception(
-                    "provenance-link detector failed for project %s", project_id
-                )
-        with self.unit_of_work():
-            self.scheduling_repository.graph_draft_batch_runs.save(run)
+                logger.exception("provenance-link detector failed for project %s", project_id)
         if not notes:
             run.status = GraphDraftBatchRunStatus.SKIPPED
             run.summary = "No staged notes landed in this batch window."
@@ -338,39 +334,34 @@ class BatchSchedulingCoordinator(BaseService):
         review_assignee_user_id: UUID | None = None,
     ) -> GraphDraftBatchRun:
         self.authorization.require_contributor(project_id, actor=actor)
-        run, _notes = self._prepare_graph_draft_batch_run(
+        reservation_requested_at = batch_policy.as_utc(utc_now())
+        reviewer = self._resolve_batch_reviewer(
+            trigger=trigger,
+            actor=actor,
+            review_assignee=review_assignee,
+            review_assignee_user_id=review_assignee_user_id,
+        )
+        run, _notes, _created = self._reserve_graph_draft_batch_run(
             project_id,
             since=since,
             until=until,
             trigger=trigger,
             user_hint=user_hint,
             actor=actor,
-            review_assignee=review_assignee,
-            review_assignee_user_id=review_assignee_user_id,
+            reviewer=reviewer,
             initial_status=GraphDraftBatchRunStatus.PENDING,
+            reservation_requested_at=reservation_requested_at,
         )
-        existing = self.scheduling_repository.get_graph_draft_batch_run_by_key(run.batch_key)
-        if existing is not None:
-            return existing
-        with self.unit_of_work():
-            self.scheduling_repository.graph_draft_batch_runs.save(run)
         return run
 
-    def _prepare_graph_draft_batch_run(
+    def _resolve_batch_reviewer(
         self,
-        project_id: UUID,
         *,
-        since: datetime | None,
-        until: datetime | None,
         trigger: GraphDraftBatchTrigger,
-        user_hint: str | None,
         actor: AuthContext | None,
         review_assignee: str | None,
         review_assignee_user_id: UUID | None,
-        initial_status: GraphDraftBatchRunStatus,
-    ) -> tuple[GraphDraftBatchRun, list[Note]]:
-        self.projects.get_project(project_id)
-        self._ensure_graph_draft_batch_settings_row(project_id, actor=actor)
+    ) -> batch_policy.BatchReviewer:
         if (
             trigger == GraphDraftBatchTrigger.MANUAL
             and review_assignee is None
@@ -384,10 +375,156 @@ class BatchSchedulingCoordinator(BaseService):
                 actor,
                 self.scheduling_repository,
             )
-        reviewer = batch_policy.BatchReviewer(
+        return batch_policy.BatchReviewer(
             reviewer=review_assignee,
             reviewer_user_id=review_assignee_user_id,
         )
+
+    def _reserve_graph_draft_batch_run(
+        self,
+        project_id: UUID,
+        *,
+        since: datetime | None,
+        until: datetime | None,
+        trigger: GraphDraftBatchTrigger,
+        user_hint: str | None,
+        actor: AuthContext | None,
+        reviewer: batch_policy.BatchReviewer,
+        initial_status: GraphDraftBatchRunStatus,
+        reservation_requested_at: datetime,
+    ) -> tuple[GraphDraftBatchRun, list[Note], bool]:
+        """Atomically reserve a disjoint reviewer-note set before provider work."""
+
+        with self.application_transaction():
+            # Global administrators can pass the route-level contributor
+            # shortcut, so preserve the service's canonical missing-project
+            # 404 before locks or lazy settings writes touch foreign keys.
+            self.projects.get_project(project_id)
+            repository = self.scheduling_repository
+            # Reviewer locks are deliberately disjoint, but all reviewers may
+            # lazily create the same project-default settings row. Serialize
+            # that shared initialization before entering reviewer scope.
+            repository.lock_graph_draft_batch_settings(project_id)
+            self._ensure_graph_draft_batch_settings_row(project_id, actor=actor)
+            repository.lock_graph_draft_batch_reviewer(
+                project_id,
+                review_assignee_user_id=reviewer.reviewer_user_id,
+                review_assignee=reviewer.reviewer,
+            )
+            active_runs = repository.active_graph_draft_batch_runs(
+                project_id,
+                review_assignee_user_id=reviewer.reviewer_user_id,
+                review_assignee=reviewer.reviewer,
+            )
+            latest_run = repository.latest_graph_draft_batch_run(
+                project_id,
+                review_assignee_user_id=reviewer.reviewer_user_id,
+                review_assignee=reviewer.reviewer,
+            )
+            active_note_ids = {
+                note_id for active_run in active_runs for note_id in active_run.source_note_ids
+            }
+            run, notes, eligible_note_ids = self._prepare_graph_draft_batch_run(
+                project_id,
+                since=since,
+                until=until,
+                trigger=trigger,
+                user_hint=user_hint,
+                actor=actor,
+                reviewer=reviewer,
+                initial_status=initial_status,
+                active_note_ids=active_note_ids,
+                previous_run=latest_run,
+            )
+            # A redundant request whose eligible notes are already reserved
+            # rejoins the active run that owns those notes. Multiple disjoint
+            # runs can coexist, so "newest active" is not sufficient here.
+            if not notes and active_runs:
+                matching_active_run = self._matching_active_batch_run(
+                    active_runs,
+                    eligible_note_ids=eligible_note_ids,
+                    requested_run=run,
+                )
+                if matching_active_run is not None:
+                    return matching_active_run, [], False
+            if (
+                not notes
+                and latest_run is not None
+                and latest_run.status
+                in {
+                    GraphDraftBatchRunStatus.READY,
+                    GraphDraftBatchRunStatus.SKIPPED,
+                }
+                and latest_run.finished_at is not None
+                and batch_policy.as_utc(latest_run.finished_at) >= reservation_requested_at
+            ):
+                # This request began while the winning inline run still held
+                # the reviewer lock; return that result after the lock wait.
+                return latest_run, [], False
+            # Before stable reservation keys, explicit-window batches used a
+            # key that included the exact window bounds. Honor such successful
+            # rows so a replay across an upgrade does not redraft the notes.
+            legacy_batch_key = batch_policy.make_batch_key(
+                project_id=project_id,
+                since=run.window_start,
+                until=run.window_end,
+                note_ids=run.source_note_ids,
+                review_assignee=reviewer.reviewer,
+                review_assignee_user_id=reviewer.reviewer_user_id,
+            )
+            legacy_existing = repository.get_graph_draft_batch_run_by_key(legacy_batch_key)
+            if (
+                legacy_existing is not None
+                and legacy_existing.status != GraphDraftBatchRunStatus.FAILED
+            ):
+                return legacy_existing, [], False
+
+            existing = repository.get_graph_draft_batch_run_by_key(run.batch_key)
+            while (
+                notes
+                and existing is not None
+                and existing.status == GraphDraftBatchRunStatus.FAILED
+            ):
+                # Failed attempts form a deterministic retry chain. This does
+                # not depend on which unrelated reviewer run happened most
+                # recently, and each concurrent retry observes the same next
+                # generation.
+                run.batch_key = batch_policy.make_reserved_batch_key(
+                    project_id=project_id,
+                    note_ids=run.source_note_ids,
+                    review_assignee=reviewer.reviewer,
+                    review_assignee_user_id=reviewer.reviewer_user_id,
+                    generation_run_id=existing.run_id,
+                )
+                existing = repository.get_graph_draft_batch_run_by_key(run.batch_key)
+            if existing is not None:
+                return existing, [], False
+            try:
+                with self.recoverable_unit_of_work() as writable_repository:
+                    writable_repository.graph_draft_batch_runs.save(run)
+            except IntegrityError:
+                # SQLite's coarse write fence normally serializes this path;
+                # the unique key remains a final cross-request race backstop.
+                existing = repository.get_graph_draft_batch_run_by_key(run.batch_key)
+                if existing is None:
+                    raise
+                return existing, [], False
+            return run, notes, True
+
+    def _prepare_graph_draft_batch_run(
+        self,
+        project_id: UUID,
+        *,
+        since: datetime | None,
+        until: datetime | None,
+        trigger: GraphDraftBatchTrigger,
+        user_hint: str | None,
+        actor: AuthContext | None,
+        reviewer: batch_policy.BatchReviewer,
+        initial_status: GraphDraftBatchRunStatus,
+        active_note_ids: set[UUID],
+        previous_run: GraphDraftBatchRun | None,
+    ) -> tuple[GraphDraftBatchRun, list[Note], set[UUID]]:
         reviewer_filter = (
             reviewer
             if reviewer.reviewer is not None or reviewer.reviewer_user_id is not None
@@ -420,7 +557,7 @@ class BatchSchedulingCoordinator(BaseService):
             if continuing_auto_window
             else set()
         )
-        notes = batch_policy.staged_notes_in_window(
+        eligible_notes = batch_policy.staged_notes_in_window(
             self.notes.list_notes(project_id=project_id),
             since=window_start,
             until=window_end,
@@ -428,6 +565,8 @@ class BatchSchedulingCoordinator(BaseService):
             exclude_note_ids=already_drafted_note_ids,
             reviewer=reviewer_filter,
         )
+        eligible_note_ids = {note.note_id for note in eligible_notes}
+        notes = [note for note in eligible_notes if note.note_id not in active_note_ids]
         notes, window_end = batch_policy.limit_notes_to_draft(notes, window_end=window_end)
         note_ids = [note.note_id for note in notes]
         run = GraphDraftBatchRun(
@@ -439,13 +578,14 @@ class BatchSchedulingCoordinator(BaseService):
             window_end=window_end,
             note_count=len(notes),
             source_note_ids=note_ids,
-            batch_key=batch_policy.make_batch_key(
+            batch_key=batch_policy.make_reserved_batch_key(
                 project_id=project_id,
-                since=window_start,
-                until=window_end,
                 note_ids=note_ids,
                 review_assignee=reviewer.reviewer,
                 review_assignee_user_id=reviewer.reviewer_user_id,
+                generation_run_id=(
+                    previous_run.run_id if previous_run is not None and not note_ids else None
+                ),
             ),
             user_hint=user_hint.strip() if user_hint else None,
             created_by=actor_user_id(actor),
@@ -453,7 +593,48 @@ class BatchSchedulingCoordinator(BaseService):
             review_assignee=reviewer.reviewer,
             review_assignee_user_id=reviewer.reviewer_user_id,
         )
-        return run, notes
+        return run, notes, eligible_note_ids
+
+    @staticmethod
+    def _matching_active_batch_run(
+        active_runs: list[GraphDraftBatchRun],
+        *,
+        eligible_note_ids: set[UUID],
+        requested_run: GraphDraftBatchRun,
+    ) -> GraphDraftBatchRun | None:
+        """Return the active reservation that best owns this request's notes."""
+
+        if eligible_note_ids:
+            candidates: list[tuple[bool, int, int, GraphDraftBatchRun]] = []
+            for index, active_run in enumerate(active_runs):
+                source_note_ids = set(active_run.source_note_ids)
+                overlap = eligible_note_ids & source_note_ids
+                if not overlap:
+                    continue
+                candidates.append(
+                    (
+                        eligible_note_ids.issubset(source_note_ids),
+                        len(overlap),
+                        -index,
+                        active_run,
+                    )
+                )
+            if candidates:
+                return max(candidates, key=lambda candidate: candidate[:3])[3]
+            return None
+
+        # Empty reservations have no note ownership to compare. Rejoin one
+        # only when its explicit cursor is exactly the same.
+        return next(
+            (
+                active_run
+                for active_run in active_runs
+                if not active_run.source_note_ids
+                and active_run.window_start == requested_run.window_start
+                and active_run.window_end == requested_run.window_end
+            ),
+            None,
+        )
 
     def process_next_graph_draft_batch_run(
         self,
@@ -655,9 +836,7 @@ class BatchSchedulingCoordinator(BaseService):
         if not self.authorization.has_global_admin(actor):
             raise AuthError("Only admins can run scheduled batch drafts.")
         current_time = batch_policy.as_utc(now or utc_now())
-        due_settings = self.scheduling_repository.list_due_graph_draft_batch_settings(
-            current_time
-        )
+        due_settings = self.scheduling_repository.list_due_graph_draft_batch_settings(current_time)
         runs: list[GraphDraftBatchRun] = []
         for batch_settings in due_settings:
             if batch_settings.next_run_at is None:
@@ -669,14 +848,12 @@ class BatchSchedulingCoordinator(BaseService):
                 now=current_time,
             )
             with self.unit_of_work():
-                claimed_settings = (
-                    self.scheduling_repository.claim_due_graph_draft_batch_settings(
-                        batch_settings.settings_id,
-                        observed_next_run_at=batch_settings.next_run_at,
-                        next_run_at=claimed_next_run_at,
-                        updated_at=utc_now(),
-                        updated_by=actor_user_id(actor),
-                    )
+                claimed_settings = self.scheduling_repository.claim_due_graph_draft_batch_settings(
+                    batch_settings.settings_id,
+                    observed_next_run_at=batch_settings.next_run_at,
+                    next_run_at=claimed_next_run_at,
+                    updated_at=utc_now(),
+                    updated_by=actor_user_id(actor),
                 )
             if claimed_settings is None:
                 continue
@@ -689,9 +866,7 @@ class BatchSchedulingCoordinator(BaseService):
                 batch_settings.updated_at = utc_now()
                 batch_settings.updated_by = actor_user_id(actor)
                 with self.unit_of_work():
-                    self.scheduling_repository.graph_draft_batch_settings.save(
-                        batch_settings
-                    )
+                    self.scheduling_repository.graph_draft_batch_settings.save(batch_settings)
                 continue
             reviewers = self._scheduled_reviewers_for_settings(
                 batch_settings,
