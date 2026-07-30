@@ -49,6 +49,7 @@ function GraphDraftDetailCard({
     setReviewNote,
     pendingCommands,
     acceptedCount,
+    undoableOperationIds,
     canEditDraft,
     canSubmitDraft,
     canReviewDraft,
@@ -201,12 +202,37 @@ function GraphDraftDetailCard({
               <button
                 type="button"
                 className="btn-secondary"
-                disabled={!canEditDraft || Boolean(pendingCommands.acceptAll)}
+                disabled={
+                  !canEditDraft ||
+                  Boolean(pendingCommands.acceptAll) ||
+                  Boolean(pendingCommands.undoAcceptAll)
+                }
                 onClick={workflow.acceptAll}
               >
                 Accept all
               </button>
             </div>
+
+            {canEditDraft && undoableOperationIds.length > 0 ? (
+              <div className="inline" role="status">
+                <span className="subtle">
+                  {undoableOperationIds.length === 1
+                    ? "1 proposal accepted as a batch."
+                    : `${undoableOperationIds.length} proposals accepted as a batch.`}
+                </span>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  disabled={
+                    Boolean(pendingCommands.acceptAll) ||
+                    Boolean(pendingCommands.undoAcceptAll)
+                  }
+                  onClick={workflow.undoAcceptAll}
+                >
+                  Undo accept all
+                </button>
+              </div>
+            ) : null}
 
             <div className="inline">
               <button
