@@ -153,11 +153,87 @@ def test_graph_patch_response_schema_requires_non_empty_source_note_ids() -> Non
 
 def test_graph_draft_prompt_versions_and_source_ref_contract_are_updated() -> None:
     assert PROMPT_VERSION == "multimodal-graph-draft-v2"
-    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v3"
+    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v4"
     assert ANALYSIS_PROMPT_VERSION == "analysis-graph-draft-v2"
     for instructions in (_instructions(), _batch_instructions(), _analysis_instructions()):
         assert "source_note_ids" in instructions
         assert "never invent" in instructions.lower()
+    assert "non-empty raw_content" in _batch_instructions()
+    assert "metadata.title" in _batch_instructions()
+
+
+@pytest.mark.parametrize("content_field", ["text", "content", "body"])
+def test_graph_patch_validator_normalizes_note_content_aliases(
+    content_field: str,
+) -> None:
+    project_id = uuid4()
+    operation = _patch_operation(
+        project_id=project_id,
+        entity_type="note",
+        semantic_type="create_note",
+        payload={
+            "project_id": str(project_id),
+            content_field: "Canonical note body",
+        },
+    )
+    validator = GraphPatchValidator(
+        get_graph_entity=lambda entity_type, entity_id: Project(
+            project_id=entity_id,
+            name="Project",
+        )
+    )
+
+    operations = validator.operations_from_graph_patch(
+        _change_set(project_id),
+        {
+            "summary": "valid",
+            "uncertain_fields": [],
+            "clarification_requests": [],
+            "operations": [operation],
+        },
+    )
+
+    assert operations[0].payload == {
+        "project_id": str(project_id),
+        "raw_content": "Canonical note body",
+    }
+
+
+def test_graph_patch_validator_preserves_note_title_as_metadata() -> None:
+    project_id = uuid4()
+    operation = _patch_operation(
+        project_id=project_id,
+        entity_type="note",
+        semantic_type="create_note",
+        payload={
+            "project_id": str(project_id),
+            "raw_content": "Canonical note body",
+            "title": "Human-facing label",
+            "metadata": {"source": "batch"},
+        },
+    )
+    validator = GraphPatchValidator(
+        get_graph_entity=lambda entity_type, entity_id: Project(
+            project_id=entity_id,
+            name="Project",
+        )
+    )
+
+    operations = validator.operations_from_graph_patch(
+        _change_set(project_id),
+        {
+            "summary": "valid",
+            "uncertain_fields": [],
+            "clarification_requests": [],
+            "operations": [operation],
+        },
+    )
+
+    assert operations[0].payload == {
+        "project_id": str(project_id),
+        "raw_content": "Canonical note body",
+        "metadata": {"source": "batch", "title": "Human-facing label"},
+    }
 
 
 def test_graph_patch_validator_preserves_explicit_source_note_ids() -> None:
@@ -634,4 +710,4 @@ def test_batch_instructions_are_narrative_first_with_terse_capture_guardrail() -
     # Stays subordinate to the supported-changes guardrail.
     assert "supported by the source artifacts" in instructions
     # The summary contract changed (now a narrative), so the version bumps.
-    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v3"
+    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v4"

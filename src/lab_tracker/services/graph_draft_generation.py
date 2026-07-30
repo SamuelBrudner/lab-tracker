@@ -241,9 +241,7 @@ class GraphDraftGenerationCoordinator(BaseService):
         metadata[batch_policy.SCHEDULED_DRAFT_POLICY_METADATA_KEY] = (
             batch_policy.SCHEDULED_DRAFT_POLICY_EXCLUDE
         )
-        metadata["manual_graph_draft_purpose"] = (
-            GraphDraftPurpose.STARTER_QUESTIONS.value
-        )
+        metadata["manual_graph_draft_purpose"] = GraphDraftPurpose.STARTER_QUESTIONS.value
         return self.notes.update_note(
             note.note_id,
             metadata=metadata,
@@ -267,9 +265,7 @@ class GraphDraftGenerationCoordinator(BaseService):
         self.authorization.require_contributor(note.project_id, actor=actor)
         if purpose == GraphDraftPurpose.STARTER_QUESTIONS:
             if mode != GraphDraftMode.GRAPH_CONTEXT:
-                raise ValidationError(
-                    "Starter-question drafting requires graph_context mode."
-                )
+                raise ValidationError("Starter-question drafting requires graph_context mode.")
             if not external_provider_acknowledged:
                 raise ValidationError(
                     "Confirm that the starter context may be sent to the configured "
@@ -299,9 +295,7 @@ class GraphDraftGenerationCoordinator(BaseService):
         else:
             raise ValidationError("Unsupported graph draft mode.")
         context_packet["draft_purpose"] = purpose.value
-        context_packet["external_provider_acknowledged"] = bool(
-            external_provider_acknowledged
-        )
+        context_packet["external_provider_acknowledged"] = bool(external_provider_acknowledged)
         if purpose == GraphDraftPurpose.STARTER_QUESTIONS:
             context_packet["draft_contract"] = _starter_question_contract()
         resolved_idempotency_key = _resolved_note_idempotency_key(
@@ -364,8 +358,7 @@ class GraphDraftGenerationCoordinator(BaseService):
         change_set, claimed = self.records.claim_graph_change_set_for_generation(
             candidate,
             claimed_at=claimed_at,
-            stale_before=claimed_at
-            - timedelta(seconds=max(1, generation_lease_seconds)),
+            stale_before=claimed_at - timedelta(seconds=max(1, generation_lease_seconds)),
         )
         if not claimed:
             _ensure_matching_note_draft_request(
@@ -555,8 +548,7 @@ class GraphDraftGenerationCoordinator(BaseService):
         change_set, claimed = self.records.claim_graph_change_set_for_generation(
             candidate,
             claimed_at=claimed_at,
-            stale_before=claimed_at
-            - timedelta(seconds=max(1, generation_lease_seconds)),
+            stale_before=claimed_at - timedelta(seconds=max(1, generation_lease_seconds)),
         )
         if not claimed:
             return change_set
@@ -564,15 +556,19 @@ class GraphDraftGenerationCoordinator(BaseService):
 
         attempts = max(1, max_attempts)
         last_error: GraphDraftingError | None = None
+        last_error_category = "model_error"
+        graph_patch: dict[str, Any] | None = None
+        operations: list[GraphChangeOperation] | None = None
+        attempt_context = context_packet
         for attempt in range(1, attempts + 1):
             try:
                 graph_patch = draft_client.draft_from_batch(
-                    batch_context=context_packet,
+                    batch_context=attempt_context,
                     user_hint=cleaned_hint,
                 )
-                break
             except GraphDraftingError as exc:
                 last_error = exc
+                last_error_category = "model_error"
                 if attempt >= attempts:
                     change_set.status = GraphChangeSetStatus.FAILED
                     change_set.error_metadata = {
@@ -587,6 +583,42 @@ class GraphDraftGenerationCoordinator(BaseService):
                     return change_set
                 if retry_backoff_seconds > 0:
                     time.sleep(retry_backoff_seconds * attempt)
+                continue
+            try:
+                self.patch_validator.validate_top_level(graph_patch)
+                operations = self.patch_validator.operations_from_graph_patch(
+                    change_set,
+                    graph_patch,
+                )
+                break
+            except GraphDraftingError as exc:
+                last_error = exc
+                last_error_category = "validation_error"
+                if attempt >= attempts:
+                    change_set.status = GraphChangeSetStatus.FAILED
+                    change_set.error_metadata = {
+                        "category": "validation_error",
+                        "message": provider_error_message(exc),
+                        "attempts": attempt,
+                        "input_snapshot": _batch_input_snapshot(context_packet),
+                    }
+                    change_set.updated_at = utc_now()
+                    _finish_generation_lease(change_set)
+                    self.records.save_graph_change_set(change_set)
+                    return change_set
+                attempt_context = {
+                    **context_packet,
+                    "generation_retry_feedback": {
+                        "attempt": attempt,
+                        "error": provider_error_message(exc),
+                        "instruction": (
+                            "Return a new complete graph patch whose operation payload_json "
+                            "objects satisfy the Lab Tracker API request schemas."
+                        ),
+                    },
+                }
+                if retry_backoff_seconds > 0:
+                    time.sleep(retry_backoff_seconds * attempt)
         else:
             message = (
                 provider_error_message(last_error)
@@ -595,7 +627,7 @@ class GraphDraftGenerationCoordinator(BaseService):
             )
             change_set.status = GraphChangeSetStatus.FAILED
             change_set.error_metadata = {
-                "category": "model_error",
+                "category": last_error_category,
                 "message": message,
                 "attempts": attempts,
                 "input_snapshot": _batch_input_snapshot(context_packet),
@@ -605,22 +637,8 @@ class GraphDraftGenerationCoordinator(BaseService):
             self.records.save_graph_change_set(change_set)
             return change_set
 
-        try:
-            self.patch_validator.validate_top_level(graph_patch)
-            operations = self.patch_validator.operations_from_graph_patch(change_set, graph_patch)
-        except GraphDraftingError as exc:
-            change_set.status = GraphChangeSetStatus.FAILED
-            change_set.error_metadata = {
-                "category": "validation_error",
-                "message": provider_error_message(exc),
-                "attempts": attempts if last_error is not None else 1,
-                "input_snapshot": _batch_input_snapshot(context_packet),
-            }
-            change_set.updated_at = utc_now()
-            _finish_generation_lease(change_set)
-            self.records.save_graph_change_set(change_set)
-            return change_set
-
+        assert graph_patch is not None
+        assert operations is not None
         change_set.operations = operations
         change_set.summary = str(graph_patch.get("summary") or "")
         change_set.uncertain_fields = string_list(graph_patch.get("uncertain_fields"))

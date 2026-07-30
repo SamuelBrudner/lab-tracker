@@ -151,6 +151,7 @@ class GraphPatchValidator:
                 raise GraphDraftingError("GPT graph patch operation was not an object.")
             _validate_graph_patch_operation_shape(item)
             payload = _payload_from_json(item.get("payload_json"))
+            payload = _normalize_generated_operation_payload(item, payload)
             source_refs = _normalize_source_refs(
                 item["source_refs"],
                 change_set=change_set,
@@ -240,6 +241,57 @@ def _payload_from_json(raw_payload: Any) -> dict[str, Any]:
     return parsed
 
 
+def _normalize_generated_operation_payload(
+    operation: dict[str, Any],
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Canonicalize narrow, lossless provider aliases before strict validation.
+
+    Provider response schemas can constrain ``payload_json`` to a JSON string,
+    but cannot enforce the nested Lab Tracker request schema. Keep the API
+    schemas strict and repair only common note-create aliases whose intent is
+    unambiguous.
+    """
+
+    if operation.get("op") != "create" or operation.get("entity_type") != "note":
+        return payload
+
+    normalized = dict(payload)
+    raw_content = normalized.get("raw_content")
+    for alias in ("text", "content", "body"):
+        alias_value = normalized.get(alias)
+        if not isinstance(alias_value, str) or not alias_value.strip():
+            continue
+        if not isinstance(raw_content, str) or not raw_content.strip():
+            normalized["raw_content"] = alias_value
+            raw_content = alias_value
+            normalized.pop(alias, None)
+        elif alias_value == raw_content:
+            normalized.pop(alias, None)
+
+    if "title" not in normalized:
+        return normalized
+    title = normalized.get("title")
+    if title is None or (isinstance(title, str) and not title.strip()):
+        normalized.pop("title", None)
+        return normalized
+    if not isinstance(title, str):
+        return normalized
+
+    metadata = normalized.get("metadata")
+    if metadata is None:
+        normalized["metadata"] = {"title": title}
+        normalized.pop("title", None)
+    elif isinstance(metadata, dict):
+        metadata_title = metadata.get("title")
+        if metadata_title is None:
+            normalized["metadata"] = {**metadata, "title": title}
+            normalized.pop("title", None)
+        elif metadata_title == title:
+            normalized.pop("title", None)
+    return normalized
+
+
 def _normalize_source_refs(
     raw_source_refs: list[Any],
     *,
@@ -261,9 +313,7 @@ def _normalize_source_refs(
     normalized: list[dict[str, Any]] = []
     for index, raw_ref in enumerate(raw_source_refs, start=1):
         if not isinstance(raw_ref, dict):
-            raise GraphDraftingError(
-                f"GPT graph patch source_ref #{index} must be an object."
-            )
+            raise GraphDraftingError(f"GPT graph patch source_ref #{index} must be an object.")
         normalized.append(
             _normalize_source_ref(
                 raw_ref,
@@ -328,9 +378,7 @@ def _normalize_source_ref(
                 f"outside this draft's source notes: {', '.join(unknown_ids)}."
             )
 
-    normalized = {
-        key: value for key, value in raw_ref.items() if key not in _SOURCE_NOTE_ID_KEYS
-    }
+    normalized = {key: value for key, value in raw_ref.items() if key not in _SOURCE_NOTE_ID_KEYS}
     normalized["source_note_ids"] = source_note_ids
     normalized["source_note_ids_resolution"] = resolution
     return normalized
@@ -350,8 +398,7 @@ def _explicit_source_note_ids(
         raw_ids = raw_ref["source_note_ids"]
         if not isinstance(raw_ids, list) or not raw_ids:
             raise GraphDraftingError(
-                f"GPT graph patch source_ref #{ref_index} source_note_ids must be a "
-                "non-empty list."
+                f"GPT graph patch source_ref #{ref_index} source_note_ids must be a non-empty list."
             )
         source_note_ids = [
             _canonical_source_note_id(raw_id, ref_index=ref_index) for raw_id in raw_ids
@@ -544,7 +591,6 @@ def _iter_payload_entity_refs(value: Any) -> list[tuple[EntityType, UUID]]:
         else:
             refs.extend(_iter_payload_entity_refs(item))
     return refs
-
 
 
 def resolve_refs(value: Any, ref_map: dict[str, UUID]) -> Any:
