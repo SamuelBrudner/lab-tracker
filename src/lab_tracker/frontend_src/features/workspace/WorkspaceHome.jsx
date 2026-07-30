@@ -69,6 +69,7 @@ function WorkspaceHome({
         onProjectDescriptionChange={(event) =>
           workspaceForms.setProjectDescription(event.target.value)
         }
+        onRestoreProjectDescription={workspaceForms.setProjectDescription}
         onCreateProject={projectActions.handleCreateProject}
         onOpenGraph={() => navigate("/app/graph")}
         onOpenBatches={() => navigate("/app/batches")}
@@ -95,6 +96,7 @@ function WorkspaceHome({
         questionHypothesis={workspaceForms.questionHypothesis}
         questionParentIds={workspaceForms.questionParentIds}
         onQuestionTextChange={(event) => workspaceForms.setQuestionText(event.target.value)}
+        onRestoreQuestionText={workspaceForms.setQuestionText}
         onQuestionTypeChange={(event) => workspaceForms.setQuestionType(event.target.value)}
         onQuestionHypothesisChange={(event) =>
           workspaceForms.setQuestionHypothesis(event.target.value)
@@ -142,6 +144,7 @@ function WorkspaceHome({
         selectedProjectId={workspaceData.selectedProjectId}
         noteText={workspaceForms.noteText}
         onNoteTextChange={(event) => workspaceForms.setNoteText(event.target.value)}
+        onRestoreNoteText={workspaceForms.setNoteText}
         onCreateTextNote={noteActions.handleCreateTextNote}
         onUploadNote={noteActions.handleUploadNote}
         onUploadFileChange={(event) => workspaceForms.setUploadFile(event.target.files?.[0] || null)}

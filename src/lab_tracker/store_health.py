@@ -24,7 +24,11 @@ from threading import Lock
 from typing import Final, Protocol
 from uuid import UUID
 
-from lab_tracker.models import DataStore, StoreKind
+from lab_tracker.models import StoreKind
+from lab_tracker.store_authority_use import (
+    StoreAuthorityBindingIdentity,
+    StoreAuthorityUseProof,
+)
 
 DEFAULT_STORE_HEALTH_CACHE_MAX_ENTRIES: Final = 256
 MAX_STORE_HEALTH_CACHE_MAX_ENTRIES: Final = 4096
@@ -42,7 +46,10 @@ RCLONE_STORE_HEALTH_FAILURE_DETAIL: Final = "Rclone store health check failed."
 GIT_STORE_HEALTH_FAILURE_DETAIL: Final = "Git store health check failed."
 
 
-@dataclass(frozen=True, slots=True)
+_STORE_PROBE_TARGET_FACTORY_TOKEN = object()
+
+
+@dataclass(frozen=True, slots=True, init=False, repr=False)
 class StoreProbeTarget:
     """Complete immutable identity and adapter input for one health probe."""
 
@@ -52,19 +59,55 @@ class StoreProbeTarget:
     root: str
     endpoint: str | None
     credential_ref: str | None
+    authority_binding_identity: StoreAuthorityBindingIdentity
+
+    def __init__(
+        self,
+        proof: StoreAuthorityUseProof,
+        *,
+        _factory_token: object,
+    ) -> None:
+        """Bind every probe field to one sealed use-time authority proof.
+
+        The constructor is intentionally incompatible with the dataclass field
+        signature.  Normal direct construction and ``dataclasses.replace`` therefore
+        cannot pair a valid authority identity with unrelated adapter inputs.
+        """
+
+        if (
+            _factory_token is not _STORE_PROBE_TARGET_FACTORY_TOKEN
+            or type(proof) is not StoreAuthorityUseProof
+        ):
+            raise TypeError("Store probe target requires an authority use proof.")
+        definition = proof.definition
+        object.__setattr__(self, "store_id", proof.store_id)
+        object.__setattr__(self, "name", definition.name)
+        object.__setattr__(self, "kind", definition.kind)
+        object.__setattr__(self, "root", definition.root)
+        object.__setattr__(self, "endpoint", definition.endpoint)
+        object.__setattr__(self, "credential_ref", definition.credential_ref)
+        object.__setattr__(
+            self,
+            "authority_binding_identity",
+            proof.binding_identity,
+        )
 
     @classmethod
-    def from_store(cls, store: DataStore) -> StoreProbeTarget:
-        """Detach the probe-relevant fields from an authorized store."""
+    def from_authority_proof(
+        cls,
+        proof: StoreAuthorityUseProof,
+    ) -> StoreProbeTarget:
+        """Build an exact cache/probe target from a use-time authority proof."""
 
         return cls(
-            store_id=store.store_id,
-            name=store.name,
-            kind=store.kind,
-            root=store.root,
-            endpoint=store.endpoint,
-            credential_ref=store.credential_ref,
+            proof,
+            _factory_token=_STORE_PROBE_TARGET_FACTORY_TOKEN,
         )
+
+    def __repr__(self) -> str:
+        """Return only non-secret probe classification, never target material."""
+
+        return f"StoreProbeTarget(store_id={self.store_id!r}, kind={self.kind!r})"
 
 
 class StoreHealthStatus(str, Enum):

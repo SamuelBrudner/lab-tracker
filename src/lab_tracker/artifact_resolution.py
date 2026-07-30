@@ -39,7 +39,7 @@ import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Sequence
 from contextlib import suppress
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -60,6 +60,7 @@ from lab_tracker.bounded_subprocess import (
     ProcessExecutionError,
     ProcessExecutor,
 )
+from lab_tracker.data_store_definition import ValidatedDataStoreDefinition
 from lab_tracker.git_process import (
     DEFAULT_GIT_ALLOW_PROTOCOL,
     GIT_GENERIC_HTTP_REDIRECT_CONFIG,
@@ -157,6 +158,10 @@ from lab_tracker.rclone_store_definition import (
 from lab_tracker.rclone_store_locator import (
     RcloneRemoteName,
     RegisteredRcloneRoot,
+)
+from lab_tracker.store_authority_use import (
+    StoreAuthorityBindingIdentity,
+    StoreAuthorityUseProof,
 )
 from lab_tracker.store_health import (
     GIT_STORE_HEALTH_FAILURE_DETAIL,
@@ -432,12 +437,14 @@ class LocalStoreResolutionTarget:
     logical_reference: ExternalArtifactReference
     store_root: str
     locator: LocalStoreLocator
+    authority_binding_identity: StoreAuthorityBindingIdentity = field(repr=False)
 
     def __init__(
         self,
         logical_reference: ExternalArtifactReference,
         store_root: str,
         locator: LocalStoreLocator,
+        authority_binding_identity: StoreAuthorityBindingIdentity,
         *,
         _factory_token: object,
     ) -> None:
@@ -458,6 +465,13 @@ class LocalStoreResolutionTarget:
         object.__setattr__(self, "logical_reference", logical_reference)
         object.__setattr__(self, "store_root", store_root)
         object.__setattr__(self, "locator", locator)
+        if type(authority_binding_identity) is not StoreAuthorityBindingIdentity:
+            raise ValueError("Store resolution target requires a sealed authority identity.")
+        object.__setattr__(
+            self,
+            "authority_binding_identity",
+            authority_binding_identity,
+        )
 
 
 class ScopedLocalStoreResolver(ABC):
@@ -486,12 +500,14 @@ class HttpStoreResolutionTarget:
     logical_reference: ExternalArtifactReference
     registered_prefix: RegisteredHttpPrefix
     locator: PortableStorePath
+    authority_binding_identity: StoreAuthorityBindingIdentity = field(repr=False)
 
     def __init__(
         self,
         logical_reference: ExternalArtifactReference,
         registered_prefix: RegisteredHttpPrefix,
         locator: PortableStorePath,
+        authority_binding_identity: StoreAuthorityBindingIdentity,
         *,
         _factory_token: object,
     ) -> None:
@@ -512,6 +528,13 @@ class HttpStoreResolutionTarget:
         object.__setattr__(self, "logical_reference", logical_reference)
         object.__setattr__(self, "registered_prefix", registered_prefix)
         object.__setattr__(self, "locator", locator)
+        if type(authority_binding_identity) is not StoreAuthorityBindingIdentity:
+            raise ValueError("Store resolution target requires a sealed authority identity.")
+        object.__setattr__(
+            self,
+            "authority_binding_identity",
+            authority_binding_identity,
+        )
 
 
 class ScopedHttpStoreResolver(ABC):
@@ -536,6 +559,7 @@ class RcloneStoreResolutionTarget:
     remote: RcloneRemoteName
     registered_root: RegisteredRcloneRoot
     locator: PortableStorePath
+    authority_binding_identity: StoreAuthorityBindingIdentity = field(repr=False)
 
     def __init__(
         self,
@@ -543,6 +567,7 @@ class RcloneStoreResolutionTarget:
         remote: RcloneRemoteName,
         registered_root: RegisteredRcloneRoot,
         locator: PortableStorePath,
+        authority_binding_identity: StoreAuthorityBindingIdentity,
         *,
         _factory_token: object,
     ) -> None:
@@ -562,6 +587,13 @@ class RcloneStoreResolutionTarget:
         object.__setattr__(self, "remote", remote)
         object.__setattr__(self, "registered_root", registered_root)
         object.__setattr__(self, "locator", locator)
+        if type(authority_binding_identity) is not StoreAuthorityBindingIdentity:
+            raise ValueError("Store resolution target requires a sealed authority identity.")
+        object.__setattr__(
+            self,
+            "authority_binding_identity",
+            authority_binding_identity,
+        )
 
     @property
     def argv_target(self) -> str:
@@ -594,12 +626,14 @@ class GitStoreResolutionTarget:
     logical_reference: ExternalArtifactReference
     remote: GitRemoteAddress
     pin: PinnedGitPath
+    authority_binding_identity: StoreAuthorityBindingIdentity = field(repr=False)
 
     def __init__(
         self,
         logical_reference: ExternalArtifactReference,
         remote: GitRemoteAddress,
         pin: PinnedGitPath,
+        authority_binding_identity: StoreAuthorityBindingIdentity,
         *,
         _factory_token: object,
     ) -> None:
@@ -619,6 +653,13 @@ class GitStoreResolutionTarget:
         object.__setattr__(self, "logical_reference", logical_reference)
         object.__setattr__(self, "remote", remote)
         object.__setattr__(self, "pin", pin)
+        if type(authority_binding_identity) is not StoreAuthorityBindingIdentity:
+            raise ValueError("Store resolution target requires a sealed authority identity.")
+        object.__setattr__(
+            self,
+            "authority_binding_identity",
+            authority_binding_identity,
+        )
 
 
 class ScopedGitStoreResolver(ABC):
@@ -1199,20 +1240,25 @@ def _content_matches_expected_hash(content: bytes, expected_hash: str) -> bool:
 
 
 def local_store_resolution_target(
-    store: DataStore,
+    proof: StoreAuthorityUseProof,
     *,
     locator: LocalStoreLocator,
     logical_reference: ExternalArtifactReference,
 ) -> LocalStoreResolutionTarget | None:
     """Build one internally consistent, store-scoped local resolution target."""
 
-    if store.kind is not StoreKind.LOCAL_FS or logical_reference.store_name != store.name:
+    definition, binding_identity = _store_target_authority(proof)
+    if (
+        definition.kind is not StoreKind.LOCAL_FS
+        or logical_reference.store_name != definition.name
+    ):
         return None
     try:
         return LocalStoreResolutionTarget(
             logical_reference=logical_reference,
-            store_root=store.root,
+            store_root=definition.root,
             locator=locator,
+            authority_binding_identity=binding_identity,
             _factory_token=_LOCAL_STORE_TARGET_FACTORY_TOKEN,
         )
     except ValueError:
@@ -1220,17 +1266,23 @@ def local_store_resolution_target(
 
 
 def http_store_resolution_target(
-    store: DataStore,
+    proof: StoreAuthorityUseProof,
     *,
     locator: PortableStorePath,
     logical_reference: ExternalArtifactReference,
 ) -> HttpStoreResolutionTarget | None:
     """Build one internally consistent, prefix-scoped HTTP resolution target."""
 
-    if store.kind is not StoreKind.HTTP or logical_reference.store_name != store.name:
+    definition, binding_identity = _store_target_authority(proof)
+    if (
+        definition.kind is not StoreKind.HTTP
+        or logical_reference.store_name != definition.name
+    ):
         return None
-    registered_base = store.endpoint if store.endpoint is not None else store.root
-    registered_prefix = RegisteredHttpPrefix.parse(registered_base)
+    # A validated definition never carries an endpoint -- the definition
+    # validator rejects one outright -- so the registered root is the only
+    # possible HTTP base here.
+    registered_prefix = RegisteredHttpPrefix.parse(definition.root)
     if registered_prefix is None:
         return None
     try:
@@ -1238,6 +1290,7 @@ def http_store_resolution_target(
             logical_reference=logical_reference,
             registered_prefix=registered_prefix,
             locator=locator,
+            authority_binding_identity=binding_identity,
             _factory_token=_HTTP_STORE_TARGET_FACTORY_TOKEN,
         )
     except ValueError:
@@ -1245,20 +1298,24 @@ def http_store_resolution_target(
 
 
 def rclone_store_resolution_target(
-    store: DataStore,
+    proof: StoreAuthorityUseProof,
     *,
     locator: PortableStorePath,
     logical_reference: ExternalArtifactReference,
 ) -> RcloneStoreResolutionTarget | None:
     """Build one internally consistent, root-scoped rclone target."""
 
-    if not is_rclone_store_kind(store.kind) or logical_reference.store_name != store.name:
+    definition, binding_identity = _store_target_authority(proof)
+    if (
+        not is_rclone_store_kind(definition.kind)
+        or logical_reference.store_name != definition.name
+    ):
         return None
     address = RegisteredRcloneStoreAddress.parse(
-        kind=store.kind,
-        name=store.name,
-        root=store.root,
-        credential_ref=store.credential_ref,
+        kind=definition.kind,
+        name=definition.name,
+        root=definition.root,
+        credential_ref=definition.credential_ref,
     )
     if address is None:
         return None
@@ -1268,6 +1325,7 @@ def rclone_store_resolution_target(
             remote=address.remote,
             registered_root=address.root,
             locator=locator,
+            authority_binding_identity=binding_identity,
             _factory_token=_RCLONE_STORE_TARGET_FACTORY_TOKEN,
         )
     except ValueError:
@@ -1275,16 +1333,20 @@ def rclone_store_resolution_target(
 
 
 def git_store_resolution_target(
-    store: DataStore,
+    proof: StoreAuthorityUseProof,
     *,
     pin: PinnedGitPath,
     logical_reference: ExternalArtifactReference,
 ) -> GitStoreResolutionTarget | None:
     """Build one internally consistent immutable registered-Git target."""
 
-    if store.kind is not StoreKind.GIT or logical_reference.store_name != store.name:
+    definition, binding_identity = _store_target_authority(proof)
+    if (
+        definition.kind is not StoreKind.GIT
+        or logical_reference.store_name != definition.name
+    ):
         return None
-    remote = parse_git_remote_address(store.root)
+    remote = parse_git_remote_address(definition.root)
     if remote is None:
         return None
     try:
@@ -1292,14 +1354,30 @@ def git_store_resolution_target(
             logical_reference=logical_reference,
             remote=remote,
             pin=pin,
+            authority_binding_identity=binding_identity,
             _factory_token=_GIT_STORE_TARGET_FACTORY_TOKEN,
         )
     except ValueError:
         return None
 
 
+def _store_target_authority(
+    proof: StoreAuthorityUseProof,
+) -> tuple[ValidatedDataStoreDefinition, StoreAuthorityBindingIdentity]:
+    """Select the detached definition and sealed identity one proof authorizes.
+
+    Only a use-time proof reaches this boundary.  A registered store row on its
+    own can no longer mint a dispatchable target, so "authorized remote target
+    that was never authorized" is not a representable state.
+    """
+
+    if type(proof) is not StoreAuthorityUseProof:
+        raise ValueError("Store resolution target requires a use-time authority proof.")
+    return proof.definition, proof.binding_identity
+
+
 def store_relative_reference(
-    store: DataStore, *, path: str, content_hash: str
+    proof: StoreAuthorityUseProof, *, path: str, content_hash: str
 ) -> (
     LocalStoreResolutionTarget
     | HttpStoreResolutionTarget
@@ -1307,12 +1385,20 @@ def store_relative_reference(
     | GitStoreResolutionTarget
     | None
 ):
-    """Translate one legacy store-relative path into a resolvable target.
+    """Translate one store-relative path into a resolvable target.
 
     Registered local, HTTP, rclone, and Git stores yield scoped targets. Git
     additionally requires a full immutable object ID paired with the portable
     repository path. Unsupported adapters return ``None``.
+
+    A use-time authority proof is required: the resulting target carries that
+    proof's sealed binding identity, so this helper cannot be used to reach an
+    adapter with a store the operator has not currently authorized.
     """
+
+    if type(proof) is not StoreAuthorityUseProof:
+        raise ValueError("Store resolution target requires a use-time authority proof.")
+    store = proof.definition
 
     if store.kind is StoreKind.LOCAL_FS:
         locator = LocalStoreLocator.parse_decoded(path)
@@ -1327,7 +1413,7 @@ def store_relative_reference(
         except ValueError:
             return None
         return local_store_resolution_target(
-            store,
+            proof,
             locator=locator,
             logical_reference=logical_reference,
         )
@@ -1345,7 +1431,7 @@ def store_relative_reference(
             locator=locator.path,
         )
         return http_store_resolution_target(
-            store,
+            proof,
             locator=locator,
             logical_reference=logical_reference,
         )
@@ -1363,7 +1449,7 @@ def store_relative_reference(
             locator=locator.path,
         )
         return rclone_store_resolution_target(
-            store,
+            proof,
             locator=locator,
             logical_reference=logical_reference,
         )
@@ -1381,10 +1467,12 @@ def store_relative_reference(
         except ValueError:
             return None
         return git_store_resolution_target(
-            store,
+            proof,
             pin=pin,
             logical_reference=logical_reference,
         )
+    # pragma: no cover - the definition validator rejects every kind that is
+    # not handled above, so no proof can carry one.
     return None
 
 
