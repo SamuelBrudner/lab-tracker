@@ -36,6 +36,10 @@ _OPENAI_ANTHROPIC_API_KEY_RE = re.compile(
     r"\bsk-(?:ant-)?[0-9A-Za-z_-]{12,}\b",
     re.IGNORECASE,
 )
+_LAB_TRACKER_BEARER_RE = re.compile(
+    r"\b(?:linv|lpat|ldev|lpair)_[0-9A-Za-z._~-]+",
+    re.IGNORECASE,
+)
 
 _PROVIDER_SECRET_FIELDS = (
     "openai_api_key",
@@ -93,5 +97,6 @@ def provider_error_message(
         lambda match: f"{match.group('name')}: {REDACTED}",
         text,
     )
+    text = _LAB_TRACKER_BEARER_RE.sub(REDACTED, text)
     text = _GOOGLE_API_KEY_RE.sub(REDACTED, text)
     return _OPENAI_ANTHROPIC_API_KEY_RE.sub(REDACTED, text)

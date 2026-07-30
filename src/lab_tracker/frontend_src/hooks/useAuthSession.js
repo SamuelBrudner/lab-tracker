@@ -4,23 +4,47 @@ import { AUTH_REJECTED_EVENT } from "../shared/api.js";
 import { auth as authGateway } from "../shared/gateways/index.js";
 import { createAuthStorage, persistAuthSession } from "../shared/auth-storage.js";
 import {
+  INVITED_PASSWORD_MIN_LENGTH,
   TOKEN_EXPIRES_AT_STORAGE_KEY,
   TOKEN_STORAGE_KEY,
 } from "../shared/constants.js";
 import { isStaticDemoEnabled } from "../shared/static-demo-api.js";
 import { clearAllLocalDrafts } from "./useLocalDraft.js";
 
-const { useCallback, useEffect, useMemo, useState } = React;
+const { useCallback, useEffect, useLayoutEffect, useMemo, useState } = React;
 const REFRESH_MARGIN_MS = 5 * 60 * 1000;
 const MIN_REFRESH_DELAY_MS = 60 * 1000;
 const REFRESH_RETRY_MS = 60 * 1000;
 const SESSION_EXPIRED_MESSAGE = "Your session expired. Please sign in again.";
 
 function readInitialInvitation() {
-  const params = new URLSearchParams(window.location.search || "");
+  const fragmentParams = new URLSearchParams((window.location.hash || "").replace(/^#/, ""));
+  const queryParams = new URLSearchParams(window.location.search || "");
+  const fragmentToken = fragmentParams.get("invite") || "";
+  const queryToken = queryParams.get("invite") || "";
+  const token = fragmentToken || queryToken;
+  const email = fragmentToken
+    ? fragmentParams.get("email") || queryParams.get("email") || ""
+    : queryParams.get("email") || "";
+  if (!token) {
+    return { cleanUrl: "", email: "", token: "" };
+  }
+
+  // Fragment invitations keep the token out of HTTP requests. Continue to
+  // accept previously issued query links, but scrub either representation
+  // before session/bootstrap requests begin.
+  fragmentParams.delete("invite");
+  fragmentParams.delete("email");
+  queryParams.delete("invite");
+  queryParams.delete("email");
+  const cleanSearch = queryParams.toString();
+  const cleanFragment = fragmentParams.toString();
   return {
-    email: params.get("email") || "",
-    token: params.get("invite") || "",
+    cleanUrl: `${window.location.pathname}${cleanSearch ? `?${cleanSearch}` : ""}${
+      cleanFragment ? `#${cleanFragment}` : ""
+    }`,
+    email,
+    token,
   };
 }
 
@@ -53,7 +77,7 @@ function useAuthSession({ replace, setBusy, setFlash, storage }) {
   // One injected storage adapter for the tab; guards every read/write/remove and
   // falls back to memory so a persistence failure can never crash the session.
   const authStorage = useMemo(() => storage ?? createAuthStorage(), [storage]);
-  const initialInvitation = readInitialInvitation();
+  const [initialInvitation] = useState(readInitialInvitation);
   const [token, setToken] = useState(() => readInitialToken(authStorage));
   const [tokenExpiresAt, setTokenExpiresAt] = useState(() =>
     readInitialTokenExpiresAt(authStorage)
@@ -66,11 +90,19 @@ function useAuthSession({ replace, setBusy, setFlash, storage }) {
   const [authMode, setAuthMode] = useState(initialInvitation.token ? "register" : "login");
   const [authUsername, setAuthUsername] = useState(initialInvitation.email);
   const [authPassword, setAuthPassword] = useState("");
+  const [authPasswordConfirmation, setAuthPasswordConfirmation] = useState("");
   const [authBootstrapToken, setAuthBootstrapToken] = useState("");
   const [authBootstrapStatus, setAuthBootstrapStatus] = useState(null);
   const [authInviteEmail] = useState(initialInvitation.email);
   const [authInviteToken, setAuthInviteToken] = useState(initialInvitation.token);
   const [authBusy, setAuthBusy] = useState(false);
+
+  useLayoutEffect(() => {
+    if (!initialInvitation.token || !initialInvitation.cleanUrl) {
+      return;
+    }
+    window.history.replaceState(window.history.state, "", initialInvitation.cleanUrl);
+  }, [initialInvitation.cleanUrl, initialInvitation.token]);
 
   const canWrite = useMemo(
     () => Boolean(user && (user.role === "admin" || user.role === "editor")),
@@ -267,6 +299,19 @@ function useAuthSession({ replace, setBusy, setFlash, storage }) {
       setFlash("", "Bootstrap token is required for the first admin account.");
       return;
     }
+    if (authMode === "register" && authInviteToken) {
+      if (authPassword.length < INVITED_PASSWORD_MIN_LENGTH) {
+        setFlash(
+          "",
+          `Password must be at least ${INVITED_PASSWORD_MIN_LENGTH} characters long.`
+        );
+        return;
+      }
+      if (authPassword !== authPasswordConfirmation) {
+        setFlash("", "Password confirmation does not match.");
+        return;
+      }
+    }
 
     setAuthBusy(true);
     setFlash("", "");
@@ -287,6 +332,7 @@ function useAuthSession({ replace, setBusy, setFlash, storage }) {
           ...(authMode === "register" && authInviteToken
             ? {
                 invite_token: authInviteToken,
+                password_confirmation: authPasswordConfirmation,
               }
             : {}),
           password: authPassword,
@@ -297,6 +343,7 @@ function useAuthSession({ replace, setBusy, setFlash, storage }) {
       setAuthBootstrapToken("");
       setAuthInviteToken("");
       setAuthPassword("");
+      setAuthPasswordConfirmation("");
       if (authInviteToken) {
         replace("/app/setup");
       }
@@ -327,6 +374,7 @@ function useAuthSession({ replace, setBusy, setFlash, storage }) {
     clearSession();
     setAuthBootstrapToken("");
     setAuthPassword("");
+    setAuthPasswordConfirmation("");
     replace("/app");
     setFlash("Signed out.", "");
   }
@@ -341,6 +389,7 @@ function useAuthSession({ replace, setBusy, setFlash, storage }) {
     authInviteToken,
     authMode,
     authPassword,
+    authPasswordConfirmation,
     authUsername,
     canWrite,
     handleAuthSubmit,
@@ -350,6 +399,7 @@ function useAuthSession({ replace, setBusy, setFlash, storage }) {
     setAuthMode,
     setAuthBootstrapToken,
     setAuthPassword,
+    setAuthPasswordConfirmation,
     setAuthUsername,
     token,
     tokenExpiresAt,

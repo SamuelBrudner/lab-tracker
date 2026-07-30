@@ -1,5 +1,6 @@
 import * as React from "react";
 
+import { INVITED_PASSWORD_MIN_LENGTH } from "./constants.js";
 import { formatDate, roleClass } from "./formatters.js";
 
 class ErrorBoundary extends React.Component {
@@ -225,11 +226,13 @@ function AuthForm({
   authMode,
   authUsername,
   authPassword,
+  authPasswordConfirmation,
   authBusy,
   onBootstrapTokenChange,
   onSubmit,
   onUsernameChange,
   onPasswordChange,
+  onPasswordConfirmationChange,
   onToggleMode,
 }) {
   const isSetup = authMode === "setup";
@@ -247,7 +250,7 @@ function AuthForm({
       ? "The first-admin token is loaded for this setup screen."
       : "Enter the first-admin token for this deployment."
     : isInvite
-    ? "Set a password for the invited account."
+    ? `Choose at least ${INVITED_PASSWORD_MIN_LENGTH} characters for the invited account, then confirm the password.`
     : "Viewer registration is public. Admin/editor accounts must be provisioned by an admin.";
   return (
     <article className="card span-6">
@@ -270,8 +273,21 @@ function AuthForm({
             value={authPassword}
             onChange={onPasswordChange}
             autoComplete={authMode === "login" ? "current-password" : "new-password"}
+            minLength={isInvite ? INVITED_PASSWORD_MIN_LENGTH : undefined}
           />
         </label>
+        {isInvite ? (
+          <label>
+            Confirm password
+            <input
+              type="password"
+              value={authPasswordConfirmation}
+              onChange={onPasswordConfirmationChange}
+              autoComplete="new-password"
+              minLength={INVITED_PASSWORD_MIN_LENGTH}
+            />
+          </label>
+        ) : null}
         {isSetup ? (
           <label>
             Bootstrap token
