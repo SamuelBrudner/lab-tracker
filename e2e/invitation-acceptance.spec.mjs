@@ -5,10 +5,15 @@ import {
   bootstrapToken,
 } from "../playwright.config.mjs";
 
+// Every e2e spec shares one server, and only the very first account can be
+// created with the bootstrap token (register_auth allows it solely while no
+// users exist). Deliberately reuse the same admin identity as the other specs
+// so whichever spec runs first bootstraps it and the rest just log in;
+// claiming a separate admin here would 401 whichever spec ran second.
 const OWNER = {
   password: "E2e-owner-a-password-2026!",
   role: "admin",
-  username: "e2e-invitation-owner",
+  username: "e2e-offline-owner-a",
 };
 
 function responseData(response) {
