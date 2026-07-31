@@ -87,6 +87,7 @@ const authSetupReadinessShape = object({
   provider: string,
   provider_credential_configured: boolean,
   scheduler_enabled: boolean,
+  source_revision: string,
 });
 
 /** @satisfies {AuthInvitationValidator} */

@@ -262,6 +262,7 @@ def build_auth_router(
                 ),
                 provider=provider,
                 provider_credential_configured=credential_configured,
+                source_revision=settings.source_revision,
             )
         )
 

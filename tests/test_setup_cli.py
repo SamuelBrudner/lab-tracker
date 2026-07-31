@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import json
 import sys
+from types import SimpleNamespace
 
 import pytest
 
 import lab_tracker_client.setup as setup_helpers
 from lab_tracker_client import LTRecord
 from lab_tracker_client import cli as lt_cli
-from lab_tracker_client.client import LabTracker, load_connection_profile
+from lab_tracker_client.client import LabTracker, LTValidationError, load_connection_profile
+
+SOURCE_REVISION = "0123456789abcdef0123456789abcdef01234567"
 
 
 def _clear_connection_env(monkeypatch) -> None:
@@ -200,6 +203,124 @@ def test_setup_connect_persists_token_only_with_save_token(config_home, capsys) 
     assert not (config_home / "config.json").exists()
 
 
+def test_setup_connect_windows_acl_failure_never_writes_token_or_replaces_profile(
+    config_home, monkeypatch
+) -> None:
+    config_home.mkdir(parents=True)
+    profile_path = config_home / "config.json"
+    original = b'{\n  "base_url": "https://existing.example"\n}\n'
+    profile_path.write_bytes(original)
+    observed_temp_bytes: list[bytes] = []
+
+    monkeypatch.setattr(setup_helpers.sys, "platform", "win32")
+
+    def reject_empty_temp(path):
+        observed_temp_bytes.append(path.read_bytes())
+        return False
+
+    monkeypatch.setattr(
+        setup_helpers,
+        "_harden_profile_permissions",
+        reject_empty_temp,
+    )
+
+    with pytest.raises(SystemExit, match="no changes were saved"):
+        lt_cli.main(
+            [
+                "setup",
+                "connect",
+                "--save-token",
+                "--token",
+                "new-secret-token",
+                "--yes",
+            ]
+        )
+
+    assert observed_temp_bytes == [b""]
+    assert profile_path.read_bytes() == original
+    assert not list(config_home.glob(".config.json.*.tmp"))
+    assert all(
+        b"new-secret-token" not in candidate.read_bytes()
+        for candidate in config_home.iterdir()
+        if candidate.is_file()
+    )
+
+
+def test_setup_connect_windows_acl_recheck_failure_cleans_temp_and_preserves_profile(
+    config_home, monkeypatch
+) -> None:
+    config_home.mkdir(parents=True)
+    profile_path = config_home / "config.json"
+    original = b'{\n  "base_url": "https://existing.example"\n}\n'
+    profile_path.write_bytes(original)
+    observed_temp_bytes: list[bytes] = []
+
+    monkeypatch.setattr(setup_helpers.sys, "platform", "win32")
+
+    def fail_recheck(path):
+        observed_temp_bytes.append(path.read_bytes())
+        return len(observed_temp_bytes) == 1
+
+    monkeypatch.setattr(
+        setup_helpers,
+        "_harden_profile_permissions",
+        fail_recheck,
+    )
+
+    with pytest.raises(SystemExit, match="no changes were saved"):
+        lt_cli.main(
+            [
+                "setup",
+                "connect",
+                "--save-token",
+                "--token",
+                "new-secret-token",
+                "--yes",
+            ]
+        )
+
+    assert observed_temp_bytes[0] == b""
+    assert b"new-secret-token" in observed_temp_bytes[1]
+    assert profile_path.read_bytes() == original
+    assert not list(config_home.glob(".config.json.*.tmp"))
+
+
+def test_setup_connect_interrupt_after_token_write_cleans_temp_and_preserves_profile(
+    config_home, monkeypatch
+) -> None:
+    config_home.mkdir(parents=True)
+    profile_path = config_home / "config.json"
+    original = b'{\n  "base_url": "https://existing.example"\n}\n'
+    profile_path.write_bytes(original)
+
+    monkeypatch.setattr(setup_helpers.sys, "platform", "win32")
+    monkeypatch.setattr(
+        setup_helpers,
+        "_harden_profile_permissions",
+        lambda _path: True,
+    )
+
+    def interrupt_after_flush(_fd):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(setup_helpers.os, "fsync", interrupt_after_flush)
+
+    with pytest.raises(KeyboardInterrupt):
+        lt_cli.main(
+            [
+                "setup",
+                "connect",
+                "--save-token",
+                "--token",
+                "new-secret-token",
+                "--yes",
+            ]
+        )
+
+    assert profile_path.read_bytes() == original
+    assert not list(config_home.glob(".config.json.*.tmp"))
+
+
 def test_setup_connect_never_leaks_a_previously_stored_token(config_home, capsys) -> None:
     lt_cli.main(["setup", "connect", "--save-token", "--token", "stored-secret", "--yes"])
     capsys.readouterr()
@@ -215,6 +336,291 @@ def test_setup_connect_never_leaks_a_previously_stored_token(config_home, capsys
     assert "stored-secret" not in json.dumps(apply_payload)
     profile = json.loads((config_home / "config.json").read_text(encoding="utf-8"))
     assert profile["access_token"] == "stored-secret"
+
+
+def test_installed_source_revision_reads_pep610_commit_id(monkeypatch) -> None:
+    direct_url = json.dumps(
+        {
+            "url": "https://github.com/SamuelBrudner/lab-tracker.git",
+            "vcs_info": {
+                "vcs": "git",
+                "requested_revision": SOURCE_REVISION,
+                "commit_id": SOURCE_REVISION.upper(),
+            },
+        }
+    )
+
+    def distribution(name):
+        assert name == "lab-tracker"
+        return SimpleNamespace(read_text=lambda _filename: direct_url)
+
+    monkeypatch.setattr(setup_helpers.importlib.metadata, "distribution", distribution)
+
+    assert setup_helpers.installed_source_revision() == SOURCE_REVISION
+
+
+def test_setup_verify_client_compares_the_pep610_git_revision(
+    config_home, monkeypatch, capsys
+) -> None:
+    monkeypatch.setattr(
+        setup_helpers,
+        "installed_source_revision",
+        lambda: SOURCE_REVISION,
+    )
+
+    lt_cli.main(
+        [
+            "setup",
+            "verify-client",
+            "--expected-revision",
+            SOURCE_REVISION,
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload == {
+        "command": "setup-verify-client",
+        "expected_revision": SOURCE_REVISION,
+        "installed_revision": SOURCE_REVISION,
+        "compatible": True,
+        "ok": True,
+    }
+
+
+def test_setup_verify_client_fails_closed_for_missing_or_mismatched_revision(
+    config_home, monkeypatch, capsys
+) -> None:
+    monkeypatch.setattr(setup_helpers, "installed_source_revision", lambda: None)
+
+    with pytest.raises(SystemExit) as excinfo:
+        lt_cli.main(
+            [
+                "setup",
+                "verify-client",
+                "--expected-revision",
+                SOURCE_REVISION,
+            ]
+        )
+    assert excinfo.value.code == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["compatible"] is False
+    assert payload["ok"] is False
+    assert "no immutable Git revision metadata" in payload["error"]
+
+    mismatched_revision = "f" * 40
+    monkeypatch.setattr(
+        setup_helpers,
+        "installed_source_revision",
+        lambda: mismatched_revision,
+    )
+    mismatch = setup_helpers.verify_client_revision(SOURCE_REVISION)
+    assert mismatch["installed_revision"] == mismatched_revision
+    assert mismatch["compatible"] is False
+    assert mismatch["ok"] is False
+    assert "does not match" in mismatch["error"]
+
+    with pytest.raises(LTValidationError, match="full 40-character Git source revision"):
+        setup_helpers.verify_client_revision("main")
+
+
+def test_setup_verify_mcp_prefers_the_current_client_environment(
+    tmp_path, monkeypatch
+) -> None:
+    scripts_dir = tmp_path / "client-environment" / "bin"
+    scripts_dir.mkdir(parents=True)
+    python = scripts_dir / "python"
+    companion = scripts_dir / "lt-mcp"
+    python.touch()
+    companion.touch()
+    monkeypatch.setattr(setup_helpers.sys, "executable", str(python))
+    monkeypatch.setattr(
+        setup_helpers.shutil,
+        "which",
+        lambda _command: "/other-environment/lt-mcp",
+    )
+
+    assert setup_helpers._resolve_mcp_executable("lt-mcp") == str(companion)
+    assert (
+        setup_helpers._resolve_mcp_executable("custom-lt-mcp")
+        == "/other-environment/lt-mcp"
+    )
+
+
+def test_setup_verify_mcp_refuses_to_launch_a_mismatched_client(
+    config_home, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        setup_helpers,
+        "installed_source_revision",
+        lambda: "f" * 40,
+    )
+
+    def unexpected_launch(_command):
+        raise AssertionError("MCP executable resolution must not run for a mismatched client")
+
+    monkeypatch.setattr(setup_helpers, "_resolve_mcp_executable", unexpected_launch)
+
+    payload = setup_helpers.verify_mcp_launch(expected_revision=SOURCE_REVISION)
+
+    assert payload["ok"] is False
+    assert payload["launched"] is False
+    assert payload["client_compatibility"]["compatible"] is False
+    assert "Refusing to launch MCP" in payload["error"]
+
+
+def test_setup_verify_mcp_launches_stdio_health_and_authenticated_project_read(
+    config_home, monkeypatch
+) -> None:
+    observed = {"calls": []}
+
+    def fake_run(args, **kwargs):
+        requests = [
+            json.loads(line)
+            for line in kwargs["input"].splitlines()
+            if '"id":' in line
+        ]
+        tool_name = requests[-1]["params"]["name"]
+        observed["calls"].append(
+            {
+                "args": args,
+                "env": kwargs["env"],
+                "input": kwargs["input"],
+                "tool_name": tool_name,
+            }
+        )
+        structured_content = (
+            {"status": "ok"}
+            if tool_name == "lab_tracker_health"
+            else {
+                "data": [],
+                "meta": {"limit": 1, "offset": 0, "total": 0},
+            }
+        )
+        stdout = "\n".join(
+            [
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": {
+                            "protocolVersion": "2025-06-18",
+                            "serverInfo": {
+                                "name": "lab-tracker-mcp",
+                                "version": "test",
+                            },
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "result": {
+                            "isError": False,
+                            "structuredContent": structured_content,
+                        },
+                    }
+                ),
+            ]
+        )
+        return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(setup_helpers, "installed_source_revision", lambda: SOURCE_REVISION)
+    monkeypatch.setattr(
+        setup_helpers,
+        "_resolve_mcp_executable",
+        lambda _command: "/tools/lt-mcp",
+    )
+    monkeypatch.setattr(setup_helpers.subprocess, "run", fake_run)
+
+    payload = setup_helpers.verify_mcp_launch(expected_revision=SOURCE_REVISION)
+
+    assert payload["ok"] is True
+    assert payload["initialized"] is True
+    assert payload["health_ok"] is True
+    assert payload["authenticated_read_ok"] is True
+    assert len(observed["calls"]) == 2
+    assert all(call["args"] == ["/tools/lt-mcp"] for call in observed["calls"])
+    assert all(
+        call["env"]["LAB_TRACKER_MCP_TRANSPORT"] == "stdio"
+        for call in observed["calls"]
+    )
+    assert [call["tool_name"] for call in observed["calls"]] == [
+        "lab_tracker_health",
+        "lab_tracker_list_projects",
+    ]
+
+
+def test_setup_verify_mcp_reports_auth_failure_and_redacts_tokens(
+    config_home, monkeypatch
+) -> None:
+    monkeypatch.setattr(setup_helpers, "installed_source_revision", lambda: SOURCE_REVISION)
+    monkeypatch.setattr(
+        setup_helpers,
+        "_resolve_mcp_executable",
+        lambda _command: "/tools/lt-mcp",
+    )
+
+    def fake_run(_args, **kwargs):
+        requests = [
+            json.loads(line)
+            for line in kwargs["input"].splitlines()
+            if '"id":' in line
+        ]
+        tool_name = requests[-1]["params"]["name"]
+        structured_content = (
+            {"status": "ok"}
+            if tool_name == "lab_tracker_health"
+            else {
+                "error": {
+                    "code": "lab_tracker_api_error",
+                    "message": "Authentication required.",
+                }
+            }
+        )
+        return SimpleNamespace(
+            returncode=0,
+            stdout="\n".join(
+                [
+                    json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": 1,
+                            "result": {
+                                "serverInfo": {"name": "lab-tracker-mcp"}
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": 2,
+                            "result": {
+                                "isError": False,
+                                "structuredContent": structured_content,
+                            },
+                        }
+                    ),
+                ]
+            ),
+            stderr=(
+                "startup failed with lpat_do-not-print "
+                "linv_invite-secret ldev_device-secret lpair_pair-secret"
+            ),
+        )
+
+    monkeypatch.setattr(setup_helpers.subprocess, "run", fake_run)
+
+    payload = setup_helpers.verify_mcp_launch(expected_revision=SOURCE_REVISION)
+
+    assert payload["ok"] is False
+    assert payload["health_ok"] is True
+    assert payload["authenticated_read_ok"] is False
+    assert "authenticated project read failed" in payload["error"]
+    assert "lpat_do-not-print" not in payload["diagnostic"]
+    assert "linv_invite-secret" not in payload["diagnostic"]
+    assert "ldev_device-secret" not in payload["diagnostic"]
+    assert "lpair_pair-secret" not in payload["diagnostic"]
 
 
 def test_setup_status_is_read_only_and_reports_repo_state(
