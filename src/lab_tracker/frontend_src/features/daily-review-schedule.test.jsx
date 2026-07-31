@@ -23,6 +23,7 @@ describe("DailyReviewScheduleForm", () => {
           next_run_at: "2026-07-24T01:15:00Z",
           notification_email: "reviewer@example.edu",
           project_id: "project-1",
+          review_email_available: true,
           run_at_local_time: "21:15",
           settings_id: "settings-1",
           timezone_name: "America/New_York",
@@ -134,6 +135,7 @@ describe("DailyReviewScheduleForm", () => {
           next_run_at: null,
           notification_email: null,
           project_id: "project-2",
+          review_email_available: true,
           run_at_local_time: null,
           settings_id: "settings-2",
           timezone_name: null,
@@ -202,5 +204,73 @@ describe("DailyReviewScheduleForm", () => {
       });
     });
     expect(settingsBody).not.toHaveProperty("user_id");
+  });
+
+  it("cannot save an email opt-in when host delivery is unavailable", async () => {
+    let settingsBody = null;
+    installFetchMock([
+      {
+        match: "/projects/project-3/graph-draft-batch-settings",
+        response: apiResponse({
+          cadence_minutes: 1440,
+          email_notifications_enabled: true,
+          enabled: true,
+          next_run_at: null,
+          notification_email: "stale@example.edu",
+          project_id: "project-3",
+          review_email_available: false,
+          run_at_local_time: "18:00",
+          settings_id: "settings-3",
+          timezone_name: "America/New_York",
+        }),
+      },
+      {
+        match: "/projects/project-3/graph-draft-batch-settings",
+        method: "PATCH",
+        response: (request) => {
+          settingsBody = JSON.parse(request.init.body);
+          return apiResponse({
+            ...settingsBody,
+            next_run_at: null,
+            project_id: "project-3",
+            review_email_available: false,
+            settings_id: "settings-3",
+          });
+        },
+      },
+    ]);
+
+    render(
+      <DailyReviewScheduleForm
+        token="token-3"
+        projectId="project-3"
+        canManage={true}
+        setBusy={vi.fn()}
+        setFlash={vi.fn()}
+      />
+    );
+
+    expect(
+      await screen.findByText(/host has not configured delivery/i)
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("Email me when a review is ready")
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("Notification email")
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Save cadence" }));
+
+    await waitFor(() => {
+      expect(settingsBody).toEqual({
+        cadence_minutes: 1440,
+        email_notifications_enabled: false,
+        enabled: true,
+        notification_email: null,
+        run_at_local_time: "18:00",
+        timezone_name: "America/New_York",
+      });
+    });
   });
 });

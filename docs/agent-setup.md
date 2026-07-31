@@ -99,6 +99,12 @@ at `/app/batches` (per project, or per user within a project). The default is
 daily at 18:00 in the cadence row's timezone — which starts as
 `America/New_York`, so set yours when you enable it.
 
+Email cues appear only when the server reports that delivery is configured.
+When delivery is unavailable or the capability is missing, the app says so,
+hides the opt-in fields, and saves email notifications disabled with no
+destination. This prevents schedules from accumulating an undeliverable email
+backlog.
+
 ## 3. Mint credentials for automations
 
 Mint **personal access tokens** on the **Agents** page in the web app
