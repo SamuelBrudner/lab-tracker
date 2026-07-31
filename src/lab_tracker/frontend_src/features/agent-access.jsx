@@ -2,8 +2,9 @@ import * as React from "react";
 
 import { auth as authGateway } from "../shared/gateways/index.js";
 import { formatDate } from "../shared/formatters.js";
+import { matchingClientSetup } from "./client-setup.js";
 
-const { useCallback, useEffect, useState } = React;
+const { useCallback, useEffect, useMemo, useState } = React;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 /* The server rejects expiries beyond its 90-day cap against its own clock,
@@ -21,18 +22,19 @@ const EXPIRY_CHOICES = [
    offer levels the user can actually mint. */
 const ACCESS_LEVELS = [
   {
-    value: "read",
-    label: "Read-only (recommended)",
-    description: "Decision context, search, and graph reads.",
-    role: "viewer",
-    readOnly: true,
-  },
-  {
     value: "stage",
-    label: "Read + stage evidence",
-    description: "Also stages notes, datasets, and draft requests. Never commits.",
+    label: "Read + stage evidence (recommended for hooks)",
+    description:
+      "Reads context and syncs staged notes from captures and commit hooks. Never commits.",
     role: "editor",
     readOnly: false,
+  },
+  {
+    value: "read",
+    label: "Read-only",
+    description: "Decision context, search, and graph reads. Cannot sync captured evidence.",
+    role: "viewer",
+    readOnly: true,
   },
   {
     value: "scheduler",
@@ -64,28 +66,43 @@ function isPrivateHost(hostname) {
   );
 }
 
-/* `LAB_TRACKER_ACCESS_TOKEN` is only bootstrap input here. The consented
-   `--save-token` step writes the permission-hardened connection profile read
-   by both the CLI and lt-mcp, then the temporary shell variable is cleared. */
-function connectCommands(secret, baseUrl) {
+/* Prompt instead of embedding the one-time token in a copied command, where it
+   would be retained in shell history. The consented `--save-token` step writes
+   the permission-hardened connection profile read by both the CLI and lt-mcp;
+   each block then clears its temporary process environment. */
+function connectCommands(baseUrl, projectId = "") {
+  const projectOption = projectId ? ` --project ${projectId}` : "";
   return {
     posix: [
-      `export LAB_TRACKER_ACCESS_TOKEN='${secret}'`,
-      `lt setup connect --base-url ${baseUrl} --save-token --yes`,
-      "unset LAB_TRACKER_ACCESS_TOKEN",
+      "(",
+      "  trap 'stty echo < /dev/tty 2>/dev/null || :; unset LAB_TRACKER_ACCESS_TOKEN' 0",
+      "  trap 'exit 130' HUP INT TERM",
+      "  printf 'Lab Tracker one-time token: ' >&2",
+      "  stty -echo < /dev/tty",
+      "  IFS= read -r LAB_TRACKER_ACCESS_TOKEN < /dev/tty",
+      "  stty echo < /dev/tty",
+      "  printf '\\n' >&2",
+      "  export LAB_TRACKER_ACCESS_TOKEN",
+      `  lt setup connect --base-url ${baseUrl}${projectOption} --save-token --yes`,
+      ")",
     ].join("\n"),
     powershell: [
-      `$env:LAB_TRACKER_ACCESS_TOKEN = '${secret}'`,
-      `lt setup connect --base-url ${baseUrl} --save-token --yes`,
-      "Remove-Item Env:LAB_TRACKER_ACCESS_TOKEN",
+      '$labTrackerSecureToken = Read-Host "Lab Tracker one-time token" -AsSecureString',
+      "try {",
+      "  $env:LAB_TRACKER_ACCESS_TOKEN = " +
+        '([System.Net.NetworkCredential]::new("", $labTrackerSecureToken)).Password',
+      `  lt setup connect --base-url ${baseUrl}${projectOption} --save-token --yes`,
+      "} finally {",
+      "  Remove-Item Env:LAB_TRACKER_ACCESS_TOKEN -ErrorAction SilentlyContinue",
+      "  $labTrackerSecureToken.Dispose()",
+      "  Remove-Variable labTrackerSecureToken -ErrorAction SilentlyContinue",
+      "}",
     ].join("\n"),
   };
 }
 
-/* Read-only tokens can bind to an existing project but the server forbids
-   them from creating one, so only offer --create when the token can write. */
-function repoCommands(canCreateProjects) {
-  return [
+function repoCommands(project, canStageEvidence) {
+  const commands = [
     {
       command: "lt setup init --install-skills --dry-run",
       title: "1. Preview repository and skill setup",
@@ -94,37 +111,58 @@ function repoCommands(canCreateProjects) {
       command: "lt setup init --install-skills --yes",
       title: "2. Apply repository and skill setup",
     },
-    {
-      command: canCreateProjects
-        ? 'lt project bind --name "My project" --create --dry-run'
-        : 'lt project bind --name "My project" --dry-run',
-      title: "3. Preview project binding",
-    },
-    {
-      command: canCreateProjects
-        ? 'lt project bind --name "My project" --create --yes'
-        : 'lt project bind --name "My project" --yes',
-      title: "4. Apply project binding",
-    },
-    {
-      command: "lt setup status",
-      title: "5. Verify setup",
-    },
   ];
+  if (project?.project_id) {
+    commands.push(
+      {
+        command: `lt project bind --project-id ${project.project_id} --dry-run`,
+        title: `3. Preview binding to ${project.name}`,
+      },
+      {
+        command: `lt project bind --project-id ${project.project_id} --yes`,
+        title: `4. Bind to ${project.name}`,
+      }
+    );
+    if (canStageEvidence) {
+      commands.push(
+        {
+          command: `lt hooks install --project ${project.project_id} --dry-run`,
+          title: "5. Preview commit capture hook",
+        },
+        {
+          command: `lt hooks install --project ${project.project_id} --yes`,
+          title: "6. Install commit capture hook",
+        }
+      );
+    }
+  }
+  commands.push({
+    command: "lt setup status",
+    title: `${commands.length + 1}. Verify repository setup`,
+  });
+  return commands;
 }
 
-const INSTALL_COMMAND =
-  "uv tool install --upgrade git+https://github.com/SamuelBrudner/lab-tracker";
-const CODEX_MCP_COMMANDS = [
-  {
-    command: "codex mcp add lab-tracker -- lt-mcp",
-    title: "1. Register Lab Tracker MCP for Codex",
-  },
-  {
+function codexMcpCommands(clientSetup) {
+  if (!clientSetup) {
+    return [];
+  }
+  const commands = [
+    {
+      command: "codex mcp add lab-tracker -- lt-mcp",
+      title: "1. Register Lab Tracker MCP for Codex",
+    },
+  ];
+  commands.push({
+    command: clientSetup.verifyMcpCommand,
+    title: "2. Launch MCP and verify health, auth, and client revision",
+  });
+  commands.push({
     command: "codex mcp list",
-    title: "2. Verify Codex MCP registration",
-  },
-];
+    title: `${commands.length + 1}. Confirm Codex registration`,
+  });
+  return commands;
+}
 
 function CommandSnippet({ title, command, onCopy }) {
   return (
@@ -142,16 +180,28 @@ function CommandSnippet({ title, command, onCopy }) {
   );
 }
 
-function AgentAccessPage({ token, user, authEnabled, navigate, setBusy, setFlash }) {
+function AgentAccessPage({
+  token,
+  user,
+  authEnabled,
+  selectedProject = null,
+  navigate,
+  setBusy,
+  setFlash,
+}) {
   const [tokens, setTokens] = useState([]);
   const [tokensFetchedAt, setTokensFetchedAt] = useState(0);
   const [loading, setLoading] = useState(true);
   const [label, setLabel] = useState("Coding agent");
-  const [access, setAccess] = useState("read");
+  const [access, setAccess] = useState(() =>
+    (ROLE_RANK[user?.role] ?? 0) >= ROLE_RANK.editor ? "stage" : "read"
+  );
   const [expiresDays, setExpiresDays] = useState(30);
   const [issued, setIssued] = useState(null);
   const [minting, setMinting] = useState(false);
   const [revokingId, setRevokingId] = useState("");
+  const [readiness, setReadiness] = useState(null);
+  const [readinessError, setReadinessError] = useState("");
 
   const authDisabled = authEnabled === false;
   const baseUrl =
@@ -159,9 +209,41 @@ function AgentAccessPage({ token, user, authEnabled, navigate, setBusy, setFlash
   const privateHost =
     typeof window !== "undefined" && isPrivateHost(window.location.hostname);
   const userRank = ROLE_RANK[user?.role] ?? 0;
-  const availableLevels = ACCESS_LEVELS.filter(
-    (level) => userRank >= ROLE_RANK[level.role]
+  const availableLevels = useMemo(
+    () => ACCESS_LEVELS.filter((level) => userRank >= ROLE_RANK[level.role]),
+    [userRank]
   );
+  const clientSetup = useMemo(
+    () => matchingClientSetup(readiness?.source_revision),
+    [readiness?.source_revision]
+  );
+
+  useEffect(() => {
+    if (!availableLevels.some((level) => level.value === access)) {
+      setAccess(availableLevels[0]?.value || "read");
+    }
+  }, [access, availableLevels]);
+
+  useEffect(() => {
+    let canceled = false;
+    authGateway
+      .getSetupReadiness({ token })
+      .then((value) => {
+        if (!canceled) {
+          setReadiness(value);
+          setReadinessError("");
+        }
+      })
+      .catch((err) => {
+        if (!canceled) {
+          setReadiness(null);
+          setReadinessError(err.message || "Setup readiness check failed.");
+        }
+      });
+    return () => {
+      canceled = true;
+    };
+  }, [token]);
 
   const refresh = useCallback(async () => {
     if (authDisabled) {
@@ -251,10 +333,37 @@ function AgentAccessPage({ token, user, authEnabled, navigate, setBusy, setFlash
     }
   }
 
-  const commands = issued ? connectCommands(issued.secret, baseUrl) : null;
-  const issuedRepoCommands = issued ? repoCommands(issued.read_only === false) : [];
-  const openRepoCommands = repoCommands(true);
-  const openConnectCommand = `lt setup connect --base-url ${baseUrl} --yes`;
+  const projectId = selectedProject?.project_id || "";
+  const commands = issued ? connectCommands(baseUrl, projectId) : null;
+  const issuedRepoCommands = issued
+    ? repoCommands(selectedProject, issued.read_only === false)
+    : [];
+  const openRepoCommands = repoCommands(selectedProject, true);
+  const openConnectCommand =
+    `lt setup connect --base-url ${baseUrl}` +
+    (projectId ? ` --project ${projectId}` : "") +
+    " --yes";
+  const mcpCommands = codexMcpCommands(clientSetup);
+  const installCommands = clientSetup
+    ? [
+        {
+          command: clientSetup.toolInstallCommand,
+          title: `Install matching lt and lt-mcp (${clientSetup.revision.slice(0, 12)})`,
+        },
+        {
+          command: clientSetup.projectInstallCommand,
+          title: "Add matching dependency in this Python project",
+        },
+        {
+          command: clientSetup.projectImportCommand,
+          title: "Verify lab_tracker_client imports in the project environment",
+        },
+        {
+          command: clientSetup.verifyClientCommand,
+          title: "Verify the project package matches this server",
+        },
+      ]
+    : [];
 
   return (
     <article className="card span-12">
@@ -280,6 +389,37 @@ function AgentAccessPage({ token, user, authEnabled, navigate, setBusy, setFlash
         </p>
       ) : null}
 
+      <p className="subtle">
+        {selectedProject ? (
+          <>
+            Repository setup will bind directly to <strong>{selectedProject.name}</strong> (
+            <code>{selectedProject.project_id}</code>).
+          </>
+        ) : (
+          <>
+            No setup project is selected. Return to <strong>Setup</strong> and choose a
+            project before installing repository binding or commit capture.
+          </>
+        )}
+      </p>
+      <p className="subtle">
+        Server-side AI drafting uses the Lab Tracker operator’s configured provider
+        credential. You do not need to enter an OpenAI key locally for Lab Tracker.
+      </p>
+      {readinessError ? (
+        <p className="warn">
+          This server’s matching client revision could not be checked (
+          {readinessError}). Do not install from a moving branch.
+        </p>
+      ) : readiness && !clientSetup ? (
+        <p className="warn">
+          Matching client installation is unavailable because this deployment does
+          not report a full immutable source revision. Do not install from GitHub{" "}
+          <code>main</code>; ask the Lab Tracker operator to deploy with revision
+          metadata.
+        </p>
+      ) : null}
+
       {authDisabled ? (
         <div className="card-inset">
           <h3>Authentication is disabled on this server</h3>
@@ -287,37 +427,60 @@ function AgentAccessPage({ token, user, authEnabled, navigate, setBusy, setFlash
             Agents can connect without a token. On the agent&#39;s machine, save the
             connection profile, then scaffold each analysis repo.
           </p>
-          <CommandSnippet
-            title="Connect this machine"
-            command={openConnectCommand}
-            onCopy={() => copyText(openConnectCommand, "Connect command copied.")}
-          />
-          {openRepoCommands.map((item) => (
-            <CommandSnippet
-              key={item.command}
-              title={item.title}
-              command={item.command}
-              onCopy={() => copyText(item.command, `${item.title} command copied.`)}
-            />
-          ))}
-          {CODEX_MCP_COMMANDS.map((item) => (
-            <CommandSnippet
-              key={item.command}
-              title={item.title}
-              command={item.command}
-              onCopy={() => copyText(item.command, `${item.title} command copied.`)}
-            />
-          ))}
-          <p className="subtle">
-            Missing the <code>lt</code> command? Install it once with{" "}
-            <code>{INSTALL_COMMAND}</code>. The repo setup installs the Lab Tracker
-            setup skill into the Claude and Codex user skill homes and writes
-            repo-level MCP configuration for clients that support those files.
-            Codex requires the explicit one-time registration above, shared by its
-            app, CLI, and IDE extension. If <code>codex mcp list</code> already
-            shows <code>lab-tracker</code>, skip the add command. Restart Codex or
-            another MCP client after setup so it reloads its configuration.
-          </p>
+          {clientSetup ? (
+            <>
+              {installCommands.map((item) => (
+                <CommandSnippet
+                  key={item.command}
+                  title={item.title}
+                  command={item.command}
+                  onCopy={() =>
+                    copyText(item.command, `${item.title} command copied.`)
+                  }
+                />
+              ))}
+              <CommandSnippet
+                title="Connect this machine"
+                command={openConnectCommand}
+                onCopy={() =>
+                  copyText(openConnectCommand, "Connect command copied.")
+                }
+              />
+              {openRepoCommands.map((item) => (
+                <CommandSnippet
+                  key={item.command}
+                  title={item.title}
+                  command={item.command}
+                  onCopy={() =>
+                    copyText(item.command, `${item.title} command copied.`)
+                  }
+                />
+              ))}
+              {mcpCommands.map((item) => (
+                <CommandSnippet
+                  key={item.command}
+                  title={item.title}
+                  command={item.command}
+                  onCopy={() =>
+                    copyText(item.command, `${item.title} command copied.`)
+                  }
+                />
+              ))}
+              <p className="subtle">
+                The pinned tool and Python dependency come from the same
+                immutable revision as this server. The repo setup installs the
+                Lab Tracker setup skill into the Claude and Codex user skill
+                homes and writes repo-level MCP configuration. The MCP verifier
+                launches <code>lt-mcp</code>, checks health, and makes a project
+                read; <code>codex mcp list</code> alone checks registration.
+              </p>
+            </>
+          ) : (
+            <p className="warn">
+              Local connection and repository commands are withheld until this
+              deployment reports a valid immutable source revision.
+            </p>
+          )}
         </div>
       ) : (
         <>
@@ -369,13 +532,12 @@ function AgentAccessPage({ token, user, authEnabled, navigate, setBusy, setFlash
             <div className="card-inset agent-token-issued">
               <h3>Token created — shown only once</h3>
               <p className="subtle">
-                Paste the block for the agent machine&#39;s shell.{" "}
-                <code>lt setup connect --save-token</code> saves the server URL and
-                token in the permission-hardened Lab Tracker connection profile (
-                <code>~/.lab-tracker/config.json</code>). Both the <code>lt</code>{" "}
-                CLI and <code>lt-mcp</code> read that profile in later shells and
-                IDE launches. Keep the one-time token private; the temporary shell
-                variable is cleared after the profile is saved.
+                Keep this one-time token private and copy it now. Run the matching
+                setup block, then paste the token at its hidden prompt. The block
+                saves the server URL and token in the permission-hardened Lab
+                Tracker connection profile (
+                <code>~/.lab-tracker/config.json</code>) used by both <code>lt</code>{" "}
+                and <code>lt-mcp</code>, then clears the temporary shell value.
               </p>
               <div className="enrollment-url">
                 <code>{issued.secret}</code>
@@ -387,53 +549,91 @@ function AgentAccessPage({ token, user, authEnabled, navigate, setBusy, setFlash
                   Copy token
                 </button>
               </div>
-              <CommandSnippet
-                title="Windows (PowerShell)"
-                command={commands.powershell}
-                onCopy={() => copyText(commands.powershell, "PowerShell setup commands copied.")}
-              />
-              <CommandSnippet
-                title="macOS / Linux"
-                command={commands.posix}
-                onCopy={() => copyText(commands.posix, "Shell setup commands copied.")}
-              />
-              {issuedRepoCommands.map((item) => (
-                <CommandSnippet
-                  key={item.command}
-                  title={item.title}
-                  command={item.command}
-                  onCopy={() => copyText(item.command, `${item.title} command copied.`)}
-                />
-              ))}
-              {CODEX_MCP_COMMANDS.map((item) => (
-                <CommandSnippet
-                  key={item.command}
-                  title={item.title}
-                  command={item.command}
-                  onCopy={() => copyText(item.command, `${item.title} command copied.`)}
-                />
-              ))}
+              {clientSetup ? (
+                <>
+                  {installCommands.map((item) => (
+                    <CommandSnippet
+                      key={item.command}
+                      title={item.title}
+                      command={item.command}
+                      onCopy={() =>
+                        copyText(
+                          item.command,
+                          `${item.title} command copied.`
+                        )
+                      }
+                    />
+                  ))}
+                  <CommandSnippet
+                    title="Windows (PowerShell)"
+                    command={commands.powershell}
+                    onCopy={() =>
+                      copyText(
+                        commands.powershell,
+                        "PowerShell setup commands copied."
+                      )
+                    }
+                  />
+                  <CommandSnippet
+                    title="macOS / Linux"
+                    command={commands.posix}
+                    onCopy={() =>
+                      copyText(
+                        commands.posix,
+                        "Shell setup commands copied."
+                      )
+                    }
+                  />
+                  {issuedRepoCommands.map((item) => (
+                    <CommandSnippet
+                      key={item.command}
+                      title={item.title}
+                      command={item.command}
+                      onCopy={() =>
+                        copyText(
+                          item.command,
+                          `${item.title} command copied.`
+                        )
+                      }
+                    />
+                  ))}
+                  {mcpCommands.map((item) => (
+                    <CommandSnippet
+                      key={item.command}
+                      title={item.title}
+                      command={item.command}
+                      onCopy={() =>
+                        copyText(
+                          item.command,
+                          `${item.title} command copied.`
+                        )
+                      }
+                    />
+                  ))}
+                  <p className="subtle">
+                    The exact project id is included in the connection profile,
+                    repository binding, and hook commands. Repo setup installs
+                    the skill into both Claude and Codex user homes and writes{" "}
+                    <code>.mcp.json</code>, <code>.cursor/mcp.json</code>,{" "}
+                    <code>.gemini/settings.json</code>, and agent instruction
+                    files. <code>lt setup status</code> reports the final local
+                    state.
+                  </p>
+                </>
+              ) : (
+                <p className="warn">
+                  Copy the token now, but do not connect a local client yet.
+                  Setup commands are withheld until the deployment reports a
+                  valid immutable source revision.
+                </p>
+              )}
               {issued.read_only !== false ? (
-                <p className="subtle">
-                  <code>lt project bind</code> matches an existing project by
-                  name; this read-only token cannot create projects, so create
-                  them here in the web app first (or mint a read-write token).
+                <p className="warn">
+                  This token can read and bind the selected project, but it cannot
+                  sync commit-hook or figure-capture evidence. Mint{" "}
+                  <strong>Read + stage evidence</strong> for capture workflows.
                 </p>
               ) : null}
-              <p className="subtle">
-                Missing the <code>lt</code> command? Install it once with{" "}
-                <code>{INSTALL_COMMAND}</code>. The repo setup installs the Lab
-                Tracker setup skill into the Claude and Codex user skill homes and
-                writes <code>.mcp.json</code>, <code>.cursor/mcp.json</code>,{" "}
-                <code>.gemini/settings.json</code>, and agent instruction files. It
-                scaffolds repo-level MCP configuration for other compatible clients.
-                Codex requires the explicit one-time registration above, shared by
-                its app, CLI, and IDE extension. If <code>codex mcp list</code>{" "}
-                already shows <code>lab-tracker</code>, skip the add command.
-                Restart Codex or another MCP client after setup so it reloads its
-                configuration.{" "}
-                <code>lt setup status</code> reports what is configured.
-              </p>
               <button type="button" className="btn-link" onClick={() => setIssued(null)}>
                 Dismiss
               </button>

@@ -431,6 +431,7 @@ function App({ onReloadForUpdate = null }) {
               token={auth.token}
               user={auth.user}
               authEnabled={auth.authEnabled}
+              selectedProject={workspaceData.selectedProject}
               navigate={navigate}
               setBusy={setBusy}
               setFlash={setFlash}

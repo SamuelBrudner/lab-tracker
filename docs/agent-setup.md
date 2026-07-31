@@ -107,12 +107,19 @@ backlog.
 
 ## 3. Mint credentials for automations
 
+Start on the web app's **Setup** page. It reads the running server's full source
+revision and renders `uv tool install` and `uv add` commands pinned to that
+immutable revision. If the deployment reports `unknown`, a short hash, or no
+revision, Setup stops and asks the operator to correct the deployment metadata;
+it never substitutes the moving GitHub `main` branch.
+
 Mint **personal access tokens** on the **Agents** page in the web app
 (`/app/agents`): pick a label, an access level, and an expiry (90-day
 maximum), and the page returns the one-time `lpat_…` secret together with
-copy-paste setup commands for the machine where the agent runs — an
-`lt setup connect --save-token` block for the `lt` client plus the
-`LAB_TRACKER_MCP_API_KEY` export MCP agents read. Minting stays
+copy-paste setup commands for the machine where the agent runs. The
+`lt setup connect --save-token` block stores the server URL, selected project,
+and token in the permission-hardened local profile used by both `lt` and
+`lt-mcp`. Minting stays
 human-in-browser by design: tokens themselves cannot call `/auth/*`, so an
 agent can never mint or relay its own credential. (The raw API remains
 `POST /auth/tokens` if you script it.)
@@ -127,17 +134,38 @@ For agents that should only *read* the graph, pick **Read-only** —
 decision-context lookups work read-only, and a read-only principal cannot
 stage or draft anything.
 
+For figure capture, repository commit hooks, watch folders, or other staged
+evidence, pick **Read + stage evidence**. It is the least-privilege writable
+choice offered by the app: it can sync staged captures and request drafts, but
+non-interactive principals remain structurally unable to accept or commit a
+draft. A read-only token cannot drain a capture outbox.
+
 ## 4. Connect coding agents over MCP
 
 Coding agents reach Lab Tracker exclusively through the MCP server (`lt-mcp`),
 which is itself an HTTP client of the API — never the database. Any
 MCP-capable agent works; **which one you use is up to you.**
 
-In an analysis repo, one command scaffolds the integration for every major
-agent at once:
+Install the exact requirement shown by the server in two places:
+
+1. `uv tool install --force "<server-pinned requirement>"` supplies the
+   machine-level `lt` and `lt-mcp` executables.
+2. Inside each analysis repository, `uv add "<same server-pinned requirement>"`
+   records the dependency in that project's Python environment. Confirm with
+   the Setup page's `uv run python` import command and
+   `uv run lt setup verify-client --expected-revision <full-revision>`.
+
+The tool environment alone is not enough for analysis code that imports
+`lab_tracker_client`; the project environment needs its own dependency.
+
+Then, in the analysis repo, one command scaffolds the integration for every
+major agent and installs the generated setup skill for both Claude and Codex:
 
 ```bash
-lab_tracker init        # or, from the client: lt setup init (--dry-run previews first)
+lt setup init --install-skills --dry-run
+lt setup init --install-skills --yes
+lt project bind --project-id <selected-project-uuid> --dry-run
+lt project bind --project-id <selected-project-uuid> --yes
 ```
 
 | File | Who reads it |
@@ -152,17 +180,27 @@ lab_tracker init        # or, from the client: lt setup init (--dry-run previews
 Two agents need one extra step:
 
 - **Codex CLI** registers MCP servers in `~/.codex/config.toml`: add
-  `[mcp_servers.lab-tracker]` with `command = "lt-mcp"`. (A project-scoped
-  `.codex/config.toml` also works, but only in repos the user has marked
-  trusted — which is why the scaffold doesn't write one.) It picks up the
-  scaffolded `AGENTS.md` per repo.
+  it with `codex mcp add lab-tracker -- lt-mcp`. Then run
+  `lt setup verify-mcp --expected-revision <full-revision>` from the same
+  environment that launches Codex. The verifier actually starts `lt-mcp`,
+  initializes MCP over stdio, calls Lab Tracker health, and makes an
+  authenticated project read through the saved profile. `codex mcp list`
+  confirms registration only. A project-scoped `.codex/config.toml` also
+  works, but only in repos the user has marked trusted—which is why the
+  scaffold does not write one.
 - **GitHub Copilot** IDEs use a different config schema — see
   [GitHub Copilot MCP setup](lab-tracker-copilot.md); Cursor details are in
   [Cursor MCP setup](lab-tracker-cursor.md).
 
-Point the MCP server at your instance with `LAB_TRACKER_BASE_URL` (and
-`LAB_TRACKER_MCP_API_KEY` when auth is on) — full variable reference in
+The saved connection profile normally supplies the API URL and LPAT. Environment
+variables still override it when you need them — `LAB_TRACKER_BASE_URL` points
+the MCP server at your instance, and `LAB_TRACKER_MCP_API_KEY` supplies the
+token when auth is on. Full variable reference in
 [`lab-tracker-mcp-skills.md`](lab-tracker-mcp-skills.md).
+
+Server-side AI drafting uses the Lab Tracker operator's configured provider
+credential. A researcher connecting `lt` or `lt-mcp` does not need to enter an
+OpenAI key locally for Lab Tracker.
 
 Every scaffolded instruction file carries the same policy, whatever the vendor: consult
 `lab_tracker_get_decision_context` before research-facing decisions; stage
@@ -172,16 +210,21 @@ Analysis repos can also send evidence automatically on every commit — see
 
 ## 5. Verify the loop
 
-1. `lt setup status` in a scaffolded repo — read-only inventory of server
-   reachability, profile, scaffold, watches, and hooks.
-2. Capture something (phone note, `lt import-folder`, or a figure from code).
-3. Press **Run now** on `/app/batches` (or run
+1. `uv run lt setup verify-client --expected-revision <full-revision>` in the
+   project environment.
+2. `lt setup status` in a scaffolded repo—read-only inventory of server
+   reachability, profile, scaffold, skills, watches, and hooks.
+3. `lt setup verify-mcp --expected-revision <full-revision>`—a real MCP health
+   and authenticated-read check.
+4. Capture something (phone note, a hook-generated commit note, or a figure
+   from code), then confirm the local outbox syncs.
+5. Press **Run now** on `/app/batches` (or run
    `scripts/daily-review-run-due.sh` / `.ps1`).
-4. Open the review queue: proposals should appear with rationale, confidence,
+6. Open the review queue: proposals should appear with rationale, confidence,
    and source references. A `failed` change set is usually provider
    misconfiguration — read its error metadata; a missing key names the exact
    variable to set.
-5. Accept one proposal and commit — as a person, in the app. That's the whole
+7. Accept one proposal and commit—as a person, in the app. That's the whole
    loop.
 
 ## What agents can and cannot do

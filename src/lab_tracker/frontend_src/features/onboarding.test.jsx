@@ -3,7 +3,7 @@ import * as React from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import { apiResponse, installFetchMock } from "../test/utils.js";
+import { apiResponse, errorResponse, installFetchMock } from "../test/utils.js";
 import { OnboardingPage } from "./onboarding.jsx";
 
 const USER = {
@@ -11,6 +11,7 @@ const USER = {
   user_id: "user-1",
   username: "marion.deerhake@yale.edu",
 };
+const SOURCE_REVISION = "0123456789abcdef0123456789abcdef01234567";
 
 const PROJECT = {
   description: "Track the lab's first research program.",
@@ -23,7 +24,7 @@ const READY_RUNTIME = {
   provider: "openai",
   provider_credential_configured: true,
   scheduler_enabled: true,
-  source_revision: "0123456789abcdef0123456789abcdef01234567",
+  source_revision: SOURCE_REVISION,
 };
 
 function renderPage(props = {}) {
@@ -60,7 +61,7 @@ describe("OnboardingPage", () => {
         provider: "agentic",
         provider_credential_configured: false,
         scheduler_enabled: false,
-        source_revision: "0123456789abcdef0123456789abcdef01234567",
+        source_revision: SOURCE_REVISION,
       },
       expectedWorker: "Needs operator setup",
       expectedProvider: "Needs operator setup",
@@ -249,7 +250,11 @@ describe("OnboardingPage", () => {
       },
     ]);
 
-    renderPage({ navigate });
+    renderPage({
+      navigate,
+      projects: [PROJECT],
+      selectedProjectId: PROJECT.project_id,
+    });
 
     await screen.findByLabelText("Automation readiness");
     const commandText = Array.from(document.querySelectorAll(".command-block"))
@@ -261,17 +266,29 @@ describe("OnboardingPage", () => {
       )
     ).toBe(true);
     expect(commandText).toContain(
-      "uv tool install --upgrade git+https://github.com/SamuelBrudner/lab-tracker"
+      `uv tool install --force "lab-tracker @ git+https://github.com/` +
+        `SamuelBrudner/lab-tracker.git@${SOURCE_REVISION}"`
+    );
+    expect(commandText).toContain(`uv add "lab-tracker @ git+`);
+    expect(commandText).toContain("import lab_tracker_client");
+    expect(commandText).toContain(
+      `uv run lt setup verify-client --expected-revision ${SOURCE_REVISION}`
     );
     expect(commandText).toContain(
       "lt setup init --install-skills --dry-run"
     );
     expect(commandText).toContain("lt setup init --install-skills --yes");
     expect(commandText).toContain(
-      'lt project bind --name "YOUR PROJECT NAME" --dry-run'
+      `lt project bind --project-id ${PROJECT.project_id} --dry-run`
+    );
+    expect(commandText).toContain(
+      `lt hooks install --project ${PROJECT.project_id} --yes`
     );
     expect(commandText).toContain("lt setup status");
     expect(commandText).toContain("codex mcp add lab-tracker -- lt-mcp");
+    expect(commandText).toContain(
+      `lt setup verify-mcp --expected-revision ${SOURCE_REVISION}`
+    );
     expect(commandText).toContain("codex mcp list");
     expect(document.body.textContent).toContain(
       "The skill installer covers Claude and Codex user skill homes."
@@ -288,5 +305,63 @@ describe("OnboardingPage", () => {
     expect(navigate).toHaveBeenNthCalledWith(1, "/app/agents");
     expect(navigate).toHaveBeenNthCalledWith(2, "/app/devices");
     expect(navigate).toHaveBeenNthCalledWith(3, "/app");
+  });
+
+  it("fails closed when the deployment does not report an immutable client revision", async () => {
+    installFetchMock([
+      {
+        match: "/auth/setup-readiness",
+        response: apiResponse({
+          ...READY_RUNTIME,
+          source_revision: "unknown",
+        }),
+      },
+    ]);
+
+    renderPage({
+      projects: [PROJECT],
+      selectedProjectId: PROJECT.project_id,
+    });
+
+    expect(
+      await screen.findByText(/Matching client installation is unavailable/)
+    ).toBeInTheDocument();
+    const commandText = Array.from(document.querySelectorAll(".command-block"))
+      .map((node) => node.textContent)
+      .join("\n");
+    expect(commandText).not.toContain("uv tool install");
+    expect(commandText).not.toContain("codex mcp add");
+    expect(commandText).not.toContain("lt setup init");
+    expect(commandText).not.toContain("lt project bind");
+    expect(commandText).not.toContain("lt hooks install");
+    expect(document.body.textContent).toContain("Do not install from GitHub main");
+    expect(document.body.textContent).toContain(
+      "Local repository commands are withheld"
+    );
+  });
+
+  it("fails closed when setup readiness cannot be loaded", async () => {
+    installFetchMock([
+      {
+        match: "/auth/setup-readiness",
+        response: errorResponse("Readiness unavailable.", 503),
+      },
+    ]);
+
+    renderPage({
+      projects: [PROJECT],
+      selectedProjectId: PROJECT.project_id,
+    });
+
+    expect(
+      await screen.findByText(/matching client revision could not be checked/i)
+    ).toHaveTextContent("Readiness unavailable.");
+    expect(screen.queryByText(/Waiting for this server/)).not.toBeInTheDocument();
+    const commandText = Array.from(document.querySelectorAll(".command-block"))
+      .map((node) => node.textContent)
+      .join("\n");
+    expect(commandText).not.toContain("uv tool install");
+    expect(commandText).not.toContain("lt setup init");
+    expect(commandText).not.toContain("lt setup verify-mcp");
   });
 });
