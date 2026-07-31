@@ -1,11 +1,11 @@
 """Read-only audit of lab-tracker MCP auth configs across host surfaces (GH #80).
 
 Lab Tracker MCP is registered in several independent config surfaces that drift
-apart — the claude-code CLI (``~/.claude.json``), the Claude Desktop app, and
+apart — Codex, the claude-code CLI (``~/.claude.json``), Claude Desktop, and
 repo-local ``.mcp.json`` / ``.cursor`` / ``.gemini`` / VS Code files. When an
-LPAT migration is applied to one surface but not another, the stale one keeps
-sending deprecated username/password credentials and every authenticated call
-401s while ``health`` stays green (the #74 incident).
+LPAT or URL migration is applied to one surface but not another, the stale one
+keeps using old connection settings while ``health`` can remain misleadingly
+green elsewhere.
 
 ``auth_doctor`` enumerates every registration it can find and reports, per
 surface: the effective auth mode (``api_key`` LPAT vs deprecated
@@ -23,6 +23,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - exercised by the Python 3.10 CI job
+    import tomli as tomllib
+
 JsonObject = dict[str, Any]
 
 AUTH_API_KEY = "api_key"
@@ -34,7 +39,7 @@ AUTH_NONE = "none"
 _API_KEY_ENV = ("LAB_TRACKER_MCP_API_KEY", "LAB_TRACKER_MCP_TOKEN")
 _USERNAME_ENV = "LAB_TRACKER_MCP_USERNAME"
 _PASSWORD_ENV = "LAB_TRACKER_MCP_PASSWORD"
-_BASE_URL_ENV = "LAB_TRACKER_MCP_BASE_URL"
+_BASE_URL_ENVS = ("LAB_TRACKER_BASE_URL", "LAB_TRACKER_MCP_BASE_URL")
 
 _MIGRATE_HINT = (
     "migrate to an LPAT: set LAB_TRACKER_MCP_API_KEY and remove "
@@ -87,7 +92,7 @@ def auth_doctor(target: str | Path = ".", *, home: str | Path | None = None) -> 
     registrations: list[AuthRegistration] = []
     saw_desktop = False
     for source in _config_sources(root, home_dir):
-        config = _load_json(source.path)
+        config = _load_config(source.path)
         if config is None:
             continue
         found = _registrations_from_config(source, config)
@@ -114,6 +119,8 @@ def _config_sources(root: Path, home_dir: Path) -> list[_ConfigSource]:
     sources = [
         # claude-code CLI (user + per-project registrations live in one file).
         _ConfigSource("claude-code", home_dir / ".claude.json"),
+        # Codex stores MCP registrations in TOML under `mcp_servers`.
+        _ConfigSource("codex", home_dir / ".codex" / "config.toml"),
         # repo-local surfaces using the mcpServers schema.
         _ConfigSource("repo:.mcp.json", root / ".mcp.json"),
         _ConfigSource("repo:.cursor/mcp.json", root / ".cursor" / "mcp.json"),
@@ -150,11 +157,12 @@ def _desktop_config_paths(home_dir: Path) -> list[Path]:
     return unique
 
 
-def _load_json(path: Path) -> JsonObject | None:
+def _load_config(path: Path) -> JsonObject | None:
     if not path.exists():
         return None
     with suppress(Exception):  # read-only + fail-soft: never raise on a bad file.
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        text = path.read_text(encoding="utf-8")
+        payload = tomllib.loads(text) if path.suffix == ".toml" else json.loads(text)
         if isinstance(payload, dict):
             return payload
     return None
@@ -166,7 +174,7 @@ def _registrations_from_config(
     registrations: list[AuthRegistration] = []
     # Top-level server maps: `mcpServers` (Claude/Cursor/Gemini) and `servers`
     # (VS Code / Copilot).
-    for key in ("mcpServers", "servers"):
+    for key in ("mcpServers", "servers", "mcp_servers"):
         registrations.extend(
             _registrations_from_server_map(source, config.get(key), scope=None)
         )
@@ -203,7 +211,7 @@ def _registrations_from_server_map(
                 path=str(source.path),
                 server=str(name),
                 auth_mode=auth_mode,
-                base_url=_clean(env.get(_BASE_URL_ENV)),
+                base_url=_first_clean(env, _BASE_URL_ENVS),
                 warning=warning,
                 scope=scope,
             )
@@ -259,6 +267,14 @@ def _present(value: object) -> bool:
 def _clean(value: object) -> str | None:
     if isinstance(value, str) and value.strip():
         return value.strip()
+    return None
+
+
+def _first_clean(env: JsonObject, names: tuple[str, ...]) -> str | None:
+    for name in names:
+        value = _clean(env.get(name))
+        if value:
+            return value
     return None
 
 

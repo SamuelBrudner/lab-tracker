@@ -187,7 +187,7 @@ def test_copilot_mcp_config_uses_servers_schema() -> None:
     assert "mcpServers" not in config
     assert server["type"] == "stdio"
     assert server["command"] == "lt-mcp"
-    assert env["LAB_TRACKER_MCP_BASE_URL"] == "http://127.0.0.1:8000"
+    assert env["LAB_TRACKER_BASE_URL"] == "http://127.0.0.1:8000"
     assert env["LAB_TRACKER_MCP_API_KEY"] == "${input:lt-token}"
     assert env["LAB_TRACKER_MCP_USERNAME"] == "${input:lt-username}"
     assert env["LAB_TRACKER_MCP_PASSWORD"] == "${input:lt-password}"
@@ -204,6 +204,25 @@ def test_committed_cursor_mcp_json_uses_mcpservers_and_matches_template() -> Non
     assert "servers" not in config
     assert config["mcpServers"]["lab-tracker"]["command"] == "lt-mcp"
     assert config == json.loads(_cursor_mcp_json())
+
+
+def test_mcp_settings_prefer_canonical_base_url_and_accept_legacy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LAB_TRACKER_BASE_URL", "https://canonical.example.test/app")
+    monkeypatch.setenv(
+        "LAB_TRACKER_MCP_BASE_URL",
+        "https://legacy.example.test",
+    )
+
+    assert mcp_server.MCPSettings.from_env().base_url == (
+        "https://canonical.example.test"
+    )
+
+    monkeypatch.delenv("LAB_TRACKER_BASE_URL")
+    assert mcp_server.MCPSettings.from_env().base_url == (
+        "https://legacy.example.test"
+    )
 
 
 def test_mcp_target_guard_allows_loopback_without_probe(monkeypatch) -> None:
@@ -310,7 +329,7 @@ def test_hosted_mcp_compose_and_caddy_configs_are_private_read_only() -> None:
 
     assert "  mcp:" in compose
     assert "LAB_TRACKER_MCP_TRANSPORT: streamable-http" in compose
-    assert "LAB_TRACKER_MCP_BASE_URL: ${LAB_TRACKER_MCP_BASE_URL:-http://app:8000}" in compose
+    assert "LAB_TRACKER_BASE_URL: ${LAB_TRACKER_MCP_BASE_URL:-http://app:8000}" in compose
     assert "LAB_TRACKER_MCP_API_KEY: ${LT_MCP_READONLY_TOKEN:" in compose
     assert '"127.0.0.1:${LAB_TRACKER_MCP_HOST_PORT:-9000}:${LAB_TRACKER_MCP_PORT:-8000}"' in compose
     assert "LAB_TRACKER_MCP_USERNAME" not in compose.split("  postgres:", 1)[0]
@@ -559,6 +578,7 @@ def test_mcp_settings_from_env_falls_back_to_connection_profile(
     )
     monkeypatch.setenv("LAB_TRACKER_CONFIG_DIR", str(config_dir))
     for name in (
+        "LAB_TRACKER_BASE_URL",
         "LAB_TRACKER_MCP_BASE_URL",
         "LAB_TRACKER_MCP_USERNAME",
         "LAB_TRACKER_MCP_PASSWORD",
@@ -665,6 +685,7 @@ def test_mcp_settings_from_env_ignores_missing_or_malformed_profile(
         (config_dir / "config.json").write_text(profile_text, encoding="utf-8")
     monkeypatch.setenv("LAB_TRACKER_CONFIG_DIR", str(config_dir))
     for name in (
+        "LAB_TRACKER_BASE_URL",
         "LAB_TRACKER_MCP_BASE_URL",
         "LAB_TRACKER_MCP_USERNAME",
         "LAB_TRACKER_MCP_PASSWORD",

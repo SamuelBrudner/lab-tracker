@@ -23,6 +23,7 @@ const READY_RUNTIME = {
   provider: "openai",
   provider_credential_configured: true,
   scheduler_enabled: true,
+  source_revision: "0123456789abcdef0123456789abcdef01234567",
 };
 
 function renderPage(props = {}) {
@@ -59,6 +60,7 @@ describe("OnboardingPage", () => {
         provider: "agentic",
         provider_credential_configured: false,
         scheduler_enabled: false,
+        source_revision: "0123456789abcdef0123456789abcdef01234567",
       },
       expectedWorker: "Needs operator setup",
       expectedProvider: "Needs operator setup",

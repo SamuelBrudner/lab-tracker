@@ -563,6 +563,48 @@ def test_batch_retry_and_dead_letter_paths_are_persisted(
     assert draft.json()["data"]["error_metadata"]["input_snapshot"]["source_note_ids"]
 
 
+def test_batch_retries_schema_invalid_patch_with_trusted_feedback(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    _note(client, admin_auth_headers, project_id, "Retry an invalid nested payload.")
+    valid_patch = _batch_patch(project_id)
+
+    class RepairingBatchDraftClient(FakeBatchDraftClient):
+        def draft_from_batch(
+            self,
+            *,
+            batch_context: dict[str, Any],
+            user_hint: str | None = None,
+        ) -> dict[str, Any]:
+            self.calls.append({"batch_context": batch_context, "user_hint": user_hint})
+            if len(self.calls) == 1:
+                invalid_patch = _batch_patch(project_id)
+                invalid_payload = json.loads(invalid_patch["operations"][0]["payload_json"])
+                invalid_payload.pop("text")
+                invalid_patch["operations"][0]["payload_json"] = json.dumps(invalid_payload)
+                return invalid_patch
+            return valid_patch
+
+    repair_client = RepairingBatchDraftClient()
+    client.app.state.graph_draft_client_factory = lambda settings: repair_client
+
+    response = client.post(
+        "/batches/run-now",
+        json={"project_id": project_id},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 201
+    assert response.json()["data"]["status"] == "ready"
+    assert len(repair_client.calls) == 2
+    feedback = repair_client.calls[1]["batch_context"]["generation_retry_feedback"]
+    assert feedback["attempt"] == 1
+    assert "Operation payload failed API validation" in feedback["error"]
+    assert "generation_retry_feedback" not in repair_client.calls[0]["batch_context"]
+
+
 def test_empty_batch_window_skips_without_creating_change_set(
     client: TestClient,
     admin_auth_headers: dict[str, str],

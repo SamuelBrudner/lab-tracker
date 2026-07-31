@@ -55,7 +55,7 @@ test = [
   "tomli; python_version < '3.11'",
 ]
 lint = [
-  "mypy>=1.15,<2",
+  "mypy>=1.15,<3",
   "ruff",
 ]
 figure = [
@@ -137,6 +137,7 @@ files = [
   "src/lab_tracker/decision_context_use_case.py",
   "src/lab_tracker/project_graph.py",
   "src/lab_tracker/provider_error_redaction.py",
+  "src/lab_tracker/deployment_probe.py",
   "src/lab_tracker/outbound_http.py",
   "src/lab_tracker/http_store_health.py",
   "src/lab_tracker/local_filesystem_authority.py",
