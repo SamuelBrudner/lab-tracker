@@ -48,7 +48,7 @@ entities.
 
 **Plan.**
 
-- Add a `LAB_TRACKER_CANONICAL_BASE_URL` setting (documented in
+- Add a canonical `LAB_TRACKER_BASE_URL` setting (documented in
   [`configuration.md`](configuration.md)). When set, every `@id` in
   provenance documents and sidecars uses it, regardless of serving host.
 - When unset, fall back to the current request-base behavior (zero-config

@@ -68,6 +68,10 @@ classdef Client < handle
             while ~isempty(baseUrl) && baseUrl(end) == '/'
                 baseUrl(end) = [];
             end
+            if endsWith(string(baseUrl), "/app")
+                baseUrl = extractBefore(string(baseUrl), strlength(string(baseUrl)) - 3);
+                baseUrl = char(baseUrl);
+            end
             obj.BaseUrl = baseUrl;
             obj.AccessToken = char(string(parser.Results.AccessToken));
             obj.Username = char(string(parser.Results.Username));
