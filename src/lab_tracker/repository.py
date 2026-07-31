@@ -34,6 +34,7 @@ from lab_tracker.models import (
     GraphDraftBatchSettings,
     GroupMembership,
     Note,
+    NoteMetadataScalar,
     OwnershipReassignment,
     Project,
     ProjectGroup,
@@ -84,6 +85,62 @@ class EntityRepository(Protocol, Generic[EntityT]):
 
     def delete(self, entity_id: UUID) -> EntityT | None:
         """Delete one entity by ID and return the removed value."""
+
+
+class NoteRepository(EntityRepository[Note], Protocol):
+    """Note persistence operations that preserve concurrent human edits."""
+
+    def try_claim_auto_transcription(
+        self,
+        note_id: UUID,
+        *,
+        claim_id: UUID,
+        claimed_at: datetime,
+        stale_before: datetime,
+    ) -> Note | None:
+        """Atomically claim one transcript-free note for a provider call.
+
+        Return the claimed current note, or ``None`` when another live claim
+        or an existing transcript makes the automatic call unnecessary.
+        """
+
+    def apply_auto_transcription_result(
+        self,
+        note_id: UUID,
+        *,
+        claim_id: UUID,
+        claimed_updated_at: datetime,
+        text: str,
+        metadata_updates: dict[str, NoteMetadataScalar],
+        updated_at: datetime,
+    ) -> Note | None:
+        """Apply a provider result only while the caller still owns the claim."""
+
+    def release_auto_transcription_claim(
+        self,
+        note_id: UUID,
+        *,
+        claim_id: UUID,
+        updated_at: datetime,
+    ) -> Note | None:
+        """Release a matching claim after provider or local preparation failure."""
+
+    def apply_transcription_result(
+        self,
+        note_id: UUID,
+        *,
+        text: str,
+        metadata_updates: dict[str, NoteMetadataScalar],
+        updated_at: datetime,
+        expected_updated_at: datetime | None = None,
+        only_if_unchanged: bool = False,
+    ) -> Note | None:
+        """Merge a transcript into the latest note state.
+
+        When ``only_if_unchanged`` is true, return the current note without
+        applying the model result if the note changed after
+        ``expected_updated_at`` or already has a transcript.
+        """
 
 
 class AcquisitionCollectionRepository(Protocol):
@@ -346,7 +403,7 @@ class LabTrackerRepository(Protocol):
     def datasets(self) -> EntityRepository[Dataset]: ...
 
     @property
-    def notes(self) -> EntityRepository[Note]: ...
+    def notes(self) -> NoteRepository: ...
 
     @property
     def sessions(self) -> EntityRepository[Session]: ...

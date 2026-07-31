@@ -796,6 +796,7 @@ class GraphDraftBatchSettings(_DomainModel):
     timezone_name: str = "America/New_York"
     next_run_at: datetime | None = None
     email_notifications_enabled: bool = False
+    review_email_available: bool = False
     notification_email: str | None = None
     notification_email_confirmed_at: datetime | None = None
     created_at: datetime = Field(default_factory=utc_now)

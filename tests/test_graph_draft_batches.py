@@ -955,6 +955,7 @@ def test_per_user_batch_notification_address_is_private_to_user_and_owner(
     client: TestClient,
     admin_auth_headers: dict[str, str],
 ) -> None:
+    client.app.state.settings.review_email_enabled = True
     project_id = _project(client, admin_auth_headers)
     first_headers = _register_project_member(
         client,
@@ -981,6 +982,7 @@ def test_per_user_batch_notification_address_is_private_to_user_and_owner(
         headers=first_headers,
     )
     assert configured.status_code == 200
+    assert configured.json()["data"]["review_email_available"] is True
 
     own = client.get(
         f"/projects/{project_id}/graph-draft-batch-settings",

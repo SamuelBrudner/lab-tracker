@@ -446,6 +446,7 @@ export interface components {
       "bootstrap_token"?: (string | null);
       "invite_token"?: (string | null);
       "password": string;
+      "password_confirmation"?: (string | null);
       "role"?: components["schemas"]["Role"];
       "username": string;
     };
@@ -726,6 +727,7 @@ export interface components {
       "notification_email"?: (string | null);
       "notification_email_confirmed_at"?: (string | null);
       "project_id": string;
+      "review_email_available"?: boolean;
       "run_at_local_time"?: string;
       "settings_id": string;
       "timezone_name"?: string;

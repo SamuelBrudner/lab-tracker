@@ -325,11 +325,15 @@ function App({ onReloadForUpdate = null }) {
             authMode={auth.authMode}
             authUsername={auth.authUsername}
             authPassword={auth.authPassword}
+            authPasswordConfirmation={auth.authPasswordConfirmation}
             authBusy={auth.authBusy}
             onBootstrapTokenChange={(event) => auth.setAuthBootstrapToken(event.target.value)}
             onSubmit={auth.handleAuthSubmit}
             onUsernameChange={(event) => auth.setAuthUsername(event.target.value)}
             onPasswordChange={(event) => auth.setAuthPassword(event.target.value)}
+            onPasswordConfirmationChange={(event) =>
+              auth.setAuthPasswordConfirmation(event.target.value)
+            }
             onToggleMode={() =>
               auth.setAuthMode((current) =>
                 current === "login" ? "register" : "login"

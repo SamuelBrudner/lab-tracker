@@ -557,12 +557,23 @@ def _process_one_review_email(app: FastAPI) -> bool:
 def _background_api(app: FastAPI, session: Session) -> LabTrackerAPI:
     """Compose one worker API from the process's immutable startup snapshot."""
 
+    return _api_for_session(app, session, surface="background")
+
+
+def _api_for_session(
+    app: FastAPI,
+    session: Session,
+    *,
+    surface: str,
+) -> LabTrackerAPI:
+    """Compose an API for a non-request task at the persistence boundary."""
+
     return LabTrackerAPI(
         raw_storage=app.state.raw_note_storage,
         repository=SQLAlchemyLabTrackerRepository(session),
         settings=app.state.settings,
         store_authority_registry=app.state.store_authority_registry,
-        surface="background",
+        surface=surface,
     )
 
 
@@ -645,6 +656,13 @@ def configure_app_state(app: FastAPI, runtime: AppRuntime) -> None:
     app.state.file_storage_backend = runtime.file_storage_backend
     app.state.raw_note_storage = runtime.raw_note_storage
     app.state.lab_tracker_api = runtime.lab_tracker_api
+    app.state.session_api_factory = (
+        lambda session, *, surface: _api_for_session(
+            app,
+            session,
+            surface=surface,
+        )
+    )
     app.state.graph_draft_client_factory = runtime.graph_draft_client_factory
     app.state.review_email_provider = runtime.review_email_provider
     app.state.auth_rate_limiter = runtime.auth_rate_limiter

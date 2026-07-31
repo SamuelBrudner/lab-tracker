@@ -352,7 +352,14 @@ class BaseService:
                 raise
 
         if event.outcome == UsageEventOutcome.ERROR:
-            self.run_after_rollback(persist_event)
+            if self._context.owns_active_boundary():
+                self.run_after_rollback(persist_event)
+            else:
+                # Standalone/background commands have no surrounding rollback
+                # hook to trigger. Their business transaction has already
+                # ended, so persist the error event now with the same fail-soft
+                # behavior as a deferred boundary action.
+                _run_boundary_actions([persist_event], "after_rollback")
         else:
             self.run_after_commit(persist_event)
 

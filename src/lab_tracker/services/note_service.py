@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Iterable
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, BinaryIO
 from uuid import UUID, uuid4
 
@@ -49,6 +50,17 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger(__name__)
 
+_TRANSCRIPTION_MUTATION_METADATA_KEYS = {
+    "auto_transcription_claim_id",
+    "auto_transcription_claimed_at",
+    "transcript_generated_at",
+    "transcript_model",
+    "transcript_provider",
+    "transcript_source_storage_id",
+    "transcript_status",
+}
+_AUTO_TRANSCRIPTION_CLAIM_TTL = timedelta(minutes=30)
+
 
 def _canonical_raw_asset(asset: NoteRawAsset | None) -> tuple[str, str, int, str] | None:
     if asset is None:
@@ -66,15 +78,29 @@ def _canonical_targets(targets: Iterable[EntityRef]) -> list[tuple[str, str]]:
     )
 
 
-def _canonical_capture_metadata(metadata: dict[str, str]) -> dict[str, str]:
+def _canonical_capture_metadata(
+    metadata: dict[str, NoteMetadataScalar],
+) -> dict[str, NoteMetadataScalar]:
     # The upload route stamps ingestion time after storing each physical copy.
-    # It is intentionally excluded; all caller-controlled and content-derived
-    # metadata remains part of conflict detection.
+    # Transcription fields are a later server-derived mutation, so neither can
+    # turn an exact replay of the original upload into a conflict.
     return {
         key: value
         for key, value in metadata.items()
         if key != "source_file_ingested_at"
+        and key not in _TRANSCRIPTION_MUTATION_METADATA_KEYS
     }
+
+
+def _has_provider_transcript(note: Note) -> bool:
+    source_storage_id = note.metadata.get("transcript_source_storage_id")
+    return bool(
+        note.raw_asset is not None
+        and (note.transcribed_text or "").strip()
+        and note.metadata.get("transcript_generated_at")
+        and source_storage_id
+        and str(source_storage_id) == str(note.raw_asset.storage_id)
+    )
 
 
 class NoteService(BaseService):
@@ -416,7 +442,7 @@ class NoteService(BaseService):
         raw_asset: NoteRawAsset | None,
         transcribed_text: str | None,
         targets: Iterable[EntityRef],
-        metadata: dict[str, str],
+        metadata: dict[str, NoteMetadataScalar],
         status: NoteStatus,
         origin: EntityOrigin,
         change_set_id: UUID | None,
@@ -442,7 +468,11 @@ class NoteService(BaseService):
         stored = {
             "raw_content": existing.raw_content,
             "raw_asset": _canonical_raw_asset(existing.raw_asset),
-            "transcribed_text": existing.transcribed_text,
+            "transcribed_text": (
+                None
+                if transcribed_text is None and _has_provider_transcript(existing)
+                else existing.transcribed_text
+            ),
             "targets": _canonical_targets(existing.targets),
             "metadata": _canonical_capture_metadata(existing.metadata),
             "status": existing.status,
@@ -463,6 +493,73 @@ class NoteService(BaseService):
                 raise error from cause
             raise error
 
+    def auto_transcribe_voice_note(
+        self,
+        note_id: UUID,
+        *,
+        transcription_client: Any,
+        actor: AuthContext | None = None,
+        on_provider_call: Callable[[Note], None] | None = None,
+    ) -> tuple[Note, bool]:
+        """Claim, call, and merge one opt-in automatic transcription.
+
+        The claim and final merge use separate short transactions. Raw audio
+        leaves the instance only for the claim winner, and the provider prompt
+        comes from that latest claimed note instead of the upload response.
+        """
+
+        note = self.get_note(note_id)
+        self.authorization.require_contributor(note.project_id, actor=actor)
+        claimed_at = utc_now()
+        claim_id = uuid4()
+        with self.unit_of_work() as repository:
+            claimed = repository.notes.try_claim_auto_transcription(
+                note_id,
+                claim_id=claim_id,
+                claimed_at=claimed_at,
+                stale_before=claimed_at - _AUTO_TRANSCRIPTION_CLAIM_TTL,
+            )
+        if claimed is None:
+            return self.get_note(note_id), False
+
+        capture_hint = claimed.metadata.get("capture_hint")
+        prompt = str(capture_hint).strip() if capture_hint is not None else ""
+        try:
+            text, transcript_metadata, completed_at = (
+                self._request_voice_transcript(
+                    note=claimed,
+                    transcription_client=transcription_client,
+                    prompt=prompt or None,
+                    on_provider_call=on_provider_call,
+                )
+            )
+            with self.unit_of_work() as repository:
+                current = repository.notes.apply_auto_transcription_result(
+                    note_id,
+                    claim_id=claim_id,
+                    claimed_updated_at=claimed.updated_at,
+                    text=text,
+                    metadata_updates=transcript_metadata,
+                    updated_at=completed_at,
+                )
+        except Exception:
+            try:
+                with self.unit_of_work() as repository:
+                    repository.notes.release_auto_transcription_claim(
+                        note_id,
+                        claim_id=claim_id,
+                        updated_at=utc_now(),
+                    )
+            except Exception:
+                _logger.exception(
+                    "Automatic transcription claim cleanup failed for note %s.",
+                    note_id,
+                )
+            raise
+        if current is None:
+            raise NotFoundError("Note does not exist.")
+        return current, True
+
     def transcribe_voice_note(
         self,
         note_id: UUID,
@@ -471,14 +568,43 @@ class NoteService(BaseService):
         prompt: str | None = None,
         actor: AuthContext | None = None,
     ) -> Note:
+        """Transcribe one audio note without restoring stale note state."""
+
         note = self.get_note(note_id)
         self.authorization.require_contributor(note.project_id, actor=actor)
+        text, transcript_metadata, completed_at = self._request_voice_transcript(
+            note=note,
+            transcription_client=transcription_client,
+            prompt=prompt,
+        )
+        with self.unit_of_work() as repository:
+            current = repository.notes.apply_transcription_result(
+                note_id,
+                text=text,
+                metadata_updates=transcript_metadata,
+                updated_at=completed_at,
+            )
+        if current is None:
+            raise NotFoundError("Note does not exist.")
+        return current
+
+    def _request_voice_transcript(
+        self,
+        *,
+        note: Note,
+        transcription_client: Any,
+        prompt: str | None,
+        on_provider_call: Callable[[Note], None] | None = None,
+    ) -> tuple[str, dict[str, NoteMetadataScalar], datetime]:
         if note.raw_asset is None:
             raise ValidationError("Voice transcription requires a note with a raw audio asset.")
         if not note.raw_asset.content_type.lower().startswith("audio/"):
             raise ValidationError("Voice transcription only supports audio note uploads.")
+        raw_asset = note.raw_asset
         try:
-            raw_asset, audio_bytes = self.download_note_raw(note_id)
+            if self.raw_storage is None:
+                raise ValidationError("Raw storage backend is not configured.")
+            audio_bytes = self.raw_storage.read(raw_asset.storage_id)
         except NotFoundError as exc:
             raise NotFoundError("Source audio file is unavailable.") from exc
         except ValidationError:
@@ -488,6 +614,8 @@ class NoteService(BaseService):
         transcribe_audio = getattr(transcription_client, "transcribe_audio", None)
         if not callable(transcribe_audio):
             raise ValidationError("Configured transcription client does not support audio.")
+        if on_provider_call is not None:
+            on_provider_call(note)
         try:
             transcript = transcribe_audio(
                 audio_bytes=audio_bytes,
@@ -502,28 +630,21 @@ class NoteService(BaseService):
         text = _transcript_text(transcript)
         if not text:
             raise ValidationError("Voice transcription response did not include text.")
-        metadata = dict(note.metadata)
-        metadata.update(
-            {
-                "transcript_status": "ready",
-                "transcript_provider": str(getattr(transcription_client, "provider", PROVIDER)),
-                "transcript_model": str(
-                    getattr(
-                        transcription_client,
-                        "transcription_model",
-                        getattr(transcription_client, "model", "unknown"),
-                    )
-                ),
-                "transcript_generated_at": utc_now().isoformat(),
-                "transcript_source_storage_id": str(raw_asset.storage_id),
-            }
-        )
-        note.transcribed_text = text
-        note.metadata = metadata
-        note.updated_at = utc_now()
-        with self.unit_of_work() as repository:
-            repository.notes.save(note)
-        return note
+        completed_at = utc_now()
+        transcript_metadata: dict[str, NoteMetadataScalar] = {
+            "transcript_status": "ready",
+            "transcript_provider": str(getattr(transcription_client, "provider", PROVIDER)),
+            "transcript_model": str(
+                getattr(
+                    transcription_client,
+                    "transcription_model",
+                    getattr(transcription_client, "model", "unknown"),
+                )
+            ),
+            "transcript_generated_at": completed_at.isoformat(),
+            "transcript_source_storage_id": str(raw_asset.storage_id),
+        }
+        return text, transcript_metadata, completed_at
 
     def get_note(self, note_id: UUID) -> Note:
         return self.get_from_repository(

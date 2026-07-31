@@ -136,13 +136,14 @@ words.
 
 ### Two honest limits in v1
 
-- **No automatic transcription.** OCR on note images and automatic audio
-  transcription are deferred (`retained-v1-surface.md` → *Deferred Workflows*).
-  Voice-note transcription is an explicit, editable, per-note action. So the
-  scientist's instinct — *"I should transcribe the important handwritten parts
-  myself rather than have AI interpret them"* — matches the tool: the photo is
-  preserved as the raw record, and the structured transcription is a deliberate
-  human edit. This is a feature, not a gap: the human record stays primary.
+- **Transcription stays explicit by default.** OCR on note images remains
+  deferred. Voice-note transcription is an editable per-note action, with an
+  optional operator-enabled background path for bounded deployments. That path
+  sends raw audio to OpenAI or Google, is disabled by default, and has no
+  built-in daily budget. The scientist's instinct — *"I should transcribe the
+  important handwritten parts myself rather than have AI interpret them"* —
+  still matches the tool: the photo is preserved as the raw record, and the
+  structured transcription remains a deliberate human edit.
 - **No protocol / reagent / plate-map entities.** These are intentionally not
   modeled. Reference the external documents and record the *as-run* specifics in
   Notes and dataset metadata.
