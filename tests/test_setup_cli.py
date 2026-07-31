@@ -126,6 +126,22 @@ def test_load_connection_profile_is_fail_soft(config_home) -> None:
     finally:
         client.close()
 
+    (config_home / "config.json").write_text(
+        json.dumps(
+            {
+                "base_url": "not-a-url",
+                "access_token": "wrong-server-token",
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = LabTracker.from_env()
+    try:
+        assert client.base_url == "http://127.0.0.1:8000"
+        assert client.access_token is None
+    finally:
+        client.close()
+
 
 def test_setup_connect_requires_consent(config_home, capsys) -> None:
     with pytest.raises(SystemExit) as excinfo:
@@ -708,9 +724,32 @@ def test_setup_init_uses_saved_profile_base_url(config_home, tmp_path, capsys) -
 
     mcp_config = json.loads((repo / ".mcp.json").read_text(encoding="utf-8"))
     server_env = mcp_config["mcpServers"]["lab-tracker"]["env"]
-    assert server_env["LAB_TRACKER_MCP_BASE_URL"] == "https://lt.example.test"
+    assert server_env["LAB_TRACKER_BASE_URL"] == "https://lt.example.test"
     assert payload["mcp_base_url"] == "https://lt.example.test"
     assert payload["mcp_base_url_source"] == "profile"
+
+
+def test_update_preserves_saved_profile_base_url(config_home, tmp_path, capsys) -> None:
+    config_home.mkdir(parents=True)
+    (config_home / "config.json").write_text(
+        json.dumps({"base_url": "https://lt.example.test/app"}),
+        encoding="utf-8",
+    )
+    repo = tmp_path / "consumer-profile-update"
+
+    lt_cli.main(["setup", "init", "--target", str(repo)])
+    capsys.readouterr()
+    (repo / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"lab-tracker": {"command": "old"}}}),
+        encoding="utf-8",
+    )
+
+    lt_cli.main(["update", "--target", str(repo)])
+    capsys.readouterr()
+
+    mcp_config = json.loads((repo / ".mcp.json").read_text(encoding="utf-8"))
+    server_env = mcp_config["mcpServers"]["lab-tracker"]["env"]
+    assert server_env["LAB_TRACKER_BASE_URL"] == "https://lt.example.test"
 
 
 def test_setup_init_dry_run_writes_nothing(config_home, tmp_path, capsys) -> None:

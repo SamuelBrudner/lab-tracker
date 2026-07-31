@@ -106,7 +106,7 @@ top-level `servers` key and `inputs` for a prompted secret:
       "type": "stdio",
       "command": "lt-mcp",
       "env": {
-        "LAB_TRACKER_MCP_BASE_URL": "http://127.0.0.1:8000",
+        "LAB_TRACKER_BASE_URL": "http://127.0.0.1:8000",
         "LAB_TRACKER_MCP_API_KEY": "${input:lt-token}"
       }
     }
@@ -124,7 +124,7 @@ launch:
       "type": "stdio",
       "command": "uvx",
       "args": ["--from", "git+https://github.com/SamuelBrudner/lab-tracker", "lt-mcp"],
-      "env": { "LAB_TRACKER_MCP_BASE_URL": "http://127.0.0.1:8000" }
+      "env": { "LAB_TRACKER_BASE_URL": "http://127.0.0.1:8000" }
     }
   }
 }
@@ -277,7 +277,7 @@ tailnet-private `tailscale serve` or a LAN reverse proxy.
       LAB_TRACKER_MCP_TRANSPORT: streamable-http
       LAB_TRACKER_MCP_HOST: 0.0.0.0              # container bind; host publish below is loopback-only
       LAB_TRACKER_MCP_PORT: "8000"
-      LAB_TRACKER_MCP_BASE_URL: http://app:8000  # hop-2 target (must report auth ON)
+      LAB_TRACKER_BASE_URL: http://app:8000  # hop-2 target (must report auth ON)
       LAB_TRACKER_MCP_API_KEY: ${LT_MCP_READONLY_TOKEN}   # a read-only lpat_
     ports:
       - "127.0.0.1:9000:8000"
@@ -305,7 +305,7 @@ mcp.lab.internal {
 `environment=local`), the internal `app` service is a fully open ADMIN endpoint.
 The hosted `app` MUST set a non-local `LAB_TRACKER_ENVIRONMENT` **and** a real
 `LAB_TRACKER_AUTH_SECRET_KEY`. The MCP startup guard refuses to start against a
-non-loopback `LAB_TRACKER_MCP_BASE_URL` target that reports `auth.enabled=false`
+non-loopback `LAB_TRACKER_BASE_URL` target that reports `auth.enabled=false`
 from `/readiness`.
 
 ## Guardrail enforcement

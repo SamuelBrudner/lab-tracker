@@ -658,7 +658,7 @@ def test_invitation_defaults_to_editor_and_warns_for_local_base_url(monkeypatch,
         invitation = invite_response.json()["data"]
         assert invitation["role"] == "editor"
         assert invitation["invite_url"].startswith("http://127.0.0.1:8000/app?invite=")
-        assert "LAB_TRACKER_PUBLIC_BASE_URL" in invitation["warning"]
+        assert "LAB_TRACKER_BASE_URL" in invitation["warning"]
 
 
 def test_admin_can_revoke_invitation(monkeypatch, tmp_path):

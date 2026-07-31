@@ -23,7 +23,7 @@
       "type": "stdio",
       "command": "lt-mcp",
       "env": {
-        "LAB_TRACKER_MCP_BASE_URL": "http://127.0.0.1:8000",
+        "LAB_TRACKER_BASE_URL": "http://127.0.0.1:8000",
         "LAB_TRACKER_MCP_API_KEY": "${input:lt-token}",
         "LAB_TRACKER_MCP_USERNAME": "${input:lt-username}",
         "LAB_TRACKER_MCP_PASSWORD": "${input:lt-password}",

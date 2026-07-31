@@ -28,6 +28,12 @@ import httpx
 
 import lab_tracker_client.hpc as hpc_capture
 import lab_tracker_client.watch as watch_capture
+from lab_tracker.instance_url import (
+    BASE_URL_ENV,
+    LEGACY_MCP_BASE_URL_ENV,
+    normalize_instance_base_url,
+    resolve_instance_base_url,
+)
 from lab_tracker_client.client import (
     DEFAULT_BASE_URL,
     LabTracker,
@@ -76,7 +82,14 @@ def save_connection_profile(
     existing_text = path.read_text(encoding="utf-8") if path.exists() else ""
     profile = load_connection_profile()
     updates = {
-        "base_url": base_url,
+        "base_url": (
+            normalize_instance_base_url(
+                base_url,
+                setting_name=BASE_URL_ENV,
+            )
+            if base_url is not None and base_url.strip()
+            else base_url
+        ),
         "default_project_id": default_project_id,
         "access_token": access_token,
     }
@@ -365,11 +378,29 @@ def _skills_status() -> JsonObject:
 
 
 def _resolve_base_url(profile: dict[str, str]) -> tuple[str, str]:
-    from_env = os.getenv("LAB_TRACKER_BASE_URL") or os.getenv("LAB_TRACKER_MCP_BASE_URL")
-    if from_env:
-        return from_env, "env"
+    canonical_env_url = os.getenv(BASE_URL_ENV)
+    legacy_env_url = os.getenv(LEGACY_MCP_BASE_URL_ENV)
+    if canonical_env_url or legacy_env_url:
+        return (
+            resolve_instance_base_url(
+                (
+                    (BASE_URL_ENV, canonical_env_url),
+                    (LEGACY_MCP_BASE_URL_ENV, legacy_env_url),
+                )
+            ),
+            "env",
+        )
     if profile.get("base_url"):
-        return profile["base_url"], "profile"
+        try:
+            return (
+                normalize_instance_base_url(
+                    profile["base_url"],
+                    setting_name="connection profile base_url",
+                ),
+                "profile",
+            )
+        except ValueError:
+            return DEFAULT_BASE_URL, "default"
     return DEFAULT_BASE_URL, "default"
 
 
@@ -381,8 +412,9 @@ def resolved_base_url_for_setup() -> tuple[str, str]:
 
 def probe_health(base_url: str) -> bool:
     with suppress(Exception):
+        normalized = normalize_instance_base_url(base_url)
         response = httpx.get(
-            base_url.rstrip("/") + "/health",
+            normalized + "/health",
             timeout=_HEALTH_PROBE_TIMEOUT_SECONDS,
         )
         return bool(response.status_code < 500)

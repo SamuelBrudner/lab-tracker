@@ -21,6 +21,7 @@ from typing import Any
 
 import httpx
 
+from lab_tracker.instance_url import normalize_instance_base_url
 from lab_tracker.models import NoteMetadataScalar
 from lab_tracker_client.client import (
     LabTracker,
@@ -32,6 +33,7 @@ from lab_tracker_client.client import (
     build_evidence_metadata,
     capture_host_metadata,
     file_sha256,
+    load_connection_profile,
 )
 from lab_tracker_client.repo import normalize_remote
 
@@ -842,25 +844,31 @@ def _resolve_capture_client(
     if client is not None:
         resolved_project_id = project_id or client.default_project_id
         return client, str(resolved_project_id) if resolved_project_id else None, False
-    resolved_project_id = project_id or os.getenv("LAB_TRACKER_PROJECT_ID")
-    base_url = os.getenv("LAB_TRACKER_BASE_URL") or os.getenv("LAB_TRACKER_MCP_BASE_URL")
-    username = os.getenv("LAB_TRACKER_USERNAME") or os.getenv("LAB_TRACKER_MCP_USERNAME")
-    password = os.getenv("LAB_TRACKER_PASSWORD") or os.getenv("LAB_TRACKER_MCP_PASSWORD")
-    access_token = os.getenv("LAB_TRACKER_ACCESS_TOKEN")
-    if not resolved_project_id or not base_url or not (access_token or (username and password)):
-        return None, None, False
-    return (
-        LabTracker(
-            base_url=base_url,
-            username=username,
-            password=password,
-            access_token=access_token,
-            default_project_id=resolved_project_id,
-            timeout_seconds=FIGURE_CAPTURE_TIMEOUT_SECONDS,
-        ),
-        str(resolved_project_id),
-        True,
+    profile = load_connection_profile()
+    resolved_project_id = (
+        project_id
+        or os.getenv("LAB_TRACKER_PROJECT_ID")
+        or profile.get("default_project_id")
     )
+    configured_base_url = (
+        os.getenv("LAB_TRACKER_BASE_URL")
+        or os.getenv("LAB_TRACKER_MCP_BASE_URL")
+        or profile.get("base_url")
+    )
+    if not resolved_project_id or not configured_base_url:
+        return None, None, False
+    resolved_client = LabTracker.from_env(
+        timeout_seconds=FIGURE_CAPTURE_TIMEOUT_SECONDS,
+    )
+    resolved_client.default_project_id = str(resolved_project_id)
+    has_credentials = bool(
+        resolved_client.access_token
+        or (resolved_client.username and resolved_client.password)
+    )
+    if not has_credentials:
+        resolved_client.close()
+        return None, None, False
+    return resolved_client, str(resolved_project_id), True
 
 
 def _client_capture_id(
@@ -988,10 +996,17 @@ def _capture_endpoint_key(client: LabTracker | None) -> str | None:
     if client is not None:
         base_url = getattr(client, "base_url", None)
     else:
-        base_url = os.getenv("LAB_TRACKER_BASE_URL") or os.getenv("LAB_TRACKER_MCP_BASE_URL")
+        profile = load_connection_profile()
+        base_url = (
+            os.getenv("LAB_TRACKER_BASE_URL")
+            or os.getenv("LAB_TRACKER_MCP_BASE_URL")
+            or profile.get("base_url")
+        )
     if not base_url:
         return None
-    return str(base_url).rstrip("/")
+    with suppress(ValueError):
+        return normalize_instance_base_url(str(base_url))
+    return None
 
 
 def _breaker_blocks(key: str | None) -> bool:
