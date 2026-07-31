@@ -14,7 +14,7 @@ _AUTHENTICATED_EMAIL_SETTINGS: dict[str, Any] = {
     "auth_enabled": True,
     "auth_secret_key": "review-email-config-test-secret",
     "review_email_enabled": True,
-    "public_base_url": "https://lab-tracker.example.test",
+    "base_url": "https://lab-tracker.example.test",
 }
 _ENV_EXAMPLE_REVIEW_EMAIL_DEFAULTS = {
     "LAB_TRACKER_REVIEW_EMAIL_ENABLED": "false",
@@ -79,12 +79,12 @@ def test_review_email_defaults_are_safe_and_external() -> None:
 def test_external_transport_requires_no_smtp_configuration() -> None:
     settings = _settings(
         review_email_transport="external",
-        public_base_url="  https://lab-tracker.example.test/app/  ",
+        base_url="  https://lab-tracker.example.test/app/  ",
     )
 
     assert settings.review_email_enabled is True
     assert settings.review_email_transport == "external"
-    assert settings.public_base_url == "https://lab-tracker.example.test/app"
+    assert settings.base_url == "https://lab-tracker.example.test"
 
 
 def test_review_email_requires_authentication() -> None:
@@ -93,7 +93,7 @@ def test_review_email_requires_authentication() -> None:
 
 
 @pytest.mark.parametrize(
-    "public_base_url",
+    "base_url",
     [
         "http://lab-tracker.example.test",
         "https://",
@@ -107,10 +107,10 @@ def test_review_email_requires_authentication() -> None:
     ],
 )
 def test_review_email_requires_safe_absolute_https_base_url(
-    public_base_url: str,
+    base_url: str,
 ) -> None:
-    with pytest.raises(ValidationError, match="HTTPS LAB_TRACKER_PUBLIC_BASE_URL"):
-        _settings(public_base_url=public_base_url)
+    with pytest.raises(ValidationError, match="LAB_TRACKER_BASE_URL"):
+        _settings(base_url=base_url)
 
 
 def test_smtp_transport_accepts_required_fields_without_login() -> None:

@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import math
-from typing import Literal
+from collections.abc import Callable
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
-from pydantic import Field, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import AliasChoices, Field, field_validator, model_validator
+from pydantic_settings import (
+    BaseSettings,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+)
 
 from lab_tracker.artifact_resolution_admission import (
     DEFAULT_ARTIFACT_RESOLUTION_GLOBAL_IN_FLIGHT_LIMIT,
@@ -15,6 +20,12 @@ from lab_tracker.artifact_resolution_admission import (
     MAX_ARTIFACT_RESOLUTION_GLOBAL_IN_FLIGHT_LIMIT,
 )
 from lab_tracker.bounded_subprocess import MAX_PROCESS_DEADLINE_SECONDS
+from lab_tracker.instance_url import (
+    BASE_URL_ENV,
+    LEGACY_CANONICAL_BASE_URL_ENV,
+    LEGACY_PUBLIC_BASE_URL_ENV,
+    normalize_instance_base_url,
+)
 from lab_tracker.local_resolution_budget import (
     DEFAULT_LOCAL_RECOVERY_MAX_DIRECTORIES,
     DEFAULT_LOCAL_RECOVERY_MAX_FILES,
@@ -49,9 +60,41 @@ INSECURE_AUTH_SECRET_KEYS = {
 }
 
 
+def _with_nonblank_base_url_aliases(
+    source: PydanticBaseSettingsSource,
+) -> Callable[[], dict[str, Any]]:
+    """Skip blank URL aliases while preserving their deterministic precedence."""
+
+    def load() -> dict[str, Any]:
+        values = source()
+        selected = values.get(BASE_URL_ENV)
+        if str(selected or "").strip():
+            return values
+
+        source_values = {
+            str(name).casefold(): value
+            for name, value in getattr(source, "env_vars", {}).items()
+        }
+        for setting_name in (
+            BASE_URL_ENV,
+            LEGACY_PUBLIC_BASE_URL_ENV,
+            LEGACY_CANONICAL_BASE_URL_ENV,
+        ):
+            candidate = source_values.get(setting_name.casefold())
+            if str(candidate or "").strip():
+                values[BASE_URL_ENV] = candidate
+                return values
+
+        values.pop(BASE_URL_ENV, None)
+        return values
+
+    return load
+
+
 class Settings(BaseSettings):
     app_name: str = "lab-tracker"
     environment: str = "local"
+    source_revision: str = "unknown"
     log_level: str = "INFO"
     database_url: str = "sqlite+pysqlite:///./lab_tracker.db"
     backup_path: str = "~/.lab-tracker/backups"
@@ -101,8 +144,14 @@ class Settings(BaseSettings):
     graph_draft_scheduler_enabled: bool = False
     graph_draft_worker_poll_seconds: float = 5.0
     graph_draft_scheduler_interval_seconds: float = 60.0
-    public_base_url: str = ""
-    canonical_base_url: str = ""
+    base_url: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "LAB_TRACKER_BASE_URL",
+            "LAB_TRACKER_PUBLIC_BASE_URL",
+            "LAB_TRACKER_CANONICAL_BASE_URL",
+        ),
+    )
     review_email_enabled: bool = False
     review_email_transport: Literal["external", "smtp"] = "external"
     review_email_worker_poll_seconds: float = 10.0
@@ -142,6 +191,11 @@ class Settings(BaseSettings):
             return self.usage_events
         return self.environment.strip().lower() != "local"
 
+    def resolved_base_url(self) -> str:
+        """Return the configured canonical instance origin, if any."""
+
+        return self.base_url
+
     @field_validator("database_url")
     @classmethod
     def _normalize_database_url(cls, value: str) -> str:
@@ -151,6 +205,27 @@ class Settings(BaseSettings):
         if cleaned.startswith("postgresql://"):
             return f"postgresql+psycopg://{cleaned.removeprefix('postgresql://')}"
         return cleaned
+
+    @field_validator("source_revision")
+    @classmethod
+    def _normalize_source_revision(cls, value: str) -> str:
+        cleaned = str(value or "").strip().lower() or "unknown"
+        if cleaned == "unknown":
+            return cleaned
+        if len(cleaned) != 40 or any(character not in "0123456789abcdef" for character in cleaned):
+            raise ValueError(
+                "LAB_TRACKER_SOURCE_REVISION must be 'unknown' or a full 40-character Git SHA."
+            )
+        return cleaned
+
+    @field_validator("base_url")
+    @classmethod
+    def _normalize_base_url(cls, value: str) -> str:
+        return normalize_instance_base_url(
+            value,
+            setting_name="LAB_TRACKER_BASE_URL",
+            allow_empty=True,
+        )
 
     @field_validator(
         "resolver_http_deadline_seconds",
@@ -391,28 +466,27 @@ class Settings(BaseSettings):
                 "than 0 and no more than 30."
             )
         if self.review_email_enabled:
-            public_base_url = self.public_base_url.strip().rstrip("/")
-            self.public_base_url = public_base_url
+            base_url = self.resolved_base_url()
             if not self.is_auth_enabled():
                 raise ValueError("LAB_TRACKER_REVIEW_EMAIL_ENABLED requires authentication.")
             try:
-                parsed_public_base_url = urlsplit(public_base_url)
+                parsed_base_url = urlsplit(base_url)
                 # Accessing ``port`` validates malformed and out-of-range ports.
-                _ = parsed_public_base_url.port
+                _ = parsed_base_url.port
             except ValueError:
-                parsed_public_base_url = None
+                parsed_base_url = None
             if (
-                parsed_public_base_url is None
-                or parsed_public_base_url.scheme.lower() != "https"
-                or not parsed_public_base_url.hostname
-                or parsed_public_base_url.username is not None
-                or parsed_public_base_url.password is not None
-                or bool(parsed_public_base_url.query)
-                or bool(parsed_public_base_url.fragment)
+                parsed_base_url is None
+                or parsed_base_url.scheme.lower() != "https"
+                or not parsed_base_url.hostname
+                or parsed_base_url.username is not None
+                or parsed_base_url.password is not None
+                or bool(parsed_base_url.query)
+                or bool(parsed_base_url.fragment)
             ):
                 raise ValueError(
                     "LAB_TRACKER_REVIEW_EMAIL_ENABLED requires an HTTPS "
-                    "LAB_TRACKER_PUBLIC_BASE_URL with a hostname and no "
+                    "LAB_TRACKER_BASE_URL origin with a hostname and no "
                     "credentials, query, or fragment."
                 )
             if self.review_email_transport == "smtp":
@@ -441,7 +515,25 @@ class Settings(BaseSettings):
         case_sensitive=False,
         extra="ignore",
         hide_input_in_errors=True,
+        populate_by_name=True,
     )
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource | Callable[[], dict[str, Any]], ...]:
+        del settings_cls
+        return (
+            init_settings,
+            _with_nonblank_base_url_aliases(env_settings),
+            _with_nonblank_base_url_aliases(dotenv_settings),
+            file_secret_settings,
+        )
 
 
 def get_settings() -> Settings:

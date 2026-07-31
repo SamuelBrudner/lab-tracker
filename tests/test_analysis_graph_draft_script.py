@@ -5,6 +5,8 @@ import subprocess
 from pathlib import Path
 from types import ModuleType
 
+import pytest
+
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "create-analysis-graph-draft.py"
 
 
@@ -69,3 +71,14 @@ def test_truncate_lines_marks_omitted_diff_lines() -> None:
 
     assert truncated is True
     assert text == "one\ntwo\n... truncated 1 additional diff lines ..."
+
+
+def test_base_url_normalization_accepts_browser_route_and_rejects_api_path() -> None:
+    script = _load_script()
+
+    assert (
+        script._normalize_base_url("https://lab.example.test/app/")
+        == "https://lab.example.test"
+    )
+    with pytest.raises(ValueError, match="origin with no path"):
+        script._normalize_base_url("https://lab.example.test/api")

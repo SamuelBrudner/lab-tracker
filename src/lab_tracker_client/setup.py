@@ -11,11 +11,15 @@ swallowed health probe.
 from __future__ import annotations
 
 import difflib
+import importlib.metadata
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
+import time
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
@@ -24,6 +28,12 @@ import httpx
 
 import lab_tracker_client.hpc as hpc_capture
 import lab_tracker_client.watch as watch_capture
+from lab_tracker.instance_url import (
+    BASE_URL_ENV,
+    LEGACY_MCP_BASE_URL_ENV,
+    normalize_instance_base_url,
+    resolve_instance_base_url,
+)
 from lab_tracker_client.client import (
     DEFAULT_BASE_URL,
     LabTracker,
@@ -37,6 +47,8 @@ JsonObject = dict[str, Any]
 
 PROFILE_KEYS = ("base_url", "default_project_id", "access_token")
 _HEALTH_PROBE_TIMEOUT_SECONDS = 2.0
+_DEFAULT_MCP_VERIFY_TIMEOUT_SECONDS = 15.0
+_FULL_GIT_REVISION = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
 
 _SCAFFOLD_FILES = (
     ".mcp.json",
@@ -47,6 +59,10 @@ _SCAFFOLD_FILES = (
     "AGENTS.lt.md",
     "lt_ids.json",
 )
+
+
+class ConnectionProfileSecurityError(RuntimeError):
+    """Raised when a connection profile cannot be persisted privately."""
 
 
 def save_connection_profile(
@@ -66,7 +82,14 @@ def save_connection_profile(
     existing_text = path.read_text(encoding="utf-8") if path.exists() else ""
     profile = load_connection_profile()
     updates = {
-        "base_url": base_url,
+        "base_url": (
+            normalize_instance_base_url(
+                base_url,
+                setting_name=BASE_URL_ENV,
+            )
+            if base_url is not None and base_url.strip()
+            else base_url
+        ),
         "default_project_id": default_project_id,
         "access_token": access_token,
     }
@@ -92,16 +115,42 @@ def save_connection_profile(
     if sys.platform != "win32":
         with suppress(OSError):
             path.parent.chmod(0o700)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    # Create the tmp file user-only BEFORE the token is written, so there is
-    # no readable window; the mode travels with the atomic replace.
-    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(proposed_text)
-    if sys.platform == "win32":
-        _harden_profile_permissions(tmp_path)
-    tmp_path.replace(path)
-    payload["permissions_hardened"] = _harden_profile_permissions(path)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    try:
+        # The temporary file must be proven private while it is still empty.
+        # On Windows, mode bits do not constrain NTFS ACLs, so no credential
+        # bytes may be written until icacls succeeds.
+        if not _harden_profile_permissions(tmp_path):
+            raise ConnectionProfileSecurityError(
+                "Could not secure the temporary Lab Tracker connection profile; "
+                "no changes were saved."
+            )
+        with tmp_path.open("w", encoding="utf-8") as handle:
+            handle.write(proposed_text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        # Re-apply and verify the restriction before the atomic replace. The
+        # secured temporary file's permissions travel with the same-directory
+        # rename, while the existing profile remains untouched on any failure.
+        if not _harden_profile_permissions(tmp_path):
+            raise ConnectionProfileSecurityError(
+                "Could not verify private Lab Tracker connection profile "
+                "permissions; no changes were saved."
+            )
+        tmp_path.replace(path)
+    finally:
+        # Also runs for KeyboardInterrupt/SystemExit after credential bytes are
+        # written. After a successful replace the temporary pathname is already
+        # absent, so this is safe on every exit path.
+        with suppress(OSError):
+            tmp_path.unlink()
+    payload["permissions_hardened"] = True
     return payload
 
 
@@ -329,11 +378,29 @@ def _skills_status() -> JsonObject:
 
 
 def _resolve_base_url(profile: dict[str, str]) -> tuple[str, str]:
-    from_env = os.getenv("LAB_TRACKER_BASE_URL") or os.getenv("LAB_TRACKER_MCP_BASE_URL")
-    if from_env:
-        return from_env, "env"
+    canonical_env_url = os.getenv(BASE_URL_ENV)
+    legacy_env_url = os.getenv(LEGACY_MCP_BASE_URL_ENV)
+    if canonical_env_url or legacy_env_url:
+        return (
+            resolve_instance_base_url(
+                (
+                    (BASE_URL_ENV, canonical_env_url),
+                    (LEGACY_MCP_BASE_URL_ENV, legacy_env_url),
+                )
+            ),
+            "env",
+        )
     if profile.get("base_url"):
-        return profile["base_url"], "profile"
+        try:
+            return (
+                normalize_instance_base_url(
+                    profile["base_url"],
+                    setting_name="connection profile base_url",
+                ),
+                "profile",
+            )
+        except ValueError:
+            return DEFAULT_BASE_URL, "default"
     return DEFAULT_BASE_URL, "default"
 
 
@@ -345,12 +412,367 @@ def resolved_base_url_for_setup() -> tuple[str, str]:
 
 def probe_health(base_url: str) -> bool:
     with suppress(Exception):
+        normalized = normalize_instance_base_url(base_url)
         response = httpx.get(
-            base_url.rstrip("/") + "/health",
+            normalized + "/health",
             timeout=_HEALTH_PROBE_TIMEOUT_SECONDS,
         )
         return bool(response.status_code < 500)
     return False
+
+
+def installed_source_revision() -> str | None:
+    """Return the immutable VCS revision recorded by a direct-URL install.
+
+    The guided setup installs Lab Tracker from an exact Git revision. Python
+    installers preserve the resolved commit in ``direct_url.json`` (PEP 610),
+    which gives both the tool environment and a consumer project's environment
+    a local, offline compatibility check.
+    """
+
+    with suppress(Exception):
+        direct_url_text = importlib.metadata.distribution("lab-tracker").read_text(
+            "direct_url.json"
+        )
+        if not direct_url_text:
+            return None
+        direct_url = json.loads(direct_url_text)
+        vcs_info = direct_url.get("vcs_info")
+        if not isinstance(vcs_info, dict):
+            return None
+        revision = str(vcs_info.get("commit_id") or "").strip().lower()
+        return revision if _FULL_GIT_REVISION.fullmatch(revision) else None
+    return None
+
+
+def verify_client_revision(expected_revision: str) -> JsonObject:
+    """Fail-closed compatibility check for the installed client package."""
+
+    expected = _validated_source_revision(expected_revision)
+    installed = installed_source_revision()
+    compatible = installed == expected
+    payload: JsonObject = {
+        "command": "setup-verify-client",
+        "expected_revision": expected,
+        "installed_revision": installed,
+        "compatible": compatible,
+        "ok": compatible,
+    }
+    if not installed:
+        payload["error"] = (
+            "The installed lab-tracker package has no immutable Git revision metadata. "
+            "Install the exact requirement shown by this server, then retry."
+        )
+    elif not compatible:
+        payload["error"] = (
+            "The installed lab-tracker client does not match this server's source revision."
+        )
+    return payload
+
+
+def verify_mcp_launch(
+    *,
+    expected_revision: str,
+    command: str = "lt-mcp",
+    timeout_seconds: float = _DEFAULT_MCP_VERIFY_TIMEOUT_SECONDS,
+) -> JsonObject:
+    """Launch MCP over stdio and exercise health plus an authenticated read.
+
+    This checks the executable that Codex will launch, not merely a config
+    listing. The project-list call is deliberately read-only but authentication
+    and authorization aware, so a saved LPAT/profile failure is caught here.
+    """
+
+    compatibility = verify_client_revision(expected_revision)
+    if timeout_seconds <= 0:
+        raise LTValidationError("MCP verification timeout must be greater than zero.")
+    if compatibility["ok"] is not True:
+        return {
+            "command": "setup-verify-mcp",
+            "executable": command,
+            "client_compatibility": compatibility,
+            "launched": False,
+            "initialized": False,
+            "health_ok": False,
+            "authenticated_read_ok": False,
+            "ok": False,
+            "error": (
+                "Refusing to launch MCP because the installed Lab Tracker client "
+                "does not match the server's immutable source revision."
+            ),
+        }
+    executable = _resolve_mcp_executable(command)
+    if not executable:
+        return {
+            "command": "setup-verify-mcp",
+            "executable": command,
+            "client_compatibility": compatibility,
+            "launched": False,
+            "initialized": False,
+            "health_ok": False,
+            "authenticated_read_ok": False,
+            "ok": False,
+            "error": (
+                f"Could not find {command!r} on PATH. Install the exact tool "
+                "requirement shown by this server, then retry."
+            ),
+        }
+
+    env = dict(os.environ)
+    env["LAB_TRACKER_MCP_TRANSPORT"] = "stdio"
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        health_completed, health_initialize, health_response = _run_mcp_tool_probe(
+            executable,
+            tool_name="lab_tracker_health",
+            arguments={},
+            timeout_seconds=_remaining_mcp_timeout(deadline),
+            env=env,
+        )
+        projects_completed, projects_initialize, projects_response = (
+            _run_mcp_tool_probe(
+                executable,
+                tool_name="lab_tracker_list_projects",
+                arguments={"limit": 1, "offset": 0},
+                timeout_seconds=_remaining_mcp_timeout(deadline),
+                env=env,
+            )
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "command": "setup-verify-mcp",
+            "executable": executable,
+            "client_compatibility": compatibility,
+            "launched": True,
+            "initialized": False,
+            "health_ok": False,
+            "authenticated_read_ok": False,
+            "ok": False,
+            "error": f"MCP verification timed out after {timeout_seconds:g} seconds.",
+        }
+    except OSError as exc:
+        return {
+            "command": "setup-verify-mcp",
+            "executable": executable,
+            "client_compatibility": compatibility,
+            "launched": False,
+            "initialized": False,
+            "health_ok": False,
+            "authenticated_read_ok": False,
+            "ok": False,
+            "error": f"Could not launch MCP: {_redact_mcp_diagnostic(str(exc))}",
+        }
+
+    health_initialize_result = _mcp_result(health_initialize)
+    projects_initialize_result = _mcp_result(projects_initialize)
+    health_content = _mcp_structured_content(health_response)
+    projects_content = _mcp_structured_content(projects_response)
+    initialized = bool(
+        isinstance(health_initialize_result.get("serverInfo"), dict)
+        and isinstance(projects_initialize_result.get("serverInfo"), dict)
+    )
+    health_ok = bool(
+        _mcp_tool_call_succeeded(health_response)
+        and health_content is not None
+        and not health_content.get("error")
+    )
+    authenticated_read_ok = bool(
+        _mcp_tool_call_succeeded(projects_response)
+        and projects_content is not None
+        and not projects_content.get("error")
+    )
+    return_codes = (
+        health_completed.returncode,
+        projects_completed.returncode,
+    )
+    compatible = compatibility["compatible"] is True
+    ok = bool(
+        all(return_code == 0 for return_code in return_codes)
+        and initialized
+        and health_ok
+        and authenticated_read_ok
+        and compatible
+    )
+    payload = {
+        "command": "setup-verify-mcp",
+        "executable": executable,
+        "client_compatibility": compatibility,
+        "launched": True,
+        "initialized": initialized,
+        "health_ok": health_ok,
+        "authenticated_read_ok": authenticated_read_ok,
+        "server_info": (
+            health_initialize_result.get("serverInfo") if initialized else None
+        ),
+        "health": health_content,
+        "project_read": projects_content,
+        "ok": ok,
+    }
+    if not ok:
+        problems: list[str] = []
+        if not compatible:
+            problems.append("client revision does not match the server")
+        failed_return_codes = [
+            return_code for return_code in return_codes if return_code != 0
+        ]
+        if failed_return_codes:
+            problems.append(
+                "MCP process exited with status "
+                + ", ".join(str(value) for value in failed_return_codes)
+            )
+        if not initialized:
+            problems.append("MCP initialize did not complete")
+        if not health_ok:
+            problems.append("Lab Tracker health call failed")
+        if not authenticated_read_ok:
+            problems.append("authenticated project read failed")
+        diagnostic = _redact_mcp_diagnostic(
+            "\n".join(
+                (
+                    health_completed.stderr,
+                    projects_completed.stderr,
+                )
+            )
+        )
+        payload["error"] = "; ".join(problems) or "MCP verification failed."
+        if diagnostic:
+            payload["diagnostic"] = diagnostic
+    return payload
+
+
+def _run_mcp_tool_probe(
+    executable: str,
+    *,
+    tool_name: str,
+    arguments: JsonObject,
+    timeout_seconds: float,
+    env: dict[str, str],
+) -> tuple[subprocess.CompletedProcess[str], JsonObject | None, JsonObject | None]:
+    """Run one initialized tool call in a fresh bounded stdio session.
+
+    FastMCP can finish shutting down on stdin EOF before a later concurrent
+    request flushes its response. One tool call per short-lived process avoids
+    that race while still testing the exact executable and saved profile Codex
+    will use.
+    """
+
+    messages = (
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "lt-setup-verify",
+                    "version": "1",
+                },
+            },
+        },
+        {
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+        },
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": tool_name,
+                "arguments": arguments,
+            },
+        },
+    )
+    stdin_text = "".join(
+        json.dumps(message, separators=(",", ":")) + "\n"
+        for message in messages
+    )
+    completed = subprocess.run(  # noqa: S603 - resolved executable, no shell.
+        [executable],
+        input=stdin_text,
+        capture_output=True,
+        text=True,
+        timeout=timeout_seconds,
+        check=False,
+        env=env,
+    )
+    responses = _mcp_responses_by_id(completed.stdout)
+    return completed, responses.get(1), responses.get(2)
+
+
+def _resolve_mcp_executable(command: str) -> str | None:
+    """Prefer the lt-mcp entrypoint from this client's Python environment."""
+
+    if command == "lt-mcp":
+        scripts_dir = Path(sys.executable).resolve().parent
+        companion_names = (
+            ("lt-mcp.exe", "lt-mcp")
+            if sys.platform == "win32"
+            else ("lt-mcp",)
+        )
+        for name in companion_names:
+            companion = scripts_dir / name
+            if companion.is_file():
+                return str(companion)
+    return shutil.which(command)
+
+
+def _remaining_mcp_timeout(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise subprocess.TimeoutExpired(cmd="lt-mcp", timeout=0)
+    return remaining
+
+
+def _validated_source_revision(value: str) -> str:
+    revision = str(value or "").strip().lower()
+    if not _FULL_GIT_REVISION.fullmatch(revision):
+        raise LTValidationError(
+            "Expected a full 40-character Git source revision from the Lab Tracker "
+            "Setup page; refusing an unpinned compatibility check."
+        )
+    return revision
+
+
+def _mcp_responses_by_id(stdout: str) -> dict[int, JsonObject]:
+    responses: dict[int, JsonObject] = {}
+    for line in stdout.splitlines():
+        with suppress(json.JSONDecodeError, TypeError, ValueError):
+            message = json.loads(line)
+            if not isinstance(message, dict):
+                continue
+            response_id = int(message.get("id"))
+            responses[response_id] = message
+    return responses
+
+
+def _mcp_result(response: JsonObject | None) -> JsonObject:
+    if not isinstance(response, dict):
+        return {}
+    result = response.get("result")
+    return result if isinstance(result, dict) else {}
+
+
+def _mcp_structured_content(response: JsonObject | None) -> JsonObject | None:
+    result = _mcp_result(response)
+    content = result.get("structuredContent")
+    return content if isinstance(content, dict) else None
+
+
+def _mcp_tool_call_succeeded(response: JsonObject | None) -> bool:
+    result = _mcp_result(response)
+    return bool(result) and result.get("isError") is not True
+
+
+def _redact_mcp_diagnostic(value: str, *, limit: int = 1000) -> str:
+    redacted = re.sub(
+        r"\b(?:lpat|linv|ldev|lpair)_[A-Za-z0-9._~-]+",
+        "***redacted***",
+        value or "",
+        flags=re.IGNORECASE,
+    )
+    return redacted.strip()[-limit:]
 
 
 def _repo_status(root: Path) -> JsonObject:

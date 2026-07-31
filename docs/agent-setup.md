@@ -154,7 +154,7 @@ Two agents need one extra step:
   [GitHub Copilot MCP setup](lab-tracker-copilot.md); Cursor details are in
   [Cursor MCP setup](lab-tracker-cursor.md).
 
-Point the MCP server at your instance with `LAB_TRACKER_MCP_BASE_URL` (and
+Point the MCP server at your instance with `LAB_TRACKER_BASE_URL` (and
 `LAB_TRACKER_MCP_API_KEY` when auth is on) — full variable reference in
 [`lab-tracker-mcp-skills.md`](lab-tracker-mcp-skills.md).
 

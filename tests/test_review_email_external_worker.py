@@ -28,13 +28,15 @@ def test_provider_message_id_limit_matches_persistence_schema() -> None:
 def _settings(**overrides: object) -> SimpleNamespace:
     values: dict[str, object] = {
         "auth_secret_key": "strong-test-secret",
-        "public_base_url": "https://lab-tracker.example.test",
+        "base_url": "https://lab-tracker.example.test",
         "review_email_claim_lease_seconds": 300,
         "review_email_enabled": True,
         "review_email_transport": "external",
     }
     values.update(overrides)
-    return SimpleNamespace(**values)
+    settings = SimpleNamespace(**values)
+    settings.resolved_base_url = lambda: str(settings.base_url)
+    return settings
 
 
 def _patch_api(
@@ -382,7 +384,7 @@ def test_worker_settings_reads_explicit_runtime_secret_file(
     monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "production")
     monkeypatch.setenv("LAB_TRACKER_DATABASE_URL", "sqlite+pysqlite:///:memory:")
     monkeypatch.setenv(
-        "LAB_TRACKER_PUBLIC_BASE_URL",
+        "LAB_TRACKER_BASE_URL",
         "https://lab-tracker.example.test",
     )
     monkeypatch.setenv("LAB_TRACKER_REVIEW_EMAIL_ENABLED", "true")

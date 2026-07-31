@@ -54,6 +54,17 @@ describe("static demo API", () => {
     expect(dataset.detail).toContain("f2eabaa");
   });
 
+  it("serves a seeded narrative review without exposing a write path", async () => {
+    const { data: batches, meta } = await apiListRequest("/batches?limit=5");
+    const draft = await apiRequest(`/graph-drafts/${batches[0].change_set_id}`);
+
+    expect(meta.total).toBe(1);
+    expect(draft.status).toBe("ready");
+    expect(draft.summary).toContain("one result and one interpretation");
+    expect(draft.operations).toHaveLength(2);
+    expect(draft.operations[0].source_refs[0].quote).toContain("0.6x gain");
+  });
+
   it("rejects writes so the public demo is safe to click through", async () => {
     await expect(
       apiRequest("/projects", {
