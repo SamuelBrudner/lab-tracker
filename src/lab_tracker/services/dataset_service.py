@@ -239,18 +239,29 @@ class DatasetService(BaseService):
         origin_provider: str | None = None,
         origin_model: str | None = None,
         origin_prompt_version: str | None = None,
+        experiment_dataset_locks_held: bool = False,
     ) -> Dataset:
         with self.application_transaction():
             located_dataset = self.get_dataset(dataset_id)
             project_id = located_dataset.project_id
             self.authorization.require_contributor(project_id, actor=actor)
-            self.repository.lock_dataset_updates(project_id, (dataset_id,))
+            if not experiment_dataset_locks_held:
+                if is_provided(question_links):
+                    parent_experiments, _ = self.repository.query_experiments(
+                        dataset_id=dataset_id,
+                        limit=None,
+                        offset=0,
+                    )
+                    self.repository.lock_experiment_updates(
+                        experiment.experiment_id
+                        for experiment in parent_experiments
+                    )
+                self.repository.lock_dataset_updates(project_id, (dataset_id,))
 
-            # Dataset persistence writes a complete snapshot, including the
-            # provenance manifest and hash. Never mutate locator state after a
-            # lock wait: PostgreSQL expires the identity map so this read and
-            # every subsequent validation observe the winning file/status
-            # transaction.
+            # A graph-draft commit may have pre-acquired canonical Experiment
+            # then Dataset locks for all operations. Either way, re-read only
+            # after those locks so membership and question-link validation
+            # observes the winning transaction.
             dataset = self.get_dataset(dataset_id)
             return self._update_dataset_in_transaction(
                 dataset,
@@ -323,6 +334,24 @@ class DatasetService(BaseService):
                 question = self.questions.get_question(link.question_id)
                 if question.project_id != dataset.project_id:
                     raise ValidationError("Question links must belong to the same project.")
+            parent_experiments, _ = self.repository.query_experiments(
+                dataset_id=dataset.dataset_id,
+                limit=None,
+                offset=0,
+            )
+            missing_experiments = [
+                experiment.name
+                for experiment in parent_experiments
+                if not any(
+                    link.question_id == experiment.primary_question_id
+                    for link in links
+                )
+            ]
+            if missing_experiments:
+                names = ", ".join(sorted(missing_experiments))
+                raise ValidationError(
+                    f"Dataset must retain every parent Experiment question: {names}"
+                )
             dataset.question_links = links
             dataset.primary_question_id = primary_links[0].question_id
 
@@ -412,11 +441,33 @@ class DatasetService(BaseService):
             repository.datasets.save(dataset)
         return dataset
 
-    def delete_dataset(self, dataset_id: UUID, *, actor: AuthContext | None = None) -> Dataset:
-        dataset = self.get_dataset(dataset_id)
-        self.authorization.require_contributor(dataset.project_id, actor=actor)
-        self._ensure_dataset_can_be_deleted(dataset)
-        with self.unit_of_work() as repository:
+    def delete_dataset(
+        self,
+        dataset_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+        experiment_dataset_locks_held: bool = False,
+    ) -> Dataset:
+        located_dataset = self.get_dataset(dataset_id)
+        self.authorization.require_contributor(located_dataset.project_id, actor=actor)
+        with self.application_transaction(), self.unit_of_work() as repository:
+            if not experiment_dataset_locks_held:
+                parent_experiments, _ = repository.query_experiments(
+                    dataset_id=dataset_id,
+                    limit=None,
+                    offset=0,
+                )
+                repository.lock_experiment_updates(
+                    experiment.experiment_id
+                    for experiment in parent_experiments
+                )
+                repository.lock_dataset_updates(
+                    located_dataset.project_id,
+                    (dataset_id,),
+                )
+            dataset = self.get_dataset(dataset_id)
+            self.authorization.require_contributor(dataset.project_id, actor=actor)
+            self._ensure_dataset_can_be_deleted(dataset)
             remove_goal_links_to_entity(
                 repository,
                 entity_type=EntityType.DATASET,
@@ -429,6 +480,15 @@ class DatasetService(BaseService):
         if dataset.status != DatasetStatus.STAGED:
             raise ValidationError(
                 "Only staged, unreferenced datasets can be deleted; archive committed datasets."
+            )
+        experiments, _ = self.repository.query_experiments(
+            dataset_id=dataset.dataset_id,
+            limit=None,
+            offset=0,
+        )
+        if experiments:
+            raise ValidationError(
+                "Dataset cannot be deleted while Experiments reference it."
             )
         claims = self.query_from_repository(
             loader=lambda repository: repository.query_claims(

@@ -227,8 +227,11 @@ class SessionService(BaseService):
     def delete_session(self, session_id: UUID, *, actor: AuthContext | None = None) -> Session:
         session = self.get_session(session_id)
         self.authorization.require_contributor(session.project_id, actor=actor)
-        self._ensure_session_can_be_deleted(session)
-        with self.unit_of_work() as repository:
+        with self.application_transaction(), self.unit_of_work() as repository:
+            repository.lock_session_acquisition_state(session_id)
+            session = self.get_session(session_id)
+            self.authorization.require_contributor(session.project_id, actor=actor)
+            self._ensure_session_can_be_deleted(session)
             remove_goal_links_to_entity(
                 repository,
                 entity_type=EntityType.SESSION,
@@ -238,6 +241,15 @@ class SessionService(BaseService):
         return session
 
     def _ensure_session_can_be_deleted(self, session: Session) -> None:
+        experiments, _ = self.repository.query_experiments(
+            session_id=session.session_id,
+            limit=None,
+            offset=0,
+        )
+        if experiments:
+            raise ValidationError(
+                "Session cannot be deleted while Experiments reference it."
+            )
         datasets = self.query_from_repository(
             loader=lambda repository: repository.query_datasets(
                 project_id=session.project_id,
@@ -332,21 +344,42 @@ class SessionService(BaseService):
     ) -> Session:
         session = self.get_session(session_id)
         self.authorization.require_contributor(session.project_id, actor=actor)
-        if session.session_type != SessionType.OPERATIONAL:
-            raise ValidationError(
-                "Only operational sessions can be promoted to scientific sessions."
+        with self.application_transaction(), self.unit_of_work() as repository:
+            repository.lock_session_acquisition_state(session_id)
+            session = self.get_session(session_id)
+            self.authorization.require_contributor(session.project_id, actor=actor)
+            if session.session_type != SessionType.OPERATIONAL:
+                raise ValidationError(
+                    "Only operational sessions can be promoted to scientific sessions."
+                )
+            if session.status != SessionStatus.ACTIVE:
+                raise ValidationError("Only active operational sessions can be promoted.")
+            question = self.questions.get_question(primary_question_id)
+            if question.project_id != session.project_id:
+                raise ValidationError("Primary question must belong to the same project.")
+            if question.status != QuestionStatus.ACTIVE:
+                raise ValidationError(
+                    "Primary question must be active for scientific sessions."
+                )
+            linked_experiments, _ = repository.query_experiments(
+                session_id=session.session_id,
+                limit=None,
+                offset=0,
             )
-        if session.status != SessionStatus.ACTIVE:
-            raise ValidationError("Only active operational sessions can be promoted.")
-        question = self.questions.get_question(primary_question_id)
-        if question.project_id != session.project_id:
-            raise ValidationError("Primary question must belong to the same project.")
-        if question.status != QuestionStatus.ACTIVE:
-            raise ValidationError("Primary question must be active for scientific sessions.")
-        session.session_type = SessionType.SCIENTIFIC
-        session.primary_question_id = primary_question_id
-        session.updated_at = utc_now()
-        with self.unit_of_work() as repository:
+            mismatched_experiments = [
+                experiment.name
+                for experiment in linked_experiments
+                if experiment.primary_question_id != primary_question_id
+            ]
+            if mismatched_experiments:
+                names = ", ".join(sorted(mismatched_experiments))
+                raise ValidationError(
+                    "Operational Session cannot become scientific because its "
+                    f"Experiment questions do not match: {names}"
+                )
+            session.session_type = SessionType.SCIENTIFIC
+            session.primary_question_id = primary_question_id
+            session.updated_at = utc_now()
             repository.sessions.save(session)
         return session
 
