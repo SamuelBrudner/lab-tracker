@@ -455,6 +455,7 @@ export interface components {
       "provider": string;
       "provider_credential_configured": boolean;
       "scheduler_enabled": boolean;
+      "source_revision": string;
     };
     "AuthTokenRead": {
       "access_token": string;

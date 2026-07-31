@@ -106,6 +106,9 @@ class FileCommandAccess(Protocol):
 class DatasetFileLocking(Protocol):
     """Transaction-scoped lock intents shared by file writes and cascades."""
 
+    def lock_experiment_updates(self, experiment_ids: Iterable[UUID]) -> None:
+        """Serialize Experiment membership before taking Dataset locks."""
+
     def lock_dataset_file_mutation(
         self,
         project_id: UUID,

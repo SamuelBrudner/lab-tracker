@@ -19,7 +19,15 @@ suitable for local development.
 
 - `LAB_TRACKER_APP_NAME`: FastAPI title (default: `lab-tracker`)
 - `LAB_TRACKER_ENVIRONMENT`: environment label (default: `local`)
+- `LAB_TRACKER_SOURCE_REVISION`: full immutable Git revision embedded by a
+  reviewed deployment build and reported by health checks (default: `unknown`).
 - `LAB_TRACKER_LOG_LEVEL`: logging level (default: `INFO`)
+- `LAB_TRACKER_BASE_URL`: canonical public/API origin for this instance, with
+  no application path or trailing slash (default: empty, so server-generated
+  links fall back to the request host and clients fall back to
+  `http://127.0.0.1:8000`). A copied browser URL ending in `/app` is accepted
+  and normalized to its origin. The browser UI is derived as `<origin>/app`;
+  API and MCP routes are derived directly from `<origin>`.
 
 ### Database and storage
 
@@ -53,14 +61,12 @@ that destination through your normal off-machine backup process.
   require invites or an admin bearer token for new users.
 - `LAB_TRACKER_AUTH_ENABLED`: enable login and role enforcement (default: `false`
   in `local`, `true` otherwise; non-local environments cannot disable auth)
-- `LAB_TRACKER_PUBLIC_BASE_URL`: public URL used in email invitation links
-- `LAB_TRACKER_CANONICAL_BASE_URL`: permanent base URL used to mint `@id`
-  identifiers in PROV-O/JSON-LD provenance documents and `lt export` sidecars
-  (default: empty — identifiers are rooted at whatever host served the
-  request). Set this once, before the first archived export, to the URL your
-  lab commits to long-term; identifiers then stay byte-identical no matter
-  which host or port serves the request. See
-  [provenance-export.md](provenance-export.md) for the identifier policy.
+- `LAB_TRACKER_PUBLIC_BASE_URL`: deprecated server-side alias for
+  `LAB_TRACKER_BASE_URL`; do not set both.
+- `LAB_TRACKER_CANONICAL_BASE_URL`: deprecated provenance-only alias for
+  `LAB_TRACKER_BASE_URL`; retained so existing archived-export deployments do
+  not silently change identifier roots. `LAB_TRACKER_BASE_URL` takes
+  precedence, followed by `LAB_TRACKER_PUBLIC_BASE_URL`, then this alias.
 - `LAB_TRACKER_USAGE_EVENTS`: enable local usage telemetry writes (default:
   `false` in `local`, `true` otherwise)
 
@@ -763,7 +769,7 @@ authorization grant: normal sign-in and project access are still required.
   (default: `10`, maximum: `30`)
 
 Enabling alerts requires authentication and an HTTPS
-`LAB_TRACKER_PUBLIC_BASE_URL`. Delivery state is durable in
+`LAB_TRACKER_BASE_URL`. Delivery state is durable in
 `review_email_outbox`: unique idempotency keys prevent duplicate enqueue,
 leases recover after worker crashes, transient failures back off, and
 `accepted` means the provider accepted the message—not that it reached an
@@ -784,8 +790,10 @@ MCP setup guides ([`lab-tracker-mcp-skills.md`](lab-tracker-mcp-skills.md),
 [`lab-tracker-copilot.md`](lab-tracker-copilot.md), and
 [`lab-tracker-cursor.md`](lab-tracker-cursor.md)) cover them in context.
 
-- `LAB_TRACKER_MCP_BASE_URL`: Lab Tracker API the MCP server reads from (default:
-  `http://127.0.0.1:8000`)
+- `LAB_TRACKER_BASE_URL`: Lab Tracker API origin the MCP server reads from
+  (default: `http://127.0.0.1:8000`)
+- `LAB_TRACKER_MCP_BASE_URL`: deprecated MCP-only alias for
+  `LAB_TRACKER_BASE_URL`; the canonical name takes precedence when both exist
 - `LAB_TRACKER_MCP_API_KEY` / `LAB_TRACKER_MCP_TOKEN`: bearer token; either name
   works and bypasses `/auth/login`
 - `LAB_TRACKER_MCP_USERNAME` / `LAB_TRACKER_MCP_PASSWORD`: login credentials used

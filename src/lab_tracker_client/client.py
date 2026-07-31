@@ -22,6 +22,13 @@ from lab_tracker.assistant_next_questions import (
     OPEN_QUESTION_STATUSES,
     build_next_questions_payload,
 )
+from lab_tracker.instance_url import (
+    BASE_URL_ENV,
+    DEFAULT_BASE_URL,
+    LEGACY_MCP_BASE_URL_ENV,
+    normalize_instance_base_url,
+    resolve_instance_base_url,
+)
 from lab_tracker.models import (
     AnalysisStatus,
     ClaimStatus,
@@ -48,7 +55,6 @@ from lab_tracker_client.transport import (
 JsonObject = dict[str, Any]
 EvidenceNoteKey = tuple[str, str, str]
 
-DEFAULT_BASE_URL = "http://127.0.0.1:8000"
 DEFAULT_TIMEOUT_SECONDS = 15.0
 MAX_PAGE_SIZE = 200
 
@@ -326,7 +332,7 @@ class LabTracker:
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
-        self.base_url = base_url.rstrip("/")
+        self.base_url = normalize_instance_base_url(base_url)
         self.username = username
         self.password = password
         self.default_project_id = default_project_id
@@ -369,7 +375,7 @@ class LabTracker:
         return LTAPIError(f"Lab Tracker request {method} {path} failed: {exc}")
 
     @classmethod
-    def from_env(cls) -> LabTracker:
+    def from_env(cls, *, timeout_seconds: float | None = None) -> LabTracker:
         """Build a client from environment variables used by consumer repos.
 
         Values absent from the environment fall back to the persisted
@@ -381,23 +387,44 @@ class LabTracker:
         """
 
         profile = load_connection_profile()
-        env_base_url = os.getenv("LAB_TRACKER_BASE_URL") or os.getenv("LAB_TRACKER_MCP_BASE_URL")
+        canonical_env_url = os.getenv(BASE_URL_ENV)
+        legacy_env_url = os.getenv(LEGACY_MCP_BASE_URL_ENV)
+        env_base_url = None
+        if canonical_env_url or legacy_env_url:
+            env_base_url = resolve_instance_base_url(
+                (
+                    (BASE_URL_ENV, canonical_env_url),
+                    (LEGACY_MCP_BASE_URL_ENV, legacy_env_url),
+                )
+            )
         env_username = os.getenv("LAB_TRACKER_USERNAME") or os.getenv("LAB_TRACKER_MCP_USERNAME")
-        profile_base_url = profile.get("base_url") or DEFAULT_BASE_URL
         profile_token = profile.get("access_token")
-        if env_username or (
-            env_base_url and env_base_url.rstrip("/") != profile_base_url.rstrip("/")
-        ):
+        try:
+            profile_base_url = normalize_instance_base_url(
+                profile.get("base_url") or DEFAULT_BASE_URL,
+                setting_name="connection profile base_url",
+            )
+        except ValueError:
+            profile_base_url = DEFAULT_BASE_URL
+            profile_token = None
+        if env_username or (env_base_url and env_base_url != profile_base_url):
             profile_token = None
         return cls(
-            base_url=env_base_url or profile.get("base_url") or DEFAULT_BASE_URL,
+            base_url=env_base_url or profile_base_url,
             username=env_username,
             password=os.getenv("LAB_TRACKER_PASSWORD") or os.getenv("LAB_TRACKER_MCP_PASSWORD"),
             access_token=os.getenv("LAB_TRACKER_ACCESS_TOKEN") or profile_token,
             default_project_id=os.getenv("LAB_TRACKER_PROJECT_ID")
             or profile.get("default_project_id"),
-            timeout_seconds=float(
-                os.getenv("LAB_TRACKER_HTTP_TIMEOUT", str(DEFAULT_TIMEOUT_SECONDS))
+            timeout_seconds=(
+                timeout_seconds
+                if timeout_seconds is not None
+                else float(
+                    os.getenv(
+                        "LAB_TRACKER_HTTP_TIMEOUT",
+                        str(DEFAULT_TIMEOUT_SECONDS),
+                    )
+                )
             ),
         )
 

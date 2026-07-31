@@ -10,6 +10,7 @@ services:
       LAB_TRACKER_APP_NAME: ${LAB_TRACKER_APP_NAME:-lab-tracker}
       LAB_TRACKER_ENVIRONMENT: ${LAB_TRACKER_ENVIRONMENT:-production}
       LAB_TRACKER_LOG_LEVEL: ${LAB_TRACKER_LOG_LEVEL:-INFO}
+      LAB_TRACKER_BASE_URL: ${LAB_TRACKER_BASE_URL:-${LAB_TRACKER_PUBLIC_BASE_URL:-}}
       LAB_TRACKER_DATABASE_URL: ${LAB_TRACKER_DATABASE_URL:-postgresql+psycopg://lab_tracker:lab_tracker@postgres:5432/lab_tracker}
       LAB_TRACKER_FILE_STORAGE_PATH: ${LAB_TRACKER_FILE_STORAGE_PATH:-/app/data/file_storage}
       LAB_TRACKER_NOTE_STORAGE_PATH: ${LAB_TRACKER_NOTE_STORAGE_PATH:-/app/data/note_storage}
@@ -66,7 +67,7 @@ services:
       LAB_TRACKER_MCP_HOST: ${LAB_TRACKER_MCP_HOST:-0.0.0.0}
       LAB_TRACKER_MCP_PORT: ${LAB_TRACKER_MCP_PORT:-8000}
       LAB_TRACKER_MCP_PATH: ${LAB_TRACKER_MCP_PATH:-/mcp}
-      LAB_TRACKER_MCP_BASE_URL: ${LAB_TRACKER_MCP_BASE_URL:-http://app:8000}
+      LAB_TRACKER_BASE_URL: ${LAB_TRACKER_MCP_BASE_URL:-http://app:8000}
       LAB_TRACKER_MCP_API_KEY: ${LT_MCP_READONLY_TOKEN:?Set LT_MCP_READONLY_TOKEN to a read-only lpat_ token}
     ports:
       - "127.0.0.1:${LAB_TRACKER_MCP_HOST_PORT:-9000}:${LAB_TRACKER_MCP_PORT:-8000}"
@@ -74,7 +75,7 @@ services:
 
   # One-shot control plane for a mailbox-owned automation. This profile is off
   # by default and receives neither mailbox nor model-provider credentials.
-  # Set LAB_TRACKER_PUBLIC_BASE_URL and provision the runtime signing-secret
+  # Set LAB_TRACKER_BASE_URL and provision the runtime signing-secret
   # file before invoking the profile.
   review-email-control:
     profiles:
@@ -89,7 +90,7 @@ services:
       LAB_TRACKER_ENVIRONMENT: ${LAB_TRACKER_ENVIRONMENT:-production}
       LAB_TRACKER_DATABASE_URL: ${LAB_TRACKER_DATABASE_URL:-postgresql+psycopg://lab_tracker:lab_tracker@postgres:5432/lab_tracker}
       LAB_TRACKER_AUTH_SECRET_KEY_FILE: /app/data/runtime-env/auth-secret-key
-      LAB_TRACKER_PUBLIC_BASE_URL: ${LAB_TRACKER_PUBLIC_BASE_URL:-}
+      LAB_TRACKER_BASE_URL: ${LAB_TRACKER_BASE_URL:-${LAB_TRACKER_PUBLIC_BASE_URL:-}}
       LAB_TRACKER_REVIEW_EMAIL_ENABLED: "true"
       LAB_TRACKER_REVIEW_EMAIL_TRANSPORT: external
       LAB_TRACKER_REVIEW_EMAIL_CLAIM_LEASE_SECONDS: ${LAB_TRACKER_REVIEW_EMAIL_CLAIM_LEASE_SECONDS:-300}

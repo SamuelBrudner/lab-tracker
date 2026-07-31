@@ -104,6 +104,10 @@ def test_setup_readiness_requires_auth_and_never_returns_provider_secret(
     monkeypatch.setenv("LAB_TRACKER_OPENAI_API_KEY", "super-secret-provider-key")
     monkeypatch.setenv("LAB_TRACKER_GRAPH_DRAFT_SCHEDULER_ENABLED", "true")
     monkeypatch.setenv("LAB_TRACKER_GRAPH_DRAFT_BACKGROUND_ENABLED", "false")
+    monkeypatch.setenv(
+        "LAB_TRACKER_SOURCE_REVISION",
+        "0123456789abcdef0123456789abcdef01234567",
+    )
 
     with TestClient(create_app()) as client:
         denied_response = client.get("/auth/setup-readiness")
@@ -122,6 +126,7 @@ def test_setup_readiness_requires_auth_and_never_returns_provider_secret(
         "background_worker_enabled": True,
         "provider": "openai",
         "provider_credential_configured": True,
+        "source_revision": "0123456789abcdef0123456789abcdef01234567",
     }
     assert "super-secret-provider-key" not in response.text
 
@@ -197,6 +202,10 @@ def test_setup_readiness_normalizes_provider_and_reports_runtime_flags(
         "LAB_TRACKER_GRAPH_DRAFT_BACKGROUND_ENABLED",
         str(background_enabled).lower(),
     )
+    monkeypatch.setenv(
+        "LAB_TRACKER_SOURCE_REVISION",
+        "0123456789abcdef0123456789abcdef01234567",
+    )
 
     with TestClient(create_app()) as client:
         _seed_admin(client, username="sam", password="secret")
@@ -212,6 +221,7 @@ def test_setup_readiness_normalizes_provider_and_reports_runtime_flags(
         "background_worker_enabled": expected_background_worker_enabled,
         "provider": expected_provider,
         "provider_credential_configured": expected_credential_configured,
+        "source_revision": "0123456789abcdef0123456789abcdef01234567",
     }
     assert credential_value not in response.text or credential_value == ""
 
@@ -592,7 +602,7 @@ def test_admin_can_invite_user_by_email_with_fragment_only_secret(monkeypatch, t
         assert invitation["status"] == "pending"
         assert invitation["warning"] is None
         parsed_invite_url = urlparse(invitation["invite_url"])
-        assert parsed_invite_url.path == "/app/"
+        assert parsed_invite_url.path == "/app"
         assert parsed_invite_url.query == ""
         assert parse_qs(parsed_invite_url.fragment)["email"] == ["member@example.org"]
         invite_token = _invitation_token(invitation["invite_url"])
@@ -888,8 +898,8 @@ def test_invitation_defaults_to_editor_and_warns_for_local_base_url(monkeypatch,
         assert invite_response.status_code == 201
         invitation = invite_response.json()["data"]
         assert invitation["role"] == "editor"
-        assert invitation["invite_url"].startswith("http://127.0.0.1:8000/app/#invite=")
-        assert "LAB_TRACKER_PUBLIC_BASE_URL" in invitation["warning"]
+        assert invitation["invite_url"].startswith("http://127.0.0.1:8000/app#invite=")
+        assert "LAB_TRACKER_BASE_URL" in invitation["warning"]
 
 
 def test_admin_can_revoke_invitation(monkeypatch, tmp_path):

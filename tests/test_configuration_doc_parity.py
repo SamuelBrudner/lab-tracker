@@ -11,9 +11,8 @@ generated):
    mirror, and deploy surfaces read ``LAB_TRACKER_*`` without going through
    ``Settings``) — so a stale bullet after a rename/removal fails here.
 
-Consumer-side client variables (``LAB_TRACKER_BASE_URL`` etc.) are documented
-in the client docs and appear in configuration.md only inside fenced code
-blocks; the start-of-line bullet regex deliberately excludes them.
+The canonical ``LAB_TRACKER_BASE_URL`` is shared by server and clients.
+Client-only variables are documented alongside the MCP service-client section.
 """
 
 from __future__ import annotations

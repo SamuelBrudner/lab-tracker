@@ -389,6 +389,39 @@ def _add_setup_parsers(subcommands: argparse._SubParsersAction) -> None:
     )
     connect_parser.set_defaults(func=_cmd_setup_connect, needs_client=False)
 
+    verify_client_parser = setup_commands.add_parser(
+        "verify-client",
+        help="Verify this environment's client was installed from the server's exact revision.",
+    )
+    verify_client_parser.add_argument(
+        "--expected-revision",
+        required=True,
+        help="Full source revision shown by the Lab Tracker Setup page.",
+    )
+    verify_client_parser.set_defaults(func=_cmd_setup_verify_client, needs_client=False)
+
+    verify_mcp_parser = setup_commands.add_parser(
+        "verify-mcp",
+        help="Launch lt-mcp and run initialize, health, and authenticated project-read checks.",
+    )
+    verify_mcp_parser.add_argument(
+        "--expected-revision",
+        required=True,
+        help="Full source revision shown by the Lab Tracker Setup page.",
+    )
+    verify_mcp_parser.add_argument(
+        "--command",
+        default="lt-mcp",
+        help="MCP executable to launch. Defaults to lt-mcp on PATH.",
+    )
+    verify_mcp_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=15.0,
+        help="Maximum seconds for the MCP exchange. Defaults to 15.",
+    )
+    verify_mcp_parser.set_defaults(func=_cmd_setup_verify_mcp, needs_client=False)
+
     schedule_parser = setup_commands.add_parser(
         "schedule",
         help="Register an OS-scheduler job running 'lt watch run' for this repo's config.",
@@ -1305,15 +1338,30 @@ def _cmd_setup_connect(args: argparse.Namespace) -> Any:
             )
     elif args.token:
         raise SystemExit("--token persists only with explicit --save-token consent.")
-    payload = setup_helpers.save_connection_profile(
-        base_url=args.base_url,
-        default_project_id=args.project,
-        access_token=token,
-        dry_run=args.dry_run,
-    )
+    try:
+        payload = setup_helpers.save_connection_profile(
+            base_url=args.base_url,
+            default_project_id=args.project,
+            access_token=token,
+            dry_run=args.dry_run,
+        )
+    except setup_helpers.ConnectionProfileSecurityError as exc:
+        raise SystemExit(str(exc)) from None
     if args.base_url:
         payload["server_reachable"] = setup_helpers.probe_health(args.base_url)
     return payload
+
+
+def _cmd_setup_verify_client(args: argparse.Namespace) -> Any:
+    return setup_helpers.verify_client_revision(args.expected_revision)
+
+
+def _cmd_setup_verify_mcp(args: argparse.Namespace) -> Any:
+    return setup_helpers.verify_mcp_launch(
+        expected_revision=args.expected_revision,
+        command=args.command,
+        timeout_seconds=args.timeout,
+    )
 
 
 def _cmd_project_bind(client: LabTracker, args: argparse.Namespace) -> Any:
@@ -1991,8 +2039,10 @@ def _cmd_doctor(args: argparse.Namespace) -> Any:
 def _cmd_update(args: argparse.Namespace) -> Any:
     from lab_tracker.cli import update_consumer_repo
 
+    mcp_base_url, _ = setup_helpers.resolved_base_url_for_setup()
     result = update_consumer_repo(
         args.target,
+        mcp_base_url=mcp_base_url,
         yes=args.yes,
         dry_run=args.dry_run,
         install_skills=args.install_skills,
@@ -2081,6 +2131,12 @@ def _payload_exit_code(payload: Any) -> int:
         isinstance(payload, dict)
         and payload.get("command") == "auth-doctor"
         and payload.get("deprecated_count")
+    ):
+        return 1
+    if (
+        isinstance(payload, dict)
+        and payload.get("command") in {"setup-verify-client", "setup-verify-mcp"}
+        and payload.get("ok") is not True
     ):
         return 1
     if isinstance(payload, dict) and payload.get("command") == "doctor-all":

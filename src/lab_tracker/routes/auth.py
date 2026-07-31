@@ -22,6 +22,7 @@ from lab_tracker.auth import (
 )
 from lab_tracker.db_types import ensure_uuid
 from lab_tracker.errors import AuthError
+from lab_tracker.instance_url import build_instance_url
 from lab_tracker.patching import provided_fields
 from lab_tracker.schemas import (
     AuthBootstrapStatus,
@@ -144,8 +145,12 @@ def build_auth_router(
         )
         base_url, warning = _public_base_url_with_warning(request)
         invite_token = issued.token
+        # Keep the invitation secret in the URL fragment so it is never sent to
+        # a server or captured in referrers/logs, while still composing the
+        # origin through the normalized instance-URL helper.
+        app_url = build_instance_url(base_url, "/app")
         invite_fragment = urlencode({"invite": invite_token, "email": email})
-        invite_url = f"{base_url}/app/#{invite_fragment}"
+        invite_url = f"{app_url}#{invite_fragment}"
         mailto_url = _mailto_invitation_url(
             email=email,
             invite_url=invite_url,
@@ -255,6 +260,7 @@ def build_auth_router(
                 ),
                 provider=provider,
                 provider_credential_configured=credential_configured,
+                source_revision=settings.source_revision,
             )
         )
 
@@ -340,15 +346,15 @@ def _auth_invitation_read(
 
 
 def _public_base_url_with_warning(request: Request) -> tuple[str, str | None]:
-    configured = str(getattr(request.app.state.settings, "public_base_url", "") or "").strip()
+    configured = request.app.state.settings.resolved_base_url()
     if configured:
-        return configured.rstrip("/"), None
-    base_url = str(request.base_url).rstrip("/")
+        return configured, None
+    base_url = build_instance_url(str(request.base_url), "")
     hostname = urlparse(base_url).hostname or ""
     if _host_needs_public_base_url_warning(hostname):
         return (
             base_url,
-            "Invitation link uses a local or private host. Set LAB_TRACKER_PUBLIC_BASE_URL "
+            "Invitation link uses a local or private host. Set LAB_TRACKER_BASE_URL "
             "to a reachable lab URL before sending it off-machine.",
         )
     return base_url, None

@@ -151,6 +151,7 @@ class GraphPatchValidator:
                 raise GraphDraftingError("GPT graph patch operation was not an object.")
             _validate_graph_patch_operation_shape(item)
             payload = _payload_from_json(item.get("payload_json"))
+            payload = _normalize_generated_operation_payload(item, payload)
             source_refs = _normalize_source_refs(
                 item["source_refs"],
                 change_set=change_set,
@@ -238,6 +239,57 @@ def _payload_from_json(raw_payload: Any) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise GraphDraftingError("GPT graph patch payload_json must decode to an object.")
     return parsed
+
+
+def _normalize_generated_operation_payload(
+    operation: dict[str, Any],
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Canonicalize narrow, lossless provider aliases before strict validation.
+
+    Provider response schemas can constrain ``payload_json`` to a JSON string,
+    but cannot enforce the nested Lab Tracker request schema. Keep the API
+    schemas strict and repair only common note-create aliases whose intent is
+    unambiguous.
+    """
+
+    if operation.get("op") != "create" or operation.get("entity_type") != "note":
+        return payload
+
+    normalized = dict(payload)
+    raw_content = normalized.get("raw_content")
+    for alias in ("text", "content", "body"):
+        alias_value = normalized.get(alias)
+        if not isinstance(alias_value, str) or not alias_value.strip():
+            continue
+        if not isinstance(raw_content, str) or not raw_content.strip():
+            normalized["raw_content"] = alias_value
+            raw_content = alias_value
+            normalized.pop(alias, None)
+        elif alias_value == raw_content:
+            normalized.pop(alias, None)
+
+    if "title" not in normalized:
+        return normalized
+    title = normalized.get("title")
+    if title is None or (isinstance(title, str) and not title.strip()):
+        normalized.pop("title", None)
+        return normalized
+    if not isinstance(title, str):
+        return normalized
+
+    metadata = normalized.get("metadata")
+    if metadata is None:
+        normalized["metadata"] = {"title": title}
+        normalized.pop("title", None)
+    elif isinstance(metadata, dict):
+        metadata_title = metadata.get("title")
+        if metadata_title is None:
+            normalized["metadata"] = {**metadata, "title": title}
+            normalized.pop("title", None)
+        elif metadata_title == title:
+            normalized.pop("title", None)
+    return normalized
 
 
 def _normalize_source_refs(

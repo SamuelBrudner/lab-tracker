@@ -96,6 +96,7 @@ describe("App", () => {
           provider: "openai",
           provider_credential_configured: false,
           scheduler_enabled: true,
+          source_revision: "0123456789abcdef0123456789abcdef01234567",
         }),
       },
     ]);

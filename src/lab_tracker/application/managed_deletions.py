@@ -17,6 +17,7 @@ from lab_tracker.db_models import (
     AnalysisModel,
     DatasetFileModel,
     DatasetModel,
+    ExperimentDatasetModel,
     NoteModel,
     ProjectModel,
 )
@@ -73,6 +74,7 @@ class ManagedDeletionAccess(Protocol):
         dataset_id: UUID,
         *,
         actor: AuthContext | None,
+        experiment_dataset_locks_held: bool = False,
     ) -> Dataset: ...
 
     def delete_analysis(
@@ -208,6 +210,15 @@ class ManagedDeletionCommands:
     ) -> Dataset:
         existing = self.api.get_dataset(dataset_id)
         self.api.require_project_read(existing.project_id, actor=actor)
+        experiment_ids = [
+            ensure_uuid(value)
+            for value in self.session.scalars(
+                select(ExperimentDatasetModel.experiment_id).where(
+                    ExperimentDatasetModel.dataset_id == str(dataset_id)
+                )
+            )
+        ]
+        self.locks.lock_experiment_updates(experiment_ids)
         self.locks.lock_dataset_deletion(existing.project_id, dataset_id)
         existing = self.api.get_dataset(dataset_id)
         self.api.require_project_read(existing.project_id, actor=actor)
@@ -219,7 +230,11 @@ class ManagedDeletionCommands:
                 )
             )
         ]
-        dataset = self.api.delete_dataset(dataset_id, actor=actor)
+        dataset = self.api.delete_dataset(
+            dataset_id,
+            actor=actor,
+            experiment_dataset_locks_held=True,
+        )
         self.session.flush()
         for storage_id in storage_ids:
             self.api.run_after_commit(
