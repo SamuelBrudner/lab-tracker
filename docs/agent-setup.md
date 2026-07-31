@@ -46,6 +46,12 @@ Anthropic, and Google are equally supported — the choice is yours.** Set
 
 Per-provider model, base URL, and timeout overrides are in the
 [configuration reference](configuration.md#graph-draft-providers-and-transcription).
+Voice transcription remains a manual action unless the operator explicitly
+sets `LAB_TRACKER_AUTO_TRANSCRIBE_VOICE_CAPTURES=true`. That opt-in sends every
+new audio upload and its optional capture hint to the configured OpenAI or
+Google provider in a fail-soft background task. It is disabled by default,
+incurs provider usage, and currently has no per-principal rate limit or daily
+budget.
 For institutional deployments, point the provider's base URL at an approved
 gateway. An `agentic` provider (a read-only tool-using drafting loop) also
 exists and requires the background worker — see

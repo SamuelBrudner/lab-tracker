@@ -446,6 +446,7 @@ export interface components {
       "bootstrap_token"?: (string | null);
       "invite_token"?: (string | null);
       "password": string;
+      "password_confirmation"?: (string | null);
       "role"?: components["schemas"]["Role"];
       "username": string;
     };

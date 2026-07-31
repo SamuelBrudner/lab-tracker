@@ -235,9 +235,20 @@ class PersonalAccessTokenIssuedRead(PersonalAccessTokenRead):
 class AuthRegisterRequest(RequestModel):
     username: NonBlankStr
     password: NonBlankStr
+    password_confirmation: NonBlankStr | None = None
     role: Role = Role.VIEWER
     bootstrap_token: NonBlankStr | None = None
     invite_token: NonBlankStr | None = None
+
+    @model_validator(mode="after")
+    def _validate_invitation_password_confirmation(self) -> AuthRegisterRequest:
+        if self.invite_token is None:
+            return self
+        if self.password_confirmation is None:
+            raise ValueError("Password confirmation is required for invited accounts.")
+        if self.password != self.password_confirmation:
+            raise ValueError("Password confirmation does not match.")
+        return self
 
 
 class AuthUserUpdate(PatchRequestModel):

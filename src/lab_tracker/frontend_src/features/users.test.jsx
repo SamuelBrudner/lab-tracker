@@ -49,7 +49,7 @@ describe("UsersPage invitations", () => {
               email: "member@example.org",
               expires_at: "2026-06-22T12:00:00Z",
               invitation_id: "11111111-1111-4111-8111-111111111111",
-              invite_url: "https://lab.example.org/app?invite=signed-token",
+              invite_url: "https://lab.example.org/app/#invite=signed-token",
               mailto_url: "mailto:member%40example.org?subject=Lab%20Tracker%20invitation",
               role: "editor",
               status: "pending",
@@ -74,7 +74,7 @@ describe("UsersPage invitations", () => {
 
     await waitFor(() => expect(setFlash).toHaveBeenCalledWith("Invitation link created."));
     expect(
-      screen.getByDisplayValue("https://lab.example.org/app?invite=signed-token")
+      screen.getByDisplayValue("https://lab.example.org/app/#invite=signed-token")
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Revoke invite" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Email invite" })).toHaveAttribute(

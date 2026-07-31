@@ -49,7 +49,7 @@ describe("App", () => {
     window.history.replaceState(
       {},
       "",
-      "/app?invite=signed-token&email=member%40example.org"
+      "/app/#invite=signed-token&email=member%40example.org"
     );
     installFetchMock([
       {
@@ -69,7 +69,8 @@ describe("App", () => {
         response: (request) => {
           expect(JSON.parse(request.init.body)).toEqual({
             invite_token: "signed-token",
-            password: "invite-secret",
+            password: "long-invite-secret",
+            password_confirmation: "long-invite-secret",
             username: "member@example.org",
           });
           return apiResponse({
@@ -104,9 +105,15 @@ describe("App", () => {
 
     expect(await screen.findByRole("heading", { name: "Accept Invitation" })).toBeInTheDocument();
     expect(screen.getByLabelText("Username")).toHaveValue("member@example.org");
+    expect(window.location.hash).toBe("");
+    expect(window.location.search).toBe("");
+    expect(window.location.pathname).toBe("/app/");
 
     fireEvent.change(screen.getByLabelText("Password"), {
-      target: { value: "invite-secret" },
+      target: { value: "long-invite-secret" },
+    });
+    fireEvent.change(screen.getByLabelText("Confirm password"), {
+      target: { value: "long-invite-secret" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Create account" }));
 
@@ -118,6 +125,55 @@ describe("App", () => {
     ).toBeInTheDocument();
     expect(window.location.pathname).toBe("/app/setup");
     expect(screen.getByText(/automatic drafting is not ready/i)).toBeInTheDocument();
+  });
+
+  it("accepts and scrubs invitation links issued in the legacy query format", async () => {
+    window.history.replaceState(
+      {},
+      "",
+      "/app?invite=legacy-signed-token&email=member%40example.org&source=email"
+    );
+    installFetchMock([
+      {
+        match: "/auth/me",
+        response: errorResponse("Authentication required.", 401),
+      },
+    ]);
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Accept Invitation" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Username")).toHaveValue("member@example.org");
+    expect(window.location.search).toBe("?source=email");
+    expect(window.location.href).not.toContain("legacy-signed-token");
+  });
+
+  it("does not submit an invited account when password confirmation differs", async () => {
+    window.history.replaceState(
+      {},
+      "",
+      "/app/#invite=signed-token&email=member%40example.org"
+    );
+    const fetchMock = installFetchMock([
+      {
+        match: "/auth/me",
+        response: errorResponse("Authentication required.", 401),
+      },
+    ]);
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Accept Invitation" })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Password"), {
+      target: { value: "long-invite-secret" },
+    });
+    fireEvent.change(screen.getByLabelText("Confirm password"), {
+      target: { value: "different-secret" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create account" }));
+
+    expect(await screen.findByText("Password confirmation does not match.")).toBeInTheDocument();
+    expect(requestedUrls(fetchMock)).not.toContain("/auth/register");
   });
 
   it("loads projects without a token when local auth is disabled", async () => {

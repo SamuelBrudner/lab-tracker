@@ -21,7 +21,7 @@ from lab_tracker.auth import (
     TokenService,
 )
 from lab_tracker.db_types import ensure_uuid
-from lab_tracker.errors import AuthError, ConflictError
+from lab_tracker.errors import AuthError
 from lab_tracker.instance_url import build_instance_url
 from lab_tracker.patching import provided_fields
 from lab_tracker.schemas import (
@@ -87,15 +87,13 @@ def build_auth_router(
         registration_role = payload.role
         username = payload.username
         if payload.invite_token:
-            invitation = invitation_token_service.verify_invitation_token(payload.invite_token)
-            invited_email = invitation_token_service.normalize_email(invitation.email)
-            provided_username = invitation_token_service.normalize_email(payload.username)
-            if provided_username != invited_email:
-                raise AuthError("Invitation token does not match this email address.")
-            if auth_service.get_user(invited_email) is not None:
-                raise ConflictError("Invitation has already been used.")
-            username = invited_email
-            registration_role = invitation.role
+            user = auth_service.register_invited_user(
+                invitation_token_service=invitation_token_service,
+                invite_token=payload.invite_token,
+                username=payload.username,
+                password=payload.password,
+                password_confirmation=payload.password_confirmation or "",
+            )
         elif payload.role != Role.VIEWER:
             if payload.role == Role.ADMIN and not auth_service.has_users():
                 expected = (bootstrap_admin_token or "").strip()
@@ -124,15 +122,11 @@ def build_auth_router(
             )
             if actor.role != Role.ADMIN:
                 raise AuthError("Public viewer registration is disabled.")
-        user = auth_service.register_user(
-            username=username,
-            password=payload.password,
-            role=registration_role,
-        )
-        if payload.invite_token:
-            invitation_token_service.consume_invitation_token(
-                payload.invite_token,
-                consumed_by_user_id=user.user_id,
+        if not payload.invite_token:
+            user = auth_service.register_user(
+                username=username,
+                password=payload.password,
+                role=registration_role,
             )
         token = token_service.issue_access_token(user)
         return Envelope(data=auth_token_read(user, token.token, token.expires_at))
@@ -151,8 +145,12 @@ def build_auth_router(
         )
         base_url, warning = _public_base_url_with_warning(request)
         invite_token = issued.token
+        # Keep the invitation secret in the URL fragment so it is never sent to
+        # a server or captured in referrers/logs, while still composing the
+        # origin through the normalized instance-URL helper.
         app_url = build_instance_url(base_url, "/app")
-        invite_url = f"{app_url}?{urlencode({'invite': invite_token, 'email': email})}"
+        invite_fragment = urlencode({"invite": invite_token, "email": email})
+        invite_url = f"{app_url}#{invite_fragment}"
         mailto_url = _mailto_invitation_url(
             email=email,
             invite_url=invite_url,
