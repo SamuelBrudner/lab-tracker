@@ -195,6 +195,7 @@ class AuthSetupReadiness(BaseModel):
     background_worker_enabled: bool
     provider: str
     provider_credential_configured: bool
+    source_revision: str
 
 
 class AuthTokenRead(BaseModel):
