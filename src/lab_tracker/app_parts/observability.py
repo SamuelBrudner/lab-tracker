@@ -171,10 +171,19 @@ def register_observability_routes(
     file_storage_path: str,
     environment: str,
     app_name: str,
+    source_revision: str,
 ) -> None:
     @app.get("/health")
-    def health() -> dict[str, str]:
-        return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
+    def health() -> dict[str, Any]:
+        return {
+            "status": "ok",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "app": {
+                "name": app_name,
+                "environment": environment,
+                "source_revision": source_revision,
+            },
+        }
 
     @app.get("/readiness")
     def readiness():
