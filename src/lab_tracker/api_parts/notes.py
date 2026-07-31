@@ -8,6 +8,7 @@ its own edit locality. These are mixins: LabTrackerAPI inherits them, so
 
 from __future__ import annotations
 
+import time
 from typing import Any
 from uuid import UUID
 
@@ -15,6 +16,7 @@ from lab_tracker.api_parts._base import _first_uuid
 from lab_tracker.auth import AuthContext
 from lab_tracker.models import (
     Note,
+    UsageEventOutcome,
     UsageEventResourceType,
     UsageEventVerb,
 )
@@ -62,6 +64,51 @@ class NotesApiMixin:
             actor=kwargs.get("actor"),
             resource_id_attr="note_id",
         )
+
+    def auto_transcribe_voice_note(self, *args: Any, **kwargs: Any) -> Any:
+        """Run the multi-transaction automatic path without a wide DB lock."""
+
+        started_at = time.perf_counter()
+        attempted_note: Note | None = None
+
+        def mark_provider_call(note: Note) -> None:
+            nonlocal attempted_note
+            attempted_note = note
+
+        try:
+            note, provider_called = self.notes.auto_transcribe_voice_note(
+                *args,
+                on_provider_call=mark_provider_call,
+                **kwargs,
+            )
+        except Exception:
+            if attempted_note is not None:
+                self.record_usage_event(
+                    verb=UsageEventVerb.TRANSCRIBE,
+                    resource_type=UsageEventResourceType.NOTE,
+                    resource_id=attempted_note.note_id,
+                    project_id=attempted_note.project_id,
+                    actor=kwargs.get("actor"),
+                    outcome=UsageEventOutcome.ERROR,
+                    duration_ms=max(
+                        0,
+                        round((time.perf_counter() - started_at) * 1000),
+                    ),
+                )
+            raise
+        if provider_called:
+            self.record_usage_event(
+                verb=UsageEventVerb.TRANSCRIBE,
+                resource_type=UsageEventResourceType.NOTE,
+                resource_id=note.note_id,
+                project_id=note.project_id,
+                actor=kwargs.get("actor"),
+                duration_ms=max(
+                    0,
+                    round((time.perf_counter() - started_at) * 1000),
+                ),
+            )
+        return note
 
     def transcribe_voice_note(self, *args: Any, **kwargs: Any) -> Any:
         return self._with_usage_event(

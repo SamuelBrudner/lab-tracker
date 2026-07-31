@@ -26,6 +26,14 @@ research record:
 - Manual note capture, including text notes, multipart raw file upload, raw file
   download, raw voice notes with editable transcripts, and attaching notes to
   retained entities.
+- Operator-opt-in background transcription for newly created audio uploads,
+  disabled by default. When enabled it applies equally to ordinary, quick, and
+  tagless mobile audio captures, uses `capture_hint` only as an optional
+  provider prompt, never blocks the upload response, and never overwrites a
+  note changed while the provider call was in flight. OpenAI or Google receives
+  the raw audio; manual transcription remains the fail-soft fallback. The
+  retained v1 boundary does not claim a built-in rate limit or daily budget, so
+  unbounded or public enablement is unsupported.
 - Consumer-side figure capture through the Python client (`savefig`,
   `capture_figures`, and `run_context`) and MATLAB package
   (`labtracker.savefig` and `labtracker.uploadFigure`) as fail-soft
@@ -222,8 +230,9 @@ The following workflows are explicitly deferred and are being retired from the
 supported product path:
 
 - OCR-based note transcription.
-- Automatic audio transcription on every upload. Voice transcription is an
-  explicit note-scoped action for user-captured voice notes.
+- Default-on, unbounded, or publicly exposed automatic audio transcription.
+  Bounded deployments may explicitly enable the retained opt-in background
+  path above; the manual note-scoped action remains available everywhere.
 - Automatic question extraction and extraction inbox workflows. Retained graph
   drafting includes note-scoped drafting and human-gated batch drafting over
   user-captured staged notes; it is not a standing system-selected extraction

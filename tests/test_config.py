@@ -1441,6 +1441,22 @@ def test_default_openai_model_is_standard_account_model(monkeypatch):
     assert settings.openai_reasoning_mode is None
 
 
+def test_auto_transcription_is_opt_in_by_default(monkeypatch):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.delenv("LAB_TRACKER_AUTO_TRANSCRIBE_VOICE_CAPTURES", raising=False)
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "local")
+
+    assert _settings_from_environment().auto_transcribe_voice_captures is False
+
+
+def test_auto_transcription_can_be_explicitly_enabled(monkeypatch):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "local")
+    monkeypatch.setenv("LAB_TRACKER_AUTO_TRANSCRIBE_VOICE_CAPTURES", "true")
+
+    assert _settings_from_environment().auto_transcribe_voice_captures is True
+
+
 def test_openai_reasoning_settings_load_from_environment(monkeypatch):
     _clear_auth_env(monkeypatch)
     monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "local")
