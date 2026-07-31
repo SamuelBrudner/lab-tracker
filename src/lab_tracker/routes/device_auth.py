@@ -12,6 +12,7 @@ from starlette.requests import Request
 from lab_tracker.auth import DeviceAuthService
 from lab_tracker.config import get_settings
 from lab_tracker.errors import AuthError
+from lab_tracker.instance_url import build_instance_url
 from lab_tracker.schemas import (
     DeviceConsumeRead,
     DeviceConsumeRequest,
@@ -37,14 +38,13 @@ def _resolve_public_base_url(request: Request) -> str:
     Setting beats inference. Falls back to the request's own host so a
     desktop browser opened at the laptop's LAN IP automatically generates
     a phone-reachable URL; only 127.0.0.1/localhost desktops need the
-    explicit LAB_TRACKER_PUBLIC_BASE_URL override.
+    explicit LAB_TRACKER_BASE_URL override.
     """
     settings = getattr(request.app.state, "settings", None) or get_settings()
-    configured = (settings.public_base_url or "").strip().rstrip("/")
+    configured = settings.resolved_base_url()
     if configured:
         return configured
-    base = str(request.base_url).rstrip("/")
-    return base
+    return build_instance_url(str(request.base_url), "")
 
 
 def _build_enrollment_qr_svg(url: str) -> str:
@@ -95,7 +95,8 @@ def build_device_auth_router(*, device_auth_service: DeviceAuthService) -> APIRo
         ttl_minutes = payload.ttl_minutes if payload.ttl_minutes is not None else 5
         offer = device_auth_service.create_enrollment(actor.user_id, ttl_minutes=ttl_minutes)
         base_url = _resolve_public_base_url(request)
-        enrollment_url = f"{base_url}/app/enroll?offer={offer.offer_token}"
+        enroll_url = build_instance_url(base_url, "/app/enroll")
+        enrollment_url = f"{enroll_url}?offer={offer.offer_token}"
         qr_svg = _build_enrollment_qr_svg(enrollment_url)
         return Envelope(
             data=DeviceEnrollmentRead(

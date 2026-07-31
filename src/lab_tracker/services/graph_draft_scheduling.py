@@ -28,6 +28,9 @@ from lab_tracker.provider_error_redaction import (
 )
 from lab_tracker.services import graph_draft_batch_policy as batch_policy
 from lab_tracker.services.base import BaseService, ServiceContext
+from lab_tracker.services.graph_draft_batch_reservation import (
+    GraphDraftBatchReservationCoordinator,
+)
 from lab_tracker.services.graph_draft_scheduling_ports import (
     BatchDraftGenerator,
     SchedulingAuthorization,
@@ -68,6 +71,7 @@ class BatchSchedulingCoordinator(BaseService):
         notes: SchedulingNotes,
         authorization: SchedulingAuthorization,
         provenance_links: SchedulingProvenanceLinks | None = None,
+        review_email_available: bool = False,
     ) -> None:
         super().__init__(context)
         self.records = records
@@ -76,6 +80,12 @@ class BatchSchedulingCoordinator(BaseService):
         self.notes = notes
         self.authorization = authorization
         self.provenance_links = provenance_links
+        self.reservations = GraphDraftBatchReservationCoordinator(
+            context,
+            projects=projects,
+            notes=notes,
+        )
+        self.review_email_available = bool(review_email_available)
 
     @property
     def scheduling_repository(self) -> SchedulingRepository:
@@ -105,14 +115,17 @@ class BatchSchedulingCoordinator(BaseService):
             user_id=user_id,
         )
         if settings is not None:
+            settings.review_email_available = self.review_email_available
             return settings
         default = self.scheduling_repository.get_graph_draft_batch_settings_by_project(project_id)
-        return batch_policy.default_batch_settings(
+        settings = batch_policy.default_batch_settings(
             project_id=project_id,
             user_id=user_id,
             actor=actor,
             inherit_from=default,
         )
+        settings.review_email_available = self.review_email_available
+        return settings
 
     def update_graph_draft_batch_settings(
         self,
@@ -144,9 +157,8 @@ class BatchSchedulingCoordinator(BaseService):
         # project-level default (user_id is None) and their own per-user
         # settings (user_id == actor). Editing *another* user's per-user
         # settings still requires owner.
-        editing_other_user = (
-            resolved_user_id is not None
-            and (actor is None or resolved_user_id != actor.user_id)
+        editing_other_user = resolved_user_id is not None and (
+            actor is None or resolved_user_id != actor.user_id
         )
         if editing_other_user:
             self.authorization.require_owner(project_id, actor=actor)
@@ -167,6 +179,7 @@ class BatchSchedulingCoordinator(BaseService):
                 actor=actor,
                 inherit_from=default,
             )
+        settings.review_email_available = self.review_email_available
         before = settings.model_copy(deep=True)
         if is_provided(enabled):
             settings.enabled = enabled
@@ -192,16 +205,15 @@ class BatchSchedulingCoordinator(BaseService):
                     utc_now() if cleaned_email is not None else None
                 )
         if is_provided(email_notifications_enabled):
+            if email_notifications_enabled and not self.review_email_available:
+                raise ValidationError(
+                    "Review email delivery is not enabled on this Lab Tracker host."
+                )
             settings.email_notifications_enabled = email_notifications_enabled
         if settings.email_notifications_enabled:
             if settings.user_id is None:
-                raise ValidationError(
-                    "Email alerts require per-user batch settings with user_id."
-                )
-            if (
-                not settings.notification_email
-                or settings.notification_email_confirmed_at is None
-            ):
+                raise ValidationError("Email alerts require per-user batch settings with user_id.")
+            if not settings.notification_email or settings.notification_email_confirmed_at is None:
                 raise ValidationError(
                     "notification_email is required before email alerts can be enabled."
                 )
@@ -215,11 +227,9 @@ class BatchSchedulingCoordinator(BaseService):
         )
         notification_changed = any(
             (
-                settings.email_notifications_enabled
-                != before.email_notifications_enabled,
+                settings.email_notifications_enabled != before.email_notifications_enabled,
                 settings.notification_email != before.notification_email,
-                settings.notification_email_confirmed_at
-                != before.notification_email_confirmed_at,
+                settings.notification_email_confirmed_at != before.notification_email_confirmed_at,
             )
         )
         if not scheduling_changed and not notification_changed:
@@ -254,20 +264,26 @@ class BatchSchedulingCoordinator(BaseService):
         review_assignee_user_id: UUID | None = None,
     ) -> GraphDraftBatchRun:
         self.authorization.require_contributor(project_id, actor=actor)
-        run, notes = self._prepare_graph_draft_batch_run(
+        reservation_requested_at = batch_policy.as_utc(utc_now())
+        reviewer = self.reservations.resolve_batch_reviewer(
+            trigger=trigger,
+            actor=actor,
+            review_assignee=review_assignee,
+            review_assignee_user_id=review_assignee_user_id,
+        )
+        run, notes, created = self.reservations.reserve_graph_draft_batch_run(
             project_id,
             since=since,
             until=until,
             trigger=trigger,
             user_hint=user_hint,
             actor=actor,
-            review_assignee=review_assignee,
-            review_assignee_user_id=review_assignee_user_id,
+            reviewer=reviewer,
             initial_status=GraphDraftBatchRunStatus.RUNNING,
+            reservation_requested_at=reservation_requested_at,
         )
-        existing = self.scheduling_repository.get_graph_draft_batch_run_by_key(run.batch_key)
-        if existing is not None:
-            return existing
+        if not created:
+            return run
         # Independent, best-effort deterministic stage: propose content-hash
         # provenance links for human review. A failure here must never flip the
         # LLM batch to FAILED or block drafting.
@@ -275,11 +291,7 @@ class BatchSchedulingCoordinator(BaseService):
             try:
                 self.provenance_links.propose_links_from_content_hash(project_id, actor=actor)
             except Exception:
-                logger.exception(
-                    "provenance-link detector failed for project %s", project_id
-                )
-        with self.unit_of_work():
-            self.scheduling_repository.graph_draft_batch_runs.save(run)
+                logger.exception("provenance-link detector failed for project %s", project_id)
         if not notes:
             run.status = GraphDraftBatchRunStatus.SKIPPED
             run.summary = "No staged notes landed in this batch window."
@@ -338,109 +350,25 @@ class BatchSchedulingCoordinator(BaseService):
         review_assignee_user_id: UUID | None = None,
     ) -> GraphDraftBatchRun:
         self.authorization.require_contributor(project_id, actor=actor)
-        run, _notes = self._prepare_graph_draft_batch_run(
+        reservation_requested_at = batch_policy.as_utc(utc_now())
+        reviewer = self.reservations.resolve_batch_reviewer(
+            trigger=trigger,
+            actor=actor,
+            review_assignee=review_assignee,
+            review_assignee_user_id=review_assignee_user_id,
+        )
+        run, _notes, _created = self.reservations.reserve_graph_draft_batch_run(
             project_id,
             since=since,
             until=until,
             trigger=trigger,
             user_hint=user_hint,
             actor=actor,
-            review_assignee=review_assignee,
-            review_assignee_user_id=review_assignee_user_id,
+            reviewer=reviewer,
             initial_status=GraphDraftBatchRunStatus.PENDING,
+            reservation_requested_at=reservation_requested_at,
         )
-        existing = self.scheduling_repository.get_graph_draft_batch_run_by_key(run.batch_key)
-        if existing is not None:
-            return existing
-        with self.unit_of_work():
-            self.scheduling_repository.graph_draft_batch_runs.save(run)
         return run
-
-    def _prepare_graph_draft_batch_run(
-        self,
-        project_id: UUID,
-        *,
-        since: datetime | None,
-        until: datetime | None,
-        trigger: GraphDraftBatchTrigger,
-        user_hint: str | None,
-        actor: AuthContext | None,
-        review_assignee: str | None,
-        review_assignee_user_id: UUID | None,
-        initial_status: GraphDraftBatchRunStatus,
-    ) -> tuple[GraphDraftBatchRun, list[Note]]:
-        self.projects.get_project(project_id)
-        self._ensure_graph_draft_batch_settings_row(project_id, actor=actor)
-        reviewer = batch_policy.BatchReviewer(
-            reviewer=review_assignee,
-            reviewer_user_id=review_assignee_user_id,
-        )
-        reviewer_filter = (
-            reviewer
-            if reviewer.reviewer is not None or reviewer.reviewer_user_id is not None
-            else None
-        )
-        now = batch_policy.as_utc(utc_now())
-        requested_window_end = batch_policy.as_utc(until) if until is not None else now
-        window_end = min(requested_window_end, now)
-        latest_success = self.scheduling_repository.latest_successful_graph_draft_batch_run(
-            project_id,
-            review_assignee_user_id=(
-                reviewer_filter.reviewer_user_id if reviewer_filter is not None else None
-            ),
-            review_assignee=reviewer_filter.reviewer if reviewer_filter is not None else None,
-        )
-        window_start = batch_policy.as_utc(
-            since
-            or (latest_success.window_end if latest_success is not None else datetime(1970, 1, 1))
-        )
-        if since is not None and window_start >= window_end:
-            raise ValidationError("Batch window since must be before until.")
-        continuing_auto_window = since is None and latest_success is not None
-        already_drafted_note_ids = (
-            self.scheduling_repository.successful_graph_draft_batch_source_note_ids_at_window_end(
-                project_id,
-                window_start,
-                review_assignee_user_id=reviewer.reviewer_user_id,
-                review_assignee=reviewer.reviewer,
-            )
-            if continuing_auto_window
-            else set()
-        )
-        notes = batch_policy.staged_notes_in_window(
-            self.notes.list_notes(project_id=project_id),
-            since=window_start,
-            until=window_end,
-            include_start=continuing_auto_window,
-            exclude_note_ids=already_drafted_note_ids,
-            reviewer=reviewer_filter,
-        )
-        notes, window_end = batch_policy.limit_notes_to_draft(notes, window_end=window_end)
-        note_ids = [note.note_id for note in notes]
-        run = GraphDraftBatchRun(
-            run_id=uuid4(),
-            project_id=project_id,
-            trigger=trigger,
-            status=initial_status,
-            window_start=window_start,
-            window_end=window_end,
-            note_count=len(notes),
-            source_note_ids=note_ids,
-            batch_key=batch_policy.make_batch_key(
-                project_id=project_id,
-                since=window_start,
-                until=window_end,
-                note_ids=note_ids,
-                review_assignee=reviewer.reviewer,
-                review_assignee_user_id=reviewer.reviewer_user_id,
-            ),
-            user_hint=user_hint.strip() if user_hint else None,
-            created_by=actor_user_id(actor),
-            created_by_user_id=actor_user_fk(actor, self.scheduling_repository),
-            review_assignee=reviewer.reviewer,
-            review_assignee_user_id=reviewer.reviewer_user_id,
-        )
-        return run, notes
 
     def process_next_graph_draft_batch_run(
         self,
@@ -576,30 +504,6 @@ class BatchSchedulingCoordinator(BaseService):
             self.scheduling_repository.graph_draft_batch_runs.save(run)
         return run
 
-    def _ensure_graph_draft_batch_settings_row(
-        self,
-        project_id: UUID,
-        *,
-        actor: AuthContext | None,
-        user_id: UUID | None = None,
-    ) -> None:
-        if (
-            self.scheduling_repository.get_graph_draft_batch_settings_by_project(
-                project_id,
-                user_id=user_id,
-            )
-            is not None
-        ):
-            return
-        with self.unit_of_work():
-            self.scheduling_repository.graph_draft_batch_settings.save(
-                batch_policy.default_batch_settings(
-                    project_id=project_id,
-                    user_id=user_id,
-                    actor=actor,
-                )
-            )
-
     def run_due_graph_draft_batches(
         self,
         *,
@@ -642,9 +546,7 @@ class BatchSchedulingCoordinator(BaseService):
         if not self.authorization.has_global_admin(actor):
             raise AuthError("Only admins can run scheduled batch drafts.")
         current_time = batch_policy.as_utc(now or utc_now())
-        due_settings = self.scheduling_repository.list_due_graph_draft_batch_settings(
-            current_time
-        )
+        due_settings = self.scheduling_repository.list_due_graph_draft_batch_settings(current_time)
         runs: list[GraphDraftBatchRun] = []
         for batch_settings in due_settings:
             if batch_settings.next_run_at is None:
@@ -656,14 +558,12 @@ class BatchSchedulingCoordinator(BaseService):
                 now=current_time,
             )
             with self.unit_of_work():
-                claimed_settings = (
-                    self.scheduling_repository.claim_due_graph_draft_batch_settings(
-                        batch_settings.settings_id,
-                        observed_next_run_at=batch_settings.next_run_at,
-                        next_run_at=claimed_next_run_at,
-                        updated_at=utc_now(),
-                        updated_by=actor_user_id(actor),
-                    )
+                claimed_settings = self.scheduling_repository.claim_due_graph_draft_batch_settings(
+                    batch_settings.settings_id,
+                    observed_next_run_at=batch_settings.next_run_at,
+                    next_run_at=claimed_next_run_at,
+                    updated_at=utc_now(),
+                    updated_by=actor_user_id(actor),
                 )
             if claimed_settings is None:
                 continue
@@ -676,9 +576,7 @@ class BatchSchedulingCoordinator(BaseService):
                 batch_settings.updated_at = utc_now()
                 batch_settings.updated_by = actor_user_id(actor)
                 with self.unit_of_work():
-                    self.scheduling_repository.graph_draft_batch_settings.save(
-                        batch_settings
-                    )
+                    self.scheduling_repository.graph_draft_batch_settings.save(batch_settings)
                 continue
             reviewers = self._scheduled_reviewers_for_settings(
                 batch_settings,

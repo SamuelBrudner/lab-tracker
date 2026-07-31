@@ -29,7 +29,7 @@ This repo includes `.cursor/mcp.json`:
     "lab-tracker": {
       "command": "lt-mcp",
       "env": {
-        "LAB_TRACKER_MCP_BASE_URL": "http://127.0.0.1:8000"
+        "LAB_TRACKER_BASE_URL": "http://127.0.0.1:8000"
       }
     }
   }
@@ -86,7 +86,7 @@ preferred portable command. If Cursor cannot find it on `PATH`, either point
         "lt-mcp"
       ],
       "env": {
-        "LAB_TRACKER_MCP_BASE_URL": "http://127.0.0.1:8000"
+        "LAB_TRACKER_BASE_URL": "http://127.0.0.1:8000"
       }
     }
   }

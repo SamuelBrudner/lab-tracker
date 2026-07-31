@@ -47,6 +47,7 @@ from lab_tracker.git_remote_policy import GitRemotePolicy
 from lab_tracker.git_store_health import GitStoreHealthProbe
 from lab_tracker.graph_drafting import GraphDraftClientFactory, make_graph_draft_client
 from lab_tracker.http_store_health import HttpStoreHealthProbe
+from lab_tracker.instance_url import build_instance_url
 from lab_tracker.local_filesystem_authority import LocalFilesystemAuthority
 from lab_tracker.local_filesystem_operations import (
     BoundedLocalFilesystemOperations,
@@ -556,12 +557,23 @@ def _process_one_review_email(app: FastAPI) -> bool:
 def _background_api(app: FastAPI, session: Session) -> LabTrackerAPI:
     """Compose one worker API from the process's immutable startup snapshot."""
 
+    return _api_for_session(app, session, surface="background")
+
+
+def _api_for_session(
+    app: FastAPI,
+    session: Session,
+    *,
+    surface: str,
+) -> LabTrackerAPI:
+    """Compose an API for a non-request task at the persistence boundary."""
+
     return LabTrackerAPI(
         raw_storage=app.state.raw_note_storage,
         repository=SQLAlchemyLabTrackerRepository(session),
         settings=app.state.settings,
         store_authority_registry=app.state.store_authority_registry,
-        surface="background",
+        surface=surface,
     )
 
 
@@ -569,9 +581,9 @@ def _review_email_url(
     settings: Settings,
     delivery: ReviewEmailDelivery,
 ) -> str:
-    base_url = settings.public_base_url.rstrip("/")
+    base_url = settings.resolved_base_url()
     if delivery.event_type == "test":
-        return f"{base_url}/app/"
+        return f"{build_instance_url(base_url, '/app')}/"
     if delivery.change_set_id is None or delivery.recipient_user_id is None:
         raise ValueError("Review-ready delivery is missing its review binding.")
     token = sign_review_link(
@@ -581,7 +593,7 @@ def _review_email_url(
         delivery_id=delivery.delivery_id,
         ttl_minutes=settings.review_email_link_ttl_minutes,
     )
-    return f"{base_url}/r/{token}"
+    return build_instance_url(base_url, f"/r/{token}")
 
 
 def _build_review_email_provider(settings: Settings) -> ReviewEmailProvider | None:
@@ -644,6 +656,13 @@ def configure_app_state(app: FastAPI, runtime: AppRuntime) -> None:
     app.state.file_storage_backend = runtime.file_storage_backend
     app.state.raw_note_storage = runtime.raw_note_storage
     app.state.lab_tracker_api = runtime.lab_tracker_api
+    app.state.session_api_factory = (
+        lambda session, *, surface: _api_for_session(
+            app,
+            session,
+            surface=surface,
+        )
+    )
     app.state.graph_draft_client_factory = runtime.graph_draft_client_factory
     app.state.review_email_provider = runtime.review_email_provider
     app.state.auth_rate_limiter = runtime.auth_rate_limiter

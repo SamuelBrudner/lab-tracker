@@ -169,6 +169,7 @@ class UsageEventResourceType(str, Enum):
     PROJECT_MEMBERSHIP = "project_membership"
     QUESTION = "question"
     QUESTION_REFACTOR = "question_refactor"
+    EXPERIMENT = "experiment"
     NOTE = "note"
     SESSION = "session"
     DATASET = "dataset"
@@ -210,6 +211,12 @@ class SessionStatus(str, Enum):
 class SessionType(str, Enum):
     SCIENTIFIC = "scientific"
     OPERATIONAL = "operational"
+
+
+class ExperimentStatus(str, Enum):
+    ACTIVE = "active"
+    CLOSED = "closed"
+    ARCHIVED = "archived"
 
 
 class AnalysisStatus(str, Enum):
@@ -789,6 +796,7 @@ class GraphDraftBatchSettings(_DomainModel):
     timezone_name: str = "America/New_York"
     next_run_at: datetime | None = None
     email_notifications_enabled: bool = False
+    review_email_available: bool = False
     notification_email: str | None = None
     notification_email_confirmed_at: datetime | None = None
     created_at: datetime = Field(default_factory=utc_now)
@@ -954,6 +962,28 @@ class QuestionRefactor(_DomainModel):
     created_at: datetime = Field(default_factory=utc_now)
     created_by: str | None = None
     created_by_user_id: UUID | None = None
+
+
+class Experiment(_DomainModel):
+    """A lightweight semantic grouping of Sessions and Datasets."""
+
+    experiment_id: UUID
+    project_id: UUID
+    name: str
+    description: str = ""
+    primary_question_id: UUID
+    status: ExperimentStatus = ExperimentStatus.ACTIVE
+    closed_at: datetime | None = None
+    archived_at: datetime | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    created_by: str | None = None
+    created_by_user_id: UUID | None = None
+    origin: EntityOrigin = EntityOrigin.USER
+    change_set_id: UUID | None = None
+    origin_provider: str | None = None
+    origin_model: str | None = None
+    origin_prompt_version: str | None = None
+    updated_at: datetime = Field(default_factory=utc_now)
 
 
 class Dataset(_DomainModel):

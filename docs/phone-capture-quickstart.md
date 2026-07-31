@@ -48,3 +48,29 @@ URL for phone capture.
 Viewer accounts can open the app but cannot capture notes. Use `Request edit
 access` from the app, or ask an admin to grant the admin global role or a
 project contributor/owner membership.
+
+## Optional Automatic Voice Transcription
+
+Voice captures upload and remain reviewable without any AI configuration. The
+manual **Transcribe** action is always available. To have the server start
+best-effort transcription after each new audio upload, explicitly configure an
+OpenAI or Google provider and opt in:
+
+```dotenv
+LAB_TRACKER_GRAPH_DRAFT_PROVIDER=openai
+LAB_TRACKER_OPENAI_API_KEY=...
+LAB_TRACKER_AUTO_TRANSCRIBE_VOICE_CAPTURES=true
+```
+
+The same behavior applies to all new audio captures, including tagless phone
+captures and offline-queued captures when they eventually upload. A short
+capture hint is passed as the provider prompt. Upload success never depends on
+the provider: failures leave the note pending for the manual action, and a
+human transcript or note edit made while the provider call is running is never
+overwritten.
+
+This option is off by default. Enabling it sends the raw recording and capture
+hint outside the Lab Tracker instance and may incur a paid call for each new
+audio capture. Lab Tracker does not yet enforce a per-person rate limit or
+daily transcription budget; exact upload replays are deduplicated, but public
+or otherwise unbounded deployments should leave the option disabled.

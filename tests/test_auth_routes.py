@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import io
+import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlparse
 
@@ -11,6 +15,8 @@ from starlette.requests import Request
 from lab_tracker.app import create_app
 from lab_tracker.auth import Role
 from lab_tracker.db import Base
+from lab_tracker.errors import AuthError, ConflictError, ValidationError
+from lab_tracker.logging import JsonFormatter
 from lab_tracker.routes.auth import _bootstrap_token_for_status
 
 
@@ -54,6 +60,12 @@ def _login(client: TestClient, username: str, password: str) -> str:
     )
     assert login_response.status_code == 200
     return login_response.json()["data"]["access_token"]
+
+
+def _invitation_token(invite_url: str) -> str:
+    parsed = urlparse(invite_url)
+    assert parsed.query == ""
+    return parse_qs(parsed.fragment)["invite"][0]
 
 
 def test_register_login_and_me_round_trip(monkeypatch, tmp_path):
@@ -564,7 +576,7 @@ def test_auth_user_update_rejects_empty_payload_and_advertises_constraint(
         assert "required" not in auth_update_schema
 
 
-def test_admin_can_invite_user_by_email(monkeypatch, tmp_path):
+def test_admin_can_invite_user_by_email_with_fragment_only_secret(monkeypatch, tmp_path):
     _bootstrap_database(monkeypatch, tmp_path)
     monkeypatch.setenv("LAB_TRACKER_PUBLIC_BASE_URL", "https://lab.example.org")
     with TestClient(create_app()) as client:
@@ -589,7 +601,13 @@ def test_admin_can_invite_user_by_email(monkeypatch, tmp_path):
         assert invitation["role"] == "editor"
         assert invitation["status"] == "pending"
         assert invitation["warning"] is None
-        assert invitation["invite_url"].startswith("https://lab.example.org/app?invite=")
+        parsed_invite_url = urlparse(invitation["invite_url"])
+        assert parsed_invite_url.path == "/app"
+        assert parsed_invite_url.query == ""
+        assert parse_qs(parsed_invite_url.fragment)["email"] == ["member@example.org"]
+        invite_token = _invitation_token(invitation["invite_url"])
+        request_target = parsed_invite_url.path
+        assert invite_token not in request_target
         assert "mailto:member%40example.org" in invitation["mailto_url"]
         invitation_body = parse_qs(urlparse(invitation["mailto_url"]).query)["body"][0]
         assert "guided setup" in invitation_body
@@ -604,12 +622,12 @@ def test_admin_can_invite_user_by_email(monkeypatch, tmp_path):
         assert [item["invitation_id"] for item in listed] == [invitation_id]
         assert listed[0]["status"] == "pending"
 
-        invite_token = invitation["invite_url"].split("invite=", 1)[1].split("&", 1)[0]
         register_response = client.post(
             "/auth/register",
             json={
                 "invite_token": invite_token,
                 "password": "invite-secret",
+                "password_confirmation": "invite-secret",
                 "username": "MEMBER@EXAMPLE.ORG",
             },
         )
@@ -623,6 +641,7 @@ def test_admin_can_invite_user_by_email(monkeypatch, tmp_path):
             json={
                 "invite_token": invite_token,
                 "password": "other-secret",
+                "password_confirmation": "other-secret",
                 "username": "member@example.org",
             },
         )
@@ -642,6 +661,228 @@ def test_admin_can_invite_user_by_email(monkeypatch, tmp_path):
         assert consumed_response.json()["data"][0]["status"] == "consumed"
 
 
+def test_invited_registration_requires_confirmed_stronger_password(monkeypatch, tmp_path):
+    _bootstrap_database(monkeypatch, tmp_path)
+    with TestClient(create_app()) as client:
+        _seed_admin(client)
+        admin_token = _login(client, "root", "secret")
+        invitation = client.post(
+            "/auth/invitations",
+            json={"email": "member@example.org", "role": "admin"},
+            headers=_auth_headers(admin_token),
+        ).json()["data"]
+        invite_token = _invitation_token(invitation["invite_url"])
+
+        missing_confirmation = client.post(
+            "/auth/register",
+            json={
+                "invite_token": invite_token,
+                "password": "long-enough-secret",
+                "username": "member@example.org",
+            },
+        )
+        assert missing_confirmation.status_code == 422
+        assert "confirmation is required" in missing_confirmation.text
+
+        mismatched_confirmation = client.post(
+            "/auth/register",
+            json={
+                "invite_token": invite_token,
+                "password": "long-enough-secret",
+                "password_confirmation": "different-secret",
+                "username": "member@example.org",
+            },
+        )
+        assert mismatched_confirmation.status_code == 422
+        assert "does not match" in mismatched_confirmation.text
+
+        short_password = client.post(
+            "/auth/register",
+            json={
+                "invite_token": invite_token,
+                "password": "too-short",
+                "password_confirmation": "too-short",
+                "username": "member@example.org",
+            },
+        )
+        assert short_password.status_code == 422
+        assert "at least 12 characters" in short_password.text
+
+        assert client.app.state.auth_service.get_user("member@example.org") is None
+        assert client.app.state.invitation_token_service.verify_invitation_token(invite_token)
+
+
+def test_invited_registration_validation_never_logs_request_secrets(
+    monkeypatch,
+    tmp_path,
+):
+    _bootstrap_database(monkeypatch, tmp_path)
+    invite_token = "linv_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    password = "sensitive-password-value"
+    app = create_app()
+    rendered = io.StringIO()
+    handler = logging.StreamHandler(rendered)
+    handler.setFormatter(JsonFormatter())
+    error_logger = logging.getLogger("lab_tracker.routes.errors")
+    original_level = error_logger.level
+    original_disabled = error_logger.disabled
+    error_logger.addHandler(handler)
+    error_logger.setLevel(logging.WARNING)
+    error_logger.disabled = False
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                "/auth/register",
+                json={
+                    "invite_token": invite_token,
+                    "password": password,
+                    "password_confirmation": "different-sensitive-value",
+                    "username": "member@example.org",
+                },
+            )
+    finally:
+        error_logger.removeHandler(handler)
+        error_logger.setLevel(original_level)
+        error_logger.disabled = original_disabled
+    rendered_logs = rendered.getvalue()
+
+    assert response.status_code == 422
+    assert "request_validation_error" in rendered_logs
+    assert "detail=Request validation failed." in rendered_logs
+    assert invite_token not in rendered_logs
+    assert password not in rendered_logs
+    assert "different-sensitive-value" not in rendered_logs
+
+
+def test_invitation_claim_failure_rolls_back_user_creation(monkeypatch, tmp_path):
+    _bootstrap_database(monkeypatch, tmp_path)
+    with TestClient(create_app()) as client:
+        _seed_admin(client)
+        admin_token = _login(client, "root", "secret")
+        invitation = client.post(
+            "/auth/invitations",
+            json={"email": "member@example.org", "role": "admin"},
+            headers=_auth_headers(admin_token),
+        ).json()["data"]
+        invite_token = _invitation_token(invitation["invite_url"])
+
+        monkeypatch.setattr(
+            client.app.state.invitation_token_service,
+            "_claim_persistent_invitation",
+            lambda _session, **_kwargs: False,
+        )
+        response = client.post(
+            "/auth/register",
+            json={
+                "invite_token": invite_token,
+                "password": "long-enough-secret",
+                "password_confirmation": "long-enough-secret",
+                "username": "member@example.org",
+            },
+        )
+
+        assert response.status_code == 401
+        assert "no longer available" in response.text
+        assert client.app.state.auth_service.get_user("member@example.org") is None
+        assert client.app.state.invitation_token_service.verify_invitation_token(invite_token)
+
+
+def test_concurrent_invitation_acceptance_creates_exactly_one_user(monkeypatch, tmp_path):
+    _bootstrap_database(monkeypatch, tmp_path)
+    app = create_app()
+    try:
+        invitation_service = app.state.invitation_token_service
+        auth_service = app.state.auth_service
+        issued = invitation_service.issue_invitation(
+            email="member@example.org",
+            role=Role.ADMIN,
+        )
+        barrier = threading.Barrier(2)
+
+        def accept() -> tuple[str, str]:
+            barrier.wait(timeout=5)
+            try:
+                user = auth_service.register_invited_user(
+                    invitation_token_service=invitation_service,
+                    invite_token=issued.token,
+                    username="member@example.org",
+                    password="long-enough-secret",
+                    password_confirmation="long-enough-secret",
+                )
+            except (AuthError, ConflictError) as exc:
+                return ("error", str(exc))
+            return ("accepted", str(user.user_id))
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(lambda _index: accept(), range(2)))
+
+        accepted = [value for kind, value in results if kind == "accepted"]
+        errors = [value for kind, value in results if kind == "error"]
+        assert len(accepted) == 1
+        assert len(errors) == 1
+        assert auth_service.get_user("member@example.org") is not None
+        invitation = invitation_service.list_invitations()[0]
+        assert invitation.status == "consumed"
+        assert str(invitation.consumed_by_user_id) == accepted[0]
+    finally:
+        app.state.db_engine.dispose()
+        app.state.cleanup_git_health_workdir()
+
+
+def test_concurrent_revocation_and_acceptance_have_one_winner(monkeypatch, tmp_path):
+    _bootstrap_database(monkeypatch, tmp_path)
+    app = create_app()
+    try:
+        invitation_service = app.state.invitation_token_service
+        auth_service = app.state.auth_service
+        issued = invitation_service.issue_invitation(
+            email="member@example.org",
+            role=Role.ADMIN,
+        )
+        barrier = threading.Barrier(2)
+
+        def accept() -> str:
+            barrier.wait(timeout=5)
+            try:
+                auth_service.register_invited_user(
+                    invitation_token_service=invitation_service,
+                    invite_token=issued.token,
+                    username="member@example.org",
+                    password="long-enough-secret",
+                    password_confirmation="long-enough-secret",
+                )
+            except (AuthError, ConflictError):
+                return "rejected"
+            return "accepted"
+
+        def revoke() -> str:
+            barrier.wait(timeout=5)
+            try:
+                invitation_service.revoke_invitation(issued.invitation.invitation_id)
+            except ValidationError:
+                return "rejected"
+            return "revoked"
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            accept_future = executor.submit(accept)
+            revoke_future = executor.submit(revoke)
+            outcomes = {accept_future.result(), revoke_future.result()}
+
+        invitation = invitation_service.list_invitations()[0]
+        user = auth_service.get_user("member@example.org")
+        if invitation.status == "consumed":
+            assert outcomes == {"accepted", "rejected"}
+            assert user is not None
+            assert invitation.consumed_by_user_id == user.user_id
+        else:
+            assert invitation.status == "revoked"
+            assert outcomes == {"revoked", "rejected"}
+            assert user is None
+    finally:
+        app.state.db_engine.dispose()
+        app.state.cleanup_git_health_workdir()
+
+
 def test_invitation_defaults_to_editor_and_warns_for_local_base_url(monkeypatch, tmp_path):
     _bootstrap_database(monkeypatch, tmp_path)
     with TestClient(create_app(), base_url="http://127.0.0.1:8000") as client:
@@ -657,8 +898,8 @@ def test_invitation_defaults_to_editor_and_warns_for_local_base_url(monkeypatch,
         assert invite_response.status_code == 201
         invitation = invite_response.json()["data"]
         assert invitation["role"] == "editor"
-        assert invitation["invite_url"].startswith("http://127.0.0.1:8000/app?invite=")
-        assert "LAB_TRACKER_PUBLIC_BASE_URL" in invitation["warning"]
+        assert invitation["invite_url"].startswith("http://127.0.0.1:8000/app#invite=")
+        assert "LAB_TRACKER_BASE_URL" in invitation["warning"]
 
 
 def test_admin_can_revoke_invitation(monkeypatch, tmp_path):
@@ -673,7 +914,7 @@ def test_admin_can_revoke_invitation(monkeypatch, tmp_path):
         )
         assert invite_response.status_code == 201
         invitation = invite_response.json()["data"]
-        invite_token = invitation["invite_url"].split("invite=", 1)[1].split("&", 1)[0]
+        invite_token = _invitation_token(invitation["invite_url"])
 
         revoked_response = client.delete(
             f"/auth/invitations/{invitation['invitation_id']}",
@@ -687,6 +928,7 @@ def test_admin_can_revoke_invitation(monkeypatch, tmp_path):
             json={
                 "invite_token": invite_token,
                 "password": "invite-secret",
+                "password_confirmation": "invite-secret",
                 "username": "member@example.org",
             },
         )
@@ -705,15 +947,14 @@ def test_invitation_token_must_match_registration_email(monkeypatch, tmp_path):
             headers=_auth_headers(admin_token),
         )
         assert invite_response.status_code == 201
-        invite_token = invite_response.json()["data"]["invite_url"].split("invite=", 1)[1].split(
-            "&", 1
-        )[0]
+        invite_token = _invitation_token(invite_response.json()["data"]["invite_url"])
 
         register_response = client.post(
             "/auth/register",
             json={
                 "invite_token": invite_token,
                 "password": "invite-secret",
+                "password_confirmation": "invite-secret",
                 "username": "other@example.org",
             },
         )

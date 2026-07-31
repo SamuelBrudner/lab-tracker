@@ -26,6 +26,14 @@ research record:
 - Manual note capture, including text notes, multipart raw file upload, raw file
   download, raw voice notes with editable transcripts, and attaching notes to
   retained entities.
+- Operator-opt-in background transcription for newly created audio uploads,
+  disabled by default. When enabled it applies equally to ordinary, quick, and
+  tagless mobile audio captures, uses `capture_hint` only as an optional
+  provider prompt, never blocks the upload response, and never overwrites a
+  note changed while the provider call was in flight. OpenAI or Google receives
+  the raw audio; manual transcription remains the fail-soft fallback. The
+  retained v1 boundary does not claim a built-in rate limit or daily budget, so
+  unbounded or public enablement is unsupported.
 - Consumer-side figure capture through the Python client (`savefig`,
   `capture_figures`, and `run_context`) and MATLAB package
   (`labtracker.savefig` and `labtracker.uploadFigure`) as fail-soft
@@ -71,8 +79,13 @@ research record:
   operation requires human edit/accept/reject before commit through normal API
   validation.
 - Per-(project, user) graph-draft batch settings and run history for configured
-  cadence, run-now, and run-due drafting over staged notes, with a project-level
-  default row and `review_assignee` attribution on scheduled user batches.
+  cadence, run-now, and run-due drafting over staged notes. The ordinary
+  settings endpoint and **Run now** action resolve the authenticated user
+  server-side; owners manage the project-level template through an explicit
+  project-default endpoint. Manual and scheduled batches carry
+  `review_assignee` attribution, and the personal queue, waiting, and
+  owner-commit projections remain distinct. Legacy drafts with no assignee are
+  recoverable only through an explicit owner oversight projection.
 - Opt-in, per-user review-ready email cues backed by a transactional delivery
   outbox, retry leases, and signed short-lived links. Email contains no project
   or research content, and links still require normal authentication and
@@ -145,7 +158,7 @@ research record:
   instance, optionally co-located next to the data files they describe. See
   [provenance-export.md](provenance-export.md).
 - The linked-data surface around those documents: `@id` identifiers minted
-  from `LAB_TRACKER_CANONICAL_BASE_URL` when configured, a public `GET /terms`
+  from `LAB_TRACKER_BASE_URL` when configured, a public `GET /terms`
   vocabulary page (HTML and JSON-LD) generated from the same registry as the
   embedded `@context`, JSON-LD content negotiation on dataset/analysis/claim
   URIs with the canonical URI echoed as `meta.iri` in plain envelopes, and a
@@ -222,8 +235,9 @@ The following workflows are explicitly deferred and are being retired from the
 supported product path:
 
 - OCR-based note transcription.
-- Automatic audio transcription on every upload. Voice transcription is an
-  explicit note-scoped action for user-captured voice notes.
+- Default-on, unbounded, or publicly exposed automatic audio transcription.
+  Bounded deployments may explicitly enable the retained opt-in background
+  path above; the manual note-scoped action remains available everywhere.
 - Automatic question extraction and extraction inbox workflows. Retained graph
   drafting includes note-scoped drafting and human-gated batch drafting over
   user-captured staged notes; it is not a standing system-selected extraction

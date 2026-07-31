@@ -89,6 +89,12 @@ def _clear_auth_env(monkeypatch) -> None:
         monkeypatch.delenv(variable, raising=False)
 
 
+def _clear_base_url_env(monkeypatch) -> None:
+    monkeypatch.delenv("LAB_TRACKER_BASE_URL", raising=False)
+    monkeypatch.delenv("LAB_TRACKER_PUBLIC_BASE_URL", raising=False)
+    monkeypatch.delenv("LAB_TRACKER_CANONICAL_BASE_URL", raising=False)
+
+
 def test_local_environment_allows_default_auth_secret(monkeypatch):
     _clear_auth_env(monkeypatch)
     monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "local")
@@ -121,6 +127,100 @@ def test_source_revision_rejects_noncanonical_values(monkeypatch, revision):
 
     with pytest.raises(ValidationError, match="full 40-character Git SHA"):
         _settings_from_environment()
+def test_base_url_uses_canonical_setting_and_normalizes_app_route(monkeypatch):
+    _clear_base_url_env(monkeypatch)
+    monkeypatch.setenv(
+        "LAB_TRACKER_BASE_URL",
+        "https://canonical.example.test/app/",
+    )
+    monkeypatch.setenv(
+        "LAB_TRACKER_PUBLIC_BASE_URL",
+        "https://legacy-public.example.test",
+    )
+    monkeypatch.setenv(
+        "LAB_TRACKER_CANONICAL_BASE_URL",
+        "https://legacy-iri.example.test",
+    )
+
+    settings = _settings_from_environment()
+
+    assert settings.base_url == "https://canonical.example.test"
+    assert settings.resolved_base_url() == "https://canonical.example.test"
+    assert "public_base_url" not in Settings.model_fields
+    assert "canonical_base_url" not in Settings.model_fields
+
+
+def test_base_url_accepts_legacy_server_aliases(monkeypatch):
+    _clear_base_url_env(monkeypatch)
+    monkeypatch.setenv(
+        "LAB_TRACKER_PUBLIC_BASE_URL",
+        "https://legacy-public.example.test/",
+    )
+    assert _settings_from_environment().base_url == (
+        "https://legacy-public.example.test"
+    )
+
+    monkeypatch.delenv("LAB_TRACKER_PUBLIC_BASE_URL")
+    monkeypatch.setenv(
+        "LAB_TRACKER_CANONICAL_BASE_URL",
+        "https://legacy-iri.example.test/app",
+    )
+    assert _settings_from_environment().base_url == "https://legacy-iri.example.test"
+
+
+def test_blank_base_url_falls_back_to_public_alias_before_canonical_alias(
+    monkeypatch,
+):
+    _clear_base_url_env(monkeypatch)
+    monkeypatch.setenv("LAB_TRACKER_BASE_URL", "")
+    monkeypatch.setenv(
+        "LAB_TRACKER_PUBLIC_BASE_URL",
+        "https://legacy-public.example.test/app/",
+    )
+    monkeypatch.setenv(
+        "LAB_TRACKER_CANONICAL_BASE_URL",
+        "https://legacy-iri.example.test",
+    )
+
+    assert _settings_from_environment().base_url == "https://legacy-public.example.test"
+
+
+def test_blank_base_url_and_public_alias_fall_back_to_canonical_alias(monkeypatch):
+    _clear_base_url_env(monkeypatch)
+    monkeypatch.setenv("LAB_TRACKER_BASE_URL", " \t ")
+    monkeypatch.setenv("LAB_TRACKER_PUBLIC_BASE_URL", " ")
+    monkeypatch.setenv(
+        "LAB_TRACKER_CANONICAL_BASE_URL",
+        "https://legacy-iri.example.test/app",
+    )
+
+    assert _settings_from_environment().base_url == "https://legacy-iri.example.test"
+
+
+def test_blank_base_url_environment_allows_nonblank_legacy_dotenv_alias(
+    tmp_path,
+    monkeypatch,
+):
+    _clear_base_url_env(monkeypatch)
+    monkeypatch.setenv("LAB_TRACKER_BASE_URL", "")
+    dotenv_path = tmp_path / ".env"
+    dotenv_path.write_text(
+        "LAB_TRACKER_PUBLIC_BASE_URL=https://legacy-dotenv.example.test/app/\n",
+        encoding="utf-8",
+    )
+
+    assert Settings(_env_file=dotenv_path).base_url == (
+        "https://legacy-dotenv.example.test"
+    )
+
+
+def test_base_url_can_be_passed_by_field_name() -> None:
+    settings = Settings(
+        _env_file=None,
+        base_url="https://field.example.test/app",
+    )
+
+    assert settings.base_url == "https://field.example.test"
 
 
 def test_local_environment_rejects_default_auth_secret_when_auth_enabled(monkeypatch):
@@ -1339,6 +1439,22 @@ def test_default_openai_model_is_standard_account_model(monkeypatch):
     assert settings.openai_model == "gpt-4o-mini"
     assert settings.openai_reasoning_effort is None
     assert settings.openai_reasoning_mode is None
+
+
+def test_auto_transcription_is_opt_in_by_default(monkeypatch):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.delenv("LAB_TRACKER_AUTO_TRANSCRIBE_VOICE_CAPTURES", raising=False)
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "local")
+
+    assert _settings_from_environment().auto_transcribe_voice_captures is False
+
+
+def test_auto_transcription_can_be_explicitly_enabled(monkeypatch):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "local")
+    monkeypatch.setenv("LAB_TRACKER_AUTO_TRANSCRIBE_VOICE_CAPTURES", "true")
+
+    assert _settings_from_environment().auto_transcribe_voice_captures is True
 
 
 def test_openai_reasoning_settings_load_from_environment(monkeypatch):

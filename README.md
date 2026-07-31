@@ -93,6 +93,27 @@ uncertain. That reflection is scientific work in its own right—often the part
 bench work leaves too little room for—so Lab Tracker is built to support
 attention rather than rush it.
 
+### Review the same proposals as a narrative
+
+The proposal queue has an alternate **Narrative** view for reading the day as a
+connected account instead of a stack of operation cards. Numbered citations
+point to the exact proposed graph edits. Hover, focus, or click a citation to
+inspect its rationale and source evidence, accept or reject the edit, or leave a
+review note.
+
+<p align="center">
+  <img
+    src="docs/screenshots/daily-review-narrative.png"
+    width="760"
+    alt="Narrative daily review with a numbered proposed-edit citation open to show its source evidence, note field, and accept or reject controls"
+  >
+</p>
+
+The existing **Proposals** view remains available beside it for
+operation-by-operation review, payload editing, and the same commit workflow.
+Switching views changes only how the draft is presented; it does not create,
+remove, or accept an edit.
+
 Review proposals one at a time when they deserve close attention, or use bulk
 acceptance for routine items. The record preserves which review mode you used,
 so bulk acceptance is never represented later as individual review. Proposal
@@ -170,7 +191,7 @@ For a no-terminal hosted start:
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/SamuelBrudner/lab-tracker)
 
-## Configure AI only if you want drafting
+## Configure AI only if you want drafting or transcription
 
 The graph and direct human workflows work without an AI provider. Graph
 drafting supports three server-side providers:
@@ -185,9 +206,13 @@ Set `LAB_TRACKER_GRAPH_DRAFT_PROVIDER` and the matching server-held API key.
 With a vision-capable model, each provider can draft directly from an individual
 image note or figure as well as text. Scheduled batch drafts currently use
 text, voice transcripts, capture hints, links, and metadata rather than image
-bytes. Voice transcription is a separate, explicit note action—not an automatic
-upload step—and currently requires OpenAI or Google; Anthropic can draft from a
-transcript created another way.
+bytes. Voice transcription currently requires OpenAI or Google; Anthropic can
+draft from a transcript created another way. The manual Transcribe action is
+always available. Operators can opt into best-effort transcription after each
+new audio upload with `LAB_TRACKER_AUTO_TRANSCRIBE_VOICE_CAPTURES=true`, but it
+is disabled by default because raw audio and the capture hint leave the
+instance, provider charges apply, and Lab Tracker does not yet enforce a
+per-user rate limit or daily transcription budget.
 
 Any MCP-capable coding agent can read the same permission-bounded context.
 `lab_tracker init` scaffolds common client configurations, and the policy stays
@@ -215,10 +240,11 @@ MCP, and verification.
 
 - This repository does not currently declare an open-source license. Public
   source availability should not be read as permission to redistribute it.
-- Standalone OCR-to-transcript workflows, semantic/vector search, automatic
-  transcription on every upload, and a standing system-selected extraction
-  inbox are outside the supported v1 surface. Individual image-note drafting
-  remains multimodal.
+- Standalone OCR-to-transcript workflows, semantic/vector search, default-on
+  or unbudgeted public transcription, and a standing system-selected extraction
+  inbox are outside the supported v1 surface. Opt-in audio transcription is
+  intended for bounded, operator-controlled deployments; individual image-note
+  drafting remains multimodal.
 - Full research artifacts often remain outside Lab Tracker. External resolution
   is opt-in, read-only, bounded, and hash-checked; operators must configure the
   allowed roots or remotes.

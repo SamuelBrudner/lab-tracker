@@ -10,3 +10,6 @@ __pycache__
 .coverage
 .coverage.*
 htmlcov
+/backups
+/deployments/dedicated-instance/.env
+/deployments/dedicated-instance/provider/.env

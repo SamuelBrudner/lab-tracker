@@ -1,6 +1,6 @@
 import * as React from "react";
 
-import { apiRequest, buildApiPath } from "../shared/api.js";
+import { apiRequest } from "../shared/api.js";
 import { formatDate } from "../shared/formatters.js";
 
 const { useCallback, useEffect, useState } = React;
@@ -22,7 +22,6 @@ function detectedTimeZone() {
 function DailyReviewScheduleForm({
   token,
   projectId,
-  userId = "",
   canManage,
   setBusy,
   setFlash,
@@ -46,27 +45,31 @@ function DailyReviewScheduleForm({
     }
     setLoading(true);
     try {
-      const path = buildApiPath(
+      const nextSettings = await apiRequest(
         `/projects/${projectId}/graph-draft-batch-settings`,
-        userId ? { user_id: userId } : {}
+        { token }
       );
-      const nextSettings = await apiRequest(path, { token });
       setSettings(nextSettings);
       setEnabled(Boolean(nextSettings.enabled));
       setCadenceMinutes(String(nextSettings.cadence_minutes || 1440));
       setRunAtLocalTime(nextSettings.run_at_local_time || "18:00");
       setTimezoneName(nextSettings.timezone_name || detectedTimeZone());
+      const reviewEmailAvailable =
+        nextSettings.review_email_available === true;
       setEmailNotificationsEnabled(
-        Boolean(nextSettings.email_notifications_enabled)
+        reviewEmailAvailable &&
+          Boolean(nextSettings.email_notifications_enabled)
       );
-      setNotificationEmail(nextSettings.notification_email || "");
+      setNotificationEmail(
+        reviewEmailAvailable ? nextSettings.notification_email || "" : ""
+      );
     } catch (err) {
       setSettings(null);
       setFlash("", err.message || "Failed to load daily review timing.");
     } finally {
       setLoading(false);
     }
-  }, [projectId, setFlash, token, userId]);
+  }, [projectId, setFlash, token]);
 
   useEffect(() => {
     loadSettings();
@@ -80,17 +83,22 @@ function DailyReviewScheduleForm({
     setBusy(true);
     setFlash("", "");
     try {
+      const reviewEmailAvailable =
+        settings?.review_email_available === true;
       const nextSettings = await apiRequest(
         `/projects/${projectId}/graph-draft-batch-settings`,
         {
           body: {
             cadence_minutes: Number(cadenceMinutes),
-            email_notifications_enabled: emailNotificationsEnabled,
+            email_notifications_enabled:
+              reviewEmailAvailable && emailNotificationsEnabled,
             enabled,
-            notification_email: notificationEmail.trim() || null,
+            notification_email:
+              reviewEmailAvailable && emailNotificationsEnabled
+                ? notificationEmail.trim() || null
+                : null,
             run_at_local_time: runAtLocalTime,
             timezone_name: timezoneName,
-            ...(userId ? { user_id: userId } : {}),
           },
           method: "PATCH",
           token,
@@ -107,6 +115,7 @@ function DailyReviewScheduleForm({
   }
 
   const disabled = !canManage || !projectId || loading;
+  const reviewEmailAvailable = settings?.review_email_available === true;
 
   return (
     <form className="form" onSubmit={saveSettings}>
@@ -175,33 +184,49 @@ function DailyReviewScheduleForm({
           placeholder="America/New_York"
         />
       </label>
-      <label className="inline toggle-row">
-        <input
-          type="checkbox"
-          checked={emailNotificationsEnabled}
-          disabled={disabled}
-          onChange={(event) =>
-            setEmailNotificationsEnabled(event.target.checked)
-          }
-        />
-        Email me when a review is ready
-      </label>
-      <label>
-        Notification email
-        <input
-          type="email"
-          value={notificationEmail}
-          disabled={disabled || !emailNotificationsEnabled}
-          required={emailNotificationsEnabled}
-          autoComplete="email"
-          onChange={(event) => setNotificationEmail(event.target.value)}
-          placeholder="name@example.edu"
-        />
-      </label>
-      <p className="subtle">
-        The message is a generic, privacy-preserving cue. It does not include
-        project names or research content.
-      </p>
+      {settings && !reviewEmailAvailable ? (
+        <p className="warn">
+          Email cues are unavailable because this host has not configured
+          delivery. Saving this schedule cannot opt you into an undeliverable
+          notification backlog.
+        </p>
+      ) : (
+        <>
+          <label className="inline toggle-row">
+            <input
+              type="checkbox"
+              checked={emailNotificationsEnabled}
+              disabled={disabled || !reviewEmailAvailable}
+              onChange={(event) =>
+                setEmailNotificationsEnabled(event.target.checked)
+              }
+            />
+            Email me when a review is ready
+          </label>
+          <label>
+            Notification email
+            <input
+              type="email"
+              value={notificationEmail}
+              disabled={
+                disabled ||
+                !reviewEmailAvailable ||
+                !emailNotificationsEnabled
+              }
+              required={
+                reviewEmailAvailable && emailNotificationsEnabled
+              }
+              autoComplete="email"
+              onChange={(event) => setNotificationEmail(event.target.value)}
+              placeholder="name@example.edu"
+            />
+          </label>
+          <p className="subtle">
+            The message is a generic, privacy-preserving cue. It does not
+            include project names or research content.
+          </p>
+        </>
+      )}
       {settings?.next_run_at ? (
         <p className="subtle">Next run: {formatDate(settings.next_run_at)}</p>
       ) : null}

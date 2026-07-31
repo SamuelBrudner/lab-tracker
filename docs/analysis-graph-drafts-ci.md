@@ -88,7 +88,7 @@ for enrollment, removal, bounds, and trust behavior.
 
 Required environment:
 
-- `LAB_TRACKER_BASE_URL` or `LAB_TRACKER_MCP_BASE_URL`
+- `LAB_TRACKER_BASE_URL` (`LAB_TRACKER_MCP_BASE_URL` remains a legacy fallback)
 - one of:
   - `LAB_TRACKER_TOKEN` (preferred — a personal access token)
   - `LAB_TRACKER_USERNAME` and `LAB_TRACKER_PASSWORD` (deprecated login; prefer a token)

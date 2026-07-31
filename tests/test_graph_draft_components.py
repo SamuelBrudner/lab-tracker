@@ -15,6 +15,7 @@ from lab_tracker.graph_drafting import (
     GraphDraftingError,
     _analysis_instructions,
     _batch_instructions,
+    _batch_prompt_text,
     _instructions,
     graph_patch_response_schema,
 )
@@ -153,11 +154,178 @@ def test_graph_patch_response_schema_requires_non_empty_source_note_ids() -> Non
 
 def test_graph_draft_prompt_versions_and_source_ref_contract_are_updated() -> None:
     assert PROMPT_VERSION == "multimodal-graph-draft-v2"
-    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v3"
+    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v4"
     assert ANALYSIS_PROMPT_VERSION == "analysis-graph-draft-v2"
     for instructions in (_instructions(), _batch_instructions(), _analysis_instructions()):
         assert "source_note_ids" in instructions
         assert "never invent" in instructions.lower()
+    assert "non-empty raw_content" in _batch_instructions()
+    assert "metadata.title" in _batch_instructions()
+
+
+@pytest.mark.parametrize("content_field", ["text", "content", "body"])
+def test_graph_patch_validator_normalizes_note_content_aliases(
+    content_field: str,
+) -> None:
+    project_id = uuid4()
+    operation = _patch_operation(
+        project_id=project_id,
+        entity_type="note",
+        semantic_type="create_note",
+        payload={
+            "project_id": str(project_id),
+            content_field: "Canonical note body",
+        },
+    )
+    validator = GraphPatchValidator(
+        get_graph_entity=lambda entity_type, entity_id: Project(
+            project_id=entity_id,
+            name="Project",
+        )
+    )
+
+    operations = validator.operations_from_graph_patch(
+        _change_set(project_id),
+        {
+            "summary": "valid",
+            "uncertain_fields": [],
+            "clarification_requests": [],
+            "operations": [operation],
+        },
+    )
+
+    assert operations[0].payload == {
+        "project_id": str(project_id),
+        "raw_content": "Canonical note body",
+    }
+
+
+def test_graph_patch_validator_preserves_note_title_as_metadata() -> None:
+    project_id = uuid4()
+    operation = _patch_operation(
+        project_id=project_id,
+        entity_type="note",
+        semantic_type="create_note",
+        payload={
+            "project_id": str(project_id),
+            "raw_content": "Canonical note body",
+            "title": "Human-facing label",
+            "metadata": {"source": "batch"},
+        },
+    )
+    validator = GraphPatchValidator(
+        get_graph_entity=lambda entity_type, entity_id: Project(
+            project_id=entity_id,
+            name="Project",
+        )
+    )
+
+    operations = validator.operations_from_graph_patch(
+        _change_set(project_id),
+        {
+            "summary": "valid",
+            "uncertain_fields": [],
+            "clarification_requests": [],
+            "operations": [operation],
+        },
+    )
+
+    assert operations[0].payload == {
+        "project_id": str(project_id),
+        "raw_content": "Canonical note body",
+        "metadata": {"source": "batch", "title": "Human-facing label"},
+    }
+
+
+def test_graph_patch_validator_rejects_conflicting_note_content_alias() -> None:
+    project_id = uuid4()
+    operation = _patch_operation(
+        project_id=project_id,
+        entity_type="note",
+        semantic_type="create_note",
+        payload={
+            "project_id": str(project_id),
+            "raw_content": "Canonical note body",
+            "text": "Conflicting provider body",
+        },
+    )
+    validator = GraphPatchValidator(
+        get_graph_entity=lambda entity_type, entity_id: Project(
+            project_id=entity_id,
+            name="Project",
+        )
+    )
+
+    with pytest.raises(
+        GraphDraftingError,
+        match="Operation payload failed API validation",
+    ):
+        validator.operations_from_graph_patch(
+            _change_set(project_id),
+            {
+                "summary": "invalid",
+                "uncertain_fields": [],
+                "clarification_requests": [],
+                "operations": [operation],
+            },
+        )
+
+
+def test_graph_patch_validator_rejects_conflicting_note_titles() -> None:
+    project_id = uuid4()
+    operation = _patch_operation(
+        project_id=project_id,
+        entity_type="note",
+        semantic_type="create_note",
+        payload={
+            "project_id": str(project_id),
+            "raw_content": "Canonical note body",
+            "title": "Conflicting provider title",
+            "metadata": {"title": "Canonical metadata title"},
+        },
+    )
+    validator = GraphPatchValidator(
+        get_graph_entity=lambda entity_type, entity_id: Project(
+            project_id=entity_id,
+            name="Project",
+        )
+    )
+
+    with pytest.raises(
+        GraphDraftingError,
+        match="Operation payload failed API validation",
+    ):
+        validator.operations_from_graph_patch(
+            _change_set(project_id),
+            {
+                "summary": "invalid",
+                "uncertain_fields": [],
+                "clarification_requests": [],
+                "operations": [operation],
+            },
+        )
+
+
+def test_batch_prompt_keeps_retry_feedback_outside_untrusted_context() -> None:
+    feedback = {
+        "attempt": 1,
+        "error": "Operation payload failed API validation: raw_content is required",
+        "instruction": "Return a new complete graph patch.",
+    }
+    batch_context = {
+        "batch_notes": [{"note_id": "source-1", "raw_content": "Observed result"}],
+        "generation_retry_feedback": feedback,
+    }
+
+    prompt = _batch_prompt_text(batch_context=batch_context, user_hint=None)
+
+    trusted_prefix, untrusted_tail = prompt.split("<untrusted_batch_context>\n", 1)
+    untrusted_payload, _ = untrusted_tail.split("\n</untrusted_batch_context>", 1)
+    assert "Trusted server validation feedback from the prior attempt" in trusted_prefix
+    assert feedback["error"] in trusted_prefix
+    assert "generation_retry_feedback" not in untrusted_payload
+    assert json.loads(untrusted_payload) == {"batch_notes": batch_context["batch_notes"]}
+    assert batch_context["generation_retry_feedback"] == feedback
 
 
 def test_graph_patch_validator_preserves_explicit_source_note_ids() -> None:
@@ -634,4 +802,4 @@ def test_batch_instructions_are_narrative_first_with_terse_capture_guardrail() -
     # Stays subordinate to the supported-changes guardrail.
     assert "supported by the source artifacts" in instructions
     # The summary contract changed (now a narrative), so the version bumps.
-    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v3"
+    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v4"

@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 CORE_SUITE = "core"
 EVIDENCE_ARTIFACT_SUITE = "evidence_artifact"
 WORKFLOW_REGISTRY_SUITE = "workflow_registry"
+ACQUISITION_SUITE = "acquisition"
 
 
 @dataclass(frozen=True)
@@ -353,12 +354,98 @@ WORKFLOW_REGISTRY_READ_OPACITY_VARIANTS = (
     ),
 )
 
+ACQUISITION_READ_OPACITY_VARIANTS = (
+    _variant(
+        ACQUISITION_SUITE,
+        "experiment-detail",
+        method="GET",
+        route_template="/experiments/{experiment_id}",
+        operation_id="get_experiment_experiments__experiment_id__get",
+    ),
+    _variant(
+        ACQUISITION_SUITE,
+        "experiment-sessions",
+        method="GET",
+        route_template="/experiments/{experiment_id}/sessions",
+        operation_id=(
+            "list_experiment_sessions_experiments__experiment_id__sessions_get"
+        ),
+    ),
+    _variant(
+        ACQUISITION_SUITE,
+        "experiment-datasets",
+        method="GET",
+        route_template="/experiments/{experiment_id}/datasets",
+        operation_id=(
+            "list_experiment_datasets_experiments__experiment_id__datasets_get"
+        ),
+    ),
+    _variant(
+        ACQUISITION_SUITE,
+        "session-experiments",
+        method="GET",
+        route_template="/sessions/{session_id}/experiments",
+        operation_id="list_session_experiments_sessions__session_id__experiments_get",
+    ),
+    _variant(
+        ACQUISITION_SUITE,
+        "dataset-experiments",
+        method="GET",
+        route_template="/datasets/{dataset_id}/experiments",
+        operation_id="list_dataset_experiments_datasets__dataset_id__experiments_get",
+    ),
+    _variant(
+        ACQUISITION_SUITE,
+        "session-collections",
+        method="GET",
+        route_template="/sessions/{session_id}/collections",
+        operation_id="list_session_collections_sessions__session_id__collections_get",
+    ),
+    _variant(
+        ACQUISITION_SUITE,
+        "collection-snapshots",
+        method="GET",
+        route_template="/collections/{collection_id}/snapshots",
+        operation_id=(
+            "list_collection_snapshots_collections__collection_id__snapshots_get"
+        ),
+    ),
+    _variant(
+        ACQUISITION_SUITE,
+        "collection-snapshot-detail",
+        method="GET",
+        route_template="/collection-snapshots/{snapshot_id}",
+        operation_id=(
+            "get_collection_snapshot_collection_snapshots__snapshot_id__get"
+        ),
+    ),
+    _variant(
+        ACQUISITION_SUITE,
+        "collection-snapshot-members",
+        method="GET",
+        route_template="/collection-snapshots/{snapshot_id}/members",
+        operation_id=(
+            "list_collection_members_collection_snapshots__snapshot_id__members_get"
+        ),
+    ),
+    _variant(
+        ACQUISITION_SUITE,
+        "collection-snapshot-manifest",
+        method="GET",
+        route_template="/collection-snapshots/{snapshot_id}/manifest",
+        operation_id=(
+            "download_collection_manifest_collection_snapshots__snapshot_id__manifest_get"
+        ),
+    ),
+)
+
 
 READ_OPACITY_VARIANTS_BY_SUITE: Mapping[str, tuple[ReadOpacityVariant, ...]] = MappingProxyType(
     {
         CORE_SUITE: CORE_READ_OPACITY_VARIANTS,
         EVIDENCE_ARTIFACT_SUITE: EVIDENCE_ARTIFACT_READ_OPACITY_VARIANTS,
         WORKFLOW_REGISTRY_SUITE: WORKFLOW_REGISTRY_READ_OPACITY_VARIANTS,
+        ACQUISITION_SUITE: ACQUISITION_READ_OPACITY_VARIANTS,
     }
 )
 

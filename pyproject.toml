@@ -55,7 +55,7 @@ test = [
   "tomli; python_version < '3.11'",
 ]
 lint = [
-  "mypy>=1.15,<2",
+  "mypy>=1.15,<3",
   "ruff",
 ]
 figure = [
@@ -175,6 +175,7 @@ files = [
   "src/lab_tracker/services/graph_draft_generation.py",
   "src/lab_tracker/services/graph_draft_review.py",
   "src/lab_tracker/services/graph_draft_commit.py",
+  "src/lab_tracker/services/graph_draft_batch_reservation.py",
   "src/lab_tracker/services/graph_draft_scheduling.py",
   "src/lab_tracker/services/graph_draft_scheduling_ports.py",
   "src/lab_tracker/services/graph_draft_service.py",

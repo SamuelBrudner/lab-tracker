@@ -17,6 +17,7 @@ from lab_tracker.api import LabTrackerAPI
 from lab_tracker.application import RequestHandlers
 from lab_tracker.auth import AuthContext, AuthService, TokenService, User, extract_bearer_token
 from lab_tracker.errors import AuthError, ValidationError
+from lab_tracker.instance_url import normalize_instance_base_url
 from lab_tracker.models import (
     AnalysisStatus,
     DatasetStatus,
@@ -164,15 +165,15 @@ def wants_jsonld(request: Request) -> bool:
 def provenance_base_url(request: Request) -> str:
     """Base URL that roots ``@id`` identifiers in provenance documents.
 
-    Prefers the configured ``LAB_TRACKER_CANONICAL_BASE_URL`` so identifiers
-    are stable names independent of the serving host; falls back to the
-    request's own base URL when unset.
+    Prefers the configured ``LAB_TRACKER_BASE_URL`` so identifiers are stable
+    names independent of the serving host; falls back to the request's own base
+    URL when unset.
     """
     settings = getattr(request.app.state, "settings", None)
-    configured = str(getattr(settings, "canonical_base_url", "") or "").strip()
+    configured = settings.resolved_base_url() if settings is not None else ""
     if configured:
-        return configured.rstrip("/")
-    return str(request.base_url).rstrip("/")
+        return configured
+    return normalize_instance_base_url(str(request.base_url))
 
 
 def safe_attachment_filename(filename: str) -> str:

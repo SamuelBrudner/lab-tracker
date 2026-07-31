@@ -46,6 +46,12 @@ Anthropic, and Google are equally supported — the choice is yours.** Set
 
 Per-provider model, base URL, and timeout overrides are in the
 [configuration reference](configuration.md#graph-draft-providers-and-transcription).
+Voice transcription remains a manual action unless the operator explicitly
+sets `LAB_TRACKER_AUTO_TRANSCRIBE_VOICE_CAPTURES=true`. That opt-in sends every
+new audio upload and its optional capture hint to the configured OpenAI or
+Google provider in a fail-soft background task. It is disabled by default,
+incurs provider usage, and currently has no per-principal rate limit or daily
+budget.
 For institutional deployments, point the provider's base URL at an approved
 gateway. An `agentic` provider (a read-only tool-using drafting loop) also
 exists and requires the background worker — see
@@ -92,6 +98,12 @@ a cadence: nothing drafts until at least one project turns the daily review on
 at `/app/batches` (per project, or per user within a project). The default is
 daily at 18:00 in the cadence row's timezone — which starts as
 `America/New_York`, so set yours when you enable it.
+
+Email cues appear only when the server reports that delivery is configured.
+When delivery is unavailable or the capability is missing, the app says so,
+hides the opt-in fields, and saves email notifications disabled with no
+destination. This prevents schedules from accumulating an undeliverable email
+backlog.
 
 ## 3. Mint credentials for automations
 
@@ -181,7 +193,9 @@ Two agents need one extra step:
   [Cursor MCP setup](lab-tracker-cursor.md).
 
 The saved connection profile normally supplies the API URL and LPAT. Environment
-variables can still override it; see
+variables still override it when you need them — `LAB_TRACKER_BASE_URL` points
+the MCP server at your instance, and `LAB_TRACKER_MCP_API_KEY` supplies the
+token when auth is on. Full variable reference in
 [`lab-tracker-mcp-skills.md`](lab-tracker-mcp-skills.md).
 
 Server-side AI drafting uses the Lab Tracker operator's configured provider

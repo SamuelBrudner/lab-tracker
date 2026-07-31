@@ -7,15 +7,14 @@ import { apiResponse, installFetchMock } from "../test/utils.js";
 import { DailyReviewScheduleForm } from "./daily-review-schedule.jsx";
 
 describe("DailyReviewScheduleForm", () => {
-  it("loads per-user settings and retains user_id when saving a preset", async () => {
+  it("loads and saves the authenticated user's personal settings", async () => {
     let settingsBody = null;
     const onSaved = vi.fn();
     const setBusy = vi.fn();
     const setFlash = vi.fn();
     const fetchMock = installFetchMock([
       {
-        match:
-          "/projects/project-1/graph-draft-batch-settings?user_id=user-1",
+        match: "/projects/project-1/graph-draft-batch-settings",
         response: apiResponse({
           cadence_minutes: 720,
           email_notifications_enabled: true,
@@ -23,6 +22,7 @@ describe("DailyReviewScheduleForm", () => {
           next_run_at: "2026-07-24T01:15:00Z",
           notification_email: "reviewer@example.edu",
           project_id: "project-1",
+          review_email_available: true,
           run_at_local_time: "21:15",
           settings_id: "settings-1",
           timezone_name: "America/New_York",
@@ -39,6 +39,7 @@ describe("DailyReviewScheduleForm", () => {
             next_run_at: "2026-07-24T10:00:00Z",
             project_id: "project-1",
             settings_id: "settings-1",
+            user_id: "user-1",
           });
         },
       },
@@ -48,7 +49,6 @@ describe("DailyReviewScheduleForm", () => {
       <DailyReviewScheduleForm
         token="token-1"
         projectId="project-1"
-        userId="user-1"
         canManage={true}
         setBusy={setBusy}
         setFlash={setFlash}
@@ -72,7 +72,7 @@ describe("DailyReviewScheduleForm", () => {
     );
     expect(screen.getByText(/^Next run:/)).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledWith(
-      "/projects/project-1/graph-draft-batch-settings?user_id=user-1",
+      "/projects/project-1/graph-draft-batch-settings",
       expect.objectContaining({
         headers: expect.objectContaining({
           Authorization: "Bearer token-1",
@@ -102,7 +102,6 @@ describe("DailyReviewScheduleForm", () => {
         notification_email: "reviewer@example.edu",
         run_at_local_time: "06:00",
         timezone_name: "America/New_York",
-        user_id: "user-1",
       });
     });
     expect(onSaved).toHaveBeenCalledWith(
@@ -118,7 +117,7 @@ describe("DailyReviewScheduleForm", () => {
     );
   });
 
-  it("uses the detected time zone and omits user_id for project-default settings", async () => {
+  it("uses the detected time zone and lets the server resolve the personal target", async () => {
     vi.spyOn(Intl, "DateTimeFormat").mockImplementation(() => ({
       resolvedOptions: () => ({ timeZone: "America/Chicago" }),
     }));
@@ -134,6 +133,7 @@ describe("DailyReviewScheduleForm", () => {
           next_run_at: null,
           notification_email: null,
           project_id: "project-2",
+          review_email_available: true,
           run_at_local_time: null,
           settings_id: "settings-2",
           timezone_name: null,
@@ -202,5 +202,73 @@ describe("DailyReviewScheduleForm", () => {
       });
     });
     expect(settingsBody).not.toHaveProperty("user_id");
+  });
+
+  it("cannot save an email opt-in when host delivery is unavailable", async () => {
+    let settingsBody = null;
+    installFetchMock([
+      {
+        match: "/projects/project-3/graph-draft-batch-settings",
+        response: apiResponse({
+          cadence_minutes: 1440,
+          email_notifications_enabled: true,
+          enabled: true,
+          next_run_at: null,
+          notification_email: "stale@example.edu",
+          project_id: "project-3",
+          review_email_available: false,
+          run_at_local_time: "18:00",
+          settings_id: "settings-3",
+          timezone_name: "America/New_York",
+        }),
+      },
+      {
+        match: "/projects/project-3/graph-draft-batch-settings",
+        method: "PATCH",
+        response: (request) => {
+          settingsBody = JSON.parse(request.init.body);
+          return apiResponse({
+            ...settingsBody,
+            next_run_at: null,
+            project_id: "project-3",
+            review_email_available: false,
+            settings_id: "settings-3",
+          });
+        },
+      },
+    ]);
+
+    render(
+      <DailyReviewScheduleForm
+        token="token-3"
+        projectId="project-3"
+        canManage={true}
+        setBusy={vi.fn()}
+        setFlash={vi.fn()}
+      />
+    );
+
+    expect(
+      await screen.findByText(/host has not configured delivery/i)
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("Email me when a review is ready")
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("Notification email")
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Save cadence" }));
+
+    await waitFor(() => {
+      expect(settingsBody).toEqual({
+        cadence_minutes: 1440,
+        email_notifications_enabled: false,
+        enabled: true,
+        notification_email: null,
+        run_at_local_time: "18:00",
+        timezone_name: "America/New_York",
+      });
+    });
   });
 });

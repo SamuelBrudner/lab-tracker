@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 from uuid import UUID
 
+import pytest
 from fastapi.testclient import TestClient
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.app_parts.middleware import system_auth_context
 from lab_tracker.auth import AuthContext, Role
+from lab_tracker.errors import ValidationError
 from lab_tracker.models import ReviewEmailDeliveryStatus
 from lab_tracker.review_links import sign_review_link
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
@@ -54,6 +56,10 @@ def _admin_user_id(client: TestClient, headers: dict[str, str]) -> str:
     return response.json()["data"]["user_id"]
 
 
+def _enable_review_email(client: TestClient) -> None:
+    client.app.state.settings.review_email_enabled = True
+
+
 def _project_and_note(client: TestClient, headers: dict[str, str]) -> tuple[str, str]:
     project_response = client.post(
         "/projects",
@@ -86,7 +92,6 @@ def _configure_email(
     response = client.patch(
         f"/projects/{project_id}/graph-draft-batch-settings",
         json={
-            "user_id": user_id,
             "enabled": True,
             "cadence_minutes": 1440,
             "run_at_local_time": "17:00",
@@ -98,6 +103,7 @@ def _configure_email(
     )
     assert response.status_code == 200
     settings = response.json()["data"]
+    assert settings["user_id"] == user_id
     assert settings["notification_email"] == email
     assert settings["notification_email_confirmed_at"] is not None
 
@@ -106,6 +112,7 @@ def test_assigned_ready_batch_enqueues_one_contentless_delivery(
     client: TestClient,
     admin_auth_headers: dict[str, str],
 ) -> None:
+    _enable_review_email(client)
     user_id = _admin_user_id(client, admin_auth_headers)
     project_id, _note_id = _project_and_note(client, admin_auth_headers)
     _configure_email(
@@ -172,6 +179,7 @@ def test_non_graph_test_alert_can_be_claimed_and_accepted(
     client: TestClient,
     admin_auth_headers: dict[str, str],
 ) -> None:
+    _enable_review_email(client)
     response = client.post(
         "/review-email/test",
         json={"destination_email": "Test.User@Example.ORG"},
@@ -205,6 +213,7 @@ def test_signed_link_redirects_without_bypassing_app_auth(
     client: TestClient,
     admin_auth_headers: dict[str, str],
 ) -> None:
+    _enable_review_email(client)
     user_id = _admin_user_id(client, admin_auth_headers)
     project_id, _note_id = _project_and_note(client, admin_auth_headers)
     _configure_email(
@@ -239,3 +248,80 @@ def test_signed_link_redirects_without_bypassing_app_auth(
     assert response.headers["location"] == f"/app/batches/{run.change_set_id}"
     protected = client.get(f"/batches/{run.change_set_id}")
     assert protected.status_code == 401
+
+
+def test_globally_disabled_review_email_cannot_opt_in_enqueue_or_claim(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    user_id = _admin_user_id(client, admin_auth_headers)
+    project_id, _note_id = _project_and_note(client, admin_auth_headers)
+
+    # Personal Daily Review settings resolve the authenticated user, and the
+    # update route rejects an explicit user_id outright, so the capability gate
+    # is only reachable when the caller omits it.
+    current = client.get(
+        f"/projects/{project_id}/graph-draft-batch-settings",
+        headers=admin_auth_headers,
+    )
+    assert current.status_code == 200
+    assert current.json()["data"]["review_email_available"] is False
+
+    opt_in = client.patch(
+        f"/projects/{project_id}/graph-draft-batch-settings",
+        json={
+            "email_notifications_enabled": True,
+            "notification_email": "reviewer@example.org",
+        },
+        headers=admin_auth_headers,
+    )
+    assert opt_in.status_code == 422
+    assert "not enabled" in opt_in.json()["error"]["message"].lower()
+
+    test_alert = client.post(
+        "/review-email/test",
+        json={"destination_email": "reviewer@example.org"},
+        headers=admin_auth_headers,
+    )
+    assert test_alert.status_code == 422
+
+    with client.app.state.db_session_factory() as session:
+        api = LabTrackerAPI(
+            raw_storage=client.app.state.raw_note_storage,
+            repository=SQLAlchemyLabTrackerRepository(session),
+            settings=client.app.state.settings,
+        )
+        run = api.run_graph_draft_batch_for_project(
+            UUID(project_id),
+            draft_client=_BatchDraftClient(project_id),
+            actor=AuthContext(user_id=UUID(user_id), role=Role.ADMIN),
+            review_assignee=user_id,
+            review_assignee_user_id=UUID(user_id),
+        )
+        assert run.change_set_id is not None
+        assert api.review_emails.list() == []
+        assert api.review_emails.claim_next(lease_seconds=60) is None
+        with pytest.raises(ValidationError, match="not enabled"):
+            api.review_emails.enqueue_test(
+                "reviewer@example.org",
+                recipient_user_id=UUID(user_id),
+            )
+
+        client.app.state.settings.review_email_enabled = True
+        enabled_api = LabTrackerAPI(
+            repository=SQLAlchemyLabTrackerRepository(session),
+            settings=client.app.state.settings,
+        )
+        pending = enabled_api.review_emails.enqueue_test(
+            "stale@example.org",
+            recipient_user_id=UUID(user_id),
+        )
+        client.app.state.settings.review_email_enabled = False
+        disabled_api = LabTrackerAPI(
+            repository=SQLAlchemyLabTrackerRepository(session),
+            settings=client.app.state.settings,
+        )
+        assert disabled_api.review_emails.claim_next(lease_seconds=60) is None
+        assert disabled_api.review_emails.get(pending.delivery_id).status == (
+            ReviewEmailDeliveryStatus.PENDING
+        )

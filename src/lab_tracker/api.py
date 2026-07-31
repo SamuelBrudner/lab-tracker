@@ -11,8 +11,10 @@ from uuid import UUID
 
 from lab_tracker.api_parts import (
     AnalysesApiMixin,
+    CollectionsApiMixin,
     DatasetsApiMixin,
     EvidenceBundlesApiMixin,
+    ExperimentsApiMixin,
     ExplorationApiMixin,
     GoalsApiMixin,
     GraphDraftsApiMixin,
@@ -37,6 +39,7 @@ from lab_tracker.note_storage import LocalNoteStorage
 from lab_tracker.repository import LabTrackerRepository
 from lab_tracker.request_context import LabTrackerRequestContext
 from lab_tracker.services import (
+    AcquisitionCollectionService,
     AnalysisService,
     BatchSchedulingCoordinator,
     ClaimService,
@@ -44,6 +47,7 @@ from lab_tracker.services import (
     DataStoreService,
     EntityVersionService,
     EvidenceBundleService,
+    ExperimentService,
     ExplorationService,
     GoalService,
     GraphContextBuilder,
@@ -86,8 +90,10 @@ class LabTrackerAPI(
     QuestionsApiMixin,
     NotesApiMixin,
     DatasetsApiMixin,
+    ExperimentsApiMixin,
     EvidenceBundlesApiMixin,
     SessionsApiMixin,
+    CollectionsApiMixin,
     AnalysesApiMixin,
     GoalsApiMixin,
     GraphDraftsApiMixin,
@@ -160,6 +166,21 @@ class LabTrackerAPI(
             questions=self.questions,
             datasets_provider=lambda: self.datasets,
             authorization=self.project_authorization,
+        )
+        self.experiments: ExperimentService = ExperimentService(
+            context,
+            projects=self.projects,
+            questions=self.questions,
+            sessions_provider=lambda: self.sessions,
+            datasets_provider=lambda: self.datasets,
+            authorization=self.project_authorization,
+        )
+        self.acquisition_collections: AcquisitionCollectionService = (
+            AcquisitionCollectionService(
+                context,
+                sessions=self.sessions,
+                authorization=self.project_authorization,
+            )
         )
         self.analyses: AnalysisService = AnalysisService(
             context,
@@ -271,6 +292,7 @@ class LabTrackerAPI(
         self.review_emails: ReviewEmailService = ReviewEmailService(
             context,
             max_attempts=self._settings.review_email_max_attempts,
+            delivery_enabled=self._settings.review_email_enabled,
         )
         graph_draft_generation = GraphDraftGenerationCoordinator(
             context,
@@ -305,6 +327,7 @@ class LabTrackerAPI(
             notes=self.notes,
             authorization=self.project_authorization,
             provenance_links=self.provenance_links,
+            review_email_available=self._settings.review_email_enabled,
         )
         self.graph_drafts: GraphDraftService = GraphDraftService(
             records=graph_draft_records,

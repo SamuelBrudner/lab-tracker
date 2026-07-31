@@ -109,6 +109,137 @@ describe("spokenReviewScript", () => {
   });
 });
 
+describe("GraphDraftDetailCard narrative review", () => {
+  it("keeps proposal cards as the default and offers a cited prose view of the same edits", async () => {
+    const base = draftFixture();
+    const secondOperation = {
+      ...base.operations[0],
+      entity_type: "note",
+      operation_id: "44444444-4444-4444-8444-444444444444",
+      payload: { raw_content: "Sleep-deprived flies courted less often." },
+      rationale: "The capture describes this result directly.",
+      semantic_type: "create_note",
+    };
+    renderDraft({ ...base, operations: [base.operations[0], secondOperation] });
+
+    expect(await screen.findAllByLabelText("Edit JSON payload")).toHaveLength(2);
+    expect(screen.getByRole("button", { name: "Proposals" })).toHaveAttribute(
+      "aria-pressed",
+      "true"
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Narrative" }));
+
+    const narrative = screen.getByRole("region", { name: "Narrative review" });
+    expect(narrative).toHaveTextContent("The draft proposes to add a new question");
+    expect(narrative).toHaveTextContent("It also proposes to add a research note");
+    expect(narrative).toHaveTextContent("One new question was drafted from today's captures.");
+    expect(
+      screen.getByRole("button", { name: /Proposed edit 1: Proposed new question/ })
+    ).toHaveTextContent("[1]");
+    expect(
+      screen.getByRole("button", { name: /Proposed edit 2: Proposed research note/ })
+    ).toHaveTextContent("[2]");
+    expect(screen.queryByLabelText("Edit JSON payload")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Proposals" }));
+    expect(await screen.findAllByLabelText("Edit JSON payload")).toHaveLength(2);
+  });
+
+  it("opens citations by hover, focus, and click and routes every decision through the workflow", async () => {
+    const draft = draftFixture({
+      operations: [
+        {
+          ...draftFixture().operations[0],
+          source_refs: [{ label: "voice memo", quote: "courtship dropped after deprivation" }],
+        },
+      ],
+    });
+    const patchBodies = [];
+    let currentDraft = draft;
+    renderDraft(draft, {
+      routes: [
+        {
+          match: /\/graph-drafts\/[^/]+\/operations\//,
+          method: "PATCH",
+          response: (request) => {
+            const body = JSON.parse(request.init.body);
+            patchBodies.push(body);
+            currentDraft = {
+              ...currentDraft,
+              operations: currentDraft.operations.map((operation) => ({
+                ...operation,
+                payload: body.payload,
+                review_note: body.review_note,
+                status: body.status,
+              })),
+            };
+            return apiResponse(currentDraft);
+          },
+        },
+      ],
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Narrative" }));
+    const citation = screen.getByRole("button", {
+      name: /Proposed edit 1: Proposed new question/,
+    });
+
+    fireEvent.focus(citation);
+    expect(
+      screen.getByRole("group", { name: "Proposed edit 1 details" })
+    ).toHaveTextContent("courtship dropped after deprivation");
+    fireEvent.keyDown(citation, { key: "Escape" });
+    expect(
+      screen.queryByRole("group", { name: "Proposed edit 1 details" })
+    ).not.toBeInTheDocument();
+
+    fireEvent.mouseEnter(citation.parentElement);
+    expect(
+      screen.getByRole("group", { name: "Proposed edit 1 details" })
+    ).toBeInTheDocument();
+    fireEvent.mouseLeave(citation.parentElement);
+    expect(
+      screen.queryByRole("group", { name: "Proposed edit 1 details" })
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(citation);
+    fireEvent.change(screen.getByLabelText("Note for proposed edit 1"), {
+      target: { value: "Checked against the raw capture." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save note" }));
+    await waitFor(() => expect(patchBodies).toHaveLength(1));
+    expect(patchBodies[0]).toMatchObject({
+      review_note: "Checked against the raw capture.",
+      status: "proposed",
+    });
+
+    // The action buttons are disabled while a save is pending. patchBodies is
+    // appended by the fetch stub before React clears that pending state, so
+    // clicking as soon as the array grows can land on a still-disabled button
+    // and be dropped silently. Wait for the control to be re-enabled first.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Accept edit" })).toBeEnabled()
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Accept edit" }));
+    await waitFor(() => expect(patchBodies).toHaveLength(2));
+    expect(patchBodies[1]).toMatchObject({
+      review_note: "Checked against the raw capture.",
+      status: "accepted",
+    });
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Reject edit" })).toBeEnabled()
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Reject edit" }));
+    await waitFor(() => expect(patchBodies).toHaveLength(3));
+    expect(patchBodies[2]).toMatchObject({
+      review_note: "Checked against the raw capture.",
+      status: "rejected",
+    });
+  });
+});
+
 describe("GraphDraftDetailCard route identity", () => {
   const ID_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
   const ID_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -251,6 +382,164 @@ describe("GraphDraftDetailCard accept all", () => {
     expect(calls).toBe(1);
     resolveAccept(apiResponse(draft));
     await waitFor(() => expect(button).not.toBeDisabled());
+  });
+
+  it("persists buffered payload and decision-note edits before bulk acceptance", async () => {
+    const draft = draftFixture();
+    const accepted = {
+      ...draft,
+      operations: [
+        {
+          ...draft.operations[0],
+          acceptance_mode: "bulk_accepted",
+          payload: { text: "Edited before accepting" },
+          review_note: "Checked against the trace.",
+          status: "accepted",
+        },
+      ],
+    };
+    const calls = [];
+    const patchBodies = [];
+    renderDraft(draft, {
+      routes: [
+        {
+          match: `/graph-drafts/${draft.change_set_id}/operations/${draft.operations[0].operation_id}`,
+          method: "PATCH",
+          response: (request) => {
+            calls.push("patch");
+            patchBodies.push(JSON.parse(request.init.body));
+            return apiResponse(draft);
+          },
+        },
+        {
+          match: `/graph-drafts/${draft.change_set_id}/accept-all`,
+          method: "POST",
+          response: () => {
+            calls.push("accept-all");
+            return apiResponse(accepted);
+          },
+        },
+      ],
+    });
+
+    fireEvent.change(await screen.findByLabelText("Text"), {
+      target: { value: "Edited before accepting" },
+    });
+    fireEvent.change(screen.getByLabelText("Decision note"), {
+      target: { value: "Checked against the trace." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Accept all" }));
+
+    await screen.findByRole("button", { name: "Undo accept all" });
+    expect(calls).toEqual(["patch", "accept-all"]);
+    expect(patchBodies).toEqual([
+      {
+        payload: { text: "Edited before accepting" },
+        review_note: "Checked against the trace.",
+        status: "proposed",
+      },
+    ]);
+  });
+
+  it("blocks bulk acceptance when a buffered payload is invalid JSON", async () => {
+    const draft = draftFixture();
+    let acceptAllCalls = 0;
+    const setFlash = vi.fn();
+    renderDraft(draft, {
+      setFlash,
+      routes: [
+        {
+          match: `/graph-drafts/${draft.change_set_id}/accept-all`,
+          method: "POST",
+          response: () => {
+            acceptAllCalls += 1;
+            return apiResponse(draft);
+          },
+        },
+      ],
+    });
+
+    fireEvent.change(await screen.findByLabelText("Edit JSON payload"), {
+      target: { value: "{" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Accept all" }));
+
+    await waitFor(() =>
+      expect(setFlash).toHaveBeenCalledWith(
+        "",
+        "One proposal has invalid JSON. Fix or revert it before accepting all."
+      )
+    );
+    expect(acceptAllCalls).toBe(0);
+  });
+
+  it("undoes only operations newly accepted by the latest bulk action", async () => {
+    const draft = draftFixture();
+    const handAcceptedId = "44444444-4444-4444-8444-444444444444";
+    const handAccepted = {
+      ...draft.operations[0],
+      acceptance_mode: "human_selected",
+      operation_id: handAcceptedId,
+      status: "accepted",
+    };
+    const before = {
+      ...draft,
+      operations: [handAccepted, draft.operations[0]],
+    };
+    const afterAccept = {
+      ...before,
+      operations: [
+        handAccepted,
+        {
+          ...draft.operations[0],
+          acceptance_mode: "bulk_accepted",
+          status: "accepted",
+        },
+      ],
+    };
+    const afterUndo = {
+      ...afterAccept,
+      operations: [
+        handAccepted,
+        {
+          ...draft.operations[0],
+          acceptance_mode: null,
+          status: "proposed",
+        },
+      ],
+    };
+    const patchedUrls = [];
+    const patchedBodies = [];
+    renderDraft(before, {
+      routes: [
+        {
+          match: `/graph-drafts/${draft.change_set_id}/accept-all`,
+          method: "POST",
+          response: apiResponse(afterAccept),
+        },
+        {
+          match: `/graph-drafts/${draft.change_set_id}/operations/${draft.operations[0].operation_id}`,
+          method: "PATCH",
+          response: (request) => {
+            patchedUrls.push(request.url);
+            patchedBodies.push(JSON.parse(request.init.body));
+            return apiResponse(afterUndo);
+          },
+        },
+      ],
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Accept all" }));
+    expect(await screen.findByText("1 proposal accepted as a batch.")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Undo accept all" }));
+
+    await waitFor(() => expect(patchedUrls).toHaveLength(1));
+    expect(patchedUrls[0]).toContain(draft.operations[0].operation_id);
+    expect(patchedUrls[0]).not.toContain(handAcceptedId);
+    expect(patchedBodies).toEqual([{ status: "proposed" }]);
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Undo accept all" })).toBeNull()
+    );
   });
 });
 

@@ -2039,8 +2039,10 @@ def _cmd_doctor(args: argparse.Namespace) -> Any:
 def _cmd_update(args: argparse.Namespace) -> Any:
     from lab_tracker.cli import update_consumer_repo
 
+    mcp_base_url, _ = setup_helpers.resolved_base_url_for_setup()
     result = update_consumer_repo(
         args.target,
+        mcp_base_url=mcp_base_url,
         yes=args.yes,
         dry_run=args.dry_run,
         install_skills=args.install_skills,

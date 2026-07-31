@@ -17,6 +17,11 @@ const CLAIM_ID = "3c722fef-c0ce-4f16-8fe1-1973a6767da6";
 const VIZ_ID = "c18ed44e-19c5-45d5-83c8-8750af44f207";
 const NOTE_ID = "13212142-db49-427e-b105-91044e931261";
 const CREATED_BY = "00000000-0000-4000-8000-000000000001";
+const GRAPH_DRAFT_ID = "8f21b9d0-e6d2-4fd0-96c8-c0436da59e31";
+const GRAPH_DRAFT_NOTE_IDS = [
+  "2d758203-b44b-47cd-8ad8-0f76379be4d3",
+  "742bdd10-e735-405a-9bb8-c801c681a1e9",
+];
 
 const PROJECTS = [
   {
@@ -242,6 +247,79 @@ const NOTES = [
     updated_at: "2026-06-05T10:10:03.259965Z",
   },
 ];
+
+const GRAPH_DRAFT = {
+  change_set_id: GRAPH_DRAFT_ID,
+  clarification_requests: [
+    "Confirm which recording rig produced the gain measurement before linking a dataset.",
+  ],
+  context_packet: {},
+  created_at: "2026-06-05T21:00:00Z",
+  draft_mode: "graph_batch",
+  model: "gpt-5.4-mini",
+  operations: [
+    {
+      change_set_id: GRAPH_DRAFT_ID,
+      confidence: 0.74,
+      entity_type: "question",
+      op: "create",
+      operation_id: "7782e178-a96d-4487-b912-d01a11f3653a",
+      payload: {
+        parent_question_ids: [QUESTION_GAIN_ID],
+        project_id: PROJECT_ID,
+        question_type: "descriptive",
+        status: "staged",
+        text: "Is the gain reduction layer-specific?",
+      },
+      rationale:
+        "the clean Rig 2 result raises a follow-up worth tracking under the normalization question.",
+      review_note: "",
+      semantic_type: "suggest_new_question",
+      source_refs: [
+        {
+          label: "voice memo",
+          quote: "background-odor lane showed ~0.6x gain (n=18)",
+        },
+      ],
+      status: "proposed",
+    },
+    {
+      change_set_id: GRAPH_DRAFT_ID,
+      confidence: 0.8,
+      entity_type: "note",
+      op: "create",
+      operation_id: "d746ba04-7e24-431b-8b30-a5c4595c77ce",
+      payload: {
+        project_id: PROJECT_ID,
+        raw_content:
+          "Divisive-normalization model sketch for PN gain (from today's whiteboard photo).",
+        status: "staged",
+        targets: [{ entity_id: QUESTION_GAIN_ID, entity_type: "question" }],
+      },
+      rationale:
+        "the whiteboard photo records a modelling idea that should remain attached to the gain-control question.",
+      review_note: "",
+      semantic_type: "create_note",
+      source_refs: [
+        {
+          label: "whiteboard photo",
+          quote: "divisive-normalization sketch for PN gain",
+        },
+      ],
+      status: "proposed",
+    },
+  ],
+  project_id: PROJECT_ID,
+  provider: "openai",
+  source_note_count: GRAPH_DRAFT_NOTE_IDS.length,
+  source_note_id: GRAPH_DRAFT_NOTE_IDS[0],
+  source_note_ids: GRAPH_DRAFT_NOTE_IDS,
+  status: "ready",
+  summary:
+    "The day’s captures converge on one result and one interpretation. A voice memo records reduced projection-neuron gain during the background-odor condition, while a whiteboard photo develops a divisive-normalization explanation for that change. Together they suggest preserving the modelling note and asking whether the reduction is specific to a processing layer.",
+  uncertain_fields: ["Whether the gain figure came from Rig 2 or Rig 4"],
+  updated_at: "2026-06-05T21:00:00Z",
+};
 
 const PROJECT_MEMBERS = [
   {
@@ -704,10 +782,26 @@ function demoPayload(url) {
       run_at_local_time: "18:00",
       timezone_name: "America/New_York",
       next_run_at: null,
+      review_email_available: false,
       updated_at: "2026-06-05T10:10:03.260000Z",
     });
   }
-  if (pathname === "/batches" || pathname === "/batches/runs" || pathname === "/graph-drafts") {
+  if (pathname === `/graph-drafts/${GRAPH_DRAFT_ID}`) {
+    return dataResponse(GRAPH_DRAFT);
+  }
+  if (pathname === "/batches" || pathname === "/graph-drafts") {
+    const projectId = searchParams.get("project_id") || "";
+    const status = searchParams.get("status") || "";
+    const needsCommit = searchParams.get("needs_commit") === "true";
+    const drafts =
+      (projectId && projectId !== PROJECT_ID) ||
+      (status && status !== GRAPH_DRAFT.status) ||
+      needsCommit
+        ? []
+        : [GRAPH_DRAFT];
+    return listResponse(drafts, searchParams);
+  }
+  if (pathname === "/batches/runs") {
     return listResponse([], searchParams);
   }
   if (pathname === "/auth/tokens" || pathname === "/auth/devices") {

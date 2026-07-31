@@ -59,3 +59,26 @@ def test_json_formatter_redacts_provider_credentials_from_message_and_traceback(
     assert encoded_key not in rendered
     assert "?key=" not in rendered
     assert "%3Fkey%3D" not in rendered
+
+
+def test_json_formatter_redacts_lab_tracker_bearer_prefixes() -> None:
+    secrets = [
+        "linv_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "lpat_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+        "ldev_CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+        "lpair_DDDDDDDDDDDDDDDDDDDDDDDDDDDDDD",
+    ]
+    record = logging.LogRecord(
+        name="lab_tracker.auth",
+        level=logging.WARNING,
+        pathname=__file__,
+        lineno=1,
+        msg="unsafe auth detail: %s",
+        args=(" ".join(secrets),),
+        exc_info=None,
+    )
+
+    rendered = JsonFormatter().format(record)
+
+    assert all(secret not in rendered for secret in secrets)
+    assert rendered.count("[REDACTED]") == len(secrets)

@@ -46,6 +46,28 @@ def _as_utc_optional(value: datetime | None) -> datetime | None:
     return as_utc(value) if value is not None else None
 
 
+def _for_reviewer(
+    stmt,
+    *,
+    review_assignee_user_id: UUID | None,
+    review_assignee: str | None,
+):
+    if review_assignee_user_id is not None:
+        return stmt.where(
+            GraphDraftBatchRunModel.review_assignee_user_id
+            == str(review_assignee_user_id)
+        )
+    if review_assignee is not None:
+        return stmt.where(
+            GraphDraftBatchRunModel.review_assignee_user_id.is_(None),
+            GraphDraftBatchRunModel.review_assignee == review_assignee,
+        )
+    return stmt.where(
+        GraphDraftBatchRunModel.review_assignee_user_id.is_(None),
+        GraphDraftBatchRunModel.review_assignee.is_(None),
+    )
+
+
 def settings_to_model(settings: GraphDraftBatchSettings) -> GraphDraftBatchSettingsModel:
     return GraphDraftBatchSettingsModel(
         settings_id=str(settings.settings_id),
@@ -509,17 +531,73 @@ class SQLAlchemyGraphDraftBatchRunRepository(EntityRepository[GraphDraftBatchRun
                 )
             )
         )
-        if review_assignee_user_id is not None:
-            stmt = stmt.where(
-                GraphDraftBatchRunModel.review_assignee_user_id
-                == str(review_assignee_user_id)
-            )
-        elif review_assignee is not None:
-            stmt = stmt.where(GraphDraftBatchRunModel.review_assignee == review_assignee)
+        # Legacy unassigned runs are their own bucket. Historically this
+        # branch omitted the reviewer predicate and therefore allowed one
+        # user's cursor to advance another user's review window.
+        stmt = _for_reviewer(
+            stmt,
+            review_assignee_user_id=review_assignee_user_id,
+            review_assignee=review_assignee,
+        )
         row = self._session.scalar(
             stmt.order_by(GraphDraftBatchRunModel.window_end.desc()).limit(1)
         )
         return run_from_model(row) if row is not None else None
+
+    def latest_for_project(
+        self,
+        project_id: UUID,
+        *,
+        review_assignee_user_id: UUID | None = None,
+        review_assignee: str | None = None,
+    ) -> GraphDraftBatchRun | None:
+        self._session.flush()
+        stmt = _for_reviewer(
+            select(GraphDraftBatchRunModel).where(
+                GraphDraftBatchRunModel.project_id == str(project_id)
+            ),
+            review_assignee_user_id=review_assignee_user_id,
+            review_assignee=review_assignee,
+        )
+        row = self._session.scalar(
+            stmt.order_by(
+                GraphDraftBatchRunModel.created_at.desc(),
+                GraphDraftBatchRunModel.run_id.desc(),
+            ).limit(1)
+        )
+        return run_from_model(row) if row is not None else None
+
+    def active_for_project(
+        self,
+        project_id: UUID,
+        *,
+        review_assignee_user_id: UUID | None = None,
+        review_assignee: str | None = None,
+    ) -> list[GraphDraftBatchRun]:
+        self._session.flush()
+        stmt = _for_reviewer(
+            select(GraphDraftBatchRunModel)
+            .where(GraphDraftBatchRunModel.project_id == str(project_id))
+            .where(
+                GraphDraftBatchRunModel.status.in_(
+                    [
+                        GraphDraftBatchRunStatus.PENDING.value,
+                        GraphDraftBatchRunStatus.RUNNING.value,
+                    ]
+                )
+            ),
+            review_assignee_user_id=review_assignee_user_id,
+            review_assignee=review_assignee,
+        )
+        rows = list(
+            self._session.scalars(
+                stmt.order_by(
+                    GraphDraftBatchRunModel.created_at.desc(),
+                    GraphDraftBatchRunModel.run_id.desc(),
+                )
+            )
+        )
+        return [run_from_model(row) for row in rows]
 
     def successful_source_note_ids_at_window_end(
         self,
@@ -540,13 +618,11 @@ class SQLAlchemyGraphDraftBatchRunRepository(EntityRepository[GraphDraftBatchRun
             .where(GraphDraftBatchRunModel.status == GraphDraftBatchRunStatus.READY.value)
             .where(GraphDraftBatchRunModel.window_end == window_end)
         )
-        if review_assignee_user_id is not None:
-            stmt = stmt.where(
-                GraphDraftBatchRunModel.review_assignee_user_id
-                == str(review_assignee_user_id)
-            )
-        elif review_assignee is not None:
-            stmt = stmt.where(GraphDraftBatchRunModel.review_assignee == review_assignee)
+        stmt = _for_reviewer(
+            stmt,
+            review_assignee_user_id=review_assignee_user_id,
+            review_assignee=review_assignee,
+        )
         rows = self._session.execute(stmt)
         note_ids: set[UUID] = set()
         for (source_note_ids,) in rows:

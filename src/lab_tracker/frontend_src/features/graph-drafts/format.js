@@ -65,6 +65,26 @@ function operationIntent(operation) {
   return `Proposed ${operation.entity_type} update`;
 }
 
+function operationNarrativeAction(operation) {
+  const semanticType = operation.semantic_type || "";
+  if (semanticType.startsWith("link_note_to_")) {
+    return `link the capture to an existing ${semanticType.replace("link_note_to_", "")}`;
+  }
+  if (semanticType === "suggest_new_question" || semanticType === "suggest_new_dataset") {
+    return `add a new ${operation.entity_type}`;
+  }
+  if (semanticType === "create_note" || semanticType === "suggest_followup") {
+    return "add a research note";
+  }
+  if (semanticType === "request_clarification") {
+    return "record a clarification request";
+  }
+  if (operation.op === "create") {
+    return `add a new ${operation.entity_type}`;
+  }
+  return `update the ${operation.entity_type}`;
+}
+
 function normalizeSpeechText(value) {
   return String(value || "")
     .replace(/[`*_#>]/g, "")
@@ -296,6 +316,7 @@ export {
   nextPayloadWithTarget,
   normalizeSpeechText,
   operationIntent,
+  operationNarrativeAction,
   operationProposalText,
   operationReviewNoteText,
   operationTitle,

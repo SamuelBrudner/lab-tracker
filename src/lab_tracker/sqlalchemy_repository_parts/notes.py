@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from uuid import UUID
 
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session as OrmSession
 
 from lab_tracker.db_models import NoteModel, NoteTargetModel
-from lab_tracker.models import Note
+from lab_tracker.models import Note, NoteMetadataScalar
 from lab_tracker.repository import EntityRepository
 from lab_tracker.sqlalchemy_mappers import (
     apply_note_to_model,
@@ -26,6 +26,21 @@ from .common import (
     substring_pattern,
     uuid_values,
 )
+
+_AUTO_TRANSCRIPTION_CLAIM_ID = "auto_transcription_claim_id"
+_AUTO_TRANSCRIPTION_CLAIMED_AT = "auto_transcription_claimed_at"
+
+
+def _metadata_datetime(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(timezone.utc)
 
 
 class SQLAlchemyNoteRepository(EntityRepository[Note]):
@@ -89,6 +104,171 @@ class SQLAlchemyNoteRepository(EntityRepository[Note]):
             entity_id,
             note_target_models(entity),
         )
+
+    def try_claim_auto_transcription(
+        self,
+        note_id: UUID,
+        *,
+        claim_id: UUID,
+        claimed_at: datetime,
+        stale_before: datetime,
+    ) -> Note | None:
+        """Claim an automatic provider call without holding a long transaction."""
+
+        self._session.flush()
+        row = self._session.scalar(
+            select(NoteModel)
+            .where(NoteModel.note_id == str(note_id))
+            .execution_options(populate_existing=True)
+        )
+        if row is None or (row.transcribed_text or "").strip():
+            return None
+
+        metadata = dict(row.note_metadata or {})
+        existing_claim = metadata.get(_AUTO_TRANSCRIPTION_CLAIM_ID)
+        existing_claimed_at = _metadata_datetime(
+            metadata.get(_AUTO_TRANSCRIPTION_CLAIMED_AT)
+        )
+        if existing_claim is not None and (
+            existing_claimed_at is None or existing_claimed_at > stale_before
+        ):
+            return None
+
+        prior_updated_at = row.updated_at
+        metadata[_AUTO_TRANSCRIPTION_CLAIM_ID] = str(claim_id)
+        metadata[_AUTO_TRANSCRIPTION_CLAIMED_AT] = claimed_at.isoformat()
+        result = self._session.execute(
+            update(NoteModel)
+            .where(
+                NoteModel.note_id == str(note_id),
+                NoteModel.updated_at == prior_updated_at,
+                or_(
+                    NoteModel.transcribed_text.is_(None),
+                    NoteModel.transcribed_text == "",
+                ),
+            )
+            .values(
+                note_metadata=metadata,
+                updated_at=claimed_at,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount != 1:
+            self._session.expire_all()
+            return None
+        self._session.flush()
+        self._session.expire_all()
+        return self.get(note_id)
+
+    def apply_auto_transcription_result(
+        self,
+        note_id: UUID,
+        *,
+        claim_id: UUID,
+        claimed_updated_at: datetime,
+        text: str,
+        metadata_updates: dict[str, NoteMetadataScalar],
+        updated_at: datetime,
+    ) -> Note | None:
+        """Apply one claimed result and discard it after any intervening edit."""
+
+        self._session.flush()
+        row = self._session.scalars(
+            select(NoteModel)
+            .where(NoteModel.note_id == str(note_id))
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).one_or_none()
+        if row is None:
+            return None
+        metadata = dict(row.note_metadata or {})
+        if metadata.get(_AUTO_TRANSCRIPTION_CLAIM_ID) != str(claim_id):
+            return self.notes_from_rows([row])[0]
+
+        metadata.pop(_AUTO_TRANSCRIPTION_CLAIM_ID, None)
+        metadata.pop(_AUTO_TRANSCRIPTION_CLAIMED_AT, None)
+        if (
+            row.updated_at != claimed_updated_at
+            or bool((row.transcribed_text or "").strip())
+        ):
+            row.note_metadata = metadata
+            row.updated_at = updated_at
+            self._session.flush()
+            return self.notes_from_rows([row])[0]
+
+        metadata.update(metadata_updates)
+        row.transcribed_text = text
+        row.note_metadata = metadata
+        row.updated_at = updated_at
+        self._session.flush()
+        return self.notes_from_rows([row])[0]
+
+    def release_auto_transcription_claim(
+        self,
+        note_id: UUID,
+        *,
+        claim_id: UUID,
+        updated_at: datetime,
+    ) -> Note | None:
+        """Remove only the caller's claim, preserving later human mutations."""
+
+        self._session.flush()
+        row = self._session.scalars(
+            select(NoteModel)
+            .where(NoteModel.note_id == str(note_id))
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).one_or_none()
+        if row is None:
+            return None
+        metadata = dict(row.note_metadata or {})
+        if metadata.get(_AUTO_TRANSCRIPTION_CLAIM_ID) != str(claim_id):
+            return self.notes_from_rows([row])[0]
+        metadata.pop(_AUTO_TRANSCRIPTION_CLAIM_ID, None)
+        metadata.pop(_AUTO_TRANSCRIPTION_CLAIMED_AT, None)
+        row.note_metadata = metadata
+        row.updated_at = updated_at
+        self._session.flush()
+        return self.notes_from_rows([row])[0]
+
+    def apply_transcription_result(
+        self,
+        note_id: UUID,
+        *,
+        text: str,
+        metadata_updates: dict[str, NoteMetadataScalar],
+        updated_at: datetime,
+        expected_updated_at: datetime | None = None,
+        only_if_unchanged: bool = False,
+    ) -> Note | None:
+        """Merge a provider transcript without restoring a stale note snapshot."""
+
+        self._session.flush()
+        row = self._session.scalars(
+            select(NoteModel)
+            .where(NoteModel.note_id == str(note_id))
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).one_or_none()
+        if row is None:
+            return None
+
+        if only_if_unchanged and (
+            bool((row.transcribed_text or "").strip())
+            or (
+                expected_updated_at is not None
+                and row.updated_at != expected_updated_at
+            )
+        ):
+            return self.notes_from_rows([row])[0]
+
+        metadata = dict(row.note_metadata or {})
+        metadata.update(metadata_updates)
+        row.transcribed_text = text
+        row.note_metadata = metadata
+        row.updated_at = updated_at
+        self._session.flush()
+        return self.notes_from_rows([row])[0]
 
     def delete(self, entity_id: UUID) -> Note | None:
         entity = self.get(entity_id)
