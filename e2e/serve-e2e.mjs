@@ -8,6 +8,7 @@
 //   E2E_PORT         port to bind (default 8177)
 //   E2E_AUTH_ENABLED "true" to run auth-enabled (default "false")
 //   E2E_BOOTSTRAP_TOKEN  first-admin bootstrap token when auth is enabled
+//   E2E_PUBLIC_BASE_URL  browser-facing URL (defaults to this disposable server)
 import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -27,6 +28,10 @@ const serverEnv = {
   LAB_TRACKER_FILE_STORAGE_PATH: join(workDir, "file-storage"),
   LAB_TRACKER_NOTE_STORAGE_PATH: join(workDir, "note-storage"),
   LAB_TRACKER_AUTH_SECRET_KEY: "e2e-secret-key",
+  // Do not inherit a developer machine's live-instance URL: invitation links
+  // must remain inside the disposable server under test.
+  LAB_TRACKER_PUBLIC_BASE_URL:
+    process.env.E2E_PUBLIC_BASE_URL || `http://127.0.0.1:${port}`,
 };
 if (authEnabled && process.env.E2E_BOOTSTRAP_TOKEN) {
   serverEnv.LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN = process.env.E2E_BOOTSTRAP_TOKEN;
