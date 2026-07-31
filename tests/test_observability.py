@@ -59,7 +59,7 @@ def test_readiness_endpoint(monkeypatch, tmp_path):
 
 def test_health_identifies_the_exact_deployment_without_secrets(monkeypatch, tmp_path):
     _bootstrap_database(monkeypatch, tmp_path, "health-identity.db")
-    monkeypatch.setenv("LAB_TRACKER_APP_NAME", "marion-lab-tracker")
+    monkeypatch.setenv("LAB_TRACKER_APP_NAME", "deployment-test-lab-tracker")
     monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "local")
     monkeypatch.setenv(
         "LAB_TRACKER_SOURCE_REVISION",
@@ -71,7 +71,7 @@ def test_health_identifies_the_exact_deployment_without_secrets(monkeypatch, tmp
 
     assert response.status_code == 200
     assert response.json()["app"] == {
-        "name": "marion-lab-tracker",
+        "name": "deployment-test-lab-tracker",
         "environment": "local",
         "source_revision": "0123456789abcdef0123456789abcdef01234567",
     }
