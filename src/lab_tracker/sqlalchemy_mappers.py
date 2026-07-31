@@ -21,6 +21,7 @@ from lab_tracker.db_models import (
     DataStoreModel,
     EntityVersionModel,
     EvidenceBundleModel,
+    ExperimentModel,
     ExplorationNodeEdgeModel,
     ExplorationNodeModel,
     GoalLinkModel,
@@ -49,6 +50,7 @@ from lab_tracker.models import (
     EntityRef,
     EntityVersion,
     EvidenceBundleRecord,
+    Experiment,
     ExplorationNode,
     ExternalArtifactReference,
     Goal,
@@ -384,6 +386,62 @@ def apply_question_refactor_to_model(
         refactor.created_by_user_id if refactor.created_by_user_id is not None else None
     )
     row.created_at = refactor.created_at
+
+
+def experiment_to_model(experiment: Experiment) -> ExperimentModel:
+    return ExperimentModel(
+        experiment_id=experiment.experiment_id,
+        project_id=experiment.project_id,
+        name=experiment.name,
+        description=experiment.description,
+        primary_question_id=experiment.primary_question_id,
+        status=experiment.status.value,
+        closed_at=experiment.closed_at,
+        archived_at=experiment.archived_at,
+        created_by=experiment.created_by,
+        created_by_user_id=experiment.created_by_user_id,
+        **_origin_model_kwargs(experiment),
+        created_at=experiment.created_at,
+        updated_at=experiment.updated_at,
+    )
+
+
+def experiment_from_model(row: ExperimentModel) -> Experiment:
+    return Experiment(
+        experiment_id=row.experiment_id,
+        project_id=row.project_id,
+        name=row.name,
+        description=row.description,
+        primary_question_id=row.primary_question_id,
+        status=row.status,
+        closed_at=_as_utc_optional(row.closed_at),
+        archived_at=_as_utc_optional(row.archived_at),
+        created_by=row.created_by,
+        created_by_user_id=(
+            row.created_by_user_id if row.created_by_user_id else None
+        ),
+        **_origin_domain_kwargs(row),
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def apply_experiment_to_model(
+    row: ExperimentModel,
+    experiment: Experiment,
+) -> None:
+    row.project_id = experiment.project_id
+    row.name = experiment.name
+    row.description = experiment.description
+    row.primary_question_id = experiment.primary_question_id
+    row.status = experiment.status.value
+    row.closed_at = experiment.closed_at
+    row.archived_at = experiment.archived_at
+    row.created_by = experiment.created_by
+    row.created_by_user_id = experiment.created_by_user_id
+    _apply_origin_to_model(row, experiment)
+    row.created_at = experiment.created_at
+    row.updated_at = experiment.updated_at
 
 
 def dataset_to_model(dataset: Dataset) -> DatasetModel:

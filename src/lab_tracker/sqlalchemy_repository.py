@@ -6,12 +6,14 @@ import focused repository modules directly when that makes ownership clearer.
 """
 
 from lab_tracker.sqlalchemy_repository_parts import (
+    SQLAlchemyAcquisitionCollectionRepository,
     SQLAlchemyAcquisitionOutputRepository,
     SQLAlchemyAnalysisRepository,
     SQLAlchemyClaimRepository,
     SQLAlchemyDatasetRepository,
     SQLAlchemyEntityVersionRepository,
     SQLAlchemyEvidenceBundleRepository,
+    SQLAlchemyExperimentRepository,
     SQLAlchemyExplorationNodeRepository,
     SQLAlchemyGoalRepository,
     SQLAlchemyGroupMembershipRepository,
@@ -29,12 +31,14 @@ from lab_tracker.sqlalchemy_repository_parts import (
 )
 
 __all__ = [
+    "SQLAlchemyAcquisitionCollectionRepository",
     "SQLAlchemyAcquisitionOutputRepository",
     "SQLAlchemyAnalysisRepository",
     "SQLAlchemyClaimRepository",
     "SQLAlchemyDatasetRepository",
     "SQLAlchemyEntityVersionRepository",
     "SQLAlchemyEvidenceBundleRepository",
+    "SQLAlchemyExperimentRepository",
     "SQLAlchemyExplorationNodeRepository",
     "SQLAlchemyGoalRepository",
     "SQLAlchemyGroupMembershipRepository",

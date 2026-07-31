@@ -34,6 +34,7 @@ from lab_tracker.models import (
     Dataset,
     DatasetFile,
     EntityVersion,
+    Experiment,
     ExplorationNode,
     Goal,
     GoalLink,
@@ -64,6 +65,7 @@ from .analyses import (
     SQLAlchemyClaimRepository,
     SQLAlchemyVisualizationRepository,
 )
+from .collections import SQLAlchemyAcquisitionCollectionRepository
 from .common import apply_pagination, substring_pattern, uuid_values
 from .core import (
     SQLAlchemyGroupMembershipRepository,
@@ -76,6 +78,7 @@ from .core import (
 from .data_stores import SQLAlchemyDataStoreRepository
 from .datasets import SQLAlchemyDatasetRepository
 from .evidence_bundles import SQLAlchemyEvidenceBundleRepository
+from .experiments import SQLAlchemyExperimentRepository
 from .exploration import SQLAlchemyExplorationNodeRepository
 from .goals import SQLAlchemyGoalRepository
 from .graph_batches import (
@@ -101,6 +104,8 @@ from .usage import (
 from .versions import SQLAlchemyEntityVersionRepository
 
 _QUESTION_DAG_LOCK_DOMAIN = b"lab-tracker:question-dag:v1\0"
+_SESSION_ACQUISITION_LOCK_DOMAIN = b"lab-tracker:session-acquisition:v1\0"
+_EXPERIMENT_UPDATE_LOCK_DOMAIN = b"lab-tracker:experiment-update:v1\0"
 _DATASET_FILE_PROJECT_LOCK_DOMAIN = b"lab-tracker:dataset-file-project:v1\0"
 _DATASET_FILE_DATASET_LOCK_DOMAIN = b"lab-tracker:dataset-file-dataset:v1\0"
 _GRAPH_DRAFT_SETTINGS_LOCK_DOMAIN = b"lab-tracker:graph-draft-settings:v1\0"
@@ -122,6 +127,14 @@ def _scoped_advisory_lock_key(domain: bytes, entity_id: UUID) -> int:
 
 def _project_question_dag_lock_key(project_id: UUID) -> int:
     return _scoped_advisory_lock_key(_QUESTION_DAG_LOCK_DOMAIN, project_id)
+
+
+def _session_acquisition_lock_key(session_id: UUID) -> int:
+    return _scoped_advisory_lock_key(_SESSION_ACQUISITION_LOCK_DOMAIN, session_id)
+
+
+def _experiment_update_lock_key(experiment_id: UUID) -> int:
+    return _scoped_advisory_lock_key(_EXPERIMENT_UPDATE_LOCK_DOMAIN, experiment_id)
 
 
 def _dataset_file_project_lock_key(project_id: UUID) -> int:
@@ -171,10 +184,14 @@ class SQLAlchemyLabTrackerRepository:
         self.usage_event_rollups = SQLAlchemyUsageEventRollupRepository(session)
         self.questions = SQLAlchemyQuestionRepository(session)
         self.question_refactors = SQLAlchemyQuestionRefactorRepository(session)
+        self.experiments = SQLAlchemyExperimentRepository(session)
         self.datasets = SQLAlchemyDatasetRepository(session)
         self.notes = SQLAlchemyNoteRepository(session)
         self.sessions = SQLAlchemySessionRepository(session)
         self.acquisition_outputs = SQLAlchemyAcquisitionOutputRepository(session)
+        self.acquisition_collections = SQLAlchemyAcquisitionCollectionRepository(
+            session
+        )
         self.analyses = SQLAlchemyAnalysisRepository(session)
         self.claims = SQLAlchemyClaimRepository(session)
         self.claim_edges = SQLAlchemyClaimEdgeRepository(session)
@@ -311,6 +328,48 @@ class SQLAlchemyLabTrackerRepository:
             self._session.execute(
                 text("UPDATE projects SET project_id = project_id WHERE project_id = :project_id"),
                 {"project_id": str(project_id)},
+            )
+        self._session.expire_all()
+
+    def lock_session_acquisition_state(self, session_id: UUID) -> None:
+        """Hold one Session's acquisition-state lock until transaction completion.
+
+        This is the first lock acquired by collection capture and Experiment
+        Session-membership commands. Those commands lock exactly one Session;
+        future multi-Session commands must acquire these locks in sorted UUID
+        order before Experiment or Dataset/file locks.
+
+        SQLite remains a supported single-process development backend, where
+        this deliberately has no effect. PostgreSQL may wait for a competing
+        transaction, so expire the identity map before callers re-read state.
+        """
+
+        if self._session.get_bind().dialect.name != "postgresql":
+            return
+        self._session.execute(
+            text("SELECT pg_advisory_xact_lock(:lock_key)"),
+            {"lock_key": _session_acquisition_lock_key(session_id)},
+        )
+        self._session.expire_all()
+
+    def lock_experiment_updates(self, experiment_ids: Iterable[UUID]) -> None:
+        """Hold Experiment mutation locks in canonical order until commit.
+
+        Commands that also need a Session acquisition-state lock acquire that
+        Session lock first. Experiment IDs are then de-duplicated and sorted;
+        Dataset/file locks, when needed, come last.
+        """
+
+        ordered_experiment_ids = sorted(set(experiment_ids), key=str)
+        if (
+            not ordered_experiment_ids
+            or self._session.get_bind().dialect.name != "postgresql"
+        ):
+            return
+        for experiment_id in ordered_experiment_ids:
+            self._session.execute(
+                text("SELECT pg_advisory_xact_lock(:lock_key)"),
+                {"lock_key": _experiment_update_lock_key(experiment_id)},
             )
         self._session.expire_all()
 
@@ -872,6 +931,125 @@ class SQLAlchemyLabTrackerRepository:
     ) -> tuple[list[QuestionRefactor], int]:
         return self.question_refactors.query(
             question_id=question_id,
+            limit=limit,
+            offset=offset,
+        )
+
+    def query_experiments(
+        self,
+        *,
+        project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
+        primary_question_id: UUID | None = None,
+        status: str | None = None,
+        search: str | None = None,
+        session_id: UUID | None = None,
+        dataset_id: UUID | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+        recent_first: bool = False,
+    ) -> tuple[list[Experiment], int]:
+        return self.experiments.query(
+            project_id=project_id,
+            project_ids=project_ids,
+            primary_question_id=primary_question_id,
+            status=status,
+            search=search,
+            session_id=session_id,
+            dataset_id=dataset_id,
+            limit=limit,
+            offset=offset,
+            recent_first=recent_first,
+        )
+
+    def experiment_has_session(
+        self,
+        *,
+        experiment_id: UUID,
+        session_id: UUID,
+    ) -> bool:
+        return self.experiments.has_session(experiment_id, session_id)
+
+    def add_experiment_session(
+        self,
+        *,
+        experiment_id: UUID,
+        session_id: UUID,
+        created_by: str | None,
+        created_by_user_id: UUID | None,
+        created_at: datetime,
+    ) -> bool:
+        return self.experiments.add_session(
+            experiment_id=experiment_id,
+            session_id=session_id,
+            created_by=created_by,
+            created_by_user_id=created_by_user_id,
+            created_at=created_at,
+        )
+
+    def remove_experiment_session(
+        self,
+        *,
+        experiment_id: UUID,
+        session_id: UUID,
+    ) -> bool:
+        return self.experiments.remove_session(experiment_id, session_id)
+
+    def query_experiment_sessions(
+        self,
+        *,
+        experiment_id: UUID,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[Session], int]:
+        return self.experiments.query_sessions(
+            experiment_id=experiment_id,
+            limit=limit,
+            offset=offset,
+        )
+
+    def experiment_has_dataset(
+        self,
+        *,
+        experiment_id: UUID,
+        dataset_id: UUID,
+    ) -> bool:
+        return self.experiments.has_dataset(experiment_id, dataset_id)
+
+    def add_experiment_dataset(
+        self,
+        *,
+        experiment_id: UUID,
+        dataset_id: UUID,
+        created_by: str | None,
+        created_by_user_id: UUID | None,
+        created_at: datetime,
+    ) -> bool:
+        return self.experiments.add_dataset(
+            experiment_id=experiment_id,
+            dataset_id=dataset_id,
+            created_by=created_by,
+            created_by_user_id=created_by_user_id,
+            created_at=created_at,
+        )
+
+    def remove_experiment_dataset(
+        self,
+        *,
+        experiment_id: UUID,
+        dataset_id: UUID,
+    ) -> bool:
+        return self.experiments.remove_dataset(experiment_id, dataset_id)
+
+    def query_experiment_datasets(
+        self,
+        *,
+        experiment_id: UUID,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[Dataset], int]:
+        return self.experiments.query_datasets(
+            experiment_id=experiment_id,
             limit=limit,
             offset=offset,
         )

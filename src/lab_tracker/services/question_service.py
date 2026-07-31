@@ -726,10 +726,16 @@ class QuestionService(BaseService):
         return notes
 
     def delete_question(self, question_id: UUID, *, actor: AuthContext | None = None) -> Question:
-        question = self.get_question(question_id)
-        self.authorization.require_contributor(question.project_id, actor=actor)
-        self._ensure_question_not_referenced(question)
-        with self.unit_of_work() as repository:
+        located_question = self.get_question(question_id)
+        self.authorization.require_contributor(
+            located_question.project_id,
+            actor=actor,
+        )
+        with self.application_transaction(), self.unit_of_work() as repository:
+            repository.lock_project_question_dag(located_question.project_id)
+            question = self.get_question(question_id)
+            self.authorization.require_contributor(question.project_id, actor=actor)
+            self._ensure_question_not_referenced(question)
             remove_goal_links_to_entity(
                 repository,
                 entity_type=EntityType.QUESTION,
@@ -739,6 +745,16 @@ class QuestionService(BaseService):
         return question
 
     def _ensure_question_not_referenced(self, question: Question) -> None:
+        experiments, _ = self.repository.query_experiments(
+            primary_question_id=question.question_id,
+            limit=None,
+            offset=0,
+        )
+        if experiments:
+            raise ValidationError(
+                "Question cannot be deleted while Experiments use it as their "
+                "primary question."
+            )
         datasets = self.query_from_repository(
             loader=lambda repository: repository.query_datasets(
                 project_id=question.project_id,
