@@ -214,6 +214,13 @@ describe("GraphDraftDetailCard narrative review", () => {
       status: "proposed",
     });
 
+    // The action buttons are disabled while a save is pending. patchBodies is
+    // appended by the fetch stub before React clears that pending state, so
+    // clicking as soon as the array grows can land on a still-disabled button
+    // and be dropped silently. Wait for the control to be re-enabled first.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Accept edit" })).toBeEnabled()
+    );
     fireEvent.click(screen.getByRole("button", { name: "Accept edit" }));
     await waitFor(() => expect(patchBodies).toHaveLength(2));
     expect(patchBodies[1]).toMatchObject({
@@ -221,6 +228,9 @@ describe("GraphDraftDetailCard narrative review", () => {
       status: "accepted",
     });
 
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Reject edit" })).toBeEnabled()
+    );
     fireEvent.click(screen.getByRole("button", { name: "Reject edit" }));
     await waitFor(() => expect(patchBodies).toHaveLength(3));
     expect(patchBodies[2]).toMatchObject({
