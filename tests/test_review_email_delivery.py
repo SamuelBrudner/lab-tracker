@@ -92,7 +92,6 @@ def _configure_email(
     response = client.patch(
         f"/projects/{project_id}/graph-draft-batch-settings",
         json={
-            "user_id": user_id,
             "enabled": True,
             "cadence_minutes": 1440,
             "run_at_local_time": "17:00",
@@ -104,6 +103,7 @@ def _configure_email(
     )
     assert response.status_code == 200
     settings = response.json()["data"]
+    assert settings["user_id"] == user_id
     assert settings["notification_email"] == email
     assert settings["notification_email_confirmed_at"] is not None
 
@@ -257,9 +257,11 @@ def test_globally_disabled_review_email_cannot_opt_in_enqueue_or_claim(
     user_id = _admin_user_id(client, admin_auth_headers)
     project_id, _note_id = _project_and_note(client, admin_auth_headers)
 
+    # Personal Daily Review settings resolve the authenticated user, and the
+    # update route rejects an explicit user_id outright, so the capability gate
+    # is only reachable when the caller omits it.
     current = client.get(
         f"/projects/{project_id}/graph-draft-batch-settings",
-        params={"user_id": user_id},
         headers=admin_auth_headers,
     )
     assert current.status_code == 200
@@ -268,7 +270,6 @@ def test_globally_disabled_review_email_cannot_opt_in_enqueue_or_claim(
     opt_in = client.patch(
         f"/projects/{project_id}/graph-draft-batch-settings",
         json={
-            "user_id": user_id,
             "email_notifications_enabled": True,
             "notification_email": "reviewer@example.org",
         },

@@ -33,6 +33,7 @@ OWNER_MODULES = (
     "graph_draft_generation.py",
     "graph_draft_review.py",
     "graph_draft_commit.py",
+    "graph_draft_batch_reservation.py",
     "graph_draft_scheduling.py",
 )
 ARCHITECTURE_MODULES = (*OWNER_MODULES, "graph_draft_service.py")

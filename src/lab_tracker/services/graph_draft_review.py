@@ -21,6 +21,8 @@ from lab_tracker.models import (
     GraphChangeOperationStatus,
     GraphChangeSet,
     GraphChangeSetStatus,
+    GraphDraftMode,
+    ProjectMembershipRole,
     utc_now,
 )
 from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
@@ -62,6 +64,12 @@ class ReviewPatchValidator(Protocol):
 
 class ReviewAuthorization(Protocol):
     def has_global_write(self, actor: AuthContext | None) -> bool: ...
+
+    def membership_role(
+        self,
+        project_id: UUID,
+        actor: AuthContext | None,
+    ) -> ProjectMembershipRole | None: ...
 
     def require_interactive(
         self,
@@ -277,9 +285,11 @@ class GraphDraftReviewCoordinator(BaseService):
     ) -> GraphChangeSet:
         change_set = self.records.get_graph_change_set(change_set_id)
         self.authorization.require_contributor(change_set.project_id, actor=actor)
-        if not self._is_graph_change_set_author(
-            change_set, actor
-        ) and not self.authorization.has_global_write(actor):
+        if (
+            not self._is_graph_change_set_author(change_set, actor)
+            and not self.authorization.has_global_write(actor)
+            and not self._is_unassigned_batch_owner_recovery(change_set, actor)
+        ):
             raise ValidationError(
                 "Only the graph draft author or assigned reviewer can submit this draft."
             )
@@ -440,8 +450,7 @@ class GraphDraftReviewCoordinator(BaseService):
                 )
             except GraphDraftingError as exc:
                 raise ValidationError(
-                    "Could not transcribe dictated feedback: "
-                    f"{provider_error_message(exc)}"
+                    f"Could not transcribe dictated feedback: {provider_error_message(exc)}"
                 ) from exc
             transcript = _revision_transcript_text(response)
             if not transcript:
@@ -543,7 +552,9 @@ class GraphDraftReviewCoordinator(BaseService):
         if self.authorization.has_global_write(actor):
             return
         self.authorization.require_contributor(change_set.project_id, actor=actor)
-        if not self._is_graph_change_set_author(change_set, actor):
+        if not self._is_graph_change_set_author(
+            change_set, actor
+        ) and not self._is_unassigned_batch_owner_recovery(change_set, actor):
             raise ValidationError(
                 "Only the graph draft author or assigned reviewer can edit this draft."
             )
@@ -552,6 +563,25 @@ class GraphDraftReviewCoordinator(BaseService):
             GraphChangeSetStatus.CHANGES_REQUESTED,
         }:
             raise ValidationError("Submitted graph drafts cannot be edited by contributors.")
+
+    def _is_unassigned_batch_owner_recovery(
+        self,
+        change_set: GraphChangeSet,
+        actor: AuthContext | None,
+    ) -> bool:
+        """Allow project owners to recover only legacy, unassigned batch drafts."""
+
+        if (
+            actor is None
+            or change_set.draft_mode != GraphDraftMode.GRAPH_BATCH
+            or change_set.review_assignee_user_id is not None
+            or change_set.review_assignee is not None
+        ):
+            return False
+        return (
+            self.authorization.membership_role(change_set.project_id, actor)
+            == ProjectMembershipRole.OWNER
+        )
 
     @staticmethod
     def _find_graph_operation(

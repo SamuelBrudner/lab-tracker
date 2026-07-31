@@ -469,6 +469,7 @@ function App({ onReloadForUpdate = null }) {
               }
               navigate={navigate}
               canManageGraph={canContributeToProject}
+              canManageProject={canManageProjectMembers}
               setBusy={setBusy}
               setFlash={setFlash}
             />

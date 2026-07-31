@@ -19,12 +19,14 @@ PORT_MODULES = (
     "src/lab_tracker/services/graph_draft_generation.py",
     "src/lab_tracker/services/graph_draft_review.py",
     "src/lab_tracker/services/graph_draft_commit.py",
+    "src/lab_tracker/services/graph_draft_batch_reservation.py",
     "src/lab_tracker/services/graph_draft_scheduling_ports.py",
 )
 GRAPH_COORDINATORS = (
     "src/lab_tracker/services/graph_draft_generation.py",
     "src/lab_tracker/services/graph_draft_review.py",
     "src/lab_tracker/services/graph_draft_commit.py",
+    "src/lab_tracker/services/graph_draft_batch_reservation.py",
     "src/lab_tracker/services/graph_draft_scheduling.py",
 )
 FORBIDDEN_BOUNDARY_NAMES = {

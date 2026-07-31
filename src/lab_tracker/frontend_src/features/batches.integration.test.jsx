@@ -104,19 +104,75 @@ describe("App", () => {
         ]),
       },
       {
-        match: buildApiPath("/batches", { limit: 5 }),
+        match: buildApiPath("/batches", { limit: 5, mine: true }),
         response: paged([pendingBatch], { limit: 5, offset: 0, total: 1 }),
       },
       {
-        match: buildApiPath("/batches", { limit: 100 }),
+        match: buildApiPath("/batches", { mine: true, limit: 100 }),
         response: paged([pendingBatch], { limit: 100, offset: 0, total: 1 }),
       },
       {
-        match: buildApiPath("/batches", { project_id: "project-1", limit: 100 }),
+        match: buildApiPath("/batches", {
+          mine: true,
+          status: "submitted",
+          limit: 100,
+        }),
+        response: paged([], { limit: 100, offset: 0, total: 0 }),
+      },
+      {
+        match: buildApiPath("/batches", { needs_commit: true, limit: 100 }),
+        response: paged([], { limit: 100, offset: 0, total: 0 }),
+      },
+      {
+        match: buildApiPath("/batches", {
+          unassigned_oversight: true,
+          limit: 100,
+        }),
+        response: paged([], { limit: 100, offset: 0, total: 0 }),
+      },
+      {
+        match: buildApiPath("/batches/runs", { mine: true, limit: 20 }),
+        response: paged([], { limit: 20, offset: 0, total: 0 }),
+      },
+      {
+        match: buildApiPath("/batches", {
+          project_id: "project-1",
+          mine: true,
+          limit: 100,
+        }),
         response: paged([pendingBatch], { limit: 100, offset: 0, total: 1 }),
       },
       {
-        match: buildApiPath("/batches/runs", { project_id: "project-1", limit: 20 }),
+        match: buildApiPath("/batches", {
+          project_id: "project-1",
+          mine: true,
+          status: "submitted",
+          limit: 100,
+        }),
+        response: paged([], { limit: 100, offset: 0, total: 0 }),
+      },
+      {
+        match: buildApiPath("/batches", {
+          project_id: "project-1",
+          needs_commit: true,
+          limit: 100,
+        }),
+        response: paged([], { limit: 100, offset: 0, total: 0 }),
+      },
+      {
+        match: buildApiPath("/batches", {
+          project_id: "project-1",
+          unassigned_oversight: true,
+          limit: 100,
+        }),
+        response: paged([], { limit: 100, offset: 0, total: 0 }),
+      },
+      {
+        match: buildApiPath("/batches/runs", {
+          project_id: "project-1",
+          mine: true,
+          limit: 20,
+        }),
         response: paged([
           {
             batch_key: "batch:test",
@@ -206,7 +262,7 @@ describe("App", () => {
         ]),
       },
       {
-        match: buildApiPath("/batches", { limit: 5 }),
+        match: buildApiPath("/batches", { limit: 5, mine: true }),
         response: paged([], { limit: 5, offset: 0, total: 0 }),
       },
     ]);
