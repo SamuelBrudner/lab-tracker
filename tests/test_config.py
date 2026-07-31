@@ -62,6 +62,7 @@ def _clear_auth_env(monkeypatch) -> None:
     monkeypatch.delenv("LAB_TRACKER_AUTH_SECRET_KEY", raising=False)
     monkeypatch.delenv("LAB_TRACKER_ENVIRONMENT", raising=False)
     monkeypatch.delenv("LAB_TRACKER_AUTH_ENABLED", raising=False)
+    monkeypatch.delenv("LAB_TRACKER_SOURCE_REVISION", raising=False)
     monkeypatch.delenv(
         "LAB_TRACKER_ARTIFACT_RESOLUTION_GLOBAL_IN_FLIGHT_LIMIT",
         raising=False,
@@ -103,6 +104,29 @@ def test_local_environment_allows_default_auth_secret(monkeypatch):
     assert settings.is_usage_events_enabled() is False
 
 
+def test_source_revision_is_normalized_for_runtime_readiness(monkeypatch):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv(
+        "LAB_TRACKER_SOURCE_REVISION",
+        " AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA ",
+    )
+
+    assert _settings_from_environment().source_revision == "a" * 40
+
+
+def test_source_revision_defaults_to_unknown(monkeypatch):
+    _clear_auth_env(monkeypatch)
+
+    assert _settings_from_environment().source_revision == "unknown"
+
+
+@pytest.mark.parametrize("revision", ["main", "abc123", "g" * 40, "f" * 39])
+def test_source_revision_rejects_noncanonical_values(monkeypatch, revision):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv("LAB_TRACKER_SOURCE_REVISION", revision)
+
+    with pytest.raises(ValidationError, match="full 40-character Git SHA"):
+        _settings_from_environment()
 def test_base_url_uses_canonical_setting_and_normalizes_app_route(monkeypatch):
     _clear_base_url_env(monkeypatch)
     monkeypatch.setenv(

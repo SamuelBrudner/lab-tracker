@@ -5,6 +5,9 @@ from lab_tracker.sqlalchemy_repository_parts.analyses import (
     SQLAlchemyClaimRepository,
     SQLAlchemyVisualizationRepository,
 )
+from lab_tracker.sqlalchemy_repository_parts.collections import (
+    SQLAlchemyAcquisitionCollectionRepository,
+)
 from lab_tracker.sqlalchemy_repository_parts.core import (
     SQLAlchemyGroupMembershipRepository,
     SQLAlchemyProjectGroupRepository,
@@ -15,6 +18,9 @@ from lab_tracker.sqlalchemy_repository_parts.core import (
 from lab_tracker.sqlalchemy_repository_parts.datasets import SQLAlchemyDatasetRepository
 from lab_tracker.sqlalchemy_repository_parts.evidence_bundles import (
     SQLAlchemyEvidenceBundleRepository,
+)
+from lab_tracker.sqlalchemy_repository_parts.experiments import (
+    SQLAlchemyExperimentRepository,
 )
 from lab_tracker.sqlalchemy_repository_parts.exploration import (
     SQLAlchemyExplorationNodeRepository,
@@ -41,12 +47,14 @@ from lab_tracker.sqlalchemy_repository_parts.versions import (
 )
 
 __all__ = [
+    "SQLAlchemyAcquisitionCollectionRepository",
     "SQLAlchemyAcquisitionOutputRepository",
     "SQLAlchemyAnalysisRepository",
     "SQLAlchemyClaimRepository",
     "SQLAlchemyDatasetRepository",
     "SQLAlchemyEntityVersionRepository",
     "SQLAlchemyEvidenceBundleRepository",
+    "SQLAlchemyExperimentRepository",
     "SQLAlchemyExplorationNodeRepository",
     "SQLAlchemyGoalRepository",
     "SQLAlchemyGroupMembershipRepository",

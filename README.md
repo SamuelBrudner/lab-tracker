@@ -93,6 +93,27 @@ uncertain. That reflection is scientific work in its own right—often the part
 bench work leaves too little room for—so Lab Tracker is built to support
 attention rather than rush it.
 
+### Review the same proposals as a narrative
+
+The proposal queue has an alternate **Narrative** view for reading the day as a
+connected account instead of a stack of operation cards. Numbered citations
+point to the exact proposed graph edits. Hover, focus, or click a citation to
+inspect its rationale and source evidence, accept or reject the edit, or leave a
+review note.
+
+<p align="center">
+  <img
+    src="docs/screenshots/daily-review-narrative.png"
+    width="760"
+    alt="Narrative daily review with a numbered proposed-edit citation open to show its source evidence, note field, and accept or reject controls"
+  >
+</p>
+
+The existing **Proposals** view remains available beside it for
+operation-by-operation review, payload editing, and the same commit workflow.
+Switching views changes only how the draft is presented; it does not create,
+remove, or accept an edit.
+
 Review proposals one at a time when they deserve close attention, or use bulk
 acceptance for routine items. The record preserves which review mode you used,
 so bulk acceptance is never represented later as individual review. Proposal

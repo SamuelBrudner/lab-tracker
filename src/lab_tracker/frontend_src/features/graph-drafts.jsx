@@ -4,6 +4,7 @@ import { useGraphDraftWorkflow } from "../hooks/useGraphDraftWorkflow.js";
 import { useReviewDictation } from "../hooks/useReviewDictation.js";
 import { useSourceArtifactPreviews } from "../hooks/useSourceArtifactPreviews.js";
 import { AudioReviewConsole } from "./graph-drafts/AudioReviewConsole.jsx";
+import { NarrativeReview } from "./graph-drafts/NarrativeReview.jsx";
 import { OperationRow } from "./graph-drafts/OperationRow.jsx";
 import { ProvenanceDetails } from "./graph-drafts/ProvenanceDetails.jsx";
 import { SourceArtifactEvidence } from "./graph-drafts/SourceArtifactEvidence.jsx";
@@ -21,6 +22,7 @@ function GraphDraftDetailCard({
   setFlash,
   backPath = "/app",
 }) {
+  const [reviewView, setReviewView] = React.useState("proposals");
   const workflow = useGraphDraftWorkflow({
     token,
     changeSetId,
@@ -94,7 +96,7 @@ function GraphDraftDetailCard({
 
       {changeSet ? (
         <div className="daily-review-report">
-          {changeSet.summary ? (
+          {changeSet.summary && reviewView === "proposals" ? (
             <div className="review-summary">
               {String(changeSet.summary)
                 .split(/\n{2,}/)
@@ -152,32 +154,66 @@ function GraphDraftDetailCard({
             </p>
           ) : null}
 
-          <div className="review-report">
-            {(changeSet.operations || []).map((operation) => {
-              const sourceMapping = sourceReview.byOperationId[operation.operation_id] || {
-                ambiguous: false,
-                artifacts: [],
-              };
-              return (
-                <OperationRow
-                  key={operation.operation_id}
-                  operation={operation}
-                  changeSet={changeSet}
-                  payloadText={payloads[operation.operation_id]}
-                  reviewNote={operationReviewNotes[operation.operation_id]}
-                  canEditDraft={canEditDraft}
-                  pending={pendingCommands[`op:${operation.operation_id}`]}
-                  sourceArtifacts={sourceMapping.artifacts}
-                  sourcePreviews={sourcePreviews}
-                  usesSharedSourceEvidence={sourceMapping.ambiguous}
-                  onPatchOperationPayload={workflow.patchOperationPayload}
-                  onUpdatePayloadText={workflow.updatePayloadText}
-                  onUpdateOperationReviewNote={workflow.updateOperationReviewNote}
-                  onSaveOperation={workflow.saveOperation}
-                />
-              );
-            })}
+          <div className="review-view-switch">
+            <span className="subtle">Review as</span>
+            <div className="review-view-toggle" role="group" aria-label="Review view">
+              <button
+                type="button"
+                className={reviewView === "narrative" ? "active" : ""}
+                aria-pressed={reviewView === "narrative"}
+                onClick={() => setReviewView("narrative")}
+              >
+                Narrative
+              </button>
+              <button
+                type="button"
+                className={reviewView === "proposals" ? "active" : ""}
+                aria-pressed={reviewView === "proposals"}
+                onClick={() => setReviewView("proposals")}
+              >
+                Proposals
+              </button>
+            </div>
           </div>
+
+          {reviewView === "narrative" ? (
+            <NarrativeReview
+              changeSet={changeSet}
+              payloads={payloads}
+              operationReviewNotes={operationReviewNotes}
+              canEditDraft={canEditDraft}
+              pendingCommands={pendingCommands}
+              onUpdateOperationReviewNote={workflow.updateOperationReviewNote}
+              onSaveOperation={workflow.saveOperation}
+            />
+          ) : (
+            <div className="review-report">
+              {(changeSet.operations || []).map((operation) => {
+                const sourceMapping = sourceReview.byOperationId[operation.operation_id] || {
+                  ambiguous: false,
+                  artifacts: [],
+                };
+                return (
+                  <OperationRow
+                    key={operation.operation_id}
+                    operation={operation}
+                    changeSet={changeSet}
+                    payloadText={payloads[operation.operation_id]}
+                    reviewNote={operationReviewNotes[operation.operation_id]}
+                    canEditDraft={canEditDraft}
+                    pending={pendingCommands[`op:${operation.operation_id}`]}
+                    sourceArtifacts={sourceMapping.artifacts}
+                    sourcePreviews={sourcePreviews}
+                    usesSharedSourceEvidence={sourceMapping.ambiguous}
+                    onPatchOperationPayload={workflow.patchOperationPayload}
+                    onUpdatePayloadText={workflow.updatePayloadText}
+                    onUpdateOperationReviewNote={workflow.updateOperationReviewNote}
+                    onSaveOperation={workflow.saveOperation}
+                  />
+                );
+              })}
+            </div>
+          )}
 
           {(changeSet.uncertain_fields || []).length > 0 ||
           (changeSet.clarification_requests || []).length > 0 ? (

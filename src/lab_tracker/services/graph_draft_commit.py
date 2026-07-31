@@ -11,6 +11,7 @@ from lab_tracker.errors import ValidationError
 from lab_tracker.models import (
     Dataset,
     EntityType,
+    Experiment,
     GraphChangeOp,
     GraphChangeOperation,
     GraphChangeOperationStatus,
@@ -39,6 +40,7 @@ class CommitPatchApplier(Protocol):
         ref_map: dict[str, UUID],
         actor: AuthContext | None,
         change_set: GraphChangeSet,
+        dataset_locks_held: bool = False,
     ) -> EntityResult: ...
 
 
@@ -89,6 +91,16 @@ class CommitRepository(Protocol):
         project_id: UUID,
         dataset_ids: list[UUID],
     ) -> None: ...
+
+    def lock_experiment_updates(self, experiment_ids: list[UUID]) -> None: ...
+
+    def query_experiments(
+        self,
+        *,
+        dataset_id: UUID,
+        limit: int | None,
+        offset: int,
+    ) -> tuple[list[Experiment], int]: ...
 
 
 class TransactionalDraftCommitCoordinator(BaseService):
@@ -177,6 +189,7 @@ class TransactionalDraftCommitCoordinator(BaseService):
                     ref_map=ref_map,
                     actor=actor,
                     change_set=change_set,
+                    dataset_locks_held=True,
                 )
                 resolved_entity_id = graph_entity_id(operation.entity_type, entity)
                 if operation.client_ref:
@@ -224,6 +237,7 @@ class TransactionalDraftCommitCoordinator(BaseService):
         """Pre-lock existing dataset update targets in canonical order."""
 
         dataset_ids_by_project: dict[UUID, set[UUID]] = {}
+        experiment_ids: set[UUID] = set()
         for operation in operations:
             if operation.op != GraphChangeOp.UPDATE or operation.entity_type != EntityType.DATASET:
                 continue
@@ -234,6 +248,19 @@ class TransactionalDraftCommitCoordinator(BaseService):
                 raise ValidationError("Dataset updates must belong to the graph draft project.")
             self.authorization.require_owner(dataset.project_id, actor=actor)
             dataset_ids_by_project.setdefault(dataset.project_id, set()).add(dataset.dataset_id)
+            parent_experiments, _ = self.commit_repository.query_experiments(
+                dataset_id=dataset.dataset_id,
+                limit=None,
+                offset=0,
+            )
+            experiment_ids.update(
+                experiment.experiment_id
+                for experiment in parent_experiments
+            )
+        if dataset_ids_by_project:
+            self.commit_repository.lock_experiment_updates(
+                sorted(experiment_ids, key=str)
+            )
         for project_id in sorted(dataset_ids_by_project, key=str):
             self.commit_repository.lock_dataset_updates(
                 project_id,
