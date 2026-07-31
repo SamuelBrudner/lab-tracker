@@ -56,7 +56,7 @@ By default, identifiers are rooted at whatever base URL served the request:
 on. Two exports of the same project through different hosts would then name
 the same records differently.
 
-**Before your first archived export, set `LAB_TRACKER_CANONICAL_BASE_URL`**
+**Before your first archived export, set `LAB_TRACKER_BASE_URL`**
 (see [configuration.md](configuration.md)) to the URL your lab commits to
 long-term. From then on every provenance `@id` uses that root, byte-identical
 regardless of which host, port, or proxy served the request. `lt export`

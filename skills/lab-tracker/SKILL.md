@@ -25,8 +25,8 @@ Treat the app as a research-context system, not a generic file manager.
    `http://127.0.0.1:8000/app`.
 6. To serve one graph to other computers on a LAN or VPN, use
    `.\scripts\serve-lan.ps1 -UsePostgres` and see `docs/lan-shared-graph.md`.
-7. On Sam's current workstation, Lab Tracker is served durably through Tailscale
-   Funnel at `https://mwcppc01ysbc155.tail79f9d8.ts.net/app`.
+7. A shared instance has one canonical `LAB_TRACKER_BASE_URL`; open its browser
+   UI at `<LAB_TRACKER_BASE_URL>/app`.
 
 ## Reporting Friction and Failures
 
@@ -95,17 +95,16 @@ and does not write directly to the database.
 MCP environment:
 
 ```bash
-LAB_TRACKER_MCP_BASE_URL=http://127.0.0.1:8000
+LAB_TRACKER_BASE_URL=http://127.0.0.1:8000
 LAB_TRACKER_MCP_USERNAME=<service-account-username>
 LAB_TRACKER_MCP_PASSWORD=<service-account-password>
 ```
 
-For agents running somewhere other than this workstation, use the public
-Tailscale Funnel base URL instead of localhost. The URL below is specific to
-Sam's current workstation — replace it with your own deployment's URL:
+For agents running somewhere other than the serving machine, use that
+deployment's reachable HTTPS origin instead of localhost:
 
 ```bash
-LAB_TRACKER_MCP_BASE_URL=https://mwcppc01ysbc155.tail79f9d8.ts.net
+LAB_TRACKER_BASE_URL=https://lab-tracker.example.org
 LAB_TRACKER_MCP_USERNAME=<service-account-username>
 LAB_TRACKER_MCP_PASSWORD=<service-account-password>
 ```
@@ -202,8 +201,8 @@ research writing such as manuscripts, grants, abstracts, results, discussion
 text, and figure legends. If Lab Tracker is unavailable or ambiguous, state that
 explicitly before proceeding.
 
-For MCP clients on other computers, point `LAB_TRACKER_MCP_BASE_URL` at the
-serving machine, preferably the durable HTTPS Funnel URL above. Same-tailnet or
+For MCP clients on other computers, point `LAB_TRACKER_BASE_URL` at the serving
+machine, preferably its durable HTTPS origin. Same-tailnet or
 LAN-only clients can also use `http://<host-ip>:8000` when the server is
 explicitly bound for LAN serving. Use `docs/lan-shared-graph.md` for the
 current serving modes.

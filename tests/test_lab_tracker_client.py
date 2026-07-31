@@ -855,6 +855,25 @@ def test_from_env_uses_mcp_base_url_fallback(monkeypatch: pytest.MonkeyPatch) ->
         lt.close()
 
 
+def test_from_env_prefers_canonical_base_url_and_normalizes_app_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "LAB_TRACKER_BASE_URL",
+        "https://canonical.example.test/app/",
+    )
+    monkeypatch.setenv(
+        "LAB_TRACKER_MCP_BASE_URL",
+        "https://legacy.example.test",
+    )
+
+    lt = LabTracker.from_env()
+    try:
+        assert lt.base_url == "https://canonical.example.test"
+    finally:
+        lt.close()
+
+
 def test_lazy_client_context_manager_does_not_close_shared_singleton() -> None:
     """`with client as lt:` must build a fresh client and never close the shared
 

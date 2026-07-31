@@ -42,7 +42,7 @@ viewer/editor/admin roles, and reset passwords. Use each project's
 
 The `Users` screen creates single-use invitation links. Pending invitations are
 listed on the same screen and can be revoked before they are consumed. If
-`LAB_TRACKER_PUBLIC_BASE_URL` is set, links use that URL. Otherwise links use
+`LAB_TRACKER_BASE_URL` is set, links use that origin. Otherwise links use
 the host from the browser request and warn when the host is local or private.
 On Render, the Docker entrypoint also uses `RENDER_EXTERNAL_URL` when available.
 
@@ -56,7 +56,7 @@ is signed in with the role encoded in the invitation.
 - Keep uploaded files and runtime secrets on the persistent disk mounted at
   `/var/data`.
 - If Render shows a different public URL after deploy, set
-  `LAB_TRACKER_PUBLIC_BASE_URL` to that URL so future email invitations use the
+  `LAB_TRACKER_BASE_URL` to that origin so future email invitations use the
   stable address.
 - Upgrade by redeploying the latest repo revision. The container applies
   migrations before serving traffic.

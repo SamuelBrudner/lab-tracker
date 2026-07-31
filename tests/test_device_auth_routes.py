@@ -87,11 +87,11 @@ def test_enrollment_qr_is_phone_scanner_friendly():
     assert "#0d8b6f" not in qr_svg
 
 
-def test_enrollment_url_honors_public_base_url_override(
+def test_enrollment_url_honors_base_url_override(
     client: TestClient,
     admin_auth_headers: dict[str, str],
 ):
-    client.app.state.settings.public_base_url = "https://lab.example.com"
+    client.app.state.settings.base_url = "https://lab.example.com"
     try:
         response = client.post(
             "/auth/devices/enrollment",
@@ -101,7 +101,7 @@ def test_enrollment_url_honors_public_base_url_override(
         payload = response.json()["data"]
         assert payload["enrollment_url"].startswith("https://lab.example.com/app/enroll?offer=")
     finally:
-        client.app.state.settings.public_base_url = ""
+        client.app.state.settings.base_url = ""
 
 
 def test_consume_enrollment_is_public_and_single_use(

@@ -45,6 +45,7 @@ from lab_tracker.decision_context_constants import (
     package_version,
 )
 from lab_tracker.demo_seed import DemoSeedResult, seed_demo_data
+from lab_tracker.instance_url import DEFAULT_BASE_URL, normalize_instance_base_url
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 
 
@@ -123,7 +124,9 @@ def init_consumer_repo(
             dry_run=dry_run,
         )
         return result
-    resolved_mcp_base_url = mcp_base_url or "http://127.0.0.1:8000"
+    resolved_mcp_base_url = normalize_instance_base_url(
+        mcp_base_url or DEFAULT_BASE_URL
+    )
     files = {
         root / ".mcp.json": _mcp_json(resolved_mcp_base_url),
         root / ".cursor" / "mcp.json": _cursor_mcp_json(resolved_mcp_base_url),
@@ -377,6 +380,7 @@ _CONVENTIONS_TARGETS: tuple[tuple[str, str, str], ...] = (
 def update_consumer_repo(
     target: str | Path = ".",
     *,
+    mcp_base_url: str | None = None,
     yes: bool = False,
     dry_run: bool = False,
     install_skills: bool = False,
@@ -396,10 +400,15 @@ def update_consumer_repo(
     if not dry_run:
         root.mkdir(parents=True, exist_ok=True)
     result = InitResult()
+    resolved_mcp_base_url = normalize_instance_base_url(
+        mcp_base_url or DEFAULT_BASE_URL
+    )
     files = {
-        root / ".mcp.json": _mcp_json(),
-        root / ".cursor" / "mcp.json": _cursor_mcp_json(),
-        root / ".gemini" / "settings.json": _gemini_settings_json(),
+        root / ".mcp.json": _mcp_json(resolved_mcp_base_url),
+        root / ".cursor" / "mcp.json": _cursor_mcp_json(resolved_mcp_base_url),
+        root / ".gemini" / "settings.json": _gemini_settings_json(
+            resolved_mcp_base_url
+        ),
         root / ".claude" / "settings.json": _claude_settings_json(),
         root / "scripts" / "lt.py": _lt_shim(),
         root / "AGENTS.lt.md": _agents_fragment(),
@@ -783,9 +792,13 @@ def main(argv: list[str] | None = None) -> None:
 
     args = parser.parse_args(argv)
     if args.command == "init":
+        from lab_tracker_client.setup import resolved_base_url_for_setup
+
+        mcp_base_url, _ = resolved_base_url_for_setup()
         result = init_consumer_repo(
             args.target,
             project_name=args.project_name,
+            mcp_base_url=mcp_base_url,
             force=args.force,
             yes=args.yes,
             dry_run=args.dry_run,
@@ -795,8 +808,12 @@ def main(argv: list[str] | None = None) -> None:
         print(json.dumps(result.as_dict(), indent=2))
         _print_init_warnings(result)
     elif args.command == "update":
+        from lab_tracker_client.setup import resolved_base_url_for_setup
+
+        mcp_base_url, _ = resolved_base_url_for_setup()
         result = update_consumer_repo(
             args.target,
+            mcp_base_url=mcp_base_url,
             yes=args.yes,
             dry_run=args.dry_run,
             install_skills=args.install_skills,
@@ -1163,13 +1180,14 @@ def _doctor_exit_code(payload: object) -> int:
     return 0 if all_targets_clean else 1
 
 
-def _mcp_json(base_url: str = "http://127.0.0.1:8000") -> str:
+def _mcp_json(base_url: str = DEFAULT_BASE_URL) -> str:
+    base_url = normalize_instance_base_url(base_url)
     payload = {
         "mcpServers": {
             "lab-tracker": {
                 "command": "lt-mcp",
                 "env": {
-                    "LAB_TRACKER_MCP_BASE_URL": base_url,
+                    "LAB_TRACKER_BASE_URL": base_url,
                 },
             }
         }
@@ -1177,7 +1195,7 @@ def _mcp_json(base_url: str = "http://127.0.0.1:8000") -> str:
     return json.dumps(payload, indent=2) + "\n"
 
 
-def _cursor_mcp_json(base_url: str = "http://127.0.0.1:8000") -> str:
+def _cursor_mcp_json(base_url: str = DEFAULT_BASE_URL) -> str:
     # Cursor reads project MCP config from .cursor/mcp.json using the same
     # top-level `mcpServers` shape as .mcp.json (it does not auto-read root
     # .mcp.json, and it does not use Copilot's `servers` schema). Keep the two
@@ -1185,7 +1203,7 @@ def _cursor_mcp_json(base_url: str = "http://127.0.0.1:8000") -> str:
     return _mcp_json(base_url)
 
 
-def _gemini_settings_json(base_url: str = "http://127.0.0.1:8000") -> str:
+def _gemini_settings_json(base_url: str = DEFAULT_BASE_URL) -> str:
     # Gemini CLI reads project settings from .gemini/settings.json and accepts
     # the same top-level `mcpServers` shape (it does not auto-read root
     # .mcp.json). Only the MCP entry is written; Gemini CLI merges project

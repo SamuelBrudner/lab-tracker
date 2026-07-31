@@ -11,6 +11,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
@@ -27,6 +28,10 @@ def main() -> int:
     args.git_repo = Path(git_repo or ".")
     if not base_url:
         _die("Set --base-url, LAB_TRACKER_BASE_URL, or LAB_TRACKER_MCP_BASE_URL.")
+    try:
+        base_url = _normalize_base_url(base_url)
+    except ValueError as exc:
+        _die(str(exc))
     if args.evidence_file and args.git_commit:
         _die("Provide only one evidence source: --evidence-file or --git-commit.")
     if not args.note_id:
@@ -36,7 +41,7 @@ def main() -> int:
             _die("Provide --note-id, or create a note with --evidence-file or --git-commit.")
 
     timeout = httpx.Timeout(args.timeout_seconds)
-    with httpx.Client(base_url=base_url.rstrip("/"), timeout=timeout) as client:
+    with httpx.Client(base_url=base_url, timeout=timeout) as client:
         headers = _auth_headers(client, args)
         note_id = args.note_id
         if note_id is None:
@@ -49,6 +54,37 @@ def main() -> int:
 
     print(json.dumps({"note_id": note_id, "change_set": draft}, indent=2, sort_keys=True))
     return 0
+
+
+def _normalize_base_url(value: str) -> str:
+    """Mirror the package URL invariant without requiring the package import."""
+
+    cleaned = value.strip()
+    try:
+        parsed = urlsplit(cleaned)
+        hostname = parsed.hostname
+        _ = parsed.port
+    except ValueError as exc:
+        raise ValueError("LAB_TRACKER_BASE_URL is not a valid URL.") from exc
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not parsed.netloc
+        or not hostname
+    ):
+        raise ValueError(
+            "LAB_TRACKER_BASE_URL must be an absolute http:// or https:// URL."
+        )
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("LAB_TRACKER_BASE_URL must not contain credentials.")
+    if parsed.query or parsed.fragment:
+        raise ValueError("LAB_TRACKER_BASE_URL must not contain a query or fragment.")
+    path = parsed.path.rstrip("/")
+    if path not in {"", "/app"}:
+        raise ValueError(
+            "LAB_TRACKER_BASE_URL must be an origin with no path; a trailing "
+            "/app browser route is accepted and removed."
+        )
+    return urlunsplit((parsed.scheme.lower(), parsed.netloc, "", "", ""))
 
 
 def _parse_args() -> argparse.Namespace:
