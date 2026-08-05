@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
@@ -190,6 +191,8 @@ class GraphDraftGenerationCoordinator(BaseService):
         mode: GraphDraftMode = GraphDraftMode.GRAPH_CONTEXT,
         user_hint: str | None = None,
         actor: AuthContext | None = None,
+        max_attempts: int = DEFAULT_BATCH_RETRY_ATTEMPTS,
+        retry_backoff_seconds: float = 0.0,
     ) -> GraphChangeSet:
         prepared = self.context_builder.prepare_note_sources_for_graph_draft(note_id, mode=mode)
         note = prepared["source_note"]
@@ -229,20 +232,26 @@ class GraphDraftGenerationCoordinator(BaseService):
         )
         self.records.save_graph_change_set(change_set)
         try:
-            graph_patch = self._draft_graph_patch(
-                draft_client,
-                graph_context=context_packet,
-                user_hint=cleaned_hint,
-                draft_mode=mode,
-                source_artifacts=prepared["source_artifacts"],
-                image_bytes=prepared["image_bytes"],
-                image_content_type=prepared["image_content_type"],
+            generated = self._draft_validated_patch_with_retries(
+                change_set=change_set,
+                context_packet=context_packet,
+                draft=lambda attempt_context: self._draft_graph_patch(
+                    draft_client,
+                    graph_context=attempt_context,
+                    user_hint=cleaned_hint,
+                    draft_mode=mode,
+                    source_artifacts=prepared["source_artifacts"],
+                    image_bytes=prepared["image_bytes"],
+                    image_content_type=prepared["image_content_type"],
+                ),
+                max_attempts=max_attempts,
+                retry_backoff_seconds=retry_backoff_seconds,
             )
-            self.patch_validator.validate_top_level(graph_patch)
-            change_set.operations = self.patch_validator.operations_from_graph_patch(
-                change_set,
-                graph_patch,
-            )
+            if generated is None:
+                change_set.status = GraphChangeSetStatus.FAILED
+                return change_set
+            graph_patch, operations = generated
+            change_set.operations = operations
             change_set.summary = str(graph_patch.get("summary") or "")
             change_set.uncertain_fields = string_list(graph_patch.get("uncertain_fields"))
             change_set.clarification_requests = string_list(
@@ -250,11 +259,6 @@ class GraphDraftGenerationCoordinator(BaseService):
             )
             change_set.status = GraphChangeSetStatus.READY
             change_set.error_metadata = {}
-        except GraphDraftingError as exc:
-            change_set.status = GraphChangeSetStatus.FAILED
-            change_set.error_metadata = {
-                "message": provider_error_message(exc),
-            }
         finally:
             change_set.updated_at = utc_now()
             self.records.save_graph_change_set(change_set)
@@ -266,6 +270,8 @@ class GraphDraftGenerationCoordinator(BaseService):
         *,
         draft_client: GraphDraftClient,
         actor: AuthContext | None = None,
+        max_attempts: int = DEFAULT_BATCH_RETRY_ATTEMPTS,
+        retry_backoff_seconds: float = 0.0,
     ) -> GraphChangeSet:
         note = self.notes.get_note(note_id)
         self.authorization.require_contributor(note.project_id, actor=actor)
@@ -298,15 +304,21 @@ class GraphDraftGenerationCoordinator(BaseService):
         )
         self.records.save_graph_change_set(change_set)
         try:
-            graph_patch = draft_client.draft_from_analysis_evidence(
-                evidence_text=evidence_text,
-                project_context=context_packet,
+            generated = self._draft_validated_patch_with_retries(
+                change_set=change_set,
+                context_packet=context_packet,
+                draft=lambda attempt_context: draft_client.draft_from_analysis_evidence(
+                    evidence_text=evidence_text,
+                    project_context=attempt_context,
+                ),
+                max_attempts=max_attempts,
+                retry_backoff_seconds=retry_backoff_seconds,
             )
-            self.patch_validator.validate_top_level(graph_patch)
-            change_set.operations = self.patch_validator.operations_from_graph_patch(
-                change_set,
-                graph_patch,
-            )
+            if generated is None:
+                change_set.status = GraphChangeSetStatus.FAILED
+                return change_set
+            graph_patch, operations = generated
+            change_set.operations = operations
             change_set.summary = str(graph_patch.get("summary") or "")
             change_set.uncertain_fields = string_list(graph_patch.get("uncertain_fields"))
             change_set.clarification_requests = string_list(
@@ -314,15 +326,69 @@ class GraphDraftGenerationCoordinator(BaseService):
             )
             change_set.status = GraphChangeSetStatus.READY
             change_set.error_metadata = {}
-        except GraphDraftingError as exc:
-            change_set.status = GraphChangeSetStatus.FAILED
-            change_set.error_metadata = {
-                "message": provider_error_message(exc),
-            }
         finally:
             change_set.updated_at = utc_now()
             self.records.save_graph_change_set(change_set)
         return change_set
+
+    def _draft_validated_patch_with_retries(
+        self,
+        *,
+        change_set: GraphChangeSet,
+        context_packet: dict[str, Any],
+        draft: Callable[[dict[str, Any]], dict[str, Any]],
+        max_attempts: int,
+        retry_backoff_seconds: float,
+    ) -> tuple[dict[str, Any], list[GraphChangeOperation]] | None:
+        """Generate a valid patch with bounded, trusted schema feedback."""
+
+        attempts = max(1, max_attempts)
+        attempt_context = context_packet
+        last_error: GraphDraftingError | None = None
+        last_error_category = "model_error"
+        for attempt in range(1, attempts + 1):
+            try:
+                graph_patch = draft(attempt_context)
+            except GraphDraftingError as exc:
+                last_error = exc
+                last_error_category = "model_error"
+            else:
+                try:
+                    self.patch_validator.validate_top_level(graph_patch)
+                    operations = self.patch_validator.operations_from_graph_patch(
+                        change_set,
+                        graph_patch,
+                    )
+                except GraphDraftingError as exc:
+                    last_error = exc
+                    last_error_category = "validation_error"
+                    attempt_context = {
+                        **context_packet,
+                        "generation_retry_feedback": {
+                            "attempt": attempt,
+                            "error": provider_error_message(exc),
+                            "instruction": (
+                                "Return a new complete graph patch whose operation "
+                                "payload_json objects satisfy the trusted Lab Tracker "
+                                "API payload contract."
+                            ),
+                        },
+                    }
+                else:
+                    return graph_patch, operations
+            if attempt < attempts and retry_backoff_seconds > 0:
+                time.sleep(retry_backoff_seconds * attempt)
+
+        change_set.error_metadata = {
+            "category": last_error_category,
+            "message": (
+                provider_error_message(last_error)
+                if last_error is not None
+                else "Model did not return a patch."
+            ),
+            "attempts": attempts,
+        }
+        return None
 
     def create_batch_graph_draft(
         self,
