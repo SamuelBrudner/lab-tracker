@@ -1109,7 +1109,7 @@ def test_analysis_note_draft_stores_operations_and_context(
     payload = response.json()["data"]
     assert payload["status"] == "ready"
     assert payload["draft_mode"] == "graph_context"
-    assert payload["prompt_version"] == "analysis-graph-draft-v2"
+    assert payload["prompt_version"] == "analysis-graph-draft-v3"
     assert payload["source_note_id"] == note_id
     assert payload["source_content_type"] == "text/markdown"
     assert payload["context_packet"]["project"]["id"] == project_id
@@ -1903,6 +1903,82 @@ def test_malformed_or_unsupported_gpt_patch_returns_stored_failed_draft(
     payload = response.json()["data"]
     assert payload["status"] == "failed"
     assert "invalid" in payload["error_metadata"]["message"]
+    assert payload["error_metadata"]["category"] == "validation_error"
+    assert payload["error_metadata"]["attempts"] == 3
+
+
+def test_graph_context_draft_retries_schema_invalid_payload_with_trusted_feedback(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    note_id = _image_note(client, admin_auth_headers, project_id)
+    invalid_patch = _draft_patch(project_id)
+    invalid_patch["operations"][0]["payload_json"] = json.dumps(
+        {
+            "project_id": project_id,
+            "question_id": "display-only-id",
+            "preview": "Does the new protocol improve yield?",
+            "question_type": "descriptive",
+        }
+    )
+
+    class RepairingDraftClient(FakeDraftClient):
+        def draft_from_note(self, **kwargs: Any) -> dict[str, Any]:
+            self.calls.append(kwargs)
+            return invalid_patch if len(self.calls) == 1 else self.patch
+
+    fake_client = RepairingDraftClient(_draft_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: fake_client
+
+    response = client.post(f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers)
+
+    assert response.status_code == 201
+    payload = response.json()["data"]
+    assert payload["status"] == "ready"
+    assert len(fake_client.calls) == 2
+    retry_context = fake_client.calls[1]["graph_context"]
+    feedback = retry_context["generation_retry_feedback"]
+    assert feedback["attempt"] == 1
+    assert "text: Field required" in feedback["error"]
+    assert "generation_retry_feedback" not in payload["context_packet"]
+
+
+def test_analysis_draft_retries_schema_invalid_payload_with_trusted_feedback(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    note_id = _analysis_note(client, admin_auth_headers, project_id)
+    invalid_patch = _draft_patch(project_id)
+    invalid_patch["operations"][0]["payload_json"] = json.dumps(
+        {
+            "project_id": project_id,
+            "title": "Does the new protocol improve yield?",
+            "question_type": "broad",
+        }
+    )
+
+    class RepairingAnalysisDraftClient(FakeDraftClient):
+        def draft_from_analysis_evidence(self, **kwargs: Any) -> dict[str, Any]:
+            self.calls.append(kwargs)
+            return invalid_patch if len(self.calls) == 1 else self.patch
+
+    fake_client = RepairingAnalysisDraftClient(_draft_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: fake_client
+
+    response = client.post(
+        f"/notes/{note_id}/analysis-graph-drafts",
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 201
+    payload = response.json()["data"]
+    assert payload["status"] == "ready"
+    assert len(fake_client.calls) == 2
+    retry_context = fake_client.calls[1]["project_context"]
+    assert "text: Field required" in retry_context["generation_retry_feedback"]["error"]
+    assert "generation_retry_feedback" not in payload["context_packet"]
 
 
 def test_generic_semantic_entity_operations_validate_operation_direction(
@@ -2070,7 +2146,7 @@ def test_edit_accept_and_commit_resolves_refs_into_canonical_records(
     assert question_payload["change_set_id"] == change_set_id
     assert question_payload["origin_provider"] == "openai"
     assert question_payload["origin_model"] == "fake-gpt"
-    assert question_payload["origin_prompt_version"] == "multimodal-graph-draft-v2"
+    assert question_payload["origin_prompt_version"] == "multimodal-graph-draft-v3"
 
     notes = client.get(
         f"/notes?project_id={project_id}&target_entity_type=question&target_entity_id={question_id}",
@@ -2357,7 +2433,7 @@ def test_revise_graph_draft_regenerates_operations_from_feedback(
     assert len(body["operations"]) == 1
     assert all(op["status"] == "proposed" for op in body["operations"])
     assert body["summary"].startswith("Revised per reviewer")
-    assert body["prompt_version"] == "multimodal-graph-draft-v2"
+    assert body["prompt_version"] == "multimodal-graph-draft-v3"
     assert body["operations"][0]["source_refs"][0]["source_note_ids"] == [note_id]
     assert (
         body["operations"][0]["source_refs"][0]["source_note_ids_resolution"]

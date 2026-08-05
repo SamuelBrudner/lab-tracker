@@ -14,9 +14,12 @@ from lab_tracker.graph_drafting import (
     PROMPT_VERSION,
     GraphDraftingError,
     _analysis_instructions,
+    _analysis_prompt_text,
     _batch_instructions,
     _batch_prompt_text,
     _instructions,
+    _note_prompt_text,
+    graph_draft_payload_contract,
     graph_patch_response_schema,
 )
 from lab_tracker.models import (
@@ -153,14 +156,48 @@ def test_graph_patch_response_schema_requires_non_empty_source_note_ids() -> Non
 
 
 def test_graph_draft_prompt_versions_and_source_ref_contract_are_updated() -> None:
-    assert PROMPT_VERSION == "multimodal-graph-draft-v2"
-    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v4"
-    assert ANALYSIS_PROMPT_VERSION == "analysis-graph-draft-v2"
+    assert PROMPT_VERSION == "multimodal-graph-draft-v3"
+    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v5"
+    assert ANALYSIS_PROMPT_VERSION == "analysis-graph-draft-v3"
     for instructions in (_instructions(), _batch_instructions(), _analysis_instructions()):
         assert "source_note_ids" in instructions
         assert "never invent" in instructions.lower()
+        assert "trusted_api_payload_contract" in instructions
     assert "non-empty raw_content" in _batch_instructions()
     assert "metadata.title" in _batch_instructions()
+
+
+def test_graph_draft_payload_contract_covers_production_failure_fields() -> None:
+    entities = graph_draft_payload_contract()["entities"]
+
+    assert entities["question"]["create"]["required_fields"] == [
+        "project_id",
+        "text",
+        "question_type",
+    ]
+    assert entities["question"]["create"]["controlled_values"]["question_type"] == [
+        "descriptive",
+        "hypothesis_driven",
+        "method_dev",
+        "other",
+    ]
+    assert entities["goal"]["create"]["required_fields"] == ["goal_type", "title"]
+    assert entities["dataset"]["create"]["required_fields"] == [
+        "project_id",
+        "primary_question_id",
+    ]
+    assert entities["analysis"]["create"]["required_fields"] == [
+        "project_id",
+        "dataset_ids",
+        "method_hash",
+        "code_version",
+    ]
+    assert entities["note"]["create"]["required_fields"] == [
+        "project_id",
+        "raw_content",
+    ]
+    for forbidden in ("question_id", "note_id", "preview", "label"):
+        assert forbidden not in entities["question"]["create"]["allowed_fields"]
 
 
 @pytest.mark.parametrize("content_field", ["text", "content", "body"])
@@ -326,6 +363,52 @@ def test_batch_prompt_keeps_retry_feedback_outside_untrusted_context() -> None:
     assert "generation_retry_feedback" not in untrusted_payload
     assert json.loads(untrusted_payload) == {"batch_notes": batch_context["batch_notes"]}
     assert batch_context["generation_retry_feedback"] == feedback
+
+
+@pytest.mark.parametrize(
+    ("prompt_builder", "context_marker"),
+    [
+        (
+            lambda context: _note_prompt_text(
+                draft_mode="graph_context",
+                user_hint=None,
+                source_artifacts=[{"note_id": "source-1", "raw_content_preview": "x"}],
+                context=context,
+            ),
+            "untrusted_graph_context",
+        ),
+        (
+            lambda context: _analysis_prompt_text(
+                evidence_text="result",
+                project_context=context,
+            ),
+            "untrusted_project_context",
+        ),
+    ],
+)
+def test_non_batch_prompts_keep_retry_feedback_outside_untrusted_context(
+    prompt_builder: Any,
+    context_marker: str,
+) -> None:
+    feedback = {
+        "attempt": 1,
+        "error": "Operation payload failed API validation: text: Field required",
+        "instruction": "Return a new complete graph patch.",
+    }
+    context = {
+        "project": {"id": "project-1"},
+        "generation_retry_feedback": feedback,
+    }
+
+    prompt = prompt_builder(context)
+
+    trusted_prefix, untrusted_tail = prompt.split(f"<{context_marker}>\n", 1)
+    untrusted_payload, _ = untrusted_tail.split(f"\n</{context_marker}>", 1)
+    assert "Trusted server validation feedback from the prior attempt" in trusted_prefix
+    assert feedback["error"] in trusted_prefix
+    assert "generation_retry_feedback" not in untrusted_payload
+    assert json.loads(untrusted_payload) == {"project": context["project"]}
+    assert context["generation_retry_feedback"] == feedback
 
 
 def test_graph_patch_validator_preserves_explicit_source_note_ids() -> None:
@@ -802,4 +885,4 @@ def test_batch_instructions_are_narrative_first_with_terse_capture_guardrail() -
     # Stays subordinate to the supported-changes guardrail.
     assert "supported by the source artifacts" in instructions
     # The summary contract changed (now a narrative), so the version bumps.
-    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v4"
+    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v5"
