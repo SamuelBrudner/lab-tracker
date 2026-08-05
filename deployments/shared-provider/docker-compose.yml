@@ -1,0 +1,25 @@
+services:
+  app:
+    image: ${LAB_TRACKER_RELEASE_IMAGE:?Set LAB_TRACKER_RELEASE_IMAGE to a reviewed immutable image}
+    # A pinned deployment must never rebuild or retag its release image from the
+    # current checkout, including when an operator passes --build.
+    build: !reset null
+    env_file:
+      - path: ${LAB_TRACKER_PROVIDER_ENV_FILE:-./deployments/shared-provider/.env}
+        required: true
+      - path: ${LAB_TRACKER_RUNTIME_ENV_FILE:-./deployments/shared-provider/runtime.env}
+        required: true
+
+  mcp:
+    image: ${LAB_TRACKER_RELEASE_IMAGE:?Set LAB_TRACKER_RELEASE_IMAGE to a reviewed immutable image}
+    build: !reset null
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import socket; connection = socket.create_connection(("127.0.0.1", 8000), timeout=3); connection.close()
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s

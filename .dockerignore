@@ -5,6 +5,7 @@ lab_tracker.db
 *.db
 .env
 deployments/shared-provider/.env
+deployments/shared-provider/runtime.env
 __pycache__
 .pytest_cache
 .coverage
