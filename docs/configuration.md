@@ -821,13 +821,25 @@ MCP setup guides ([`lab-tracker-mcp-skills.md`](lab-tracker-mcp-skills.md),
 The hosted read-only MCP endpoint (the optional `mcp` docker-compose service)
 adds:
 
-- `LT_MCP_READONLY_TOKEN`: required bearer token for the hosted endpoint
+- `LT_MCP_READONLY_TOKEN`: required read-only `lpat_` used only by the MCP
+  service when it calls the Lab Tracker API
+- `LT_MCP_INBOUND_TOKEN`: required distinct random bearer token remote MCP
+  clients send to the hosted endpoint; generate one with `openssl rand -hex 32`
+- `LAB_TRACKER_MCP_INBOUND_TOKEN`: runtime form of the inbound token, required
+  whenever `LAB_TRACKER_MCP_TRANSPORT=streamable-http`; it must contain 32-512
+  visible ASCII characters without whitespace
 - `LAB_TRACKER_MCP_TRANSPORT`: `stdio` (default) or `streamable-http`
 - `LAB_TRACKER_MCP_HOST` / `LAB_TRACKER_MCP_PORT` / `LAB_TRACKER_MCP_PATH`: bind
   host, port, and path for `streamable-http` (defaults: `127.0.0.1`, `8000`,
   `/mcp`)
 - `LAB_TRACKER_MCP_HOST_PORT`: host loopback port the compose `mcp` service is
   published on (default: `9000`)
+
+The process refuses to start if the inbound token is absent, weak, or equal to
+the API LPAT. Requests with missing or invalid inbound credentials receive 401
+before FastMCP dispatch, and the inbound `Authorization` header is stripped
+before the downstream app runs. This is a shared private endpoint, not per-user
+authorization; serve it only through TLS on a VPN or tailnet.
 
 ### Export-only Dolt mirror
 
