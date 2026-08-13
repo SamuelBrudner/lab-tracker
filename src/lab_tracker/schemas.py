@@ -1271,6 +1271,116 @@ class ProjectGraphRead(BaseModel):
     edges: list[ProjectGraphEdge]
 
 
+PersistedGraphEntityType = Literal[
+    "question",
+    "session",
+    "note",
+    "dataset",
+    "analysis",
+    "claim",
+    "exploration_node",
+    "visualization",
+    "goal",
+]
+GraphEntityType = Literal[
+    "question",
+    "session",
+    "note",
+    "dataset",
+    "analysis",
+    "claim",
+    "exploration_node",
+    "external_artifact",
+    "visualization",
+    "goal",
+]
+GraphTraversalDirection = Literal["incoming", "outgoing", "both"]
+
+
+class GraphNodeSummary(BaseModel):
+    id: str
+    entity_type: GraphEntityType
+    entity_id: str
+    label: str
+    detail: str | None = None
+    status: str | None = None
+    route: str | None = None
+    updated_at: datetime | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class GraphEntityCount(BaseModel):
+    total: int = Field(..., ge=0)
+    by_status: dict[str, int] = Field(default_factory=dict)
+
+
+class GraphProjectSummary(BaseModel):
+    project_id: UUID
+    name: str
+    description: str
+    status: ProjectStatus
+    updated_at: datetime
+
+
+class GraphOverviewRead(BaseModel):
+    project: GraphProjectSummary
+    counts: dict[PersistedGraphEntityType, GraphEntityCount]
+    open_goals: list[GraphNodeSummary] = Field(default_factory=list)
+    open_questions: list[GraphNodeSummary] = Field(default_factory=list)
+    recent_nodes: list[GraphNodeSummary] = Field(default_factory=list)
+
+
+class GraphSearchHit(BaseModel):
+    node: GraphNodeSummary
+    snippet: str
+    match_reasons: list[str]
+
+
+class GraphSearchRead(BaseModel):
+    project_id: UUID
+    query: str
+    items: list[GraphSearchHit] = Field(default_factory=list)
+    limit: int = Field(..., ge=1, le=100)
+    offset: int = Field(..., ge=0)
+    has_more: bool = False
+    next_offset: int | None = Field(default=None, ge=0)
+
+
+class GraphRelationshipSemantics(BaseModel):
+    kind: Literal["direct", "qualified"]
+    direction: Literal["source_to_target", "target_to_source"]
+    predicate_iri: str | None = None
+    class_iri: str | None = None
+    concept_iris: list[str] = Field(default_factory=list)
+    additional_concept_schemes: list[str] = Field(default_factory=list)
+    classification_predicate_iri: str | None = None
+
+
+class GraphNeighborhoodEdge(ProjectGraphEdge):
+    semantics: GraphRelationshipSemantics
+
+
+class GraphTraversalTruncation(BaseModel):
+    truncated: bool
+    node_limit_reached: bool
+    edge_limit_reached: bool
+    expansion_stopped: bool
+
+
+class GraphNeighborhoodRead(BaseModel):
+    project_id: UUID
+    direction: GraphTraversalDirection
+    requested_depth: int = Field(..., ge=1, le=2)
+    reached_depth: int = Field(..., ge=0, le=2)
+    anchor: GraphNodeSummary
+    anchor_content: str | None = None
+    anchor_content_truncated: bool = False
+    nodes: list[GraphNodeSummary] = Field(default_factory=list)
+    edges: list[GraphNeighborhoodEdge] = Field(default_factory=list)
+    truncation: GraphTraversalTruncation
+
+
+
 class SearchResults(BaseModel):
     questions: list[Question] = Field(default_factory=list)
     notes: list[Note] = Field(default_factory=list)

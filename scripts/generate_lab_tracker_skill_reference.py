@@ -49,6 +49,9 @@ LIST_ENDPOINTS = (
     "/visualizations",
     "/graph-drafts",
     "/search",
+    "/projects/{project_id}/graph/overview",
+    "/projects/{project_id}/graph/search",
+    "/projects/{project_id}/graph/neighborhood/{entity_type}/{entity_id}",
 )
 
 

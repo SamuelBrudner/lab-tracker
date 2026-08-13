@@ -887,3 +887,382 @@ def test_project_graph_routes_are_opaque_to_outsiders_but_require_authentication
     }
     assert mermaid_response.json() == missing_mermaid.json() == graph_response.json()
     assert unauthenticated_response.status_code == 401
+
+
+def test_graph_overview_is_bounded_and_counts_persisted_types(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    ids = _create_graph_fixture(client, admin_auth_headers)
+
+    response = client.get(
+        f"/projects/{ids['project_id']}/graph/overview",
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["project"]["project_id"] == ids["project_id"]
+    assert data["counts"]["question"]["total"] == 3
+    assert data["counts"]["session"]["total"] == 2
+    assert data["counts"]["exploration_node"]["total"] == 3
+    assert data["counts"]["visualization"] == {"total": 1, "by_status": {}}
+    assert len(data["open_goals"]) <= 5
+    assert len(data["open_questions"]) <= 5
+    assert len(data["recent_nodes"]) <= 10
+
+
+def test_graph_search_ranks_and_filters_cross_entity_hits(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    ids = _create_graph_fixture(client, admin_auth_headers)
+
+    exact = client.get(
+        f"/projects/{ids['project_id']}/graph/search",
+        params={"q": "Graph paper"},
+        headers=admin_auth_headers,
+    )
+    wildcard = client.get(
+        f"/projects/{ids['project_id']}/graph/search",
+        params={"q": "%_", "entity_types": "question"},
+        headers=admin_auth_headers,
+    )
+    filtered = client.get(
+        f"/projects/{ids['project_id']}/graph/search",
+        params={
+            "q": "Evidence",
+            "entity_types": ["claim", "exploration_node"],
+            "statuses": ["supported"],
+        },
+        headers=admin_auth_headers,
+    )
+
+    assert exact.status_code == wildcard.status_code == filtered.status_code == 200
+    exact_item = exact.json()["data"]["items"][0]
+    assert exact_item["node"]["id"] == f"goal:{ids['goal_id']}"
+    assert exact_item["match_reasons"] == ["exact_title", "field:title"]
+    assert wildcard.json()["data"]["items"] == []
+    assert [item["node"]["entity_type"] for item in filtered.json()["data"]["items"]] == ["claim"]
+
+
+def test_graph_neighborhood_traverses_typed_edges_without_full_graph_materialization(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    ids = _create_graph_fixture(client, admin_auth_headers)
+
+    response = client.get(
+        f"/projects/{ids['project_id']}/graph/neighborhood/claim/{ids['claim_id']}",
+        params={
+            "direction": "both",
+            "depth": 2,
+            "max_nodes": 50,
+            "max_edges": 100,
+            "include_anchor_content": True,
+        },
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["anchor"]["id"] == f"claim:{ids['claim_id']}"
+    assert "Evidence supports the claim" in data["anchor_content"]
+    assert data["anchor_content_truncated"] is False
+    relationships = {edge["relationship"] for edge in data["edges"]}
+    assert {
+        "claim_dataset_support",
+        "claim_analysis_support",
+        "claim_question_answers",
+        "exploration_target",
+        "exploration_evidence",
+        "visualization_claim",
+    }.issubset(relationships)
+    semantic_edge = next(
+        edge for edge in data["edges"] if edge["relationship"] == "claim_dataset_support"
+    )
+    assert semantic_edge["semantics"]["kind"] == "direct"
+    assert semantic_edge["semantics"]["predicate_iri"]
+
+
+def test_graph_neighborhood_project_mismatch_is_opaque(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    ids = _create_graph_fixture(client, admin_auth_headers)
+    other_project_id = client.post(
+        "/projects",
+        json={"name": "Other graph"},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+
+    response = client.get(
+        f"/projects/{other_project_id}/graph/neighborhood/claim/{ids['claim_id']}",
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["message"] == "Project does not exist."
+
+
+def test_graph_overview_empty_project_and_entry_points_are_deterministic(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    empty_project_id = client.post(
+        "/projects",
+        json={"name": "Empty graph"},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    empty = client.get(
+        f"/projects/{empty_project_id}/graph/overview",
+        headers=admin_auth_headers,
+    )
+
+    assert empty.status_code == 200
+    empty_data = empty.json()["data"]
+    assert all(count["total"] == 0 for count in empty_data["counts"].values())
+    assert empty_data["open_goals"] == []
+    assert empty_data["open_questions"] == []
+    assert empty_data["recent_nodes"] == []
+
+    ids = _create_graph_fixture(client, admin_auth_headers)
+    for index in range(7):
+        question = client.post(
+            "/questions",
+            json={
+                "project_id": ids["project_id"],
+                "text": f"Bounded overview question {index}",
+                "question_type": "descriptive",
+                "status": "active",
+            },
+            headers=admin_auth_headers,
+        )
+        assert question.status_code == 201
+        goal = client.post(
+            f"/projects/{ids['project_id']}/goals",
+            json={"goal_type": "paper", "title": f"Bounded overview goal {index}"},
+            headers=admin_auth_headers,
+        )
+        assert goal.status_code == 201
+
+    first = client.get(
+        f"/projects/{ids['project_id']}/graph/overview",
+        headers=admin_auth_headers,
+    ).json()["data"]
+    second = client.get(
+        f"/projects/{ids['project_id']}/graph/overview",
+        headers=admin_auth_headers,
+    ).json()["data"]
+
+    assert len(first["open_goals"]) == 5
+    assert len(first["open_questions"]) == 5
+    assert len(first["recent_nodes"]) == 10
+    assert first == second
+
+
+def test_graph_search_covers_all_types_ranking_pagination_unicode_and_snippets(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    ids = _create_graph_fixture(client, admin_auth_headers)
+    dataset = client.get(
+        f"/datasets/{ids['dataset_id']}",
+        headers=admin_auth_headers,
+    ).json()["data"]
+    queries = {
+        "question": "linked",
+        "session": ids["scientific_session_id"],
+        "note": "Figure note",
+        "dataset": dataset["commit_hash"],
+        "analysis": "code-1",
+        "claim": "supports the claim",
+        "exploration_node": "committed analysis",
+        "visualization": "Main figure",
+        "goal": "Graph paper",
+    }
+    for entity_type, query in queries.items():
+        response = client.get(
+            f"/projects/{ids['project_id']}/graph/search",
+            params={"q": query, "entity_types": entity_type},
+            headers=admin_auth_headers,
+        )
+        assert response.status_code == 200, (entity_type, response.text)
+        assert response.json()["data"]["items"][0]["node"]["entity_type"] == entity_type
+
+    ranking_ids = []
+    for text in (
+        "Rank target",
+        "Rank target prefix extension",
+        "Before rank target substring",
+    ):
+        response = client.post(
+            "/questions",
+            json={
+                "project_id": ids["project_id"],
+                "text": text,
+                "question_type": "descriptive",
+                "status": "active",
+            },
+            headers=admin_auth_headers,
+        )
+        assert response.status_code == 201
+        ranking_ids.append(response.json()["data"]["question_id"])
+    ranked = client.get(
+        f"/projects/{ids['project_id']}/graph/search",
+        params={"q": "Rank target", "entity_types": "question"},
+        headers=admin_auth_headers,
+    ).json()["data"]["items"]
+    assert [item["node"]["entity_id"] for item in ranked[:3]] == ranking_ids
+    assert [item["match_reasons"][0] for item in ranked[:3]] == [
+        "exact_title",
+        "prefix",
+        "substring",
+    ]
+
+    long_text = "α" * 500 + " Δresponse " + "β" * 500
+    note = client.post(
+        "/notes",
+        json={"project_id": ids["project_id"], "raw_content": long_text},
+        headers=admin_auth_headers,
+    )
+    assert note.status_code == 201
+    unicode_result = client.get(
+        f"/projects/{ids['project_id']}/graph/search",
+        params={"q": "Δresponse", "entity_types": "note"},
+        headers=admin_auth_headers,
+    ).json()["data"]["items"][0]
+    assert "Δresponse" in unicode_result["snippet"]
+    assert len(unicode_result["snippet"]) <= 280
+
+    first_page = client.get(
+        f"/projects/{ids['project_id']}/graph/search",
+        params={"q": "linked", "limit": 1},
+        headers=admin_auth_headers,
+    ).json()["data"]
+    assert first_page["has_more"] is True
+    assert first_page["next_offset"] == 1
+    second_page = client.get(
+        f"/projects/{ids['project_id']}/graph/search",
+        params={"q": "linked", "limit": 1, "offset": first_page["next_offset"]},
+        headers=admin_auth_headers,
+    ).json()["data"]
+    assert second_page["items"][0]["node"]["id"] != first_page["items"][0]["node"]["id"]
+
+
+def test_graph_neighborhood_direction_filters_cycles_and_truncation_are_deterministic(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    ids = _create_graph_fixture(client, admin_auth_headers)
+    base_path = (
+        f"/projects/{ids['project_id']}/graph/neighborhood/claim/{ids['claim_id']}"
+    )
+    outgoing = client.get(
+        base_path,
+        params={
+            "direction": "outgoing",
+            "relationships": "claim_question_answers",
+            "node_types": "question",
+        },
+        headers=admin_auth_headers,
+    ).json()["data"]
+    incoming = client.get(
+        base_path,
+        params={
+            "direction": "incoming",
+            "relationships": "claim_analysis_support",
+            "node_types": "analysis",
+        },
+        headers=admin_auth_headers,
+    ).json()["data"]
+    assert {edge["relationship"] for edge in outgoing["edges"]} == {
+        "claim_question_answers"
+    }
+    assert {node["entity_type"] for node in outgoing["nodes"]} == {"question"}
+    assert {edge["relationship"] for edge in incoming["edges"]} == {
+        "claim_analysis_support"
+    }
+    assert {node["entity_type"] for node in incoming["nodes"]} == {"analysis"}
+
+    params = {"depth": 2, "max_nodes": 2, "max_edges": 100}
+    first = client.get(base_path, params=params, headers=admin_auth_headers).json()["data"]
+    second = client.get(base_path, params=params, headers=admin_auth_headers).json()["data"]
+    assert first == second
+    assert first["truncation"]["truncated"] is True
+    assert first["truncation"]["node_limit_reached"] is True
+    assert len(first["nodes"]) <= 1
+    assert len({node["id"] for node in first["nodes"]}) == len(first["nodes"])
+    assert len({edge["id"] for edge in first["edges"]}) == len(first["edges"])
+
+    invalid_requests = (
+        (base_path, {"depth": 3}),
+        (base_path, {"max_nodes": 201}),
+        (base_path, {"max_edges": 501}),
+        (base_path, {"node_types": "project"}),
+        (base_path, {"relationships": "not_a_relationship"}),
+        (
+            f"/projects/{ids['project_id']}/graph/neighborhood/external_artifact/"
+            f"{ids['claim_id']}",
+            {},
+        ),
+    )
+    for path, invalid_params in invalid_requests:
+        response = client.get(path, params=invalid_params, headers=admin_auth_headers)
+        assert response.status_code == 422, response.text
+
+
+def test_graph_neighborhood_bounds_anchor_content_and_keeps_external_artifacts_as_leaves(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    project_id = client.post(
+        "/projects",
+        json={"name": "Bounded content graph"},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    long_note = client.post(
+        "/notes",
+        json={"project_id": project_id, "raw_content": "x" * 8_001},
+        headers=admin_auth_headers,
+    )
+    assert long_note.status_code == 201
+    note_id = long_note.json()["data"]["note_id"]
+    content = client.get(
+        f"/projects/{project_id}/graph/neighborhood/note/{note_id}",
+        params={"include_anchor_content": True},
+        headers=admin_auth_headers,
+    ).json()["data"]
+    assert len(content["anchor_content"]) == 8_000
+    assert content["anchor_content_truncated"] is True
+
+    citation = {
+        "source_system": "doi",
+        "uri": "doi:10.1101/bounded-graph",
+        "content_hash": "sha256:bounded",
+    }
+    claim = client.post(
+        "/claims",
+        json={
+            "project_id": project_id,
+            "statement": "External evidence is a leaf.",
+            "confidence": 50,
+            "external_citations": [citation],
+        },
+        headers=admin_auth_headers,
+    )
+    assert claim.status_code == 201
+    claim_id = claim.json()["data"]["claim_id"]
+    neighborhood = client.get(
+        f"/projects/{project_id}/graph/neighborhood/claim/{claim_id}",
+        params={"direction": "outgoing", "depth": 2, "relationships": "claim_cites"},
+        headers=admin_auth_headers,
+    ).json()["data"]
+    assert [node["entity_type"] for node in neighborhood["nodes"]] == [
+        "external_artifact"
+    ]
+    assert [edge["relationship"] for edge in neighborhood["edges"]] == ["claim_cites"]
+    assert not any(
+        edge["source"].startswith("external_artifact:")
+        for edge in neighborhood["edges"]
+    )
