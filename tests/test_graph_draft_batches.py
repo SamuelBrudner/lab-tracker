@@ -4,9 +4,6 @@ import json
 from concurrent.futures import (
     ThreadPoolExecutor,
 )
-from concurrent.futures import (
-    TimeoutError as FutureTimeoutError,
-)
 from datetime import datetime, time, timedelta, timezone
 from threading import Event
 from typing import Any
@@ -1207,12 +1204,14 @@ def test_concurrent_inline_run_now_calls_share_one_provider_run(
         assert entered_provider.wait(timeout=5)
         second_future = executor.submit(run_now)
         try:
-            with pytest.raises(FutureTimeoutError):
-                second_future.result(timeout=0.2)
+            # The live claim is visible before provider I/O, so an idempotent
+            # replay can immediately rejoin the RUNNING row instead of waiting
+            # for the first provider call to finish.
+            second = second_future.result(timeout=1)
+            assert second.json()["data"]["status"] == "running"
         finally:
             release_provider.set()
         first = first_future.result(timeout=5)
-        second = second_future.result(timeout=5)
 
     assert first.status_code == 201
     assert second.status_code == 201
@@ -1921,6 +1920,7 @@ def test_agentic_graph_draft_client_uses_read_only_context_trace() -> None:
     class CapturingBaseClient:
         provider = "fake"
         model = "fake-model"
+        timeout_seconds = 5400.0
 
         def __init__(self) -> None:
             self.batch_context: dict[str, Any] | None = None
@@ -1947,6 +1947,7 @@ def test_agentic_graph_draft_client_uses_read_only_context_trace() -> None:
 
     base = CapturingBaseClient()
     client = AgenticGraphDraftClient(base_client=base)
+    assert client.timeout_seconds == 5400.0
 
     result = client.draft_from_batch(
         batch_context={

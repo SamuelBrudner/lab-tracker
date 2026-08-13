@@ -142,6 +142,54 @@ class NoteRepository(EntityRepository[Note], Protocol):
         ``expected_updated_at`` or already has a transcript.
         """
 
+    def try_mark_member_onboarding_first_capture(
+        self,
+        note_id: UUID,
+        *,
+        capture_note_id: UUID,
+        captured_at: datetime,
+        completed: bool,
+    ) -> Note | None:
+        """Atomically stamp an otherwise-unclaimed onboarding checkpoint.
+
+        Return the updated checkpoint only for the winning writer. Concurrent
+        or repeated captures return ``None`` so funnel events remain first-only.
+        """
+
+    def try_finalize_member_onboarding_alignment(
+        self,
+        checkpoint: Note,
+        *,
+        expected_updated_at: datetime,
+    ) -> Note | None:
+        """CAS one trusted alignment projection and its additive targets."""
+
+    def try_mark_member_onboarding_completed(
+        self,
+        note_id: UUID,
+        *,
+        completed_at: datetime,
+    ) -> Note | None:
+        """Stamp completion only when capture exists and completion is absent."""
+
+    def try_resolve_member_onboarding_ai_alignment(
+        self,
+        note_id: UUID,
+        *,
+        change_set_id: UUID,
+        resolved_at: datetime,
+        resolution: str,
+    ) -> Note | None:
+        """Stamp the first terminal AI alignment without overwriting note state."""
+
+    def add_member_onboarding_question_target(
+        self,
+        note_id: UUID,
+        *,
+        question_id: UUID,
+    ) -> Note | None:
+        """Idempotently insert one question target without rewriting the note."""
+
 
 class AcquisitionCollectionRepository(Protocol):
     """Persistence contract that keeps manifest JSON behind explicit reads."""
@@ -324,8 +372,49 @@ class DataStoreRepository(Protocol):
 class GraphChangeSetRepository(EntityRepository[GraphChangeSet], Protocol):
     """Persistence operations specific to graph-draft change sets."""
 
+    def get_for_update(self, entity_id: UUID) -> GraphChangeSet | None:
+        """Return and row-lock one change set for a serialized mutation."""
+
     def project_id_for(self, change_set_id: UUID) -> UUID | None:
         """Resolve a draft's project without materializing its operations."""
+
+    def claim_for_generation(
+        self,
+        candidate: GraphChangeSet,
+        *,
+        claimed_at: datetime,
+        lease_until: datetime,
+        claim_token: UUID,
+    ) -> tuple[GraphChangeSet, bool]:
+        """Create or reclaim a generation row under a fenced lease."""
+
+    def renew_generation_claim(
+        self,
+        change_set_id: UUID,
+        claim_token: UUID,
+        *,
+        renewed_at: datetime,
+        lease_until: datetime,
+    ) -> GraphChangeSet | None:
+        """Extend a still-live claim, or return None after ownership loss."""
+
+    def complete_generation_claim(
+        self,
+        change_set: GraphChangeSet,
+        claim_token: UUID,
+        *,
+        completed_at: datetime,
+    ) -> GraphChangeSet | None:
+        """Persist a READY result only while the caller owns the live claim."""
+
+    def fail_generation_claim(
+        self,
+        change_set: GraphChangeSet,
+        claim_token: UUID,
+        *,
+        failed_at: datetime,
+    ) -> GraphChangeSet | None:
+        """Persist a FAILED result only while the caller owns the live claim."""
 
 
 class ReviewEmailOutboxRepository(Protocol):
@@ -957,6 +1046,7 @@ class LabTrackerRepository(Protocol):
         status: str | None = None,
         source_note_id: UUID | None = None,
         draft_mode: str | None = None,
+        purpose: str | None = None,
         batch_key: str | None = None,
         limit: int | None = None,
         offset: int = 0,
@@ -1074,8 +1164,39 @@ class LabTrackerRepository(Protocol):
         self,
         *,
         claimed_at: datetime,
+        lease_until: datetime,
+        claim_token: UUID,
     ) -> GraphDraftBatchRun | None:
-        """Atomically claim the oldest pending graph draft batch run."""
+        """Atomically claim the oldest pending or expired batch run."""
+
+    def claim_graph_draft_batch_run(
+        self,
+        run_id: UUID,
+        *,
+        claimed_at: datetime,
+        lease_until: datetime,
+        claim_token: UUID,
+    ) -> GraphDraftBatchRun | None:
+        """Claim one pending, unclaimed, or expired batch run."""
+
+    def renew_graph_draft_batch_run_claim(
+        self,
+        run_id: UUID,
+        claim_token: UUID,
+        *,
+        renewed_at: datetime,
+        lease_until: datetime,
+    ) -> GraphDraftBatchRun | None:
+        """Extend one still-live batch-run claim."""
+
+    def finish_graph_draft_batch_run_claim(
+        self,
+        run: GraphDraftBatchRun,
+        claim_token: UUID,
+        *,
+        finished_at: datetime,
+    ) -> GraphDraftBatchRun | None:
+        """Persist one terminal batch-run result under token fencing."""
 
     def list_dataset_files(self, dataset_id: UUID) -> list[DatasetFile]:
         """Return all files attached to a dataset."""

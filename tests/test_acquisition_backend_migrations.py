@@ -11,6 +11,8 @@ from sqlalchemy import create_engine, inspect, text
 _PREVIOUS_REVISION = "0058_data_store_authority_bindings"
 _EXPERIMENT_REVISION = "0059_experiments"
 _COLLECTION_REVISION = "0060_acquisition_collections"
+_GRAPH_DRAFT_FENCING_REVISION = "0061_graph_draft_generation_fencing"
+_MEMBER_ONBOARDING_REVISION = "0062_member_onboarding_purpose"
 _ACQUISITION_TABLES = {
     "experiments",
     "experiment_sessions",
@@ -137,9 +139,17 @@ def _assert_acquisition_schema(database_url: str) -> None:
 def test_acquisition_revisions_extend_current_main_in_one_chain() -> None:
     script = ScriptDirectory.from_config(_alembic_config())
 
-    assert script.get_heads() == [_COLLECTION_REVISION]
+    assert script.get_heads() == [_MEMBER_ONBOARDING_REVISION]
     assert script.get_revision(_EXPERIMENT_REVISION).down_revision == _PREVIOUS_REVISION
     assert script.get_revision(_COLLECTION_REVISION).down_revision == _EXPERIMENT_REVISION
+    assert (
+        script.get_revision(_GRAPH_DRAFT_FENCING_REVISION).down_revision
+        == _COLLECTION_REVISION
+    )
+    assert (
+        script.get_revision(_MEMBER_ONBOARDING_REVISION).down_revision
+        == _GRAPH_DRAFT_FENCING_REVISION
+    )
 
 
 def test_sqlite_acquisition_migrations_round_trip(

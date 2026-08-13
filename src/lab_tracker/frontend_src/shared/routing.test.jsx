@@ -1,9 +1,16 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { AppLink, appBasePath, parseAppRoute, resolveAppPath } from "./routing.jsx";
+import {
+  AppLink,
+  appBasePath,
+  isContextualProjectReady,
+  parseAppRoute,
+  resolveAppPath,
+} from "./routing.jsx";
 
 const QUESTION_ID = "fb3454e0-6319-40bb-864c-9de91d0b04f1";
+const PROJECT_ID = "0d637c19-0060-4dc7-8304-ef7c8c940d85";
 
 describe("app routing", () => {
   it("parses the agent-access page route", () => {
@@ -14,6 +21,15 @@ describe("app routing", () => {
   it("parses the guided setup route at root and under a deployment prefix", () => {
     expect(parseAppRoute("/app/setup")).toEqual({ kind: "setup" });
     expect(parseAppRoute("/lab-tracker/app/setup")).toEqual({ kind: "setup" });
+  });
+
+  it("parses ongoing-project onboarding with contextual query state", () => {
+    expect(
+      parseAppRoute(`/app/projects/${PROJECT_ID}/onboarding?from=setup`)
+    ).toEqual({ kind: "member-onboarding", projectId: PROJECT_ID });
+    expect(
+      parseAppRoute(`/lab-tracker/app/projects/${PROJECT_ID}/onboarding`)
+    ).toEqual({ kind: "member-onboarding", projectId: PROJECT_ID });
   });
 
   it("parses app routes under a GitHub Pages project prefix", () => {
@@ -30,6 +46,27 @@ describe("app routing", () => {
       "/lab-tracker/app/graph"
     );
     expect(resolveAppPath("/app/graph", "/app")).toBe("/app/graph");
+  });
+
+  it("lets an absent contextual project reach its denied or not-found request after projects load", () => {
+    expect(isContextualProjectReady({
+      projectId: PROJECT_ID,
+      projects: [],
+      projectsLoaded: false,
+      selectedProjectId: "",
+    })).toBe(false);
+    expect(isContextualProjectReady({
+      projectId: PROJECT_ID,
+      projects: [],
+      projectsLoaded: true,
+      selectedProjectId: "",
+    })).toBe(true);
+    expect(isContextualProjectReady({
+      projectId: PROJECT_ID,
+      projects: [{ project_id: PROJECT_ID }],
+      projectsLoaded: true,
+      selectedProjectId: "another-project",
+    })).toBe(false);
   });
 });
 

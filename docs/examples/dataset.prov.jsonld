@@ -32,6 +32,16 @@
       "@id": "lab:changeSet",
       "@type": "@id"
     },
+    "checkpointAlignmentChangeSet": {
+      "@id": "lab:checkpointAlignmentChangeSet",
+      "@type": "@id"
+    },
+    "checkpointAlignmentMode": "lab:checkpointAlignmentMode",
+    "checkpointAlignmentResolution": "lab:checkpointAlignmentResolution",
+    "checkpointAlignmentResolvedAt": "lab:checkpointAlignmentResolvedAt",
+    "checkpointAsOf": "lab:checkpointAsOf",
+    "checkpointPayloadSha256": "lab:checkpointPayloadSha256",
+    "checkpointSourceTextSha256": "lab:checkpointSourceTextSha256",
     "checksum": "lab:checksum",
     "choice": "lab:choice",
     "cites": {
@@ -112,6 +122,11 @@
     "falsificationCriteria": "lab:falsificationCriteria",
     "fileName": "lab:fileName",
     "filePath": "lab:filePath",
+    "firstForwardCapture": {
+      "@id": "lab:firstForwardCapture",
+      "@type": "@id"
+    },
+    "firstForwardCaptureAt": "lab:firstForwardCaptureAt",
     "generatedAt": "prov:generatedAtTime",
     "goalLink": {
       "@id": "lab:goalLink",
@@ -122,6 +137,7 @@
       "@id": "lab:groundingDataset",
       "@type": "@id"
     },
+    "historicalCoverage": "lab:historicalCoverage",
     "hypothesis": "lab:hypothesis",
     "invalidates": {
       "@id": "lab:invalidates",
@@ -134,6 +150,8 @@
       "@type": "@json"
     },
     "lesson": "lab:lesson",
+    "memberOnboardingCompletedAt": "lab:memberOnboardingCompletedAt",
+    "memberOnboardingRole": "lab:memberOnboardingRole",
     "metadata": {
       "@id": "lab:metadata",
       "@type": "@json"

@@ -8,8 +8,19 @@ from uuid import UUID
 from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session as OrmSession
 
-from lab_tracker.db_models import NoteModel, NoteTargetModel
-from lab_tracker.models import Note, NoteMetadataScalar
+from lab_tracker.db_models import GraphChangeSetModel, NoteModel, NoteTargetModel
+from lab_tracker.member_onboarding import (
+    ALIGNMENT_CHANGE_SET_ID_KEY,
+    ALIGNMENT_MODE_KEY,
+    ALIGNMENT_PAYLOAD_HASH_KEY,
+    ALIGNMENT_RESOLUTION_KEY,
+    ALIGNMENT_RESOLUTIONS_KEY,
+    ALIGNMENT_RESOLVED_AT_KEY,
+    COMPLETED_AT_KEY,
+    FIRST_CAPTURE_AT_KEY,
+    FIRST_CAPTURE_NOTE_ID_KEY,
+)
+from lab_tracker.models import EntityType, Note, NoteMetadataScalar
 from lab_tracker.repository import EntityRepository
 from lab_tracker.sqlalchemy_mappers import (
     apply_note_to_model,
@@ -119,6 +130,7 @@ class SQLAlchemyNoteRepository(EntityRepository[Note]):
         row = self._session.scalar(
             select(NoteModel)
             .where(NoteModel.note_id == str(note_id))
+            .with_for_update()
             .execution_options(populate_existing=True)
         )
         if row is None or (row.transcribed_text or "").strip():
@@ -269,6 +281,232 @@ class SQLAlchemyNoteRepository(EntityRepository[Note]):
         row.updated_at = updated_at
         self._session.flush()
         return self.notes_from_rows([row])[0]
+
+    def try_mark_member_onboarding_first_capture(
+        self,
+        note_id: UUID,
+        *,
+        capture_note_id: UUID,
+        captured_at: datetime,
+        completed: bool,
+    ) -> Note | None:
+        """Serialize and stamp the first-capture projection exactly once."""
+
+        self._session.flush()
+        for _attempt in range(3):
+            row = self._session.scalar(
+                select(NoteModel)
+                .where(NoteModel.note_id == str(note_id))
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if row is None:
+                return None
+            metadata = dict(row.note_metadata or {})
+            if metadata.get(FIRST_CAPTURE_NOTE_ID_KEY):
+                return None
+            prior_updated_at = row.updated_at
+            metadata[FIRST_CAPTURE_NOTE_ID_KEY] = str(capture_note_id)
+            metadata[FIRST_CAPTURE_AT_KEY] = captured_at.isoformat()
+            if completed:
+                metadata[COMPLETED_AT_KEY] = captured_at.isoformat()
+            result = self._session.execute(
+                update(NoteModel)
+                .where(
+                    NoteModel.note_id == str(note_id),
+                    NoteModel.updated_at == prior_updated_at,
+                )
+                .values(note_metadata=metadata, updated_at=captured_at)
+                .execution_options(synchronize_session=False)
+            )
+            if result.rowcount == 1:
+                self._session.flush()
+                self._session.expire_all()
+                return self.get(note_id)
+            # SQLite ignores FOR UPDATE; a concurrent trusted metadata writer
+            # may therefore win this optimistic comparison. Reload and retry
+            # so storing a genuine capture does not require a client resend.
+            self._session.expire_all()
+        return None
+
+    def try_finalize_member_onboarding_alignment(
+        self,
+        checkpoint: Note,
+        *,
+        expected_updated_at: datetime,
+    ) -> Note | None:
+        """Persist the first trusted alignment and targets as one transaction."""
+
+        self._session.flush()
+        row = self._session.scalar(
+            select(NoteModel)
+            .where(NoteModel.note_id == str(checkpoint.note_id))
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if row is None:
+            return None
+        current_metadata = dict(row.note_metadata or {})
+        if current_metadata.get(ALIGNMENT_MODE_KEY):
+            return None
+        active_ai_draft = self._session.scalar(
+            select(GraphChangeSetModel.change_set_id)
+            .where(
+                GraphChangeSetModel.source_note_id == str(checkpoint.note_id),
+                GraphChangeSetModel.purpose == "member_checkpoint_alignment",
+                GraphChangeSetModel.status != "failed",
+            )
+            .limit(1)
+        )
+        if active_ai_draft is not None:
+            return None
+        merged_metadata = dict(current_metadata)
+        for key in (
+            ALIGNMENT_MODE_KEY,
+            ALIGNMENT_PAYLOAD_HASH_KEY,
+            ALIGNMENT_RESOLVED_AT_KEY,
+            ALIGNMENT_RESOLUTIONS_KEY,
+        ):
+            if key in checkpoint.metadata:
+                merged_metadata[key] = checkpoint.metadata[key]
+        prior_updated_at = row.updated_at
+        result = self._session.execute(
+            update(NoteModel)
+            .where(
+                NoteModel.note_id == str(checkpoint.note_id),
+                NoteModel.updated_at == prior_updated_at,
+            )
+            .values(
+                note_metadata=merged_metadata,
+                updated_at=checkpoint.updated_at,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount != 1:
+            self._session.expire_all()
+            return None
+        # Manual alignment is additive.  Insert only missing edges so the
+        # project target, first-capture markers, and any concurrently committed
+        # trusted question link can never be erased by a stale snapshot.
+        for target in checkpoint.targets:
+            target_key = {
+                "note_id": checkpoint.note_id,
+                "entity_type": target.entity_type,
+                "entity_id": target.entity_id,
+            }
+            if self._session.get(NoteTargetModel, target_key) is None:
+                self._session.add(NoteTargetModel(**target_key))
+        self._session.flush()
+        self._session.expire_all()
+        return self.get(checkpoint.note_id)
+
+    def try_mark_member_onboarding_completed(
+        self,
+        note_id: UUID,
+        *,
+        completed_at: datetime,
+    ) -> Note | None:
+        self._session.flush()
+        row = self._session.scalar(
+            select(NoteModel)
+            .where(NoteModel.note_id == str(note_id))
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if row is None:
+            return None
+        metadata = dict(row.note_metadata or {})
+        if (
+            not metadata.get(FIRST_CAPTURE_NOTE_ID_KEY)
+            or metadata.get(COMPLETED_AT_KEY)
+        ):
+            return None
+        prior_updated_at = row.updated_at
+        metadata[COMPLETED_AT_KEY] = completed_at.isoformat()
+        result = self._session.execute(
+            update(NoteModel)
+            .where(
+                NoteModel.note_id == str(note_id),
+                NoteModel.updated_at == prior_updated_at,
+            )
+            .values(note_metadata=metadata, updated_at=completed_at)
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount != 1:
+            self._session.expire_all()
+            return None
+        self._session.flush()
+        self._session.expire_all()
+        return self.get(note_id)
+
+    def try_resolve_member_onboarding_ai_alignment(
+        self,
+        note_id: UUID,
+        *,
+        change_set_id: UUID,
+        resolved_at: datetime,
+        resolution: str,
+    ) -> Note | None:
+        """Stamp AI resolution while preserving concurrent capture metadata."""
+
+        self._session.flush()
+        row = self._session.scalar(
+            select(NoteModel)
+            .where(NoteModel.note_id == str(note_id))
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if row is None:
+            return None
+        metadata = dict(row.note_metadata or {})
+        mode = metadata.get(ALIGNMENT_MODE_KEY)
+        if mode not in {None, "ai"}:
+            return None
+        existing_change_set_id = metadata.get(ALIGNMENT_CHANGE_SET_ID_KEY)
+        if existing_change_set_id not in {None, str(change_set_id)}:
+            return None
+        metadata.update(
+            {
+                ALIGNMENT_MODE_KEY: "ai",
+                ALIGNMENT_RESOLVED_AT_KEY: resolved_at.isoformat(),
+                ALIGNMENT_CHANGE_SET_ID_KEY: str(change_set_id),
+                ALIGNMENT_RESOLUTION_KEY: resolution,
+            }
+        )
+        row.note_metadata = metadata
+        row.updated_at = resolved_at
+        self._session.flush()
+        self._session.expire_all()
+        return self.get(note_id)
+
+    def add_member_onboarding_question_target(
+        self,
+        note_id: UUID,
+        *,
+        question_id: UUID,
+    ) -> Note | None:
+        """Insert a relation row only; preserve every NoteModel scalar field."""
+
+        self._session.flush()
+        row = self._session.scalar(
+            select(NoteModel)
+            .where(NoteModel.note_id == str(note_id))
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if row is None:
+            return None
+        target_key = {
+            "note_id": note_id,
+            "entity_type": EntityType.QUESTION,
+            "entity_id": question_id,
+        }
+        existing = self._session.get(NoteTargetModel, target_key)
+        if existing is None:
+            self._session.add(NoteTargetModel(**target_key))
+            self._session.flush()
+        self._session.expire_all()
+        return self.get(note_id)
 
     def delete(self, entity_id: UUID) -> Note | None:
         entity = self.get(entity_id)

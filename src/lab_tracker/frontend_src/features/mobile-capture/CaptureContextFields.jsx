@@ -10,6 +10,8 @@ function CaptureContextFields({
   projects,
   selectedProjectId,
   onSelectedProjectChange,
+  projectLocked = false,
+  lockedCheckpointNoteId = "",
   activeQuestions,
   questionId,
   setQuestionId,
@@ -36,7 +38,7 @@ function CaptureContextFields({
       <label>
         Project
         <select
-          disabled={!canWrite}
+          disabled={!canWrite || projectLocked}
           onChange={(event) => onSelectedProjectChange(event.target.value)}
           value={selectedProjectId}
         >
@@ -48,6 +50,14 @@ function CaptureContextFields({
           ))}
         </select>
       </label>
+      {lockedCheckpointNoteId ? (
+        <div className="item capture-locked-checkpoint" role="status">
+          <strong>Tracking checkpoint attached</strong>
+          <p className="subtle">
+            This required note target is locked for your first forward capture. You can still add the ordinary context below.
+          </p>
+        </div>
+      ) : null}
       <label>
         Active question (optional)
         <select

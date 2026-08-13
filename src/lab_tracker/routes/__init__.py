@@ -31,6 +31,7 @@ from .goals import build_goals_router
 from .graph_batches import build_graph_batches_router
 from .graph_drafts import build_graph_drafts_router
 from .groups import build_groups_router
+from .member_onboarding import build_member_onboarding_router
 from .notes import build_notes_router
 from .ownership import build_ownership_router
 from .personal_access_tokens import build_personal_access_tokens_router
@@ -92,6 +93,7 @@ def register_routes(
     app.include_router(build_evidence_bundles_router(api))
     app.include_router(build_dataset_files_router(api))
     app.include_router(build_notes_router(api))
+    app.include_router(build_member_onboarding_router(api))
     app.include_router(build_graph_drafts_router(api))
     app.include_router(build_graph_batches_router(api))
     app.include_router(build_review_delivery_router(api))

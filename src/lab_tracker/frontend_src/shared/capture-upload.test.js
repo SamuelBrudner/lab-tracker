@@ -19,9 +19,10 @@ function fakeQueue() {
 
 describe("buildTargets", () => {
   it("includes only the selected entity ids", () => {
-    expect(buildTargets({ questionId: "q1", datasetId: "d1", claimId: "" })).toEqual([
+    expect(buildTargets({ questionId: "q1", datasetId: "d1", claimId: "", noteId: "n1" })).toEqual([
       { entity_id: "q1", entity_type: "question" },
       { entity_id: "d1", entity_type: "dataset" },
+      { entity_id: "n1", entity_type: "note" },
     ]);
   });
 

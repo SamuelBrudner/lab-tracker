@@ -26,6 +26,45 @@ import {
 } from "../test/fixtures.js";
 
 describe("App", () => {
+  it("keeps member onboarding checkpoints immutable outside their workflow", async () => {
+    const noteId = "11111111-1111-4111-8111-111111111111";
+    localStorage.setItem(TOKEN_STORAGE_KEY, "token-checkpoint-detail");
+    window.history.replaceState({}, "", `/app/notes/${noteId}`);
+
+    installFetchMock([
+      {
+        match: "/auth/me",
+        response: apiResponse({ role: "admin", username: "sam" }),
+      },
+      {
+        match: projectsPath,
+        response: apiResponse([]),
+      },
+      {
+        match: `/notes/${noteId}`,
+        response: apiResponse(
+          note({
+            metadata: { member_onboarding_role: "checkpoint" },
+            noteId,
+            rawContent: "Current project checkpoint",
+          })
+        ),
+      },
+    ]);
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Note Detail" })).toBeInTheDocument();
+    expect(
+      await screen.findByText(/This attributed onboarding checkpoint is immutable/)
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Save transcript" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Draft graph update" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open member onboarding" }));
+    expect(window.location.pathname).toBe("/app/projects/project-1/onboarding");
+  });
+
   it("previews an image note and starts a graph draft", async () => {
     const noteId = "11111111-1111-4111-8111-111111111111";
     const draftId = "22222222-2222-4222-8222-222222222222";

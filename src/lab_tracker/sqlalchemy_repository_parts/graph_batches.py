@@ -142,6 +142,10 @@ def run_to_model(run: GraphDraftBatchRun) -> GraphDraftBatchRunModel:
         change_set_id=str(run.change_set_id) if run.change_set_id is not None else None,
         summary=run.summary,
         error_metadata=dict(run.error_metadata),
+        claim_token=_uuid_str(run.claim_token),
+        claimed_at=run.claimed_at,
+        lease_expires_at=run.lease_expires_at,
+        attempt_count=run.attempt_count,
         created_at=run.created_at,
         updated_at=run.updated_at,
         started_at=run.started_at,
@@ -166,6 +170,10 @@ def apply_run_to_model(row: GraphDraftBatchRunModel, run: GraphDraftBatchRun) ->
     row.change_set_id = str(run.change_set_id) if run.change_set_id is not None else None
     row.summary = run.summary
     row.error_metadata = dict(run.error_metadata)
+    row.claim_token = _uuid_str(run.claim_token)
+    row.claimed_at = run.claimed_at
+    row.lease_expires_at = run.lease_expires_at
+    row.attempt_count = run.attempt_count
     row.created_at = run.created_at
     row.updated_at = run.updated_at
     row.started_at = run.started_at
@@ -193,6 +201,10 @@ def run_from_model(row: GraphDraftBatchRunModel) -> GraphDraftBatchRun:
         change_set_id=ensure_uuid(row.change_set_id) if row.change_set_id else None,
         summary=row.summary or "",
         error_metadata=_dict(row.error_metadata),
+        claim_token=_uuid(row.claim_token),
+        claimed_at=_as_utc_optional(row.claimed_at),
+        lease_expires_at=_as_utc_optional(row.lease_expires_at),
+        attempt_count=int(row.attempt_count or 0),
         created_at=as_utc(row.created_at),
         updated_at=as_utc(row.updated_at),
         started_at=as_utc(row.started_at),
@@ -670,22 +682,70 @@ class SQLAlchemyGraphDraftBatchRunRepository(EntityRepository[GraphDraftBatchRun
         self,
         *,
         claimed_at: datetime,
+        lease_until: datetime,
+        claim_token: UUID,
     ) -> GraphDraftBatchRun | None:
+        if lease_until <= claimed_at:
+            raise ValueError("lease_until must be later than claimed_at.")
         self._session.flush()
-        row = self._session.scalar(
+        eligible = self._claimable_at(claimed_at)
+        candidate_stmt = (
             select(GraphDraftBatchRunModel)
-            .where(GraphDraftBatchRunModel.status == GraphDraftBatchRunStatus.PENDING.value)
+            .where(eligible)
             .order_by(GraphDraftBatchRunModel.created_at, GraphDraftBatchRunModel.run_id)
             .limit(1)
         )
+        if self._session.get_bind().dialect.name == "postgresql":
+            candidate_stmt = candidate_stmt.with_for_update(skip_locked=True)
+        row = self._session.scalar(candidate_stmt)
         if row is None:
             return None
+        return self._claim_row(
+            row.run_id,
+            eligible=eligible,
+            claimed_at=claimed_at,
+            lease_until=lease_until,
+            claim_token=claim_token,
+        )
+
+    def claim(
+        self,
+        run_id: UUID,
+        *,
+        claimed_at: datetime,
+        lease_until: datetime,
+        claim_token: UUID,
+    ) -> GraphDraftBatchRun | None:
+        if lease_until <= claimed_at:
+            raise ValueError("lease_until must be later than claimed_at.")
+        self._session.flush()
+        return self._claim_row(
+            str(run_id),
+            eligible=self._claimable_at(claimed_at),
+            claimed_at=claimed_at,
+            lease_until=lease_until,
+            claim_token=claim_token,
+        )
+
+    def _claim_row(
+        self,
+        run_id: UUID | str,
+        *,
+        eligible: Any,
+        claimed_at: datetime,
+        lease_until: datetime,
+        claim_token: UUID,
+    ) -> GraphDraftBatchRun | None:
         result = self._session.execute(
             update(GraphDraftBatchRunModel)
-            .where(GraphDraftBatchRunModel.run_id == row.run_id)
-            .where(GraphDraftBatchRunModel.status == GraphDraftBatchRunStatus.PENDING.value)
+            .where(GraphDraftBatchRunModel.run_id == str(run_id))
+            .where(eligible)
             .values(
                 status=GraphDraftBatchRunStatus.RUNNING.value,
+                claim_token=str(claim_token),
+                claimed_at=claimed_at,
+                lease_expires_at=lease_until,
+                attempt_count=GraphDraftBatchRunModel.attempt_count + 1,
                 started_at=claimed_at,
                 updated_at=claimed_at,
             )
@@ -693,11 +753,96 @@ class SQLAlchemyGraphDraftBatchRunRepository(EntityRepository[GraphDraftBatchRun
         )
         if result.rowcount != 1:
             return None
-        claimed = self._session.get(GraphDraftBatchRunModel, row.run_id)
+        self._session.expire_all()
+        claimed = self._session.get(GraphDraftBatchRunModel, str(run_id))
         if claimed is None:
             return None
         self._session.refresh(claimed)
         return run_from_model(claimed)
+
+    def renew_claim(
+        self,
+        run_id: UUID,
+        claim_token: UUID,
+        *,
+        renewed_at: datetime,
+        lease_until: datetime,
+    ) -> GraphDraftBatchRun | None:
+        if lease_until <= renewed_at:
+            raise ValueError("lease_until must be later than renewed_at.")
+        self._session.flush()
+        result = self._session.execute(
+            update(GraphDraftBatchRunModel)
+            .where(GraphDraftBatchRunModel.run_id == str(run_id))
+            .where(
+                GraphDraftBatchRunModel.status
+                == GraphDraftBatchRunStatus.RUNNING.value
+            )
+            .where(GraphDraftBatchRunModel.claim_token == str(claim_token))
+            .where(GraphDraftBatchRunModel.lease_expires_at > renewed_at)
+            .values(lease_expires_at=lease_until, updated_at=renewed_at)
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount != 1:
+            return None
+        self._session.expire_all()
+        return self.get(run_id)
+
+    def finish_claim(
+        self,
+        run: GraphDraftBatchRun,
+        claim_token: UUID,
+        *,
+        finished_at: datetime,
+    ) -> GraphDraftBatchRun | None:
+        if run.status not in {
+            GraphDraftBatchRunStatus.READY,
+            GraphDraftBatchRunStatus.SKIPPED,
+            GraphDraftBatchRunStatus.FAILED,
+        }:
+            raise ValueError("A claimed batch run may only finish in a terminal status.")
+        self._session.flush()
+        result = self._session.execute(
+            update(GraphDraftBatchRunModel)
+            .where(GraphDraftBatchRunModel.run_id == str(run.run_id))
+            .where(
+                GraphDraftBatchRunModel.status
+                == GraphDraftBatchRunStatus.RUNNING.value
+            )
+            .where(GraphDraftBatchRunModel.claim_token == str(claim_token))
+            .where(GraphDraftBatchRunModel.lease_expires_at > finished_at)
+            .values(
+                status=run.status.value,
+                change_set_id=_uuid_str(run.change_set_id),
+                summary=run.summary,
+                error_metadata=dict(run.error_metadata),
+                claim_token=None,
+                claimed_at=None,
+                lease_expires_at=None,
+                finished_at=finished_at,
+                updated_at=finished_at,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount != 1:
+            return None
+        self._session.expire_all()
+        return self.get(run.run_id)
+
+    @staticmethod
+    def _claimable_at(now: datetime) -> Any:
+        return or_(
+            GraphDraftBatchRunModel.status == GraphDraftBatchRunStatus.PENDING.value,
+            and_(
+                GraphDraftBatchRunModel.status
+                == GraphDraftBatchRunStatus.RUNNING.value,
+                or_(
+                    GraphDraftBatchRunModel.claim_token.is_(None),
+                    GraphDraftBatchRunModel.lease_expires_at.is_(None),
+                    GraphDraftBatchRunModel.lease_expires_at <= now,
+                ),
+            ),
+        )
 
     def save(self, entity: GraphDraftBatchRun) -> None:
         self._session.flush()

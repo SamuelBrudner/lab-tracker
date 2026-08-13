@@ -76,6 +76,20 @@ and visualizations without a mandatory second-person approval step. The human
 gate protects the record from machine-authored changes; it is not a universal
 peer-review workflow.
 
+### Join a project already in progress
+
+Lab Tracker can begin in the middle of the science. **Orient me to this
+project** creates one attributed present-tense checkpoint from the current
+output, live questions, strongest recent context, and next move. It produces a
+small question map and copyable brief, then hands off to one real text, photo,
+or voice capture so routine tracking starts prospectively.
+
+The checkpoint is visible to authorized project members and explicitly labels
+earlier historical coverage as selective. It is not a reconstructed-complete
+history or a claim of lab consensus. Exact manual question mappings remain
+direct human staged writes; optional AI alignment stays individually reviewed
+and owner-gated. See [joining an ongoing project](docs/member-onboarding.md).
+
 <p align="center">
   <img
     src="docs/screenshots/capture-draft-op-evidence.png"
@@ -154,6 +168,9 @@ every historical record arrived fully connected.
   offline-first watch-folder, repository, and HPC adapters.
 - **Human-gated drafting:** note-scoped and batch graph drafts, scheduled or
   run-now drafting, accept/edit/reject review, and durable curation provenance.
+- **Ongoing-project onboarding:** an attributed current-state checkpoint,
+  individually reviewed question alignment, deterministic brief, and one
+  separate forward capture without requiring historical backfill.
 - **Retrieval and portability:** substring search, project graph views,
   permission-bounded assistant context, publication-readiness checks,
   provenance export, and hash-verified external artifact references.

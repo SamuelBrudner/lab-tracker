@@ -78,6 +78,15 @@ research record:
   staged notes. Drafting may be note-scoped or batch-scoped, but every proposed
   operation requires human edit/accept/reject before commit through normal API
   validation.
+- Ongoing-project member onboarding as a prospective-first retained workflow:
+  one immutable project-visible checkpoint per project/member, one to three
+  individually resolved live-question alignments, a deterministic labelled
+  current-state map/brief, and one separate real browser capture. Earlier
+  history is explicitly selective rather than reconstructed as complete.
+  Exact manual mappings use normal direct-human staged writes; opt-in AI may
+  only propose a capped set of staged questions or additive checkpoint links,
+  and accepted AI proposals still require project-owner commit. Viewers remain
+  read-only and receive an edit-access request.
 - Per-(project, user) graph-draft batch settings and run history for configured
   cadence, run-now, and run-due drafting over staged notes. The ordinary
   settings endpoint and **Run now** action resolve the authenticated user

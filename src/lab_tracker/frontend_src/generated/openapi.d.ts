@@ -62,6 +62,21 @@ export interface paths {
     get: operations["get_batch_settings_projects__project_id__graph_draft_batch_settings_get"];
     patch: operations["update_batch_settings_projects__project_id__graph_draft_batch_settings_patch"];
   };
+  "/projects/{project_id}/member-onboarding": {
+    get: operations["get_member_onboarding_projects__project_id__member_onboarding_get"];
+  };
+  "/projects/{project_id}/member-onboarding/checkpoint": {
+    put: operations["put_checkpoint_projects__project_id__member_onboarding_checkpoint_put"];
+  };
+  "/projects/{project_id}/member-onboarding/manual-alignment": {
+    put: operations["put_manual_alignment_projects__project_id__member_onboarding_manual_alignment_put"];
+  };
+  "/projects/{project_id}/member-onboarding/ai-alignment": {
+    post: operations["start_ai_alignment_projects__project_id__member_onboarding_ai_alignment_post"];
+  };
+  "/projects/{project_id}/member-onboarding/owner-queue": {
+    get: operations["owner_queue_projects__project_id__member_onboarding_owner_queue_get"];
+  };
   "/datasets": {
     get: operations["list_datasets_datasets_get"];
   };
@@ -323,6 +338,76 @@ export interface operations {
       200: {
         content: {
           "application/json": components["schemas"]["Envelope_GraphDraftBatchSettings_"];
+        };
+      };
+    };
+  };
+  "get_member_onboarding_projects__project_id__member_onboarding_get": {
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["Envelope_MemberOnboardingRead_"];
+        };
+      };
+    };
+  };
+  "put_checkpoint_projects__project_id__member_onboarding_checkpoint_put": {
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["MemberOnboardingCheckpointRequest"];
+      };
+    };
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["Envelope_MemberOnboardingRead_"];
+        };
+      };
+      201: {
+        content: {
+          "application/json": components["schemas"]["Envelope_MemberOnboardingRead_"];
+        };
+      };
+    };
+  };
+  "put_manual_alignment_projects__project_id__member_onboarding_manual_alignment_put": {
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["MemberOnboardingManualAlignmentRequest"];
+      };
+    };
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["Envelope_MemberOnboardingRead_"];
+        };
+      };
+    };
+  };
+  "start_ai_alignment_projects__project_id__member_onboarding_ai_alignment_post": {
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["MemberOnboardingAiAlignmentRequest"];
+      };
+    };
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["Envelope_MemberOnboardingRead_"];
+        };
+      };
+      202: {
+        content: {
+          "application/json": components["schemas"]["Envelope_MemberOnboardingRead_"];
+        };
+      };
+    };
+  };
+  "owner_queue_projects__project_id__member_onboarding_owner_queue_get": {
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["ListEnvelope_MemberOnboardingOwnerQueueItem_"];
         };
       };
     };
@@ -620,6 +705,10 @@ export interface components {
       "data": components["schemas"]["GraphDraftBatchSettings"];
       "meta"?: (Record<string, unknown> | null);
     };
+    "Envelope_MemberOnboardingRead_": {
+      "data": components["schemas"]["MemberOnboardingRead"];
+      "meta"?: (Record<string, unknown> | null);
+    };
     "Envelope_Note_": {
       "data": components["schemas"]["Note"];
       "meta"?: (Record<string, unknown> | null);
@@ -689,6 +778,9 @@ export interface components {
       "created_by_username"?: (string | null);
       "draft_mode"?: components["schemas"]["GraphDraftMode"];
       "error_metadata"?: Record<string, unknown>;
+      "generation_attempt_count"?: number;
+      "generation_claimed_at"?: (string | null);
+      "generation_lease_expires_at"?: (string | null);
       "meeting_note_count": number;
       "model": string;
       "operation_count"?: number;
@@ -696,6 +788,7 @@ export interface components {
       "project_id": string;
       "prompt_version": string;
       "provider"?: string;
+      "purpose"?: components["schemas"]["GraphDraftPurpose"];
       "review_assignee"?: (string | null);
       "review_assignee_user_id"?: (string | null);
       "review_assignee_username"?: (string | null);
@@ -745,6 +838,7 @@ export interface components {
       "user_id"?: string;
     };
     "GraphDraftMode": "graph_context" | "image_only" | "graph_batch";
+    "GraphDraftPurpose": "general" | "member_checkpoint_alignment";
     "GraphDraftSemanticType": "create_entity" | "update_entity" | "create_note" | "link_note_to_question" | "link_note_to_session" | "link_note_to_dataset" | "link_note_to_analysis" | "suggest_new_question" | "suggest_new_dataset" | "suggest_new_goal" | "link_node_to_goal" | "update_goal" | "suggest_followup" | "request_clarification";
     "ListEnvelope_AuthInvitationRead_": {
       "data": Array<components["schemas"]["AuthInvitationRead"]>;
@@ -760,6 +854,10 @@ export interface components {
     };
     "ListEnvelope_DeviceTokenRead_": {
       "data": Array<components["schemas"]["DeviceTokenRead"]>;
+      "meta": components["schemas"]["PaginationMeta"];
+    };
+    "ListEnvelope_MemberOnboardingOwnerQueueItem_": {
+      "data": Array<components["schemas"]["MemberOnboardingOwnerQueueItem"]>;
       "meta": components["schemas"]["PaginationMeta"];
     };
     "ListEnvelope_Note_": {
@@ -781,6 +879,82 @@ export interface components {
     "ListEnvelope_ReviewEmailDelivery_": {
       "data": Array<components["schemas"]["ReviewEmailDelivery"]>;
       "meta": components["schemas"]["PaginationMeta"];
+    };
+    "MemberOnboardingAiAlignmentRequest": {
+      "external_provider_acknowledged": boolean;
+    };
+    "MemberOnboardingAlignment": {
+      "draft"?: (components["schemas"]["GraphChangeSet"] | null);
+      "mode"?: "none" | "manual" | "ai";
+      "question_resolutions"?: Array<components["schemas"]["MemberOnboardingQuestionResolution"]>;
+      "resolved_at"?: (string | null);
+    };
+    "MemberOnboardingCapabilities": {
+      "can_align": boolean;
+      "can_capture": boolean;
+      "can_commit": boolean;
+      "can_create_checkpoint": boolean;
+      "can_read": boolean;
+    };
+    "MemberOnboardingCheckpointRequest": {
+      "as_of"?: (string | null);
+      "current_output_or_decision": string;
+      "live_questions": Array<string>;
+      "next_move": string;
+      "source_text"?: (string | null);
+      "strongest_recent_context": string;
+    };
+    "MemberOnboardingGuidedFields": {
+      "current_output_or_decision": string;
+      "live_questions": Array<string>;
+      "next_move": string;
+      "source_text_present"?: boolean;
+      "strongest_recent_context": string;
+    };
+    "MemberOnboardingManualAlignmentRequest": {
+      "resolutions": Array<components["schemas"]["MemberOnboardingManualResolution"]>;
+    };
+    "MemberOnboardingManualResolution": {
+      "action": "link_existing" | "create_staged" | "checkpoint_only";
+      "existing_question_id"?: (string | null);
+      "question_index": number;
+    };
+    "MemberOnboardingMapItem": {
+      "operation_id"?: (string | null);
+      "question_id"?: (string | null);
+      "question_index": number;
+      "source": "shared" | "pending" | "personal";
+      "status": string;
+      "text": string;
+    };
+    "MemberOnboardingOwnerQueueItem": {
+      "accepted_operation_count"?: number;
+      "checkpoint": components["schemas"]["Note"];
+      "draft": components["schemas"]["GraphChangeSet"];
+      "member_user_id"?: (string | null);
+      "member_username"?: (string | null);
+      "project_id": string;
+    };
+    "MemberOnboardingQuestionResolution": {
+      "action": string;
+      "operation_id"?: (string | null);
+      "question_id"?: (string | null);
+      "question_index": number;
+      "status"?: (string | null);
+    };
+    "MemberOnboardingRead": {
+      "alignment"?: (components["schemas"]["MemberOnboardingAlignment"] | null);
+      "brief_markdown"?: string;
+      "capabilities": components["schemas"]["MemberOnboardingCapabilities"];
+      "checkpoint"?: (components["schemas"]["Note"] | null);
+      "first_capture"?: (components["schemas"]["Note"] | null);
+      "guided_fields"?: (components["schemas"]["MemberOnboardingGuidedFields"] | null);
+      "map_items"?: Array<components["schemas"]["MemberOnboardingMapItem"]>;
+      "member_complete"?: boolean;
+      "owner_commit_pending"?: boolean;
+      "project_id": string;
+      "role": components["schemas"]["ProjectMembershipRole"];
+      "state": "not_started" | "checkpoint_ready" | "alignment_ready" | "awaiting_owner" | "changes_requested" | "rejected" | "committed" | "capture_pending" | "complete";
     };
     "Note": {
       "archived_at"?: (string | null);

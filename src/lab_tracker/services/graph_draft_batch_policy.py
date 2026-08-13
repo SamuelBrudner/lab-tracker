@@ -11,6 +11,10 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from lab_tracker.auth import AuthContext
 from lab_tracker.errors import ValidationError
+from lab_tracker.member_onboarding import (
+    SCHEDULED_DRAFT_EXCLUDE,
+    SCHEDULED_DRAFT_POLICY_KEY,
+)
 from lab_tracker.models import (
     GraphChangeSetStatus,
     GraphDraftBatchSettings,
@@ -189,6 +193,8 @@ def staged_notes_in_window(
             note
             for note in notes
             if note.status == NoteStatus.STAGED
+            and note.metadata.get(SCHEDULED_DRAFT_POLICY_KEY)
+            != SCHEDULED_DRAFT_EXCLUDE
             and note.note_id not in excluded
             and note_matches_reviewer(note, reviewer)
             and (
