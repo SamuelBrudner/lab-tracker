@@ -154,6 +154,7 @@ def test_postgres_search_and_json_relationship_traversal_queries(
                     updated_at=now,
                 )
             )
+            session.flush()
             session.add_all(
                 [
                     QuestionModel(
@@ -193,6 +194,7 @@ def test_postgres_search_and_json_relationship_traversal_queries(
                     ),
                 ]
             )
+            session.flush()
             session.add(
                 QuestionParentModel(
                     question_id=child_id,
