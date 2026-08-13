@@ -671,7 +671,7 @@ function MemberOnboardingPage({
     setAiRequestPending(false);
     setManualOpen(false);
     setProviderConsent(false);
-  }, [projectId, savedCheckpoint?.note_id]);
+  }, [projectId, token]);
 
   useEffect(() => {
     if (draft?.status === "failed") {
