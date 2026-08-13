@@ -46,6 +46,7 @@ export default defineConfig({
         E2E_PORT: AUTH_ENABLED_PORT,
         E2E_AUTH_ENABLED: "true",
         E2E_BOOTSTRAP_TOKEN: BOOTSTRAP_TOKEN,
+        E2E_FAKE_ONBOARDING_PROVIDER: "true",
       },
       url: `http://127.0.0.1:${AUTH_ENABLED_PORT}/health`,
       reuseExistingServer: false,
