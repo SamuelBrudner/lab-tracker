@@ -54,12 +54,17 @@ exist.
 Optional GitHub Copilot MCP hosting is a separate read-only service:
 
 ```bash
-LT_MCP_READONLY_TOKEN=lpat_... docker compose up mcp
+export LT_MCP_READONLY_TOKEN=lpat_...
+export LT_MCP_INBOUND_TOKEN="$(openssl rand -hex 32)"
+docker compose up mcp
 ```
 
 The MCP service uses streamable HTTP and is published only on host loopback
 (`127.0.0.1:9000` by default). Put a private TLS proxy or tailnet serve layer in
-front of it; the checked-in Caddy example is `deploy/mcp/Caddyfile`.
+front of it; the checked-in Caddy example is `deploy/mcp/Caddyfile`. Remote MCP
+clients authenticate with `LT_MCP_INBOUND_TOKEN`; the distinct read-only LPAT
+remains server-side for MCP-to-API calls. Never expose this shared endpoint
+directly to the public internet.
 
 ### LAN Phone Capture
 

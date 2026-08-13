@@ -51,6 +51,7 @@ def test_compose_merge_has_pinned_images_and_no_builds(tmp_path: Path) -> None:
             "LAB_TRACKER_RUNTIME_ENV_FILE": str(runtime_env),
             "LAB_TRACKER_RELEASE_IMAGE": release_image,
             "LT_MCP_READONLY_TOKEN": "unused",
+            "LT_MCP_INBOUND_TOKEN": "inbound-" + "a" * 32,
         }
     )
     result = subprocess.run(
