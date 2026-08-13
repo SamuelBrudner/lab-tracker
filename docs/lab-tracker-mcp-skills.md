@@ -63,6 +63,23 @@ header before dispatch. The LPAT is used only for the MCP-to-API hop. Keep the
 endpoint private behind TLS or a tailnet; the inbound token is an access gate,
 not per-user graph authorization or attribution.
 
+For a remote agent, the graph-native read sequence is:
+
+1. `lab_tracker_graph_overview(project_id)` for bounded counts, open entry
+   points, and recent nodes.
+2. `lab_tracker_search_graph(project_id, query, ...)` for deterministic typed
+   hits across questions, notes, sessions, datasets, analyses, claims,
+   exploration nodes, goals, and visualizations.
+3. `lab_tracker_get_graph_neighborhood(...)` for a capped one- or two-hop
+   traversal around one selected anchor.
+4. `lab_tracker_get_decision_context(...)` before any research-facing choice.
+
+The graph tools return summaries by default, treat stored text as untrusted,
+and expose full anchor text only when explicitly requested, capped at 8,000
+characters. They complement rather than replace the existing full project graph
+and list/search tools. OKF export is a separate portability concern, not the
+interactive traversal path.
+
 Portable consumer `.mcp.json` files should use the console entry point rather
 than a hardcoded absolute Python path:
 

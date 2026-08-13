@@ -66,6 +66,14 @@ clients authenticate with `LT_MCP_INBOUND_TOKEN`; the distinct read-only LPAT
 remains server-side for MCP-to-API calls. Never expose this shared endpoint
 directly to the public internet.
 
+Remote agents should navigate large projects progressively: call
+`lab_tracker_graph_overview`, then `lab_tracker_search_graph`, then
+`lab_tracker_get_graph_neighborhood`. All three calls are permission-bounded,
+read-only, and response-capped; they use the same shared VIEWER LPAT identity on
+this hosted path. That is shared service scope, not per-user forwarding or
+OAuth. Before choosing an analysis, plot, control, figure, or research wording,
+the agent must still call `lab_tracker_get_decision_context`.
+
 ### LAN Phone Capture
 
 macOS/Linux:

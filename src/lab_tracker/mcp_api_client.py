@@ -364,6 +364,59 @@ class LabTrackerAPIClient:
             },
         )
 
+    def graph_overview(self, project_id: str) -> JsonObject:
+        return self._request("GET", f"/projects/{project_id}/graph/overview")
+
+    def search_graph(
+        self,
+        project_id: str,
+        query: str,
+        *,
+        entity_types: list[str] | None = None,
+        statuses: list[str] | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> JsonObject:
+        return self._request(
+            "GET",
+            f"/projects/{project_id}/graph/search",
+            params={
+                "q": query,
+                "entity_types": entity_types,
+                "statuses": statuses,
+                "limit": limit,
+                "offset": offset,
+            },
+        )
+
+    def get_graph_neighborhood(
+        self,
+        project_id: str,
+        entity_type: str,
+        entity_id: str,
+        *,
+        direction: str = "both",
+        relationships: list[str] | None = None,
+        node_types: list[str] | None = None,
+        depth: int = 1,
+        max_nodes: int = 50,
+        max_edges: int = 100,
+        include_anchor_content: bool = False,
+    ) -> JsonObject:
+        return self._request(
+            "GET",
+            f"/projects/{project_id}/graph/neighborhood/{entity_type}/{entity_id}",
+            params={
+                "direction": direction,
+                "relationships": relationships,
+                "node_types": node_types,
+                "depth": depth,
+                "max_nodes": max_nodes,
+                "max_edges": max_edges,
+                "include_anchor_content": include_anchor_content,
+            },
+        )
+
     def list_sessions(
         self,
         *,

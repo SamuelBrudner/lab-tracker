@@ -43,6 +43,7 @@ from lab_tracker.git_store_locator import (
     PinnedGitPath,
     canonical_git_store_uri,
 )
+from lab_tracker.graph_query import GraphQueryService
 from lab_tracker.local_store_locator import (
     PortableStorePath,
     canonical_store_uri,
@@ -78,6 +79,10 @@ from lab_tracker.provenance import (
 from lab_tracker.rclone_store_definition import is_rclone_store_kind
 from lab_tracker.schemas import (
     AssistantDecisionContextRequest,
+    GraphNeighborhoodRead,
+    GraphOverviewRead,
+    GraphSearchRead,
+    GraphTraversalDirection,
     PortfolioProjectGroupSummary,
     ProjectGraphRead,
     ProjectGraphView,
@@ -338,6 +343,65 @@ class ContextQueries:
     ) -> ProjectGraphRead:
         project = self.api.get_project_for_read(project_id, actor=actor)
         return build_project_graph(self.repository, project.project_id, view=view)
+
+    def graph_overview(
+        self,
+        project_id: UUID,
+        *,
+        actor: AuthContext,
+    ) -> GraphOverviewRead:
+        project = self.api.get_project_for_read(project_id, actor=actor)
+        return GraphQueryService(self.session).overview(project)
+
+    def search_graph(
+        self,
+        project_id: UUID,
+        *,
+        actor: AuthContext,
+        query: str,
+        entity_types: list[str] | None,
+        statuses: list[str] | None,
+        limit: int,
+        offset: int,
+    ) -> GraphSearchRead:
+        project = self.api.get_project_for_read(project_id, actor=actor)
+        return GraphQueryService(self.session).search(
+            project,
+            query=query,
+            entity_types=entity_types,
+            statuses=statuses,
+            limit=limit,
+            offset=offset,
+        )
+
+    def graph_neighborhood(
+        self,
+        project_id: UUID,
+        *,
+        actor: AuthContext,
+        anchor_type: str,
+        anchor_id: UUID,
+        direction: GraphTraversalDirection,
+        relationships: list[str] | None,
+        node_types: list[str] | None,
+        depth: int,
+        max_nodes: int,
+        max_edges: int,
+        include_anchor_content: bool,
+    ) -> GraphNeighborhoodRead:
+        project = self.api.get_project_for_read(project_id, actor=actor)
+        return GraphQueryService(self.session).neighborhood(
+            project,
+            anchor_type=anchor_type,
+            anchor_id=anchor_id,
+            direction=direction,
+            relationships=relationships,
+            node_types=node_types,
+            depth=depth,
+            max_nodes=max_nodes,
+            max_edges=max_edges,
+            include_anchor_content=include_anchor_content,
+        )
 
     def dataset_provenance(
         self,

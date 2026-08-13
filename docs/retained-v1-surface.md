@@ -110,6 +110,11 @@ research record:
   [agent-setup.md](agent-setup.md).
 - Project graph views and exports for inspecting the retained question,
   evidence, goal, analysis, claim, dataset, session, and visualization graph.
+  Agent-oriented reads add a bounded project overview, deterministic
+  cross-entity substring search, and typed one- or two-hop neighborhood
+  traversal. These queries authorize project scope before matching, cap nodes
+  and edges, return summaries by default, and never build the full graph merely
+  to slice a neighborhood.
 - Sessions and acquisition outputs, including closing sessions and promoting
   eligible sessions into datasets.
 - Dataset staging and direct commit with provenance/manifest capture, without
@@ -217,9 +222,12 @@ research record:
   cross-platform process executor and expose only static adapter-specific
   failures. See
   [external-artifact-resolution-design.md](external-artifact-resolution-design.md).
-- Read-only assistant and MCP decision-context endpoints over the retained
-  graph. Assistants may inspect context through these surfaces, but retained v1
-  does not delegate graph commits to autonomous agents.
+- Read-only assistant and MCP endpoints over the retained graph. Remote agents
+  can orient with `graph_overview`, locate a typed anchor with `search_graph`,
+  and inspect its bounded neighborhood before requesting task-specific decision
+  context. Decision context remains mandatory before research-facing choices;
+  returned record text is untrusted, and retained v1 does not delegate graph
+  commits to autonomous agents.
 
 Anything not listed above is out of the retained v1 surface and should not
 shape the default runtime, supported docs, or simplified architecture.
