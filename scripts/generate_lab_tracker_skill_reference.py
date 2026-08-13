@@ -23,6 +23,9 @@ REQUEST_SCHEMAS = (
     ("Goals", "GoalCreateFields"),
     ("Visualizations", "VisualizationCreate"),
     ("Graph Drafts", "GraphDraftCreateRequest"),
+    ("Member Onboarding Checkpoint", "MemberOnboardingCheckpointRequest"),
+    ("Member Onboarding Manual Alignment", "MemberOnboardingManualAlignmentRequest"),
+    ("Member Onboarding AI Alignment", "MemberOnboardingAiAlignmentRequest"),
     ("Decision Context", "AssistantDecisionContextRequest"),
 )
 
@@ -48,6 +51,7 @@ LIST_ENDPOINTS = (
     "/projects/{project_id}/goals",
     "/visualizations",
     "/graph-drafts",
+    "/projects/{project_id}/member-onboarding/owner-queue",
     "/search",
     "/projects/{project_id}/graph/overview",
     "/projects/{project_id}/graph/search",

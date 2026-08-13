@@ -183,6 +183,7 @@ class UsageEventResourceType(str, Enum):
     GOAL = "goal"
     GOAL_LINK = "goal_link"
     GRAPH_CHANGE_SET = "graph_change_set"
+    MEMBER_ONBOARDING = "member_onboarding"
     GRAPH_DRAFT_BATCH_SETTINGS = "graph_draft_batch_settings"
     GRAPH_DRAFT_BATCH_RUN = "graph_draft_batch_run"
     RECORD_EXPORT = "record_export"
@@ -415,6 +416,13 @@ class GraphDraftMode(str, Enum):
     GRAPH_CONTEXT = "graph_context"
     IMAGE_ONLY = "image_only"
     GRAPH_BATCH = "graph_batch"
+
+
+class GraphDraftPurpose(str, Enum):
+    """Why a graph draft exists, independent of its source/input mode."""
+
+    GENERAL = "general"
+    MEMBER_CHECKPOINT_ALIGNMENT = "member_checkpoint_alignment"
 
 
 class GraphDraftBatchRunStatus(str, Enum):
@@ -736,11 +744,16 @@ class GraphChangeSet(_DomainModel):
     model: str
     prompt_version: str
     draft_mode: GraphDraftMode = GraphDraftMode.GRAPH_CONTEXT
+    purpose: GraphDraftPurpose = GraphDraftPurpose.GENERAL
     context_packet: dict[str, Any] = Field(default_factory=dict)
     summary: str = ""
     uncertain_fields: list[str] = Field(default_factory=list)
     clarification_requests: list[str] = Field(default_factory=list)
     status: GraphChangeSetStatus = GraphChangeSetStatus.DRAFTING
+    generation_claim_token: UUID | None = Field(default=None, exclude=True)
+    generation_claimed_at: datetime | None = None
+    generation_lease_expires_at: datetime | None = None
+    generation_attempt_count: int = Field(default=0, ge=0)
     commit_message: str | None = None
     error_metadata: dict[str, Any] = Field(default_factory=dict)
     operation_count: int = 0
@@ -840,6 +853,10 @@ class GraphDraftBatchRun(_DomainModel):
     change_set_id: UUID | None = None
     summary: str = ""
     error_metadata: dict[str, Any] = Field(default_factory=dict)
+    claim_token: UUID | None = Field(default=None, exclude=True)
+    claimed_at: datetime | None = None
+    lease_expires_at: datetime | None = None
+    attempt_count: int = Field(default=0, ge=0)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
     started_at: datetime = Field(default_factory=utc_now)

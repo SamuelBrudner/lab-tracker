@@ -174,7 +174,11 @@ function NoteDetailCard({
   const [transcriptText, setTranscriptText] = useState("");
   const isImage = Boolean(note?.raw_asset?.content_type?.startsWith("image/"));
   const isAudio = Boolean(note?.raw_asset?.content_type?.startsWith("audio/"));
-  const canDraft = Boolean(isImage || isAudio || note?.raw_content);
+  const isMemberOnboardingCheckpoint =
+    note?.metadata?.member_onboarding_role === "checkpoint";
+  const canDraft = Boolean(
+    !isMemberOnboardingCheckpoint && (isImage || isAudio || note?.raw_content)
+  );
 
   const project = useMemo(() => {
     if (!note) {
@@ -344,7 +348,7 @@ function NoteDetailCard({
               <div className="subtle">Transcribed text</div>
               <textarea
                 className="transcript-editor"
-                disabled={!canWrite}
+                disabled={!canWrite || isMemberOnboardingCheckpoint}
                 onChange={(event) => setTranscriptText(event.target.value)}
                 value={transcriptText}
               />
@@ -383,7 +387,16 @@ function NoteDetailCard({
             Set active project
           </button>
         ) : null}
-        {note && isAudio ? (
+        {note && isMemberOnboardingCheckpoint ? (
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={() => navigate(`/app/projects/${note.project_id}/onboarding`)}
+          >
+            Open member onboarding
+          </button>
+        ) : null}
+        {note && isAudio && !isMemberOnboardingCheckpoint ? (
           <button
             type="button"
             className="btn-secondary"
@@ -393,7 +406,7 @@ function NoteDetailCard({
             Transcribe voice
           </button>
         ) : null}
-        {note ? (
+        {note && !isMemberOnboardingCheckpoint ? (
           <button
             type="button"
             className="btn-secondary"
@@ -413,7 +426,7 @@ function NoteDetailCard({
             Draft graph update
           </button>
         ) : null}
-        {note && isImage ? (
+        {note && isImage && !isMemberOnboardingCheckpoint ? (
           <button
             type="button"
             className="btn-secondary"
@@ -424,6 +437,12 @@ function NoteDetailCard({
           </button>
         ) : null}
       </div>
+      {note && isMemberOnboardingCheckpoint ? (
+        <p className="subtle">
+          This attributed onboarding checkpoint is immutable. Review its question map and
+          capture progress in the member-onboarding workflow.
+        </p>
+      ) : null}
     </article>
   );
 }

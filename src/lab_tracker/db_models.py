@@ -577,7 +577,18 @@ class NoteTargetModel(Base):
 
 class GraphChangeSetModel(Base):
     __tablename__ = "graph_change_sets"
-    __table_args__ = (UniqueConstraint("batch_key", name="uq_graph_change_sets_batch_key"),)
+    __table_args__ = (
+        UniqueConstraint("batch_key", name="uq_graph_change_sets_batch_key"),
+        CheckConstraint(
+            "generation_attempt_count >= 0",
+            name="ck_graph_change_sets_generation_attempt_count",
+        ),
+        Index(
+            "ix_graph_change_sets_generation_lease",
+            "status",
+            "generation_lease_expires_at",
+        ),
+    )
 
     change_set_id: Mapped[UUID] = mapped_column(
         GUID,
@@ -605,11 +616,20 @@ class GraphChangeSetModel(Base):
     model: Mapped[str] = mapped_column(String(100), nullable=False)
     prompt_version: Mapped[str] = mapped_column(String(80), nullable=False)
     draft_mode: Mapped[str] = mapped_column(String(30), nullable=False, default="graph_context")
+    purpose: Mapped[str] = mapped_column(String(48), nullable=False, default="general")
     context_packet: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
     summary: Mapped[str] = mapped_column(Text, default="")
     uncertain_fields: Mapped[list[str]] = mapped_column(JSON, default=list)
     clarification_requests: Mapped[list[str]] = mapped_column(JSON, default=list)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="drafting")
+    generation_claim_token: Mapped[UUID | None] = mapped_column(GUID)
+    generation_claimed_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    generation_lease_expires_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    generation_attempt_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
     commit_message: Mapped[str | None] = mapped_column(Text)
     error_metadata: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
     created_by: Mapped[str | None] = mapped_column(String(255))
@@ -842,7 +862,19 @@ class ReviewEmailOutboxModel(Base):
 
 class GraphDraftBatchRunModel(Base):
     __tablename__ = "graph_draft_batch_runs"
-    __table_args__ = (UniqueConstraint("batch_key", name="uq_graph_draft_batch_runs_batch_key"),)
+    __table_args__ = (
+        UniqueConstraint("batch_key", name="uq_graph_draft_batch_runs_batch_key"),
+        CheckConstraint(
+            "attempt_count >= 0",
+            name="ck_graph_draft_batch_runs_attempt_count",
+        ),
+        Index(
+            "ix_graph_draft_batch_runs_claimable",
+            "status",
+            "lease_expires_at",
+            "created_at",
+        ),
+    )
 
     run_id: Mapped[UUID] = mapped_column(
         GUID,
@@ -868,6 +900,10 @@ class GraphDraftBatchRunModel(Base):
     )
     summary: Mapped[str] = mapped_column(Text, default="")
     error_metadata: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    claim_token: Mapped[UUID | None] = mapped_column(GUID)
+    claimed_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_by: Mapped[str | None] = mapped_column(String(255))
     created_by_user_id: Mapped[UUID | None] = mapped_column(
         GUID,

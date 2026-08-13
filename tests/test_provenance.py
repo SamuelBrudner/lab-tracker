@@ -261,6 +261,68 @@ def test_record_export_uses_minimal_profile_classes_and_controlled_concepts():
     }
 
 
+def test_record_export_preserves_member_checkpoint_boundary_without_raw_metadata():
+    base_url = "http://example.test"
+    note_id = uuid4()
+    note = Note(
+        note_id=note_id,
+        project_id=uuid4(),
+        raw_content="# Current state\n\nA present-tense account.",
+        metadata={
+            "member_onboarding_role": "checkpoint",
+            "member_onboarding_schema_version": "1",
+            "member_onboarding_as_of": "2026-08-13T16:30:00+00:00",
+            "member_onboarding_historical_coverage": "selective",
+            "member_onboarding_payload_sha256": "a" * 64,
+            "member_onboarding_source_text_sha256": "b" * 64,
+            "member_onboarding_alignment_mode": "manual",
+            "member_onboarding_alignment_resolved_at": (
+                "2026-08-13T16:35:00+00:00"
+            ),
+            "member_onboarding_alignment_resolution": "submitted",
+            "member_onboarding_alignment_change_set_id": (
+                "6b08b566-4607-4a6a-9fab-7c22da0ec8df"
+            ),
+            "member_onboarding_first_capture_note_id": (
+                "55555555-aaaa-4aaa-8aaa-555555555555"
+            ),
+            "member_onboarding_first_capture_at": "2026-08-13T16:40:00+00:00",
+            "member_onboarding_completed_at": "2026-08-13T16:40:00+00:00",
+            "member_onboarding_current_output_or_decision": "private duplicate",
+            "unrelated_internal_metadata": "must not leak",
+        },
+    )
+
+    document = build_record_export_provenance_document(
+        base_url,
+        RecordExportRecords(notes=[note]),
+    )
+    node = _node_by_id(document, f"{base_url}/notes/{note_id}")
+
+    assert node["memberOnboardingRole"] == "checkpoint"
+    assert node["checkpointAsOf"] == "2026-08-13T16:30:00+00:00"
+    assert node["historicalCoverage"] == "selective"
+    assert node["checkpointPayloadSha256"] == "a" * 64
+    assert node["checkpointSourceTextSha256"] == "b" * 64
+    assert node["checkpointAlignmentMode"] == "manual"
+    assert node["checkpointAlignmentResolvedAt"] == "2026-08-13T16:35:00+00:00"
+    assert node["checkpointAlignmentResolution"] == "submitted"
+    assert node["checkpointAlignmentChangeSet"] == {
+        "@id": (
+            f"{base_url}/graph-drafts/"
+            "6b08b566-4607-4a6a-9fab-7c22da0ec8df"
+        )
+    }
+    assert node["wasInformedBy"] == node["checkpointAlignmentChangeSet"]
+    assert node["firstForwardCapture"] == {
+        "@id": f"{base_url}/notes/55555555-aaaa-4aaa-8aaa-555555555555"
+    }
+    assert node["firstForwardCaptureAt"] == "2026-08-13T16:40:00+00:00"
+    assert node["memberOnboardingCompletedAt"] == "2026-08-13T16:40:00+00:00"
+    assert "member_onboarding_current_output_or_decision" not in node
+    assert "unrelated_internal_metadata" not in node
+
+
 def test_record_export_provenance_includes_terminal_reasons():
     question_id = UUID("11111111-aaaa-aaaa-aaaa-111111111111")
     dataset_id = UUID("22222222-aaaa-aaaa-aaaa-222222222222")

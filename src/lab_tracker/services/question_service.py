@@ -15,6 +15,7 @@ from lab_tracker.errors import (
     OpaqueTargetNotFoundError,
     ValidationError,
 )
+from lab_tracker.member_onboarding import is_member_checkpoint
 from lab_tracker.models import (
     EntityOrigin,
     EntityRef,
@@ -109,6 +110,7 @@ class QuestionService(BaseService):
         origin_provider: str | None = None,
         origin_model: str | None = None,
         origin_prompt_version: str | None = None,
+        allow_member_onboarding_reserved: bool = False,
     ) -> Question:
         return self.create_question_result(
             project_id,
@@ -125,6 +127,7 @@ class QuestionService(BaseService):
             origin_provider=origin_provider,
             origin_model=origin_model,
             origin_prompt_version=origin_prompt_version,
+            allow_member_onboarding_reserved=allow_member_onboarding_reserved,
         ).entity
 
     def create_question_result(
@@ -144,6 +147,7 @@ class QuestionService(BaseService):
         origin_provider: str | None = None,
         origin_model: str | None = None,
         origin_prompt_version: str | None = None,
+        allow_member_onboarding_reserved: bool = False,
     ) -> IdempotentCreateResult[Question]:
         self.authorization.require_contributor(project_id, actor=actor)
         self.projects.get_project(project_id)
@@ -151,6 +155,14 @@ class QuestionService(BaseService):
         resolved_text = text.strip()
         resolved_hypothesis = hypothesis.strip() if hypothesis else None
         resolved_client_capture_id = normalize_client_capture_id(client_capture_id)
+        if (
+            resolved_client_capture_id is not None
+            and resolved_client_capture_id.startswith("member-question:")
+            and not allow_member_onboarding_reserved
+        ):
+            raise ValidationError(
+                "member-question: client_capture_id values are reserved for member onboarding."
+            )
         question_id = uuid4()
         parent_ids = unique_ids(parent_question_ids)
         for parent_id in parent_ids:
@@ -716,6 +728,11 @@ class QuestionService(BaseService):
         notes: list[Note] = []
         for note_id in note_ids:
             note = self.notes.get_note(note_id)
+            if is_member_checkpoint(note):
+                raise ValidationError(
+                    "Member onboarding checkpoint targets cannot be retargeted "
+                    "by question refactoring."
+                )
             if note.project_id != source.project_id:
                 raise ValidationError("Note must belong to the same project.")
             if not _targets_question(note.targets, source.question_id):
@@ -745,6 +762,19 @@ class QuestionService(BaseService):
         return question
 
     def _ensure_question_not_referenced(self, question: Question) -> None:
+        linked_notes = self.query_from_repository(
+            loader=lambda repository: repository.query_notes(
+                project_id=question.project_id,
+                target_entity_type=EntityType.QUESTION.value,
+                target_entity_id=question.question_id,
+                limit=1,
+                offset=0,
+            ),
+        )
+        if linked_notes:
+            raise ValidationError(
+                "Question cannot be deleted while notes target it."
+            )
         experiments, _ = self.repository.query_experiments(
             primary_question_id=question.question_id,
             limit=None,

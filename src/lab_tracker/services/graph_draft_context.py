@@ -41,6 +41,7 @@ EntityResult = (
 _RECENT_CONTEXT_LIMIT = 10
 _QUESTION_CONTEXT_LIMIT = 50
 _CAPTURE_BUNDLE_LIMIT = 6
+BATCH_SOURCE_CONTEXT_CHAR_BUDGET = 256_000
 
 
 class GraphContextBuilder:
@@ -90,9 +91,9 @@ class GraphContextBuilder:
         # Chronological order gives the day a contractual timeline rather than
         # relying on incidental input ordering.
         batch_notes = sorted(
-            notes[:batch_note_limit],
+            notes,
             key=lambda item: (item.created_at, str(item.note_id)),
-        )
+        )[:batch_note_limit]
 
         notes_by_project: dict[UUID, list[Note]] = {}
         for note in batch_notes:
@@ -147,6 +148,12 @@ class GraphContextBuilder:
                 }
             )
 
+        (
+            bounded_source_artifacts,
+            source_context_included_chars,
+            source_context_omitted_chars,
+            source_context_truncated_note_count,
+        ) = _bounded_batch_source_artifacts(batch_notes)
         packet: dict[str, Any] = {
             "mode": "graph_batch",
             "batch_window": _batch_window(window, batch_notes),
@@ -156,7 +163,14 @@ class GraphContextBuilder:
                 _capture_placement(note, sessions_by_project.get(note.project_id, []))
                 for note in batch_notes
             ],
-            "source_artifacts": [_source_artifact_packet(item) for item in batch_notes],
+            "source_artifacts": bounded_source_artifacts,
+            "source_context_budget_chars": BATCH_SOURCE_CONTEXT_CHAR_BUDGET,
+            "source_context_included_chars": source_context_included_chars,
+            "source_context_omitted_chars": source_context_omitted_chars,
+            "source_context_truncated": source_context_omitted_chars > 0,
+            "source_context_truncated_note_count": (
+                source_context_truncated_note_count
+            ),
             "projects": project_blocks,
             "truncated_note_count": truncated_note_count,
         }
@@ -567,6 +581,19 @@ def _graph_batch_context_summary(packet: dict[str, Any]) -> dict[str, Any]:
     truncated = int(packet.get("truncated_note_count") or 0)
     if truncated:
         warnings.append(f"batch truncated; {truncated} note(s) omitted")
+    source_context_truncated = bool(packet.get("source_context_truncated"))
+    source_context_omitted_chars = int(
+        packet.get("source_context_omitted_chars") or 0
+    )
+    source_context_truncated_note_count = int(
+        packet.get("source_context_truncated_note_count") or 0
+    )
+    if source_context_truncated:
+        warnings.append(
+            "source text truncated by per-note preview and/or aggregate batch budget; "
+            f"{source_context_omitted_chars} character(s) omitted across "
+            f"{source_context_truncated_note_count} note(s)"
+        )
     projects = packet.get("projects") or []
     batch_notes = [item for item in packet.get("batch_notes") or [] if isinstance(item, dict)]
     meeting_note_count = sum(1 for item in batch_notes if item.get("is_meeting"))
@@ -595,6 +622,17 @@ def _graph_batch_context_summary(packet: dict[str, Any]) -> dict[str, Any]:
         },
         "source_artifact_counts": source_artifact_counts,
         "truncated_note_count": truncated,
+        "source_context_budget_chars": int(
+            packet.get("source_context_budget_chars") or 0
+        ),
+        "source_context_included_chars": int(
+            packet.get("source_context_included_chars") or 0
+        ),
+        "source_context_omitted_chars": source_context_omitted_chars,
+        "source_context_truncated": source_context_truncated,
+        "source_context_truncated_note_count": (
+            source_context_truncated_note_count
+        ),
         "warnings": warnings,
     }
 
@@ -754,7 +792,72 @@ def _source_artifact_packet(note: Note) -> dict[str, Any]:
         payload["transcript_is_derived"] = True
     if note.raw_content:
         payload["raw_content_preview"] = note.raw_content[:1000]
+        if len(note.raw_content) > 1000:
+            payload["raw_content_preview_truncated"] = True
+            payload["raw_content_preview_omitted_chars"] = (
+                len(note.raw_content) - 1000
+            )
     return payload
+
+
+def _bounded_batch_source_artifacts(
+    notes: list[Note],
+    *,
+    budget_chars: int = BATCH_SOURCE_CONTEXT_CHAR_BUDGET,
+) -> tuple[list[dict[str, Any]], int, int, int]:
+    """Share one source-text budget deterministically across batch notes.
+
+    Notes are processed in their already-canonical chronological order. At
+    each step the remaining budget is divided by the remaining note count, so
+    a long early transcript cannot starve every later note. Unused allocation
+    rolls forward. Metadata is retained; only untrusted source text consumes
+    this provider-input budget.
+    """
+
+    if budget_chars < 0:
+        raise ValueError("budget_chars must not be negative.")
+    artifacts: list[dict[str, Any]] = []
+    remaining = budget_chars
+    included = 0
+    omitted = 0
+    truncated_notes = 0
+    total_notes = len(notes)
+    for index, note in enumerate(notes):
+        artifact = _source_artifact_packet(note)
+        remaining_notes = total_notes - index
+        allocation = remaining // remaining_notes if remaining_notes else 0
+        # The long-standing raw-content preview cap is part of the effective
+        # source-text bound too. Count that omission alongside any additional
+        # aggregate-budget truncation so the packet never under-reports how
+        # much original source text was excluded.
+        note_omitted = int(
+            artifact.get("raw_content_preview_omitted_chars") or 0
+        )
+        used = 0
+        for field_name in ("transcript_text", "raw_content_preview"):
+            value = artifact.get(field_name)
+            if not isinstance(value, str):
+                continue
+            field_allowance = max(0, allocation - used)
+            if len(value) > field_allowance:
+                artifact[field_name] = value[:field_allowance]
+                artifact[f"{field_name}_truncated"] = True
+                field_omitted = len(value) - field_allowance
+                artifact[f"{field_name}_omitted_chars"] = int(
+                    artifact.get(f"{field_name}_omitted_chars") or 0
+                ) + field_omitted
+                note_omitted += field_omitted
+                used += field_allowance
+            else:
+                used += len(value)
+        remaining -= used
+        included += used
+        omitted += note_omitted
+        if note_omitted:
+            truncated_notes += 1
+            artifact["source_text_omitted_chars"] = note_omitted
+        artifacts.append(artifact)
+    return artifacts, included, omitted, truncated_notes
 
 
 def _compact_question(question: Question) -> dict[str, Any]:

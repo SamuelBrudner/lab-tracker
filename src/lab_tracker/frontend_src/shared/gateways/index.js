@@ -5,7 +5,8 @@
 import * as auth from "./auth.js";
 import * as datasets from "./datasets.js";
 import * as graphDrafts from "./graph-drafts.js";
+import * as memberOnboarding from "./member-onboarding.js";
 import * as notes from "./notes.js";
 import * as projects from "./projects.js";
 
-export { auth, datasets, graphDrafts, notes, projects };
+export { auth, datasets, graphDrafts, memberOnboarding, notes, projects };

@@ -1420,6 +1420,7 @@ class SQLAlchemyLabTrackerRepository:
         status: str | None = None,
         source_note_id: UUID | None = None,
         draft_mode: str | None = None,
+        purpose: str | None = None,
         batch_key: str | None = None,
         limit: int | None = None,
         offset: int = 0,
@@ -1431,6 +1432,7 @@ class SQLAlchemyLabTrackerRepository:
             status=status,
             source_note_id=source_note_id,
             draft_mode=draft_mode,
+            purpose=purpose,
             batch_key=batch_key,
             limit=limit,
             offset=offset,
@@ -1559,5 +1561,54 @@ class SQLAlchemyLabTrackerRepository:
         self,
         *,
         claimed_at: datetime,
+        lease_until: datetime,
+        claim_token: UUID,
     ) -> GraphDraftBatchRun | None:
-        return self.graph_draft_batch_runs.claim_next_pending(claimed_at=claimed_at)
+        return self.graph_draft_batch_runs.claim_next_pending(
+            claimed_at=claimed_at,
+            lease_until=lease_until,
+            claim_token=claim_token,
+        )
+
+    def claim_graph_draft_batch_run(
+        self,
+        run_id: UUID,
+        *,
+        claimed_at: datetime,
+        lease_until: datetime,
+        claim_token: UUID,
+    ) -> GraphDraftBatchRun | None:
+        return self.graph_draft_batch_runs.claim(
+            run_id,
+            claimed_at=claimed_at,
+            lease_until=lease_until,
+            claim_token=claim_token,
+        )
+
+    def renew_graph_draft_batch_run_claim(
+        self,
+        run_id: UUID,
+        claim_token: UUID,
+        *,
+        renewed_at: datetime,
+        lease_until: datetime,
+    ) -> GraphDraftBatchRun | None:
+        return self.graph_draft_batch_runs.renew_claim(
+            run_id,
+            claim_token,
+            renewed_at=renewed_at,
+            lease_until=lease_until,
+        )
+
+    def finish_graph_draft_batch_run_claim(
+        self,
+        run: GraphDraftBatchRun,
+        claim_token: UUID,
+        *,
+        finished_at: datetime,
+    ) -> GraphDraftBatchRun | None:
+        return self.graph_draft_batch_runs.finish_claim(
+            run,
+            claim_token,
+            finished_at=finished_at,
+        )

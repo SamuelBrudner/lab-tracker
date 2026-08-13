@@ -26,6 +26,7 @@ from lab_tracker.models import (
     GraphDraftBatchSettings,
     GraphDraftBatchTrigger,
     GraphDraftMode,
+    GraphDraftPurpose,
     Note,
     UsageEventResourceType,
     UsageEventVerb,
@@ -153,6 +154,7 @@ class GraphDraftsApiMixin:
         status: GraphChangeSetStatus | None = None,
         source_note_id: UUID | None = None,
         draft_mode: GraphDraftMode | None = None,
+        purpose: GraphDraftPurpose | None = None,
         batch_key: str | None = None,
     ) -> list[GraphChangeSet]:
         return self.graph_drafts.list_graph_change_sets(
@@ -160,6 +162,7 @@ class GraphDraftsApiMixin:
             status=status,
             source_note_id=source_note_id,
             draft_mode=draft_mode,
+            purpose=purpose,
             batch_key=batch_key,
         )
 
@@ -171,6 +174,7 @@ class GraphDraftsApiMixin:
         status: GraphChangeSetStatus | None = None,
         source_note_id: UUID | None = None,
         draft_mode: GraphDraftMode | None = None,
+        purpose: GraphDraftPurpose | None = None,
         batch_key: str | None = None,
         limit: int | None = None,
         offset: int = 0,
@@ -182,6 +186,7 @@ class GraphDraftsApiMixin:
             status=status,
             source_note_id=source_note_id,
             draft_mode=draft_mode,
+            purpose=purpose,
             batch_key=batch_key,
             limit=limit,
             offset=offset,

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { apiResponse, installFetchMock } from "../../test/utils.js";
 import { ContractError } from "../contract.js";
-import { auth, datasets, graphDrafts, notes, projects } from "./index.js";
+import { auth, datasets, graphDrafts, memberOnboarding, notes, projects } from "./index.js";
 
 const AUTH_USER = {
   created_at: "2026-07-20T00:00:00Z",
@@ -126,6 +126,90 @@ describe("graph-drafts gateway", () => {
       },
     ]);
     await expect(graphDrafts.getChangeSet("cs-1", { token: "t" })).rejects.toBeInstanceOf(ContractError);
+  });
+});
+
+describe("member-onboarding gateway", () => {
+  const orientation = {
+    alignment: null,
+    brief_markdown: "",
+    capabilities: {
+      can_align: true,
+      can_capture: true,
+      can_commit: false,
+      can_create_checkpoint: true,
+      can_read: true,
+    },
+    checkpoint: null,
+    first_capture: null,
+    guided_fields: null,
+    map_items: [],
+    member_complete: false,
+    owner_commit_pending: false,
+    project_id: "p-1",
+    role: "contributor",
+    state: "not_started",
+  };
+
+  it("validates the derived resource and sends explicit provider acknowledgement", async () => {
+    let aiBody;
+    installFetchMock([
+      {
+        match: "/projects/p-1/member-onboarding",
+        response: apiResponse(orientation),
+      },
+      {
+        match: "/projects/p-1/member-onboarding/ai-alignment",
+        method: "POST",
+        response: (request) => {
+          aiBody = JSON.parse(request.init.body);
+          return apiResponse(orientation);
+        },
+      },
+    ]);
+
+    await expect(memberOnboarding.getMemberOnboarding("p-1")).resolves.toMatchObject({
+      project_id: "p-1",
+      state: "not_started",
+    });
+    await memberOnboarding.requestAiAlignment("p-1", true, { token: "t" });
+    expect(aiBody).toEqual({ external_provider_acknowledged: true });
+  });
+
+  it("fails loudly when a successful onboarding response loses its project identity", async () => {
+    const malformed = { ...orientation };
+    Reflect.deleteProperty(malformed, "project_id");
+    installFetchMock([
+      {
+        match: "/projects/p-1/member-onboarding",
+        response: apiResponse(malformed),
+      },
+    ]);
+
+    await expect(memberOnboarding.getMemberOnboarding("p-1")).rejects.toBeInstanceOf(
+      ContractError
+    );
+  });
+
+  it("validates owner queue items and their nested draft identity", async () => {
+    installFetchMock([
+      {
+        match: "/projects/p-1/member-onboarding/owner-queue",
+        response: apiResponse([
+          {
+            accepted_operation_count: 1,
+            checkpoint: { note_id: "n-1" },
+            draft: { change_set_id: "cs-1", operations: [], status: "submitted" },
+            member_user_id: "u-1",
+            member_username: "member@example.org",
+            project_id: "p-1",
+          },
+        ]),
+      },
+    ]);
+
+    const { data } = await memberOnboarding.listOwnerQueue("p-1", { token: "t" });
+    expect(data[0].draft.change_set_id).toBe("cs-1");
   });
 });
 

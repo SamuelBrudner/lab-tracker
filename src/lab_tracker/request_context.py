@@ -20,8 +20,13 @@ class LabTrackerRequestContext:
         *,
         run_deferred_actions: Callable[[list[Callable[[], None]] | None, str], None],
     ) -> None:
-        run_deferred_actions(self.after_commit_actions, "after_commit")
-        self.after_commit_actions.clear()
+        # A post-commit reconciliation may schedule its own fail-soft usage
+        # event. Drain in generations so those newly appended actions run in
+        # this completed request rather than being cleared unseen.
+        while self.after_commit_actions:
+            actions = list(self.after_commit_actions)
+            self.after_commit_actions.clear()
+            run_deferred_actions(actions, "after_commit")
         self.after_rollback_actions.clear()
 
     def complete_rollback(

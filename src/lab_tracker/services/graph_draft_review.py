@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Protocol
 from uuid import UUID
 
@@ -15,6 +16,13 @@ from lab_tracker.graph_drafting import (
     GraphDraftClient,
     GraphDraftingError,
 )
+from lab_tracker.member_onboarding import (
+    ALIGNMENT_MODE_KEY,
+    COMPLETED_AT_KEY,
+    FIRST_CAPTURE_NOTE_ID_KEY,
+    is_member_checkpoint,
+    validate_member_alignment_operations,
+)
 from lab_tracker.models import (
     AcceptanceMode,
     GraphChangeOperation,
@@ -22,7 +30,12 @@ from lab_tracker.models import (
     GraphChangeSet,
     GraphChangeSetStatus,
     GraphDraftMode,
+    GraphDraftPurpose,
+    Note,
     ProjectMembershipRole,
+    Question,
+    UsageEventResourceType,
+    UsageEventVerb,
     utc_now,
 )
 from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
@@ -39,7 +52,36 @@ _REVISION_ATTACHMENT_EVIDENCE_MESSAGE = (
 class ReviewRecords(Protocol):
     def get_graph_change_set(self, change_set_id: UUID) -> GraphChangeSet: ...
 
+    def get_graph_change_set_for_update(self, change_set_id: UUID) -> GraphChangeSet: ...
+
     def save_graph_change_set(self, change_set: GraphChangeSet) -> None: ...
+
+    def get_member_onboarding_checkpoint(self, note_id: UUID) -> Note | None: ...
+
+    def get_member_onboarding_question(self, question_id: UUID) -> Question | None: ...
+
+    def resolve_member_onboarding_ai_alignment(
+        self,
+        note_id: UUID,
+        *,
+        change_set_id: UUID,
+        resolved_at: datetime,
+        resolution: str,
+    ) -> Note | None: ...
+
+    def mark_member_onboarding_completed(
+        self,
+        note_id: UUID,
+        *,
+        completed_at: datetime,
+    ) -> Note | None: ...
+
+    def reconcile_member_onboarding_completion(
+        self,
+        note_id: UUID,
+        *,
+        completed_at: datetime,
+    ) -> Note | None: ...
 
 
 class RevisionGenerator(Protocol):
@@ -153,7 +195,31 @@ class GraphDraftReviewCoordinator(BaseService):
         acceptance_mode: AcceptanceMode = AcceptanceMode.HUMAN_SELECTED,
         actor: AuthContext | None = None,
     ) -> GraphChangeSet:
-        change_set = self.records.get_graph_change_set(change_set_id)
+        with self.application_transaction():
+            return self._update_graph_change_operation(
+                change_set_id,
+                operation_id,
+                payload=payload,
+                status=status,
+                review_note=review_note,
+                acceptance_mode=acceptance_mode,
+                actor=actor,
+            )
+
+    def _update_graph_change_operation(
+        self,
+        change_set_id: UUID,
+        operation_id: UUID,
+        *,
+        payload: PatchValue[dict[str, Any] | None],
+        status: PatchValue[GraphChangeOperationStatus | None],
+        review_note: PatchValue[str | None],
+        acceptance_mode: AcceptanceMode,
+        actor: AuthContext | None,
+    ) -> GraphChangeSet:
+        change_set = self._change_set_for_serialized_onboarding_mutation(
+            change_set_id
+        )
         self._ensure_graph_change_set_editable(change_set, actor=actor)
         operation = self._find_graph_operation(change_set, operation_id)
         if not any(is_provided(value) for value in (payload, status, review_note)):
@@ -223,6 +289,8 @@ class GraphDraftReviewCoordinator(BaseService):
                     operation.status = GraphChangeOperationStatus.PROPOSED
         if operation == before:
             return change_set
+        if change_set.purpose == GraphDraftPurpose.MEMBER_CHECKPOINT_ALIGNMENT:
+            self._validate_member_onboarding_change_set(change_set)
         self._stamp_operation_acceptance(operation, acceptance_mode, actor)
         operation.updated_at = utc_now()
         change_set.updated_at = utc_now()
@@ -259,6 +327,10 @@ class GraphDraftReviewCoordinator(BaseService):
         actor: AuthContext | None = None,
     ) -> GraphChangeSet:
         change_set = self.records.get_graph_change_set(change_set_id)
+        if change_set.purpose == GraphDraftPurpose.MEMBER_CHECKPOINT_ALIGNMENT:
+            raise ValidationError(
+                "Member onboarding proposals require individual review; bulk accept is disabled."
+            )
         self._ensure_graph_change_set_editable(change_set, actor=actor)
         accepted_any = False
         for operation in change_set.operations:
@@ -283,8 +355,38 @@ class GraphDraftReviewCoordinator(BaseService):
         *,
         actor: AuthContext | None = None,
     ) -> GraphChangeSet:
-        change_set = self.records.get_graph_change_set(change_set_id)
+        with self.application_transaction():
+            return self._submit_graph_change_set(change_set_id, actor=actor)
+
+    def _submit_graph_change_set(
+        self,
+        change_set_id: UUID,
+        *,
+        actor: AuthContext | None,
+    ) -> GraphChangeSet:
+        change_set = self._change_set_for_serialized_onboarding_mutation(
+            change_set_id
+        )
         self.authorization.require_contributor(change_set.project_id, actor=actor)
+        is_member_onboarding = (
+            change_set.purpose == GraphDraftPurpose.MEMBER_CHECKPOINT_ALIGNMENT
+        )
+        if is_member_onboarding:
+            self._require_member_onboarding_author(change_set, actor=actor)
+            self._validate_member_onboarding_change_set(change_set)
+            unresolved = [
+                operation
+                for operation in change_set.operations
+                if operation.status
+                not in {
+                    GraphChangeOperationStatus.ACCEPTED,
+                    GraphChangeOperationStatus.REJECTED,
+                }
+            ]
+            if unresolved:
+                raise ValidationError(
+                    "Resolve every onboarding proposal individually before submitting."
+                )
         if (
             not self._is_graph_change_set_author(change_set, actor)
             and not self.authorization.has_global_write(actor)
@@ -298,14 +400,60 @@ class GraphDraftReviewCoordinator(BaseService):
             GraphChangeSetStatus.CHANGES_REQUESTED,
         }:
             raise ValidationError("Only ready or changes-requested graph drafts can be submitted.")
-        change_set.status = GraphChangeSetStatus.SUBMITTED
+        accepted_count = sum(
+            operation.status == GraphChangeOperationStatus.ACCEPTED
+            for operation in change_set.operations
+        )
+        review_already_recorded = bool(
+            is_member_onboarding
+            and change_set.context_packet.get("member_onboarding_review_recorded")
+        )
+        change_set.status = (
+            GraphChangeSetStatus.REJECTED
+            if is_member_onboarding and accepted_count == 0
+            else GraphChangeSetStatus.SUBMITTED
+        )
         change_set.submitted_at = utc_now()
         change_set.submitted_by = actor_user_id(actor)
         change_set.reviewed_at = None
         change_set.reviewed_by = None
         change_set.review_note = None
+        if is_member_onboarding:
+            change_set.context_packet = {
+                **change_set.context_packet,
+                "member_onboarding_resolution": (
+                    "checkpoint_only" if accepted_count == 0 else "submitted"
+                ),
+                "member_onboarding_review_recorded": True,
+            }
         change_set.updated_at = change_set.submitted_at
         self.records.save_graph_change_set(change_set)
+        if is_member_onboarding:
+            checkpoint = self.records.resolve_member_onboarding_ai_alignment(
+                change_set.source_note_id,
+                change_set_id=change_set.change_set_id,
+                resolved_at=change_set.submitted_at,
+                resolution=(
+                    "checkpoint_only" if accepted_count == 0 else "submitted"
+                ),
+            )
+            if checkpoint is None or checkpoint.metadata.get(ALIGNMENT_MODE_KEY) != "ai":
+                raise ValidationError(
+                    "Member onboarding alignment mode could not be finalized."
+                )
+            if not review_already_recorded:
+                self.record_usage_event(
+                    verb=UsageEventVerb.REVIEW,
+                    resource_type=UsageEventResourceType.MEMBER_ONBOARDING,
+                    resource_id=change_set.source_note_id,
+                    project_id=change_set.project_id,
+                    actor=actor,
+                )
+            self._mark_member_onboarding_complete(change_set, actor=actor)
+            self._schedule_member_onboarding_completion_reconciliation(
+                change_set,
+                actor=actor,
+            )
         return change_set
 
     def review_graph_change_set(
@@ -316,8 +464,31 @@ class GraphDraftReviewCoordinator(BaseService):
         note: str | None = None,
         actor: AuthContext | None = None,
     ) -> GraphChangeSet:
-        change_set = self.records.get_graph_change_set(change_set_id)
+        with self.application_transaction():
+            return self._review_graph_change_set(
+                change_set_id,
+                status=status,
+                note=note,
+                actor=actor,
+            )
+
+    def _review_graph_change_set(
+        self,
+        change_set_id: UUID,
+        *,
+        status: GraphChangeSetStatus,
+        note: str | None,
+        actor: AuthContext | None,
+    ) -> GraphChangeSet:
+        change_set = self._change_set_for_serialized_onboarding_mutation(
+            change_set_id
+        )
         self.authorization.require_owner(change_set.project_id, actor=actor)
+        if change_set.purpose == GraphDraftPurpose.MEMBER_CHECKPOINT_ALIGNMENT:
+            self.authorization.require_interactive(
+                actor,
+                action="Reviewing member onboarding proposals",
+            )
         if status not in {
             GraphChangeSetStatus.CHANGES_REQUESTED,
             GraphChangeSetStatus.REJECTED,
@@ -333,6 +504,15 @@ class GraphDraftReviewCoordinator(BaseService):
         self.records.save_graph_change_set(change_set)
         return change_set
 
+    def _change_set_for_serialized_onboarding_mutation(
+        self,
+        change_set_id: UUID,
+    ) -> GraphChangeSet:
+        change_set = self.records.get_graph_change_set(change_set_id)
+        if change_set.purpose != GraphDraftPurpose.MEMBER_CHECKPOINT_ALIGNMENT:
+            return change_set
+        return self.records.get_graph_change_set_for_update(change_set_id)
+
     def revise_graph_change_set(
         self,
         change_set_id: UUID,
@@ -345,6 +525,11 @@ class GraphDraftReviewCoordinator(BaseService):
         """Regenerate the complete operation set without risking the old draft."""
 
         change_set = self.records.get_graph_change_set(change_set_id)
+        if change_set.purpose == GraphDraftPurpose.MEMBER_CHECKPOINT_ALIGNMENT:
+            raise ValidationError(
+                "Member onboarding proposals can be changed only through "
+                "individual operation review."
+            )
         self._ensure_graph_change_set_editable(change_set, actor=actor)
         revision_inputs = inputs or RevisionInputs()
         cleaned, transcript = self._resolve_revision_feedback(
@@ -542,6 +727,8 @@ class GraphDraftReviewCoordinator(BaseService):
         *,
         actor: AuthContext | None,
     ) -> None:
+        if change_set.purpose == GraphDraftPurpose.MEMBER_CHECKPOINT_ALIGNMENT:
+            self._require_member_onboarding_author(change_set, actor=actor)
         if change_set.status in {
             GraphChangeSetStatus.COMMITTED,
             GraphChangeSetStatus.COMMITTING,
@@ -563,6 +750,115 @@ class GraphDraftReviewCoordinator(BaseService):
             GraphChangeSetStatus.CHANGES_REQUESTED,
         }:
             raise ValidationError("Submitted graph drafts cannot be edited by contributors.")
+
+    def _require_member_onboarding_author(
+        self,
+        change_set: GraphChangeSet,
+        *,
+        actor: AuthContext | None,
+    ) -> None:
+        self.authorization.require_interactive(
+            actor,
+            action="Reviewing member onboarding proposals",
+        )
+        checkpoint = self.records.get_member_onboarding_checkpoint(
+            change_set.source_note_id
+        )
+        if checkpoint is None or not is_member_checkpoint(checkpoint):
+            raise ValidationError("Member onboarding source checkpoint is unavailable.")
+        if actor is None:
+            raise ValidationError("Only the checkpoint author may review this proposal.")
+        matches = (
+            checkpoint.created_by_user_id == actor.user_id
+            if checkpoint.created_by_user_id is not None
+            else checkpoint.created_by == str(actor.user_id)
+        )
+        if not matches:
+            raise ValidationError("Only the checkpoint author may review this proposal.")
+
+    def _validate_member_onboarding_change_set(
+        self,
+        change_set: GraphChangeSet,
+    ) -> None:
+        checkpoint = self.records.get_member_onboarding_checkpoint(
+            change_set.source_note_id
+        )
+        if checkpoint is None:
+            raise ValidationError("Member onboarding source checkpoint is unavailable.")
+
+        def get_question(question_id: UUID) -> Question:
+            question = self.records.get_member_onboarding_question(question_id)
+            if question is None:
+                raise ValidationError("Onboarding question target does not exist.")
+            return question
+
+        validate_member_alignment_operations(
+            change_set,
+            checkpoint,
+            get_question=get_question,
+        )
+
+    def _mark_member_onboarding_complete(
+        self,
+        change_set: GraphChangeSet,
+        *,
+        actor: AuthContext | None,
+    ) -> None:
+        checkpoint = self.records.get_member_onboarding_checkpoint(
+            change_set.source_note_id
+        )
+        if (
+            checkpoint is None
+            or checkpoint.metadata.get(COMPLETED_AT_KEY)
+            or not checkpoint.metadata.get(FIRST_CAPTURE_NOTE_ID_KEY)
+        ):
+            return
+        completed = self.records.mark_member_onboarding_completed(
+            checkpoint.note_id,
+            completed_at=utc_now(),
+        )
+        if completed is None:
+            return
+        self.record_usage_event(
+            verb=UsageEventVerb.SUBMIT,
+            resource_type=UsageEventResourceType.MEMBER_ONBOARDING,
+            resource_id=completed.note_id,
+            project_id=completed.project_id,
+            actor=actor,
+        )
+
+    def _schedule_member_onboarding_completion_reconciliation(
+        self,
+        change_set: GraphChangeSet,
+        *,
+        actor: AuthContext | None,
+    ) -> None:
+        self.run_after_commit(
+            lambda: self._reconcile_member_onboarding_completion(
+                change_set.source_note_id,
+                actor=actor,
+            )
+        )
+
+    def _reconcile_member_onboarding_completion(
+        self,
+        checkpoint_id: UUID,
+        *,
+        actor: AuthContext | None,
+    ) -> None:
+        completed = self.records.reconcile_member_onboarding_completion(
+            checkpoint_id,
+            completed_at=utc_now(),
+        )
+        if completed is None:
+            return
+        self.record_usage_event(
+            verb=UsageEventVerb.SUBMIT,
+            resource_type=UsageEventResourceType.MEMBER_ONBOARDING,
+            resource_id=completed.note_id,
+            project_id=completed.project_id,
+            actor=actor,
+        )
 
     def _is_unassigned_batch_owner_recovery(
         self,

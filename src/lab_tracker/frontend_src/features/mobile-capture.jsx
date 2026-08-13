@@ -5,6 +5,7 @@ import { CaptureComposer } from "./mobile-capture/CaptureComposer.jsx";
 import { CaptureContextFields } from "./mobile-capture/CaptureContextFields.jsx";
 import { MobileInstallPrompt } from "./mobile-capture/MobileInstallPrompt.jsx";
 import { PendingReviewList } from "./mobile-capture/PendingReviewList.jsx";
+import { readCaptureLaunchContext } from "./mobile-capture/capture-helpers.js";
 
 function MobileCaptureCard({
   token,
@@ -22,6 +23,11 @@ function MobileCaptureCard({
   refreshProjectCounts,
   refreshRecentNotes,
 }) {
+  const captureSearch = window.location.search;
+  const launchContext = React.useMemo(
+    () => readCaptureLaunchContext(captureSearch),
+    [captureSearch]
+  );
   const capture = useMobileCapture({
     token,
     ownerId,
@@ -33,6 +39,8 @@ function MobileCaptureCard({
     setFlash,
     refreshProjectCounts,
     refreshRecentNotes,
+    lockedCheckpointNoteId: launchContext.checkpointNoteId,
+    returnPath: launchContext.returnPath,
   });
 
   return (
@@ -44,6 +52,7 @@ function MobileCaptureCard({
           <CaptureComposer
             canWrite={canWrite}
             navigate={navigate}
+            returnPath={launchContext.returnPath}
             attachmentMenuOpen={capture.attachmentMenuOpen}
             setAttachmentMenuOpen={capture.setAttachmentMenuOpen}
             photoFile={capture.photoFile}
@@ -69,6 +78,8 @@ function MobileCaptureCard({
             projects={projects}
             selectedProjectId={selectedProjectId}
             onSelectedProjectChange={onSelectedProjectChange}
+            projectLocked={Boolean(launchContext.checkpointNoteId)}
+            lockedCheckpointNoteId={launchContext.checkpointNoteId}
             activeQuestions={capture.activeQuestions}
             questionId={capture.questionId}
             setQuestionId={capture.setQuestionId}

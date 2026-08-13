@@ -65,6 +65,28 @@ describe("static demo API", () => {
     expect(draft.operations[0].source_refs[0].quote).toContain("0.6x gain");
   });
 
+  it("serves read-only member orientation and an empty owner queue", async () => {
+    const projectId = "2a32290d-5977-4e1a-9639-23210d3d4f1e";
+    const orientation = await apiRequest(`/projects/${projectId}/member-onboarding`);
+    const queue = await apiListRequest(
+      `/projects/${projectId}/member-onboarding/owner-queue?limit=50&offset=0`
+    );
+
+    expect(orientation).toMatchObject({
+      capabilities: {
+        can_align: false,
+        can_capture: false,
+        can_create_checkpoint: false,
+        can_read: true,
+      },
+      project_id: projectId,
+      role: "viewer",
+      state: "not_started",
+    });
+    expect(queue.data).toEqual([]);
+    expect(queue.meta.total).toBe(0);
+  });
+
   it("rejects writes so the public demo is safe to click through", async () => {
     await expect(
       apiRequest("/projects", {

@@ -36,6 +36,20 @@ function missingBundleTranscript(note, notes) {
   return bundleAudioNotes(note, notes).some((candidate) => !hasTranscript(candidate));
 }
 
+function readCaptureLaunchContext(search = window.location.search) {
+  try {
+    const params = new URLSearchParams(search || "");
+    const returnPath = params.get("return_to") || "";
+    return {
+      checkpointNoteId: params.get("checkpoint_note_id") || "",
+      projectId: params.get("project_id") || "",
+      returnPath: returnPath.startsWith("/app/") ? returnPath : "",
+    };
+  } catch {
+    return { checkpointNoteId: "", projectId: "", returnPath: "" };
+  }
+}
+
 export {
   bundleAudioNotes,
   captureHint,
@@ -44,4 +58,5 @@ export {
   hasTranscript,
   isAudioCapture,
   missingBundleTranscript,
+  readCaptureLaunchContext,
 };
