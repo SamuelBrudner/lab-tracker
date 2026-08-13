@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import secrets
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 from urllib.parse import urlparse
 
 from mcp.server.fastmcp import FastMCP
+from starlette.responses import Response
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from lab_tracker.decision_context_constants import MCP_SERVER_INSTRUCTIONS
 from lab_tracker.mcp_api_client import (
@@ -91,6 +94,7 @@ class MCPServerRuntimeSettings:
     host: str = "127.0.0.1"
     port: int = 8000
     path: str = "/mcp"
+    inbound_token: str | None = field(default=None, repr=False)
 
     @classmethod
     def from_env(cls) -> MCPServerRuntimeSettings:
@@ -102,12 +106,59 @@ class MCPServerRuntimeSettings:
         path = os.getenv("LAB_TRACKER_MCP_PATH", "/mcp").strip() or "/mcp"
         if not path.startswith("/"):
             path = f"/{path}"
+        inbound_token = os.getenv("LAB_TRACKER_MCP_INBOUND_TOKEN")
+        if transport == "streamable-http":
+            inbound_token = _validated_inbound_token(inbound_token)
         return cls(
             transport=transport,  # type: ignore[arg-type]
             host=os.getenv("LAB_TRACKER_MCP_HOST", "127.0.0.1").strip()
             or "127.0.0.1",
             port=_env_int("LAB_TRACKER_MCP_PORT", default=8000),
             path=path,
+            inbound_token=inbound_token,
+        )
+
+
+class MCPInboundBearerAuthMiddleware:
+    """Fail-closed bearer authentication for a hosted MCP ASGI application."""
+
+    def __init__(self, app: ASGIApp, token: str) -> None:
+        self.app = app
+        self._token = _validated_inbound_token(token).encode("ascii")
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        authorization_values = [
+            value for name, value in scope.get("headers", []) if name.lower() == b"authorization"
+        ]
+        if not self._authorized(authorization_values):
+            response = Response(
+                status_code=401,
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+            await response(scope, receive, send)
+            return
+
+        # Do not expose the transport credential to FastMCP or application logs.
+        downstream_scope = dict(scope)
+        downstream_scope["headers"] = [
+            (name, value)
+            for name, value in scope.get("headers", [])
+            if name.lower() != b"authorization"
+        ]
+        await self.app(downstream_scope, receive, send)
+
+    def _authorized(self, values: list[bytes]) -> bool:
+        if len(values) != 1:
+            return False
+        scheme, separator, credential = values[0].partition(b" ")
+        return (
+            separator == b" "
+            and scheme.lower() == b"bearer"
+            and secrets.compare_digest(credential, self._token)
         )
 
 
@@ -133,14 +184,51 @@ def build_server(settings: MCPServerRuntimeSettings | None = None) -> FastMCP:
     return runtime_server
 
 
+def build_streamable_http_app(
+    runtime_server: FastMCP, settings: MCPServerRuntimeSettings
+) -> ASGIApp:
+    if settings.transport != "streamable-http":
+        raise ValueError("Streamable HTTP app requires streamable-http transport settings.")
+    token = _validated_inbound_token(settings.inbound_token)
+    return MCPInboundBearerAuthMiddleware(runtime_server.streamable_http_app(), token)
+
+
 server = build_server()
 
 
 def main() -> None:
     runtime_settings = MCPServerRuntimeSettings.from_env()
-    _ensure_mcp_target_safe()
+    api_settings = MCPSettings.from_env()
+    _ensure_mcp_target_safe(api_settings)
+    _ensure_hosted_tokens_are_distinct(runtime_settings, api_settings)
     runtime_server = build_server(runtime_settings)
-    runtime_server.run(transport=runtime_settings.transport)
+    if runtime_settings.transport == "streamable-http":
+        _run_streamable_http(runtime_server, runtime_settings)
+    else:
+        runtime_server.run(transport=runtime_settings.transport)
+
+
+def _run_streamable_http(
+    runtime_server: FastMCP, settings: MCPServerRuntimeSettings
+) -> None:
+    import uvicorn
+
+    app = build_streamable_http_app(runtime_server, settings)
+    uvicorn.run(app, host=settings.host, port=settings.port)
+
+
+def _ensure_hosted_tokens_are_distinct(
+    runtime_settings: MCPServerRuntimeSettings, api_settings: MCPSettings
+) -> None:
+    if runtime_settings.transport != "streamable-http":
+        return
+    inbound_token = _validated_inbound_token(runtime_settings.inbound_token)
+    api_key = (api_settings.api_key or "").strip()
+    if api_key and secrets.compare_digest(inbound_token.encode(), api_key.encode()):
+        raise SystemExit(
+            "LAB_TRACKER_MCP_INBOUND_TOKEN must be distinct from "
+            "LAB_TRACKER_MCP_API_KEY / LT_MCP_READONLY_TOKEN."
+        )
 
 
 def _ensure_mcp_target_safe(settings: MCPSettings | None = None) -> None:
@@ -213,6 +301,27 @@ def _env_int(name: str, *, default: int) -> int:
     return value
 
 
+def _validated_inbound_token(value: str | None) -> str:
+    if value is None or not value:
+        raise SystemExit(
+            "LAB_TRACKER_MCP_INBOUND_TOKEN is required for streamable-http transport."
+        )
+    try:
+        encoded = value.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise SystemExit(
+            "LAB_TRACKER_MCP_INBOUND_TOKEN must contain only visible ASCII characters."
+        ) from exc
+    if len(encoded) < 32 or len(encoded) > 512 or any(
+        byte < 0x21 or byte > 0x7E for byte in encoded
+    ):
+        raise SystemExit(
+            "LAB_TRACKER_MCP_INBOUND_TOKEN must be 32-512 visible ASCII characters "
+            "with no whitespace."
+        )
+    return value
+
+
 __all__ = [
     "DEFAULT_BASE_URL",
     "DEFAULT_TIMEOUT_SECONDS",
@@ -223,11 +332,13 @@ __all__ = [
     "LabTrackerAPIUnavailableError",
     "LabTrackerAPIValidationError",
     "MCPSettings",
+    "MCPInboundBearerAuthMiddleware",
     "MCPServerRuntimeSettings",
     "MCP_SERVER_INSTRUCTIONS",
     "MCPTransport",
     "SERVER_NAME",
     "build_server",
+    "build_streamable_http_app",
     "client_from_env",
     "lab_tracker_api_error",
     "lab_tracker_agent_consultation_policy",

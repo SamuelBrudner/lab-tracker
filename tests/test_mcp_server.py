@@ -9,7 +9,11 @@ from pathlib import Path
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from mcp import ClientSession
+from mcp.client.streamable_http import streamable_http_client
 from mcp.server.fastmcp.exceptions import ToolError
+from pydantic import AnyUrl
+from starlette.responses import Response
 
 try:
     import tomllib
@@ -258,6 +262,7 @@ def test_mcp_runtime_settings_from_env_for_streamable_http(monkeypatch) -> None:
     monkeypatch.setenv("LAB_TRACKER_MCP_HOST", "127.0.0.1")
     monkeypatch.setenv("LAB_TRACKER_MCP_PORT", "9000")
     monkeypatch.setenv("LAB_TRACKER_MCP_PATH", "mcp")
+    monkeypatch.setenv("LAB_TRACKER_MCP_INBOUND_TOKEN", "inbound-" + "a" * 32)
 
     settings = mcp_server.MCPServerRuntimeSettings.from_env()
 
@@ -265,6 +270,19 @@ def test_mcp_runtime_settings_from_env_for_streamable_http(monkeypatch) -> None:
     assert settings.host == "127.0.0.1"
     assert settings.port == 9000
     assert settings.path == "/mcp"
+    assert settings.inbound_token == "inbound-" + "a" * 32
+    assert settings.inbound_token not in repr(settings)
+
+
+def test_mcp_runtime_settings_require_strong_inbound_token(monkeypatch) -> None:
+    monkeypatch.setenv("LAB_TRACKER_MCP_TRANSPORT", "streamable-http")
+
+    with pytest.raises(SystemExit, match="LAB_TRACKER_MCP_INBOUND_TOKEN is required"):
+        mcp_server.MCPServerRuntimeSettings.from_env()
+
+    monkeypatch.setenv("LAB_TRACKER_MCP_INBOUND_TOKEN", "too short")
+    with pytest.raises(SystemExit, match="32-512 visible ASCII"):
+        mcp_server.MCPServerRuntimeSettings.from_env()
 
 
 def test_mcp_runtime_settings_reject_invalid_transport_and_port(monkeypatch) -> None:
@@ -273,9 +291,23 @@ def test_mcp_runtime_settings_reject_invalid_transport_and_port(monkeypatch) -> 
         mcp_server.MCPServerRuntimeSettings.from_env()
 
     monkeypatch.setenv("LAB_TRACKER_MCP_TRANSPORT", "streamable-http")
+    monkeypatch.setenv("LAB_TRACKER_MCP_INBOUND_TOKEN", "inbound-" + "a" * 32)
     monkeypatch.setenv("LAB_TRACKER_MCP_PORT", "not-a-port")
     with pytest.raises(SystemExit, match="LAB_TRACKER_MCP_PORT"):
         mcp_server.MCPServerRuntimeSettings.from_env()
+
+
+def test_hosted_mcp_rejects_reusing_api_token() -> None:
+    shared_token = "shared-" + "a" * 32
+
+    with pytest.raises(SystemExit, match="must be distinct"):
+        mcp_server._ensure_hosted_tokens_are_distinct(
+            mcp_server.MCPServerRuntimeSettings(
+                transport="streamable-http",
+                inbound_token=shared_token,
+            ),
+            mcp_server.MCPSettings(api_key=shared_token),
+        )
 
 
 def test_build_server_for_streamable_http_uses_private_stateless_settings() -> None:
@@ -295,14 +327,94 @@ def test_build_server_for_streamable_http_uses_private_stateless_settings() -> N
     assert runtime_server.settings.json_response is True
 
 
+def test_hosted_mcp_bearer_gate_rejects_missing_invalid_and_duplicate_credentials() -> None:
+    inbound_token = "inbound-" + "a" * 32
+    downstream_authorization: list[str | None] = []
+
+    async def downstream(scope, receive, send) -> None:
+        headers = dict(scope.get("headers", []))
+        value = headers.get(b"authorization")
+        downstream_authorization.append(value.decode() if value else None)
+        await Response("ok")(scope, receive, send)
+
+    app = mcp_server.MCPInboundBearerAuthMiddleware(downstream, inbound_token)
+
+    async def exercise() -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as client:
+            missing = await client.get("/mcp")
+            malformed = await client.get(
+                "/mcp", headers={"Authorization": inbound_token}
+            )
+            invalid = await client.get(
+                "/mcp", headers={"Authorization": "Bearer " + "b" * 40}
+            )
+            duplicate = await client.get(
+                "/mcp",
+                headers=[
+                    ("Authorization", f"Bearer {inbound_token}"),
+                    ("Authorization", f"Bearer {inbound_token}"),
+                ],
+            )
+            valid = await client.get(
+                "/mcp", headers={"Authorization": f"Bearer {inbound_token}"}
+            )
+
+        for response in (missing, malformed, invalid, duplicate):
+            assert response.status_code == 401
+            assert response.headers["www-authenticate"] == "Bearer"
+            assert inbound_token not in response.text
+        assert valid.status_code == 200
+
+    asyncio.run(exercise())
+
+    assert downstream_authorization == [None]
+
+
+def test_valid_hosted_bearer_completes_mcp_initialize_and_resource_read() -> None:
+    inbound_token = "inbound-" + "a" * 32
+    settings = mcp_server.MCPServerRuntimeSettings(
+        transport="streamable-http",
+        host="127.0.0.1",
+        port=9000,
+        path="/mcp",
+        inbound_token=inbound_token,
+    )
+    runtime_server = mcp_server.build_server(settings)
+    fastmcp_app = runtime_server.streamable_http_app()
+    app = mcp_server.MCPInboundBearerAuthMiddleware(fastmcp_app, inbound_token)
+
+    async def exercise() -> None:
+        async with (
+            fastmcp_app.router.lifespan_context(fastmcp_app),
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="http://127.0.0.1:9000",
+                headers={"Authorization": f"Bearer {inbound_token}"},
+            ) as client,
+            streamable_http_client(
+                "http://127.0.0.1:9000/mcp", http_client=client
+            ) as (read_stream, write_stream, _),
+            ClientSession(read_stream, write_stream) as session,
+        ):
+            await session.initialize()
+            resource = await session.read_resource(AnyUrl("lab-tracker://surface"))
+
+        assert resource.contents
+        assert "Lab Tracker" in resource.contents[0].text
+
+    asyncio.run(exercise())
+
+
 def test_main_runs_streamable_http_transport_from_env(monkeypatch) -> None:
     guard_calls: list[str] = []
     built_settings: list[mcp_server.MCPServerRuntimeSettings] = []
     run_calls: list[str] = []
 
     class FakeServer:
-        def run(self, transport: str) -> None:
-            run_calls.append(transport)
+        pass
 
     def fake_build(settings: mcp_server.MCPServerRuntimeSettings | None = None):
         assert settings is not None
@@ -313,8 +425,18 @@ def test_main_runs_streamable_http_transport_from_env(monkeypatch) -> None:
     monkeypatch.setenv("LAB_TRACKER_MCP_HOST", "127.0.0.1")
     monkeypatch.setenv("LAB_TRACKER_MCP_PORT", "9000")
     monkeypatch.setenv("LAB_TRACKER_MCP_PATH", "/mcp")
-    monkeypatch.setattr(mcp_server, "_ensure_mcp_target_safe", lambda: guard_calls.append("guard"))
+    monkeypatch.setenv("LAB_TRACKER_MCP_INBOUND_TOKEN", "inbound-" + "a" * 32)
+    monkeypatch.setattr(
+        mcp_server,
+        "_ensure_mcp_target_safe",
+        lambda _settings: guard_calls.append("guard"),
+    )
     monkeypatch.setattr(mcp_server, "build_server", fake_build)
+    monkeypatch.setattr(
+        mcp_server,
+        "_run_streamable_http",
+        lambda _server, settings: run_calls.append(settings.transport),
+    )
 
     mcp_server.main()
 
@@ -331,6 +453,7 @@ def test_hosted_mcp_compose_and_caddy_configs_are_private_read_only() -> None:
     assert "LAB_TRACKER_MCP_TRANSPORT: streamable-http" in compose
     assert "LAB_TRACKER_BASE_URL: ${LAB_TRACKER_MCP_BASE_URL:-http://app:8000}" in compose
     assert "LAB_TRACKER_MCP_API_KEY: ${LT_MCP_READONLY_TOKEN:" in compose
+    assert "LAB_TRACKER_MCP_INBOUND_TOKEN: ${LT_MCP_INBOUND_TOKEN:" in compose
     assert '"127.0.0.1:${LAB_TRACKER_MCP_HOST_PORT:-9000}:${LAB_TRACKER_MCP_PORT:-8000}"' in compose
     assert "LAB_TRACKER_MCP_USERNAME" not in compose.split("  postgres:", 1)[0]
 

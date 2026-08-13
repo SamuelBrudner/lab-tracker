@@ -17,6 +17,7 @@ lab_tracker.db.lock
 .npm-cache/
 .codex/
 .lab-tracker-dolt/
+/deployments/shared-provider/runtime.env
 
 # Beads / Dolt files (added by bd init)
 .dolt/

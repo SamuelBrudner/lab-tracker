@@ -103,6 +103,19 @@ docker compose logs -f app
 If migrations fail after the configured retry budget, the app container exits
 with an error. Restore from backup or fix the migration before restarting.
 
+### Pinned provider-backed instances
+
+A live instance that uses a reviewed immutable image must not be operated with
+the source-build Compose file alone. Select the checked-in
+`deployments/shared-provider/docker-compose.yml` overlay through the host's
+ignored `.env`; the overlay removes the app and MCP build definitions and
+requires both services to use `LAB_TRACKER_RELEASE_IMAGE`.
+
+See [`deployments/shared-provider/README.md`](../deployments/shared-provider/README.md)
+for the one-time host configuration and the fail-closed preflight. Once the
+overlay is selected, ordinary `docker compose` commands retain the pinned image
+and even `--build` cannot rebuild or retag it from the current checkout.
+
 ## First Admin Token
 
 When no `LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN` is provided, the Docker entrypoint

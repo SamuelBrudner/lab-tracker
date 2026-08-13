@@ -2,7 +2,8 @@
 #
 # Replace mcp.lab.internal with the tailnet/VPN hostname you will serve. This
 # file intentionally does not configure permissive CORS; the MCP endpoint should
-# stay private and token-authenticated.
+# stay private. The MCP ASGI process enforces a distinct inbound bearer before
+# FastMCP receives a request; this proxy terminates TLS and preserves that header.
 
 mcp.lab.internal {
     @badhost not host mcp.lab.internal

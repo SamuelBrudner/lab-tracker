@@ -240,8 +240,9 @@ In `mcp_api_client.py`: add `LAB_TRACKER_MCP_API_KEY` (alias
 **Secret-in-logs hygiene (load-bearing).** `lab_tracker_api_error()` and
 `LabTrackerAPIUnavailableError` serialize request lines into tool output returned
 to Copilot. **Redact any `lpat_…` / `Bearer …` substring** before it reaches tool
-output; strip `Authorization` from proxy/uvicorn logs; rely on the required short
-`expires_at` because secrets leak somewhere over their lifetime.
+output; strip `Authorization` from proxy logs and before FastMCP dispatch; rely
+on the required short `expires_at` because secrets leak somewhere over their
+lifetime.
 
 ### B4 — HTTP transport (only for Mode 2)
 
@@ -252,16 +253,19 @@ LAB_TRACKER_MCP_TRANSPORT   # "stdio" (default) | "streamable-http"
 LAB_TRACKER_MCP_HOST        # default 127.0.0.1  (loopback — proxy owns TLS)
 LAB_TRACKER_MCP_PORT        # default 8000
 LAB_TRACKER_MCP_PATH        # default "/mcp"
+LAB_TRACKER_MCP_INBOUND_TOKEN  # required distinct random bearer for hosted clients
 ```
 
 Construct `FastMCP(SERVER_NAME, instructions=…, stateless_http=True,
-json_response=True)` for the hosted endpoint, then
-`server.run(transport="streamable-http")`. Keep the server **standalone** (its own
-process / HTTP client of the API) — do not mount under FastAPI this round (a
-mounted sub-app's lifespan isn't run, requiring manual `session_manager.run()`
-hoisting). Inbound auth: simplest is a reverse-proxy / ASGI static-header gate
-that authenticates the read-only `lpat_`; authorization still happens at the API
-(hop 2), not in FastMCP scopes.
+json_response=True)` for the hosted endpoint, wrap `server.streamable_http_app()`
+with the inbound gate, and serve that ASGI application with Uvicorn. Keep the
+server **standalone** (its own process / HTTP client of the API) — do not mount
+under FastAPI this round (a mounted sub-app's lifespan isn't run, requiring
+manual `session_manager.run()` hoisting). Inbound auth uses a random transport
+credential distinct from the read-only `lpat_`.
+Authorization still happens at the API (hop 2), not in FastMCP scopes. The gate
+protects even direct backend access and strips the inbound header before
+dispatch.
 
 ## Deployment (Mode 2 only)
 
@@ -278,13 +282,15 @@ tailnet-private `tailscale serve` or a LAN reverse proxy.
       LAB_TRACKER_MCP_HOST: 0.0.0.0              # container bind; host publish below is loopback-only
       LAB_TRACKER_MCP_PORT: "8000"
       LAB_TRACKER_BASE_URL: http://app:8000  # hop-2 target (must report auth ON)
+      LAB_TRACKER_MCP_INBOUND_TOKEN: ${LT_MCP_INBOUND_TOKEN}  # random, not an lpat_
       LAB_TRACKER_MCP_API_KEY: ${LT_MCP_READONLY_TOKEN}   # a read-only lpat_
     ports:
       - "127.0.0.1:9000:8000"
     depends_on: [app]
 ```
 
-Caddy terminates TLS, validates Origin/Host, and strips the bearer from logs:
+Caddy terminates TLS, validates Origin/Host, and strips the inbound bearer from
+logs while forwarding it to the ASGI authentication gate:
 
 ```caddyfile
 mcp.lab.internal {
@@ -298,7 +304,8 @@ mcp.lab.internal {
 > The exact Origin values Copilot IDEs send are unverified — treat the allowlist
 > as a **placeholder; confirm against live request logs** before enforcing, or
 > legitimate traffic will 403. Origin checks defend only the browser threat
-> model; for non-browser clients rely on the token + TLS + short TTL + revocation.
+> model; for non-browser clients rely on the distinct inbound token + TLS. The
+> server-side read-only LPAT remains independently short-lived and revocable.
 > Set **no permissive CORS** on `/mcp`.
 
 **Open-ADMIN footgun (guard required).** When auth is disabled (default for
@@ -341,9 +348,10 @@ client skips `/auth/login` with a key; no `lpat_` substring in returned errors;
 **P1 — HTTP transport + private read-only hosted endpoint.** Implemented: B4 +
 compose `mcp` service (host-loopback publish) + Caddyfile (Origin allowlist +
 log-strip) + tailnet-private deployment docs. No migration. Read-only only. Test
-gates: boots streamable-http on loopback; reverse-proxy Origin 403; hosted
-`lpat_` cannot write; `/mcp` sets no permissive CORS; startup guard refuses an
-auth-off hop-2 target.
+gates: missing/invalid inbound credentials 401 before FastMCP; a valid distinct
+credential completes MCP initialization and resource reads; boots streamable-http
+on loopback; reverse-proxy Origin 403; hosted `lpat_` cannot write; `/mcp` sets
+no permissive CORS; startup guard refuses an auth-off hop-2 target.
 
 **Deferred (not in current scope):** per-request token forwarding (only if remote
 writes are ever wanted), OAuth 2.1 PRM, the autonomous coding agent, PyPI publish
