@@ -8,6 +8,7 @@
 //   E2E_PORT         port to bind (default 8177)
 //   E2E_AUTH_ENABLED "true" to run auth-enabled (default "false")
 //   E2E_BOOTSTRAP_TOKEN  first-admin bootstrap token when auth is enabled
+//   E2E_FAKE_ONBOARDING_PROVIDER "true" to use deterministic onboarding AI
 //   E2E_PUBLIC_BASE_URL  browser-facing URL (defaults to this disposable server)
 import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -18,12 +19,14 @@ import { fileURLToPath } from "node:url";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const port = process.env.E2E_PORT || "8177";
 const authEnabled = process.env.E2E_AUTH_ENABLED === "true";
+const fakeOnboardingProvider = process.env.E2E_FAKE_ONBOARDING_PROVIDER === "true";
 const workDir = mkdtempSync(join(tmpdir(), "lt-e2e-"));
 
 const serverEnv = {
   ...process.env,
   LAB_TRACKER_ENVIRONMENT: "local",
   LAB_TRACKER_AUTH_ENABLED: authEnabled ? "true" : "false",
+  LAB_TRACKER_E2E_FAKE_ONBOARDING_PROVIDER: fakeOnboardingProvider ? "true" : "false",
   LAB_TRACKER_DATABASE_URL: `sqlite+pysqlite:///${join(workDir, "e2e.db")}`,
   LAB_TRACKER_FILE_STORAGE_PATH: join(workDir, "file-storage"),
   LAB_TRACKER_NOTE_STORAGE_PATH: join(workDir, "note-storage"),
@@ -75,7 +78,17 @@ if (!authEnabled) {
 
 server = spawn(
   "uv",
-  ["run", "uvicorn", "lab_tracker.asgi:app", "--host", "127.0.0.1", "--port", port],
+  [
+    "run",
+    "uvicorn",
+    fakeOnboardingProvider
+      ? "e2e.onboarding_fake_provider_app:app"
+      : "lab_tracker.asgi:app",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    port,
+  ],
   { cwd: repoRoot, env: serverEnv, stdio: "inherit" }
 );
 server.on("exit", (code) => {
