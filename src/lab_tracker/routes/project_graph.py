@@ -16,6 +16,7 @@ from lab_tracker.schemas import (
     GraphEntityType,
     GraphNeighborhoodRead,
     GraphOverviewRead,
+    GraphRetrievalMode,
     GraphSearchRead,
     GraphTraversalDirection,
     PersistedGraphEntityType,
@@ -68,6 +69,7 @@ def build_project_graph_router(api: LabTrackerAPI) -> APIRouter:
         statuses: Annotated[list[str] | None, Query()] = None,
         limit: Annotated[int, Query(ge=1, le=100)] = 20,
         offset: Annotated[int, Query(ge=0)] = 0,
+        retrieval_mode: GraphRetrievalMode = "auto",
     ):
         results = handlers_from_request(request).context.search_graph(
             project_id,
@@ -77,6 +79,7 @@ def build_project_graph_router(api: LabTrackerAPI) -> APIRouter:
             statuses=statuses,
             limit=limit,
             offset=offset,
+            retrieval_mode=retrieval_mode,
         )
         return Envelope(
             data=results,

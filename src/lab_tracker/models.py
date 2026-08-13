@@ -1484,6 +1484,17 @@ class UsageEvent(_DomainModel):
     outcome: UsageEventOutcome = UsageEventOutcome.OK
     duration_ms: int | None = None
     result_count: int | None = None
+    retrieval_strategy: Literal["lexical", "hybrid", "shadow"] | None = None
+    retrieval_fallback: Literal[
+        "server_mode_off",
+        "adapter_unavailable",
+        "semantic_index_invalid",
+        "semantic_timeout",
+        "coverage_below_threshold",
+        "shadow_policy",
+    ] | None = None
+    semantic_duration_ms: int | None = Field(default=None, ge=0)
+    shadow_overlap_milli: int | None = Field(default=None, ge=0, le=1000)
 
 
 class UsageEventRollup(_DomainModel):

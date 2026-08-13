@@ -125,9 +125,18 @@ def test_setup_readiness_requires_auth_and_never_returns_provider_secret(
         "scheduler_enabled": True,
         "background_worker_enabled": True,
         "provider": "openai",
-        "provider_credential_configured": True,
-        "source_revision": "0123456789abcdef0123456789abcdef01234567",
-    }
+            "provider_credential_configured": True,
+            "source_revision": "0123456789abcdef0123456789abcdef01234567",
+            "semantic": {
+                "adapter_available": False,
+                "mode": "off",
+                "coverage": 0.0,
+                "queue_depth": 0,
+                "oldest_lag_seconds": None,
+                "failed_jobs": 0,
+                "last_reconciliation_at": None,
+            },
+        }
     assert "super-secret-provider-key" not in response.text
 
 
@@ -220,9 +229,18 @@ def test_setup_readiness_normalizes_provider_and_reports_runtime_flags(
         "scheduler_enabled": scheduler_enabled,
         "background_worker_enabled": expected_background_worker_enabled,
         "provider": expected_provider,
-        "provider_credential_configured": expected_credential_configured,
-        "source_revision": "0123456789abcdef0123456789abcdef01234567",
-    }
+            "provider_credential_configured": expected_credential_configured,
+            "source_revision": "0123456789abcdef0123456789abcdef01234567",
+            "semantic": {
+                "adapter_available": False,
+                "mode": "off",
+                "coverage": 0.0,
+                "queue_depth": 0,
+                "oldest_lag_seconds": None,
+                "failed_jobs": 0,
+                "last_reconciliation_at": None,
+            },
+        }
     assert credential_value not in response.text or credential_value == ""
 
 

@@ -227,7 +227,10 @@ research record:
   and inspect its bounded neighborhood before requesting task-specific decision
   context. Decision context remains mandatory before research-facing choices;
   returned record text is untrusted, and retained v1 does not delegate graph
-  commits to autonomous agents.
+  commits to autonomous agents. Optional semantic seed retrieval is an
+  eval-gated derivative layer behind one off-by-default switch; it adds no
+  provider adapter and no second graph. See
+  [eval-gated hybrid GraphRAG](eval-gated-hybrid-graphrag.md).
 
 Anything not listed above is out of the retained v1 surface and should not
 shape the default runtime, supported docs, or simplified architecture.

@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session as OrmSession
 
 from lab_tracker.artifact_resolution import ResolverRegistry
 from lab_tracker.config import Settings
+from lab_tracker.semantic_retrieval import EmbeddingClient
 from lab_tracker.store_authority_use import StoreAuthoritySnapshotProvider
 from lab_tracker.store_health import StoreProbe
 
@@ -75,6 +76,7 @@ class RequestHandlers:
         store_health_checker: StoreProbe,
         release_read_scope: Callable[[], None],
         store_authority_snapshot_provider: StoreAuthoritySnapshotProvider,
+        semantic_client: EmbeddingClient | None = None,
     ) -> RequestHandlers:
         """Bind every handler to the middleware's existing request resources."""
 
@@ -87,6 +89,8 @@ class RequestHandlers:
                 release_read_scope=release_read_scope,
                 resolver_registry=resolver_registry,
                 store_authority_snapshot_provider=store_authority_snapshot_provider,
+                settings=settings,
+                semantic_client=semantic_client,
             ),
             store_health=StoreHealthQueries(
                 api=api,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime
+from typing import Literal, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import delete, func, select
@@ -39,6 +40,10 @@ def usage_event_to_model(event: UsageEvent) -> UsageEventModel:
         outcome=event.outcome.value,
         duration_ms=event.duration_ms,
         result_count=event.result_count,
+        retrieval_strategy=event.retrieval_strategy,
+        retrieval_fallback=event.retrieval_fallback,
+        semantic_duration_ms=event.semantic_duration_ms,
+        shadow_overlap_milli=event.shadow_overlap_milli,
     )
 
 
@@ -57,6 +62,24 @@ def usage_event_from_model(row: UsageEventModel) -> UsageEvent:
         outcome=UsageEventOutcome(row.outcome),
         duration_ms=row.duration_ms,
         result_count=row.result_count,
+        retrieval_strategy=cast(
+            Literal["lexical", "hybrid", "shadow"] | None,
+            row.retrieval_strategy,
+        ),
+        retrieval_fallback=cast(
+            Literal[
+                "server_mode_off",
+                "adapter_unavailable",
+                "semantic_index_invalid",
+                "semantic_timeout",
+                "coverage_below_threshold",
+                "shadow_policy",
+            ]
+            | None,
+            row.retrieval_fallback,
+        ),
+        semantic_duration_ms=row.semantic_duration_ms,
+        shadow_overlap_milli=row.shadow_overlap_milli,
     )
 
 

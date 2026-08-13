@@ -46,6 +46,14 @@ migrations when the configured database is file-backed SQLite. For a backup on
 another disk or synced destination, run `lab-tracker backup --to <path>` and copy
 that destination through your normal off-machine backup process.
 
+### Semantic graph retrieval
+
+- `LAB_TRACKER_SEMANTIC_SEARCH_MODE`: single semantic indexing and serving
+  switch: `off`, `shadow`, or `hybrid` (default: `off`). This initiative ships
+  no real embedding adapter, so setting `shadow` or `hybrid` without a
+  separately injected adapter degrades safely to lexical retrieval. See
+  [`eval-gated-hybrid-graphrag.md`](eval-gated-hybrid-graphrag.md).
+
 ### Authentication and invitations
 
 - `LAB_TRACKER_AUTH_SECRET_KEY`: auth signing secret (default allowed only in `local`)

@@ -67,9 +67,11 @@ For a remote agent, the graph-native read sequence is:
 
 1. `lab_tracker_graph_overview(project_id)` for bounded counts, open entry
    points, and recent nodes.
-2. `lab_tracker_search_graph(project_id, query, ...)` for deterministic typed
-   hits across questions, notes, sessions, datasets, analyses, claims,
-   exploration nodes, goals, and visualizations.
+2. `lab_tracker_search_graph(project_id, query, retrieval_mode="auto", ...)`
+   for deterministic typed hits across questions, notes, sessions, datasets,
+   analyses, claims, exploration nodes, goals, and visualizations. See
+   [eval-gated hybrid GraphRAG](eval-gated-hybrid-graphrag.md); the default
+   runtime remains lexical and ships no embedding provider.
 3. `lab_tracker_get_graph_neighborhood(...)` for a capped one- or two-hop
    traversal around one selected anchor.
 4. `lab_tracker_get_decision_context(...)` before any research-facing choice.

@@ -36,7 +36,9 @@ from lab_tracker.schemas import (
     AuthUserUpdate,
     Envelope,
     ListEnvelope,
+    SemanticReadiness,
 )
+from lab_tracker.semantic_retrieval import semantic_configuration_hash, semantic_coverage
 
 from .shared import (
     actor_from_authorization_header,
@@ -252,6 +254,32 @@ def build_auth_router(
         settings = request.app.state.settings
         provider, credential_configured = _graph_draft_provider_readiness(settings)
         scheduler_enabled = bool(settings.graph_draft_scheduler_enabled)
+        semantic_client = getattr(request.app.state, "semantic_embedding_client", None)
+        semantic_readiness = SemanticReadiness(
+            adapter_available=semantic_client is not None,
+            mode=settings.semantic_search_mode,
+            last_reconciliation_at=getattr(
+                request.app.state,
+                "semantic_last_reconciliation_at",
+                None,
+            ),
+        )
+        if semantic_client is not None:
+            try:
+                with request.app.state.db_session_factory() as session:
+                    coverage = semantic_coverage(
+                        session,
+                        config_hash=semantic_configuration_hash(
+                            semantic_client.descriptor
+                        ),
+                    )
+                semantic_readiness.coverage = coverage.coverage
+                semantic_readiness.queue_depth = coverage.queue_depth
+                semantic_readiness.oldest_lag_seconds = coverage.oldest_lag_seconds
+                semantic_readiness.failed_jobs = coverage.failed_jobs
+            except Exception:
+                # Optional semantic degradation never changes overall readiness.
+                semantic_readiness.adapter_available = False
         return Envelope(
             data=AuthSetupReadiness(
                 scheduler_enabled=scheduler_enabled,
@@ -261,6 +289,7 @@ def build_auth_router(
                 provider=provider,
                 provider_credential_configured=credential_configured,
                 source_revision=settings.source_revision,
+                semantic=semantic_readiness,
             )
         )
 

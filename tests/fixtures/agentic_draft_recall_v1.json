@@ -1,0 +1,68 @@
+{
+  "schema": "agentic-draft-recall/v1",
+  "cases": [
+    {
+      "id": "label-over-metadata",
+      "terms": ["dopamine", "latency"],
+      "expected_top_ids": ["q-target"],
+      "projects": [
+        {
+          "id": "project-a",
+          "active_or_staged_questions": [
+            {"id": "q-target", "label": "Dopamine response latency", "metadata": "baseline"},
+            {"id": "q-distractor", "label": "Unrelated control", "metadata": "dopamine latency"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "statement-hit",
+      "terms": ["photometry"],
+      "expected_top_ids": ["claim-1"],
+      "projects": [
+        {
+          "id": "project-a",
+          "recent_claims": [
+            {"id": "claim-1", "statement": "Photometry signal rises before movement"},
+            {"id": "claim-2", "statement": "Movement is stable", "metadata": "photometry"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "text-hit",
+      "terms": ["optogenetic"],
+      "expected_top_ids": ["q-opto"],
+      "projects": [
+        {"id": "project-b", "active_or_staged_questions": [{"id": "q-opto", "text": "Does optogenetic inhibition change choice?"}]}
+      ]
+    },
+    {
+      "id": "title-hit",
+      "terms": ["alignment"],
+      "expected_top_ids": ["goal-align"],
+      "projects": [
+        {"id": "project-b", "recent_goals": [{"id": "goal-align", "title": "Resolve trial alignment"}]}
+      ]
+    },
+    {
+      "id": "multiple-primary-terms",
+      "terms": ["pupil", "reward"],
+      "expected_top_ids": ["note-both"],
+      "projects": [
+        {"id": "project-c", "recent_notes": [
+          {"id": "note-one", "label": "Pupil response", "metadata": "reward"},
+          {"id": "note-both", "label": "Pupil reward response"}
+        ]}
+      ]
+    },
+    {
+      "id": "no-match",
+      "terms": ["histology"],
+      "expected_top_ids": [],
+      "projects": [
+        {"id": "project-c", "recent_analyses": [{"id": "analysis-1", "label": "Behavior model"}]}
+      ]
+    }
+  ]
+}

@@ -144,6 +144,7 @@ class Settings(BaseSettings):
     graph_draft_scheduler_enabled: bool = False
     graph_draft_worker_poll_seconds: float = 5.0
     graph_draft_scheduler_interval_seconds: float = 60.0
+    semantic_search_mode: Literal["off", "shadow", "hybrid"] = "off"
     base_url: str = Field(
         default="",
         validation_alias=AliasChoices(

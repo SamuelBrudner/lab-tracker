@@ -197,6 +197,17 @@ class AuthSetupReadiness(BaseModel):
     provider: str
     provider_credential_configured: bool
     source_revision: str
+    semantic: SemanticReadiness | None = None
+
+
+class SemanticReadiness(BaseModel):
+    adapter_available: bool
+    mode: Literal["off", "shadow", "hybrid"]
+    coverage: float = Field(default=0.0, ge=0.0, le=1.0)
+    queue_depth: int = Field(default=0, ge=0)
+    oldest_lag_seconds: float | None = Field(default=None, ge=0.0)
+    failed_jobs: int = Field(default=0, ge=0)
+    last_reconciliation_at: datetime | None = None
 
 
 class AuthTokenRead(BaseModel):
@@ -687,6 +698,7 @@ class AssistantDecisionContextRequest(RequestModel):
     since: datetime | None = None
     until: datetime | None = None
     limit: int = Field(default=20, ge=1, le=100)
+    retrieval_mode: GraphRetrievalMode = "auto"
 
 
 class SessionCreate(RequestModel):
@@ -1295,6 +1307,8 @@ GraphEntityType = Literal[
     "goal",
 ]
 GraphTraversalDirection = Literal["incoming", "outgoing", "both"]
+GraphRetrievalMode = Literal["auto", "lexical", "hybrid"]
+SemanticSearchState = Literal["disabled", "unavailable", "partial", "stale", "ready"]
 
 
 class GraphNodeSummary(BaseModel):
@@ -1334,6 +1348,23 @@ class GraphSearchHit(BaseModel):
     node: GraphNodeSummary
     snippet: str
     match_reasons: list[str]
+    lexical_rank: int | None = Field(default=None, ge=1)
+    semantic_rank: int | None = Field(default=None, ge=1)
+    fused_rank: int | None = Field(default=None, ge=1)
+    matched_semantic_chunk_index: int | None = Field(default=None, ge=0)
+
+
+class GraphRetrievalMetadata(BaseModel):
+    requested_mode: GraphRetrievalMode = "auto"
+    effective_mode: Literal["lexical", "hybrid"] = "lexical"
+    server_mode: Literal["off", "shadow", "hybrid"] = "off"
+    semantic_state: SemanticSearchState = "disabled"
+    fallback_reason: str | None = None
+    coverage: float = Field(default=0.0, ge=0.0, le=1.0)
+    lexical_candidate_count: int = Field(default=0, ge=0)
+    semantic_candidate_count: int = Field(default=0, ge=0)
+    candidate_limit: int = Field(default=100, ge=100, le=500)
+    pool_truncated: bool = False
 
 
 class GraphSearchRead(BaseModel):
@@ -1344,6 +1375,7 @@ class GraphSearchRead(BaseModel):
     offset: int = Field(..., ge=0)
     has_more: bool = False
     next_offset: int | None = Field(default=None, ge=0)
+    retrieval: GraphRetrievalMetadata = Field(default_factory=GraphRetrievalMetadata)
 
 
 class GraphRelationshipSemantics(BaseModel):
@@ -1378,6 +1410,32 @@ class GraphNeighborhoodRead(BaseModel):
     nodes: list[GraphNodeSummary] = Field(default_factory=list)
     edges: list[GraphNeighborhoodEdge] = Field(default_factory=list)
     truncation: GraphTraversalTruncation
+
+
+class RetrievedGraphNode(BaseModel):
+    node: GraphNodeSummary
+    relevance: Literal["anchor", "graph_seed", "graph_neighbor"]
+    seed_rank: int | None = Field(default=None, ge=1)
+    excerpt: str = ""
+    content_truncated: bool = False
+
+
+class GraphRetrievalPath(BaseModel):
+    seed_node_id: str
+    target_node_id: str
+    node_ids: list[str] = Field(default_factory=list)
+    edge_ids: list[str] = Field(default_factory=list)
+
+
+class RetrievedGraphRead(BaseModel):
+    seeds: list[RetrievedGraphNode] = Field(default_factory=list)
+    nodes: list[RetrievedGraphNode] = Field(default_factory=list)
+    edges: list[GraphNeighborhoodEdge] = Field(default_factory=list)
+    paths: list[GraphRetrievalPath] = Field(default_factory=list)
+    retrieval: GraphRetrievalMetadata
+    traversal_truncation: GraphTraversalTruncation
+    content_truncated: bool = False
+    total_content_characters: int = Field(default=0, ge=0, le=40_000)
 
 
 

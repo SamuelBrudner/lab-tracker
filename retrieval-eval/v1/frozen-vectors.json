@@ -1,0 +1,12 @@
+{
+  "schema": "retrieval-eval-frozen-vectors/v1",
+  "descriptor": {"adapter":"frozen-eval","model":"synthetic-topics","revision":"v1","dimensions":4,"normalization":"unit_l2","batch_limit":16},
+  "vectors": [
+    {"purpose":"query","text":"anticipated payoff signal","value":[1,0,0,0]},
+    {"purpose":"document","text":"Reward prediction error and dopamine response","value":[1,0,0,0]},
+    {"purpose":"query","text":"animal favors one direction","value":[0,1,0,0]},
+    {"purpose":"document","text":"Contralateral choice lateralization","value":[0,1,0,0]},
+    {"purpose":"query","text":"video brightness contaminates neural trace","value":[0,0,1,0]},
+    {"purpose":"document","text":"Photometry motion artifact control","value":[0,0,1,0]}
+  ]
+}

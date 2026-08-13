@@ -455,6 +455,7 @@ export interface components {
       "provider": string;
       "provider_credential_configured": boolean;
       "scheduler_enabled": boolean;
+      "semantic"?: (components["schemas"]["SemanticReadiness"] | null);
       "source_revision": string;
     };
     "AuthTokenRead": {
@@ -908,6 +909,15 @@ export interface components {
       "recipient_user_id"?: (string | null);
     };
     "Role": "admin" | "editor" | "viewer";
+    "SemanticReadiness": {
+      "adapter_available": boolean;
+      "coverage"?: number;
+      "failed_jobs"?: number;
+      "last_reconciliation_at"?: (string | null);
+      "mode": "off" | "shadow" | "hybrid";
+      "oldest_lag_seconds"?: (number | null);
+      "queue_depth"?: number;
+    };
     "StoreCapability": "bytes_by_path" | "byte_range" | "list" | "versioned_snapshot" | "query";
     "StoreKind": "local_fs" | "ssh" | "s3" | "gcs" | "azure_blob" | "dropbox" | "gdrive" | "box" | "onedrive" | "object_table" | "database" | "http" | "rclone" | "git";
   };

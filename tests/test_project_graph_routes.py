@@ -165,6 +165,7 @@ def _create_graph_fixture(
                 "commit_manifest": {
                     "files": [{"path": "raw/data.csv", "checksum": "abc"}],
                     "source_session_id": source_session_id,
+                    "note_ids": [note_id],
                 },
             },
             headers=headers,
@@ -366,6 +367,8 @@ def test_project_graph_direct_relationship_tokens_have_exhaustive_semantic_mappi
         "visualization_claim": ("lab:relatedClaim", "target_to_source"),
         "session_question": ("lab:primaryQuestion", "target_to_source"),
         "dataset_source_session": ("lab:sourceSession", "target_to_source"),
+        "dataset_manifest_note": ("lab:note", "target_to_source"),
+        "note_was_derived_from": ("prov:wasDerivedFrom", "source_to_target"),
     }
     expected.update(
         {
@@ -983,6 +986,35 @@ def test_graph_neighborhood_traverses_typed_edges_without_full_graph_materializa
     )
     assert semantic_edge["semantics"]["kind"] == "direct"
     assert semantic_edge["semantics"]["predicate_iri"]
+
+
+def test_dataset_manifest_note_edge_matches_full_graph_and_neighborhood(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    ids = _create_graph_fixture(client, admin_auth_headers)
+    full = client.get(
+        f"/projects/{ids['project_id']}/graph?view=full",
+        headers=admin_auth_headers,
+    ).json()["data"]
+    neighborhood = client.get(
+        f"/projects/{ids['project_id']}/graph/neighborhood/dataset/{ids['dataset_id']}",
+        params={"depth": 1},
+        headers=admin_auth_headers,
+    ).json()["data"]
+    full_edge = next(
+        edge
+        for edge in full["edges"]
+        if edge["relationship"] == "dataset_manifest_note"
+    )
+    bounded_edge = next(
+        edge
+        for edge in neighborhood["edges"]
+        if edge["relationship"] == "dataset_manifest_note"
+    )
+    assert full_edge["source"] == bounded_edge["source"] == f"note:{ids['note_id']}"
+    assert full_edge["target"] == bounded_edge["target"] == f"dataset:{ids['dataset_id']}"
+    assert bounded_edge["semantics"]["direction"] == "target_to_source"
 
 
 def test_graph_neighborhood_project_mismatch_is_opaque(

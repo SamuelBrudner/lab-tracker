@@ -323,6 +323,18 @@ class BaseService:
         duration_ms: int | None = None,
         result_count: int | None = None,
         surface: UsageEventSurface | str | None = None,
+        retrieval_strategy: Literal["lexical", "hybrid", "shadow"] | None = None,
+        retrieval_fallback: Literal[
+            "server_mode_off",
+            "adapter_unavailable",
+            "semantic_index_invalid",
+            "semantic_timeout",
+            "coverage_below_threshold",
+            "shadow_policy",
+        ]
+        | None = None,
+        semantic_duration_ms: int | None = None,
+        shadow_overlap_milli: int | None = None,
     ) -> None:
         if not self._context.active_settings().is_usage_events_enabled():
             return
@@ -340,6 +352,10 @@ class BaseService:
             outcome=UsageEventOutcome(outcome),
             duration_ms=duration_ms,
             result_count=result_count,
+            retrieval_strategy=retrieval_strategy,
+            retrieval_fallback=retrieval_fallback,
+            semantic_duration_ms=semantic_duration_ms,
+            shadow_overlap_milli=shadow_overlap_milli,
         )
 
         def persist_event() -> None:

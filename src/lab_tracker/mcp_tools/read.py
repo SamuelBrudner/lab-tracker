@@ -53,6 +53,7 @@ GraphEntityTypeInput = Literal[
     "goal",
 ]
 GraphDirectionInput = Literal["incoming", "outgoing", "both"]
+GraphRetrievalModeInput = Literal["auto", "lexical", "hybrid"]
 
 
 def _read_client() -> Any:
@@ -291,6 +292,7 @@ def lab_tracker_search_graph(
     statuses: list[str] | None = None,
     limit: Annotated[int, Field(strict=True, ge=1, le=100)] = 20,
     offset: Annotated[int, Field(strict=True, ge=0)] = 0,
+    retrieval_mode: GraphRetrievalModeInput = "auto",
 ) -> JsonObject:
     """Search all retained graph record types inside one authorized project.
 
@@ -308,6 +310,7 @@ def lab_tracker_search_graph(
             statuses=statuses,
             limit=limit,
             offset=offset,
+            retrieval_mode=retrieval_mode,
         ),
         hint=next_action(
             "lab_tracker_get_graph_neighborhood",
@@ -723,6 +726,7 @@ def lab_tracker_get_decision_context(
     claim_id: str | None = None,
     visualization_id: str | None = None,
     limit: int = 20,
+    retrieval_mode: GraphRetrievalModeInput = "auto",
 ) -> JsonObject:
     """CALL THIS FIRST before research-facing decisions.
 
@@ -747,6 +751,7 @@ def lab_tracker_get_decision_context(
             claim_id=claim_id,
             visualization_id=visualization_id,
             limit=limit,
+            retrieval_mode=retrieval_mode,
         ),
         hint=next_action(
             "lab_tracker_next_questions",

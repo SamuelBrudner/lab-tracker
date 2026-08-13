@@ -15,6 +15,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -1719,6 +1720,104 @@ class UsageEventModel(Base):
     outcome: Mapped[str] = mapped_column(String(20), nullable=False)
     duration_ms: Mapped[int | None] = mapped_column(Integer)
     result_count: Mapped[int | None] = mapped_column(Integer)
+    retrieval_strategy: Mapped[str | None] = mapped_column(String(20))
+    retrieval_fallback: Mapped[str | None] = mapped_column(String(40))
+    semantic_duration_ms: Mapped[int | None] = mapped_column(Integer)
+    shadow_overlap_milli: Mapped[int | None] = mapped_column(Integer)
+
+
+class SemanticIndexEntryModel(Base):
+    """Portable, rebuildable vector chunks for one graph node document."""
+
+    __tablename__ = "semantic_index_entries"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "entity_type",
+            "entity_id",
+            "config_hash",
+            "chunk_index",
+            name="uq_semantic_index_entry_identity",
+        ),
+        Index(
+            "ix_semantic_index_entries_project_config_status",
+            "project_id",
+            "config_hash",
+            "status_snapshot",
+        ),
+    )
+
+    entry_id: Mapped[UUID] = mapped_column(GUID, primary_key=True, default=uuid4)
+    project_id: Mapped[UUID] = mapped_column(
+        GUID,
+        ForeignKey("projects.project_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    entity_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    entity_id: Mapped[UUID] = mapped_column(GUID, nullable=False)
+    config_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    chunk_start: Mapped[int] = mapped_column(Integer, nullable=False)
+    chunk_end: Mapped[int] = mapped_column(Integer, nullable=False)
+    status_snapshot: Mapped[str | None] = mapped_column(String(40))
+    source_updated_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    document_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    renderer_version: Mapped[str] = mapped_column(String(80), nullable=False)
+    dimension: Mapped[int] = mapped_column(Integer, nullable=False)
+    embedding: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    indexed_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
+
+
+class SemanticIndexJobModel(Base):
+    """Coalesced generation and portable lease for an index identity."""
+
+    __tablename__ = "semantic_index_jobs"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "entity_type",
+            "entity_id",
+            "config_hash",
+            name="uq_semantic_index_job_identity",
+        ),
+        Index(
+            "ix_semantic_index_jobs_claim",
+            "state",
+            "retry_at",
+            "lease_expires_at",
+            "updated_at",
+        ),
+        Index(
+            "ix_semantic_index_jobs_project_config",
+            "project_id",
+            "config_hash",
+        ),
+    )
+
+    job_id: Mapped[UUID] = mapped_column(GUID, primary_key=True, default=uuid4)
+    project_id: Mapped[UUID] = mapped_column(
+        GUID,
+        ForeignKey("projects.project_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    entity_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    entity_id: Mapped[UUID] = mapped_column(GUID, nullable=False)
+    config_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    requested_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    completed_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    state: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    retry_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    claim_token: Mapped[UUID | None] = mapped_column(GUID)
+    claimed_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    error_code: Mapped[str | None] = mapped_column(String(80))
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        UtcDateTime,
+        default=_utc_now,
+        onupdate=_utc_now,
+    )
 
 
 class UsageEventRollupModel(Base):

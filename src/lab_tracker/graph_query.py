@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import time
 from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, Literal
+from typing import cast as type_cast
 from uuid import UUID
 
 from sqlalchemy import (
@@ -41,6 +43,7 @@ from lab_tracker.db_models import (
     GoalModel,
     NoteModel,
     NoteTargetModel,
+    ProvenanceLinkModel,
     QuestionModel,
     QuestionParentModel,
     SessionModel,
@@ -48,11 +51,14 @@ from lab_tracker.db_models import (
     VisualizationModel,
 )
 from lab_tracker.errors import NotFoundError, ValidationError
+from lab_tracker.graph_documents import GraphNodeDocument, GraphNodeDocumentRenderer
 from lab_tracker.models import (
     EntityType,
     ExternalArtifactReference,
     GoalStatus,
     Project,
+    ProvenanceLinkRelation,
+    ProvenanceLinkStatus,
     QuestionStatus,
     decode_session_link_code,
     encode_session_link_code,
@@ -70,11 +76,22 @@ from lab_tracker.schemas import (
     GraphOverviewRead,
     GraphProjectSummary,
     GraphRelationshipSemantics,
+    GraphRetrievalMetadata,
+    GraphRetrievalMode,
+    GraphRetrievalPath,
     GraphSearchHit,
     GraphSearchRead,
     GraphTraversalDirection,
     GraphTraversalTruncation,
     PersistedGraphEntityType,
+    RetrievedGraphNode,
+    RetrievedGraphRead,
+)
+from lab_tracker.semantic_retrieval import (
+    EmbeddingClient,
+    ExactSemanticRetriever,
+    SemanticSearchMode,
+    candidate_limit_for_page,
 )
 from lab_tracker.sqlalchemy_repository_parts.common import substring_pattern
 
@@ -107,6 +124,7 @@ _ANCHOR_CONTENT_LIMIT = 8_000
 _OPEN_QUESTION_STATUSES = (QuestionStatus.STAGED.value, QuestionStatus.ACTIVE.value)
 _OPEN_GOAL_STATUSES = (GoalStatus.PLANNED.value, GoalStatus.IN_PROGRESS.value)
 _EDGE_FETCH_BUFFER = 201
+_GRAPH_DOCUMENT_RENDERER = GraphNodeDocumentRenderer()
 
 NodeKey = tuple[str, str]
 DirectionValue = Literal["incoming", "outgoing", "both"]
@@ -116,12 +134,14 @@ DirectionValue = Literal["incoming", "outgoing", "both"]
 class _HydratedNode:
     summary: GraphNodeSummary
     content: str
+    document: GraphNodeDocument | None
 
 
 @dataclass(frozen=True)
 class _SearchRow:
     key: NodeKey
     updated_at: Any
+    match_rank: int
     match_reason: str
     matched_field: str
     matched_text: str
@@ -146,8 +166,18 @@ class _EdgeCandidate:
 class GraphQueryService:
     """Execute bounded graph reads against one request-scoped SQL session."""
 
-    def __init__(self, session: OrmSession) -> None:
+    def __init__(
+        self,
+        session: OrmSession,
+        *,
+        semantic_client: EmbeddingClient | None = None,
+        semantic_search_mode: SemanticSearchMode = "off",
+    ) -> None:
         self._session = session
+        self._semantic_client = semantic_client
+        self._semantic_search_mode = semantic_search_mode
+        self.semantic_duration_ms: int | None = None
+        self.shadow_overlap_milli: int | None = None
 
     def overview(self, project: Project) -> GraphOverviewRead:
         self._session.flush()
@@ -196,6 +226,19 @@ class GraphQueryService:
             recent_nodes=_summaries_in_order(recent_keys, hydrated),
         )
 
+    def render_document(
+        self,
+        project_id: UUID,
+        *,
+        entity_type: str,
+        entity_id: UUID,
+    ) -> GraphNodeDocument | None:
+        """Render one authorized project-scoped node with the shared renderer."""
+
+        key = (entity_type, str(entity_id))
+        hydrated = self._hydrate_nodes(project_id, [key]).get(key)
+        return hydrated.document if hydrated is not None else None
+
     def search(
         self,
         project: Project,
@@ -205,76 +248,287 @@ class GraphQueryService:
         statuses: Sequence[str] | None,
         limit: int,
         offset: int,
+        retrieval_mode: GraphRetrievalMode = "auto",
     ) -> GraphSearchRead:
         self._session.flush()
         normalized_query = query.strip()
         if not 2 <= len(normalized_query) <= 256:
             raise ValidationError("Graph search query must be 2 to 256 characters.")
         selected_types = tuple(entity_types) if entity_types is not None else _PERSISTED_NODE_TYPES
-        branches = self._search_branches(
+        selected_statuses = tuple(statuses) if statuses is not None else None
+        candidate_limit = candidate_limit_for_page(offset, limit)
+        metadata = GraphRetrievalMetadata(
+            requested_mode=retrieval_mode,
+            server_mode=self._semantic_search_mode,
+            candidate_limit=candidate_limit,
+        )
+        semantic_allowed = retrieval_mode != "lexical" and self._semantic_search_mode != "off"
+        lexical_window = candidate_limit if semantic_allowed else offset + limit + 1
+        lexical_rows, lexical_truncated = self._lexical_search_rows(
             project.project_id,
             query=normalized_query,
             entity_types=selected_types,
-            statuses=tuple(statuses) if statuses is not None else None,
+            statuses=selected_statuses,
+            limit=lexical_window,
         )
-        if not branches:
+        metadata.lexical_candidate_count = min(len(lexical_rows), candidate_limit)
+
+        semantic_candidates: tuple[Any, ...] = ()
+        coverage = None
+        semantic_timed_out = False
+        semantic_failure = False
+        if semantic_allowed and self._semantic_client is not None:
+            semantic_started = time.perf_counter()
+            try:
+                retriever = ExactSemanticRetriever(self._session, self._semantic_client)
+                coverage = retriever.coverage(project.project_id)
+                semantic_result = retriever.search(
+                    project.project_id,
+                    normalized_query,
+                    entity_types=selected_types,
+                    statuses=selected_statuses,
+                    candidate_limit=candidate_limit,
+                )
+                semantic_candidates = semantic_result.candidates
+                semantic_timed_out = semantic_result.timed_out
+                metadata.semantic_candidate_count = len(semantic_candidates)
+                metadata.coverage = coverage.coverage
+                if semantic_result.corrupt_chunks:
+                    semantic_failure = True
+            except TimeoutError:
+                semantic_timed_out = True
+            except Exception:
+                # Semantic degradation must never fail graph search.
+                semantic_failure = True
+            finally:
+                self.semantic_duration_ms = max(
+                    0,
+                    int((time.perf_counter() - semantic_started) * 1000),
+                )
+        if semantic_candidates:
+            semantic_nodes = self._hydrate_nodes(
+                project.project_id,
+                [candidate.key for candidate in semantic_candidates],
+            )
+            current_semantic_candidates_list: list[Any] = []
+            for candidate in semantic_candidates:
+                semantic_node = semantic_nodes.get(candidate.key)
+                if (
+                    semantic_node is not None
+                    and semantic_node.document is not None
+                    and semantic_node.document.document_hash == candidate.document_hash
+                ):
+                    current_semantic_candidates_list.append(candidate)
+            current_semantic_candidates = tuple(current_semantic_candidates_list)
+            if len(current_semantic_candidates) != len(semantic_candidates):
+                # A stale derivative invalidates the semantic leg for this
+                # request; preserve the complete deterministic lexical result.
+                semantic_failure = True
+            semantic_candidates = current_semantic_candidates
+            metadata.semantic_candidate_count = len(semantic_candidates)
+            lexical_keys = {row.key for row in lexical_rows[:candidate_limit]}
+            semantic_keys = {candidate.key for candidate in semantic_candidates}
+            denominator = max(1, min(len(lexical_keys), len(semantic_keys)))
+            self.shadow_overlap_milli = round(
+                1_000 * len(lexical_keys & semantic_keys) / denominator
+            )
+
+        serve_hybrid = bool(
+            self._semantic_search_mode == "hybrid"
+            and retrieval_mode != "lexical"
+            and self._semantic_client is not None
+            and coverage is not None
+            and coverage.ready
+            and not semantic_timed_out
+            and not semantic_failure
+        )
+        if retrieval_mode == "lexical":
+            metadata.semantic_state = (
+                "disabled" if self._semantic_search_mode == "off" else "unavailable"
+            )
+        elif self._semantic_search_mode == "off":
+            metadata.semantic_state = "disabled"
+            metadata.fallback_reason = "server_mode_off"
+        elif self._semantic_client is None:
+            metadata.semantic_state = "unavailable"
+            metadata.fallback_reason = "adapter_unavailable"
+        elif semantic_failure:
+            metadata.semantic_state = "stale"
+            metadata.fallback_reason = "semantic_index_invalid"
+        elif semantic_timed_out:
+            metadata.semantic_state = "stale"
+            metadata.fallback_reason = "semantic_timeout"
+        elif coverage is None or not coverage.ready:
+            metadata.semantic_state = "partial"
+            metadata.fallback_reason = "coverage_below_threshold"
+        else:
+            metadata.semantic_state = "ready"
+
+        if self._semantic_search_mode == "shadow" and retrieval_mode != "lexical":
+            metadata.fallback_reason = "shadow_policy"
+        metadata.effective_mode = "hybrid" if serve_hybrid else "lexical"
+
+        if not serve_hybrid:
+            selected_rows = lexical_rows[offset : offset + limit]
+            has_more = len(lexical_rows) > offset + limit or lexical_truncated
+            hydrated = self._hydrate_nodes(
+                project.project_id,
+                [row.key for row in selected_rows],
+            )
+            lexical_items = [
+                GraphSearchHit(
+                    node=hydrated[row.key].summary,
+                    snippet=_bounded_snippet(row.matched_text, normalized_query),
+                    match_reasons=[row.match_reason, f"field:{row.matched_field}"],
+                    lexical_rank=rank,
+                )
+                for rank, row in enumerate(selected_rows, start=offset + 1)
+                if row.key in hydrated
+            ]
+            metadata.pool_truncated = lexical_truncated or semantic_timed_out
             return GraphSearchRead(
                 project_id=project.project_id,
                 query=normalized_query,
+                items=lexical_items,
                 limit=limit,
                 offset=offset,
+                has_more=has_more,
+                next_offset=offset + limit if has_more else None,
+                retrieval=metadata,
             )
+
+        lexical_by_key = {
+            row.key: (rank, row)
+            for rank, row in enumerate(lexical_rows[:candidate_limit], start=1)
+        }
+        semantic_by_key: dict[NodeKey, Any] = {
+            candidate.key: candidate for candidate in semantic_candidates
+        }
+        candidate_keys = set(lexical_by_key) | set(semantic_by_key)
+        hydrated = self._hydrate_nodes(project.project_id, candidate_keys)
+        current_candidate_keys: set[NodeKey] = set()
+        for key in candidate_keys:
+            node = hydrated.get(key)
+            if node is None:
+                continue
+            semantic_candidate = semantic_by_key.get(key)
+            if semantic_candidate is not None and (
+                node.document is None
+                or node.document.document_hash != semantic_candidate.document_hash
+            ):
+                continue
+            current_candidate_keys.add(key)
+        candidate_keys = current_candidate_keys
+        ordered_keys = sorted(
+            candidate_keys,
+            key=lambda key: _fusion_sort_key(
+                key,
+                lexical=lexical_by_key.get(key),
+                semantic=semantic_by_key.get(key),
+                hydrated=hydrated[key],
+            ),
+        )
+        metadata.semantic_candidate_count = sum(
+            key in semantic_by_key for key in candidate_keys
+        )
+        metadata.pool_truncated = bool(
+            lexical_truncated
+            or semantic_timed_out
+            or len(semantic_candidates) >= candidate_limit
+        )
+        selected_keys = ordered_keys[offset : offset + limit]
+        fused_items: list[GraphSearchHit] = []
+        for fused_rank, key in enumerate(selected_keys, start=offset + 1):
+            lexical = lexical_by_key.get(key)
+            semantic = semantic_by_key.get(key)
+            node = hydrated[key]
+            if lexical is not None:
+                lexical_rank, lexical_row = lexical
+                snippet = _bounded_snippet(lexical_row.matched_text, normalized_query)
+                reasons = [
+                    lexical_row.match_reason,
+                    f"field:{lexical_row.matched_field}",
+                ]
+            else:
+                lexical_rank = None
+                assert semantic is not None
+                if node.document is None:  # pragma: no cover - persisted candidates only
+                    continue
+                snippet = _semantic_chunk_snippet(node.document, semantic.chunk_index)
+                reasons = ["semantic"]
+            fused_items.append(
+                GraphSearchHit(
+                    node=node.summary,
+                    snippet=snippet,
+                    match_reasons=reasons,
+                    lexical_rank=lexical_rank,
+                    semantic_rank=semantic.rank if semantic is not None else None,
+                    fused_rank=fused_rank,
+                    matched_semantic_chunk_index=(
+                        semantic.chunk_index if semantic is not None else None
+                    ),
+                )
+            )
+        has_more = len(ordered_keys) > offset + limit or metadata.pool_truncated
+        return GraphSearchRead(
+            project_id=project.project_id,
+            query=normalized_query,
+            items=fused_items,
+            limit=limit,
+            offset=offset,
+            has_more=has_more,
+            next_offset=offset + limit if has_more else None,
+            retrieval=metadata,
+        )
+
+    def _lexical_search_rows(
+        self,
+        project_id: UUID,
+        *,
+        query: str,
+        entity_types: Sequence[str],
+        statuses: Sequence[str] | None,
+        limit: int,
+    ) -> tuple[list[_SearchRow], bool]:
+        branches = self._search_branches(
+            project_id,
+            query=query,
+            entity_types=entity_types,
+            statuses=statuses,
+        )
+        if not branches:
+            return [], False
         candidates = union_all(*branches).subquery("graph_search_candidates")
         type_order = case(
             _NODE_TYPE_ORDER,
             value=candidates.c.entity_type,
             else_=99,
         )
-        statement = (
-            select(candidates)
-            .order_by(
-                candidates.c.match_rank,
-                candidates.c.updated_at.desc(),
-                type_order,
-                candidates.c.entity_id,
-            )
-            .offset(offset)
-            .limit(limit + 1)
+        rows = list(
+            self._session.execute(
+                select(candidates)
+                .order_by(
+                    candidates.c.match_rank,
+                    candidates.c.updated_at.desc(),
+                    type_order,
+                    candidates.c.entity_id,
+                )
+                .limit(limit + 1)
+            ).mappings()
         )
-        rows = list(self._session.execute(statement).mappings())
-        has_more = len(rows) > limit
-        selected_rows = rows[:limit]
-        search_rows = [
-            _SearchRow(
-                key=(str(row["entity_type"]), str(row["entity_id"])),
-                updated_at=row["updated_at"],
-                match_reason=str(row["match_reason"]),
-                matched_field=str(row["matched_field"]),
-                matched_text=str(row["matched_text"] or ""),
-            )
-            for row in selected_rows
-        ]
-        hydrated = self._hydrate_nodes(
-            project.project_id,
-            [row.key for row in search_rows],
-        )
-        items = [
-            GraphSearchHit(
-                node=hydrated[row.key].summary,
-                snippet=_bounded_snippet(row.matched_text, normalized_query),
-                match_reasons=[row.match_reason, f"field:{row.matched_field}"],
-            )
-            for row in search_rows
-            if row.key in hydrated
-        ]
-        return GraphSearchRead(
-            project_id=project.project_id,
-            query=normalized_query,
-            items=items,
-            limit=limit,
-            offset=offset,
-            has_more=has_more,
-            next_offset=offset + limit if has_more else None,
+        return (
+            [
+                _SearchRow(
+                    key=(str(row["entity_type"]), str(row["entity_id"])),
+                    updated_at=row["updated_at"],
+                    match_rank=int(row["match_rank"]),
+                    match_reason=str(row["match_reason"]),
+                    matched_field=str(row["matched_field"]),
+                    matched_text=str(row["matched_text"] or ""),
+                )
+                for row in rows[:limit]
+            ],
+            len(rows) > limit,
         )
 
     def neighborhood(
@@ -408,6 +662,200 @@ class GraphQueryService:
                 edge_limit_reached=edge_limit_reached,
                 expansion_stopped=expansion_stopped,
             ),
+        )
+
+    def retrieve_multi_seed(
+        self,
+        project: Project,
+        *,
+        explicit_anchors: Sequence[NodeKey],
+        search: GraphSearchRead,
+        depth: int = 2,
+        max_nodes: int = 50,
+        max_edges: int = 100,
+    ) -> RetrievedGraphRead:
+        """Expand explicit anchors and up to eight fused seeds in one traversal."""
+
+        self._session.flush()
+        ordered_anchors = list(dict.fromkeys(explicit_anchors))
+        query_keys: list[NodeKey] = [
+            (hit.node.entity_type, hit.node.entity_id)
+            for hit in search.items[:8]
+            if (hit.node.entity_type, hit.node.entity_id) not in ordered_anchors
+        ]
+        requested_seeds = [*ordered_anchors, *query_keys]
+        hydrated = self._hydrate_nodes(project.project_id, requested_seeds)
+        seed_keys = [key for key in requested_seeds if key in hydrated]
+        anchor_keys = {key for key in ordered_anchors if key in hydrated}
+        query_rank = {key: rank for rank, key in enumerate(query_keys, start=1)}
+        seed_priority = {key: rank for rank, key in enumerate(seed_keys)}
+
+        seen_nodes: set[NodeKey] = set(seed_keys[:max_nodes])
+        discovery_order: list[NodeKey] = list(seed_keys[:max_nodes])
+        frontier: list[NodeKey] = list(discovery_order)
+        origins: dict[NodeKey, NodeKey] = {key: key for key in frontier}
+        node_paths: dict[NodeKey, list[NodeKey]] = {key: [key] for key in frontier}
+        edge_paths: dict[NodeKey, list[str]] = {key: [] for key in frontier}
+        inherited_priority: dict[NodeKey, int] = {
+            key: seed_priority[key] for key in frontier
+        }
+        edges: dict[str, _EdgeCandidate] = {}
+        external_nodes: dict[NodeKey, _HydratedNode] = {}
+        node_limit_reached = len(seed_keys) > max_nodes
+        edge_limit_reached = False
+        reached_depth = 0
+
+        for current_depth in range(1, depth + 1):
+            if not frontier:
+                break
+            reached_depth = current_depth
+            candidates = self._edge_candidates(
+                project.project_id,
+                frontier=frontier,
+                direction="both",
+                relationships=None,
+                node_types=None,
+                limit=min(701, max_edges + max_nodes + _EDGE_FETCH_BUFFER),
+            )
+            citation_candidates, citation_nodes = self._citation_candidates(
+                project.project_id,
+                frontier=frontier,
+                direction="both",
+                relationships=None,
+                node_types=None,
+            )
+            external_nodes.update(citation_nodes)
+            frontier_set = set(frontier)
+            transitions: list[tuple[object, ...]] = []
+            for candidate in {*candidates, *citation_candidates}:
+                if candidate.source in frontier_set:
+                    transitions.append(
+                        (
+                            inherited_priority[candidate.source],
+                            _edge_sort_key(candidate),
+                            _node_sort_key(candidate.target),
+                            candidate.source,
+                            candidate.target,
+                            candidate,
+                        )
+                    )
+                if candidate.target in frontier_set:
+                    transitions.append(
+                        (
+                            inherited_priority[candidate.target],
+                            _edge_sort_key(candidate),
+                            _node_sort_key(candidate.source),
+                            candidate.target,
+                            candidate.source,
+                            candidate,
+                        )
+                    )
+            next_frontier: list[NodeKey] = []
+            for _, _, _, parent, adjacent, raw_candidate in sorted(transitions):
+                candidate = type_cast(_EdgeCandidate, raw_candidate)
+                parent_key = type_cast(NodeKey, parent)
+                adjacent_key = type_cast(NodeKey, adjacent)
+                if candidate.edge_id not in edges:
+                    if len(edges) >= max_edges:
+                        edge_limit_reached = True
+                        break
+                    edges[candidate.edge_id] = candidate
+                if adjacent_key in seen_nodes:
+                    continue
+                if len(seen_nodes) >= max_nodes:
+                    node_limit_reached = True
+                    continue
+                seen_nodes.add(adjacent_key)
+                discovery_order.append(adjacent_key)
+                origins[adjacent_key] = origins[parent_key]
+                node_paths[adjacent_key] = [*node_paths[parent_key], adjacent_key]
+                edge_paths[adjacent_key] = [
+                    *edge_paths[parent_key],
+                    candidate.edge_id,
+                ]
+                inherited_priority[adjacent_key] = inherited_priority[parent_key]
+                if adjacent_key[0] != "external_artifact":
+                    next_frontier.append(adjacent_key)
+            if edge_limit_reached:
+                break
+            frontier = next_frontier
+
+        persisted_keys = [
+            key
+            for key in discovery_order
+            if key not in hydrated and key[0] != "external_artifact"
+        ]
+        hydrated.update(self._hydrate_nodes(project.project_id, persisted_keys))
+        hydrated.update(external_nodes)
+        valid_order = [key for key in discovery_order if key in hydrated]
+        valid_keys = set(valid_order)
+        response_edges = [
+            _edge_read(candidate)
+            for candidate in sorted(edges.values(), key=_edge_sort_key)
+            if candidate.source in valid_keys and candidate.target in valid_keys
+        ]
+        if len(response_edges) < len(edges):
+            node_limit_reached = True
+
+        response_nodes: list[RetrievedGraphNode] = []
+        total_content = 0
+        content_truncated = False
+        for key in valid_order:
+            if key in anchor_keys:
+                relevance: Literal["anchor", "graph_seed", "graph_neighbor"] = "anchor"
+                content_limit = 8_000
+            elif key in query_rank:
+                relevance = "graph_seed"
+                content_limit = 2_000
+            else:
+                relevance = "graph_neighbor"
+                content_limit = 1_200
+            raw_content = hydrated[key].content
+            remaining = max(0, 40_000 - total_content)
+            excerpt_limit = min(content_limit, remaining)
+            excerpt = raw_content[:excerpt_limit]
+            truncated = len(raw_content) > excerpt_limit
+            content_truncated = content_truncated or truncated
+            total_content += len(excerpt)
+            response_nodes.append(
+                RetrievedGraphNode(
+                    node=hydrated[key].summary,
+                    relevance=relevance,
+                    seed_rank=query_rank.get(key),
+                    excerpt=excerpt,
+                    content_truncated=truncated,
+                )
+            )
+
+        by_key: dict[NodeKey, RetrievedGraphNode] = {
+            (item.node.entity_type, item.node.entity_id): item for item in response_nodes
+        }
+        paths = [
+            GraphRetrievalPath(
+                seed_node_id=_node_id(origins[key]),
+                target_node_id=_node_id(key),
+                node_ids=[_node_id(value) for value in node_paths[key]],
+                edge_ids=edge_paths[key],
+            )
+            for key in valid_order
+            if key in origins
+        ]
+        expansion_stopped = (node_limit_reached or edge_limit_reached) and reached_depth < depth
+        truncation = GraphTraversalTruncation(
+            truncated=node_limit_reached or edge_limit_reached,
+            node_limit_reached=node_limit_reached,
+            edge_limit_reached=edge_limit_reached,
+            expansion_stopped=expansion_stopped,
+        )
+        return RetrievedGraphRead(
+            seeds=[by_key[key] for key in seed_keys if key in by_key],
+            nodes=response_nodes,
+            edges=response_edges,
+            paths=paths,
+            retrieval=search.retrieval,
+            traversal_truncation=truncation,
+            content_truncated=content_truncated,
+            total_content_characters=total_content,
         )
 
     def _counts(
@@ -552,6 +1000,8 @@ class GraphQueryService:
                     fields=(
                         ("transcribed_text", NoteModel.transcribed_text, False),
                         ("raw_content", NoteModel.raw_content, False),
+                        ("raw_filename", NoteModel.raw_filename, False),
+                        ("metadata", cast(NoteModel.note_metadata, String()), False),
                     ),
                     statuses=statuses,
                 )
@@ -565,7 +1015,22 @@ class GraphQueryService:
                     DatasetModel.status,
                     project_scope=DatasetModel.project_id == str(project_id),
                     query=query,
-                    fields=(("commit_hash", DatasetModel.commit_hash, False),),
+                    fields=(
+                        ("commit_hash", DatasetModel.commit_hash, False),
+                        ("metadata", cast(DatasetModel.manifest_metadata, String()), True),
+                        ("nwb_metadata", cast(DatasetModel.manifest_nwb_metadata, String()), False),
+                        (
+                            "bids_metadata",
+                            cast(DatasetModel.manifest_bids_metadata, String()),
+                            False,
+                        ),
+                        (
+                            "external_artifacts",
+                            cast(DatasetModel.manifest_external_artifacts, String()),
+                            False,
+                        ),
+                        ("files", cast(DatasetModel.manifest_files, String()), False),
+                    ),
                     statuses=statuses,
                 )
             )
@@ -582,6 +1047,11 @@ class GraphQueryService:
                         ("code_version", AnalysisModel.code_version, True),
                         ("method_hash", AnalysisModel.method_hash, False),
                         ("environment_hash", AnalysisModel.environment_hash, False),
+                        (
+                            "external_artifacts",
+                            cast(AnalysisModel.external_artifacts, String()),
+                            False,
+                        ),
                     ),
                     statuses=statuses,
                 )
@@ -600,6 +1070,11 @@ class GraphQueryService:
                         ("falsification_criteria", ClaimModel.falsification_criteria, False),
                         ("verification_plan", ClaimModel.verification_plan, False),
                         ("refuting_outcome", ClaimModel.refuting_outcome, False),
+                        (
+                            "external_citations",
+                            cast(ClaimModel.external_citations, String()),
+                            False,
+                        ),
                     ),
                     statuses=statuses,
                 )
@@ -616,6 +1091,11 @@ class GraphQueryService:
                     fields=(
                         ("title", ExplorationNodeModel.title, True),
                         ("choice", ExplorationNodeModel.choice, False),
+                        (
+                            "alternatives_considered",
+                            cast(ExplorationNodeModel.alternatives_considered, String()),
+                            False,
+                        ),
                         ("rationale", ExplorationNodeModel.rationale, False),
                         ("hypothesis", ExplorationNodeModel.hypothesis, False),
                         ("failure_mode", ExplorationNodeModel.failure_mode, False),
@@ -665,6 +1145,7 @@ class GraphQueryService:
                         ("title", GoalModel.title, True),
                         ("summary", GoalModel.summary, False),
                         ("external_ref", GoalModel.external_ref, False),
+                        ("attributes", cast(GoalModel.attributes, String()), False),
                     ),
                     statuses=statuses,
                 )
@@ -1073,6 +1554,32 @@ class GraphQueryService:
             ),
         )
         add(
+            "note",
+            ProvenanceLinkModel.source_entity_id,
+            "note",
+            ProvenanceLinkModel.target_entity_id,
+            "derived from",
+            "note_was_derived_from",
+            identity=literal("provenance-link=")
+            + cast(ProvenanceLinkModel.link_id, String()),
+            select_from=ProvenanceLinkModel,
+            joins=(
+                (
+                    NoteModel,
+                    NoteModel.note_id == ProvenanceLinkModel.source_entity_id,
+                ),
+            ),
+            where=(
+                ProvenanceLinkModel.project_id == project_value,
+                NoteModel.project_id == project_value,
+                ProvenanceLinkModel.status == ProvenanceLinkStatus.ACCEPTED.value,
+                ProvenanceLinkModel.relation
+                == ProvenanceLinkRelation.WAS_DERIVED_FROM.value,
+                ProvenanceLinkModel.source_entity_type == EntityType.NOTE.value,
+                ProvenanceLinkModel.target_entity_type == EntityType.NOTE.value,
+            ),
+        )
+        add(
             "question",
             SessionModel.primary_question_id,
             "session",
@@ -1106,6 +1613,14 @@ class GraphQueryService:
         )
         if evidence_branch is not None:
             branches.append(evidence_branch)
+        manifest_note_branch = self._manifest_note_branch(
+            project_id,
+            frontier=frontier,
+            direction=direction,
+            node_types=node_types,
+        )
+        if manifest_note_branch is not None:
+            branches.append(manifest_note_branch)
         if not branches:
             return []
         candidates = union_all(*branches).subquery("graph_edge_candidates")
@@ -1187,6 +1702,54 @@ class GraphQueryService:
             node_types=node_types,
         )
 
+    def _manifest_note_branch(
+        self,
+        project_id: UUID,
+        *,
+        frontier: Sequence[NodeKey],
+        direction: DirectionValue,
+        node_types: set[str] | None,
+    ) -> Any | None:
+        dialect = self._session.get_bind().dialect.name
+        if dialect == "sqlite":
+            references = (
+                func.json_each(DatasetModel.manifest_note_ids)
+                .table_valued("key", "value")
+                .alias("dataset_manifest_note")
+            )
+            note_id = cast(references.c.value, String())
+        elif dialect == "postgresql":
+            references = (
+                func.json_array_elements_text(DatasetModel.manifest_note_ids)
+                .table_valued("value")
+                .render_derived()
+                .alias("dataset_manifest_note")
+            )
+            note_id = cast(references.c.value, String())
+        else:
+            return None
+        project_value = str(project_id)
+        return _edge_branch(
+            "note",
+            note_id,
+            "dataset",
+            DatasetModel.dataset_id,
+            "commit note",
+            "dataset_manifest_note",
+            select_from=DatasetModel,
+            joins=(
+                (references, true()),
+                (NoteModel, cast(NoteModel.note_id, String()) == note_id),
+            ),
+            where=(
+                DatasetModel.project_id == project_value,
+                NoteModel.project_id == project_value,
+            ),
+            frontier=frontier,
+            direction=direction,
+            node_types=node_types,
+        )
+
     def _citation_candidates(
         self,
         project_id: UUID,
@@ -1246,6 +1809,7 @@ class GraphQueryService:
                         },
                     ),
                     content=content,
+                    document=None,
                 )
         return candidates, nodes
 
@@ -1564,6 +2128,17 @@ def _as_text_expression(value: str | Any) -> Any:
 
 
 def _hydrate_row(entity_type: str, row: Any) -> tuple[NodeKey, _HydratedNode]:
+    document = _GRAPH_DOCUMENT_RENDERER.render(entity_type, row)
+    return document.key, _HydratedNode(
+        summary=document.summary,
+        content=document.content,
+        document=document,
+    )
+
+    # The legacy inline rendering below remains temporarily as a readable
+    # compatibility reference while all graph consumers move to the canonical
+    # renderer above. It is unreachable and will be removed after the migration
+    # window.
     if entity_type == "question":
         entity_id = str(row.question_id)
         label = _compact(row.text)
@@ -1761,7 +2336,7 @@ def _hydrate_row(entity_type: str, row: Any) -> tuple[NodeKey, _HydratedNode]:
     else:  # pragma: no cover - callers constrain persisted entity types
         raise ValueError(f"Unsupported graph entity type: {entity_type}")
     key = (entity_type, entity_id)
-    return key, _HydratedNode(summary=summary, content=content)
+    return key, _HydratedNode(summary=summary, content=content, document=document)
 
 
 def _dataset_label(row: Any) -> str:
@@ -1810,6 +2385,44 @@ def _bounded_snippet(value: str, query: str) -> str:
         ("…" if start else "")
         + compact_value[start:end]
         + ("…" if end < len(compact_value) else "")
+    )
+
+
+def _semantic_chunk_snippet(document: GraphNodeDocument, chunk_index: int) -> str:
+    chunks = document.chunks()
+    if 0 <= chunk_index < len(chunks):
+        return _compact(chunks[chunk_index].text)[:_SEARCH_SNIPPET_LIMIT]
+    return _compact(document.semantic_text or document.content)[:_SEARCH_SNIPPET_LIMIT]
+
+
+def _fusion_sort_key(
+    key: NodeKey,
+    *,
+    lexical: tuple[int, _SearchRow] | None,
+    semantic: Any | None,
+    hydrated: _HydratedNode,
+) -> tuple[object, ...]:
+    lexical_rank = lexical[0] if lexical is not None else None
+    semantic_rank = semantic.rank if semantic is not None else None
+    exact = lexical is not None and lexical[1].match_rank == 0
+    fused_score = sum(
+        1.0 / (60 + rank)
+        for rank in (lexical_rank, semantic_rank)
+        if rank is not None
+    )
+    best_component_rank = min(
+        rank for rank in (lexical_rank, semantic_rank) if rank is not None
+    )
+    updated_at = hydrated.summary.updated_at
+    updated_timestamp = updated_at.timestamp() if updated_at is not None else 0.0
+    return (
+        0 if exact else 1,
+        lexical_rank if exact and lexical_rank is not None else 0,
+        -fused_score,
+        best_component_rank,
+        -updated_timestamp,
+        _NODE_TYPE_ORDER.get(key[0], 99),
+        key[1],
     )
 
 

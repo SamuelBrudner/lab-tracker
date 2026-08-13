@@ -376,6 +376,7 @@ class LabTrackerAPIClient:
         statuses: list[str] | None = None,
         limit: int = 20,
         offset: int = 0,
+        retrieval_mode: str = "auto",
     ) -> JsonObject:
         return self._request(
             "GET",
@@ -386,6 +387,7 @@ class LabTrackerAPIClient:
                 "statuses": statuses,
                 "limit": limit,
                 "offset": offset,
+                "retrieval_mode": retrieval_mode,
             },
         )
 
@@ -642,6 +644,7 @@ class LabTrackerAPIClient:
         claim_id: str | None = None,
         visualization_id: str | None = None,
         limit: int = 20,
+        retrieval_mode: str = "auto",
     ) -> JsonObject:
         try:
             return self._request(
@@ -657,6 +660,7 @@ class LabTrackerAPIClient:
                     "claim_id": claim_id,
                     "visualization_id": visualization_id,
                     "limit": limit,
+                    "retrieval_mode": retrieval_mode,
                 },
             )
         except LabTrackerAPIUnavailableError as exc:

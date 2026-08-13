@@ -1430,22 +1430,41 @@ def _agentic_search_existing_nodes(
             for item in project.get(field, []) or []:
                 if not isinstance(item, dict):
                     continue
+                primary_haystack = " ".join(
+                    str(item.get(key) or "").lower()
+                    for key in ("label", "statement", "text", "title")
+                )
                 haystack = json.dumps(item, sort_keys=True).lower()
+                primary_hit_terms = [term for term in terms if term in primary_haystack]
                 hit_terms = [term for term in terms if term in haystack]
                 if not hit_terms:
                     continue
+                metadata_hit_terms = [
+                    term for term in hit_terms if term not in primary_hit_terms
+                ]
                 matches.append(
                     {
                         "project_id": project_id,
                         "context_field": field,
                         "id": item.get("id"),
                         "label": item.get("label") or item.get("text") or item.get("statement"),
-                        "matched_terms": hit_terms[:5],
+                        "matched_terms": [*primary_hit_terms, *metadata_hit_terms][:5],
+                        "_rank_score": 4 * len(primary_hit_terms)
+                        + len(metadata_hit_terms),
                     }
                 )
-                if len(matches) >= 20:
-                    return matches
-    return matches
+    matches.sort(
+        key=lambda item: (
+            -int(item["_rank_score"]),
+            str(item["project_id"]),
+            str(item["context_field"]),
+            str(item["id"]),
+        )
+    )
+    return [
+        {key: value for key, value in item.items() if key != "_rank_score"}
+        for item in matches[:20]
+    ]
 
 
 def _agentic_decision_context_summary(projects: list[dict[str, Any]]) -> dict[str, Any]:

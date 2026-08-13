@@ -21,6 +21,9 @@ from lab_tracker.models import (
     GoalLinkStatus,
     GoalRelation,
     Note,
+    ProvenanceLink,
+    ProvenanceLinkRelation,
+    ProvenanceLinkStatus,
     Question,
     QuestionLink,
     QuestionLinkRole,
@@ -175,6 +178,13 @@ _DIRECT_RELATIONSHIP_SEMANTICS: dict[str, DirectRelationshipSemanticMapping] = {
     "dataset_source_session": DirectRelationshipSemanticMapping(
         term_iri("sourceSession"),
         "target_to_source",
+    ),
+    "dataset_manifest_note": DirectRelationshipSemanticMapping(
+        term_iri("note"),
+        "target_to_source",
+    ),
+    "note_was_derived_from": DirectRelationshipSemanticMapping(
+        "prov:wasDerivedFrom"
     ),
 }
 _DIRECT_RELATIONSHIP_SEMANTICS.update(
@@ -335,6 +345,15 @@ class ProjectGraphRepository(Protocol):
         offset: int,
     ) -> tuple[list[Session], int]: ...
 
+    def query_provenance_links(
+        self,
+        *,
+        project_id: UUID,
+        status: str | None,
+        limit: int | None,
+        offset: int,
+    ) -> tuple[list[ProvenanceLink], int]: ...
+
 
 def build_project_graph(
     repository: ProjectGraphRepository,
@@ -355,6 +374,7 @@ def build_project_graph(
     goals: list[Goal] = []
     notes: list[Note] = []
     sessions: list[Session] = []
+    provenance_links: list[ProvenanceLink] = []
     if view_value in {"evidence", "full"}:
         datasets, _ = repository.query_datasets(project_id=project_id, limit=None, offset=0)
         analyses, _ = repository.query_analyses(project_id=project_id, limit=None, offset=0)
@@ -378,6 +398,12 @@ def build_project_graph(
     if view_value == "full":
         notes, _ = repository.query_notes(project_id=project_id, limit=None, offset=0)
         sessions, _ = repository.query_sessions(project_id=project_id, limit=None, offset=0)
+        provenance_links, _ = repository.query_provenance_links(
+            project_id=project_id,
+            status=ProvenanceLinkStatus.ACCEPTED.value,
+            limit=None,
+            offset=0,
+        )
 
     builder = _ProjectGraphBuilder(project_id=project_id, view=view_value)
     for question in _sort_entities(questions, "question_id", _question_label):
@@ -416,7 +442,7 @@ def build_project_graph(
             goals,
         )
     if view_value == "full":
-        _add_full_edges(builder, notes, sessions, datasets)
+        _add_full_edges(builder, notes, sessions, datasets, provenance_links)
 
     return builder.graph()
 
@@ -896,6 +922,7 @@ def _add_full_edges(
     notes: list[Note],
     sessions: list[Session],
     datasets: list[Dataset],
+    provenance_links: list[ProvenanceLink],
 ) -> None:
     for note in _sort_entities(notes, "note_id", _note_label):
         note_id = _entity_node_id("note", note.note_id)
@@ -921,6 +948,16 @@ def _add_full_edges(
             "session_question",
         )
     for dataset in _sort_entities(datasets, "dataset_id", _dataset_label):
+        for manifest_note_id in sorted(
+            set(dataset.commit_manifest.note_ids),
+            key=str,
+        ):
+            builder.add_edge(
+                _entity_node_id("note", manifest_note_id),
+                _entity_node_id("dataset", dataset.dataset_id),
+                "commit note",
+                "dataset_manifest_note",
+            )
         source_session_id = dataset.commit_manifest.source_session_id
         if source_session_id is None:
             continue
@@ -929,6 +966,21 @@ def _add_full_edges(
             _entity_node_id("dataset", dataset.dataset_id),
             "source session",
             "dataset_source_session",
+        )
+    for link in sorted(provenance_links, key=lambda item: str(item.link_id)):
+        if (
+            link.status is not ProvenanceLinkStatus.ACCEPTED
+            or link.relation is not ProvenanceLinkRelation.WAS_DERIVED_FROM
+            or link.source.entity_type is not EntityType.NOTE
+            or link.target.entity_type is not EntityType.NOTE
+        ):
+            continue
+        builder.add_edge(
+            _entity_node_id("note", link.source.entity_id),
+            _entity_node_id("note", link.target.entity_id),
+            "derived from",
+            "note_was_derived_from",
+            identity=f"provenance-link={link.link_id}",
         )
 
 

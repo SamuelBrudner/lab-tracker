@@ -38,9 +38,11 @@ def test_usage_event_model_has_no_content_columns():
         "actor_role",
         "principal_type",
         "surface",
-        "project_id",
-        "outcome",
-    }
+            "project_id",
+            "outcome",
+            "retrieval_strategy",
+            "retrieval_fallback",
+        }
     for column in UsageEventModel.__table__.columns:
         assert not isinstance(column.type, (Text, JSON))
         if isinstance(column.type, String):

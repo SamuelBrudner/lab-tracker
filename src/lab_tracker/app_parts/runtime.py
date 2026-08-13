@@ -10,6 +10,7 @@ import weakref
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import mkdtemp
 
@@ -76,6 +77,11 @@ from lab_tracker.review_email_transport import (
     SMTPTLSMode,
 )
 from lab_tracker.review_links import sign_review_link
+from lab_tracker.semantic_index import (
+    SemanticIndexReconciler,
+    SemanticIndexWorker,
+    install_semantic_change_tracking,
+)
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 from lab_tracker.store_authority_registry import StoreAuthorityRegistry
 from lab_tracker.store_authority_use import (
@@ -390,11 +396,19 @@ def make_lifespan(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         lock: ProcessLock | None = None
         background_tasks: list[asyncio.Task[None]] = []
+        remove_semantic_tracking: Callable[[], None] | None = None
         try:
             lock = _acquire_database_lock(runtime.engine)
+            semantic_client = getattr(app.state, "semantic_embedding_client", None)
+            if semantic_client is not None and runtime.settings.semantic_search_mode != "off":
+                remove_semantic_tracking = install_semantic_change_tracking(
+                    runtime.session_factory,
+                    client=semantic_client,
+                )
             background_tasks = [
                 *_start_graph_draft_background_tasks(app),
                 *_start_review_email_background_tasks(app),
+                *_start_semantic_background_tasks(app),
             ]
             yield
         finally:
@@ -402,12 +416,21 @@ def make_lifespan(
                 try:
                     await _stop_background_tasks(background_tasks)
                 finally:
+                    if remove_semantic_tracking is not None:
+                        remove_semantic_tracking()
                     if lock is not None:
                         lock.release()
             finally:
                 try:
                     runtime.engine.dispose()
                 finally:
+                    semantic_client = getattr(
+                        app.state,
+                        "semantic_embedding_client",
+                        None,
+                    )
+                    if semantic_client is not None:
+                        semantic_client.close()
                     runtime.cleanup_git_health_workdir()
 
     return lifespan
@@ -434,6 +457,17 @@ def _start_review_email_background_tasks(app: FastAPI) -> list[asyncio.Task[None
     ):
         return []
     return [asyncio.create_task(_review_email_worker_loop(app))]
+
+
+def _start_semantic_background_tasks(app: FastAPI) -> list[asyncio.Task[None]]:
+    client = getattr(app.state, "semantic_embedding_client", None)
+    settings = getattr(app.state, "settings", None)
+    if client is None or settings is None or settings.semantic_search_mode == "off":
+        return []
+    return [
+        asyncio.create_task(_semantic_worker_loop(app)),
+        asyncio.create_task(_semantic_reconciler_loop(app)),
+    ]
 
 
 async def _stop_background_tasks(tasks: list[asyncio.Task[None]]) -> None:
@@ -487,6 +521,34 @@ async def _review_email_worker_loop(app: FastAPI) -> None:
             processed = False
         if not processed:
             await asyncio.sleep(settings.review_email_worker_poll_seconds)
+
+
+async def _semantic_worker_loop(app: FastAPI) -> None:
+    worker = SemanticIndexWorker(
+        app.state.db_session_factory,
+        app.state.semantic_embedding_client,
+    )
+    while True:
+        try:
+            processed = await asyncio.to_thread(worker.process_one)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _logger.exception("Semantic index worker tick failed.")
+            processed = False
+        if not processed:
+            await asyncio.sleep(0.5)
+
+
+async def _semantic_reconciler_loop(app: FastAPI) -> None:
+    while True:
+        try:
+            await asyncio.to_thread(_reconcile_semantic_index, app)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _logger.exception("Semantic index reconciliation failed.")
+        await asyncio.sleep(60.0)
 
 
 def _process_one_graph_draft_batch_run(app: FastAPI) -> bool:
@@ -552,6 +614,30 @@ def _process_one_review_email(app: FastAPI) -> bool:
                 provider_message_id=result.message_id,
             )
         return True
+
+
+def _reconcile_semantic_index(app: FastAPI) -> None:
+    from sqlalchemy import select
+
+    from lab_tracker.db_models import ProjectModel
+
+    remaining = 500
+    with app.state.db_session_factory.begin() as session:
+        project_ids = list(
+            session.scalars(
+                select(ProjectModel.project_id).order_by(ProjectModel.project_id).limit(50)
+            )
+        )
+        reconciler = SemanticIndexReconciler(
+            session,
+            app.state.semantic_embedding_client,
+        )
+        for project_id in project_ids:
+            if remaining <= 0:
+                break
+            queued = reconciler.reconcile_project(project_id, limit=remaining)
+            remaining -= queued
+    app.state.semantic_last_reconciliation_at = datetime.now(timezone.utc)
 
 
 def _background_api(app: FastAPI, session: Session) -> LabTrackerAPI:
@@ -648,6 +734,10 @@ def configure_app_state(app: FastAPI, runtime: AppRuntime) -> None:
     app.state.invitation_token_service = runtime.invitation_token_service
     app.state.auth_enabled = runtime.auth_enabled
     app.state.settings = runtime.settings
+    # This initiative intentionally ships no real adapter. Deployments and tests
+    # may inject one explicitly behind the provider-neutral protocol.
+    app.state.semantic_embedding_client = None
+    app.state.semantic_last_reconciliation_at = None
     app.state.store_authority_registry = runtime.store_authority_registry
     app.state.store_authority_snapshot_provider = (
         runtime.store_authority_snapshot_provider

@@ -384,6 +384,7 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 - `project_id` (optional): string(uuid) | null
 - `query` (required): string; min length 1
 - `question_id` (optional): string(uuid) | null
+- `retrieval_mode` (optional): string enum: auto, lexical, hybrid
 - `since` (optional): string(date-time) | null
 - `task_kind` (required): string; min length 1
 - `until` (optional): string(date-time) | null
@@ -507,6 +508,7 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 - `statuses` (optional): list[string] | null
 - `limit` (optional): integer; minimum 1, maximum 100, default 20
 - `offset` (optional): integer; minimum 0, default 0
+- `retrieval_mode` (optional): string enum: auto, lexical, hybrid
 
 #### `GET /projects/{project_id}/graph/neighborhood/{entity_type}/{entity_id}`
 - `project_id` (required): string(uuid)

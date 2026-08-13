@@ -1558,6 +1558,7 @@ def test_decision_context_posts_to_api_route() -> None:
             "query": "baseline controls",
             "project_id": "project-1",
             "limit": 5,
+            "retrieval_mode": "auto",
         }
         return _json_response(
             200,
@@ -1668,6 +1669,7 @@ def test_read_only_viewer_lpat_reaches_decision_context_through_mcp_tool(
         "query": "MCP scoped context",
         "project_id": scoped_project_member.visible_project_id,
         "limit": 20,
+        "retrieval_mode": "auto",
     }
 
 
@@ -2720,9 +2722,10 @@ def test_graph_read_tools_forward_filters_and_next_actions(monkeypatch) -> None:
                 {
                     "entity_types": ["question", "claim"],
                     "statuses": ["active"],
-                    "limit": 7,
-                    "offset": 3,
-                },
+                        "limit": 7,
+                        "offset": 3,
+                        "retrieval_mode": "auto",
+                    },
             ),
         ),
         (

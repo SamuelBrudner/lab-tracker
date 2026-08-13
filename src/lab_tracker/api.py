@@ -6,7 +6,7 @@ import logging
 import time
 from collections.abc import Callable
 from types import TracebackType
-from typing import Protocol, TypeVar
+from typing import Literal, Protocol, TypeVar
 from uuid import UUID
 
 from lab_tracker.api_parts import (
@@ -403,6 +403,18 @@ class LabTrackerAPI(
         duration_ms: int | None = None,
         result_count: int | None = None,
         surface: UsageEventSurface | str | None = None,
+        retrieval_strategy: Literal["lexical", "hybrid", "shadow"] | None = None,
+        retrieval_fallback: Literal[
+            "server_mode_off",
+            "adapter_unavailable",
+            "semantic_index_invalid",
+            "semantic_timeout",
+            "coverage_below_threshold",
+            "shadow_policy",
+        ]
+        | None = None,
+        semantic_duration_ms: int | None = None,
+        shadow_overlap_milli: int | None = None,
     ) -> None:
         self.projects.record_usage_event(
             verb=verb,
@@ -414,6 +426,10 @@ class LabTrackerAPI(
             duration_ms=duration_ms,
             result_count=result_count,
             surface=surface,
+            retrieval_strategy=retrieval_strategy,
+            retrieval_fallback=retrieval_fallback,
+            semantic_duration_ms=semantic_duration_ms,
+            shadow_overlap_milli=shadow_overlap_milli,
         )
 
     def _with_usage_event(

@@ -180,6 +180,56 @@ def test_accept_stamps_human_curation_provenance(
     assert accepted["accepted_at"] is not None
 
 
+def test_accepted_note_derivation_edge_matches_full_graph_and_neighborhood(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    antecedent = _note_with_hash(
+        client,
+        admin_auth_headers,
+        project_id,
+        "antecedent",
+        "shared",
+    )
+    derived = _note_with_hash(
+        client,
+        admin_auth_headers,
+        project_id,
+        "derived",
+        "shared",
+    )
+    _run_detection(client, admin_auth_headers, project_id)
+    link_id = _links(client, admin_auth_headers, project_id)[0]["link_id"]
+    client.patch(
+        f"/provenance-links/{link_id}",
+        json={"status": "accepted"},
+        headers=admin_auth_headers,
+    )
+
+    full = client.get(
+        f"/projects/{project_id}/graph?view=full",
+        headers=admin_auth_headers,
+    ).json()["data"]
+    neighborhood = client.get(
+        f"/projects/{project_id}/graph/neighborhood/note/{derived}",
+        headers=admin_auth_headers,
+    ).json()["data"]
+    full_edge = next(
+        edge
+        for edge in full["edges"]
+        if edge["relationship"] == "note_was_derived_from"
+    )
+    bounded_edge = next(
+        edge
+        for edge in neighborhood["edges"]
+        if edge["relationship"] == "note_was_derived_from"
+    )
+    assert full_edge["source"] == bounded_edge["source"] == f"note:{derived}"
+    assert full_edge["target"] == bounded_edge["target"] == f"note:{antecedent}"
+    assert bounded_edge["semantics"]["predicate_iri"].endswith("wasDerivedFrom")
+
+
 def test_reject_clears_acceptance_and_is_not_reproposed(
     client: TestClient, admin_auth_headers: dict[str, str]
 ) -> None:

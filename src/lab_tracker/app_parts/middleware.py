@@ -385,6 +385,11 @@ def configure_database_session_middleware(
                 store_authority_snapshot_provider=(
                     request.app.state.store_authority_snapshot_provider
                 ),
+                semantic_client=getattr(
+                    request.app.state,
+                    "semantic_embedding_client",
+                    None,
+                ),
             )
             response = await call_next(request)
         except BaseException as exc:

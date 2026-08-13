@@ -62,6 +62,7 @@ from lab_tracker.models import (
     Goal,
     Project,
     ProjectStatus,
+    ProvenanceLink,
     Question,
     StoreCapability,
     StoreKind,
@@ -81,13 +82,16 @@ from lab_tracker.schemas import (
     AssistantDecisionContextRequest,
     GraphNeighborhoodRead,
     GraphOverviewRead,
+    GraphRetrievalMode,
     GraphSearchRead,
     GraphTraversalDirection,
     PortfolioProjectGroupSummary,
     ProjectGraphRead,
     ProjectGraphView,
+    RetrievedGraphRead,
     SearchResults,
 )
+from lab_tracker.semantic_retrieval import EmbeddingClient
 from lab_tracker.store_authority_use import (
     DetachedStoreAuthorityBinding,
     StoreAuthoritySnapshotProvider,
@@ -215,6 +219,10 @@ class ContextAccess(Protocol):
         project_id: UUID | None,
         actor: AuthContext | None,
         result_count: int | None,
+        retrieval_strategy: Any = None,
+        retrieval_fallback: Any = None,
+        semantic_duration_ms: int | None = None,
+        shadow_overlap_milli: int | None = None,
     ) -> None: ...
 
 
@@ -262,6 +270,15 @@ class ContextRepository(DecisionContextRepository, Protocol):
         recent_first: bool = False,
     ) -> tuple[list[ExplorationNode], int]: ...
 
+    def query_provenance_links(
+        self,
+        *,
+        project_id: UUID,
+        status: str | None,
+        limit: int | None,
+        offset: int,
+    ) -> tuple[list[ProvenanceLink], int]: ...
+
 
 @dataclass(frozen=True)
 class ContextQueries:
@@ -273,6 +290,8 @@ class ContextQueries:
     release_read_scope: Callable[[], None]
     resolver_registry: ResolverRegistry | None = None
     store_authority_snapshot_provider: StoreAuthoritySnapshotProvider | None = None
+    settings: Any | None = None
+    semantic_client: EmbeddingClient | None = None
     _prepared_external_artifact_resolutions: dict[
         object, _PreparedExternalArtifactResolutionRecord
     ] = field(default_factory=dict, init=False, repr=False, compare=False)
@@ -299,7 +318,7 @@ class ContextQueries:
             self.repository,
             accessible_project_ids=accessible_project_ids,
         )
-        return build_decision_context(
+        context = build_decision_context(
             reader,
             task_kind=payload.task_kind,
             query=payload.query,
@@ -316,6 +335,68 @@ class ContextQueries:
             until=payload.until,
             limit=payload.limit,
         )
+        data = context.get("data")
+        if not isinstance(data, dict):
+            return context
+        scope = data.get("scope")
+        project_scope = scope.get("project") if isinstance(scope, dict) else None
+        context_project_id = (
+            project_scope.get("project_id") if isinstance(project_scope, dict) else None
+        )
+        if not context_project_id:
+            return context
+        # This authorization check necessarily precedes query embedding or any
+        # other semantic adapter call.
+        project = self.api.get_project_for_read(UUID(str(context_project_id)), actor=actor)
+        graph_service = GraphQueryService(
+            self.session,
+            semantic_client=self.semantic_client,
+            semantic_search_mode=(
+                self.settings.semantic_search_mode if self.settings is not None else "off"
+            ),
+        )
+        graph_search = graph_service.search(
+            project,
+            query=payload.query,
+            entity_types=None,
+            statuses=None,
+            limit=8,
+            offset=0,
+            retrieval_mode=payload.retrieval_mode,
+        )
+        explicit_anchors = [
+            (entity_type, str(entity_id))
+            for entity_type, entity_id in (
+                ("question", payload.question_id),
+                ("dataset", payload.dataset_id),
+                ("analysis", payload.analysis_id),
+                ("claim", payload.claim_id),
+                ("visualization", payload.visualization_id),
+            )
+            if entity_id is not None
+        ]
+        retrieved_graph = graph_service.retrieve_multi_seed(
+            project,
+            explicit_anchors=explicit_anchors,
+            search=graph_search,
+        )
+        data["retrieved_graph"] = retrieved_graph.model_dump(mode="json")
+        _merge_retrieved_graph_sections(
+            data,
+            retrieved_graph,
+            reader=reader,
+            project_id=project.project_id,
+            limit=payload.limit,
+        )
+        meta = context.setdefault("meta", {})
+        if isinstance(meta, dict):
+            meta["retrieval_policy"] = (
+                "explicit_anchors_then_fused_graph_seeds_then_typed_graph_then_recency"
+            )
+            meta["effective_graph_retrieval_mode"] = (
+                graph_search.retrieval.effective_mode
+            )
+        return context
 
     def portfolio_summary(
         self,
@@ -363,16 +444,46 @@ class ContextQueries:
         statuses: list[str] | None,
         limit: int,
         offset: int,
+        retrieval_mode: GraphRetrievalMode = "auto",
     ) -> GraphSearchRead:
         project = self.api.get_project_for_read(project_id, actor=actor)
-        return GraphQueryService(self.session).search(
+        service = GraphQueryService(
+            self.session,
+            semantic_client=self.semantic_client,
+            semantic_search_mode=(
+                self.settings.semantic_search_mode if self.settings is not None else "off"
+            ),
+        )
+        result = service.search(
             project,
             query=query,
             entity_types=entity_types,
             statuses=statuses,
             limit=limit,
             offset=offset,
+            retrieval_mode=retrieval_mode,
         )
+        strategy = (
+            "shadow"
+            if (
+                self.settings is not None
+                and self.settings.semantic_search_mode == "shadow"
+                and retrieval_mode != "lexical"
+            )
+            else result.retrieval.effective_mode
+        )
+        self.api.record_usage_event(
+            verb=UsageEventVerb.SEARCH,
+            resource_type=UsageEventResourceType.SEARCH,
+            project_id=project.project_id,
+            actor=actor,
+            result_count=len(result.items),
+            retrieval_strategy=strategy,
+            retrieval_fallback=result.retrieval.fallback_reason,
+            semantic_duration_ms=service.semantic_duration_ms,
+            shadow_overlap_milli=service.shadow_overlap_milli,
+        )
+        return result
 
     def graph_neighborhood(
         self,
@@ -936,6 +1047,112 @@ def _goal_matches_project(
     if goal.project_id is not None:
         return goal.project_id == project_id
     return project_id in scope_project_ids
+
+
+def _merge_retrieved_graph_sections(
+    data: JsonObject,
+    retrieved: RetrievedGraphRead,
+    *,
+    reader: RepositoryDecisionContextReader,
+    project_id: UUID,
+    limit: int,
+) -> None:
+    """Merge graph nodes into legacy typed sections in relevance order."""
+
+    specs: dict[str, tuple[str, str, Callable[[str], JsonObject | None] | None]] = {
+        "question": ("questions", "question_id", reader.get_question),
+        "note": ("notes", "note_id", None),
+        "session": ("sessions", "session_id", None),
+        "dataset": ("datasets", "dataset_id", reader.get_dataset),
+        "analysis": ("analyses", "analysis_id", reader.get_analysis),
+        "claim": ("claims", "claim_id", reader.get_claim),
+        "visualization": ("visualizations", "viz_id", reader.get_visualization),
+    }
+    graph_order: dict[tuple[str, str], int] = {}
+    graph_priority: dict[tuple[str, str], int] = {}
+    for order, retrieved_node in enumerate(retrieved.nodes):
+        node = retrieved_node.node
+        spec = specs.get(node.entity_type)
+        if spec is None:
+            continue
+        section, id_key, getter = spec
+        raw_items = data.setdefault(section, [])
+        if not isinstance(raw_items, list):
+            continue
+        items = [item for item in raw_items if isinstance(item, dict)]
+        item = next(
+            (value for value in items if str(value.get(id_key)) == node.entity_id),
+            None,
+        )
+        created_from_graph = item is None
+        if item is None:
+            item = getter(node.entity_id) if getter is not None else None
+            if item is None:
+                item = {
+                    id_key: node.entity_id,
+                    "project_id": str(project_id),
+                    "status": node.status,
+                    "graph_excerpt": retrieved_node.excerpt,
+                    "graph_excerpt_only": True,
+                }
+                if node.entity_type == "note":
+                    item["raw_content"] = retrieved_node.excerpt
+                elif node.entity_type == "session":
+                    item["link_code"] = node.detail
+                    item["session_type"] = node.label.removesuffix(" session")
+            item["relevance_reasons"] = []
+            raw_items.append(item)
+        reasons = item.setdefault("relevance_reasons", [])
+        if (
+            created_from_graph
+            and isinstance(reasons, list)
+            and retrieved_node.relevance not in reasons
+        ):
+            reasons.append(retrieved_node.relevance)
+        node_key = (node.entity_type, node.entity_id)
+        graph_order[node_key] = order
+        graph_priority[node_key] = {
+            "anchor": 0,
+            "graph_seed": 1,
+            "graph_neighbor": 2,
+        }[retrieved_node.relevance]
+
+    type_by_section = {value[0]: key for key, value in specs.items()}
+    id_by_section = {value[0]: value[1] for value in specs.values()}
+    for section, entity_type in type_by_section.items():
+        raw_items = data.get(section)
+        if not isinstance(raw_items, list):
+            continue
+        id_key = id_by_section[section]
+        typed_items = [item for item in raw_items if isinstance(item, dict)]
+        typed_items.sort(
+            key=lambda item: _decision_relevance_sort_key(
+                item,
+                graph_order.get((entity_type, str(item.get(id_key))), 10_000),
+                graph_priority.get((entity_type, str(item.get(id_key)))),
+            )
+        )
+        data[section] = typed_items[:limit]
+
+
+def _decision_relevance_sort_key(
+    item: JsonObject,
+    graph_order: int,
+    graph_priority: int | None,
+) -> tuple[int, int]:
+    raw_reasons = item.get("relevance_reasons")
+    reasons = set(raw_reasons) if isinstance(raw_reasons, list) else set()
+    if graph_priority is not None:
+        priority = graph_priority
+    elif "anchor" in reasons:
+        priority = 0
+    elif "graph_seed" in reasons or "search_match" in reasons:
+        priority = 1
+    elif "graph_neighbor" in reasons:
+        priority = 2
+    else:
+        priority = 3
+    return priority, graph_order
 
 
 def _single_project_id(project_ids: set[UUID] | None) -> UUID | None:
