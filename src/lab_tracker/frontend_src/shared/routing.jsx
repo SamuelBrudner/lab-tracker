@@ -6,7 +6,11 @@ const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function parseAppRoute(pathname) {
-  const parts = String(pathname || "")
+  // `navigate()` passes the complete destination (including query/hash) while
+  // popstate gives us `window.location.pathname`. Parse both forms identically
+  // so contextual routes such as Capture can safely carry query state.
+  const pathOnly = String(pathname || "").split(/[?#]/, 1)[0];
+  const parts = pathOnly
     .split("/")
     .filter(Boolean);
   if (parts.length === 0) {
@@ -43,6 +47,14 @@ function parseAppRoute(pathname) {
   }
   if (routeParts.length === 2 && routeParts[1] === "batches") {
     return { kind: "batches" };
+  }
+  if (
+    routeParts.length === 4 &&
+    routeParts[1] === "projects" &&
+    UUID_RE.test(routeParts[2] || "") &&
+    routeParts[3] === "onboarding"
+  ) {
+    return { kind: "member-onboarding", projectId: routeParts[2] };
   }
   if (routeParts.length >= 3 && routeParts[1] === "batches" && UUID_RE.test(routeParts[2] || "")) {
     return { kind: "batch", changeSetId: routeParts[2] };
@@ -100,6 +112,15 @@ function resolveAppPath(to, currentPathname = window.location.pathname) {
     return resolved;
   }
   return `${basePath}${resolved}`;
+}
+
+function isContextualProjectReady({ projectId, projects, projectsLoaded, selectedProjectId }) {
+  if (!projectId || selectedProjectId === projectId) {
+    return true;
+  }
+  return Boolean(
+    projectsLoaded && !projects.some((project) => project.project_id === projectId)
+  );
 }
 
 function useAppRoute() {
@@ -169,4 +190,11 @@ function AppLink({ to, navigate, className = "", children }) {
   );
 }
 
-export { AppLink, appBasePath, parseAppRoute, resolveAppPath, useAppRoute };
+export {
+  AppLink,
+  appBasePath,
+  isContextualProjectReady,
+  parseAppRoute,
+  resolveAppPath,
+  useAppRoute,
+};

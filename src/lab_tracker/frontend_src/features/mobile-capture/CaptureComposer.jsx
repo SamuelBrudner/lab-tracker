@@ -19,6 +19,7 @@ const VOICE_NOTE_TYPES = [
 function CaptureComposer({
   canWrite,
   navigate,
+  returnPath = "",
   attachmentMenuOpen,
   setAttachmentMenuOpen,
   photoFile,
@@ -42,8 +43,8 @@ function CaptureComposer({
     <section className="capture-primary" aria-labelledby="capture-primary-title">
       <div className="capture-section-head capture-section-toolbar">
         <h2 id="capture-primary-title">Capture</h2>
-        <button type="button" className="btn-secondary" onClick={() => navigate("/app")}>
-          Workspace
+        <button type="button" className="btn-secondary" onClick={() => navigate(returnPath || "/app")}>
+          {returnPath ? "Back to orientation" : "Workspace"}
         </button>
       </div>
       <input

@@ -20,6 +20,7 @@ from lab_tracker.services.graph_draft_review import GraphDraftReviewCoordinator
 from lab_tracker.services.graph_draft_scheduling import BatchSchedulingCoordinator
 from lab_tracker.services.graph_draft_service import GraphDraftService
 from lab_tracker.services.graph_draft_validation import GraphPatchValidator
+from lab_tracker.services.member_onboarding_service import MemberOnboardingService
 from lab_tracker.services.note_service import NoteService
 from lab_tracker.services.ownership_service import OwnershipReassignmentService
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
@@ -53,6 +54,7 @@ __all__ = [
     "GraphPatchApplier",
     "GraphPatchValidator",
     "NoteService",
+    "MemberOnboardingService",
     "OwnershipReassignmentService",
     "ProjectAuthorizationPolicy",
     "ProjectService",

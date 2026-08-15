@@ -103,6 +103,32 @@ CORE_READ_OPACITY_VARIANTS = (
     ),
     _variant(
         CORE_SUITE,
+        "project-graph-overview",
+        method="GET",
+        route_template="/projects/{project_id}/graph/overview",
+        operation_id=("get_graph_overview_projects__project_id__graph_overview_get"),
+    ),
+    _variant(
+        CORE_SUITE,
+        "project-graph-search",
+        method="GET",
+        route_template="/projects/{project_id}/graph/search",
+        operation_id=("search_project_graph_projects__project_id__graph_search_get"),
+    ),
+    _variant(
+        CORE_SUITE,
+        "project-graph-neighborhood",
+        method="GET",
+        route_template=(
+            "/projects/{project_id}/graph/neighborhood/{entity_type}/{entity_id}"
+        ),
+        operation_id=(
+            "get_graph_neighborhood_projects__project_id__graph_neighborhood_"
+            "_entity_type___entity_id__get"
+        ),
+    ),
+    _variant(
+        CORE_SUITE,
         "project-graph-mermaid",
         method="GET",
         route_template="/projects/{project_id}/graph/mermaid",

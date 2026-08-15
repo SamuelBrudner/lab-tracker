@@ -44,6 +44,9 @@ def test_fastmcp_registers_lab_tracker_tools() -> None:
     assert "lab_tracker_readiness" in names
     assert "lab_tracker_describe_schema" in names
     assert "lab_tracker_search" in names
+    assert "lab_tracker_graph_overview" in names
+    assert "lab_tracker_search_graph" in names
+    assert "lab_tracker_get_graph_neighborhood" in names
     assert "lab_tracker_get_decision_context" in names
     assert "CALL THIS FIRST" in (
         tools_by_name["lab_tracker_get_decision_context"].description or ""
@@ -75,6 +78,7 @@ def test_fastmcp_registers_lab_tracker_tools() -> None:
     assert "CALL THIS FIRST before research-facing decisions" in (mcp_server.server.instructions)
     assert "what to plot" in mcp_server.server.instructions
     assert "AI can suggest; only a person commits" in mcp_server.server.instructions
+    assert "lab_tracker_graph_overview" in mcp_server.server.instructions
 
 
 def test_fastmcp_artifact_tool_schema_publishes_portable_content_bounds() -> None:
@@ -147,6 +151,17 @@ def test_fastmcp_tool_annotations_mark_reads_and_writes_for_copilot() -> None:
     assert refactor_history.annotations.readOnlyHint is True
     assert "lab_tracker_list_question_refactors" in {tool.__name__ for tool in READ_TOOLS}
     assert "lab_tracker_list_question_refactors" not in {tool.__name__ for tool in WRITE_TOOLS}
+
+    for graph_tool_name in (
+        "lab_tracker_graph_overview",
+        "lab_tracker_search_graph",
+        "lab_tracker_get_graph_neighborhood",
+    ):
+        graph_tool = tools_by_name[graph_tool_name]
+        assert graph_tool.annotations is not None
+        assert graph_tool.annotations.readOnlyHint is True
+        assert graph_tool_name in {tool.__name__ for tool in READ_TOOLS}
+        assert graph_tool_name not in {tool.__name__ for tool in WRITE_TOOLS}
 
     create_note = tools_by_name["lab_tracker_create_note"]
     assert create_note.annotations is not None
@@ -2629,3 +2644,190 @@ def test_client_readiness_uses_service_credentials_when_configured() -> None:
         ("POST", "/auth/login", None),
         ("GET", "/readiness", "Bearer token-1"),
     ]
+
+
+def test_fastmcp_graph_tool_schemas_publish_hard_bounds() -> None:
+    tools = asyncio.run(mcp_server.server.list_tools())
+    tools_by_name = {tool.name: tool for tool in tools}
+
+    search = tools_by_name["lab_tracker_search_graph"]
+    neighborhood = tools_by_name["lab_tracker_get_graph_neighborhood"]
+    assert search.inputSchema["properties"]["query"]["minLength"] == 2
+    assert search.inputSchema["properties"]["query"]["maxLength"] == 256
+    assert search.inputSchema["properties"]["limit"]["maximum"] == 100
+    assert neighborhood.inputSchema["properties"]["depth"]["maximum"] == 2
+    assert neighborhood.inputSchema["properties"]["max_nodes"]["maximum"] == 200
+    assert neighborhood.inputSchema["properties"]["max_edges"]["maximum"] == 500
+    assert "untrusted" in (neighborhood.description or "")
+
+
+def test_graph_read_tools_forward_filters_and_next_actions(monkeypatch) -> None:
+    from lab_tracker.mcp_tools import read as read_tools
+
+    calls: list[tuple[str, object]] = []
+
+    class FakeClient:
+        def graph_overview(self, project_id):
+            calls.append(("overview", project_id))
+            return {"data": {"project": {"project_id": project_id}}}
+
+        def search_graph(self, project_id, query, **kwargs):
+            calls.append(("search", (project_id, query, kwargs)))
+            return {"data": {"items": []}}
+
+        def get_graph_neighborhood(self, project_id, entity_type, entity_id, **kwargs):
+            calls.append(("neighborhood", (project_id, entity_type, entity_id, kwargs)))
+            return {"data": {"nodes": [], "edges": []}}
+
+        def close(self) -> None:
+            return None
+
+    read_tools.close_cached_read_client()
+    monkeypatch.setattr(read_tools, "client_from_env", lambda: FakeClient())
+
+    overview = read_tools.lab_tracker_graph_overview("project-1")
+    search = read_tools.lab_tracker_search_graph(
+        "project-1",
+        "control",
+        entity_types=["question", "claim"],
+        statuses=["active"],
+        limit=7,
+        offset=3,
+    )
+    neighborhood = read_tools.lab_tracker_get_graph_neighborhood(
+        "project-1",
+        "claim",
+        "claim-1",
+        direction="incoming",
+        relationships=["claim_analysis_support"],
+        node_types=["analysis"],
+        depth=2,
+        max_nodes=20,
+        max_edges=30,
+        include_anchor_content=True,
+    )
+
+    assert overview["next_action"]["tool"] == "lab_tracker_search_graph"
+    assert search["next_action"]["tool"] == "lab_tracker_get_graph_neighborhood"
+    assert neighborhood["next_action"]["tool"] == "lab_tracker_get_decision_context"
+    assert calls == [
+        ("overview", "project-1"),
+        (
+            "search",
+            (
+                "project-1",
+                "control",
+                {
+                    "entity_types": ["question", "claim"],
+                    "statuses": ["active"],
+                    "limit": 7,
+                    "offset": 3,
+                },
+            ),
+        ),
+        (
+            "neighborhood",
+            (
+                "project-1",
+                "claim",
+                "claim-1",
+                {
+                    "direction": "incoming",
+                    "relationships": ["claim_analysis_support"],
+                    "node_types": ["analysis"],
+                    "depth": 2,
+                    "max_nodes": 20,
+                    "max_edges": 30,
+                    "include_anchor_content": True,
+                },
+            ),
+        ),
+    ]
+
+
+def test_graph_api_client_forwards_repeated_filters_and_bounds() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/graph/overview"):
+            return _json_response(200, {"data": {"project": {"project_id": "project-1"}}})
+        if request.url.path.endswith("/graph/search"):
+            assert request.url.params["q"] == "control"
+            assert request.url.params.get_list("entity_types") == ["question", "claim"]
+            assert request.url.params.get_list("statuses") == ["active", "supported"]
+            assert request.url.params["limit"] == "7"
+            assert request.url.params["offset"] == "3"
+            return _json_response(200, {"data": {"items": []}})
+        if "/graph/neighborhood/claim/claim-1" in request.url.path:
+            assert request.url.params["direction"] == "incoming"
+            assert request.url.params.get_list("relationships") == [
+                "claim_analysis_support"
+            ]
+            assert request.url.params.get_list("node_types") == ["analysis"]
+            assert request.url.params["depth"] == "2"
+            assert request.url.params["max_nodes"] == "20"
+            assert request.url.params["max_edges"] == "30"
+            assert request.url.params["include_anchor_content"] == "true"
+            return _json_response(200, {"data": {"nodes": [], "edges": []}})
+        return _json_response(404, {"error": {"message": "not found"}})
+
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(base_url="http://testserver"),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        assert client.graph_overview("project-1")["data"]["project"]["project_id"] == (
+            "project-1"
+        )
+        assert client.search_graph(
+            "project-1",
+            "control",
+            entity_types=["question", "claim"],
+            statuses=["active", "supported"],
+            limit=7,
+            offset=3,
+        )["data"]["items"] == []
+        assert client.get_graph_neighborhood(
+            "project-1",
+            "claim",
+            "claim-1",
+            direction="incoming",
+            relationships=["claim_analysis_support"],
+            node_types=["analysis"],
+            depth=2,
+            max_nodes=20,
+            max_edges=30,
+            include_anchor_content=True,
+        )["data"]["edges"] == []
+    finally:
+        client.close()
+
+    assert [request.url.path for request in requests] == [
+        "/projects/project-1/graph/overview",
+        "/projects/project-1/graph/search",
+        "/projects/project-1/graph/neighborhood/claim/claim-1",
+    ]
+
+
+def test_graph_read_tools_fail_soft_on_api_errors(monkeypatch) -> None:
+    from lab_tracker.mcp_tools import read as read_tools
+
+    class FailingClient:
+        def graph_overview(self, _project_id):
+            raise mcp_server.LabTrackerAPIValidationError(
+                "Invalid graph request.",
+                status_code=422,
+                code="validation_error",
+            )
+
+        def close(self) -> None:
+            return None
+
+    read_tools.close_cached_read_client()
+    monkeypatch.setattr(read_tools, "client_from_env", lambda: FailingClient())
+
+    payload = read_tools.lab_tracker_graph_overview("project-1")
+
+    assert payload["error"]["operation"] == "lab_tracker_graph_overview"
+    assert payload["error"]["status_code"] == 422

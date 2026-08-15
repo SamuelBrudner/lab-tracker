@@ -1173,6 +1173,7 @@ def _note_node(
         node["wasDerivedFrom"] = [{"@id": iri} for iri in derived_from_iris]
     if note.transcribed_text:
         node["transcribedText"] = note.transcribed_text
+    _apply_member_onboarding_checkpoint_provenance(base_url, node, note)
     _apply_origin_provenance(base_url, node, note)
     if note.targets:
         node["target"] = [
@@ -1198,6 +1199,51 @@ def _note_node(
             supervision_edges=supervision_edges,
         )
     return node
+
+
+def _apply_member_onboarding_checkpoint_provenance(
+    base_url: str, node: dict[str, object], note: Note
+) -> None:
+    """Expose the declared boundary carried by a member checkpoint.
+
+    Ordinary note metadata is intentionally not exported wholesale.  These
+    server-reserved fields are different: without them a checkpoint's raw
+    present-tense account could be mistaken for complete project history.
+    """
+
+    metadata = note.metadata
+    if metadata.get("member_onboarding_role") != "checkpoint":
+        return
+    field_map = {
+        "member_onboarding_role": "memberOnboardingRole",
+        "member_onboarding_as_of": "checkpointAsOf",
+        "member_onboarding_historical_coverage": "historicalCoverage",
+        "member_onboarding_payload_sha256": "checkpointPayloadSha256",
+        "member_onboarding_source_text_sha256": "checkpointSourceTextSha256",
+        "member_onboarding_alignment_mode": "checkpointAlignmentMode",
+        "member_onboarding_alignment_resolved_at": "checkpointAlignmentResolvedAt",
+        "member_onboarding_alignment_resolution": "checkpointAlignmentResolution",
+        "member_onboarding_first_capture_at": "firstForwardCaptureAt",
+        "member_onboarding_completed_at": "memberOnboardingCompletedAt",
+    }
+    for metadata_key, property_name in field_map.items():
+        value = metadata.get(metadata_key)
+        if value:
+            node[property_name] = value
+    first_capture_note_id = metadata.get("member_onboarding_first_capture_note_id")
+    if first_capture_note_id:
+        node["firstForwardCapture"] = {
+            "@id": _resource_iri(base_url, "notes", first_capture_note_id)
+        }
+    alignment_change_set_id = metadata.get(
+        "member_onboarding_alignment_change_set_id"
+    )
+    if alignment_change_set_id:
+        alignment_activity = {
+            "@id": _draft_activity_iri(base_url, alignment_change_set_id)
+        }
+        node["checkpointAlignmentChangeSet"] = alignment_activity
+        _append_id_ref(node, "wasInformedBy", alignment_activity)
 
 
 def _session_node(

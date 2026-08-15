@@ -124,6 +124,9 @@ Read tools:
 - `lab_tracker_list_question_refactors`: List refactor history where a question is the source or replacement.
 - `lab_tracker_list_notes`: List notes for known scope; use decision context first for research choices.
 - `lab_tracker_search`: Search questions and notes when the project or anchor IDs are not known.
+- `lab_tracker_graph_overview`: Orient within one project using bounded counts and entry-point summaries.
+- `lab_tracker_search_graph`: Search all retained graph record types inside one authorized project.
+- `lab_tracker_get_graph_neighborhood`: Traverse a deterministic, bounded typed neighborhood around one graph node.
 - `lab_tracker_list_sessions`: List acquisition/experiment sessions for a known project scope.
 - `lab_tracker_list_datasets`: List datasets; create-order is dataset -> analysis -> claim -> visualization.
 - `lab_tracker_list_analyses`: List analyses; use after datasets and before claims/visualizations.
@@ -223,6 +226,30 @@ For new projects or newly imported repo context:
 
 Question status transitions are one-way for review: `staged` can become
 `active`, `abandoned`, or `superseded`, but `active` cannot return to `staged`.
+
+## Joining An Ongoing Project
+
+Use the member-onboarding workflow when a person begins using Lab Tracker for
+work that is already underway. Treat it as a declared, selective checkpoint of
+the present—not as a complete reconstruction of project history.
+
+1. Open the project onboarding page and record the current output or decision,
+   one to three live questions, the strongest recent context, and the next move.
+2. Resolve each live question manually, or explicitly acknowledge external AI
+   processing before requesting a constrained draft. AI output stays proposed
+   until the member reviews every operation.
+3. Use the generated map and Markdown brief as an attributed working
+   perspective. A contributor may finish their personal onboarding before a
+   project owner commits accepted graph changes.
+4. Store one separate, genuine text, photo, or voice capture against the
+   checkpoint. The checkpoint itself and pending offline data do not count.
+5. Backfill older material only for a specific question, goal, or time window;
+   never imply that the checkpoint makes historical coverage complete.
+
+Checkpoint notes are project-visible, immutable human source records. Do not
+send them through generic graph drafting, transcription, batch drafting, or
+automation paths. Viewers may inspect onboarding state but need contributor
+access to create a checkpoint, align questions, or make the first capture.
 
 ## Dolt Mirror
 
@@ -371,6 +398,23 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 - `mode` (optional): GraphDraftMode enum: graph_context, image_only, graph_batch
 - `user_hint` (optional): string; min length 1 | null
 
+#### Member Onboarding Checkpoint: `MemberOnboardingCheckpointRequest`
+- Required: `current_output_or_decision`, `live_questions`, `strongest_recent_context`, `next_move`
+- `as_of` (optional): string(date-time) | null
+- `current_output_or_decision` (required): string; min length 1
+- `live_questions` (required): list[string; min length 1]
+- `next_move` (required): string; min length 1
+- `source_text` (optional): string | null
+- `strongest_recent_context` (required): string; min length 1
+
+#### Member Onboarding Manual Alignment: `MemberOnboardingManualAlignmentRequest`
+- Required: `resolutions`
+- `resolutions` (required): list[object]
+
+#### Member Onboarding AI Alignment: `MemberOnboardingAiAlignmentRequest`
+- Required: `external_provider_acknowledged`
+- `external_provider_acknowledged` (required): boolean
+
 #### Decision Context: `AssistantDecisionContextRequest`
 - Required: `task_kind`, `query`
 - `analysis_id` (optional): string(uuid) | null
@@ -483,6 +527,12 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 - `project_id` (optional): string(uuid) | null
 - `status` (optional): GraphChangeSetStatus enum: drafting, ready, submitted, changes_requested, committing, rejected, failed, committed | null
 - `source_note_id` (optional): string(uuid) | null
+- `purpose` (optional): GraphDraftPurpose enum: general, member_checkpoint_alignment | null
+- `limit` (optional): integer; default 50; maximum 200 from shared route validation
+- `offset` (optional): integer; default 0; minimum 0 from shared route validation
+
+#### `GET /projects/{project_id}/member-onboarding/owner-queue`
+- `project_id` (required): string(uuid)
 - `limit` (optional): integer; default 50; maximum 200 from shared route validation
 - `offset` (optional): integer; default 0; minimum 0 from shared route validation
 
@@ -493,6 +543,29 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 - `include` (optional): string | null
 - `limit` (optional): integer; default 20; maximum 200 from shared route validation
 - `offset` (optional): integer; default 0; minimum 0 from shared route validation
+
+#### `GET /projects/{project_id}/graph/overview`
+- `project_id` (required): string(uuid)
+
+#### `GET /projects/{project_id}/graph/search`
+- `project_id` (required): string(uuid)
+- `q` (required): string; min length 2, max length 256
+- `entity_types` (optional): list[string enum: question, session, note, dataset, analysis, claim, exploration_node, visualization, goal] | null
+- `statuses` (optional): list[string] | null
+- `limit` (optional): integer; minimum 1, maximum 100, default 20
+- `offset` (optional): integer; minimum 0, default 0
+
+#### `GET /projects/{project_id}/graph/neighborhood/{entity_type}/{entity_id}`
+- `project_id` (required): string(uuid)
+- `entity_type` (required): string enum: question, session, note, dataset, analysis, claim, exploration_node, visualization, goal
+- `entity_id` (required): string(uuid)
+- `direction` (optional): string enum: incoming, outgoing, both
+- `relationships` (optional): list[string] | null
+- `node_types` (optional): list[string enum: question, session, note, dataset, analysis, claim, exploration_node, external_artifact, visualization, goal] | null
+- `depth` (optional): integer; minimum 1, maximum 2, default 1
+- `max_nodes` (optional): integer; minimum 1, maximum 200, default 50
+- `max_edges` (optional): integer; minimum 1, maximum 500, default 100
+- `include_anchor_content` (optional): boolean; default False
 <!-- END GENERATED API REFERENCE -->
 
 ## Quality Gates

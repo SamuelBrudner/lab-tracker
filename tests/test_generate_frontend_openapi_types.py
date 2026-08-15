@@ -2,7 +2,19 @@ from __future__ import annotations
 
 from copy import deepcopy
 
-from scripts.generate_frontend_openapi_types import generate_declaration
+from scripts.generate_frontend_openapi_types import SCOPED_OPERATIONS, generate_declaration
+
+
+def test_member_onboarding_operations_are_all_in_the_checked_scope() -> None:
+    expected = {
+        ("get", "/projects/{project_id}/member-onboarding"),
+        ("put", "/projects/{project_id}/member-onboarding/checkpoint"),
+        ("put", "/projects/{project_id}/member-onboarding/manual-alignment"),
+        ("post", "/projects/{project_id}/member-onboarding/ai-alignment"),
+        ("get", "/projects/{project_id}/member-onboarding/owner-queue"),
+    }
+
+    assert expected <= set(SCOPED_OPERATIONS)
 
 
 def _openapi_with_response(response_schema: str) -> dict:

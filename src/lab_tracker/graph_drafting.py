@@ -304,13 +304,14 @@ class OpenAIGraphDraftClient:
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         self.model = model
+        self.timeout_seconds = float(timeout_seconds)
         self.reasoning_effort = reasoning_effort
         self.reasoning_mode = reasoning_mode
         self.transcription_model = transcription_model
         self._api_key = api_key.strip()
         self._client = httpx.Client(
             base_url=base_url.rstrip("/"),
-            timeout=timeout_seconds,
+            timeout=self.timeout_seconds,
             transport=transport,
         )
 
@@ -638,10 +639,11 @@ class AnthropicGraphDraftClient:
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         self.model = model
+        self.timeout_seconds = float(timeout_seconds)
         self._api_key = api_key.strip()
         self._client = httpx.Client(
             base_url=base_url.rstrip("/"),
-            timeout=timeout_seconds,
+            timeout=self.timeout_seconds,
             transport=transport,
         )
 
@@ -827,10 +829,11 @@ class GoogleGraphDraftClient:
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         self.model = model
+        self.timeout_seconds = float(timeout_seconds)
         self._api_key = api_key.strip()
         self._client = httpx.Client(
             base_url=base_url.rstrip("/"),
-            timeout=timeout_seconds,
+            timeout=self.timeout_seconds,
             transport=transport,
         )
 
@@ -1043,6 +1046,7 @@ class AgenticGraphDraftClient:
     def __init__(self, *, base_client: GraphDraftClient) -> None:
         self._base_client = base_client
         self.model = f"agentic:{getattr(base_client, 'model', 'unknown')}"
+        self.timeout_seconds = float(getattr(base_client, "timeout_seconds", 60.0))
 
     @classmethod
     def from_settings(cls, settings: Settings) -> AgenticGraphDraftClient:

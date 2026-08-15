@@ -46,9 +46,11 @@ from lab_tracker.models import (
     GoalStatus,
     GoalType,
     GraphChangeOperationStatus,
+    GraphChangeSet,
     GraphChangeSetStatus,
     GraphDraftBatchRunStatus,
     GraphDraftMode,
+    GraphDraftPurpose,
     GroupMembership,
     Note,
     NoteArchiveReason,
@@ -565,6 +567,144 @@ class NoteArchiveRequest(RequestModel):
     reason: NoteArchiveReason = NoteArchiveReason.ARCHIVED_UNREVIEWED
 
 
+class MemberOnboardingCheckpointRequest(RequestModel):
+    current_output_or_decision: NonBlankStr
+    live_questions: list[NonBlankStr] = Field(min_length=1, max_length=3)
+    strongest_recent_context: NonBlankStr
+    next_move: NonBlankStr
+    source_text: str | None = None
+    as_of: datetime | None = None
+
+    @field_validator("live_questions")
+    @classmethod
+    def _unique_live_questions(cls, value: list[str]) -> list[str]:
+        normalized = [item.strip().casefold() for item in value]
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("live_questions must be unique")
+        return value
+
+    @field_validator("as_of")
+    @classmethod
+    def _aware_as_of(cls, value: datetime | None) -> datetime | None:
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise ValueError("as_of must include a timezone offset")
+        return value
+
+
+class MemberOnboardingManualResolution(RequestModel):
+    question_index: int = Field(ge=0, le=2)
+    action: Literal["link_existing", "create_staged", "checkpoint_only"]
+    existing_question_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def _action_fields_match(self):
+        if self.action == "link_existing" and self.existing_question_id is None:
+            raise ValueError("link_existing requires existing_question_id")
+        if self.action != "link_existing" and self.existing_question_id is not None:
+            raise ValueError(
+                "existing_question_id is only allowed for link_existing"
+            )
+        return self
+
+
+class MemberOnboardingManualAlignmentRequest(RequestModel):
+    resolutions: list[MemberOnboardingManualResolution] = Field(
+        min_length=1,
+        max_length=3,
+    )
+
+    @field_validator("resolutions")
+    @classmethod
+    def _unique_indexes(
+        cls,
+        value: list[MemberOnboardingManualResolution],
+    ) -> list[MemberOnboardingManualResolution]:
+        indexes = [item.question_index for item in value]
+        if len(set(indexes)) != len(indexes):
+            raise ValueError("Each question_index may appear only once")
+        return value
+
+
+class MemberOnboardingAiAlignmentRequest(RequestModel):
+    external_provider_acknowledged: Literal[True]
+
+
+class MemberOnboardingCapabilities(BaseModel):
+    can_read: bool
+    can_create_checkpoint: bool
+    can_align: bool
+    can_capture: bool
+    can_commit: bool
+
+
+class MemberOnboardingGuidedFields(BaseModel):
+    current_output_or_decision: str
+    live_questions: list[str]
+    strongest_recent_context: str
+    next_move: str
+    source_text_present: bool = False
+
+
+class MemberOnboardingQuestionResolution(BaseModel):
+    question_index: int
+    action: str
+    question_id: UUID | None = None
+    operation_id: UUID | None = None
+    status: str | None = None
+
+
+class MemberOnboardingAlignment(BaseModel):
+    mode: Literal["none", "manual", "ai"] = "none"
+    resolved_at: datetime | None = None
+    question_resolutions: list[MemberOnboardingQuestionResolution] = Field(
+        default_factory=list
+    )
+    draft: GraphChangeSet | None = None
+
+
+class MemberOnboardingMapItem(BaseModel):
+    question_index: int
+    text: str
+    source: Literal["shared", "pending", "personal"]
+    status: str
+    question_id: UUID | None = None
+    operation_id: UUID | None = None
+
+
+class MemberOnboardingRead(BaseModel):
+    project_id: UUID
+    role: ProjectMembershipRole
+    capabilities: MemberOnboardingCapabilities
+    state: Literal[
+        "not_started",
+        "checkpoint_ready",
+        "alignment_ready",
+        "awaiting_owner",
+        "changes_requested",
+        "rejected",
+        "committed",
+        "capture_pending",
+        "complete",
+    ]
+    checkpoint: Note | None = None
+    guided_fields: MemberOnboardingGuidedFields | None = None
+    alignment: MemberOnboardingAlignment | None = None
+    map_items: list[MemberOnboardingMapItem] = Field(default_factory=list)
+    brief_markdown: str = ""
+    first_capture: Note | None = None
+    member_complete: bool = False
+    owner_commit_pending: bool = False
+
+
+class MemberOnboardingOwnerQueueItem(BaseModel):
+    project_id: UUID
+    checkpoint: Note
+    draft: GraphChangeSet
+    member_user_id: UUID | None = None
+    member_username: str | None = None
+    accepted_operation_count: int = 0
+
+
 class GraphDraftOperationUpdate(PatchRequestModel):
     non_nullable_fields = frozenset({"payload", "status"})
 
@@ -603,6 +743,7 @@ class GraphChangeSetSummary(BaseModel):
     model: str
     prompt_version: str
     draft_mode: GraphDraftMode
+    purpose: GraphDraftPurpose
     summary: str = ""
     uncertain_fields: list[str] = Field(default_factory=list)
     clarification_requests: list[str] = Field(default_factory=list)
@@ -1269,6 +1410,116 @@ class ProjectGraphRead(BaseModel):
     view: ProjectGraphView
     nodes: list[ProjectGraphNode]
     edges: list[ProjectGraphEdge]
+
+
+PersistedGraphEntityType = Literal[
+    "question",
+    "session",
+    "note",
+    "dataset",
+    "analysis",
+    "claim",
+    "exploration_node",
+    "visualization",
+    "goal",
+]
+GraphEntityType = Literal[
+    "question",
+    "session",
+    "note",
+    "dataset",
+    "analysis",
+    "claim",
+    "exploration_node",
+    "external_artifact",
+    "visualization",
+    "goal",
+]
+GraphTraversalDirection = Literal["incoming", "outgoing", "both"]
+
+
+class GraphNodeSummary(BaseModel):
+    id: str
+    entity_type: GraphEntityType
+    entity_id: str
+    label: str
+    detail: str | None = None
+    status: str | None = None
+    route: str | None = None
+    updated_at: datetime | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class GraphEntityCount(BaseModel):
+    total: int = Field(..., ge=0)
+    by_status: dict[str, int] = Field(default_factory=dict)
+
+
+class GraphProjectSummary(BaseModel):
+    project_id: UUID
+    name: str
+    description: str
+    status: ProjectStatus
+    updated_at: datetime
+
+
+class GraphOverviewRead(BaseModel):
+    project: GraphProjectSummary
+    counts: dict[PersistedGraphEntityType, GraphEntityCount]
+    open_goals: list[GraphNodeSummary] = Field(default_factory=list)
+    open_questions: list[GraphNodeSummary] = Field(default_factory=list)
+    recent_nodes: list[GraphNodeSummary] = Field(default_factory=list)
+
+
+class GraphSearchHit(BaseModel):
+    node: GraphNodeSummary
+    snippet: str
+    match_reasons: list[str]
+
+
+class GraphSearchRead(BaseModel):
+    project_id: UUID
+    query: str
+    items: list[GraphSearchHit] = Field(default_factory=list)
+    limit: int = Field(..., ge=1, le=100)
+    offset: int = Field(..., ge=0)
+    has_more: bool = False
+    next_offset: int | None = Field(default=None, ge=0)
+
+
+class GraphRelationshipSemantics(BaseModel):
+    kind: Literal["direct", "qualified"]
+    direction: Literal["source_to_target", "target_to_source"]
+    predicate_iri: str | None = None
+    class_iri: str | None = None
+    concept_iris: list[str] = Field(default_factory=list)
+    additional_concept_schemes: list[str] = Field(default_factory=list)
+    classification_predicate_iri: str | None = None
+
+
+class GraphNeighborhoodEdge(ProjectGraphEdge):
+    semantics: GraphRelationshipSemantics
+
+
+class GraphTraversalTruncation(BaseModel):
+    truncated: bool
+    node_limit_reached: bool
+    edge_limit_reached: bool
+    expansion_stopped: bool
+
+
+class GraphNeighborhoodRead(BaseModel):
+    project_id: UUID
+    direction: GraphTraversalDirection
+    requested_depth: int = Field(..., ge=1, le=2)
+    reached_depth: int = Field(..., ge=0, le=2)
+    anchor: GraphNodeSummary
+    anchor_content: str | None = None
+    anchor_content_truncated: bool = False
+    nodes: list[GraphNodeSummary] = Field(default_factory=list)
+    edges: list[GraphNeighborhoodEdge] = Field(default_factory=list)
+    truncation: GraphTraversalTruncation
+
 
 
 class SearchResults(BaseModel):

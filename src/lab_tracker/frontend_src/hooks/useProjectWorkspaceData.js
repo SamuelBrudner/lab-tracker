@@ -39,6 +39,7 @@ function useProjectWorkspaceData({
   loadProjectData = true,
 }) {
   const [projects, setProjects] = useState([]);
+  const [projectsLoaded, setProjectsLoaded] = useState(false);
   const [selectedProjectId, setSelectedProjectId] = useState(() => readStoredProjectId());
 
   useEffect(() => {
@@ -162,11 +163,13 @@ function useProjectWorkspaceData({
       projectsRequestRef.current += 1;
       projectDataRequestRef.current += 1;
       setProjects([]);
+      setProjectsLoaded(false);
       clearProjectState();
       return;
     }
 
     let canceled = false;
+    setProjectsLoaded(false);
     setBusy(true);
     refreshProjects()
       .catch((err) => {
@@ -176,6 +179,7 @@ function useProjectWorkspaceData({
       })
       .finally(() => {
         if (!canceled) {
+          setProjectsLoaded(true);
           setBusy(false);
         }
       });
@@ -246,6 +250,7 @@ function useProjectWorkspaceData({
     datasets,
     noteCount: projectCounts.notes,
     projects,
+    projectsLoaded,
     questionCount: projectCounts.questions,
     questions,
     refreshProjectData,

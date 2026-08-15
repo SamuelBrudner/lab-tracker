@@ -8,6 +8,7 @@ import { PortfolioHome } from "../portfolio-home.jsx";
 import { QuestionPanel } from "../questions/QuestionPanel.jsx";
 import { SessionPanel } from "../sessions/index.js";
 import { ProjectContextCard, RequestEditAccess } from "../../shared/ui.jsx";
+import { OwnerOnboardingQueueBanner } from "../member-onboarding.jsx";
 
 function WorkspaceHome({
   auth,
@@ -41,7 +42,7 @@ function WorkspaceHome({
         <article className="card span-12 first-run-card">
           <div>
             <h2>Welcome to Lab Tracker</h2>
-            <p className="subtle">Create your first project to start capturing lab context.</p>
+            <p className="subtle">Add the project your lab is already running, then capture where the scientific work stands today.</p>
           </div>
           <button
             type="button"
@@ -49,10 +50,36 @@ function WorkspaceHome({
             disabled={!auth.canWrite}
             onClick={() => document.querySelector('[name="new-project-name"]')?.focus()}
           >
-            Create first project
+            Add ongoing project
           </button>
         </article>
       ) : null}
+
+      {hasProjects ? (
+        <article className="card span-12 member-onboarding-entry">
+          <div className="row-between">
+            <div>
+              <p className="eyebrow">Starting Lab Tracker mid-project?</p>
+              <h2>Orient to the work already in motion</h2>
+              <p className="subtle">Save a personal checkpoint, align the live questions, get a project-now brief, and make one forward capture.</p>
+            </div>
+            <button
+              className="btn-primary"
+              disabled={!workspaceData.selectedProjectId}
+              onClick={() => navigate(`/app/projects/${workspaceData.selectedProjectId}/onboarding`)}
+              type="button"
+            >
+              {canContribute ? "Orient me to this project" : "View project orientation"}
+            </button>
+          </div>
+        </article>
+      ) : null}
+
+      <OwnerOnboardingQueueBanner
+        projectId={workspaceData.selectedProjectId}
+        token={auth.token}
+        navigate={navigate}
+      />
 
       <Dashboard
         projects={workspaceData.projects}

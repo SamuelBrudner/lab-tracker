@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import math
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
-from datetime import datetime
-from typing import Any, Protocol
+from datetime import datetime, timedelta
+from typing import Any
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext
+from lab_tracker.config import Settings
 from lab_tracker.errors import ValidationError
 from lab_tracker.graph_drafting import (
     ANALYSIS_PROMPT_VERSION,
@@ -20,139 +22,86 @@ from lab_tracker.graph_drafting import (
     GraphDraftClient,
     GraphDraftingError,
 )
+from lab_tracker.member_onboarding import is_member_checkpoint
 from lab_tracker.models import (
     GraphChangeOperation,
     GraphChangeSet,
     GraphChangeSetStatus,
     GraphDraftMode,
     Note,
-    NoteRawAsset,
     NoteStatus,
     utc_now,
 )
 from lab_tracker.provider_error_redaction import provider_error_message
 from lab_tracker.services import graph_draft_batch_policy as batch_policy
 from lab_tracker.services.base import BaseService, ServiceContext
+from lab_tracker.services.graph_draft_generation_ports import (
+    DraftFromImageCallable,
+    DraftFromNoteCallable,
+    ReviewEmailEnqueuer,
+)
+from lab_tracker.services.graph_draft_generation_ports import (
+    GeneratedDraftProposal as GeneratedDraftProposal,
+)
+from lab_tracker.services.graph_draft_generation_ports import (
+    GenerationAuthorization as GenerationAuthorization,
+)
+from lab_tracker.services.graph_draft_generation_ports import (
+    GenerationClaim as GenerationClaim,
+)
+from lab_tracker.services.graph_draft_generation_ports import (
+    GenerationContextBuilder as GenerationContextBuilder,
+)
+from lab_tracker.services.graph_draft_generation_ports import (
+    GenerationNotes as GenerationNotes,
+)
+from lab_tracker.services.graph_draft_generation_ports import (
+    GenerationPatchValidator as GenerationPatchValidator,
+)
+from lab_tracker.services.graph_draft_generation_ports import (
+    GenerationRecords as GenerationRecords,
+)
 from lab_tracker.services.graph_draft_validation import string_list
 from lab_tracker.services.shared import UserExistenceReader, actor_user_fk, actor_user_id
 
 DEFAULT_BATCH_RETRY_ATTEMPTS = 3
+DEFAULT_PROVIDER_TIMEOUT_SECONDS = 60.0
+GENERATION_LEASE_MARGIN_SECONDS = 30
 
 
-class GenerationRecords(Protocol):
-    def save_graph_change_set(self, change_set: GraphChangeSet) -> None: ...
-
-    def list_graph_change_sets(
-        self,
-        *,
-        draft_mode: GraphDraftMode | None = None,
-        batch_key: str | None = None,
-    ) -> list[GraphChangeSet]: ...
+class _GenerationOwnershipLost(RuntimeError):
+    """Internal control flow: never persist a stale provider result."""
 
 
-class GenerationNotes(Protocol):
-    def get_note(self, note_id: UUID) -> Note: ...
+def provider_generation_lease_seconds(draft_client: GraphDraftClient) -> int:
+    """Return one provider attempt's timeout plus a completion margin."""
 
-    def download_note_raw(self, note_id: UUID) -> tuple[NoteRawAsset, bytes]: ...
-
-
-class GenerationAuthorization(Protocol):
-    def require_contributor(
-        self,
-        project_id: UUID,
-        *,
-        actor: AuthContext | None,
-    ) -> None: ...
-
-
-class GenerationContextBuilder(Protocol):
-    def prepare_note_sources_for_graph_draft(
-        self,
-        note_id: UUID,
-        *,
-        mode: GraphDraftMode,
-        source_note_ids: list[UUID] | None = None,
-    ) -> dict[str, Any]: ...
-
-    def build_graph_context_packet(
-        self,
-        note: Note,
-        *,
-        source_notes: list[Note],
-        user_hint: str | None,
-        actor: AuthContext | None,
-    ) -> dict[str, Any]: ...
-
-    def image_only_context_packet(
-        self,
-        note: Note,
-        *,
-        source_notes: list[Note],
-        user_hint: str | None,
-    ) -> dict[str, Any]: ...
-
-    def build_batch_graph_context(
-        self,
-        notes: list[Note],
-        *,
-        window: tuple[datetime, datetime] | None,
-        actor: AuthContext | None,
-        batch_note_limit: int,
-    ) -> dict[str, Any]: ...
+    raw_timeout = getattr(
+        draft_client,
+        "timeout_seconds",
+        DEFAULT_PROVIDER_TIMEOUT_SECONDS,
+    )
+    try:
+        timeout_seconds = float(raw_timeout)
+    except (TypeError, ValueError):
+        timeout_seconds = DEFAULT_PROVIDER_TIMEOUT_SECONDS
+    if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+        timeout_seconds = DEFAULT_PROVIDER_TIMEOUT_SECONDS
+    return max(1, math.ceil(timeout_seconds)) + GENERATION_LEASE_MARGIN_SECONDS
 
 
-class GenerationPatchValidator(Protocol):
-    def validate_top_level(self, graph_patch: dict[str, Any]) -> None: ...
+def configured_provider_generation_lease_seconds(settings: Settings) -> int:
+    """Resolve the active provider timeout even before client construction."""
 
-    def operations_from_graph_patch(
-        self,
-        change_set: GraphChangeSet,
-        graph_patch: dict[str, Any],
-    ) -> list[GraphChangeOperation]: ...
-
-
-class ReviewEmailEnqueuer(Protocol):
-    def enqueue_ready_review(
-        self,
-        change_set: GraphChangeSet,
-    ) -> object | None: ...
-
-
-class DraftFromNoteCallable(Protocol):
-    def __call__(
-        self,
-        *,
-        graph_context: dict[str, Any],
-        user_hint: str | None,
-        draft_mode: str,
-        source_artifacts: list[dict[str, Any]],
-        image_bytes: bytes | None,
-        image_content_type: str | None,
-        extra_images: list[dict[str, Any]],
-    ) -> dict[str, Any]: ...
-
-
-class DraftFromImageCallable(Protocol):
-    def __call__(
-        self,
-        *,
-        image_bytes: bytes,
-        content_type: str,
-        graph_context: dict[str, Any],
-        user_hint: str | None,
-        draft_mode: str,
-    ) -> dict[str, Any]: ...
-
-
-@dataclass(frozen=True)
-class GeneratedDraftProposal:
-    """A validated, non-persisted proposal returned to another lifecycle owner."""
-
-    context_packet: dict[str, Any]
-    operations: list[GraphChangeOperation]
-    summary: str
-    uncertain_fields: list[str]
-    clarification_requests: list[str]
+    provider = (settings.graph_draft_provider or "openai").strip().lower()
+    if provider in {"anthropic", "claude"}:
+        timeout_seconds = settings.anthropic_timeout_seconds
+    elif provider in {"google", "gemini"}:
+        timeout_seconds = settings.google_timeout_seconds
+    else:
+        # OpenAI and the agentic OpenAI wrapper share the OpenAI transport.
+        timeout_seconds = settings.openai_timeout_seconds
+    return max(1, math.ceil(float(timeout_seconds))) + GENERATION_LEASE_MARGIN_SECONDS
 
 
 class GraphDraftGenerationCoordinator(BaseService):
@@ -183,6 +132,83 @@ class GraphDraftGenerationCoordinator(BaseService):
 
         return self._context.active_repository()
 
+    def claim_generation(
+        self,
+        candidate: GraphChangeSet,
+        *,
+        draft_client: GraphDraftClient,
+        now: datetime | None = None,
+    ) -> GenerationClaim:
+        """Create/reclaim an attempt and return its unforgeable owner token."""
+
+        claimed_at = now or utc_now()
+        claim_token = uuid4()
+        lease_until = claimed_at + timedelta(
+            seconds=provider_generation_lease_seconds(draft_client)
+        )
+        change_set, acquired = self.records.claim_graph_change_set_generation(
+            candidate,
+            claimed_at=claimed_at,
+            lease_until=lease_until,
+            claim_token=claim_token,
+        )
+        return GenerationClaim(
+            change_set=change_set,
+            claim_token=claim_token,
+            acquired=acquired,
+        )
+
+    def renew_generation_claim(
+        self,
+        change_set_id: UUID,
+        claim_token: UUID,
+        *,
+        draft_client: GraphDraftClient,
+        now: datetime | None = None,
+    ) -> GraphChangeSet | None:
+        renewed_at = now or utc_now()
+        lease_until = renewed_at + timedelta(
+            seconds=provider_generation_lease_seconds(draft_client)
+        )
+        return self.records.renew_graph_change_set_generation(
+            change_set_id,
+            claim_token,
+            renewed_at=renewed_at,
+            lease_until=lease_until,
+        )
+
+    def complete_generation_claim(
+        self,
+        change_set: GraphChangeSet,
+        *,
+        claim_token: UUID,
+        now: datetime | None = None,
+    ) -> GraphChangeSet | None:
+        change_set.status = GraphChangeSetStatus.READY
+        completed_at = now or utc_now()
+        change_set.updated_at = completed_at
+        return self.records.complete_graph_change_set_generation(
+            change_set,
+            claim_token,
+            completed_at=completed_at,
+        )
+
+    def fail_generation_claim(
+        self,
+        change_set: GraphChangeSet,
+        *,
+        claim_token: UUID,
+        now: datetime | None = None,
+    ) -> GraphChangeSet | None:
+        change_set.status = GraphChangeSetStatus.FAILED
+        failed_at = now or utc_now()
+        change_set.updated_at = failed_at
+        return self.records.fail_graph_change_set_generation(
+            change_set,
+            claim_token,
+            failed_at=failed_at,
+        )
+
     def create_graph_draft_from_note(
         self,
         note_id: UUID,
@@ -197,6 +223,11 @@ class GraphDraftGenerationCoordinator(BaseService):
         prepared = self.context_builder.prepare_note_sources_for_graph_draft(note_id, mode=mode)
         note = prepared["source_note"]
         self.authorization.require_contributor(note.project_id, actor=actor)
+        if any(is_member_checkpoint(item) for item in prepared["source_notes"]):
+            raise ValidationError(
+                "Member onboarding checkpoints can be drafted only through the "
+                "dedicated acknowledged alignment workflow."
+            )
         raw_asset = prepared["primary_raw_asset"]
         cleaned_hint = user_hint.strip() if user_hint else None
         if mode == GraphDraftMode.GRAPH_CONTEXT:
@@ -226,11 +257,22 @@ class GraphDraftGenerationCoordinator(BaseService):
             model=getattr(draft_client, "model", "unknown"),
             prompt_version=PROMPT_VERSION,
             draft_mode=mode,
+            batch_key=_note_generation_key(
+                note=note,
+                source_notes=prepared["source_notes"],
+                mode=mode,
+                prompt_version=PROMPT_VERSION,
+                user_hint=cleaned_hint,
+                evidence_checksum=(raw_asset.checksum if raw_asset is not None else None),
+            ),
             context_packet=context_packet,
             created_by=actor_user_id(actor),
             created_by_user_id=actor_user_fk(actor, self.user_reader),
         )
-        self.records.save_graph_change_set(change_set)
+        claim = self.claim_generation(change_set, draft_client=draft_client)
+        if not claim.acquired:
+            return claim.change_set
+        change_set = claim.change_set
         try:
             generated = self._draft_validated_patch_with_retries(
                 change_set=change_set,
@@ -246,10 +288,15 @@ class GraphDraftGenerationCoordinator(BaseService):
                 ),
                 max_attempts=max_attempts,
                 retry_backoff_seconds=retry_backoff_seconds,
+                before_attempt=lambda _attempt: self.renew_generation_claim(
+                    change_set.change_set_id,
+                    claim.claim_token,
+                    draft_client=draft_client,
+                )
+                is not None,
             )
             if generated is None:
-                change_set.status = GraphChangeSetStatus.FAILED
-                return change_set
+                return self._finish_failed_or_current(change_set, claim.claim_token)
             graph_patch, operations = generated
             change_set.operations = operations
             change_set.summary = str(graph_patch.get("summary") or "")
@@ -257,12 +304,23 @@ class GraphDraftGenerationCoordinator(BaseService):
             change_set.clarification_requests = string_list(
                 graph_patch.get("clarification_requests")
             )
-            change_set.status = GraphChangeSetStatus.READY
             change_set.error_metadata = {}
-        finally:
-            change_set.updated_at = utc_now()
-            self.records.save_graph_change_set(change_set)
-        return change_set
+            completed = self.complete_generation_claim(
+                change_set,
+                claim_token=claim.claim_token,
+            )
+            return completed or self.records.get_graph_change_set(
+                change_set.change_set_id
+            )
+        except _GenerationOwnershipLost:
+            return self.records.get_graph_change_set(change_set.change_set_id)
+        except Exception as exc:
+            change_set.error_metadata = {
+                "category": "runner_error",
+                "message": provider_error_message(exc),
+            }
+            self._finish_failed_or_current(change_set, claim.claim_token)
+            raise
 
     def create_analysis_graph_draft_from_note(
         self,
@@ -275,6 +333,10 @@ class GraphDraftGenerationCoordinator(BaseService):
     ) -> GraphChangeSet:
         note = self.notes.get_note(note_id)
         self.authorization.require_contributor(note.project_id, actor=actor)
+        if is_member_checkpoint(note):
+            raise ValidationError(
+                "Member onboarding checkpoints cannot use analysis drafting."
+            )
         evidence_text = self._analysis_evidence_from_note(note)
         context_packet = self.context_builder.build_graph_context_packet(
             note,
@@ -298,11 +360,23 @@ class GraphDraftGenerationCoordinator(BaseService):
             model=getattr(draft_client, "model", "unknown"),
             prompt_version=ANALYSIS_PROMPT_VERSION,
             draft_mode=GraphDraftMode.GRAPH_CONTEXT,
+            batch_key=_note_generation_key(
+                note=note,
+                source_notes=[note],
+                mode=GraphDraftMode.GRAPH_CONTEXT,
+                prompt_version=ANALYSIS_PROMPT_VERSION,
+                user_hint=None,
+                evidence_checksum=_text_checksum(evidence_text),
+                kind="analysis",
+            ),
             context_packet=context_packet,
             created_by=actor_user_id(actor),
             created_by_user_id=actor_user_fk(actor, self.user_reader),
         )
-        self.records.save_graph_change_set(change_set)
+        claim = self.claim_generation(change_set, draft_client=draft_client)
+        if not claim.acquired:
+            return claim.change_set
+        change_set = claim.change_set
         try:
             generated = self._draft_validated_patch_with_retries(
                 change_set=change_set,
@@ -313,10 +387,15 @@ class GraphDraftGenerationCoordinator(BaseService):
                 ),
                 max_attempts=max_attempts,
                 retry_backoff_seconds=retry_backoff_seconds,
+                before_attempt=lambda _attempt: self.renew_generation_claim(
+                    change_set.change_set_id,
+                    claim.claim_token,
+                    draft_client=draft_client,
+                )
+                is not None,
             )
             if generated is None:
-                change_set.status = GraphChangeSetStatus.FAILED
-                return change_set
+                return self._finish_failed_or_current(change_set, claim.claim_token)
             graph_patch, operations = generated
             change_set.operations = operations
             change_set.summary = str(graph_patch.get("summary") or "")
@@ -324,12 +403,23 @@ class GraphDraftGenerationCoordinator(BaseService):
             change_set.clarification_requests = string_list(
                 graph_patch.get("clarification_requests")
             )
-            change_set.status = GraphChangeSetStatus.READY
             change_set.error_metadata = {}
-        finally:
-            change_set.updated_at = utc_now()
-            self.records.save_graph_change_set(change_set)
-        return change_set
+            completed = self.complete_generation_claim(
+                change_set,
+                claim_token=claim.claim_token,
+            )
+            return completed or self.records.get_graph_change_set(
+                change_set.change_set_id
+            )
+        except _GenerationOwnershipLost:
+            return self.records.get_graph_change_set(change_set.change_set_id)
+        except Exception as exc:
+            change_set.error_metadata = {
+                "category": "runner_error",
+                "message": provider_error_message(exc),
+            }
+            self._finish_failed_or_current(change_set, claim.claim_token)
+            raise
 
     def _draft_validated_patch_with_retries(
         self,
@@ -339,6 +429,7 @@ class GraphDraftGenerationCoordinator(BaseService):
         draft: Callable[[dict[str, Any]], dict[str, Any]],
         max_attempts: int,
         retry_backoff_seconds: float,
+        before_attempt: Callable[[int], bool] | None = None,
     ) -> tuple[dict[str, Any], list[GraphChangeOperation]] | None:
         """Generate a valid patch with bounded, trusted schema feedback."""
 
@@ -347,6 +438,8 @@ class GraphDraftGenerationCoordinator(BaseService):
         last_error: GraphDraftingError | None = None
         last_error_category = "model_error"
         for attempt in range(1, attempts + 1):
+            if before_attempt is not None and not before_attempt(attempt):
+                raise _GenerationOwnershipLost
             try:
                 graph_patch = draft(attempt_context)
             except GraphDraftingError as exc:
@@ -390,6 +483,17 @@ class GraphDraftGenerationCoordinator(BaseService):
         }
         return None
 
+    def _finish_failed_or_current(
+        self,
+        change_set: GraphChangeSet,
+        claim_token: UUID,
+    ) -> GraphChangeSet:
+        failed = self.fail_generation_claim(
+            change_set,
+            claim_token=claim_token,
+        )
+        return failed or self.records.get_graph_change_set(change_set.change_set_id)
+
     def create_batch_graph_draft(
         self,
         notes: list[Note],
@@ -403,6 +507,7 @@ class GraphDraftGenerationCoordinator(BaseService):
         review_assignee_user_id: UUID | None = None,
         max_attempts: int = DEFAULT_BATCH_RETRY_ATTEMPTS,
         retry_backoff_seconds: float = 0.0,
+        before_attempt: Callable[[int], bool] | None = None,
     ) -> GraphChangeSet:
         batch_notes = sorted(notes, key=lambda item: (item.created_at, str(item.note_id)))
         if not batch_notes:
@@ -412,6 +517,10 @@ class GraphDraftGenerationCoordinator(BaseService):
             raise ValidationError("Batch graph drafts must be scoped to one project.")
         project_id = next(iter(project_ids))
         self.authorization.require_contributor(project_id, actor=actor)
+        if any(is_member_checkpoint(note) for note in batch_notes):
+            raise ValidationError(
+                "Member onboarding checkpoints cannot be included in generic batch drafting."
+            )
         non_staged = [note.note_id for note in batch_notes if note.status != NoteStatus.STAGED]
         if non_staged:
             raise ValidationError("Batch graph drafts can only include staged notes.")
@@ -429,17 +538,6 @@ class GraphDraftGenerationCoordinator(BaseService):
                 review_assignee=review_assignee,
                 review_assignee_user_id=review_assignee_user_id,
             )
-        existing = self.records.list_graph_change_sets(
-            draft_mode=GraphDraftMode.GRAPH_BATCH,
-            batch_key=batch_key,
-        )
-        active_existing = [
-            change_set
-            for change_set in existing
-            if change_set.status in batch_policy.ACTIVE_BATCH_CHANGE_SET_STATUSES
-        ]
-        if active_existing:
-            return active_existing[0]
         self._ensure_draft_client_allowed_here(draft_client, actor=actor)
         context_packet = self.context_builder.build_batch_graph_context(
             batch_notes,
@@ -472,102 +570,70 @@ class GraphDraftGenerationCoordinator(BaseService):
             review_assignee=review_assignee,
             review_assignee_user_id=review_assignee_user_id,
         )
-        self.records.save_graph_change_set(change_set)
+        claim = self.claim_generation(change_set, draft_client=draft_client)
+        if not claim.acquired:
+            return claim.change_set
+        change_set = claim.change_set
 
-        attempts = max(1, max_attempts)
-        last_error: GraphDraftingError | None = None
-        last_error_category = "model_error"
-        graph_patch: dict[str, Any] | None = None
-        operations: list[GraphChangeOperation] | None = None
-        attempt_context = context_packet
-        for attempt in range(1, attempts + 1):
-            try:
-                graph_patch = draft_client.draft_from_batch(
+        def renew_all(attempt: int) -> bool:
+            if before_attempt is not None and not before_attempt(attempt):
+                return False
+            return (
+                self.renew_generation_claim(
+                    change_set.change_set_id,
+                    claim.claim_token,
+                    draft_client=draft_client,
+                )
+                is not None
+            )
+
+        try:
+            generated = self._draft_validated_patch_with_retries(
+                change_set=change_set,
+                context_packet=context_packet,
+                draft=lambda attempt_context: draft_client.draft_from_batch(
                     batch_context=attempt_context,
                     user_hint=cleaned_hint,
-                )
-            except GraphDraftingError as exc:
-                last_error = exc
-                last_error_category = "model_error"
-                if attempt >= attempts:
-                    change_set.status = GraphChangeSetStatus.FAILED
-                    change_set.error_metadata = {
-                        "category": "model_error",
-                        "message": provider_error_message(exc),
-                        "attempts": attempt,
-                        "input_snapshot": _batch_input_snapshot(context_packet),
-                    }
-                    change_set.updated_at = utc_now()
-                    self.records.save_graph_change_set(change_set)
-                    return change_set
-                if retry_backoff_seconds > 0:
-                    time.sleep(retry_backoff_seconds * attempt)
-                continue
-            try:
-                self.patch_validator.validate_top_level(graph_patch)
-                operations = self.patch_validator.operations_from_graph_patch(
-                    change_set,
-                    graph_patch,
-                )
-                break
-            except GraphDraftingError as exc:
-                last_error = exc
-                last_error_category = "validation_error"
-                if attempt >= attempts:
-                    change_set.status = GraphChangeSetStatus.FAILED
-                    change_set.error_metadata = {
-                        "category": "validation_error",
-                        "message": provider_error_message(exc),
-                        "attempts": attempt,
-                        "input_snapshot": _batch_input_snapshot(context_packet),
-                    }
-                    change_set.updated_at = utc_now()
-                    self.records.save_graph_change_set(change_set)
-                    return change_set
-                attempt_context = {
-                    **context_packet,
-                    "generation_retry_feedback": {
-                        "attempt": attempt,
-                        "error": provider_error_message(exc),
-                        "instruction": (
-                            "Return a new complete graph patch whose operation payload_json "
-                            "objects satisfy the Lab Tracker API request schemas."
-                        ),
-                    },
-                }
-                if retry_backoff_seconds > 0:
-                    time.sleep(retry_backoff_seconds * attempt)
-        else:
-            message = (
-                provider_error_message(last_error)
-                if last_error is not None
-                else "Model did not return a patch."
+                ),
+                max_attempts=max_attempts,
+                retry_backoff_seconds=retry_backoff_seconds,
+                before_attempt=renew_all,
             )
-            change_set.status = GraphChangeSetStatus.FAILED
+            if generated is None:
+                change_set.error_metadata["input_snapshot"] = _batch_input_snapshot(
+                    context_packet
+                )
+                return self._finish_failed_or_current(change_set, claim.claim_token)
+            graph_patch, operations = generated
+            change_set.operations = operations
+            change_set.summary = str(graph_patch.get("summary") or "")
+            change_set.uncertain_fields = string_list(
+                graph_patch.get("uncertain_fields")
+            )
+            change_set.clarification_requests = string_list(
+                graph_patch.get("clarification_requests")
+            )
+            change_set.error_metadata = {}
+            with self.application_transaction():
+                completed = self.complete_generation_claim(
+                    change_set,
+                    claim_token=claim.claim_token,
+                )
+                if completed is not None and self.review_email_outbox is not None:
+                    self.review_email_outbox.enqueue_ready_review(completed)
+            return completed or self.records.get_graph_change_set(
+                change_set.change_set_id
+            )
+        except _GenerationOwnershipLost:
+            return self.records.get_graph_change_set(change_set.change_set_id)
+        except Exception as exc:
             change_set.error_metadata = {
-                "category": last_error_category,
-                "message": message,
-                "attempts": attempts,
+                "category": "runner_error",
+                "message": provider_error_message(exc),
                 "input_snapshot": _batch_input_snapshot(context_packet),
             }
-            change_set.updated_at = utc_now()
-            self.records.save_graph_change_set(change_set)
-            return change_set
-
-        assert graph_patch is not None
-        assert operations is not None
-        change_set.operations = operations
-        change_set.summary = str(graph_patch.get("summary") or "")
-        change_set.uncertain_fields = string_list(graph_patch.get("uncertain_fields"))
-        change_set.clarification_requests = string_list(graph_patch.get("clarification_requests"))
-        change_set.status = GraphChangeSetStatus.READY
-        change_set.error_metadata = {}
-        change_set.updated_at = utc_now()
-        with self.application_transaction():
-            self.records.save_graph_change_set(change_set)
-            if self.review_email_outbox is not None:
-                self.review_email_outbox.enqueue_ready_review(change_set)
-        return change_set
+            self._finish_failed_or_current(change_set, claim.claim_token)
+            raise
 
     @staticmethod
     def _ensure_draft_client_allowed_here(
@@ -760,6 +826,38 @@ class GraphDraftGenerationCoordinator(BaseService):
 
 def _text_checksum(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _note_generation_key(
+    *,
+    note: Note,
+    source_notes: list[Note],
+    mode: GraphDraftMode,
+    prompt_version: str,
+    user_hint: str | None,
+    evidence_checksum: str | None,
+    kind: str = "note",
+) -> str:
+    """Identify one exact note-source generation request across retries."""
+
+    payload = {
+        "version": "v1",
+        "kind": kind,
+        "project_id": str(note.project_id),
+        "note_id": str(note.note_id),
+        "source_versions": [
+            {"note_id": str(item.note_id), "updated_at": item.updated_at.isoformat()}
+            for item in source_notes
+        ],
+        "mode": mode.value,
+        "prompt_version": prompt_version,
+        "user_hint": user_hint,
+        "evidence_checksum": evidence_checksum,
+    }
+    digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return f"generation:{digest[:48]}"
 
 
 def _is_text_asset(content_type: str) -> bool:
