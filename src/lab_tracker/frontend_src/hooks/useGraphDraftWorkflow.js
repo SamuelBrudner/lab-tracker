@@ -1,7 +1,7 @@
 import * as React from "react";
 
 import { apiListRequest, apiRequest, buildApiPath } from "../shared/api.js";
-import { graphDrafts } from "../shared/gateways/index.js";
+import { graphDrafts, memberOnboarding } from "../shared/gateways/index.js";
 import {
   canContributeWithRole,
   canManageWithRole,
@@ -35,6 +35,10 @@ function useGraphDraftWorkflow({
   const [bulkAcceptedIds, setBulkAcceptedIds] = useState([]);
   const [draftProjectRole, setDraftProjectRole] = useState("");
   const [draftProjectId, setDraftProjectId] = useState("");
+  const [onboardingAccess, setOnboardingAccess] = useState({
+    capabilities: null,
+    projectId: "",
+  });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [commitMessage, setCommitMessage] = useState("");
@@ -94,19 +98,42 @@ function useGraphDraftWorkflow({
   const effectiveCanManageGraph = usesDraftProjectAccess
     ? isAdmin || (hasDraftProjectAccess && canManageWithRole(user, draftProjectRole))
     : Boolean(canManageGraph);
+  const isMemberOnboarding = changeSet?.purpose === "member_checkpoint_alignment";
+  const hasOnboardingAccess =
+    isMemberOnboarding && onboardingAccess.projectId === changeSet?.project_id;
+  const onboardingAuthorId =
+    changeSet?.review_assignee_user_id ||
+    changeSet?.created_by_user_id ||
+    changeSet?.review_assignee ||
+    changeSet?.created_by ||
+    "";
+  const isOnboardingAuthor = Boolean(
+    user?.user_id && onboardingAuthorId && user.user_id === onboardingAuthorId
+  );
+  const canWriteCurrentDraft = isMemberOnboarding
+    ? isOnboardingAuthor &&
+      (isAdmin || Boolean(hasOnboardingAccess && onboardingAccess.capabilities?.can_align))
+    : effectiveCanWrite;
+  const canManageCurrentDraft = isMemberOnboarding
+    ? isAdmin || Boolean(hasOnboardingAccess && onboardingAccess.capabilities?.can_commit)
+    : effectiveCanManageGraph;
   const canEditDraft =
     isCurrent &&
-    effectiveCanWrite &&
+    canWriteCurrentDraft &&
     ["ready", "changes_requested"].includes(changeSet?.status || "");
   const canSubmitDraft =
     isCurrent &&
-    effectiveCanWrite &&
+    canWriteCurrentDraft &&
     ["ready", "changes_requested"].includes(changeSet?.status || "");
-  const canReviewDraft = isCurrent && effectiveCanManageGraph && changeSet?.status === "submitted";
+  const canReviewDraft =
+    isCurrent && canManageCurrentDraft && changeSet?.status === "submitted";
   const canCommitDraft =
     isCurrent &&
-    effectiveCanManageGraph &&
-    ["ready", "submitted"].includes(changeSet?.status || "");
+    canManageCurrentDraft &&
+    (changeSet?.purpose === "member_checkpoint_alignment"
+      ? changeSet?.status === "submitted"
+      : ["ready", "submitted"].includes(changeSet?.status || ""));
+  const canReviseDraft = canEditDraft && !isMemberOnboarding;
 
   const loadDraft = useCallback(async () => {
     if (!changeSetId) {
@@ -203,6 +230,36 @@ function useGraphDraftWorkflow({
       canceled = true;
     };
   }, [changeSet?.project_id, token, user?.role, user?.user_id]);
+
+  useEffect(() => {
+    let canceled = false;
+    const projectId = changeSet?.project_id || "";
+    if (changeSet?.purpose !== "member_checkpoint_alignment" || !projectId) {
+      setOnboardingAccess({ capabilities: null, projectId: "" });
+      return () => {
+        canceled = true;
+      };
+    }
+    setOnboardingAccess({ capabilities: null, projectId });
+    memberOnboarding
+      .getMemberOnboarding(projectId, { token })
+      .then((state) => {
+        if (!canceled && state?.project_id === projectId) {
+          setOnboardingAccess({
+            capabilities: state.capabilities || null,
+            projectId,
+          });
+        }
+      })
+      .catch(() => {
+        if (!canceled) {
+          setOnboardingAccess({ capabilities: null, projectId });
+        }
+      });
+    return () => {
+      canceled = true;
+    };
+  }, [changeSet?.project_id, changeSet?.purpose, token]);
 
   function updatePayloadText(operationId, value) {
     setPayloads((current) => ({ ...current, [operationId]: value }));
@@ -508,7 +565,7 @@ function useGraphDraftWorkflow({
   // Called with the dictation console's current inputs. Returns true only when
   // the server accepted the revision, so the caller can clear those inputs.
   async function reviseDraft({ isRecording, feedback, audioFile, attachments }) {
-    if (!changeSet || !canEditDraft) {
+    if (!changeSet || !canReviseDraft) {
       return false;
     }
     if (isRecording) {
@@ -570,6 +627,7 @@ function useGraphDraftWorkflow({
     undoableOperationIds,
     spokenReview,
     canEditDraft,
+    canReviseDraft,
     canSubmitDraft,
     canReviewDraft,
     canCommitDraft,

@@ -227,6 +227,30 @@ For new projects or newly imported repo context:
 Question status transitions are one-way for review: `staged` can become
 `active`, `abandoned`, or `superseded`, but `active` cannot return to `staged`.
 
+## Joining An Ongoing Project
+
+Use the member-onboarding workflow when a person begins using Lab Tracker for
+work that is already underway. Treat it as a declared, selective checkpoint of
+the present—not as a complete reconstruction of project history.
+
+1. Open the project onboarding page and record the current output or decision,
+   one to three live questions, the strongest recent context, and the next move.
+2. Resolve each live question manually, or explicitly acknowledge external AI
+   processing before requesting a constrained draft. AI output stays proposed
+   until the member reviews every operation.
+3. Use the generated map and Markdown brief as an attributed working
+   perspective. A contributor may finish their personal onboarding before a
+   project owner commits accepted graph changes.
+4. Store one separate, genuine text, photo, or voice capture against the
+   checkpoint. The checkpoint itself and pending offline data do not count.
+5. Backfill older material only for a specific question, goal, or time window;
+   never imply that the checkpoint makes historical coverage complete.
+
+Checkpoint notes are project-visible, immutable human source records. Do not
+send them through generic graph drafting, transcription, batch drafting, or
+automation paths. Viewers may inspect onboarding state but need contributor
+access to create a checkpoint, align questions, or make the first capture.
+
 ## Dolt Mirror
 
 Dolt is an export-only versioned mirror for snapshots, diffs, branches, and
@@ -374,6 +398,23 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 - `mode` (optional): GraphDraftMode enum: graph_context, image_only, graph_batch
 - `user_hint` (optional): string; min length 1 | null
 
+#### Member Onboarding Checkpoint: `MemberOnboardingCheckpointRequest`
+- Required: `current_output_or_decision`, `live_questions`, `strongest_recent_context`, `next_move`
+- `as_of` (optional): string(date-time) | null
+- `current_output_or_decision` (required): string; min length 1
+- `live_questions` (required): list[string; min length 1]
+- `next_move` (required): string; min length 1
+- `source_text` (optional): string | null
+- `strongest_recent_context` (required): string; min length 1
+
+#### Member Onboarding Manual Alignment: `MemberOnboardingManualAlignmentRequest`
+- Required: `resolutions`
+- `resolutions` (required): list[object]
+
+#### Member Onboarding AI Alignment: `MemberOnboardingAiAlignmentRequest`
+- Required: `external_provider_acknowledged`
+- `external_provider_acknowledged` (required): boolean
+
 #### Decision Context: `AssistantDecisionContextRequest`
 - Required: `task_kind`, `query`
 - `analysis_id` (optional): string(uuid) | null
@@ -486,6 +527,12 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 - `project_id` (optional): string(uuid) | null
 - `status` (optional): GraphChangeSetStatus enum: drafting, ready, submitted, changes_requested, committing, rejected, failed, committed | null
 - `source_note_id` (optional): string(uuid) | null
+- `purpose` (optional): GraphDraftPurpose enum: general, member_checkpoint_alignment | null
+- `limit` (optional): integer; default 50; maximum 200 from shared route validation
+- `offset` (optional): integer; default 0; minimum 0 from shared route validation
+
+#### `GET /projects/{project_id}/member-onboarding/owner-queue`
+- `project_id` (required): string(uuid)
 - `limit` (optional): integer; default 50; maximum 200 from shared route validation
 - `offset` (optional): integer; default 0; minimum 0 from shared route validation
 

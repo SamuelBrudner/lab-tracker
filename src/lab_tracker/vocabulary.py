@@ -568,6 +568,81 @@ _PROPERTY_TERMS: tuple[Term, ...] = (
         "lab:transcribedText",
         "Machine transcription of a captured voice note.",
     ),
+    Term(
+        "memberOnboardingRole",
+        "lab:memberOnboardingRole",
+        "The server-declared role of a note in member onboarding, currently checkpoint.",
+        emitters=("_note_node",),
+    ),
+    Term(
+        "checkpointAsOf",
+        "lab:checkpointAsOf",
+        "The instant at which a member checkpoint declares the project's present state.",
+        emitters=("_note_node",),
+    ),
+    Term(
+        "historicalCoverage",
+        "lab:historicalCoverage",
+        "The checkpoint's declared coverage of work before its boundary; "
+        "selective does not mean complete.",
+        emitters=("_note_node",),
+    ),
+    Term(
+        "checkpointPayloadSha256",
+        "lab:checkpointPayloadSha256",
+        "SHA-256 digest of the canonical guided checkpoint payload.",
+        emitters=("_note_node",),
+    ),
+    Term(
+        "checkpointSourceTextSha256",
+        "lab:checkpointSourceTextSha256",
+        "SHA-256 digest of optional source text incorporated into an immutable checkpoint.",
+        emitters=("_note_node",),
+    ),
+    Term(
+        "checkpointAlignmentMode",
+        "lab:checkpointAlignmentMode",
+        "How the member resolved the checkpoint's live-question alignment.",
+        emitters=("_note_node",),
+    ),
+    Term(
+        "checkpointAlignmentResolvedAt",
+        "lab:checkpointAlignmentResolvedAt",
+        "The instant when the member resolved every live-question alignment.",
+        emitters=("_note_node",),
+    ),
+    Term(
+        "checkpointAlignmentResolution",
+        "lab:checkpointAlignmentResolution",
+        "The terminal member-alignment outcome recorded for the checkpoint.",
+        emitters=("_note_node",),
+    ),
+    Term(
+        "checkpointAlignmentChangeSet",
+        "lab:checkpointAlignmentChangeSet",
+        "The reviewed graph change set that proposed an AI-assisted checkpoint alignment.",
+        is_id=True,
+        emitters=("_note_node",),
+    ),
+    Term(
+        "firstForwardCapture",
+        "lab:firstForwardCapture",
+        "The separate note that first demonstrated prospective capture after a checkpoint.",
+        is_id=True,
+        emitters=("_note_node",),
+    ),
+    Term(
+        "firstForwardCaptureAt",
+        "lab:firstForwardCaptureAt",
+        "The instant when the first separate forward capture was stored.",
+        emitters=("_note_node",),
+    ),
+    Term(
+        "memberOnboardingCompletedAt",
+        "lab:memberOnboardingCompletedAt",
+        "The instant when checkpoint alignment and a separate forward capture were both complete.",
+        emitters=("_note_node",),
+    ),
     # --- Visualizations ---
     Term(
         "vizType",

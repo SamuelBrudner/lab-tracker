@@ -19,6 +19,7 @@ from lab_tracker.models import (
     GraphChangeOp,
     GraphChangeOperation,
     GraphChangeSet,
+    GraphDraftPurpose,
     GraphDraftSemanticType,
     NoteStatus,
     ProjectStatus,
@@ -104,6 +105,17 @@ class GraphPatchApplier:
             )
         if operation.target_entity_id is None:
             raise ValidationError("Update operations require target_entity_id.")
+        if (
+            change_set.purpose == GraphDraftPurpose.MEMBER_CHECKPOINT_ALIGNMENT
+            and operation.op == GraphChangeOp.UPDATE
+            and operation.entity_type == EntityType.NOTE
+            and operation.semantic_type == GraphDraftSemanticType.LINK_NOTE_TO_QUESTION
+        ):
+            return self._add_member_onboarding_note_targets(
+                operation.target_entity_id,
+                payload,
+                actor=actor,
+            )
         return self._update_graph_entity(
             operation.entity_type,
             operation.target_entity_id,
@@ -112,6 +124,32 @@ class GraphPatchApplier:
             actor=actor,
             origin_kwargs=origin_kwargs,
             dataset_locks_held=dataset_locks_held,
+        )
+
+    def _add_member_onboarding_note_targets(
+        self,
+        note_id: UUID,
+        payload: dict[str, Any],
+        *,
+        actor: AuthContext | None,
+    ) -> EntityResult:
+        """Add links without rewriting the human checkpoint or its provenance."""
+
+        raw_targets = payload.get("targets")
+        if not isinstance(raw_targets, list):
+            raise ValidationError("Onboarding note links require targets.")
+        added: list[EntityRef] = []
+        for raw_target in raw_targets:
+            try:
+                added.append(EntityRef.model_validate(raw_target))
+            except Exception as exc:
+                raise ValidationError("Onboarding note link target is invalid.") from exc
+        if len(added) != 1 or added[0].entity_type != EntityType.QUESTION:
+            raise ValidationError("Onboarding note links require one question target.")
+        return self.notes.add_member_onboarding_question_target(
+            note_id,
+            question_id=added[0].entity_id,
+            actor=actor,
         )
 
     def _create_graph_entity(

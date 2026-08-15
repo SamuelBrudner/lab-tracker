@@ -11,6 +11,7 @@ from uuid import uuid4
 import pytest
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, func, inspect, select, text
 from sqlalchemy.exc import IntegrityError
@@ -56,12 +57,17 @@ _MUTATED_MODELS = (
 )
 
 _EVIDENCE_BUNDLE_REVISION = "0055_evidence_bundles"
-_CURRENT_HEAD_REVISION = "0060_acquisition_collections"
 _PRINCIPAL_CAPTURE_KEY_REVISION = "0054_project_capture_key_principal_scope"
 
 
 def _alembic_config() -> Config:
     return Config(str(Path(__file__).resolve().parent.parent / "alembic.ini"))
+
+
+def _single_script_head(config: Config) -> str:
+    heads = ScriptDirectory.from_config(config).get_heads()
+    assert len(heads) == 1
+    return heads[0]
 
 
 def _current_revision(database_url: str) -> str:
@@ -235,6 +241,7 @@ def test_0055_postgres_migration_cycle_preserves_existing_principals_and_project
     migrated_postgres_database_url: str,
 ) -> None:
     config = _alembic_config()
+    current_head_revision = _single_script_head(config)
     user_id = str(uuid4())
     project_id = str(uuid4())
     bundle_id = str(uuid4())
@@ -409,7 +416,7 @@ def test_0055_postgres_migration_cycle_preserves_existing_principals_and_project
         command.downgrade(config, _PRINCIPAL_CAPTURE_KEY_REVISION)
         command.upgrade(config, "head")
         assert _current_revision(migrated_postgres_database_url) == (
-            _CURRENT_HEAD_REVISION
+            current_head_revision
         )
         with engine.connect() as connection:
             assert connection.scalar(text("SELECT COUNT(*) FROM evidence_bundles")) == 0

@@ -52,6 +52,8 @@ function useMobileCapture({
   setFlash,
   refreshProjectCounts,
   refreshRecentNotes,
+  lockedCheckpointNoteId = "",
+  returnPath = "",
 }) {
   const [captureMode, setCaptureMode] = useState("text");
   const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
@@ -197,10 +199,19 @@ function useMobileCapture({
   }, [selectedProjectId, token, ownerId, setFlash]);
 
   function currentTargets() {
-    return buildTargets({ questionId, sessionId, datasetId, analysisId, claimId });
+    return buildTargets({
+      questionId,
+      sessionId,
+      datasetId,
+      analysisId,
+      claimId,
+      noteId: lockedCheckpointNoteId,
+    });
   }
 
   function captureMetadata({ kind, bundleId = "", file = null }) {
+    // The checkpoint relationship is a retained note target, not client-authored
+    // onboarding metadata. `member_onboarding_*` keys are server-reserved.
     return buildCaptureMetadata({ captureMode, kind, bundleId, file, hint, voiceNoteType });
   }
 
@@ -472,6 +483,9 @@ function useMobileCapture({
         setPhotoFile(null);
         setAudioFile(null);
         setTextNote("");
+        if (returnPath) {
+          navigate(returnPath);
+        }
         return;
       }
 
@@ -485,6 +499,9 @@ function useMobileCapture({
       setPhotoFile(null);
       setAudioFile(null);
       setTextNote("");
+      if (returnPath) {
+        navigate(returnPath);
+      }
     } catch (err) {
       setFlash("", err.message || "Capture failed.");
     } finally {

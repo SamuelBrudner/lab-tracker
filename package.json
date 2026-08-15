@@ -2,7 +2,7 @@
   "name": "lab-tracker-frontend",
   "private": true,
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "scripts": {
     "build": "npm run build:frontend",
@@ -19,16 +19,16 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@playwright/test": "^1.61.1",
-    "@testing-library/jest-dom": "^6.6.3",
+    "@playwright/test": "^1.62.1",
+    "@testing-library/jest-dom": "^7.0.1",
     "@testing-library/react": "^16.3.0",
     "esbuild": "^0.28.1",
     "eslint": "^10.7.0",
     "eslint-plugin-react-hooks": "^7.1.1",
     "fake-indexeddb": "^6.2.5",
-    "globals": "^17.7.0",
-    "jsdom": "^29.1.1",
-    "playwright": "^1.61.1",
+    "globals": "^17.9.0",
+    "jsdom": "^30.0.1",
+    "playwright": "^1.62.1",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "typescript": "^7.0.2",

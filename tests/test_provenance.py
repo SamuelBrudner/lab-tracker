@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
+from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
+from fastapi.testclient import TestClient
 
 from lab_tracker.models import (
     Analysis,
@@ -86,6 +89,49 @@ def _classification_ids(node: dict[str, object]) -> set[str]:
         str(classification["@id"])
         for classification in classifications
         if isinstance(classification, dict)
+    }
+
+
+class _OnboardingDraftClient:
+    provider = "fake"
+    model = "fake-member-alignment"
+    timeout_seconds = 1
+
+    def __init__(self, patch: dict[str, Any]) -> None:
+        self.patch = patch
+
+    def draft_from_note(self, **_: Any) -> dict[str, Any]:
+        return self.patch
+
+    def close(self) -> None:
+        return None
+
+
+def _onboarding_question_patch(project_id: str, checkpoint_id: str) -> dict[str, Any]:
+    return {
+        "summary": "Align the member's live question.",
+        "uncertain_fields": [],
+        "clarification_requests": [],
+        "operations": [
+            {
+                "client_ref": "live_question_0",
+                "op": "create",
+                "entity_type": "question",
+                "semantic_type": "suggest_new_question",
+                "target_entity_id": None,
+                "payload_json": json.dumps(
+                    {
+                        "project_id": project_id,
+                        "text": "Does the assay preserve response fidelity?",
+                        "question_type": "other",
+                        "status": "staged",
+                    }
+                ),
+                "rationale": "The member named this as live.",
+                "confidence": 0.8,
+                "source_refs": [{"source_note_ids": [checkpoint_id]}],
+            }
+        ],
     }
 
 
@@ -259,6 +305,156 @@ def test_record_export_uses_minimal_profile_classes_and_controlled_concepts():
         "lab:questionLinkRole/primary",
         "lab:outcomeStatus/supports",
     }
+
+
+def test_record_export_preserves_real_ai_member_checkpoint_audit(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_response = client.post(
+        "/projects",
+        json={"name": f"Ongoing provenance assay {uuid4().hex[:8]}"},
+        headers=admin_auth_headers,
+    )
+    assert project_response.status_code == 201, project_response.text
+    project_id = project_response.json()["data"]["project_id"]
+
+    checkpoint_response = client.put(
+        f"/projects/{project_id}/member-onboarding/checkpoint",
+        json={
+            "current_output_or_decision": "We selected the low-light assay.",
+            "live_questions": ["Does the assay preserve response fidelity?"],
+            "strongest_recent_context": "Pilot 4 was stable across two runs.",
+            "next_move": "Repeat with the blinded batch.",
+            "source_text": "Full historical handoff text.",
+        },
+        headers=admin_auth_headers,
+    )
+    assert checkpoint_response.status_code == 201, checkpoint_response.text
+    checkpoint = checkpoint_response.json()["data"]["checkpoint"]
+    checkpoint_id = checkpoint["note_id"]
+    checkpoint_creator_id = checkpoint["created_by_user_id"]
+    assert checkpoint_creator_id
+
+    fake = _OnboardingDraftClient(
+        _onboarding_question_patch(project_id, checkpoint_id)
+    )
+    client.app.state.graph_draft_client_factory = lambda _settings: fake
+    alignment_response = client.post(
+        f"/projects/{project_id}/member-onboarding/ai-alignment",
+        json={"external_provider_acknowledged": True},
+        headers=admin_auth_headers,
+    )
+    assert alignment_response.status_code == 200, alignment_response.text
+    draft = alignment_response.json()["data"]["alignment"]["draft"]
+    change_set_id = draft["change_set_id"]
+    operation_id = draft["operations"][0]["operation_id"]
+
+    acceptance_response = client.patch(
+        f"/graph-drafts/{change_set_id}/operations/{operation_id}",
+        json={"status": "accepted"},
+        headers=admin_auth_headers,
+    )
+    assert acceptance_response.status_code == 200, acceptance_response.text
+    accepted_operation = acceptance_response.json()["data"]["operations"][0]
+    accepted_at = accepted_operation["accepted_at"]
+    assert accepted_operation["acceptance_mode"] == "human_selected"
+    assert accepted_operation["accepted_by_user_id"] == checkpoint_creator_id
+    assert accepted_at
+
+    submitted_response = client.post(
+        f"/graph-drafts/{change_set_id}/submit",
+        headers=admin_auth_headers,
+    )
+    assert submitted_response.status_code == 200, submitted_response.text
+    commit_response = client.post(
+        f"/graph-drafts/{change_set_id}/commit",
+        json={"message": "Owner committed the reviewed member alignment."},
+        headers=admin_auth_headers,
+    )
+    assert commit_response.status_code == 200, commit_response.text
+    committed_operation = commit_response.json()["data"]["operations"][0]
+    result_question_id = committed_operation["result_entity_id"]
+    assert result_question_id
+
+    current_response = client.get(
+        f"/projects/{project_id}/member-onboarding",
+        headers=admin_auth_headers,
+    )
+    assert current_response.status_code == 200, current_response.text
+    checkpoint_metadata = current_response.json()["data"]["checkpoint"]["metadata"]
+    alignment_resolved_at = checkpoint_metadata[
+        "member_onboarding_alignment_resolved_at"
+    ]
+
+    export_response = client.post(
+        f"/record-exports/users/{checkpoint_creator_id}",
+        headers=admin_auth_headers,
+    )
+    assert export_response.status_code == 200, export_response.text
+    export_payload = export_response.json()["data"]
+    assert checkpoint_id in {
+        note["note_id"] for note in export_payload["records"]["notes"]
+    }
+    document = export_payload["provenance"]
+    base_url = str(document["@context"]["lab"]).removesuffix("/terms#")
+    checkpoint_iri = f"{base_url}/notes/{checkpoint_id}"
+    graph_ids = {
+        node["@id"] for node in document["@graph"] if isinstance(node, dict)
+    }
+    assert checkpoint_iri in graph_ids, graph_ids
+    checkpoint_node = _node_by_id(document, checkpoint_iri)
+    change_set_iri = f"{base_url}/graph-drafts/{change_set_id}"
+
+    assert checkpoint_node["memberOnboardingRole"] == "checkpoint"
+    assert checkpoint_node["historicalCoverage"] == "selective"
+    assert checkpoint_node["checkpointPayloadSha256"]
+    assert checkpoint_node["checkpointSourceTextSha256"]
+    assert checkpoint_node["checkpointAlignmentMode"] == "ai"
+    assert checkpoint_node["checkpointAlignmentResolvedAt"] == alignment_resolved_at
+    assert checkpoint_node["checkpointAlignmentResolution"] == "submitted"
+    assert checkpoint_node["checkpointAlignmentChangeSet"] == {
+        "@id": change_set_iri
+    }
+    assert checkpoint_node["wasInformedBy"] == {"@id": change_set_iri}
+    assert set(checkpoint_metadata).isdisjoint(checkpoint_node)
+
+    question_node = _node_by_id(
+        document,
+        f"{base_url}/questions/{result_question_id}",
+    )
+    assert question_node["origin"] == "ai_suggested"
+    assert question_node["changeSet"] == {"@id": change_set_iri}
+    assert question_node["wasGeneratedBy"] == {"@id": change_set_iri}
+    change_set_activity = _node_by_id(document, change_set_iri)
+    assert change_set_activity["@type"] == "prov:Activity"
+    assert change_set_activity["entityType"] == "graph_change_set"
+    assert change_set_activity["entityId"] == change_set_id
+
+    # The JSON-LD relation is dereferenceable to the immutable review audit,
+    # where operation identity, source relation, acceptor, and decision time live.
+    audit_response = client.get(
+        f"/graph-drafts/{change_set_id}",
+        headers=admin_auth_headers,
+    )
+    assert audit_response.status_code == 200, audit_response.text
+    audit = audit_response.json()["data"]
+    assert audit["status"] == "committed"
+    assert audit["purpose"] == "member_checkpoint_alignment"
+    assert audit["source_note_id"] == checkpoint_id
+    assert audit["committed_by"] == checkpoint_creator_id
+    [audited_operation] = audit["operations"]
+    assert audited_operation["operation_id"] == operation_id
+    assert audited_operation["status"] == "applied"
+    assert audited_operation["source_refs"] == [
+        {
+            "source_note_ids": [checkpoint_id],
+            "source_note_ids_resolution": "explicit",
+        }
+    ]
+    assert audited_operation["acceptance_mode"] == "human_selected"
+    assert audited_operation["accepted_by_user_id"] == checkpoint_creator_id
+    assert audited_operation["accepted_at"] == accepted_at
 
 
 def test_record_export_provenance_includes_terminal_reasons():

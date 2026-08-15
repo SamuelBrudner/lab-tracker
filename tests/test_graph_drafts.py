@@ -12,6 +12,7 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from lab_tracker.app_parts.middleware import system_auth_context
 from lab_tracker.auth import AuthContext, PrincipalType, Role, utc_now
@@ -1149,6 +1150,47 @@ def test_analysis_note_draft_records_model_failure(
     assert fake_client.closed is True
 
 
+def test_unexpected_provider_error_durably_fails_request_scoped_claim(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    note_id = _image_note(client, admin_auth_headers, project_id)
+
+    class ExplodingDraftClient(FakeDraftClient):
+        timeout_seconds = 60.0
+
+        def draft_from_note(self, **_kwargs: Any) -> dict[str, Any]:
+            raise RuntimeError("unexpected provider adapter failure")
+
+    exploding_client = ExplodingDraftClient()
+    client.app.state.graph_draft_client_factory = lambda _settings: exploding_client
+    failing_client = TestClient(client.app, raise_server_exceptions=False)
+    try:
+        response = failing_client.post(
+            f"/notes/{note_id}/graph-drafts",
+            headers=admin_auth_headers,
+        )
+    finally:
+        failing_client.close()
+
+    assert response.status_code == 500
+    with client.app.state.db_session_factory() as session:
+        row = session.scalar(
+            select(GraphChangeSetModel).where(
+                GraphChangeSetModel.source_note_id == note_id
+            )
+        )
+        assert row is not None
+        assert row.status == "failed"
+        assert row.generation_claim_token is None
+        assert row.generation_lease_expires_at is None
+        assert row.error_metadata == {
+            "category": "runner_error",
+            "message": "unexpected provider adapter failure",
+        }
+
+
 def test_graph_context_packet_includes_selected_targets_and_recent_neighborhood(
     client: TestClient,
     admin_auth_headers: dict[str, str],
@@ -2041,7 +2083,11 @@ def test_generic_semantic_entity_operations_validate_operation_direction(
         }
     )
 
-    rejected = client.post(f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers)
+    rejected = client.post(
+        f"/notes/{note_id}/graph-drafts",
+        json={"user_hint": "Exercise invalid generic operation direction."},
+        headers=admin_auth_headers,
+    )
 
     assert rejected.status_code == 201
     failed_payload = rejected.json()["data"]

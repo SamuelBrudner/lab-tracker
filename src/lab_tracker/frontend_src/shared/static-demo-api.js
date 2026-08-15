@@ -23,6 +23,27 @@ const GRAPH_DRAFT_NOTE_IDS = [
   "742bdd10-e735-405a-9bb8-c801c681a1e9",
 ];
 
+const MEMBER_ONBOARDING = {
+  alignment: null,
+  brief_markdown: "",
+  capabilities: {
+    can_align: false,
+    can_capture: false,
+    can_commit: false,
+    can_create_checkpoint: false,
+    can_read: true,
+  },
+  checkpoint: null,
+  first_capture: null,
+  guided_fields: null,
+  map_items: [],
+  member_complete: false,
+  owner_commit_pending: false,
+  project_id: PROJECT_ID,
+  role: "viewer",
+  state: "not_started",
+};
+
 const PROJECTS = [
   {
     project_id: PROJECT_ID,
@@ -766,6 +787,12 @@ function demoPayload(url) {
   }
   if (pathname === `/projects/${PROJECT_ID}/members`) {
     return listResponse(PROJECT_MEMBERS, searchParams);
+  }
+  if (pathname === `/projects/${PROJECT_ID}/member-onboarding`) {
+    return dataResponse(MEMBER_ONBOARDING);
+  }
+  if (pathname === `/projects/${PROJECT_ID}/member-onboarding/owner-queue`) {
+    return listResponse([], searchParams);
   }
   if (pathname === `/projects/${PROJECT_ID}/graph`) {
     const view = searchParams.get("view") || "evidence";

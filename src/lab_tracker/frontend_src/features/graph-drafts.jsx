@@ -21,6 +21,7 @@ function GraphDraftDetailCard({
   setBusy,
   setFlash,
   backPath = "/app",
+  allowBulkAccept = true,
 }) {
   const [reviewView, setReviewView] = React.useState("proposals");
   const workflow = useGraphDraftWorkflow({
@@ -53,6 +54,7 @@ function GraphDraftDetailCard({
     acceptedCount,
     undoableOperationIds,
     canEditDraft,
+    canReviseDraft,
     canSubmitDraft,
     canReviewDraft,
     canCommitDraft,
@@ -63,6 +65,8 @@ function GraphDraftDetailCard({
   );
   const sourcePreviews = useSourceArtifactPreviews(sourceReview.artifactsToLoad, token);
   const reviewAttachmentEvidence = changeSet?.context_packet?.review_attachment_evidence;
+  const effectiveAllowBulkAccept =
+    allowBulkAccept && changeSet?.purpose !== "member_checkpoint_alignment";
   const reviewAttachmentMessage =
     reviewAttachmentEvidence?.status === "unavailable"
       ? reviewAttachmentEvidence.message ||
@@ -123,7 +127,7 @@ function GraphDraftDetailCard({
             speechSupported={dictation.speechSupported}
             recordingSupported={dictation.recordingSupported}
             isRecording={dictation.isRecording}
-            canEditDraft={canEditDraft}
+            canEditDraft={canReviseDraft}
             spokenReview={workflow.spokenReview}
             reviseAudio={dictation.reviseAudio}
             reviseFeedback={dictation.reviseFeedback}
@@ -235,21 +239,23 @@ function GraphDraftDetailCard({
               <strong>
                 {acceptedCount} of {(changeSet.operations || []).length} kept
               </strong>
-              <button
-                type="button"
-                className="btn-secondary"
-                disabled={
-                  !canEditDraft ||
-                  Boolean(pendingCommands.acceptAll) ||
-                  Boolean(pendingCommands.undoAcceptAll)
-                }
-                onClick={workflow.acceptAll}
-              >
-                Accept all
-              </button>
+              {effectiveAllowBulkAccept ? (
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  disabled={
+                    !canEditDraft ||
+                    Boolean(pendingCommands.acceptAll) ||
+                    Boolean(pendingCommands.undoAcceptAll)
+                  }
+                  onClick={workflow.acceptAll}
+                >
+                  Accept all
+                </button>
+              ) : null}
             </div>
 
-            {canEditDraft && undoableOperationIds.length > 0 ? (
+            {effectiveAllowBulkAccept && canEditDraft && undoableOperationIds.length > 0 ? (
               <div className="inline" role="status">
                 <span className="subtle">
                   {undoableOperationIds.length === 1

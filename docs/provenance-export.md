@@ -80,6 +80,18 @@ consumer can follow any `@id` in a sidecar straight to the live record. The
 plain-JSON envelope for those records carries the canonical URI as
 `meta.iri`, bridging the two representations from the other side.
 
+Member-onboarding checkpoints retain their epistemic boundary in exported
+note nodes. The export carries the checkpoint role, its `as_of` time, the
+declared `selective` historical coverage, canonical payload/source hashes when
+present, the member's alignment mode and resolution time, and the first
+separate forward-capture link and completion timestamps when reached. For AI
+alignment it also links the checkpoint to the immutable graph-change-set audit
+record that contains each operation, source reference, human acceptance mode,
+acceptor, and decision time. It does not export arbitrary note metadata.
+Together with the existing `prov:wasAttributedTo` edge, this keeps one member's
+present-tense orientation from being misread as complete history or lab
+consensus after it leaves the application.
+
 ## A worked example
 
 A complete dataset sidecar is committed at

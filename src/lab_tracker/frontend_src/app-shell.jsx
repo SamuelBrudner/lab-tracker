@@ -11,6 +11,7 @@ import { ProjectGraphExplorer } from "./features/project-graph.jsx";
 import { VisualizationDetailCard } from "./features/analysis/VisualizationDetailCard.jsx";
 import { DatasetDetailCard } from "./features/datasets/index.js";
 import { MobileCaptureCard } from "./features/mobile-capture.jsx";
+import { MemberOnboardingPage } from "./features/member-onboarding.jsx";
 import { NoteDetailCard } from "./features/notes.jsx";
 import { OnboardingPage } from "./features/onboarding.jsx";
 import { QuestionDetailCard } from "./features/questions/QuestionDetailCard.jsx";
@@ -37,7 +38,7 @@ import {
   UnknownRouteCard,
   WorkflowCoverageCard,
 } from "./shared/ui.jsx";
-import { useAppRoute } from "./shared/routing.jsx";
+import { isContextualProjectReady, useAppRoute } from "./shared/routing.jsx";
 import { droppedUploadsMessage, installOfflineRetry } from "./shared/register-sw.js";
 import { PendingUploadsBadge } from "./shared/upload-status.jsx";
 import { apiRequest } from "./shared/api.js";
@@ -45,7 +46,19 @@ import { apiRequest } from "./shared/api.js";
 function App({ onReloadForUpdate = null }) {
   const { navigate, replace, route } = useAppRoute();
   const isHomeRoute = route.kind === "home";
-  const needsProjectData = isHomeRoute || route.kind === "capture" || route.kind === "batches";
+  const isMemberOnboardingRoute = route.kind === "member-onboarding";
+  const captureProjectId = (() => {
+    if (route.kind !== "capture") {
+      return "";
+    }
+    try {
+      return new URLSearchParams(window.location.search).get("project_id") || "";
+    } catch {
+      return "";
+    }
+  })();
+  const needsProjectData =
+    isHomeRoute || route.kind === "capture" || route.kind === "batches" || isMemberOnboardingRoute;
   const [busy, setBusy] = React.useState(false);
   const [message, setMessage] = React.useState("");
   const [error, setError] = React.useState("");
@@ -80,6 +93,26 @@ function App({ onReloadForUpdate = null }) {
     setBusy,
     setFlash,
   });
+  const workspaceProjects = workspaceData.projects;
+  const selectedWorkspaceProjectId = workspaceData.selectedProjectId;
+  const setSelectedWorkspaceProjectId = workspaceData.setSelectedProjectId;
+  React.useEffect(() => {
+    const contextualProjectId = isMemberOnboardingRoute ? route.projectId : captureProjectId;
+    if (
+      contextualProjectId &&
+      workspaceProjects.some((project) => project.project_id === contextualProjectId) &&
+      selectedWorkspaceProjectId !== contextualProjectId
+    ) {
+      setSelectedWorkspaceProjectId(contextualProjectId);
+    }
+  }, [
+    captureProjectId,
+    isMemberOnboardingRoute,
+    route.projectId,
+    workspaceProjects,
+    selectedWorkspaceProjectId,
+    setSelectedWorkspaceProjectId,
+  ]);
   const noteData = useProjectNoteData({
     enabled: isHomeRoute && apiEnabled,
     selectedProjectId: workspaceData.selectedProjectId,
@@ -98,7 +131,9 @@ function App({ onReloadForUpdate = null }) {
   // One sequenced access boundary for the dashboard-selected project. Late
   // members responses for a previously-selected project can no longer overwrite
   // the current project's role, and controls deny while access is unknown.
-  const projectAccess = useProjectAccess(workspaceData.selectedProjectId, {
+  const scopedProjectId =
+    (isMemberOnboardingRoute ? route.projectId : captureProjectId) || workspaceData.selectedProjectId;
+  const projectAccess = useProjectAccess(scopedProjectId, {
     token: auth.token,
     user: auth.user,
     enabled: apiEnabled,
@@ -275,6 +310,12 @@ function App({ onReloadForUpdate = null }) {
 
   const isCaptureRoute = route.kind === "capture";
   const isFocusedReviewRoute = route.kind === "batch";
+  const contextualProjectReady = isContextualProjectReady({
+    projectId: captureProjectId || (isMemberOnboardingRoute ? route.projectId : ""),
+    projects: workspaceData.projects,
+    projectsLoaded: workspaceData.projectsLoaded,
+    selectedProjectId: workspaceData.selectedProjectId,
+  });
 
   return (
     <div
@@ -344,13 +385,13 @@ function App({ onReloadForUpdate = null }) {
         </section>
       ) : (
         <section className="grid">
-          {isCaptureRoute ? (
+          {isCaptureRoute && contextualProjectReady ? (
             <MobileCaptureCard
               token={auth.token}
               ownerId={ownerId}
               canWrite={canContributeToProject}
               projects={workspaceData.projects}
-              selectedProjectId={workspaceData.selectedProjectId}
+              selectedProjectId={captureProjectId || workspaceData.selectedProjectId}
               onSelectedProjectChange={workspaceData.setSelectedProjectId}
               questions={workspaceData.questions}
               datasets={workspaceData.datasets}
@@ -361,6 +402,11 @@ function App({ onReloadForUpdate = null }) {
               refreshProjectCounts={workspaceData.refreshProjectCounts}
               refreshRecentNotes={noteData.refreshRecentNotes}
             />
+          ) : isCaptureRoute ? (
+            <article className="card span-12">
+              <h2>Capture</h2>
+              <p className="subtle">Loading the selected project context…</p>
+            </article>
           ) : null}
 
           {isHomeRoute ? (
@@ -394,7 +440,8 @@ function App({ onReloadForUpdate = null }) {
             />
           ) : route.kind === "graph" ||
             isFocusedReviewRoute ||
-            route.kind === "setup" ? null : (
+            route.kind === "setup" ||
+            isMemberOnboardingRoute ? null : (
             // The graph explorer has its own project picker and fills the
             // viewport; stacking the Dashboard card (second picker, New
             // Project + member forms) next to it just buries the canvas.
@@ -415,6 +462,30 @@ function App({ onReloadForUpdate = null }) {
               setBusy={setBusy}
               setFlash={setFlash}
             />
+          ) : null}
+
+          {isMemberOnboardingRoute && contextualProjectReady ? (
+            <MemberOnboardingPage
+              token={auth.token}
+              projectId={route.projectId}
+              project={workspaceData.projects.find((item) => item.project_id === route.projectId) || null}
+              projectAccess={{
+                canContribute: canContributeToProject,
+                canManage: canManageProjectMembers,
+                role: selectedProjectRole,
+              }}
+              questions={workspaceData.questions.filter(
+                (question) => question.project_id === route.projectId
+              )}
+              navigate={navigate}
+              setBusy={setBusy}
+              setFlash={setFlash}
+            />
+          ) : isMemberOnboardingRoute ? (
+            <article className="card span-12">
+              <h2>Orient to this project</h2>
+              <p className="subtle">Loading the selected project context…</p>
+            </article>
           ) : null}
 
           {route.kind === "devices" ? (
@@ -515,6 +586,14 @@ function App({ onReloadForUpdate = null }) {
               user={auth.user}
               setBusy={setBusy}
               setFlash={setFlash}
+              backPath={(() => {
+                try {
+                  const value = new URLSearchParams(window.location.search).get("return_to") || "";
+                  return value.startsWith("/app/") ? value : "/app";
+                } catch {
+                  return "/app";
+                }
+              })()}
             />
           ) : null}
 
