@@ -6,7 +6,7 @@ new checkout.
 ## Prerequisites
 
 - Python 3.10 or newer
-- Node.js 20 or newer and npm
+- Node.js 22 or newer and npm
 - `bd` (Beads) for issue tracking
 
 Install or update Beads with the Windows PowerShell installer:
