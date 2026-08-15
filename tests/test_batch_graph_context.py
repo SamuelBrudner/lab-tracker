@@ -13,7 +13,11 @@ from fastapi.testclient import TestClient
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.db_models import NoteModel, QuestionModel
 from lab_tracker.models import Note, Session, SessionType
-from lab_tracker.services.graph_draft_context import _capture_placement
+from lab_tracker.services.graph_draft_context import (
+    _bounded_batch_source_artifacts,
+    _capture_placement,
+    _graph_batch_context_summary,
+)
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 
 
@@ -644,3 +648,85 @@ def test_capture_placement_matches_session_window_and_passes_bundle() -> None:
     unplaced = _capture_placement(outside, [session])
     assert unplaced["in_session"] is None
     assert unplaced["capture_bundle_id"] is None
+
+
+def test_batch_source_budget_is_fair_deterministic_and_reports_warning() -> None:
+    project_id = uuid4()
+    baseline = datetime(2026, 8, 13, tzinfo=timezone.utc)
+    notes = [
+        Note(
+            note_id=UUID("00000000-0000-0000-0000-000000000001"),
+            project_id=project_id,
+            raw_content="",
+            transcribed_text="A" * 20,
+            created_at=baseline,
+        ),
+        Note(
+            note_id=UUID("00000000-0000-0000-0000-000000000002"),
+            project_id=project_id,
+            raw_content="",
+            transcribed_text="BB",
+            created_at=baseline + timedelta(seconds=1),
+        ),
+        Note(
+            note_id=UUID("00000000-0000-0000-0000-000000000003"),
+            project_id=project_id,
+            raw_content="",
+            transcribed_text="C" * 20,
+            created_at=baseline + timedelta(seconds=2),
+        ),
+    ]
+
+    artifacts, included, omitted, truncated_notes = (
+        _bounded_batch_source_artifacts(notes, budget_chars=12)
+    )
+
+    # Four characters are reserved for each remaining note. The short middle
+    # note uses only two, so its two unused characters roll forward to the
+    # final note instead of being lost or allowing the first to starve it.
+    assert [artifact["transcript_text"] for artifact in artifacts] == [
+        "AAAA",
+        "BB",
+        "CCCCCC",
+    ]
+    assert included == 12
+    assert omitted == 30
+    assert truncated_notes == 2
+
+    packet = {
+        "source_artifacts": artifacts,
+        "source_context_budget_chars": 12,
+        "source_context_included_chars": included,
+        "source_context_omitted_chars": omitted,
+        "source_context_truncated": True,
+        "source_context_truncated_note_count": truncated_notes,
+        "projects": [],
+        "batch_notes": [],
+        "truncated_note_count": 0,
+    }
+    summary = _graph_batch_context_summary(packet)
+    assert summary["source_context_omitted_chars"] == 30
+    assert summary["source_context_truncated_note_count"] == 2
+    assert any(
+        "30 character(s) omitted across 2 note(s)" in warning
+        for warning in summary["warnings"]
+    )
+
+
+def test_batch_source_budget_counts_existing_raw_preview_omission() -> None:
+    note = Note(
+        note_id=uuid4(),
+        project_id=uuid4(),
+        raw_content="x" * 1500,
+    )
+
+    artifacts, included, omitted, truncated_notes = (
+        _bounded_batch_source_artifacts([note], budget_chars=2000)
+    )
+
+    assert included == 1000
+    assert omitted == 500
+    assert truncated_notes == 1
+    assert artifacts[0]["raw_content_preview"] == "x" * 1000
+    assert artifacts[0]["raw_content_preview_omitted_chars"] == 500
+    assert artifacts[0]["source_text_omitted_chars"] == 500

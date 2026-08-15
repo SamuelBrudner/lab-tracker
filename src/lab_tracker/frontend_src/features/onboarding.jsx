@@ -4,6 +4,7 @@ import { apiRequest } from "../shared/api.js";
 import { auth as authGateway } from "../shared/gateways/index.js";
 import { matchingClientSetup } from "./client-setup.js";
 import { DailyReviewScheduleForm } from "./daily-review-schedule.jsx";
+import { OwnerOnboardingQueueBanner } from "./member-onboarding.jsx";
 
 const { useEffect, useMemo, useState } = React;
 
@@ -198,6 +199,13 @@ function OnboardingPage({
     : [];
 
   return (
+    <>
+    <OwnerOnboardingQueueBanner
+      projectId={selectedProjectId}
+      token={token}
+      navigate={navigate}
+      returnPath="/app/setup"
+    />
     <article className="card span-12 setup-page">
       <div className="item-head">
         <div>
@@ -275,6 +283,21 @@ function OnboardingPage({
             <p className="warn">
               Ask an administrator to add you to a project before continuing.
             </p>
+          ) : null}
+          {activeProject ? (
+            <div className="item setup-project-orientation">
+              <strong>Is this project already underway?</strong>
+              <p className="subtle">
+                Start with its current scientific thread. You do not need to reconstruct the full project history before using Lab Tracker.
+              </p>
+              <button
+                className="btn-primary"
+                onClick={() => navigate(`/app/projects/${activeProject.project_id}/onboarding`)}
+                type="button"
+              >
+                Orient me to this ongoing project
+              </button>
+            </div>
           ) : null}
         </li>
 
@@ -495,6 +518,7 @@ function OnboardingPage({
         </button>
       </div>
     </article>
+    </>
   );
 }
 

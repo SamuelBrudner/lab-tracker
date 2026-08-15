@@ -64,7 +64,7 @@ function buildCaptureMetadata({
 }
 
 // Build the note target links from the selected entity ids.
-function buildTargets({ questionId, sessionId, datasetId, analysisId, claimId }) {
+function buildTargets({ questionId, sessionId, datasetId, analysisId, claimId, noteId }) {
   const targets = [];
   if (questionId) {
     targets.push({ entity_id: questionId, entity_type: "question" });
@@ -80,6 +80,9 @@ function buildTargets({ questionId, sessionId, datasetId, analysisId, claimId })
   }
   if (claimId) {
     targets.push({ entity_id: claimId, entity_type: "claim" });
+  }
+  if (noteId) {
+    targets.push({ entity_id: noteId, entity_type: "note" });
   }
   return targets;
 }

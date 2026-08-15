@@ -687,6 +687,14 @@ startup; it surfaces at the first draft as a `failed` change set whose error
 names the variable to set. The step-by-step walkthrough (scheduling, agent
 credentials, MCP) is [`agent-setup.md`](agent-setup.md).
 
+The optional AI path in ongoing-project member onboarding uses this same
+provider. Before the request is accepted, the browser must acknowledge that the
+complete checkpoint and a bounded candidate list of up to 30 active/staged
+project questions (identifier, text, status, and type) will leave the Lab
+Tracker instance. A manual question-alignment path remains available and
+invokes no provider, and the copyable current-state brief is always rendered
+locally rather than sent for a second generation call.
+
 Automatic upload transcription is a separate, explicit operator opt-in. When
 enabled, every newly created audio upload—including tagless phone captures and
 quick captures—is sent to the configured OpenAI or Google provider after the
@@ -753,6 +761,22 @@ otherwise bounded and provider-side spending limits are acceptable. Exact
   (default: `https://generativelanguage.googleapis.com/v1beta`)
 - `LAB_TRACKER_GOOGLE_TIMEOUT_SECONDS`: Google graph draft API timeout in
   seconds (default: `60`)
+
+Provider generation is recovered with token-fenced leases. Each bounded
+provider attempt receives the active client's configured timeout plus a
+30-second persistence margin; the same token must renew before every retry and
+must still own an unexpired lease to record `ready` or `failed`. An expired
+worker's later response is discarded, so reclaim cannot let an older result
+overwrite a newer attempt. Scheduled batch-run ownership uses the same fence.
+
+Batch prompts admit at most 100 notes and at most 256,000 source-text
+characters in aggregate. The budget is shared deterministically in
+chronological order: each remaining note receives an equal share of the
+remaining allowance and unused space rolls forward. Context metadata records
+the included and omitted character counts, including omissions from the
+existing 1,000-character per-note raw-content preview, the number of truncated
+notes, and an explicit warning. This prevents a 100-note batch from silently
+expanding to millions of transcript characters.
 
 ### Daily-review email alerts
 

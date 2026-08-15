@@ -10,6 +10,7 @@ from lab_tracker.api_parts.experiments import ExperimentsApiMixin
 from lab_tracker.api_parts.exploration import ExplorationApiMixin
 from lab_tracker.api_parts.goals import GoalsApiMixin
 from lab_tracker.api_parts.graph_drafts import GraphDraftsApiMixin
+from lab_tracker.api_parts.member_onboarding import MemberOnboardingApiMixin
 from lab_tracker.api_parts.notes import NotesApiMixin
 from lab_tracker.api_parts.projects import ProjectsApiMixin
 from lab_tracker.api_parts.provenance import ProvenanceApiMixin
@@ -29,6 +30,7 @@ __all__ = [
     "AnalysesApiMixin",
     "GoalsApiMixin",
     "GraphDraftsApiMixin",
+    "MemberOnboardingApiMixin",
     "ExplorationApiMixin",
     "ProvenanceApiMixin",
     "UsageApiMixin",

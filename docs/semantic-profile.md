@@ -193,7 +193,7 @@ type.
 | `Dataset` | `lab:Dataset` | Status and origin are concepts |
 | `Analysis` | `lab:Analysis` | Status and origin are concepts |
 | `Claim` | `lab:Claim` | Status and origin are concepts |
-| `Note` | `lab:Note` | Status and origin are concepts |
+| `Note` | `lab:Note` | Status and origin are concepts; server-declared member checkpoints also carry their attributed present-state boundary and selective-history declaration |
 | `Visualization` | `lab:Visualization` | Open-ended `vizType` remains a literal |
 | `Session` | `lab:AcquisitionSession` | Session type, status, and origin are concepts |
 | `Goal` | `lab:Goal` | Currently appears in ARA logic; type, status, and origin are concepts |

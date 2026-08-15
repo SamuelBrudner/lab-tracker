@@ -11,7 +11,12 @@ from starlette.requests import Request
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.db_types import ensure_uuid
-from lab_tracker.models import GraphChangeSet, GraphChangeSetStatus, UsageEventResourceType
+from lab_tracker.models import (
+    GraphChangeSet,
+    GraphChangeSetStatus,
+    GraphDraftPurpose,
+    UsageEventResourceType,
+)
 from lab_tracker.patching import provided_fields
 from lab_tracker.schemas import (
     Envelope,
@@ -97,6 +102,7 @@ def build_graph_drafts_router(api: LabTrackerAPI) -> APIRouter:
         project_id: UUID | None = None,
         status: GraphChangeSetStatus | None = None,
         source_note_id: UUID | None = None,
+        purpose: GraphDraftPurpose | None = None,
         limit: int = 50,
         offset: int = 0,
     ):
@@ -111,6 +117,7 @@ def build_graph_drafts_router(api: LabTrackerAPI) -> APIRouter:
             project_ids=project_ids,
             status=status,
             source_note_id=source_note_id,
+            purpose=purpose,
             limit=limit,
             offset=offset,
             include_operations=False,
@@ -342,6 +349,7 @@ def _graph_change_set_summary(change_set: GraphChangeSet) -> GraphChangeSetSumma
         model=change_set.model,
         prompt_version=change_set.prompt_version,
         draft_mode=change_set.draft_mode,
+        purpose=change_set.purpose,
         summary=change_set.summary,
         uncertain_fields=list(change_set.uncertain_fields),
         clarification_requests=list(change_set.clarification_requests),

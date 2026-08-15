@@ -19,6 +19,7 @@ from lab_tracker.models import (
     GraphDraftBatchSettings,
     GraphDraftBatchTrigger,
     GraphDraftMode,
+    GraphDraftPurpose,
     Note,
 )
 from lab_tracker.patching import NOT_PROVIDED, PatchValue
@@ -122,10 +123,7 @@ class GraphDraftService:
         *,
         actor: AuthContext | None = None,
     ) -> GraphChangeSet:
-        return self.records.get_graph_change_set_for_read(
-            change_set_id,
-            actor=actor,
-        )
+        return self.records.get_graph_change_set_for_read(change_set_id, actor=actor)
 
     def list_graph_change_sets(
         self,
@@ -134,6 +132,7 @@ class GraphDraftService:
         status: GraphChangeSetStatus | None = None,
         source_note_id: UUID | None = None,
         draft_mode: GraphDraftMode | None = None,
+        purpose: GraphDraftPurpose | None = None,
         batch_key: str | None = None,
     ) -> list[GraphChangeSet]:
         return self.records.list_graph_change_sets(
@@ -141,6 +140,7 @@ class GraphDraftService:
             status=status,
             source_note_id=source_note_id,
             draft_mode=draft_mode,
+            purpose=purpose,
             batch_key=batch_key,
         )
 
@@ -152,6 +152,7 @@ class GraphDraftService:
         status: GraphChangeSetStatus | None = None,
         source_note_id: UUID | None = None,
         draft_mode: GraphDraftMode | None = None,
+        purpose: GraphDraftPurpose | None = None,
         batch_key: str | None = None,
         limit: int | None = None,
         offset: int = 0,
@@ -163,6 +164,7 @@ class GraphDraftService:
             status=status,
             source_note_id=source_note_id,
             draft_mode=draft_mode,
+            purpose=purpose,
             batch_key=batch_key,
             limit=limit,
             offset=offset,
@@ -207,10 +209,7 @@ class GraphDraftService:
         *,
         actor: AuthContext | None = None,
     ) -> GraphChangeSet:
-        return self.review.bulk_accept_graph_change_operations(
-            change_set_id,
-            actor=actor,
-        )
+        return self.review.bulk_accept_graph_change_operations(change_set_id, actor=actor)
 
     def submit_graph_change_set(
         self,
@@ -390,8 +389,12 @@ class GraphDraftService:
             actor=actor,
         )
 
-    def claim_next_graph_draft_batch_run(self) -> GraphDraftBatchRun | None:
-        return self.scheduling.claim_next_graph_draft_batch_run()
+    def claim_next_graph_draft_batch_run(
+        self,
+        *,
+        lease_seconds: int,
+    ) -> GraphDraftBatchRun | None:
+        return self.scheduling.claim_next_graph_draft_batch_run(lease_seconds=lease_seconds)
 
     def execute_graph_draft_batch_run(
         self,

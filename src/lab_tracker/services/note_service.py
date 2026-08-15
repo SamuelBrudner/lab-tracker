@@ -13,15 +13,27 @@ from sqlalchemy.exc import IntegrityError
 from lab_tracker.auth import AuthContext
 from lab_tracker.errors import ConflictError, NotFoundError, ValidationError
 from lab_tracker.graph_drafting import PROVIDER, GraphDraftingError
+from lab_tracker.member_onboarding import (
+    CHECKPOINT_CLIENT_KEY_PREFIX,
+    COMPLETED_AT_KEY,
+    FIRST_CAPTURE_NOTE_ID_KEY,
+    has_reserved_capture_key,
+    has_reserved_note_metadata,
+    is_member_checkpoint,
+)
 from lab_tracker.models import (
     EntityOrigin,
     EntityRef,
     EntityType,
+    GraphChangeSetStatus,
+    GraphDraftPurpose,
     Note,
     NoteArchiveReason,
     NoteMetadataScalar,
     NoteRawAsset,
     NoteStatus,
+    UsageEventResourceType,
+    UsageEventVerb,
     utc_now,
 )
 from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
@@ -174,6 +186,7 @@ class NoteService(BaseService):
         origin_provider: str | None = None,
         origin_model: str | None = None,
         origin_prompt_version: str | None = None,
+        allow_member_onboarding_reserved: bool = False,
     ) -> Note:
         return self.create_note_result(
             project_id,
@@ -190,6 +203,7 @@ class NoteService(BaseService):
             origin_provider=origin_provider,
             origin_model=origin_model,
             origin_prompt_version=origin_prompt_version,
+            allow_member_onboarding_reserved=allow_member_onboarding_reserved,
         ).entity
 
     def create_note_result(
@@ -209,6 +223,7 @@ class NoteService(BaseService):
         origin_provider: str | None = None,
         origin_model: str | None = None,
         origin_prompt_version: str | None = None,
+        allow_member_onboarding_reserved: bool = False,
     ) -> IdempotentCreateResult[Note]:
         self.authorization.require_contributor(project_id, actor=actor)
         self.projects.get_project(project_id)
@@ -219,6 +234,16 @@ class NoteService(BaseService):
         resolved_targets = list(targets or [])
         for target in resolved_targets:
             self.validate_target(target, project_id)
+        if not allow_member_onboarding_reserved:
+            if has_reserved_note_metadata(metadata):
+                raise ValidationError(
+                    "Member-onboarding metadata is reserved for the guided workflow."
+                )
+            if has_reserved_capture_key(client_capture_id):
+                raise ValidationError(
+                    f"client_capture_id values beginning {CHECKPOINT_CLIENT_KEY_PREFIX!r} "
+                    "are reserved for the guided workflow."
+                )
         resolved_metadata = normalize_note_metadata(metadata)
         resolved_client_capture_id = _normalize_client_capture_id(client_capture_id)
         if resolved_client_capture_id is not None:
@@ -242,6 +267,12 @@ class NoteService(BaseService):
                     origin_prompt_version=origin_prompt_version,
                     client_capture_id=resolved_client_capture_id,
                 )
+                # A prior first-capture projection can lose a CAS to a
+                # simultaneous trusted checkpoint update.  Exact replay is a
+                # safe opportunity to repair that projection without emitting
+                # duplicate events (the checkpoint CAS remains first-only).
+                with self.application_transaction():
+                    self._mark_first_member_onboarding_capture(existing, actor=actor)
                 return IdempotentCreateResult("reused", existing)
         note = Note(
             note_id=uuid4(),
@@ -261,40 +292,43 @@ class NoteService(BaseService):
             origin_model=origin_model,
             origin_prompt_version=origin_prompt_version,
         )
-        try:
-            unit_of_work = (
-                self.recoverable_unit_of_work
-                if resolved_client_capture_id is not None
-                else self.unit_of_work
-            )
-            with unit_of_work() as repository:
-                repository.notes.save(note)
-        except IntegrityError as exc:
-            if resolved_client_capture_id is None:
-                raise
-            existing = self._find_client_capture_note(
-                project_id,
-                resolved_client_capture_id,
-            )
-            if existing is None:
-                raise
-            self._ensure_matching_capture_note(
-                existing,
-                raw_content=raw_text,
-                raw_asset=raw_asset,
-                transcribed_text=resolved_transcribed_text,
-                targets=resolved_targets,
-                metadata=resolved_metadata,
-                status=status,
-                origin=origin,
-                change_set_id=change_set_id,
-                origin_provider=origin_provider,
-                origin_model=origin_model,
-                origin_prompt_version=origin_prompt_version,
-                client_capture_id=resolved_client_capture_id,
-                cause=exc,
-            )
-            return IdempotentCreateResult("reused", existing)
+        with self.application_transaction():
+            try:
+                unit_of_work = (
+                    self.recoverable_unit_of_work
+                    if resolved_client_capture_id is not None
+                    else self.unit_of_work
+                )
+                with unit_of_work() as repository:
+                    repository.notes.save(note)
+            except IntegrityError as exc:
+                if resolved_client_capture_id is None:
+                    raise
+                existing = self._find_client_capture_note(
+                    project_id,
+                    resolved_client_capture_id,
+                )
+                if existing is None:
+                    raise
+                self._ensure_matching_capture_note(
+                    existing,
+                    raw_content=raw_text,
+                    raw_asset=raw_asset,
+                    transcribed_text=resolved_transcribed_text,
+                    targets=resolved_targets,
+                    metadata=resolved_metadata,
+                    status=status,
+                    origin=origin,
+                    change_set_id=change_set_id,
+                    origin_provider=origin_provider,
+                    origin_model=origin_model,
+                    origin_prompt_version=origin_prompt_version,
+                    client_capture_id=resolved_client_capture_id,
+                    cause=exc,
+                )
+                self._mark_first_member_onboarding_capture(existing, actor=actor)
+                return IdempotentCreateResult("reused", existing)
+            self._mark_first_member_onboarding_capture(note, actor=actor)
         return IdempotentCreateResult("created", note)
 
     def store_note_raw_asset(
@@ -334,6 +368,7 @@ class NoteService(BaseService):
         client_capture_id: str | None = None,
         status: NoteStatus = NoteStatus.STAGED,
         actor: AuthContext | None = None,
+        allow_member_onboarding_reserved: bool = False,
     ) -> Note:
         return self.upload_note_raw_result(
             project_id,
@@ -348,6 +383,7 @@ class NoteService(BaseService):
             client_capture_id=client_capture_id,
             status=status,
             actor=actor,
+            allow_member_onboarding_reserved=allow_member_onboarding_reserved,
         ).entity
 
     def upload_note_raw_result(
@@ -365,6 +401,7 @@ class NoteService(BaseService):
         client_capture_id: str | None = None,
         status: NoteStatus = NoteStatus.STAGED,
         actor: AuthContext | None = None,
+        allow_member_onboarding_reserved: bool = False,
     ) -> IdempotentCreateResult[Note]:
         asset = raw_asset
         created_asset = False
@@ -394,6 +431,7 @@ class NoteService(BaseService):
                 client_capture_id=resolved_client_capture_id,
                 status=status,
                 actor=actor,
+                allow_member_onboarding_reserved=allow_member_onboarding_reserved,
             )
         except Exception:
             if asset is not None and (created_asset or owns_raw_asset):
@@ -510,6 +548,11 @@ class NoteService(BaseService):
 
         note = self.get_note(note_id)
         self.authorization.require_contributor(note.project_id, actor=actor)
+        if is_member_checkpoint(note):
+            raise ValidationError(
+                "Member onboarding checkpoints cannot be transcribed outside "
+                "the guided workflow."
+            )
         claimed_at = utc_now()
         claim_id = uuid4()
         with self.unit_of_work() as repository:
@@ -572,6 +615,11 @@ class NoteService(BaseService):
 
         note = self.get_note(note_id)
         self.authorization.require_contributor(note.project_id, actor=actor)
+        if is_member_checkpoint(note):
+            raise ValidationError(
+                "Member onboarding checkpoints cannot be transcribed outside "
+                "the guided workflow."
+            )
         text, transcript_metadata, completed_at = self._request_voice_transcript(
             note=note,
             transcription_client=transcription_client,
@@ -699,10 +747,49 @@ class NoteService(BaseService):
         origin_provider: str | None = None,
         origin_model: str | None = None,
         origin_prompt_version: str | None = None,
+        allow_member_onboarding_checkpoint: bool = False,
     ) -> Note:
         note = self.get_note(note_id)
         self.authorization.require_contributor(note.project_id, actor=actor)
+        designated_checkpoint = self._member_onboarding_checkpoint_for_capture(note)
+        reserved_update = is_provided(metadata) and has_reserved_note_metadata(metadata)
+        if not allow_member_onboarding_checkpoint and (
+            is_member_checkpoint(note)
+            or has_reserved_note_metadata(note.metadata)
+            or reserved_update
+        ):
+            raise ValidationError(
+                "Member-onboarding metadata and checkpoints are immutable outside "
+                "the guided workflow."
+            )
         before = note.model_copy(deep=True)
+        if designated_checkpoint is not None:
+            if is_provided(targets):
+                proposed_targets = list(targets or [])
+                if not any(
+                    target.entity_type == EntityType.NOTE
+                    and target.entity_id == designated_checkpoint.note_id
+                    for target in proposed_targets
+                ):
+                    raise ValidationError(
+                        "The designated first capture must remain attached to its "
+                        "member onboarding checkpoint."
+                    )
+                targets = proposed_targets
+            if is_provided(status) and status not in {
+                NoteStatus.STAGED,
+                NoteStatus.COMMITTED,
+            }:
+                raise ValidationError(
+                    "The designated first capture must remain staged or committed."
+                )
+            if (
+                origin not in {None, EntityOrigin.USER}
+                or change_set_id is not None
+            ):
+                raise ValidationError(
+                    "The designated first capture must remain a direct human record."
+                )
         if is_provided(transcribed_text):
             note.transcribed_text = transcribed_text.strip() if transcribed_text else None
         if is_provided(targets):
@@ -743,6 +830,7 @@ class NoteService(BaseService):
         *,
         reason: NoteArchiveReason,
         actor: AuthContext | None = None,
+        allow_member_onboarding_checkpoint: bool = False,
     ) -> Note:
         """Set a captured note aside, recording why and by whom.
 
@@ -754,6 +842,14 @@ class NoteService(BaseService):
 
         note = self.get_note(note_id)
         self.authorization.require_contributor(note.project_id, actor=actor)
+        if is_member_checkpoint(note) and not allow_member_onboarding_checkpoint:
+            raise ValidationError(
+                "Member onboarding checkpoints cannot be archived outside the guided workflow."
+            )
+        if self._member_onboarding_checkpoint_for_capture(note) is not None:
+            raise ValidationError(
+                "The designated first member-onboarding capture cannot be archived."
+            )
         note.status = NoteStatus.ARCHIVED
         note.archived_reason = reason
         note.archived_at = utc_now()
@@ -773,9 +869,23 @@ class NoteService(BaseService):
         content = self.raw_storage.read(note.raw_asset.storage_id)
         return note.raw_asset, content
 
-    def delete_note(self, note_id: UUID, *, actor: AuthContext | None = None) -> Note:
+    def delete_note(
+        self,
+        note_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+        allow_member_onboarding_checkpoint: bool = False,
+    ) -> Note:
         note = self.get_note(note_id)
         self.authorization.require_contributor(note.project_id, actor=actor)
+        if is_member_checkpoint(note) and not allow_member_onboarding_checkpoint:
+            raise ValidationError(
+                "Member onboarding checkpoints cannot be deleted."
+            )
+        if self._member_onboarding_checkpoint_for_capture(note) is not None:
+            raise ValidationError(
+                "The designated first member-onboarding capture cannot be deleted."
+            )
         self._ensure_note_can_be_deleted(note)
         with self.unit_of_work() as repository:
             remove_goal_links_to_entity(
@@ -803,6 +913,193 @@ class NoteService(BaseService):
             for change_set in change_sets
         ):
             raise ValidationError("Note cannot be deleted while graph drafts reference it.")
+
+    def add_member_onboarding_question_target(
+        self,
+        checkpoint_id: UUID,
+        *,
+        question_id: UUID,
+        actor: AuthContext | None,
+    ) -> Note:
+        """Add one trusted alignment edge without replacing checkpoint state."""
+
+        checkpoint = self.get_note(checkpoint_id)
+        self.authorization.require_contributor(checkpoint.project_id, actor=actor)
+        if not is_member_checkpoint(checkpoint):
+            raise ValidationError("Onboarding link target must be a member checkpoint.")
+        question = self.questions.get_question(question_id)
+        if question.project_id != checkpoint.project_id:
+            raise ValidationError("Onboarding question link must stay in one project.")
+        with self.unit_of_work() as repository:
+            updated = repository.notes.add_member_onboarding_question_target(
+                checkpoint_id,
+                question_id=question_id,
+            )
+        if updated is None:
+            raise NotFoundError("Note does not exist.")
+        return updated
+
+    def _mark_first_member_onboarding_capture(
+        self,
+        note: Note,
+        *,
+        actor: AuthContext | None,
+    ) -> None:
+        """Project one genuine forward capture onto its author's checkpoint.
+
+        The generic capture remains the durable evidence record.  These trusted
+        checkpoint markers only make the onboarding funnel idempotently
+        queryable; they contain no research content.
+        """
+
+        if (
+            actor is None
+            or not actor.is_interactive
+            or note.status not in {NoteStatus.STAGED, NoteStatus.COMMITTED}
+            or note.origin != EntityOrigin.USER
+            or note.change_set_id is not None
+        ):
+            return
+
+        for target in note.targets:
+            if target.entity_type != EntityType.NOTE or target.entity_id == note.note_id:
+                continue
+            checkpoint = self.repository.notes.get(target.entity_id)
+            if checkpoint is None or not is_member_checkpoint(checkpoint):
+                continue
+            if checkpoint.project_id != note.project_id:
+                continue
+            if checkpoint.created_by_user_id is not None:
+                if checkpoint.created_by_user_id != note.created_by_user_id:
+                    continue
+            elif checkpoint.created_by != note.created_by:
+                continue
+            if checkpoint.metadata.get(FIRST_CAPTURE_NOTE_ID_KEY):
+                continue
+            captured_at = utc_now()
+            completed = self._checkpoint_alignment_is_resolved(checkpoint)
+            checkpoint = self.repository.notes.try_mark_member_onboarding_first_capture(
+                checkpoint.note_id,
+                capture_note_id=note.note_id,
+                captured_at=captured_at,
+                completed=completed,
+            )
+            if checkpoint is None:
+                continue
+            self.record_usage_event(
+                verb=UsageEventVerb.UPLOAD,
+                resource_type=UsageEventResourceType.MEMBER_ONBOARDING,
+                resource_id=checkpoint.note_id,
+                project_id=checkpoint.project_id,
+                actor=actor,
+            )
+            if completed:
+                self.record_usage_event(
+                    verb=UsageEventVerb.SUBMIT,
+                    resource_type=UsageEventResourceType.MEMBER_ONBOARDING,
+                    resource_id=checkpoint.note_id,
+                    project_id=checkpoint.project_id,
+                    actor=actor,
+                )
+            else:
+                self.schedule_member_onboarding_completion_reconciliation(
+                    checkpoint.note_id,
+                    actor=actor,
+                )
+            return
+
+    def _member_onboarding_checkpoint_for_capture(
+        self,
+        note: Note,
+    ) -> Note | None:
+        """Return the checkpoint that durably designated this capture, if any."""
+
+        checkpoints, _ = self.repository.query_notes(
+            project_id=note.project_id,
+            target_entity_type=EntityType.PROJECT.value,
+            target_entity_id=note.project_id,
+            limit=None,
+            offset=0,
+        )
+        capture_id = str(note.note_id)
+        return next(
+            (
+                checkpoint
+                for checkpoint in checkpoints
+                if is_member_checkpoint(checkpoint)
+                and checkpoint.metadata.get(FIRST_CAPTURE_NOTE_ID_KEY) == capture_id
+            ),
+            None,
+        )
+
+    def schedule_member_onboarding_completion_reconciliation(
+        self,
+        checkpoint_id: UUID,
+        *,
+        actor: AuthContext | None,
+    ) -> None:
+        """Close the rare alignment/capture commit-order race after commit."""
+
+        self.run_after_commit(
+            lambda: self._reconcile_member_onboarding_completion(
+                checkpoint_id,
+                actor=actor,
+            )
+        )
+
+    def _reconcile_member_onboarding_completion(
+        self,
+        checkpoint_id: UUID,
+        *,
+        actor: AuthContext | None,
+    ) -> None:
+        checkpoint = self.repository.notes.get(checkpoint_id)
+        if (
+            checkpoint is None
+            or checkpoint.metadata.get(COMPLETED_AT_KEY)
+            or not checkpoint.metadata.get(FIRST_CAPTURE_NOTE_ID_KEY)
+            or not self._checkpoint_alignment_is_resolved(checkpoint)
+        ):
+            return
+        completed = self.repository.notes.try_mark_member_onboarding_completed(
+            checkpoint_id,
+            completed_at=utc_now(),
+        )
+        if completed is None:
+            return
+        # Request middleware has already committed before running this hook;
+        # publish the CAS before scheduling the fail-soft usage event.
+        self.repository.commit()
+        self.record_usage_event(
+            verb=UsageEventVerb.SUBMIT,
+            resource_type=UsageEventResourceType.MEMBER_ONBOARDING,
+            resource_id=completed.note_id,
+            project_id=completed.project_id,
+            actor=actor,
+        )
+
+    def _checkpoint_alignment_is_resolved(self, checkpoint: Note) -> bool:
+        if checkpoint.metadata.get("member_onboarding_alignment_mode") in {
+            "manual",
+            "ai",
+        }:
+            return True
+        drafts, _ = self.repository.query_graph_change_sets(
+            project_id=checkpoint.project_id,
+            source_note_id=checkpoint.note_id,
+            purpose=GraphDraftPurpose.MEMBER_CHECKPOINT_ALIGNMENT.value,
+            limit=None,
+            offset=0,
+        )
+        return any(
+            draft.status
+            in {
+                GraphChangeSetStatus.SUBMITTED,
+                GraphChangeSetStatus.REJECTED,
+                GraphChangeSetStatus.COMMITTED,
+            }
+            for draft in drafts
+        )
 
     def validate_target(self, target: EntityRef, project_id: UUID) -> None:
         """Validate one note target and project scope without writing."""

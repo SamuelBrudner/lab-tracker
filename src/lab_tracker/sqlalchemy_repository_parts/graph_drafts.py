@@ -3,15 +3,23 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from datetime import datetime
+from hashlib import blake2b
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, delete, func, or_, select, text, update
 from sqlalchemy.orm import Session as OrmSession
 
-from lab_tracker.db_models import GraphChangeOperationModel, GraphChangeSetModel, UserModel
+from lab_tracker.db_models import (
+    GraphChangeOperationModel,
+    GraphChangeSetModel,
+    NoteModel,
+    UserModel,
+)
 from lab_tracker.db_types import ensure_uuid
-from lab_tracker.errors import ValidationError
+from lab_tracker.errors import ConflictError, ValidationError
+from lab_tracker.member_onboarding import ALIGNMENT_MODE_KEY
 from lab_tracker.models import (
     AcceptanceMode,
     EntityType,
@@ -21,6 +29,7 @@ from lab_tracker.models import (
     GraphChangeSet,
     GraphChangeSetStatus,
     GraphDraftMode,
+    GraphDraftPurpose,
     GraphDraftSemanticType,
     utc_now,
 )
@@ -28,6 +37,18 @@ from lab_tracker.repository import EntityRepository
 from lab_tracker.sqlalchemy_mapper_parts.common import as_utc
 
 from .common import apply_pagination, count_from_statement, replace_child_rows, uuid_values
+
+_GENERATION_KEY_LOCK_DOMAIN = b"lab-tracker:graph-draft-generation:v1\0"
+
+
+def _generation_key_lock_id(batch_key: str) -> int:
+    """Return a stable signed-bigint advisory lock for one generation key."""
+
+    digest = blake2b(
+        _GENERATION_KEY_LOCK_DOMAIN + batch_key.encode("utf-8"),
+        digest_size=8,
+    ).digest()
+    return int.from_bytes(digest, byteorder="big", signed=True)
 
 
 def _uuid(value: str | None) -> UUID | None:
@@ -134,11 +155,16 @@ def change_set_to_model(change_set: GraphChangeSet) -> GraphChangeSetModel:
         model=change_set.model,
         prompt_version=change_set.prompt_version,
         draft_mode=change_set.draft_mode.value,
+        purpose=change_set.purpose.value,
         context_packet=dict(change_set.context_packet),
         summary=change_set.summary,
         uncertain_fields=list(change_set.uncertain_fields),
         clarification_requests=list(change_set.clarification_requests),
         status=change_set.status.value,
+        generation_claim_token=_uuid_str(change_set.generation_claim_token),
+        generation_claimed_at=change_set.generation_claimed_at,
+        generation_lease_expires_at=change_set.generation_lease_expires_at,
+        generation_attempt_count=change_set.generation_attempt_count,
         commit_message=change_set.commit_message,
         error_metadata=dict(change_set.error_metadata),
         created_by=change_set.created_by,
@@ -171,11 +197,16 @@ def apply_change_set_to_model(row: GraphChangeSetModel, change_set: GraphChangeS
     row.model = change_set.model
     row.prompt_version = change_set.prompt_version
     row.draft_mode = change_set.draft_mode.value
+    row.purpose = change_set.purpose.value
     row.context_packet = dict(change_set.context_packet)
     row.summary = change_set.summary
     row.uncertain_fields = list(change_set.uncertain_fields)
     row.clarification_requests = list(change_set.clarification_requests)
     row.status = change_set.status.value
+    row.generation_claim_token = _uuid_str(change_set.generation_claim_token)
+    row.generation_claimed_at = change_set.generation_claimed_at
+    row.generation_lease_expires_at = change_set.generation_lease_expires_at
+    row.generation_attempt_count = change_set.generation_attempt_count
     row.commit_message = change_set.commit_message
     row.error_metadata = dict(change_set.error_metadata)
     row.created_by = change_set.created_by
@@ -219,11 +250,18 @@ def change_set_from_model(
         model=row.model,
         prompt_version=row.prompt_version,
         draft_mode=GraphDraftMode(row.draft_mode or GraphDraftMode.GRAPH_CONTEXT.value),
+        purpose=GraphDraftPurpose(row.purpose or GraphDraftPurpose.GENERAL.value),
         context_packet=_dict(row.context_packet),
         summary=row.summary or "",
         uncertain_fields=list(row.uncertain_fields or []),
         clarification_requests=list(row.clarification_requests or []),
         status=GraphChangeSetStatus(row.status),
+        generation_claim_token=_uuid(row.generation_claim_token),
+        generation_claimed_at=_as_utc_optional(row.generation_claimed_at),
+        generation_lease_expires_at=_as_utc_optional(
+            row.generation_lease_expires_at
+        ),
+        generation_attempt_count=int(row.generation_attempt_count or 0),
         commit_message=row.commit_message,
         error_metadata=_dict(row.error_metadata),
         operation_count=operation_count if operation_count is not None else len(operation_list),
@@ -336,6 +374,18 @@ class SQLAlchemyGraphChangeSetRepository(EntityRepository[GraphChangeSet]):
             return None
         return self._from_rows([row])[0]
 
+    def get_for_update(self, entity_id: UUID) -> GraphChangeSet | None:
+        self._session.flush()
+        row = self._session.scalar(
+            select(GraphChangeSetModel)
+            .where(GraphChangeSetModel.change_set_id == str(entity_id))
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if row is None:
+            return None
+        return self._from_rows([row])[0]
+
     def project_id_for(self, change_set_id: UUID) -> UUID | None:
         """Resolve read scope without hydrating operations or attribution."""
 
@@ -346,6 +396,269 @@ class SQLAlchemyGraphChangeSetRepository(EntityRepository[GraphChangeSet]):
             )
         )
         return _uuid(project_id)
+
+    def claim_for_generation(
+        self,
+        candidate: GraphChangeSet,
+        *,
+        claimed_at: datetime,
+        lease_until: datetime,
+        claim_token: UUID,
+    ) -> tuple[GraphChangeSet, bool]:
+        """Create or atomically reclaim one provider-generation attempt."""
+
+        if lease_until <= claimed_at:
+            raise ValueError("lease_until must be later than claimed_at.")
+        self._session.flush()
+        if (
+            candidate.batch_key is not None
+            and self._session.get_bind().dialect.name == "postgresql"
+        ):
+            # Serialize only the tiny first-claim transaction for this stable
+            # generation key. The lock is transaction scoped and is released
+            # before provider I/O, so two first requests cannot both observe
+            # an absent row and race on the unique constraint.
+            self._session.execute(
+                text("SELECT pg_advisory_xact_lock(:lock_key)"),
+                {"lock_key": _generation_key_lock_id(candidate.batch_key)},
+            )
+        if candidate.purpose == GraphDraftPurpose.MEMBER_CHECKPOINT_ALIGNMENT:
+            # Manual alignment takes this same checkpoint row lock before it
+            # checks for a live AI draft.  Keeping the order checkpoint ->
+            # graph-change-set makes the two modes mutually exclusive even
+            # when their requests start concurrently.
+            checkpoint = self._session.scalar(
+                select(NoteModel)
+                .where(NoteModel.note_id == str(candidate.source_note_id))
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if checkpoint is None:
+                raise ValidationError(
+                    "Member onboarding source checkpoint is unavailable."
+                )
+            if dict(checkpoint.note_metadata or {}).get(ALIGNMENT_MODE_KEY) == "manual":
+                raise ConflictError(
+                    "The checkpoint alignment has already been finalized manually."
+                )
+        row = (
+            self._session.scalar(
+                select(GraphChangeSetModel).where(
+                    GraphChangeSetModel.batch_key == candidate.batch_key
+                )
+            )
+            if candidate.batch_key is not None
+            else None
+        )
+        if row is None:
+            candidate.status = GraphChangeSetStatus.DRAFTING
+            candidate.generation_claim_token = claim_token
+            candidate.generation_claimed_at = claimed_at
+            candidate.generation_lease_expires_at = lease_until
+            candidate.generation_attempt_count = 1
+            candidate.updated_at = claimed_at
+            self._session.add(change_set_to_model(candidate))
+            self._session.flush()
+            persisted = self.get(candidate.change_set_id)
+            if persisted is None:  # pragma: no cover - flush made the row visible
+                raise RuntimeError("Claimed graph draft could not be reloaded.")
+            return persisted, True
+
+        self._ensure_same_generation_identity(row, candidate)
+        eligible = or_(
+            GraphChangeSetModel.status == GraphChangeSetStatus.FAILED.value,
+            and_(
+                GraphChangeSetModel.status == GraphChangeSetStatus.DRAFTING.value,
+                or_(
+                    GraphChangeSetModel.generation_lease_expires_at.is_(None),
+                    GraphChangeSetModel.generation_lease_expires_at <= claimed_at,
+                ),
+            ),
+        )
+        result = self._session.execute(
+            update(GraphChangeSetModel)
+            .where(GraphChangeSetModel.change_set_id == row.change_set_id)
+            .where(eligible)
+            .values(
+                source_note_id=str(candidate.source_note_id),
+                source_note_ids=[str(note_id) for note_id in candidate.source_note_ids],
+                source_checksum=candidate.source_checksum,
+                source_content_type=candidate.source_content_type,
+                source_filename=candidate.source_filename,
+                batch_window_start=candidate.batch_window_start,
+                batch_window_end=candidate.batch_window_end,
+                provider=candidate.provider,
+                model=candidate.model,
+                prompt_version=candidate.prompt_version,
+                draft_mode=candidate.draft_mode.value,
+                purpose=candidate.purpose.value,
+                context_packet=dict(candidate.context_packet),
+                summary="",
+                uncertain_fields=[],
+                clarification_requests=[],
+                status=GraphChangeSetStatus.DRAFTING.value,
+                generation_claim_token=str(claim_token),
+                generation_claimed_at=claimed_at,
+                generation_lease_expires_at=lease_until,
+                generation_attempt_count=(
+                    GraphChangeSetModel.generation_attempt_count + 1
+                ),
+                commit_message=None,
+                error_metadata={},
+                review_assignee=candidate.review_assignee,
+                review_assignee_user_id=_uuid_str(
+                    candidate.review_assignee_user_id
+                ),
+                updated_at=claimed_at,
+                submitted_at=None,
+                submitted_by=None,
+                reviewed_at=None,
+                reviewed_by=None,
+                review_note=None,
+                committed_at=None,
+                committed_by=None,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount != 1:
+            self._session.expire_all()
+            current = self.get(ensure_uuid(row.change_set_id))
+            if current is None:  # pragma: no cover - rows are not deleted here
+                raise RuntimeError("Graph draft disappeared while claiming generation.")
+            return current, False
+        self._session.execute(
+            delete(GraphChangeOperationModel).where(
+                GraphChangeOperationModel.change_set_id == row.change_set_id
+            )
+        )
+        self._session.flush()
+        self._session.expire_all()
+        claimed = self.get(ensure_uuid(row.change_set_id))
+        if claimed is None:  # pragma: no cover - conditional update retained row
+            raise RuntimeError("Claimed graph draft could not be reloaded.")
+        return claimed, True
+
+    def renew_generation_claim(
+        self,
+        change_set_id: UUID,
+        claim_token: UUID,
+        *,
+        renewed_at: datetime,
+        lease_until: datetime,
+    ) -> GraphChangeSet | None:
+        if lease_until <= renewed_at:
+            raise ValueError("lease_until must be later than renewed_at.")
+        self._session.flush()
+        result = self._session.execute(
+            update(GraphChangeSetModel)
+            .where(GraphChangeSetModel.change_set_id == str(change_set_id))
+            .where(GraphChangeSetModel.status == GraphChangeSetStatus.DRAFTING.value)
+            .where(GraphChangeSetModel.generation_claim_token == str(claim_token))
+            .where(GraphChangeSetModel.generation_lease_expires_at > renewed_at)
+            .values(
+                generation_lease_expires_at=lease_until,
+                updated_at=renewed_at,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount != 1:
+            return None
+        self._session.expire_all()
+        return self.get(change_set_id)
+
+    def complete_generation_claim(
+        self,
+        change_set: GraphChangeSet,
+        claim_token: UUID,
+        *,
+        completed_at: datetime,
+    ) -> GraphChangeSet | None:
+        if change_set.status != GraphChangeSetStatus.READY:
+            raise ValueError("Completed graph generation must have READY status.")
+        return self._finish_generation_claim(
+            change_set,
+            claim_token,
+            finished_at=completed_at,
+        )
+
+    def fail_generation_claim(
+        self,
+        change_set: GraphChangeSet,
+        claim_token: UUID,
+        *,
+        failed_at: datetime,
+    ) -> GraphChangeSet | None:
+        if change_set.status != GraphChangeSetStatus.FAILED:
+            raise ValueError("Failed graph generation must have FAILED status.")
+        return self._finish_generation_claim(
+            change_set,
+            claim_token,
+            finished_at=failed_at,
+        )
+
+    def _finish_generation_claim(
+        self,
+        change_set: GraphChangeSet,
+        claim_token: UUID,
+        *,
+        finished_at: datetime,
+    ) -> GraphChangeSet | None:
+        self._session.flush()
+        result = self._session.execute(
+            update(GraphChangeSetModel)
+            .where(
+                GraphChangeSetModel.change_set_id == str(change_set.change_set_id)
+            )
+            .where(GraphChangeSetModel.status == GraphChangeSetStatus.DRAFTING.value)
+            .where(GraphChangeSetModel.generation_claim_token == str(claim_token))
+            .where(GraphChangeSetModel.generation_lease_expires_at > finished_at)
+            .values(
+                context_packet=dict(change_set.context_packet),
+                summary=change_set.summary,
+                uncertain_fields=list(change_set.uncertain_fields),
+                clarification_requests=list(change_set.clarification_requests),
+                status=change_set.status.value,
+                generation_claim_token=None,
+                generation_claimed_at=None,
+                generation_lease_expires_at=None,
+                error_metadata=dict(change_set.error_metadata),
+                updated_at=finished_at,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount != 1:
+            return None
+        entity_id = str(change_set.change_set_id)
+        replace_child_rows(
+            self._session,
+            GraphChangeOperationModel,
+            GraphChangeOperationModel.change_set_id,
+            entity_id,
+            [operation_to_model(operation) for operation in change_set.operations],
+        )
+        self._session.flush()
+        self._session.expire_all()
+        return self.get(change_set.change_set_id)
+
+    @staticmethod
+    def _ensure_same_generation_identity(
+        row: GraphChangeSetModel,
+        candidate: GraphChangeSet,
+    ) -> None:
+        persisted_note_ids = [
+            str(note_id) for note_id in (row.source_note_ids or [row.source_note_id])
+        ]
+        candidate_note_ids = [str(note_id) for note_id in candidate.source_note_ids]
+        if (
+            str(row.project_id) != str(candidate.project_id)
+            or str(row.source_note_id) != str(candidate.source_note_id)
+            or persisted_note_ids != candidate_note_ids
+            or row.draft_mode != candidate.draft_mode.value
+            or row.purpose != candidate.purpose.value
+        ):
+            raise ValidationError(
+                "Graph draft generation key was already used for different source fields."
+            )
 
     def list(self) -> list[GraphChangeSet]:
         self._session.flush()
@@ -413,6 +726,7 @@ class SQLAlchemyGraphChangeSetRepository(EntityRepository[GraphChangeSet]):
         status: str | None = None,
         source_note_id: UUID | None = None,
         draft_mode: str | None = None,
+        purpose: str | None = None,
         batch_key: str | None = None,
         limit: int | None = None,
         offset: int = 0,
@@ -439,6 +753,9 @@ class SQLAlchemyGraphChangeSetRepository(EntityRepository[GraphChangeSet]):
         if draft_mode is not None:
             stmt = stmt.where(GraphChangeSetModel.draft_mode == draft_mode)
             count_stmt = count_stmt.where(GraphChangeSetModel.draft_mode == draft_mode)
+        if purpose is not None:
+            stmt = stmt.where(GraphChangeSetModel.purpose == purpose)
+            count_stmt = count_stmt.where(GraphChangeSetModel.purpose == purpose)
         if batch_key is not None:
             stmt = stmt.where(GraphChangeSetModel.batch_key == batch_key)
             count_stmt = count_stmt.where(GraphChangeSetModel.batch_key == batch_key)

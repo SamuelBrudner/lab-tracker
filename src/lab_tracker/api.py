@@ -18,6 +18,7 @@ from lab_tracker.api_parts import (
     ExplorationApiMixin,
     GoalsApiMixin,
     GraphDraftsApiMixin,
+    MemberOnboardingApiMixin,
     NotesApiMixin,
     ProjectsApiMixin,
     ProvenanceApiMixin,
@@ -57,6 +58,7 @@ from lab_tracker.services import (
     GraphDraftService,
     GraphPatchApplier,
     GraphPatchValidator,
+    MemberOnboardingService,
     NoteService,
     OwnershipReassignmentService,
     ProjectAuthorizationPolicy,
@@ -97,6 +99,7 @@ class LabTrackerAPI(
     AnalysesApiMixin,
     GoalsApiMixin,
     GraphDraftsApiMixin,
+    MemberOnboardingApiMixin,
     ExplorationApiMixin,
     ProvenanceApiMixin,
     UsageApiMixin,
@@ -335,6 +338,16 @@ class LabTrackerAPI(
             review=graph_draft_review,
             commit=graph_draft_commit,
             scheduling=graph_draft_scheduling,
+        )
+        self.member_onboarding: MemberOnboardingService = MemberOnboardingService(
+            context,
+            projects=self.projects,
+            questions=self.questions,
+            notes=self.notes,
+            authorization=self.project_authorization,
+            graph_records=graph_draft_records,
+            graph_generation=graph_draft_generation,
+            graph_validator=graph_patch_validator,
         )
 
     def for_request(self, repository: LabTrackerRepository) -> LabTrackerAPI:

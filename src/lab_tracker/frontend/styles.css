@@ -2076,6 +2076,104 @@ button.project-graph-legend-item:hover {
   margin-top: 0.7rem;
 }
 
+.member-onboarding-entry > .row-between,
+.member-onboarding-page > .item-head {
+  align-items: flex-start;
+  gap: 1rem;
+}
+
+.member-onboarding-heading-actions {
+  align-items: flex-end;
+  flex: 0 0 auto;
+}
+
+.member-onboarding-checkpoint fieldset {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  margin: 0;
+  padding: 0.75rem;
+}
+
+.member-onboarding-checkpoint legend {
+  font-weight: 700;
+  padding: 0 0.25rem;
+}
+
+.member-onboarding-question-input {
+  align-items: end;
+  margin-bottom: 0.55rem;
+}
+
+.member-onboarding-question-input label {
+  flex: 1 1 26rem;
+}
+
+.member-onboarding-saved-checkpoint p,
+.member-onboarding-saved-checkpoint ol {
+  margin-bottom: 0;
+}
+
+.member-onboarding-payoff {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.member-onboarding-map .item {
+  align-items: center;
+  display: flex;
+  gap: 0.65rem;
+  justify-content: space-between;
+}
+
+.member-onboarding-map .map-state-awaiting_owner,
+.member-onboarding-map .map-state-member_reviewed,
+.member-onboarding-map .map-state-pending,
+.member-onboarding-map .map-state-proposed {
+  background: transparent;
+  border-style: dashed;
+  border-width: 2px;
+}
+
+.member-onboarding-map .map-state-unreviewed {
+  opacity: 0.62;
+}
+
+.member-onboarding-map .map-status-proposed {
+  opacity: 0.62;
+}
+
+.member-onboarding-map .map-state-personal {
+  border-left: 4px solid var(--accent);
+}
+
+.member-onboarding-map-legend {
+  margin-top: 0.65rem;
+}
+
+.member-onboarding-brief {
+  max-height: 30rem;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+.member-onboarding-owner-queue {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.member-onboarding-owner-queue .row-between {
+  gap: 0.75rem;
+}
+
+.setup-project-orientation {
+  margin-top: 0.75rem;
+}
+
+.capture-locked-checkpoint {
+  border-left: 4px solid var(--accent);
+}
+
 .setup-readiness {
   border-top: 1px solid var(--line);
   margin-top: 0.85rem;
@@ -2525,6 +2623,21 @@ button.project-graph-legend-item:hover {
 
   .setup-finish .btn-primary {
     width: 100%;
+  }
+
+  .member-onboarding-entry > .row-between,
+  .member-onboarding-page > .item-head,
+  .member-onboarding-owner-queue .row-between {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .member-onboarding-heading-actions {
+    align-items: stretch;
+  }
+
+  .member-onboarding-payoff {
+    grid-template-columns: 1fr;
   }
 
   .review-app-shell {

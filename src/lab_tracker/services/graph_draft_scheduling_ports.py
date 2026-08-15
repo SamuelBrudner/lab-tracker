@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime
 from typing import Protocol
 from uuid import UUID
@@ -41,6 +42,7 @@ class BatchDraftGenerator(Protocol):
         batch_key: str | None = None,
         review_assignee: str | None = None,
         review_assignee_user_id: UUID | None = None,
+        before_attempt: Callable[[int], bool] | None = None,
     ) -> GraphChangeSet: ...
 
 
@@ -186,4 +188,32 @@ class SchedulingRepository(Protocol):
         self,
         *,
         claimed_at: datetime,
+        lease_until: datetime,
+        claim_token: UUID,
+    ) -> GraphDraftBatchRun | None: ...
+
+    def claim_graph_draft_batch_run(
+        self,
+        run_id: UUID,
+        *,
+        claimed_at: datetime,
+        lease_until: datetime,
+        claim_token: UUID,
+    ) -> GraphDraftBatchRun | None: ...
+
+    def renew_graph_draft_batch_run_claim(
+        self,
+        run_id: UUID,
+        claim_token: UUID,
+        *,
+        renewed_at: datetime,
+        lease_until: datetime,
+    ) -> GraphDraftBatchRun | None: ...
+
+    def finish_graph_draft_batch_run_claim(
+        self,
+        run: GraphDraftBatchRun,
+        claim_token: UUID,
+        *,
+        finished_at: datetime,
     ) -> GraphDraftBatchRun | None: ...

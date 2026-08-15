@@ -15,7 +15,7 @@ from read_opacity_inventory import (
 
 
 def test_read_opacity_inventory_has_the_exact_suite_partition() -> None:
-    assert len(READ_OPACITY_VARIANTS) == 47
+    assert len(READ_OPACITY_VARIANTS) == 50
     assert set(READ_OPACITY_VARIANTS_BY_SUITE) == {
         ACQUISITION_SUITE,
         CORE_SUITE,
@@ -24,13 +24,13 @@ def test_read_opacity_inventory_has_the_exact_suite_partition() -> None:
     }
     assert Counter(variant.suite for variant in READ_OPACITY_VARIANTS) == {
         ACQUISITION_SUITE: 10,
-        CORE_SUITE: 15,
+        CORE_SUITE: 18,
         EVIDENCE_ARTIFACT_SUITE: 18,
         WORKFLOW_REGISTRY_SUITE: 4,
     }
     assert {suite: len(variants) for suite, variants in READ_OPACITY_VARIANTS_BY_SUITE.items()} == {
         ACQUISITION_SUITE: 10,
-        CORE_SUITE: 15,
+        CORE_SUITE: 18,
         EVIDENCE_ARTIFACT_SUITE: 18,
         WORKFLOW_REGISTRY_SUITE: 4,
     }
@@ -43,8 +43,8 @@ def test_read_opacity_inventory_ids_and_semantic_variants_are_unique() -> None:
         for variant in READ_OPACITY_VARIANTS
     ]
 
-    assert len(coverage_ids) == len(set(coverage_ids)) == 47
-    assert len(semantic_variants) == len(set(semantic_variants)) == 47
+    assert len(coverage_ids) == len(set(coverage_ids)) == 50
+    assert len(semantic_variants) == len(set(semantic_variants)) == 50
 
     for variant in READ_OPACITY_VARIANTS:
         coverage_prefix = f"{variant.suite}."
@@ -73,8 +73,8 @@ def test_read_opacity_inventory_matches_openapi_operations(app: FastAPI) -> None
             variant.variant
         )
 
-    assert len(inventory_by_operation) == 45
-    assert len({variant.operation_id for variant in READ_OPACITY_VARIANTS}) == 45
+    assert len(inventory_by_operation) == 48
+    assert len({variant.operation_id for variant in READ_OPACITY_VARIANTS}) == 48
     assert {
         operation: variants
         for operation, variants in inventory_by_operation.items()

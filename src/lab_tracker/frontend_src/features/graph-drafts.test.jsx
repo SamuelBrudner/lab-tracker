@@ -44,6 +44,30 @@ function draftFixture(overrides = {}) {
   };
 }
 
+function onboardingAccessFixture(capabilities = {}) {
+  return {
+    alignment: null,
+    brief_markdown: "",
+    capabilities: {
+      can_align: true,
+      can_capture: true,
+      can_commit: false,
+      can_create_checkpoint: true,
+      can_read: true,
+      ...capabilities,
+    },
+    checkpoint: null,
+    first_capture: null,
+    guided_fields: null,
+    map_items: [],
+    member_complete: false,
+    owner_commit_pending: false,
+    project_id: "project-1",
+    role: "contributor",
+    state: "not_started",
+  };
+}
+
 function renderDraft(draft, extraProps = {}) {
   installFetchMock([
     { match: `/graph-drafts/${draft.change_set_id}`, response: apiResponse(draft) },
@@ -110,6 +134,93 @@ describe("spokenReviewScript", () => {
 });
 
 describe("GraphDraftDetailCard narrative review", () => {
+  it("uses loaded onboarding purpose to forbid bulk review and require submitted status for owner commit", async () => {
+    const ready = draftFixture({
+      purpose: "member_checkpoint_alignment",
+      status: "ready",
+      operations: [
+        {
+          ...draftFixture().operations[0],
+          acceptance_mode: "human_selected",
+          status: "accepted",
+        },
+      ],
+    });
+    const readyView = renderDraft(ready);
+
+    expect(await screen.findByText("1 of 1 kept")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Accept all" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Commit accepted changes" })).toBeDisabled();
+    readyView.unmount();
+
+    const submitted = { ...ready, status: "submitted" };
+    renderDraft(submitted);
+    await screen.findByText("1 of 1 kept");
+    expect(screen.queryByRole("button", { name: "Accept all" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Commit accepted changes" })).toBeEnabled();
+  });
+
+  it("keeps another member's onboarding draft read-only on the generic review route", async () => {
+    const ready = draftFixture({
+      created_by: "author-2",
+      created_by_user_id: "author-2",
+      purpose: "member_checkpoint_alignment",
+      review_assignee: "author-2",
+      review_assignee_user_id: "author-2",
+      status: "changes_requested",
+    });
+    renderDraft(ready, {
+      canManageGraph: false,
+      user: { role: "viewer", user_id: "member-1", username: "member" },
+      routes: [
+        {
+          match: "/projects/project-1/members?limit=200",
+          response: apiResponse([{ role: "contributor", user_id: "member-1" }]),
+        },
+        {
+          match: "/projects/project-1/member-onboarding",
+          response: apiResponse(onboardingAccessFixture()),
+        },
+      ],
+    });
+
+    expect(await screen.findByLabelText("Edit JSON payload")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Submit for review" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Revise with AI" })).toBeDisabled();
+  });
+
+  it("honors server-derived inherited owner capability for onboarding commit", async () => {
+    const submitted = draftFixture({
+      purpose: "member_checkpoint_alignment",
+      status: "submitted",
+      operations: [
+        {
+          ...draftFixture().operations[0],
+          acceptance_mode: "human_selected",
+          status: "accepted",
+        },
+      ],
+    });
+    renderDraft(submitted, {
+      canManageGraph: false,
+      user: { role: "viewer", user_id: "group-owner", username: "owner" },
+      routes: [
+        {
+          match: "/projects/project-1/members?limit=200",
+          response: apiResponse([]),
+        },
+        {
+          match: "/projects/project-1/member-onboarding",
+          response: apiResponse(onboardingAccessFixture({ can_commit: true })),
+        },
+      ],
+    });
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Commit accepted changes" })).toBeEnabled()
+    );
+  });
+
   it("keeps proposal cards as the default and offers a cited prose view of the same edits", async () => {
     const base = draftFixture();
     const secondOperation = {
