@@ -35,6 +35,6 @@
     "vitest": "^4.1.9"
   },
   "dependencies": {
-    "@xyflow/react": "^12.11.2"
+    "@xyflow/react": "^12.11.3"
   }
 }
