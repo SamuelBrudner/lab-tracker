@@ -4,9 +4,10 @@
 `lt hpc`. It records the *state of an analysis repository* — commit SHA, dirty
 flag, remote, branch, produced artifacts, and an environment fingerprint — as
 durable local outbox events that later sync into staged Lab Tracker evidence
-notes. Like its siblings it never blocks the caller, never uploads bytes (only
-metadata and hashes), and everything semantic stays behind the human review
-gate.
+notes. Like its siblings it never blocks the caller. Commit events upload a
+bounded textual diff (800 lines by default) alongside metadata and hashes;
+declared run artifacts stay as pointers. Everything semantic remains behind the
+human review gate.
 
 The usual flow: a post-commit git hook self-reports every commit; researchers
 optionally annotate captures or declare run outputs; the outbox drains whenever
@@ -66,11 +67,11 @@ requires human review.
 ### Post-Commit Hook
 
 Every `git commit` records a `commit` event: commit SHA, branch, remote, commit
-subject/author, dirty-tree flag, and the environment fingerprint. Events are
-idempotent per commit — a re-fired hook updates nothing and creates no
-duplicates. The hook only lands the capture in the staged-note inbox; graph
-proposal generation waits for the configured daily-review schedule or an
-explicit on-demand review trigger.
+subject/author, dirty-tree flag, environment fingerprint, file summary, and a
+bounded textual diff. Events are idempotent per commit — a re-fired hook updates
+nothing and creates no duplicates. The hook only lands the capture in the
+staged-note inbox; graph proposal generation waits for the configured
+daily-review schedule or an explicit on-demand review trigger.
 
 ### Annotation
 
@@ -117,7 +118,10 @@ lt repo sync [--dry-run] [--request-draft] [--limit N]
 ```
 
 Sync uploads each event as a staged markdown note (`provider=git`) under the
-project's normal review flow, deduplicated through the evidence index. The
+project's normal review flow. Commit notes contain their bounded diff; the inbox
+exposes it through the safe text-asset preview, and scheduled review includes it
+within the aggregate source-context budget. Events are deduplicated through the
+evidence index. The
 shared evidence identity is `<normalized-remote>@<commit>` — the same identity
 `scripts/create-analysis-graph-draft.py` emits, so hook-based and CI-based
 capture of one commit dedup to one identity rather than parallel note streams.
@@ -163,9 +167,9 @@ credentials. See
 
 ## Boundaries
 
-- **Commit-time vs run-time.** The hook captures what a commit *is*; `finish`
-  captures what a run *produced*. Both are metadata + hashes; data files never
-  leave the host.
+- **Commit-time vs run-time.** The hook captures what a commit *is*, including a
+  bounded textual diff; `finish` captures what a run *produced* as metadata and
+  hashes. Declared data files never leave the host.
 - **Dirty working trees** are recorded as a flag on the capture, but there is
   no commit to pin — uncommitted state is metadata, not resolvable provenance.
 - **No continuous monitoring.** Capture is event-based (commits, explicit

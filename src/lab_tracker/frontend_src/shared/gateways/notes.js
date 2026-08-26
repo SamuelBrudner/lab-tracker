@@ -3,6 +3,7 @@
 // Typed gateway for the note domain.
 import { apiFetch, buildApiPath } from "../api.js";
 import {
+  boolean,
   nullish,
   object,
   oneOf,
@@ -25,12 +26,13 @@ const noteStatusShape = /** @type {import("../contract.js").Validator<NonNullabl
   oneOf("staged", "committed", "archived")
 );
 
-// A note's uploaded asset descriptor. Present only for binary notes; the UI
-// reads content_type and filename.
+// A note's uploaded asset descriptor. Text uploads keep their content in raw
+// storage too; is_text tells the UI when the bounded text projection is safe.
 /** @satisfies {NoteRawAssetValidator} */
 const rawAssetShape = object({
   content_type: optional(string),
   filename: optional(string),
+  is_text: optional(boolean),
 });
 
 // A note as read by the capture panel and detail card. Identity is required;

@@ -65,6 +65,55 @@ def test_upload_note_raw_preserves_manual_transcript(tmp_path):
     assert note.transcribed_text == "manual transcript"
 
 
+def test_uploaded_text_asset_has_bounded_utf8_projection(tmp_path):
+    api = repository_backed_api(raw_storage=LocalNoteStorage(tmp_path))
+    actor = _actor()
+    project = api.create_project("Text evidence", actor=actor)
+    content = "αβγ\n## Diff\ndiff --git a/a.py b/a.py\n".encode()
+
+    note = api.upload_note_raw(
+        project_id=project.project_id,
+        content=content,
+        filename="commit.md",
+        content_type="text/markdown; charset=utf-8",
+        actor=actor,
+    )
+
+    assert note.raw_asset is not None
+    assert note.raw_asset.is_text is True
+    asset, excerpt = api.read_note_raw_text(note.note_id, max_chars=3)
+    assert asset == note.raw_asset
+    assert excerpt.text == "αβγ"
+    assert excerpt.included_bytes == len("αβγ".encode())
+    assert excerpt.omitted_bytes == len(content) - excerpt.included_bytes
+    assert excerpt.truncated is True
+
+
+def test_uploaded_text_projection_rejects_binary_and_invalid_utf8(tmp_path):
+    api = repository_backed_api(raw_storage=LocalNoteStorage(tmp_path))
+    actor = _actor()
+    project = api.create_project("Text validation", actor=actor)
+    binary_note = api.upload_note_raw(
+        project_id=project.project_id,
+        content=b"image",
+        filename="image.jpg",
+        content_type="image/jpeg",
+        actor=actor,
+    )
+    invalid_note = api.upload_note_raw(
+        project_id=project.project_id,
+        content=b"valid prefix\xff",
+        filename="invalid.txt",
+        content_type="text/plain",
+        actor=actor,
+    )
+
+    with pytest.raises(ValidationError, match="not a supported text type"):
+        api.read_note_raw_text(binary_note.note_id, max_chars=100)
+    with pytest.raises(ValidationError, match="valid UTF-8"):
+        api.read_note_raw_text(invalid_note.note_id, max_chars=100)
+
+
 def test_upload_note_raw_rolls_back_raw_asset_when_note_creation_fails(tmp_path):
     api = repository_backed_api(raw_storage=LocalNoteStorage(tmp_path))
     actor = _actor()

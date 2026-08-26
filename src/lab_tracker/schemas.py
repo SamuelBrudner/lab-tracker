@@ -321,6 +321,18 @@ class NoteRawDownloadRead(BaseModel):
     content_base64: str
 
 
+class NoteRawTextRead(BaseModel):
+    storage_id: UUID
+    filename: str
+    content_type: str
+    size_bytes: int
+    checksum: str
+    text: str
+    truncated: bool
+    included_bytes: int
+    omitted_bytes: int
+
+
 class ProjectCreate(RequestModel):
     name: NonBlankStr
     description: str | None = None

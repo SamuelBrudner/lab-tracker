@@ -32,6 +32,7 @@ from lab_tracker.local_store_locator import (
     canonical_local_store_uri,
     canonical_store_uri,
 )
+from lab_tracker.note_text import is_text_content_type
 
 NoteMetadataScalar = str | bool | int | float
 ClaimConfidence = Annotated[
@@ -702,6 +703,11 @@ class NoteRawAsset(_DomainModel):
     content_type: str
     size_bytes: int
     checksum: str
+
+    @computed_field(return_type=bool)
+    @property
+    def is_text(self) -> bool:
+        return is_text_content_type(self.content_type)
 
 
 class GraphChangeOperation(_DomainModel):

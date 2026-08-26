@@ -36,6 +36,7 @@ from lab_tracker.models import (
     UsageEventVerb,
     utc_now,
 )
+from lab_tracker.note_text import NoteTextExcerpt, decode_utf8_excerpt, is_text_content_type
 from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
 from lab_tracker.provider_error_redaction import provider_error_message
 from lab_tracker.services.analysis_service import AnalysisService
@@ -868,6 +869,46 @@ class NoteService(BaseService):
             raise ValidationError("Raw storage backend is not configured.")
         content = self.raw_storage.read(note.raw_asset.storage_id)
         return note.raw_asset, content
+
+    def read_note_raw_text(
+        self,
+        note_id: UUID,
+        *,
+        max_chars: int,
+    ) -> tuple[NoteRawAsset, NoteTextExcerpt]:
+        """Read a bounded UTF-8 projection of an uploaded text asset."""
+
+        if max_chars < 0:
+            raise ValidationError("max_chars must not be negative.")
+        note = self.get_note(note_id)
+        raw_asset = note.raw_asset
+        if raw_asset is None:
+            raise NotFoundError("Note does not have raw content.")
+        if not is_text_content_type(raw_asset.content_type):
+            raise ValidationError("Raw note asset is not a supported text type.")
+        if self.raw_storage is None:
+            raise ValidationError("Raw storage backend is not configured.")
+
+        # Four bytes per requested character covers the largest UTF-8 code
+        # point. One extra code point lets the decoder establish truncation
+        # without ever reading the whole asset.
+        prefix_size = min(raw_asset.size_bytes, max_chars * 4 + 4)
+        read_prefix = getattr(self.raw_storage, "read_prefix", None)
+        content = (
+            read_prefix(raw_asset.storage_id, prefix_size)
+            if callable(read_prefix)
+            else self.raw_storage.read(raw_asset.storage_id)[:prefix_size]
+        )
+        try:
+            excerpt = decode_utf8_excerpt(
+                content,
+                total_size_bytes=raw_asset.size_bytes,
+                max_chars=max_chars,
+                payload_is_complete=len(content) >= raw_asset.size_bytes,
+            )
+        except UnicodeDecodeError as exc:
+            raise ValidationError("Raw text asset must contain valid UTF-8.") from exc
+        return raw_asset, excerpt
 
     def delete_note(
         self,

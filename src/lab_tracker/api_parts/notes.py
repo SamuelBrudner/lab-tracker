@@ -156,6 +156,9 @@ class NotesApiMixin:
     def download_note_raw(self, *args: Any, **kwargs: Any) -> Any:
         return self.notes.download_note_raw(*args, **kwargs)
 
+    def read_note_raw_text(self, *args: Any, **kwargs: Any) -> Any:
+        return self.notes.read_note_raw_text(*args, **kwargs)
+
     def delete_note(self, *args: Any, **kwargs: Any) -> Any:
         return self._with_usage_event(
             lambda: self.notes.delete_note(*args, **kwargs),

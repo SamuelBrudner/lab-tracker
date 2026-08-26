@@ -48,6 +48,7 @@ SCOPED_OPERATIONS = (
     ("post", "/data-stores"),
     ("get", "/notes"),
     ("get", "/notes/{note_id}"),
+    ("get", "/notes/{note_id}/raw-text"),
     ("get", "/graph-drafts/{change_set_id}"),
     ("post", "/review-email/test"),
     ("get", "/review-email/deliveries"),

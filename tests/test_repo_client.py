@@ -82,6 +82,8 @@ def test_init_config_and_capture_commit(tmp_path, monkeypatch) -> None:
     assert event["source"]["git_branch"] in {"main", "master"}
     assert event["source"]["repo_remote_url"] == "https://example.com/org/repo.git"
     assert event["source"]["git_dirty"] is False
+    assert "## Diff" in event["payload"]["body"]
+    assert "diff --git a/analysis.py b/analysis.py" in event["payload"]["body"]
     assert event["question_id"] == "question-1"
     assert read_event(path)["sync"]["status"] == "pending"
     assert outbox_status(loaded.outbox_path())["pending"] == 1
@@ -176,7 +178,7 @@ def test_capture_commit_records_dirty_tree(tmp_path, monkeypatch) -> None:
     assert event["source"]["git_dirty"] is True
 
 
-def test_render_event_note_contains_commit_state(tmp_path, monkeypatch) -> None:
+def test_render_event_note_contains_bounded_commit_diff(tmp_path, monkeypatch) -> None:
     _clear_repo_env(monkeypatch)
     commit = _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
@@ -185,10 +187,12 @@ def test_render_event_note_contains_commit_state(tmp_path, monkeypatch) -> None:
 
     note = render_event_note(event)
 
+    assert note == event["payload"]["body"]
     assert commit in note
     assert "https://example.com/org/repo.git" in note
-    assert "## Repository State" in note
-    assert "## Research Context" in note
+    assert "# Git Commit Evidence" in note
+    assert "## Diff" in note
+    assert "diff --git a/analysis.py b/analysis.py" in note
 
 
 # --- external id / normalization ------------------------------------------

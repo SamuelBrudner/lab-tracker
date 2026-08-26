@@ -92,6 +92,9 @@ export interface paths {
   "/notes/{note_id}": {
     get: operations["get_note_notes__note_id__get"];
   };
+  "/notes/{note_id}/raw-text": {
+    get: operations["read_note_raw_text_notes__note_id__raw_text_get"];
+  };
   "/graph-drafts/{change_set_id}": {
     get: operations["get_graph_draft_graph_drafts__change_set_id__get"];
   };
@@ -462,6 +465,15 @@ export interface operations {
       };
     };
   };
+  "read_note_raw_text_notes__note_id__raw_text_get": {
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["Envelope_NoteRawTextRead_"];
+        };
+      };
+    };
+  };
   "get_graph_draft_graph_drafts__change_set_id__get": {
     responses: {
       200: {
@@ -707,6 +719,10 @@ export interface components {
     };
     "Envelope_MemberOnboardingRead_": {
       "data": components["schemas"]["MemberOnboardingRead"];
+      "meta"?: (Record<string, unknown> | null);
+    };
+    "Envelope_NoteRawTextRead_": {
+      "data": components["schemas"]["NoteRawTextRead"];
       "meta"?: (Record<string, unknown> | null);
     };
     "Envelope_Note_": {
@@ -985,8 +1001,20 @@ export interface components {
       "checksum": string;
       "content_type": string;
       "filename": string;
+      "is_text": boolean;
       "size_bytes": number;
       "storage_id": string;
+    };
+    "NoteRawTextRead": {
+      "checksum": string;
+      "content_type": string;
+      "filename": string;
+      "included_bytes": number;
+      "omitted_bytes": number;
+      "size_bytes": number;
+      "storage_id": string;
+      "text": string;
+      "truncated": boolean;
     };
     "NoteStatus": "staged" | "committed" | "archived";
     "OutcomeStatus": "unknown" | "supports" | "refutes" | "inconclusive";
