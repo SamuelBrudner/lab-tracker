@@ -37,6 +37,7 @@ from lab_tracker.decision_context_constants import (
     CLAUDE_BLOCK_END,
     CODE_CONVENTIONS_BLOCK_BEGIN,
     CODE_CONVENTIONS_BLOCK_END,
+    COMMIT_CAPTURE_RECOVERY_POLICY,
     code_conventions_version_line,
     code_facing_idioms,
     cursor_rules_mdc,
@@ -1264,7 +1265,7 @@ def _lt_shim() -> str:
 
 def _agents_fragment() -> str:
     return dedent(
-        """\
+        f"""\
         # Lab Tracker Integration
 
         Use Lab Tracker for project/question/note context and keep concrete execution
@@ -1301,6 +1302,8 @@ def _agents_fragment() -> str:
         configured (`LAB_TRACKER_GRAPH_DRAFT_PROVIDER`: OpenAI, Anthropic, or
         Google — the lab's choice). See `docs/agent-setup.md` in the Lab
         Tracker repository, or the `lab-tracker://setup-guide` MCP resource.
+
+        {COMMIT_CAPTURE_RECOVERY_POLICY}
 
         MCP config is scaffolded per agent and works with any MCP-capable
         coding agent: `.mcp.json` (Claude Code and other root-config readers),

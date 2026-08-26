@@ -97,8 +97,9 @@ def managed_hook_block(
     # user sees *why* and *how to drain* rather than an unactionable one-liner.
     warning = (
         "lab-tracker: commit capture did not fully sync (see the note above if "
-        "shown). Queued events are kept — inspect with 'lt outbox status' and "
-        "drain with 'lt outbox sync'. Commit kept."
+        "shown). Queued events are kept. Retry now with 'lt outbox sync', then "
+        "verify with 'lt outbox status' before reporting an unresolved capture. "
+        "Replay is idempotent. Commit kept."
     )
     lines.extend(
         [

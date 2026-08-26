@@ -38,6 +38,12 @@ host-local scratch). `install-hook` writes a managed block into the repo's
   `LAB_TRACKER_LT`.
 - A post-commit hook can never block the commit; on capture failure it prints a
   one-line warning and the commit proceeds.
+- If a commit made during an agent task reports a timeout, sync failure, or
+  queued event, the agent must treat the result as ambiguous: the server may
+  already have accepted it. Before reporting an unresolved capture, run
+  `lt outbox sync` from that repository and then `lt outbox status`. Replay is
+  idempotent and deduplicates an already accepted capture; report a problem only
+  if the retry fails and status still shows pending events.
 
 ### Optional repository conventions
 

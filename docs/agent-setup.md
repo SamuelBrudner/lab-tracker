@@ -140,6 +140,14 @@ choice offered by the app: it can sync staged captures and request drafts, but
 non-interactive principals remain structurally unable to accept or commit a
 draft. A read-only token cannot drain a capture outbox.
 
+When a commit made during an agent task reports a Lab Tracker timeout, sync
+failure, or queued event, the agent must treat the outcome as ambiguous because
+the server may already have accepted the capture. Before reporting it as
+unresolved, run `lt outbox sync` from that repository, then run
+`lt outbox status`. Replay is idempotent and deduplicates an already accepted
+capture. Report an unresolved capture only if the retry fails and status still
+shows pending events.
+
 ## 4. Connect coding agents over MCP
 
 Coding agents reach Lab Tracker exclusively through the MCP server (`lt-mcp`),

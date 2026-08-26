@@ -29,6 +29,17 @@ RESEARCH_FACING_DECISION_POLICY = (
     "in it."
 )
 
+COMMIT_CAPTURE_RECOVERY_POLICY = (
+    "When a commit made during an agent task reports that Lab Tracker capture "
+    "timed out, failed to sync, or left a queued event, treat the result as "
+    "ambiguous: the server may already have accepted it. Before reporting the "
+    "event as unresolved, the agent must run `lt outbox sync` from that "
+    "repository, then run `lt outbox status` to verify the queue. Replay is "
+    "idempotent and deduplicates an already accepted capture. Report an "
+    "unresolved capture only if the retry fails and status still shows pending "
+    "events."
+)
+
 AGENT_CONSULTATION_POLICY = f"""# Lab Tracker Agent Consultation Policy
 
 {RESEARCH_FACING_DECISION_POLICY}
@@ -108,6 +119,8 @@ def managed_agent_activation_block() -> str:
             "rejects in the Lab Tracker app. You may stage evidence and, when the "
             "user asks, trigger or request drafts; never accept, bulk-accept, or "
             "commit them.",
+            "",
+            COMMIT_CAPTURE_RECOVERY_POLICY,
             "",
             "If Lab Tracker is unavailable or ambiguous, say that explicitly and "
             "proceed without graph context. Do not create or mutate Lab Tracker "

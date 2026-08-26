@@ -1457,7 +1457,9 @@ def _git_snapshot_sync_diagnostic(payload: Any) -> str | None:
     return (
         f"lab-tracker: commit capture did not fully sync — {cause}. "
         f"{queued} event(s) are queued at {outbox}; the commit was kept. "
-        "Drain later with 'lt outbox sync' (inspect with 'lt outbox status')."
+        "Treat a timeout as ambiguous: the server may already have accepted the "
+        "capture. Retry now with 'lt outbox sync', then verify with 'lt outbox "
+        "status'; replay is idempotent."
     )
 
 
