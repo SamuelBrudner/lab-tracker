@@ -37,6 +37,7 @@ from lab_tracker.decision_context_constants import (
     COMMIT_CAPTURE_RECOVERY_POLICY,
     code_conventions_version_line,
     code_facing_idioms,
+    cursor_rules_mdc,
     managed_code_conventions_block,
 )
 from lab_tracker.demo_seed import DemoSeedResult
@@ -471,6 +472,46 @@ def test_update_scaffold_files_are_stable_between_runs(tmp_path: Path) -> None:
     }
     assert scaffold <= set(second.up_to_date)
     assert not second.backups
+
+
+def test_update_keeps_cursor_rule_byte_stable_with_one_front_matter_header(
+    tmp_path: Path,
+) -> None:
+    init_consumer_repo(tmp_path, yes=True)
+    cursor_rule = tmp_path / ".cursor" / "rules" / "lab-tracker.mdc"
+    initial = cursor_rule.read_text(encoding="utf-8")
+
+    first = update_consumer_repo(tmp_path)
+    second = update_consumer_repo(tmp_path)
+
+    assert initial == cursor_rules_mdc()
+    assert cursor_rule.read_text(encoding="utf-8") == initial
+    assert initial.count("description: Lab Tracker code-facing conventions") == 1
+    assert cursor_rule in first.skipped
+    assert cursor_rule in second.skipped
+
+
+def test_update_repairs_duplicate_cursor_front_matter_and_dry_run_previews_it(
+    tmp_path: Path,
+) -> None:
+    init_consumer_repo(tmp_path, yes=True)
+    cursor_rule = tmp_path / ".cursor" / "rules" / "lab-tracker.mdc"
+    front_matter, _separator, _body = cursor_rules_mdc().partition("\n\n")
+    duplicated = f"{front_matter}\n\n{cursor_rules_mdc()}"
+    cursor_rule.write_text(duplicated, encoding="utf-8")
+
+    preview = update_consumer_repo(tmp_path, dry_run=True)
+
+    assert cursor_rule.read_text(encoding="utf-8") == duplicated
+    assert cursor_rule in preview.diffs
+    assert preview._preview_contents[cursor_rule] == cursor_rules_mdc()
+
+    result = update_consumer_repo(tmp_path)
+
+    repaired = cursor_rule.read_text(encoding="utf-8")
+    assert repaired == cursor_rules_mdc()
+    assert repaired.count("description: Lab Tracker code-facing conventions") == 1
+    assert cursor_rule in result.overwritten
 
 
 def test_update_dry_run_writes_nothing(tmp_path: Path) -> None:
