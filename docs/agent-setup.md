@@ -182,6 +182,14 @@ ID and project membership with the project owner. A successful `lt health`
 checks connectivity, not authenticated project access. `--dry-run` previews the
 binding without writing `lt_ids.json`.
 
+The Agent access page verifies the selected project's effective membership with
+the newly issued token before displaying connection, binding, or capture
+commands. If an admin's token lacks membership, **Grant project access** adds
+the admin's account as a contributor (for capture) or viewer (for read-only use)
+and checks the same token again. Failed checks keep the token available to copy
+and provide a retry without requiring another token. Scheduler-only tokens do
+not offer repository setup commands.
+
 Personal tokens use their own role: an admin account's editor/viewer token still
 needs direct project membership or inherited group access. If the browser shows
 the project but the token cannot find it, have an owner add the token's user as

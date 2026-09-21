@@ -386,6 +386,11 @@ ProjectGroupRead = ProjectGroup
 GroupMembershipRead = GroupMembership
 
 
+class ProjectAccessRead(BaseModel):
+    project_id: UUID
+    role: ProjectMembershipRole
+
+
 class ProjectMembershipCreate(RequestModel):
     user_id: UUID | None = None
     username: str | None = Field(default=None, min_length=1)

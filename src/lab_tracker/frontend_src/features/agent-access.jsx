@@ -1,6 +1,6 @@
 import * as React from "react";
 
-import { auth as authGateway } from "../shared/gateways/index.js";
+import { auth as authGateway, projects as projectsGateway } from "../shared/gateways/index.js";
 import { formatDate } from "../shared/formatters.js";
 import { matchingClientSetup } from "./client-setup.js";
 
@@ -210,6 +210,49 @@ function AgentAccessPage({
   const [revokingId, setRevokingId] = useState("");
   const [readiness, setReadiness] = useState(null);
   const [readinessError, setReadinessError] = useState("");
+  const [projectCheck, setProjectCheck] = useState(null);
+  const [checkNonce, setCheckNonce] = useState(0);
+  const [granting, setGranting] = useState(false);
+  const projectId = selectedProject?.project_id || "";
+  const schedulerToken = issued?.scope === "batch_run_due";
+  const needsStage = issued?.read_only === false;
+  const checkKey = issued ? `${issued.token_id}:${projectId}` : "";
+  const checkedProject = projectCheck?.key === checkKey ? projectCheck : null;
+  const projectVerified = checkedProject?.status === "ready";
+
+  useEffect(() => {
+    if (!issued || !projectId || schedulerToken) {
+      setProjectCheck(null);
+      return undefined;
+    }
+    let canceled = false;
+    setProjectCheck({ key: checkKey, status: "checking" });
+    projectsGateway.getAccess(projectId, {
+      token: issued.secret,
+      notifyAuthRejected: false,
+    }).then((accessResult) => {
+      if (canceled) return;
+      const canStage = ["editor", "admin"].includes(issued.role) &&
+        ["contributor", "owner"].includes(accessResult.role);
+      if (accessResult.project_id !== projectId) {
+        throw new Error("Project verification returned a different project.");
+      }
+      setProjectCheck({
+        key: checkKey,
+        status: needsStage && !canStage ? "blocked" : "ready",
+        needsMembership: needsStage && !canStage,
+      });
+    }).catch((err) => {
+      if (!canceled) {
+        setProjectCheck({
+          key: checkKey, status: "blocked",
+          needsMembership: err.status === 403 || err.status === 404,
+          message: err.message || "Project access could not be verified.",
+        });
+      }
+    });
+    return () => { canceled = true; };
+  }, [issued, projectId, schedulerToken, needsStage, checkKey, checkNonce]);
 
   const authDisabled = authEnabled === false;
   const baseUrl =
@@ -341,7 +384,21 @@ function AgentAccessPage({
     }
   }
 
-  const projectId = selectedProject?.project_id || "";
+  async function handleGrantAccess() {
+    setGranting(true);
+    try {
+      await projectsGateway.addMember(projectId, {
+        user_id: user.user_id,
+        role: needsStage ? "contributor" : "viewer",
+      }, { token });
+      setCheckNonce((value) => value + 1);
+    } catch (err) {
+      setFlash("", err.message || "Could not grant project access.");
+    } finally {
+      setGranting(false);
+    }
+  }
+
   const commands = issued ? connectCommands(baseUrl, projectId) : null;
   const issuedRepoCommands = issued
     ? repoCommands(selectedProject, issued.read_only === false)
@@ -563,7 +620,46 @@ function AgentAccessPage({
                   Copy token
                 </button>
               </div>
-              {clientSetup ? (
+              {schedulerToken ? (
+                <p className="subtle">
+                  This scheduler token only triggers daily review. It cannot read
+                  projects or run repository setup. Choose Read + stage evidence
+                  or Read-only for repository setup.
+                </p>
+              ) : !projectId ? (
+                <p className="warn">Choose a project in Setup to verify this token before connecting.</p>
+              ) : !projectVerified ? (
+                <div className="card-inset" role="status">
+                  {checkedProject?.status === "blocked" ? (
+                    <>
+                      <p className="warn">
+                        This token has not verified {needsStage ? "capture" : "read"} access
+                        to {selectedProject.name}. Setup commands are withheld.
+                        {checkedProject.message ? ` ${checkedProject.message}` : ""}
+                      </p>
+                      {checkedProject.needsMembership && user?.role === "admin" && user?.user_id ? (
+                        <>
+                          <p>
+                            Your browser has admin access, but this token needs project membership.
+                            Grant your account {needsStage ? "contributor" : "viewer"} access
+                            to {selectedProject.name} to continue. The token keeps its current permissions.
+                          </p>
+                          <button type="button" className="btn-primary" disabled={granting}
+                            onClick={handleGrantAccess}>
+                            {granting ? "Granting…" : "Grant project access"}
+                          </button>
+                        </>
+                      ) : checkedProject.needsMembership ? (
+                        <p>Ask a project owner for {needsStage ? "contributor" : "viewer"} access, then retry.</p>
+                      ) : null}
+                      <button type="button" className="btn-secondary" disabled={granting}
+                        onClick={() => setCheckNonce((value) => value + 1)}>
+                        Retry access check
+                      </button>
+                    </>
+                  ) : <p>Verifying this token’s access to {selectedProject.name}…</p>}
+                </div>
+              ) : clientSetup ? (
                 <>
                   {installCommands.map((item) => (
                     <CommandSnippet
@@ -647,7 +743,7 @@ function AgentAccessPage({
                   valid immutable source revision.
                 </p>
               )}
-              {issued.read_only !== false ? (
+              {projectVerified && !schedulerToken && issued.read_only !== false ? (
                 <p className="warn">
                   This token can read and bind the selected project, but it cannot
                   sync commit-hook or figure-capture evidence. Mint{" "}

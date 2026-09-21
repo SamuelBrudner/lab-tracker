@@ -35,6 +35,7 @@ SCOPED_OPERATIONS = (
     ("post", "/auth/tokens"),
     ("delete", "/auth/tokens/{token_id}"),
     ("get", "/projects"),
+    ("get", "/projects/{project_id}/access"),
     ("get", "/projects/{project_id}/members"),
     ("get", "/projects/{project_id}/graph-draft-batch-settings"),
     ("patch", "/projects/{project_id}/graph-draft-batch-settings"),

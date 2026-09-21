@@ -22,6 +22,7 @@ from lab_tracker.patching import provided_fields
 from lab_tracker.schemas import (
     Envelope,
     ListEnvelope,
+    ProjectAccessRead,
     ProjectCreate,
     ProjectMembershipCreate,
     ProjectMembershipUpdate,
@@ -98,6 +99,16 @@ def build_projects_router(api: LabTrackerAPI) -> APIRouter:
             project_id=project.project_id,
         )
         return Envelope(data=project)
+
+    @router.get("/projects/{project_id}/access", response_model=Envelope[ProjectAccessRead])
+    def get_project_access(project_id: UUID, request: Request):
+        """Read effective project membership using the caller's actual credentials."""
+        actor = actor_from_request(request)
+        request_api = api_from_request(request, api)
+        # Preserve the opaque missing/inaccessible project boundary.
+        request_api.get_project_for_read(project_id, actor=actor)
+        role = request_api.project_membership_role(project_id, actor)
+        return Envelope(data=ProjectAccessRead(project_id=project_id, role=role))
 
     @router.get(
         "/projects/{project_id}/publication-readiness",

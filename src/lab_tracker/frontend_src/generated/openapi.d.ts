@@ -55,6 +55,9 @@ export interface paths {
   "/projects": {
     get: operations["list_projects_projects_get"];
   };
+  "/projects/{project_id}/access": {
+    get: operations["get_project_access_projects__project_id__access_get"];
+  };
   "/projects/{project_id}/members": {
     get: operations["list_project_members_projects__project_id__members_get"];
   };
@@ -309,6 +312,15 @@ export interface operations {
       200: {
         content: {
           "application/json": components["schemas"]["ListEnvelope_Project_"];
+        };
+      };
+    };
+  };
+  "get_project_access_projects__project_id__access_get": {
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["Envelope_ProjectAccessRead_"];
         };
       };
     };
@@ -737,6 +749,10 @@ export interface components {
       "data": components["schemas"]["PersonalAccessTokenRead"];
       "meta"?: (Record<string, unknown> | null);
     };
+    "Envelope_ProjectAccessRead_": {
+      "data": components["schemas"]["ProjectAccessRead"];
+      "meta"?: (Record<string, unknown> | null);
+    };
     "Envelope_ReviewEmailDelivery_": {
       "data": components["schemas"]["ReviewEmailDelivery"];
       "meta"?: (Record<string, unknown> | null);
@@ -1064,6 +1080,10 @@ export interface components {
       "project_id": string;
       "status"?: components["schemas"]["ProjectStatus"];
       "updated_at"?: string;
+    };
+    "ProjectAccessRead": {
+      "project_id": string;
+      "role": components["schemas"]["ProjectMembershipRole"];
     };
     "ProjectMembership": {
       "created_at"?: string;

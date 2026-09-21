@@ -5,7 +5,7 @@
 // layer and validate at the network boundary so a malformed 2xx payload fails
 // loudly instead of degrading to null/empty data downstream.
 import { apiFetch, buildApiPath, fetchAllPages } from "../api.js";
-import { arrayOf, object, oneOf, parseCollection, string } from "../contract.js";
+import { arrayOf, object, oneOf, parseCollection, parseResource, string } from "../contract.js";
 
 /** @typedef {import("../../generated/openapi.js").operations["list_projects_projects_get"]["responses"][200]["content"]["application/json"]["data"][number]} Project */
 /** @typedef {import("../../generated/openapi.js").operations["list_project_members_projects__project_id__members_get"]["responses"][200]["content"]["application/json"]["data"][number]} ProjectMembership */
@@ -32,6 +32,24 @@ const memberShape = object({
   user_id: string,
 });
 
+/** @typedef {import("../../generated/openapi.js").operations["get_project_access_projects__project_id__access_get"]["responses"][200]["content"]["application/json"]["data"]} ProjectAccess */
+/** @satisfies {import("../contract.js").Validator<ProjectAccess>} */
+const projectAccessShape = object({ project_id: string, role: membershipRoleShape });
+
+/** @param {string} projectId */
+async function getAccess(projectId, options = {}) {
+  const envelope = await apiFetch(`/projects/${projectId}/access`, options);
+  return parseResource(envelope, projectAccessShape);
+}
+
+/** @param {string} projectId @param {Record<string, unknown>} body */
+async function addMember(projectId, body, options = {}) {
+  const envelope = await apiFetch(`/projects/${projectId}/members`, {
+    ...options, method: "POST", body,
+  });
+  return parseResource(envelope, memberShape);
+}
+
 // List every project, validating each item. Pagination stays in the transport
 // layer (fetchAllPages) whose termination logic is subtle and already tested;
 // this adds fail-loud item validation on top of it.
@@ -51,4 +69,4 @@ async function listMembers(projectId, options = {}) {
   return parseCollection(envelope, memberShape);
 }
 
-export { listMembers, listProjects, memberShape, projectShape };
+export { addMember, getAccess, listMembers, listProjects, memberShape, projectShape };

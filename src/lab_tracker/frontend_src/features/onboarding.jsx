@@ -163,41 +163,6 @@ function OnboardingPage({
     }
   }
 
-  const repoSetupCommands = activeProject
-    ? [
-        {
-          command: "lt setup init --install-skills --dry-run",
-          label: "1. Preview repository and skill setup",
-        },
-        {
-          command: "lt setup init --install-skills --yes",
-          label: "2. Apply after reviewing the preview",
-        },
-        {
-          command:
-            `lt project bind --project-id ${activeProject.project_id} --dry-run`,
-          label: `3. Preview binding to ${activeProject.name}`,
-        },
-        {
-          command: `lt project bind --project-id ${activeProject.project_id} --yes`,
-          label: `4. Bind to ${activeProject.name}`,
-        },
-        {
-          command:
-            `lt hooks install --project ${activeProject.project_id} --dry-run`,
-          label: "5. Preview commit capture hook",
-        },
-        {
-          command: `lt hooks install --project ${activeProject.project_id} --yes`,
-          label: "6. Install commit capture hook",
-        },
-        {
-          command: "lt setup status",
-          label: "7. Verify repository setup",
-        },
-      ]
-    : [];
-
   return (
     <>
     <OwnerOnboardingQueueBanner
@@ -344,9 +309,9 @@ function OnboardingPage({
           </div>
           <p>
             Install the client revision that matches this server, then open{" "}
-            <strong>Agents</strong> here to create a personal token. The one-time
-            connection command saves one local profile used by both <code>lt</code>{" "}
-            and <code>lt-mcp</code>.
+            <strong>Agents</strong> here to create a personal token and verify its
+            access to your selected project. Complete any project-access step there
+            before copying the connection commands for <code>lt</code> and <code>lt-mcp</code>.
           </p>
           {clientSetup ? (
             <>
@@ -400,9 +365,9 @@ function OnboardingPage({
           <p className="subtle">
             Run these inside each analysis repository. First add the same pinned
             package to the project’s Python environment so figure capture can import{" "}
-            <code>lab_tracker_client</code>. Then inspect each dry run before its
-            matching <code>--yes</code> command. The commands bind the exact project
-            selected above—there is no placeholder to replace.
+            <code>lab_tracker_client</code>. Continue on the Agents page for binding
+            and capture commands verified for your token and selected project.
+            Inspect each dry run before its matching <code>--yes</code> command.
           </p>
           {clientSetup ? (
             <>
@@ -421,14 +386,10 @@ function OnboardingPage({
                 command={clientSetup.verifyClientCommand}
                 setFlash={setFlash}
               />
-              {repoSetupCommands.map((item) => (
-                <SetupCommand
-                  key={item.command}
-                  label={item.label}
-                  command={item.command}
-                  setFlash={setFlash}
-                />
-              ))}
+              <button type="button" className="btn-primary"
+                onClick={() => navigate("/app/agents")}>
+                Verify access and finish repository setup
+              </button>
               <p className="subtle">
                 The skill installer covers Claude and Codex user skill homes.
                 Codex usually detects skill changes automatically; use{" "}
