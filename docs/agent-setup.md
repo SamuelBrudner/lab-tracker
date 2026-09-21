@@ -176,6 +176,17 @@ lt project bind --project-id <selected-project-uuid> --dry-run
 lt project bind --project-id <selected-project-uuid> --yes
 ```
 
+Binding searches all projects visible to the configured credentials. If an ID
+cannot be found, run `lt setup status` to check the server URL, then confirm the
+ID and project membership with the project owner. A successful `lt health`
+checks connectivity, not authenticated project access. `--dry-run` previews the
+binding without writing `lt_ids.json`.
+
+Personal tokens use their own role: an admin account's editor/viewer token still
+needs direct project membership or inherited group access. If the browser shows
+the project but the token cannot find it, have an owner add the token's user as
+a project contributor (or viewer for read-only use).
+
 | File | Who reads it |
 | --- | --- |
 | `.mcp.json` | Claude Code and other root-config MCP readers |

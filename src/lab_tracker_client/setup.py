@@ -981,11 +981,19 @@ def bind_project(
             record = None
             verification_warning = _project_id_verification_warning(exc)
         if record is None and verification_warning is None:
-            raise LTValidationError(f"No project found with id {project_id}.")
+            raise LTValidationError(
+                f"Project {project_id} was not found among the projects visible to "
+                "the current credentials. It may be missing, belong to another "
+                "instance, or require project membership. Check the server URL "
+                "with `lt setup status` and confirm the project ID and access "
+                "with its owner. An editor/viewer token needs project access "
+                "even when its account is an admin. A successful `lt health` check only verifies "
+                "connectivity, not project access."
+            )
     else:
         matches = [
             project
-            for project in client.list_projects()
+            for project in client.iter_projects()
             if str(project.get("name") or "") == name
         ]
         if len(matches) > 1:
@@ -1055,7 +1063,7 @@ def _project_id_verification_warning(exc: Exception) -> str:
 
 
 def _find_project_by_id(client: LabTracker, project_id: str) -> Any:
-    for project in client.list_projects():
+    for project in client.iter_projects():
         if str(project.get("project_id") or "") == project_id:
             return project
     return None

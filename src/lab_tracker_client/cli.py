@@ -1370,14 +1370,17 @@ def _cmd_project_bind(client: LabTracker, args: argparse.Namespace) -> Any:
             "lt project bind writes lt_ids.json; pass --yes to consent or "
             "--dry-run to preview."
         )
-    return setup_helpers.bind_project(
-        client,
-        project_id=args.project_id,
-        name=args.name,
-        create=args.create,
-        ids_path=args.ids,
-        dry_run=args.dry_run,
-    )
+    try:
+        return setup_helpers.bind_project(
+            client,
+            project_id=args.project_id,
+            name=args.name,
+            create=args.create,
+            ids_path=args.ids,
+            dry_run=args.dry_run,
+        )
+    except LTValidationError as exc:
+        raise SystemExit(f"lt project bind: {exc}") from None
 
 
 def _cmd_git_snapshot(args: argparse.Namespace) -> Any:

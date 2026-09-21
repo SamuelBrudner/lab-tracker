@@ -6,6 +6,7 @@ import json
 import sys
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 import lab_tracker_client.setup as setup_helpers
@@ -767,7 +768,7 @@ class _FakeBindClient:
         self.projects = projects
         self.created: list[str] = []
 
-    def list_projects(self) -> list[LTRecord]:
+    def iter_projects(self) -> list[LTRecord]:
         return [LTRecord(project) for project in self.projects]
 
     def upsert_project(self, *, name: str, description: str = "", status=None) -> LTRecord:
@@ -791,7 +792,7 @@ def _fake_bind_client(monkeypatch, projects: list[dict[str, str]]) -> _FakeBindC
 
 
 class _AuthFailBindClient(_FakeBindClient):
-    def list_projects(self) -> list[LTRecord]:
+    def iter_projects(self) -> list[LTRecord]:
         raise RuntimeError("401: set LAB_TRACKER_USERNAME/PASSWORD")
 
 
@@ -821,6 +822,59 @@ def test_project_bind_dry_run_and_write(config_home, tmp_path, monkeypatch, caps
     ids_payload = json.loads((tmp_path / "lt_ids.json").read_text(encoding="utf-8"))
     assert ids_payload["project_id"] == "p-1"
     assert ids_payload["project_name"] == "Demo"
+
+
+@pytest.mark.parametrize("mode", ["--dry-run", "--yes"])
+def test_project_bind_missing_id_has_actionable_cli_error(
+    config_home, tmp_path, monkeypatch, mode
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _fake_bind_client(monkeypatch, [])
+    path = tmp_path / "lt_ids.json"
+    original = '{"project_id": "existing"}\n'
+    path.write_text(original)
+
+    with pytest.raises(SystemExit) as excinfo:
+        lt_cli.main(["project", "bind", "--project-id", "missing", mode])
+
+    message = str(excinfo.value)
+    assert message.startswith("lt project bind: Project missing")
+    assert "current credentials" in message
+    assert "lt setup status" in message
+    assert "project membership" in message
+    assert path.read_text() == original
+
+
+@pytest.mark.parametrize("selector", ["--project-id", "--name"])
+def test_project_bind_finds_project_beyond_list_cap(
+    config_home, tmp_path, monkeypatch, capsys, selector
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    projects = [{"project_id": f"p-{i}", "name": f"Project {i}"} for i in range(201)]
+    offsets = []
+
+    def handler(request):
+        assert request.method == "GET"
+        assert request.url.path == "/projects"
+        offset = int(request.url.params["offset"])
+        limit = int(request.url.params["limit"])
+        offsets.append(offset)
+        return httpx.Response(
+            200,
+            json={"data": projects[offset : offset + limit], "meta": {"total": 201}},
+        )
+
+    client = LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(lt_cli.LabTracker, "from_env", classmethod(lambda cls: client))
+    value = "p-200" if selector == "--project-id" else "Project 200"
+    lt_cli.main(["project", "bind", selector, value, "--dry-run"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["project_id"] == "p-200"
+    assert payload["project_name"] == "Project 200"
+    assert payload["action"] == "would-bind"
+    assert offsets == [0, 200]
+    assert not (tmp_path / "lt_ids.json").exists()
 
 
 def test_project_bind_preserves_existing_ids_keys(
@@ -876,7 +930,7 @@ def test_project_bind_fails_loudly_on_ambiguous_name(
             {"project_id": "p-2", "name": "Demo"},
         ],
     )
-    with pytest.raises(Exception, match="Multiple projects"):
+    with pytest.raises(SystemExit, match="Multiple projects"):
         lt_cli.main(["project", "bind", "--name", "Demo", "--yes"])
     assert not (tmp_path / "lt_ids.json").exists()
 
@@ -885,7 +939,7 @@ def test_project_bind_create_requires_flag(config_home, tmp_path, monkeypatch, c
     monkeypatch.chdir(tmp_path)
     fake = _fake_bind_client(monkeypatch, [])
 
-    with pytest.raises(Exception, match="--create"):
+    with pytest.raises(SystemExit, match="--create"):
         lt_cli.main(["project", "bind", "--name", "Fresh", "--yes"])
     assert fake.created == []
 
@@ -917,7 +971,7 @@ def test_project_bind_rejects_malformed_ids_file(
     (tmp_path / "lt_ids.json").write_text("{broken", encoding="utf-8")
     _fake_bind_client(monkeypatch, [{"project_id": "p-1", "name": "Demo"}])
 
-    with pytest.raises(Exception, match="not valid JSON"):
+    with pytest.raises(SystemExit, match="not valid JSON"):
         lt_cli.main(["project", "bind", "--project-id", "p-1", "--yes"])
     assert (tmp_path / "lt_ids.json").read_text(encoding="utf-8") == "{broken"
 

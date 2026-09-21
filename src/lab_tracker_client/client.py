@@ -466,6 +466,10 @@ class LabTracker:
             offset=offset,
         )
 
+    def iter_projects(self) -> Iterator[LTRecord]:
+        """Iterate every visible project without the list API's total-result cap."""
+        return self._iter_all("/projects")
+
     def list_questions(
         self,
         *,
