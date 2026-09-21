@@ -140,6 +140,14 @@ choice offered by the app: it can sync staged captures and request drafts, but
 non-interactive principals remain structurally unable to accept or commit a
 draft. A read-only token cannot drain a capture outbox.
 
+When a commit made during an agent task reports a Lab Tracker timeout, sync
+failure, or queued event, the agent must treat the outcome as ambiguous because
+the server may already have accepted the capture. Before reporting it as
+unresolved, run `lt outbox sync` from that repository, then run
+`lt outbox status`. Replay is idempotent and deduplicates an already accepted
+capture. Report an unresolved capture only if the retry fails and status still
+shows pending events.
+
 ## 4. Connect coding agents over MCP
 
 Coding agents reach Lab Tracker exclusively through the MCP server (`lt-mcp`),
@@ -168,6 +176,25 @@ lt project bind --project-id <selected-project-uuid> --dry-run
 lt project bind --project-id <selected-project-uuid> --yes
 ```
 
+Binding searches all projects visible to the configured credentials. If an ID
+cannot be found, run `lt setup status` to check the server URL, then confirm the
+ID and project membership with the project owner. A successful `lt health`
+checks connectivity, not authenticated project access. `--dry-run` previews the
+binding without writing `lt_ids.json`.
+
+The Agent access page verifies the selected project's effective membership with
+the newly issued token before displaying connection, binding, or capture
+commands. If an admin's token lacks membership, **Grant project access** adds
+the admin's account as a contributor (for capture) or viewer (for read-only use)
+and checks the same token again. Failed checks keep the token available to copy
+and provide a retry without requiring another token. Scheduler-only tokens do
+not offer repository setup commands.
+
+Personal tokens use their own role: an admin account's editor/viewer token still
+needs direct project membership or inherited group access. If the browser shows
+the project but the token cannot find it, have an owner add the token's user as
+a project contributor (or viewer for read-only use).
+
 | File | Who reads it |
 | --- | --- |
 | `.mcp.json` | Claude Code and other root-config MCP readers |
@@ -177,8 +204,17 @@ lt project bind --project-id <selected-project-uuid> --yes
 | `.claude/settings.json` | Claude Code hooks (`lt setup status` on session start, `lt prime` before research-facing prompts) |
 | `AGENTS.lt.md`, `scripts/lt.py`, `lt_ids.json` | Agent-readable integration notes, the client shim, and the project-id mapping (`lt project bind` fills it) |
 
-Two agents need one extra step:
+Choose the instructions for your client:
 
+- **Claude Code** reads the generated repository `.mcp.json`. Open Claude Code
+  in that repository and approve the server when prompted. For access outside
+  that repository, register it for your user account instead:
+  `claude mcp add --transport stdio --scope user lab-tracker -- lt-mcp`.
+  Use `claude mcp list` or `/mcp` in Claude Code to check the connection. Run
+  `lt setup verify-mcp --expected-revision <full-revision>` from the same
+  environment to verify health, authentication, and the installed client revision.
+  These instructions target Claude Code; Claude Desktop has separate client
+  configuration.
 - **Codex CLI** registers MCP servers in `~/.codex/config.toml`: add
   it with `codex mcp add lab-tracker -- lt-mcp`. Then run
   `lt setup verify-mcp --expected-revision <full-revision>` from the same
@@ -239,3 +275,34 @@ The record stays honest about the division of labor: every entity carries an
 `origin` (`user` / `ai_suggested` / `ai_executed` / `user_revised`), the change set, provider,
 model, and prompt version, all exportable as PROV-O. A rubber-stamped bulk
 accept is never mistaken later for a considered per-operation review.
+
+## Diagnose an unavailable connection
+
+Run `lt setup status` to inspect `server.reachable`. Failed probes also return
+`diagnosis`, `detail`, and `next_step`. The probe uses the existing two-second
+HTTP timeout and observes the actual request; it makes no extra network probes
+and does not require the Tailscale CLI. MCP transport failures expose the same
+`diagnosis` and `next_step` while preserving their fail-soft
+`proceed_without_graph_context` action.
+
+| Diagnosis | Observation and next step |
+|---|---|
+| `dns_resolution_failed` | Name resolution failed; check the hostname and resolver. |
+| `tcp_connection_failed` | TCP could not connect; check the address, listener, routing, and firewall. |
+| `tls_handshake_stalled` | TCP connected, but TLS timed out; ask the operator to inspect the HTTPS listener or reverse proxy. |
+| `tls_certificate_error` | Certificate verification failed; check the hostname, certificate, clock, and CA configuration. Do not disable verification. |
+| `http_response_timeout` | The connection was established, but an HTTP response timed out; inspect application/proxy logs. |
+| `http_error` | The health endpoint returned HTTP 4xx/5xx; inspect its status and application/proxy configuration. |
+| `transport_error` | The transport did not supply enough evidence to identify the stage. |
+
+For a `.ts.net` address, a TLS stall includes conditional Funnel guidance:
+on the **Lab Tracker host**, check `tailscale funnel status` and the service
+listening on its proxied port. An offline Funnel origin is one possible cause,
+not something a client can prove from the timeout alone. Public Funnel clients
+do not need to join the tailnet. DNS resolution and a successful TCP connection
+do not prove that the origin is serving.
+
+For compatibility, `reachable` remains true for HTTP responses below 500,
+including authentication errors; it describes connectivity, not token validity
+or project access. These diagnostics require an updated local Lab Tracker client
+or MCP process, so upgrade the client and restart the MCP host after installing.

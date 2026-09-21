@@ -11,8 +11,8 @@ to obtain a bearer token, how to react to a 401, and which exception a transport
 failure becomes) and keeps its own response/error translation and public
 exception classes. The transport therefore stays domain-free — it lives in the
 consumer package and is imported *up* into the server-side MCP client — and the
-facades' observable contracts (exact messages, typed errors, the SDK-vs-MCP
-transport-failure split) are unchanged.
+facades retain their typed errors and SDK-vs-MCP transport-failure split.
+Connection failures include stage-specific diagnostics from the same request.
 
 Uploads stream from a file handle with a local size preflight, so a note or
 visualization upload never materializes a whole file in memory and an oversize
@@ -28,6 +28,8 @@ from pathlib import Path
 from typing import Any, BinaryIO, Protocol
 
 import httpx
+
+from lab_tracker_client.connection_diagnostics import ConnectionTrace
 
 JsonObject = dict[str, Any]
 
@@ -124,10 +126,19 @@ class HttpTransport:
         # httpx would disable the timeout rather than use the client default.
         if timeout is not None:
             kwargs["timeout"] = timeout
+        trace = ConnectionTrace(self._base_url)
+        kwargs["extensions"] = {"trace": trace}
         try:
             return self._client.request(method, path, **kwargs)
         except httpx.HTTPError as exc:
-            raise self._auth.wrap_transport_error(method, path, exc) from exc
+            diagnostic = trace.diagnose(exc)
+            wrapped = self._auth.wrap_transport_error(method, path, exc)
+            # Keep each facade's public exception type while attaching safe metadata.
+            setattr(wrapped, "connection_diagnostic", diagnostic)  # noqa: B010
+            wrapped.args = (
+                f"{wrapped} {diagnostic['detail']} {diagnostic['next_step']}",
+            )
+            raise wrapped from exc
 
     def request(
         self,

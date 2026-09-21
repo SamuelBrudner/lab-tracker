@@ -41,6 +41,7 @@ from lab_tracker_client.client import (
     connection_profile_path,
     load_connection_profile,
 )
+from lab_tracker_client.connection_diagnostics import ConnectionTrace
 from lab_tracker_client.hooks import HOOK_BLOCK_BEGIN, hook_path_for_repo
 
 JsonObject = dict[str, Any]
@@ -210,7 +211,7 @@ def setup_status(target: str | Path = ".", *, brief: bool = False) -> JsonObject
         "server": {
             "base_url": base_url,
             "source": base_url_source,
-            "reachable": probe_health(base_url),
+            **probe_health_diagnostics(base_url),
         },
         "profile": {
             "present": connection_profile_path().exists(),
@@ -411,14 +412,26 @@ def resolved_base_url_for_setup() -> tuple[str, str]:
 
 
 def probe_health(base_url: str) -> bool:
-    with suppress(Exception):
+    return bool(probe_health_diagnostics(base_url)["reachable"])
+
+
+def probe_health_diagnostics(base_url: str) -> JsonObject:
+    trace = ConnectionTrace(base_url)
+    try:
         normalized = normalize_instance_base_url(base_url)
-        response = httpx.get(
-            normalized + "/health",
-            timeout=_HEALTH_PROBE_TIMEOUT_SECONDS,
-        )
-        return bool(response.status_code < 500)
-    return False
+        with httpx.Client(timeout=_HEALTH_PROBE_TIMEOUT_SECONDS) as client:
+            response = client.get(normalized + "/health", extensions={"trace": trace})
+        payload: JsonObject = {"reachable": response.status_code < 500}
+        if response.status_code >= 400:
+            payload.update(
+                diagnosis="http_error",
+                status_code=response.status_code,
+                detail=f"HTTP connection succeeded; server returned HTTP {response.status_code}.",
+                next_step="Check the URL, access requirements, and application or proxy logs.",
+            )
+        return payload
+    except Exception as exc:  # status remains fail-soft for session hooks.
+        return {"reachable": False, **trace.diagnose(exc)}
 
 
 def installed_source_revision() -> str | None:
@@ -981,11 +994,19 @@ def bind_project(
             record = None
             verification_warning = _project_id_verification_warning(exc)
         if record is None and verification_warning is None:
-            raise LTValidationError(f"No project found with id {project_id}.")
+            raise LTValidationError(
+                f"Project {project_id} was not found among the projects visible to "
+                "the current credentials. It may be missing, belong to another "
+                "instance, or require project membership. Check the server URL "
+                "with `lt setup status` and confirm the project ID and access "
+                "with its owner. An editor/viewer token needs project access "
+                "even when its account is an admin. A successful `lt health` check only verifies "
+                "connectivity, not project access."
+            )
     else:
         matches = [
             project
-            for project in client.list_projects()
+            for project in client.iter_projects()
             if str(project.get("name") or "") == name
         ]
         if len(matches) > 1:
@@ -1055,7 +1076,7 @@ def _project_id_verification_warning(exc: Exception) -> str:
 
 
 def _find_project_by_id(client: LabTracker, project_id: str) -> Any:
-    for project in client.list_projects():
+    for project in client.iter_projects():
         if str(project.get("project_id") or "") == project_id:
             return project
     return None

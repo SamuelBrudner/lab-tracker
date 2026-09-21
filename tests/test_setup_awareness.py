@@ -290,7 +290,7 @@ def test_setup_status_exposes_and_checks_each_default_skill_target(
     )
     claude_path.parent.mkdir(parents=True)
     claude_path.write_text(setup_skill_markdown(), encoding="utf-8")
-    monkeypatch.setattr(setup_helpers, "probe_health", lambda _url: True)
+    monkeypatch.setattr(setup_helpers, "probe_health_diagnostics", lambda _url: {"reachable": True})
 
     partial = setup_helpers.setup_status(repo)
     skills = partial["skills"]

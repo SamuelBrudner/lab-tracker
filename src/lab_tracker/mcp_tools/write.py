@@ -20,6 +20,7 @@ from lab_tracker.mcp_api_client import (
 )
 from lab_tracker.mcp_evidence_bundle import record_evidence_bundle
 from lab_tracker.mcp_tools.hints import next_action, with_next_action
+from lab_tracker_client.connection_diagnostics import connection_error_metadata
 
 
 def _write_tool(
@@ -34,7 +35,9 @@ def _write_tool(
         payload = call(client)
         return with_next_action(payload, hint) if hint is not None else payload
     except (LabTrackerAPIUnavailableError, httpx.HTTPError) as exc:
-        return lab_tracker_unavailable(tool_name, detail=str(exc))
+        return lab_tracker_unavailable(
+            tool_name, detail=str(exc), **connection_error_metadata(exc)
+        )
     except LabTrackerAPIError as exc:
         return lab_tracker_api_error(tool_name, exc)
     finally:

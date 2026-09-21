@@ -25,6 +25,7 @@ from lab_tracker_client.client import (
     EntityRef,
     EvidenceImportResult,
     LabTracker,
+    LTAPIError,
     LTValidationError,
     ids,
 )
@@ -54,9 +55,12 @@ def main(argv: list[str] | None = None) -> None:
                 client.close()
         else:
             payload = args.func(args)
-    except Exception:
+    except Exception as exc:
         if getattr(args, "fail_silent", False):
             return
+        if isinstance(exc, LTAPIError) and not args.debug:
+            print(f"error: {exc}", file=sys.stderr)
+            raise SystemExit(1) from None
         raise
     exit_code = _payload_exit_code(payload)
     if exit_code and getattr(args, "fail_silent", False):
@@ -69,6 +73,12 @@ def main(argv: list[str] | None = None) -> None:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="lt", description="Lab Tracker consumer CLI.")
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        default=os.getenv("LAB_TRACKER_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"},
+        help="Show tracebacks for API errors (or set LAB_TRACKER_DEBUG=1).",
+    )
     subcommands = parser.add_subparsers(dest="command", required=True)
 
     health_parser = subcommands.add_parser(
@@ -1370,14 +1380,17 @@ def _cmd_project_bind(client: LabTracker, args: argparse.Namespace) -> Any:
             "lt project bind writes lt_ids.json; pass --yes to consent or "
             "--dry-run to preview."
         )
-    return setup_helpers.bind_project(
-        client,
-        project_id=args.project_id,
-        name=args.name,
-        create=args.create,
-        ids_path=args.ids,
-        dry_run=args.dry_run,
-    )
+    try:
+        return setup_helpers.bind_project(
+            client,
+            project_id=args.project_id,
+            name=args.name,
+            create=args.create,
+            ids_path=args.ids,
+            dry_run=args.dry_run,
+        )
+    except LTValidationError as exc:
+        raise SystemExit(f"lt project bind: {exc}") from None
 
 
 def _cmd_git_snapshot(args: argparse.Namespace) -> Any:
@@ -1457,7 +1470,9 @@ def _git_snapshot_sync_diagnostic(payload: Any) -> str | None:
     return (
         f"lab-tracker: commit capture did not fully sync — {cause}. "
         f"{queued} event(s) are queued at {outbox}; the commit was kept. "
-        "Drain later with 'lt outbox sync' (inspect with 'lt outbox status')."
+        "Treat a timeout as ambiguous: the server may already have accepted the "
+        "capture. Retry now with 'lt outbox sync', then verify with 'lt outbox "
+        "status'; replay is idempotent."
     )
 
 

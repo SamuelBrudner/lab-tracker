@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import timedelta
 from uuid import uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 
 from lab_tracker.auth import Role, utc_now
@@ -36,6 +37,75 @@ def _create_token(
     )
     assert response.status_code == 201, response.text
     return response.json()["data"]
+
+
+@pytest.mark.parametrize("role,read_only,membership", [
+    ("editor", False, "contributor"), ("viewer", True, "viewer"),
+])
+def test_setup_verifies_token_project_access_before_and_after_membership(
+    client, admin_auth_headers, role, read_only, membership
+):
+    project_id = client.post(
+        "/projects", json={"name": "Setup project"}, headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    path = f"/projects/{project_id}/access"
+    assert client.get(path, headers=admin_auth_headers).json()["data"]["role"] == "owner"
+    issued = _create_token(client, admin_auth_headers, role=role, read_only=read_only)
+    token_headers = _bearer(issued["secret"])
+    denied = client.get(path, headers=token_headers)
+    missing = client.get(f"/projects/{uuid4()}/access", headers=token_headers)
+    assert denied.status_code == missing.status_code == 404
+    assert denied.json() == missing.json()
+    assert client.get("/projects", headers=token_headers).json()["data"] == []
+
+    user_id = client.get("/auth/me", headers=admin_auth_headers).json()["data"]["user_id"]
+    body = {"user_id": user_id, "role": membership}
+    # A token cannot repair its own access; the human's owner/admin session must.
+    assert client.post(
+        f"/projects/{project_id}/members", json=body, headers=token_headers,
+    ).status_code in {401, 403}
+    assert client.post(
+        f"/projects/{project_id}/members", json=body, headers=admin_auth_headers,
+    ).status_code == 201
+    verified = client.get(path, headers=token_headers)
+    assert verified.status_code == 200
+    assert verified.json()["data"] == {"project_id": project_id, "role": membership}
+    assert [p["project_id"] for p in client.get(
+        "/projects", headers=token_headers,
+    ).json()["data"]] == [project_id]
+    capture = client.post(
+        "/notes",
+        json={"project_id": project_id, "raw_content": "Setup capture", "status": "staged"},
+        headers=token_headers,
+    )
+    assert capture.status_code == (403 if read_only else 201)
+    client.delete(f"/auth/tokens/{issued['token_id']}", headers=admin_auth_headers)
+    assert client.get(path, headers=token_headers).status_code == 401
+
+
+def test_setup_access_check_recognizes_inherited_group_ownership(client, admin_auth_headers):
+    group = client.post("/groups", json={"name": "Setup group"}, headers=admin_auth_headers)
+    assert group.status_code == 201
+    group_id = group.json()["data"]["group_id"]
+    project = client.post(
+        "/projects", json={"name": "Inherited setup", "group_id": group_id},
+        headers=admin_auth_headers,
+    )
+    assert project.status_code == 201
+    project_id = project.json()["data"]["project_id"]
+    user_id = client.get("/auth/me", headers=admin_auth_headers).json()["data"]["user_id"]
+    assert client.post(
+        f"/groups/{group_id}/members", json={"user_id": user_id, "role": "owner"},
+        headers=admin_auth_headers,
+    ).status_code == 201
+    issued = _create_token(client, admin_auth_headers, role="editor", read_only=False)
+    verified = client.get(f"/projects/{project_id}/access", headers=_bearer(issued["secret"]))
+    assert verified.status_code == 200
+    assert verified.json()["data"]["role"] == "owner"
+    # Verification is read-only and does not introduce redundant direct memberships.
+    assert client.get(
+        f"/projects/{project_id}/members", headers=admin_auth_headers,
+    ).json()["data"] == []
 
 
 def test_batch_run_due_scoped_token_can_only_trigger_the_run(

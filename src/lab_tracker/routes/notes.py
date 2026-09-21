@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, FastAPI, File, Form, UploadFile
+from fastapi import APIRouter, BackgroundTasks, FastAPI, File, Form, Query, UploadFile
 from starlette import status as http_status
 from starlette.requests import Request
 from starlette.responses import Response
@@ -27,6 +27,10 @@ from lab_tracker.models import (
     UsageEventResourceType,
     utc_now,
 )
+from lab_tracker.note_text import (
+    DEFAULT_NOTE_TEXT_PREVIEW_CHARS,
+    MAX_NOTE_TEXT_PREVIEW_CHARS,
+)
 from lab_tracker.patching import provided_fields
 from lab_tracker.schemas import (
     Envelope,
@@ -34,6 +38,7 @@ from lab_tracker.schemas import (
     NoteArchiveRequest,
     NoteCreate,
     NoteRawDownloadRead,
+    NoteRawTextRead,
     NoteTranscriptRequest,
     NoteUpdate,
 )
@@ -266,6 +271,41 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
             content_base64=encoded,
         )
         return Envelope(data=payload)
+
+    @router.get(
+        "/notes/{note_id:uuid}/raw-text",
+        response_model=Envelope[NoteRawTextRead],
+    )
+    def read_note_raw_text(
+        note_id: UUID,
+        request: Request,
+        max_chars: Annotated[
+            int,
+            Query(ge=1, le=MAX_NOTE_TEXT_PREVIEW_CHARS),
+        ] = DEFAULT_NOTE_TEXT_PREVIEW_CHARS,
+    ):
+        request_api = api_from_request(request, api)
+        request_api.get_note_for_read(
+            note_id,
+            actor=actor_from_request(request),
+        )
+        raw_asset, excerpt = request_api.read_note_raw_text(
+            note_id,
+            max_chars=max_chars,
+        )
+        return Envelope(
+            data=NoteRawTextRead(
+                storage_id=raw_asset.storage_id,
+                filename=raw_asset.filename,
+                content_type=raw_asset.content_type,
+                size_bytes=raw_asset.size_bytes,
+                checksum=raw_asset.checksum,
+                text=excerpt.text,
+                truncated=excerpt.truncated,
+                included_bytes=excerpt.included_bytes,
+                omitted_bytes=excerpt.omitted_bytes,
+            )
+        )
 
     @router.patch("/notes/{note_id:uuid}", response_model=Envelope[Note])
     def update_note(note_id: UUID, payload: NoteUpdate, request: Request):

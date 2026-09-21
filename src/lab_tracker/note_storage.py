@@ -101,6 +101,15 @@ class LocalNoteStorage:
             raise NotFoundError("Raw note content not found.")
         return path.read_bytes()
 
+    def read_prefix(self, storage_id: UUID, max_bytes: int) -> bytes:
+        if max_bytes < 0:
+            raise ValueError("max_bytes must not be negative.")
+        path = self._path_for(storage_id)
+        if not path.exists():
+            raise NotFoundError("Raw note content not found.")
+        with path.open("rb") as handle:
+            return handle.read(max_bytes)
+
     def delete(self, storage_id: UUID) -> None:
         path = self._path_for(storage_id)
         if not path.exists():

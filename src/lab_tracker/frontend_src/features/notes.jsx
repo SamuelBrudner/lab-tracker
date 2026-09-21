@@ -134,8 +134,20 @@ function NotePanel({
               <span className="pill">{note.status}</span>
               <span className="subtle">{formatDate(note.created_at)}</span>
             </div>
-            <p>{note.transcribed_text || note.raw_content || "(binary upload)"}</p>
+            <p>
+              {note.transcribed_text ||
+                note.raw_content ||
+                note.raw_asset?.filename ||
+                "(binary upload)"}
+            </p>
             <p className="mono">{note.note_id}</p>
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={() => navigate(`/app/notes/${note.note_id}`)}
+            >
+              Open note
+            </button>
           </article>
         ))}
       </div>
@@ -171,13 +183,16 @@ function NoteDetailCard({
   const canWrite = note?.project_id ? noteAccess.canContribute : dashboardCanWrite;
   const [imagePreview, setImagePreview] = useState("");
   const [audioPreview, setAudioPreview] = useState("");
+  const [textPreview, setTextPreview] = useState(null);
+  const [textPreviewError, setTextPreviewError] = useState("");
   const [transcriptText, setTranscriptText] = useState("");
   const isImage = Boolean(note?.raw_asset?.content_type?.startsWith("image/"));
   const isAudio = Boolean(note?.raw_asset?.content_type?.startsWith("audio/"));
+  const isText = Boolean(note?.raw_asset?.is_text);
   const isMemberOnboardingCheckpoint =
     note?.metadata?.member_onboarding_role === "checkpoint";
   const canDraft = Boolean(
-    !isMemberOnboardingCheckpoint && (isImage || isAudio || note?.raw_content)
+    !isMemberOnboardingCheckpoint && (isImage || isAudio || isText || note?.raw_content)
   );
 
   const project = useMemo(() => {
@@ -191,13 +206,20 @@ function NoteDetailCard({
     let canceled = false;
     setImagePreview("");
     setAudioPreview("");
-    if (!note || (!isImage && !isAudio)) {
+    setTextPreview(null);
+    setTextPreviewError("");
+    if (!note || (!isImage && !isAudio && !isText)) {
       return () => {
         canceled = true;
       };
     }
-    apiRequest(`/notes/${note.note_id}/raw`, { token })
+    const path = isText ? `/notes/${note.note_id}/raw-text` : `/notes/${note.note_id}/raw`;
+    apiRequest(path, { token })
       .then((raw) => {
+        if (!canceled && isText && typeof raw?.text === "string") {
+          setTextPreview(raw);
+          return;
+        }
         if (!canceled && raw?.content_base64 && raw?.content_type) {
           const dataUrl = `data:${raw.content_type};base64,${raw.content_base64}`;
           if (raw.content_type.startsWith("image/")) {
@@ -212,12 +234,15 @@ function NoteDetailCard({
         if (!canceled) {
           setImagePreview("");
           setAudioPreview("");
+          if (isText) {
+            setTextPreviewError("Text preview is unavailable.");
+          }
         }
       });
     return () => {
       canceled = true;
     };
-  }, [isAudio, isImage, note, token]);
+  }, [isAudio, isImage, isText, note, token]);
 
   useEffect(() => {
     setTranscriptText(note?.transcribed_text || "");
@@ -295,8 +320,11 @@ function NoteDetailCard({
           return;
         }
       }
-      const draft = await apiRequest(`/notes/${note.note_id}/graph-drafts`, {
-        body: { mode },
+      const draftPath = isText
+        ? `/notes/${note.note_id}/analysis-graph-drafts`
+        : `/notes/${note.note_id}/graph-drafts`;
+      const draft = await apiRequest(draftPath, {
+        ...(isText ? {} : { body: { mode } }),
         method: "POST",
         token,
       });
@@ -355,7 +383,24 @@ function NoteDetailCard({
             </div>
             <div>
               <div className="subtle">Raw content</div>
-              <p>{note.raw_content || <span className="subtle">(binary upload)</span>}</p>
+              {note.raw_content ? <p>{note.raw_content}</p> : null}
+              {!note.raw_content && textPreview ? (
+                <div className="stack">
+                  <pre className="note-text">{textPreview.text}</pre>
+                  {textPreview.truncated ? (
+                    <p className="subtle">
+                      Preview truncated; {textPreview.omitted_bytes} byte(s) omitted.
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
+              {!note.raw_content && isText && !textPreview && !textPreviewError ? (
+                <p className="subtle">Loading text preview...</p>
+              ) : null}
+              {textPreviewError ? <p className="flash error">{textPreviewError}</p> : null}
+              {!note.raw_content && !isText ? (
+                <p className="subtle">(binary upload)</p>
+              ) : null}
             </div>
           </div>
           <div className="stack">

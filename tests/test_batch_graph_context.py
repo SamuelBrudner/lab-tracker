@@ -708,7 +708,7 @@ def test_batch_source_budget_is_fair_deterministic_and_reports_warning() -> None
     assert summary["source_context_omitted_chars"] == 30
     assert summary["source_context_truncated_note_count"] == 2
     assert any(
-        "30 character(s) omitted across 2 note(s)" in warning
+        "30 inline character(s) and 0 uploaded-text byte(s) omitted across 2 note(s)" in warning
         for warning in summary["warnings"]
     )
 
@@ -730,3 +730,36 @@ def test_batch_source_budget_counts_existing_raw_preview_omission() -> None:
     assert artifacts[0]["raw_content_preview"] == "x" * 1000
     assert artifacts[0]["raw_content_preview_omitted_chars"] == 500
     assert artifacts[0]["source_text_omitted_chars"] == 500
+
+
+def test_batch_context_includes_bounded_uploaded_commit_diff(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _create_project(client, admin_auth_headers, "Commit review")
+    prefix = "# Git Commit Evidence\n\n## Diff\n\ndiff --git a/a.py b/a.py\n"
+    body = (prefix + ("+changed line\n" * 21_000)).encode()
+    note_id = _quick_capture(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        filename="commit.md",
+        body=body,
+        content_type="text/markdown",
+    )
+
+    notes = _load_notes(client, [note_id])
+    with _request_api(client) as api:
+        packet = api.build_batch_graph_context(notes)
+
+    artifact = packet["source_artifacts"][0]
+    assert artifact["type"] == "text"
+    assert artifact["raw_asset_text"].startswith(prefix)
+    assert "diff --git a/a.py b/a.py" in artifact["raw_asset_text"]
+    assert artifact["raw_asset_text_truncated"] is True
+    assert artifact["raw_asset_text_included_bytes"] == 256_000
+    assert artifact["raw_asset_text_omitted_bytes"] == len(body) - 256_000
+    assert packet["source_context_included_chars"] == 256_000
+    assert packet["source_context_omitted_bytes"] == len(body) - 256_000
+    assert packet["source_context_truncated"] is True
+    assert packet["source_context_truncated_note_count"] == 1

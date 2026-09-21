@@ -13,6 +13,27 @@ lt-mcp
 ```
 
 The installed `lt-mcp` console script is the canonical portable launch command.
+
+### Startup fails importing FastMCP
+
+Lab Tracker currently requires MCP SDK `>=1.27,<2` because the server imports
+`mcp.server.fastmcp`. An older Lab Tracker dependency declaration allowed SDK
+2.x, which can leave a newly installed `lt-mcp` unable to start.
+
+For a `uv tool` installation, rerun the exact pinned `uv tool install --force`
+command shown by Setup, adding `--with "mcp>=1.27,<2"`. This repairs the MCP
+dependency while preserving the client revision required by your server. For a
+source checkout's virtual environment, run:
+
+```bash
+uv pip install "mcp>=1.27,<2"
+```
+
+Restart the MCP connection in your assistant, then run the exact
+`lt setup verify-mcp --expected-revision <full-revision>` command shown by Setup.
+The verifier checks the protocol handshake as well as API health and project
+access. Installing MCP 1.x alone does not replace those connection checks.
+
 `python -m lab_tracker.mcp_server` remains supported for source checkouts and
 manual debugging.
 

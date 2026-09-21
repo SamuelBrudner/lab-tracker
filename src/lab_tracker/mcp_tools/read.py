@@ -25,6 +25,7 @@ from lab_tracker.mcp_api_client import (
     suppress_unverified_artifact_content,
 )
 from lab_tracker.mcp_tools.hints import next_action, with_next_action
+from lab_tracker_client.connection_diagnostics import connection_error_metadata
 
 _cached_read_client: Any | None = None
 _cached_read_client_factory: Any | None = None
@@ -83,7 +84,9 @@ def _read_tool(
         return with_next_action(call(client), hint)
     except (LabTrackerAPIUnavailableError, httpx.HTTPError) as exc:
         close_cached_read_client()
-        return lab_tracker_unavailable(tool_name, detail=str(exc))
+        return lab_tracker_unavailable(
+            tool_name, detail=str(exc), **connection_error_metadata(exc)
+        )
     except LabTrackerAPIError as exc:
         return lab_tracker_api_error(tool_name, exc)
 

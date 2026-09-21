@@ -9,6 +9,7 @@ import zipfile
 from pathlib import Path, PurePosixPath
 
 import pytest
+from packaging.requirements import Requirement
 
 from lab_tracker.local_filesystem_operations import (
     LOCAL_FILESYSTEM_PROTOCOL_VERSION,
@@ -360,3 +361,15 @@ assert any(icon["src"] == "/app/static/icon-192.png" for icon in manifest["icons
         capture_output=True,
         text=True,
     )
+
+
+def test_mcp_dependency_excludes_sdk_without_bundled_fastmcp() -> None:
+    repo_root = Path(__file__).resolve().parent.parent
+    project = tomllib.loads((repo_root / "pyproject.toml").read_text(encoding="utf-8"))
+    requirements = [Requirement(value) for value in project["project"]["dependencies"]]
+    mcp = next(requirement for requirement in requirements if requirement.name == "mcp")
+    assert "1.27.0" in mcp.specifier
+    assert "1.27.2" in mcp.specifier
+    assert "1.26.0" not in mcp.specifier
+    assert "2.0.0" not in mcp.specifier
+    assert "2.2.0" not in mcp.specifier
