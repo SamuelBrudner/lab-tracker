@@ -274,17 +274,19 @@ describe("OnboardingPage", () => {
     expect(commandText).toContain(
       `uv run lt setup verify-client --expected-revision ${SOURCE_REVISION}`
     );
+    // This page has only the browser session, not the token's verified access.
+    expect(commandText).not.toContain("lt project bind");
+    expect(commandText).not.toContain("lt hooks install");
+    expect(commandText).not.toContain("lt setup init");
+    fireEvent.click(screen.getByRole("button", {
+      name: "Verify access and finish repository setup",
+    }));
+    expect(navigate).toHaveBeenCalledWith("/app/agents");
+    navigate.mockClear();
     expect(commandText).toContain(
-      "lt setup init --install-skills --dry-run"
+      "claude mcp add --transport stdio --scope user lab-tracker -- lt-mcp"
     );
-    expect(commandText).toContain("lt setup init --install-skills --yes");
-    expect(commandText).toContain(
-      `lt project bind --project-id ${PROJECT.project_id} --dry-run`
-    );
-    expect(commandText).toContain(
-      `lt hooks install --project ${PROJECT.project_id} --yes`
-    );
-    expect(commandText).toContain("lt setup status");
+    expect(commandText).toContain("claude mcp list");
     expect(commandText).toContain("codex mcp add lab-tracker -- lt-mcp");
     expect(commandText).toContain(
       `lt setup verify-mcp --expected-revision ${SOURCE_REVISION}`
@@ -331,6 +333,7 @@ describe("OnboardingPage", () => {
       .join("\n");
     expect(commandText).not.toContain("uv tool install");
     expect(commandText).not.toContain("codex mcp add");
+    expect(commandText).not.toContain("claude mcp add");
     expect(commandText).not.toContain("lt setup init");
     expect(commandText).not.toContain("lt project bind");
     expect(commandText).not.toContain("lt hooks install");

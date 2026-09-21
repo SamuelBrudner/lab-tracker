@@ -89,7 +89,7 @@ def setup_guide_markdown() -> str:
         "   enrolls the current repository: each commit queues durable staged\n"
         "   evidence that syncs when the server is reachable. Repos are enrolled\n"
         "   one consented command at a time.\n"
-        "10. **MCP launch verification** — after Codex registration, `lt setup\n"
+        "10. **MCP launch verification** — after client registration, `lt setup\n"
         "    verify-mcp --expected-revision <revision>` launches `lt-mcp` over\n"
         "    stdio, initializes the protocol, calls health, and performs an\n"
         "    authenticated project read through the saved profile.\n"

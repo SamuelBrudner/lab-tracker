@@ -34,8 +34,10 @@ from lab_tracker.decision_context_constants import (
     CLAUDE_BLOCK_BEGIN,
     CODE_CONVENTIONS_BLOCK_BEGIN,
     CODE_CONVENTIONS_BLOCK_END,
+    COMMIT_CAPTURE_RECOVERY_POLICY,
     code_conventions_version_line,
     code_facing_idioms,
+    cursor_rules_mdc,
     managed_code_conventions_block,
 )
 from lab_tracker.demo_seed import DemoSeedResult
@@ -94,6 +96,7 @@ def test_init_creates_portable_consumer_files(tmp_path: Path) -> None:
     assert "never accept" in agents_fragment  # proposal workflow is human-gated
     assert ".gemini/settings.json" in agents_fragment
     assert "~/.codex/config.toml" in agents_fragment
+    assert COMMIT_CAPTURE_RECOVERY_POLICY in agents_fragment
     # Every agent instruction file gets the same activation block; the
     # code-conventions blocks stay behind --yes consent.
     agents_md = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
@@ -110,6 +113,10 @@ def test_init_creates_portable_consumer_files(tmp_path: Path) -> None:
     claude_md = (tmp_path / "CLAUDE.md").read_text(encoding="utf-8")
     assert "BEGIN LAB TRACKER MCP ACTIVATION" in claude_md
     assert "lab_tracker_get_decision_context" in claude_md
+    for prompt_name in ("CLAUDE.md", "AGENTS.md", "GEMINI.md"):
+        prompt = (tmp_path / prompt_name).read_text(encoding="utf-8")
+        assert COMMIT_CAPTURE_RECOVERY_POLICY in prompt
+        assert prompt.index("lt outbox sync") < prompt.index("lt outbox status")
 
 
 def test_init_skips_existing_files_without_force(tmp_path: Path) -> None:
@@ -414,6 +421,30 @@ def test_update_preserves_conventions_consent(tmp_path: Path) -> None:
     assert (tmp_path / ".cursor" / "rules" / "lab-tracker.mdc").exists()
 
 
+def test_update_refreshes_commit_capture_recovery_policy(tmp_path: Path) -> None:
+    init_consumer_repo(tmp_path)
+    prompt_paths = [
+        tmp_path / "CLAUDE.md",
+        tmp_path / "AGENTS.md",
+        tmp_path / "GEMINI.md",
+        tmp_path / "AGENTS.lt.md",
+    ]
+    for path in prompt_paths:
+        stale = path.read_text(encoding="utf-8").replace(
+            COMMIT_CAPTURE_RECOVERY_POLICY,
+            "Stale commit-capture recovery policy.",
+        )
+        path.write_text(stale, encoding="utf-8")
+
+    update_consumer_repo(tmp_path)
+
+    for path in prompt_paths:
+        refreshed = path.read_text(encoding="utf-8")
+        assert COMMIT_CAPTURE_RECOVERY_POLICY in refreshed
+        assert "Stale commit-capture recovery policy." not in refreshed
+        assert refreshed.index("lt outbox sync") < refreshed.index("lt outbox status")
+
+
 def test_update_never_rewrites_lt_ids(tmp_path: Path) -> None:
     init_consumer_repo(tmp_path)
     ids = tmp_path / "lt_ids.json"
@@ -441,6 +472,46 @@ def test_update_scaffold_files_are_stable_between_runs(tmp_path: Path) -> None:
     }
     assert scaffold <= set(second.up_to_date)
     assert not second.backups
+
+
+def test_update_keeps_cursor_rule_byte_stable_with_one_front_matter_header(
+    tmp_path: Path,
+) -> None:
+    init_consumer_repo(tmp_path, yes=True)
+    cursor_rule = tmp_path / ".cursor" / "rules" / "lab-tracker.mdc"
+    initial = cursor_rule.read_text(encoding="utf-8")
+
+    first = update_consumer_repo(tmp_path)
+    second = update_consumer_repo(tmp_path)
+
+    assert initial == cursor_rules_mdc()
+    assert cursor_rule.read_text(encoding="utf-8") == initial
+    assert initial.count("description: Lab Tracker code-facing conventions") == 1
+    assert cursor_rule in first.skipped
+    assert cursor_rule in second.skipped
+
+
+def test_update_repairs_duplicate_cursor_front_matter_and_dry_run_previews_it(
+    tmp_path: Path,
+) -> None:
+    init_consumer_repo(tmp_path, yes=True)
+    cursor_rule = tmp_path / ".cursor" / "rules" / "lab-tracker.mdc"
+    front_matter, _separator, _body = cursor_rules_mdc().partition("\n\n")
+    duplicated = f"{front_matter}\n\n{cursor_rules_mdc()}"
+    cursor_rule.write_text(duplicated, encoding="utf-8")
+
+    preview = update_consumer_repo(tmp_path, dry_run=True)
+
+    assert cursor_rule.read_text(encoding="utf-8") == duplicated
+    assert cursor_rule in preview.diffs
+    assert preview._preview_contents[cursor_rule] == cursor_rules_mdc()
+
+    result = update_consumer_repo(tmp_path)
+
+    repaired = cursor_rule.read_text(encoding="utf-8")
+    assert repaired == cursor_rules_mdc()
+    assert repaired.count("description: Lab Tracker code-facing conventions") == 1
+    assert cursor_rule in result.overwritten
 
 
 def test_update_dry_run_writes_nothing(tmp_path: Path) -> None:

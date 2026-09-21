@@ -1588,6 +1588,40 @@ def test_note_raw_download_sanitizes_attachment_filename(
     assert raw_download.headers["content-disposition"] == ('attachment; filename="bad\'__name.txt"')
 
 
+def test_note_raw_text_endpoint_is_bounded_and_marks_text_assets(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    project_id = client.post(
+        "/projects",
+        json={"name": "Commit evidence preview"},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    content = "αβγ\n## Diff\ndiff --git a/a.py b/a.py\n".encode()
+    upload = client.post(
+        "/notes/quick-capture",
+        data={"project_id": project_id},
+        files={"file": ("commit.md", content, "text/markdown")},
+        headers=admin_auth_headers,
+    )
+    assert upload.status_code == 201, upload.text
+    note = upload.json()["data"]
+    assert note["raw_asset"]["is_text"] is True
+
+    preview = client.get(
+        f"/notes/{note['note_id']}/raw-text",
+        params={"max_chars": 3},
+        headers=admin_auth_headers,
+    )
+
+    assert preview.status_code == 200, preview.text
+    payload = preview.json()["data"]
+    assert payload["text"] == "αβγ"
+    assert payload["included_bytes"] == len("αβγ".encode())
+    assert payload["omitted_bytes"] == len(content) - len("αβγ".encode())
+    assert payload["truncated"] is True
+
+
 def test_quick_capture_stages_note_with_minimal_payload(
     client: TestClient,
     admin_auth_headers: dict[str, str],

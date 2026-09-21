@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from typing import Any
 from uuid import UUID
 
@@ -24,6 +25,7 @@ from lab_tracker.models import (
     Session,
     Visualization,
 )
+from lab_tracker.note_text import NoteTextExcerpt, is_text_content_type
 from lab_tracker.services.analysis_service import AnalysisService
 from lab_tracker.services.claim_service import ClaimService
 from lab_tracker.services.dataset_service import DatasetService
@@ -153,7 +155,21 @@ class GraphContextBuilder:
             source_context_included_chars,
             source_context_omitted_chars,
             source_context_truncated_note_count,
-        ) = _bounded_batch_source_artifacts(batch_notes)
+        ) = _bounded_batch_source_artifacts(
+            batch_notes,
+            text_asset_reader=lambda note_id, max_chars: self.notes.read_note_raw_text(
+                note_id,
+                max_chars=max_chars,
+            )[1],
+        )
+        source_context_included_bytes = sum(
+            int(item.get("raw_asset_text_included_bytes") or 0)
+            for item in bounded_source_artifacts
+        )
+        source_context_omitted_bytes = sum(
+            int(item.get("raw_asset_text_omitted_bytes") or 0)
+            for item in bounded_source_artifacts
+        )
         packet: dict[str, Any] = {
             "mode": "graph_batch",
             "batch_window": _batch_window(window, batch_notes),
@@ -167,7 +183,11 @@ class GraphContextBuilder:
             "source_context_budget_chars": BATCH_SOURCE_CONTEXT_CHAR_BUDGET,
             "source_context_included_chars": source_context_included_chars,
             "source_context_omitted_chars": source_context_omitted_chars,
-            "source_context_truncated": source_context_omitted_chars > 0,
+            "source_context_included_bytes": source_context_included_bytes,
+            "source_context_omitted_bytes": source_context_omitted_bytes,
+            "source_context_truncated": (
+                source_context_omitted_chars > 0 or source_context_omitted_bytes > 0
+            ),
             "source_context_truncated_note_count": (
                 source_context_truncated_note_count
             ),
@@ -585,13 +605,17 @@ def _graph_batch_context_summary(packet: dict[str, Any]) -> dict[str, Any]:
     source_context_omitted_chars = int(
         packet.get("source_context_omitted_chars") or 0
     )
+    source_context_omitted_bytes = int(
+        packet.get("source_context_omitted_bytes") or 0
+    )
     source_context_truncated_note_count = int(
         packet.get("source_context_truncated_note_count") or 0
     )
     if source_context_truncated:
         warnings.append(
             "source text truncated by per-note preview and/or aggregate batch budget; "
-            f"{source_context_omitted_chars} character(s) omitted across "
+            f"{source_context_omitted_chars} inline character(s) and "
+            f"{source_context_omitted_bytes} uploaded-text byte(s) omitted across "
             f"{source_context_truncated_note_count} note(s)"
         )
     projects = packet.get("projects") or []
@@ -629,6 +653,7 @@ def _graph_batch_context_summary(packet: dict[str, Any]) -> dict[str, Any]:
             packet.get("source_context_included_chars") or 0
         ),
         "source_context_omitted_chars": source_context_omitted_chars,
+        "source_context_omitted_bytes": source_context_omitted_bytes,
         "source_context_truncated": source_context_truncated,
         "source_context_truncated_note_count": (
             source_context_truncated_note_count
@@ -760,6 +785,8 @@ def _source_artifact_type(note: Note) -> str:
         return "image"
     if content_type.startswith("audio/"):
         return "audio"
+    if is_text_content_type(content_type):
+        return "text"
     if note.raw_asset is not None:
         return "file"
     return "text"
@@ -786,6 +813,7 @@ def _source_artifact_packet(note: Note) -> dict[str, Any]:
         payload["content_type"] = note.raw_asset.content_type
         payload["size_bytes"] = note.raw_asset.size_bytes
         payload["checksum"] = note.raw_asset.checksum
+        payload["is_text"] = note.raw_asset.is_text
     if note.transcribed_text:
         payload["transcript_id"] = f"transcript:{note.note_id}"
         payload["transcript_text"] = note.transcribed_text
@@ -804,6 +832,7 @@ def _bounded_batch_source_artifacts(
     notes: list[Note],
     *,
     budget_chars: int = BATCH_SOURCE_CONTEXT_CHAR_BUDGET,
+    text_asset_reader: Callable[[UUID, int], NoteTextExcerpt] | None = None,
 ) -> tuple[list[dict[str, Any]], int, int, int]:
     """Share one source-text budget deterministically across batch notes.
 
@@ -843,18 +872,44 @@ def _bounded_batch_source_artifacts(
                 artifact[field_name] = value[:field_allowance]
                 artifact[f"{field_name}_truncated"] = True
                 field_omitted = len(value) - field_allowance
-                artifact[f"{field_name}_omitted_chars"] = int(
-                    artifact.get(f"{field_name}_omitted_chars") or 0
-                ) + field_omitted
+                artifact[f"{field_name}_omitted_chars"] = (
+                    int(artifact.get(f"{field_name}_omitted_chars") or 0) + field_omitted
+                )
                 note_omitted += field_omitted
                 used += field_allowance
             else:
                 used += len(value)
+        raw_asset = note.raw_asset
+        if raw_asset is not None and raw_asset.is_text and text_asset_reader is not None:
+            field_allowance = max(0, allocation - used)
+            if field_allowance:
+                try:
+                    excerpt = text_asset_reader(note.note_id, field_allowance)
+                except (NotFoundError, OSError, ValidationError):
+                    artifact["raw_asset_text_unavailable"] = True
+                    artifact["raw_asset_text_included_bytes"] = 0
+                    artifact["raw_asset_text_omitted_bytes"] = raw_asset.size_bytes
+                    artifact["raw_asset_text_truncated"] = raw_asset.size_bytes > 0
+                else:
+                    artifact["raw_asset_text"] = excerpt.text
+                    artifact["raw_asset_text_included_bytes"] = excerpt.included_bytes
+                    artifact["raw_asset_text_omitted_bytes"] = excerpt.omitted_bytes
+                    artifact["raw_asset_text_truncated"] = excerpt.truncated
+                    used += len(excerpt.text)
+            else:
+                artifact["raw_asset_text"] = ""
+                artifact["raw_asset_text_included_bytes"] = 0
+                artifact["raw_asset_text_omitted_bytes"] = raw_asset.size_bytes
+                artifact["raw_asset_text_truncated"] = raw_asset.size_bytes > 0
         remaining -= used
         included += used
         omitted += note_omitted
-        if note_omitted:
+        raw_asset_omitted = int(
+            artifact.get("raw_asset_text_omitted_bytes") or 0
+        )
+        if note_omitted or raw_asset_omitted:
             truncated_notes += 1
+        if note_omitted:
             artifact["source_text_omitted_chars"] = note_omitted
         artifacts.append(artifact)
     return artifacts, included, omitted, truncated_notes

@@ -162,6 +162,86 @@ describe("App", () => {
     expect(await screen.findByText("Graph draft ready for review.")).toBeInTheDocument();
   });
 
+  it("previews uploaded commit evidence and starts an analysis draft", async () => {
+    const noteId = "11111111-1111-4111-8111-111111111111";
+    const draftId = "22222222-2222-4222-8222-222222222222";
+    const draft = {
+      change_set_id: draftId,
+      clarification_requests: [],
+      context_packet: { mode: "analysis_evidence" },
+      created_at: "2026-04-20T00:00:00Z",
+      draft_mode: "graph_context",
+      model: "gpt-5.4-mini",
+      operations: [],
+      project_id: "project-1",
+      prompt_version: "analysis-graph-draft-v1",
+      provider: "openai",
+      source_content_type: "text/markdown",
+      source_note_id: noteId,
+      status: "ready",
+      summary: "Commit diff reviewed",
+      uncertain_fields: [],
+      updated_at: "2026-04-20T00:00:00Z",
+    };
+    localStorage.setItem(TOKEN_STORAGE_KEY, "token-commit-draft");
+    window.history.replaceState({}, "", `/app/notes/${noteId}`);
+
+    installFetchMock([
+      {
+        match: "/auth/me",
+        response: apiResponse({ role: "admin", username: "sam" }),
+      },
+      { match: projectsPath, response: apiResponse([]) },
+      {
+        match: `/notes/${noteId}`,
+        response: apiResponse(
+          note({
+            noteId,
+            rawAsset: {
+              checksum: "abc",
+              content_type: "text/markdown",
+              filename: "commit.md",
+              is_text: true,
+              size_bytes: 64,
+              storage_id: "33333333-3333-4333-8333-333333333333",
+            },
+            transcribedText: null,
+          })
+        ),
+      },
+      {
+        match: `/notes/${noteId}/raw-text`,
+        response: apiResponse({
+          checksum: "abc",
+          content_type: "text/markdown",
+          filename: "commit.md",
+          included_bytes: 64,
+          omitted_bytes: 0,
+          size_bytes: 64,
+          storage_id: "33333333-3333-4333-8333-333333333333",
+          text: "# Git Commit Evidence\n\n## Diff\n\ndiff --git a/a.py b/a.py",
+          truncated: false,
+        }),
+      },
+      {
+        match: `/notes/${noteId}/analysis-graph-drafts`,
+        method: "POST",
+        response: apiResponse(draft, 201),
+      },
+      { match: `/graph-drafts/${draftId}`, response: apiResponse(draft) },
+    ]);
+
+    render(<App />);
+
+    expect(await screen.findByText("# Git Commit Evidence", { exact: false })).toBeInTheDocument();
+    expect(screen.getByText("diff --git a/a.py b/a.py", { exact: false })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Draft graph update" }));
+
+    expect(await screen.findByRole("heading", { name: "Review" })).toBeInTheDocument();
+    expect(await screen.findByText("Graph draft ready for review.")).toBeInTheDocument();
+  });
+
   it("reviews, edits, accepts, and commits a graph draft", async () => {
     const noteId = "11111111-1111-4111-8111-111111111111";
     const draftId = "22222222-2222-4222-8222-222222222222";

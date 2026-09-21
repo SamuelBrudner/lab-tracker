@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   apiResponse,
+  errorResponse,
   installFetchMock as installBaseFetchMock,
 } from "../test/utils.js";
 import { AgentAccessPage } from "./agent-access.jsx";
@@ -30,6 +31,10 @@ function installFetchMock(routes, readinessOverrides = {}) {
       }),
     },
     ...routes,
+    {
+      match: `/projects/${PROJECT.project_id}/access`,
+      response: apiResponse({ project_id: PROJECT.project_id, role: "contributor" }),
+    },
   ]);
 }
 
@@ -42,17 +47,17 @@ function issuedTokenPayload(overrides = {}) {
     read_only: true,
     revoked_at: null,
     role: "viewer",
-    scope: "api",
+    scope: "all",
     token_id: TOKEN_ID,
     ...overrides,
   };
 }
 
-function renderPage(props = {}) {
-  return render(
+function page(props = {}) {
+  return (
     <AgentAccessPage
       token="user-token"
-      user={{ role: "admin", username: "sam" }}
+      user={{ user_id: "admin-id", role: "admin", username: "sam" }}
       authEnabled
       selectedProject={PROJECT}
       navigate={vi.fn()}
@@ -61,6 +66,10 @@ function renderPage(props = {}) {
       {...props}
     />
   );
+}
+
+function renderPage(props = {}) {
+  return render(page(props));
 }
 
 describe("AgentAccessPage", () => {
@@ -84,6 +93,7 @@ describe("AgentAccessPage", () => {
               label: mintBody.label,
               read_only: mintBody.read_only,
               role: mintBody.role,
+              scope: mintBody.scope,
               secret: "lpat_test-secret",
             }),
             201
@@ -103,6 +113,110 @@ describe("AgentAccessPage", () => {
     await waitFor(() => expect(mintBody).not.toBeNull());
     expect(mintBody.role).toBe("admin");
     expect(mintBody.scope).toBe("batch_run_due");
+    expect(await screen.findByText(/This scheduler token only triggers/)).toBeInTheDocument();
+    expect(document.querySelectorAll(".command-block")).toHaveLength(0);
+  });
+
+  it("repairs admin membership in setup before revealing commands for the actual token", async () => {
+    let granted = false;
+    const fetchMock = installFetchMock([
+      { match: "/auth/tokens", response: apiResponse([]) },
+      { match: "/auth/tokens", method: "POST", response: apiResponse(issuedTokenPayload({
+        role: "editor", read_only: false, secret: "lpat_setup",
+      }), 201) },
+      { match: `/projects/${PROJECT.project_id}/access`, response: (request) => {
+        expect(request.init.headers.Authorization).toBe("Bearer lpat_setup");
+        return granted ? apiResponse({ project_id: PROJECT.project_id, role: "contributor" })
+          : errorResponse("Project does not exist.", 404);
+      } },
+      { match: `/projects/${PROJECT.project_id}/members`, method: "POST", response: (request) => {
+        expect(request.init.headers.Authorization).toBe("Bearer user-token");
+        expect(JSON.parse(request.init.body)).toEqual({ user_id: "admin-id", role: "contributor" });
+        granted = true;
+        return apiResponse({ user_id: "admin-id", role: "contributor" }, 201);
+      } },
+    ]);
+    renderPage();
+    fireEvent.click(screen.getByRole("button", { name: "Create agent token" }));
+    const grantButton = await screen.findByRole("button", { name: "Grant project access" });
+    expect(document.querySelectorAll(".command-block")).toHaveLength(0);
+    expect(screen.getByText("lpat_setup")).toBeInTheDocument();
+    expect(granted).toBe(false);
+    fireEvent.click(grantButton);
+    await screen.findByText(`lt project bind --project-id ${PROJECT.project_id} --yes`);
+    expect(fetchMock.mock.calls.filter(([url]) => url === `/projects/${PROJECT.project_id}/access`)).toHaveLength(2);
+    expect(fetchMock.mock.calls.filter(([url, init]) => url === "/auth/tokens" && init.method === "POST")).toHaveLength(1);
+  });
+
+  it.each([401, 500])("withholds setup on verification error %s without offering a grant", async (status) => {
+    installFetchMock([
+      { match: "/auth/tokens", response: apiResponse([]) },
+      { match: "/auth/tokens", method: "POST", response: apiResponse(issuedTokenPayload({ secret: "lpat_failed" }), 201) },
+      { match: `/projects/${PROJECT.project_id}/access`, response: errorResponse("Cannot verify", status) },
+    ]);
+    renderPage();
+    fireEvent.click(screen.getByRole("button", { name: "Create agent token" }));
+    await screen.findByRole("button", { name: "Retry access check" });
+    expect(screen.queryByRole("button", { name: "Grant project access" })).toBeNull();
+    expect(document.querySelectorAll(".command-block")).toHaveLength(0);
+    expect(screen.getByText("lpat_failed")).toBeInTheDocument();
+  });
+
+  it("does not advertise capture commands for a staging token with only viewer membership", async () => {
+    installFetchMock([
+      { match: "/auth/tokens", response: apiResponse([]) },
+      { match: "/auth/tokens", method: "POST", response: apiResponse(issuedTokenPayload({
+        role: "editor", read_only: false, secret: "lpat_viewer_membership",
+      }), 201) },
+      { match: `/projects/${PROJECT.project_id}/access`, response: apiResponse({ project_id: PROJECT.project_id, role: "viewer" }) },
+    ]);
+    renderPage({ user: { user_id: "editor-id", role: "editor" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create agent token" }));
+    await screen.findByText(/Ask a project owner for contributor access/);
+    expect(screen.queryByRole("button", { name: "Grant project access" })).toBeNull();
+    expect(document.querySelectorAll(".command-block")).toHaveLength(0);
+  });
+
+  it("ignores a late access result after switching projects", async () => {
+    let resolveOld;
+    const nextProject = { name: "Next project", project_id: "next-project" };
+    installFetchMock([
+      { match: "/auth/tokens", response: apiResponse([]) },
+      { match: "/auth/tokens", method: "POST", response: apiResponse(issuedTokenPayload({ secret: "lpat_switch" }), 201) },
+      { match: `/projects/${PROJECT.project_id}/access`, response: () => new Promise((resolve) => { resolveOld = resolve; }) },
+      { match: `/projects/${nextProject.project_id}/access`, response: errorResponse("Project does not exist.", 404) },
+    ]);
+    const view = renderPage();
+    fireEvent.click(screen.getByRole("button", { name: "Create agent token" }));
+    await waitFor(() => expect(resolveOld).toBeDefined());
+    expect(document.querySelectorAll(".command-block")).toHaveLength(0);
+    view.rerender(page({ selectedProject: nextProject }));
+    await screen.findByRole("button", { name: "Grant project access" });
+    resolveOld(apiResponse({ project_id: PROJECT.project_id, role: "owner" }));
+    await waitFor(() => expect(screen.getByText(/This token has not verified/)).toHaveTextContent("Next project"));
+    expect(document.querySelectorAll(".command-block")).toHaveLength(0);
+  });
+
+  it("keeps commands hidden when granting membership fails and can retry", async () => {
+    let allow = false;
+    const setFlash = vi.fn();
+    installFetchMock([
+      { match: "/auth/tokens", response: apiResponse([]) },
+      { match: "/auth/tokens", method: "POST", response: apiResponse(issuedTokenPayload({ secret: "lpat_retry" }), 201) },
+      { match: `/projects/${PROJECT.project_id}/access`, response: () => allow
+        ? apiResponse({ project_id: PROJECT.project_id, role: "viewer" })
+        : errorResponse("Project does not exist.", 404) },
+      { match: `/projects/${PROJECT.project_id}/members`, method: "POST", response: errorResponse("Cannot grant access", 403) },
+    ]);
+    renderPage({ setFlash });
+    fireEvent.click(screen.getByRole("button", { name: "Create agent token" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Grant project access" }));
+    await waitFor(() => expect(setFlash).toHaveBeenCalledWith("", "Cannot grant access"));
+    expect(document.querySelectorAll(".command-block")).toHaveLength(0);
+    allow = true; // An owner fixes membership separately.
+    fireEvent.click(screen.getByRole("button", { name: "Retry access check" }));
+    await screen.findByText(`lt project bind --project-id ${PROJECT.project_id} --yes`);
+    expect(document.body.textContent).not.toContain("lt hooks install");
   });
 
   it("mints a token and shows one-time setup commands", async () => {
@@ -163,6 +277,7 @@ describe("AgentAccessPage", () => {
     expect(deltaDays).toBeLessThanOrEqual(30);
 
     expect(screen.getByText("lpat_test-secret")).toBeInTheDocument();
+    await screen.findByText(`lt project bind --project-id ${PROJECT.project_id} --yes`);
     const origin = window.location.origin;
     const commandBlocks = document.querySelectorAll(".command-block");
     const commandText = Array.from(commandBlocks)
@@ -211,6 +326,10 @@ describe("AgentAccessPage", () => {
       `lt hooks install --project ${PROJECT.project_id} --yes`
     );
     expect(commandText).toContain("lt setup status");
+    expect(commandText).toContain(
+      "claude mcp add --transport stdio --scope user lab-tracker -- lt-mcp"
+    );
+    expect(commandText).toContain("claude mcp list");
     expect(commandText).toContain("codex mcp add lab-tracker -- lt-mcp");
     expect(commandText).toContain(
       `lt setup verify-mcp --expected-revision ${SOURCE_REVISION}`
@@ -285,6 +404,7 @@ describe("AgentAccessPage", () => {
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "Copy token" })).toBeInTheDocument()
     );
+    await screen.findByText(`lt project bind --project-id ${PROJECT.project_id} --yes`);
     const commandText = Array.from(document.querySelectorAll(".command-block"))
       .map((node) => node.textContent)
       .join("\n");
@@ -447,6 +567,10 @@ describe("AgentAccessPage", () => {
       `lt hooks install --project ${PROJECT.project_id} --yes`
     );
     expect(commandText).toContain("lt setup status");
+    expect(commandText).toContain(
+      "claude mcp add --transport stdio --scope user lab-tracker -- lt-mcp"
+    );
+    expect(commandText).toContain("claude mcp list");
     expect(commandText).toContain("codex mcp add lab-tracker -- lt-mcp");
     expect(commandText).toContain(
       `lt setup verify-mcp --expected-revision ${SOURCE_REVISION}`
@@ -481,5 +605,6 @@ describe("AgentAccessPage", () => {
     expect(commandText).not.toContain("lt project bind");
     expect(commandText).not.toContain("lt hooks install");
     expect(commandText).not.toContain("codex mcp add");
+    expect(commandText).not.toContain("claude mcp add");
   });
 });

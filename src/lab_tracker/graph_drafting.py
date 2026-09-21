@@ -20,7 +20,7 @@ from lab_tracker.config import Settings
 from lab_tracker.provider_error_redaction import provider_error_message
 
 PROMPT_VERSION = "multimodal-graph-draft-v3"
-BATCH_PROMPT_VERSION = "daily-batch-graph-draft-v5"
+BATCH_PROMPT_VERSION = "daily-batch-graph-draft-v6"
 ANALYSIS_PROMPT_VERSION = "analysis-graph-draft-v3"
 # Default provider label only. Callers stamping provenance must prefer the active
 # client's `.provider` (e.g. getattr(client, "provider", PROVIDER)); transcripts and
@@ -1175,6 +1175,13 @@ def _batch_instructions() -> str:
         "\"Capture 'Rig 2 Fly 12' could not be placed in today's activity -- "
         "which session or question does it belong to?\"), and do not narrate it "
         "as if it happened.\n\n"
+        "Repository commit captures include a '# Git Commit Evidence' text asset "
+        "with commit metadata, a file summary, and a bounded diff. In the narrative, "
+        "explain in plain language what the commit appears to have accomplished from "
+        "that evidence. Use the commit subject as context, verify it against the file "
+        "summary and diff, and state uncertainty when the bounded diff is incomplete. "
+        "Keep the commit hash as provenance only; never use a hash by itself as the "
+        "description of the work.\n\n"
         "Then derive graph operations from that narrative. Treat the batch as a "
         "whole: propose linkages between notes and existing "
         "questions/sessions/datasets where the evidence supports it; when several "

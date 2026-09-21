@@ -1121,6 +1121,8 @@ button.project-graph-legend-item:hover {
   padding: 0.7rem;
   font-size: 0.88rem;
   line-height: 1.35;
+  max-height: 36rem;
+  overflow: auto;
 }
 
 .review-fields {

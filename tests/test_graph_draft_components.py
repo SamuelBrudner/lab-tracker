@@ -157,7 +157,7 @@ def test_graph_patch_response_schema_requires_non_empty_source_note_ids() -> Non
 
 def test_graph_draft_prompt_versions_and_source_ref_contract_are_updated() -> None:
     assert PROMPT_VERSION == "multimodal-graph-draft-v3"
-    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v5"
+    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v6"
     assert ANALYSIS_PROMPT_VERSION == "analysis-graph-draft-v3"
     for instructions in (_instructions(), _batch_instructions(), _analysis_instructions()):
         assert "source_note_ids" in instructions
@@ -878,6 +878,10 @@ def test_batch_instructions_are_narrative_first_with_terse_capture_guardrail() -
     assert "a bare label or identifier is not a finding" in lowered
     assert "rig 2 fly 12" in lowered
     assert "clarification_requests" in instructions
+    # Commit captures become human-readable accounts, not hash-only entries.
+    assert "what the commit appears to have accomplished" in lowered
+    assert "commit hash as provenance only" in lowered
+    assert "verify it against the file summary and diff" in lowered
     # Meeting notes still get fleshed out, but only where content exists.
     assert "meeting" in lowered
     assert "flesh out what the meeting discussed" in lowered
@@ -885,4 +889,4 @@ def test_batch_instructions_are_narrative_first_with_terse_capture_guardrail() -
     # Stays subordinate to the supported-changes guardrail.
     assert "supported by the source artifacts" in instructions
     # The summary contract changed (now a narrative), so the version bumps.
-    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v5"
+    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v6"

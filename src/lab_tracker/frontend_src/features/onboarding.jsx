@@ -163,41 +163,6 @@ function OnboardingPage({
     }
   }
 
-  const repoSetupCommands = activeProject
-    ? [
-        {
-          command: "lt setup init --install-skills --dry-run",
-          label: "1. Preview repository and skill setup",
-        },
-        {
-          command: "lt setup init --install-skills --yes",
-          label: "2. Apply after reviewing the preview",
-        },
-        {
-          command:
-            `lt project bind --project-id ${activeProject.project_id} --dry-run`,
-          label: `3. Preview binding to ${activeProject.name}`,
-        },
-        {
-          command: `lt project bind --project-id ${activeProject.project_id} --yes`,
-          label: `4. Bind to ${activeProject.name}`,
-        },
-        {
-          command:
-            `lt hooks install --project ${activeProject.project_id} --dry-run`,
-          label: "5. Preview commit capture hook",
-        },
-        {
-          command: `lt hooks install --project ${activeProject.project_id} --yes`,
-          label: "6. Install commit capture hook",
-        },
-        {
-          command: "lt setup status",
-          label: "7. Verify repository setup",
-        },
-      ]
-    : [];
-
   return (
     <>
     <OwnerOnboardingQueueBanner
@@ -344,9 +309,9 @@ function OnboardingPage({
           </div>
           <p>
             Install the client revision that matches this server, then open{" "}
-            <strong>Agents</strong> here to create a personal token. The one-time
-            connection command saves one local profile used by both <code>lt</code>{" "}
-            and <code>lt-mcp</code>.
+            <strong>Agents</strong> here to create a personal token and verify its
+            access to your selected project. Complete any project-access step there
+            before copying the connection commands for <code>lt</code> and <code>lt-mcp</code>.
           </p>
           {clientSetup ? (
             <>
@@ -400,9 +365,9 @@ function OnboardingPage({
           <p className="subtle">
             Run these inside each analysis repository. First add the same pinned
             package to the project’s Python environment so figure capture can import{" "}
-            <code>lab_tracker_client</code>. Then inspect each dry run before its
-            matching <code>--yes</code> command. The commands bind the exact project
-            selected above—there is no placeholder to replace.
+            <code>lab_tracker_client</code>. Continue on the Agents page for binding
+            and capture commands verified for your token and selected project.
+            Inspect each dry run before its matching <code>--yes</code> command.
           </p>
           {clientSetup ? (
             <>
@@ -421,14 +386,10 @@ function OnboardingPage({
                 command={clientSetup.verifyClientCommand}
                 setFlash={setFlash}
               />
-              {repoSetupCommands.map((item) => (
-                <SetupCommand
-                  key={item.command}
-                  label={item.label}
-                  command={item.command}
-                  setFlash={setFlash}
-                />
-              ))}
+              <button type="button" className="btn-primary"
+                onClick={() => navigate("/app/agents")}>
+                Verify access and finish repository setup
+              </button>
               <p className="subtle">
                 The skill installer covers Claude and Codex user skill homes.
                 Codex usually detects skill changes automatically; use{" "}
@@ -450,32 +411,41 @@ function OnboardingPage({
           <div className="item-head">
             <div>
               <p className="eyebrow">Step 5</p>
-              <h3>Register and verify MCP in Codex</h3>
+              <h3>Connect your coding assistant</h3>
             </div>
             <span className="pill">Run once</span>
           </div>
           <p className="subtle">
-            Repository scaffolding also writes MCP files for supported clients.
-            Current Codex clients share MCP configuration through{" "}
-            <code>config.toml</code>, so register the local <code>lt-mcp</code>{" "}
-            server once. Then launch the executable through the setup verifier: it
-            performs an MCP initialize exchange, calls health, and makes an
-            authenticated project read using the saved profile.
+            Choose Claude Code or Codex CLI below. Claude Code can use the
+            repository <code>.mcp.json</code> generated in the previous step;
+            approve the server when prompted. For access outside that repository,
+            use the Claude Code user registration command. Then run the shared
+            verifier to check MCP health, authentication, and client revision.
           </p>
           {clientSetup ? (
             <>
               <SetupCommand
-                label="1. Register Lab Tracker MCP for Codex"
+                label="Claude Code: register for your user account (optional with repo .mcp.json)"
+                command="claude mcp add --transport stdio --scope user lab-tracker -- lt-mcp"
+                setFlash={setFlash}
+              />
+              <SetupCommand
+                label="Claude Code: check the connection"
+                command="claude mcp list"
+                setFlash={setFlash}
+              />
+              <SetupCommand
+                label="Codex CLI: register Lab Tracker MCP"
                 command="codex mcp add lab-tracker -- lt-mcp"
                 setFlash={setFlash}
               />
               <SetupCommand
-                label="2. Launch MCP and verify health, auth, and client revision"
+                label="For either client: verify MCP health, auth, and client revision"
                 command={clientSetup.verifyMcpCommand}
                 setFlash={setFlash}
               />
               <SetupCommand
-                label="3. Confirm Codex registration"
+                label="Codex CLI: confirm registration"
                 command="codex mcp list"
                 setFlash={setFlash}
               />
@@ -487,7 +457,7 @@ function OnboardingPage({
             </p>
           )}
           <p className="subtle">
-            In Codex, <code>/mcp</code> shows connected servers. If your organization
+            In Claude Code or Codex CLI, <code>/mcp</code> shows MCP status. If your organization
             manages MCP policy, an administrator may need to allow this server.
           </p>
         </li>

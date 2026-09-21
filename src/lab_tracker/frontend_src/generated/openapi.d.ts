@@ -55,6 +55,9 @@ export interface paths {
   "/projects": {
     get: operations["list_projects_projects_get"];
   };
+  "/projects/{project_id}/access": {
+    get: operations["get_project_access_projects__project_id__access_get"];
+  };
   "/projects/{project_id}/members": {
     get: operations["list_project_members_projects__project_id__members_get"];
   };
@@ -91,6 +94,9 @@ export interface paths {
   };
   "/notes/{note_id}": {
     get: operations["get_note_notes__note_id__get"];
+  };
+  "/notes/{note_id}/raw-text": {
+    get: operations["read_note_raw_text_notes__note_id__raw_text_get"];
   };
   "/graph-drafts/{change_set_id}": {
     get: operations["get_graph_draft_graph_drafts__change_set_id__get"];
@@ -310,6 +316,15 @@ export interface operations {
       };
     };
   };
+  "get_project_access_projects__project_id__access_get": {
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["Envelope_ProjectAccessRead_"];
+        };
+      };
+    };
+  };
   "list_project_members_projects__project_id__members_get": {
     responses: {
       200: {
@@ -458,6 +473,15 @@ export interface operations {
       200: {
         content: {
           "application/json": components["schemas"]["Envelope_Note_"];
+        };
+      };
+    };
+  };
+  "read_note_raw_text_notes__note_id__raw_text_get": {
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["Envelope_NoteRawTextRead_"];
         };
       };
     };
@@ -709,6 +733,10 @@ export interface components {
       "data": components["schemas"]["MemberOnboardingRead"];
       "meta"?: (Record<string, unknown> | null);
     };
+    "Envelope_NoteRawTextRead_": {
+      "data": components["schemas"]["NoteRawTextRead"];
+      "meta"?: (Record<string, unknown> | null);
+    };
     "Envelope_Note_": {
       "data": components["schemas"]["Note"];
       "meta"?: (Record<string, unknown> | null);
@@ -719,6 +747,10 @@ export interface components {
     };
     "Envelope_PersonalAccessTokenRead_": {
       "data": components["schemas"]["PersonalAccessTokenRead"];
+      "meta"?: (Record<string, unknown> | null);
+    };
+    "Envelope_ProjectAccessRead_": {
+      "data": components["schemas"]["ProjectAccessRead"];
       "meta"?: (Record<string, unknown> | null);
     };
     "Envelope_ReviewEmailDelivery_": {
@@ -985,8 +1017,20 @@ export interface components {
       "checksum": string;
       "content_type": string;
       "filename": string;
+      "is_text": boolean;
       "size_bytes": number;
       "storage_id": string;
+    };
+    "NoteRawTextRead": {
+      "checksum": string;
+      "content_type": string;
+      "filename": string;
+      "included_bytes": number;
+      "omitted_bytes": number;
+      "size_bytes": number;
+      "storage_id": string;
+      "text": string;
+      "truncated": boolean;
     };
     "NoteStatus": "staged" | "committed" | "archived";
     "OutcomeStatus": "unknown" | "supports" | "refutes" | "inconclusive";
@@ -1036,6 +1080,10 @@ export interface components {
       "project_id": string;
       "status"?: components["schemas"]["ProjectStatus"];
       "updated_at"?: string;
+    };
+    "ProjectAccessRead": {
+      "project_id": string;
+      "role": components["schemas"]["ProjectMembershipRole"];
     };
     "ProjectMembership": {
       "created_at"?: string;

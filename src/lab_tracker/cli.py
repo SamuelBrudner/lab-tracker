@@ -37,6 +37,7 @@ from lab_tracker.decision_context_constants import (
     CLAUDE_BLOCK_END,
     CODE_CONVENTIONS_BLOCK_BEGIN,
     CODE_CONVENTIONS_BLOCK_END,
+    COMMIT_CAPTURE_RECOVERY_POLICY,
     code_conventions_version_line,
     code_facing_idioms,
     cursor_rules_mdc,
@@ -162,11 +163,12 @@ def init_consumer_repo(
         )
         _write_managed_block(
             root / ".cursor" / "rules" / "lab-tracker.mdc",
-            cursor_rules_mdc(),
+            managed_code_conventions_block(),
             begin_marker=CODE_CONVENTIONS_BLOCK_BEGIN,
             end_marker=CODE_CONVENTIONS_BLOCK_END,
             result=result,
             dry_run=dry_run,
+            document_transform=_normalize_cursor_rules_document,
         )
     else:
         result.offers.append(
@@ -441,11 +443,16 @@ def update_consumer_repo(
             path,
             managed_code_conventions_block(begin_marker=begin_marker, end_marker=end_marker)
             if relative != ".cursor/rules/lab-tracker.mdc"
-            else cursor_rules_mdc(),
+            else managed_code_conventions_block(),
             begin_marker=begin_marker,
             end_marker=end_marker,
             result=result,
             dry_run=dry_run,
+            document_transform=(
+                _normalize_cursor_rules_document
+                if relative == ".cursor/rules/lab-tracker.mdc"
+                else None
+            ),
         )
     if conventions_offer_needed:
         result.offers.append(
@@ -932,6 +939,7 @@ def _write_managed_block(
     end_marker: str,
     result: InitResult,
     dry_run: bool = False,
+    document_transform: Callable[[str], str] | None = None,
 ) -> None:
     if path.exists() or path in result._preview_contents:
         existing = _planned_or_disk_text(path, result)
@@ -941,6 +949,8 @@ def _write_managed_block(
             begin_marker=begin_marker,
             end_marker=end_marker,
         )
+        if document_transform is not None:
+            content = document_transform(content)
         if content == existing:
             result.skipped.append(path)
             return
@@ -952,13 +962,37 @@ def _write_managed_block(
         path.write_text(content, encoding="utf-8")
         result.overwritten.append(path)
         return
+    content = document_transform(block) if document_transform is not None else block
     if dry_run:
-        _record_dry_run_change(path, "", block, result)
+        _record_dry_run_change(path, "", content, result)
         result.created.append(path)
         return
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(block, encoding="utf-8")
+    path.write_text(content, encoding="utf-8")
     result.created.append(path)
+
+
+def _normalize_cursor_rules_document(content: str) -> str:
+    """Keep one canonical file-level header around the managed Cursor rule."""
+
+    front_matter, separator, _managed_block = cursor_rules_mdc().partition("\n\n")
+    if not separator:  # pragma: no cover - canonical template always has a body
+        return content
+
+    remaining = content
+    if remaining.startswith("---\n"):
+        closing = remaining.find("\n---\n", len("---\n"))
+        if closing != -1:
+            remaining = remaining[closing + len("\n---\n") :]
+
+    remaining = remaining.lstrip("\n")
+    while remaining.startswith(front_matter):
+        boundary = len(front_matter)
+        if len(remaining) > boundary and remaining[boundary] != "\n":
+            break
+        remaining = remaining[boundary:].lstrip("\n")
+
+    return f"{front_matter}\n\n{remaining}"
 
 
 def _upsert_managed_block(
@@ -1264,7 +1298,7 @@ def _lt_shim() -> str:
 
 def _agents_fragment() -> str:
     return dedent(
-        """\
+        f"""\
         # Lab Tracker Integration
 
         Use Lab Tracker for project/question/note context and keep concrete execution
@@ -1301,6 +1335,8 @@ def _agents_fragment() -> str:
         configured (`LAB_TRACKER_GRAPH_DRAFT_PROVIDER`: OpenAI, Anthropic, or
         Google — the lab's choice). See `docs/agent-setup.md` in the Lab
         Tracker repository, or the `lab-tracker://setup-guide` MCP resource.
+
+        {COMMIT_CAPTURE_RECOVERY_POLICY}
 
         MCP config is scaffolded per agent and works with any MCP-capable
         coding agent: `.mcp.json` (Claude Code and other root-config readers),

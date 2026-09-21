@@ -86,7 +86,7 @@ short, consent-gated sequence on the `lt` CLI.
    enrolls the current repository: each commit queues durable staged
    evidence that syncs when the server is reachable. Repos are enrolled
    one consented command at a time.
-10. **MCP launch verification** — after Codex registration, `lt setup
+10. **MCP launch verification** — after client registration, `lt setup
     verify-mcp --expected-revision <revision>` launches `lt-mcp` over
     stdio, initializes the protocol, calls health, and performs an
     authenticated project read through the saved profile.
@@ -116,4 +116,4 @@ upgrades, and `lt update` is the refresh path.
 If Lab Tracker is unreachable and the user does not operate a server, point
 them at whoever runs their lab's instance instead of standing one up ad hoc.
 
-<!-- lab-tracker-setup-guide version=0.1.0 sha256=1a17fae93102 -->
+<!-- lab-tracker-setup-guide version=0.1.0 sha256=fce7c9fa6c1f -->

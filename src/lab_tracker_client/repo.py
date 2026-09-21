@@ -4,8 +4,9 @@ The ``lt repo`` adapter is the third offline-first sibling of ``lt watch`` and
 ``lt hpc``: a post-commit git hook (or a direct call) records the *state* of an
 analysis repository — commit SHA, dirty flag, remote, branch — as a durable
 local event, which later drains into a staged Lab Tracker note. Like the other
-adapters it never blocks the caller, never sends bytes (only metadata + hashes),
-and lands behind the human review gate.
+adapters it never blocks the caller and lands behind the human review gate. Commit
+events include the same bounded diff evidence as the canonical git snapshot hook;
+other event types remain metadata-first.
 
 Modeled 1:1 on :mod:`lab_tracker_client.hpc`; the shared evidence transport,
 dedup index, and host metadata come from :mod:`lab_tracker_client.client`.
@@ -214,11 +215,26 @@ def make_event(
     source: Mapping[str, Any] | None = None,
     artifacts: Sequence[Mapping[str, Any]] | None = None,
     summary: str | None = None,
+    summary_is_explicit: bool | None = None,
 ) -> JsonObject:
     resolved_event_type = _event_type(event_type)
     resolved_cwd = str(Path(cwd or Path.cwd()).expanduser().resolve())
     resolved_source = {**git_context(resolved_cwd), **dict(source or {})}
     commit = str(resolved_source.get("git_commit") or "")
+    evidence_body = ""
+    if resolved_event_type == "commit" and commit:
+        # Local import avoids a module cycle: git_capture uses normalize_remote
+        # from this module for deterministic commit identities.
+        from lab_tracker_client.git_capture import commit_evidence
+
+        try:
+            evidence_body, evidence_facts = commit_evidence(resolved_cwd, commit)
+        except LTValidationError:
+            # Repository reporting is offline-first and must still leave a
+            # durable metadata event if git cannot render the diff.
+            evidence_body = ""
+        else:
+            resolved_source.update(evidence_facts)
     resolved_run_id = _non_empty(
         run_id or os.getenv("LAB_TRACKER_REPO_RUN_ID") or commit or new_run_id()
     )
@@ -230,6 +246,13 @@ def make_event(
     resolved_dataset_ids = [str(item) for item in dataset_ids or [] if str(item).strip()]
     resolved_tags = [str(item) for item in tags or [] if str(item).strip()]
     resolved_summary = summary or _default_summary(resolved_event_type, resolved_source)
+    resolved_summary_is_explicit = (
+        summary is not None if summary_is_explicit is None else summary_is_explicit
+    )
+    if evidence_body and resolved_summary_is_explicit:
+        evidence_body = (
+            evidence_body.rstrip() + "\n\n## Capture Annotation\n\n" + resolved_summary.strip()
+        )
     payload: JsonObject = {
         "version": EVENT_VERSION,
         "run_id": resolved_run_id,
@@ -259,6 +282,8 @@ def make_event(
             "title": _event_title(resolved_event_type, resolved_source, resolved_run_id),
             "summary": resolved_summary,
             "status": "staged",
+            "body": evidence_body,
+            "summary_is_explicit": resolved_summary_is_explicit,
         },
         "host": _json_mapping(capture_host_metadata()),
         "sync": {"status": "pending", "attempts": 0},
@@ -329,6 +354,9 @@ def capture_commit(
         cwd=cwd,
         artifacts=artifacts or existing.get("artifacts"),
         summary=summary or _optional_str(existing.get("summary")),
+        summary_is_explicit=(
+            summary is not None or bool(existing.get("payload", {}).get("summary_is_explicit"))
+        ),
     )
     if _capture_content(existing) == _capture_content(merged):
         return existing, path, "unchanged"
@@ -371,6 +399,7 @@ def _capture_content(event: Mapping[str, Any]) -> str:
         key: payload["source"].get(key) for key in _CAPTURE_SOURCE_KEYS
     }
     content["environment"] = payload["environment"]
+    content["payload_body"] = payload["payload"].get("body")
     return json.dumps(content, sort_keys=True)
 
 
@@ -416,6 +445,7 @@ def validate_event(payload: Mapping[str, Any]) -> JsonObject:
     event["environment"] = _json_mapping(event.get("environment") or {})
     event["artifacts"] = [_artifact_payload(item) for item in event.get("artifacts") or []]
     event["summary"] = str(event.get("summary") or "")
+    event["payload"] = _json_mapping(event.get("payload") or {})
     event["host"] = _json_mapping(event.get("host") or {})
     sync = event.get("sync") if isinstance(event.get("sync"), Mapping) else {}
     event["sync"] = {
@@ -934,6 +964,9 @@ def _sync_event(
 
 def render_event_note(event: Mapping[str, Any]) -> str:
     payload = validate_event(dict(event))
+    evidence_body = str(payload["payload"].get("body") or "").strip()
+    if evidence_body:
+        return evidence_body
     source = payload["source"]
     commit = str(source.get("git_commit") or "")
     short = str(source.get("git_commit_short") or commit[:12] or payload["run_id"])

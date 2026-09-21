@@ -3,13 +3,16 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import sys
 from datetime import timedelta
 from pathlib import Path
 
+import anyio
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-from mcp import ClientSession
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.server.fastmcp.exceptions import ToolError
 from pydantic import AnyUrl
@@ -2831,3 +2834,25 @@ def test_graph_read_tools_fail_soft_on_api_errors(monkeypatch) -> None:
 
     assert payload["error"]["operation"] == "lab_tracker_graph_overview"
     assert payload["error"]["status_code"] == 422
+
+
+def test_mcp_entrypoint_initializes_over_stdio(tmp_path: Path) -> None:
+    async def check_server() -> None:
+        parameters = StdioServerParameters(
+            command=sys.executable,
+            args=["-m", "lab_tracker.mcp_server"],
+            env={
+                "LAB_TRACKER_BASE_URL": "http://127.0.0.1:8000",
+                "LAB_TRACKER_CONFIG_DIR": str(tmp_path),
+                "LAB_TRACKER_MCP_TRANSPORT": "stdio",
+            },
+        )
+        with anyio.fail_after(20):
+            async with stdio_client(parameters) as (read, write):
+                async with ClientSession(read, write) as session:
+                    initialized = await session.initialize()
+                    assert initialized.serverInfo.name == mcp_server.SERVER_NAME
+                    tools = await session.list_tools()
+                    assert "lab_tracker_health" in {tool.name for tool in tools.tools}
+
+    asyncio.run(check_server())

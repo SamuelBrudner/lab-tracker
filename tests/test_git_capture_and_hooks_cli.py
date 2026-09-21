@@ -293,6 +293,9 @@ def test_git_snapshot_sync_failure_prints_actionable_stderr(
     assert "did not fully sync" in err
     assert "failed to sync" in err  # names the cause
     assert "lt outbox sync" in err  # names the exact recovery command
+    assert err.index("lt outbox sync") < err.index("lt outbox status")
+    assert "timeout as ambiguous" in err
+    assert "idempotent" in err
     assert "1 event" in err  # names the backlog size
     assert ".lab-tracker/outbox/watch" in err.replace("\\", "/")  # names where
 
@@ -428,6 +431,9 @@ def test_hooks_install_writes_posix_hook(git_repo, capsys) -> None:
     # (GH #77); and the fallback warning points at the drain commands.
     assert ">/dev/null 2>&1" not in content
     assert "lt outbox sync" in content
+    assert content.index("lt outbox sync") < content.index("lt outbox status")
+    assert "before reporting an unresolved capture" in content
+    assert "Replay is idempotent" in content
     assert "--fail-silent" not in content
     assert 'LAB_TRACKER_PROJECT_ID="${LAB_TRACKER_PROJECT_ID:-p-9}"' in content
     assert "\\" not in content.split('LAB_TRACKER_LT:-', 1)[1].split("}", 1)[0]

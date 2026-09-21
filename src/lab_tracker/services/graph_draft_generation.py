@@ -32,6 +32,7 @@ from lab_tracker.models import (
     NoteStatus,
     utc_now,
 )
+from lab_tracker.note_text import is_text_content_type
 from lab_tracker.provider_error_redaction import provider_error_message
 from lab_tracker.services import graph_draft_batch_policy as batch_policy
 from lab_tracker.services.base import BaseService, ServiceContext
@@ -735,7 +736,7 @@ class GraphDraftGenerationCoordinator(BaseService):
                     ]
                 )
             )
-            if _is_text_asset(raw_asset.content_type):
+            if is_text_content_type(raw_asset.content_type):
                 try:
                     raw_text = content.decode("utf-8").strip()
                 except UnicodeDecodeError as exc:
@@ -858,17 +859,6 @@ def _note_generation_key(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
     return f"generation:{digest[:48]}"
-
-
-def _is_text_asset(content_type: str) -> bool:
-    normalized = (content_type or "").split(";", 1)[0].strip().lower()
-    return normalized.startswith("text/") or normalized in {
-        "application/json",
-        "application/ld+json",
-        "application/markdown",
-        "application/x-ndjson",
-        "application/xml",
-    }
 
 
 def _batch_input_snapshot(context_packet: dict[str, Any]) -> dict[str, Any]:
