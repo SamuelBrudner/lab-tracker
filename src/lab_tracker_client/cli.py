@@ -25,6 +25,7 @@ from lab_tracker_client.client import (
     EntityRef,
     EvidenceImportResult,
     LabTracker,
+    LTAPIError,
     LTValidationError,
     ids,
 )
@@ -54,9 +55,12 @@ def main(argv: list[str] | None = None) -> None:
                 client.close()
         else:
             payload = args.func(args)
-    except Exception:
+    except Exception as exc:
         if getattr(args, "fail_silent", False):
             return
+        if isinstance(exc, LTAPIError) and not args.debug:
+            print(f"error: {exc}", file=sys.stderr)
+            raise SystemExit(1) from None
         raise
     exit_code = _payload_exit_code(payload)
     if exit_code and getattr(args, "fail_silent", False):
@@ -69,6 +73,12 @@ def main(argv: list[str] | None = None) -> None:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="lt", description="Lab Tracker consumer CLI.")
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        default=os.getenv("LAB_TRACKER_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"},
+        help="Show tracebacks for API errors (or set LAB_TRACKER_DEBUG=1).",
+    )
     subcommands = parser.add_subparsers(dest="command", required=True)
 
     health_parser = subcommands.add_parser(
