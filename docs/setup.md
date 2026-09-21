@@ -290,3 +290,20 @@ npm run build
 - [Serve the shared graph on a LAN/VPN](lan-shared-graph.md)
 - [Phone capture quickstart](phone-capture-quickstart.md)
 - [Windows fresh-clone setup](windows-fresh-clone.md)
+
+## CLI connection errors
+
+If the API is unreachable, `lt health`, `lt readiness`, and other commands
+print `error: <API message>` to stderr and exit with code 1. Successful JSON
+output stays on stdout. To include the Python traceback when troubleshooting,
+put the global debug option before the command:
+
+```bash
+lt --debug health
+lt --debug readiness
+```
+
+Alternatively, set `LAB_TRACKER_DEBUG=1` in the client environment. Debug mode
+does not override an explicit `--fail-silent` hook invocation. Invalid command
+arguments retain argparse's exit code 2; unexpected programming errors still
+surface normally.
