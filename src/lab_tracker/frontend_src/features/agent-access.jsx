@@ -143,24 +143,32 @@ function repoCommands(project, canStageEvidence) {
   return commands;
 }
 
-function codexMcpCommands(clientSetup) {
+function clientMcpCommands(clientSetup) {
   if (!clientSetup) {
     return [];
   }
   const commands = [
     {
+      command: "claude mcp add --transport stdio --scope user lab-tracker -- lt-mcp",
+      title: "Claude Code: register for your user account (optional with repo .mcp.json)",
+    },
+    {
+      command: "claude mcp list",
+      title: "Claude Code: check the connection",
+    },
+    {
       command: "codex mcp add lab-tracker -- lt-mcp",
-      title: "1. Register Lab Tracker MCP for Codex",
+      title: "Codex CLI: register Lab Tracker MCP",
+    },
+    {
+      command: "codex mcp list",
+      title: "Codex CLI: confirm registration",
+    },
+    {
+      command: clientSetup.verifyMcpCommand,
+      title: "For either client: verify MCP health, auth, and client revision",
     },
   ];
-  commands.push({
-    command: clientSetup.verifyMcpCommand,
-    title: "2. Launch MCP and verify health, auth, and client revision",
-  });
-  commands.push({
-    command: "codex mcp list",
-    title: `${commands.length + 1}. Confirm Codex registration`,
-  });
   return commands;
 }
 
@@ -343,7 +351,7 @@ function AgentAccessPage({
     `lt setup connect --base-url ${baseUrl}` +
     (projectId ? ` --project ${projectId}` : "") +
     " --yes";
-  const mcpCommands = codexMcpCommands(clientSetup);
+  const mcpCommands = clientMcpCommands(clientSetup);
   const installCommands = clientSetup
     ? [
         {
@@ -456,6 +464,12 @@ function AgentAccessPage({
                   }
                 />
               ))}
+              <p className="subtle">
+                Choose the commands for your client below. Claude Code can use
+                the generated repository <code>.mcp.json</code>; approve the server
+                when prompted. Use user registration if you need access outside
+                that repository. These are local CLI instructions.
+              </p>
               {mcpCommands.map((item) => (
                 <CommandSnippet
                   key={item.command}
@@ -597,6 +611,12 @@ function AgentAccessPage({
                       }
                     />
                   ))}
+                  <p className="subtle">
+                    Choose the commands for your client below. Claude Code can use
+                    the generated repository <code>.mcp.json</code>; approve the server
+                    when prompted. Use user registration if you need access outside
+                    that repository. These are local CLI instructions.
+                  </p>
                   {mcpCommands.map((item) => (
                     <CommandSnippet
                       key={item.command}

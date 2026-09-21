@@ -196,8 +196,17 @@ a project contributor (or viewer for read-only use).
 | `.claude/settings.json` | Claude Code hooks (`lt setup status` on session start, `lt prime` before research-facing prompts) |
 | `AGENTS.lt.md`, `scripts/lt.py`, `lt_ids.json` | Agent-readable integration notes, the client shim, and the project-id mapping (`lt project bind` fills it) |
 
-Two agents need one extra step:
+Choose the instructions for your client:
 
+- **Claude Code** reads the generated repository `.mcp.json`. Open Claude Code
+  in that repository and approve the server when prompted. For access outside
+  that repository, register it for your user account instead:
+  `claude mcp add --transport stdio --scope user lab-tracker -- lt-mcp`.
+  Use `claude mcp list` or `/mcp` in Claude Code to check the connection. Run
+  `lt setup verify-mcp --expected-revision <full-revision>` from the same
+  environment to verify health, authentication, and the installed client revision.
+  These instructions target Claude Code; Claude Desktop has separate client
+  configuration.
 - **Codex CLI** registers MCP servers in `~/.codex/config.toml`: add
   it with `codex mcp add lab-tracker -- lt-mcp`. Then run
   `lt setup verify-mcp --expected-revision <full-revision>` from the same

@@ -450,32 +450,41 @@ function OnboardingPage({
           <div className="item-head">
             <div>
               <p className="eyebrow">Step 5</p>
-              <h3>Register and verify MCP in Codex</h3>
+              <h3>Connect your coding assistant</h3>
             </div>
             <span className="pill">Run once</span>
           </div>
           <p className="subtle">
-            Repository scaffolding also writes MCP files for supported clients.
-            Current Codex clients share MCP configuration through{" "}
-            <code>config.toml</code>, so register the local <code>lt-mcp</code>{" "}
-            server once. Then launch the executable through the setup verifier: it
-            performs an MCP initialize exchange, calls health, and makes an
-            authenticated project read using the saved profile.
+            Choose Claude Code or Codex CLI below. Claude Code can use the
+            repository <code>.mcp.json</code> generated in the previous step;
+            approve the server when prompted. For access outside that repository,
+            use the Claude Code user registration command. Then run the shared
+            verifier to check MCP health, authentication, and client revision.
           </p>
           {clientSetup ? (
             <>
               <SetupCommand
-                label="1. Register Lab Tracker MCP for Codex"
+                label="Claude Code: register for your user account (optional with repo .mcp.json)"
+                command="claude mcp add --transport stdio --scope user lab-tracker -- lt-mcp"
+                setFlash={setFlash}
+              />
+              <SetupCommand
+                label="Claude Code: check the connection"
+                command="claude mcp list"
+                setFlash={setFlash}
+              />
+              <SetupCommand
+                label="Codex CLI: register Lab Tracker MCP"
                 command="codex mcp add lab-tracker -- lt-mcp"
                 setFlash={setFlash}
               />
               <SetupCommand
-                label="2. Launch MCP and verify health, auth, and client revision"
+                label="For either client: verify MCP health, auth, and client revision"
                 command={clientSetup.verifyMcpCommand}
                 setFlash={setFlash}
               />
               <SetupCommand
-                label="3. Confirm Codex registration"
+                label="Codex CLI: confirm registration"
                 command="codex mcp list"
                 setFlash={setFlash}
               />
@@ -487,7 +496,7 @@ function OnboardingPage({
             </p>
           )}
           <p className="subtle">
-            In Codex, <code>/mcp</code> shows connected servers. If your organization
+            In Claude Code or Codex CLI, <code>/mcp</code> shows MCP status. If your organization
             manages MCP policy, an administrator may need to allow this server.
           </p>
         </li>
