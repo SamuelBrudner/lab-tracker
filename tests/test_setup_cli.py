@@ -654,7 +654,7 @@ def test_setup_status_is_read_only_and_reports_repo_state(
 def test_setup_status_suggests_persisting_default_base_url(
     config_home, tmp_path, monkeypatch, capsys
 ) -> None:
-    monkeypatch.setattr(setup_helpers, "probe_health", lambda _url: True)
+    monkeypatch.setattr(setup_helpers, "probe_health_diagnostics", lambda _url: {"reachable": True})
 
     lt_cli.main(["setup", "status", "--target", str(tmp_path)])
     payload = json.loads(capsys.readouterr().out)

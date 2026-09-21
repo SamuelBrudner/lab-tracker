@@ -275,3 +275,34 @@ The record stays honest about the division of labor: every entity carries an
 `origin` (`user` / `ai_suggested` / `ai_executed` / `user_revised`), the change set, provider,
 model, and prompt version, all exportable as PROV-O. A rubber-stamped bulk
 accept is never mistaken later for a considered per-operation review.
+
+## Diagnose an unavailable connection
+
+Run `lt setup status` to inspect `server.reachable`. Failed probes also return
+`diagnosis`, `detail`, and `next_step`. The probe uses the existing two-second
+HTTP timeout and observes the actual request; it makes no extra network probes
+and does not require the Tailscale CLI. MCP transport failures expose the same
+`diagnosis` and `next_step` while preserving their fail-soft
+`proceed_without_graph_context` action.
+
+| Diagnosis | Observation and next step |
+|---|---|
+| `dns_resolution_failed` | Name resolution failed; check the hostname and resolver. |
+| `tcp_connection_failed` | TCP could not connect; check the address, listener, routing, and firewall. |
+| `tls_handshake_stalled` | TCP connected, but TLS timed out; ask the operator to inspect the HTTPS listener or reverse proxy. |
+| `tls_certificate_error` | Certificate verification failed; check the hostname, certificate, clock, and CA configuration. Do not disable verification. |
+| `http_response_timeout` | The connection was established, but an HTTP response timed out; inspect application/proxy logs. |
+| `http_error` | The health endpoint returned HTTP 4xx/5xx; inspect its status and application/proxy configuration. |
+| `transport_error` | The transport did not supply enough evidence to identify the stage. |
+
+For a `.ts.net` address, a TLS stall includes conditional Funnel guidance:
+on the **Lab Tracker host**, check `tailscale funnel status` and the service
+listening on its proxied port. An offline Funnel origin is one possible cause,
+not something a client can prove from the timeout alone. Public Funnel clients
+do not need to join the tailnet. DNS resolution and a successful TCP connection
+do not prove that the origin is serving.
+
+For compatibility, `reachable` remains true for HTTP responses below 500,
+including authentication errors; it describes connectivity, not token validity
+or project access. These diagnostics require an updated local Lab Tracker client
+or MCP process, so upgrade the client and restart the MCP host after installing.

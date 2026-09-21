@@ -41,6 +41,7 @@ from lab_tracker_client.client import (
     connection_profile_path,
     load_connection_profile,
 )
+from lab_tracker_client.connection_diagnostics import ConnectionTrace
 from lab_tracker_client.hooks import HOOK_BLOCK_BEGIN, hook_path_for_repo
 
 JsonObject = dict[str, Any]
@@ -210,7 +211,7 @@ def setup_status(target: str | Path = ".", *, brief: bool = False) -> JsonObject
         "server": {
             "base_url": base_url,
             "source": base_url_source,
-            "reachable": probe_health(base_url),
+            **probe_health_diagnostics(base_url),
         },
         "profile": {
             "present": connection_profile_path().exists(),
@@ -411,14 +412,26 @@ def resolved_base_url_for_setup() -> tuple[str, str]:
 
 
 def probe_health(base_url: str) -> bool:
-    with suppress(Exception):
+    return bool(probe_health_diagnostics(base_url)["reachable"])
+
+
+def probe_health_diagnostics(base_url: str) -> JsonObject:
+    trace = ConnectionTrace(base_url)
+    try:
         normalized = normalize_instance_base_url(base_url)
-        response = httpx.get(
-            normalized + "/health",
-            timeout=_HEALTH_PROBE_TIMEOUT_SECONDS,
-        )
-        return bool(response.status_code < 500)
-    return False
+        with httpx.Client(timeout=_HEALTH_PROBE_TIMEOUT_SECONDS) as client:
+            response = client.get(normalized + "/health", extensions={"trace": trace})
+        payload: JsonObject = {"reachable": response.status_code < 500}
+        if response.status_code >= 400:
+            payload.update(
+                diagnosis="http_error",
+                status_code=response.status_code,
+                detail=f"HTTP connection succeeded; server returned HTTP {response.status_code}.",
+                next_step="Check the URL, access requirements, and application or proxy logs.",
+            )
+        return payload
+    except Exception as exc:  # status remains fail-soft for session hooks.
+        return {"reachable": False, **trace.diagnose(exc)}
 
 
 def installed_source_revision() -> str | None:
