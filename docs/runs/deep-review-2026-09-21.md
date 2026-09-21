@@ -2201,7 +2201,7 @@ Spot-checked with no defect found: `application/catalog_queries.py` scope helper
 - **Global-role checks are the weak layer.** **L106**, **L105**, **L129** and the supervision defect: `require_role(WRITE_ROLES)` guards instance-wide entities with no per-user ownership, and tests only cover admin/viewer extremes.
 - **Python-side filtering after `limit=None` loads** (**M46**, **M48**, **L40**, **L86**, **L104**, **L118**, **L101**, **L97**, plus context/readiness above) traces to the repository lacking JSON-metadata and relation filters.
 - **Inconsistent adjudication of identical facts**: 401-vs-404 oracle confirmed (**refuted:graph-drafting-6**) and refuted (**refuted:evidence-provenance-3**); global supervision load confirmed (**L40**) and refuted (**L40**); pivot-invalidation loss refuted (**refuted:services-core-b-7**) but reproducible. The synthesis should re-adjudicate these three.
-- **Triplicate reporting**: **M43**/**M43**/**M43** (rate limiter), **M83**/#46 and **M5**/**M5** (uv.lock / `uv run`), **M45**/**M45** (401 vs 403), **L41**/**L41**, **L12**/**L12** are the same findings across sweeps.
+- **Triplicate reporting**: **M43**/**M43**/**M43** (rate limiter), **M83**/**M83** and **M5**/**M5** (uv.lock / `uv run`), **M45**/**M45** (401 vs 403), **L41**/**L41**, **L12**/**L12** are the same findings across sweeps.
 
 ## Severity calibration notes
 
