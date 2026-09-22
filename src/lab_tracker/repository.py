@@ -88,6 +88,13 @@ class EntityRepository(Protocol, Generic[EntityT]):
         """Delete one entity by ID and return the removed value."""
 
 
+class VisualizationRepository(EntityRepository[Visualization], Protocol):
+    """Visualization persistence with the row lock asset mutations hold."""
+
+    def get_for_update(self, entity_id: UUID) -> Visualization | None:
+        """Lock one visualization row until transaction end and return it fresh."""
+
+
 class NoteRepository(EntityRepository[Note], Protocol):
     """Note persistence operations that preserve concurrent human edits."""
 
@@ -532,7 +539,7 @@ class LabTrackerRepository(Protocol):
     def evidence_bundles(self) -> EvidenceBundleRepository: ...
 
     @property
-    def visualizations(self) -> EntityRepository[Visualization]: ...
+    def visualizations(self) -> VisualizationRepository: ...
 
     @property
     def graph_change_sets(self) -> GraphChangeSetRepository: ...

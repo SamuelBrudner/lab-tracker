@@ -493,6 +493,26 @@ class SQLAlchemyVisualizationRepository(EntityRepository[Visualization]):
             return None
         return self.visualizations_from_rows([row])[0]
 
+    def get_for_update(self, entity_id: UUID) -> Visualization | None:
+        """Take the row lock the file upload/delete commands hold, then re-read.
+
+        PostgreSQL waits here for a concurrent asset mutation to commit, and
+        ``populate_existing`` replaces any stale identity-map state, so a
+        metadata write never saves asset columns from an older snapshot.
+        SQLite serializes writers itself and ignores ``FOR UPDATE``.
+        """
+
+        self._session.flush()
+        row = self._session.scalars(
+            select(VisualizationModel)
+            .where(VisualizationModel.viz_id == str(entity_id))
+            .with_for_update(of=VisualizationModel)
+            .execution_options(populate_existing=True)
+        ).first()
+        if row is None:
+            return None
+        return self.visualizations_from_rows([row])[0]
+
     def list(self) -> list[Visualization]:
         self._session.flush()
         rows = list(
