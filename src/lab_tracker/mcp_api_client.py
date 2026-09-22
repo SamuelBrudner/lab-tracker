@@ -8,6 +8,7 @@ import re
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, get_args
 from urllib.parse import quote
@@ -734,8 +735,22 @@ class LabTrackerAPIClient:
         analysis_id: str | None = None,
         claim_id: str | None = None,
         visualization_id: str | None = None,
+        created_by: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
         limit: int = 20,
     ) -> JsonObject:
+        resolved_created_by = (
+            _uuid_path_id(created_by, "created_by") if created_by is not None else None
+        )
+        since_at = _parse_aware_datetime(since, "since")
+        until_at = _parse_aware_datetime(until, "until")
+        if since_at is not None and until_at is not None and since_at > until_at:
+            raise LabTrackerAPIValidationError(
+                f"since must not be later than until; got since={since!r:.40} "
+                f"until={until!r:.40}.",
+                code="validation_error",
+            )
         try:
             return self._request(
                 "POST",
@@ -749,6 +764,9 @@ class LabTrackerAPIClient:
                     "analysis_id": analysis_id,
                     "claim_id": claim_id,
                     "visualization_id": visualization_id,
+                    "created_by": resolved_created_by,
+                    "since": since_at.isoformat() if since_at is not None else None,
+                    "until": until_at.isoformat() if until_at is not None else None,
                     "limit": limit,
                 },
             )
@@ -1345,6 +1363,29 @@ def _uuid_path_id(value: object, field: str) -> str:
             code="validation_error",
         )
     return value
+
+
+def _parse_aware_datetime(value: object, field: str) -> datetime | None:
+    """Parse an optional ISO 8601 timestamp that must carry a timezone offset."""
+
+    if value is None:
+        return None
+    parsed: datetime | None = None
+    if isinstance(value, str):
+        text = value.strip()
+        if text[-1:] in ("Z", "z"):
+            text = f"{text[:-1]}+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            parsed = None
+    if parsed is None or parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise LabTrackerAPIValidationError(
+            f"{field} must be an ISO 8601 datetime with a timezone offset "
+            f"(for example 2025-07-01T00:00:00Z); got {value!r:.80}.",
+            code="validation_error",
+        )
+    return parsed
 
 
 def _path_choice(value: object, field: str, allowed_values: tuple[str, ...]) -> str:

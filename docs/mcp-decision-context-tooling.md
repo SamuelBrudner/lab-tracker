@@ -120,6 +120,9 @@ Request shape:
   "analysis_id": "optional UUID",
   "claim_id": "optional UUID",
   "visualization_id": "optional UUID",
+  "created_by": "optional user UUID",
+  "since": "optional ISO 8601 datetime with timezone offset",
+  "until": "optional ISO 8601 datetime with timezone offset",
   "limit": 20
 }
 ```
@@ -140,6 +143,15 @@ Optional anchors:
 
 Anchors constrain and prioritize context. If anchors conflict, the tool should
 return a structured ambiguity error rather than blending unrelated projects.
+
+Optional person/window scope (required in practice for `progress_review`):
+
+- `created_by`: user UUID whose records to include.
+- `since` (inclusive) / `until` (exclusive): ISO 8601 bounds on `created_at`.
+  The MCP tool requires a timezone offset (for example `2025-07-01T00:00:00Z`)
+  and rejects `since` later than `until` before calling the API.
+
+`lab_tracker_get_decision_context` forwards all three to the HTTP endpoint.
 
 Response shape:
 
@@ -356,8 +368,8 @@ The tool should return structured errors that assistant clients can act on:
 | API unreachable or readiness failure | Return `unavailable` with readiness details. Assistant must state Lab Tracker was unavailable before proceeding. |
 | Invalid task kind | Return `invalid_task_kind` with allowed values. |
 | Empty query | Return `invalid_query`. |
-| Multiple plausible projects | Return `ambiguous_project` with candidate projects and reasons. |
-| Anchor not found | Return `anchor_not_found`. |
+| Multiple plausible projects | Return `ambiguous_project` with candidate projects and reasons, plus `candidate_projects_total` and `candidate_projects_truncated` so a cut candidate list is never presented as complete. |
+| Anchor not found | Return `anchor_not_found`. Projects are resolved by id, so an anchor in any readable project resolves regardless of how many projects exist. |
 | Anchors cross projects | Return `conflicting_anchors`. |
 | No direct matches | Return an empty direct-match section plus bounded project recency if a project is known. |
 
