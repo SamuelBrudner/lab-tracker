@@ -404,3 +404,162 @@ def test_concurrent_goal_patches_re_read_the_goal_under_the_lock(
     assert fetched.status_code == 200, fetched.text
     assert fetched.json()["data"]["title"] == "From the loser"
     assert fetched.json()["data"]["summary"] == "From the winner."
+
+
+def _projectless_goal_reaching(
+    client: TestClient,
+    headers: dict[str, str],
+) -> tuple[str, str, str]:
+    """A projectless goal linked to ``Home`` plus a question in ``Doomed``."""
+
+    home = _post(client, headers, "/projects", {"name": "Home"})
+    doomed = _post(client, headers, "/projects", {"name": "Doomed"})
+    question = _post(
+        client,
+        headers,
+        "/questions",
+        {
+            "project_id": doomed["project_id"],
+            "text": "Does the link outlive the project?",
+            "question_type": "descriptive",
+        },
+    )
+    goal = _post(
+        client,
+        headers,
+        "/goals",
+        {
+            "goal_type": "paper",
+            "title": "Cross-project paper",
+            "links": [
+                {
+                    "entity_type": "project",
+                    "entity_id": home["project_id"],
+                    "relation": "contributes_to",
+                }
+            ],
+        },
+    )
+    return goal["goal_id"], doomed["project_id"], question["question_id"]
+
+
+def _race_goal_link_with_project_delete(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    link: Callable[[], Any],
+    delete: Callable[[], Any],
+    link_first: bool,
+) -> tuple[Any, Any]:
+    """Pause the first writer after its locks until the second is provably blocked.
+
+    The goal writer pauses in ``GoalService._save_goal`` (after its locked
+    validation); the project delete pauses right after
+    ``lock_project_deletion``.
+    """
+
+    from lab_tracker.services.goal_service import GoalService
+
+    first_paused = Event()
+    release_first = Event()
+    backend_pids: dict[str, int] = {}
+    original_save = GoalService._save_goal
+    original_lock_deletion = SQLAlchemyLabTrackerRepository.lock_project_deletion
+
+    def paused_save(self: GoalService, goal: Any) -> None:
+        backend_pids["link"] = _backend_pid(self.repository)  # type: ignore[arg-type]
+        if link_first:
+            first_paused.set()
+            if not release_first.wait(timeout=20):
+                raise RuntimeError("Timed out holding the goal writer's locks.")
+        original_save(self, goal)
+
+    def paused_lock_deletion(
+        repository: SQLAlchemyLabTrackerRepository, project_id: UUID
+    ) -> None:
+        backend_pids["delete"] = _backend_pid(repository)
+        original_lock_deletion(repository, project_id)
+        if not link_first:
+            first_paused.set()
+            if not release_first.wait(timeout=20):
+                raise RuntimeError("Timed out holding the project deletion lock.")
+
+    def record_link_pid(repository: SQLAlchemyLabTrackerRepository, project_id: UUID) -> None:
+        backend_pids.setdefault("link", _backend_pid(repository))
+        original_lock_references(repository, project_id)
+
+    original_lock_references = SQLAlchemyLabTrackerRepository.lock_project_references
+    monkeypatch.setattr(GoalService, "_save_goal", paused_save)
+    monkeypatch.setattr(
+        SQLAlchemyLabTrackerRepository, "lock_project_deletion", paused_lock_deletion
+    )
+    monkeypatch.setattr(
+        SQLAlchemyLabTrackerRepository, "lock_project_references", record_link_pid
+    )
+    first, second = (link, delete) if link_first else (delete, link)
+    blocked, blocker = ("delete", "link") if link_first else ("link", "delete")
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first_future: Future[Any] = executor.submit(first)
+        assert first_paused.wait(timeout=10)
+        second_future: Future[Any] = executor.submit(second)
+        try:
+            deadline = monotonic() + 10
+            while blocked not in backend_pids and monotonic() < deadline:
+                Event().wait(timeout=0.01)
+            assert blocked in backend_pids
+            _wait_until_blocked(
+                client,
+                blocked_pid=backend_pids[blocked],
+                blocker_pid=backend_pids[blocker],
+            )
+        finally:
+            release_first.set()
+        first_result = first_future.result(timeout=20)
+        second_result = second_future.result(timeout=20)
+    return (first_result, second_result) if link_first else (second_result, first_result)
+
+
+def test_projectless_goal_link_first_is_cleaned_up_by_concurrent_project_delete(
+    postgres_client: TestClient,
+    postgres_admin_auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    headers = postgres_admin_auth_headers
+    goal_id, doomed_id, question_id = _projectless_goal_reaching(postgres_client, headers)
+
+    linked, deleted = _race_goal_link_with_project_delete(
+        postgres_client,
+        monkeypatch,
+        link=lambda: _link_goal(postgres_client, headers, goal_id, question_id),
+        delete=lambda: postgres_client.delete(f"/projects/{doomed_id}", headers=headers),
+        link_first=True,
+    )
+
+    assert linked.status_code == 201, linked.text
+    assert deleted.status_code == 200, deleted.text
+    assert question_id not in _goal_link_targets(postgres_client)
+    fetched = postgres_client.get(f"/goals/{goal_id}", headers=headers)
+    assert fetched.status_code == 200, fetched.text
+
+
+def test_project_delete_first_makes_concurrent_projectless_goal_link_fail_cleanly(
+    postgres_client: TestClient,
+    postgres_admin_auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    headers = postgres_admin_auth_headers
+    goal_id, doomed_id, question_id = _projectless_goal_reaching(postgres_client, headers)
+
+    linked, deleted = _race_goal_link_with_project_delete(
+        postgres_client,
+        monkeypatch,
+        link=lambda: _link_goal(postgres_client, headers, goal_id, question_id),
+        delete=lambda: postgres_client.delete(f"/projects/{doomed_id}", headers=headers),
+        link_first=False,
+    )
+
+    assert deleted.status_code == 200, deleted.text
+    assert linked.status_code == 404, linked.text
+    assert question_id not in _goal_link_targets(postgres_client)
+    fetched = postgres_client.get(f"/goals/{goal_id}", headers=headers)
+    assert fetched.status_code == 200, fetched.text

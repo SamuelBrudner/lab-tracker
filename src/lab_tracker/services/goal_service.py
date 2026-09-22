@@ -305,6 +305,16 @@ class GoalService(BaseService):
         ):
             if is_provided(value) and value is None:
                 raise ValidationError(f"{field_name} must not be null.")
+        # Cheap field validation runs before link targets are resolved, so an
+        # invalid request keeps reporting its field error; it runs again on
+        # the re-read goal under the lock.
+        if is_provided(title):
+            ensure_non_empty(title, "title")
+        if is_provided(attributes) or is_provided(goal_type):
+            self._validate_attributes(
+                goal_type if is_provided(goal_type) else located_goal.goal_type,
+                attributes if is_provided(attributes) else located_goal.attributes,
+            )
         link_specs = list(links) if is_provided(links) and links is not None else None
         target_project_ids = {
             self._ensure_target_exists(link.target, located_goal.project_id)
@@ -502,13 +512,24 @@ class GoalService(BaseService):
         )
 
     def _lock_goal_projects(self, project_ids: Iterable[UUID]) -> frozenset[UUID]:
-        """Take the reference lock of every project in canonical UUID order.
+        """Lock every project the goal reaches, in canonical UUID order.
 
-        Delete paths remove the goal links naming a deleted entity under
-        ``lock_project_references`` of the entity's project, so a goal write
-        holding the same lock for every project its links reach can neither
-        link a target whose delete is in flight nor restore a link that such
-        a delete just removed.
+        Entity deletes (questions, notes, sessions, datasets, analyses,
+        claims, visualizations) remove the goal links naming the entity under
+        ``lock_project_references`` of its project. Project deletion does not
+        take that lock: it takes the project's dataset-file deletion scope
+        exclusively, so this write also holds that scope shared
+        (``lock_project_deletion_guard``) for every reached project. Holding
+        both, a goal write can neither link a target whose delete is in
+        flight nor restore a link that such a delete just removed. All
+        reference locks come first, then the guards, matching the documented
+        order (project reference lock before Dataset/file locks).
+
+        Project deletion deliberately does not take the reference lock itself:
+        graph draft commits take the deletion guard shared *before* the
+        project DAG/reference lock, so a project delete taking the reference
+        lock before its exclusive deletion scope would deadlock with them,
+        and taking it after would deadlock with dataset deletes.
 
         Known lock-order gap: a graph draft commit pre-locks its own project
         before applying operations, so a goal operation in it whose links
@@ -519,8 +540,11 @@ class GoalService(BaseService):
         """
 
         locked_project_ids = frozenset(project_ids)
-        for project_id in sorted(locked_project_ids, key=str):
+        ordered_project_ids = sorted(locked_project_ids, key=str)
+        for project_id in ordered_project_ids:
             self.repository.lock_project_references(project_id)
+        for project_id in ordered_project_ids:
+            self.repository.lock_project_deletion_guard(project_id)
         return locked_project_ids
 
     @contextmanager

@@ -18,7 +18,7 @@ import pytest
 from api_helpers import repository_backed_api
 
 from lab_tracker.auth import AuthContext, Role
-from lab_tracker.errors import ConflictError, NotFoundError
+from lab_tracker.errors import ConflictError, NotFoundError, ValidationError
 from lab_tracker.models import (
     EntityRef,
     EntityType,
@@ -258,3 +258,73 @@ def test_goal_write_rejects_a_scope_that_grew_while_waiting_for_the_lock(
 
     with pytest.raises(ConflictError, match="changed while waiting"):
         api.update_goal(goal.goal_id, title="Renamed", actor=actor)
+
+
+def test_goal_writes_hold_each_reached_projects_deletion_guard_after_its_reference_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Project deletion takes only the exclusive project-deletion scope, so a
+    goal write reaching a project must hold that scope shared to exclude it.
+    All reference locks come first, in sorted order, then every guard."""
+
+    api = repository_backed_api()
+    actor = _actor()
+    home = api.create_project("Home", actor=actor)
+    other = api.create_project("Other", actor=actor)
+    question = api.create_question(
+        other.project_id, "Reached?", QuestionType.DESCRIPTIVE, actor=actor
+    )
+    goal = api.create_goal(
+        None,
+        goal_type=GoalType.PAPER,
+        title="Cross-project paper",
+        links=[
+            GoalLinkSpec(target=_project_ref(home.project_id), relation=GoalRelation.CONTRIBUTES_TO)
+        ],
+        actor=actor,
+    )
+    repository = api.goals.repository
+    calls: list[tuple[str, UUID]] = []
+    original_references = repository.lock_project_references
+    original_guard = repository.lock_project_deletion_guard
+
+    def record_references(project_id: UUID) -> None:
+        calls.append(("references", project_id))
+        original_references(project_id)
+
+    def record_guard(project_id: UUID) -> None:
+        calls.append(("guard", project_id))
+        original_guard(project_id)
+
+    monkeypatch.setattr(repository, "lock_project_references", record_references)
+    monkeypatch.setattr(repository, "lock_project_deletion_guard", record_guard)
+
+    api.link_node_to_goal(
+        goal.goal_id,
+        target=_question_ref(question.question_id),
+        relation=GoalRelation.ADDRESSES,
+        actor=actor,
+    )
+
+    ordered = sorted((home.project_id, other.project_id), key=str)
+    assert calls == [
+        *(("references", project_id) for project_id in ordered),
+        *(("guard", project_id) for project_id in ordered),
+    ]
+
+
+@pytest.mark.parametrize(
+    "invalid_field",
+    [{"title": "   "}, {"attributes": {"unknown_attribute": True}}],
+)
+def test_goal_update_reports_field_errors_before_resolving_link_targets(
+    invalid_field: dict[str, object],
+) -> None:
+    """Field validation keeps its pre-locking precedence over a missing target."""
+
+    api = repository_backed_api()
+    actor, _project, _questions, goal = _setup(api)
+    missing = GoalLinkSpec(target=_question_ref(uuid4()), relation=GoalRelation.ADDRESSES)
+
+    with pytest.raises(ValidationError):
+        api.update_goal(goal.goal_id, links=[missing], actor=actor, **invalid_field)
