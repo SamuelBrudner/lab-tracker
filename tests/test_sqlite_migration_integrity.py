@@ -24,6 +24,7 @@ from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.engine import Connection, Engine
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
+_VERSIONS_DIR = _REPO_ROOT / "src" / "lab_tracker" / "alembic" / "versions"
 
 Statement = tuple[str, dict[str, Any]]
 
@@ -483,3 +484,18 @@ def test_sqlite_upgrade_refuses_to_run_over_stale_batch_tables(
     assert "backup" in message
     assert _current_revision(database_url) == start_revision
 
+
+def test_no_revision_toggles_sqlite_foreign_keys() -> None:
+    """env.py owns FK enforcement for the whole run; revisions must not toggle it.
+
+    ``PRAGMA foreign_keys`` is a no-op inside a transaction, so a per-revision
+    OFF/ON pair either does nothing or leaves enforcement off for later
+    revisions depending on the starting revision.
+    """
+
+    offenders = sorted(
+        path.name
+        for path in _VERSIONS_DIR.glob("*.py")
+        if "foreign_keys" in path.read_text(encoding="utf-8").lower()
+    )
+    assert offenders == []
