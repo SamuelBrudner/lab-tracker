@@ -6428,7 +6428,7 @@ def test_git_resolver_refuses_oversized_blob(tmp_path):
 def test_git_resolver_evicts_cache_over_quota(tmp_path):
     base = tmp_path / "gitcache"
     base.mkdir()
-    old = base / "oldremotecache"
+    old = base / "0123456789abcdef"  # named like a per-remote cache the resolver creates
     old.mkdir()
     (old / "objects.pack").write_bytes(b"x" * 5000)
     os.utime(old, (1, 1))  # mark as the least-recently-used cache
