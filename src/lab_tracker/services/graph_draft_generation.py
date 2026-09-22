@@ -159,6 +159,23 @@ class GraphDraftGenerationCoordinator(BaseService):
             acquired=acquired,
         )
 
+    def claim_note_generation(
+        self,
+        candidate: GraphChangeSet,
+        *,
+        draft_client: GraphDraftClient,
+    ) -> GenerationClaim:
+        """Claim a note-scoped generation; a rejected draft is never reused.
+
+        Re-drafting keys a fresh row off the rejected one (deterministically, so
+        concurrent re-drafts converge) and leaves the rejected review intact.
+        """
+        claim = self.claim_generation(candidate, draft_client=draft_client)
+        while not claim.acquired and claim.change_set.status == GraphChangeSetStatus.REJECTED:
+            candidate.batch_key = _successor_generation_key(claim.change_set)
+            claim = self.claim_generation(candidate, draft_client=draft_client)
+        return claim
+
     def renew_generation_claim(
         self,
         change_set_id: UUID,
@@ -270,7 +287,7 @@ class GraphDraftGenerationCoordinator(BaseService):
             created_by=actor_user_id(actor),
             created_by_user_id=actor_user_fk(actor, self.user_reader),
         )
-        claim = self.claim_generation(change_set, draft_client=draft_client)
+        claim = self.claim_note_generation(change_set, draft_client=draft_client)
         if not claim.acquired:
             return claim.change_set
         change_set = claim.change_set
@@ -374,7 +391,7 @@ class GraphDraftGenerationCoordinator(BaseService):
             created_by=actor_user_id(actor),
             created_by_user_id=actor_user_fk(actor, self.user_reader),
         )
-        claim = self.claim_generation(change_set, draft_client=draft_client)
+        claim = self.claim_note_generation(change_set, draft_client=draft_client)
         if not claim.acquired:
             return claim.change_set
         change_set = claim.change_set
@@ -857,6 +874,15 @@ def _note_generation_key(
     }
     digest = hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return f"generation:{digest[:48]}"
+
+
+def _successor_generation_key(rejected: GraphChangeSet) -> str:
+    if rejected.batch_key is None:
+        raise ValidationError("Rejected graph draft has no generation key.")
+    digest = hashlib.sha256(
+        f"{rejected.batch_key}|rejected:{rejected.change_set_id}".encode()
     ).hexdigest()
     return f"generation:{digest[:48]}"
 

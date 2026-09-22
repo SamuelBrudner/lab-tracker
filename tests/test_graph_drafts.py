@@ -3473,3 +3473,77 @@ def test_general_draft_commits_note_link_with_mixed_targets(
         ("question", question_id),
         ("session", session_id),
     }
+
+
+def _submit_and_reject(
+    client: TestClient, headers: dict[str, str], change_set_id: str
+) -> None:
+    submitted = client.post(f"/graph-drafts/{change_set_id}/submit", headers=headers)
+    assert submitted.status_code == 200, submitted.text
+    rejected = client.post(
+        f"/graph-drafts/{change_set_id}/review",
+        json={"status": "rejected", "note": "Try a different framing."},
+        headers=headers,
+    )
+    assert rejected.status_code == 200, rejected.text
+    assert rejected.json()["data"]["status"] == "rejected"
+
+
+def test_redrafting_note_after_rejection_generates_new_draft(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    """A rejected draft must not satisfy idempotent reuse for the same note."""
+    project_id = _project(client, admin_auth_headers)
+    note_id = _image_note(client, admin_auth_headers, project_id)
+    fake = FakeDraftClient(_draft_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: fake
+    first = client.post(f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers)
+    assert first.status_code == 201, first.text
+    first_id = first.json()["data"]["change_set_id"]
+    _submit_and_reject(client, admin_auth_headers, first_id)
+
+    second = client.post(f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers)
+
+    assert second.status_code == 201, second.text
+    second_data = second.json()["data"]
+    assert second_data["change_set_id"] != first_id
+    assert second_data["status"] == "ready"
+    assert len(fake.calls) == 2
+    # The rejected draft keeps its review history.
+    original = client.get(f"/graph-drafts/{first_id}", headers=admin_auth_headers)
+    assert original.json()["data"]["status"] == "rejected"
+    assert original.json()["data"]["review_note"] == "Try a different framing."
+    assert len(original.json()["data"]["operations"]) == 2
+
+    # The live re-draft is itself idempotent until it is rejected too.
+    repeat = client.post(f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers)
+    assert repeat.json()["data"]["change_set_id"] == second_data["change_set_id"]
+    assert len(fake.calls) == 2
+
+    _submit_and_reject(client, admin_auth_headers, second_data["change_set_id"])
+    third = client.post(f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers)
+    assert third.json()["data"]["change_set_id"] not in {
+        first_id,
+        second_data["change_set_id"],
+    }
+    assert third.json()["data"]["status"] == "ready"
+    assert len(fake.calls) == 3
+
+
+def test_redrafting_analysis_note_after_rejection_generates_new_draft(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    note_id = _analysis_note(client, admin_auth_headers, project_id)
+    fake = FakeDraftClient(_draft_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: fake
+    path = f"/notes/{note_id}/analysis-graph-drafts"
+    first_id = client.post(path, headers=admin_auth_headers).json()["data"]["change_set_id"]
+    _submit_and_reject(client, admin_auth_headers, first_id)
+
+    second = client.post(path, headers=admin_auth_headers)
+
+    assert second.status_code == 201, second.text
+    assert second.json()["data"]["change_set_id"] != first_id
+    assert second.json()["data"]["status"] == "ready"
+    assert len(fake.calls) == 2
