@@ -342,6 +342,27 @@ class TestCronInstallerAdapter:
         content = installed.read_text()
         assert content.count("lab-tracker-daily-review") == 1
 
+    def test_installed_crontab_ends_with_newline_like_debian_cron_requires(self, tmp_path):
+        # Debian/Ubuntu cron (3.0pl1) aborts with "new crontab file is missing
+        # newline before EOF, can't install." when the piped crontab lacks a
+        # final newline. The stub mirrors that check instead of blindly `cat`.
+        installed = tmp_path / "installed-crontab"
+        script = (
+            "#!/bin/sh\n"
+            'if [ "$1" = "-l" ]; then echo "no crontab for tester" >&2; exit 1; fi\n'
+            f'cat > "{installed}"\n'
+            # $(...) strips a trailing newline, so a non-empty last byte means none.
+            f'if [ -n "$(tail -c 1 "{installed}")" ]; then\n'
+            '    echo "new crontab file is missing newline before EOF, can\'t install." >&2\n'
+            "    exit 1\n"
+            "fi\n"
+        )
+        result = self._run(tmp_path, script)
+        assert result.returncode == 0, result.stderr
+        content = installed.read_text()
+        assert content.endswith("\n")
+        assert content.count("lab-tracker-daily-review") == 1
+
     def test_success_merges_dedupes_tag_and_preserves_other_jobs(self, tmp_path):
         installed = tmp_path / "installed-crontab"
         script = (
