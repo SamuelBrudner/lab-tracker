@@ -376,8 +376,8 @@ def _client_is_local(request: Request) -> bool:
 
     The peer comes from the transport (request.client), not the client-controlled
     Host header, so it cannot be spoofed by a remote attacker. Behind a reverse
-    proxy this is the proxy's address; configure trusted proxy headers (or use the
-    ``never``/``first_run`` disclosure modes) for hosted deployments.
+    proxy or Docker network this is the proxy's or gateway's private address,
+    so this check is only consulted in LAB_TRACKER_ENVIRONMENT=local.
     """
     client = request.client
     if client is None:
@@ -400,30 +400,18 @@ def _bootstrap_token_for_status(
 ) -> tuple[str | None, str | None]:
     if has_users or not bootstrap_token:
         return None, None
-    mode = (
-        str(
-            getattr(
-                request.app.state.settings,
-                "bootstrap_admin_token_disclosure",
-                "local",
-            )
-            or "local"
-        )
-        .strip()
-        .lower()
-    )
+    mode = request.app.state.settings.effective_bootstrap_admin_token_disclosure()
     if mode == "never":
-        return (
-            None,
-            "First-admin token display is disabled for this deployment.",
-        )
+        return None, _BOOTSTRAP_TOKEN_HIDDEN_WARNING
     if mode == "first_run":
         return bootstrap_token, None
-    # Default ('local') mode: disclose only to a real local/private-network peer.
-    # The trust boundary MUST come from the connection peer (request.client.host),
-    # never the client-controlled Host header — otherwise a remote attacker on an
-    # internet-exposed deploy can send `Host: 127.0.0.1`, read the token, and seize
-    # the first admin.
+    # 'local' mode (the default, and only allowed, in LAB_TRACKER_ENVIRONMENT=local):
+    # disclose only to a real local/private-network peer. The trust boundary MUST
+    # come from the connection peer (request.client.host), never the
+    # client-controlled Host header — otherwise a remote attacker can send
+    # `Host: 127.0.0.1`, read the token, and seize the first admin. Outside the
+    # local environment the peer is typically a proxy or Docker gateway with a
+    # private address, which is why Settings rejects this mode there.
     if _client_is_local(request):
         return bootstrap_token, None
     return (
@@ -431,6 +419,13 @@ def _bootstrap_token_for_status(
         "First-admin token display is available only from a local, LAN, or VPN "
         "address for this deployment.",
     )
+
+
+_BOOTSTRAP_TOKEN_HIDDEN_WARNING = (
+    "First-admin token display is disabled for this deployment. Paste the "
+    "LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN value; Docker deployments that generate it "
+    "store it in /app/data/runtime-env/bootstrap-admin-token inside the app container."
+)
 
 
 def _mailto_invitation_url(

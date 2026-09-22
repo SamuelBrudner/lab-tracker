@@ -671,13 +671,20 @@ containment remain a separate follow-up.
 
 - `LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN`: one-time token for creating the first
   admin on fresh auth-enabled deployments
-- `LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE`: `local` (default),
-  `first_run`, or `never`; controls whether `/auth/bootstrap-status` can return
-  the first-admin token before any users exist. In the default `local` mode the
-  setup screen shows the token only when the request originates from a local,
-  LAN, or VPN address and hides it on public hosts; use `first_run` to allow
-  first-run browser display on public deployments; `never` always hides it. The
-  token is never returned after any user exists.
+- `LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE`: `never`, `first_run`, or
+  `local`; controls whether the unauthenticated `/auth/bootstrap-status` can
+  return the first-admin token before any users exist. When unset it defaults to
+  `local` in `LAB_TRACKER_ENVIRONMENT=local` and to `never` everywhere else.
+  `local` shows the token only when the TCP peer is a loopback, LAN, or
+  link-local address; behind a reverse proxy, a Docker bridge, or Docker Desktop
+  every client arrives from such a private address, so setting `local` outside
+  the `local` environment is rejected at startup. `never` always hides the token:
+  paste it into `Create First Admin` yourself (the Docker entrypoint stores a
+  generated token in `/app/data/runtime-env/bootstrap-admin-token`, e.g.
+  `docker compose exec app cat /app/data/runtime-env/bootstrap-admin-token`).
+  `first_run` shows it to any caller until the first user exists; use it only
+  when you create the first admin immediately after deploy, as the Render
+  blueprint does. The token is never returned after any user exists.
 
 ### Graph draft providers and transcription
 

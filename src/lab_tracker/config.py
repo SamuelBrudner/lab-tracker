@@ -50,6 +50,7 @@ from lab_tracker.store_health_admission import (
 )
 
 DEFAULT_AUTH_SECRET_KEY = "dev-only-change-me"
+BootstrapAdminTokenDisclosure = Literal["local", "first_run", "never"]
 MAX_COMBINED_HOST_IO_IN_FLIGHT_LIMIT = 32
 INSECURE_AUTH_SECRET_KEYS = {
     DEFAULT_AUTH_SECRET_KEY,
@@ -109,7 +110,8 @@ class Settings(BaseSettings):
     auth_public_viewer_registration_enabled: bool = True
     usage_events: bool | None = None
     bootstrap_admin_token: str = ""
-    bootstrap_admin_token_disclosure: Literal["local", "first_run", "never"] = "local"
+    # None resolves per environment; see effective_bootstrap_admin_token_disclosure().
+    bootstrap_admin_token_disclosure: BootstrapAdminTokenDisclosure | None = None
     auth_enabled: bool | None = None
     max_upload_bytes: int = 100 * 1024 * 1024
     store_authority_grants_json: str = Field(
@@ -191,6 +193,22 @@ class Settings(BaseSettings):
         if self.usage_events is not None:
             return self.usage_events
         return self.environment.strip().lower() != "local"
+
+    def is_local_environment(self) -> bool:
+        return self.environment.strip().lower() == "local"
+
+    def effective_bootstrap_admin_token_disclosure(self) -> BootstrapAdminTokenDisclosure:
+        """Return the first-admin token disclosure policy in force.
+
+        ``local`` trusts the transport peer address, which behind a reverse
+        proxy, Docker bridge, or Docker Desktop is a private address for every
+        client. It is therefore only the default (and only allowed) in the
+        ``local`` environment; elsewhere the default is ``never``.
+        """
+
+        if self.bootstrap_admin_token_disclosure is not None:
+            return self.bootstrap_admin_token_disclosure
+        return "local" if self.is_local_environment() else "never"
 
     def resolved_base_url(self) -> str:
         """Return the configured canonical instance origin, if any."""
@@ -381,6 +399,14 @@ class Settings(BaseSettings):
             raise ValueError(
                 "LAB_TRACKER_AUTH_SECRET_KEY must be set to a strong "
                 "non-placeholder value when authentication is enabled."
+            )
+        if not is_local and self.bootstrap_admin_token_disclosure == "local":
+            raise ValueError(
+                "LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE=local is only allowed "
+                "when LAB_TRACKER_ENVIRONMENT is 'local': it trusts the connection "
+                "peer address, which behind a reverse proxy or Docker network is "
+                "private for every client. Use 'never' (the default outside local) "
+                "or 'first_run'."
             )
         if self.max_upload_bytes < 1:
             raise ValueError("LAB_TRACKER_MAX_UPLOAD_BYTES must be at least 1.")

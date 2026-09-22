@@ -481,6 +481,63 @@ def test_bootstrap_status_can_opt_into_public_first_run_disclosure(
         assert status_payload["bootstrap_token_warning"] is None
 
 
+@pytest.mark.parametrize(
+    "peer",
+    [
+        ("172.18.0.1", 50000),  # Docker bridge gateway in front of a host proxy
+        ("192.168.65.1", 50000),  # Docker Desktop
+        ("127.0.0.1", 50000),  # same-host reverse proxy
+    ],
+)
+def test_bootstrap_token_is_never_disclosed_by_peer_address_outside_local(
+    monkeypatch,
+    tmp_path,
+    peer,
+):
+    _bootstrap_database(monkeypatch, tmp_path)
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "production")
+    monkeypatch.delenv("LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE", raising=False)
+    monkeypatch.setenv("LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN", "bootstrap-secret")
+    app = create_app()
+    request = _bootstrap_status_request(app, client=peer, host="lab.example.org")
+
+    token, warning = _bootstrap_token_for_status(
+        request, bootstrap_token="bootstrap-secret", has_users=False
+    )
+
+    assert token is None
+    assert warning is not None
+    assert "LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN" in warning
+    assert "runtime-env/bootstrap-admin-token" in warning
+
+
+def test_bootstrap_status_hides_token_by_default_outside_local(monkeypatch, tmp_path):
+    _bootstrap_database(monkeypatch, tmp_path)
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "production")
+    monkeypatch.delenv("LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE", raising=False)
+    monkeypatch.setenv("LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN", "bootstrap-secret")
+    with TestClient(
+        create_app(),
+        base_url="http://127.0.0.1",
+        client=("127.0.0.1", 50000),
+    ) as client:
+        status_payload = client.get("/auth/bootstrap-status").json()["data"]
+        assert status_payload["bootstrap_token"] is None
+        assert status_payload["first_admin_available"] is True
+
+        # The operator pastes the token retrieved from the host; registration works.
+        created = client.post(
+            "/auth/register",
+            json={
+                "username": "root",
+                "password": "secret",
+                "role": "admin",
+                "bootstrap_token": "bootstrap-secret",
+            },
+        )
+        assert created.status_code == 201, created.text
+
+
 def test_admin_can_manage_users(monkeypatch, tmp_path):
     _bootstrap_database(monkeypatch, tmp_path)
     with TestClient(create_app()) as client:

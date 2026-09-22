@@ -1564,3 +1564,83 @@ def test_non_local_environment_rejects_disabled_auth(monkeypatch):
     monkeypatch.setenv("LAB_TRACKER_AUTH_SECRET_KEY", "custom-secret")
     with pytest.raises(ValidationError, match="LAB_TRACKER_AUTH_ENABLED=false"):
         _settings_from_environment()
+
+
+def _clear_bootstrap_disclosure_env(monkeypatch) -> None:
+    _clear_auth_env(monkeypatch)
+    monkeypatch.delenv("LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE", raising=False)
+
+
+def test_bootstrap_disclosure_defaults_to_local_only_in_local_environment(monkeypatch):
+    _clear_bootstrap_disclosure_env(monkeypatch)
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "local")
+
+    settings = _settings_from_environment()
+
+    assert settings.bootstrap_admin_token_disclosure is None
+    assert settings.effective_bootstrap_admin_token_disclosure() == "local"
+
+
+@pytest.mark.parametrize("environment", ["production", "staging", " Production "])
+def test_bootstrap_disclosure_defaults_to_never_outside_local(monkeypatch, environment):
+    _clear_bootstrap_disclosure_env(monkeypatch)
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", environment)
+    monkeypatch.setenv("LAB_TRACKER_AUTH_SECRET_KEY", "strong-production-secret")
+
+    settings = _settings_from_environment()
+
+    assert settings.effective_bootstrap_admin_token_disclosure() == "never"
+
+
+def test_explicit_local_bootstrap_disclosure_is_rejected_outside_local(monkeypatch):
+    _clear_bootstrap_disclosure_env(monkeypatch)
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "production")
+    monkeypatch.setenv("LAB_TRACKER_AUTH_SECRET_KEY", "strong-production-secret")
+    monkeypatch.setenv("LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE", "local")
+
+    with pytest.raises(
+        ValidationError,
+        match="LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE=local is only allowed",
+    ):
+        _settings_from_environment()
+
+
+@pytest.mark.parametrize("mode", ["first_run", "never"])
+def test_explicit_non_peer_bootstrap_disclosure_modes_are_valid_outside_local(
+    monkeypatch,
+    mode,
+):
+    # render.yaml pins first_run; the dedicated-instance deployment pins never.
+    _clear_bootstrap_disclosure_env(monkeypatch)
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "production")
+    monkeypatch.setenv("LAB_TRACKER_AUTH_SECRET_KEY", "strong-production-secret")
+    monkeypatch.setenv("LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE", mode)
+
+    assert _settings_from_environment().effective_bootstrap_admin_token_disclosure() == mode
+
+
+def test_explicit_local_bootstrap_disclosure_is_valid_in_local_environment(monkeypatch):
+    _clear_bootstrap_disclosure_env(monkeypatch)
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "local")
+    monkeypatch.setenv("LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE", "local")
+
+    assert _settings_from_environment().effective_bootstrap_admin_token_disclosure() == "local"
+
+
+def test_env_example_bootstrap_disclosure_is_valid_for_its_environment(monkeypatch):
+    _clear_bootstrap_disclosure_env(monkeypatch)
+    env_example = Path(__file__).resolve().parent.parent / ".env.example"
+    configured = dict(
+        line.split("=", 1)
+        for line in env_example.read_text(encoding="utf-8").splitlines()
+        if line and not line.startswith("#") and "=" in line
+    )
+
+    settings = Settings(
+        _env_file=None,
+        environment=configured["LAB_TRACKER_ENVIRONMENT"],
+        auth_secret_key="strong-production-secret",
+        bootstrap_admin_token_disclosure=configured["LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE"],
+    )
+
+    assert settings.effective_bootstrap_admin_token_disclosure() != "local"
