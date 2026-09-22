@@ -22,6 +22,13 @@ _NOT_FOUND = {
         "issues": None,
     }
 }
+_GROUP_NOT_FOUND = {
+    "error": {
+        "code": "not_found",
+        "message": "Group does not exist.",
+        "issues": None,
+    }
+}
 
 
 def _post(client: TestClient, headers: dict[str, str], path: str, payload: dict) -> dict:
@@ -49,6 +56,7 @@ def _group_store(client: TestClient, headers: dict[str, str], group_id: str, nam
 @dataclass(frozen=True)
 class _Lab:
     group_id: str
+    other_group_id: str
     project_id: str
     group_store_id: str
     project_store_id: str
@@ -98,6 +106,7 @@ def lab(client: TestClient, admin_auth_headers: dict[str, str]) -> _Lab:
     )["store_id"]
     return _Lab(
         group_id=group_id,
+        other_group_id=other_group_id,
         project_id=project_id,
         group_store_id=_group_store(client, headers, group_id, "lab-shared"),
         project_store_id=project_store_id,
@@ -110,6 +119,16 @@ def _listed_ids(client: TestClient, headers: dict[str, str], **params: str) -> l
     response = client.get("/data-stores", params=params, headers=headers)
     assert response.status_code == 200, response.text
     return [store["store_id"] for store in response.json()["data"]]
+
+
+def _assert_group_listing_opaque(
+    client: TestClient,
+    headers: dict[str, str],
+    group_id: str,
+) -> None:
+    response = client.get("/data-stores", params={"group_id": group_id}, headers=headers)
+    assert response.status_code == 404, response.text
+    assert response.json() == _GROUP_NOT_FOUND
 
 
 def _assert_readable(client: TestClient, headers: dict[str, str], store_id: str) -> None:
@@ -148,10 +167,12 @@ def test_project_member_reads_inherited_group_store_it_lists(
         lab.group_store_id,
     ]
     assert _listed_ids(client, member.headers) == [lab.project_store_id, lab.group_store_id]
+    assert _listed_ids(client, member.headers, group_id=lab.group_id) == [lab.group_store_id]
     _assert_readable(client, member.headers, lab.group_store_id)
     _assert_readable(client, member.headers, lab.project_store_id)
     _assert_opaque(client, member.headers, lab.other_group_store_id)
     _assert_opaque(client, member.headers, lab.other_project_store_id)
+    _assert_group_listing_opaque(client, member.headers, lab.other_group_id)
 
 
 def test_group_member_lists_group_stores_without_project_membership(
@@ -172,6 +193,7 @@ def test_group_member_lists_group_stores_without_project_membership(
     _assert_readable(client, member.headers, lab.group_store_id)
     _assert_opaque(client, member.headers, lab.project_store_id)
     _assert_opaque(client, member.headers, lab.other_group_store_id)
+    _assert_group_listing_opaque(client, member.headers, lab.other_group_id)
 
 
 def test_outsider_sees_no_group_store(
@@ -183,3 +205,6 @@ def test_outsider_sees_no_group_store(
     assert _listed_ids(client, outsider.headers) == []
     _assert_opaque(client, outsider.headers, lab.group_store_id)
     _assert_opaque(client, outsider.headers, lab.other_group_store_id)
+    # A group the outsider cannot see answers exactly like a missing one.
+    _assert_group_listing_opaque(client, outsider.headers, lab.group_id)
+    _assert_group_listing_opaque(client, outsider.headers, str(uuid4()))
