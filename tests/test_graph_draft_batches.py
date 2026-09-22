@@ -2213,6 +2213,32 @@ def test_revise_rejects_daily_review_batch_drafts_explicitly(
     assert len(draft.json()["data"]["operations"]) == 1
 
 
+def test_revise_checks_draft_access_before_revealing_the_draft_mode(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    """An outsider holding a batch id must not learn it is a Daily Review batch."""
+    project_id = _project(client, admin_auth_headers)
+    _note(client, admin_auth_headers, project_id, "Gel photo A looked clean.")
+    fake_client = FakeBatchDraftClient(_batch_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: fake_client
+    run = client.post(
+        "/batches/run-now",
+        json={"project_id": project_id},
+        headers=admin_auth_headers,
+    ).json()["data"]
+    outsider_headers = _user_auth_headers(client, role=Role.EDITOR)
+
+    revised = client.post(
+        f"/graph-drafts/{run['change_set_id']}/revise",
+        data={"feedback": "Split this into two questions."},
+        headers=outsider_headers,
+    )
+
+    assert revised.status_code in {403, 404}, revised.text
+    assert "Daily Review" not in revised.text
+
+
 def test_batch_lists_paginate_in_sql_without_operations_or_context_packets(
     client: TestClient,
     admin_auth_headers: dict[str, str],

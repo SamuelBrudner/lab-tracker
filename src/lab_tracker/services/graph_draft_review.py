@@ -526,8 +526,10 @@ class GraphDraftReviewCoordinator(BaseService):
         """Regenerate the complete operation set without risking the old draft."""
 
         change_set = self.records.get_graph_change_set(change_set_id)
-        ensure_graph_change_set_revisable(change_set)
+        # Access first, so a caller who cannot edit the draft learns nothing
+        # about its mode; the mode check still precedes audio transcription.
         self._ensure_graph_change_set_editable(change_set, actor=actor)
+        ensure_graph_change_set_revisable(change_set)
         revision_inputs = inputs or RevisionInputs()
         cleaned, transcript = self._resolve_revision_feedback(
             feedback,
