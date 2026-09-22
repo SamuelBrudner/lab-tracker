@@ -133,5 +133,6 @@ def test_supervision_edge_management_requires_write_role(
         headers=_auth_headers(viewer_token),
     )
 
-    assert response.status_code == 401
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "forbidden"
     assert response.json()["error"]["message"] == "Insufficient role."

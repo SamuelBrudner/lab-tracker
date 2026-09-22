@@ -695,8 +695,8 @@ def test_revoked_member_cannot_replay_or_probe_bundle_key(
         json=_note_bundle(project_id, content="Probe existing key"),
         headers=editor_headers,
     )
-    assert replay.status_code == 401
-    assert conflicting_probe.status_code == 401
+    assert replay.status_code == 403
+    assert conflicting_probe.status_code == 403
     assert replay.json()["error"]["message"] == conflicting_probe.json()["error"]["message"]
 
 

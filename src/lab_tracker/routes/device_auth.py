@@ -11,7 +11,7 @@ from starlette.requests import Request
 
 from lab_tracker.auth import DeviceAuthService
 from lab_tracker.config import get_settings
-from lab_tracker.errors import AuthError
+from lab_tracker.errors import PermissionDeniedError
 from lab_tracker.instance_url import build_instance_url
 from lab_tracker.schemas import (
     DeviceConsumeRead,
@@ -91,7 +91,7 @@ def build_device_auth_router(*, device_auth_service: DeviceAuthService) -> APIRo
     def create_enrollment(payload: DeviceEnrollmentCreate, request: Request):
         actor = actor_from_request(request)
         if actor.is_device:
-            raise AuthError("Pairing must be initiated from a logged-in user session.")
+            raise PermissionDeniedError("Pairing must be initiated from a logged-in user session.")
         ttl_minutes = payload.ttl_minutes if payload.ttl_minutes is not None else 5
         offer = device_auth_service.create_enrollment(actor.user_id, ttl_minutes=ttl_minutes)
         base_url = _resolve_public_base_url(request)
@@ -134,7 +134,7 @@ def build_device_auth_router(*, device_auth_service: DeviceAuthService) -> APIRo
     def list_devices(request: Request):
         actor = actor_from_request(request)
         if actor.is_device:
-            raise AuthError("Listing devices requires user credentials.")
+            raise PermissionDeniedError("Listing devices requires user credentials.")
         devices = device_auth_service.list_devices(actor.user_id)
         items = [
             DeviceTokenRead(
@@ -158,7 +158,7 @@ def build_device_auth_router(*, device_auth_service: DeviceAuthService) -> APIRo
     def revoke_device(device_token_id: UUID, request: Request):
         actor = actor_from_request(request)
         if actor.is_device:
-            raise AuthError("Revoking devices requires user credentials.")
+            raise PermissionDeniedError("Revoking devices requires user credentials.")
         device = device_auth_service.revoke_device(actor.user_id, device_token_id)
         return Envelope(
             data=DeviceTokenRead(

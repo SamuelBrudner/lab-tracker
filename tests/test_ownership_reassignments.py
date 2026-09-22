@@ -637,7 +637,7 @@ def test_ownership_reassignment_route_records_audit_and_requires_admin(
         json={"from_user_id": source_user_id, "to_user_id": successor_user_id},
         headers=viewer_headers,
     )
-    assert denied.status_code == 401
+    assert denied.status_code == 403
 
     self_reassignment = client.post(
         "/ownership-reassignments",

@@ -337,8 +337,8 @@ def test_register_non_viewer_requires_admin_token(monkeypatch, tmp_path):
             json={"username": "editor-2", "password": "secret", "role": "editor"},
             headers=_auth_headers(viewer_token),
         )
-        assert viewer_auth_response.status_code == 401
-        assert viewer_auth_response.json()["error"]["code"] == "auth_error"
+        assert viewer_auth_response.status_code == 403
+        assert viewer_auth_response.json()["error"]["code"] == "forbidden"
 
         _seed_admin(client)
         admin_token = _login(client, "root", "secret")
@@ -556,7 +556,7 @@ def test_admin_can_manage_users(monkeypatch, tmp_path):
         viewer_token = viewer_response.json()["data"]["access_token"]
 
         denied_response = client.get("/auth/users", headers=_auth_headers(viewer_token))
-        assert denied_response.status_code == 401
+        assert denied_response.status_code == 403
 
         users_response = client.get("/auth/users", headers=_auth_headers(admin_token))
         assert users_response.status_code == 200

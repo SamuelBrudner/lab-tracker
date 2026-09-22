@@ -363,8 +363,8 @@ def test_record_export_returns_scoped_dump_and_provenance_for_user_and_group(
         f"/groups/{group_id}/record-exports/users/{source_user_id}",
         headers=viewer_headers,
     )
-    assert global_denied.status_code == 401
-    assert group_denied.status_code == 401
+    assert global_denied.status_code == 403
+    assert group_denied.status_code == 403
 
     unsafe_read = client.get(
         f"/record-exports/users/{source_user_id}",

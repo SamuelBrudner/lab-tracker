@@ -576,8 +576,8 @@ def test_core_mutations_keep_permission_errors_instead_of_becoming_opaque(
             json=payload,
             headers=scoped_project_member.member_headers,
         )
-        assert response.status_code == 401, f"{method} {path}: {response.text}"
-        assert response.json()["error"]["code"] == "auth_error"
+        assert response.status_code == 403, f"{method} {path}: {response.text}"
+        assert response.json()["error"]["code"] == "forbidden"
 
 
 def test_validation_precedence_is_independent_of_target_visibility(

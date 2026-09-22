@@ -291,10 +291,10 @@ def test_read_only_viewer_token_can_read_scoped_decision_context_opaquely(
         headers=pat_headers,
     )
 
-    assert hidden.status_code == missing.status_code == 401
+    assert hidden.status_code == missing.status_code == 403
     assert hidden.json() == missing.json() == {
         "error": {
-            "code": "auth_error",
+            "code": "forbidden",
             "message": "Project access required.",
             "issues": None,
         }
@@ -583,9 +583,9 @@ def test_admin_token_management_requires_an_interactive_admin(
         headers=_bearer(admin_pat["secret"]),
     )
 
-    assert by_editor.status_code == 401
+    assert by_editor.status_code == 403
     assert by_editor.json()["error"]["message"] == "Admin privileges required."
-    assert revoke_by_editor.status_code == 401
+    assert revoke_by_editor.status_code == 403
     assert by_service.status_code == 403
     assert revoke_by_service.status_code == 403
     assert client.get("/projects", headers=_bearer(issued["secret"])).status_code == 200

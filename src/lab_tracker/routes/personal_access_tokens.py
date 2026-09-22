@@ -16,7 +16,7 @@ from lab_tracker.auth import (
     PrincipalType,
     Role,
 )
-from lab_tracker.errors import AuthError, NotFoundError
+from lab_tracker.errors import AuthError, NotFoundError, PermissionDeniedError
 from lab_tracker.schemas import (
     Envelope,
     ListEnvelope,
@@ -43,7 +43,7 @@ def build_personal_access_tokens_router(
     def create_personal_access_token(payload: PersonalAccessTokenCreate, request: Request):
         actor = actor_from_request(request)
         if actor.is_device or actor.is_service:
-            raise AuthError("Personal access tokens require user credentials.")
+            raise PermissionDeniedError("Personal access tokens require user credentials.")
         user = auth_service.get_user_by_id(actor.user_id)
         if user is None:
             raise AuthError("Authentication required.")
@@ -64,7 +64,7 @@ def build_personal_access_tokens_router(
     def list_personal_access_tokens(request: Request):
         actor = actor_from_request(request)
         if actor.is_device or actor.is_service:
-            raise AuthError("Personal access tokens require user credentials.")
+            raise PermissionDeniedError("Personal access tokens require user credentials.")
         items = [
             _token_read(token)
             for token in personal_access_token_service.list_tokens(actor.user_id)
@@ -78,7 +78,7 @@ def build_personal_access_tokens_router(
     def revoke_personal_access_token(token_id: UUID, request: Request):
         actor = actor_from_request(request)
         if actor.is_device or actor.is_service:
-            raise AuthError("Personal access tokens require user credentials.")
+            raise PermissionDeniedError("Personal access tokens require user credentials.")
         token = personal_access_token_service.revoke_token(actor.user_id, token_id)
         return Envelope(data=_token_read(token))
 
@@ -122,9 +122,9 @@ def _ensure_interactive_admin(actor: AuthContext) -> None:
     """
 
     if actor.principal_type is not PrincipalType.USER:
-        raise AuthError("Personal access tokens require user credentials.")
+        raise PermissionDeniedError("Personal access tokens require user credentials.")
     if actor.role is not Role.ADMIN:
-        raise AuthError("Admin privileges required.")
+        raise PermissionDeniedError("Admin privileges required.")
 
 
 def _token_read(token: PersonalAccessToken) -> PersonalAccessTokenRead:

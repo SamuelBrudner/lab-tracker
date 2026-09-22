@@ -197,6 +197,14 @@ class LTStoreAuthorityDeniedError(LTAPIError):
     """Raised when a data-store authority grant cannot authorize registration."""
 
 
+class LTPermissionDeniedError(LTAPIError):
+    """Raised on HTTP 403: the credential is valid but lacks permission.
+
+    Unlike a 401, the client neither refreshes the token nor logs in again;
+    the fix is project or role access, not new credentials.
+    """
+
+
 class LTValidationError(LTError):
     """Raised when client-side validation catches a bad request shape."""
 
@@ -1317,6 +1325,8 @@ class LabTracker:
             raise LTValidationError(_response_error(response))
         if response.status_code == 409:
             raise LTConflictError(_response_error(response))
+        if response.status_code == 403:
+            raise LTPermissionDeniedError(_response_error(response))
         if response.status_code >= 400:
             raise LTAPIError(_response_error(response))
         return self._data_record(_response_json(response))
@@ -1673,6 +1683,8 @@ class LabTracker:
             and _response_error_code(response) == _STORE_AUTHORITY_DENIED_ERROR_CODE
         ):
             raise LTStoreAuthorityDeniedError(_response_error(response))
+        if response.status_code == 403:
+            raise LTPermissionDeniedError(_response_error(response))
         if response.status_code >= 400:
             raise LTAPIError(_response_error(response))
         return _response_json(response), response.status_code

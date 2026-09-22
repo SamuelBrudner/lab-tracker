@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext
 from lab_tracker.config import Settings
-from lab_tracker.errors import AuthError, NotFoundError, ValidationError
+from lab_tracker.errors import NotFoundError, PermissionDeniedError, ValidationError
 from lab_tracker.graph_drafting import GraphDraftClient, GraphDraftClientFactory
 from lab_tracker.member_onboarding import (
     SCHEDULED_DRAFT_EXCLUDE,
@@ -580,7 +580,7 @@ class BatchSchedulingCoordinator(BaseService):
         enqueue: bool,
     ) -> list[GraphDraftBatchRun]:
         if not self.authorization.has_global_admin(actor):
-            raise AuthError("Only admins can run scheduled batch drafts.")
+            raise PermissionDeniedError("Only admins can run scheduled batch drafts.")
         current_time = batch_policy.as_utc(now or utc_now())
         due_settings = self.scheduling_repository.list_due_graph_draft_batch_settings(current_time)
         runs: list[GraphDraftBatchRun] = []

@@ -185,9 +185,9 @@ def test_group_read_opacity_does_not_change_group_mutation_authorization(
         headers=group_read_scope.member_headers,
     )
 
-    assert member_list.status_code == 401
-    assert member_patch.status_code == 401
-    assert member_delete.status_code == 401
+    assert member_list.status_code == 403
+    assert member_patch.status_code == 403
+    assert member_delete.status_code == 403
 
     after_denial = client.get(
         f"/groups/{group_read_scope.group_id}",
@@ -359,10 +359,10 @@ def test_group_member_management_requires_group_owner(
     )
 
     assert get_response.status_code == 200
-    assert list_members.status_code == 401
+    assert list_members.status_code == 403
     assert list_members.json()["error"]["message"] == "Group owner access required."
-    assert patch_group.status_code == 401
-    assert patch_member.status_code == 401
+    assert patch_group.status_code == 403
+    assert patch_member.status_code == 403
 
 
 def test_group_routes_reject_last_owner_removal_and_allow_group_delete(
@@ -867,7 +867,7 @@ def test_direct_project_owner_cannot_move_project_out_of_group_without_group_own
         headers=scope.student_headers,
     )
 
-    assert response.status_code == 401, response.text
+    assert response.status_code == 403, response.text
     assert response.json()["error"]["message"] == "Group owner access required."
     stored = client.get(f"/projects/{scope.project_id}", headers=admin_auth_headers)
     assert stored.json()["data"]["group_id"] == scope.group_id
@@ -937,7 +937,7 @@ def test_direct_project_owner_cannot_delete_grouped_project_without_group_owner(
 
     denied = client.delete(f"/projects/{scope.project_id}", headers=scope.student_headers)
 
-    assert denied.status_code == 401, denied.text
+    assert denied.status_code == 403, denied.text
     assert denied.json()["error"]["message"] == "Group owner access required."
     assert client.get(f"/projects/{scope.project_id}", headers=scope.pi_headers).status_code == 200
 

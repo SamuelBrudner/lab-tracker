@@ -59,8 +59,11 @@ LAB_TRACKER_MCP_PASSWORD=<service-account-password>
 The server does not store bearer tokens. When `LAB_TRACKER_MCP_API_KEY` (or
 `LAB_TRACKER_MCP_TOKEN`) is set, the client sends that `lpat_` token directly
 and does not call `/auth/login`. Otherwise it logs in with the configured
-username/password and retries once after a 401. Credentials are only required
-when `LAB_TRACKER_AUTH_ENABLED=true`; local auth-disabled testing can omit them.
+username/password and retries once after a 401. A `403 forbidden` means the
+credential is valid but lacks project or role access: tools return it with
+`next_action.action = "request_access"` and never refresh or replace the
+credential. Credentials are only required when `LAB_TRACKER_AUTH_ENABLED=true`;
+local auth-disabled testing can omit them.
 
 For a private hosted read-only MCP endpoint, enable the compose `mcp` profile:
 

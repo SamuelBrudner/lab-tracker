@@ -154,7 +154,16 @@ class LabTrackerAPIUnavailableError(LabTrackerAPIError):
 
 
 class LabTrackerAPIAuthError(LabTrackerAPIError):
-    """Raised when Lab Tracker rejects MCP credentials or permissions."""
+    """Raised when Lab Tracker rejects the MCP credential itself (HTTP 401)."""
+
+
+class LabTrackerAPIPermissionError(LabTrackerAPIError):
+    """Raised on HTTP 403: the MCP credential is valid but lacks permission.
+
+    Deliberately not a :class:`LabTrackerAPIAuthError`: the credential must not
+    be refreshed or reported as rejected; the caller needs project or role
+    access instead.
+    """
 
 
 class LabTrackerAPIValidationError(LabTrackerAPIError):
@@ -311,8 +320,8 @@ class LabTrackerAPIClient:
 
         try:
             self._request("POST", CREDENTIAL_WRITE_PROBE_PATH, json_payload={})
-        except LabTrackerAPIAuthError as exc:
-            if exc.status_code == 403 and exc.code == "service_forbidden":
+        except LabTrackerAPIPermissionError as exc:
+            if exc.code == "service_forbidden":
                 return False
             raise
         except LabTrackerAPIUnavailableError:
@@ -1573,10 +1582,19 @@ def lab_tracker_api_error(operation: str, exc: LabTrackerAPIError) -> JsonObject
         error["status_code"] = exc.status_code
     if exc.issues:
         error["issues"] = _redact_error_issues(exc.issues)
-    return {
-        "error": error,
-        "data": None,
-        "next_action": {
+    if isinstance(exc, LabTrackerAPIPermissionError):
+        next_action: JsonObject = {
+            "action": "request_access",
+            "tool": None,
+            "arguments": {},
+            "reason": (
+                "The credential is valid but lacks permission for this action. Ask a "
+                "project owner or Lab Tracker admin for the needed access; do not "
+                "replace or refresh the credential."
+            ),
+        }
+    else:
+        next_action = {
             "action": "revise_request_or_credentials",
             "tool": None,
             "arguments": {},
@@ -1584,7 +1602,11 @@ def lab_tracker_api_error(operation: str, exc: LabTrackerAPIError) -> JsonObject
                 "Use the structured error details to correct the request, credentials, "
                 "or Lab Tracker permissions before retrying."
             ),
-        },
+        }
+    return {
+        "error": error,
+        "data": None,
+        "next_action": next_action,
     }
 
 
@@ -1715,8 +1737,10 @@ def _login_rejected_error(
 def _api_error_from_response(response: httpx.Response) -> LabTrackerAPIError:
     message, code, issues = _response_error_parts(response)
     kwargs = {"status_code": response.status_code, "code": code, "issues": issues}
-    if response.status_code in {401, 403}:
+    if response.status_code == 401:
         return LabTrackerAPIAuthError(message, **kwargs)
+    if response.status_code == 403:
+        return LabTrackerAPIPermissionError(message, **kwargs)
     if response.status_code == 422:
         return LabTrackerAPIValidationError(message, **kwargs)
     if response.status_code >= 500:

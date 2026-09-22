@@ -5,7 +5,7 @@ from __future__ import annotations
 from uuid import UUID
 
 from lab_tracker.auth import AuthContext, Role
-from lab_tracker.errors import AuthError
+from lab_tracker.errors import AuthError, PermissionDeniedError
 from lab_tracker.models import ProjectMembershipRole
 from lab_tracker.services.base import BaseService, ServiceContext
 
@@ -53,7 +53,7 @@ class ProjectAuthorizationPolicy(BaseService):
         """
 
         if actor is None or not actor.is_interactive:
-            raise AuthError(
+            raise PermissionDeniedError(
                 f"{action} requires an interactive human session; service "
                 "tokens and automation principals may draft graph proposals "
                 "but not accept or commit them."
@@ -82,7 +82,7 @@ class ProjectAuthorizationPolicy(BaseService):
     ) -> None:
         role = self.group_membership_role(group_id, actor)
         if role not in GROUP_READ_ROLES:
-            raise AuthError("Group access required.")
+            raise PermissionDeniedError("Group access required.")
 
     def can_group_read(
         self,
@@ -106,7 +106,7 @@ class ProjectAuthorizationPolicy(BaseService):
             return
         role = self.group_membership_role(group_id, actor)
         if role not in GROUP_OWNER_ROLES:
-            raise AuthError("Group owner access required.")
+            raise PermissionDeniedError("Group owner access required.")
 
     def accessible_project_ids(self, actor: AuthContext | None) -> set[UUID] | None:
         if self.has_global_read(actor):
@@ -189,7 +189,7 @@ class ProjectAuthorizationPolicy(BaseService):
     ) -> None:
         role = self.membership_role(project_id, actor)
         if role not in PROJECT_READ_ROLES:
-            raise AuthError("Project access required.")
+            raise PermissionDeniedError("Project access required.")
 
     def can_read(
         self,
@@ -213,7 +213,7 @@ class ProjectAuthorizationPolicy(BaseService):
             return
         role = self.membership_role(project_id, actor)
         if role not in PROJECT_CONTRIBUTOR_ROLES:
-            raise AuthError("Project contributor access required.")
+            raise PermissionDeniedError("Project contributor access required.")
 
     def require_owner(
         self,
@@ -225,4 +225,4 @@ class ProjectAuthorizationPolicy(BaseService):
             return
         role = self.membership_role(project_id, actor)
         if role not in PROJECT_OWNER_ROLES:
-            raise AuthError("Project owner access required.")
+            raise PermissionDeniedError("Project owner access required.")

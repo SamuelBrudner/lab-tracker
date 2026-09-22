@@ -15,6 +15,7 @@ from lab_tracker.errors import (
     AuthError,
     NotFoundError,
     OpaqueTargetNotFoundError,
+    PermissionDeniedError,
     ValidationError,
 )
 from lab_tracker.goals_attributes import validate_goal_attributes
@@ -536,7 +537,7 @@ class GoalService(BaseService):
     ) -> set[UUID]:
         project_ids = self._goal_scope_project_ids(goal)
         if not project_ids and not self.authorization.has_global_read(actor):
-            raise AuthError("Project access required.")
+            raise PermissionDeniedError("Project access required.")
         for project_id in project_ids:
             self.authorization.require_read(project_id, actor=actor)
         return project_ids
@@ -549,14 +550,14 @@ class GoalService(BaseService):
     ) -> None:
         project_ids = self._goal_scope_project_ids(goal)
         if not project_ids and not self.authorization.has_global_write(actor):
-            raise AuthError("Project contributor access required.")
+            raise PermissionDeniedError("Project contributor access required.")
         for project_id in project_ids:
             self.authorization.require_contributor(project_id, actor=actor)
 
     def _require_goal_owner(self, goal: Goal, *, actor: AuthContext | None = None) -> None:
         project_ids = self._goal_scope_project_ids(goal)
         if not project_ids and not self.authorization.has_global_admin(actor):
-            raise AuthError("Project owner access required.")
+            raise PermissionDeniedError("Project owner access required.")
         for project_id in project_ids:
             self.authorization.require_owner(project_id, actor=actor)
 

@@ -24,7 +24,7 @@ from lab_tracker.auth import (
     resolve_session_user,
 )
 from lab_tracker.db_types import ensure_uuid
-from lab_tracker.errors import AuthError
+from lab_tracker.errors import AuthError, PermissionDeniedError
 from lab_tracker.instance_url import build_instance_url
 from lab_tracker.patching import provided_fields
 from lab_tracker.schemas import (
@@ -114,7 +114,9 @@ def build_auth_router(
                     token_service=token_service,
                 )
                 if actor.role != Role.ADMIN:
-                    raise AuthError("Admin privileges required to register non-viewer users.")
+                    raise PermissionDeniedError(
+                        "Admin privileges required to register non-viewer users."
+                    )
         elif not request.app.state.settings.auth_public_viewer_registration_enabled:
             if not request.headers.get("authorization"):
                 raise AuthError("Public viewer registration is disabled.")
@@ -225,7 +227,7 @@ def build_auth_router(
             raise AuthError("Token refresh is unavailable when authentication is disabled.")
         actor = actor_from_request(request)
         if actor.principal_type is not PrincipalType.USER:
-            raise AuthError("Token refresh requires a user session.")
+            raise PermissionDeniedError("Token refresh requires a user session.")
         claims, user = resolve_session_user(
             extract_bearer_token(request.headers.get("authorization")),
             token_service=token_service,
@@ -244,7 +246,7 @@ def build_auth_router(
             raise AuthError("Session revocation is unavailable when authentication is disabled.")
         actor = actor_from_request(request)
         if actor.principal_type is not PrincipalType.USER:
-            raise AuthError("Session revocation requires a user session.")
+            raise PermissionDeniedError("Session revocation requires a user session.")
         user = auth_service.revoke_sessions(actor.user_id)
         return Envelope(data=auth_user_read(user))
 
@@ -313,7 +315,7 @@ def _graph_draft_provider_readiness(settings) -> tuple[str, bool]:
 def _ensure_admin(request: Request) -> None:
     actor = actor_from_request(request)
     if actor.role != Role.ADMIN:
-        raise AuthError("Admin privileges required.")
+        raise PermissionDeniedError("Admin privileges required.")
 
 
 def _auth_rate_key(request: Request, purpose: str, username: str | None = None) -> str:

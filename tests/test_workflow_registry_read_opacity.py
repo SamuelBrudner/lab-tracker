@@ -931,8 +931,8 @@ def test_workflow_registry_mutations_keep_permission_errors(
             headers=scoped_project_member.member_headers,
             **kwargs,
         )
-        assert response.status_code == 401, f"{method} {path}: {response.text}"
-        assert response.json()["error"]["code"] == "auth_error"
+        assert response.status_code == 403, f"{method} {path}: {response.text}"
+        assert response.json()["error"]["code"] == "forbidden"
 
 
 def test_workflow_registry_lists_hide_nonmember_records(

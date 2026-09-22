@@ -3024,7 +3024,7 @@ def test_writable_service_token_cannot_accept_or_commit_graph_draft(
     # ...but the accept and commit gates reject it.
     assert (
         client.post(f"/graph-drafts/{change_set_id}/accept-all", headers=token).status_code
-        == 401
+        == 403
     )
     assert (
         client.post(
@@ -3032,7 +3032,7 @@ def test_writable_service_token_cannot_accept_or_commit_graph_draft(
             json={"message": "token commit"},
             headers=token,
         ).status_code
-        == 401
+        == 403
     )
 
 

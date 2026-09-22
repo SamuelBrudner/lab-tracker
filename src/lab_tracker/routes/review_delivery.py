@@ -8,7 +8,7 @@ from starlette.responses import RedirectResponse
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.auth import Role
-from lab_tracker.errors import AuthError
+from lab_tracker.errors import PermissionDeniedError
 from lab_tracker.models import ReviewEmailDelivery
 from lab_tracker.review_links import InvalidReviewLinkToken, verify_review_link
 from lab_tracker.schemas import Envelope, ListEnvelope, ReviewEmailTestRequest
@@ -85,4 +85,4 @@ def build_review_delivery_router(api: LabTrackerAPI) -> APIRouter:
 def _require_admin(request: Request) -> None:
     actor = actor_from_request(request)
     if actor.role != Role.ADMIN:
-        raise AuthError("Only admins can manage review email delivery.")
+        raise PermissionDeniedError("Only admins can manage review email delivery.")

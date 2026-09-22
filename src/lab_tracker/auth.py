@@ -34,7 +34,13 @@ from lab_tracker.db_models import (
     UserModel,
 )
 from lab_tracker.db_types import ensure_uuid
-from lab_tracker.errors import AuthError, ConflictError, NotFoundError, ValidationError
+from lab_tracker.errors import (
+    AuthError,
+    ConflictError,
+    NotFoundError,
+    PermissionDeniedError,
+    ValidationError,
+)
 from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
 
 LOCAL_AUTH_USER_ID = ensure_uuid("00000000-0000-4000-8000-000000000001")
@@ -1367,7 +1373,7 @@ def require_role(actor: AuthContext | None, allowed_roles: Iterable[Role]) -> No
     if actor is None:
         raise AuthError("Authentication required.")
     if actor.role not in set(allowed_roles):
-        raise AuthError("Insufficient role.")
+        raise PermissionDeniedError("Insufficient role.")
 
 
 def _cap_role(role: Role, *, issuer_role: Role) -> Role:

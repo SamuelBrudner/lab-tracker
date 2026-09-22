@@ -280,7 +280,7 @@ def test_viewer_and_noninteractive_principal_are_read_only(
         json=_checkpoint_payload(),
         headers=viewer_user.headers,
     )
-    assert denied.status_code == 401
+    assert denied.status_code == 403
 
     actor = AuthContext(
         user_id=uuid4(),
@@ -604,7 +604,7 @@ def test_ai_accepted_path_is_author_reviewed_owner_committed_and_additive(
         json={"message": "not owner"},
         headers=author_headers,
     )
-    assert contributor_commit.status_code == 401
+    assert contributor_commit.status_code == 403
     queue = client.get(
         f"/projects/{project_id}/member-onboarding/owner-queue",
         headers=admin_auth_headers,

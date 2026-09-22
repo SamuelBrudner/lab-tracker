@@ -513,7 +513,7 @@ def test_legacy_unassigned_reviews_are_owner_oversight_not_personal_work(
     assert [item["change_set_id"] for item in owner_oversight.json()["data"]] == [
         run["change_set_id"]
     ]
-    assert contributor_project_oversight.status_code == 401
+    assert contributor_project_oversight.status_code == 403
     assert contributor_all_oversight.status_code == 200
     assert contributor_all_oversight.json()["data"] == []
 
@@ -841,9 +841,9 @@ def test_personal_cadence_and_owner_project_template_are_independent(
         json={"enabled": True, "user_id": first_user_id},
         headers=admin_auth_headers,
     )
-    assert forbidden_default.status_code == 401
+    assert forbidden_default.status_code == 403
     assert spoofed_beneficiary.status_code == 422
-    assert spoofed_read.status_code == 401
+    assert spoofed_read.status_code == 403
     assert null_beneficiary.status_code == 422
     assert default_with_user.status_code == 422
 
@@ -993,7 +993,7 @@ def test_per_user_batch_notification_address_is_private_to_user_and_owner(
         params={"user_id": first_user_id},
         headers=second_headers,
     )
-    assert other.status_code == 401
+    assert other.status_code == 403
 
     owner = client.get(
         f"/projects/{project_id}/graph-draft-batch-settings",
@@ -1022,14 +1022,14 @@ def test_viewer_cannot_schedule_or_run_project_batch(
         json={"enabled": True},
         headers=viewer_headers,
     )
-    assert settings.status_code == 401
+    assert settings.status_code == 403
 
     run = client.post(
         "/batches/run-now",
         json={"project_id": project_id},
         headers=viewer_headers,
     )
-    assert run.status_code == 401
+    assert run.status_code == 403
 
 
 def test_background_run_now_enqueues_and_worker_processes(
@@ -2175,9 +2175,9 @@ def test_run_due_rejects_non_admin_user(
 
     response = client.post("/batches/run-due", headers=viewer_headers)
 
-    assert response.status_code == 401
+    assert response.status_code == 403
     assert response.json()["error"] == {
-        "code": "auth_error",
+        "code": "forbidden",
         "message": "Only admins can run scheduled batch drafts.",
         "issues": None,
     }

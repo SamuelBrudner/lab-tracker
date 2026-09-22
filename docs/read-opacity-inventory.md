@@ -4,8 +4,9 @@ This inventory freezes the retained targeted-read surfaces where revealing
 whether a record exists would disclose project or group membership. For each
 variant, an existing inaccessible target and a missing target return the same
 canonical `404`; authorized callers retain the documented media type and
-payload contract. Authentication and service-token capability failures remain
-`401` and `403`, respectively.
+payload contract. Authentication failures remain `401`; service-token
+capability failures and the explicit permission failures of mutations are
+`403` ([status-code contract](internal-boundaries.md#authentication-versus-authorization-status-codes)).
 
 ## Count and scope
 

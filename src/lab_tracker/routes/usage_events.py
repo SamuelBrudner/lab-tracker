@@ -18,7 +18,7 @@ from starlette.responses import StreamingResponse
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.auth import Role
-from lab_tracker.errors import AuthError
+from lab_tracker.errors import PermissionDeniedError
 from lab_tracker.models import UsageEvent
 from lab_tracker.schemas import Envelope, ListEnvelope
 
@@ -204,4 +204,4 @@ def _usage_events_csv_chunks(
 def _ensure_admin(request: Request) -> None:
     actor = actor_from_request(request)
     if actor.role != Role.ADMIN:
-        raise AuthError("Admin privileges required.")
+        raise PermissionDeniedError("Admin privileges required.")

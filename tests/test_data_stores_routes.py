@@ -541,7 +541,7 @@ def test_create_group_store_requires_group_owner(client, scoped_project_member, 
         json={"group_id": group_id, "name": "lab-fs", "kind": "s3", "root": "s3://x"},
         headers=scoped_project_member.member_headers,
     )
-    assert response.status_code == 401
+    assert response.status_code == 403
 
 
 def test_create_data_store_requires_exactly_one_scope(client, admin_auth_headers):
@@ -660,8 +660,8 @@ def test_create_data_store_authorizes_before_semantic_definition_validation(
             headers=scoped_project_member.member_headers,
         )
 
-    assert response.status_code == 401, response.text
-    assert response.json()["error"]["code"] == "auth_error"
+    assert response.status_code == 403, response.text
+    assert response.json()["error"]["code"] == "forbidden"
     assert secret not in response.text
     assert secret not in caplog.text
 
@@ -1036,7 +1036,7 @@ def test_create_data_store_requires_contributor(client, scoped_project_member):
         headers=scoped_project_member.member_headers,
     )
     # A viewer cannot register a store.
-    assert response.status_code == 401
+    assert response.status_code == 403
 
 
 def test_data_store_health_local_fs(client, admin_auth_headers, tmp_path):
