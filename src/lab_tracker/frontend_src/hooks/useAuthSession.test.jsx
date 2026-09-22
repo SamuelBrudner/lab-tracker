@@ -240,7 +240,31 @@ describe("useAuthSession", () => {
     expect(setFlash).toHaveBeenLastCalledWith("", "Your session expired. Please sign in again.");
   });
 
-  it("keeps the token when a later API request returns a permission 401", async () => {
+  it("clears a paired-device session when its revoked device token returns 401", async () => {
+    localStorage.setItem(TOKEN_STORAGE_KEY, "ltd_revoked-device-secret");
+    const setBusy = vi.fn();
+    const setFlash = vi.fn();
+    installFetchMock([
+      {
+        match: "/auth/me",
+        response: apiResponse(USER, 200, { auth_enabled: true }),
+      },
+      {
+        match: "/protected",
+        response: errorResponse("Invalid device token.", 401),
+      },
+    ]);
+
+    render(<AuthHarness setBusy={setBusy} setFlash={setFlash} withProbe />);
+
+    await waitFor(() => expect(setBusy).toHaveBeenLastCalledWith(false));
+    fireEvent.click(screen.getByRole("button", { name: "Probe API" }));
+
+    await waitFor(() => expect(localStorage.getItem(TOKEN_STORAGE_KEY)).toBeNull());
+    expect(screen.getByTestId("token")).toHaveTextContent("");
+  });
+
+  it("keeps the token when a later API request returns a permission 403", async () => {
     localStorage.setItem(TOKEN_STORAGE_KEY, "stored-token");
     const setBusy = vi.fn();
     const setFlash = vi.fn();
@@ -251,7 +275,7 @@ describe("useAuthSession", () => {
       },
       {
         match: "/protected",
-        response: errorResponse("Project access required.", 401),
+        response: errorResponse("Project contributor access required.", 403),
       },
     ]);
 

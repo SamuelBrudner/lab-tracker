@@ -158,4 +158,47 @@ describe("strict JSON envelope helpers", () => {
       window.removeEventListener(AUTH_REJECTED_EVENT, authRejected);
     }
   });
+
+  it.each([
+    "Invalid device token.",
+    "Invalid personal access token.",
+    "Session has been revoked.",
+  ])("rejects authentication for any credential 401 (%s)", async (message) => {
+    const authRejected = vi.fn();
+    const token = "revoked-credential";
+    window.addEventListener(AUTH_REJECTED_EVENT, authRejected);
+    installFetchMock([{ match: "/notes", response: errorResponse(message, 401) }]);
+
+    try {
+      await expect(apiRequest("/notes", { token })).rejects.toMatchObject({
+        message,
+        status: 401,
+      });
+      expect(authRejected).toHaveBeenCalledTimes(1);
+      expect(authRejected.mock.calls[0][0].detail).toEqual({ message, status: 401, token });
+    } finally {
+      window.removeEventListener(AUTH_REJECTED_EVENT, authRejected);
+    }
+  });
+
+  it.each([
+    "Project contributor access required.",
+    "Insufficient role.",
+    "This action is not permitted for paired devices.",
+  ])("keeps the session on a permission 403 (%s)", async (message) => {
+    const authRejected = vi.fn();
+    window.addEventListener(AUTH_REJECTED_EVENT, authRejected);
+    installFetchMock([
+      { match: "/notes", method: "POST", response: errorResponse(message, 403) },
+    ]);
+
+    try {
+      await expect(
+        apiRequest("/notes", { method: "POST", body: {}, token: "still-valid-token" })
+      ).rejects.toMatchObject({ message, status: 403 });
+      expect(authRejected).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener(AUTH_REJECTED_EVENT, authRejected);
+    }
+  });
 });
