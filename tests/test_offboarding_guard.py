@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from uuid import uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 
 from lab_tracker.auth import Role
@@ -306,3 +307,121 @@ def test_group_bulk_offboard_allows_reassignment_before_revoke(
     )
     assert removed.status_code == 200
     assert [item["user_id"] for item in removed.json()["data"]] == [source_user_id]
+
+
+@pytest.mark.parametrize("change_after_export", ["create", "update"])
+def test_project_membership_revoke_requires_export_fresher_than_attributed_records(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    change_after_export: str,
+):
+    source_headers, source_user_id = _register_user(client)
+    project_id = client.post(
+        "/projects",
+        json={"name": "Stale export offboarding"},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    member = client.post(
+        f"/projects/{project_id}/members",
+        json={"user_id": source_user_id, "role": "contributor"},
+        headers=admin_auth_headers,
+    )
+    assert member.status_code == 201
+    early_question_id = _create_attributed_question(
+        client,
+        source_headers,
+        project_id=project_id,
+        label="early",
+    )
+    early_export = client.post(
+        f"/record-exports/users/{source_user_id}",
+        headers=admin_auth_headers,
+    )
+    assert early_export.status_code == 200, early_export.text
+    assert [
+        item["question_id"] for item in early_export.json()["data"]["records"]["questions"]
+    ] == [early_question_id]
+
+    if change_after_export == "create":
+        _create_attributed_question(
+            client,
+            source_headers,
+            project_id=project_id,
+            label="late",
+        )
+    else:
+        edited = client.patch(
+            f"/questions/{early_question_id}",
+            json={"text": "early question, revised after the export"},
+            headers=source_headers,
+        )
+        assert edited.status_code == 200, edited.text
+
+    blocked = client.delete(
+        f"/projects/{project_id}/members/{source_user_id}",
+        headers=admin_auth_headers,
+    )
+    assert blocked.status_code == 422, blocked.text
+    assert "Export or reassign" in blocked.json()["error"]["message"]
+    assert project_id in blocked.json()["error"]["message"]
+
+    fresh_export = client.post(
+        f"/record-exports/users/{source_user_id}",
+        headers=admin_auth_headers,
+    )
+    assert fresh_export.status_code == 200, fresh_export.text
+
+    removed = client.delete(
+        f"/projects/{project_id}/members/{source_user_id}",
+        headers=admin_auth_headers,
+    )
+    assert removed.status_code == 200, removed.text
+
+
+def test_group_bulk_offboard_requires_export_fresher_than_attributed_records(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    source_headers, source_user_id = _register_user(client)
+    group_id = client.post(
+        "/groups",
+        json={"name": "Stale export bulk offboarding"},
+        headers=admin_auth_headers,
+    ).json()["data"]["group_id"]
+    project_id = client.post(
+        "/projects",
+        json={"name": "Stale export bulk project", "group_id": group_id},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    onboard = client.post(
+        f"/groups/{group_id}/project-memberships",
+        json={"user_id": source_user_id, "role": "contributor"},
+        headers=admin_auth_headers,
+    )
+    assert onboard.status_code == 200
+    _create_attributed_question(client, source_headers, project_id=project_id, label="early")
+    early_export = client.post(
+        f"/groups/{group_id}/record-exports/users/{source_user_id}",
+        headers=admin_auth_headers,
+    )
+    assert early_export.status_code == 200, early_export.text
+    _create_attributed_question(client, source_headers, project_id=project_id, label="late")
+
+    blocked = client.delete(
+        f"/groups/{group_id}/project-memberships/{source_user_id}",
+        headers=admin_auth_headers,
+    )
+
+    assert blocked.status_code == 422, blocked.text
+    assert "Export or reassign" in blocked.json()["error"]["message"]
+
+    fresh_export = client.post(
+        f"/groups/{group_id}/record-exports/users/{source_user_id}",
+        headers=admin_auth_headers,
+    )
+    assert fresh_export.status_code == 200, fresh_export.text
+    removed = client.delete(
+        f"/groups/{group_id}/project-memberships/{source_user_id}",
+        headers=admin_auth_headers,
+    )
+    assert removed.status_code == 200, removed.text

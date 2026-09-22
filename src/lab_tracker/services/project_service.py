@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy.exc import IntegrityError
@@ -818,54 +819,83 @@ class ProjectService(BaseService):
         user_id: UUID,
         candidate_project_ids: set[UUID],
     ) -> None:
-        record_project_ids = self._attributed_record_project_ids(
+        """Reject revoking access while attributed records lack a fresh export.
+
+        A project's attributed records count as released only when an export
+        event covering that project was generated at or after the latest
+        creation or update of any of those records; an older export misses
+        records written after it. Reassignment releases records by moving
+        their attribution away from the user.
+        """
+
+        record_watermarks = self._attributed_record_watermarks(
             user_id,
             candidate_project_ids,
         )
-        if not record_project_ids:
+        if not record_watermarks:
             return
         export_events, _ = self.repository.query_record_export_events(
             user_id=user_id,
             limit=None,
             offset=0,
         )
-        for event in export_events:
-            if record_project_ids.issubset(set(event.project_ids)):
-                return
-        project_list = ", ".join(str(project_id) for project_id in sorted(record_project_ids))
+        unreleased_project_ids = {
+            project_id
+            for project_id, last_changed_at in record_watermarks.items()
+            if not any(
+                project_id in event.project_ids and event.created_at >= last_changed_at
+                for event in export_events
+            )
+        }
+        if not unreleased_project_ids:
+            return
+        project_list = ", ".join(
+            str(project_id) for project_id in sorted(unreleased_project_ids)
+        )
         raise ValidationError(
             "Export or reassign this user's records before revoking membership "
             f"for projects: {project_list}."
         )
 
-    def _attributed_record_project_ids(
+    def _attributed_record_watermarks(
         self,
         user_id: UUID,
         candidate_project_ids: set[UUID],
-    ) -> set[UUID]:
+    ) -> dict[UUID, datetime]:
+        """Map each project holding the user's attributed records to its latest change."""
+
         if not candidate_project_ids:
-            return set()
+            return {}
         records = self.repository.records_attributed_to_user(
             user_id=user_id,
             project_ids=candidate_project_ids,
         )
-        project_ids = {
-            item.project_id
-            for collection in (
-                records.questions,
-                records.datasets,
-                records.sessions,
-                records.notes,
-                records.analyses,
-                records.claims,
-            )
-            for item in collection
-        }
+        changes: list[tuple[UUID, datetime]] = []
+        for item in (
+            *records.questions,
+            *records.datasets,
+            *records.notes,
+            *records.analyses,
+            *records.claims,
+        ):
+            changes.append((item.project_id, max(item.created_at, item.updated_at)))
+        for session in records.sessions:
+            changes.append((session.project_id, session.updated_at))
         for visualization in records.visualizations:
             analysis = self.repository.analyses.get(visualization.analysis_id)
             if analysis is not None:
-                project_ids.add(analysis.project_id)
-        return project_ids
+                changes.append(
+                    (
+                        analysis.project_id,
+                        max(visualization.created_at, visualization.updated_at),
+                    )
+                )
+        watermarks: dict[UUID, datetime] = {}
+        for project_id, changed_at in changes:
+            current = watermarks.get(project_id)
+            if current is None or changed_at > current:
+                watermarks[project_id] = changed_at
+        return watermarks
 
     def accessible_project_ids(self, actor: AuthContext | None) -> set[UUID] | None:
         return self.authorization.accessible_project_ids(actor)
