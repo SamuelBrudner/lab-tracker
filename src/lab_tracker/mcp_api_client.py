@@ -6,6 +6,7 @@ import mimetypes
 import os
 import re
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, get_args
@@ -18,6 +19,7 @@ from lab_tracker.artifact_resolution_limits import (
     ArtifactContentBoundsError,
 )
 from lab_tracker.assistant_next_questions import (
+    ANSWERING_CLAIM_STATUSES,
     OPEN_GOAL_STATUSES,
     OPEN_QUESTION_STATUSES,
     build_next_questions_payload,
@@ -56,6 +58,10 @@ JsonObject = dict[str, Any]
 SERVER_NAME = "lab-tracker-mcp"
 DEFAULT_TIMEOUT_SECONDS = 10.0
 UNAVAILABLE_CODE = "lab_tracker_unavailable"
+# The list endpoints cap ``limit`` at 200; next_questions pages through each list
+# up to this many rows and reports any list it had to cut in ``meta``.
+LIST_PAGE_SIZE = 200
+NEXT_QUESTIONS_MAX_ROWS_PER_LIST = 2000
 UNAVAILABLE_MESSAGE = "Lab Tracker unavailable - proceeding without graph context."
 # No API route serves this path; see LabTrackerAPIClient.credential_can_write.
 CREDENTIAL_WRITE_PROBE_PATH = "/_lab-tracker-mcp/credential-write-probe"
@@ -758,25 +764,58 @@ class LabTrackerAPIClient:
         project_id: str | None = None,
         limit: int = 5,
     ) -> JsonObject:
+        truncated_inputs: list[JsonObject] = []
+
+        def collect(
+            label: str,
+            list_fn: Callable[..., JsonObject],
+            lookup_project_id: str | None,
+            status: str,
+        ) -> list[JsonObject]:
+            rows, total = _collect_list_pages(
+                lambda page_limit, offset: list_fn(
+                    project_id=lookup_project_id,
+                    status=status,
+                    limit=page_limit,
+                    offset=offset,
+                ),
+                label=label,
+            )
+            if len(rows) < total:
+                truncated_inputs.append(
+                    {
+                        "list": label,
+                        "project_id": lookup_project_id,
+                        "status": status,
+                        "fetched": len(rows),
+                        "total": total,
+                    }
+                )
+            return rows
+
         goals: list[JsonObject] = []
-        for status in OPEN_GOAL_STATUSES:
-            payload = self.list_goals(project_id=project_id, status=status, limit=200)
-            goals.extend(_payload_items(payload))
+        for goal_status in OPEN_GOAL_STATUSES:
+            goals.extend(collect("goals", self.list_goals, project_id, goal_status))
 
         project_ids = _project_ids_for_next_question_lookup(goals, project_id)
         questions: list[JsonObject] = []
         claims: list[JsonObject] = []
         for lookup_project_id in project_ids:
-            for status in OPEN_QUESTION_STATUSES:
-                payload = self.list_questions(
-                    project_id=lookup_project_id,
-                    status=status,
-                    limit=200,
+            for question_status in OPEN_QUESTION_STATUSES:
+                questions.extend(
+                    collect("questions", self.list_questions, lookup_project_id, question_status)
                 )
-                questions.extend(_payload_items(payload))
-            claims.extend(_payload_items(self.list_claims(project_id=lookup_project_id, limit=200)))
+            # Only supported claims settle a question, so spend the row budget on them.
+            for claim_status in ANSWERING_CLAIM_STATUSES:
+                claims.extend(collect("claims", self.list_claims, lookup_project_id, claim_status))
 
-        return build_next_questions_payload(goals, questions, claims, limit=limit)
+        return build_next_questions_payload(
+            goals,
+            questions,
+            claims,
+            limit=limit,
+            truncated_inputs=truncated_inputs,
+        )
 
     def create_project(
         self,
@@ -1524,6 +1563,34 @@ def _payload_items(payload: JsonObject) -> list[JsonObject]:
     if not isinstance(data, list):
         raise LabTrackerAPIError("Lab Tracker API response did not include list data.")
     return [item for item in data if isinstance(item, dict)]
+
+
+def _collect_list_pages(
+    fetch: Callable[[int, int], JsonObject],
+    *,
+    label: str,
+) -> tuple[list[JsonObject], int]:
+    """Page a list endpoint via ``fetch(limit, offset)``.
+
+    Returns the rows read (at most ``NEXT_QUESTIONS_MAX_ROWS_PER_LIST``) and the
+    server-reported total, so callers can detect and report truncation.
+    """
+
+    max_rows = NEXT_QUESTIONS_MAX_ROWS_PER_LIST
+    rows: list[JsonObject] = []
+    while True:
+        page_limit = min(LIST_PAGE_SIZE, max_rows - len(rows))
+        payload = fetch(page_limit, len(rows))
+        page = _payload_items(payload)
+        meta = payload.get("meta")
+        total = meta.get("total") if isinstance(meta, dict) else None
+        if not isinstance(total, int) or isinstance(total, bool) or total < 0:
+            raise LabTrackerAPIError(
+                f"Lab Tracker API {label} response did not include an integer meta.total."
+            )
+        rows.extend(page)
+        if not page or len(rows) >= total or len(rows) >= max_rows:
+            return rows, total
 
 
 def _project_ids_for_next_question_lookup(

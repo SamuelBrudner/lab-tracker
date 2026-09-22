@@ -767,6 +767,10 @@ def lab_tracker_next_questions(
     Call this when the user asks what research thread to advance or when a
     fresh session needs an obvious entry action. The ranking favors direct
     goal-question links, active questions, and questions with hypotheses.
+    A question counts as answered only when a supported claim answers it. When
+    any goal, question, or claim list is too large to load in full,
+    ``meta.inputs_truncated`` is true and ``meta.truncated_inputs`` names the
+    cut lists, so the ranking may be incomplete.
     """
     return _read_tool(
         "lab_tracker_next_questions",

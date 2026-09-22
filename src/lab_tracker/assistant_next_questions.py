@@ -45,8 +45,14 @@ def build_next_questions_payload(
     claims: list[JsonObject],
     *,
     limit: int = 5,
+    truncated_inputs: list[JsonObject] | None = None,
 ) -> JsonObject:
-    """Build a ranked ready-work-style list from goal/question graph records."""
+    """Build a ranked ready-work-style list from goal/question graph records.
+
+    ``truncated_inputs`` lists every input list the caller could not load in
+    full; it is reported in ``meta`` so a partial ranking is never presented as
+    complete.
+    """
 
     resolved_limit = min(max(int(limit or 5), 1), 20)
     open_goals = [
@@ -59,14 +65,17 @@ def build_next_questions_payload(
         if str(question.get("status") or "") in OPEN_QUESTION_STATUSES
         and _record_id(question, "question_id") not in answered_question_ids
     ]
+    truncation = _truncation_meta(truncated_inputs)
     if not open_goals:
         return _empty_payload(
             "No planned or in-progress goals are visible. Create or activate a goal "
-            "before asking what research thread to advance."
+            "before asking what research thread to advance.",
+            truncation,
         )
     if not open_questions:
         return _empty_payload(
-            "No active or staged unanswered questions are visible for the active goals."
+            "No active or staged unanswered questions are visible for the active goals.",
+            truncation,
         )
 
     ranked: list[JsonObject] = []
@@ -110,6 +119,7 @@ def build_next_questions_payload(
                 "direct goal-question links first, then active over staged status, "
                 "then questions carrying hypotheses."
             ),
+            **truncation,
         },
     }
     if selected:
@@ -175,7 +185,12 @@ def _ranked_item(
     }
 
 
-def _empty_payload(reason: str) -> JsonObject:
+def _truncation_meta(truncated_inputs: list[JsonObject] | None) -> JsonObject:
+    entries = list(truncated_inputs or [])
+    return {"inputs_truncated": bool(entries), "truncated_inputs": entries}
+
+
+def _empty_payload(reason: str, truncation: JsonObject) -> JsonObject:
     return {
         "data": [],
         "meta": {
@@ -184,6 +199,7 @@ def _empty_payload(reason: str) -> JsonObject:
             "empty_reason": reason,
             "goal_statuses": list(OPEN_GOAL_STATUSES),
             "question_statuses": list(OPEN_QUESTION_STATUSES),
+            **truncation,
         },
         "next_action": {
             "tool": "lab_tracker_list_goals",
