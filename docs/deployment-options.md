@@ -102,6 +102,12 @@ and linked from the repository homepage. It is the primary non-build preview
 path; README screenshots remain the fallback when the hosted demo is
 unavailable.
 
+Build the demo site with `npm run build:pages-demo` (output in
+`dist/pages-demo`). GitHub Pages serves `404.html` at the requested URL for
+every deep link, so its asset URLs are absolute; pass
+`node scripts/build-pages-demo.mjs <outDir> --base-path=/<repository>/` when
+publishing somewhere other than the default `/lab-tracker/`.
+
 ## Managed Lab Deployment
 
 Managed lab deployments should keep infrastructure work out of the lab member's
