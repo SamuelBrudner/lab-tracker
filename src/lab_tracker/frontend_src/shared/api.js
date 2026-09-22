@@ -119,12 +119,28 @@ function buildApiPath(path, params = {}) {
   return `${url.pathname}${url.search}${url.hash}`;
 }
 
+// The request never produced an HTTP response (offline, DNS, CORS, refused
+// connection). Distinct from an ApiError (the server answered with a status)
+// and from a ContractError (a 2xx whose body broke the contract), so callers
+// can queue for retry on exactly this case.
+class NetworkError extends Error {
+  /** @param {unknown} cause */
+  constructor(cause) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = "NetworkError";
+  }
+}
+
 /** @param {string} path @param {RequestInit} [init] @returns {Promise<Response>} */
-function appFetch(path, init = {}) {
+async function appFetch(path, init = {}) {
   if (isStaticDemoEnabled()) {
     return demoFetch(path, init);
   }
-  return fetch(path, init);
+  try {
+    return await fetch(path, init);
+  } catch (error) {
+    throw new NetworkError(error);
+  }
 }
 
 /** @param {string} path @param {ApiOptions} [options] @returns {Promise<unknown>} */
@@ -321,6 +337,7 @@ async function downloadProtectedResource({ path, token = "", filename = "" }) {
 
 export {
   AUTH_REJECTED_EVENT,
+  NetworkError,
   apiFetch,
   apiRequest,
   apiTextRequest,

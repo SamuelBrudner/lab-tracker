@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   AUTH_REJECTED_EVENT,
+  NetworkError,
   apiListRequest,
   apiRequest,
   fetchAllPages,
@@ -14,6 +15,39 @@ import {
   errorResponse,
   installFetchMock,
 } from "../test/utils.js";
+
+describe("network failures", () => {
+  it("wraps a rejected fetch in NetworkError, keeping its message and cause", async () => {
+    const offline = new TypeError("Failed to fetch");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw offline;
+      })
+    );
+
+    const error = await apiRequest("/resource").catch((caught) => caught);
+
+    expect(error).toBeInstanceOf(NetworkError);
+    expect(error.message).toBe("Failed to fetch");
+    expect(error.cause).toBe(offline);
+    expect(error.status).toBeUndefined();
+  });
+
+  it("does not report a malformed successful response as a network failure", async () => {
+    installFetchMock([
+      {
+        match: "/resource",
+        response: new Response("ok", { headers: { "content-type": "text/plain" }, status: 200 }),
+      },
+    ]);
+
+    const error = await apiRequest("/resource").catch((caught) => caught);
+
+    expect(error).toBeInstanceOf(ContractError);
+    expect(error).not.toBeInstanceOf(NetworkError);
+  });
+});
 
 describe("strict JSON envelope helpers", () => {
   it("apiRequest rejects malformed successful resource envelopes", async () => {
