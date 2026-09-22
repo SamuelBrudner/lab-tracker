@@ -43,6 +43,7 @@ HPC_EVIDENCE_PROVIDER = "hpc-outbox"
 HPC_EVIDENCE_ADAPTER = "lt-hpc"
 ALLOWED_EVENT_TYPES = {"submit", "begin", "finish"}
 TERMINAL_SYNC_STATES = {"synced"}
+_UTF8_MAX_BYTES_PER_CHAR = 4
 
 
 JsonObject = dict[str, Any]
@@ -1086,13 +1087,36 @@ def _read_log_excerpt(paths: Sequence[str | Path], *, max_chars: int = 4000) -> 
             break
         path = Path(item).expanduser()
         try:
-            text = path.read_text(encoding="utf-8", errors="replace")
+            text = _read_text_tail(path, max_chars=remaining)
         except OSError:
             continue
         excerpt = text[-remaining:]
         chunks.append(f"==> {path} <==\n{excerpt.strip()}")
         remaining -= len(excerpt)
     return "\n\n".join(chunks)
+
+
+def _read_text_tail(path: Path, *, max_chars: int) -> str:
+    """Decode at most the last ``max_chars`` characters of a UTF-8 text file.
+
+    Scheduler logs can be gigabytes, and ``lt hpc finish`` runs inside a
+    memory-limited job epilogue, so only the final ``4 * max_chars`` bytes (the
+    UTF-8 worst case per character) are read. A multi-byte character split by
+    the seek point is dropped rather than decoded as a replacement character.
+    """
+
+    max_bytes = _UTF8_MAX_BYTES_PER_CHAR * max_chars
+    with path.open("rb") as handle:
+        size = handle.seek(0, os.SEEK_END)
+        start = max(0, size - max_bytes)
+        handle.seek(start)
+        data = handle.read(size - start)
+    if start > 0:
+        skip = 0
+        while skip < min(len(data), _UTF8_MAX_BYTES_PER_CHAR - 1) and (data[skip] & 0xC0 == 0x80):
+            skip += 1
+        data = data[skip:]
+    return data.decode("utf-8", errors="replace")[-max_chars:]
 
 
 def _join_log_excerpt(*parts: str) -> str:

@@ -274,9 +274,7 @@ def _matching_note_payload(path, *, note_id: str) -> dict:
     }
 
 
-def test_sync_skips_duplicate_when_server_already_holds_the_evidence(
-    tmp_path, monkeypatch
-) -> None:
+def test_sync_skips_duplicate_when_server_already_holds_the_evidence(tmp_path, monkeypatch) -> None:
     _clear_hpc_env(monkeypatch)
     monkeypatch.chdir(tmp_path)
     config = init_config(project_id="project-1", cluster="bouchet")
@@ -293,9 +291,7 @@ def test_sync_skips_duplicate_when_server_already_holds_the_evidence(
             )
         return _json_response(500, {"error": {"message": "unexpected request"}})
 
-    with LabTracker(
-        base_url="http://testserver", transport=httpx.MockTransport(handler)
-    ) as lt:
+    with LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler)) as lt:
         summary = sync_outbox(lt, config)
 
     assert summary["errors"] == []
@@ -327,9 +323,7 @@ def test_second_sync_pass_is_idempotent_with_zero_requests(tmp_path, monkeypatch
             return _json_response(201, {"data": {"note_id": "note-once"}})
         return _json_response(500, {"error": {"message": "unexpected request"}})
 
-    with LabTracker(
-        base_url="http://testserver", transport=httpx.MockTransport(handler)
-    ) as lt:
+    with LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler)) as lt:
         first = sync_outbox(lt, config)
         requests_after_first = len(requests)
         second = sync_outbox(lt, config)
@@ -343,9 +337,7 @@ def test_second_sync_pass_is_idempotent_with_zero_requests(tmp_path, monkeypatch
     assert len(requests) == requests_after_first
 
 
-def test_retry_after_persisted_upload_failure_dedupes_against_server(
-    tmp_path, monkeypatch
-) -> None:
+def test_retry_after_persisted_upload_failure_dedupes_against_server(tmp_path, monkeypatch) -> None:
     _clear_hpc_env(monkeypatch)
     monkeypatch.chdir(tmp_path)
     config = init_config(project_id="project-1", cluster="bouchet")
@@ -368,9 +360,7 @@ def test_retry_after_persisted_upload_failure_dedupes_against_server(
             return _json_response(503, {"error": {"message": "gateway timeout"}})
         return _json_response(500, {"error": {"message": "unexpected request"}})
 
-    with LabTracker(
-        base_url="http://testserver", transport=httpx.MockTransport(handler)
-    ) as lt:
+    with LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler)) as lt:
         failed = sync_outbox(lt, config)
         retried = sync_outbox(lt, config)
 
@@ -384,3 +374,65 @@ def test_retry_after_persisted_upload_failure_dedupes_against_server(
     synced = read_event(path)
     assert synced["sync"]["status"] == "synced"
     assert synced["sync"]["note_id"] == "note-persisted"
+
+
+def test_log_excerpt_reads_only_the_tail_of_a_large_log(tmp_path) -> None:
+    """M78: a multi-MB log must not be read (and decoded) whole for a 4 KB tail."""
+
+    import tracemalloc
+
+    from lab_tracker_client.hpc import _read_log_excerpt
+
+    log = tmp_path / "slurm-1.out"
+    line = "progress step ok " * 4 + "\n"
+    with log.open("w", encoding="utf-8") as handle:
+        for _ in range((16 * 1024 * 1024) // len(line)):
+            handle.write(line)
+        handle.write("FINAL LINE: done\n")
+
+    tracemalloc.start()
+    try:
+        excerpt = _read_log_excerpt([log], max_chars=4000)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    text = log.read_text(encoding="utf-8")
+    assert excerpt == f"==> {log} <==\n{text[-4000:].strip()}"
+    assert excerpt.endswith("FINAL LINE: done")
+    assert peak < 1024 * 1024
+
+
+def test_log_excerpt_tail_matches_full_decode_for_multibyte_logs(tmp_path) -> None:
+    from lab_tracker_client.hpc import _read_log_excerpt
+
+    short = tmp_path / "a.log"
+    long_multibyte = tmp_path / "b.log"
+    broken = tmp_path / "c.log"
+    short.write_bytes(b"\xff\xfe broken start " * 20 + "short-a \u2713".encode())
+    long_multibyte.write_text(
+        "h\u00e9llo \u2713 \u65e5\u672c\u8a9e \U0001f9ea " * 900 + "end-b", encoding="utf-8"
+    )
+    broken.write_text("never reached", encoding="utf-8")
+    missing = tmp_path / "missing.log"
+
+    excerpt = _read_log_excerpt([short, missing, long_multibyte, broken], max_chars=4000)
+
+    short_text = short.read_bytes().decode("utf-8", errors="replace")
+    long_tail = long_multibyte.read_text(encoding="utf-8")[-(4000 - len(short_text)) :]
+    assert excerpt == "\n\n".join(
+        [
+            f"==> {short} <==\n{short_text.strip()}",
+            f"==> {long_multibyte} <==\n{long_tail.strip()}",
+        ]
+    )
+    assert "\ufffd" not in excerpt.split("\n\n")[1]
+
+
+def test_log_excerpt_short_logs_are_returned_whole(tmp_path) -> None:
+    from lab_tracker_client.hpc import _read_log_excerpt
+
+    log = tmp_path / "short.log"
+    log.write_text("✓ only line\n", encoding="utf-8")
+
+    assert _read_log_excerpt([log], max_chars=4000) == f"==> {log} <==\n✓ only line"
