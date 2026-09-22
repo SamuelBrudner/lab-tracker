@@ -8,7 +8,7 @@ import { useApiResource } from "../hooks/useApiResource.js";
 import { useLocalDraft } from "../hooks/useLocalDraft.js";
 import { useProjectAccess } from "../hooks/useProjectAccess.js";
 
-const { useEffect, useMemo, useState } = React;
+const { useEffect, useMemo, useRef, useState } = React;
 
 function NotePanel({
   canWrite,
@@ -256,11 +256,33 @@ function NoteDetailCard({
     setTranscriptText(note?.transcribed_text || "");
   }, [note]);
 
+  // A mutation response is adopted only while the card still shows that note:
+  // the card is reused across note routes, so a slow response for the note the
+  // user just left must not replace the one now loaded. Returns whether the
+  // response belongs to the routed note.
+  const routedNoteIdRef = useRef(noteId);
+  useEffect(() => {
+    routedNoteIdRef.current = noteId;
+  }, [noteId]);
+
+  function adoptUpdatedNote(updated) {
+    if (routedNoteIdRef.current !== updated.note_id) {
+      return false;
+    }
+    setNote((current) => (current?.note_id === updated.note_id ? updated : current));
+    return true;
+  }
+
+  // The transcript editor is locked while a save or transcription is in
+  // flight: its response replaces the text, which would drop anything typed.
+  const [transcriptLocked, setTranscriptLocked] = useState(false);
+
   async function saveTranscript({ silent = false } = {}) {
     if (!note || !canWrite) {
       return null;
     }
     setBusy(true);
+    setTranscriptLocked(true);
     if (!silent) {
       setFlash("", "");
     }
@@ -284,7 +306,7 @@ function NoteDetailCard({
           token,
         })
       );
-      setNote(updated);
+      adoptUpdatedNote(updated);
       if (!silent) {
         setFlash("Transcript saved.");
       }
@@ -293,6 +315,7 @@ function NoteDetailCard({
       setFlash("", err.message || "Failed to save transcript.");
       return null;
     } finally {
+      setTranscriptLocked(false);
       setBusy(false);
     }
   }
@@ -302,6 +325,7 @@ function NoteDetailCard({
       return;
     }
     setBusy(true);
+    setTranscriptLocked(true);
     setFlash("", "");
     try {
       const updated = noteShape(
@@ -313,12 +337,14 @@ function NoteDetailCard({
       );
       // Adopt the server copy (text plus provider provenance) so later saves
       // and the draft flow's "transcript changed?" check start from it.
-      setNote(updated);
-      setTranscriptText(updated.transcribed_text || "");
+      if (adoptUpdatedNote(updated)) {
+        setTranscriptText(updated.transcribed_text || "");
+      }
       setFlash("Voice transcript ready.");
     } catch (err) {
       setFlash("", err.message || "Failed to transcribe voice note.");
     } finally {
+      setTranscriptLocked(false);
       setBusy(false);
     }
   }
@@ -396,7 +422,7 @@ function NoteDetailCard({
               <div className="subtle">Transcribed text</div>
               <textarea
                 className="transcript-editor"
-                disabled={!canWrite || isMemberOnboardingCheckpoint}
+                disabled={!canWrite || isMemberOnboardingCheckpoint || transcriptLocked}
                 onChange={(event) => setTranscriptText(event.target.value)}
                 value={transcriptText}
               />

@@ -221,4 +221,124 @@ describe("NoteDetailCard transcript provenance", () => {
     expect(patches[0].metadata).toMatchObject({ ...CAPTURE_METADATA, ...PROVENANCE });
     expect(patches[0].transcribed_text).toBe("Typed by the reviewer");
   });
+  it("does not apply a transcription for a note the user has moved away from", async () => {
+    const OTHER_ID = "note-other";
+    let releaseTranscript = null;
+    installFetchMock([
+      {
+        match: `/notes/${NOTE_ID}`,
+        response: apiResponse(
+          voiceNote({
+            metadata: { ...CAPTURE_METADATA, transcript_status: "pending" },
+            transcribedText: "",
+          })
+        ),
+      },
+      {
+        match: `/notes/${OTHER_ID}`,
+        response: apiResponse(
+          note({
+            metadata: { ...CAPTURE_METADATA, transcript_status: "ready" },
+            noteId: OTHER_ID,
+            rawAsset: { ...AUDIO_ASSET, storage_id: "storage-other" },
+            transcribedText: "Other note transcript",
+          })
+        ),
+      },
+      {
+        match: /^\/notes\/note-(voice|other)\/raw$/,
+        response: apiResponse({ ...AUDIO_ASSET, content_base64: "dm9pY2U=" }),
+      },
+      { match: "/projects/project-1/members", response: apiResponse([]) },
+      {
+        match: `/notes/${NOTE_ID}/transcript`,
+        method: "POST",
+        response: () =>
+          new Promise((resolve) => {
+            releaseTranscript = resolve;
+          }),
+      },
+    ]);
+    const setFlash = vi.fn();
+    const props = {
+      token: "token-1",
+      projects: [{ name: "Project One", project_id: "project-1" }],
+      navigate: vi.fn(),
+      onSetActiveProject: vi.fn(),
+      canWrite: true,
+      user: ADMIN,
+      setBusy: vi.fn(),
+      setFlash,
+    };
+    const { rerender } = render(<NoteDetailCard {...props} noteId={NOTE_ID} />);
+    await waitForLoadedVoiceNote();
+
+    fireEvent.click(screen.getByRole("button", { name: "Transcribe voice" }));
+    await waitFor(() => expect(releaseTranscript).toBeTypeOf("function"));
+    rerender(<NoteDetailCard {...props} noteId={OTHER_ID} />);
+    expect(await screen.findByDisplayValue("Other note transcript")).toBeInTheDocument();
+
+    releaseTranscript(
+      apiResponse(
+        voiceNote({
+          metadata: { ...CAPTURE_METADATA, ...PROVENANCE, transcript_status: "ready" },
+          transcribedText: "Transcript of the first note",
+        })
+      )
+    );
+    await waitFor(() => expect(setFlash).toHaveBeenCalledWith("Voice transcript ready."));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(screen.getByDisplayValue("Other note transcript")).toBeInTheDocument();
+    expect(screen.queryByDisplayValue("Transcript of the first note")).not.toBeInTheDocument();
+  });
+  it("locks the transcript editor while a save is in flight", async () => {
+    let releasePatch = null;
+    installFetchMock([
+      {
+        match: `/notes/${NOTE_ID}`,
+        response: [
+          apiResponse(
+            voiceNote({
+              metadata: { ...CAPTURE_METADATA, transcript_status: "pending" },
+              transcribedText: "",
+            })
+          ),
+          apiResponse(
+            voiceNote({
+              metadata: { ...CAPTURE_METADATA, transcript_status: "pending" },
+              transcribedText: "",
+            })
+          ),
+        ],
+      },
+      {
+        match: `/notes/${NOTE_ID}/raw`,
+        response: apiResponse({ ...AUDIO_ASSET, content_base64: "dm9pY2U=" }),
+      },
+      { match: "/projects/project-1/members", response: apiResponse([]) },
+      {
+        match: `/notes/${NOTE_ID}`,
+        method: "PATCH",
+        response: (request) =>
+          new Promise((resolve) => {
+            releasePatch = () => resolve(patchedNote(request));
+          }),
+      },
+    ]);
+    const { setFlash } = renderDetail();
+    await waitForLoadedVoiceNote();
+
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Saved text" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save transcript" }));
+    await waitFor(() => expect(releasePatch).toBeTypeOf("function"));
+
+    // Typing during the save would be overwritten by the saved server copy.
+    expect(screen.getByRole("textbox")).toBeDisabled();
+
+    releasePatch();
+    await waitFor(() => expect(setFlash).toHaveBeenCalledWith("Transcript saved."));
+    await waitFor(() => expect(screen.getByRole("textbox")).toBeEnabled());
+    expect(screen.getByRole("textbox")).toHaveValue("Saved text");
+  });
 });
