@@ -25,6 +25,14 @@ from lab_tracker_client.client import (
     build_evidence_metadata,
     capture_host_metadata,
 )
+from lab_tracker_client.gitinfo import (
+    dirty_label,
+    dirty_metadata,
+    dirty_state_fields,
+    git_dirty_state,
+    git_output,
+    git_timeout_seconds,
+)
 
 CONFIG_VERSION = 1
 EVENT_VERSION = 1
@@ -411,6 +419,9 @@ def run_submit_command(
     resolved_command = [str(part) for part in command if str(part)]
     if not resolved_command:
         raise LTValidationError("lt hpc submit requires a command after '--'.")
+    # Fail on a bad LAB_TRACKER_GIT_TIMEOUT_SECONDS before submitting: raising
+    # after the scheduler accepted the job would lose the job's record.
+    git_timeout_seconds()
     run_id = new_run_id()
     outbox = config.outbox_path()
     env = {
@@ -729,10 +740,9 @@ def finish_event(
 def git_context(cwd: str | Path | None = None) -> JsonObject:
     root = Path(cwd or Path.cwd()).expanduser()
     commit = _git_output(root, "rev-parse", "HEAD")
-    dirty = bool(_git_output(root, "status", "--porcelain"))
     return {
         "git_commit": commit,
-        "git_dirty": dirty,
+        **dirty_state_fields(git_dirty_state(root, commit=commit)),
     }
 
 
@@ -855,7 +865,7 @@ def render_event_note(event: Mapping[str, Any]) -> str:
         lines.append(f"- Working directory: `{payload['cwd']}`")
     if source.get("git_commit"):
         lines.append(f"- Git commit: `{source['git_commit']}`")
-        lines.append(f"- Git dirty: {bool(source.get('git_dirty'))}")
+        lines.append(f"- Git dirty: {dirty_label(source)}")
     lines.extend(["", "## Research Context", f"- Project: `{payload['project_id']}`"])
     if payload.get("question_id"):
         lines.append(f"- Candidate question: `{payload['question_id']}`")
@@ -920,7 +930,7 @@ def event_metadata(
             metadata[f"hpc_{key}"] = scheduler[key]
     if source.get("git_commit"):
         metadata["hpc_git_commit"] = str(source["git_commit"])
-        metadata["hpc_git_dirty"] = bool(source.get("git_dirty"))
+        metadata.update(dirty_metadata(source, "hpc_"))
     host = payload.get("host") if isinstance(payload.get("host"), Mapping) else {}
     for key in CAPTURE_HOST_METADATA_KEYS:
         if host.get(key):
@@ -1005,19 +1015,7 @@ def _job_from_token(token: str, *, fallback_cluster: str | None) -> SbatchJob:
 
 
 def _git_output(root: Path, *args: str) -> str:
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(root), *args],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=1,
-        )
-    except Exception:
-        return ""
-    if result.returncode != 0:
-        return ""
-    return result.stdout.strip()
+    return git_output(root, *args)
 
 
 def _path_sha256(path: Path) -> str:

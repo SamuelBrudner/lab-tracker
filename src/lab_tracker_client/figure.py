@@ -7,7 +7,6 @@ import io
 import mimetypes
 import os
 import stat
-import subprocess
 import sys
 import time
 import uuid
@@ -35,7 +34,12 @@ from lab_tracker_client.client import (
     file_sha256,
     load_connection_profile,
 )
-from lab_tracker_client.gitinfo import sanitize_remote_url
+from lab_tracker_client.gitinfo import (
+    DirtyState,
+    git_dirty_state,
+    git_output,
+    sanitize_remote_url,
+)
 from lab_tracker_client.repo import normalize_remote
 
 FIGURE_CAPTURE_TIMEOUT_SECONDS = 2.5
@@ -113,7 +117,8 @@ class RunContext:
     expires_at: float
     run_id: str = ""
     git_commit: str = ""
-    git_dirty: bool = False
+    git_dirty: bool | None = False
+    git_status_error: str = ""
     repo_remote_url: str = ""
     code_file: str = ""
     code_symbol: str = ""
@@ -125,10 +130,12 @@ class RunContext:
         return time.monotonic() >= self.expires_at
 
     def to_metadata(self) -> dict[str, NoteMetadataScalar]:
-        metadata: dict[str, NoteMetadataScalar] = {
-            "run_captured_at": self.captured_at,
-            "run_git_dirty": self.git_dirty,
-        }
+        metadata: dict[str, NoteMetadataScalar] = {"run_captured_at": self.captured_at}
+        if self.git_dirty is None:
+            # Unknown is never reported as clean; the marker says why.
+            metadata["run_git_status_error"] = self.git_status_error or "unknown"
+        else:
+            metadata["run_git_dirty"] = self.git_dirty
         if self.run_id:
             metadata["run_id"] = self.run_id
         if self.git_commit:
@@ -261,12 +268,15 @@ def run_context(
 
     resolved_extra = dict(_validate_metadata(extra) or {})
     pointer = _run_code_pointer()
+    git_commit = _git_output("rev-parse", "HEAD")
+    dirty_state = _git_dirty_state(git_commit)
     context = RunContext(
         captured_at=datetime.now(timezone.utc).isoformat(),
         expires_at=time.monotonic() + max(0.0, float(ttl_seconds)),
         run_id=uuid.uuid4().hex,
-        git_commit=_git_output("rev-parse", "HEAD"),
-        git_dirty=bool(_git_output("status", "--porcelain")),
+        git_commit=git_commit,
+        git_dirty=dirty_state.dirty,
+        git_status_error=dirty_state.error,
         repo_remote_url=_credential_free_repo_remote(
             _git_output("config", "--get", "remote.origin.url")
         ),
@@ -952,19 +962,11 @@ def _active_run_context() -> RunContext | None:
 
 
 def _git_output(*args: str) -> str:
-    try:
-        result = subprocess.run(
-            ["git", *args],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=1,
-        )
-    except Exception:
-        return ""
-    if result.returncode != 0:
-        return ""
-    return result.stdout.strip()
+    return git_output(None, *args)
+
+
+def _git_dirty_state(commit: str) -> DirtyState:
+    return git_dirty_state(None, commit=commit)
 
 
 def _credential_free_repo_remote(remote: str) -> str:

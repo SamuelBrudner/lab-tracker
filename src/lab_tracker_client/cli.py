@@ -1167,17 +1167,22 @@ def _repo_capture_payload(command: str, args: argparse.Namespace, *, event_type:
         artifacts=artifacts,
         summary=args.summary,
     )
-    return {
+    payload = {
         "command": command,
         "action": action,
         "run_id": event["run_id"],
         "event_type": event["event_type"],
         "git_commit": event["source"].get("git_commit", ""),
-        "git_dirty": event["source"].get("git_dirty", False),
+        # None when git could not report the working-tree state (see
+        # git_status_error); never defaulted to a "clean" False.
+        "git_dirty": event["source"].get("git_dirty"),
         "artifact_count": len(event["artifacts"]),
         "event_path": str(path),
         "outbox": str(config.outbox_path()),
     }
+    if event["source"].get("git_status_error"):
+        payload["git_status_error"] = event["source"]["git_status_error"]
+    return payload
 
 
 def _cmd_repo_status(args: argparse.Namespace) -> Any:

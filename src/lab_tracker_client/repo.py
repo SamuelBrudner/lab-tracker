@@ -18,7 +18,6 @@ import hashlib
 import json
 import os
 import re
-import subprocess
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -43,7 +42,14 @@ from lab_tracker_client.client import (
     build_evidence_metadata,
     capture_host_metadata,
 )
-from lab_tracker_client.gitinfo import sanitize_remote_url
+from lab_tracker_client.gitinfo import (
+    dirty_label,
+    dirty_metadata,
+    dirty_state_fields,
+    git_dirty_state,
+    git_output,
+    sanitize_remote_url,
+)
 
 CONFIG_VERSION = 1
 EVENT_VERSION = 1
@@ -54,7 +60,6 @@ REPO_EVIDENCE_ADAPTER = "lt-repo"
 REPO_CAPTURE_KIND = "repo_event"
 ALLOWED_EVENT_TYPES = {"commit", "report", "finish"}
 TERMINAL_SYNC_STATES = {"synced"}
-_GIT_TIMEOUT_SECONDS = 1
 
 JsonObject = dict[str, Any]
 
@@ -850,7 +855,7 @@ def git_context(cwd: str | Path | None = None) -> JsonObject:
     commit = _git_output(root, "rev-parse", "HEAD")
     context: JsonObject = {
         "git_commit": commit,
-        "git_dirty": bool(_git_output(root, "status", "--porcelain")),
+        **dirty_state_fields(git_dirty_state(root, commit=commit)),
     }
     if commit:
         context["git_commit_short"] = commit[:12]
@@ -1002,7 +1007,7 @@ def render_event_note(event: Mapping[str, Any]) -> str:
             lines.append(f"- {label}: `{source[key]}`")
     if source.get("git_subject"):
         lines.append(f"- Commit subject: {source['git_subject']}")
-    lines.append(f"- Dirty working tree: {bool(source.get('git_dirty'))}")
+    lines.append(f"- Dirty working tree: {dirty_label(source)}")
     if payload["cwd"]:
         lines.append(f"- Working directory: `{payload['cwd']}`")
     lines.extend(["", "## Research Context", f"- Project: `{payload['project_id']}`"])
@@ -1061,7 +1066,7 @@ def event_metadata(
         metadata["repo_remote_url"] = remote
     if source.get("git_branch"):
         metadata["repo_git_branch"] = str(source["git_branch"])
-    metadata["repo_git_dirty"] = bool(source.get("git_dirty"))
+    metadata.update(dirty_metadata(source, "repo_"))
     for key, value in payload["environment"].items():
         if isinstance(value, (str, bool, int, float)) and str(key).startswith("repo_environment"):
             metadata[str(key)] = value
@@ -1173,19 +1178,7 @@ def _write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
 
 
 def _git_output(root: Path, *args: str) -> str:
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(root), *args],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=_GIT_TIMEOUT_SECONDS,
-        )
-    except Exception:
-        return ""
-    if result.returncode != 0:
-        return ""
-    return result.stdout.strip()
+    return git_output(root, *args)
 
 
 def _default_event_id(event_type: str, source: Mapping[str, Any], commit: str) -> str:
