@@ -26,6 +26,7 @@ identity per commit (see ``tests/test_repo_bridge.py`` for the contract test).
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -34,13 +35,23 @@ from lab_tracker.models import ExternalArtifactReference
 
 REPO_EVIDENCE_PROVIDER = "git"
 
+# ``scheme://authority rest`` — authority is everything up to the first
+# '/', '?' or '#', so a raw '@' inside a password stays in the authority.
+_SCHEME_URL = re.compile(
+    r"^(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*)://(?P<authority>[^/?#]*)(?P<rest>.*)\Z",
+    re.DOTALL,
+)
+# Transports whose login name is addressing (``ssh://git@host``), not a secret.
+_SSH_SCHEMES = frozenset({"ssh", "git+ssh", "ssh+git"})
+
 
 @dataclass(frozen=True)
 class RepoNoteCapture:
     """The repo state a staged ``lt repo`` note captured.
 
     ``dirty`` is ``True``/``False`` only when the capture recorded a boolean
-    ``repo_git_dirty``. It is ``None`` (unknown) when the flag is absent — the
+    ``repo_git_dirty`` (a bool, or ``"True"``/``"False"`` as the server stores
+    it). It is ``None`` (unknown) when the flag is absent — the
     client records an unanswered ``git status`` as ``repo_git_status_error``
     instead, and CI-script notes carry no flag — or is not a boolean;
     ``status_error`` then carries the recorded reason, if any. Never read an
@@ -73,9 +84,9 @@ def repo_note_capture(
     dirty, status_error = _dirty_state(meta)
     return RepoNoteCapture(
         commit=commit,
-        remote=str(
-            meta.get("repo_remote_url") or meta.get("git_remote_origin_url") or ""
-        ).strip(),
+        remote=_sanitize_remote_url(
+            str(meta.get("repo_remote_url") or meta.get("git_remote_origin_url") or "")
+        ),
         branch=str(meta.get("repo_git_branch") or meta.get("git_branch") or "").strip(),
         dirty=dirty,
         status_error=status_error,
@@ -158,13 +169,56 @@ def _artifact_reference(
     )
 
 
+# The server stores every note metadata value as a string
+# (``schemas._normalize_note_metadata_for_request`` applies ``str(value)``), so
+# a boolean flag sent through the API comes back as ``str(bool)``. Exactly
+# those two spellings are read; anything else is not guessed at.
+_STORED_DIRTY_FLAGS = {"True": True, "False": False}
+
+
+def _sanitize_remote_url(remote: str) -> str:
+    """Return ``remote`` with every credential-bearing part removed.
+
+    Defence in depth for notes stored before the client and CI producers
+    sanitised remotes: a credentialed remote read from note metadata must not
+    be copied into Analysis artifact metadata. Mirrors
+    ``lab_tracker_client.gitinfo.sanitize_remote_url`` (the server package
+    does not import the client); ``tests/test_repo_bridge.py`` pins the two
+    together. All userinfo is dropped from non-ssh scheme URLs, ssh URLs keep
+    only the login name, query strings and fragments are dropped, and scp-like
+    addressing and local paths are returned unchanged.
+    """
+
+    cleaned = remote.strip()
+    if not cleaned:
+        return ""
+    match = _SCHEME_URL.match(cleaned)
+    if match is None:
+        return cleaned
+    scheme = match["scheme"]
+    authority = match["authority"]
+    userinfo, at, host = authority.rpartition("@")
+    if at:
+        login = userinfo.partition(":")[0]
+        keep_login = scheme.lower() in _SSH_SCHEMES and bool(login)
+        authority = f"{login}@{host}" if keep_login else host
+    path = re.split(r"[?#]", match["rest"], maxsplit=1)[0]
+    return f"{scheme}://{authority}{path}"
+
+
 def _dirty_state(meta: Mapping[str, Any]) -> tuple[bool | None, str]:
-    """Read the captured dirty flag without guessing: bool, else unknown."""
+    """Read the captured dirty flag without guessing.
+
+    A bool, or the server's canonical ``str(bool)`` encoding, is known; a
+    missing flag is unknown; any other value is unknown with a marker.
+    """
 
     status_error = str(meta.get("repo_git_status_error") or "").strip()
     raw = meta.get("repo_git_dirty")
     if isinstance(raw, bool):
         return raw, status_error
+    if isinstance(raw, str) and raw in _STORED_DIRTY_FLAGS:
+        return _STORED_DIRTY_FLAGS[raw], status_error
     if raw is None:
         return None, status_error
     marker = f"unrecognized repo_git_dirty value {raw!r}"
