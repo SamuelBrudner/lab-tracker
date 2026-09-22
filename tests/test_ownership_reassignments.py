@@ -1,16 +1,26 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 from api_helpers import repository_backed_api
 from fastapi.testclient import TestClient
+from sqlalchemy import func, or_, select
 
 from lab_tracker.auth import AuthContext, Role
 from lab_tracker.db_models import (
     AnalysisModel,
+    Base,
+    ClaimEdgeModel,
     ClaimModel,
     DatasetModel,
+    DataStoreModel,
+    EntityVersionModel,
+    ExperimentDatasetModel,
+    ExperimentModel,
+    ExperimentSessionModel,
+    ExplorationNodeModel,
     GoalLinkModel,
     GoalModel,
     GraphChangeSetModel,
@@ -20,12 +30,21 @@ from lab_tracker.db_models import (
     ProjectGroupModel,
     ProjectMembershipModel,
     ProjectModel,
+    ProvenanceLinkModel,
     QuestionModel,
     QuestionRefactorModel,
     SessionModel,
     UserModel,
     VisualizationModel,
 )
+from lab_tracker.sqlalchemy_repository_parts.ownership import (
+    ATTRIBUTION_REASSIGNMENT_TARGETS,
+    USER_COLUMNS_NOT_REASSIGNED,
+)
+
+# Column names that identify a user: foreign keys to users are found
+# structurally; these catch free-text or un-keyed attribution columns.
+_USER_REFERENCE_COLUMN_NAME = re.compile(r"(^|_)(by|user_id|assignee)$")
 
 
 def _now() -> datetime:
@@ -89,6 +108,13 @@ def test_ownership_reassignment_moves_all_attribution_surfaces():
     goal_link_id = uuid4()
     project_membership_id = uuid4()
     group_membership_id = uuid4()
+    successor_claim_id = uuid4()
+    claim_edge_id = uuid4()
+    experiment_id = uuid4()
+    entity_version_id = uuid4()
+    provenance_link_id = uuid4()
+    exploration_node_id = uuid4()
+    data_store_id = uuid4()
     now = _now()
     from_user = str(from_user_id)
     to_user = str(to_user_id)
@@ -341,6 +367,112 @@ def test_ownership_reassignment_moves_all_attribution_surfaces():
                 created_by_user_id=from_user,
                 created_at=now,
             ),
+            ClaimModel(
+                claim_id=str(successor_claim_id),
+                project_id=str(project_id),
+                statement="Successor scientist claim",
+                confidence=60.0,
+                status="proposed",
+                created_by=to_user,
+                created_by_user_id=to_user,
+                created_at=now,
+                updated_at=now,
+            ),
+            ExperimentModel(
+                experiment_id=str(experiment_id),
+                project_id=str(project_id),
+                name="Handoff experiment",
+                description="",
+                primary_question_id=str(source_question_id),
+                status="active",
+                origin="user",
+                created_by=from_user,
+                created_by_user_id=from_user,
+                created_at=now,
+                updated_at=now,
+            ),
+            EntityVersionModel(
+                version_id=str(entity_version_id),
+                entity_type="question",
+                entity_id=str(source_question_id),
+                version_number=1,
+                snapshot={},
+                created_by=from_user,
+                created_by_user_id=from_user,
+                created_at=now,
+            ),
+            ProvenanceLinkModel(
+                link_id=str(provenance_link_id),
+                project_id=str(project_id),
+                source_entity_type="dataset",
+                source_entity_id=str(dataset_id),
+                target_entity_type="question",
+                target_entity_id=str(source_question_id),
+                relation="used",
+                basis="content_hash_match",
+                status="proposed",
+                origin="system_detected",
+                created_by=from_user,
+                created_by_user_id=from_user,
+                created_at=now,
+                updated_at=now,
+            ),
+            ExplorationNodeModel(
+                node_id=str(exploration_node_id),
+                project_id=str(project_id),
+                node_type="decision",
+                title="Chose the successor pipeline",
+                target_entity_type="question",
+                target_entity_id=str(source_question_id),
+                status="staged",
+                origin="user",
+                created_by=from_user,
+                created_by_user_id=from_user,
+                created_at=now,
+                updated_at=now,
+            ),
+            DataStoreModel(
+                store_id=str(data_store_id),
+                project_id=str(project_id),
+                name="handoff-store",
+                kind="local_fs",
+                capabilities=[],
+                root="/data/handoff",
+                is_default=False,
+                created_by=from_user,
+                created_by_user_id=from_user,
+                created_at=now,
+                updated_at=now,
+            ),
+        ]
+    )
+    session.flush()
+
+    session.add_all(
+        [
+            ClaimEdgeModel(
+                edge_id=str(claim_edge_id),
+                claim_id=str(claim_id),
+                target_claim_id=str(successor_claim_id),
+                relation="extends",
+                created_by=from_user,
+                created_by_user_id=from_user,
+                created_at=now,
+            ),
+            ExperimentSessionModel(
+                experiment_id=str(experiment_id),
+                session_id=str(session_id),
+                created_by=from_user,
+                created_by_user_id=from_user,
+                created_at=now,
+            ),
+            ExperimentDatasetModel(
+                experiment_id=str(experiment_id),
+                dataset_id=str(dataset_id),
+                created_by=from_user,
+                created_by_user_id=from_user,
+                created_at=now,
+            ),
         ]
     )
     session.commit()
@@ -352,29 +484,22 @@ def test_ownership_reassignment_moves_all_attribution_surfaces():
         actor=AuthContext(user_id=admin_user_id, role=Role.ADMIN),
     )
 
-    expected_counts = {
-        "project_groups": 1,
-        "projects": 1,
-        "questions": 1,
-        "question_refactors": 1,
-        "datasets": 1,
-        "notes": 1,
-        "claims": 1,
-        "visualizations": 1,
-        "graph_change_sets": 1,
-        "graph_draft_batch_runs": 1,
-        "sessions": 1,
-        "goals": 1,
-        "goal_links": 1,
-        "project_memberships": 1,
-        "group_memberships": 1,
-        "analyses": 1,
-    }
+    expected_counts = {target.label: 1 for target in ATTRIBUTION_REASSIGNMENT_TARGETS}
+    assert {
+        "experiments",
+        "experiment_sessions",
+        "experiment_datasets",
+        "entity_versions",
+        "claim_edges",
+        "provenance_links",
+        "exploration_nodes",
+        "data_stores",
+    } <= set(expected_counts)
     assert reassignment.from_user_id == from_user_id
     assert reassignment.to_user_id == to_user_id
     assert reassignment.reason == "trainee graduated"
     assert reassignment.record_counts == expected_counts
-    assert reassignment.total_records == 16
+    assert reassignment.total_records == len(expected_counts)
     assert reassignment.created_by == str(admin_user_id)
     assert reassignment.created_by_user_id == admin_user_id
 
@@ -406,6 +531,66 @@ def test_ownership_reassignment_moves_all_attribution_surfaces():
     assert analysis is not None
     assert analysis.executed_by == to_user
     assert str(analysis.executed_by_user_id) == to_user
+
+    for target in ATTRIBUTION_REASSIGNMENT_TARGETS:
+        remaining = session.scalar(
+            select(func.count())
+            .select_from(target.model)
+            .where(
+                or_(
+                    target.text_column == from_user,
+                    target.user_id_column == from_user,
+                )
+            )
+        )
+        assert remaining == 0, f"{target.label} still attributed to the departing user"
+
+
+def _user_reference_columns() -> set[tuple[str, str]]:
+    discovered: set[tuple[str, str]] = set()
+    for table in Base.metadata.sorted_tables:
+        if table.name == "users":
+            continue
+        for column in table.columns:
+            references_users = any(
+                foreign_key.column.table.name == "users" for foreign_key in column.foreign_keys
+            )
+            if references_users or _USER_REFERENCE_COLUMN_NAME.search(column.name):
+                discovered.add((table.name, column.name))
+    return discovered
+
+
+def test_every_user_reference_column_is_classified_for_reassignment():
+    """Adding a user/attribution column must decide whether reassignment moves it."""
+
+    reassigned = {
+        (target.label, column.key)
+        for target in ATTRIBUTION_REASSIGNMENT_TARGETS
+        for column in (target.text_column, target.user_id_column)
+    }
+    excluded = set(USER_COLUMNS_NOT_REASSIGNED)
+    discovered = _user_reference_columns()
+
+    assert not reassigned & excluded
+    assert all(reason.strip() for reason in USER_COLUMNS_NOT_REASSIGNED.values())
+    assert excluded - discovered == set(), "stale USER_COLUMNS_NOT_REASSIGNED entries"
+    unclassified = discovered - reassigned - excluded
+    assert unclassified == set(), (
+        "Classify these user-reference columns: add them to an attribution pair "
+        "reassigned by ownership reassignment or to USER_COLUMNS_NOT_REASSIGNED "
+        f"with a reason: {sorted(unclassified)}"
+    )
+    assert {target.label for target in ATTRIBUTION_REASSIGNMENT_TARGETS} >= {
+        "experiments",
+        "experiment_sessions",
+        "experiment_datasets",
+        "entity_versions",
+        "claim_edges",
+        "provenance_links",
+        "exploration_nodes",
+        "data_stores",
+        "analyses",
+    }
 
 
 def test_ownership_reassignment_route_records_audit_and_requires_admin(
@@ -514,3 +699,50 @@ def test_ownership_reassignment_route_records_audit_and_requires_admin(
     assert [item["reassignment_id"] for item in listed.json()["data"]] == [reassignment_id]
     assert fetched.status_code == 200
     assert fetched.json()["data"]["reassignment_id"] == reassignment_id
+
+
+def test_ownership_reassignment_route_moves_experiments(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    source_headers, source_user_id = _register_user(client, role=Role.ADMIN)
+    _, successor_user_id = _register_user(client, role=Role.VIEWER)
+    project_id = client.post(
+        "/projects",
+        json={"name": "Experiment handoff"},
+        headers=source_headers,
+    ).json()["data"]["project_id"]
+    question_id = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Which experiment survives the handoff?",
+            "question_type": "descriptive",
+            "status": "active",
+        },
+        headers=source_headers,
+    ).json()["data"]["question_id"]
+    experiment = client.post(
+        "/experiments",
+        json={
+            "project_id": project_id,
+            "name": "Handoff experiment",
+            "primary_question_id": question_id,
+        },
+        headers=source_headers,
+    )
+    assert experiment.status_code == 201, experiment.text
+    experiment_id = experiment.json()["data"]["experiment_id"]
+
+    created = client.post(
+        "/ownership-reassignments",
+        json={"from_user_id": source_user_id, "to_user_id": successor_user_id},
+        headers=admin_auth_headers,
+    )
+
+    assert created.status_code == 201, created.text
+    assert created.json()["data"]["record_counts"]["experiments"] == 1
+    moved = client.get(f"/experiments/{experiment_id}", headers=admin_auth_headers)
+    assert moved.status_code == 200, moved.text
+    assert moved.json()["data"]["created_by"] == successor_user_id
+    assert moved.json()["data"]["created_by_user_id"] == successor_user_id
