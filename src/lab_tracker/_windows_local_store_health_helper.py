@@ -102,6 +102,7 @@ _IO_REPARSE_TAG_MOUNT_POINT = 0xA0000003
 _IO_REPARSE_TAG_SYMLINK = 0xA000000C
 _SYMLINK_FLAG_RELATIVE = 0x00000001
 _STATUS_INVALID_PARAMETER = 0xC000000D
+_STATUS_ACCESS_DENIED = 0xC0000022
 _STATUS_REPARSE_POINT_ENCOUNTERED = 0xC000050B
 _STATUS_NO_SUCH_FILE = 0xC000000F
 _STATUS_OBJECT_NAME_NOT_FOUND = 0xC0000034
@@ -256,6 +257,15 @@ class WindowsLocalStoreHealthError(RuntimeError):
 
 class WindowsLocalStoreHealthDenied(RuntimeError):
     """The requested directory could not be proven accessible and authorized."""
+
+
+class WindowsLocalStoreHealthAccessDenied(WindowsLocalStoreHealthDenied):
+    """The host refused access to one object (``STATUS_ACCESS_DENIED``).
+
+    Outside enumeration this is an ordinary denial. Beneath an enumeration
+    boundary it is a static, path-free reason to skip one subtree and report
+    the traversal as limited rather than abort the whole scan.
+    """
 
 
 class WindowsLocalStoreHealthMissing(RuntimeError):
@@ -754,6 +764,8 @@ class CtypesWindowsDirectoryApi:
                 _STATUS_OBJECT_PATH_NOT_FOUND,
             ):
                 raise WindowsLocalStoreHealthMissing(_GENERIC_FAILURE_DETAIL)
+            if _status_code(status) == _STATUS_ACCESS_DENIED:
+                raise WindowsLocalStoreHealthAccessDenied(_GENERIC_FAILURE_DETAIL)
             raise WindowsLocalStoreHealthDenied(_GENERIC_FAILURE_DETAIL)
         return cast(int, handle)
 
@@ -1947,14 +1959,23 @@ class _HandleResolver:
         expected_identity: tuple[int, bytes],
         boundary: _PhysicalDirectory,
         equivalent_roots: tuple[_DosPath, ...],
-    ) -> _ResolvedDirectory:
-        """Classify and resolve one listed directory through exact handles."""
+    ) -> _ResolvedDirectory | None:
+        """Classify and resolve one listed directory through exact handles.
 
-        child, surrogate, tag = self._open_enumerable_child(
-            parent.directory,
-            component,
-            track_components=False,
-        )
+        ``None`` is a static skip: the listed entry is a name surrogate whose
+        target is cleanly absent. A listed entry or alias target the host
+        refuses to open raises ``_EnumerationDirectoryLimit``. The listed
+        entry itself disappearing after the listing remains a fatal race.
+        """
+
+        try:
+            child, surrogate, tag = self._open_enumerable_child(
+                parent.directory,
+                component,
+                track_components=False,
+            )
+        except WindowsLocalStoreHealthAccessDenied:
+            raise _EnumerationDirectoryLimit from None
         if self.directory_identity(child.handle) != expected_identity:
             raise WindowsLocalStoreHealthError(_GENERIC_FAILURE_DETAIL)
         if not surrogate:
@@ -1964,24 +1985,26 @@ class _HandleResolver:
             )
         target = self._read_target_and_close(child, tag)
         if target.absolute is not None:
+            start = boundary
             components = self._absolute_target_suffix(
                 target.absolute,
                 equivalent_roots,
             )
+        else:
+            start = parent
+            components = target.relative_tokens
+        try:
             return self._resolve_enumerable_pending(
-                boundary,
+                start,
                 list(components),
                 boundary=boundary,
                 equivalent_roots=equivalent_roots,
                 track_components=False,
             )
-        return self._resolve_enumerable_pending(
-            parent,
-            list(target.relative_tokens),
-            boundary=boundary,
-            equivalent_roots=equivalent_roots,
-            track_components=False,
-        )
+        except WindowsLocalStoreHealthMissing:
+            return None
+        except WindowsLocalStoreHealthAccessDenied:
+            raise _EnumerationDirectoryLimit from None
 
     def directory_entries(self, handle: int) -> Iterator[_DirectoryEntry]:
         return self._api.enumerate_directory(handle)
@@ -2220,9 +2243,11 @@ class _HandleResolver:
             if not classified_leaf:
                 raise WindowsLocalStoreHealthError(_GENERIC_FAILURE_DETAIL)
         except WindowsLocalStoreHealthMissing:
-            raise WindowsLocalStoreHealthError(
-                _GENERIC_FAILURE_DETAIL
-            ) from None
+            # Every target component is opened fresh by name; a cleanly
+            # absent one is a dangling alias, which is a static skip.
+            return None
+        except WindowsLocalStoreHealthAccessDenied:
+            raise _EnumerationResolutionLimit from None
         finally:
             release_pending()
             self.close_enumeration_handles(
@@ -2303,11 +2328,22 @@ class _HandleResolver:
             steps += 1
             if steps > _MAX_RESOLUTION_COMPONENTS:
                 raise WindowsLocalStoreHealthDenied(_GENERIC_FAILURE_DETAIL)
-            child, surrogate, tag = self._open_enumerable_child(
-                current.directory,
-                token,
-                track_components=track_components,
-            )
+            try:
+                child, surrogate, tag = self._open_enumerable_child(
+                    current.directory,
+                    token,
+                    track_components=track_components,
+                )
+            except (
+                WindowsLocalStoreHealthMissing,
+                WindowsLocalStoreHealthAccessDenied,
+            ):
+                # Callers may skip this resolution; release its handles now
+                # rather than retaining them until the final cleanup.
+                self.close_enumeration_handles(
+                    tuple(node.directory.handle for node in created)
+                )
+                raise
             if not surrogate:
                 current = _PhysicalDirectory(child, current)
                 created.append(current)
@@ -3094,16 +3130,26 @@ class _WindowsFileEnumerator:
                 if queue_size is None:
                     self._directory_limited = True
                     continue
-                child = self._resolver.open_enumerable_entry(
-                    frame.node,
-                    entry.name,
-                    expected_identity=(
-                        frame.volume_serial_number,
-                        entry.file_id,
-                    ),
-                    boundary=root,
-                    equivalent_roots=equivalent_roots,
-                )
+                try:
+                    child = self._resolver.open_enumerable_entry(
+                        frame.node,
+                        entry.name,
+                        expected_identity=(
+                            frame.volume_serial_number,
+                            entry.file_id,
+                        ),
+                        boundary=root,
+                        equivalent_roots=equivalent_roots,
+                    )
+                except _EnumerationDirectoryLimit:
+                    # An unreadable subtree is skipped and reported as a
+                    # limited, never exhaustive, traversal.
+                    self._metadata.release_queue_component(queue_size)
+                    self._directory_limited = True
+                    continue
+                if child is None:
+                    self._metadata.release_queue_component(queue_size)
+                    continue
                 child_identity = self._resolver.directory_identity(
                     child.node.directory.handle
                 )
@@ -3148,6 +3194,9 @@ class _WindowsFileEnumerator:
                 self._directory_limited = True
                 continue
             except _EnumerationResolutionLimit:
+                self._collector.mark_limited()
+                continue
+            except WindowsLocalStoreHealthAccessDenied:
                 self._collector.mark_limited()
                 continue
             if candidate_identity is None:

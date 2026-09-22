@@ -1086,9 +1086,11 @@ class ScriptedEnumerationApi:
         iterator_failures: Mapping[int, BaseException] | None = None,
         iterator_close_failures: Mapping[int, BaseException] | None = None,
         close_failures: Mapping[int, BaseException] | None = None,
+        access_denied: Sequence[tuple[int, str]] = (),
     ) -> None:
         self.roots = dict(roots)
         self.children = dict(children)
+        self.access_denied = frozenset(access_denied)
         self.child_keys_by_handle = {
             handle: key for key, handle in self.children.items()
         }
@@ -1134,8 +1136,13 @@ class ScriptedEnumerationApi:
         except KeyError:
             raise helper.WindowsLocalStoreHealthDenied from None
 
+    def _deny_access(self, parent: int, component: str) -> None:
+        if (parent, component) in self.access_denied:
+            raise helper.WindowsLocalStoreHealthAccessDenied
+
     def open_enumerable_component(self, parent: int, component: str) -> int:
         self.component_calls.append((parent, component))
+        self._deny_access(parent, component)
         try:
             return self.children[(parent, component)]
         except KeyError:
@@ -1143,6 +1150,7 @@ class ScriptedEnumerationApi:
 
     def open_component(self, parent: int, component: str) -> int:
         self.alias_component_calls.append((parent, component))
+        self._deny_access(parent, component)
         try:
             return self.children[(parent, component)]
         except KeyError:
@@ -1150,6 +1158,7 @@ class ScriptedEnumerationApi:
 
     def open_candidate_component(self, parent: int, component: str) -> int:
         self.candidate_component_calls.append((parent, component))
+        self._deny_access(parent, component)
         key = (parent, component)
         record = self.candidate_records.get(key)
         if record is None:
@@ -2102,7 +2111,7 @@ def test_file_symlink_escape_fails_before_target_side_open(
     assert api.close_calls == [101, 10]
 
 
-def test_file_symlink_missing_target_race_discards_retained_candidates() -> None:
+def test_dangling_file_symlink_is_skipped_and_keeps_retained_candidates() -> None:
     api = ScriptedEnumerationApi(
         roots={"C:\\": 10},
         children={},
@@ -2141,9 +2150,14 @@ def test_file_symlink_missing_target_race_discards_retained_candidates() -> None
             api=api,
             output=output,
         )
-        == helper.FAILED_EXIT
+        == helper.COMPLETE_EXIT
     )
-    assert output.getvalue() == b""
+    assert _enumeration_payload(output) == {
+        "v": 1,
+        "status": "complete",
+        "directories": 1,
+        "candidates": [{"root_index": 0, "locator": ["decoy.bin"]}],
+    }
     assert api.candidate_component_calls == [
         (10, "decoy.bin"),
         (10, "link.bin"),
@@ -4873,3 +4887,285 @@ def test_real_helper_protocol_failure_is_output_free(tmp_path: Path) -> None:
     assert completed.returncode == 3
     assert completed.stdout == b""
     assert completed.stderr == b""
+
+
+def _keep_and_link_api(
+    *,
+    link_attributes: int,
+    substitute: str,
+    children: Mapping[tuple[int, str], int] | None = None,
+    listings: Mapping[int, Sequence[helper._DirectoryEntry]] | None = None,
+    final_paths: Mapping[int, str] | None = None,
+    identities: Mapping[int, tuple[int, bytes]] | None = None,
+    access_denied: Sequence[tuple[int, str]] = (),
+) -> ScriptedEnumerationApi:
+    directory_link = bool(link_attributes & _DIRECTORY)
+    link_handle = 20 if directory_link else 102
+    return ScriptedEnumerationApi(
+        roots={"C:\\": 10},
+        children={
+            **({(10, "link"): 20} if directory_link else {}),
+            **dict(children or {}),
+        },
+        candidate_children=(
+            {(10, "keep.bin"): 101}
+            if directory_link
+            else {(10, "keep.bin"): 101, (10, "link"): 102}
+        ),
+        final_paths={10: "C:\\", **dict(final_paths or {})},
+        identities={10: (7, b"r" * 16), **dict(identities or {})},
+        listings={
+            10: [
+                _entry("keep.bin", identity_byte=b"k"),
+                _entry(
+                    "link",
+                    attributes=link_attributes,
+                    tag=_SYMLINK_TAG,
+                    identity_byte=b"l",
+                ),
+            ],
+            **dict(listings or {}),
+        },
+        attributes={link_handle: link_attributes},
+        tags={link_handle: _SYMLINK_TAG},
+        reparses={
+            link_handle: _reparse_buffer(
+                tag=_SYMLINK_TAG,
+                substitute=substitute,
+                relative=True,
+            )
+        },
+        access_denied=access_denied,
+    )
+
+
+@pytest.mark.parametrize(
+    ("link_attributes", "substitute"),
+    (
+        (0x400, r"gone\artifact.bin"),
+        (_REPARSE_DIRECTORY, "gone-dir"),
+        (_REPARSE_DIRECTORY, r"gone-parent\inner"),
+    ),
+)
+def test_dangling_symlinks_are_static_skips_that_keep_sibling_candidates(
+    link_attributes: int,
+    substitute: str,
+) -> None:
+    api = _keep_and_link_api(
+        link_attributes=link_attributes,
+        substitute=substitute,
+    )
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request(("C:\\",)),
+            api=api,
+            output=output,
+        )
+        == helper.COMPLETE_EXIT
+    )
+    assert _enumeration_payload(output) == {
+        "v": 1,
+        "status": "complete",
+        "directories": 1,
+        "candidates": [{"root_index": 0, "locator": ["keep.bin"]}],
+    }
+    assert all(iterator.closed for iterator in api.iterators)
+    assert sorted(api.close_calls) == sorted(set(api.close_calls))
+    assert 10 in api.close_calls
+
+
+def test_listed_directory_vanishing_before_open_still_fails_closed() -> None:
+    api = ScriptedEnumerationApi(
+        roots={"C:\\": 10},
+        children={},
+        final_paths={10: "C:\\"},
+        identities={10: (7, b"r" * 16)},
+        listings={
+            10: [
+                _entry("keep.bin", identity_byte=b"k"),
+                _entry("vanished", attributes=_DIRECTORY, identity_byte=b"v"),
+            ]
+        },
+    )
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request(("C:\\",)),
+            api=api,
+            output=output,
+        )
+        == helper.FAILED_EXIT
+    )
+    assert output.getvalue() == b""
+    assert all(iterator.closed for iterator in api.iterators)
+
+
+def test_unreadable_listed_directory_is_skipped_as_a_limited_enumeration() -> None:
+    api = ScriptedEnumerationApi(
+        roots={"C:\\": 10},
+        children={(10, "readable"): 30},
+        final_paths={10: "C:\\", 30: r"C:\readable"},
+        identities={10: (7, b"r" * 16), 30: (7, b"o" * 16)},
+        listings={
+            10: [
+                _entry("keep.bin", identity_byte=b"k"),
+                _entry("private", attributes=_DIRECTORY, identity_byte=b"p"),
+                _entry("readable", attributes=_DIRECTORY, identity_byte=b"o"),
+            ],
+            30: [_entry("sibling.bin", identity_byte=b"s")],
+        },
+        access_denied=[(10, "private")],
+    )
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request(("C:\\",)),
+            api=api,
+            output=output,
+        )
+        == helper.COMPLETE_EXIT
+    )
+    assert _enumeration_payload(output) == {
+        "v": 1,
+        "status": "limit",
+        "directories": 2,
+        "candidates": [
+            {"root_index": 0, "locator": ["keep.bin"]},
+            {"root_index": 0, "locator": ["readable", "sibling.bin"]},
+        ],
+    }
+    assert (10, "private") in api.component_calls
+    assert api.enumeration_calls == [10, 30]
+    assert all(iterator.closed for iterator in api.iterators)
+
+
+@pytest.mark.parametrize(
+    ("link_attributes", "substitute", "denied"),
+    (
+        (0x400, r"private\artifact.bin", (10, "private")),
+        (_REPARSE_DIRECTORY, "private", (10, "private")),
+        (_REPARSE_DIRECTORY, r"outer\private", (30, "private")),
+    ),
+)
+def test_symlink_into_unreadable_directory_is_skipped_as_limited(
+    link_attributes: int,
+    substitute: str,
+    denied: tuple[int, str],
+) -> None:
+    api = _keep_and_link_api(
+        link_attributes=link_attributes,
+        substitute=substitute,
+        children={(10, "outer"): 30},
+        final_paths={30: r"C:\outer"},
+        identities={30: (7, b"o" * 16)},
+        access_denied=[denied],
+    )
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request(("C:\\",)),
+            api=api,
+            output=output,
+        )
+        == helper.COMPLETE_EXIT
+    )
+    assert _enumeration_payload(output) == {
+        "v": 1,
+        "status": "limit",
+        "directories": 1,
+        "candidates": [{"root_index": 0, "locator": ["keep.bin"]}],
+    }
+    assert all(iterator.closed for iterator in api.iterators)
+    assert sorted(api.close_calls) == sorted(set(api.close_calls))
+
+
+@pytest.mark.parametrize("registered", (False, True))
+def test_unreadable_enumeration_boundary_remains_denied(registered: bool) -> None:
+    api = ScriptedEnumerationApi(
+        roots={"C:\\": 10},
+        children={(10, "grant"): 20, (20, "store"): 30},
+        final_paths={10: "C:\\", 20: r"C:\grant", 30: r"C:\grant\store"},
+        identities={30: (1, b"s" * 16)},
+        listings={30: [_entry("artifact.bin")]},
+        access_denied=[(20, "store")] if registered else [(10, "grant")],
+    )
+    output = io.BytesIO()
+    request = (
+        _registered_enumerate_request(r"C:\grant\store", r"C:\grant")
+        if registered
+        else _enumerate_request((r"C:\grant",))
+    )
+
+    assert helper.execute_request(request, api=api, output=output) == (
+        helper.DENIED_EXIT
+    )
+    assert output.getvalue() == b""
+
+
+def test_escaping_directory_symlink_denial_is_not_downgraded_to_a_skip() -> None:
+    api = _keep_and_link_api(
+        link_attributes=_REPARSE_DIRECTORY,
+        substitute=r"..\outside",
+    )
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request(("C:\\",)),
+            api=api,
+            output=output,
+        )
+        == helper.DENIED_EXIT
+    )
+    assert output.getvalue() == b""
+
+
+def test_ntcreatefile_access_denied_is_a_distinct_denial() -> None:
+    access_denied = FakeNtCreateFile(((0xC0000022, None),))
+    api = _raw_api(nt_create_file=access_denied)
+    with pytest.raises(helper.WindowsLocalStoreHealthAccessDenied):
+        api.open_enumerable_component(_ROOT_HANDLE, "private")
+
+    other = FakeNtCreateFile(((0xC0000043, None),))
+    api = _raw_api(nt_create_file=other)
+    with pytest.raises(helper.WindowsLocalStoreHealthDenied) as denied:
+        api.open_enumerable_component(_ROOT_HANDLE, "busy")
+    assert type(denied.value) is helper.WindowsLocalStoreHealthDenied
+
+
+def test_unopenable_listed_file_is_skipped_as_a_limited_enumeration() -> None:
+    api = ScriptedEnumerationApi(
+        roots={"C:\\": 10},
+        children={},
+        final_paths={10: "C:\\"},
+        identities={10: (7, b"r" * 16)},
+        listings={
+            10: [
+                _entry("keep.bin", identity_byte=b"k"),
+                _entry("locked.bin", identity_byte=b"x"),
+            ]
+        },
+        access_denied=[(10, "locked.bin")],
+    )
+    output = io.BytesIO()
+
+    assert (
+        helper.execute_request(
+            _enumerate_request(("C:\\",)),
+            api=api,
+            output=output,
+        )
+        == helper.COMPLETE_EXIT
+    )
+    assert _enumeration_payload(output) == {
+        "v": 1,
+        "status": "limit",
+        "directories": 1,
+        "candidates": [{"root_index": 0, "locator": ["keep.bin"]}],
+    }
+    assert (10, "locked.bin") in api.candidate_component_calls

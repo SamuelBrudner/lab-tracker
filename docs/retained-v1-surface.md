@@ -209,7 +209,13 @@ research record:
   read-only). Recovery enumeration is a single pre-follow-safe helper traversal
   under the same absolute deadline. It returns only bounded path-free relative
   locators after cleanup and fails terminally on malformed, partial, ambiguous,
-  timed-out, or cleanup-uncertain results.
+  timed-out, or cleanup-uncertain results. Static conditions beneath the
+  retained root/store boundary do not abort the scan: a dangling alias is
+  skipped like an escaping one, and a subdirectory or alias target the host
+  refuses to open (`EACCES`/`EPERM`, Windows access denied) is skipped and
+  marks the traversal limited, so a miss is never reported as exhaustive. An
+  unreadable boundary, an escape the Windows helper cannot prove safe, or an
+  object replaced or removed after it was listed still fails closed.
 
   The root authority grants the subtree visible in the operator-controlled
   service namespace rather than one device identity, and the application

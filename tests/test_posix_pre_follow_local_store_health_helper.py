@@ -2390,3 +2390,289 @@ def test_native_mount_descendant_is_enumerated_inside_containing_grant(
             "locator": [mount_root.name, candidate.name],
         }
     ]
+
+
+def _run_enumeration_in_process(
+    root: Path,
+    *,
+    store: Path | None = None,
+) -> tuple[int, dict[str, object] | None, list[bytes]]:
+    output: list[bytes] = []
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(helper, "_write_stdout", output.append)
+        result = helper.main(
+            ("helper",),
+            _enumeration_environment(
+                [str(root)],
+                store_root=None if store is None else str(store),
+                target_name=None,
+                max_files=10,
+                max_directories=10,
+            ),
+        )
+    response = json.loads(b"".join(output)) if output else None
+    return result, response, output
+
+
+def _deny_relative_open(
+    monkeypatch: pytest.MonkeyPatch,
+    denied: str,
+    error_number: int,
+) -> list[str]:
+    real_open = helper.os.open
+    attempts: list[str] = []
+
+    def denying_open(
+        path: str,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if os.fspath(path) == denied and dir_fd is not None:
+            attempts.append(os.fspath(path))
+            raise OSError(error_number, os.strerror(error_number))
+        if dir_fd is None:
+            return real_open(path, flags, mode)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(helper.os, "open", denying_open)
+    return attempts
+
+
+@pytest.mark.parametrize("registered", (False, True))
+def test_dangling_aliases_are_static_skips_that_keep_sibling_candidates(
+    tmp_path: Path,
+    registered: bool,
+) -> None:
+    root = tmp_path / "grant"
+    store = root / "store"
+    store.mkdir(parents=True)
+    scope = store if registered else root
+    (scope / "artifact.bin").write_bytes(b"artifact")
+    (scope / "broken").symlink_to("does-not-exist")
+    (scope / "broken-parent").symlink_to("gone/inner.bin")
+    (scope / "broken-directory").symlink_to(
+        "gone-directory",
+        target_is_directory=True,
+    )
+    (scope / "broken-absolute").symlink_to(scope / "missing.bin")
+    nested = scope / "nested"
+    nested.mkdir()
+    (nested / "latest").symlink_to("run-0042", target_is_directory=True)
+
+    completed, response = _completed_enumeration(
+        [root],
+        store_root=store if registered else None,
+        max_files=10,
+        max_directories=10,
+    )
+
+    assert completed.returncode == helper.COMPLETE_EXIT
+    assert completed.stderr == b""
+    assert response is not None
+    locators = [
+        candidate["locator"]
+        for candidate in response["candidates"]  # type: ignore[union-attr]
+    ]
+    assert ["artifact.bin"] in locators
+    assert all(
+        locator[-1] not in {"broken", "broken-parent", "broken-directory"}
+        for locator in locators
+    )
+    if registered:
+        assert response == {
+            "v": 1,
+            "status": "complete",
+            "directories": 2,
+            "candidates": [{"root_index": 0, "locator": ["artifact.bin"]}],
+        }
+    else:
+        assert response["status"] == "complete"
+
+
+def test_listed_entry_vanishing_before_lstat_still_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "grant"
+    root.mkdir()
+    (root / "artifact.bin").write_bytes(b"artifact")
+    (root / "vanishing.bin").write_bytes(b"vanishing")
+    real_stat = helper.os.stat
+
+    def vanishing_stat(
+        path: str,
+        *,
+        dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> os.stat_result:
+        if os.fspath(path) == "vanishing.bin" and dir_fd is not None:
+            raise FileNotFoundError(2, "private enumeration diagnostic")
+        return real_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(helper.os, "stat", vanishing_stat)
+
+    result, response, output = _run_enumeration_in_process(root)
+
+    assert result == helper.MISSING_EXIT
+    assert response is None
+    assert output == []
+
+
+def test_alias_target_vanishing_after_lstat_still_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "grant"
+    root.mkdir()
+    (root / "artifact.bin").write_bytes(b"artifact")
+    target = root / "target"
+    target.mkdir()
+    (root / "alias").symlink_to("target", target_is_directory=True)
+    attempts = _deny_relative_open(monkeypatch, "target", 2)
+
+    result, response, output = _run_enumeration_in_process(root)
+
+    assert attempts
+    assert result in {helper.MISSING_EXIT, helper.FAILED_EXIT}
+    assert response is None
+    assert output == []
+
+
+@pytest.mark.parametrize("registered", (False, True))
+@pytest.mark.parametrize("error_number", (13, 1))
+def test_unreadable_subdirectory_is_skipped_as_a_limited_enumeration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    registered: bool,
+    error_number: int,
+) -> None:
+    root = tmp_path / "grant"
+    store = root / "store"
+    store.mkdir(parents=True)
+    scope = store if registered else root
+    (scope / "artifact.bin").write_bytes(b"artifact")
+    private = scope / "private"
+    private.mkdir()
+    (private / "hidden.bin").write_bytes(b"hidden")
+    (scope / "private-alias").symlink_to("private", target_is_directory=True)
+    readable = scope / "readable"
+    readable.mkdir()
+    (readable / "sibling.bin").write_bytes(b"sibling")
+    attempts = _deny_relative_open(monkeypatch, "private", error_number)
+
+    result, response, output = _run_enumeration_in_process(
+        root,
+        store=store if registered else None,
+    )
+
+    assert result == helper.COMPLETE_EXIT
+    assert len(attempts) == 2
+    assert response is not None
+    assert response["status"] == "limit"
+    locators = [
+        candidate["locator"]
+        for candidate in response["candidates"]  # type: ignore[union-attr]
+    ]
+    assert ["artifact.bin"] in locators
+    assert ["readable", "sibling.bin"] in locators
+    assert all("hidden.bin" not in locator for locator in locators)
+    if registered:
+        assert response["directories"] == 2
+    assert len(output) == 1
+
+
+def test_unsearchable_listed_directory_is_skipped_as_a_limited_enumeration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "grant"
+    root.mkdir()
+    (root / "artifact.bin").write_bytes(b"artifact")
+    listable = root / "listable"
+    listable.mkdir()
+    (listable / "hidden.bin").write_bytes(b"hidden")
+    real_stat = helper.os.stat
+
+    def unsearchable_stat(
+        path: str,
+        *,
+        dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> os.stat_result:
+        if os.fspath(path) == "hidden.bin" and dir_fd is not None:
+            raise PermissionError(13, "private enumeration diagnostic")
+        return real_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(helper.os, "stat", unsearchable_stat)
+
+    result, response, _output = _run_enumeration_in_process(root)
+
+    assert result == helper.COMPLETE_EXIT
+    assert response == {
+        "v": 1,
+        "status": "limit",
+        "directories": 2,
+        "candidates": [{"root_index": 0, "locator": ["artifact.bin"]}],
+    }
+
+
+@pytest.mark.parametrize("registered", (False, True))
+def test_unreadable_enumeration_boundary_remains_denied(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    registered: bool,
+) -> None:
+    root = tmp_path / "grant"
+    store = root / "store"
+    store.mkdir(parents=True)
+    (store / "artifact.bin").write_bytes(b"artifact")
+    real_open = helper.os.open
+    denied = os.fspath(root)
+
+    def denying_open(
+        path: str,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if dir_fd is None and os.fspath(path) == denied and not registered:
+            raise PermissionError(13, "private enumeration diagnostic")
+        if dir_fd is not None and os.fspath(path) == "store" and registered:
+            raise PermissionError(13, "private enumeration diagnostic")
+        if dir_fd is None:
+            return real_open(path, flags, mode)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(helper.os, "open", denying_open)
+
+    result, response, output = _run_enumeration_in_process(
+        root,
+        store=store if registered else None,
+    )
+
+    assert result == helper.DENIED_EXIT
+    assert response is None
+    assert output == []
+
+
+@pytest.mark.parametrize("error_number", (40, 20))
+def test_queued_directory_replacement_race_remains_fatal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error_number: int,
+) -> None:
+    root = tmp_path / "grant"
+    root.mkdir()
+    (root / "artifact.bin").write_bytes(b"artifact")
+    (root / "replaced").mkdir()
+    attempts = _deny_relative_open(monkeypatch, "replaced", error_number)
+
+    result, response, output = _run_enumeration_in_process(root)
+
+    assert attempts == ["replaced"]
+    assert result == helper.DENIED_EXIT
+    assert response is None
+    assert output == []
