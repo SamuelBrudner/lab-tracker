@@ -654,6 +654,9 @@ class LabTrackerRepository(Protocol):
     ) -> GroupMembership | None:
         """Return one group membership by group and user."""
 
+    def lock_group_owner_memberships(self, group_id: UUID) -> None:
+        """Lock owner membership rows for a group during invariant checks."""
+
     def query_supervision_edges(
         self,
         *,

@@ -19,6 +19,7 @@ from lab_tracker.models import (
     utc_now,
 )
 from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
+from lab_tracker.repository import LabTrackerRepository
 from lab_tracker.services.base import BaseService, IdempotentCreateResult, ServiceContext
 from lab_tracker.services.goal_link_cleanup import remove_goal_links_to_project_contents
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
@@ -468,23 +469,29 @@ class ProjectService(BaseService):
     ) -> GroupMembership:
         self.authorization.require_group_owner(group_id, actor=actor)
         self.get_project_group(group_id)
-        existing = self.get_group_membership_for_user(group_id, user_id)
-        if existing is None:
-            membership = GroupMembership(
-                membership_id=uuid4(),
-                group_id=group_id,
-                user_id=user_id,
-                role=role,
-                created_by=actor_user_id(actor),
-                created_by_user_id=actor_user_fk(actor, self.repository),
-            )
-        else:
-            membership = existing
-            if membership.role == role:
-                return membership
-            membership.role = role
-            membership.updated_at = utc_now()
         with self.unit_of_work() as repository:
+            existing = repository.get_group_membership(group_id=group_id, user_id=user_id)
+            if existing is None:
+                membership = GroupMembership(
+                    membership_id=uuid4(),
+                    group_id=group_id,
+                    user_id=user_id,
+                    role=role,
+                    created_by=actor_user_id(actor),
+                    created_by_user_id=actor_user_fk(actor, self.repository),
+                )
+            else:
+                if existing.role == role:
+                    return existing
+                if existing.role == ProjectMembershipRole.OWNER:
+                    existing = self._require_group_keeps_owner(
+                        repository,
+                        group_id=group_id,
+                        user_id=user_id,
+                    )
+                membership = existing
+                membership.role = role
+                membership.updated_at = utc_now()
             repository.group_memberships.save(membership)
             saved = repository.group_memberships.get(membership.membership_id)
         return saved or membership
@@ -497,20 +504,52 @@ class ProjectService(BaseService):
         actor: AuthContext | None = None,
     ) -> GroupMembership:
         self.authorization.require_group_owner(group_id, actor=actor)
-        membership = self.get_group_membership_for_user(group_id, user_id)
+        with self.unit_of_work() as repository:
+            membership = repository.get_group_membership(group_id=group_id, user_id=user_id)
+            if membership is None:
+                raise NotFoundError("Group membership does not exist.")
+            if membership.role == ProjectMembershipRole.OWNER:
+                membership = self._require_group_keeps_owner(
+                    repository,
+                    group_id=group_id,
+                    user_id=user_id,
+                )
+            project_ids = self._project_ids_for_group(group_id)
+            self._ensure_offboarding_records_released(user_id, project_ids)
+            repository.group_memberships.delete(membership.membership_id)
+        return membership
+
+    @staticmethod
+    def _require_group_keeps_owner(
+        repository: LabTrackerRepository,
+        *,
+        group_id: UUID,
+        user_id: UUID,
+    ) -> GroupMembership:
+        """Lock the group's owner rows and reject losing its last owner.
+
+        Callers invoke this before demoting or removing a group owner. The owner
+        rows are locked first so two concurrent demotions/removals cannot both
+        observe a second owner, and the membership is re-read under the lock.
+        Returns the refreshed membership for the caller to change.
+        """
+
+        repository.lock_group_owner_memberships(group_id)
+        membership = repository.get_group_membership(group_id=group_id, user_id=user_id)
         if membership is None:
             raise NotFoundError("Group membership does not exist.")
-        owner_count = sum(
-            1
-            for item in self.list_group_memberships(group_id=group_id, actor=actor)
-            if item.role == ProjectMembershipRole.OWNER
+        if membership.role != ProjectMembershipRole.OWNER:
+            return membership
+        memberships, _ = repository.query_group_memberships(
+            group_id=group_id,
+            limit=None,
+            offset=0,
         )
-        if membership.role == ProjectMembershipRole.OWNER and owner_count <= 1:
+        owner_count = sum(
+            1 for item in memberships if item.role == ProjectMembershipRole.OWNER
+        )
+        if owner_count <= 1:
             raise ValidationError("Groups must keep at least one owner.")
-        project_ids = self._project_ids_for_group(group_id)
-        self._ensure_offboarding_records_released(user_id, project_ids)
-        with self.unit_of_work() as repository:
-            repository.group_memberships.delete(membership.membership_id)
         return membership
 
     def upsert_group_project_memberships(

@@ -594,6 +594,9 @@ class SQLAlchemyLabTrackerRepository:
             user_id=user_id,
         )
 
+    def lock_group_owner_memberships(self, group_id: UUID) -> None:
+        self.group_memberships.lock_group_owners(group_id)
+
     def query_supervision_edges(
         self,
         *,

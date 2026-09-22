@@ -9,8 +9,13 @@ from fastapi.testclient import TestClient
 from sqlalchemy import delete, select
 
 from lab_tracker.auth import utc_now
-from lab_tracker.db_models import ProjectMembershipModel, UsageEventModel
+from lab_tracker.db_models import (
+    GroupMembershipModel,
+    ProjectMembershipModel,
+    UsageEventModel,
+)
 from lab_tracker.sqlalchemy_repository_parts.core import (
+    SQLAlchemyGroupMembershipRepository,
     SQLAlchemyProjectMembershipRepository,
 )
 
@@ -389,6 +394,170 @@ def test_group_routes_reject_last_owner_removal_and_allow_group_delete(
     assert delete_group.status_code == 200
     assert delete_group.json()["data"]["group_id"] == group["group_id"]
     assert get_deleted.status_code == 404
+
+
+def _group_owner_ids(
+    client: TestClient,
+    group_id: str,
+    headers: dict[str, str],
+) -> set[str]:
+    members = client.get(f"/groups/{group_id}/members", headers=headers)
+    assert members.status_code == 200, members.text
+    return {item["user_id"] for item in members.json()["data"] if item["role"] == "owner"}
+
+
+@pytest.mark.parametrize("method", ["patch", "post"])
+def test_group_routes_reject_last_owner_demotion(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    method: str,
+) -> None:
+    owner_name = f"group-demote-last-owner-{uuid4().hex[:8]}"
+    owner_token, owner_user_id = _register_user(
+        client,
+        owner_name,
+        role="editor",
+        headers=admin_auth_headers,
+    )
+    owner_headers = _auth_headers(owner_token)
+    group_id = client.post(
+        "/groups",
+        json={"name": "Last owner demotion group"},
+        headers=owner_headers,
+    ).json()["data"]["group_id"]
+
+    if method == "patch":
+        demote = client.patch(
+            f"/groups/{group_id}/members/{owner_user_id}",
+            json={"role": "viewer"},
+            headers=owner_headers,
+        )
+    else:
+        demote = client.post(
+            f"/groups/{group_id}/members",
+            json={"username": owner_name, "role": "contributor"},
+            headers=owner_headers,
+        )
+
+    assert demote.status_code == 422, demote.text
+    assert demote.json()["error"]["message"] == "Groups must keep at least one owner."
+    assert _group_owner_ids(client, group_id, owner_headers) == {owner_user_id}
+    still_manages = client.patch(
+        f"/groups/{group_id}",
+        json={"description": "Still owned"},
+        headers=owner_headers,
+    )
+    assert still_manages.status_code == 200, still_manages.text
+
+
+def test_group_owner_demotion_allowed_while_another_owner_remains(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    owner_token, owner_user_id = _register_user(
+        client,
+        f"group-demote-owner-{uuid4().hex[:8]}",
+        role="editor",
+        headers=admin_auth_headers,
+    )
+    owner_headers = _auth_headers(owner_token)
+    group_id = client.post(
+        "/groups",
+        json={"name": "Two owner group"},
+        headers=owner_headers,
+    ).json()["data"]["group_id"]
+    co_owner_name = f"group-co-owner-{uuid4().hex[:8]}"
+    _, co_owner_user_id = _register_user(client, co_owner_name)
+    promote = client.post(
+        f"/groups/{group_id}/members",
+        json={"username": co_owner_name, "role": "owner"},
+        headers=owner_headers,
+    )
+    assert promote.status_code == 201, promote.text
+
+    demote = client.patch(
+        f"/groups/{group_id}/members/{owner_user_id}",
+        json={"role": "viewer"},
+        headers=owner_headers,
+    )
+
+    assert demote.status_code == 200, demote.text
+    assert demote.json()["data"]["role"] == "viewer"
+    assert _group_owner_ids(client, group_id, admin_auth_headers) == {co_owner_user_id}
+
+
+@pytest.mark.parametrize("operation", ["demote", "remove"])
+def test_group_owner_guard_rechecks_owner_count_after_lock(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    monkeypatch,
+    operation: str,
+) -> None:
+    owner_token, owner_user_id = _register_user(
+        client,
+        f"group-race-owner-{uuid4().hex[:8]}",
+        role="editor",
+        headers=admin_auth_headers,
+    )
+    owner_headers = _auth_headers(owner_token)
+    group_id = client.post(
+        "/groups",
+        json={"name": "Owner race group"},
+        headers=owner_headers,
+    ).json()["data"]["group_id"]
+    target_name = f"group-race-target-{uuid4().hex[:8]}"
+    _, target_user_id = _register_user(client, target_name)
+    promote = client.post(
+        f"/groups/{group_id}/members",
+        json={"username": target_name, "role": "owner"},
+        headers=owner_headers,
+    )
+    assert promote.status_code == 201, promote.text
+
+    original_lock = SQLAlchemyGroupMembershipRepository.lock_group_owners
+
+    def remove_other_owner_after_lock(
+        self: SQLAlchemyGroupMembershipRepository,
+        locked_group_id,
+    ) -> None:
+        # Simulate a concurrent transaction that removed the other owner just
+        # before this one acquired the owner-row lock.
+        original_lock(self, locked_group_id)
+        if str(locked_group_id) != group_id:
+            return
+        self._session.execute(
+            delete(GroupMembershipModel).where(
+                GroupMembershipModel.group_id == group_id,
+                GroupMembershipModel.user_id == owner_user_id,
+            )
+        )
+        self._session.flush()
+
+    monkeypatch.setattr(
+        SQLAlchemyGroupMembershipRepository,
+        "lock_group_owners",
+        remove_other_owner_after_lock,
+    )
+
+    if operation == "demote":
+        response = client.patch(
+            f"/groups/{group_id}/members/{target_user_id}",
+            json={"role": "viewer"},
+            headers=admin_auth_headers,
+        )
+    else:
+        response = client.delete(
+            f"/groups/{group_id}/members/{target_user_id}",
+            headers=admin_auth_headers,
+        )
+
+    assert response.status_code == 422, response.text
+    assert response.json()["error"]["message"] == "Groups must keep at least one owner."
+    monkeypatch.undo()
+    assert _group_owner_ids(client, group_id, admin_auth_headers) == {
+        owner_user_id,
+        target_user_id,
+    }
 
 
 def test_group_owner_bulk_onboards_and_offboards_project_memberships(
