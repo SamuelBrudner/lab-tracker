@@ -609,3 +609,168 @@ def test_group_bulk_upsert_rejects_sole_project_owner_demotion(
         item for item in members.json()["data"] if item["user_id"] == viewer_user_id
     ]
     assert [item["role"] for item in matching_members] == ["owner"]
+
+
+@dataclass(frozen=True, slots=True)
+class GroupedProjectScope:
+    group_id: str
+    project_id: str
+    pi_headers: dict[str, str]
+    student_headers: dict[str, str]
+    student_group_id: str
+
+
+@pytest.fixture
+def grouped_project_scope(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> GroupedProjectScope:
+    """A lab group owned by a PI with a child project directly owned by a student.
+
+    The student is also the owner of an unrelated group of their own, so moves
+    between groups exercise the current-group check separately from the
+    target-group check.
+    """
+
+    pi_token, _ = _register_user(
+        client,
+        f"group-oversight-pi-{uuid4().hex[:8]}",
+        role="editor",
+        headers=admin_auth_headers,
+    )
+    pi_headers = _auth_headers(pi_token)
+    group_response = client.post(
+        "/groups",
+        json={"name": "PI oversight lab"},
+        headers=pi_headers,
+    )
+    assert group_response.status_code == 201, group_response.text
+    group_id = group_response.json()["data"]["group_id"]
+    project_id = _create_project(
+        client,
+        admin_auth_headers,
+        "Thesis project",
+        group_id=group_id,
+    )
+    student_name = f"group-oversight-student-{uuid4().hex[:8]}"
+    student_token, _ = _register_user(
+        client,
+        student_name,
+        role="editor",
+        headers=admin_auth_headers,
+    )
+    student_headers = _auth_headers(student_token)
+    add_owner = client.post(
+        f"/projects/{project_id}/members",
+        json={"username": student_name, "role": "owner"},
+        headers=admin_auth_headers,
+    )
+    assert add_owner.status_code == 201, add_owner.text
+    student_group = client.post(
+        "/groups",
+        json={"name": "Student side group"},
+        headers=student_headers,
+    )
+    assert student_group.status_code == 201, student_group.text
+    assert client.get(f"/projects/{project_id}", headers=pi_headers).status_code == 200
+    return GroupedProjectScope(
+        group_id=group_id,
+        project_id=project_id,
+        pi_headers=pi_headers,
+        student_headers=student_headers,
+        student_group_id=student_group.json()["data"]["group_id"],
+    )
+
+
+@pytest.mark.parametrize("new_group", ["detach", "student_group"])
+def test_direct_project_owner_cannot_move_project_out_of_group_without_group_owner(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    grouped_project_scope: GroupedProjectScope,
+    new_group: str,
+) -> None:
+    scope = grouped_project_scope
+    target = None if new_group == "detach" else scope.student_group_id
+
+    response = client.patch(
+        f"/projects/{scope.project_id}",
+        json={"group_id": target},
+        headers=scope.student_headers,
+    )
+
+    assert response.status_code == 401, response.text
+    assert response.json()["error"]["message"] == "Group owner access required."
+    stored = client.get(f"/projects/{scope.project_id}", headers=admin_auth_headers)
+    assert stored.json()["data"]["group_id"] == scope.group_id
+    assert client.get(f"/projects/{scope.project_id}", headers=scope.pi_headers).status_code == 200
+
+
+def test_direct_project_owner_keeps_non_group_edits_on_grouped_project(
+    client: TestClient,
+    grouped_project_scope: GroupedProjectScope,
+) -> None:
+    scope = grouped_project_scope
+
+    renamed = client.patch(
+        f"/projects/{scope.project_id}",
+        json={"name": "Renamed thesis project"},
+        headers=scope.student_headers,
+    )
+    # Echoing the unchanged group_id is not a group move and needs no group rights.
+    described = client.patch(
+        f"/projects/{scope.project_id}",
+        json={"description": "Still in the lab", "group_id": scope.group_id},
+        headers=scope.student_headers,
+    )
+
+    assert renamed.status_code == 200, renamed.text
+    assert renamed.json()["data"]["name"] == "Renamed thesis project"
+    assert described.status_code == 200, described.text
+    assert described.json()["data"]["description"] == "Still in the lab"
+    assert described.json()["data"]["group_id"] == scope.group_id
+
+
+def test_group_owner_and_admin_can_detach_grouped_project(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    grouped_project_scope: GroupedProjectScope,
+) -> None:
+    scope = grouped_project_scope
+
+    detached = client.patch(
+        f"/projects/{scope.project_id}",
+        json={"group_id": None},
+        headers=scope.pi_headers,
+    )
+    assert detached.status_code == 200, detached.text
+    assert detached.json()["data"]["group_id"] is None
+
+    reattached = client.patch(
+        f"/projects/{scope.project_id}",
+        json={"group_id": scope.group_id},
+        headers=admin_auth_headers,
+    )
+    assert reattached.status_code == 200, reattached.text
+    detached_by_admin = client.patch(
+        f"/projects/{scope.project_id}",
+        json={"group_id": None},
+        headers=admin_auth_headers,
+    )
+    assert detached_by_admin.status_code == 200, detached_by_admin.text
+    assert detached_by_admin.json()["data"]["group_id"] is None
+
+
+def test_direct_project_owner_cannot_delete_grouped_project_without_group_owner(
+    client: TestClient,
+    grouped_project_scope: GroupedProjectScope,
+) -> None:
+    scope = grouped_project_scope
+
+    denied = client.delete(f"/projects/{scope.project_id}", headers=scope.student_headers)
+
+    assert denied.status_code == 401, denied.text
+    assert denied.json()["error"]["message"] == "Group owner access required."
+    assert client.get(f"/projects/{scope.project_id}", headers=scope.pi_headers).status_code == 200
+
+    deleted = client.delete(f"/projects/{scope.project_id}", headers=scope.pi_headers)
+    assert deleted.status_code == 200, deleted.text

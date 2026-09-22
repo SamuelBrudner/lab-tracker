@@ -235,7 +235,12 @@ class ProjectService(BaseService):
         self.authorization.require_owner(project_id, actor=actor)
         project = self.get_project(project_id)
         before = project.model_copy(deep=True)
-        if is_provided(group_id):
+        if is_provided(group_id) and group_id != project.group_id:
+            # Group owners inherit owner access for PI oversight, so moving a
+            # project out of its group needs the current group's consent just as
+            # moving it into a group needs the target group's.
+            if project.group_id is not None:
+                self.authorization.require_group_owner(project.group_id, actor=actor)
             if group_id is not None:
                 self.authorization.require_group_owner(group_id, actor=actor)
                 self.get_project_group(group_id)
@@ -263,6 +268,9 @@ class ProjectService(BaseService):
     def delete_project(self, project_id: UUID, *, actor: AuthContext | None = None) -> Project:
         self.authorization.require_owner(project_id, actor=actor)
         project = self.get_project(project_id)
+        if project.group_id is not None:
+            # Deleting a grouped project removes it from group oversight too.
+            self.authorization.require_group_owner(project.group_id, actor=actor)
         with self.unit_of_work() as repository:
             remove_goal_links_to_project_contents(repository, project_id=project_id)
             repository.projects.delete(project_id)
