@@ -10,12 +10,12 @@
  * one place.
  */
 
-const CACHE_VERSION = "v-d15d0da9e826";
+const CACHE_VERSION = "v-2e9140213123";
 const CACHE_NAME = `lab-tracker-shell-${CACHE_VERSION}`;
 const SHELL_ASSETS = [
   "/app/",
-  "/app/static/app.js?v=d15d0da9e826",
-  "/app/static/styles.css?v=d15d0da9e826",
+  "/app/static/app.js?v=2e9140213123",
+  "/app/static/styles.css?v=2e9140213123",
   "/app/static/manifest.json",
   "/app/static/icon-180.png",
   "/app/static/icon-192.png",
@@ -25,6 +25,14 @@ const SHELL_ASSETS = [
 const SHARE_TARGET_PATH = "/app/share-target";
 const SHARE_INBOX_DB = "lab-tracker-share-inbox";
 const SHARE_INBOX_STORE = "pending";
+// The worker cannot reliably tell a share-sheet launch from a form another
+// site submits with its referrer suppressed, so the parked inbox is bounded:
+// a hostile page must not be able to fill the origin's storage quota by
+// re-submitting. Keep these in step with shared/share-target-inbox.js.
+const SHARE_INBOX_MAX_PENDING = 20;
+const SHARE_INBOX_MAX_BYTES = 50 * 1024 * 1024;
+const SHARE_INBOX_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const SHARE_INBOX_UPDATED_MESSAGE = "SHARE_INBOX_UPDATED";
 const UPDATE_PROMPT_HANDSHAKE_MS = 1500;
 
 let updatePromptSupported = false;
@@ -80,10 +88,11 @@ self.addEventListener("fetch", (event) => {
 
   // OS share-sheet submissions land here. We intentionally don't forward the
   // POST to the API: the OS process has no auth context. Instead the file is
-  // parked in a small IndexedDB inbox and the capture page lists it for the
-  // user to review; nothing is imported until they confirm (see
-  // shared/share-target-inbox.js). Any web page can also submit a form here,
-  // so POSTs that visibly come from another site are rejected outright.
+  // parked in a small, bounded IndexedDB inbox and the capture page lists it
+  // for the user to review; nothing is imported until they confirm (see
+  // shared/share-target-inbox.js). Any web page can also submit a form here;
+  // the explicit review step is what keeps such a submission out of the
+  // user's projects.
   if (request.method === "POST" && url.pathname === SHARE_TARGET_PATH) {
     event.respondWith(handleShareTarget(request));
     return;
@@ -126,21 +135,15 @@ self.addEventListener("fetch", (event) => {
   }
 });
 
-// A genuine share-sheet launch is browser-initiated: no referrer, and
-// Sec-Fetch-Site "none" where the browser exposes it. A form auto-submitted
-// by another web page reveals itself through any of these signals when they
-// are visible to the worker. The signals can be suppressed (e.g. a
-// no-referrer policy), so this is defence in depth: the capture page still
-// requires an explicit Import before any parked share is uploaded.
+// For a navigation FetchEvent the only initiator signal a service worker can
+// see is request.referrer: browsers add the Origin and Sec-Fetch-* headers
+// after service-worker dispatch, so they never reach this handler. A
+// share-sheet launch has no referrer; a form submitted by another web page
+// carries that page's URL unless it suppresses it (e.g. a no-referrer
+// policy). Rejecting a foreign referrer is therefore only defence in depth;
+// the control is the capture page's explicit review-and-import step, and
+// the inbox bounds below cap what an unreviewed submission can park.
 function crossSiteShareSignal(request) {
-  const fetchSite = String(request.headers.get("sec-fetch-site") || "").toLowerCase();
-  if (fetchSite && fetchSite !== "none" && fetchSite !== "same-origin") {
-    return `sec-fetch-site=${fetchSite}`;
-  }
-  const origin = request.headers.get("origin");
-  if (origin && origin !== "null" && origin !== self.location.origin) {
-    return `origin=${origin}`;
-  }
   const referrer = String(request.referrer || "");
   if (referrer && !referrer.startsWith("about:")) {
     let referrerOrigin = "";
@@ -156,6 +159,62 @@ function crossSiteShareSignal(request) {
   return "";
 }
 
+const shareTextEncoder = new TextEncoder();
+
+function shareRecordBytes(record) {
+  let bytes = 0;
+  if (record.file) {
+    bytes = record.file.size;
+    if (!Number.isFinite(bytes)) {
+      // Unmeasurable records would make the byte cap fail open.
+      throw new TypeError("Parked share file has no measurable size.");
+    }
+  }
+  for (const value of [record.filename, record.contentType, record.title, record.text, record.url]) {
+    if (value) {
+      bytes += shareTextEncoder.encode(value).length;
+    }
+  }
+  return bytes;
+}
+
+function shareExpired(record, now) {
+  const receivedAt = Number(record.receivedAt);
+  return !Number.isFinite(receivedAt) || now - receivedAt >= SHARE_INBOX_MAX_AGE_MS;
+}
+
+function shareRecordsFromForm(formData, receivedAt) {
+  const files = formData.getAll("file");
+  const title = String(formData.get("title") || "").trim();
+  const text = String(formData.get("text") || "").trim();
+  const url = String(formData.get("url") || "").trim();
+  const records = [];
+  for (const file of files) {
+    if (file && (file instanceof File || file instanceof Blob)) {
+      records.push({
+        file,
+        filename: file.name || "shared",
+        contentType: file.type || "application/octet-stream",
+        title,
+        text,
+        url,
+        receivedAt,
+      });
+    }
+  }
+  if (records.length === 0 && (title || text || url)) {
+    records.push({ title, text, url, receivedAt });
+  }
+  return records;
+}
+
+async function notifyShareInboxChanged() {
+  const windows = await self.clients.matchAll({ includeUncontrolled: true, type: "window" });
+  for (const client of windows) {
+    client.postMessage({ type: SHARE_INBOX_UPDATED_MESSAGE });
+  }
+}
+
 async function handleShareTarget(request) {
   const crossSiteSignal = crossSiteShareSignal(request);
   if (crossSiteSignal) {
@@ -164,42 +223,27 @@ async function handleShareTarget(request) {
   }
   let redirectStatus = "empty";
   try {
-    const formData = await request.formData();
-    const files = formData.getAll("file");
-    const title = String(formData.get("title") || "").trim();
-    const text = String(formData.get("text") || "").trim();
-    const url = String(formData.get("url") || "").trim();
     const receivedAt = Date.now();
-    let storedCount = 0;
-    for (const file of files) {
-      if (file && (file instanceof File || file instanceof Blob)) {
-        await storeIncomingShare({
-          file,
-          filename: file.name || "shared",
-          contentType: file.type || "application/octet-stream",
-          title,
-          text,
-          url,
-          receivedAt,
-        });
-        storedCount += 1;
-      }
+    const records = shareRecordsFromForm(await request.formData(), receivedAt);
+    if (records.length > 0) {
+      redirectStatus = await parkIncomingShares(records, receivedAt);
     }
-    if (storedCount === 0 && (title || text || url)) {
-      await storeIncomingShare({
-        title,
-        text,
-        url,
-        receivedAt,
-      });
-      storedCount += 1;
-    }
-    redirectStatus = storedCount > 0 ? "1" : "empty";
   } catch (error) {
     // Stashing failed; navigate into the app with an explicit error marker so
     // the capture page can tell the user the OS share was not saved.
     console.warn("share-target inbox write failed", error);
     redirectStatus = "error";
+  }
+  if (redirectStatus === "1") {
+    // The share is already parked: a capture page that misses this message
+    // still lists it when it next mounts or becomes visible.
+    try {
+      await notifyShareInboxChanged();
+    } catch (error) {
+      console.warn("share-target inbox change notification failed", error);
+    }
+  } else if (redirectStatus === "full" || redirectStatus === "too-large") {
+    console.warn("share-target POST refused: share inbox limit", redirectStatus);
   }
   return Response.redirect(`/app/capture?from-share=${redirectStatus}`, 303);
 }
@@ -218,20 +262,56 @@ function openShareInbox() {
   });
 }
 
-async function storeIncomingShare(record) {
+// Parks `records` (one share) in a single transaction, first dropping shares
+// past SHARE_INBOX_MAX_AGE_MS. Resolves "1" when parked, "too-large" when the
+// share alone exceeds a cap, or "full" when it does not fit beside the
+// unexpired shares still awaiting review, which are never evicted for it.
+async function parkIncomingShares(records, now) {
+  const incomingBytes = records.reduce((total, record) => total + shareRecordBytes(record), 0);
+  if (records.length > SHARE_INBOX_MAX_PENDING || incomingBytes > SHARE_INBOX_MAX_BYTES) {
+    return "too-large";
+  }
   const db = await openShareInbox();
   try {
     return await new Promise((resolve, reject) => {
       const tx = db.transaction(SHARE_INBOX_STORE, "readwrite");
-      const req = tx.objectStore(SHARE_INBOX_STORE).add(record);
-      let insertedId = null;
-      req.onsuccess = () => {
-        insertedId = req.result;
+      const store = tx.objectStore(SHARE_INBOX_STORE);
+      let outcome = "";
+      let failure = null;
+      const listing = store.getAll();
+      listing.onsuccess = () => {
+        try {
+          let pendingCount = 0;
+          let pendingBytes = 0;
+          for (const parked of listing.result) {
+            if (shareExpired(parked, now)) {
+              store.delete(parked.id);
+            } else {
+              pendingCount += 1;
+              pendingBytes += shareRecordBytes(parked);
+            }
+          }
+          if (
+            pendingCount + records.length > SHARE_INBOX_MAX_PENDING ||
+            pendingBytes + incomingBytes > SHARE_INBOX_MAX_BYTES
+          ) {
+            outcome = "full";
+            return;
+          }
+          for (const record of records) {
+            store.add(record);
+          }
+          outcome = "1";
+        } catch (error) {
+          failure = error;
+          tx.abort();
+        }
       };
-      req.onerror = () => reject(req.error);
-      tx.oncomplete = () => resolve(insertedId);
-      tx.onerror = () => reject(tx.error);
-      tx.onabort = () => reject(tx.error || new Error("IndexedDB transaction aborted."));
+      tx.oncomplete = () =>
+        outcome ? resolve(outcome) : reject(new Error("Share inbox listing did not complete."));
+      tx.onerror = () => reject(failure || tx.error);
+      tx.onabort = () =>
+        reject(failure || tx.error || new Error("IndexedDB transaction aborted."));
     });
   } finally {
     db.close();
