@@ -140,7 +140,10 @@ class LabTrackerAPI(
             context,
             authorization=self.project_authorization,
         )
-        self.supervision: SupervisionService = SupervisionService(context)
+        self.supervision: SupervisionService = SupervisionService(
+            context,
+            authorization=self.project_authorization,
+        )
         self.ownership_reassignments: OwnershipReassignmentService = OwnershipReassignmentService(
             context
         )

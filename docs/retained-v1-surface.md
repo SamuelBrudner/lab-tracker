@@ -19,6 +19,12 @@ research record:
   while group viewers and contributors inherit no child-project access unless
   the explicit `group_read_all` flag is enabled for that group; when enabled,
   that inherited access is read-only.
+- Dated supervision edges, projected as `actedOnBehalfOf` in provenance
+  exports. Only a global admin or an owner of a project group containing both
+  users may create, retarget, end, or delete an edge (global `editor` role
+  also required); being the supervisor or supervisee is not authority. Lists
+  and detail reads return the edges the caller may manage plus the edges that
+  name the caller; other edges are an opaque `404`.
 - Questions created, staged, activated, maintained explicitly by users, and
   connected with `parent_question_ids` to form broad-to-atomic hierarchies.
 - Simple query/search flows over questions and notes using the built-in
