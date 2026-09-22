@@ -544,4 +544,64 @@ describe("DailyReviewScheduleForm", () => {
     );
     expect(screen.getByLabelText("Cadence")).toHaveValue("720");
   });
+
+  it("shows and preserves a stored cadence that is not one of the presets", async () => {
+    let settingsBody = null;
+    installFetchMock([
+      {
+        match: "/projects/project-1/graph-draft-batch-settings",
+        response: apiResponse({
+          cadence_minutes: 180,
+          email_notifications_enabled: false,
+          enabled: true,
+          next_run_at: null,
+          notification_email: null,
+          project_id: "project-1",
+          review_email_available: false,
+          run_at_local_time: "18:00",
+          settings_id: "settings-1",
+          timezone_name: "UTC",
+          user_id: "user-1",
+        }),
+      },
+      {
+        match: "/projects/project-1/graph-draft-batch-settings",
+        method: "PATCH",
+        response: (request) => {
+          settingsBody = JSON.parse(request.init.body);
+          return apiResponse({
+            ...settingsBody,
+            project_id: "project-1",
+            settings_id: "settings-1",
+            user_id: "user-1",
+          });
+        },
+      },
+    ]);
+
+    render(
+      <DailyReviewScheduleForm
+        token="token-1"
+        projectId="project-1"
+        canManage={true}
+        setBusy={vi.fn()}
+        setFlash={vi.fn()}
+      />
+    );
+
+    const cadence = await screen.findByLabelText("Cadence");
+    await waitFor(() => {
+      expect(cadence).toHaveValue("180");
+    });
+    expect(
+      screen.getByRole("option", { name: "Every 3 hours (custom)" }).selected
+    ).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "Save cadence" }));
+    await waitFor(() => {
+      expect(settingsBody).toEqual(
+        expect.objectContaining({ cadence_minutes: 180 })
+      );
+    });
+  });
 });

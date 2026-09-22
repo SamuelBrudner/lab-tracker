@@ -11,6 +11,32 @@ const BATCH_CADENCE_OPTIONS = [
   { label: "Weekly", value: "10080" },
 ];
 
+// The API accepts any cadence of at least an hour (settable via the API, CLI
+// or MCP), so a stored cadence outside the presets is shown as its own option
+// rather than letting the select display a preset it did not load.
+function customCadenceLabel(minutesValue) {
+  const minutes = Number(minutesValue);
+  if (minutes % 1440 === 0) {
+    const days = minutes / 1440;
+    return `Every ${days} day${days === 1 ? "" : "s"} (custom)`;
+  }
+  if (minutes % 60 === 0) {
+    const hours = minutes / 60;
+    return `Every ${hours} hour${hours === 1 ? "" : "s"} (custom)`;
+  }
+  return `Every ${minutes} minutes (custom)`;
+}
+
+function cadenceOptions(cadenceMinutes) {
+  if (BATCH_CADENCE_OPTIONS.some((option) => option.value === cadenceMinutes)) {
+    return BATCH_CADENCE_OPTIONS;
+  }
+  return [
+    ...BATCH_CADENCE_OPTIONS,
+    { label: customCadenceLabel(cadenceMinutes), value: cadenceMinutes },
+  ];
+}
+
 function detectedTimeZone() {
   try {
     return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
@@ -193,7 +219,7 @@ function DailyReviewScheduleForm({
           disabled={disabled}
           onChange={(event) => setCadenceMinutes(event.target.value)}
         >
-          {BATCH_CADENCE_OPTIONS.map((option) => (
+          {cadenceOptions(cadenceMinutes).map((option) => (
             <option key={option.value} value={option.value}>
               {option.label}
             </option>
