@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Sequence
 from dataclasses import FrozenInstanceError, fields
 from uuid import UUID
@@ -279,3 +280,27 @@ def test_base_exception_propagates_unchanged(failure: BaseException) -> None:
         _probe(inspector)(_target())
 
     assert caught.value is failure
+
+
+def test_ordinary_probe_exception_is_logged_without_its_message(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    secret = "private local path diagnostic"
+    inspector = RecordingInspector((RuntimeError(secret),))
+    target = _target("/raw/operator/secret-store")
+
+    with caplog.at_level(logging.WARNING, logger="lab_tracker.local_store_health"):
+        result = _probe(inspector)(target)
+
+    _assert_static_failure(result)
+
+    records = [
+        record for record in caplog.records if record.name == "lab_tracker.local_store_health"
+    ]
+    assert len(records) == 1
+    assert records[0].levelno == logging.WARNING
+    message = records[0].getMessage()
+    assert str(target.store_id) in message
+    assert "RuntimeError" in message
+    assert secret not in message
+    assert records[0].exc_info is None

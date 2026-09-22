@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import FrozenInstanceError, fields
 from uuid import UUID
 
@@ -717,3 +718,27 @@ def test_real_safe_client_sends_head_without_credentials_or_proxy_headers(
     assert b"\r\ncookie:" not in lowered
     assert b"\r\nproxy-authorization:" not in lowered
     assert connector.socket.closed is True
+
+
+def test_ordinary_probe_exception_is_logged_without_its_message(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    secret = "hunter2"
+    probe, _, _ = _probe(RuntimeError(f"failed https://user:{secret}@store.example/"))
+    target = _target(credential_ref=f"vault:{secret}")
+
+    with caplog.at_level(logging.WARNING, logger="lab_tracker.http_store_health"):
+        result = probe(target)
+
+    _assert_static_failure(result)
+
+    records = [
+        record for record in caplog.records if record.name == "lab_tracker.http_store_health"
+    ]
+    assert len(records) == 1
+    assert records[0].levelno == logging.WARNING
+    message = records[0].getMessage()
+    assert str(target.store_id) in message
+    assert "RuntimeError" in message
+    assert secret not in message
+    assert records[0].exc_info is None

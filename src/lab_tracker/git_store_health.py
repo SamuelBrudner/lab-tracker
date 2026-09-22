@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 import time
@@ -31,6 +32,8 @@ from lab_tracker.store_health import (
     StoreHealthStatus,
     StoreProbeTarget,
 )
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,7 +69,14 @@ class GitStoreHealthProbe:
 
         try:
             return self._probe(target)
-        except Exception:
+        except Exception as exc:
+            # Only the store id and exception class are logged: the message can
+            # carry remote URLs, credentials, or private filesystem paths.
+            _logger.warning(
+                "Git store health probe for store %s failed with %s.",
+                target.store_id,
+                type(exc).__name__,
+            )
             return _unreachable()
 
     def _probe(self, target: StoreProbeTarget) -> StoreHealth:

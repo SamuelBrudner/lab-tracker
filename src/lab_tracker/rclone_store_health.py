@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from collections.abc import Callable
@@ -25,6 +26,8 @@ from lab_tracker.store_health import (
 )
 
 RCLONE_HEALTH_OUTPUT_LIMIT_BYTES: Final = 64 * 1024
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,7 +56,14 @@ class RcloneStoreHealthProbe:
 
         try:
             return self._probe(target)
-        except Exception:
+        except Exception as exc:
+            # Only the store id and exception class are logged: the message can
+            # carry remote URLs, credentials, or private filesystem paths.
+            _logger.warning(
+                "Rclone store health probe for store %s failed with %s.",
+                target.store_id,
+                type(exc).__name__,
+            )
             return _unreachable()
 
     def _probe(self, target: StoreProbeTarget) -> StoreHealth:
