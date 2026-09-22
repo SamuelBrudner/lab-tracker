@@ -373,3 +373,52 @@ def test_mcp_dependency_excludes_sdk_without_bundled_fastmcp() -> None:
     assert "1.26.0" not in mcp.specifier
     assert "2.0.0" not in mcp.specifier
     assert "2.2.0" not in mcp.specifier
+
+
+def _ci_job_blocks(workflow: str) -> dict[str, str]:
+    jobs_section = workflow.split("\njobs:\n", 1)[1]
+    blocks: dict[str, str] = {}
+    name: str | None = None
+    lines: list[str] = []
+    for line in jobs_section.splitlines():
+        if line.startswith("  ") and not line.startswith("   ") and line.endswith(":"):
+            if name is not None:
+                blocks[name] = "\n".join(lines)
+            name, lines = line.strip().rstrip(":"), []
+        else:
+            lines.append(line)
+    if name is not None:
+        blocks[name] = "\n".join(lines)
+    return blocks
+
+
+def test_ci_checks_lock_freshness_before_every_locked_install() -> None:
+    repo_root = Path(__file__).resolve().parent.parent
+    workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    blocks = _ci_job_blocks(workflow)
+    installing_jobs = {name: body for name, body in blocks.items() if "uv sync" in body}
+
+    assert "test" in installing_jobs
+    for name, body in installing_jobs.items():
+        assert "run: uv lock --check" in body, name
+        assert body.index("run: uv lock --check") < body.index("uv sync"), name
+
+
+def test_dependabot_updates_python_dependencies_with_the_lockfile() -> None:
+    repo_root = Path(__file__).resolve().parent.parent
+    config = (repo_root / ".github" / "dependabot.yml").read_text(encoding="utf-8")
+    entries = config.split("  - package-ecosystem: ")[1:]
+    ecosystems = {entry.split("\n", 1)[0].strip().strip('"'): entry for entry in entries}
+
+    assert "pip" not in ecosystems
+    uv_entry = ecosystems["uv"]
+    assert 'dependency-name: "mcp"' in uv_entry
+    assert "version-update:semver-major" in uv_entry
+
+
+def test_contributor_install_commands_respect_the_lockfile() -> None:
+    repo_root = Path(__file__).resolve().parent.parent
+    for relative in ("README.md", "CLAUDE.md", "docs/setup.md"):
+        text = (repo_root / relative).read_text(encoding="utf-8")
+        assert "uv pip install -e" not in text, relative
+        assert "uv sync --frozen" in text, relative

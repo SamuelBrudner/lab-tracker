@@ -26,6 +26,10 @@ jobs:
           node-version: "22"
           cache: "npm"
       - uses: astral-sh/setup-uv@v7
+      # --frozen installs exactly what uv.lock records without validating it
+      # against pyproject.toml; fail here when they have drifted.
+      - name: Check uv.lock matches pyproject.toml
+        run: uv lock --check
       - name: Install Python dependencies
         run: uv sync --frozen --extra test --extra lint
       - name: Install frontend dependencies
@@ -62,6 +66,10 @@ jobs:
         with:
           python-version: "3.10"
       - uses: astral-sh/setup-uv@v7
+      # --frozen installs exactly what uv.lock records without validating it
+      # against pyproject.toml; fail here when they have drifted.
+      - name: Check uv.lock matches pyproject.toml
+        run: uv lock --check
       - name: Install frozen Python dependencies
         run: uv sync --frozen --extra test
       - name: Test declared minimum Python
@@ -82,6 +90,10 @@ jobs:
           node-version: "22"
           cache: "npm"
       - uses: astral-sh/setup-uv@v7
+      # --frozen installs exactly what uv.lock records without validating it
+      # against pyproject.toml; fail here when they have drifted.
+      - name: Check uv.lock matches pyproject.toml
+        run: uv lock --check
       - name: Install Python dependencies
         run: uv sync --frozen --extra test
       - name: Install frontend dependencies
@@ -120,6 +132,10 @@ jobs:
         with:
           python-version: "3.11"
       - uses: astral-sh/setup-uv@v7
+      # --frozen installs exactly what uv.lock records without validating it
+      # against pyproject.toml; fail here when they have drifted.
+      - name: Check uv.lock matches pyproject.toml
+        run: uv lock --check
       - name: Install Python dependencies
         run: uv sync --frozen --extra test
       - name: Test Postgres integration subset
@@ -137,6 +153,10 @@ jobs:
         with:
           python-version: "3.11"
       - uses: astral-sh/setup-uv@v7
+      # --frozen installs exactly what uv.lock records without validating it
+      # against pyproject.toml; fail here when they have drifted.
+      - name: Check uv.lock matches pyproject.toml
+        run: uv lock --check
       - name: Install frozen Python test dependencies
         run: uv sync --frozen --extra test
       - name: Test ordinary and bind mounts beneath one grant
@@ -171,6 +191,10 @@ jobs:
         with:
           python-version: "3.11"
       - uses: astral-sh/setup-uv@v7
+      # --frozen installs exactly what uv.lock records without validating it
+      # against pyproject.toml; fail here when they have drifted.
+      - name: Check uv.lock matches pyproject.toml
+        run: uv lock --check
       - name: Install frozen Python dependencies
         run: uv sync --frozen --extra test --extra lint
       - name: Lint
@@ -225,6 +249,10 @@ jobs:
         with:
           python-version: "3.10"
       - uses: astral-sh/setup-uv@v7
+      # --frozen installs exactly what uv.lock records without validating it
+      # against pyproject.toml; fail here when they have drifted.
+      - name: Check uv.lock matches pyproject.toml
+        run: uv lock --check
       - name: Install frozen Python test dependencies
         run: uv sync --frozen --extra test
       - name: Test handle-bound local store health
@@ -246,6 +274,10 @@ jobs:
         with:
           python-version: "3.11"
       - uses: astral-sh/setup-uv@v7
+      # --frozen installs exactly what uv.lock records without validating it
+      # against pyproject.toml; fail here when they have drifted.
+      - name: Check uv.lock matches pyproject.toml
+        run: uv lock --check
       - name: Install frozen Python test dependencies
         run: uv sync --frozen --extra test
       - name: Test O_SEARCH helper and wheel

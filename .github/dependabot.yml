@@ -8,7 +8,15 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
-  - package-ecosystem: "pip"
+  # The uv ecosystem updates pyproject.toml and regenerates uv.lock in the same
+  # PR; the pip ecosystem only edited pyproject.toml and left the lock stale.
+  - package-ecosystem: "uv"
     directory: "/"
     schedule:
       interval: "weekly"
+    ignore:
+      # mcp 2.x removed `mcp.server.fastmcp` (FastMCP became MCPServer), which
+      # lab_tracker.mcp_server and its tests import. Keep mcp<2 until the server
+      # is ported to the 2.x API; drop this ignore in that port.
+      - dependency-name: "mcp"
+        update-types: ["version-update:semver-major"]

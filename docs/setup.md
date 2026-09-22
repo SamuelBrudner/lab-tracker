@@ -27,11 +27,12 @@ disagree, the retained-surface document wins.
 ### With uv (recommended)
 
 ```bash
-uv venv
+uv sync --frozen --extra test --extra lint
 source .venv/bin/activate
-uv pip install -e ".[test,lint]"
 ```
 
+`uv sync --frozen` creates `.venv` and installs the exact dependency versions
+recorded in `uv.lock`, so a new upstream release cannot change your install.
 Install `uv` first if needed (for example: `brew install uv` or `pipx install uv`).
 
 ### With pip and venv (fallback)
@@ -42,7 +43,9 @@ source .venv/bin/activate
 pip install -e ".[test,lint]"
 ```
 
-Commands below use `uv run`. If you used pip/venv instead, drop the `uv run` prefix.
+pip resolves the version ranges in `pyproject.toml` rather than the tested
+versions in `uv.lock`. Commands below use `uv run`. If you used pip/venv
+instead, drop the `uv run` prefix.
 
 The `[test,lint]` extras pull in the backend test and lint tooling. To capture
 Matplotlib figures with the Python client (`lab_tracker_client.savefig`,
@@ -50,7 +53,7 @@ Matplotlib figures with the Python client (`lab_tracker_client.savefig`,
 and `pillow`:
 
 ```bash
-uv pip install -e ".[test,lint,figure]"
+uv sync --frozen --extra test --extra lint --extra figure
 ```
 
 Windows fresh-clone notes, including Beads/Dolt setup, are in
