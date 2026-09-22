@@ -724,6 +724,19 @@ class LabTrackerRepository(Protocol):
     ) -> tuple[list[UsageEvent], int]:
         """Query local usage telemetry events."""
 
+    def page_usage_events(
+        self,
+        *,
+        project_id: UUID | None = None,
+        verb: str | None = None,
+        resource_type: str | None = None,
+        surface: str | None = None,
+        outcome: str | None = None,
+        after: tuple[datetime, UUID] | None = None,
+        limit: int,
+    ) -> list[UsageEvent]:
+        """Return one newest-first keyset page of usage events after ``after``."""
+
     def usage_event_summary(
         self,
         *,

@@ -692,6 +692,27 @@ class SQLAlchemyLabTrackerRepository:
             offset=offset,
         )
 
+    def page_usage_events(
+        self,
+        *,
+        project_id: UUID | None = None,
+        verb: str | None = None,
+        resource_type: str | None = None,
+        surface: str | None = None,
+        outcome: str | None = None,
+        after: tuple[datetime, UUID] | None = None,
+        limit: int,
+    ) -> list[UsageEvent]:
+        return self.usage_events.query_page(
+            project_id=project_id,
+            verb=verb,
+            resource_type=resource_type,
+            surface=surface,
+            outcome=outcome,
+            after=after,
+            limit=limit,
+        )
+
     def usage_event_summary(
         self,
         *,

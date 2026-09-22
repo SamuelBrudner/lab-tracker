@@ -16,6 +16,10 @@ class UsageApiMixin:
         repository = self._service_context.active_repository()
         return repository.query_usage_events(*args, **kwargs)
 
+    def page_usage_events(self, *args: Any, **kwargs: Any) -> Any:
+        repository = self._service_context.active_repository()
+        return repository.page_usage_events(*args, **kwargs)
+
     def usage_event_summary(self, *args: Any, **kwargs: Any) -> Any:
         repository = self._service_context.active_repository()
         return repository.usage_event_summary(*args, **kwargs)

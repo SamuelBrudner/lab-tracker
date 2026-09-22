@@ -6,7 +6,7 @@ from collections import defaultdict
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import ColumnElement, and_, delete, func, or_, select
 from sqlalchemy.orm import Session as OrmSession
 
 from lab_tracker.db_models import UsageEventModel, UsageEventRollupModel
@@ -22,6 +22,9 @@ from lab_tracker.repository import EntityRepository
 from lab_tracker.sqlalchemy_mapper_parts.common import uuid_from_db, uuid_to_db
 
 from .common import apply_pagination, count_from_statement
+
+UsageEventPageCursor = tuple[datetime, UUID]
+"""``(occurred_at, event_id)`` of the last usage event on a keyset page."""
 
 
 def usage_event_to_model(event: UsageEvent) -> UsageEventModel:
@@ -143,28 +146,97 @@ class SQLAlchemyUsageEventRepository(EntityRepository[UsageEvent]):
         offset: int = 0,
     ) -> tuple[list[UsageEvent], int]:
         self._session.flush()
-        stmt = select(UsageEventModel)
-        count_stmt = select(UsageEventModel.event_id)
-        for column, value in (
-            (UsageEventModel.project_id, str(project_id) if project_id is not None else None),
-            (UsageEventModel.verb, verb),
-            (UsageEventModel.resource_type, resource_type),
-            (UsageEventModel.surface, surface),
-            (UsageEventModel.outcome, outcome),
-        ):
-            if value is not None:
-                stmt = stmt.where(column == value)
-                count_stmt = count_stmt.where(column == value)
-        if occurred_before is not None:
-            stmt = stmt.where(UsageEventModel.occurred_at < occurred_before)
-            count_stmt = count_stmt.where(UsageEventModel.occurred_at < occurred_before)
-        if occurred_on_or_after is not None:
-            stmt = stmt.where(UsageEventModel.occurred_at >= occurred_on_or_after)
-            count_stmt = count_stmt.where(UsageEventModel.occurred_at >= occurred_on_or_after)
+        clauses = _usage_event_filter_clauses(
+            project_id=project_id,
+            verb=verb,
+            resource_type=resource_type,
+            surface=surface,
+            outcome=outcome,
+            occurred_before=occurred_before,
+            occurred_on_or_after=occurred_on_or_after,
+        )
+        stmt = select(UsageEventModel).where(*clauses)
+        count_stmt = select(UsageEventModel.event_id).where(*clauses)
         stmt = stmt.order_by(UsageEventModel.occurred_at.desc(), UsageEventModel.event_id.desc())
         total = count_from_statement(self._session, count_stmt)
         rows = self._session.scalars(apply_pagination(stmt, limit=limit, offset=offset))
         return [usage_event_from_model(row) for row in rows], total
+
+    def query_page(
+        self,
+        *,
+        project_id: UUID | None = None,
+        verb: str | None = None,
+        resource_type: str | None = None,
+        surface: str | None = None,
+        outcome: str | None = None,
+        after: UsageEventPageCursor | None = None,
+        limit: int,
+    ) -> list[UsageEvent]:
+        """Return one keyset page in ``query`` order (newest first), without a count.
+
+        ``after`` is the ``(occurred_at, event_id)`` of the last event of the
+        previous page. Keyset paging keeps pages stable while new events are
+        written, unlike offsets, which shift as rows are inserted ahead of them.
+        """
+
+        if limit < 1:
+            raise ValueError("Usage event page limit must be positive.")
+        self._session.flush()
+        clauses = _usage_event_filter_clauses(
+            project_id=project_id,
+            verb=verb,
+            resource_type=resource_type,
+            surface=surface,
+            outcome=outcome,
+            occurred_before=None,
+            occurred_on_or_after=None,
+        )
+        if after is not None:
+            after_occurred_at, after_event_id = after
+            clauses.append(
+                or_(
+                    UsageEventModel.occurred_at < after_occurred_at,
+                    and_(
+                        UsageEventModel.occurred_at == after_occurred_at,
+                        UsageEventModel.event_id < after_event_id,
+                    ),
+                )
+            )
+        stmt = (
+            select(UsageEventModel)
+            .where(*clauses)
+            .order_by(UsageEventModel.occurred_at.desc(), UsageEventModel.event_id.desc())
+            .limit(limit)
+        )
+        return [usage_event_from_model(row) for row in self._session.scalars(stmt)]
+
+
+def _usage_event_filter_clauses(
+    *,
+    project_id: UUID | None,
+    verb: str | None,
+    resource_type: str | None,
+    surface: str | None,
+    outcome: str | None,
+    occurred_before: datetime | None,
+    occurred_on_or_after: datetime | None,
+) -> list[ColumnElement[bool]]:
+    clauses: list[ColumnElement[bool]] = []
+    for column, value in (
+        (UsageEventModel.project_id, str(project_id) if project_id is not None else None),
+        (UsageEventModel.verb, verb),
+        (UsageEventModel.resource_type, resource_type),
+        (UsageEventModel.surface, surface),
+        (UsageEventModel.outcome, outcome),
+    ):
+        if value is not None:
+            clauses.append(column == value)
+    if occurred_before is not None:
+        clauses.append(UsageEventModel.occurred_at < occurred_before)
+    if occurred_on_or_after is not None:
+        clauses.append(UsageEventModel.occurred_at >= occurred_on_or_after)
+    return clauses
 
 
 class SQLAlchemyUsageEventRollupRepository(EntityRepository[UsageEventRollup]):

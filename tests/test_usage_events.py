@@ -261,6 +261,155 @@ def test_project_delete_usage_event_survives_the_cascade_delete(
     assert event.outcome == "ok"
 
 
+def _seed_export_usage_events(client: TestClient, count: int) -> list[str]:
+    """Insert usage events, several sharing one timestamp, and return export order."""
+
+    base_time = datetime.now(timezone.utc) - timedelta(days=1)
+    rows = [
+        UsageEventModel(
+            event_id=str(uuid4()),
+            # Groups of three share an occurred_at so pages must break ties by id.
+            occurred_at=base_time + timedelta(seconds=index // 3),
+            verb="view",
+            resource_type="question",
+            resource_id=str(uuid4()),
+            actor_user_id=None,
+            actor_role="admin",
+            principal_type="user",
+            surface="http",
+            project_id=None,
+            outcome="ok",
+            duration_ms=index,
+            result_count=None,
+        )
+        for index in range(count)
+    ]
+    ordered = sorted(
+        ((row.occurred_at, str(row.event_id)) for row in rows),
+        reverse=True,
+    )
+    with client.app.state.db_session_factory() as session:
+        session.add_all(rows)
+        session.commit()
+    return [event_id for _occurred_at, event_id in ordered]
+
+
+def test_usage_event_export_streams_bounded_pages_in_stable_order(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from lab_tracker.routes import usage_events as usage_routes
+    from lab_tracker.sqlalchemy_repository_parts.usage import SQLAlchemyUsageEventRepository
+
+    page_size = 4
+    monkeypatch.setattr(usage_routes, "_USAGE_EXPORT_PAGE_SIZE", page_size, raising=False)
+    fetch_limits: list[int | None] = []
+    for method_name in ("query", "query_page"):
+        original = getattr(SQLAlchemyUsageEventRepository, method_name, None)
+        if original is None:
+            continue
+
+        def spy(self, *args, _original=original, **kwargs):  # noqa: ANN001, ANN002, ANN003
+            fetch_limits.append(kwargs.get("limit"))
+            return _original(self, *args, **kwargs)
+
+        monkeypatch.setattr(SQLAlchemyUsageEventRepository, method_name, spy)
+
+    expected_ids = _seed_export_usage_events(client, 11)
+
+    jsonl_response = client.get(
+        "/usage-events/export",
+        params={"format": "jsonl", "resource_type": "question"},
+        headers=admin_auth_headers,
+    )
+    assert jsonl_response.status_code == 200, jsonl_response.text
+    assert jsonl_response.headers["content-type"].startswith("application/x-ndjson")
+    assert jsonl_response.headers["content-disposition"] == (
+        'attachment; filename="usage-events.jsonl"'
+    )
+    assert jsonl_response.text.endswith("\n")
+    rows = [json.loads(line) for line in jsonl_response.text.splitlines()]
+    assert [row["event_id"] for row in rows] == expected_ids
+    assert fetch_limits, "export must read usage events through bounded pages"
+    assert all(limit is not None and limit <= page_size for limit in fetch_limits), fetch_limits
+
+    fetch_limits.clear()
+    csv_response = client.get(
+        "/usage-events/export",
+        params={"format": "csv", "resource_type": "question"},
+        headers=admin_auth_headers,
+    )
+    assert csv_response.status_code == 200, csv_response.text
+    assert csv_response.headers["content-type"].startswith("text/csv")
+    csv_lines = csv_response.text.split("\r\n")
+    assert csv_lines[0] == (
+        "event_id,occurred_at,verb,resource_type,resource_id,actor_user_id,actor_role,"
+        "principal_type,surface,project_id,outcome,duration_ms,result_count"
+    )
+    assert csv_lines[-1] == ""
+    assert [line.split(",", 1)[0] for line in csv_lines[1:-1]] == expected_ids
+    assert all(limit is not None and limit <= page_size for limit in fetch_limits), fetch_limits
+
+    empty_params = {"resource_type": "question", "verb": "delete"}
+    empty_csv = client.get(
+        "/usage-events/export",
+        params={**empty_params, "format": "csv"},
+        headers=admin_auth_headers,
+    )
+    assert empty_csv.status_code == 200
+    assert empty_csv.text == csv_lines[0] + "\r\n"
+    empty_jsonl = client.get(
+        "/usage-events/export",
+        params={**empty_params, "format": "jsonl"},
+        headers=admin_auth_headers,
+    )
+    assert empty_jsonl.status_code == 200
+    assert empty_jsonl.text == ""
+
+
+def test_usage_event_export_pages_do_not_repeat_rows_when_events_arrive_mid_export(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from lab_tracker.routes import usage_events as usage_routes
+    from lab_tracker.sqlalchemy_repository_parts.usage import SQLAlchemyUsageEventRepository
+
+    monkeypatch.setattr(usage_routes, "_USAGE_EXPORT_PAGE_SIZE", 3)
+    expected_ids = _seed_export_usage_events(client, 8)
+    original = SQLAlchemyUsageEventRepository.query_page
+    pages_served = 0
+
+    def insert_newer_events_after_first_page(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        nonlocal pages_served
+        page = original(self, *args, **kwargs)
+        pages_served += 1
+        if pages_served == 1:
+            _seed_export_usage_events(client, 5)
+        return page
+
+    monkeypatch.setattr(
+        SQLAlchemyUsageEventRepository,
+        "query_page",
+        insert_newer_events_after_first_page,
+    )
+    # New events are timestamped a day ago + a few seconds, i.e. at the same times
+    # as the seeded rows; keyset paging must still neither repeat nor skip rows
+    # that existed when their page was read.
+    response = client.get(
+        "/usage-events/export",
+        params={"format": "jsonl", "resource_type": "question"},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    exported = [json.loads(line)["event_id"] for line in response.text.splitlines()]
+    assert len(exported) == len(set(exported))
+    assert set(expected_ids) <= set(exported)
+    assert pages_served > 1
+
+
 def test_usage_event_retention_rolls_up_and_prunes_raw_events(
     client: TestClient,
     admin_auth_headers: dict[str, str],
