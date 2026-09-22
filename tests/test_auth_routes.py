@@ -17,6 +17,7 @@ from lab_tracker.auth import Role
 from lab_tracker.db import Base
 from lab_tracker.errors import AuthError, ConflictError, ValidationError
 from lab_tracker.logging import JsonFormatter
+from lab_tracker.rate_limit import InMemoryRateLimiter
 from lab_tracker.routes.auth import _bootstrap_token_for_status
 
 
@@ -1099,6 +1100,29 @@ def test_login_rate_limits_repeated_invalid_credentials(monkeypatch, tmp_path):
             "/auth/login",
             json={"username": "sam", "password": "wrong"},
         )
+
+    assert limited.status_code == 429
+    assert limited.json()["error"]["code"] == "rate_limited"
+
+
+def test_login_block_survives_a_flood_of_unknown_usernames(monkeypatch, tmp_path):
+    _bootstrap_database(monkeypatch, tmp_path)
+    monkeypatch.setenv("LAB_TRACKER_AUTH_RATE_LIMIT_ATTEMPTS", "3")
+    monkeypatch.setenv("LAB_TRACKER_AUTH_RATE_LIMIT_WINDOW_SECONDS", "60")
+
+    with TestClient(create_app()) as client:
+        client.app.state.auth_rate_limiter = InMemoryRateLimiter(
+            max_attempts=3, window_seconds=60, max_buckets=20
+        )
+        _seed_admin(client, username="sam", password="secret")
+        for _ in range(3):
+            response = client.post("/auth/login", json={"username": "sam", "password": "wrong"})
+            assert response.status_code == 401
+
+        for index in range(60):
+            client.post("/auth/login", json={"username": f"nobody-{index}", "password": "x"})
+
+        limited = client.post("/auth/login", json={"username": "sam", "password": "secret"})
 
     assert limited.status_code == 429
     assert limited.json()["error"]["code"] == "rate_limited"

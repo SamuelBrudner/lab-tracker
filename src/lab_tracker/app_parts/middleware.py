@@ -344,6 +344,10 @@ def _should_apply_csp(path: str) -> bool:
 
 
 def _pat_rate_key(request: Request, token: str) -> str:
+    # Keyed per token on purpose. lpat_ secrets carry 256 bits of entropy, so
+    # guessing is infeasible and needs no host-wide throttle. A host-only key
+    # would let one misconfigured agent behind a shared proxy lock out every
+    # PAT user behind that proxy. Memory stays bounded by the limiter's cap.
     client_host = request.client.host if request.client is not None else "unknown"
     token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
     return f"lpat:{client_host}:{token_hash[:24]}"

@@ -47,35 +47,70 @@ def test_expired_buckets_are_pruned_when_new_keys_arrive(clock: _Clock) -> None:
     assert limiter.bucket_count == 1
 
 
-def test_bucket_count_is_capped_by_evicting_the_oldest(clock: _Clock) -> None:
-    limiter = InMemoryRateLimiter(
-        max_attempts=2, window_seconds=60, max_buckets=3, clock=clock
-    )
-    limiter.record_failure("oldest")
+def test_bucket_count_is_capped_by_evicting_the_oldest_unblocked(clock: _Clock) -> None:
+    limiter = InMemoryRateLimiter(max_attempts=2, window_seconds=60, max_buckets=3, clock=clock)
     limiter.record_failure("oldest")
     clock.now += 1
     limiter.record_failure("middle")
-    limiter.record_failure("middle")
     clock.now += 1
-    limiter.record_failure("newest")
     limiter.record_failure("newest")
 
-    for index in range(3, 1000):
-        clock.now += 0.001
-        limiter.record_failure(f"flood-{index}")
-        assert limiter.bucket_count <= 3
+    limiter.record_failure("fourth")
 
     assert limiter.bucket_count == 3
-    # The flood evicted the oldest buckets; the most recent keys stay limited.
-    limiter.record_failure("flood-999")
+    assert list(limiter.stored_keys()) == ["middle", "newest", "fourth"]
+
+
+def test_blocked_bucket_survives_a_flood_of_distinct_keys(clock: _Clock) -> None:
+    """Flooding junk keys from one host must not lift that host's own block."""
+    limiter = InMemoryRateLimiter(max_attempts=3, window_seconds=60, max_buckets=5, clock=clock)
+    target = "login:10.0.0.9:alice"
+    for _ in range(3):
+        limiter.record_failure(target)
+
+    for index in range(1000):
+        clock.now += 0.01
+        limiter.check(f"login:10.0.0.9:junk-{index}")
+        limiter.record_failure(f"login:10.0.0.9:junk-{index}")
+        assert limiter.bucket_count <= 5
+
     with pytest.raises(RateLimitError):
-        limiter.check("flood-999")
+        limiter.check(target)
+
+
+def test_new_failures_fail_closed_when_every_live_bucket_is_blocked(clock: _Clock) -> None:
+    limiter = InMemoryRateLimiter(max_attempts=1, window_seconds=60, max_buckets=2, clock=clock)
+    limiter.record_failure("first")
+    limiter.record_failure("second")
+
+    with pytest.raises(RateLimitError):
+        limiter.record_failure("third")
+    with pytest.raises(RateLimitError):
+        limiter.record_attempt("third")
+
+    # Nothing was evicted, and an untracked key can still be checked, so a
+    # correct credential is never refused by a saturated limiter.
+    assert sorted(limiter.stored_keys()) == ["first", "second"]
+    limiter.check("third")
+    with pytest.raises(RateLimitError):
+        limiter.check("first")
+
+    clock.now += 60
+    limiter.record_failure("third")
+    assert list(limiter.stored_keys()) == ["third"]
+
+
+def test_check_does_not_allocate_a_bucket(clock: _Clock) -> None:
+    limiter = InMemoryRateLimiter(max_attempts=2, window_seconds=60, clock=clock)
+
+    for index in range(100):
+        limiter.check(f"login:10.0.0.1:user-{index}")
+
+    assert limiter.bucket_count == 0
 
 
 def test_capped_limiter_keeps_limiting_live_keys_under_the_cap(clock: _Clock) -> None:
-    limiter = InMemoryRateLimiter(
-        max_attempts=2, window_seconds=60, max_buckets=3, clock=clock
-    )
+    limiter = InMemoryRateLimiter(max_attempts=2, window_seconds=60, max_buckets=3, clock=clock)
     limiter.record_failure("a")
     limiter.record_failure("a")
     limiter.record_failure("b")
@@ -87,9 +122,7 @@ def test_capped_limiter_keeps_limiting_live_keys_under_the_cap(clock: _Clock) ->
 
 
 def test_touching_an_expired_key_restarts_its_window_as_the_newest(clock: _Clock) -> None:
-    limiter = InMemoryRateLimiter(
-        max_attempts=1, window_seconds=60, max_buckets=2, clock=clock
-    )
+    limiter = InMemoryRateLimiter(max_attempts=2, window_seconds=60, max_buckets=2, clock=clock)
     limiter.record_failure("first")
     clock.now += 30
     limiter.record_failure("second")
@@ -97,12 +130,10 @@ def test_touching_an_expired_key_restarts_its_window_as_the_newest(clock: _Clock
     limiter.record_failure("first")  # new window for "first"
     limiter.record_failure("third")  # prunes nothing live; evicts oldest live ("second")
 
+    assert list(limiter.stored_keys()) == ["first", "third"]
+    limiter.record_failure("first")
     with pytest.raises(RateLimitError):
         limiter.check("first")
-    with pytest.raises(RateLimitError):
-        limiter.check("third")
-    limiter.check("second")
-    assert limiter.bucket_count == 2
 
 
 def test_reset_removes_the_bucket(clock: _Clock) -> None:
@@ -112,7 +143,7 @@ def test_reset_removes_the_bucket(clock: _Clock) -> None:
     limiter.reset("login:10.0.0.1:alice")
 
     limiter.check("login:10.0.0.1:alice")
-    assert limiter.bucket_count <= 1
+    assert limiter.bucket_count == 0
 
 
 def test_long_keys_are_stored_as_bounded_digests(clock: _Clock) -> None:
