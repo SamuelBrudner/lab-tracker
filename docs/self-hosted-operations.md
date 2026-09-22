@@ -27,9 +27,9 @@ headers: Caddy's `reverse_proxy` does by default, while nginx needs
 `proxy_set_header X-Forwarded-Proto $scheme;`. The compose default is
 `127.0.0.1`, which matches no proxy outside the container, so forwarded headers
 are ignored and every proxied request appears to come from the proxy's own
-address. That address is private, so in the `local`
-`LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE` mode a proxied internet client
-would be treated as local until the proxy is trusted.
+address. Rate-limit buckets and HSTS then key off the proxy instead of the
+client. (The first-admin token is never disclosed by peer address outside
+`LAB_TRACKER_ENVIRONMENT=local`; see [First Admin Token](#first-admin-token).)
 
 When a TLS reverse proxy (Caddy, nginx, or `tailscale serve`) on the Docker host
 forwards to the published app port, the app sees the Compose network gateway
@@ -172,6 +172,12 @@ docker compose up -d app
 docker compose logs -f app
 ```
 
+Upgrading past revision `0063_user_session_epoch` signs every browser user out
+once: session tokens now carry a revocation epoch and an absolute lifetime
+(`LAB_TRACKER_AUTH_SESSION_MAX_AGE_HOURS`, default 168), and older tokens lack
+both. Personal access tokens and paired devices keep working. Changing a user's
+password or role, or `POST /auth/sessions/revoke`, ends that user's sessions.
+
 If you run the optional MCP service, rebuild and restart it from the same
 checkout with `docker compose --profile mcp up -d --build mcp`.
 
@@ -208,9 +214,16 @@ generates one and stores it in:
 /app/data/runtime-env/bootstrap-admin-token
 ```
 
-Open the app through `http://127.0.0.1:8000/app` or another local/LAN/VPN host
-and choose `Create First Admin`; the first-run setup screen loads the generated
-token while no users exist. The token is not shown after the first user is
-created. Public deployments can opt into browser display with
-`LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE=first_run`; otherwise the token is
-hidden on public hosts.
+The app never shows that token in the browser outside
+`LAB_TRACKER_ENVIRONMENT=local`, whatever address you connect from. Read it
+from the container and paste it into `Create First Admin`:
+
+```bash
+docker compose exec app cat /app/data/runtime-env/bootstrap-admin-token
+```
+
+The token stops working once the first user exists. Managed platforms without
+shell access can opt into browser display with
+`LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE=first_run` (the Render blueprint
+does); `local` is accepted only when `LAB_TRACKER_ENVIRONMENT=local`, and
+startup fails if it is set anywhere else.

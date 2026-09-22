@@ -46,10 +46,10 @@ On first boot, the container generates and persists:
 - `LAB_TRACKER_AUTH_SECRET_KEY`
 - `LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN`
 
-The first-admin token is stored in the app data volume. Open the app through
-`http://127.0.0.1:8000/app` or another local/LAN/VPN host and choose
-`Create First Admin`; the setup screen loads the generated token while no users
-exist.
+The first-admin token is stored in the app data volume. Read it with
+`docker compose exec app cat /app/data/runtime-env/bootstrap-admin-token`, open
+`http://127.0.0.1:8000/app`, choose `Create First Admin` and paste it; the app
+does not display it outside `LAB_TRACKER_ENVIRONMENT=local`.
 
 Optional GitHub Copilot MCP hosting is a separate read-only service behind the
 `mcp` Compose profile, so the app, Postgres, backup, and restore commands never

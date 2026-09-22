@@ -126,8 +126,9 @@ LAB_TRACKER_MCP_ALLOWED_ORIGINS=https://github.com
 With a Host allowlist set, a request with another `Host` gets `421` and one
 whose `Origin` is not listed gets `403` (requests without `Origin` pass).
 `LAB_TRACKER_MCP_ALLOWED_ORIGINS` without `LAB_TRACKER_MCP_ALLOWED_HOSTS` is a
-startup error. The docker-compose `mcp` service does not forward these two
-variables; add them to its `environment:` list to use them there.
+startup error. The docker-compose `mcp` service forwards
+`LAB_TRACKER_MCP_ALLOW_WRITES`, `LAB_TRACKER_MCP_ALLOWED_HOSTS` and
+`LAB_TRACKER_MCP_ALLOWED_ORIGINS` from the ignored `.env`.
 
 For a remote agent, the graph-native read sequence is:
 

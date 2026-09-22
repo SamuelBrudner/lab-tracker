@@ -879,9 +879,18 @@ adds:
   `/mcp`)
 - `LAB_TRACKER_MCP_HOST_PORT`: host loopback port the compose `mcp` service is
   published on (default: `9000`)
+- `LAB_TRACKER_MCP_ALLOW_WRITES`: `false` (default) or `true`. A hosted server
+  registers only read tools and resources and refuses to start unless its API
+  token is a read-only `lpat_`; `true` deliberately serves write tools too.
+  Tools that read files on the MCP host are never registered when hosted.
+- `LAB_TRACKER_MCP_ALLOWED_HOSTS` / `LAB_TRACKER_MCP_ALLOWED_ORIGINS`: optional
+  comma-separated Host and Origin allowlists (for example `mcp.lab.internal`
+  and `https://github.com`; `:*` matches any port). Empty leaves Host policy to
+  the reverse proxy; an Origin list requires a Host list.
 
 The process refuses to start if the inbound token is absent, weak, or equal to
-the API LPAT. Requests with missing or invalid inbound credentials receive 401
+the API LPAT, if the API reports authentication disabled or cannot be reached,
+or if the API token can write while `LAB_TRACKER_MCP_ALLOW_WRITES` is off. Requests with missing or invalid inbound credentials receive 401
 before FastMCP dispatch, and the inbound `Authorization` header is stripped
 before the downstream app runs. This is a shared private endpoint, not per-user
 authorization; serve it only through TLS on a VPN or tailnet.

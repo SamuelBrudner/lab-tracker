@@ -102,6 +102,12 @@ services:
       LAB_TRACKER_BASE_URL: ${LAB_TRACKER_MCP_BASE_URL:-http://app:8000}
       LAB_TRACKER_MCP_INBOUND_TOKEN: ${LT_MCP_INBOUND_TOKEN:-}
       LAB_TRACKER_MCP_API_KEY: ${LT_MCP_READONLY_TOKEN:-}
+      # Hosted MCP serves read tools only unless writes are deliberately enabled.
+      LAB_TRACKER_MCP_ALLOW_WRITES: ${LAB_TRACKER_MCP_ALLOW_WRITES:-false}
+      # Optional Host/Origin allowlists (comma lists); empty leaves Host policy
+      # to the reverse proxy in front of the loopback-published port.
+      LAB_TRACKER_MCP_ALLOWED_HOSTS: ${LAB_TRACKER_MCP_ALLOWED_HOSTS:-}
+      LAB_TRACKER_MCP_ALLOWED_ORIGINS: ${LAB_TRACKER_MCP_ALLOWED_ORIGINS:-}
     ports:
       - "127.0.0.1:${LAB_TRACKER_MCP_HOST_PORT:-9000}:${LAB_TRACKER_MCP_PORT:-8000}"
     init: true
