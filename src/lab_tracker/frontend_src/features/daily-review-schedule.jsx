@@ -41,12 +41,30 @@ function DailyReviewScheduleForm({
   // load — e.g. for a previously selected project — is ignored so it can never
   // populate the form that "Save cadence" PATCHes into the current project.
   const loadGenerationRef = useRef(0);
+  // The project the form currently belongs to (null once unmounted), so a save
+  // response for a previously selected project is not shown under this one.
+  const currentProjectIdRef = useRef(projectId);
+
+  useEffect(() => {
+    currentProjectIdRef.current = projectId;
+    return () => {
+      currentProjectIdRef.current = null;
+    };
+  }, [projectId]);
 
   const loadSettings = useCallback(async () => {
     const generation = ++loadGenerationRef.current;
     const isCurrent = () => generation === loadGenerationRef.current;
+    // Until this project's settings load, the form must neither show nor be
+    // able to save values loaded (or edited) for a previous project.
+    setSettings(null);
+    setEnabled(true);
+    setCadenceMinutes("1440");
+    setRunAtLocalTime("18:00");
+    setTimezoneName(detectedTimeZone());
+    setEmailNotificationsEnabled(false);
+    setNotificationEmail("");
     if (!projectId) {
-      setSettings(null);
       setLoading(false);
       return;
     }
@@ -77,7 +95,6 @@ function DailyReviewScheduleForm({
       if (!isCurrent()) {
         return;
       }
-      setSettings(null);
       setFlash("", err.message || "Failed to load daily review timing.");
     } finally {
       if (isCurrent()) {
@@ -96,9 +113,10 @@ function DailyReviewScheduleForm({
 
   async function saveSettings(event) {
     event.preventDefault();
-    if (!projectId || !canManage) {
+    if (!projectId || !canManage || !settings) {
       return;
     }
+    const savedProjectId = projectId;
     setBusy(true);
     setFlash("", "");
     try {
@@ -123,7 +141,9 @@ function DailyReviewScheduleForm({
           token,
         }
       );
-      setSettings(nextSettings);
+      if (currentProjectIdRef.current === savedProjectId) {
+        setSettings(nextSettings);
+      }
       onSaved(nextSettings);
       setFlash("Daily review schedule updated.");
     } catch (err) {
@@ -133,7 +153,10 @@ function DailyReviewScheduleForm({
     }
   }
 
-  const disabled = !canManage || !projectId || loading;
+  const runNowDisabled = !canManage || !projectId || loading;
+  // Editing and saving are only possible once the current project's settings
+  // have loaded, so a failed load can never PATCH values it did not return.
+  const disabled = runNowDisabled || !settings;
   const reviewEmailAvailable = settings?.review_email_available === true;
 
   return (
@@ -257,7 +280,7 @@ function DailyReviewScheduleForm({
           <button
             type="button"
             className="btn-secondary"
-            disabled={disabled}
+            disabled={runNowDisabled}
             onClick={onRunNow}
           >
             Run now
