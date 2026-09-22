@@ -125,7 +125,19 @@ research record:
   and MCP setup commands, and token listing/revocation. Service principals
   stay blocked from `/auth/*`, and device principals from everything under
   `/auth/*` except read-only `/auth/me` session introspection; see
-  [agent-setup.md](agent-setup.md).
+  [agent-setup.md](agent-setup.md). Token reads report the issued `role` and
+  the `effective_role` the token acts with now: the lower of that role and the
+  owner's current role.
+- Session sign-out and admin credential management: `POST /auth/sessions/revoke`
+  ends every session of the caller (sign out everywhere). An admin at an
+  interactive session lists and revokes another user's personal access tokens
+  with `GET /auth/users/{user_id}/tokens` and
+  `DELETE /auth/users/{user_id}/tokens/{token_id}`, and their paired devices
+  with `GET /auth/users/{user_id}/devices` and
+  `DELETE /auth/users/{user_id}/devices/{device_token_id}`. Changing a user's
+  role or password through `PATCH /auth/users/{user_id}` ends that user's
+  sessions and narrows their tokens and devices to the new role, but does not
+  revoke the tokens or devices; use these routes to cut them off.
 - Project graph views and exports for inspecting the retained question,
   evidence, goal, analysis, claim, dataset, session, and visualization graph.
   Agent-oriented reads add a bounded project overview, deterministic

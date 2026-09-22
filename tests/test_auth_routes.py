@@ -1262,6 +1262,36 @@ def test_admin_credential_change_revokes_existing_sessions(monkeypatch, tmp_path
         assert _user_id(client, _login(client, "victim", password)) == victim_id
 
 
+@pytest.mark.parametrize(
+    "update",
+    [{"password": "rotated-secret"}, {"role": "editor"}],
+    ids=["own-password", "own-role"],
+)
+def test_admin_changing_own_credentials_ends_their_current_session(
+    monkeypatch, tmp_path, update
+):
+    """Documented in self-hosted-operations.md: the admin must sign in again."""
+    _bootstrap_database(monkeypatch, tmp_path)
+    with TestClient(create_app()) as client:
+        _seed_admin(client)
+        _seed_admin(client, username="second-admin")
+        admin_token = _login(client, "root", "secret")
+        admin_id = _user_id(client, admin_token)
+
+        updated = client.patch(
+            f"/auth/users/{admin_id}",
+            json=update,
+            headers=_auth_headers(admin_token),
+        )
+
+        assert updated.status_code == 200, updated.text
+        me = client.get("/auth/me", headers=_auth_headers(admin_token))
+        assert me.status_code == 401
+        assert me.json()["error"]["message"] == "Session has been revoked."
+        password = update.get("password", "secret")
+        assert _user_id(client, _login(client, "root", password)) == admin_id
+
+
 def test_sign_out_everywhere_revokes_every_session_of_the_caller(monkeypatch, tmp_path):
     _bootstrap_database(monkeypatch, tmp_path)
     with TestClient(create_app()) as client:

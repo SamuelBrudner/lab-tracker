@@ -176,6 +176,12 @@ once: session tokens now carry a revocation epoch and an absolute lifetime
 (`LAB_TRACKER_AUTH_SESSION_MAX_AGE_HOURS`, default 168), and older tokens lack
 both. Personal access tokens and paired devices keep working. Changing a user's
 password or role, or `POST /auth/sessions/revoke`, ends that user's sessions.
+This includes an admin changing their own password or role through
+`PATCH /auth/users/{user_id}`: the request succeeds, and then that admin's
+current session is signed out and they must sign in again. Session changes do
+not revoke a user's personal access tokens or paired devices; an admin revokes
+those with `DELETE /auth/users/{user_id}/tokens/{token_id}` and
+`DELETE /auth/users/{user_id}/devices/{device_token_id}`.
 
 If you run the optional MCP service, rebuild and restart it from the same
 checkout with `docker compose --profile mcp up -d --build mcp`.
