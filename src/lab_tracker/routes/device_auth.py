@@ -9,9 +9,16 @@ from fastapi import APIRouter
 from starlette import status as http_status
 from starlette.requests import Request
 
-from lab_tracker.auth import DeviceAuthService
+from lab_tracker.auth import (
+    AuthContext,
+    AuthService,
+    DeviceAuthService,
+    DeviceToken,
+    PrincipalType,
+    Role,
+)
 from lab_tracker.config import get_settings
-from lab_tracker.errors import PermissionDeniedError
+from lab_tracker.errors import NotFoundError, PermissionDeniedError
 from lab_tracker.instance_url import build_instance_url
 from lab_tracker.schemas import (
     DeviceConsumeRead,
@@ -23,7 +30,7 @@ from lab_tracker.schemas import (
     ListEnvelope,
 )
 
-from .shared import actor_from_request
+from .shared import actor_from_request, list_response, paginate, validate_pagination
 
 _ENROLLMENT_QR_ERROR = "l"
 _ENROLLMENT_QR_MODULE_SIZE = 8
@@ -80,7 +87,11 @@ def _build_enrollment_qr_svg(url: str) -> str:
     )
 
 
-def build_device_auth_router(*, device_auth_service: DeviceAuthService) -> APIRouter:
+def build_device_auth_router(
+    *,
+    auth_service: AuthService,
+    device_auth_service: DeviceAuthService,
+) -> APIRouter:
     router = APIRouter()
 
     @router.post(
@@ -136,16 +147,7 @@ def build_device_auth_router(*, device_auth_service: DeviceAuthService) -> APIRo
         if actor.is_device:
             raise PermissionDeniedError("Listing devices requires user credentials.")
         devices = device_auth_service.list_devices(actor.user_id)
-        items = [
-            DeviceTokenRead(
-                device_token_id=device.device_token_id,
-                label=device.label,
-                created_at=device.created_at,
-                last_used_at=device.last_used_at,
-                revoked_at=device.revoked_at,
-            )
-            for device in devices
-        ]
+        items = [_device_token_read(device) for device in devices]
         return ListEnvelope(
             data=items,
             meta={"limit": max(len(items), 1), "offset": 0, "total": len(items)},
@@ -160,14 +162,60 @@ def build_device_auth_router(*, device_auth_service: DeviceAuthService) -> APIRo
         if actor.is_device:
             raise PermissionDeniedError("Revoking devices requires user credentials.")
         device = device_auth_service.revoke_device(actor.user_id, device_token_id)
-        return Envelope(
-            data=DeviceTokenRead(
-                device_token_id=device.device_token_id,
-                label=device.label,
-                created_at=device.created_at,
-                last_used_at=device.last_used_at,
-                revoked_at=device.revoked_at,
-            )
-        )
+        return Envelope(data=_device_token_read(device))
+
+    @router.get(
+        "/auth/users/{user_id:uuid}/devices",
+        response_model=ListEnvelope[DeviceTokenRead],
+    )
+    def list_user_devices(
+        user_id: UUID,
+        request: Request,
+        limit: int = 50,
+        offset: int = 0,
+    ):
+        validate_pagination(limit, offset)
+        _ensure_interactive_admin(actor_from_request(request))
+        if auth_service.get_user_by_id(user_id) is None:
+            raise NotFoundError("User does not exist.")
+        devices = [
+            _device_token_read(device) for device in device_auth_service.list_devices(user_id)
+        ]
+        items, total = paginate(devices, limit, offset)
+        return list_response(items, limit=limit, offset=offset, total=total)
+
+    @router.delete(
+        "/auth/users/{user_id:uuid}/devices/{device_token_id:uuid}",
+        response_model=Envelope[DeviceTokenRead],
+    )
+    def revoke_user_device(user_id: UUID, device_token_id: UUID, request: Request):
+        _ensure_interactive_admin(actor_from_request(request))
+        if auth_service.get_user_by_id(user_id) is None:
+            raise NotFoundError("User does not exist.")
+        device = device_auth_service.revoke_device(user_id, device_token_id)
+        return Envelope(data=_device_token_read(device))
 
     return router
+
+
+def _ensure_interactive_admin(actor: AuthContext) -> None:
+    """Revoking another user's devices needs a person at an admin session.
+
+    Paired devices and lpat_ service tokens are already fenced off /auth/* by
+    the middleware; this re-check keeps the routes fail-closed on their own.
+    """
+
+    if actor.principal_type is not PrincipalType.USER:
+        raise PermissionDeniedError("Managing devices requires user credentials.")
+    if actor.role is not Role.ADMIN:
+        raise PermissionDeniedError("Admin privileges required.")
+
+
+def _device_token_read(device: DeviceToken) -> DeviceTokenRead:
+    return DeviceTokenRead(
+        device_token_id=device.device_token_id,
+        label=device.label,
+        created_at=device.created_at,
+        last_used_at=device.last_used_at,
+        revoked_at=device.revoked_at,
+    )

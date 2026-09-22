@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
+from uuid import uuid4
+
 import pytest
 from fastapi.testclient import TestClient
 
 from lab_tracker.app import create_app
+from lab_tracker.auth import Role, utc_now
 from lab_tracker.routes.device_auth import (
     _ENROLLMENT_QR_BORDER,
     _ENROLLMENT_QR_DARK,
@@ -312,3 +316,125 @@ def test_consume_rejects_empty_label(
         json={"offer_token": enrollment["offer_token"], "label": label},
     )
     assert response.status_code in (400, 422)
+
+
+def _register_and_login(
+    client: TestClient,
+    *,
+    role: Role,
+    prefix: str,
+) -> tuple[str, dict[str, str]]:
+    username = f"{prefix}-{uuid4().hex[:8]}"
+    user = client.app.state.auth_service.register_user(
+        username=username,
+        password="secret",
+        role=role,
+    )
+    login = client.post("/auth/login", json={"username": username, "password": "secret"})
+    assert login.status_code == 200, login.text
+    return str(user.user_id), _device_headers(login.json()["data"]["access_token"])
+
+
+def test_admin_can_list_and_revoke_another_users_paired_devices(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    owner_id, owner_headers = _register_and_login(client, role=Role.EDITOR, prefix="owner")
+    device_token_id, secret = _pair_device(client, owner_headers, label="Owner phone")
+    _pair_device(client, admin_auth_headers, label="Admin's own")
+    # Changing the owner's credentials ends their sessions but not their devices,
+    # so an admin needs these routes to cut a departed member's devices off.
+    reset = client.patch(
+        f"/auth/users/{owner_id}",
+        json={"password": "a-new-password"},
+        headers=admin_auth_headers,
+    )
+    assert reset.status_code == 200, reset.text
+    assert client.get("/auth/me", headers=_device_headers(secret)).status_code == 200
+
+    listed = client.get(f"/auth/users/{owner_id}/devices", headers=admin_auth_headers)
+    assert listed.status_code == 200, listed.text
+    body = listed.json()
+    assert [item["device_token_id"] for item in body["data"]] == [device_token_id]
+    assert body["data"][0]["label"] == "Owner phone"
+    assert body["meta"] == {"limit": 50, "offset": 0, "total": 1}
+    assert "secret" not in body["data"][0]
+
+    revoked = client.delete(
+        f"/auth/users/{owner_id}/devices/{device_token_id}",
+        headers=admin_auth_headers,
+    )
+    assert revoked.status_code == 200, revoked.text
+    assert revoked.json()["data"]["revoked_at"] is not None
+    assert client.get("/auth/me", headers=_device_headers(secret)).status_code == 401
+    again = client.get(f"/auth/users/{owner_id}/devices", headers=admin_auth_headers)
+    assert again.json()["data"][0]["revoked_at"] is not None
+
+
+def test_admin_device_management_rejects_mismatched_and_unknown_targets(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    _owner_id, owner_headers = _register_and_login(client, role=Role.EDITOR, prefix="owner")
+    other_id, _ = _register_and_login(client, role=Role.VIEWER, prefix="other")
+    device_token_id, secret = _pair_device(client, owner_headers)
+
+    mismatched = client.delete(
+        f"/auth/users/{other_id}/devices/{device_token_id}",
+        headers=admin_auth_headers,
+    )
+    unknown_device = client.delete(
+        f"/auth/users/{other_id}/devices/{uuid4()}",
+        headers=admin_auth_headers,
+    )
+    unknown_user_list = client.get(f"/auth/users/{uuid4()}/devices", headers=admin_auth_headers)
+    unknown_user_revoke = client.delete(
+        f"/auth/users/{uuid4()}/devices/{device_token_id}",
+        headers=admin_auth_headers,
+    )
+
+    assert mismatched.status_code == 404
+    # A device of another user is indistinguishable from a missing one.
+    assert mismatched.json() == unknown_device.json()
+    assert unknown_user_list.status_code == 404
+    assert unknown_user_revoke.status_code == 404
+    assert client.get("/auth/me", headers=_device_headers(secret)).status_code == 200
+
+
+def test_admin_device_management_requires_an_interactive_admin(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    owner_id, owner_headers = _register_and_login(client, role=Role.EDITOR, prefix="owner")
+    device_token_id, secret = _pair_device(client, owner_headers)
+    _admin_device_id, admin_device_secret = _pair_device(client, admin_auth_headers)
+    admin_pat = client.post(
+        "/auth/tokens",
+        json={
+            "label": "Admin agent",
+            "role": "admin",
+            "read_only": False,
+            "expires_at": (utc_now() + timedelta(days=7)).isoformat(),
+        },
+        headers=admin_auth_headers,
+    )
+    assert admin_pat.status_code == 201, admin_pat.text
+    pat_headers = _device_headers(admin_pat.json()["data"]["secret"])
+    list_path = f"/auth/users/{owner_id}/devices"
+    revoke_path = f"/auth/users/{owner_id}/devices/{device_token_id}"
+
+    by_editor = client.get(list_path, headers=owner_headers)
+    revoke_by_editor = client.delete(revoke_path, headers=owner_headers)
+    by_service = client.get(list_path, headers=pat_headers)
+    revoke_by_service = client.delete(revoke_path, headers=pat_headers)
+    by_device = client.get(list_path, headers=_device_headers(admin_device_secret))
+    revoke_by_device = client.delete(revoke_path, headers=_device_headers(admin_device_secret))
+
+    assert by_editor.status_code == 401
+    assert by_editor.json()["error"]["message"] == "Admin privileges required."
+    assert revoke_by_editor.status_code == 401
+    assert by_service.status_code == 403
+    assert revoke_by_service.status_code == 403
+    assert by_device.status_code == 403
+    assert revoke_by_device.status_code == 403
+    assert client.get("/auth/me", headers=_device_headers(secret)).status_code == 200

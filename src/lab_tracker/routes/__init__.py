@@ -72,7 +72,10 @@ def register_routes(
         )
     )
     app.include_router(
-        build_device_auth_router(device_auth_service=device_auth_service)
+        build_device_auth_router(
+            auth_service=auth_service,
+            device_auth_service=device_auth_service,
+        )
     )
     app.include_router(
         build_personal_access_tokens_router(
