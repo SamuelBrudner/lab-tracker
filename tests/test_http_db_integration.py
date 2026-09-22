@@ -176,6 +176,29 @@ def test_list_routes_filter_records_by_creator(client: TestClient):
         assert response.json()["meta"]["total"] == 1
 
 
+def test_list_routes_reject_non_uuid_created_by_filter_as_validation_error(app) -> None:
+    endpoints = (
+        "/questions",
+        "/datasets",
+        "/notes",
+        "/analyses",
+        "/claims",
+        "/visualizations",
+        "/exploration-nodes",
+    )
+    with TestClient(app, raise_server_exceptions=False) as client:
+        headers = _admin_headers(client)
+        for endpoint in endpoints:
+            for bad_value in ("alice", "me", "not-a-uuid"):
+                response = client.get(
+                    endpoint,
+                    params={"created_by": bad_value},
+                    headers=headers,
+                )
+                assert response.status_code == 422, (endpoint, bad_value, response.text)
+                assert response.json()["error"]["code"] == "request_validation_error"
+
+
 def test_core_entity_crud_routes_use_database_persistence(
     client: TestClient,
     admin_auth_headers: dict[str, str],

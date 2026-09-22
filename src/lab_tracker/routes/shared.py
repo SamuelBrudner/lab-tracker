@@ -47,7 +47,7 @@ from lab_tracker.schemas import (
 )
 
 CreatedByFilter = Annotated[
-    str | None,
+    UUID | None,
     Query(
         description=(
             "Filter by the FK-backed attribution user UUID. Legacy string-only "
@@ -55,6 +55,11 @@ CreatedByFilter = Annotated[
         ),
     ),
 ]
+
+
+def created_by_filter_value(created_by: UUID | None) -> str | None:
+    """Return the canonical string form of a validated ``CreatedByFilter`` value."""
+    return str(created_by) if created_by is not None else None
 
 
 def auth_user_read(user: User) -> AuthUserRead:

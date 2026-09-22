@@ -443,7 +443,7 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 - `question_type` (optional): QuestionType enum: descriptive, hypothesis_driven, method_dev, other | null
 - `search` (optional): string | null
 - `q` (optional): string | null
-- `created_by` (optional): string | null
+- `created_by` (optional): string(uuid) | null
 - `parent_question_id` (optional): string(uuid) | null
 - `ancestor_question_id` (optional): string(uuid) | null
 - `limit` (optional): integer; default 50; maximum 200 from shared route validation
@@ -452,7 +452,7 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 #### `GET /notes`
 - `project_id` (optional): string(uuid) | null
 - `status` (optional): NoteStatus enum: staged, committed, archived | null
-- `created_by` (optional): string | null
+- `created_by` (optional): string(uuid) | null
 - `since` (optional): string(date-time) | null
 - `until` (optional): string(date-time) | null
 - `target_entity_type` (optional): EntityType enum: project, question, dataset, note, session, analysis, claim, visualization, goal | null
@@ -470,7 +470,7 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 #### `GET /datasets`
 - `project_id` (optional): string(uuid) | null
 - `status` (optional): DatasetStatus enum: staged, committed, archived | null
-- `created_by` (optional): string | null
+- `created_by` (optional): string(uuid) | null
 - `since` (optional): string(date-time) | null
 - `until` (optional): string(date-time) | null
 - `limit` (optional): integer; default 50; maximum 200 from shared route validation
@@ -487,7 +487,7 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 - `dataset_id` (optional): string(uuid) | null
 - `question_id` (optional): string(uuid) | null
 - `status` (optional): AnalysisStatus enum: staged, committed, archived | null
-- `created_by` (optional): string | null
+- `created_by` (optional): string(uuid) | null
 - `since` (optional): string(date-time) | null
 - `until` (optional): string(date-time) | null
 - `recent_first` (optional): boolean; default False
@@ -499,7 +499,7 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 - `status` (optional): ClaimStatus enum: proposed, testing, supported, rejected | null
 - `dataset_id` (optional): string(uuid) | null
 - `analysis_id` (optional): string(uuid) | null
-- `created_by` (optional): string | null
+- `created_by` (optional): string(uuid) | null
 - `since` (optional): string(date-time) | null
 - `until` (optional): string(date-time) | null
 - `limit` (optional): integer; default 50; maximum 200 from shared route validation
@@ -516,7 +516,7 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 - `project_id` (optional): string(uuid) | null
 - `analysis_id` (optional): string(uuid) | null
 - `claim_id` (optional): string(uuid) | null
-- `created_by` (optional): string | null
+- `created_by` (optional): string(uuid) | null
 - `since` (optional): string(date-time) | null
 - `until` (optional): string(date-time) | null
 - `recent_first` (optional): boolean; default False
