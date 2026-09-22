@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { apiRequest, fetchAllPages } from "../shared/api.js";
+import { flashAfterRefresh } from "./flashAfterRefresh.js";
 
 const { useCallback, useEffect, useState } = React;
 
@@ -174,20 +175,26 @@ function useDatasetWorkflow({
     setBusy(true);
     setFlash("", "");
     try {
-      await apiRequest("/datasets", {
-        body: {
-          primary_question_id: datasetPrimaryQuestionId,
-          project_id: selectedProjectId,
-          secondary_question_ids: secondaryQuestionIds,
-        },
-        method: "POST",
-        token,
-      });
+      try {
+        await apiRequest("/datasets", {
+          body: {
+            primary_question_id: datasetPrimaryQuestionId,
+            project_id: selectedProjectId,
+            secondary_question_ids: secondaryQuestionIds,
+          },
+          method: "POST",
+          token,
+        });
+      } catch (err) {
+        setFlash("", err.message || "Failed to create dataset.");
+        return;
+      }
       setDatasetSecondaryRaw("");
-      await refreshProjectData(selectedProjectId);
-      setFlash("Dataset staged.");
-    } catch (err) {
-      setFlash("", err.message || "Failed to create dataset.");
+      await flashAfterRefresh({
+        refresh: () => refreshProjectData(selectedProjectId),
+        setFlash,
+        success: "Dataset staged.",
+      });
     } finally {
       setBusy(false);
     }
@@ -212,17 +219,23 @@ function useDatasetWorkflow({
     setBusy(true);
     setFlash("", "");
     try {
-      const updated = await apiRequest(`/datasets/${datasetId}`, {
-        body: { status: "committed" },
-        method: "PATCH",
-        token,
+      let updated;
+      try {
+        updated = await apiRequest(`/datasets/${datasetId}`, {
+          body: { status: "committed" },
+          method: "PATCH",
+          token,
+        });
+      } catch (err) {
+        setFlash("", err.message || "Failed to commit dataset.");
+        return;
+      }
+      await flashAfterRefresh({
+        refresh: () => refreshProjectData(selectedProjectId),
+        setFlash,
+        success:
+          updated && updated.status === "committed" ? "Dataset committed." : "Dataset updated.",
       });
-      await refreshProjectData(selectedProjectId);
-      setFlash(
-        updated && updated.status === "committed" ? "Dataset committed." : "Dataset updated."
-      );
-    } catch (err) {
-      setFlash("", err.message || "Failed to commit dataset.");
     } finally {
       setBusy(false);
     }

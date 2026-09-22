@@ -1,4 +1,5 @@
 import { apiRequest } from "../shared/api.js";
+import { flashAfterRefresh } from "./flashAfterRefresh.js";
 
 function useQuestionActions({
   token,
@@ -28,24 +29,30 @@ function useQuestionActions({
     setBusy(true);
     setFlash("", "");
     try {
-      await apiRequest("/questions", {
-        body: {
-          hypothesis: questionHypothesis.trim() || null,
-          project_id: selectedProjectId,
-          question_type: questionType,
-          parent_question_ids: questionParentIds,
-          text: questionText.trim(),
-        },
-        method: "POST",
-        token,
-      });
+      try {
+        await apiRequest("/questions", {
+          body: {
+            hypothesis: questionHypothesis.trim() || null,
+            project_id: selectedProjectId,
+            question_type: questionType,
+            parent_question_ids: questionParentIds,
+            text: questionText.trim(),
+          },
+          method: "POST",
+          token,
+        });
+      } catch (err) {
+        setFlash("", err.message || "Failed to create question.");
+        return;
+      }
       setQuestionText("");
       setQuestionHypothesis("");
       setQuestionParentIds([]);
-      await refreshProjectData(selectedProjectId);
-      setFlash("Question staged.");
-    } catch (err) {
-      setFlash("", err.message || "Failed to create question.");
+      await flashAfterRefresh({
+        refresh: () => refreshProjectData(selectedProjectId),
+        setFlash,
+        success: "Question staged.",
+      });
     } finally {
       setBusy(false);
     }
@@ -58,15 +65,21 @@ function useQuestionActions({
     setBusy(true);
     setFlash("", "");
     try {
-      await apiRequest(`/questions/${questionId}`, {
-        body: { status: "active" },
-        method: "PATCH",
-        token,
+      try {
+        await apiRequest(`/questions/${questionId}`, {
+          body: { status: "active" },
+          method: "PATCH",
+          token,
+        });
+      } catch (err) {
+        setFlash("", err.message || "Failed to activate question.");
+        return;
+      }
+      await flashAfterRefresh({
+        refresh: () => refreshProjectData(selectedProjectId),
+        setFlash,
+        success: "Question activated.",
       });
-      await refreshProjectData(selectedProjectId);
-      setFlash("Question activated.");
-    } catch (err) {
-      setFlash("", err.message || "Failed to activate question.");
     } finally {
       setBusy(false);
     }
