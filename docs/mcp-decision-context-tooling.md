@@ -151,7 +151,15 @@ Optional person/window scope (required in practice for `progress_review`):
   The MCP tool requires a timezone offset (for example `2025-07-01T00:00:00Z`)
   and rejects `since` later than `until` before calling the API.
 
-`lab_tracker_get_decision_context` forwards all three to the HTTP endpoint.
+Which surfaces expose the person/window scope:
+
+- HTTP: `POST /assistant/decision-context` accepts `created_by`, `since`, and
+  `until` in the request body (`AssistantDecisionContextRequest`).
+- MCP: `lab_tracker_get_decision_context` takes the same three parameters,
+  validates them as described above, and forwards them in that POST body.
+- Python client / `lt` CLI: `lab_tracker_client` has no decision-context method
+  or command, so it exposes none of these filters. Use the MCP tool or call the
+  HTTP endpoint directly for a `progress_review` briefing.
 
 Response shape:
 
