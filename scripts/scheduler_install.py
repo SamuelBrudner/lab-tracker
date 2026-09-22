@@ -29,6 +29,7 @@ from urllib.parse import urlsplit
 MAX_INTERVAL_MINUTES = 24 * 60
 _CRONTAB_ABSENT_MARKERS = ("no crontab for",)
 _SECRET_ENV_KEYS = ("LAB_TRACKER_API_KEY", "LAB_TRACKER_ADMIN_USER", "LAB_TRACKER_ADMIN_PASS")
+_ADMIN_PAIR = ("LAB_TRACKER_ADMIN_USER", "LAB_TRACKER_ADMIN_PASS")
 # A base API URL only ever needs scheme, host, optional port, and an optional
 # path prefix. Restricting to this charset rejects every byte that is dangerous
 # in a crontab command field (quotes, ; $ % ( ) { } < > | & backtick, control
@@ -259,19 +260,44 @@ def _restrict_to_owner(path: str) -> None:
         os.close(fd)
 
 
+def lone_admin_half(values: dict[str, str]) -> str | None:
+    """Return the admin-pair key missing from ``values`` when exactly one half is set."""
+    present = [key for key in _ADMIN_PAIR if values.get(key)]
+    if len(present) != 1:
+        return None
+    return next(key for key in _ADMIN_PAIR if key not in present)
+
+
 def write_secrets_file(path: str, values: dict[str, str]) -> bool:
     """Write non-empty secret values to a private 0600 JSON file.
 
-    Returns False, leaving the file untouched, when every supplied value is
-    empty and the file already holds credentials: re-running an installer from
-    a shell without the credential exported (e.g. to change the interval) must
-    not silently wipe the persisted token. Delete the file to clear it.
+    The supplied credential replaces the stored one. Returns False, leaving the
+    file untouched, when every supplied value is empty and the file already
+    holds credentials: re-running an installer from a shell without the
+    credential exported (e.g. to change the interval) must not silently wipe the
+    persisted token. Delete the file to clear it.
+
+    When only one of ``LAB_TRACKER_ADMIN_USER`` / ``LAB_TRACKER_ADMIN_PASS`` is
+    supplied (for example a password rotation), the other half is carried over
+    from the stored file; if the file has no such value the write is refused
+    with ``SchedulerConfigError`` rather than persisting a login that cannot
+    work.
 
     O_NOFOLLOW refuses to follow a pre-planted symlink at the fixed secrets path,
     so a local attacker cannot redirect the write (or the O_TRUNC) onto another
     file the user owns.
     """
     data = {key: value for key, value in values.items() if value}
+    missing = lone_admin_half(data)
+    if missing is not None:
+        stored = _read_existing_secrets(path).get(missing)
+        if not isinstance(stored, str) or not stored:
+            provided = next(key for key in _ADMIN_PAIR if key != missing)
+            raise SchedulerConfigError(
+                f"{provided} is set but {missing} is not, and {path} has no stored "
+                f"{missing} to keep; export both {' and '.join(_ADMIN_PAIR)}."
+            )
+        data[missing] = stored
     if not data and any(_read_existing_secrets(path).values()):
         _restrict_to_owner(path)
         return False
@@ -347,10 +373,14 @@ def _cmd_render_plist(args: argparse.Namespace) -> int:
 
 
 def _cmd_write_secrets(args: argparse.Namespace) -> int:
-    written = write_secrets_file(
-        args.path,
-        {key: os.environ.get(key, "") for key in _SECRET_ENV_KEYS},
-    )
+    values = {key: os.environ.get(key, "") for key in _SECRET_ENV_KEYS}
+    written = write_secrets_file(args.path, values)
+    carried = lone_admin_half(values)
+    if carried is not None:
+        sys.stderr.write(
+            f"lab-tracker scheduler: {carried} is not set; keeping the stored {carried} "
+            f"from {args.path}.\n"
+        )
     if not written:
         sys.stderr.write(
             f"lab-tracker scheduler: none of {', '.join(_SECRET_ENV_KEYS)} is set; "

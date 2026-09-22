@@ -19,6 +19,9 @@
   to the current user only. The task definition carries only that file's path;
   the trigger reads it structurally (ConvertFrom-Json) at run time. Re-running
   with no credential set keeps an existing secrets file; delete it to clear it.
+  Setting only one of LAB_TRACKER_ADMIN_USER / LAB_TRACKER_ADMIN_PASS (e.g. to
+  rotate the password) keeps the other from the existing file, and fails if the
+  file has none.
 
   Each run appends a timestamped result line to -LogFile (default
   %LOCALAPPDATA%\LabTracker\daily-review.log).
@@ -87,6 +90,24 @@ foreach ($pair in @(
         @("LAB_TRACKER_ADMIN_USER", $env:LAB_TRACKER_ADMIN_USER),
         @("LAB_TRACKER_ADMIN_PASS", $env:LAB_TRACKER_ADMIN_PASS))) {
     if ($pair[1]) { $credentials[$pair[0]] = [string]$pair[1] }
+}
+
+# Only one half of the admin login set (e.g. a password rotation): carry the
+# other half over from the stored file, or refuse before anything is written,
+# so the file never ends up holding a login that cannot work.
+if ($credentials.Contains("LAB_TRACKER_ADMIN_USER") -xor $credentials.Contains("LAB_TRACKER_ADMIN_PASS")) {
+    $missing = if ($credentials.Contains("LAB_TRACKER_ADMIN_USER")) { "LAB_TRACKER_ADMIN_PASS" } else { "LAB_TRACKER_ADMIN_USER" }
+    $stored = $null
+    if (Test-Path -LiteralPath $SecretsFile) {
+        # Fails loudly on malformed JSON rather than silently discarding it.
+        $stored = (Get-Content -LiteralPath $SecretsFile -Raw | ConvertFrom-Json).$missing
+    }
+    if (-not $stored) {
+        throw ("$missing is not set in this session and $SecretsFile has no stored $missing to keep; " +
+            "export both LAB_TRACKER_ADMIN_USER and LAB_TRACKER_ADMIN_PASS and re-run the installer.")
+    }
+    $credentials[$missing] = [string]$stored
+    Write-Host "$missing is not set; keeping the stored $missing from $SecretsFile."
 }
 
 $hasCredential = $false

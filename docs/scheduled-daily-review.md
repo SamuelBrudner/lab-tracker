@@ -83,6 +83,9 @@ secret values never appear in the crontab or launchd plist.
 Re-running an installer from a shell where none of those credentials is
 exported keeps the existing secrets file (and resets its mode to `0600`);
 export a new credential to replace it, or delete the file to clear it.
+Exporting only one of `LAB_TRACKER_ADMIN_USER` / `LAB_TRACKER_ADMIN_PASS` (for
+example to rotate the password) keeps the other from the existing file; if the
+file has none, the installer refuses and changes nothing.
 
 The Windows installer does the same: a Scheduled Task does not inherit
 `$env:` assignments from the installing PowerShell session, so
@@ -91,7 +94,9 @@ The Windows installer does the same: a Scheduled Task does not inherit
 `%LOCALAPPDATA%\LabTracker\daily-review.secrets.json`, with inheritance
 disabled and access granted to the current user only. The task definition
 carries only that file's path; the trigger reads it with `ConvertFrom-Json` at
-run time. Re-running without a credential set keeps the existing file. Each
+run time. Re-running without a credential set keeps the existing file, and
+setting only one of the admin user/password keeps the other from it (or
+refuses when the file has none). Each
 scheduled run appends a timestamped success or failure line to
 `%LOCALAPPDATA%\LabTracker\daily-review.log` and exits non-zero on failure,
 so Task Scheduler's **Last Run Result** shows it too. Installing against a

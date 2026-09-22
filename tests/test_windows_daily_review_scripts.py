@@ -78,6 +78,27 @@ def test_installer_keeps_existing_credentials_when_none_exported() -> None:
     assert "keeping the existing credentials" in installer
 
 
+def test_installer_completes_a_lone_admin_credential_from_the_stored_file() -> None:
+    # Only LAB_TRACKER_ADMIN_PASS (or only _USER) set in the session must not
+    # overwrite the file with half a login: the missing half is carried over
+    # from the stored file, or the installer refuses before writing anything.
+    installer = _text(INSTALLER)
+
+    assert (
+        '$credentials.Contains("LAB_TRACKER_ADMIN_USER") -xor '
+        '$credentials.Contains("LAB_TRACKER_ADMIN_PASS")'
+    ) in installer
+    completion = installer.index("-xor")
+    stored_read = installer.index("Get-Content -LiteralPath $SecretsFile -Raw", completion)
+    carried = installer.index("$credentials[$missing] = [string]$stored", completion)
+    refusal = installer.index("throw", completion)
+    write = installer.index("WriteAllText($SecretsFile")
+    assert completion < stored_read < write
+    assert completion < carried < write
+    assert completion < refusal < write
+    assert "export both LAB_TRACKER_ADMIN_USER and LAB_TRACKER_ADMIN_PASS" in installer
+
+
 def test_installer_warns_for_a_remote_url_without_credentials() -> None:
     installer = _text(INSTALLER)
 
