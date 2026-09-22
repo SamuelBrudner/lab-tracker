@@ -3,6 +3,7 @@ from __future__ import annotations
 import ctypes
 import errno
 import gc
+import json
 import os
 import signal
 import subprocess
@@ -10,6 +11,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
 
 import pytest
@@ -712,6 +714,369 @@ print(child.pid, flush=True)
     _assert_pid_terminated(pid)
 
 
+_NEVER_REAPING_INIT_HARNESS = r"""
+import ctypes
+import json
+import sys
+import time
+
+from lab_tracker.bounded_subprocess import (
+    BoundedSubprocessExecutor,
+    ProcessDeadline,
+    ProcessExecutionError,
+)
+
+PR_SET_CHILD_SUBREAPER = 36
+libc = ctypes.CDLL(None, use_errno=True)
+if libc.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
+    raise OSError(ctypes.get_errno(), "prctl(PR_SET_CHILD_SUBREAPER) failed")
+# From here on this process adopts every orphaned descendant and, like a
+# server running as PID 1 without an init, never waits for them.
+
+INHERITED_PIPE = '''
+import subprocess, sys
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+print(child.pid, flush=True)
+'''
+CLOSED_PIPES = '''
+import subprocess, sys
+child = subprocess.Popen(
+    [sys.executable, "-c", "import time; time.sleep(60)"],
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+print(child.pid, flush=True)
+'''
+
+
+def state_of(pid):
+    with open(f"/proc/{pid}/stat", "rb") as stat_file:
+        raw = stat_file.read()
+    fields = raw[raw.rfind(b")") + 2 :].split()
+    return {"state": fields[0].decode(), "ppid": int(fields[1])}
+
+
+executor = BoundedSubprocessExecutor()
+report = {"maximum_cleanup_seconds": executor.maximum_cleanup_seconds}
+for name, source, deadline_seconds in (
+    ("inherited_pipe", INHERITED_PIPE, 0.25),
+    ("closed_pipes", CLOSED_PIPES, 5.0),
+):
+    pid_bytes = bytearray()
+    started = time.monotonic()
+    outcome = "returned"
+    returncode = None
+    try:
+        returncode = executor.run(
+            (sys.executable, "-c", source),
+            deadline=ProcessDeadline.after(deadline_seconds),
+            stdout_limit_bytes=1024,
+            stderr_limit_bytes=1024,
+            stdout_consumer=pid_bytes.extend,
+        ).returncode
+    except ProcessExecutionError as error:
+        outcome = type(error).__name__
+    elapsed = time.monotonic() - started
+    descendant = int(pid_bytes.strip())
+    report[name] = {
+        "outcome": outcome,
+        "returncode": returncode,
+        "elapsed": elapsed,
+        "deadline_seconds": deadline_seconds,
+        "descendant": state_of(descendant),
+    }
+report["harness_pid"] = __import__("os").getpid()
+print(json.dumps(report), flush=True)
+"""
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="requires Linux child subreapers and /proc",
+)
+def test_zombie_only_group_is_terminated_under_never_reaping_init() -> None:
+    completed = subprocess.run(  # noqa: S603 - fixed Python test harness
+        _python(_NEVER_REAPING_INIT_HARNESS),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr.decode(errors="replace")
+    report = json.loads(completed.stdout)
+    maximum_cleanup = report["maximum_cleanup_seconds"]
+
+    inherited = report["inherited_pipe"]
+    assert inherited["outcome"] == "ProcessDeadlineExceeded"
+    closed = report["closed_pipes"]
+    assert closed["outcome"] == "returned"
+    assert closed["returncode"] == 0
+    for scenario in (inherited, closed):
+        # The killed descendant was adopted by the harness and is still an
+        # unreaped zombie: cleanup succeeded without any init reaping it.
+        assert scenario["descendant"] == {
+            "state": "Z",
+            "ppid": report["harness_pid"],
+        }
+    assert inherited["elapsed"] < (
+        inherited["deadline_seconds"] + maximum_cleanup + 0.75
+    )
+    assert closed["elapsed"] < maximum_cleanup + 2.0
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
+def test_live_group_member_that_survives_kill_still_fails_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_killpg = os.killpg
+    signals: list[int] = []
+
+    def killpg_that_cannot_kill(process_group_id: int, signum: int) -> None:
+        signals.append(signum)
+        if signum == bounded_subprocess._POSIX_SIGKILL:
+            # Report delivery without killing, as for a member that survives.
+            real_killpg(process_group_id, 0)
+            return
+        real_killpg(process_group_id, signum)
+
+    monkeypatch.setattr(
+        bounded_subprocess,
+        "_kill_process_group",
+        killpg_that_cannot_kill,
+    )
+    # SIG_IGN survives exec, so the descendant ignores SIGTERM from birth.
+    source = """
+import signal
+import subprocess
+import sys
+
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+child = subprocess.Popen(
+    [sys.executable, "-c", "import time; time.sleep(60)"],
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+print(child.pid, flush=True)
+"""
+    executor = BoundedSubprocessExecutor(
+        terminate_grace_seconds=0.05,
+        kill_grace_seconds=0.20,
+    )
+    descendant_pid = bytearray()
+    started = time.monotonic()
+    try:
+        with pytest.raises(ProcessCleanupError) as raised:
+            executor.run(
+                _python(source),
+                deadline=_deadline(),
+                stdout_limit_bytes=1024,
+                stderr_limit_bytes=1024,
+                stdout_consumer=descendant_pid.extend,
+            )
+        elapsed = time.monotonic() - started
+        pid = int(descendant_pid.strip())
+        assert _pid_is_running(pid)
+    finally:
+        if descendant_pid.strip():
+            with suppress(ProcessLookupError):
+                os.kill(int(descendant_pid.strip()), bounded_subprocess._POSIX_SIGKILL)
+
+    assert str(raised.value) == "Subprocess cleanup failed."
+    assert bounded_subprocess._POSIX_SIGKILL in signals
+    assert elapsed < executor.maximum_cleanup_seconds + 2.0
+    _assert_pid_terminated(pid)
+
+
+def _write_proc_stat(
+    root: Path,
+    pid: int,
+    *,
+    state: str,
+    process_group_id: int,
+    threads: int = 1,
+    comm: str = "python3",
+) -> None:
+    fields = [
+        state,
+        "1",
+        str(process_group_id),
+        str(process_group_id),
+        "0",
+        "-1",
+        "4194304",
+        *(["0"] * 8),
+        "20",
+        "0",
+        str(threads),
+        "0",
+        "12345",
+    ]
+    process_dir = root / str(pid)
+    process_dir.mkdir()
+    (process_dir / "stat").write_text(f"{pid} ({comm}) {' '.join(fields)}\n")
+
+
+@pytest.fixture
+def fake_proc(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    if os.name != "posix":
+        pytest.skip("requires POSIX symlinks")
+    root = tmp_path / "proc"
+    root.mkdir()
+    (root / "self").symlink_to(str(os.getpid()))
+    (root / "meminfo").write_text("MemTotal: 1 kB\n")
+    monkeypatch.setattr(bounded_subprocess, "_PROC_ROOT", str(root))
+    monkeypatch.setattr(sys, "platform", "linux")
+    return root
+
+
+def test_zombie_scan_accepts_group_whose_members_are_all_zombies(
+    fake_proc: Path,
+) -> None:
+    _write_proc_stat(fake_proc, 500, state="Z", process_group_id=500)
+    _write_proc_stat(
+        fake_proc,
+        501,
+        state="X",
+        process_group_id=500,
+        comm="evil) R 1 500 (name",
+    )
+    _write_proc_stat(fake_proc, 502, state="S", process_group_id=777)
+
+    assert bounded_subprocess._process_group_has_only_zombies(500) is True
+
+
+@pytest.mark.parametrize(
+    "member",
+    [
+        {"state": "S"},
+        {"state": "R"},
+        {"state": "D"},
+        {"state": "T"},
+        # Linux shows a process whose main thread exited as Z while other
+        # threads still run; only a single-thread zombie is really dead.
+        {"state": "Z", "threads": 2},
+    ],
+    ids=["sleeping", "running", "uninterruptible", "stopped", "zombie-leader-thread"],
+)
+def test_zombie_scan_rejects_group_with_live_member(
+    fake_proc: Path,
+    member: dict[str, object],
+) -> None:
+    _write_proc_stat(fake_proc, 500, state="Z", process_group_id=500)
+    _write_proc_stat(
+        fake_proc,
+        503,
+        state=str(member["state"]),
+        process_group_id=500,
+        threads=int(str(member.get("threads", 1))),
+    )
+
+    assert bounded_subprocess._process_group_has_only_zombies(500) is False
+
+
+def test_zombie_scan_is_inconclusive_without_group_members(fake_proc: Path) -> None:
+    _write_proc_stat(fake_proc, 502, state="Z", process_group_id=777)
+
+    assert bounded_subprocess._process_group_has_only_zombies(500) is False
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    ["unparseable-stat", "foreign-pid-namespace", "unreadable-stat", "no-proc"],
+)
+def test_zombie_scan_fails_closed_when_proc_is_not_authoritative(
+    fake_proc: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    corruption: str,
+) -> None:
+    _write_proc_stat(fake_proc, 500, state="Z", process_group_id=500)
+    if corruption == "unparseable-stat":
+        bad = fake_proc / "504"
+        bad.mkdir()
+        (bad / "stat").write_text("504 (truncated")
+    elif corruption == "foreign-pid-namespace":
+        (fake_proc / "self").unlink()
+        (fake_proc / "self").symlink_to("1")
+    elif corruption == "unreadable-stat":
+        (fake_proc / "505").mkdir()
+        (fake_proc / "505" / "stat").mkdir()
+    else:
+        monkeypatch.setattr(
+            bounded_subprocess,
+            "_PROC_ROOT",
+            str(fake_proc / "missing"),
+        )
+
+    assert bounded_subprocess._process_group_has_only_zombies(500) is False
+
+
+def test_zombie_scan_is_linux_only(
+    fake_proc: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_proc_stat(fake_proc, 500, state="Z", process_group_id=500)
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    assert bounded_subprocess._process_group_has_only_zombies(500) is False
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
+@pytest.mark.parametrize(
+    ("kill_outcome", "expected_signals", "zombie_scans", "succeeds"),
+    [
+        (None, [signal.SIGTERM, 0, "KILL", 0], 1, True),
+        (
+            PermissionError(errno.EPERM, "denied KILL"),
+            [signal.SIGTERM, 0, "KILL", 0],
+            0,
+            False,
+        ),
+    ],
+    ids=["after-delivered-kill", "never-without-delivered-kill"],
+)
+def test_zombie_only_group_is_accepted_only_after_delivered_kill(
+    monkeypatch: pytest.MonkeyPatch,
+    kill_outcome: BaseException | None,
+    expected_signals: list[int | str],
+    zombie_scans: int,
+    succeeds: bool,
+) -> None:
+    process = FakePosixProcess()
+    calls = _install_process_group_outcomes(
+        monkeypatch,
+        [None, None, kill_outcome, None],
+    )
+    scanned_after: list[list[int]] = []
+
+    def fake_zombie_scan(process_group_id: int) -> bool:
+        assert process_group_id == FakePosixProcess.pid
+        scanned_after.append(list(calls))
+        return True
+
+    monkeypatch.setattr(
+        bounded_subprocess,
+        "_process_group_has_only_zombies",
+        fake_zombie_scan,
+    )
+    lifecycle = _posix_lifecycle(process)
+
+    if succeeds:
+        lifecycle.stop(cleanup_expires_at=time.monotonic())
+        lifecycle.stop(cleanup_expires_at=time.monotonic())
+    else:
+        with pytest.raises(ProcessCleanupError):
+            lifecycle.stop(cleanup_expires_at=time.monotonic())
+
+    sigkill = bounded_subprocess._POSIX_SIGKILL
+    assert calls == [sigkill if s == "KILL" else s for s in expected_signals]
+    assert len(scanned_after) == zombie_scans
+    for observed in scanned_after:
+        assert sigkill in observed
+    assert process.returncode == 0
+
+
 def test_cleanup_uses_one_advertised_absolute_bound() -> None:
     executor = BoundedSubprocessExecutor(
         terminate_grace_seconds=0.05,
@@ -1035,6 +1400,15 @@ def _assert_pid_terminated(pid: int) -> None:
 def _pid_is_running(pid: int) -> bool:
     if os.name == "nt":
         return _windows_pid_is_running(pid)
+    if sys.platform.startswith("linux"):
+        # A killed descendant is re-parented to init; it is terminated once it
+        # is a zombie, whether or not init ever reaps it.
+        try:
+            with open(f"/proc/{pid}/stat", "rb") as stat_file:
+                raw = stat_file.read()
+        except (FileNotFoundError, ProcessLookupError):
+            return False
+        return raw[raw.rfind(b")") + 2 :].split()[0] not in {b"Z", b"X"}
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
