@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import functools
+import inspect
 import ipaddress
 import os
 import re
 import secrets
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import urlparse
 
+import anyio.to_thread
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.responses import Response
@@ -204,6 +208,33 @@ class MCPInboundBearerAuthMiddleware:
         )
 
 
+def _offload_blocking_tool(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Run a synchronous tool in a worker thread instead of on the event loop.
+
+    FastMCP awaits async tools but calls sync ones inline on its event loop, and
+    every Lab Tracker tool does blocking HTTP I/O, so one slow API call would
+    stall every other client of a hosted server. ``functools.wraps`` keeps the
+    name, docstring and (through ``__wrapped__``) the signature FastMCP derives
+    the tool schema from, so the registered contract and results are unchanged.
+    """
+
+    if inspect.iscoroutinefunction(fn):
+        return fn
+
+    @functools.wraps(fn)
+    async def run_in_worker_thread(*args: Any, **kwargs: Any) -> Any:
+        return await anyio.to_thread.run_sync(functools.partial(fn, *args, **kwargs))
+
+    return run_in_worker_thread
+
+
+class LabTrackerFastMCP(FastMCP):
+    """FastMCP server that keeps blocking tool calls off the event loop."""
+
+    def add_tool(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
+        super().add_tool(_offload_blocking_tool(fn), *args, **kwargs)
+
+
 def build_server(settings: MCPServerRuntimeSettings | None = None) -> FastMCP:
     settings = settings or MCPServerRuntimeSettings()
     kwargs: dict[str, object] = {}
@@ -226,7 +257,7 @@ def build_server(settings: MCPServerRuntimeSettings | None = None) -> FastMCP:
                 allowed_origins=list(settings.allowed_origins),
             ),
         }
-    runtime_server = FastMCP(
+    runtime_server = LabTrackerFastMCP(
         SERVER_NAME,
         instructions=MCP_SERVER_INSTRUCTIONS,
         **kwargs,

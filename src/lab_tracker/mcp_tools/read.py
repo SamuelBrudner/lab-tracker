@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Annotated, Any, Literal
 
 import httpx
@@ -29,6 +30,9 @@ from lab_tracker_client.connection_diagnostics import connection_error_metadata
 
 _cached_read_client: Any | None = None
 _cached_read_client_factory: Any | None = None
+# Tools run in worker threads (see mcp_server.LabTrackerFastMCP), so the shared
+# read client is created, replaced and discarded under a lock.
+_read_client_lock = threading.Lock()
 
 PersistedGraphEntityTypeInput = Literal[
     "question",
@@ -58,19 +62,42 @@ GraphDirectionInput = Literal["incoming", "outgoing", "both"]
 
 def _read_client() -> Any:
     global _cached_read_client, _cached_read_client_factory
-    if _cached_read_client is None or _cached_read_client_factory is not client_from_env:
-        close_cached_read_client()
-        _cached_read_client = client_from_env()
-        _cached_read_client_factory = client_from_env
-    return _cached_read_client
+    with _read_client_lock:
+        if _cached_read_client is None or _cached_read_client_factory is not client_from_env:
+            _close_cached_read_client_locked()
+            _cached_read_client = client_from_env()
+            _cached_read_client_factory = client_from_env
+        return _cached_read_client
 
 
 def close_cached_read_client() -> None:
+    with _read_client_lock:
+        _close_cached_read_client_locked()
+
+
+def _close_cached_read_client_locked() -> None:
     global _cached_read_client, _cached_read_client_factory
     if _cached_read_client is not None:
         _cached_read_client.close()
     _cached_read_client = None
     _cached_read_client_factory = None
+
+
+def _discard_read_client(client: Any) -> None:
+    """Drop ``client`` from the cache if it is still the cached one, then close it.
+
+    A concurrent call may already have replaced the cached client; never close
+    that newer client because this call's (older) one failed.
+    """
+
+    global _cached_read_client, _cached_read_client_factory
+    with _read_client_lock:
+        is_cached = _cached_read_client is client
+        if is_cached:
+            _cached_read_client = None
+            _cached_read_client_factory = None
+    if is_cached:
+        client.close()
 
 
 def _read_tool(
@@ -83,7 +110,7 @@ def _read_tool(
     try:
         return with_next_action(call(client), hint)
     except (LabTrackerAPIUnavailableError, httpx.HTTPError) as exc:
-        close_cached_read_client()
+        _discard_read_client(client)
         return lab_tracker_unavailable(
             tool_name, detail=str(exc), **connection_error_metadata(exc)
         )
