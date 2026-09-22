@@ -22,6 +22,7 @@ from lab_tracker.auth import (
     Role,
     device_principal_can_access,
     extract_bearer_token,
+    resolve_session_user,
     service_principal_can_access,
 )
 from lab_tracker.errors import AuthError, RateLimitError
@@ -217,16 +218,13 @@ def configure_auth_middleware(app: FastAPI) -> None:
                     principal_type=PrincipalType.SERVICE,
                 )
             else:
-                claims = await run_in_threadpool(
-                    app.state.token_service.verify_access_token,
-                    token,
+                _claims, user = await run_in_threadpool(
+                    lambda: resolve_session_user(
+                        token,
+                        token_service=app.state.token_service,
+                        auth_service=app.state.auth_service,
+                    )
                 )
-                user = await run_in_threadpool(
-                    app.state.auth_service.get_user_by_id,
-                    claims.user_id,
-                )
-                if user is None:
-                    raise AuthError("Invalid token.")
                 request.state.auth_context = AuthContext(user_id=user.user_id, role=user.role)
         except RateLimitError as exc:
             return _rate_limited_response(str(exc))

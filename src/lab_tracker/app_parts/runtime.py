@@ -286,6 +286,7 @@ def _build_app_runtime(
     token_service = TokenService(
         settings.auth_secret_key,
         ttl_minutes=settings.auth_token_ttl_minutes,
+        max_session_age_hours=settings.auth_session_max_age_hours,
     )
     invitation_token_service = InvitationTokenService(
         settings.auth_secret_key,

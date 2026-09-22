@@ -17,8 +17,11 @@ from lab_tracker.auth import (
     AuthService,
     Invitation,
     InvitationTokenService,
+    PrincipalType,
     Role,
     TokenService,
+    extract_bearer_token,
+    resolve_session_user,
 )
 from lab_tracker.db_types import ensure_uuid
 from lab_tracker.errors import AuthError
@@ -221,11 +224,29 @@ def build_auth_router(
         if not request.app.state.auth_enabled:
             raise AuthError("Token refresh is unavailable when authentication is disabled.")
         actor = actor_from_request(request)
-        user = auth_service.get_user_by_id(actor.user_id)
-        if user is None:
-            raise AuthError("Authentication required.")
-        token = token_service.issue_access_token(user)
+        if actor.principal_type is not PrincipalType.USER:
+            raise AuthError("Token refresh requires a user session.")
+        claims, user = resolve_session_user(
+            extract_bearer_token(request.headers.get("authorization")),
+            token_service=token_service,
+            auth_service=auth_service,
+        )
+        # Carry the original sign-in time so refresh cannot outlive the
+        # absolute session lifetime.
+        token = token_service.issue_access_token(user, auth_time=claims.auth_time)
         return Envelope(data=auth_token_read(user, token.token, token.expires_at))
+
+    @router.post("/auth/sessions/revoke", response_model=Envelope[AuthUserRead])
+    def revoke_auth_sessions(request: Request):
+        """Sign out everywhere: invalidate every session JWT of the caller."""
+
+        if not request.app.state.auth_enabled:
+            raise AuthError("Session revocation is unavailable when authentication is disabled.")
+        actor = actor_from_request(request)
+        if actor.principal_type is not PrincipalType.USER:
+            raise AuthError("Session revocation requires a user session.")
+        user = auth_service.revoke_sessions(actor.user_id)
+        return Envelope(data=auth_user_read(user))
 
     @router.get("/auth/me", response_model=Envelope[AuthUserRead])
     def auth_me(request: Request):

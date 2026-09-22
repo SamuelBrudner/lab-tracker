@@ -1126,3 +1126,123 @@ def test_public_viewer_registration_can_be_disabled(monkeypatch, tmp_path):
 
     assert created_by_admin.status_code == 201
     assert created_by_admin.json()["data"]["user"]["role"] == "viewer"
+
+
+def _frozen_auth_clock(monkeypatch) -> dict[str, datetime]:
+    import lab_tracker.auth as auth_module
+
+    current_time = {"value": datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)}
+    monkeypatch.setattr(auth_module, "utc_now", lambda: current_time["value"])
+    return current_time
+
+
+def _user_id(client: TestClient, token: str) -> str:
+    response = client.get("/auth/me", headers=_auth_headers(token))
+    assert response.status_code == 200, response.text
+    return response.json()["data"]["user_id"]
+
+
+@pytest.mark.parametrize(
+    "update",
+    [{"password": "rotated-secret"}, {"role": "editor"}],
+    ids=["password-reset", "role-change"],
+)
+def test_admin_credential_change_revokes_existing_sessions(monkeypatch, tmp_path, update):
+    _bootstrap_database(monkeypatch, tmp_path)
+    with TestClient(create_app()) as client:
+        _seed_admin(client)
+        admin_token = _login(client, "root", "secret")
+        _seed_admin(client, username="victim", password="secret")
+        client.app.state.auth_service.update_user(
+            client.app.state.auth_service.get_user("victim").user_id,
+            role=Role.VIEWER,
+        )
+        stolen_token = _login(client, "victim", "secret")
+        victim_id = _user_id(client, stolen_token)
+
+        updated = client.patch(
+            f"/auth/users/{victim_id}",
+            json=update,
+            headers=_auth_headers(admin_token),
+        )
+        assert updated.status_code == 200, updated.text
+
+        me = client.get("/auth/me", headers=_auth_headers(stolen_token))
+        refresh = client.post("/auth/refresh", headers=_auth_headers(stolen_token))
+        assert me.status_code == 401
+        assert me.json()["error"]["message"] == "Session has been revoked."
+        assert refresh.status_code == 401
+        # Unrelated sessions keep working.
+        assert client.get("/auth/me", headers=_auth_headers(admin_token)).status_code == 200
+        password = update.get("password", "secret")
+        assert _user_id(client, _login(client, "victim", password)) == victim_id
+
+
+def test_sign_out_everywhere_revokes_every_session_of_the_caller(monkeypatch, tmp_path):
+    _bootstrap_database(monkeypatch, tmp_path)
+    with TestClient(create_app()) as client:
+        _seed_admin(client)
+        _seed_admin(client, username="other")
+        laptop = _login(client, "root", "secret")
+        phone = _login(client, "root", "secret")
+        other = _login(client, "other", "secret")
+
+        revoked = client.post("/auth/sessions/revoke", headers=_auth_headers(laptop))
+
+        assert revoked.status_code == 200, revoked.text
+        assert revoked.json()["data"]["username"] == "root"
+        assert client.get("/auth/me", headers=_auth_headers(laptop)).status_code == 401
+        assert client.get("/auth/me", headers=_auth_headers(phone)).status_code == 401
+        assert client.post("/auth/refresh", headers=_auth_headers(phone)).status_code == 401
+        # A revoked admin session can no longer authorize privileged registration.
+        register = client.post(
+            "/auth/register",
+            json={"username": "editor-x", "password": "secret", "role": "editor"},
+            headers=_auth_headers(phone),
+        )
+        assert register.status_code == 401
+        assert client.get("/auth/me", headers=_auth_headers(other)).status_code == 200
+        fresh = _login(client, "root", "secret")
+        assert client.get("/auth/me", headers=_auth_headers(fresh)).status_code == 200
+
+
+def test_sign_out_everywhere_is_unavailable_when_auth_is_disabled(monkeypatch, tmp_path):
+    _bootstrap_database(monkeypatch, tmp_path)
+    monkeypatch.setenv("LAB_TRACKER_AUTH_ENABLED", "false")
+    with TestClient(create_app()) as client:
+        response = client.post("/auth/sessions/revoke")
+        assert response.status_code == 401
+        assert "authentication is disabled" in response.json()["error"]["message"]
+
+
+def test_refresh_cannot_extend_a_session_past_its_absolute_lifetime(monkeypatch, tmp_path):
+    _bootstrap_database(monkeypatch, tmp_path)
+    monkeypatch.setenv("LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES", "60")
+    monkeypatch.setenv("LAB_TRACKER_AUTH_SESSION_MAX_AGE_HOURS", "2")
+    clock = _frozen_auth_clock(monkeypatch)
+    signed_in_at = clock["value"]
+
+    with TestClient(create_app()) as client:
+        _seed_admin(client, username="sam")
+        token = _login(client, "sam", "secret")
+        for minutes in (50, 100):
+            clock["value"] = signed_in_at + timedelta(minutes=minutes)
+            refreshed = client.post("/auth/refresh", headers=_auth_headers(token))
+            assert refreshed.status_code == 200, refreshed.text
+            token = refreshed.json()["data"]["access_token"]
+        expires_at = datetime.fromisoformat(
+            refreshed.json()["data"]["expires_at"].replace("Z", "+00:00")
+        )
+        # The refresh at +100 min would normally run to +160 min; it is capped.
+        assert expires_at == signed_in_at + timedelta(hours=2)
+
+        clock["value"] = signed_in_at + timedelta(minutes=119)
+        assert client.get("/auth/me", headers=_auth_headers(token)).status_code == 200
+        clock["value"] = signed_in_at + timedelta(hours=2)
+        assert client.post("/auth/refresh", headers=_auth_headers(token)).status_code == 401
+        assert client.get("/auth/me", headers=_auth_headers(token)).status_code == 401
+
+        # Signing in again starts a new session.
+        assert client.get(
+            "/auth/me", headers=_auth_headers(_login(client, "sam", "secret"))
+        ).status_code == 200

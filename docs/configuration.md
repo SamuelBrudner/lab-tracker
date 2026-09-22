@@ -51,6 +51,15 @@ that destination through your normal off-machine backup process.
 - `LAB_TRACKER_AUTH_SECRET_KEY`: auth signing secret (the placeholder default is
   rejected whenever authentication is enabled, including in `local`)
 - `LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES`: access token lifetime (default: `720`)
+- `LAB_TRACKER_AUTH_SESSION_MAX_AGE_HOURS`: absolute lifetime of a signed-in
+  session (default: `168`, i.e. 7 days; between `1` and `8760`, and no shorter
+  than `LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES`). `/auth/refresh` carries the
+  original sign-in time forward and never issues a token past this limit, so
+  users sign in again at least this often. Separately, changing a user's
+  password or role, or calling `POST /auth/sessions/revoke` (sign out
+  everywhere), immediately invalidates every session token that user holds;
+  personal access tokens and paired devices are managed separately under
+  `/auth/tokens` and `/auth/devices`.
 - `LAB_TRACKER_AUTH_INVITE_TTL_HOURS`: signed invitation link lifetime
   (default: `168`)
 - `LAB_TRACKER_AUTH_RATE_LIMIT_ATTEMPTS`: failed login attempts, or register

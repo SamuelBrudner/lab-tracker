@@ -15,7 +15,14 @@ from starlette.responses import JSONResponse
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.application import RequestHandlers
-from lab_tracker.auth import AuthContext, AuthService, TokenService, User, extract_bearer_token
+from lab_tracker.auth import (
+    AuthContext,
+    AuthService,
+    TokenService,
+    User,
+    extract_bearer_token,
+    resolve_session_user,
+)
 from lab_tracker.errors import AuthError, ValidationError
 from lab_tracker.instance_url import normalize_instance_base_url
 from lab_tracker.models import (
@@ -150,10 +157,11 @@ def actor_from_authorization_header(
     token_service: TokenService,
 ) -> AuthContext:
     token = extract_bearer_token(request.headers.get("authorization"))
-    claims = token_service.verify_access_token(token)
-    user = auth_service.get_user_by_id(claims.user_id)
-    if user is None:
-        raise AuthError("Invalid token.")
+    _claims, user = resolve_session_user(
+        token,
+        token_service=token_service,
+        auth_service=auth_service,
+    )
     return AuthContext(user_id=user.user_id, role=user.role)
 
 

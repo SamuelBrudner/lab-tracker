@@ -1644,3 +1644,33 @@ def test_env_example_bootstrap_disclosure_is_valid_for_its_environment(monkeypat
     )
 
     assert settings.effective_bootstrap_admin_token_disclosure() != "local"
+
+
+def test_auth_session_max_age_defaults_to_seven_days(monkeypatch):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.delenv("LAB_TRACKER_AUTH_SESSION_MAX_AGE_HOURS", raising=False)
+    monkeypatch.delenv("LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES", raising=False)
+
+    assert _settings_from_environment().auth_session_max_age_hours == 7 * 24
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "8761"])
+def test_auth_session_max_age_rejects_out_of_range_values(monkeypatch, value):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.delenv("LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES", raising=False)
+    monkeypatch.setenv("LAB_TRACKER_AUTH_SESSION_MAX_AGE_HOURS", value)
+
+    with pytest.raises(ValidationError, match="LAB_TRACKER_AUTH_SESSION_MAX_AGE_HOURS"):
+        _settings_from_environment()
+
+
+def test_auth_session_max_age_must_cover_one_token_lifetime(monkeypatch):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv("LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES", "180")
+    monkeypatch.setenv("LAB_TRACKER_AUTH_SESSION_MAX_AGE_HOURS", "2")
+
+    with pytest.raises(
+        ValidationError,
+        match="no shorter than LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES",
+    ):
+        _settings_from_environment()

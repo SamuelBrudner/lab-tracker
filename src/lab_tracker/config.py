@@ -51,6 +51,8 @@ from lab_tracker.store_health_admission import (
 
 DEFAULT_AUTH_SECRET_KEY = "dev-only-change-me"
 BootstrapAdminTokenDisclosure = Literal["local", "first_run", "never"]
+DEFAULT_AUTH_SESSION_MAX_AGE_HOURS = 7 * 24
+MAX_AUTH_SESSION_MAX_AGE_HOURS = 365 * 24
 MAX_COMBINED_HOST_IO_IN_FLIGHT_LIMIT = 32
 INSECURE_AUTH_SECRET_KEYS = {
     DEFAULT_AUTH_SECRET_KEY,
@@ -104,6 +106,7 @@ class Settings(BaseSettings):
     note_storage_path: str = "./note_storage"
     auth_secret_key: str = DEFAULT_AUTH_SECRET_KEY
     auth_token_ttl_minutes: int = 60 * 12
+    auth_session_max_age_hours: int = DEFAULT_AUTH_SESSION_MAX_AGE_HOURS
     auth_invite_ttl_hours: int = 7 * 24
     auth_rate_limit_attempts: int = 10
     auth_rate_limit_window_seconds: int = 60
@@ -412,6 +415,16 @@ class Settings(BaseSettings):
             raise ValueError("LAB_TRACKER_MAX_UPLOAD_BYTES must be at least 1.")
         if self.backup_keep < 1:
             raise ValueError("LAB_TRACKER_BACKUP_KEEP must be at least 1.")
+        if not 1 <= self.auth_session_max_age_hours <= MAX_AUTH_SESSION_MAX_AGE_HOURS:
+            raise ValueError(
+                "LAB_TRACKER_AUTH_SESSION_MAX_AGE_HOURS must be between 1 and "
+                f"{MAX_AUTH_SESSION_MAX_AGE_HOURS}."
+            )
+        if self.auth_session_max_age_hours * 60 < self.auth_token_ttl_minutes:
+            raise ValueError(
+                "LAB_TRACKER_AUTH_SESSION_MAX_AGE_HOURS must be no shorter than "
+                "LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES."
+            )
         if self.auth_rate_limit_attempts < 1:
             raise ValueError("LAB_TRACKER_AUTH_RATE_LIMIT_ATTEMPTS must be at least 1.")
         if self.auth_rate_limit_window_seconds < 1:

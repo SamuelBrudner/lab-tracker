@@ -1590,6 +1590,10 @@ class UserModel(Base):
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[str] = mapped_column(String(20), nullable=False)
     created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
+    # Embedded in every session JWT; bumping it revokes all of the user's sessions.
+    session_epoch: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
 
 
 class InvitationModel(Base):
