@@ -74,7 +74,11 @@ therefore describes one maintenance-window checkpoint. Work is written to a
 `MANIFEST.sha256` is that directory atomically renamed as a completed backup.
 Restore smoke refuses partial directories and verifies the manifest first.
 
-The restore smoke uses uniquely named disposable Docker resources. It restores
+The restore smoke uses uniquely named disposable Docker resources. It waits
+until the scratch Postgres accepts TCP connections on the scratch network (the
+path `pg_restore` uses, so the image's socket-only init server cannot pass the
+gate), retries `pg_restore` a bounded number of times only on connection
+failures, restores
 the dump with ownership and grants omitted, checks the migration and user
 tables, restores the app-data archive, verifies that it is non-empty, and
 removes every scratch resource.

@@ -59,6 +59,9 @@ scratch_user="restore_smoke_user"
 scratch_password="restore-smoke-${scratch_suffix}"
 
 cleanup() {
+  if [ -n "${restore_log:-}" ]; then
+    rm -f "${restore_log}"
+  fi
   docker rm -f "${postgres_container}" >/dev/null 2>&1 || true
   docker volume rm "${postgres_volume}" "${app_volume}" >/dev/null 2>&1 || true
   docker network rm "${network}" >/dev/null 2>&1 || true
@@ -85,19 +88,33 @@ docker run --detach \
   --volume "${postgres_volume}:/var/lib/postgresql/data" \
   postgres:16-alpine >/dev/null
 
+# The postgres image's first boot runs an init-only temporary server that
+# listens on the Unix socket alone, then restarts on TCP. Probe over TCP from
+# the scratch network -- the same path pg_restore uses -- so a socket-only
+# answer from the temporary server cannot pass the readiness gate.
 attempt=0
-until docker exec "${postgres_container}" \
-  pg_isready -U "${scratch_user}" -d "${scratch_database}" >/dev/null 2>&1
+until docker run --rm \
+  --network "${network}" \
+  postgres:16-alpine \
+  pg_isready \
+    --host postgres \
+    --username "${scratch_user}" \
+    --dbname "${scratch_database}" >/dev/null 2>&1
 do
   attempt=$((attempt + 1))
-  if [ "${attempt}" -ge 30 ]; then
-    echo "Scratch Postgres did not become ready." >&2
+  if [ "${attempt}" -ge 60 ]; then
+    echo "Scratch Postgres did not accept TCP connections." >&2
     exit 1
   fi
   sleep 1
 done
 
-docker run --rm \
+# Retry only connection-level failures (for example a restart gap right after
+# the readiness probe); any other pg_restore error fails the smoke at once.
+restore_log="$(mktemp)"
+restore_attempt=0
+restore_max_attempts=5
+until docker run --rm \
   --network "${network}" \
   --env "PGPASSWORD=${scratch_password}" \
   --volume "${backup_dir}:/backup:ro" \
@@ -109,7 +126,21 @@ docker run --rm \
     --no-owner \
     --no-privileges \
     --exit-on-error \
-    /backup/postgres.dump
+    /backup/postgres.dump 2>"${restore_log}"
+do
+  cat "${restore_log}" >&2
+  restore_attempt=$((restore_attempt + 1))
+  if ! grep -E -q 'connection to server|could not connect|Connection refused|the database system is (starting up|shutting down)' "${restore_log}"; then
+    echo "pg_restore failed; not retrying a non-connection error." >&2
+    exit 1
+  fi
+  if [ "${restore_attempt}" -ge "${restore_max_attempts}" ]; then
+    echo "pg_restore could not connect to scratch Postgres after ${restore_attempt} attempts." >&2
+    exit 1
+  fi
+  sleep 2
+done
+cat "${restore_log}" >&2
 
 restored_revision="$(
   docker exec \
