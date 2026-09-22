@@ -281,6 +281,76 @@ class TestSecretsFile:
         # The symlink target was never truncated/overwritten.
         assert target.read_text() == "do not clobber"
 
+    def test_empty_credentials_keep_an_existing_non_empty_secrets_file(self, tmp_path):
+        # Re-running an installer from a shell without the credential exported
+        # (e.g. to change the interval) must not wipe the persisted token.
+        path = str(tmp_path / "daily-review.secrets.json")
+        mod.write_secrets_file(path, {"LAB_TRACKER_API_KEY": "lpat_persisted"})
+        written = mod.write_secrets_file(
+            path,
+            {
+                "LAB_TRACKER_API_KEY": "",
+                "LAB_TRACKER_ADMIN_USER": "",
+                "LAB_TRACKER_ADMIN_PASS": "",
+            },
+        )
+        assert written is False
+        assert mod.read_secret(path, "LAB_TRACKER_API_KEY") == "lpat_persisted"
+        assert stat.S_IMODE(Path(path).stat().st_mode) == 0o600
+
+    def test_new_credentials_replace_an_existing_secrets_file(self, tmp_path):
+        path = str(tmp_path / "daily-review.secrets.json")
+        mod.write_secrets_file(path, {"LAB_TRACKER_API_KEY": "lpat_old"})
+        written = mod.write_secrets_file(
+            path,
+            {
+                "LAB_TRACKER_API_KEY": "",
+                "LAB_TRACKER_ADMIN_USER": "admin",
+                "LAB_TRACKER_ADMIN_PASS": "pw",
+            },
+        )
+        assert written is True
+        with open(path, encoding="utf-8") as handle:
+            assert json.load(handle) == {
+                "LAB_TRACKER_ADMIN_USER": "admin",
+                "LAB_TRACKER_ADMIN_PASS": "pw",
+            }
+
+    def test_empty_credentials_without_existing_file_write_an_empty_file(self, tmp_path):
+        path = tmp_path / "daily-review.secrets.json"
+        assert mod.write_secrets_file(str(path), {"LAB_TRACKER_API_KEY": ""}) is True
+        assert json.loads(path.read_text()) == {}
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+    def test_unreadable_existing_secrets_file_fails_loudly_instead_of_overwriting(
+        self, tmp_path
+    ):
+        path = tmp_path / "daily-review.secrets.json"
+        path.write_text("{not json")
+        with pytest.raises(mod.SchedulerConfigError, match="not valid JSON"):
+            mod.write_secrets_file(str(path), {"LAB_TRACKER_API_KEY": ""})
+        assert path.read_text() == "{not json"
+
+    def test_write_secrets_subcommand_reports_kept_file_on_stderr(self, tmp_path):
+        path = tmp_path / "daily-review.secrets.json"
+        mod.write_secrets_file(str(path), {"LAB_TRACKER_API_KEY": "lpat_persisted"})
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key
+            not in {"LAB_TRACKER_API_KEY", "LAB_TRACKER_ADMIN_USER", "LAB_TRACKER_ADMIN_PASS"}
+        }
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "write-secrets", str(path)],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "keeping the existing credentials" in result.stderr
+        assert str(path) in result.stderr
+        assert json.loads(path.read_text()) == {"LAB_TRACKER_API_KEY": "lpat_persisted"}
+
 
 class TestCronInstallerAdapter:
     """End-to-end tests of install-daily-review.sh with a stub crontab on PATH."""
@@ -293,7 +363,7 @@ class TestCronInstallerAdapter:
         extra_env: dict[str, str] | None = None,
     ):
         stub_dir = tmp_path / "bin"
-        stub_dir.mkdir()
+        stub_dir.mkdir(exist_ok=True)
         crontab = stub_dir / "crontab"
         crontab.write_text(crontab_script)
         crontab.chmod(0o755)
@@ -377,6 +447,28 @@ class TestCronInstallerAdapter:
         content = installed.read_text()
         assert "unrelated-job" in content
         assert content.count("lab-tracker-daily-review") == 1
+
+    def test_rerun_without_exported_credentials_keeps_persisted_token(self, tmp_path):
+        installed = tmp_path / "installed-crontab"
+        script = (
+            "#!/bin/sh\n"
+            'if [ "$1" = "-l" ]; then echo "no crontab for tester" >&2; exit 1; fi\n'
+            f'cat > "{installed}"\n'
+        )
+        first = self._run(
+            tmp_path, script, extra_env={"LAB_TRACKER_API_KEY": "lpat_persisted"}
+        )
+        assert first.returncode == 0, first.stderr
+        secrets_file = tmp_path / ".config/lab-tracker/daily-review.secrets.json"
+        assert json.loads(secrets_file.read_text()) == {"LAB_TRACKER_API_KEY": "lpat_persisted"}
+
+        # Documented flow: re-run in a fresh shell just to change the interval.
+        second = self._run(tmp_path, script)
+        assert second.returncode == 0, second.stderr
+        assert "keeping the existing credentials" in second.stderr
+        assert json.loads(secrets_file.read_text()) == {"LAB_TRACKER_API_KEY": "lpat_persisted"}
+        assert stat.S_IMODE(secrets_file.stat().st_mode) == 0o600
+        assert installed.read_text().count("lab-tracker-daily-review") == 1
 
     def test_persists_adversarial_token_and_future_cron_run_uses_it(self, tmp_path):
         installed = tmp_path / "installed-crontab"

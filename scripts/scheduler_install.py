@@ -28,6 +28,7 @@ from urllib.parse import urlsplit
 
 MAX_INTERVAL_MINUTES = 24 * 60
 _CRONTAB_ABSENT_MARKERS = ("no crontab for",)
+_SECRET_ENV_KEYS = ("LAB_TRACKER_API_KEY", "LAB_TRACKER_ADMIN_USER", "LAB_TRACKER_ADMIN_PASS")
 # A base API URL only ever needs scheme, host, optional port, and an optional
 # path prefix. Restricting to this charset rejects every byte that is dangerous
 # in a crontab command field (quotes, ; $ % ( ) { } < > | & backtick, control
@@ -227,18 +228,48 @@ def render_launchd_plist(
     return plistlib.dumps(document).decode("utf-8")
 
 
-def write_secrets_file(path: str, values: dict[str, str]) -> None:
+def _read_existing_secrets(path: str) -> dict[str, object]:
+    """Return the persisted secrets, ``{}`` if absent; raise if unreadable."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return {}
+    with os.fdopen(fd, encoding="utf-8") as handle:
+        try:
+            data = json.load(handle)
+        except json.JSONDecodeError:
+            raise SchedulerConfigError(
+                f"Existing secrets file {path} is not valid JSON; refusing to overwrite "
+                "it. Inspect it, delete it, and re-run the installer."
+            ) from None
+    if not isinstance(data, dict):
+        raise SchedulerConfigError(
+            f"Existing secrets file {path} is not a JSON object; refusing to overwrite "
+            "it. Inspect it, delete it, and re-run the installer."
+        )
+    return data
+
+
+def write_secrets_file(path: str, values: dict[str, str]) -> bool:
     """Write non-empty secret values to a private 0600 JSON file.
+
+    Returns False, leaving the file untouched, when every supplied value is
+    empty and the file already holds credentials: re-running an installer from
+    a shell without the credential exported (e.g. to change the interval) must
+    not silently wipe the persisted token. Delete the file to clear it.
 
     O_NOFOLLOW refuses to follow a pre-planted symlink at the fixed secrets path,
     so a local attacker cannot redirect the write (or the O_TRUNC) onto another
     file the user owns.
     """
     data = {key: value for key, value in values.items() if value}
+    if not data and any(_read_existing_secrets(path).values()):
+        return False
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         json.dump(data, handle)
     os.chmod(path, 0o600)
+    return True
 
 
 def read_secret(path: str, key: str) -> str:
@@ -306,14 +337,16 @@ def _cmd_render_plist(args: argparse.Namespace) -> int:
 
 
 def _cmd_write_secrets(args: argparse.Namespace) -> int:
-    write_secrets_file(
+    written = write_secrets_file(
         args.path,
-        {
-            "LAB_TRACKER_API_KEY": os.environ.get("LAB_TRACKER_API_KEY", ""),
-            "LAB_TRACKER_ADMIN_USER": os.environ.get("LAB_TRACKER_ADMIN_USER", ""),
-            "LAB_TRACKER_ADMIN_PASS": os.environ.get("LAB_TRACKER_ADMIN_PASS", ""),
-        },
+        {key: os.environ.get(key, "") for key in _SECRET_ENV_KEYS},
     )
+    if not written:
+        sys.stderr.write(
+            f"lab-tracker scheduler: none of {', '.join(_SECRET_ENV_KEYS)} is set; "
+            f"keeping the existing credentials in {args.path}. "
+            "Export a new credential to replace them, or delete the file to clear them.\n"
+        )
     return 0
 
 

@@ -75,6 +75,8 @@ fi
 # interactive shell used to run this installer, so the generated command points
 # at the same structurally-read 0600 JSON format as the launchd adapter. Secret
 # values never appear in the crontab and are never sourced or shell-evaluated.
+# A re-run with no credential exported keeps an existing non-empty secrets
+# file (write-secrets says so on stderr) instead of wiping it.
 umask 077
 mkdir -p "$SECRETS_DIR"
 LAB_TRACKER_API_KEY="${LAB_TRACKER_API_KEY:-}" \
