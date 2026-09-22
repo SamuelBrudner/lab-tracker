@@ -2453,6 +2453,9 @@ def _parse_git_locator(uri: str) -> tuple[str, str, str] | None:
 _logger = logging.getLogger(__name__)
 
 _GIT_CACHE_DIR_PREFIX = "lab-tracker-git-cache-"
+# Per-remote cache directory names written by ``GitResolver._repo_cache_path``;
+# quota eviction only ever removes entries of this shape.
+_GIT_REPO_CACHE_NAME = re.compile(r"(?:(?:sha1|sha256)-)?[0-9a-f]{16}")
 _GIT_CACHE_LOCKS: dict[str, threading.Lock] = {}
 _GIT_CACHE_LOCKS_GUARD = threading.Lock()
 _GIT_CACHE_UNAVAILABLE_DETAIL = "Git artifact cache is unavailable."
@@ -2880,7 +2883,10 @@ class GitResolver(ArtifactResolver, ScopedGitStoreResolver):
     def _enforce_cache_quota(self, base: str) -> None:
         """Evict least-recently-used per-remote caches until under the quota.
 
-        A cache whose lock is held (an in-flight resolution) is never evicted.
+        Only directories named like the per-remote caches this resolver creates
+        are counted or evicted, so unrelated data under an operator-configured
+        root is never removed. A cache whose lock is held (an in-flight
+        resolution) is never evicted.
         """
 
         if not self._max_cache_bytes or not os.path.isdir(base):
@@ -2888,6 +2894,8 @@ class GitResolver(ArtifactResolver, ScopedGitStoreResolver):
         entries: list[tuple[float, str, int]] = []
         total = 0
         for name in os.listdir(base):
+            if _GIT_REPO_CACHE_NAME.fullmatch(name) is None:
+                continue
             path = os.path.join(base, name)
             try:
                 entry_stat = os.lstat(path)
@@ -2942,7 +2950,13 @@ def _ensure_private_cache_directory(path: str, *, create_parents: bool) -> None:
     if stat.S_ISLNK(entry_stat.st_mode) or not stat.S_ISDIR(entry_stat.st_mode):
         raise GitCacheUnsafeError(f"{path} is not a real directory (symlink or other file).")
     _require_owned_by_server(entry_stat, path)
-    if os.name != "nt" and stat.S_IMODE(entry_stat.st_mode) & 0o077:
+    mode = stat.S_IMODE(entry_stat.st_mode)
+    if os.name != "nt" and mode & 0o077:
+        _logger.warning(
+            "Tightening Git resolver cache directory %s permissions from %s to 0o700.",
+            path,
+            oct(mode),
+        )
         os.chmod(path, 0o700)
 
 

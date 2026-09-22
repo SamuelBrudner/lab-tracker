@@ -261,17 +261,73 @@ def test_symlinked_per_remote_cache_is_refused(tmp_path: Path) -> None:
     assert second.calls == []
 
 
+class _WarningSpy:
+    """Stand-in for the module logger; configure_logging() hides records from caplog."""
+
+    def __init__(self) -> None:
+        self.warnings: list[str] = []
+
+    def warning(self, message: str, *args: object) -> None:
+        self.warnings.append(message % args)
+
+
 @_POSIX_ONLY
-def test_group_or_world_accessible_cache_root_is_tightened(tmp_path: Path) -> None:
+def test_group_or_world_accessible_cache_root_is_tightened(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     root = tmp_path / "cache"
     root.mkdir()
     root.chmod(0o777)
     data = b"data"
+    spy = _WarningSpy()
+    monkeypatch.setattr("lab_tracker.artifact_resolution._logger", spy)
 
     result = _resolver(_Runner(data), cache_root=root).resolve(_ref(data))
 
     assert result.status is ResolutionStatus.VERIFIED
     assert stat.S_IMODE(root.stat().st_mode) == 0o700
+    assert len(spy.warnings) == 1
+    assert str(root) in spy.warnings[0]
+    assert "0o777" in spy.warnings[0]
+    assert "0o700" in spy.warnings[0]
+
+
+@_POSIX_ONLY
+def test_group_accessible_per_remote_cache_is_tightened_with_a_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data = b"data"
+    root = tmp_path / "cache"
+    runner = _Runner(data)
+    assert _resolver(runner, cache_root=root).resolve(_ref(data)).status is (
+        ResolutionStatus.VERIFIED
+    )
+    remote_cache = Path(runner.cwd(runner.calls[0]))
+    remote_cache.chmod(0o750)
+    spy = _WarningSpy()
+    monkeypatch.setattr("lab_tracker.artifact_resolution._logger", spy)
+
+    result = _resolver(_Runner(data), cache_root=root).resolve(_ref(data))
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert stat.S_IMODE(remote_cache.stat().st_mode) == 0o700
+    assert len(spy.warnings) == 1
+    assert str(remote_cache) in spy.warnings[0]
+    assert "0o750" in spy.warnings[0]
+
+
+@_POSIX_ONLY
+def test_private_cache_directories_are_not_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data = b"data"
+    spy = _WarningSpy()
+    monkeypatch.setattr("lab_tracker.artifact_resolution._logger", spy)
+    resolver = _resolver(_Runner(data), cache_root=tmp_path / "cache")
+
+    assert resolver.resolve(_ref(data)).status is ResolutionStatus.VERIFIED
+    assert resolver.resolve(_ref(data)).status is ResolutionStatus.VERIFIED
+    assert spy.warnings == []
 
 
 @pytest.mark.parametrize(
@@ -353,8 +409,9 @@ def test_resolution_holds_the_per_remote_cache_lock(tmp_path: Path) -> None:
 def test_quota_eviction_skips_a_cache_in_use(tmp_path: Path) -> None:
     root = tmp_path / "cache"
     root.mkdir(mode=0o700)
-    busy = root / "busy"
-    idle = root / "idle"
+    # Names shaped like the per-remote caches the resolver creates.
+    busy = root / "0123456789abcdef"
+    idle = root / "sha256-fedcba9876543210"
     for path in (busy, idle):
         path.mkdir()
         (path / "pack").write_bytes(b"x" * 4096)
@@ -367,6 +424,53 @@ def test_quota_eviction_skips_a_cache_in_use(tmp_path: Path) -> None:
 
     assert busy.exists()
     assert not idle.exists()
+
+
+def test_quota_eviction_never_touches_directories_the_cache_did_not_create(
+    tmp_path: Path,
+) -> None:
+    # An operator-configured root may hold unrelated data; eviction must only
+    # remove per-remote caches, and foreign bytes must not count against the quota.
+    root = tmp_path / "cache"
+    root.mkdir(mode=0o700)
+    foreign = [root / "operator-data", root / "0123456789ABCDEF", root / "sha512-0123456789abcdef"]
+    for path in foreign:
+        path.mkdir()
+        (path / "payload").write_bytes(b"x" * 4096)
+        os.utime(path, (1, 1))
+    cache = root / "0123456789abcdef"
+    cache.mkdir()
+    (cache / "pack").write_bytes(b"x" * 512)
+    resolver = _resolver(_Runner(b""), cache_root=root, max_cache_bytes=1024)
+
+    resolver._enforce_cache_quota(str(root))
+
+    assert all((path / "payload").exists() for path in foreign)
+    assert cache.exists()
+
+
+def test_quota_eviction_removes_oldest_cache_but_keeps_foreign_directories(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "cache"
+    root.mkdir(mode=0o700)
+    foreign = root / "operator-data"
+    foreign.mkdir()
+    (foreign / "payload").write_bytes(b"x" * 4096)
+    os.utime(foreign, (1, 1))
+    old_cache = root / "sha1-0123456789abcdef"
+    new_cache = root / "fedcba9876543210"
+    for mtime, path in ((2, old_cache), (3, new_cache)):
+        path.mkdir()
+        (path / "pack").write_bytes(b"x" * 800)
+        os.utime(path, (mtime, mtime))
+    resolver = _resolver(_Runner(b""), cache_root=root, max_cache_bytes=1024)
+
+    resolver._enforce_cache_quota(str(root))
+
+    assert (foreign / "payload").exists()
+    assert not old_cache.exists()
+    assert new_cache.exists()
 
 
 def test_resolvers_sharing_a_cache_root_share_its_locks(tmp_path: Path) -> None:
