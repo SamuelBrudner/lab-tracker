@@ -100,7 +100,10 @@ research record:
   project-default endpoint. Manual and scheduled batches carry
   `review_assignee` attribution, and the personal queue, waiting, and
   owner-commit projections remain distinct. Legacy drafts with no assignee are
-  recoverable only through an explicit owner oversight projection.
+  recoverable only through an explicit owner oversight projection. `GET
+  /batches` pages these projections in the database and returns summaries
+  (`operation_count`, `meeting_note_count`) without operations or the context
+  packet; `GET /batches/{change_set_id}` returns the full draft.
 - Opt-in, per-user review-ready email cues backed by a transactional delivery
   outbox, retry leases, and signed short-lived links. Email contains no project
   or research content, and links still require normal authentication and
