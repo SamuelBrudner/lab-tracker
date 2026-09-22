@@ -954,6 +954,7 @@ def test_member_onboarding_usage_events_are_first_only_and_content_free(
     assert "sensitive-forward-capture-sentinel" not in serialized
 
 
+@pytest.mark.postgres
 def test_postgres_first_capture_serializes_with_manual_alignment(
     postgres_client: TestClient,
     postgres_admin_auth_headers: dict[str, str],
@@ -1052,6 +1053,7 @@ def test_postgres_first_capture_serializes_with_manual_alignment(
     assert current["checkpoint"]["metadata"][FIRST_CAPTURE_NOTE_ID_KEY] == str(capture_id)
 
 
+@pytest.mark.postgres
 def test_postgres_manual_link_serializes_against_question_delete(
     postgres_client: TestClient,
     postgres_admin_auth_headers: dict[str, str],
