@@ -35,6 +35,7 @@ from lab_tracker_client.client import (
     file_sha256,
     load_connection_profile,
 )
+from lab_tracker_client.gitinfo import sanitize_remote_url
 from lab_tracker_client.repo import normalize_remote
 
 FIGURE_CAPTURE_TIMEOUT_SECONDS = 2.5
@@ -969,9 +970,7 @@ def _git_output(*args: str) -> str:
 def _credential_free_repo_remote(remote: str) -> str:
     """Return a stable remote identity without URL-carried credentials."""
 
-    without_query = remote.partition("?")[0]
-    without_fragment = without_query.partition("#")[0]
-    return normalize_remote(without_fragment)
+    return normalize_remote(sanitize_remote_url(remote))
 
 
 def _is_transport_failure(exc: BaseException) -> bool:

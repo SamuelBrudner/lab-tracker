@@ -400,6 +400,36 @@ def test_git_snapshot_strips_remote_credentials(git_repo, capsys) -> None:
     assert "https://example.com/lab/repo.git" in raw
 
 
+@pytest.mark.parametrize(
+    ("remote", "expected"),
+    [
+        # GitHub's bare-token form: the token is the whole userinfo.
+        ("https://ghp_SEKRET123@github.com/lab/repo.git", "https://github.com/lab/repo.git"),
+        ("https://oauth2:SEKRET123@gitlab.example.com/lab/repo.git",
+         "https://gitlab.example.com/lab/repo.git"),
+        ("https://github.com/lab/repo.git?access_token=SEKRET123",
+         "https://github.com/lab/repo.git"),
+        ("ssh://git:SEKRET123@example.com/lab/repo.git", "ssh://git@example.com/lab/repo.git"),
+        ("git@github.com:lab/repo.git", "git@github.com:lab/repo.git"),
+    ],
+)
+def test_git_snapshot_never_records_remote_credentials(
+    git_repo, capsys, remote: str, expected: str
+) -> None:
+    from lab_tracker_client.watch import read_event
+
+    _git(git_repo, "remote", "add", "origin", remote)
+    lt_cli.main(["git", "snapshot", "--repo", str(git_repo), "--project", "p-1", "--no-sync"])
+    payload = json.loads(capsys.readouterr().out)
+
+    event_path = Path(payload["event_path"])
+    assert "SEKRET123" not in event_path.read_text(encoding="utf-8")
+    event = read_event(event_path)
+    assert event["source"]["git_remote_origin_url"] == expected
+    assert event["source"]["uri"] == expected
+    assert f"- remote_origin: {expected}\n" in event["payload"]["body"]
+
+
 def test_git_snapshot_fail_silent_swallows_errors(git_repo, capsys) -> None:
     # No project resolvable: fails loudly without the flag, silently with it.
     lt_cli.main(["git", "snapshot", "--repo", str(git_repo), "--no-sync", "--fail-silent"])

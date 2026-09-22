@@ -18,7 +18,6 @@ from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
 
 import lab_tracker_client.watch as watch_capture
 from lab_tracker.repository_conventions import (
@@ -27,6 +26,7 @@ from lab_tracker.repository_conventions import (
     repository_conventions_metadata,
 )
 from lab_tracker_client.client import LTValidationError
+from lab_tracker_client.gitinfo import sanitize_remote_url
 from lab_tracker_client.repo import normalize_remote
 
 JsonObject = dict[str, Any]
@@ -258,8 +258,8 @@ def commit_evidence(
     root = _git(repo, "rev-parse", "--show-toplevel").strip()
     commit_sha = _git(repo, "rev-parse", f"{commit}^{{commit}}").strip()
     branch = _git_optional(repo, "branch", "--show-current").strip() or "detached"
-    remote_url = _strip_url_credentials(
-        _git_optional(repo, "config", "--get", "remote.origin.url").strip()
+    remote_url = sanitize_remote_url(
+        _git_optional(repo, "config", "--get", "remote.origin.url")
     )
     metadata_text = _git(
         repo,
@@ -405,20 +405,3 @@ def _project_from_ids(repo_root: Path) -> str | None:
             return _optional(str(payload.get("project_id") or ""))
     return None
 
-
-def _strip_url_credentials(url: str) -> str:
-    """Drop user:password userinfo from remote URLs so tokens never enter
-    evidence text or metadata. Bare usernames (ssh's ``git@``) are kept —
-    they are addressing, not secrets."""
-
-    if not url or "@" not in url:
-        return url
-    with suppress(ValueError):
-        parts = urlsplit(url)
-        if parts.netloc and "@" in parts.netloc:
-            userinfo, _, host = parts.netloc.rpartition("@")
-            if ":" in userinfo:
-                return urlunsplit(
-                    (parts.scheme, host, parts.path, parts.query, parts.fragment)
-                )
-    return url

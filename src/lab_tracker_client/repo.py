@@ -43,6 +43,7 @@ from lab_tracker_client.client import (
     build_evidence_metadata,
     capture_host_metadata,
 )
+from lab_tracker_client.gitinfo import sanitize_remote_url
 
 CONFIG_VERSION = 1
 EVENT_VERSION = 1
@@ -220,6 +221,12 @@ def make_event(
     resolved_event_type = _event_type(event_type)
     resolved_cwd = str(Path(cwd or Path.cwd()).expanduser().resolve())
     resolved_source = {**git_context(resolved_cwd), **dict(source or {})}
+    if resolved_source.get("repo_remote_url"):
+        # Caller-supplied sources are sanitised too: no remote credential may
+        # reach the outbox event, the rendered note or its metadata.
+        resolved_source["repo_remote_url"] = sanitize_remote_url(
+            str(resolved_source["repo_remote_url"])
+        )
     commit = str(resolved_source.get("git_commit") or "")
     evidence_body = ""
     if resolved_event_type == "commit" and commit:
@@ -854,6 +861,8 @@ def git_context(cwd: str | Path | None = None) -> JsonObject:
         ("git_author", ("log", "-1", "--pretty=%an")),
     ):
         value = _git_output(root, *args)
+        if key == "repo_remote_url":
+            value = sanitize_remote_url(value)
         if value:
             context[key] = value
     if commit:
@@ -981,8 +990,10 @@ def render_event_note(event: Mapping[str, Any]) -> str:
         "",
         "## Repository State",
     ]
+    remote = sanitize_remote_url(str(source.get("repo_remote_url") or ""))
+    if remote:
+        lines.append(f"- Remote: `{remote}`")
     for label, key in (
-        ("Remote", "repo_remote_url"),
         ("Branch", "git_branch"),
         ("Commit", "git_commit"),
         ("Author", "git_author"),
@@ -1045,8 +1056,9 @@ def event_metadata(
         metadata["repo_tags"] = ",".join(payload["tags"])
     if source.get("git_commit"):
         metadata["repo_git_commit"] = str(source["git_commit"])
-    if source.get("repo_remote_url"):
-        metadata["repo_remote_url"] = str(source["repo_remote_url"])
+    remote = sanitize_remote_url(str(source.get("repo_remote_url") or ""))
+    if remote:
+        metadata["repo_remote_url"] = remote
     if source.get("git_branch"):
         metadata["repo_git_branch"] = str(source["git_branch"])
     metadata["repo_git_dirty"] = bool(source.get("git_dirty"))
