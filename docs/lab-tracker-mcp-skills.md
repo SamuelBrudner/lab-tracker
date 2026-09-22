@@ -243,8 +243,8 @@ docker compose up app
 SQLite remains the local fallback for simple single-client development.
 
 Local development starts with authentication disabled. Set
-`LAB_TRACKER_AUTH_ENABLED=true` when you want to test login, roles, or service
-account credentials.
+`LAB_TRACKER_AUTH_ENABLED=true` and set `LAB_TRACKER_AUTH_SECRET_KEY` to a strong
+random value when you want to test login, roles, or service account credentials.
 
 For MCP clients on other computers, use the reachable shared-server URL instead
 of localhost, for example:

@@ -48,7 +48,8 @@ that destination through your normal off-machine backup process.
 
 ### Authentication and invitations
 
-- `LAB_TRACKER_AUTH_SECRET_KEY`: auth signing secret (default allowed only in `local`)
+- `LAB_TRACKER_AUTH_SECRET_KEY`: auth signing secret (the placeholder default is
+  rejected whenever authentication is enabled, including in `local`)
 - `LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES`: access token lifetime (default: `720`)
 - `LAB_TRACKER_AUTH_INVITE_TTL_HOURS`: signed invitation link lifetime
   (default: `168`)
@@ -874,8 +875,9 @@ authorization; serve it only through TLS on a VPN or tailnet.
 ## Authentication behavior
 
 Local development starts with authentication disabled so early testing can use
-the app without creating accounts. Set `LAB_TRACKER_AUTH_ENABLED=true` to test
-the login and role flow. Non-local environments keep authentication enabled by
+the app without creating accounts. Set `LAB_TRACKER_AUTH_ENABLED=true` and set
+`LAB_TRACKER_AUTH_SECRET_KEY` to a strong random value to test the login and
+role flow. Non-local environments keep authentication enabled by
 default and cannot disable auth.
 
 Public registration creates viewer accounts when

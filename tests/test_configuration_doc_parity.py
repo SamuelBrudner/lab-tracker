@@ -138,3 +138,38 @@ def test_setup_non_docker_first_admin_environment_is_accepted() -> None:
 
     assert result.returncode == 0, result.stderr
     assert int(result.stdout.strip()) >= 32
+
+
+_AUTH_ENABLE_INSTRUCTION_DOCS = (
+    _DOC_PATH,
+    _REPO_ROOT / "docs" / "lab-tracker-mcp-skills.md",
+)
+_AUTH_ENABLE_INSTRUCTION = re.compile(r"\bSet\s+`LAB_TRACKER_AUTH_ENABLED=true`")
+
+
+def test_auth_enable_instructions_also_require_a_strong_secret() -> None:
+    """Enabling auth with the placeholder secret is rejected even in ``local``.
+
+    Every prose instruction to turn auth on must also tell the reader to set
+    ``LAB_TRACKER_AUTH_SECRET_KEY`` in the same paragraph, or following it
+    fails at startup with a validation error.
+    """
+    offenders: list[str] = []
+    for path in _AUTH_ENABLE_INSTRUCTION_DOCS:
+        for paragraph in re.split(r"\n\s*\n", path.read_text(encoding="utf-8")):
+            if _AUTH_ENABLE_INSTRUCTION.search(paragraph) and (
+                "LAB_TRACKER_AUTH_SECRET_KEY" not in paragraph
+            ):
+                offenders.append(f"{path.relative_to(_REPO_ROOT)}: {paragraph!r}")
+    assert not offenders, offenders
+
+
+def test_auth_secret_bullet_describes_when_the_placeholder_is_rejected() -> None:
+    text = _DOC_PATH.read_text(encoding="utf-8")
+    match = re.search(
+        r"(?m)^- `LAB_TRACKER_AUTH_SECRET_KEY`.*(?:\n  .*)*", text
+    )
+    assert match is not None
+    bullet = " ".join(match.group(0).split())
+    assert "allowed only in `local`" not in bullet
+    assert "rejected whenever authentication is enabled" in bullet
