@@ -37,6 +37,10 @@ function clearShareTargetStatus() {
   }
 }
 
+function errorDetail(error) {
+  return (error && error.message) || String(error) || "unknown error";
+}
+
 // Controller for the mobile capture surface: owns capture-composer state, the
 // pending-review queue, and the upload/offline command workflow. The component
 // consumes this and renders; the network/offline mechanics live in
@@ -193,11 +197,33 @@ function useMobileCapture({
             }
             return drainResult;
           })
-          .catch(() => undefined);
+          .catch((error) => {
+            // The imported captures stay queued for the next online/boot
+            // retry; make the failure visible rather than silently holding them.
+            // eslint-disable-next-line no-console
+            console.error("Shared capture upload failed:", error);
+            if (!canceled) {
+              setFlash(
+                "",
+                `Shared captures were imported but could not be uploaded yet: ${errorDetail(error)}. ` +
+                  "They stay queued and will retry when you're back online."
+              );
+            }
+          });
       })
-      .catch(() => {
-        // Migration failures shouldn't block the rest of the capture UI;
-        // the shares stay in the inbox for the next attempt.
+      .catch((error) => {
+        // Migration failures shouldn't block the rest of the capture UI (the
+        // shares stay in the inbox for the next attempt), but they must be
+        // visible rather than silently swallowed.
+        // eslint-disable-next-line no-console
+        console.error("Shared capture import failed:", error);
+        if (!canceled) {
+          setFlash(
+            "",
+            `Shared captures could not be imported: ${errorDetail(error)}. ` +
+              "They stay in the share inbox and will be retried."
+          );
+        }
       });
     return () => {
       canceled = true;
