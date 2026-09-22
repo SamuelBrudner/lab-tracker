@@ -25,6 +25,7 @@ from lab_tracker.models import (
     ExternalArtifactReference,
     Note,
     NoteMetadataScalar,
+    NoteStatus,
     Question,
     QuestionLink,
     QuestionLinkRole,
@@ -241,6 +242,19 @@ _QUESTION_STATUS_TRANSITIONS: dict[QuestionStatus, set[QuestionStatus]] = {
     QuestionStatus.SUPERSEDED: {QuestionStatus.SUPERSEDED},
 }
 
+# ARCHIVED is deliberately absent as a plain-status target: archiving a note goes
+# through the archive command, which always records a reason, an actor and a time.
+# Leaving ARCHIVED (restoring a capture) is allowed; the service clears the stamps.
+_NOTE_STATUS_TRANSITIONS: dict[NoteStatus, set[NoteStatus]] = {
+    NoteStatus.STAGED: {NoteStatus.STAGED, NoteStatus.COMMITTED},
+    NoteStatus.COMMITTED: {NoteStatus.COMMITTED, NoteStatus.STAGED},
+    NoteStatus.ARCHIVED: {NoteStatus.ARCHIVED, NoteStatus.STAGED, NoteStatus.COMMITTED},
+}
+
+# A new note starts life staged; a requested creation status must be reachable
+# from there through the ordinary note transition table.
+NOTE_CREATION_START_STATUS = NoteStatus.STAGED
+
 _ANALYSIS_STATUS_TRANSITIONS: dict[AnalysisStatus, set[AnalysisStatus]] = {
     AnalysisStatus.STAGED: {
         AnalysisStatus.STAGED,
@@ -313,6 +327,23 @@ def _ensure_question_status_transition(
         next_status,
         _QUESTION_STATUS_TRANSITIONS,
         entity_name="Question",
+    )
+
+
+def _ensure_note_status_transition(
+    current_status: NoteStatus,
+    next_status: NoteStatus,
+) -> None:
+    if next_status == NoteStatus.ARCHIVED and current_status != NoteStatus.ARCHIVED:
+        raise ValidationError(
+            "Notes are archived only through POST /notes/{note_id}/archive, "
+            "which records why the capture was set aside."
+        )
+    _ensure_status_transition(
+        current_status,
+        next_status,
+        _NOTE_STATUS_TRANSITIONS,
+        entity_name="Note",
     )
 
 

@@ -50,6 +50,8 @@ from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.question_service import QuestionService
 from lab_tracker.services.session_service import SessionService
 from lab_tracker.services.shared import (
+    NOTE_CREATION_START_STATUS,
+    _ensure_note_status_transition,
     actor_user_fk,
     actor_user_id,
     normalize_note_metadata,
@@ -229,6 +231,7 @@ class NoteService(BaseService):
     ) -> IdempotentCreateResult[Note]:
         self.authorization.require_contributor(project_id, actor=actor)
         self.projects.get_project(project_id)
+        _ensure_note_status_transition(NOTE_CREATION_START_STATUS, status)
         raw_text = raw_content.strip() if raw_content else ""
         if not raw_text and raw_asset is None:
             raise ValidationError("raw_content or raw_asset must be provided.")
@@ -808,6 +811,13 @@ class NoteService(BaseService):
         if is_provided(status):
             if status is None:
                 raise ValidationError("status must not be null.")
+            _ensure_note_status_transition(note.status, status)
+            if note.status == NoteStatus.ARCHIVED and status != NoteStatus.ARCHIVED:
+                # Restoring a capture must not leave it reporting a stale archive.
+                note.archived_reason = None
+                note.archived_at = None
+                note.archived_by = None
+                note.archived_by_user_id = None
             note.status = status
         if origin is not None:
             note.origin = origin
