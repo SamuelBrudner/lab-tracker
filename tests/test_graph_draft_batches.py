@@ -9,7 +9,6 @@ from threading import Event
 from typing import Any
 from uuid import UUID, uuid4
 
-import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -1925,6 +1924,7 @@ def test_agentic_graph_draft_client_uses_read_only_context_trace() -> None:
         def __init__(self) -> None:
             self.batch_context: dict[str, Any] | None = None
             self.user_hint: str | None = None
+            self.note_calls: list[dict[str, Any]] = []
             self.closed = False
 
         def draft_from_batch(
@@ -1941,6 +1941,12 @@ def test_agentic_graph_draft_client_uses_read_only_context_trace() -> None:
                 "clarification_requests": [],
                 "operations": [],
             }
+
+        def draft_from_note(self, **kwargs: Any) -> dict[str, Any]:
+            self.note_calls.append(
+                {"user_hint": kwargs["user_hint"], "draft_mode": kwargs["draft_mode"]}
+            )
+            return {"summary": "note", "operations": []}
 
         def close(self) -> None:
             self.closed = True
@@ -1986,8 +1992,9 @@ def test_agentic_graph_draft_client_uses_read_only_context_trace() -> None:
     }
     assert trace["matched_existing_nodes"][0]["id"] == "question-1"
     assert "prefer existing questions" in (base.user_hint or "")
-    with pytest.raises(GraphDraftingError, match="background batch drafts"):
-        client.draft_from_note()
+    # Note-scoped drafts skip the batch tool pass and use the wrapped client.
+    assert client.draft_from_note(user_hint="note hint")["summary"] == "note"
+    assert base.note_calls == [{"user_hint": "note hint", "draft_mode": "graph_context"}]
 
 
 def test_batch_settings_claim_requires_observed_next_run_at(

@@ -21,6 +21,7 @@ from lab_tracker.config import Settings
 from lab_tracker.db_models import GraphChangeOperationModel, GraphChangeSetModel
 from lab_tracker.errors import AuthError, ValidationError
 from lab_tracker.graph_drafting import (
+    AgenticGraphDraftClient,
     AnthropicGraphDraftClient,
     GoogleGraphDraftClient,
     GraphDraftingError,
@@ -60,6 +61,7 @@ class FakeDraftClient:
         graph_context: dict[str, Any] | None = None,
         user_hint: str | None = None,
         draft_mode: str = "graph_context",
+        project_context: dict[str, Any] | None = None,
         source_artifacts: list[dict[str, Any]] | None = None,
         image_bytes: bytes | None = None,
         image_content_type: str | None = None,
@@ -3627,3 +3629,48 @@ def test_anthropic_client_reports_output_truncation_explicitly() -> None:
     assert "4096" in message
     assert "LAB_TRACKER_ANTHROPIC_MAX_OUTPUT_TOKENS" in message
     assert "malformed" not in message
+
+
+@pytest.mark.parametrize("provider", ["agentic", " Agentic-OpenAI ", "agentic_openai"])
+def test_settings_reject_agentic_provider_without_background_worker(provider: str) -> None:
+    with pytest.raises(
+        PydanticValidationError, match="LAB_TRACKER_GRAPH_DRAFT_BACKGROUND_ENABLED"
+    ):
+        Settings(environment="local", graph_draft_provider=provider)
+
+    assert Settings(
+        environment="local",
+        graph_draft_provider=provider,
+        graph_draft_background_enabled=True,
+    ).graph_draft_background_enabled
+    # The scheduler also runs the background worker.
+    assert Settings(
+        environment="local",
+        graph_draft_provider=provider,
+        graph_draft_scheduler_enabled=True,
+    ).graph_draft_scheduler_enabled
+
+
+def test_agentic_provider_note_drafts_use_the_wrapped_single_shot_client(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    """Note-scoped and analysis drafts must work when the agentic batch drafter is active."""
+    project_id = _project(client, admin_auth_headers)
+    note_id = _image_note(client, admin_auth_headers, project_id)
+    analysis_note_id = _analysis_note(client, admin_auth_headers, project_id)
+    base = FakeDraftClient(_draft_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: AgenticGraphDraftClient(
+        base_client=base
+    )
+
+    note_draft = client.post(f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers)
+    analysis_draft = client.post(
+        f"/notes/{analysis_note_id}/analysis-graph-drafts", headers=admin_auth_headers
+    )
+
+    assert note_draft.status_code == 201, note_draft.text
+    assert note_draft.json()["data"]["status"] == "ready"
+    assert analysis_draft.status_code == 201, analysis_draft.text
+    assert analysis_draft.json()["data"]["status"] == "ready"
+    assert base.calls[0]["draft_mode"] == "graph_context"
+    assert "method_hash=abc123" in base.calls[1]["evidence_text"]

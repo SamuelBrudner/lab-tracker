@@ -16,7 +16,7 @@ from typing import Any, Protocol, TypeAlias, runtime_checkable
 
 import httpx
 
-from lab_tracker.config import Settings
+from lab_tracker.config import BACKGROUND_ONLY_GRAPH_DRAFT_PROVIDERS, Settings
 from lab_tracker.provider_error_redaction import provider_error_message
 
 PROMPT_VERSION = "multimodal-graph-draft-v3"
@@ -1050,6 +1050,8 @@ class AgenticGraphDraftClient:
     only inspect the batch context already assembled by Lab Tracker, search
     existing graph-node summaries inside that context, and attach a bounded
     trace before delegating to the same structured graph-patch provider.
+    Note-scoped and analysis drafts skip the tool pass and go straight to the
+    wrapped client, so interactive drafting keeps working under this provider.
     """
 
     provider = "agentic"
@@ -1081,8 +1083,17 @@ class AgenticGraphDraftClient:
         image_content_type: str | None = None,
         extra_images: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        raise GraphDraftingError(
-            "Agentic graph drafting is only supported for background batch drafts."
+        # The agentic tool pass is batch-only; note-scoped drafts use the
+        # wrapped single-shot (equally read-only) client directly.
+        return self._base_client.draft_from_note(
+            graph_context=graph_context,
+            user_hint=user_hint,
+            draft_mode=draft_mode,
+            project_context=project_context,
+            source_artifacts=source_artifacts,
+            image_bytes=image_bytes,
+            image_content_type=image_content_type,
+            extra_images=extra_images,
         )
 
     def draft_from_analysis_evidence(
@@ -1091,8 +1102,9 @@ class AgenticGraphDraftClient:
         evidence_text: str,
         project_context: dict[str, Any],
     ) -> dict[str, Any]:
-        raise GraphDraftingError(
-            "Agentic graph drafting is only supported for background batch drafts."
+        return self._base_client.draft_from_analysis_evidence(
+            evidence_text=evidence_text,
+            project_context=project_context,
         )
 
     def draft_from_batch(
@@ -1148,7 +1160,7 @@ def make_graph_draft_client(settings: Settings) -> GraphDraftClient:
         return AnthropicGraphDraftClient.from_settings(settings)
     if provider in {"google", "gemini"}:
         return GoogleGraphDraftClient.from_settings(settings)
-    if provider in {"agentic", "agentic-openai", "agentic_openai"}:
+    if provider in BACKGROUND_ONLY_GRAPH_DRAFT_PROVIDERS:
         return AgenticGraphDraftClient.from_settings(settings)
     raise GraphDraftingError(
         "Unknown graph_draft_provider "

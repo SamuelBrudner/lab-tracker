@@ -55,6 +55,9 @@ BootstrapAdminTokenDisclosure = Literal["local", "first_run", "never"]
 DEFAULT_AUTH_SESSION_MAX_AGE_HOURS = 7 * 24
 MAX_AUTH_SESSION_MAX_AGE_HOURS = 365 * 24
 MAX_COMBINED_HOST_IO_IN_FLIGHT_LIMIT = 32
+# Graph-draft providers whose batch drafter runs only inside the background
+# worker (``graph_drafting.AgenticGraphDraftClient``).
+BACKGROUND_ONLY_GRAPH_DRAFT_PROVIDERS = frozenset({"agentic", "agentic-openai", "agentic_openai"})
 INSECURE_AUTH_SECRET_KEYS = {
     DEFAULT_AUTH_SECRET_KEY,
     "replace-with-a-strong-secret",
@@ -419,6 +422,19 @@ class Settings(BaseSettings):
             variable="LAB_TRACKER_STORE_HEALTH_SINGLEFLIGHT_WAIT_SECONDS",
             maximum=MAX_STORE_HEALTH_SINGLEFLIGHT_WAIT_SECONDS,
         )
+
+    @model_validator(mode="after")
+    def _validate_graph_draft_provider_capabilities(self) -> Settings:
+        provider = (self.graph_draft_provider or "openai").strip().lower()
+        if provider in BACKGROUND_ONLY_GRAPH_DRAFT_PROVIDERS and not (
+            self.graph_draft_background_enabled or self.graph_draft_scheduler_enabled
+        ):
+            raise ValueError(
+                f"LAB_TRACKER_GRAPH_DRAFT_PROVIDER={provider} drafts batches only in "
+                "the background worker; set LAB_TRACKER_GRAPH_DRAFT_BACKGROUND_ENABLED=true "
+                "(or LAB_TRACKER_GRAPH_DRAFT_SCHEDULER_ENABLED=true) or choose another provider."
+            )
+        return self
 
     @model_validator(mode="after")
     def _validate_auth_secret_key(self) -> Settings:

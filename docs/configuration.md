@@ -765,7 +765,10 @@ otherwise bounded and provider-side spending limits are acceptable. Exact
 - `LAB_TRACKER_GRAPH_DRAFT_PROVIDER`: active drafting provider (default:
   `openai`; accepted values are `openai`, `anthropic`/`claude`, and
   `google`/`gemini`; `agentic`/`agentic-openai` enables the read-only agentic
-  batch drafter and must be run through the background worker)
+  batch drafter, which runs only in the background worker, so startup fails
+  unless `LAB_TRACKER_GRAPH_DRAFT_BACKGROUND_ENABLED` or
+  `LAB_TRACKER_GRAPH_DRAFT_SCHEDULER_ENABLED` is `true`; note-scoped and
+  analysis drafts under this provider use the wrapped OpenAI client directly)
 - `LAB_TRACKER_GRAPH_DRAFT_BACKGROUND_ENABLED`: when `true`, run-now and
   run-due enqueue graph-draft batch jobs and the in-process worker executes
   them (default: `false`)
