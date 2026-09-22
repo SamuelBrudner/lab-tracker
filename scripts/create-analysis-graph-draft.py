@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -278,7 +279,12 @@ def _git_commit_evidence(
     root = _git(repo, "rev-parse", "--show-toplevel").strip()
     commit_sha = _git(repo, "rev-parse", f"{commit}^{{commit}}").strip()
     branch = _git_optional(repo, "branch", "--show-current").strip() or "detached"
-    remote_url = _git_optional(repo, "config", "--get", "remote.origin.url").strip()
+    # Remotes routinely embed credentials (``https://<token>@host``,
+    # ``https://oauth2:<token>@host``, ``?access_token=``); only the sanitised
+    # form may reach the evidence body or note metadata.
+    remote_url = _sanitize_remote_url(
+        _git_optional(repo, "config", "--get", "remote.origin.url")
+    )
     metadata_text = _git(
         repo,
         "show",
@@ -361,6 +367,48 @@ def _git_commit_evidence(
     return evidence, metadata
 
 
+# ``scheme://authority rest`` — authority is everything up to the first
+# '/', '?' or '#', so a raw '@' inside a password stays in the authority.
+_SCHEME_URL = re.compile(
+    r"^(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*)://(?P<authority>[^/?#]*)(?P<rest>.*)\Z",
+    re.DOTALL,
+)
+# Transports whose login name is addressing (``ssh://git@host``), not a secret.
+_SSH_SCHEMES = frozenset({"ssh", "git+ssh", "ssh+git"})
+
+
+def _sanitize_remote_url(remote: str) -> str:
+    """Return ``remote`` with every credential-bearing part removed.
+
+    Inlined copy of the canonical
+    ``lab_tracker_client.gitinfo.sanitize_remote_url`` (this script stays
+    stdlib+httpx so CI can run it without the client package).
+    ``tests/test_analysis_graph_draft_script.py`` pins the two implementations
+    together — change both or that contract test fails.
+
+    All userinfo is dropped from non-ssh scheme URLs (a bare
+    ``https://<token>@host`` username is a token), ssh URLs keep only the login
+    name, query strings and fragments are dropped, and scp-like addressing and
+    local paths are returned unchanged.
+    """
+
+    cleaned = remote.strip()
+    if not cleaned:
+        return ""
+    match = _SCHEME_URL.match(cleaned)
+    if match is None:
+        return cleaned
+    scheme = match["scheme"]
+    authority = match["authority"]
+    userinfo, at, host = authority.rpartition("@")
+    if at:
+        login = userinfo.partition(":")[0]
+        keep_login = scheme.lower() in _SSH_SCHEMES and bool(login)
+        authority = f"{login}@{host}" if keep_login else host
+    path = re.split(r"[?#]", match["rest"], maxsplit=1)[0]
+    return f"{scheme}://{authority}{path}"
+
+
 def _normalize_remote(remote: str) -> str:
     """Canonicalize a git remote URL for a stable, credential-free identity.
 
@@ -369,8 +417,6 @@ def _normalize_remote(remote: str) -> str:
     package). ``tests/test_repo_bridge.py`` pins the two implementations
     together — change both or that contract test fails.
     """
-
-    import re
 
     cleaned = remote.strip()
     if not cleaned:
