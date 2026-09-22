@@ -4,7 +4,7 @@ import { apiListRequest, apiRequest, buildApiPath } from "../shared/api.js";
 import { formatDate } from "../shared/formatters.js";
 import { DailyReviewScheduleForm } from "./daily-review-schedule.jsx";
 
-const { useCallback, useEffect, useMemo, useState } = React;
+const { useCallback, useEffect, useMemo, useRef, useState } = React;
 
 function batchNoteCount(batch) {
   return batch?.source_note_count || batch?.source_note_ids?.length || 1;
@@ -123,6 +123,9 @@ function BatchReviewPage({
   const [unassignedOversightBatches, setUnassignedOversightBatches] = useState([]);
   const [runs, setRuns] = useState([]);
   const [loading, setLoading] = useState(false);
+  // Each load bumps the generation; results, failures and the loading reset of
+  // a superseded load (e.g. for a previously selected project) are ignored.
+  const loadGenerationRef = useRef(0);
 
   const activeProject = useMemo(
     () => projects.find((project) => project.project_id === selectedProjectId) || null,
@@ -138,6 +141,8 @@ function BatchReviewPage({
   }, [needsCommitBatches, waitingBatches]);
 
   const loadBatches = useCallback(async () => {
+    const generation = ++loadGenerationRef.current;
+    const isCurrent = () => generation === loadGenerationRef.current;
     setLoading(true);
     try {
       const batchPath = buildApiPath("/batches", {
@@ -181,20 +186,31 @@ function BatchReviewPage({
           : Promise.resolve({ data: [] }),
         apiListRequest(runPath, { token }),
       ]);
+      if (!isCurrent()) {
+        return;
+      }
       setBatches(batchData || []);
       setWaitingBatches(waitingData || []);
       setNeedsCommitBatches(needsCommitData || []);
       setUnassignedOversightBatches(unassignedOversightData || []);
       setRuns(runData || []);
     } catch (err) {
-      setFlash("", err.message || "Failed to load daily reviews.");
+      if (isCurrent()) {
+        setFlash("", err.message || "Failed to load daily reviews.");
+      }
     } finally {
-      setLoading(false);
+      if (isCurrent()) {
+        setLoading(false);
+      }
     }
   }, [canManageProject, selectedProjectId, setFlash, token]);
 
   useEffect(() => {
     loadBatches();
+    return () => {
+      // Invalidate the in-flight load on project change or unmount.
+      loadGenerationRef.current += 1;
+    };
   }, [loadBatches]);
 
   async function runNow() {

@@ -79,6 +79,108 @@ describe("PendingBatchBanner", () => {
 });
 
 describe("BatchReviewPage", () => {
+  function installGatedProjectQueues() {
+    const resolvers = { "project-a": [], "project-b": [] };
+    installFetchMock([
+      {
+        match: /^\/batches(\/runs)?\?project_id=project-(a|b)&/,
+        response: (request) => {
+          const projectId = request.url.match(/project_id=(project-[ab])/)[1];
+          const isReadyQueue =
+            request.url === `/batches?project_id=${projectId}&mine=true&limit=100`;
+          return new Promise((resolve) => {
+            resolvers[projectId].push(() =>
+              resolve(
+                apiResponse(
+                  isReadyQueue
+                    ? [
+                        {
+                          change_set_id: `ready-${projectId}`,
+                          created_at: "2026-07-16T12:00:00Z",
+                          operations: [],
+                          source_note_count: 1,
+                          status: "ready",
+                          summary: `Ready in ${projectId}`,
+                        },
+                      ]
+                    : []
+                )
+              )
+            );
+          });
+        },
+      },
+      {
+        match: /^\/projects\/project-(a|b)\/graph-draft-batch-settings$/,
+        response: () => apiResponse({ cadence_minutes: 1440, enabled: true }),
+      },
+    ]);
+    const settle = async (projectId) => {
+      await waitFor(() => expect(resolvers[projectId]).toHaveLength(4));
+      resolvers[projectId].forEach((release) => release());
+    };
+    return { resolvers, settle };
+  }
+
+  function renderPage(selectedProjectId) {
+    const props = {
+      token: "token-1",
+      projects: [
+        { name: "Project A", project_id: "project-a" },
+        { name: "Project B", project_id: "project-b" },
+      ],
+      onSelectedProjectChange: vi.fn(),
+      navigate: vi.fn(),
+      canManageGraph: true,
+      canManageProject: false,
+      setBusy: vi.fn(),
+      setFlash: vi.fn(),
+    };
+    const view = render(<BatchReviewPage {...props} selectedProjectId={selectedProjectId} />);
+    return {
+      ...view,
+      select: (projectId) =>
+        view.rerender(<BatchReviewPage {...props} selectedProjectId={projectId} />),
+    };
+  }
+
+  const flushResponses = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  };
+
+  it("ignores late queue responses for a previously selected project", async () => {
+    const { settle } = installGatedProjectQueues();
+    const page = renderPage("project-a");
+    page.select("project-b");
+
+    await settle("project-b");
+    expect(await screen.findByText("Ready in project-b")).toBeInTheDocument();
+
+    await settle("project-a");
+    await flushResponses();
+
+    expect(screen.getByText("Ready in project-b")).toBeInTheDocument();
+    expect(screen.queryByText("Ready in project-a")).not.toBeInTheDocument();
+  });
+
+  it("keeps the current project's loading state when a stale load settles", async () => {
+    const { settle } = installGatedProjectQueues();
+    const page = renderPage("project-a");
+    expect(screen.getByText("Loading...")).toBeInTheDocument();
+    page.select("project-b");
+
+    await settle("project-a");
+    await flushResponses();
+
+    expect(screen.getByText("Loading...")).toBeInTheDocument();
+    expect(screen.queryByText("Ready in project-a")).not.toBeInTheDocument();
+
+    await settle("project-b");
+    expect(await screen.findByText("Ready in project-b")).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText("Loading...")).not.toBeInTheDocument());
+  });
+
   it("shows distinct personal, waiting, and owner-commit queues", async () => {
     installFetchMock([
       {
