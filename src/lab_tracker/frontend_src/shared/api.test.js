@@ -181,6 +181,29 @@ describe("strict JSON envelope helpers", () => {
     }
   });
 
+  it("does not reject the session for a credential-free 401", async () => {
+    // Unauthenticated flows (device pairing, invitation redemption, login) can
+    // return 401 while a user is signed in; they carry no session credential.
+    const authRejected = vi.fn();
+    window.addEventListener(AUTH_REJECTED_EVENT, authRejected);
+    installFetchMock([
+      {
+        match: "/auth/devices/consume",
+        method: "POST",
+        response: errorResponse("Enrollment offer has expired.", 401),
+      },
+    ]);
+
+    try {
+      await expect(
+        apiRequest("/auth/devices/consume", { method: "POST", body: { offer_token: "x" } })
+      ).rejects.toMatchObject({ message: "Enrollment offer has expired.", status: 401 });
+      expect(authRejected).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener(AUTH_REJECTED_EVENT, authRejected);
+    }
+  });
+
   it.each([
     "Project contributor access required.",
     "Insufficient role.",

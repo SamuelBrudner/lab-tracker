@@ -149,8 +149,11 @@ function useAuthSession({ replace, setBusy, setFlash, storage }) {
 
   useEffect(() => {
     function handleAuthRejected(event) {
+      // Only a rejection of the credential this session holds signs it out; a
+      // 401 from a request that sent another (or no) credential says nothing
+      // about the current session.
       const rejectedToken = event.detail?.token || "";
-      if (!token || (rejectedToken && rejectedToken !== token)) {
+      if (!token || rejectedToken !== token) {
         return;
       }
       clearSession();

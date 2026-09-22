@@ -2,7 +2,7 @@ import * as React from "react";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { apiRequest } from "../shared/api.js";
+import { AUTH_REJECTED_EVENT, apiRequest } from "../shared/api.js";
 import { createAuthStorage } from "../shared/auth-storage.js";
 import {
   TOKEN_EXPIRES_AT_STORAGE_KEY,
@@ -262,6 +262,38 @@ describe("useAuthSession", () => {
 
     await waitFor(() => expect(localStorage.getItem(TOKEN_STORAGE_KEY)).toBeNull());
     expect(screen.getByTestId("token")).toHaveTextContent("");
+  });
+
+  it("ignores an auth rejection that does not name the current token", async () => {
+    localStorage.setItem(TOKEN_STORAGE_KEY, "stored-token");
+    const setBusy = vi.fn();
+    const setFlash = vi.fn();
+    installFetchMock([
+      {
+        match: "/auth/me",
+        response: apiResponse(USER, 200, { auth_enabled: true }),
+      },
+    ]);
+
+    render(<AuthHarness setBusy={setBusy} setFlash={setFlash} />);
+    await waitFor(() => expect(setBusy).toHaveBeenLastCalledWith(false));
+
+    act(() => {
+      for (const token of ["", "some-other-token"]) {
+        window.dispatchEvent(
+          new CustomEvent(AUTH_REJECTED_EVENT, {
+            detail: { message: "Enrollment offer has expired.", status: 401, token },
+          })
+        );
+      }
+    });
+
+    expect(localStorage.getItem(TOKEN_STORAGE_KEY)).toBe("stored-token");
+    expect(screen.getByTestId("token")).toHaveTextContent("stored-token");
+    expect(setFlash).not.toHaveBeenCalledWith(
+      "",
+      "Your session expired. Please sign in again."
+    );
   });
 
   it("keeps the token when a later API request returns a permission 403", async () => {
