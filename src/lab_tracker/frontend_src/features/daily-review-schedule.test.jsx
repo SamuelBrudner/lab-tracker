@@ -441,7 +441,7 @@ describe("DailyReviewScheduleForm", () => {
     expect(fetchMock.mock.calls.some(([, init]) => init?.method === "PATCH")).toBe(false);
   });
 
-  it("does not apply a previous project's save response to the current project", async () => {
+  async function saveThenSwitchProject() {
     let releasePatch = null;
     const onSaved = vi.fn();
     installFetchMock([
@@ -497,7 +497,18 @@ describe("DailyReviewScheduleForm", () => {
     await waitFor(() => expect(screen.getByLabelText("Cadence")).toHaveValue("720"));
     expect(screen.getByText(/Email cues are unavailable/)).toBeInTheDocument();
 
-    releasePatch(
+    const settle = async (response) => {
+      releasePatch(response);
+      await waitFor(() => expect(props.setBusy).toHaveBeenLastCalledWith(false));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    };
+    return { onSaved, props, settle };
+  }
+
+  it("does not apply a previous project's save response to the current project", async () => {
+    const { onSaved, props, settle } = await saveThenSwitchProject();
+
+    await settle(
       apiResponse({
         cadence_minutes: 1440,
         enabled: true,
@@ -508,14 +519,29 @@ describe("DailyReviewScheduleForm", () => {
         timezone_name: "UTC",
       })
     );
-    await waitFor(() => expect(props.setBusy).toHaveBeenLastCalledWith(false));
-    await new Promise((resolve) => setTimeout(resolve, 0));
 
-    // The stale save must not report success into project B's context.
+    // The stale save must not report success into project B's context; it
+    // says which project the save applied to instead.
     expect(onSaved).not.toHaveBeenCalled();
     expect(props.setFlash).not.toHaveBeenCalledWith("Daily review schedule updated.");
+    expect(props.setFlash).toHaveBeenLastCalledWith(
+      "Daily review schedule for the previous project updated."
+    );
     expect(screen.queryByText(/Next run:/)).not.toBeInTheDocument();
     expect(screen.getByText(/Email cues are unavailable/)).toBeInTheDocument();
+    expect(screen.getByLabelText("Cadence")).toHaveValue("720");
+  });
+
+  it("names the previous project when its in-flight save fails after a switch", async () => {
+    const { onSaved, props, settle } = await saveThenSwitchProject();
+
+    await settle(errorResponse("Timezone rejected.", 422));
+
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(props.setFlash).toHaveBeenLastCalledWith(
+      "",
+      "Failed to update the previous project's daily review timing: Timezone rejected."
+    );
     expect(screen.getByLabelText("Cadence")).toHaveValue("720");
   });
 });

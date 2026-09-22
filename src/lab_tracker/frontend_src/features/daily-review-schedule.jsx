@@ -117,6 +117,10 @@ function DailyReviewScheduleForm({
       return;
     }
     const savedProjectId = projectId;
+    // The form moved to another project (or unmounted) while this save was in
+    // flight: its result belongs to the previous project, so it must neither
+    // populate nor be reported as the current project's.
+    const projectChanged = () => currentProjectIdRef.current !== savedProjectId;
     setBusy(true);
     setFlash("", "");
     try {
@@ -141,16 +145,23 @@ function DailyReviewScheduleForm({
           token,
         }
       );
-      if (currentProjectIdRef.current !== savedProjectId) {
-        // The form moved to another project (or unmounted) while this save
-        // was in flight: its result belongs to the previous project, so it
-        // must neither populate nor report success into the current context.
+      if (projectChanged()) {
+        setFlash("Daily review schedule for the previous project updated.");
         return;
       }
       setSettings(nextSettings);
       onSaved(nextSettings);
       setFlash("Daily review schedule updated.");
     } catch (err) {
+      if (projectChanged()) {
+        setFlash(
+          "",
+          `Failed to update the previous project's daily review timing: ${
+            err.message || "unknown error"
+          }`
+        );
+        return;
+      }
       setFlash("", err.message || "Failed to update daily review timing.");
     } finally {
       setBusy(false);

@@ -114,23 +114,32 @@ describe("useMobileCapture share-target import", () => {
     );
   });
 
-  it("logs and flashes a share import failure instead of swallowing it", async () => {
+  it("logs and flashes a share import failure, then uploads what was already imported", async () => {
+    // migrateIncomingShares can fail partway (e.g. on the second share) after
+    // earlier shares were already queued; those must upload now rather than
+    // wait for the next online/boot drain.
     const failure = new Error("inbox unreadable");
-    const queue = { drain: vi.fn() };
+    const queue = {
+      drain: vi.fn(async () => ({ dropped: [], stillQueued: [], uploaded: [{}] })),
+    };
     shareMocks.getUploadQueue.mockReturnValue(queue);
     shareMocks.migrateIncomingShares.mockRejectedValue(failure);
 
     const { props } = renderCaptureHook();
 
     await waitFor(() =>
-      expect(consoleError).toHaveBeenCalledWith("Shared capture import failed:", failure)
+      expect(queue.drain).toHaveBeenCalledWith({
+        token: "token-1",
+        ownerId: "owner-1",
+        authEnabled: true,
+      })
     );
+    expect(consoleError).toHaveBeenCalledWith("Shared capture import failed:", failure);
     expect(props.setFlash).toHaveBeenLastCalledWith(
       "",
       "Shared captures could not be imported: inbox unreadable. " +
-        "They stay in the share inbox and will be retried."
+        "Shares not yet imported stay in the share inbox and will be retried."
     );
-    expect(queue.drain).not.toHaveBeenCalled();
   });
 
   it("does not flash a failure after the capture surface moved on", async () => {

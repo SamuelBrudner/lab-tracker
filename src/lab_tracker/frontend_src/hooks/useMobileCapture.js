@@ -164,6 +164,29 @@ function useMobileCapture({
       return undefined;
     }
     let canceled = false;
+    function drainImportedShares() {
+      return queue
+        .drain({ token, ownerId, authEnabled })
+        .then((drainResult) => {
+          if (drainResult.dropped.length > 0) {
+            setFlash("", droppedUploadsMessage(drainResult.dropped));
+          }
+          return drainResult;
+        })
+        .catch((error) => {
+          // The imported captures stay queued for the next online/boot
+          // retry; make the failure visible rather than silently holding them.
+          // eslint-disable-next-line no-console
+          console.error("Shared capture upload failed:", error);
+          if (!canceled) {
+            setFlash(
+              "",
+              `Shared captures were imported but could not be uploaded yet: ${errorDetail(error)}. ` +
+                "They stay queued and will retry when you're back online."
+            );
+          }
+        });
+    }
     migrateIncomingShares({
       createTextNote: ({ metadata, rawContent }) =>
         apiRequest("/notes", {
@@ -179,8 +202,8 @@ function useMobileCapture({
       projectId: selectedProjectId,
       ownerId,
       uploadQueue: queue,
-    })
-      .then((result) => {
+    }).then(
+      (result) => {
         if (canceled || result.migrated === 0) {
           return undefined;
         }
@@ -189,42 +212,28 @@ function useMobileCapture({
             ? "1 shared capture imported."
             : `${result.migrated} shared captures imported.`
         );
-        return queue
-          .drain({ token, ownerId, authEnabled })
-          .then((drainResult) => {
-            if (drainResult.dropped.length > 0) {
-              setFlash("", droppedUploadsMessage(drainResult.dropped));
-            }
-            return drainResult;
-          })
-          .catch((error) => {
-            // The imported captures stay queued for the next online/boot
-            // retry; make the failure visible rather than silently holding them.
-            // eslint-disable-next-line no-console
-            console.error("Shared capture upload failed:", error);
-            if (!canceled) {
-              setFlash(
-                "",
-                `Shared captures were imported but could not be uploaded yet: ${errorDetail(error)}. ` +
-                  "They stay queued and will retry when you're back online."
-              );
-            }
-          });
-      })
-      .catch((error) => {
+        return drainImportedShares();
+      },
+      (error) => {
         // Migration failures shouldn't block the rest of the capture UI (the
-        // shares stay in the inbox for the next attempt), but they must be
-        // visible rather than silently swallowed.
+        // remaining shares stay in the inbox for the next attempt), but they
+        // must be visible rather than silently swallowed.
         // eslint-disable-next-line no-console
         console.error("Shared capture import failed:", error);
-        if (!canceled) {
-          setFlash(
-            "",
-            `Shared captures could not be imported: ${errorDetail(error)}. ` +
-              "They stay in the share inbox and will be retried."
-          );
+        if (canceled) {
+          return undefined;
         }
-      });
+        setFlash(
+          "",
+          `Shared captures could not be imported: ${errorDetail(error)}. ` +
+            "Shares not yet imported stay in the share inbox and will be retried."
+        );
+        // The import can fail partway, after earlier shares were already
+        // queued: upload those now instead of holding them until the next
+        // online/boot drain.
+        return drainImportedShares();
+      }
+    );
     return () => {
       canceled = true;
     };
