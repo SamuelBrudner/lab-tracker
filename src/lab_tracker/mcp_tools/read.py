@@ -843,7 +843,8 @@ def lab_tracker_next_questions(
     A question counts as answered only when a supported claim answers it. When
     any goal, question, or claim list is too large to load in full,
     ``meta.inputs_truncated`` is true and ``meta.truncated_inputs`` names the
-    cut lists, so the ranking may be incomplete.
+    cut lists and why (``row_cap`` or ``list_changed_while_paging``), so the
+    ranking may be incomplete.
     """
     return _read_tool(
         "lab_tracker_next_questions",

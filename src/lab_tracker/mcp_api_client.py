@@ -807,6 +807,13 @@ class LabTrackerAPIClient:
                         "status": status,
                         "fetched": len(rows),
                         "total": total,
+                        # Either the per-list row cap stopped paging, or rows
+                        # disappeared between pages (an empty page came early).
+                        "reason": (
+                            "row_cap"
+                            if len(rows) >= NEXT_QUESTIONS_MAX_ROWS_PER_LIST
+                            else "list_changed_while_paging"
+                        ),
                     }
                 )
             return rows

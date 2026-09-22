@@ -131,6 +131,7 @@ def test_next_questions_reports_truncated_inputs(monkeypatch: pytest.MonkeyPatch
         "status": "active",
         "fetched": 3,
         "total": 5,
+        "reason": "row_cap",
     }
     assert truncated["claims"]["fetched"] == 3
     assert truncated["claims"]["total"] == 4
@@ -150,3 +151,50 @@ def test_next_questions_requires_list_totals() -> None:
             client.next_questions(project_id=PROJECT_ID)
     finally:
         client.close()
+
+
+def test_next_questions_reports_a_list_that_shrank_while_paging() -> None:
+    goals, questions, claims = _fixture_rows(question_count=3, claim_count=1)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == f"/projects/{PROJECT_ID}/goals":
+            status = request.url.params.get("status")
+            return _page([row for row in goals if row["status"] == status], request)
+        if path == "/questions":
+            # Two rows were deleted after the total was counted: the next page is
+            # empty although fewer than meta.total rows were read.
+            if request.url.params.get("status") != "active":
+                return _page([], request)
+            offset = int(request.url.params["offset"])
+            return httpx.Response(
+                200,
+                json={
+                    "data": questions[offset:],
+                    "meta": {"limit": 200, "offset": offset, "total": len(questions) + 2},
+                },
+            )
+        if path == "/claims":
+            return _page(claims, request)
+        return httpx.Response(404, json={"error": {"message": "not found"}})
+
+    client = LabTrackerAPIClient(
+        MCPSettings(base_url="http://testserver"),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        payload = client.next_questions(project_id=PROJECT_ID)
+    finally:
+        client.close()
+
+    assert payload["meta"]["inputs_truncated"] is True
+    assert payload["meta"]["truncated_inputs"] == [
+        {
+            "list": "questions",
+            "project_id": PROJECT_ID,
+            "status": "active",
+            "fetched": 3,
+            "total": 5,
+            "reason": "list_changed_while_paging",
+        }
+    ]
