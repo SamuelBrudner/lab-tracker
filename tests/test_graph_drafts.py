@@ -19,7 +19,7 @@ from lab_tracker.app_parts.middleware import system_auth_context
 from lab_tracker.auth import AuthContext, PrincipalType, Role, utc_now
 from lab_tracker.config import Settings
 from lab_tracker.db_models import GraphChangeOperationModel, GraphChangeSetModel
-from lab_tracker.errors import AuthError, ValidationError
+from lab_tracker.errors import AuthError, PermissionDeniedError, ValidationError
 from lab_tracker.graph_drafting import (
     AgenticGraphDraftClient,
     AnthropicGraphDraftClient,
@@ -3042,8 +3042,17 @@ def test_system_actor_is_admin_but_not_interactive(client: TestClient) -> None:
     system = system_auth_context()
     assert authz.has_global_admin(system) is True
     authz.require_interactive(_human_actor(), action="Committing")
-    with pytest.raises(AuthError):
+    with pytest.raises(PermissionDeniedError):
         authz.require_interactive(system, action="Committing")
+
+
+def test_require_interactive_without_an_actor_is_an_authentication_failure(
+    client: TestClient,
+) -> None:
+    authz = client.app.state.lab_tracker_api.project_authorization
+    with pytest.raises(AuthError, match="Authentication required.") as excinfo:
+        authz.require_interactive(None, action="Committing")
+    assert not isinstance(excinfo.value, PermissionDeniedError)
 
 
 def test_system_actor_cannot_commit_graph_change_set(

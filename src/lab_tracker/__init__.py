@@ -8,6 +8,7 @@ from lab_tracker.errors import (
     ConflictError,
     LabTrackerError,
     NotFoundError,
+    PermissionDeniedError,
     StoreAuthorityDeniedError,
     ValidationError,
 )
@@ -68,6 +69,7 @@ __all__ = [
     "NoteStatus",
     "NotFoundError",
     "OutcomeStatus",
+    "PermissionDeniedError",
     "Project",
     "ProjectGroup",
     "ProjectGroupKind",

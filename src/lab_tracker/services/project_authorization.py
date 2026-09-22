@@ -48,11 +48,13 @@ class ProjectAuthorizationPolicy(BaseService):
         or commit them: only a person in the loop turns a proposal into a
         committed graph edge. Pairs with :attr:`AuthContext.is_interactive`, and
         is fail-closed: only an interactive human session (USER or DEVICE) is
-        admitted; SERVICE and SYSTEM principals and a missing (None) actor are
-        all rejected.
+        admitted; SERVICE and SYSTEM principals are denied, and a missing
+        (None) actor is an authentication failure.
         """
 
-        if actor is None or not actor.is_interactive:
+        if actor is None:
+            raise AuthError("Authentication required.")
+        if not actor.is_interactive:
             raise PermissionDeniedError(
                 f"{action} requires an interactive human session; service "
                 "tokens and automation principals may draft graph proposals "
