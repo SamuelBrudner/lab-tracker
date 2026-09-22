@@ -12,11 +12,11 @@ describe("UsersPage invitations", () => {
     const setFlash = vi.fn();
     const fetchMock = installFetchMock([
       {
-        match: "/auth/users?limit=200",
+        match: "/auth/users?limit=200&offset=0",
         response: apiResponse([], 200, { limit: 200, offset: 0, total: 0 }),
       },
       {
-        match: "/auth/invitations?limit=200",
+        match: "/auth/invitations?limit=200&offset=0",
         response: [
           apiResponse([], 200, { limit: 200, offset: 0, total: 0 }),
           apiResponse(

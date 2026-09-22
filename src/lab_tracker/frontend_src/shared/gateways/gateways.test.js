@@ -318,6 +318,67 @@ describe("auth gateway", () => {
     await expect(auth.getCurrentUser()).rejects.toBeInstanceOf(ContractError);
   });
 
+  it("lists every user and invitation page instead of truncating at one page", async () => {
+    const users = Array.from({ length: 201 }, (_, index) => ({
+      ...AUTH_USER,
+      user_id: `u-${index}`,
+      username: `user-${index}`,
+    }));
+    const invitations = Array.from({ length: 201 }, (_, index) => ({
+      consumed_at: null,
+      created_at: "2026-07-20T00:00:00Z",
+      email: `member-${index}@example.com`,
+      expires_at: "2026-07-21T00:00:00Z",
+      invitation_id: `i-${index}`,
+      revoked_at: null,
+      role: "viewer",
+      status: "pending",
+    }));
+    const page = (items, offset) =>
+      apiResponse(items.slice(offset, offset + 200), 200, {
+        limit: 200,
+        offset,
+        total: items.length,
+      });
+    installFetchMock([
+      { match: "/auth/users?limit=200&offset=0", response: page(users, 0) },
+      { match: "/auth/users?limit=200&offset=200", response: page(users, 200) },
+      { match: "/auth/invitations?limit=200&offset=0", response: page(invitations, 0) },
+      { match: "/auth/invitations?limit=200&offset=200", response: page(invitations, 200) },
+    ]);
+
+    const listedUsers = (await auth.listUsers({ token: "tok" })).data;
+    const listedInvitations = (await auth.listInvitations({ token: "tok" })).data;
+
+    expect(listedUsers.map((user) => user.user_id)).toEqual(users.map((user) => user.user_id));
+    expect(listedInvitations.map((invitation) => invitation.invitation_id)).toEqual(
+      invitations.map((invitation) => invitation.invitation_id)
+    );
+  });
+
+  it("fails loudly on a malformed user in a later page", async () => {
+    installFetchMock([
+      {
+        match: "/auth/users?limit=200&offset=0",
+        response: apiResponse(
+          Array.from({ length: 200 }, (_, index) => ({ ...AUTH_USER, user_id: `u-${index}` })),
+          200,
+          { limit: 200, offset: 0, total: 201 }
+        ),
+      },
+      {
+        match: "/auth/users?limit=200&offset=200",
+        response: apiResponse([{ ...AUTH_USER, username: 7 }], 200, {
+          limit: 200,
+          offset: 200,
+          total: 201,
+        }),
+      },
+    ]);
+
+    await expect(auth.listUsers({ token: "tok" })).rejects.toBeInstanceOf(ContractError);
+  });
+
   it("validates user and invitation management responses", async () => {
     const invitation = {
       consumed_at: null,
