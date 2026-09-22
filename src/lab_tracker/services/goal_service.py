@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Iterable
 from datetime import date
 from typing import TYPE_CHECKING
@@ -44,6 +45,8 @@ if TYPE_CHECKING:
     from lab_tracker.services.session_service import SessionService
     from lab_tracker.services.visualization_service import VisualizationService
 
+
+_logger = logging.getLogger(__name__)
 
 GOAL_LINK_TARGET_TYPES = {
     EntityType.PROJECT,
@@ -212,9 +215,31 @@ class GoalService(BaseService):
         return [goal for goal in goals if self.can_read_goal(goal, actor=actor)]
 
     def can_read_goal(self, goal: Goal, *, actor: AuthContext | None = None) -> bool:
+        """Whether a listing may show this goal to the actor.
+
+        A goal whose link target no longer exists cannot have its scope
+        resolved, so ``GET /goals/{id}`` answers 404 for it. Listings skip it the
+        same way instead of failing for every caller, and log each dangling
+        link so the broken row stays visible to operators. Any other
+        ``NotFoundError`` still propagates.
+        """
+
         try:
             self._require_goal_read(goal, actor=actor)
         except AuthError:
+            return False
+        except NotFoundError:
+            dangling_links = self._dangling_links(goal)
+            if not dangling_links:
+                raise
+            for link in dangling_links:
+                _logger.warning(
+                    "Goal %s link %s targets missing %s %s; hiding the goal from listings.",
+                    goal.goal_id,
+                    link.link_id,
+                    link.target.entity_type.value,
+                    link.target.entity_id,
+                )
             return False
         return True
 
@@ -478,6 +503,15 @@ class GoalService(BaseService):
 
     def _target_project_id(self, target: EntityRef) -> UUID:
         return self._ensure_target_exists(target, None)
+
+    def _dangling_links(self, goal: Goal) -> list[GoalLink]:
+        dangling: list[GoalLink] = []
+        for link in goal.links:
+            try:
+                self._target_project_id(link.target)
+            except NotFoundError:
+                dangling.append(link)
+        return dangling
 
     def _goal_scope_project_ids(self, goal: Goal) -> set[UUID]:
         project_ids: set[UUID] = set()
