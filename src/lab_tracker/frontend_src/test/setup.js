@@ -45,6 +45,9 @@ vi.mock("@xyflow/react", async () => {
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  // restoreAllMocks does not undo vi.stubGlobal (e.g. installFetchMock's
+  // fetch); without this a stub leaks into the next test.
+  vi.unstubAllGlobals();
 });
 
 beforeEach(() => {
