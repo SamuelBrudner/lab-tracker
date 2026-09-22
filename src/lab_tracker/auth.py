@@ -1224,6 +1224,14 @@ class PersonalAccessTokenService:
             now = utc_now()
             if row is None or row.revoked_at is not None or _as_utc(row.expires_at) <= now:
                 return None
+            owner = session.get(UserModel, row.user_id)
+            if owner is None:
+                return None
+            # The stored role is the issuance-time cap. The effective role is
+            # the lower of that cap and the owner's live role, so demoting a
+            # user immediately narrows every token they minted while promotion
+            # never widens one.
+            effective_role = _cap_role(Role(row.role), issuer_role=Role(owner.role))
             last_used_at = _as_utc(row.last_used_at) if row.last_used_at is not None else None
             if (
                 last_used_at is None
@@ -1235,7 +1243,7 @@ class PersonalAccessTokenService:
                 user_id=ensure_uuid(row.user_id),
                 token_id=ensure_uuid(row.token_id),
                 label=row.label,
-                role=Role(row.role),
+                role=effective_role,
                 read_only=bool(row.read_only),
                 scope=row.scope,
             )

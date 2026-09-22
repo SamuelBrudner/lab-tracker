@@ -8,8 +8,15 @@ from fastapi import APIRouter
 from starlette import status as http_status
 from starlette.requests import Request
 
-from lab_tracker.auth import AuthService, PersonalAccessToken, PersonalAccessTokenService
-from lab_tracker.errors import AuthError
+from lab_tracker.auth import (
+    AuthContext,
+    AuthService,
+    PersonalAccessToken,
+    PersonalAccessTokenService,
+    PrincipalType,
+    Role,
+)
+from lab_tracker.errors import AuthError, NotFoundError
 from lab_tracker.schemas import (
     Envelope,
     ListEnvelope,
@@ -18,7 +25,7 @@ from lab_tracker.schemas import (
     PersonalAccessTokenRead,
 )
 
-from .shared import actor_from_request, list_response
+from .shared import actor_from_request, list_response, paginate, validate_pagination
 
 
 def build_personal_access_tokens_router(
@@ -75,7 +82,49 @@ def build_personal_access_tokens_router(
         token = personal_access_token_service.revoke_token(actor.user_id, token_id)
         return Envelope(data=_token_read(token))
 
+    @router.get(
+        "/auth/users/{user_id:uuid}/tokens",
+        response_model=ListEnvelope[PersonalAccessTokenRead],
+    )
+    def list_user_personal_access_tokens(
+        user_id: UUID,
+        request: Request,
+        limit: int = 50,
+        offset: int = 0,
+    ):
+        validate_pagination(limit, offset)
+        _ensure_interactive_admin(actor_from_request(request))
+        if auth_service.get_user_by_id(user_id) is None:
+            raise NotFoundError("User does not exist.")
+        tokens = [
+            _token_read(token) for token in personal_access_token_service.list_tokens(user_id)
+        ]
+        items, total = paginate(tokens, limit, offset)
+        return list_response(items, limit=limit, offset=offset, total=total)
+
+    @router.delete(
+        "/auth/users/{user_id:uuid}/tokens/{token_id:uuid}",
+        response_model=Envelope[PersonalAccessTokenRead],
+    )
+    def revoke_user_personal_access_token(user_id: UUID, token_id: UUID, request: Request):
+        _ensure_interactive_admin(actor_from_request(request))
+        token = personal_access_token_service.revoke_token(user_id, token_id)
+        return Envelope(data=_token_read(token))
+
     return router
+
+
+def _ensure_interactive_admin(actor: AuthContext) -> None:
+    """Admin credential management needs a person at an admin session.
+
+    Paired devices and lpat_ service tokens are already fenced off /auth/* by
+    the middleware; this re-check keeps the routes fail-closed on their own.
+    """
+
+    if actor.principal_type is not PrincipalType.USER:
+        raise AuthError("Personal access tokens require user credentials.")
+    if actor.role is not Role.ADMIN:
+        raise AuthError("Admin privileges required.")
 
 
 def _token_read(token: PersonalAccessToken) -> PersonalAccessTokenRead:

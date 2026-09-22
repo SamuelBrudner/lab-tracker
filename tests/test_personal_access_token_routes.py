@@ -462,3 +462,130 @@ def test_invalid_personal_access_token_attempts_are_rate_limited(
     assert first.status_code == 401
     assert second.status_code == 401
     assert third.status_code == 429
+
+
+def _register_and_login(
+    client: TestClient,
+    *,
+    role: Role,
+    prefix: str,
+) -> tuple[str, dict[str, str]]:
+    username = f"{prefix}-{uuid4().hex[:8]}"
+    user = client.app.state.auth_service.register_user(
+        username=username,
+        password="secret",
+        role=role,
+    )
+    login = client.post("/auth/login", json={"username": username, "password": "secret"})
+    assert login.status_code == 200, login.text
+    return str(user.user_id), _bearer(login.json()["data"]["access_token"])
+
+
+def test_personal_access_token_loses_authority_when_its_user_is_demoted(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    root_project = client.post(
+        "/projects",
+        json={"name": "Root-only project"},
+        headers=admin_auth_headers,
+    )
+    assert root_project.status_code == 201, root_project.text
+    root_project_id = root_project.json()["data"]["project_id"]
+    second_id, second_headers = _register_and_login(client, role=Role.ADMIN, prefix="second")
+    issued = _create_token(client, second_headers, role="admin", read_only=False)
+    pat_headers = _bearer(issued["secret"])
+    before = client.get("/projects", headers=pat_headers)
+    assert root_project_id in {item["project_id"] for item in before.json()["data"]}
+
+    demoted = client.patch(
+        f"/auth/users/{second_id}",
+        json={"role": "viewer"},
+        headers=admin_auth_headers,
+    )
+    assert demoted.status_code == 200, demoted.text
+
+    listing = client.get("/projects", headers=pat_headers)
+    create = client.post("/projects", json={"name": "Blocked"}, headers=pat_headers)
+    delete = client.delete(f"/projects/{root_project_id}", headers=pat_headers)
+
+    assert listing.status_code == 200, listing.text
+    assert root_project_id not in {item["project_id"] for item in listing.json()["data"]}
+    assert create.status_code == 403
+    assert create.json()["error"]["code"] == "service_forbidden"
+    assert delete.status_code == 403
+    assert client.get(f"/projects/{root_project_id}", headers=admin_auth_headers).status_code == 200
+
+
+def test_admin_can_list_and_revoke_another_users_personal_access_tokens(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    owner_id, owner_headers = _register_and_login(client, role=Role.EDITOR, prefix="owner")
+    issued = _create_token(client, owner_headers, role="editor", read_only=False)
+    _create_token(client, admin_auth_headers, label="Admin's own")
+
+    listed = client.get(f"/auth/users/{owner_id}/tokens", headers=admin_auth_headers)
+    assert listed.status_code == 200, listed.text
+    body = listed.json()
+    assert [item["token_id"] for item in body["data"]] == [issued["token_id"]]
+    assert body["meta"] == {"limit": 50, "offset": 0, "total": 1}
+    assert "secret" not in body["data"][0]
+
+    revoked = client.delete(
+        f"/auth/users/{owner_id}/tokens/{issued['token_id']}",
+        headers=admin_auth_headers,
+    )
+    assert revoked.status_code == 200, revoked.text
+    assert revoked.json()["data"]["revoked_at"] is not None
+    assert client.get("/projects", headers=_bearer(issued["secret"])).status_code == 401
+
+
+def test_admin_token_management_rejects_mismatched_and_unknown_targets(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    owner_id, owner_headers = _register_and_login(client, role=Role.EDITOR, prefix="owner")
+    other_id, _ = _register_and_login(client, role=Role.VIEWER, prefix="other")
+    issued = _create_token(client, owner_headers)
+
+    mismatched = client.delete(
+        f"/auth/users/{other_id}/tokens/{issued['token_id']}",
+        headers=admin_auth_headers,
+    )
+    unknown_user = client.get(f"/auth/users/{uuid4()}/tokens", headers=admin_auth_headers)
+
+    assert mismatched.status_code == 404
+    assert unknown_user.status_code == 404
+    assert client.get("/projects", headers=_bearer(issued["secret"])).status_code == 200
+    assert owner_id != other_id
+
+
+def test_admin_token_management_requires_an_interactive_admin(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    owner_id, owner_headers = _register_and_login(client, role=Role.EDITOR, prefix="owner")
+    issued = _create_token(client, owner_headers)
+    admin_pat = _create_token(client, admin_auth_headers, role="admin", read_only=False)
+
+    by_editor = client.get(f"/auth/users/{owner_id}/tokens", headers=owner_headers)
+    revoke_by_editor = client.delete(
+        f"/auth/users/{owner_id}/tokens/{issued['token_id']}",
+        headers=owner_headers,
+    )
+    by_service = client.get(
+        f"/auth/users/{owner_id}/tokens",
+        headers=_bearer(admin_pat["secret"]),
+    )
+    revoke_by_service = client.delete(
+        f"/auth/users/{owner_id}/tokens/{issued['token_id']}",
+        headers=_bearer(admin_pat["secret"]),
+    )
+
+    assert by_editor.status_code == 401
+    assert by_editor.json()["error"]["message"] == "Admin privileges required."
+    assert revoke_by_editor.status_code == 401
+    assert by_service.status_code == 403
+    assert revoke_by_service.status_code == 403
+    assert client.get("/projects", headers=_bearer(issued["secret"])).status_code == 200
