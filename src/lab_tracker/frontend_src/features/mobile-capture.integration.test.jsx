@@ -184,6 +184,82 @@ describe("App", () => {
     expect(window.location.search).not.toContain("from-share");
   });
 
+  it("disables capture actions while a save is in flight so a double tap creates one note", async () => {
+    const noteId = "44444444-4444-4444-8444-444444444444";
+    localStorage.setItem(TOKEN_STORAGE_KEY, "token-mobile-double-tap");
+    window.history.replaceState({}, "", "/app/capture");
+    let releaseCreate;
+    const createGate = new Promise((resolve) => {
+      releaseCreate = resolve;
+    });
+    let createCount = 0;
+
+    installFetchMock([
+      { match: "/auth/me", response: apiResponse({ role: "admin", username: "sam" }) },
+      { match: projectsPath, response: apiResponse([project("project-1", "Project One")]) },
+      { match: questionListPath("project-1"), response: paged([]) },
+      { match: datasetListPath("project-1"), response: paged([]) },
+      {
+        match: noteCountPath("project-1"),
+        response: () => paged([], { limit: 1, offset: 0, total: 0 }),
+      },
+      { match: activeSessionsPath("project-1"), response: paged([]) },
+      {
+        match: buildApiPath("/graph-drafts", { project_id: "project-1", limit: 10 }),
+        response: paged([]),
+      },
+      {
+        match: buildApiPath("/notes", { project_id: "project-1", limit: 10 }),
+        response: paged([]),
+      },
+      { match: captureAnalysesPath("project-1"), response: paged([]) },
+      { match: captureClaimsPath("project-1"), response: paged([]) },
+      {
+        match: "/notes",
+        method: "POST",
+        response: async () => {
+          createCount += 1;
+          await createGate;
+          return apiResponse(note({ noteId }), 201);
+        },
+      },
+      {
+        match: questionCountPath("project-1"),
+        response: () => paged([], { limit: 1, offset: 0, total: 0 }),
+      },
+      {
+        match: datasetCountPath("project-1"),
+        response: () => paged([], { limit: 1, offset: 0, total: 0 }),
+      },
+      {
+        match: recentNotesPath("project-1"),
+        response: () => paged([note({ noteId })], { limit: 5, offset: 0, total: 1 }),
+      },
+    ]);
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Capture" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByLabelText("Project")).toHaveValue("project-1"));
+    fireEvent.change(screen.getByLabelText("Message or hint"), {
+      target: { value: "Fly 12 climbed the gradient" },
+    });
+    const sendButton = screen.getByRole("button", { name: "Save capture" });
+    const laterButton = screen.getByRole("button", { name: "Save for later" });
+    expect(sendButton).toBeEnabled();
+
+    fireEvent.click(sendButton);
+    await waitFor(() => expect(createCount).toBe(1));
+    expect(sendButton).toBeDisabled();
+    expect(laterButton).toBeDisabled();
+    fireEvent.click(sendButton);
+    fireEvent.click(laterButton);
+
+    releaseCreate();
+    expect(await screen.findByText("Capture saved for review.")).toBeInTheDocument();
+    expect(createCount).toBe(1);
+  });
+
   it("captures a mobile image with context as a capture-only note", async () => {
     const noteId = "11111111-1111-4111-8111-111111111111";
     const draftId = "22222222-2222-4222-8222-222222222222";

@@ -69,6 +69,7 @@ function MobileCaptureCard({
             onStartTextCapture={capture.startTextCapture}
             onStartBundleCapture={capture.startBundleCapture}
             readyToCapture={capture.readyToCapture()}
+            uploading={capture.uploading}
             needsVoice={capture.needsVoice()}
             voiceNoteType={capture.voiceNoteType}
             setVoiceNoteType={capture.setVoiceNoteType}

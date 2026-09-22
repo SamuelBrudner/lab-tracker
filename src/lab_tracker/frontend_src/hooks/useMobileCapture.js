@@ -14,7 +14,7 @@ import { droppedUploadsMessage, getUploadQueue } from "../shared/register-sw.js"
 import { migrateIncomingShares } from "../shared/share-target-inbox.js";
 import { captureHint, captureNotes, isAudioCapture } from "../features/mobile-capture/capture-helpers.js";
 
-const { useEffect, useMemo, useState } = React;
+const { useEffect, useMemo, useRef, useState } = React;
 
 function readShareTargetStatus() {
   try {
@@ -78,6 +78,11 @@ function useMobileCapture({
   const [analyses, setAnalyses] = useState([]);
   const [claims, setClaims] = useState([]);
   const [pendingError, setPendingError] = useState("");
+  // A capture save spans several awaited requests; `uploading` disables the
+  // composer actions, and the ref closes the window before React re-renders
+  // (two taps delivered to the same render closure).
+  const [uploading, setUploading] = useState(false);
+  const uploadInFlightRef = useRef(false);
   const activeQuestions = useMemo(
     () => questions.filter((question) => question.status === "active"),
     [questions]
@@ -395,7 +400,7 @@ function useMobileCapture({
   }
 
   async function uploadCapture() {
-    if (!canWrite) {
+    if (uploadInFlightRef.current || !canWrite) {
       return;
     }
     if (!selectedProjectId) {
@@ -406,6 +411,8 @@ function useMobileCapture({
       setFlash("", "Choose the required capture input before upload.");
       return;
     }
+    uploadInFlightRef.current = true;
+    setUploading(true);
     setBusy(true);
     setFlash("", "");
     try {
@@ -506,6 +513,8 @@ function useMobileCapture({
     } catch (err) {
       setFlash("", err.message || "Capture failed.");
     } finally {
+      uploadInFlightRef.current = false;
+      setUploading(false);
       setBusy(false);
     }
   }
@@ -542,6 +551,7 @@ function useMobileCapture({
     pendingActionErrors,
     pendingError,
     // derived predicates
+    uploading,
     composerTextValue,
     needsVoice,
     readyToCapture,

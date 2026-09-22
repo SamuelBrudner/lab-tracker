@@ -34,6 +34,7 @@ function CaptureComposer({
   onStartTextCapture,
   onStartBundleCapture,
   readyToCapture,
+  uploading = false,
   needsVoice,
   voiceNoteType,
   setVoiceNoteType,
@@ -109,7 +110,7 @@ function CaptureComposer({
         <button
           aria-label="Save capture"
           className="capture-composer-send"
-          disabled={!canWrite || !readyToCapture}
+          disabled={!canWrite || !readyToCapture || uploading}
           onClick={() => onUploadCapture()}
           title="Save capture"
           type="button"
@@ -219,7 +220,7 @@ function CaptureComposer({
       <div className="capture-actions">
         <button
           className="btn-secondary"
-          disabled={!canWrite || !readyToCapture}
+          disabled={!canWrite || !readyToCapture || uploading}
           onClick={() => onUploadCapture()}
           type="button"
         >
