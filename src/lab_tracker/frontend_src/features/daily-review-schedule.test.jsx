@@ -525,7 +525,7 @@ describe("DailyReviewScheduleForm", () => {
     expect(onSaved).not.toHaveBeenCalled();
     expect(props.setFlash).not.toHaveBeenCalledWith("Daily review schedule updated.");
     expect(props.setFlash).toHaveBeenLastCalledWith(
-      "Daily review schedule for the previous project updated."
+      "Daily review schedule saved for the project you were editing."
     );
     expect(screen.queryByText(/Next run:/)).not.toBeInTheDocument();
     expect(screen.getByText(/Email cues are unavailable/)).toBeInTheDocument();
@@ -540,7 +540,7 @@ describe("DailyReviewScheduleForm", () => {
     expect(onSaved).not.toHaveBeenCalled();
     expect(props.setFlash).toHaveBeenLastCalledWith(
       "",
-      "Failed to update the previous project's daily review timing: Timezone rejected."
+      "Failed to update daily review timing for the project you were editing: Timezone rejected."
     );
     expect(screen.getByLabelText("Cadence")).toHaveValue("720");
   });

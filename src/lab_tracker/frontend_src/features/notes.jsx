@@ -252,9 +252,24 @@ function NoteDetailCard({
     };
   }, [isAudio, isImage, isText, loadedNoteId, token]);
 
+  // Sync the editor from the server copy without discarding unsaved edits. A
+  // different note always resets it. For the same note, a new server
+  // transcript replaces the editor text only when the editor still holds the
+  // previously synced text; this effect runs after the render that adopted
+  // the response, so the user may already have typed in between.
+  const syncedTranscriptRef = useRef({ noteId: "", text: "" });
+  const serverTranscript = note?.transcribed_text || "";
   useEffect(() => {
-    setTranscriptText(note?.transcribed_text || "");
-  }, [note]);
+    const synced = syncedTranscriptRef.current;
+    syncedTranscriptRef.current = { noteId: loadedNoteId, text: serverTranscript };
+    if (synced.noteId !== loadedNoteId) {
+      setTranscriptText(serverTranscript);
+      return;
+    }
+    if (synced.text !== serverTranscript) {
+      setTranscriptText((current) => (current === synced.text ? serverTranscript : current));
+    }
+  }, [loadedNoteId, serverTranscript]);
 
   // A mutation response is adopted only while the card still shows that note:
   // the card is reused across note routes, so a slow response for the note the
@@ -336,7 +351,10 @@ function NoteDetailCard({
         })
       );
       // Adopt the server copy (text plus provider provenance) so later saves
-      // and the draft flow's "transcript changed?" check start from it.
+      // and the draft flow's "transcript changed?" check start from it. The
+      // editor was locked while the request was in flight, so nothing typed can
+      // be lost by showing the new transcript in the same render; the sync
+      // effect then leaves any edit made after this render alone.
       if (adoptUpdatedNote(updated)) {
         setTranscriptText(updated.transcribed_text || "");
       }

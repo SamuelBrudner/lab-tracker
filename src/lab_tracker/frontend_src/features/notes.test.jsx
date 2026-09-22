@@ -1,6 +1,6 @@
 import * as React from "react";
 
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import { apiResponse, note } from "../test/fixtures.js";
 import { installFetchMock } from "../test/utils.js";
@@ -42,7 +42,13 @@ function patchedNote(request) {
   );
 }
 
-function baseRoutes({ noteResponses, onPatch, onRawFetch = () => {}, extra = [] }) {
+function baseRoutes({
+  noteResponses,
+  onPatch,
+  onRawFetch = () => {},
+  extra = [],
+  transcriptResponse = null,
+}) {
   return [
     { match: `/notes/${NOTE_ID}`, response: noteResponses },
     {
@@ -59,12 +65,14 @@ function baseRoutes({ noteResponses, onPatch, onRawFetch = () => {}, extra = [] 
     {
       match: `/notes/${NOTE_ID}/transcript`,
       method: "POST",
-      response: apiResponse(
-        voiceNote({
-          metadata: { ...CAPTURE_METADATA, ...PROVENANCE, transcript_status: "ready" },
-          transcribedText: "Provider transcript",
-        })
-      ),
+      response:
+        transcriptResponse ||
+        apiResponse(
+          voiceNote({
+            metadata: { ...CAPTURE_METADATA, ...PROVENANCE, transcript_status: "ready" },
+            transcribedText: "Provider transcript",
+          })
+        ),
     },
     {
       match: `/notes/${NOTE_ID}`,
@@ -141,6 +149,51 @@ describe("NoteDetailCard transcript provenance", () => {
       transcript_status: "ready",
     });
     expect(patches[0].metadata.transcript_edited_at).toEqual(expect.any(String));
+  });
+
+  it("keeps an edit typed while the transcription response is being applied", async () => {
+    // Deterministic form of a race: the user types in the same tick the
+    // transcription response lands, before React flushes the effect that
+    // syncs the editor from the refreshed note. The edit must survive.
+    let releaseTranscript = null;
+    installFetchMock(
+      baseRoutes({
+        noteResponses: [
+          apiResponse(
+            voiceNote({
+              metadata: { ...CAPTURE_METADATA, transcript_status: "pending" },
+              transcribedText: "",
+            })
+          ),
+        ],
+        onPatch: () => {},
+        transcriptResponse: () =>
+          new Promise((resolve) => {
+            releaseTranscript = resolve;
+          }),
+      })
+    );
+    renderDetail();
+    await waitForLoadedVoiceNote();
+    fireEvent.click(screen.getByRole("button", { name: "Transcribe voice" }));
+    await waitFor(() => expect(releaseTranscript).toBeTypeOf("function"));
+
+    await act(async () => {
+      releaseTranscript(
+        apiResponse(
+          voiceNote({
+            metadata: { ...CAPTURE_METADATA, ...PROVENANCE, transcript_status: "ready" },
+            transcribedText: "Provider transcript",
+          })
+        )
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      fireEvent.change(screen.getByRole("textbox"), {
+        target: { value: "Typed right away" },
+      });
+    });
+
+    expect(screen.getByRole("textbox")).toHaveValue("Typed right away");
   });
 
   it("drafts from a fresh transcription without replaying stale metadata", async () => {

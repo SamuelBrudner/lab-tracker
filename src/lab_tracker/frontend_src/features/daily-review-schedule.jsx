@@ -118,8 +118,9 @@ function DailyReviewScheduleForm({
     }
     const savedProjectId = projectId;
     // The form moved to another project (or unmounted) while this save was in
-    // flight: its result belongs to the previous project, so it must neither
-    // populate nor be reported as the current project's.
+    // flight: its result belongs to the project that was being edited, so it
+    // must neither populate nor be reported as the current project's. The
+    // messages avoid saying "previous" because an unmount is not a switch.
     const projectChanged = () => currentProjectIdRef.current !== savedProjectId;
     setBusy(true);
     setFlash("", "");
@@ -146,7 +147,7 @@ function DailyReviewScheduleForm({
         }
       );
       if (projectChanged()) {
-        setFlash("Daily review schedule for the previous project updated.");
+        setFlash("Daily review schedule saved for the project you were editing.");
         return;
       }
       setSettings(nextSettings);
@@ -156,7 +157,7 @@ function DailyReviewScheduleForm({
       if (projectChanged()) {
         setFlash(
           "",
-          `Failed to update the previous project's daily review timing: ${
+          `Failed to update daily review timing for the project you were editing: ${
             err.message || "unknown error"
           }`
         );
