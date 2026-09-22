@@ -5,6 +5,7 @@ import { CaptureComposer } from "./mobile-capture/CaptureComposer.jsx";
 import { CaptureContextFields } from "./mobile-capture/CaptureContextFields.jsx";
 import { MobileInstallPrompt } from "./mobile-capture/MobileInstallPrompt.jsx";
 import { PendingReviewList } from "./mobile-capture/PendingReviewList.jsx";
+import { SharedInboxReview } from "./mobile-capture/SharedInboxReview.jsx";
 import { readCaptureLaunchContext } from "./mobile-capture/capture-helpers.js";
 
 function MobileCaptureCard({
@@ -48,6 +49,16 @@ function MobileCaptureCard({
   return (
     <article className="card span-12 capture-card">
       <MobileInstallPrompt />
+
+      <SharedInboxReview
+        shares={capture.incomingShares}
+        projects={projects}
+        selectedProjectId={selectedProjectId}
+        canWrite={canWrite}
+        busy={capture.sharesBusy}
+        onImport={capture.importIncomingShares}
+        onDiscard={capture.discardIncomingShares}
+      />
 
       <div className="capture-layout">
         <form className="form capture-form" onSubmit={(event) => event.preventDefault()}>

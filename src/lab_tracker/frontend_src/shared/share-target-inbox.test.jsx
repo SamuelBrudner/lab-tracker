@@ -6,6 +6,7 @@ import {
   STORE,
   createIndexedDbShareStorage,
   createMemoryShareStorage,
+  discardIncomingShares,
   migrateIncomingShares,
 } from "./share-target-inbox.js";
 import {
@@ -16,6 +17,11 @@ import {
 
 function makeFile(name = "shared.jpg", content = "img", type = "image/jpeg") {
   return new File([content], name, { type });
+}
+
+// The ids the user saw in the review step and confirmed for import.
+async function reviewedIds(storage) {
+  return (await storage.list()).map((share) => share.id);
 }
 
 function makeQueue() {
@@ -78,6 +84,49 @@ afterEach(() => {
 });
 
 describe("migrateIncomingShares", () => {
+  it("imports only the shares the user reviewed, leaving later arrivals parked", async () => {
+    const storage = createMemoryShareStorage([
+      { text: "reviewed note", receivedAt: 1 },
+      { text: "arrived after review", receivedAt: 2 },
+    ]);
+    const [reviewed] = await reviewedIds(storage);
+    const createTextNote = vi.fn(async () => ({ note_id: "note-share" }));
+
+    const result = await migrateIncomingShares({
+      createTextNote,
+      projectId: "proj-a",
+      ownerId: "owner-1",
+      uploadQueue: makeQueue(),
+      storage,
+      shareIds: [reviewed],
+    });
+
+    expect(result).toEqual({ migrated: 1, skipped: 0 });
+    expect(createTextNote).toHaveBeenCalledTimes(1);
+    expect(createTextNote).toHaveBeenCalledWith(
+      expect.objectContaining({ rawContent: "reviewed note" })
+    );
+    expect(await storage.list()).toEqual([
+      expect.objectContaining({ text: "arrived after review" }),
+    ]);
+  });
+
+  it("refuses to import without an explicit list of reviewed shares", async () => {
+    const storage = createMemoryShareStorage([{ text: "unreviewed", receivedAt: 1 }]);
+    const createTextNote = vi.fn();
+
+    await expect(
+      migrateIncomingShares({
+        createTextNote,
+        projectId: "proj-a",
+        uploadQueue: makeQueue(),
+        storage,
+      })
+    ).rejects.toThrow(TypeError);
+    expect(createTextNote).not.toHaveBeenCalled();
+    expect(await storage.list()).toHaveLength(1);
+  });
+
   it("attaches project + token and hands each share to the upload queue", async () => {
     const storage = createMemoryShareStorage([
       {
@@ -102,6 +151,7 @@ describe("migrateIncomingShares", () => {
       ownerId: "owner-1",
       uploadQueue,
       storage,
+      shareIds: await reviewedIds(storage),
     });
 
     expect(result.migrated).toBe(2);
@@ -127,6 +177,7 @@ describe("migrateIncomingShares", () => {
       ownerId: "owner-1",
       uploadQueue,
       storage,
+      shareIds: await reviewedIds(storage),
     });
 
     expect(result.migrated).toBe(0);
@@ -143,6 +194,7 @@ describe("migrateIncomingShares", () => {
       ownerId: "owner-1",
       uploadQueue,
       storage,
+      shareIds: await reviewedIds(storage),
     });
 
     expect(result.migrated).toBe(0);
@@ -158,6 +210,7 @@ describe("migrateIncomingShares", () => {
       ownerId: "owner-1",
       uploadQueue,
       storage,
+      shareIds: await reviewedIds(storage),
     });
 
     expect(result).toEqual({ migrated: 0, skipped: 1 });
@@ -182,6 +235,7 @@ describe("migrateIncomingShares", () => {
       ownerId: "owner-1",
       uploadQueue,
       storage,
+      shareIds: await reviewedIds(storage),
     });
 
     expect(result).toEqual({ migrated: 1, skipped: 0 });
@@ -213,6 +267,7 @@ describe("migrateIncomingShares", () => {
       ownerId: "owner-1",
       uploadQueue,
       storage,
+      shareIds: await reviewedIds(storage),
     });
 
     expect(result).toEqual({ migrated: 0, skipped: 1 });
@@ -286,6 +341,7 @@ describe("migrateIncomingShares", () => {
       ownerId: "owner-1",
       uploadQueue,
       storage,
+      shareIds: await reviewedIds(storage),
     });
 
     expect(result).toEqual({ migrated: 1, skipped: 0 });
@@ -305,5 +361,22 @@ describe("migrateIncomingShares", () => {
       share_title: "Shared from OS",
       share_text: "bench note",
     });
+  });
+});
+
+describe("discardIncomingShares", () => {
+  it("removes only the reviewed shares without importing anything", async () => {
+    const storage = createMemoryShareStorage([
+      { text: "unwanted", receivedAt: 1 },
+      { text: "arrived after review", receivedAt: 2 },
+    ]);
+    const [reviewed] = await reviewedIds(storage);
+
+    const result = await discardIncomingShares({ storage, shareIds: [reviewed] });
+
+    expect(result).toEqual({ discarded: 1 });
+    expect(await storage.list()).toEqual([
+      expect.objectContaining({ text: "arrived after review" }),
+    ]);
   });
 });

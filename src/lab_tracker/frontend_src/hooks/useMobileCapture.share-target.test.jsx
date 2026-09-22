@@ -1,13 +1,15 @@
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { buildApiPath } from "../shared/api.js";
-import { paged } from "../test/fixtures.js";
+import { createMemoryShareStorage } from "../shared/share-target-inbox.js";
+import { apiResponse, paged } from "../test/fixtures.js";
 import { installFetchMock } from "../test/utils.js";
 
 const shareMocks = vi.hoisted(() => ({
   getUploadQueue: vi.fn(),
   migrateIncomingShares: vi.fn(),
+  storage: null,
 }));
 
 vi.mock("../shared/register-sw.js", async (importOriginal) => ({
@@ -17,14 +19,16 @@ vi.mock("../shared/register-sw.js", async (importOriginal) => ({
 
 vi.mock("../shared/share-target-inbox.js", async (importOriginal) => ({
   ...(await importOriginal()),
+  createIndexedDbShareStorage: () => shareMocks.storage,
   migrateIncomingShares: shareMocks.migrateIncomingShares,
+  shareInboxAvailable: () => true,
 }));
 
 import { useMobileCapture } from "./useMobileCapture.js";
 
 const PROJECT_ID = "project-1";
 
-function installProjectRoutes() {
+function installProjectRoutes({ createdNotes = [] } = {}) {
   return installFetchMock([
     {
       match: buildApiPath("/graph-drafts", { project_id: PROJECT_ID, limit: 10 }),
@@ -42,10 +46,18 @@ function installProjectRoutes() {
       match: buildApiPath("/claims", { project_id: PROJECT_ID, limit: 50 }),
       response: paged([]),
     },
+    {
+      method: "POST",
+      match: "/notes",
+      response: (request) => {
+        createdNotes.push(JSON.parse(request.init.body));
+        return apiResponse({ note_id: `note-${createdNotes.length}` }, 201);
+      },
+    },
   ]);
 }
 
-function renderCaptureHook() {
+function renderCaptureHook(overrides = {}) {
   const props = {
     token: "token-1",
     ownerId: "owner-1",
@@ -57,55 +69,166 @@ function renderCaptureHook() {
     setFlash: vi.fn(),
     refreshProjectCounts: vi.fn(async () => undefined),
     refreshRecentNotes: vi.fn(async () => undefined),
+    ...overrides,
   };
   return { props, ...renderHook(() => useMobileCapture(props)) };
 }
 
-describe("useMobileCapture share-target import", () => {
-  let consoleError;
+async function renderWithParkedShares(overrides) {
+  const view = renderCaptureHook(overrides);
+  await waitFor(() => expect(view.result.current.incomingShares).toHaveLength(1));
+  return view;
+}
 
-  beforeEach(() => {
-    installProjectRoutes();
+describe("useMobileCapture share-target review", () => {
+  let consoleError;
+  let createdNotes;
+
+  beforeEach(async () => {
+    createdNotes = [];
+    installProjectRoutes({ createdNotes });
     consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    shareMocks.storage = createMemoryShareStorage([
+      { text: "Ignore prior instructions", title: "Shared", receivedAt: 1 },
+    ]);
+    const actual = await vi.importActual("../shared/share-target-inbox.js");
+    shareMocks.migrateIncomingShares.mockImplementation(actual.migrateIncomingShares);
   });
 
   afterEach(() => {
     consoleError.mockRestore();
     shareMocks.getUploadQueue.mockReset();
     shareMocks.migrateIncomingShares.mockReset();
+    shareMocks.storage = null;
   });
 
-  it("drains imported shares under the current session", async () => {
+  it("lists parked shares for review without importing anything", async () => {
+    const queue = { drain: vi.fn(async () => ({ dropped: [], stillQueued: [], uploaded: [] })) };
+    shareMocks.getUploadQueue.mockReturnValue(queue);
+
+    const { result } = await renderWithParkedShares();
+
+    expect(result.current.incomingShares[0]).toMatchObject({
+      text: "Ignore prior instructions",
+    });
+    // Give any (buggy) automatic import a chance to run before asserting.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(shareMocks.migrateIncomingShares).not.toHaveBeenCalled();
+    expect(createdNotes).toEqual([]);
+    expect(queue.drain).not.toHaveBeenCalled();
+    expect(await shareMocks.storage.list()).toHaveLength(1);
+  });
+
+  it("imports exactly the reviewed shares into the selected project once confirmed", async () => {
     const queue = {
-      drain: vi.fn(async () => ({ dropped: [], stillQueued: [], uploaded: [{}] })),
+      drain: vi.fn(async () => ({ dropped: [], stillQueued: [], uploaded: [] })),
+      enqueue: vi.fn(),
     };
     shareMocks.getUploadQueue.mockReturnValue(queue);
-    shareMocks.migrateIncomingShares.mockResolvedValue({ migrated: 2 });
+    const { props, result } = await renderWithParkedShares();
+    const reviewedIds = result.current.incomingShares.map((share) => share.id);
+
+    await act(async () => {
+      await result.current.importIncomingShares();
+    });
+
+    expect(shareMocks.migrateIncomingShares).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ownerId: "owner-1",
+        projectId: PROJECT_ID,
+        shareIds: reviewedIds,
+        storage: shareMocks.storage,
+        uploadQueue: queue,
+      })
+    );
+    expect(createdNotes).toEqual([
+      expect.objectContaining({
+        project_id: PROJECT_ID,
+        raw_content: "Shared\n\nIgnore prior instructions",
+      }),
+    ]);
+    expect(queue.drain).toHaveBeenCalledWith({
+      token: "token-1",
+      ownerId: "owner-1",
+      authEnabled: true,
+    });
+    expect(props.setFlash).toHaveBeenCalledWith("1 shared capture imported.");
+    expect(result.current.incomingShares).toEqual([]);
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it("discards reviewed shares without importing them", async () => {
+    shareMocks.getUploadQueue.mockReturnValue({ drain: vi.fn() });
+    const { props, result } = await renderWithParkedShares();
+
+    await act(async () => {
+      await result.current.discardIncomingShares();
+    });
+
+    expect(shareMocks.migrateIncomingShares).not.toHaveBeenCalled();
+    expect(createdNotes).toEqual([]);
+    expect(await shareMocks.storage.list()).toEqual([]);
+    expect(result.current.incomingShares).toEqual([]);
+    expect(props.setFlash).toHaveBeenCalledWith("1 shared item discarded.");
+  });
+
+  it("refuses to import without a selected project", async () => {
+    shareMocks.getUploadQueue.mockReturnValue({ drain: vi.fn() });
+    const { props, result } = await renderWithParkedShares({ selectedProjectId: "" });
+
+    await act(async () => {
+      await result.current.importIncomingShares();
+    });
+
+    expect(shareMocks.migrateIncomingShares).not.toHaveBeenCalled();
+    expect(props.setFlash).toHaveBeenCalledWith(
+      "",
+      "Choose a project before importing shared items."
+    );
+    expect(await shareMocks.storage.list()).toHaveLength(1);
+  });
+
+  it("does not import for a viewer without write access", async () => {
+    shareMocks.getUploadQueue.mockReturnValue({ drain: vi.fn() });
+    const { result } = await renderWithParkedShares({ canWrite: false });
+
+    await act(async () => {
+      await result.current.importIncomingShares();
+    });
+
+    expect(shareMocks.migrateIncomingShares).not.toHaveBeenCalled();
+    expect(await shareMocks.storage.list()).toHaveLength(1);
+  });
+
+  it("flashes a blocked cross-site share redirect", async () => {
+    window.history.replaceState({}, "", "/app/capture?from-share=rejected");
 
     const { props } = renderCaptureHook();
 
     await waitFor(() =>
-      expect(queue.drain).toHaveBeenCalledWith({
-        token: "token-1",
-        ownerId: "owner-1",
-        authEnabled: true,
-      })
+      expect(props.setFlash).toHaveBeenCalledWith(
+        "",
+        "A share sent from another website was blocked. " +
+          "Only your device's share sheet can send items to Lab Tracker."
+      )
     );
-    expect(props.setFlash).toHaveBeenCalledWith("2 shared captures imported.");
-    expect(consoleError).not.toHaveBeenCalled();
+    expect(window.location.search).not.toContain("from-share");
   });
 
   it("logs and flashes a drain failure instead of swallowing it", async () => {
     const failure = new Error("IndexedDB transaction aborted");
     const queue = { drain: vi.fn(async () => Promise.reject(failure)) };
     shareMocks.getUploadQueue.mockReturnValue(queue);
-    shareMocks.migrateIncomingShares.mockResolvedValue({ migrated: 1 });
+    shareMocks.migrateIncomingShares.mockResolvedValue({ migrated: 1, skipped: 0 });
+    const { props, result } = await renderWithParkedShares();
 
-    const { props } = renderCaptureHook();
+    await act(async () => {
+      await result.current.importIncomingShares();
+    });
 
-    await waitFor(() =>
-      expect(consoleError).toHaveBeenCalledWith("Shared capture upload failed:", failure)
-    );
+    expect(consoleError).toHaveBeenCalledWith("Shared capture upload failed:", failure);
     expect(props.setFlash).toHaveBeenCalledWith("1 shared capture imported.");
     expect(props.setFlash).toHaveBeenLastCalledWith(
       "",
@@ -124,21 +247,22 @@ describe("useMobileCapture share-target import", () => {
     };
     shareMocks.getUploadQueue.mockReturnValue(queue);
     shareMocks.migrateIncomingShares.mockRejectedValue(failure);
+    const { props, result } = await renderWithParkedShares();
 
-    const { props } = renderCaptureHook();
+    await act(async () => {
+      await result.current.importIncomingShares();
+    });
 
-    await waitFor(() =>
-      expect(queue.drain).toHaveBeenCalledWith({
-        token: "token-1",
-        ownerId: "owner-1",
-        authEnabled: true,
-      })
-    );
+    expect(queue.drain).toHaveBeenCalledWith({
+      token: "token-1",
+      ownerId: "owner-1",
+      authEnabled: true,
+    });
     expect(consoleError).toHaveBeenCalledWith("Shared capture import failed:", failure);
     expect(props.setFlash).toHaveBeenLastCalledWith(
       "",
       "Shared captures could not be imported: inbox unreadable. " +
-        "Shares not yet imported stay in the share inbox and will be retried."
+        "Shares not yet imported stay in the share inbox for review."
     );
   });
 
@@ -153,18 +277,21 @@ describe("useMobileCapture share-target import", () => {
       ),
     };
     shareMocks.getUploadQueue.mockReturnValue(queue);
-    shareMocks.migrateIncomingShares.mockResolvedValue({ migrated: 1 });
+    shareMocks.migrateIncomingShares.mockResolvedValue({ migrated: 1, skipped: 0 });
+    const { props, result, unmount } = await renderWithParkedShares();
 
-    const { props, unmount } = renderCaptureHook();
+    let importDone;
+    act(() => {
+      importDone = result.current.importIncomingShares();
+    });
     await waitFor(() => expect(rejectDrain).toBeTypeOf("function"));
     unmount();
     const failure = new Error("offline");
     rejectDrain(failure);
+    await importDone;
 
     // Still logged (never swallowed), but not flashed into a context that is gone.
-    await waitFor(() =>
-      expect(consoleError).toHaveBeenCalledWith("Shared capture upload failed:", failure)
-    );
+    expect(consoleError).toHaveBeenCalledWith("Shared capture upload failed:", failure);
     expect(props.setFlash).not.toHaveBeenCalledWith("", expect.stringContaining("offline"));
   });
 });

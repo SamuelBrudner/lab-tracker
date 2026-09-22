@@ -2,10 +2,13 @@
  *
  * The service worker (sw.js) parks shared files in a separate IndexedDB
  * database (lab-tracker-share-inbox) because the OS-initiated POST has no
- * auth context. When the page boots, migrateIncomingShares attaches the
- * user's active project + bearer token and hands each share to the main
- * upload queue, which is responsible for the actual POST + retry. Storage
- * is split from logic so callers can inject an in-memory adapter in tests.
+ * auth context. Any web page can also POST to the share target, so parked
+ * shares are untrusted until the user reviews them: the capture page lists
+ * them, and only when the user confirms does migrateIncomingShares attach the
+ * active project + bearer token to exactly the reviewed shares and hand them
+ * to the main upload queue, which is responsible for the actual POST + retry.
+ * Storage is split from logic so callers can inject an in-memory adapter in
+ * tests.
  */
 
 import { UPLOAD_FILE_PATH } from "./upload-queue.js";
@@ -108,17 +111,42 @@ function shareTextContent(share) {
   return Array.from(new Set(parts)).join("\n\n");
 }
 
+function shareInboxAvailable() {
+  return typeof globalThis.indexedDB !== "undefined";
+}
+
+function requireReviewedShareIds(shareIds) {
+  if (!Array.isArray(shareIds)) {
+    throw new TypeError(
+      "shareIds must list the shares the user reviewed; parked shares are never imported implicitly."
+    );
+  }
+  return new Set(shareIds);
+}
+
+async function listReviewedShares(storage, shareIds) {
+  const reviewed = requireReviewedShareIds(shareIds);
+  if (reviewed.size === 0) {
+    return [];
+  }
+  return (await storage.list()).filter((share) => reviewed.has(share.id));
+}
+
+// Imports exactly the shares the user reviewed (`shareIds`), so a share that
+// lands in the inbox after the review was shown is never imported unseen.
 async function migrateIncomingShares({
   createTextNote = null,
   projectId,
   ownerId = "",
   uploadQueue,
+  shareIds,
   storage = createIndexedDbShareStorage(),
 }) {
+  requireReviewedShareIds(shareIds);
   if (!projectId || !uploadQueue) {
     return { migrated: 0, skipped: 0 };
   }
-  const shares = await storage.list();
+  const shares = await listReviewedShares(storage, shareIds);
   if (shares.length === 0) {
     return { migrated: 0, skipped: 0 };
   }
@@ -164,10 +192,20 @@ async function migrateIncomingShares({
   return { migrated, skipped };
 }
 
+async function discardIncomingShares({ shareIds, storage = createIndexedDbShareStorage() }) {
+  const shares = await listReviewedShares(storage, shareIds);
+  for (const share of shares) {
+    await storage.remove(share.id);
+  }
+  return { discarded: shares.length };
+}
+
 export {
   DB_NAME,
   STORE,
   createIndexedDbShareStorage,
   createMemoryShareStorage,
+  discardIncomingShares,
   migrateIncomingShares,
+  shareInboxAvailable,
 };

@@ -11,10 +11,15 @@ import {
   uploadOrQueueRawFile,
 } from "../shared/capture-upload.js";
 import { droppedUploadsMessage, getUploadQueue } from "../shared/register-sw.js";
-import { migrateIncomingShares } from "../shared/share-target-inbox.js";
+import {
+  createIndexedDbShareStorage,
+  discardIncomingShares as discardParkedShares,
+  migrateIncomingShares,
+  shareInboxAvailable,
+} from "../shared/share-target-inbox.js";
 import { captureHint, captureNotes, isAudioCapture } from "../features/mobile-capture/capture-helpers.js";
 
-const { useEffect, useMemo, useRef, useState } = React;
+const { useCallback, useEffect, useMemo, useRef, useState } = React;
 
 function readShareTargetStatus() {
   try {
@@ -87,6 +92,17 @@ function useMobileCapture({
   // (two taps delivered to the same render closure).
   const [uploading, setUploading] = useState(false);
   const uploadInFlightRef = useRef(false);
+  // OS share-sheet items parked by the service worker. Anyone's web page can
+  // POST to the share target, so they are only listed for review here and
+  // imported when the user explicitly confirms (importIncomingShares).
+  const shareStorage = useMemo(
+    () => (shareInboxAvailable() ? createIndexedDbShareStorage() : null),
+    []
+  );
+  const [incomingShares, setIncomingShares] = useState([]);
+  const [sharesBusy, setSharesBusy] = useState(false);
+  const shareActionInFlightRef = useRef(false);
+  const mountedRef = useRef(false);
   const activeQuestions = useMemo(
     () => questions.filter((question) => question.status === "active"),
     [questions]
@@ -138,6 +154,13 @@ function useMobileCapture({
   }, [selectedProjectId, token]);
 
   useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
     const status = readShareTargetStatus();
     if (!status) {
       return;
@@ -147,97 +170,171 @@ function useMobileCapture({
       setFlash("", "Shared capture could not be saved. Open Lab Tracker and try again.");
     } else if (status === "empty") {
       setFlash("", "Shared content was empty.");
+    } else if (status === "rejected") {
+      setFlash(
+        "",
+        "A share sent from another website was blocked. " +
+          "Only your device's share sheet can send items to Lab Tracker."
+      );
     }
   }, [setFlash]);
 
+  const reloadIncomingShares = useCallback(async () => {
+    if (!shareStorage) {
+      return;
+    }
+    const shares = await shareStorage.list();
+    if (mountedRef.current) {
+      setIncomingShares(shares);
+    }
+  }, [shareStorage]);
+
+  const reportShareInboxReadFailure = useCallback(
+    (error) => {
+      // eslint-disable-next-line no-console
+      console.error("Shared capture inbox could not be read:", error);
+      if (mountedRef.current) {
+        setFlash("", `Shared items could not be loaded for review: ${errorDetail(error)}.`);
+      }
+    },
+    [setFlash]
+  );
+
   useEffect(() => {
-    // Pick up anything the OS share sheet handed off via the service worker
-    // and route it through the standard offline upload queue. Runs only once
-    // a project is selected so the migrated shares get attached to a real
-    // project. IndexedDB-less environments (jsdom in unit tests) silently
-    // no-op via the queue's null check.
+    // List (never import) whatever the OS share sheet handed off via the
+    // service worker. IndexedDB-less environments have no inbox to read.
+    reloadIncomingShares().catch(reportShareInboxReadFailure);
+  }, [reloadIncomingShares, reportShareInboxReadFailure]);
+
+  function drainImportedShares(queue) {
+    return queue
+      .drain({ token, ownerId, authEnabled })
+      .then((drainResult) => {
+        if (drainResult.dropped.length > 0 && mountedRef.current) {
+          setFlash("", droppedUploadsMessage(drainResult.dropped));
+        }
+        return drainResult;
+      })
+      .catch((error) => {
+        // The imported captures stay queued for the next online/boot
+        // retry; make the failure visible rather than silently holding them.
+        // eslint-disable-next-line no-console
+        console.error("Shared capture upload failed:", error);
+        if (mountedRef.current) {
+          setFlash(
+            "",
+            `Shared captures were imported but could not be uploaded yet: ${errorDetail(error)}. ` +
+              "They stay queued and will retry when you're back online."
+          );
+        }
+      });
+  }
+
+  async function runShareAction(action) {
+    shareActionInFlightRef.current = true;
+    setSharesBusy(true);
+    try {
+      await action();
+    } finally {
+      shareActionInFlightRef.current = false;
+      if (mountedRef.current) {
+        setSharesBusy(false);
+      }
+      await reloadIncomingShares().catch(reportShareInboxReadFailure);
+    }
+  }
+
+  // Imports exactly the shares currently shown for review into the selected
+  // project. Only ever called from an explicit user action.
+  async function importIncomingShares() {
+    if (shareActionInFlightRef.current || !canWrite || incomingShares.length === 0) {
+      return;
+    }
     if (!selectedProjectId) {
-      return undefined;
+      setFlash("", "Choose a project before importing shared items.");
+      return;
     }
     const queue = getUploadQueue();
-    if (!queue) {
-      return undefined;
+    if (!queue || !shareStorage) {
+      setFlash("", "Shared items cannot be imported: this browser has no offline upload storage.");
+      return;
     }
-    let canceled = false;
-    function drainImportedShares() {
-      return queue
-        .drain({ token, ownerId, authEnabled })
-        .then((drainResult) => {
-          if (drainResult.dropped.length > 0) {
-            setFlash("", droppedUploadsMessage(drainResult.dropped));
-          }
-          return drainResult;
-        })
-        .catch((error) => {
-          // The imported captures stay queued for the next online/boot
-          // retry; make the failure visible rather than silently holding them.
-          // eslint-disable-next-line no-console
-          console.error("Shared capture upload failed:", error);
-          if (!canceled) {
-            setFlash(
-              "",
-              `Shared captures were imported but could not be uploaded yet: ${errorDetail(error)}. ` +
-                "They stay queued and will retry when you're back online."
-            );
-          }
+    const projectId = selectedProjectId;
+    const shareIds = incomingShares.map((share) => share.id);
+    setFlash("", "");
+    await runShareAction(async () => {
+      let result;
+      try {
+        result = await migrateIncomingShares({
+          createTextNote: ({ metadata, rawContent }) =>
+            apiRequest("/notes", {
+              body: {
+                metadata,
+                project_id: projectId,
+                raw_content: rawContent,
+                targets: [],
+              },
+              method: "POST",
+              token,
+            }),
+          projectId,
+          ownerId,
+          shareIds,
+          storage: shareStorage,
+          uploadQueue: queue,
         });
-    }
-    migrateIncomingShares({
-      createTextNote: ({ metadata, rawContent }) =>
-        apiRequest("/notes", {
-          body: {
-            metadata,
-            project_id: selectedProjectId,
-            raw_content: rawContent,
-            targets: [],
-          },
-          method: "POST",
-          token,
-        }),
-      projectId: selectedProjectId,
-      ownerId,
-      uploadQueue: queue,
-    }).then(
-      (result) => {
-        if (canceled || result.migrated === 0) {
-          return undefined;
+      } catch (error) {
+        // eslint-disable-next-line no-console
+        console.error("Shared capture import failed:", error);
+        if (mountedRef.current) {
+          setFlash(
+            "",
+            `Shared captures could not be imported: ${errorDetail(error)}. ` +
+              "Shares not yet imported stay in the share inbox for review."
+          );
         }
+        // The import can fail partway, after earlier shares were already
+        // queued: upload those now instead of holding them until the next
+        // online/boot drain.
+        await drainImportedShares(queue);
+        return;
+      }
+      if (result.migrated === 0) {
+        return;
+      }
+      if (mountedRef.current) {
         setFlash(
           result.migrated === 1
             ? "1 shared capture imported."
             : `${result.migrated} shared captures imported.`
         );
-        return drainImportedShares();
-      },
-      (error) => {
-        // Migration failures shouldn't block the rest of the capture UI (the
-        // remaining shares stay in the inbox for the next attempt), but they
-        // must be visible rather than silently swallowed.
-        // eslint-disable-next-line no-console
-        console.error("Shared capture import failed:", error);
-        if (canceled) {
-          return undefined;
-        }
-        setFlash(
-          "",
-          `Shared captures could not be imported: ${errorDetail(error)}. ` +
-            "Shares not yet imported stay in the share inbox and will be retried."
-        );
-        // The import can fail partway, after earlier shares were already
-        // queued: upload those now instead of holding them until the next
-        // online/boot drain.
-        return drainImportedShares();
       }
-    );
-    return () => {
-      canceled = true;
-    };
-  }, [selectedProjectId, token, ownerId, authEnabled, setFlash]);
+      await drainImportedShares(queue);
+    });
+  }
+
+  async function discardIncomingShares() {
+    if (shareActionInFlightRef.current || !shareStorage || incomingShares.length === 0) {
+      return;
+    }
+    const shareIds = incomingShares.map((share) => share.id);
+    await runShareAction(async () => {
+      try {
+        const { discarded } = await discardParkedShares({ shareIds, storage: shareStorage });
+        if (mountedRef.current) {
+          setFlash(
+            discarded === 1 ? "1 shared item discarded." : `${discarded} shared items discarded.`
+          );
+        }
+      } catch (error) {
+        // eslint-disable-next-line no-console
+        console.error("Shared capture discard failed:", error);
+        if (mountedRef.current) {
+          setFlash("", `Shared items could not be discarded: ${errorDetail(error)}.`);
+        }
+      }
+    });
+  }
 
   function currentTargets() {
     return buildTargets({
@@ -579,6 +676,11 @@ function useMobileCapture({
     activeQuestions,
     analyses,
     claims,
+    // OS share-sheet items awaiting explicit review
+    incomingShares,
+    sharesBusy,
+    importIncomingShares,
+    discardIncomingShares,
     // pending-review queue
     pendingDrafts,
     pendingNotes,

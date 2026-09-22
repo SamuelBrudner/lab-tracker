@@ -10,12 +10,12 @@
  * one place.
  */
 
-const CACHE_VERSION = "v-82e2c281040d";
+const CACHE_VERSION = "v-b992ba482071";
 const CACHE_NAME = `lab-tracker-shell-${CACHE_VERSION}`;
 const SHELL_ASSETS = [
   "/app/",
-  "/app/static/app.js?v=82e2c281040d",
-  "/app/static/styles.css?v=82e2c281040d",
+  "/app/static/app.js?v=b992ba482071",
+  "/app/static/styles.css?v=b992ba482071",
   "/app/static/manifest.json",
   "/app/static/icon-180.png",
   "/app/static/icon-192.png",
@@ -80,9 +80,10 @@ self.addEventListener("fetch", (event) => {
 
   // OS share-sheet submissions land here. We intentionally don't forward the
   // POST to the API: the OS process has no auth context. Instead the file is
-  // parked in a small IndexedDB inbox and the page picks it up on next load
-  // (see shared/share-target-inbox.js), enqueueing it through the same
-  // offline upload queue as in-app captures.
+  // parked in a small IndexedDB inbox and the capture page lists it for the
+  // user to review; nothing is imported until they confirm (see
+  // shared/share-target-inbox.js). Any web page can also submit a form here,
+  // so POSTs that visibly come from another site are rejected outright.
   if (request.method === "POST" && url.pathname === SHARE_TARGET_PATH) {
     event.respondWith(handleShareTarget(request));
     return;
@@ -125,7 +126,42 @@ self.addEventListener("fetch", (event) => {
   }
 });
 
+// A genuine share-sheet launch is browser-initiated: no referrer, and
+// Sec-Fetch-Site "none" where the browser exposes it. A form auto-submitted
+// by another web page reveals itself through any of these signals when they
+// are visible to the worker. The signals can be suppressed (e.g. a
+// no-referrer policy), so this is defence in depth: the capture page still
+// requires an explicit Import before any parked share is uploaded.
+function crossSiteShareSignal(request) {
+  const fetchSite = String(request.headers.get("sec-fetch-site") || "").toLowerCase();
+  if (fetchSite && fetchSite !== "none" && fetchSite !== "same-origin") {
+    return `sec-fetch-site=${fetchSite}`;
+  }
+  const origin = request.headers.get("origin");
+  if (origin && origin !== "null" && origin !== self.location.origin) {
+    return `origin=${origin}`;
+  }
+  const referrer = String(request.referrer || "");
+  if (referrer && !referrer.startsWith("about:")) {
+    let referrerOrigin = "";
+    try {
+      referrerOrigin = new URL(referrer).origin;
+    } catch {
+      return `referrer=${referrer}`;
+    }
+    if (referrerOrigin !== self.location.origin) {
+      return `referrer=${referrerOrigin}`;
+    }
+  }
+  return "";
+}
+
 async function handleShareTarget(request) {
+  const crossSiteSignal = crossSiteShareSignal(request);
+  if (crossSiteSignal) {
+    console.warn("share-target POST from another site rejected", crossSiteSignal);
+    return Response.redirect("/app/capture?from-share=rejected", 303);
+  }
   let redirectStatus = "empty";
   try {
     const formData = await request.formData();
