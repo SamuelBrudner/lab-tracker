@@ -316,11 +316,14 @@ class DatasetService(BaseService):
             raise ValidationError("commit_manifest must not be null.")
         if is_provided(commit_hash) and commit_hash is None:
             raise ValidationError("commit_hash must not be null.")
-        was_committed = current_status == DatasetStatus.COMMITTED
-        if was_committed and (
+        # Only staged datasets have mutable provenance. Archiving is terminal and
+        # reachable from COMMITTED, so an archived dataset keeps the manifest,
+        # question links and commit hash it had; only terminal_reason may change.
+        if current_status != DatasetStatus.STAGED and (
             is_provided(commit_hash) or is_provided(question_links) or is_provided(commit_manifest)
         ):
-            raise ValidationError("Committed datasets are immutable.")
+            label = "Committed" if current_status == DatasetStatus.COMMITTED else "Archived"
+            raise ValidationError(f"{label} datasets are immutable.")
         if is_provided(question_links):
             links = list(question_links)
             primary_links = [link for link in links if link.role == QuestionLinkRole.PRIMARY]
