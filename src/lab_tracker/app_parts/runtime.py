@@ -26,6 +26,9 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.app_parts.middleware import system_auth_context
+from lab_tracker.application.store_health_queries import (
+    LOCAL_STORE_HEALTH_UNSUPPORTED,
+)
 from lab_tracker.artifact_resolution import (
     LAB_TRACKER_GIT_ALLOWED_REMOTES_ENV,
     LAB_TRACKER_RCLONE_ALLOWED_REMOTES_ENV,
@@ -60,7 +63,6 @@ from lab_tracker.local_filesystem_operations import (
     BoundedLocalFilesystemOperations,
 )
 from lab_tracker.local_resolution_budget import LocalResolutionLimits
-from lab_tracker.local_store_health import LocalStoreHealthProbe
 from lab_tracker.logging import configure_logging
 from lab_tracker.models import ReviewEmailDelivery, StoreKind
 from lab_tracker.note_storage import LocalNoteStorage
@@ -126,16 +128,19 @@ class _OwnedGitHealthWorkdir:
 
 @dataclass(frozen=True)
 class _StoreHealthDispatchProbe:
-    """Dispatch external probes explicitly; retain only safe legacy leaves."""
+    """Dispatch external probes explicitly; retain only safe legacy leaves.
 
-    local_probe: StoreProbe
+    Local store health is not composed in this build (see
+    ``LOCAL_STORE_HEALTH_UNSUPPORTED``); a local target never reaches host I/O.
+    """
+
     http_probe: StoreProbe
     rclone_probe: StoreProbe
     git_probe: StoreProbe
 
     def __call__(self, target: StoreProbeTarget) -> StoreHealth:
         if target.kind is StoreKind.LOCAL_FS:
-            return self.local_probe(target)
+            return LOCAL_STORE_HEALTH_UNSUPPORTED
         if target.kind is StoreKind.HTTP:
             return self.http_probe(target)
         if is_rclone_store_kind(target.kind):
@@ -417,10 +422,6 @@ def _build_app_runtime(
     )
     store_health_checker = CachedStoreHealthProbe(
         _StoreHealthDispatchProbe(
-            local_probe=LocalStoreHealthProbe(
-                inspector=local_filesystem_operations,
-                deadline_seconds=settings.resolver_subprocess_deadline_seconds,
-            ),
             http_probe=HttpStoreHealthProbe(
                 policy=outbound_http_policy,
                 client=outbound_http_client,

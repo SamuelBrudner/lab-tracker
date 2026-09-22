@@ -22,6 +22,9 @@ from lab_tracker.app_parts.runtime import (
     configure_app_state,
     make_lifespan,
 )
+from lab_tracker.application.store_health_queries import (
+    LOCAL_STORE_HEALTH_UNSUPPORTED,
+)
 from lab_tracker.artifact_resolution import (
     GitCacheSettings,
     ResolverRegistry,
@@ -931,26 +934,6 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(
         recording_registry_from_env,
     )
 
-    def recording_local_store_health_probe(
-        *,
-        inspector,
-        deadline_seconds,
-    ):
-        captured["health_local_inspector"] = inspector
-        captured["health_local_deadline_seconds"] = deadline_seconds
-
-        def probe(target):
-            captured["local_health_target"] = target
-            return StoreHealth(StoreHealthStatus.HEALTHY)
-
-        return probe
-
-    monkeypatch.setattr(
-        runtime_module,
-        "LocalStoreHealthProbe",
-        recording_local_store_health_probe,
-    )
-
     def recording_http_store_health_probe(
         *,
         policy,
@@ -1096,7 +1079,6 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(
         assert recovery.max_files == 23
         assert recovery.max_directories == 29
         assert recovery.max_bytes == 1_048_576
-        assert captured["health_local_inspector"] is runtime.local_filesystem_operations
         assert runtime.local_filesystem_operations.executor is runtime.process_executor
         assert captured["registry_http_policy"] is runtime.outbound_http_policy
         assert captured["health_http_policy"] is runtime.outbound_http_policy
@@ -1117,7 +1099,6 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(
             root=str(tmp_path / "git-cache"),
             max_bytes=4096,
         )
-        assert captured["health_local_deadline_seconds"] == 7.25
         assert captured["health_rclone_deadline_seconds"] == 7.25
         assert captured["health_git_deadline_seconds"] == 7.25
 
@@ -1129,8 +1110,13 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(
             endpoint=None,
             credential_ref=None,
         )
-        assert runtime.store_health_checker(local_health_target).is_healthy
-        assert captured["local_health_target"] is local_health_target
+        # Local store health is statically unsupported in this build: the
+        # runtime composes no local probe and never inspects the root.
+        assert not hasattr(runtime_module, "LocalStoreHealthProbe")
+        assert (
+            runtime.store_health_checker(local_health_target)
+            == LOCAL_STORE_HEALTH_UNSUPPORTED
+        )
         assert "legacy_health_target" not in captured
 
         http_health_target = unsafe_probe_target_for_adapter_test(

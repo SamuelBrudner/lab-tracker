@@ -187,8 +187,8 @@ research record:
   platform-path-separated
   `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS` once into one filesystem-I/O-free lexical
   authority, bounded local-filesystem broker, and bounded process executor.
-  Registered local-store health, registered local reads, and every recovery
-  candidate read receive those exact shared objects. The helper anchors the
+  Registered local reads and every recovery candidate read receive those exact
+  shared objects. The helper anchors the
   trusted grant, resolves aliases component-by-component from no-follow retained
   descriptors/handles, and rejects an escape before target traversal. A
   registered read adds the retained store root as a nested boundary before its
@@ -219,9 +219,14 @@ research record:
 
   The root authority grants the subtree visible in the operator-controlled
   service namespace rather than one device identity, and the application
-  runtime denies all local roots when it is unset or empty. Local health remains
-  an isolated, output-free, point-in-time advisory operation rather than
-  registration validation or a durable filesystem lease. POSIX ordinary/bind
+  runtime denies all local roots when it is unset or empty. Registered
+  local-store health is not supported in this build: `GET
+  /data-stores/{id}/health` answers every `local_fs` store with status
+  `unsupported` and the static detail `Local store health is not supported in
+  this build.` before any authority snapshot, cache, or host I/O, and the
+  runtime composes no local health probe. It stays deferred until the local-use
+  slice retains the store's revalidated grant boundary inside the filesystem
+  helper; it is never registration validation or a durable filesystem lease. POSIX ordinary/bind
   mounts beneath a root are allowed; unsupported Windows nested
   volume/UNC/device/GUID namespaces fail closed; eligible Cloud directories
   remain traversable; untrusted topology mutation makes the local surface
@@ -233,7 +238,7 @@ research record:
   a fetch size cap, and a bounded cache — never by cloning or polling. Rclone
   resolution and store health are likewise gated by one immutable exact
   remote-name policy (`LAB_TRACKER_RCLONE_ALLOWED_REMOTES`, deny-by-default).
-  Local, rclone, and Git health commands reuse resolution's bounded
+  Rclone and Git health commands reuse resolution's bounded
   cross-platform process executor and expose only static adapter-specific
   failures. See
   [external-artifact-resolution-design.md](external-artifact-resolution-design.md).

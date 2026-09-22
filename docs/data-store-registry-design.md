@@ -100,7 +100,8 @@ A project's **effective store set** = its own stores plus inherited group stores
 at most one is the **default** (a scope may have none). Registration validates
 stored configuration without initiating backend I/O or invoking a health
 adapter. Operators can run the separate, read-only health endpoint for a bounded
-advisory check of a local root, remote prefix, or configured credentials. A
+advisory check of a remote prefix or configured credentials; local-store health
+is not supported in this build (see the health control plane below). A
 healthy result describes reachability at probe time; it is not a registration
 guarantee or a durable capability.
 
@@ -394,22 +395,20 @@ Shipped:
   preflight, redirect denial, sanitized environment, app-owned working
   directory, and one deadline across both bounded commands. Invalid targets
   perform no per-probe process work, and ordinary failures expose only one
-  static detail per adapter. Local health and local artifact reads use the exact
-  same authority, broker, and process executor. Health creates one deadline
-  before invoking a bounded directory-inspection role. The
-  filesystem-I/O-free authority
-  selects the most-specific lexical operator grant, then one fixed isolated,
-  output-free Python helper resolves the trusted root and lexically admitted
-  candidate component-by-component under retained no-follow handles. Windows
-  normalizes only safe separator aliases before this strict helper protocol.
-  Symlink and junction targets are parsed before traversal and must remain
-  inside that same grant;
-  unsupported namespace or mount targets fail closed, while eligible Cloud
-  directory placeholders remain traversable. No canonical pathname plan is
-  returned or reopened. Helper-owned close attempts are best effort and
-  contained helper exit is the cleanup backstop. This remains a static,
-  advisory point-in-time result rather than a durable filesystem lease. The
-  legacy helper now fails closed for local, HTTP, rclone, and Git.
+  static detail per adapter. Local store health is not supported in this
+  build: the query layer answers every `local_fs` store with `unsupported` and
+  the static detail `Local store health is not supported in this build.`
+  before any authority snapshot, cache, or host I/O, and the runtime composes
+  no local probe. The bounded directory-inspection helper role (the
+  filesystem-I/O-free authority selects the most-specific lexical operator
+  grant, then one fixed isolated, output-free Python helper resolves the
+  trusted root and lexically admitted candidate component-by-component under
+  retained no-follow handles) selects only a global operator grant, so wiring
+  it to registered stores now would bypass the store's own revalidated grant.
+  Local health stays deferred until the local-use slice retains that grant
+  boundary in the helper, and will then remain a static, advisory
+  point-in-time result rather than a durable filesystem lease. The legacy
+  helper now fails closed for local, HTTP, rclone, and Git.
   `object_table` and `database` remain unsupported.
 - ✅ Group-scoped stores: a store is scoped to exactly one of a project or a
   group (migration `0050`, nullable `project_id` + `group_id`). A group store is
@@ -440,8 +439,8 @@ Shipped:
   files through a broader global root. Application composition parses
   `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS` once as an `os.pathsep`-separated
   operator list and builds one filesystem-I/O-free lexical authority, bounded
-  operations broker, and process executor. Local health, direct reads, and all
-  recovery candidate reads receive those exact shared objects. One logical
+  operations broker, and process executor. Direct reads and all recovery
+  candidate reads receive those exact shared objects. One logical
   local budget shares the configured subprocess deadline and a 512 MiB
   default/hard-max cumulative full-read allowance across the direct attempt and
   recovery; the API's 8 MiB `max_bytes` remains a separate returned-view cap.
@@ -495,7 +494,8 @@ Deferred:
 The remaining authority work persists a selected grant ID plus immutable
 fingerprint on each store, binds registration to the scoped proof, revalidates
 that binding before health/cache/resolution work, and retains local grant
-boundaries in the filesystem helper. Snapshot/query adapters remain deferred.
+boundaries in the filesystem helper; registered local-store health is enabled
+only after that retention lands. Snapshot/query adapters remain deferred.
 Health stays an explicit operator action at `GET /data-stores/{id}/health`, not
 a side effect of registration.
 

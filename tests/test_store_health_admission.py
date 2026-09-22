@@ -16,9 +16,11 @@ from starlette.responses import JSONResponse
 from starlette.testclient import TestClient
 
 from lab_tracker.app_parts.middleware import _apply_store_health_admission
+from lab_tracker.application.store_health_queries import (
+    LOCAL_STORE_HEALTH_UNSUPPORTED_MESSAGE,
+)
 from lab_tracker.auth import AuthContext, Role
 from lab_tracker.store_health import (
-    STORE_HEALTH_PROBE_UNAVAILABLE_MESSAGE,
     CachedStoreHealthProbe,
     StoreHealth,
     StoreProbeTarget,
@@ -432,7 +434,7 @@ def test_fail_closed_health_bypasses_singleflight_for_concurrent_callers(
             response.json()["data"]["detail"],
         )
         for response in responses
-    } == {("unsupported", STORE_HEALTH_PROBE_UNAVAILABLE_MESSAGE)}
+    } == {("unsupported", LOCAL_STORE_HEALTH_UNSUPPORTED_MESSAGE)}
     assert calls == 0
     assert checker.in_flight_count == 0
     assert checker.entry_count == 0
@@ -489,6 +491,6 @@ def test_missing_checker_wiring_returns_static_unavailable_result(
         "store_id": store.json()["data"]["store_id"],
         "kind": "local_fs",
         "status": "unsupported",
-        "detail": STORE_HEALTH_PROBE_UNAVAILABLE_MESSAGE,
+        "detail": LOCAL_STORE_HEALTH_UNSUPPORTED_MESSAGE,
     }
     assert unrelated.status_code == 200, unrelated.text

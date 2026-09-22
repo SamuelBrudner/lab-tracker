@@ -17,6 +17,9 @@ from read_opacity_inventory import (
 )
 
 from lab_tracker.api import LabTrackerAPI
+from lab_tracker.application.store_health_queries import (
+    LOCAL_STORE_HEALTH_UNSUPPORTED_MESSAGE,
+)
 from lab_tracker.auth import Role, utc_now
 from lab_tracker.local_filesystem_authority import LocalFilesystemAuthority
 from lab_tracker.local_filesystem_operations import BoundedLocalFilesystemOperations
@@ -28,7 +31,6 @@ from lab_tracker.sqlalchemy_repository_parts.graph_drafts import (
     SQLAlchemyGraphChangeSetRepository,
 )
 from lab_tracker.store_health import (
-    STORE_HEALTH_PROBE_UNAVAILABLE_MESSAGE,
     CachedStoreHealthProbe,
     StoreHealth,
     StoreHealthStatus,
@@ -444,7 +446,7 @@ def test_store_health_authorizes_before_live_checker(
     assert authorized.json()["data"]["status"] == "unsupported"
     assert (
         authorized.json()["data"]["detail"]
-        == STORE_HEALTH_PROBE_UNAVAILABLE_MESSAGE
+        == LOCAL_STORE_HEALTH_UNSUPPORTED_MESSAGE
     )
     assert checked == []
 
@@ -558,7 +560,7 @@ def test_store_health_cache_and_admission_preserve_browser_device_and_lpat_scope
     assert warmed_hidden.json()["data"]["status"] == "unsupported"
     assert (
         warmed_hidden.json()["data"]["detail"]
-        == STORE_HEALTH_PROBE_UNAVAILABLE_MESSAGE
+        == LOCAL_STORE_HEALTH_UNSUPPORTED_MESSAGE
     )
 
     principal_headers = [
@@ -585,7 +587,7 @@ def test_store_health_cache_and_admission_preserve_browser_device_and_lpat_scope
         assert visible.json()["data"]["status"] == "unsupported"
         assert (
             visible.json()["data"]["detail"]
-            == STORE_HEALTH_PROBE_UNAVAILABLE_MESSAGE
+            == LOCAL_STORE_HEALTH_UNSUPPORTED_MESSAGE
         )
         assert hidden.status_code == missing.status_code == 404
         assert hidden.content == missing.content
@@ -671,7 +673,7 @@ def test_project_and_group_inherited_readers_can_use_all_four_variants(
         assert responses[3].json()["data"]["status"] == "unsupported"
         assert (
             responses[3].json()["data"]["detail"]
-            == STORE_HEALTH_PROBE_UNAVAILABLE_MESSAGE
+            == LOCAL_STORE_HEALTH_UNSUPPORTED_MESSAGE
         )
 
 
@@ -855,7 +857,7 @@ def test_group_store_health_authorizes_before_live_checker(
     assert authorized.json()["data"]["status"] == "unsupported"
     assert (
         authorized.json()["data"]["detail"]
-        == STORE_HEALTH_PROBE_UNAVAILABLE_MESSAGE
+        == LOCAL_STORE_HEALTH_UNSUPPORTED_MESSAGE
     )
     assert checked == []
 

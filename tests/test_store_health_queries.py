@@ -6,7 +6,10 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from lab_tracker.application.store_health_queries import StoreHealthQueries
+from lab_tracker.application.store_health_queries import (
+    LOCAL_STORE_HEALTH_UNSUPPORTED_MESSAGE,
+    StoreHealthQueries,
+)
 from lab_tracker.auth import AuthContext, Role
 from lab_tracker.data_store_definition import ValidatedDataStoreDefinition
 from lab_tracker.errors import OpaqueTargetNotFoundError
@@ -458,23 +461,15 @@ def test_snapshot_provider_base_exception_is_preserved_after_scope_release() -> 
         DataStore(
             store_id=uuid4(),
             project_id=uuid4(),
-            name="local-store",
-            kind=StoreKind.LOCAL_FS,
-            capabilities=[StoreCapability.BYTES_BY_PATH],
-            root="/not-opened",
-        ),
-        DataStore(
-            store_id=uuid4(),
-            project_id=uuid4(),
             name="database-store",
             kind=StoreKind.DATABASE,
             capabilities=[StoreCapability.QUERY],
             root="opaque-database-reference",
         ),
     ],
-    ids=["legacy", "invalid", "local", "unsupported-kind"],
+    ids=["legacy", "invalid", "unsupported-kind"],
 )
-def test_legacy_invalid_local_and_static_paths_never_snapshot_or_construct_target(
+def test_legacy_invalid_and_static_paths_never_snapshot_or_construct_target(
     store: DataStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -511,6 +506,67 @@ def test_legacy_invalid_local_and_static_paths_never_snapshot_or_construct_targe
     assert result.health == StoreHealth(
         StoreHealthStatus.UNSUPPORTED,
         STORE_HEALTH_PROBE_UNAVAILABLE_MESSAGE,
+    )
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+def test_local_store_health_is_statically_unsupported_in_this_build(
+    bound: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = DataStore(
+        store_id=uuid4(),
+        project_id=uuid4(),
+        name="local-store",
+        kind=StoreKind.LOCAL_FS,
+        capabilities=[StoreCapability.BYTES_BY_PATH],
+        root="/not-opened",
+        authority_grant_id="local-grant" if bound else None,
+        authority_grant_fingerprint=(
+            f"sag-v1-sha256:{'b' * 64}" if bound else None
+        ),
+    )
+    events: list[str] = []
+    checker = _StoreHealthChecker(
+        health=StoreHealth(StoreHealthStatus.HEALTHY),
+        events=events,
+    )
+    provider = _RecordingProvider(
+        StoreAuthorityRegistry.deny_all(),
+        events=events,
+    )
+
+    def reject_target_construction(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("local health path constructed a probe target")
+
+    monkeypatch.setattr(
+        StoreProbeTarget,
+        "from_authority_proof",
+        classmethod(reject_target_construction),
+    )
+    query = StoreHealthQueries(
+        api=_StoreHealthAccess(store=store, events=events),
+        checker=checker,
+        release_read_scope=lambda: events.append("release"),
+        store_authority_snapshot_provider=provider,
+    )
+
+    result = query.check(store.store_id, actor=_actor())
+
+    assert LOCAL_STORE_HEALTH_UNSUPPORTED_MESSAGE == (
+        "Local store health is not supported in this build."
+    )
+    assert LOCAL_STORE_HEALTH_UNSUPPORTED_MESSAGE != (
+        STORE_HEALTH_PROBE_UNAVAILABLE_MESSAGE
+    )
+    assert events == ["authorize", "release"]
+    assert provider.calls == 0
+    assert checker.targets == []
+    assert result.store_id == store.store_id
+    assert result.kind is StoreKind.LOCAL_FS
+    assert result.health == StoreHealth(
+        StoreHealthStatus.UNSUPPORTED,
+        LOCAL_STORE_HEALTH_UNSUPPORTED_MESSAGE,
     )
 
 
