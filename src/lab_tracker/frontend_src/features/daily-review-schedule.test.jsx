@@ -271,4 +271,124 @@ describe("DailyReviewScheduleForm", () => {
       });
     });
   });
+  it("ignores a late settings response for a previously selected project", async () => {
+    const pending = {};
+    function settingsFor(projectId, overrides) {
+      return apiResponse({
+        cadence_minutes: 1440,
+        email_notifications_enabled: false,
+        enabled: true,
+        next_run_at: null,
+        notification_email: null,
+        project_id: projectId,
+        review_email_available: false,
+        run_at_local_time: "18:00",
+        settings_id: `settings-${projectId}`,
+        timezone_name: "UTC",
+        user_id: "user-1",
+        ...overrides,
+      });
+    }
+    function gated(projectId) {
+      return () =>
+        new Promise((resolve) => {
+          pending[projectId] = resolve;
+        });
+    }
+    let patchBody = null;
+    installFetchMock([
+      {
+        match: "/projects/project-a/graph-draft-batch-settings",
+        response: gated("project-a"),
+      },
+      {
+        match: "/projects/project-b/graph-draft-batch-settings",
+        response: gated("project-b"),
+      },
+      {
+        match: "/projects/project-b/graph-draft-batch-settings",
+        method: "PATCH",
+        response: (request) => {
+          patchBody = JSON.parse(request.init.body);
+          return settingsFor("project-b", patchBody);
+        },
+      },
+    ]);
+    const props = {
+      token: "token-1",
+      canManage: true,
+      setBusy: vi.fn(),
+      setFlash: vi.fn(),
+    };
+
+    const { rerender } = render(
+      <DailyReviewScheduleForm {...props} projectId="project-a" />
+    );
+    await waitFor(() => expect(pending["project-a"]).toBeTypeOf("function"));
+    rerender(<DailyReviewScheduleForm {...props} projectId="project-b" />);
+    await waitFor(() => expect(pending["project-b"]).toBeTypeOf("function"));
+
+    pending["project-b"](
+      settingsFor("project-b", { cadence_minutes: 720, timezone_name: "UTC" })
+    );
+    await waitFor(() => expect(screen.getByLabelText("Cadence")).toHaveValue("720"));
+    expect(screen.getByLabelText("Cadence")).toBeEnabled();
+
+    // Project A's slower response lands last; it must not overwrite B's form.
+    pending["project-a"](
+      settingsFor("project-a", {
+        cadence_minutes: 10080,
+        run_at_local_time: "07:30",
+        timezone_name: "Asia/Tokyo",
+      })
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(screen.getByLabelText("Cadence")).toHaveValue("720");
+    expect(screen.getByLabelText("Time zone")).toHaveValue("UTC");
+    expect(screen.getByLabelText("Local run time")).toHaveValue("18:00");
+
+    fireEvent.click(screen.getByRole("button", { name: "Save cadence" }));
+    await waitFor(() => expect(patchBody).not.toBeNull());
+    expect(patchBody).toMatchObject({
+      cadence_minutes: 720,
+      run_at_local_time: "18:00",
+      timezone_name: "UTC",
+    });
+  });
+
+  it("keeps the current project's loading state when a stale request settles", async () => {
+    const pending = {};
+    installFetchMock([
+      {
+        match: "/projects/project-a/graph-draft-batch-settings",
+        response: () =>
+          new Promise((resolve) => {
+            pending["project-a"] = resolve;
+          }),
+      },
+      {
+        match: "/projects/project-b/graph-draft-batch-settings",
+        response: () =>
+          new Promise((resolve) => {
+            pending["project-b"] = resolve;
+          }),
+      },
+    ]);
+    const props = { token: "token-1", canManage: true, setBusy: vi.fn(), setFlash: vi.fn() };
+
+    const { rerender } = render(<DailyReviewScheduleForm {...props} projectId="project-a" />);
+    await waitFor(() => expect(pending["project-a"]).toBeTypeOf("function"));
+    rerender(<DailyReviewScheduleForm {...props} projectId="project-b" />);
+    await waitFor(() => expect(pending["project-b"]).toBeTypeOf("function"));
+
+    pending["project-a"](apiResponse({ cadence_minutes: 10080, project_id: "project-a" }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // B is still loading, so the form must stay disabled.
+    expect(screen.getByLabelText("Cadence")).toBeDisabled();
+    expect(screen.getByLabelText("Cadence")).toHaveValue("1440");
+  });
 });

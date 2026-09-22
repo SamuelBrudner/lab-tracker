@@ -3,7 +3,7 @@ import * as React from "react";
 import { apiRequest } from "../shared/api.js";
 import { formatDate } from "../shared/formatters.js";
 
-const { useCallback, useEffect, useState } = React;
+const { useCallback, useEffect, useRef, useState } = React;
 
 const BATCH_CADENCE_OPTIONS = [
   { label: "Daily", value: "1440" },
@@ -37,10 +37,17 @@ function DailyReviewScheduleForm({
   const [emailNotificationsEnabled, setEmailNotificationsEnabled] =
     useState(false);
   const [notificationEmail, setNotificationEmail] = useState("");
+  // Each load bumps the generation; a response (or failure) from an older
+  // load — e.g. for a previously selected project — is ignored so it can never
+  // populate the form that "Save cadence" PATCHes into the current project.
+  const loadGenerationRef = useRef(0);
 
   const loadSettings = useCallback(async () => {
+    const generation = ++loadGenerationRef.current;
+    const isCurrent = () => generation === loadGenerationRef.current;
     if (!projectId) {
       setSettings(null);
+      setLoading(false);
       return;
     }
     setLoading(true);
@@ -49,6 +56,9 @@ function DailyReviewScheduleForm({
         `/projects/${projectId}/graph-draft-batch-settings`,
         { token }
       );
+      if (!isCurrent()) {
+        return;
+      }
       setSettings(nextSettings);
       setEnabled(Boolean(nextSettings.enabled));
       setCadenceMinutes(String(nextSettings.cadence_minutes || 1440));
@@ -64,15 +74,24 @@ function DailyReviewScheduleForm({
         reviewEmailAvailable ? nextSettings.notification_email || "" : ""
       );
     } catch (err) {
+      if (!isCurrent()) {
+        return;
+      }
       setSettings(null);
       setFlash("", err.message || "Failed to load daily review timing.");
     } finally {
-      setLoading(false);
+      if (isCurrent()) {
+        setLoading(false);
+      }
     }
   }, [projectId, setFlash, token]);
 
   useEffect(() => {
     loadSettings();
+    return () => {
+      // Invalidate the in-flight load on project change or unmount.
+      loadGenerationRef.current += 1;
+    };
   }, [loadSettings]);
 
   async function saveSettings(event) {
