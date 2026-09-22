@@ -91,5 +91,3 @@ def get_session_factory(
         future=True,
     )
 
-
-SessionLocal = get_session_factory()
