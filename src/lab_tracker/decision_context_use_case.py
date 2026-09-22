@@ -27,6 +27,10 @@ from lab_tracker.decision_context_selection import (
 from lab_tracker.decision_context_types import DecisionContextReader, JsonObject
 
 NOTE_TEXT_FIELD_LIMIT = 1000
+# An ambiguous_project error lists at most this many search-matched projects
+# (one get_project read each); the rest are counted, not read.
+AMBIGUOUS_PROJECT_CANDIDATE_LIMIT = 10
+AMBIGUOUS_PROJECT_MESSAGE = "Decision context needs a project or a more specific anchor."
 
 
 def build_decision_context(
@@ -408,14 +412,27 @@ def _ambiguous_project_error(
     search_truncated: bool,
     limit: int,
 ) -> JsonObject:
+    # The match lookup returns ids only, so each listed candidate costs one
+    # read; list a bounded prefix and count the rest instead of reading them.
+    listed_project_ids = sorted(search_project_ids)[:AMBIGUOUS_PROJECT_CANDIDATE_LIMIT]
     candidates: list[JsonObject] = []
-    for matched_project_id in sorted(search_project_ids):
+    for matched_project_id in listed_project_ids:
         matched_project = reader.get_project(matched_project_id)
         if matched_project is not None:
             candidates.append(candidate_project(matched_project, "search_match"))
     if candidates:
-        candidates_total = len(candidates)
-        candidates_truncated = search_truncated
+        candidates_total = len(search_project_ids)
+        candidates_truncated = search_truncated or candidates_total > len(candidates)
+        matched_text = (
+            f"{candidates_total} or more projects match"
+            if search_truncated
+            else f"{candidates_total} projects match"
+        )
+        message = (
+            f"{AMBIGUOUS_PROJECT_MESSAGE} {matched_text} the query; "
+            f"{len(candidates)} are listed. Pass project_id, an entity anchor, "
+            "or a more specific query."
+        )
     else:
         active_payload = reader.list_projects(status="active", limit=limit)
         candidates = [
@@ -424,12 +441,14 @@ def _ambiguous_project_error(
         ]
         candidates_total = _envelope_total(active_payload, "projects")
         candidates_truncated = candidates_total > len(candidates)
+        message = AMBIGUOUS_PROJECT_MESSAGE
     return decision_error(
         "ambiguous_project",
-        "Decision context needs a project or a more specific anchor.",
+        message,
         candidate_projects=candidates,
         candidate_projects_total=candidates_total,
         candidate_projects_truncated=candidates_truncated,
+        candidate_projects_omitted=candidates_total - len(candidates),
     )
 
 

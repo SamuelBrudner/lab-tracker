@@ -12,11 +12,14 @@ from lab_tracker.decision_context_builders import (
     task_guidance,
     truncation,
 )
-from lab_tracker.decision_context_constants import TASK_KIND_VALUES
+from lab_tracker.decision_context_constants import CONTEXT_LOOKUP_LIMIT, TASK_KIND_VALUES
 from lab_tracker.decision_context_query import RepositoryDecisionContextReader
 from lab_tracker.decision_context_selection import merge_entities
 from lab_tracker.decision_context_types import JsonObject
-from lab_tracker.decision_context_use_case import build_decision_context
+from lab_tracker.decision_context_use_case import (
+    AMBIGUOUS_PROJECT_CANDIDATE_LIMIT,
+    build_decision_context,
+)
 from lab_tracker.models import (
     NoteStatus,
     QuestionStatus,
@@ -537,3 +540,65 @@ def test_repository_reader_project_match_lookup_preserves_ambiguity_after_many_m
         str(crowded_project.project_id),
         str(sparse_project.project_id),
     }
+
+
+def test_ambiguous_project_error_reads_a_bounded_number_of_candidates() -> None:
+    matched_ids = {f"project-{index:03d}" for index in range(CONTEXT_LOOKUP_LIMIT)}
+
+    class ManyMatchesReader(FakeDecisionContextReader):
+        get_project_calls = 0
+
+        def get_project(self, project_id: str) -> JsonObject | None:
+            self.get_project_calls += 1
+            return {"project_id": project_id, "name": project_id, "status": "active"}
+
+        def project_ids_with_search_matches(
+            self,
+            query: str,
+            *,
+            limit: int = 50,
+        ) -> set[str]:
+            return set(sorted(matched_ids)[:limit])
+
+    reader = ManyMatchesReader()
+    payload = build_decision_context(reader, task_kind="summary", query="common")
+
+    error = payload["error"]
+    assert error["code"] == "ambiguous_project"
+    assert reader.get_project_calls == AMBIGUOUS_PROJECT_CANDIDATE_LIMIT
+    assert [item["project_id"] for item in error["candidate_projects"]] == sorted(matched_ids)[
+        :AMBIGUOUS_PROJECT_CANDIDATE_LIMIT
+    ]
+    # The lookup stopped at its limit, so the total is a lower bound.
+    assert error["candidate_projects_total"] == CONTEXT_LOOKUP_LIMIT
+    assert error["candidate_projects_truncated"] is True
+    assert error["candidate_projects_omitted"] == (
+        CONTEXT_LOOKUP_LIMIT - AMBIGUOUS_PROJECT_CANDIDATE_LIMIT
+    )
+    assert f"{CONTEXT_LOOKUP_LIMIT} or more projects match" in error["message"]
+    assert "project_id" in error["message"]
+
+
+def test_ambiguous_project_error_reports_exact_count_of_omitted_matches() -> None:
+    matched_ids = {f"project-{index:03d}" for index in range(AMBIGUOUS_PROJECT_CANDIDATE_LIMIT + 3)}
+
+    class SomeMatchesReader(FakeDecisionContextReader):
+        def get_project(self, project_id: str) -> JsonObject | None:
+            return {"project_id": project_id, "name": project_id, "status": "active"}
+
+        def project_ids_with_search_matches(
+            self,
+            query: str,
+            *,
+            limit: int = 50,
+        ) -> set[str]:
+            return set(matched_ids)
+
+    payload = build_decision_context(SomeMatchesReader(), task_kind="summary", query="common")
+
+    error = payload["error"]
+    assert len(error["candidate_projects"]) == AMBIGUOUS_PROJECT_CANDIDATE_LIMIT
+    assert error["candidate_projects_total"] == AMBIGUOUS_PROJECT_CANDIDATE_LIMIT + 3
+    assert error["candidate_projects_truncated"] is True
+    assert error["candidate_projects_omitted"] == 3
+    assert f"{AMBIGUOUS_PROJECT_CANDIDATE_LIMIT + 3} projects match" in error["message"]
