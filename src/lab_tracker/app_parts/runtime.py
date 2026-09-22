@@ -29,6 +29,7 @@ from lab_tracker.app_parts.middleware import system_auth_context
 from lab_tracker.artifact_resolution import (
     LAB_TRACKER_GIT_ALLOWED_REMOTES_ENV,
     LAB_TRACKER_RCLONE_ALLOWED_REMOTES_ENV,
+    GitCacheSettings,
     RecoveryPolicy,
     ResolverRegistry,
     check_store_health,
@@ -320,6 +321,10 @@ def build_app_runtime(settings: Settings, *, verify_schema: bool = True) -> AppR
             process_executor=process_executor,
             http_deadline_seconds=settings.resolver_http_deadline_seconds,
             subprocess_deadline_seconds=settings.resolver_subprocess_deadline_seconds,
+            git_cache=GitCacheSettings(
+                root=settings.git_cache_root or None,
+                max_bytes=settings.git_cache_max_bytes,
+            ),
         )
         return _build_app_runtime(
             settings,

@@ -599,6 +599,23 @@ pass the exact deadline object through the bounded filesystem broker.
   value denies every Git remote. Entries are not whitespace-trimmed; an empty,
   malformed, or semantically duplicate normalized entry fails startup without
   echoing the configured value.
+- `LAB_TRACKER_GIT_CACHE_ROOT`: absolute directory for the Git resolver's
+  per-remote fetch caches (`~` is expanded; a relative path fails startup).
+  When unset, each resolver uses a private, unpredictably named temporary
+  directory (mode `0700`) created on first use and removed when the process
+  exits, so the cache does not survive restarts. A configured root is created
+  with mode `0700` or tightened to it; a root or per-remote cache that is a
+  symlink or is owned by another user is refused (the resolution is
+  `unresolved` and a warning is logged). A per-remote cache whose
+  repository-local Git config holds anything other than the keys `git init`
+  writes is refused, and every resolver Git command overrides
+  `core.hooksPath` and `core.fsmonitor`, so planted hooks or config cannot run
+  commands.
+- `LAB_TRACKER_GIT_CACHE_MAX_BYTES`: positive byte quota for the Git resolver
+  cache (default: unset, unbounded). Least-recently-used per-remote caches are
+  evicted before a new fetch; a cache an in-flight resolution is using is
+  never evicted. Anything other than a positive decimal integer (for example
+  `0`, `-5`, or `2GB`) fails startup.
 
 Each Git grant must use one of these forms:
 
@@ -622,9 +639,9 @@ fragment components, percent escapes, and malformed paths or authorities are
 also rejected. Credentials belong in operator-controlled Git credential helpers
 or SSH facilities, never in this setting or a persisted store root.
 
-The local root list, local recovery controls, and rclone and Git policies are
-parsed once from `Settings` at startup; no runtime consumer independently
-rereads the process environment. Runtime builds one local operations broker
+The local root list, local recovery controls, rclone and Git policies, and
+Git cache controls are parsed once from `Settings` at startup; no runtime
+consumer independently rereads the process environment. Runtime builds one local operations broker
 from that root list and passes the exact broker to health, artifact resolution,
 and bounded recovery enumeration. Rclone and Git resolution and health share
 one immutable instance of their corresponding policy. All subprocess-backed

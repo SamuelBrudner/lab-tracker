@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 from collections.abc import Callable
 from typing import Any, Literal
 from urllib.parse import urlsplit
@@ -144,6 +145,8 @@ class Settings(BaseSettings):
     store_health_singleflight_wait_seconds: float = DEFAULT_STORE_HEALTH_SINGLEFLIGHT_WAIT_SECONDS
     rclone_allowed_remotes: str = ""
     git_allowed_remotes: str = ""
+    git_cache_root: str = ""
+    git_cache_max_bytes: int | None = None
     graph_draft_provider: str = "openai"
     graph_draft_background_enabled: bool = False
     graph_draft_scheduler_enabled: bool = False
@@ -276,6 +279,32 @@ class Settings(BaseSettings):
             value,
             variable="LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS",
             maximum=MAX_PROCESS_DEADLINE_SECONDS,
+        )
+
+    @field_validator("git_cache_root")
+    @classmethod
+    def _validate_git_cache_root(cls, value: str) -> str:
+        cleaned = str(value or "").strip()
+        if not cleaned:
+            return ""
+        expanded = os.path.expanduser(cleaned)
+        if not os.path.isabs(expanded):
+            raise ValueError("LAB_TRACKER_GIT_CACHE_ROOT must be an absolute path.")
+        return expanded
+
+    @field_validator("git_cache_max_bytes", mode="before")
+    @classmethod
+    def _validate_git_cache_max_bytes(cls, value: object) -> int | None:
+        if value is None:
+            return None
+        if type(value) is int and value > 0:
+            return value
+        if type(value) is str:
+            stripped = value.strip()
+            if stripped.isascii() and stripped.isdecimal() and int(stripped) > 0:
+                return int(stripped)
+        raise ValueError(
+            "LAB_TRACKER_GIT_CACHE_MAX_BYTES must be a positive integer number of bytes."
         )
 
     @field_validator("resolver_recovery", mode="before")

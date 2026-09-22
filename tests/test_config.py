@@ -23,6 +23,7 @@ from lab_tracker.app_parts.runtime import (
     make_lifespan,
 )
 from lab_tracker.artifact_resolution import (
+    GitCacheSettings,
     ResolverRegistry,
     outbound_http_policy_from_config,
 )
@@ -907,8 +908,10 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(
         process_executor,
         http_deadline_seconds,
         subprocess_deadline_seconds,
+        git_cache,
     ):
         assert safe_http_client_timeouts == [12.5]
+        captured["registry_git_cache"] = git_cache
         captured["registry_local_file_reader"] = local_file_reader
         captured["registry_local_recovery_enumerator"] = local_recovery_enumerator
         captured["registry_local_resolution_limits"] = local_resolution_limits
@@ -1046,6 +1049,8 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(
         store_health_singleflight_wait_seconds=2.25,
         rclone_allowed_remotes="settings-remote",
         git_allowed_remotes="https://settings.example/lab",
+        git_cache_root=str(tmp_path / "git-cache"),
+        git_cache_max_bytes=4096,
     )
     runtime = build_app_runtime(settings, verify_schema=False)
     app = FastAPI()
@@ -1108,6 +1113,10 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(
         assert captured["registry_http_deadline_seconds"] == 12.5
         assert captured["health_http_deadline_seconds"] == 12.5
         assert captured["registry_subprocess_deadline_seconds"] == 7.25
+        assert captured["registry_git_cache"] == GitCacheSettings(
+            root=str(tmp_path / "git-cache"),
+            max_bytes=4096,
+        )
         assert captured["health_local_deadline_seconds"] == 7.25
         assert captured["health_rclone_deadline_seconds"] == 7.25
         assert captured["health_git_deadline_seconds"] == 7.25
@@ -1269,6 +1278,7 @@ def test_lifespan_removes_app_owned_git_health_workdir(monkeypatch):
         process_executor,
         http_deadline_seconds,
         subprocess_deadline_seconds,
+        git_cache,
     ):
         del (
             local_file_reader,
@@ -1282,6 +1292,7 @@ def test_lifespan_removes_app_owned_git_health_workdir(monkeypatch):
             process_executor,
             http_deadline_seconds,
             subprocess_deadline_seconds,
+            git_cache,
         )
         return resolver_registry
 

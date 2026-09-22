@@ -30,12 +30,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import mimetypes
 import os
+import re
 import shutil
+import stat
 import tempfile
+import threading
 import time
+import weakref
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Sequence
 from contextlib import suppress
@@ -2445,6 +2450,37 @@ def _parse_git_locator(uri: str) -> tuple[str, str, str] | None:
     return remote, commit, path
 
 
+_logger = logging.getLogger(__name__)
+
+_GIT_CACHE_DIR_PREFIX = "lab-tracker-git-cache-"
+_GIT_CACHE_LOCKS: dict[str, threading.Lock] = {}
+_GIT_CACHE_LOCKS_GUARD = threading.Lock()
+_GIT_CACHE_UNAVAILABLE_DETAIL = "Git artifact cache is unavailable."
+# The only repository-local config keys `git init` writes into a cache.
+_GIT_CACHE_ALLOWED_CONFIG_KEYS = frozenset(
+    {
+        ("core", "repositoryformatversion"),
+        ("core", "filemode"),
+        ("core", "bare"),
+        ("core", "logallrefupdates"),
+        ("core", "ignorecase"),
+        ("core", "precomposeunicode"),
+        ("core", "symlinks"),
+        ("extensions", "objectformat"),
+    }
+)
+_GIT_CONFIG_SECTION = re.compile(r"\[([A-Za-z0-9-]+)\]")
+_GIT_CONFIG_ENTRY = re.compile(r"([A-Za-z][A-Za-z0-9-]*)\s*=\s*[A-Za-z0-9_-]*")
+# Command-line config outranks repository-local, global, and system config, so
+# resolver commands never run hooks or an fsmonitor program.
+_GIT_CACHE_NEUTRALIZING_CONFIG_ARGS = (
+    "-c",
+    f"core.hooksPath={os.devnull}",
+    "-c",
+    "core.fsmonitor=false",
+)
+
+
 class GitResolver(ArtifactResolver, ScopedGitStoreResolver):
     """Resolves artifacts pinned to a git commit.
 
@@ -2470,7 +2506,16 @@ class GitResolver(ArtifactResolver, ScopedGitStoreResolver):
     * The blob's size is checked (``git cat-file -s``) before it is read, so an
       object larger than ``max_fetch_bytes`` is refused rather than buffered.
     * ``max_cache_bytes`` bounds the on-disk fetch cache; least-recently-used
-      per-remote caches are evicted before a new fetch.
+      per-remote caches are evicted before a new fetch, skipping any cache an
+      in-flight resolution holds. One lock per remote cache serializes
+      resolutions that share it.
+    * ``cache_root`` must be a real directory owned by the server's user; it is
+      tightened to mode 0700, and a symlinked or foreign-owned root or
+      per-remote cache is refused. When unset, the cache lives in a private
+      0700 temporary directory created on first use and removed with the
+      resolver. A per-remote cache whose repository-local Git config contains
+      anything beyond the keys ``git init`` writes is refused, and every
+      resolver command overrides ``core.hooksPath`` and ``core.fsmonitor``.
     """
 
     def __init__(
@@ -2489,11 +2534,17 @@ class GitResolver(ArtifactResolver, ScopedGitStoreResolver):
     ) -> None:
         if runner is not None and executor is not None:
             raise ValueError("Configure either runner or executor, not both.")
+        if max_cache_bytes is not None and (
+            isinstance(max_cache_bytes, bool) or max_cache_bytes <= 0
+        ):
+            raise ValueError("max_cache_bytes must be a positive integer or None.")
         self._runner = runner
         self._executor = executor
         self._binary = binary
         self._allow_protocol = allow_protocol
-        self._cache_root = cache_root
+        self._cache_root = os.fspath(cache_root) if cache_root else None
+        self._private_cache_root: str | None = None
+        self._cache_guard = threading.Lock()
         self._remote_policy = (
             remote_policy if remote_policy is not None else GitRemotePolicy.deny_all()
         )
@@ -2599,30 +2650,32 @@ class GitResolver(ArtifactResolver, ScopedGitStoreResolver):
             )
             executor = self._executor if self._executor is not None else BoundedSubprocessExecutor()
             deadline.check()
-            cache = self._repo_cache(
+            base, cache = self._repo_cache_path(
                 approved.subprocess_value,
                 object_format=object_format,
             )
-            deadline.check()
-            env = _git_environment(self._allow_protocol, cwd=cache)
-            collector = _HashCollector(
-                algorithm=algorithm,
-                max_bytes=max_bytes,
-                window=window,
-                max_total=self._max_fetch_bytes,
-                budget_check=deadline.check,
-            )
-            self._read_blob(
-                approved,
-                revision,
-                path,
-                cache=cache,
-                executor=executor,
-                env=env,
-                deadline=deadline,
-                stdout_consumer=collector.consume,
-                object_format=object_format,
-            )
+            with self._cache_lock_for(cache):
+                self._prepare_repo_cache(base, cache)
+                deadline.check()
+                env = _git_environment(self._allow_protocol, cwd=cache)
+                collector = _HashCollector(
+                    algorithm=algorithm,
+                    max_bytes=max_bytes,
+                    window=window,
+                    max_total=self._max_fetch_bytes,
+                    budget_check=deadline.check,
+                )
+                self._read_blob(
+                    approved,
+                    revision,
+                    path,
+                    cache=cache,
+                    executor=executor,
+                    env=env,
+                    deadline=deadline,
+                    stdout_consumer=collector.consume,
+                    object_format=object_format,
+                )
             content, total, truncated, observed = collector.finish()
             deadline.check()
         except _GitReadError as exc:
@@ -2661,7 +2714,7 @@ class GitResolver(ArtifactResolver, ScopedGitStoreResolver):
         remote = approved.subprocess_value
         deadline.check()
         rev = f"{commit}:{path}"
-        config_args = _git_http_config_args(approved)
+        config_args = [*_git_http_config_args(approved), *_GIT_CACHE_NEUTRALIZING_CONFIG_ARGS]
         # Idempotent: a fresh cache is initialised once, an existing one reused.
         init_args = ["init", "-q"]
         if object_format is not None:
@@ -2773,18 +2826,15 @@ class GitResolver(ArtifactResolver, ScopedGitStoreResolver):
             stdout_consumer=stdout_consumer,
         )
 
-    def _repo_cache(
+    def _repo_cache_path(
         self,
         remote: str,
         *,
         object_format: GitObjectFormat | None = None,
-    ) -> str:
-        base = (
-            os.fspath(self._cache_root)
-            if self._cache_root
-            else os.path.join(tempfile.gettempdir(), "lab-tracker-git-cache")
-        )
-        self._enforce_cache_quota(base)
+    ) -> tuple[str, str]:
+        """Return ``(cache root, per-remote cache path)`` for one remote."""
+
+        base = self._cache_base()
         if object_format is None:
             cache_identity = remote
             cache_prefix = ""
@@ -2792,12 +2842,46 @@ class GitResolver(ArtifactResolver, ScopedGitStoreResolver):
             cache_identity = f"{object_format}\0{remote}"
             cache_prefix = f"{object_format}-"
         digest = hashlib.sha256(cache_identity.encode("utf-8")).hexdigest()[:16]
-        cache = os.path.join(base, f"{cache_prefix}{digest}")
-        os.makedirs(cache, exist_ok=True)
-        return cache
+        return base, os.path.join(base, f"{cache_prefix}{digest}")
+
+    def _cache_base(self) -> str:
+        if self._cache_root is not None:
+            return self._cache_root
+        with self._cache_guard:
+            if self._private_cache_root is None:
+                # mkdtemp creates an unpredictable, owner-only (0700) directory.
+                path = tempfile.mkdtemp(prefix=_GIT_CACHE_DIR_PREFIX)
+                weakref.finalize(self, shutil.rmtree, path, True)
+                self._private_cache_root = path
+            return self._private_cache_root
+
+    def _cache_lock_for(self, cache: str) -> threading.Lock:
+        # Process-wide, so resolvers sharing a configured root share locks.
+        key = os.path.normpath(os.path.abspath(cache))
+        with _GIT_CACHE_LOCKS_GUARD:
+            lock = _GIT_CACHE_LOCKS.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                _GIT_CACHE_LOCKS[key] = lock
+            return lock
+
+    def _prepare_repo_cache(self, base: str, cache: str) -> None:
+        """Create or re-validate the cache; the caller holds ``cache``'s lock."""
+
+        try:
+            _ensure_private_cache_directory(base, create_parents=True)
+            self._enforce_cache_quota(base)
+            _ensure_private_cache_directory(cache, create_parents=False)
+            validate_git_cache_config(cache)
+        except GitCacheUnsafeError as exc:
+            _logger.warning("Refusing the Git resolver cache: %s", exc)
+            raise _GitReadError(_GIT_CACHE_UNAVAILABLE_DETAIL) from None
 
     def _enforce_cache_quota(self, base: str) -> None:
-        """Evict least-recently-used per-remote caches until under the quota."""
+        """Evict least-recently-used per-remote caches until under the quota.
+
+        A cache whose lock is held (an in-flight resolution) is never evicted.
+        """
 
         if not self._max_cache_bytes or not os.path.isdir(base):
             return
@@ -2805,18 +2889,114 @@ class GitResolver(ArtifactResolver, ScopedGitStoreResolver):
         total = 0
         for name in os.listdir(base):
             path = os.path.join(base, name)
-            if not os.path.isdir(path):
+            try:
+                entry_stat = os.lstat(path)
+            except OSError:
+                continue
+            if not stat.S_ISDIR(entry_stat.st_mode):
                 continue
             size = _dir_size(path)
-            entries.append((os.path.getmtime(path), path, size))
+            entries.append((entry_stat.st_mtime, path, size))
             total += size
         if total <= self._max_cache_bytes:
             return
         for _mtime, path, size in sorted(entries):  # oldest first
             if total <= self._max_cache_bytes:
                 break
-            shutil.rmtree(path, ignore_errors=True)
+            lock = self._cache_lock_for(path)
+            if not lock.acquire(blocking=False):
+                continue
+            try:
+                shutil.rmtree(path, ignore_errors=True)
+            finally:
+                lock.release()
             total -= size
+
+
+class GitCacheUnsafeError(Exception):
+    """A Git resolver cache directory or repository failed a safety check."""
+
+
+def _require_owned_by_server(entry_stat: os.stat_result, path: str) -> None:
+    if os.name == "nt":
+        return
+    if entry_stat.st_uid != os.geteuid():
+        raise GitCacheUnsafeError(
+            f"{path} is owned by uid {entry_stat.st_uid}, not the server's uid {os.geteuid()}."
+        )
+
+
+def _ensure_private_cache_directory(path: str, *, create_parents: bool) -> None:
+    """Create ``path`` (0700) or verify an existing one is a private real directory."""
+
+    try:
+        if create_parents:
+            os.makedirs(path, mode=0o700, exist_ok=True)
+        else:
+            os.mkdir(path, 0o700)
+    except FileExistsError:
+        pass
+    except OSError as exc:
+        raise GitCacheUnsafeError(f"{path} could not be created: {exc}") from None
+    entry_stat = os.lstat(path)
+    if stat.S_ISLNK(entry_stat.st_mode) or not stat.S_ISDIR(entry_stat.st_mode):
+        raise GitCacheUnsafeError(f"{path} is not a real directory (symlink or other file).")
+    _require_owned_by_server(entry_stat, path)
+    if os.name != "nt" and stat.S_IMODE(entry_stat.st_mode) & 0o077:
+        os.chmod(path, 0o700)
+
+
+def validate_git_cache_config(repository: str) -> None:
+    """Refuse a cache repository whose local config Lab Tracker did not write.
+
+    Repository-local Git config can run commands (``core.fsmonitor``,
+    ``core.hooksPath``, ``core.sshCommand``, credential helpers) or redirect
+    fetches (``url.*.insteadOf``, ``include.path``). A fresh ``git init`` writes
+    only the allowlisted ``core``/``extensions`` keys, so anything else means
+    the cache was tampered with. ``.git`` must be a real directory (not a
+    ``gitdir:`` file or symlink) and it and its config must be owned by the
+    server's user.
+    """
+
+    git_dir = os.path.join(repository, ".git")
+    try:
+        git_dir_stat = os.lstat(git_dir)
+    except FileNotFoundError:
+        return
+    if not stat.S_ISDIR(git_dir_stat.st_mode):
+        raise GitCacheUnsafeError(f"{git_dir} is not a real directory.")
+    _require_owned_by_server(git_dir_stat, git_dir)
+    config_path = os.path.join(git_dir, "config")
+    try:
+        config_stat = os.lstat(config_path)
+    except FileNotFoundError:
+        return
+    if not stat.S_ISREG(config_stat.st_mode):
+        raise GitCacheUnsafeError(f"{config_path} is not a regular file.")
+    _require_owned_by_server(config_stat, config_path)
+    try:
+        with open(config_path, encoding="utf-8") as handle:
+            lines = handle.read().splitlines()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise GitCacheUnsafeError(f"{config_path} could not be read: {exc}") from None
+    section: str | None = None
+    for number, raw_line in enumerate(lines, start=1):
+        line = raw_line.strip()
+        if not line or line[0] in "#;":
+            continue
+        section_match = _GIT_CONFIG_SECTION.fullmatch(line)
+        if section_match is not None:
+            section = section_match.group(1).lower()
+            continue
+        entry_match = _GIT_CONFIG_ENTRY.fullmatch(line)
+        if (
+            entry_match is None
+            or section is None
+            or (section, entry_match.group(1).lower()) not in _GIT_CACHE_ALLOWED_CONFIG_KEYS
+        ):
+            raise GitCacheUnsafeError(
+                f"{config_path} line {number} is not a key Lab Tracker writes."
+            )
 
 
 def _dir_size(path: str) -> int:
@@ -3088,18 +3268,51 @@ LAB_TRACKER_GIT_ALLOWED_REMOTES_ENV = "LAB_TRACKER_GIT_ALLOWED_REMOTES"
 LAB_TRACKER_GIT_CACHE_ROOT_ENV = "LAB_TRACKER_GIT_CACHE_ROOT"
 LAB_TRACKER_GIT_CACHE_MAX_BYTES_ENV = "LAB_TRACKER_GIT_CACHE_MAX_BYTES"
 
+
+@dataclass(frozen=True)
+class GitCacheSettings:
+    """Validated Git resolver cache controls.
+
+    ``root`` is an absolute directory for the per-remote fetch caches (``None``
+    uses a private temporary directory per resolver). ``max_bytes`` bounds the
+    cache (``None`` means unbounded).
+    """
+
+    root: str | None = None
+    max_bytes: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.root is not None and not os.path.isabs(self.root):
+            raise ValueError("Git cache root must be an absolute path.")
+        if self.max_bytes is not None and (
+            isinstance(self.max_bytes, bool) or self.max_bytes <= 0
+        ):
+            raise ValueError("Git cache max_bytes must be a positive integer.")
+
+
+def git_cache_settings_from_env() -> GitCacheSettings:
+    """Strictly parse the Git cache controls from the process environment."""
+
+    raw_root = os.environ.get(LAB_TRACKER_GIT_CACHE_ROOT_ENV)
+    root: str | None = None
+    if raw_root is not None and raw_root.strip():
+        root = os.path.expanduser(raw_root.strip())
+        if not os.path.isabs(root):
+            raise ValueError(f"{LAB_TRACKER_GIT_CACHE_ROOT_ENV} must be an absolute path.")
+    raw_max_bytes = os.environ.get(LAB_TRACKER_GIT_CACHE_MAX_BYTES_ENV)
+    max_bytes = (
+        None
+        if raw_max_bytes is None
+        else _strict_env_positive_int(
+            raw_max_bytes,
+            0,
+            variable=LAB_TRACKER_GIT_CACHE_MAX_BYTES_ENV,
+        )
+    )
+    return GitCacheSettings(root=root, max_bytes=max_bytes)
+
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 _FALSY = frozenset({"0", "false", "no", "off", ""})
-
-
-def _env_positive_int(value: str | None, default: int) -> int:
-    if value is None:
-        return default
-    try:
-        parsed = int(value.strip())
-    except ValueError:
-        return default
-    return parsed if parsed > 0 else default
 
 
 def recovery_from_env() -> RecoveryPolicy:
@@ -3213,8 +3426,13 @@ def registry_from_env(
     rclone_remote_policy: RcloneRemotePolicy | None = None,
     git_remote_policy: GitRemotePolicy | None = None,
     process_executor: ProcessExecutor | None = None,
+    git_cache: GitCacheSettings | None = None,
 ) -> ResolverRegistry:
-    """Build the default registry, reading resolver config from the env."""
+    """Build the default registry, reading resolver config from the env.
+
+    Every argument left as ``None`` is read strictly from the environment;
+    runtime composition passes the values it loaded from ``Settings``.
+    """
 
     if (
         local_path_policy is None
@@ -3233,8 +3451,8 @@ def registry_from_env(
             os.environ.get(LAB_TRACKER_GIT_ALLOWED_REMOTES_ENV),
             variable=LAB_TRACKER_GIT_ALLOWED_REMOTES_ENV,
         )
-    git_cache_root = os.environ.get(LAB_TRACKER_GIT_CACHE_ROOT_ENV) or None
-    git_max_cache_bytes = _env_positive_int(os.environ.get(LAB_TRACKER_GIT_CACHE_MAX_BYTES_ENV), 0)
+    if git_cache is None:
+        git_cache = git_cache_settings_from_env()
     if http_deadline_seconds is None:
         raw_deadline = os.environ.get(LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS_ENV)
         try:
@@ -3302,6 +3520,6 @@ def registry_from_env(
         rclone_remote_policy=rclone_remote_policy,
         git_remote_policy=git_remote_policy,
         process_executor=process_executor,
-        git_cache_root=git_cache_root,
-        git_max_cache_bytes=git_max_cache_bytes or None,
+        git_cache_root=git_cache.root,
+        git_max_cache_bytes=git_cache.max_bytes,
     )
