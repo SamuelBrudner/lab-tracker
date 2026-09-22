@@ -286,6 +286,31 @@ def test_store_authority_grants_load_exact_dotenv_value(tmp_path, monkeypatch):
     assert Settings(_env_file=dotenv_path).store_authority_grants_json == configured
 
 
+@pytest.mark.parametrize(
+    ("field_name", "secret"),
+    [
+        ("auth_secret_key", "auth-secret-sentinel-3c1d9e"),
+        ("bootstrap_admin_token", "bootstrap-token-sentinel-51af0b"),
+        ("review_email_smtp_password", "smtp-password-sentinel-a7e2c4"),
+        ("openai_api_key", "openai-key-sentinel-0d9b6f"),
+        ("anthropic_api_key", "anthropic-key-sentinel-e48a12"),
+        ("google_api_key", "google-key-sentinel-9f3c07"),
+        (
+            "database_url",
+            "postgresql+psycopg://lab:db-password-sentinel-6b2e@db:5432/lab",
+        ),
+    ],
+)
+def test_credential_settings_are_hidden_from_settings_repr(field_name, secret):
+    # Settings is embedded in AppRuntime, LabTrackerAPI and RequestHandlers, so
+    # any repr in a log line or traceback must not carry credentials.
+    settings = Settings(_env_file=None, **{field_name: secret})
+
+    assert getattr(settings, field_name) == secret
+    assert secret not in repr(settings)
+    assert secret not in str(settings)
+
+
 def test_store_authority_grants_are_hidden_from_settings_rendering():
     secret = "sag-sensitive-sentinel-7f94d128"
     settings = Settings(

@@ -103,12 +103,15 @@ class Settings(BaseSettings):
     environment: str = "local"
     source_revision: str = "unknown"
     log_level: str = "INFO"
-    database_url: str = "sqlite+pysqlite:///./lab_tracker.db"
+    # Credential-bearing fields stay out of repr(): Settings is embedded in
+    # AppRuntime, LabTrackerAPI and RequestHandlers, so a repr in a log line or
+    # traceback would otherwise print them.
+    database_url: str = Field(default="sqlite+pysqlite:///./lab_tracker.db", repr=False)
     backup_path: str = "~/.lab-tracker/backups"
     backup_keep: int = 10
     file_storage_path: str = "./file_storage"
     note_storage_path: str = "./note_storage"
-    auth_secret_key: str = DEFAULT_AUTH_SECRET_KEY
+    auth_secret_key: str = Field(default=DEFAULT_AUTH_SECRET_KEY, repr=False)
     auth_token_ttl_minutes: int = 60 * 12
     auth_session_max_age_hours: int = DEFAULT_AUTH_SESSION_MAX_AGE_HOURS
     auth_invite_ttl_hours: int = 7 * 24
@@ -117,7 +120,7 @@ class Settings(BaseSettings):
     # None resolves per environment; see is_public_viewer_registration_enabled().
     auth_public_viewer_registration_enabled: bool | None = None
     usage_events: bool | None = None
-    bootstrap_admin_token: str = ""
+    bootstrap_admin_token: str = Field(default="", repr=False)
     # None resolves per environment; see effective_bootstrap_admin_token_disclosure().
     bootstrap_admin_token_disclosure: BootstrapAdminTokenDisclosure | None = None
     auth_enabled: bool | None = None
@@ -174,18 +177,18 @@ class Settings(BaseSettings):
     review_email_smtp_host: str = ""
     review_email_smtp_port: int = 587
     review_email_smtp_username: str = ""
-    review_email_smtp_password: str = ""
+    review_email_smtp_password: str = Field(default="", repr=False)
     review_email_smtp_from_address: str = ""
     review_email_smtp_tls_mode: Literal["none", "starttls", "implicit"] = "starttls"
     review_email_smtp_timeout_seconds: float = 10.0
-    openai_api_key: str = ""
+    openai_api_key: str = Field(default="", repr=False)
     openai_model: str = "gpt-4o-mini"
     openai_reasoning_effort: Literal["none", "low", "medium", "high", "xhigh", "max"] | None = None
     openai_reasoning_mode: Literal["standard", "pro"] | None = None
     openai_transcription_model: str = "gpt-4o-mini-transcribe"
     openai_base_url: str = "https://api.openai.com/v1"
     openai_timeout_seconds: float = 60.0
-    anthropic_api_key: str = ""
+    anthropic_api_key: str = Field(default="", repr=False)
     anthropic_model: str = "claude-3-5-sonnet-latest"
     anthropic_base_url: str = "https://api.anthropic.com/v1"
     # Sized with the output budget below: a non-streaming call returns nothing
@@ -194,7 +197,7 @@ class Settings(BaseSettings):
     # Output budget per Messages call. Batch drafts carry a multi-paragraph
     # narrative plus one operation per finding, so 4096 truncated real days.
     anthropic_max_output_tokens: int = Field(default=16000, ge=1)
-    google_api_key: str = ""
+    google_api_key: str = Field(default="", repr=False)
     google_model: str = "gemini-2.5-flash"
     google_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
     google_timeout_seconds: float = 60.0
