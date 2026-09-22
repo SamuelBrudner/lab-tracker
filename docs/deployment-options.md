@@ -51,13 +51,17 @@ The first-admin token is stored in the app data volume. Open the app through
 `Create First Admin`; the setup screen loads the generated token while no users
 exist.
 
-Optional GitHub Copilot MCP hosting is a separate read-only service:
+Optional GitHub Copilot MCP hosting is a separate read-only service behind the
+`mcp` Compose profile, so the app, Postgres, backup, and restore commands never
+need MCP tokens:
 
 ```bash
 export LT_MCP_READONLY_TOKEN=lpat_...
 export LT_MCP_INBOUND_TOKEN="$(openssl rand -hex 32)"
-docker compose up mcp
+docker compose --profile mcp up mcp
 ```
+
+The `mcp` container refuses to start while either token is empty.
 
 The MCP service uses streamable HTTP and is published only on host loopback
 (`127.0.0.1:9000` by default). Put a private TLS proxy or tailnet serve layer in

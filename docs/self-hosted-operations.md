@@ -12,6 +12,51 @@ Use this for the Docker/Postgres path in `docker-compose.yml`.
 Back up before updating the image or pulling new code because startup can run
 schema migrations.
 
+The optional hosted MCP service is behind the `mcp` Compose profile, so the
+commands on this page never need `LT_MCP_INBOUND_TOKEN` or
+`LT_MCP_READONLY_TOKEN`. When you run it, add `--profile mcp` (or set
+`COMPOSE_PROFILES=mcp` in `.env`); see
+[`deployment-options.md`](deployment-options.md#dockerpostgres-lab-instance).
+
+## Reverse Proxy and Client Addresses
+
+Uvicorn in the app container trusts `X-Forwarded-For` and `X-Forwarded-Proto`
+only from peers listed in `FORWARDED_ALLOW_IPS`. The compose default is
+`127.0.0.1`, which matches no proxy outside the container, so forwarded headers
+are ignored and every proxied request appears to come from the proxy's own
+address. That address is private, so in the `local`
+`LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE` mode a proxied internet client
+would be treated as local until the proxy is trusted.
+
+When a TLS reverse proxy (Caddy, nginx, or `tailscale serve`) on the Docker host
+forwards to the published app port, the app sees the Compose network gateway
+as its peer. Find it and set it in the ignored `.env` before creating the first
+admin:
+
+```bash
+docker network inspect lab-tracker_default \
+  --format '{{(index .IPAM.Config 0).Gateway}}'
+```
+
+```dotenv
+FORWARDED_ALLOW_IPS=172.18.0.1
+```
+
+For a proxy container on the same Compose network, use that container's
+address instead. Recreate the app with `docker compose up -d app` after a
+change. Never set `FORWARDED_ALLOW_IPS=*` while the app port is reachable
+without going through the proxy: any client could then choose the address the
+app sees.
+
+## Process Reaping
+
+The compose `app` and `mcp` services set `init: true`, so Docker runs a minimal
+init as PID 1 that reaps orphaned grandchildren of the bounded subprocesses
+used for registered Git and rclone stores. Keep it (`docker run --init`) in any
+custom compose file or container command. Render's Docker runtime has no
+equivalent `render.yaml` setting, so a Render deployment runs uvicorn as PID 1
+without an init reaper.
+
 ## Local Filesystem Stores
 
 The normative local-root and mount contract is in
@@ -99,6 +144,9 @@ docker compose build app
 docker compose up -d app
 docker compose logs -f app
 ```
+
+If you run the optional MCP service, rebuild and restart it from the same
+checkout with `docker compose --profile mcp up -d --build mcp`.
 
 If migrations fail after the configured retry budget, the app container exits
 with an error. Restore from backup or fix the migration before restarting.

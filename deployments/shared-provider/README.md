@@ -23,6 +23,9 @@ the immutable image and ordinary root-Compose settings:
 ```dotenv
 COMPOSE_FILE=docker-compose.yml:deployments/shared-provider/docker-compose.yml
 LAB_TRACKER_RELEASE_IMAGE=lab-tracker-primary:sha-<full-git-revision>
+# Only when this instance also hosts the read-only MCP endpoint, which then
+# needs LT_MCP_READONLY_TOKEN and LT_MCP_INBOUND_TOKEN:
+# COMPOSE_PROFILES=mcp
 ```
 
 The `COMPOSE_FILE` separator shown above is for macOS/Linux. Use `;` on
@@ -32,7 +35,7 @@ Before changing the live service, verify that ordinary Compose resolution has
 no build definition and gives app and MCP the same immutable image:
 
 ```bash
-docker compose config --format json | jq \
+COMPOSE_PROFILES=mcp docker compose config --format json | jq \
   '{app: .services.app | {image,build}, mcp: .services.mcp | {image,build}}'
 ```
 

@@ -62,15 +62,18 @@ and does not call `/auth/login`. Otherwise it logs in with the configured
 username/password and retries once after a 401. Credentials are only required
 when `LAB_TRACKER_AUTH_ENABLED=true`; local auth-disabled testing can omit them.
 
-For a private hosted read-only MCP endpoint, use the compose `mcp` service:
+For a private hosted read-only MCP endpoint, enable the compose `mcp` profile:
 
 ```bash
 export LT_MCP_READONLY_TOKEN=lpat_...
 export LT_MCP_INBOUND_TOKEN="$(openssl rand -hex 32)"
-docker compose up mcp
+docker compose --profile mcp up mcp
 ```
 
-It runs `lt-mcp` with `LAB_TRACKER_MCP_TRANSPORT=streamable-http`, points the MCP
+The service is opt-in, so other compose commands never need these tokens, and
+its container refuses to start while either token is empty. It runs the
+image's installed MCP server (the `lt-mcp` entry point) with
+`LAB_TRACKER_MCP_TRANSPORT=streamable-http`, points the MCP
 process at the internal API hop (`http://app:8000`), and publishes only
 `127.0.0.1:9000` on the host. Put a private TLS proxy in front of that loopback
 port; `deploy/mcp/Caddyfile` is the checked-in example with Origin/Host checks,

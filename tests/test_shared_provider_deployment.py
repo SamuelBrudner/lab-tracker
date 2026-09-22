@@ -44,20 +44,30 @@ def test_compose_merge_has_pinned_images_and_no_builds(tmp_path: Path) -> None:
         "LAB_TRACKER_GRAPH_DRAFT_PROVIDER=openai\n", encoding="utf-8"
     )
     release_image = "lab-tracker-primary:sha-0123456789abcdef"
-    environment = os.environ.copy()
+    # MCP tokens are deliberately absent: resolving the overlay, including the
+    # opt-in mcp profile, must not require them (the mcp entrypoint enforces
+    # them when the container starts).
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(("LT_MCP_", "COMPOSE_"))
+    }
     environment.update(
         {
             "LAB_TRACKER_PROVIDER_ENV_FILE": str(provider_env),
             "LAB_TRACKER_RUNTIME_ENV_FILE": str(runtime_env),
             "LAB_TRACKER_RELEASE_IMAGE": release_image,
-            "LT_MCP_READONLY_TOKEN": "unused",
-            "LT_MCP_INBOUND_TOKEN": "inbound-" + "a" * 32,
+            "COMPOSE_PROFILES": "mcp",
         }
     )
+    empty_dotenv = tmp_path / "empty.env"
+    empty_dotenv.write_text("", encoding="utf-8")
     result = subprocess.run(
         [
             docker,
             "compose",
+            "--env-file",
+            str(empty_dotenv),
             "-f",
             str(REPO_ROOT / "docker-compose.yml"),
             "-f",
@@ -77,3 +87,6 @@ def test_compose_merge_has_pinned_images_and_no_builds(tmp_path: Path) -> None:
     for service_name in ("app", "mcp"):
         assert services[service_name]["image"] == release_image
         assert "build" not in services[service_name]
+    assert services["app"]["init"] is True
+    assert services["mcp"]["init"] is True
+    assert "/health" not in " ".join(services["mcp"]["healthcheck"]["test"])

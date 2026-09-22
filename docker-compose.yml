@@ -36,10 +36,17 @@ services:
       LAB_TRACKER_STORE_HEALTH_CACHE_MAX_ENTRIES: ${LAB_TRACKER_STORE_HEALTH_CACHE_MAX_ENTRIES:-256}
       LAB_TRACKER_STORE_HEALTH_CACHE_TTL_SECONDS: ${LAB_TRACKER_STORE_HEALTH_CACHE_TTL_SECONDS:-10}
       LAB_TRACKER_STORE_HEALTH_SINGLEFLIGHT_WAIT_SECONDS: ${LAB_TRACKER_STORE_HEALTH_SINGLEFLIGHT_WAIT_SECONDS:-10}
+      # uvicorn trusts X-Forwarded-For/-Proto only from these peers. Set it to
+      # the reverse proxy's address as seen by this container; see
+      # docs/self-hosted-operations.md.
+      FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1}
     ports:
       - "8000:8000"
     volumes:
       - app_data:/app/data
+    # uvicorn runs as the container's main process and never reaps orphaned
+    # grandchildren of bounded subprocesses; Docker's init does.
+    init: true
     restart: unless-stopped
     healthcheck:
       test:
@@ -52,27 +59,65 @@ services:
       retries: 3
       start_period: 20s
 
+  # Optional hosted read-only MCP endpoint. It is behind the `mcp` profile so
+  # app, postgres, backup, and restore commands never need MCP tokens; enable
+  # it with `docker compose --profile mcp up -d mcp`. Compose interpolates the
+  # whole file before selecting profiles, so the token requirement is enforced
+  # by the entrypoint below when the service starts, not by `${VAR:?}`.
   mcp:
+    profiles:
+      - mcp
     build:
       context: .
       dockerfile: Dockerfile
-    command: uv run python -m lab_tracker.mcp_server
+    # Run the image's frozen virtualenv directly (PATH starts with
+    # /app/.venv/bin). `uv run` would re-lock and reinstall the project at
+    # container start, and the app entrypoint would run database migrations
+    # this API client does not need.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        if [ -z "$${LAB_TRACKER_MCP_INBOUND_TOKEN:-}" ]; then
+          echo "Set LT_MCP_INBOUND_TOKEN to a distinct random bearer token before enabling the mcp profile." >&2
+          exit 64
+        fi
+        if [ -z "$${LAB_TRACKER_MCP_API_KEY:-}" ]; then
+          echo "Set LT_MCP_READONLY_TOKEN to a read-only lpat_ token before enabling the mcp profile." >&2
+          exit 64
+        fi
+        exec python -m lab_tracker.mcp_server
     depends_on:
       app:
         condition: service_healthy
     environment:
       LAB_TRACKER_MCP_TRANSPORT: streamable-http
       # Docker needs the process reachable on the container interface; the
-      # published host port below is still loopback-only.
-      LAB_TRACKER_MCP_HOST: ${LAB_TRACKER_MCP_HOST:-0.0.0.0}
+      # published host port below is still loopback-only. This is fixed rather
+      # than interpolated because LAB_TRACKER_MCP_HOST in `.env` configures a
+      # host-run `lt-mcp` and would otherwise bind the container's loopback.
+      LAB_TRACKER_MCP_HOST: 0.0.0.0
       LAB_TRACKER_MCP_PORT: ${LAB_TRACKER_MCP_PORT:-8000}
       LAB_TRACKER_MCP_PATH: ${LAB_TRACKER_MCP_PATH:-/mcp}
       LAB_TRACKER_BASE_URL: ${LAB_TRACKER_MCP_BASE_URL:-http://app:8000}
-      LAB_TRACKER_MCP_INBOUND_TOKEN: ${LT_MCP_INBOUND_TOKEN:?Set LT_MCP_INBOUND_TOKEN to a distinct random bearer token}
-      LAB_TRACKER_MCP_API_KEY: ${LT_MCP_READONLY_TOKEN:?Set LT_MCP_READONLY_TOKEN to a read-only lpat_ token}
+      LAB_TRACKER_MCP_INBOUND_TOKEN: ${LT_MCP_INBOUND_TOKEN:-}
+      LAB_TRACKER_MCP_API_KEY: ${LT_MCP_READONLY_TOKEN:-}
     ports:
       - "127.0.0.1:${LAB_TRACKER_MCP_HOST_PORT:-9000}:${LAB_TRACKER_MCP_PORT:-8000}"
+    init: true
     restart: unless-stopped
+    # The image HEALTHCHECK probes the app's /health route; the MCP ASGI app
+    # answers every unauthenticated request with 401, so probe the listener.
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import os, socket; socket.create_connection(("127.0.0.1", int(os.environ.get("LAB_TRACKER_MCP_PORT", "8000"))), timeout=3).close()
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   # One-shot control plane for a mailbox-owned automation. This profile is off
   # by default and receives neither mailbox nor model-provider credentials.
