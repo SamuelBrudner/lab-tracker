@@ -190,10 +190,9 @@ class AppRuntime:
 
 
 _MIGRATE_HINT = (
-    "Apply migrations before starting the app: run `uv run alembic upgrade head` "
-    "from a repository checkout (or `python -m alembic upgrade head` with the "
-    "same LAB_TRACKER_DATABASE_URL), or start with `lab-tracker serve`, which "
-    "migrates first."
+    "Apply migrations before starting the app: start it with `lab-tracker serve`, "
+    "which migrates first, or run `uv run alembic upgrade head` from a repository "
+    "checkout with the same LAB_TRACKER_DATABASE_URL."
 )
 
 
