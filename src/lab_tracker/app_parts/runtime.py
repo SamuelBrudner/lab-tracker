@@ -223,11 +223,13 @@ def _is_known_revision(script: ScriptDirectory, revision: str) -> bool:
 def verify_database_schema(engine: Engine) -> None:
     """Fail loudly unless the database is at this build's Alembic head.
 
-    A database with no Alembic revision (unmigrated) or at a known revision
-    other than the head (stale) raises ``DatabaseSchemaError``. A revision this
-    build does not know is newer than the build -- the image-only rollback case
-    in deployments/dedicated-instance, which requires backward-compatible
-    migrations -- so it is logged as a warning and allowed.
+    A database with no Alembic revision (unmigrated), at a known revision other
+    than the head (stale), or at a revision this build does not know (the wrong
+    database, an abandoned branch, or a newer build's schema) raises
+    ``DatabaseSchemaError``. The unknown case is refused rather than tolerated
+    because both supported entrypoints (``lab-tracker serve`` and the Docker
+    entrypoint) run ``alembic upgrade head`` first and already fail there with
+    "Can't locate revision"; serving anyway would 500 every data route.
     """
 
     script = _migration_script_directory()
@@ -250,15 +252,14 @@ def verify_database_schema(engine: Engine) -> None:
         )
     unknown = sorted(revision for revision in current if not _is_known_revision(script, revision))
     if unknown:
-        _logger.warning(
-            "Database %s is at revision %s, newer than this build's head %s; "
-            "continuing because routine migrations must stay backward-compatible "
-            "with the previous image.",
-            database,
-            ", ".join(unknown),
-            ", ".join(sorted(expected)),
+        raise DatabaseSchemaError(
+            f"Database {database} is at revision {', '.join(unknown)}, which is "
+            f"unknown to this build (expected head {', '.join(sorted(expected))}). "
+            "It is the wrong database, an abandoned migration branch, or was "
+            "migrated by a newer build: point LAB_TRACKER_DATABASE_URL at the "
+            "correct database, or restore the build that matches this database "
+            "(or a database backup that matches this build)."
         )
-        return
     raise DatabaseSchemaError(
         f"Database {database} is at revision {', '.join(sorted(current))} but this "
         f"build expects head {', '.join(sorted(expected))}. {_MIGRATE_HINT}"

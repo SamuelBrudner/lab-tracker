@@ -36,9 +36,10 @@ suitable for local development.
   unmigrated database (no `alembic_version`) or one at an older known revision
   fails startup with a message naming the revisions. Run
   `uv run alembic upgrade head` first, or start with `lab-tracker serve` (or
-  the Docker entrypoint), which migrate before serving. A revision newer than
-  the running build is logged as a warning and allowed, because image-only
-  rollback runs the previous image against an already-migrated database.
+  the Docker entrypoint), which migrate before serving. A revision this build
+  does not know (the wrong database, an abandoned migration branch, or a
+  database already migrated by a newer build) also fails startup; point the URL
+  at the right database or restore the build (or database backup) that matches.
 - `LAB_TRACKER_BACKUP_PATH`: SQLite snapshot directory used by `lab-tracker
   serve` and `lab-tracker backup` (default: `~/.lab-tracker/backups`)
 - `LAB_TRACKER_BACKUP_KEEP`: number of newest SQLite snapshots to keep when a

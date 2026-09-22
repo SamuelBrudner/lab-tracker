@@ -100,35 +100,28 @@ def test_database_at_head_starts_and_bootstraps_local_user(database_url: str) ->
     assert str(LOCAL_AUTH_USER_ID) in user_ids
 
 
-def test_database_ahead_of_this_build_starts_with_warning(
-    database_url: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # Image-only rollback (deployments/dedicated-instance) runs the previous
-    # image against a database already migrated by the newer one.
+def test_database_at_unknown_revision_fails_startup(database_url: str) -> None:
+    # An unknown revision means the wrong database (another Alembic-managed
+    # app, an abandoned branch) or a newer build's schema; both entrypoints
+    # (`lab-tracker serve`, the Docker entrypoint) already refuse it at
+    # `alembic upgrade head`, so the app must not start and 500 every route.
     command.upgrade(_alembic_config(), "head")
+    (head,) = ScriptDirectory.from_config(_alembic_config()).get_heads()
     engine = sa.create_engine(database_url)
     try:
         with engine.begin() as connection:
-            connection.execute(sa.text("UPDATE alembic_version SET version_num = 'ffffnewer'"))
+            connection.execute(sa.text("UPDATE alembic_version SET version_num = 'ffffunknown'"))
     finally:
         engine.dispose()
 
-    warnings: list[str] = []
+    with pytest.raises(DatabaseSchemaError) as excinfo:
+        create_app()
 
-    class _WarningSpy:
-        def warning(self, message: str, *args: object) -> None:
-            warnings.append(message % args)
-
-        def info(self, message: str, *args: object) -> None:
-            pass
-
-    # configure_logging() replaces the root handlers, so caplog cannot see it.
-    monkeypatch.setattr("lab_tracker.app_parts.runtime._logger", _WarningSpy())
-    _create_app()
-
-    assert len(warnings) == 1
-    assert "ffffnewer" in warnings[0]
-    assert "newer than this build" in warnings[0]
+    message = str(excinfo.value)
+    assert "ffffunknown" in message
+    assert "unknown to this build" in message
+    assert head in message
+    assert "restore" in message
 
 
 def test_unreachable_database_fails_startup(
