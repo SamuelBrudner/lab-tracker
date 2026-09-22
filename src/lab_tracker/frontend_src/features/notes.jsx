@@ -166,7 +166,12 @@ function NoteDetailCard({
   setBusy,
   setFlash,
 }) {
-  const { data: note, error, loading } = useApiResource(
+  const {
+    data: note,
+    error,
+    loading,
+    setData: setNote,
+  } = useApiResource(
     noteId ? `/notes/${noteId}` : "",
     token,
     "Failed to load note.",
@@ -189,6 +194,9 @@ function NoteDetailCard({
   const isImage = Boolean(note?.raw_asset?.content_type?.startsWith("image/"));
   const isAudio = Boolean(note?.raw_asset?.content_type?.startsWith("audio/"));
   const isText = Boolean(note?.raw_asset?.is_text);
+  // Previews are keyed by note identity so refreshing `note` after a mutation
+  // does not re-download the raw asset.
+  const loadedNoteId = note?.note_id || "";
   const isMemberOnboardingCheckpoint =
     note?.metadata?.member_onboarding_role === "checkpoint";
   const canDraft = Boolean(
@@ -208,12 +216,12 @@ function NoteDetailCard({
     setAudioPreview("");
     setTextPreview(null);
     setTextPreviewError("");
-    if (!note || (!isImage && !isAudio && !isText)) {
+    if (!loadedNoteId || (!isImage && !isAudio && !isText)) {
       return () => {
         canceled = true;
       };
     }
-    const path = isText ? `/notes/${note.note_id}/raw-text` : `/notes/${note.note_id}/raw`;
+    const path = isText ? `/notes/${loadedNoteId}/raw-text` : `/notes/${loadedNoteId}/raw`;
     apiRequest(path, { token })
       .then((raw) => {
         if (!canceled && isText && typeof raw?.text === "string") {
@@ -242,7 +250,7 @@ function NoteDetailCard({
     return () => {
       canceled = true;
     };
-  }, [isAudio, isImage, isText, note, token]);
+  }, [isAudio, isImage, isText, loadedNoteId, token]);
 
   useEffect(() => {
     setTranscriptText(note?.transcribed_text || "");
@@ -257,19 +265,26 @@ function NoteDetailCard({
       setFlash("", "");
     }
     try {
+      // PATCH replaces the whole metadata bag, so build it from the server's
+      // current copy: provenance written since this page loaded (by /transcript
+      // or background auto-transcription) must survive a transcript edit.
+      const latest = noteShape(await apiRequest(`/notes/${note.note_id}`, { token }));
       const metadata = {
-        ...(note.metadata || {}),
+        ...(latest.metadata || {}),
         transcript_status: transcriptText.trim() ? "ready" : "pending",
         transcript_edited_at: new Date().toISOString(),
       };
-      const updated = await apiRequest(`/notes/${note.note_id}`, {
-        body: {
-          metadata,
-          transcribed_text: transcriptText,
-        },
-        method: "PATCH",
-        token,
-      });
+      const updated = noteShape(
+        await apiRequest(`/notes/${note.note_id}`, {
+          body: {
+            metadata,
+            transcribed_text: transcriptText,
+          },
+          method: "PATCH",
+          token,
+        })
+      );
+      setNote(updated);
       if (!silent) {
         setFlash("Transcript saved.");
       }
@@ -289,12 +304,17 @@ function NoteDetailCard({
     setBusy(true);
     setFlash("", "");
     try {
-      const updated = await apiRequest(`/notes/${note.note_id}/transcript`, {
-        body: {},
-        method: "POST",
-        token,
-      });
-      setTranscriptText(updated?.transcribed_text || "");
+      const updated = noteShape(
+        await apiRequest(`/notes/${note.note_id}/transcript`, {
+          body: {},
+          method: "POST",
+          token,
+        })
+      );
+      // Adopt the server copy (text plus provider provenance) so later saves
+      // and the draft flow's "transcript changed?" check start from it.
+      setNote(updated);
+      setTranscriptText(updated.transcribed_text || "");
       setFlash("Voice transcript ready.");
     } catch (err) {
       setFlash("", err.message || "Failed to transcribe voice note.");
