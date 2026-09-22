@@ -443,6 +443,14 @@ class ReviewEmailOutboxRepository(Protocol):
     ) -> ReviewEmailDelivery | None:
         """Return the delivery for one globally unique idempotency key."""
 
+    def dead_letter_expired_leases(
+        self,
+        *,
+        now: datetime,
+        max_attempts: int,
+    ) -> builtins.list[UUID]:
+        """Fail expired leases that already used ``max_attempts``; return their ids."""
+
     def claim_next(
         self,
         *,
@@ -454,7 +462,7 @@ class ReviewEmailOutboxRepository(Protocol):
         """Atomically lease the next due or stale delivery.
 
         Expired leases count as attempts: a stale lease that already used
-        ``max_attempts`` is dead-lettered as FAILED instead of re-leased.
+        ``max_attempts`` is never re-leased (see ``dead_letter_expired_leases``).
         """
 
 

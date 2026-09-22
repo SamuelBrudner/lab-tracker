@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import timedelta
 from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import event
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.app_parts.middleware import system_auth_context
@@ -365,3 +367,42 @@ def test_expired_leases_count_as_attempts_and_dead_letter_at_max_attempts(
             api.review_emails.claim_next(lease_seconds=60, now=start + timedelta(hours=1))
             is None
         )
+
+
+def test_dead_lettering_is_logged_and_idle_polls_do_not_write(
+    client: TestClient,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An idle claim is a read; a dead-lettered delivery is named in a warning."""
+    _enable_review_email(client)
+    client.app.state.settings.review_email_max_attempts = 1
+    engine = client.app.state.db_engine
+    statements: list[str] = []
+
+    def record(conn, cursor, statement, parameters, context, executemany):  # noqa: ANN001
+        statements.append(statement.lstrip().split(None, 1)[0].upper())
+
+    with client.app.state.db_session_factory() as session:
+        api = LabTrackerAPI(
+            repository=SQLAlchemyLabTrackerRepository(session),
+            settings=client.app.state.settings,
+        )
+        event.listen(engine, "before_cursor_execute", record)
+        try:
+            assert api.review_emails.claim_next(lease_seconds=60, now=utc_now()) is None
+        finally:
+            event.remove(engine, "before_cursor_execute", record)
+        assert "UPDATE" not in statements
+
+        delivery = api.review_emails.enqueue_test("poison@example.org")
+        start = utc_now()
+        assert api.review_emails.claim_next(lease_seconds=60, now=start) is not None
+        with caplog.at_level(logging.WARNING, logger="lab_tracker.services.review_email_service"):
+            assert (
+                api.review_emails.claim_next(lease_seconds=60, now=start + timedelta(seconds=61))
+                is None
+            )
+
+    assert api.review_emails.get(delivery.delivery_id).status == ReviewEmailDeliveryStatus.FAILED
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(str(delivery.delivery_id) in r.getMessage() for r in warnings)

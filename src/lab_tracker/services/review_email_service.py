@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta
 from email.headerregistry import Address
 from uuid import UUID, uuid4
@@ -17,6 +18,8 @@ from lab_tracker.models import (
     utc_now,
 )
 from lab_tracker.services.base import BaseService, ServiceContext
+
+logger = logging.getLogger(__name__)
 
 REVIEW_READY_EVENT = "review_ready"
 TEST_EVENT = "test"
@@ -150,6 +153,18 @@ class ReviewEmailService(BaseService):
         if not self.delivery_enabled:
             return None
         claimed_at = now or utc_now()
+        with self.unit_of_work():
+            dead_lettered = self.repository.review_email_outbox.dead_letter_expired_leases(
+                now=claimed_at,
+                max_attempts=self.max_attempts,
+            )
+        for delivery_id in dead_lettered:
+            logger.warning(
+                "Review email delivery %s failed: its lease expired after %d attempt(s) "
+                "without a reported result.",
+                delivery_id,
+                self.max_attempts,
+            )
         while True:
             claim_token = uuid4()
             with self.unit_of_work():

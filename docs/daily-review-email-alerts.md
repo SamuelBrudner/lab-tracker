@@ -22,7 +22,8 @@ sanitized failure in a new transaction. Expired leases can be reclaimed after
 a worker crash; retryable failures use exponential backoff and a bounded
 attempt count. Every lease counts as an attempt, so a delivery whose worker
 keeps dying before it reports a result is marked `failed` once its lease
-expires with `LAB_TRACKER_REVIEW_EMAIL_MAX_ATTEMPTS` attempts used.
+expires with `LAB_TRACKER_REVIEW_EMAIL_MAX_ATTEMPTS` attempts used. The next
+claim logs a warning naming each delivery it marks failed this way.
 
 `accepted` means the provider accepted the submission. It does not prove inbox
 delivery; that would require provider delivery webhooks.
