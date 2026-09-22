@@ -508,9 +508,12 @@ describe("DailyReviewScheduleForm", () => {
         timezone_name: "UTC",
       })
     );
-    await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(props.setBusy).toHaveBeenLastCalledWith(false));
     await new Promise((resolve) => setTimeout(resolve, 0));
 
+    // The stale save must not report success into project B's context.
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(props.setFlash).not.toHaveBeenCalledWith("Daily review schedule updated.");
     expect(screen.queryByText(/Next run:/)).not.toBeInTheDocument();
     expect(screen.getByText(/Email cues are unavailable/)).toBeInTheDocument();
     expect(screen.getByLabelText("Cadence")).toHaveValue("720");

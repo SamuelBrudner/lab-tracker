@@ -141,9 +141,13 @@ function DailyReviewScheduleForm({
           token,
         }
       );
-      if (currentProjectIdRef.current === savedProjectId) {
-        setSettings(nextSettings);
+      if (currentProjectIdRef.current !== savedProjectId) {
+        // The form moved to another project (or unmounted) while this save
+        // was in flight: its result belongs to the previous project, so it
+        // must neither populate nor report success into the current context.
+        return;
       }
+      setSettings(nextSettings);
       onSaved(nextSettings);
       setFlash("Daily review schedule updated.");
     } catch (err) {
