@@ -709,6 +709,35 @@ def test_ensure_mcp_target_safe_warns_and_boots_on_startup_auth_failure(
     assert "lpat_secret" not in err
 
 
+def test_ensure_mcp_target_safe_reports_startup_403_as_credential_problem(
+    monkeypatch, capsys
+) -> None:
+    # A 403 on the probe is a credential-capability problem, not an unreachable
+    # target, so it gets the credential diagnostic rather than "API unavailable".
+    class ForbiddenClient:
+        def __init__(self, _settings):
+            pass
+
+        def readiness(self):
+            raise mcp_server.LabTrackerAPIPermissionError(
+                "Not permitted for this token.", status_code=403, code="service_forbidden"
+            )
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(mcp_server, "LabTrackerAPIClient", ForbiddenClient)
+
+    mcp_server._ensure_mcp_target_safe(
+        mcp_server.MCPSettings(base_url="http://lab.example.test", api_key="lpat_secret")
+    )
+
+    err = capsys.readouterr().err
+    assert "startup auth probe failed (HTTP 403)" in err
+    assert "unavailable" not in err
+    assert "lpat_secret" not in err
+
+
 def test_mcp_settings_from_env_accepts_api_key_aliases(monkeypatch) -> None:
     monkeypatch.setenv("LAB_TRACKER_MCP_API_KEY", "lpat_primary")
     monkeypatch.setenv("LAB_TRACKER_MCP_TOKEN", "lpat_alias")

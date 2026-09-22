@@ -1572,6 +1572,11 @@ def lab_tracker_unavailable(operation: str, **metadata: object) -> JsonObject:
     }
 
 
+# Middleware 403 codes meaning the credential's kind or scope, not the user's
+# project or role access, blocks the route.
+_CREDENTIAL_CAPABILITY_CODES = frozenset({"service_forbidden", "device_forbidden"})
+
+
 def lab_tracker_api_error(operation: str, exc: LabTrackerAPIError) -> JsonObject:
     error: JsonObject = {
         "code": exc.code or "lab_tracker_api_error",
@@ -1582,8 +1587,21 @@ def lab_tracker_api_error(operation: str, exc: LabTrackerAPIError) -> JsonObject
         error["status_code"] = exc.status_code
     if exc.issues:
         error["issues"] = _redact_error_issues(exc.issues)
-    if isinstance(exc, LabTrackerAPIPermissionError):
+    if isinstance(exc, LabTrackerAPIPermissionError) and exc.code in _CREDENTIAL_CAPABILITY_CODES:
         next_action: JsonObject = {
+            "action": "use_capable_credential",
+            "tool": None,
+            "arguments": {},
+            "reason": (
+                "The credential is valid, but its kind or scope cannot reach this route "
+                "(for example a read-only or narrowly scoped personal access token). "
+                "Mint a personal access token with the needed scope, and read_only=false "
+                "for writes, and set it as LAB_TRACKER_MCP_API_KEY; requesting project "
+                "access will not help."
+            ),
+        }
+    elif isinstance(exc, LabTrackerAPIPermissionError):
+        next_action = {
             "action": "request_access",
             "tool": None,
             "arguments": {},

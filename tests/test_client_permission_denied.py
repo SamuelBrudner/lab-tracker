@@ -137,3 +137,33 @@ def test_mcp_401_remains_auth_error() -> None:
     assert excinfo.value.status_code == 401
     envelope = mcp_api_client.lab_tracker_api_error("lab_tracker_list_projects", excinfo.value)
     assert envelope["next_action"]["action"] == "revise_request_or_credentials"
+
+
+@pytest.mark.parametrize(
+    ("code", "message"),
+    [
+        ("service_forbidden", "Not permitted for this token."),
+        ("device_forbidden", "This action is not permitted for paired devices."),
+    ],
+)
+def test_mcp_credential_capability_403_advises_a_capable_credential(
+    code: str, message: str
+) -> None:
+    # The credential is valid but its kind or scope (a read-only or narrowly
+    # scoped lpat_ token, a paired device) cannot reach the route: asking for
+    # project access will not help, a more capable credential will.
+    error = mcp_api_client.LabTrackerAPIPermissionError(message, status_code=403, code=code)
+
+    envelope = mcp_api_client.lab_tracker_api_error("lab_tracker_create_note", error)
+
+    next_action = envelope["next_action"]
+    assert next_action["action"] == "use_capable_credential"
+    assert "LAB_TRACKER_MCP_API_KEY" in next_action["reason"]
+    assert "do not replace" not in next_action["reason"]
+
+
+def test_mcp_server_exports_permission_error() -> None:
+    from lab_tracker import mcp_server
+
+    assert "LabTrackerAPIPermissionError" in mcp_server.__all__
+    assert mcp_server.LabTrackerAPIPermissionError is mcp_api_client.LabTrackerAPIPermissionError

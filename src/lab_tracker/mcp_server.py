@@ -30,6 +30,7 @@ from lab_tracker.mcp_api_client import (
     LabTrackerAPIAuthError,
     LabTrackerAPIClient,
     LabTrackerAPIError,
+    LabTrackerAPIPermissionError,
     LabTrackerAPIUnavailableError,
     LabTrackerAPIValidationError,
     MCPSettings,
@@ -356,8 +357,8 @@ def _ensure_mcp_target_safe(
                 f"authentication (GET /readiness failed: {exc}). Fix the API target "
                 "or credentials; the server will start once the probe succeeds."
             ) from exc
-        if isinstance(exc, LabTrackerAPIAuthError):
-            # A swallowed auth failure makes the resulting 401 undiagnosable:
+        if isinstance(exc, (LabTrackerAPIAuthError, LabTrackerAPIPermissionError)):
+            # A swallowed auth failure makes the resulting 401/403 undiagnosable:
             # health stays green while every authenticated tool fails (GH #79).
             _warn_startup_auth_probe_failed(settings, exc)
         else:
@@ -436,7 +437,7 @@ def _warn_startup_target_probe_failed(
 
 
 def _warn_startup_auth_probe_failed(
-    settings: MCPSettings, exc: LabTrackerAPIAuthError
+    settings: MCPSettings, exc: LabTrackerAPIAuthError | LabTrackerAPIPermissionError
 ) -> None:
     status = exc.status_code or 401
     auth_mode = (
@@ -538,6 +539,7 @@ __all__ = [
     "LabTrackerAPIAuthError",
     "LabTrackerAPIClient",
     "LabTrackerAPIError",
+    "LabTrackerAPIPermissionError",
     "LabTrackerAPIUnavailableError",
     "LabTrackerAPIValidationError",
     "MCPSettings",

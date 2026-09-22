@@ -188,7 +188,8 @@ the canonical `404`. The middleware's `403 device_forbidden` and
 `403 service_forbidden` are the same class of denial for paired devices and
 personal access tokens. The browser app, the `lt` SDK (`LTPermissionDeniedError`),
 and the MCP client (`LabTrackerAPIPermissionError`, next action
-`request_access`) only treat `401` as credential rejection. The executable
+`request_access`, or `use_capable_credential` for the two middleware codes)
+only treat `401` as credential rejection. The executable
 contract is `tests/test_authorization_status_codes.py`.
 
 Known scope-adjacent exceptions:
