@@ -291,9 +291,9 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 #### Projects: `ProjectCreate`
 - Required: `name`
 - `client_capture_id` (optional): string | null
-- `description` (optional): string | null
+- `description` (optional): string; max length 1000 | null
 - `group_id` (optional): string(uuid) | null
-- `name` (required): string; min length 1
+- `name` (required): string; min length 1, max length 255
 - `status` (optional): ProjectStatus enum: active, archived | null
 
 #### Questions: `QuestionCreate`
@@ -351,11 +351,11 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 
 #### Analyses: `AnalysisCreate`
 - Required: `project_id`, `dataset_ids`, `method_hash`, `code_version`
-- `code_version` (required): string; min length 1
+- `code_version` (required): string; min length 1, max length 255
 - `dataset_ids` (required): list[string(uuid)]
-- `environment_hash` (optional): string | null
+- `environment_hash` (optional): string; max length 255 | null
 - `external_artifacts` (optional): list[object] | null
-- `method_hash` (required): string; min length 1
+- `method_hash` (required): string; min length 1, max length 255
 - `project_id` (required): string(uuid)
 - `status` (optional): AnalysisStatus enum: staged, committed, archived | null
 - `terminal_reason` (optional): string; min length 1 | null
@@ -378,20 +378,20 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 #### Goals: `GoalCreateFields`
 - Required: `goal_type`, `title`
 - `attributes` (optional): object | null
-- `external_ref` (optional): string | null
+- `external_ref` (optional): string; max length 1000 | null
 - `goal_type` (required): GoalType enum: paper, grant, talk, other
 - `status` (optional): GoalStatus enum: planned, in_progress, submitted, accepted, abandoned | null
 - `summary` (optional): string | null
 - `target_date` (optional): string(date) | null
-- `title` (required): string; min length 1
+- `title` (required): string; min length 1, max length 255
 
 #### Visualizations: `VisualizationCreate`
 - Required: `analysis_id`, `viz_type`, `file_path`
 - `analysis_id` (required): string(uuid)
 - `caption` (optional): string | null
-- `file_path` (required): string; min length 1
+- `file_path` (required): string; min length 1, max length 1000
 - `related_claim_ids` (optional): list[string(uuid)] | null
-- `viz_type` (required): string; min length 1
+- `viz_type` (required): string; min length 1, max length 40
 
 #### Graph Drafts: `GraphDraftCreateRequest`
 - Required: none

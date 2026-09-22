@@ -29,6 +29,18 @@ from lab_tracker.data_store_definition import (
     DATA_STORE_NAME_MAX_LENGTH,
     DATA_STORE_ROOT_MAX_LENGTH,
 )
+from lab_tracker.db import Base
+from lab_tracker.db_models import (
+    AcquisitionOutputModel,
+    AnalysisModel,
+    ExperimentModel,
+    GoalModel,
+    InvitationModel,
+    ProjectGroupModel,
+    ProjectModel,
+    UserModel,
+    VisualizationModel,
+)
 from lab_tracker.goals_attributes import validate_goal_attributes
 from lab_tracker.models import (
     Analysis,
@@ -99,6 +111,100 @@ def _non_blank_string(value: str) -> str:
 
 
 NonBlankStr = Annotated[str, Field(min_length=1), AfterValidator(_non_blank_string)]
+
+
+def _orm_string_length(model: type[Base], column: str) -> int:
+    """Return the VARCHAR length of an ORM column so request limits cannot drift.
+
+    SQLite ignores declared lengths while Postgres rejects over-long values with
+    a DataError (HTTP 500), so request schemas bound every string they store in a
+    ``String(n)`` column by the same ``n`` and fail with a 422 on every backend.
+    """
+
+    length = getattr(model.__table__.columns[column].type, "length", None)
+    if not isinstance(length, int):
+        raise RuntimeError(f"{model.__name__}.{column} is not a bounded string column.")
+    return length
+
+
+# Bounded request strings: the constraint sits on the plain ``str`` so pydantic
+# reports ``string_too_long`` before the non-blank check runs.
+ProjectNameStr = Annotated[
+    str,
+    Field(min_length=1, max_length=_orm_string_length(ProjectModel, "name")),
+    AfterValidator(_non_blank_string),
+]
+ProjectDescriptionStr = Annotated[
+    str,
+    Field(max_length=_orm_string_length(ProjectModel, "description")),
+]
+ProjectGroupNameStr = Annotated[
+    str,
+    Field(min_length=1, max_length=_orm_string_length(ProjectGroupModel, "name")),
+    AfterValidator(_non_blank_string),
+]
+ProjectGroupDescriptionStr = Annotated[
+    str,
+    Field(max_length=_orm_string_length(ProjectGroupModel, "description")),
+]
+ExperimentNameStr = Annotated[
+    str,
+    Field(min_length=1, max_length=_orm_string_length(ExperimentModel, "name")),
+    AfterValidator(_non_blank_string),
+]
+AnalysisMethodHashStr = Annotated[
+    str,
+    Field(min_length=1, max_length=_orm_string_length(AnalysisModel, "method_hash")),
+    AfterValidator(_non_blank_string),
+]
+AnalysisCodeVersionStr = Annotated[
+    str,
+    Field(min_length=1, max_length=_orm_string_length(AnalysisModel, "code_version")),
+    AfterValidator(_non_blank_string),
+]
+AnalysisEnvironmentHashStr = Annotated[
+    str,
+    Field(max_length=_orm_string_length(AnalysisModel, "environment_hash")),
+]
+VisualizationTypeStr = Annotated[
+    str,
+    Field(min_length=1, max_length=_orm_string_length(VisualizationModel, "viz_type")),
+    AfterValidator(_non_blank_string),
+]
+VisualizationFilePathStr = Annotated[
+    str,
+    Field(min_length=1, max_length=_orm_string_length(VisualizationModel, "file_path")),
+    AfterValidator(_non_blank_string),
+]
+AcquisitionFilePathStr = Annotated[
+    str,
+    Field(min_length=1, max_length=_orm_string_length(AcquisitionOutputModel, "file_path")),
+    AfterValidator(_non_blank_string),
+]
+AcquisitionChecksumStr = Annotated[
+    str,
+    Field(min_length=1, max_length=_orm_string_length(AcquisitionOutputModel, "checksum")),
+    AfterValidator(_non_blank_string),
+]
+GoalTitleStr = Annotated[
+    str,
+    Field(min_length=1, max_length=_orm_string_length(GoalModel, "title")),
+    AfterValidator(_non_blank_string),
+]
+GoalExternalRefStr = Annotated[
+    str,
+    Field(max_length=_orm_string_length(GoalModel, "external_ref")),
+]
+UsernameStr = Annotated[
+    str,
+    Field(min_length=1, max_length=_orm_string_length(UserModel, "username")),
+    AfterValidator(_non_blank_string),
+]
+InvitationEmailStr = Annotated[
+    str,
+    Field(min_length=1, max_length=_orm_string_length(InvitationModel, "email")),
+    AfterValidator(_non_blank_string),
+]
 
 
 def _unique_uuid_list(value: list[UUID] | None) -> list[UUID] | None:
@@ -210,6 +316,9 @@ class ClaimInputRequest(ClaimInput):
 
 class VisualizationInputRequest(VisualizationInput):
     model_config = ConfigDict(from_attributes=True, frozen=True, extra="forbid")
+
+    viz_type: VisualizationTypeStr
+    file_path: VisualizationFilePathStr
 
 
 EntityRefIn = Annotated[EntityRef, _ValidatedAsRequest(EntityRefRequest)]
@@ -331,7 +440,7 @@ class PersonalAccessTokenIssuedRead(PersonalAccessTokenRead):
 
 
 class AuthRegisterRequest(RequestModel):
-    username: NonBlankStr
+    username: UsernameStr
     password: NonBlankStr
     password_confirmation: NonBlankStr | None = None
     role: Role = Role.VIEWER
@@ -367,7 +476,7 @@ class AuthUserUpdate(PatchRequestModel):
 
 
 class AuthInvitationCreate(RequestModel):
-    email: NonBlankStr
+    email: InvitationEmailStr
     role: Role = Role.EDITOR
 
 
@@ -430,8 +539,8 @@ class NoteRawTextRead(BaseModel):
 
 
 class ProjectCreate(RequestModel):
-    name: NonBlankStr
-    description: str | None = None
+    name: ProjectNameStr
+    description: ProjectDescriptionStr | None = None
     status: ProjectStatus | None = None
     group_id: UUID | None = None
     client_capture_id: str | None = None
@@ -440,15 +549,15 @@ class ProjectCreate(RequestModel):
 class ProjectUpdate(PatchRequestModel):
     non_nullable_fields = frozenset({"name", "description", "status"})
 
-    name: NonBlankStr | SkipJsonSchema[None] = None
-    description: str | SkipJsonSchema[None] = None
+    name: ProjectNameStr | SkipJsonSchema[None] = None
+    description: ProjectDescriptionStr | SkipJsonSchema[None] = None
     status: ProjectStatus | SkipJsonSchema[None] = None
     group_id: UUID | None = None
 
 
 class ProjectGroupCreate(RequestModel):
-    name: NonBlankStr
-    description: str | None = None
+    name: ProjectGroupNameStr
+    description: ProjectGroupDescriptionStr | None = None
     kind: ProjectGroupKind | None = None
     group_read_all: bool | None = None
 
@@ -456,8 +565,8 @@ class ProjectGroupCreate(RequestModel):
 class ProjectGroupUpdate(PatchRequestModel):
     non_nullable_fields = frozenset({"name", "description", "kind", "group_read_all"})
 
-    name: NonBlankStr | SkipJsonSchema[None] = None
-    description: str | SkipJsonSchema[None] = None
+    name: ProjectGroupNameStr | SkipJsonSchema[None] = None
+    description: ProjectGroupDescriptionStr | SkipJsonSchema[None] = None
     kind: ProjectGroupKind | SkipJsonSchema[None] = None
     group_read_all: bool | SkipJsonSchema[None] = None
 
@@ -597,7 +706,7 @@ class QuestionRefactorResult(BaseModel):
 
 class ExperimentCreate(RequestModel):
     project_id: UUID
-    name: NonBlankStr
+    name: ExperimentNameStr
     primary_question_id: UUID
     description: str | None = None
 
@@ -605,7 +714,7 @@ class ExperimentCreate(RequestModel):
 class ExperimentUpdate(PatchRequestModel):
     non_nullable_fields = frozenset({"name", "status"})
 
-    name: NonBlankStr | SkipJsonSchema[None] = None
+    name: ExperimentNameStr | SkipJsonSchema[None] = None
     description: str | None = None
     status: ExperimentStatus | SkipJsonSchema[None] = None
 
@@ -975,17 +1084,17 @@ class SessionDatasetPromotionRequest(RequestModel):
 
 
 class AcquisitionOutputCreate(RequestModel):
-    file_path: NonBlankStr
-    checksum: NonBlankStr
+    file_path: AcquisitionFilePathStr
+    checksum: AcquisitionChecksumStr
     size_bytes: int | None = Field(default=None, ge=0)
 
 
 class AnalysisCreate(RequestModel):
     project_id: UUID
     dataset_ids: list[UUID] = Field(..., min_length=1)
-    method_hash: NonBlankStr
-    code_version: NonBlankStr
-    environment_hash: str | None = None
+    method_hash: AnalysisMethodHashStr
+    code_version: AnalysisCodeVersionStr
+    environment_hash: AnalysisEnvironmentHashStr | None = None
     external_artifacts: list[ExternalArtifactReferenceIn] | None = None
     status: AnalysisStatus | None = None
     terminal_reason: NonBlankStr | None = None
@@ -1000,7 +1109,7 @@ class AnalysisUpdate(PatchRequestModel):
     non_nullable_fields = frozenset({"status", "external_artifacts"})
 
     status: AnalysisStatus | SkipJsonSchema[None] = None
-    environment_hash: str | None = None
+    environment_hash: AnalysisEnvironmentHashStr | None = None
     external_artifacts: list[ExternalArtifactReferenceIn] | SkipJsonSchema[None] = None
     terminal_reason: NonBlankStr | None = None
 
@@ -1144,11 +1253,11 @@ ProvenanceLinkRead = ProvenanceLink
 
 class GoalCreateFields(RequestModel):
     goal_type: GoalType
-    title: NonBlankStr
+    title: GoalTitleStr
     summary: str | None = None
     status: GoalStatus | None = None
     target_date: date | None = None
-    external_ref: str | None = None
+    external_ref: GoalExternalRefStr | None = None
     attributes: dict[str, Any] | None = None
 
     @model_validator(mode="after")
@@ -1176,11 +1285,11 @@ class GoalUpdate(PatchRequestModel):
     )
 
     goal_type: GoalType | SkipJsonSchema[None] = None
-    title: NonBlankStr | SkipJsonSchema[None] = None
+    title: GoalTitleStr | SkipJsonSchema[None] = None
     summary: str | SkipJsonSchema[None] = None
     status: GoalStatus | SkipJsonSchema[None] = None
     target_date: date | None = None
-    external_ref: str | None = None
+    external_ref: GoalExternalRefStr | None = None
     attributes: dict[str, Any] | SkipJsonSchema[None] = None
     links: list[GoalLinkCreate] | SkipJsonSchema[None] = None
 
@@ -1240,8 +1349,8 @@ DataStoreRead = DataStore
 
 class VisualizationCreate(RequestModel):
     analysis_id: UUID
-    viz_type: NonBlankStr
-    file_path: NonBlankStr
+    viz_type: VisualizationTypeStr
+    file_path: VisualizationFilePathStr
     caption: str | None = None
     related_claim_ids: list[UUID] | None = None
 
@@ -1254,8 +1363,8 @@ class VisualizationCreate(RequestModel):
 class VisualizationUpdate(PatchRequestModel):
     non_nullable_fields = frozenset({"viz_type", "file_path", "related_claim_ids"})
 
-    viz_type: NonBlankStr | SkipJsonSchema[None] = None
-    file_path: NonBlankStr | SkipJsonSchema[None] = None
+    viz_type: VisualizationTypeStr | SkipJsonSchema[None] = None
+    file_path: VisualizationFilePathStr | SkipJsonSchema[None] = None
     caption: str | None = None
     related_claim_ids: list[UUID] | SkipJsonSchema[None] = None
 
@@ -1311,9 +1420,9 @@ class EvidenceBundleExistingAnalysis(RequestModel):
 class EvidenceBundleCreateAnalysis(RequestModel):
     kind: Literal["create"]
     dataset_ids: list[UUID] | None = None
-    method_hash: NonBlankStr
-    code_version: NonBlankStr
-    environment_hash: str | None = None
+    method_hash: AnalysisMethodHashStr
+    code_version: AnalysisCodeVersionStr
+    environment_hash: AnalysisEnvironmentHashStr | None = None
     external_artifacts: list[ExternalArtifactReferenceIn] | None = None
     status: AnalysisStatus = AnalysisStatus.STAGED
     terminal_reason: NonBlankStr | None = None
@@ -1378,8 +1487,8 @@ class EvidenceBundleExistingVisualization(RequestModel):
 class EvidenceBundleCreateVisualization(RequestModel):
     kind: Literal["create"]
     analysis_id: UUID | None = None
-    viz_type: NonBlankStr
-    file_path: NonBlankStr
+    viz_type: VisualizationTypeStr
+    file_path: VisualizationFilePathStr
     caption: str | None = None
     related_claim_ids: list[UUID] | None = None
     upload_intent: EvidenceBundleUploadIntent | None = None
@@ -1680,7 +1789,7 @@ class PortfolioProjectGroupSummary(BaseModel):
 
 
 class AnalysisCommitRequest(RequestModel):
-    environment_hash: str | None = None
+    environment_hash: AnalysisEnvironmentHashStr | None = None
     external_artifacts: list[ExternalArtifactReferenceIn] | None = None
     claims: list[ClaimInputIn] | None = None
     visualizations: list[VisualizationInputIn] | None = None
