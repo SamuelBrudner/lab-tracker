@@ -1130,6 +1130,44 @@ def test_login_block_survives_a_flood_of_unknown_usernames(monkeypatch, tmp_path
     assert limited.json()["error"]["code"] == "rate_limited"
 
 
+def test_one_host_login_flood_does_not_rate_limit_other_hosts(monkeypatch, tmp_path):
+    """A host that fills its share of blocked login buckets is limited itself.
+
+    Registration uses its own limiter and other hosts keep their share of the
+    login table, so signup and ordinary failed logins elsewhere are unaffected.
+    """
+    _bootstrap_database(monkeypatch, tmp_path)
+    app = create_app()
+    with TestClient(app, client=("203.0.113.9", 40000)) as attacker:
+        app.state.auth_rate_limiter = InMemoryRateLimiter(
+            max_attempts=1,
+            window_seconds=60,
+            max_buckets=6,
+            max_buckets_per_client=3,
+        )
+        flood = [
+            attacker.post("/auth/login", json={"username": f"nobody-{index}", "password": "x"})
+            for index in range(20)
+        ]
+        other = TestClient(app, client=("198.51.100.7", 40000))
+        registered = other.post(
+            "/auth/register",
+            json={"username": "newcomer", "password": "secret-pass-1"},
+        )
+        failed_login = other.post("/auth/login", json={"username": "ghost", "password": "x"})
+        attacker_register = attacker.post(
+            "/auth/register",
+            json={"username": "attacker-signup", "password": "secret-pass-1"},
+        )
+
+    assert [response.status_code for response in flood[:3]] == [401, 401, 401]
+    assert {response.status_code for response in flood[3:]} == {429}
+    assert registered.status_code == 201
+    assert failed_login.status_code == 401
+    assert attacker_register.status_code == 201
+    assert app.state.register_rate_limiter is not app.state.auth_rate_limiter
+
+
 def test_public_viewer_registration_can_be_disabled(monkeypatch, tmp_path):
     _bootstrap_database(monkeypatch, tmp_path)
     monkeypatch.setenv("LAB_TRACKER_AUTH_PUBLIC_VIEWER_REGISTRATION_ENABLED", "false")

@@ -14,6 +14,8 @@ from lab_tracker.errors import RateLimitError
 # Keys embed attacker-chosen input (usernames, token digests), so both the
 # number of buckets and the size of each key are bounded.
 DEFAULT_RATE_LIMIT_MAX_BUCKETS = 10_000
+# Unless configured, one client may hold at most this fraction of the table.
+DEFAULT_RATE_LIMIT_CLIENT_SHARE_DIVISOR = 10
 MAX_RATE_LIMIT_KEY_LENGTH = 256
 _HASHED_KEY_PREFIX = "sha256:"
 _LIMITED_MESSAGE = "Too many authentication attempts. Try again later."
@@ -23,6 +25,7 @@ _LIMITED_MESSAGE = "Too many authentication attempts. Try again later."
 class _Bucket:
     attempts: int
     reset_at: float
+    client: str | None
 
 
 class InMemoryRateLimiter:
@@ -43,6 +46,13 @@ class InMemoryRateLimiter:
     * If every live bucket is blocking, a failure for a new key fails closed
       with ``RateLimitError`` until the oldest window expires. Keys without a
       bucket still pass ``check``, so correct credentials keep working.
+    * Updates may name the ``client`` (the connection peer) that owns the key.
+      One client holds at most ``max_buckets_per_client`` live buckets: past
+      that it evicts its own oldest unblocked bucket, and once all of its
+      buckets are blocking its new failures fail closed. A single host can
+      therefore only limit itself; it cannot fill the table with blocked
+      buckets and push every other host into the fail-closed state. Keys
+      recorded without a client count only against ``max_buckets``.
 
     Keys longer than ``MAX_RATE_LIMIT_KEY_LENGTH`` are stored as their SHA-256
     digest.
@@ -54,13 +64,21 @@ class InMemoryRateLimiter:
         max_attempts: int,
         window_seconds: int,
         max_buckets: int = DEFAULT_RATE_LIMIT_MAX_BUCKETS,
+        max_buckets_per_client: int | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if max_buckets < 1:
             raise ValueError("Rate limiter max_buckets must be at least 1.")
+        if max_buckets_per_client is None:
+            max_buckets_per_client = max(1, max_buckets // DEFAULT_RATE_LIMIT_CLIENT_SHARE_DIVISOR)
+        if not 1 <= max_buckets_per_client <= max_buckets:
+            raise ValueError(
+                "Rate limiter max_buckets_per_client must be between 1 and max_buckets."
+            )
         self.max_attempts = max(1, int(max_attempts))
         self.window_seconds = max(1, int(window_seconds))
         self.max_buckets = int(max_buckets)
+        self.max_buckets_per_client = int(max_buckets_per_client)
         self._clock = clock
         # Ordered oldest window first. Every (re)created bucket is appended with
         # reset_at = now + window, and the monotonic clock never decreases, so the
@@ -70,6 +88,10 @@ class InMemoryRateLimiter:
         # Attempts only grow within a window, so a key leaves this set once and
         # never returns until its bucket is recreated.
         self._evictable: OrderedDict[str, None] = OrderedDict()
+        # Per-client live bucket counts and evictable keys (same order). Entries
+        # are removed when a client has no live bucket, so both stay bounded.
+        self._client_bucket_counts: dict[str, int] = {}
+        self._client_evictable: dict[str, OrderedDict[str, None]] = {}
         self._lock = Lock()
 
     @property
@@ -87,15 +109,15 @@ class InMemoryRateLimiter:
             if bucket is not None and self._is_blocked(bucket):
                 raise RateLimitError(_LIMITED_MESSAGE)
 
-    def record_failure(self, key: str) -> None:
+    def record_failure(self, key: str, *, client: str | None = None) -> None:
         with self._lock:
             stored_key = _storage_key(key)
-            self._increment(stored_key, self._bucket_for_update(stored_key))
+            self._increment(stored_key, self._bucket_for_update(stored_key, client))
 
-    def record_attempt(self, key: str) -> None:
+    def record_attempt(self, key: str, *, client: str | None = None) -> None:
         with self._lock:
             stored_key = _storage_key(key)
-            bucket = self._bucket_for_update(stored_key)
+            bucket = self._bucket_for_update(stored_key, client)
             if self._is_blocked(bucket):
                 raise RateLimitError(_LIMITED_MESSAGE)
             self._increment(stored_key, bucket)
@@ -111,6 +133,8 @@ class InMemoryRateLimiter:
         bucket.attempts += 1
         if self._is_blocked(bucket):
             self._evictable.pop(stored_key, None)
+            if bucket.client is not None:
+                self._drop_client_evictable(bucket.client, stored_key)
 
     def _live_bucket(self, stored_key: str) -> _Bucket | None:
         bucket = self._buckets.get(stored_key)
@@ -121,26 +145,54 @@ class InMemoryRateLimiter:
             return None
         return bucket
 
-    def _bucket_for_update(self, stored_key: str) -> _Bucket:
+    def _bucket_for_update(self, stored_key: str, client: str | None) -> _Bucket:
         bucket = self._live_bucket(stored_key)
         if bucket is not None:
             return bucket
         now = self._clock()
         self._prune_expired(now)
+        if (
+            client is not None
+            and self._client_bucket_counts.get(client, 0) >= self.max_buckets_per_client
+        ):
+            client_evictable = self._client_evictable.get(client)
+            if not client_evictable:
+                # Every live bucket of this client is blocking; the client is
+                # limited itself and cannot take another host's share.
+                raise RateLimitError(_LIMITED_MESSAGE)
+            self._discard(next(iter(client_evictable)))
         if len(self._buckets) >= self.max_buckets:
             if not self._evictable:
                 # Every live bucket is blocking; evicting one would lift a block.
                 raise RateLimitError(_LIMITED_MESSAGE)
-            evicted_key, _ = self._evictable.popitem(last=False)
-            del self._buckets[evicted_key]
-        bucket = _Bucket(attempts=0, reset_at=now + self.window_seconds)
+            self._discard(next(iter(self._evictable)))
+        bucket = _Bucket(attempts=0, reset_at=now + self.window_seconds, client=client)
         self._buckets[stored_key] = bucket
         self._evictable[stored_key] = None
+        if client is not None:
+            self._client_bucket_counts[client] = self._client_bucket_counts.get(client, 0) + 1
+            self._client_evictable.setdefault(client, OrderedDict())[stored_key] = None
         return bucket
 
     def _discard(self, stored_key: str) -> None:
-        self._buckets.pop(stored_key, None)
+        bucket = self._buckets.pop(stored_key, None)
         self._evictable.pop(stored_key, None)
+        if bucket is None or bucket.client is None:
+            return
+        self._drop_client_evictable(bucket.client, stored_key)
+        remaining = self._client_bucket_counts[bucket.client] - 1
+        if remaining:
+            self._client_bucket_counts[bucket.client] = remaining
+        else:
+            del self._client_bucket_counts[bucket.client]
+
+    def _drop_client_evictable(self, client: str, stored_key: str) -> None:
+        client_evictable = self._client_evictable.get(client)
+        if client_evictable is None:
+            return
+        client_evictable.pop(stored_key, None)
+        if not client_evictable:
+            del self._client_evictable[client]
 
     def _prune_expired(self, now: float) -> None:
         while self._buckets:

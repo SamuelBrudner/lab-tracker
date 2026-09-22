@@ -72,11 +72,14 @@ that destination through your normal off-machine backup process.
 - `LAB_TRACKER_AUTH_RATE_LIMIT_ATTEMPTS`: failed login attempts, or register
   attempts from one caller, allowed per window (default: `10`)
 - `LAB_TRACKER_AUTH_RATE_LIMIT_WINDOW_SECONDS`: rate-limit window in seconds
-  (default: `60`). The limiter is in-process and tracks at most 10,000 callers
-  at once. When it is full it forgets the oldest caller that is not yet
-  blocked; it never forgets a blocked caller. If every tracked caller is
-  blocked, further failed attempts from new callers get `429` until the oldest
-  window ends, while correct credentials still sign in.
+  (default: `60`). Login and registration are limited separately. Each limiter
+  is in-process and tracks at most 10,000 callers at once, and one client
+  address at most 1,000 of them. When a client or the whole table is full it
+  forgets the oldest caller that is not yet blocked; it never forgets a blocked
+  caller. If every caller tracked for a client address is blocked, that
+  address's further failed attempts get `429` until its oldest window ends; if
+  every tracked caller is blocked, the same applies to new addresses. Correct
+  credentials still sign in either way.
 - `LAB_TRACKER_AUTH_PUBLIC_VIEWER_REGISTRATION_ENABLED`: allow public
   self-registration for viewer accounts (default: `true`). Set to `false` to
   require invites or an admin bearer token for new users.

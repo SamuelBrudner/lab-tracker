@@ -171,6 +171,7 @@ class AppRuntime:
     graph_draft_client_factory: GraphDraftClientFactory
     review_email_provider: ReviewEmailProvider | None
     auth_rate_limiter: InMemoryRateLimiter
+    register_rate_limiter: InMemoryRateLimiter
     pat_rate_limiter: InMemoryRateLimiter
     local_filesystem_operations: BoundedLocalFilesystemOperations
     outbound_http_policy: OutboundHttpPolicy
@@ -408,6 +409,13 @@ def _build_app_runtime(
         max_attempts=settings.auth_rate_limit_attempts,
         window_seconds=settings.auth_rate_limit_window_seconds,
     )
+    # Registration is limited separately from login: login buckets are keyed by
+    # attacker-chosen usernames, and sharing one table would let a login flood
+    # lock every host out of signup, invitation acceptance and first-admin setup.
+    register_rate_limiter = InMemoryRateLimiter(
+        max_attempts=settings.auth_rate_limit_attempts,
+        window_seconds=settings.auth_rate_limit_window_seconds,
+    )
     pat_rate_limiter = InMemoryRateLimiter(
         max_attempts=settings.auth_rate_limit_attempts,
         window_seconds=settings.auth_rate_limit_window_seconds,
@@ -462,6 +470,7 @@ def _build_app_runtime(
         graph_draft_client_factory=make_graph_draft_client,
         review_email_provider=review_email_provider,
         auth_rate_limiter=auth_rate_limiter,
+        register_rate_limiter=register_rate_limiter,
         pat_rate_limiter=pat_rate_limiter,
         local_filesystem_operations=local_filesystem_operations,
         outbound_http_policy=outbound_http_policy,
@@ -761,6 +770,7 @@ def configure_app_state(app: FastAPI, runtime: AppRuntime) -> None:
     app.state.graph_draft_client_factory = runtime.graph_draft_client_factory
     app.state.review_email_provider = runtime.review_email_provider
     app.state.auth_rate_limiter = runtime.auth_rate_limiter
+    app.state.register_rate_limiter = runtime.register_rate_limiter
     app.state.pat_rate_limiter = runtime.pat_rate_limiter
     app.state.outbound_http_policy = runtime.outbound_http_policy
     app.state.rclone_remote_policy = runtime.rclone_remote_policy

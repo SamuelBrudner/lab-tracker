@@ -164,3 +164,115 @@ def test_long_keys_are_stored_as_bounded_digests(clock: _Clock) -> None:
 def test_limiter_rejects_a_non_positive_bucket_cap() -> None:
     with pytest.raises(ValueError, match="max_buckets"):
         InMemoryRateLimiter(max_attempts=1, window_seconds=60, max_buckets=0)
+
+
+def test_limiter_rejects_an_invalid_per_client_bucket_cap() -> None:
+    with pytest.raises(ValueError, match="max_buckets_per_client"):
+        InMemoryRateLimiter(
+            max_attempts=1, window_seconds=60, max_buckets=4, max_buckets_per_client=0
+        )
+    with pytest.raises(ValueError, match="max_buckets_per_client"):
+        InMemoryRateLimiter(
+            max_attempts=1, window_seconds=60, max_buckets=4, max_buckets_per_client=5
+        )
+
+
+def test_one_client_filling_its_quota_is_limited_without_saturating_others(
+    clock: _Clock,
+) -> None:
+    """A single host that blocks its whole quota is limited itself, not the table."""
+    limiter = InMemoryRateLimiter(
+        max_attempts=1,
+        window_seconds=60,
+        max_buckets=4,
+        max_buckets_per_client=2,
+        clock=clock,
+    )
+    limiter.record_failure("login:attacker:a1", client="attacker")
+    limiter.record_failure("login:attacker:a2", client="attacker")
+
+    for index in range(50):
+        with pytest.raises(RateLimitError):
+            limiter.record_failure(f"login:attacker:junk-{index}", client="attacker")
+    with pytest.raises(RateLimitError):
+        limiter.record_attempt("register:attacker", client="attacker")
+
+    # Other hosts still get their own buckets, and the attacker's blocks hold.
+    limiter.record_failure("login:other:alice", client="other")
+    limiter.record_attempt("register:other", client="other")
+    assert limiter.bucket_count == 4
+    with pytest.raises(RateLimitError):
+        limiter.check("login:attacker:a1")
+    with pytest.raises(RateLimitError):
+        limiter.check("login:other:alice")
+
+    clock.now += 60
+    limiter.record_failure("login:attacker:a3", client="attacker")
+    assert list(limiter.stored_keys()) == ["login:attacker:a3"]
+
+
+def test_client_over_quota_evicts_its_own_oldest_unblocked_bucket(clock: _Clock) -> None:
+    limiter = InMemoryRateLimiter(
+        max_attempts=2,
+        window_seconds=60,
+        max_buckets=10,
+        max_buckets_per_client=2,
+        clock=clock,
+    )
+    limiter.record_failure("other-1", client="other")
+    clock.now += 1
+    limiter.record_failure("mine-1", client="mine")
+    clock.now += 1
+    limiter.record_failure("mine-2", client="mine")
+    limiter.record_failure("mine-2", client="mine")  # blocked, never evicted
+    clock.now += 1
+
+    limiter.record_failure("mine-3", client="mine")
+
+    assert list(limiter.stored_keys()) == ["other-1", "mine-2", "mine-3"]
+    with pytest.raises(RateLimitError):
+        limiter.check("mine-2")
+
+
+def test_per_client_quota_is_released_when_buckets_expire_or_reset(clock: _Clock) -> None:
+    limiter = InMemoryRateLimiter(
+        max_attempts=1,
+        window_seconds=60,
+        max_buckets=10,
+        max_buckets_per_client=2,
+        clock=clock,
+    )
+    limiter.record_failure("a", client="host")
+    limiter.record_failure("b", client="host")
+    with pytest.raises(RateLimitError):
+        limiter.record_failure("c", client="host")
+
+    limiter.reset("a")
+    limiter.record_failure("c", client="host")
+    with pytest.raises(RateLimitError):
+        limiter.record_failure("d", client="host")
+
+    clock.now += 60
+    limiter.check("b")  # touching an expired bucket discards it
+    limiter.record_failure("d", client="host")
+    limiter.record_failure("e", client="host")
+    assert sorted(limiter.stored_keys()) == ["d", "e"]
+
+
+def test_global_cap_still_fails_closed_when_many_clients_block_their_quota(
+    clock: _Clock,
+) -> None:
+    limiter = InMemoryRateLimiter(
+        max_attempts=1,
+        window_seconds=60,
+        max_buckets=4,
+        max_buckets_per_client=2,
+        clock=clock,
+    )
+    for host in ("h1", "h2"):
+        limiter.record_failure(f"{host}-a", client=host)
+        limiter.record_failure(f"{host}-b", client=host)
+
+    with pytest.raises(RateLimitError):
+        limiter.record_failure("h3-a", client="h3")
+    assert limiter.bucket_count == 4

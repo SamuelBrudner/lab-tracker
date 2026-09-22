@@ -27,6 +27,7 @@ from lab_tracker.db_types import ensure_uuid
 from lab_tracker.errors import AuthError, PermissionDeniedError
 from lab_tracker.instance_url import build_instance_url
 from lab_tracker.patching import provided_fields
+from lab_tracker.rate_limit import InMemoryRateLimiter
 from lab_tracker.schemas import (
     AuthBootstrapStatus,
     AuthInvitationCreate,
@@ -86,7 +87,12 @@ def build_auth_router(
         status_code=http_status.HTTP_201_CREATED,
     )
     def register_auth(payload: AuthRegisterRequest, request: Request):
-        _record_auth_attempt(request, _auth_rate_key(request, "register"))
+        # Registration has its own limiter so a flood of blocked login buckets
+        # can never lock signup, invitation acceptance or the first admin out.
+        _register_rate_limiter(request).record_attempt(
+            _auth_rate_key(request, "register"),
+            client=_rate_limit_client(request),
+        )
         registration_role = payload.role
         username = payload.username
         if payload.invite_token:
@@ -318,28 +324,35 @@ def _ensure_admin(request: Request) -> None:
         raise PermissionDeniedError("Admin privileges required.")
 
 
+def _rate_limit_client(request: Request) -> str:
+    return request.client.host if request.client is not None else "unknown"
+
+
 def _auth_rate_key(request: Request, purpose: str, username: str | None = None) -> str:
-    client_host = request.client.host if request.client is not None else "unknown"
-    parts = [purpose, client_host]
+    parts = [purpose, _rate_limit_client(request)]
     if username is not None:
         parts.append(username.strip().lower())
     return ":".join(parts)
 
 
-def _auth_rate_limiter(request: Request):
-    return request.app.state.auth_rate_limiter
+def _auth_rate_limiter(request: Request) -> InMemoryRateLimiter:
+    limiter: InMemoryRateLimiter = request.app.state.auth_rate_limiter
+    return limiter
+
+
+def _register_rate_limiter(request: Request) -> InMemoryRateLimiter:
+    limiter: InMemoryRateLimiter = request.app.state.register_rate_limiter
+    return limiter
 
 
 def _check_auth_rate_limit(request: Request, key: str) -> None:
     _auth_rate_limiter(request).check(key)
 
 
-def _record_auth_attempt(request: Request, key: str) -> None:
-    _auth_rate_limiter(request).record_attempt(key)
-
-
 def _record_auth_failure(request: Request, key: str) -> None:
-    _auth_rate_limiter(request).record_failure(key)
+    # Login buckets are keyed by attacker-chosen usernames, so each one is
+    # charged to the peer's per-client share of the table.
+    _auth_rate_limiter(request).record_failure(key, client=_rate_limit_client(request))
 
 
 def _reset_auth_rate_limit(request: Request, key: str) -> None:
