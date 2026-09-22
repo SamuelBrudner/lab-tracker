@@ -142,9 +142,12 @@ def test_mcp_health_keeps_fail_soft_and_exposes_diagnostic(monkeypatch):
         MCPSettings(base_url="https://origin.ts.net"),
         transport=httpx.MockTransport(handler),
     )
-    monkeypatch.setattr(read, "_read_client", lambda: client)
-    monkeypatch.setattr(read, "close_cached_read_client", client.close)
-    result = read._read_tool("lab_tracker_health", lambda c: c.health(), hint={})
+    read.close_cached_read_client()
+    monkeypatch.setattr(read, "client_from_env", lambda: client)
+    try:
+        result = read._read_tool("lab_tracker_health", lambda c: c.health(), hint={})
+    finally:
+        read.close_cached_read_client()
     assert result["error"]["code"] == "lab_tracker_unavailable"
     assert result["error"]["diagnosis"] == "tls_handshake_stalled"
     assert "tailscale funnel status" in result["error"]["next_step"]

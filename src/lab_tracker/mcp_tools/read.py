@@ -30,9 +30,13 @@ from lab_tracker_client.connection_diagnostics import connection_error_metadata
 
 _cached_read_client: Any | None = None
 _cached_read_client_factory: Any | None = None
-# Tools run in worker threads (see mcp_server.LabTrackerFastMCP), so the shared
-# read client is created, replaced and discarded under a lock.
+# Tools run concurrently in worker threads (see mcp_server.LabTrackerFastMCP)
+# and share the cached read client. Every call leases it; a client dropped from
+# the cache while leased is only closed once its last in-flight call releases
+# it, so one call's transport failure never closes the client under another.
 _read_client_lock = threading.Lock()
+_read_client_leases: dict[int, int] = {}
+_retired_read_clients: dict[int, Any] = {}
 
 PersistedGraphEntityTypeInput = Literal[
     "question",
@@ -61,42 +65,71 @@ GraphDirectionInput = Literal["incoming", "outgoing", "both"]
 
 
 def _read_client() -> Any:
+    """Lease the shared read client; pair every call with ``_release_read_client``."""
+
     global _cached_read_client, _cached_read_client_factory
     with _read_client_lock:
+        to_close: list[Any] = []
         if _cached_read_client is None or _cached_read_client_factory is not client_from_env:
-            _close_cached_read_client_locked()
+            to_close = _retire_cached_read_client_locked()
             _cached_read_client = client_from_env()
             _cached_read_client_factory = client_from_env
-        return _cached_read_client
+        client = _cached_read_client
+        _read_client_leases[id(client)] = _read_client_leases.get(id(client), 0) + 1
+    _close_read_clients(to_close)
+    return client
+
+
+def _release_read_client(client: Any, *, discard: bool) -> None:
+    """End one call's lease on ``client``.
+
+    ``discard`` drops ``client`` from the cache (after a transport failure) if it
+    is still the cached one; a newer cached client is never touched. A dropped
+    client is closed once no call holds it any more.
+    """
+
+    with _read_client_lock:
+        key = id(client)
+        leases = _read_client_leases.get(key)
+        if leases is None:
+            raise RuntimeError("Lab Tracker read client released but not leased.")
+        if leases > 1:
+            _read_client_leases[key] = leases - 1
+        else:
+            del _read_client_leases[key]
+        to_close: list[Any] = []
+        if discard and _cached_read_client is client:
+            to_close = _retire_cached_read_client_locked()
+        if leases == 1 and key in _retired_read_clients:
+            to_close.append(_retired_read_clients.pop(key))
+    _close_read_clients(to_close)
 
 
 def close_cached_read_client() -> None:
+    """Drop the cached read client, closing it now or when its last call ends."""
+
     with _read_client_lock:
-        _close_cached_read_client_locked()
+        to_close = _retire_cached_read_client_locked()
+    _close_read_clients(to_close)
 
 
-def _close_cached_read_client_locked() -> None:
+def _retire_cached_read_client_locked() -> list[Any]:
+    """Drop the cached client; return it for closing only if no call holds it."""
+
     global _cached_read_client, _cached_read_client_factory
-    if _cached_read_client is not None:
-        _cached_read_client.close()
+    client = _cached_read_client
     _cached_read_client = None
     _cached_read_client_factory = None
+    if client is None:
+        return []
+    if id(client) in _read_client_leases:
+        _retired_read_clients[id(client)] = client
+        return []
+    return [client]
 
 
-def _discard_read_client(client: Any) -> None:
-    """Drop ``client`` from the cache if it is still the cached one, then close it.
-
-    A concurrent call may already have replaced the cached client; never close
-    that newer client because this call's (older) one failed.
-    """
-
-    global _cached_read_client, _cached_read_client_factory
-    with _read_client_lock:
-        is_cached = _cached_read_client is client
-        if is_cached:
-            _cached_read_client = None
-            _cached_read_client_factory = None
-    if is_cached:
+def _close_read_clients(clients: list[Any]) -> None:
+    for client in clients:
         client.close()
 
 
@@ -107,15 +140,18 @@ def _read_tool(
     hint: JsonObject,
 ) -> JsonObject:
     client = _read_client()
+    transport_failed = False
     try:
         return with_next_action(call(client), hint)
     except (LabTrackerAPIUnavailableError, httpx.HTTPError) as exc:
-        _discard_read_client(client)
+        transport_failed = True
         return lab_tracker_unavailable(
             tool_name, detail=str(exc), **connection_error_metadata(exc)
         )
     except LabTrackerAPIError as exc:
         return lab_tracker_api_error(tool_name, exc)
+    finally:
+        _release_read_client(client, discard=transport_failed)
 
 
 def _tool_title(tool: Any) -> str:
