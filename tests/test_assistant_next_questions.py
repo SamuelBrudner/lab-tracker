@@ -56,3 +56,16 @@ def test_supported_claim_answers_a_question() -> None:
 
     assert payload["data"] == []
     assert "unanswered" in payload["meta"]["empty_reason"]
+
+
+def test_truncation_is_reported_only_when_the_caller_tracks_it() -> None:
+    untracked = build_next_questions_payload([_goal()], [_question()], [])
+    assert "inputs_truncated" not in untracked["meta"]
+
+    entry = {"list": "claims", "project_id": "p", "status": "supported", "fetched": 1, "total": 2}
+    tracked = build_next_questions_payload([_goal()], [_question()], [], truncated_inputs=[entry])
+    assert tracked["meta"]["inputs_truncated"] is True
+    assert tracked["meta"]["truncated_inputs"] == [entry]
+
+    empty = build_next_questions_payload([], [], [], truncated_inputs=[entry])
+    assert empty["meta"]["inputs_truncated"] is True

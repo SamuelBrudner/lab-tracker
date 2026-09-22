@@ -51,7 +51,8 @@ def build_next_questions_payload(
 
     ``truncated_inputs`` lists every input list the caller could not load in
     full; it is reported in ``meta`` so a partial ranking is never presented as
-    complete.
+    complete. Callers that do not track truncation pass ``None`` and ``meta``
+    then makes no completeness claim.
     """
 
     resolved_limit = min(max(int(limit or 5), 1), 20)
@@ -186,7 +187,10 @@ def _ranked_item(
 
 
 def _truncation_meta(truncated_inputs: list[JsonObject] | None) -> JsonObject:
-    entries = list(truncated_inputs or [])
+    # ``None`` means the caller did not track truncation; never claim completeness.
+    if truncated_inputs is None:
+        return {}
+    entries = list(truncated_inputs)
     return {"inputs_truncated": bool(entries), "truncated_inputs": entries}
 
 
