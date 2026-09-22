@@ -40,7 +40,11 @@ function useProjectWorkspaceData({
 }) {
   const [projects, setProjects] = useState([]);
   const [projectsLoaded, setProjectsLoaded] = useState(false);
-  const [selectedProjectId, setSelectedProjectId] = useState(() => readStoredProjectId());
+  // Starts empty: the stored last-used project is only a candidate until
+  // refreshProjects validates it against the (authenticated) project list.
+  // Seeding state from storage here would be wiped by the not-yet-enabled
+  // reset below before auth resolves, so the candidate is read at validation.
+  const [selectedProjectId, setSelectedProjectId] = useState("");
 
   useEffect(() => {
     // Only persist real selections; an empty value means "no projects loaded
@@ -149,9 +153,11 @@ function useProjectWorkspaceData({
       clearProjectState();
       return nextProjects;
     }
+    const storedProjectId = readStoredProjectId();
     setSelectedProjectId((current) => {
-      if (current && nextProjects.some((item) => item.project_id === current)) {
-        return current;
+      const candidate = current || storedProjectId;
+      if (candidate && nextProjects.some((item) => item.project_id === candidate)) {
+        return candidate;
       }
       return nextProjects[0].project_id;
     });

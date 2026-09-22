@@ -493,6 +493,39 @@ describe("App", () => {
     expect(document.querySelector('[name="new-project-name"]')).toBeDisabled();
   });
 
+  it("restores the last-used project once auth resolves instead of the first project", async () => {
+    // The workspace hook is mounted before /auth/me resolves; the stored
+    // selection must survive that window and be validated against the loaded
+    // project list, not wiped and replaced by the first project.
+    localStorage.setItem(TOKEN_STORAGE_KEY, "token-last-used-project");
+    localStorage.setItem("lab-tracker:last-used-project-id", "project-2");
+    window.history.replaceState({}, "", "/app/capture");
+    const requested = [];
+    installFetchMock([
+      { match: "/auth/me", response: apiResponse({ role: "admin", username: "sam" }) },
+      {
+        match: projectsPath,
+        response: apiResponse([
+          project("project-1", "Project One"),
+          project("project-2", "Project Two"),
+        ]),
+      },
+      {
+        match: /[?&]project_id=project-[12](&|$)/,
+        response: (request) => {
+          requested.push(request.url);
+          return paged([], { limit: 1, offset: 0, total: 0 });
+        },
+      },
+    ]);
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByLabelText("Project")).toHaveValue("project-2"));
+    expect(localStorage.getItem("lab-tracker:last-used-project-id")).toBe("project-2");
+    expect(requested.some((url) => url.includes("project_id=project-1"))).toBe(false);
+  });
+
   it("restores a stored session and signs out", async () => {
     localStorage.setItem(TOKEN_STORAGE_KEY, "token-1");
     installFetchMock([

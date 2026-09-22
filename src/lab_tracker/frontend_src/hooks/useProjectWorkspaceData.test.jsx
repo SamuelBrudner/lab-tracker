@@ -78,6 +78,53 @@ describe("useProjectWorkspaceData last-used project persistence", () => {
     expect(result.current.selectedProjectId).toBe(PROJECT_B.project_id);
   });
 
+  it("keeps the stored project through the not-yet-enabled window before auth resolves", async () => {
+    localStorage.setItem(STORAGE_KEY, PROJECT_B.project_id);
+
+    installFetchMock([
+      {
+        method: "GET",
+        match: /\/projects\?/,
+        response: projectsListResponse([PROJECT_A, PROJECT_B]),
+      },
+      {
+        method: "GET",
+        match: new RegExp(`/(questions|datasets|notes)\\?project_id=${PROJECT_B.project_id}`),
+        response: emptyCountResponse(),
+      },
+    ]);
+
+    const setBusy = vi.fn();
+    const setFlash = vi.fn();
+    const { result, rerender } = renderHook(
+      ({ enabled }) =>
+        useProjectWorkspaceData({ enabled, token: "test-token", setBusy, setFlash }),
+      { initialProps: { enabled: false } }
+    );
+
+    // Unvalidated storage is never exposed as the selection while disabled.
+    expect(result.current.selectedProjectId).toBe("");
+
+    rerender({ enabled: true });
+
+    await waitFor(() => {
+      expect(result.current.projects).toHaveLength(2);
+    });
+    expect(result.current.selectedProjectId).toBe(PROJECT_B.project_id);
+    expect(localStorage.getItem(STORAGE_KEY)).toBe(PROJECT_B.project_id);
+
+    // Signing out clears the in-memory selection but keeps the stored
+    // last-used project, so the next sign-in restores it.
+    rerender({ enabled: false });
+    expect(result.current.selectedProjectId).toBe("");
+    expect(localStorage.getItem(STORAGE_KEY)).toBe(PROJECT_B.project_id);
+
+    rerender({ enabled: true });
+    await waitFor(() => {
+      expect(result.current.selectedProjectId).toBe(PROJECT_B.project_id);
+    });
+  });
+
   it("falls back to the first project and overwrites a stale stored id", async () => {
     localStorage.setItem(STORAGE_KEY, "missing-project");
 
