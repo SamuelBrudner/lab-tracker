@@ -38,6 +38,10 @@ docker network inspect lab-tracker_default \
   --format '{{(index .IPAM.Config 0).Gateway}}'
 ```
 
+The network name is `<project>_default`, where the Compose project name is the
+checkout directory name unless `COMPOSE_PROJECT_NAME` (or `docker compose -p`)
+sets it; `docker network ls` shows the actual name.
+
 ```dotenv
 FORWARDED_ALLOW_IPS=172.18.0.1
 ```
@@ -48,14 +52,34 @@ change. Never set `FORWARDED_ALLOW_IPS=*` while the app port is reachable
 without going through the proxy: any client could then choose the address the
 app sees.
 
+Trusting the gateway is only safe when the proxy is the sole path to the app.
+The root compose file publishes the app on every host interface
+(`8000:8000`), so clients could still reach it directly, and Docker's userland
+proxy relays some of those connections (IPv6 clients, Docker Desktop) from the
+same gateway address, letting them forge `X-Forwarded-For`. When a proxy fronts
+the app, publish the app port on loopback only with a local
+`docker-compose.override.yml` next to `docker-compose.yml` (Compose loads it
+automatically; keep it out of commits). `!override` replaces the published
+ports instead of appending to them:
+
+```yaml
+services:
+  app:
+    ports: !override
+      - "127.0.0.1:8000:8000"
+```
+
+A proxy container on the Compose network reaches `app:8000` directly and needs
+no published port at all.
+
 ## Process Reaping
 
-The compose `app` and `mcp` services set `init: true`, so Docker runs a minimal
-init as PID 1 that reaps orphaned grandchildren of the bounded subprocesses
-used for registered Git and rclone stores. Keep it (`docker run --init`) in any
-custom compose file or container command. Render's Docker runtime has no
-equivalent `render.yaml` setting, so a Render deployment runs uvicorn as PID 1
-without an init reaper.
+The image entrypoint runs under `tini`, which reaps orphaned grandchildren of
+the bounded subprocesses used for registered Git and rclone stores. That covers
+Render and plain `docker run` as well as Compose. The compose `app` and `mcp`
+services also set `init: true`; `tini -s` then stays a child subreaper under
+Docker's init. A custom `entrypoint:` bypasses `tini`, so keep `init: true` (or
+`docker run --init`) wherever you override it, as the root `mcp` service does.
 
 ## Local Filesystem Stores
 

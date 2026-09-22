@@ -175,6 +175,18 @@ def test_dockerfile_runs_app_as_non_root_user():
     assert "USER labtracker" in dockerfile
 
 
+def test_dockerfile_reaps_orphans_under_every_runtime():
+    """Render and plain ``docker run`` have no ``init: true``; the image must reap."""
+    repo_root = Path(__file__).resolve().parent.parent
+    dockerfile = (repo_root / "Dockerfile").read_text(encoding="utf-8")
+
+    assert "apt-get install --no-install-recommends -y ca-certificates tini" in dockerfile
+    assert (
+        'ENTRYPOINT ["/usr/bin/tini", "-s", "--", "/app/docker-entrypoint.sh"]'
+        in dockerfile
+    )
+
+
 def test_docker_entrypoint_has_short_migration_retry_budget():
     repo_root = Path(__file__).resolve().parent.parent
     entrypoint = (repo_root / "deploy" / "docker-entrypoint.sh").read_text(encoding="utf-8")

@@ -270,7 +270,31 @@ def test_operations_doc_explains_proxy_trust_and_init() -> None:
     assert "FORWARDED_ALLOW_IPS=" in operations
     assert "--profile mcp" in operations
     assert "init: true" in operations
-    assert "Render" in operations
+    assert "tini" in operations
+    assert "Render's Docker runtime has no" not in operations
+    assert "COMPOSE_PROJECT_NAME" in operations
+
+
+def _operations_doc_proxy_override() -> str:
+    operations = (REPO_ROOT / "docs" / "self-hosted-operations.md").read_text(
+        encoding="utf-8"
+    )
+    section = operations.split("## Reverse Proxy and Client Addresses\n", 1)[1]
+    section = section.split("\n## ", 1)[0]
+    return section.split("```yaml\n", 1)[1].split("```", 1)[0]
+
+
+def test_operations_doc_proxy_override_publishes_the_app_on_loopback_only(
+    tmp_path: Path,
+) -> None:
+    override = tmp_path / "docker-compose.override.yml"
+    override.write_text(_operations_doc_proxy_override(), encoding="utf-8")
+
+    services = _resolved_services(tmp_path, "-f", str(override))
+
+    ports = services["app"]["ports"]
+    assert ports, "the app must stay published for the proxy"
+    assert all(port["host_ip"] == "127.0.0.1" for port in ports), ports
 
 
 def test_owned_docs_start_the_mcp_service_through_its_profile() -> None:
