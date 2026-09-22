@@ -44,6 +44,7 @@ from lab_tracker_client.client import (
     build_evidence_metadata,
     capture_host_metadata,
 )
+from lab_tracker_client.evidence_index import outbox_note_index
 
 CONFIG_VERSION = 1
 EVENT_VERSION = 1
@@ -1037,9 +1038,6 @@ def _sync_staged_note(
     note: LTRecord | None = None
     change_set_id = _optional_str(event.get("sync", {}).get("change_set_id"))
     project_id = _non_empty(_optional_str(event["context"].get("project_id")) or "", "project_id")
-    if project_id not in note_indexes:
-        note_indexes[project_id] = client.build_evidence_note_index(project_id=project_id)
-    index = note_indexes[project_id]
     if not note_id and source_path:
         result = client.import_evidence_file(
             project_id=project_id,
@@ -1052,7 +1050,13 @@ def _sync_staged_note(
             metadata=_event_metadata(event),
             status=str(event["payload"].get("status") or "staged"),
             dry_run=dry_run,
-            evidence_note_index=index,
+            evidence_note_index=outbox_note_index(
+                client,
+                note_indexes,
+                project_id=project_id,
+                outbox=path.parent,
+                dry_run=dry_run,
+            ),
         )
         if dry_run:
             return WatchSyncResult(
@@ -1089,6 +1093,13 @@ def _sync_staged_note(
             str(metadata["evidence_source_provider"]),
             str(metadata["evidence_source_external_id"]),
             str(metadata["evidence_content_hash"]),
+        )
+        index = outbox_note_index(
+            client,
+            note_indexes,
+            project_id=project_id,
+            outbox=path.parent,
+            dry_run=dry_run,
         )
         note = index.get(evidence_key)
         if dry_run:

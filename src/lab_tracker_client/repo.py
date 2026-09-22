@@ -42,6 +42,7 @@ from lab_tracker_client.client import (
     build_evidence_metadata,
     capture_host_metadata,
 )
+from lab_tracker_client.evidence_index import outbox_note_index
 from lab_tracker_client.gitinfo import (
     dirty_label,
     dirty_metadata,
@@ -915,9 +916,13 @@ def _sync_event(
     action = "synced"
     reason = ""
     if not note_id:
-        if project_id not in note_indexes:
-            note_indexes[project_id] = client.build_evidence_note_index(project_id=project_id)
-        index = note_indexes[project_id]
+        index = outbox_note_index(
+            client,
+            note_indexes,
+            project_id=project_id,
+            outbox=path.parent,
+            dry_run=dry_run,
+        )
         evidence_key = (
             str(metadata["evidence_source_provider"]),
             str(metadata["evidence_source_external_id"]),

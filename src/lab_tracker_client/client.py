@@ -13,7 +13,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 import httpx
 
@@ -221,7 +221,16 @@ class LTRecord(dict[str, Any]):
         return dict(self)
 
 
-EvidenceNoteIndex = dict[EvidenceNoteKey, LTRecord]
+class EvidenceNoteIndex(Protocol):
+    """Evidence-key -> existing note lookup used to dedupe evidence uploads.
+
+    A plain ``dict[EvidenceNoteKey, LTRecord]`` satisfies it, as does the
+    persistent :class:`~lab_tracker_client.evidence_index.CachedEvidenceNoteIndex`.
+    """
+
+    def get(self, key: EvidenceNoteKey, /) -> LTRecord | None: ...
+
+    def __setitem__(self, key: EvidenceNoteKey, note: LTRecord, /) -> None: ...
 
 # Sentinel distinguishing "caller did not supply this field" from an explicit
 # empty/None value, so get_or_create only compares fields the caller actually
@@ -1135,8 +1144,26 @@ class LabTracker:
                 return note
         return None
 
-    def build_evidence_note_index(self, *, project_id: str) -> EvidenceNoteIndex:
-        index: EvidenceNoteIndex = {}
+    def build_evidence_note_index(
+        self,
+        *,
+        project_id: str,
+        cache_dir: str | Path | None = None,
+    ) -> EvidenceNoteIndex:
+        """Index the project's evidence notes by evidence key.
+
+        Without ``cache_dir`` this lists every note in the project. Outbox
+        syncs pass their cache directory instead, so repeated syncs refresh a
+        persistent index incrementally (see
+        :mod:`lab_tracker_client.evidence_index`) rather than re-listing every
+        note on each run.
+        """
+
+        if cache_dir is not None:
+            from lab_tracker_client.evidence_index import CachedEvidenceNoteIndex
+
+            return CachedEvidenceNoteIndex.load(self, project_id=project_id, cache_dir=cache_dir)
+        index: dict[EvidenceNoteKey, LTRecord] = {}
         for note in self._iter_all("/notes", params={"project_id": str(project_id)}):
             key = _evidence_note_key(note)
             if key is not None:

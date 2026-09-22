@@ -66,7 +66,7 @@ class _FakeSyncClient:
         self.uploads: list[dict[str, object]] = []
         self.draft_requests: list[str] = []
 
-    def build_evidence_note_index(self, *, project_id: str) -> dict:
+    def build_evidence_note_index(self, *, project_id: str, cache_dir: object = None) -> dict:
         return {}
 
     def _upload_note_file_payload(self, **kwargs: object) -> LTRecord:
