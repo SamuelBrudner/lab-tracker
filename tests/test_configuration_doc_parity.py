@@ -17,7 +17,10 @@ Client-only variables are documented alongside the MCP service-client section.
 
 from __future__ import annotations
 
+import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 from lab_tracker.config import Settings
@@ -85,3 +88,53 @@ def test_every_documented_variable_is_consumed_by_the_code() -> None:
         "docs/configuration.md documents variables nothing consumes "
         f"(stale after a rename/removal?): {sorted(stale)}"
     )
+
+
+_SETUP_DOC_PATH = _REPO_ROOT / "docs" / "setup.md"
+
+
+def _non_docker_first_admin_exports() -> list[str]:
+    text = _SETUP_DOC_PATH.read_text(encoding="utf-8")
+    section = text.split("### Non-Docker\n", 1)[1].split("\n### ", 1)[0]
+    block = section.split("```bash\n", 1)[1].split("```", 1)[0]
+    exports = [line for line in block.splitlines() if line.startswith("export ")]
+    assert "lab-tracker serve" in block
+    return exports
+
+
+def test_setup_non_docker_first_admin_environment_is_accepted() -> None:
+    """The documented first-admin exports must build valid auth-enabled settings."""
+    exports = _non_docker_first_admin_exports()
+    script = "\n".join(
+        [
+            "set -eu",
+            *exports,
+            'exec "$PYTHON" -c "from lab_tracker.config import Settings; '
+            "settings = Settings(_env_file=None); "
+            "assert settings.is_auth_enabled(); "
+            "assert settings.bootstrap_admin_token; "
+            'print(len(settings.auth_secret_key))"',
+        ]
+    )
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("LAB_TRACKER_")
+    }
+    environment["PATH"] = os.pathsep.join(
+        [str(Path(sys.executable).parent), environment.get("PATH", "")]
+    )
+    environment["PYTHON"] = sys.executable
+
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env=environment,
+        cwd=_REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert int(result.stdout.strip()) >= 32
