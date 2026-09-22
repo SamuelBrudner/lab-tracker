@@ -61,7 +61,8 @@ def build_decision_context(
     # Projects are always resolved by id: a list_projects window (oldest first)
     # would hide newer projects and produce false anchor_not_found errors.
     resolved_project_id = str(project_id) if project_id else None
-    if resolved_project_id and reader.get_project(resolved_project_id) is None:
+    explicit_project = reader.get_project(resolved_project_id) if resolved_project_id else None
+    if resolved_project_id and explicit_project is None:
         return decision_error(
             "anchor_not_found",
             f"Project {resolved_project_id!r} was not found.",
@@ -181,7 +182,13 @@ def build_decision_context(
                 limit=resolved_limit,
             )
 
-    project = reader.get_project(resolved_project_id)
+    # Every anchor was checked against an explicit project id, so it still
+    # names the resolved project; reuse that read instead of repeating it.
+    project = (
+        explicit_project
+        if explicit_project is not None
+        else reader.get_project(resolved_project_id)
+    )
     if project is None:
         return decision_error(
             "anchor_not_found",

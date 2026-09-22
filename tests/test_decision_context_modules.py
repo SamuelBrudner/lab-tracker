@@ -344,6 +344,29 @@ def test_build_decision_context_orchestrates_reader_selection_and_builders() -> 
     assert data["truncation"] == {"was_truncated": False, "sections": []}
 
 
+def test_build_decision_context_reads_an_explicit_project_once() -> None:
+    class CountingReader(FakeDecisionContextReader):
+        def __init__(self) -> None:
+            self.project_reads: list[str] = []
+
+        def get_project(self, project_id: str) -> JsonObject | None:
+            self.project_reads.append(project_id)
+            return super().get_project(project_id)
+
+    reader = CountingReader()
+    payload = build_decision_context(
+        reader,
+        task_kind="summary",
+        query="baseline controls",
+        project_id="project-1",
+        question_id="question-1",
+        limit=5,
+    )
+
+    assert payload["data"]["scope"]["project"]["project_id"] == "project-1"
+    assert reader.project_reads == ["project-1"]
+
+
 def test_build_decision_context_uses_one_scoped_lookup_for_auto_resolution() -> None:
     class AmbiguousSearchReader(FakeDecisionContextReader):
         second_project = {
