@@ -21,6 +21,7 @@ from lab_tracker.graph_drafting import (
     PROVIDER,
     GraphDraftClient,
     GraphDraftingError,
+    GraphDraftOutputTruncatedError,
 )
 from lab_tracker.member_onboarding import is_member_checkpoint
 from lab_tracker.models import (
@@ -452,14 +453,21 @@ class GraphDraftGenerationCoordinator(BaseService):
         """Generate a valid patch with bounded, trusted schema feedback."""
 
         attempts = max(1, max_attempts)
+        attempts_made = 0
         attempt_context = context_packet
         last_error: GraphDraftingError | None = None
         last_error_category = "model_error"
         for attempt in range(1, attempts + 1):
             if before_attempt is not None and not before_attempt(attempt):
                 raise _GenerationOwnershipLost
+            attempts_made = attempt
             try:
                 graph_patch = draft(attempt_context)
+            except GraphDraftOutputTruncatedError as exc:
+                # The same output budget would truncate again; fail now.
+                last_error = exc
+                last_error_category = "output_truncated"
+                break
             except GraphDraftingError as exc:
                 last_error = exc
                 last_error_category = "model_error"
@@ -497,7 +505,7 @@ class GraphDraftGenerationCoordinator(BaseService):
                 if last_error is not None
                 else "Model did not return a patch."
             ),
-            "attempts": attempts,
+            "attempts": attempts_made,
         }
         return None
 

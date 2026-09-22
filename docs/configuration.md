@@ -809,12 +809,14 @@ otherwise bounded and provider-side spending limits are acceptable. Exact
 - `LAB_TRACKER_ANTHROPIC_BASE_URL`: Anthropic API base URL (default:
   `https://api.anthropic.com/v1`)
 - `LAB_TRACKER_ANTHROPIC_TIMEOUT_SECONDS`: Anthropic graph draft API timeout in
-  seconds (default: `60`)
+  seconds (default: `300`, sized with the default output budget because the
+  request is not streamed and returns nothing until the model finishes)
 - `LAB_TRACKER_ANTHROPIC_MAX_OUTPUT_TOKENS`: `max_tokens` output budget for
   each Anthropic graph-draft request (default: `16000`; must be positive and
   within the configured model's output limit). A response that stops at this
   limit fails with an explicit truncation error instead of a malformed-JSON
-  error; raise it for large daily batches, together with
+  error, and is not retried because the same budget would truncate again;
+  raise it for large daily batches, together with
   `LAB_TRACKER_ANTHROPIC_TIMEOUT_SECONDS`, since longer outputs take longer.
 - `LAB_TRACKER_GOOGLE_API_KEY`: required when the provider is `google` or
   `gemini`; also required for Google voice-note transcription

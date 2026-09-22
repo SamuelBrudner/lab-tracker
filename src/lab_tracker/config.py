@@ -187,7 +187,9 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-3-5-sonnet-latest"
     anthropic_base_url: str = "https://api.anthropic.com/v1"
-    anthropic_timeout_seconds: float = 60.0
+    # Sized with the output budget below: a non-streaming call returns nothing
+    # until the model finishes, and 16000 output tokens can take minutes.
+    anthropic_timeout_seconds: float = 300.0
     # Output budget per Messages call. Batch drafts carry a multi-paragraph
     # narrative plus one operation per finding, so 4096 truncated real days.
     anthropic_max_output_tokens: int = Field(default=16000, ge=1)

@@ -27,6 +27,7 @@ from lab_tracker.graph_drafting import (
     READ_ONLY_AGENT_TOOLS,
     AgenticGraphDraftClient,
     GraphDraftingError,
+    GraphDraftOutputTruncatedError,
 )
 from lab_tracker.models import GraphChangeSetStatus
 from lab_tracker.services import graph_draft_batch_policy as batch_policy
@@ -1433,6 +1434,42 @@ def test_batch_retry_and_dead_letter_paths_are_persisted(
     draft = client.get(f"/batches/{failed_run['change_set_id']}", headers=admin_auth_headers)
     assert draft.json()["data"]["status"] == "failed"
     assert draft.json()["data"]["error_metadata"]["input_snapshot"]["source_note_ids"]
+
+
+def test_batch_output_truncation_fails_without_retrying(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    """An output-limit stop is deterministic: retrying the same budget only pays again."""
+    project_id = _project(client, admin_auth_headers)
+    _note(client, admin_auth_headers, project_id, "A long day of notes.")
+
+    class TruncatingBatchDraftClient(FakeBatchDraftClient):
+        def draft_from_batch(
+            self,
+            *,
+            batch_context: dict[str, Any],
+            user_hint: str | None = None,
+        ) -> dict[str, Any]:
+            self.calls.append({"batch_context": batch_context, "user_hint": user_hint})
+            raise GraphDraftOutputTruncatedError("stopped at the output limit of 16 tokens")
+
+    truncating_client = TruncatingBatchDraftClient()
+    client.app.state.graph_draft_client_factory = lambda settings: truncating_client
+
+    response = client.post(
+        "/batches/run-now",
+        json={"project_id": project_id},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 201
+    run = response.json()["data"]
+    assert run["status"] == "failed"
+    assert len(truncating_client.calls) == 1
+    assert run["error_metadata"]["category"] == "output_truncated"
+    assert run["error_metadata"]["attempts"] == 1
+    assert "output limit" in run["error_metadata"]["message"]
 
 
 def test_batch_retries_schema_invalid_patch_with_trusted_feedback(

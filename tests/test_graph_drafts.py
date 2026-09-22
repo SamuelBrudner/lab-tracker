@@ -25,6 +25,7 @@ from lab_tracker.graph_drafting import (
     AnthropicGraphDraftClient,
     GoogleGraphDraftClient,
     GraphDraftingError,
+    GraphDraftOutputTruncatedError,
     OpenAIGraphDraftClient,
     make_graph_draft_client,
 )
@@ -3634,6 +3635,7 @@ def test_anthropic_client_reports_output_truncation_explicitly() -> None:
     finally:
         client.close()
 
+    assert isinstance(raised.value, GraphDraftOutputTruncatedError)
     message = str(raised.value)
     assert "4096" in message
     assert "LAB_TRACKER_ANTHROPIC_MAX_OUTPUT_TOKENS" in message

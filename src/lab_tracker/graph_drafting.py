@@ -64,6 +64,13 @@ class GraphDraftingError(RuntimeError):
         super().__init__(provider_error_message(message, secrets=secrets))
 
 
+class GraphDraftOutputTruncatedError(GraphDraftingError):
+    """The provider stopped at its output-token budget before finishing.
+
+    Deterministic for a given budget, so generation does not retry it.
+    """
+
+
 @lru_cache(maxsize=1)
 def graph_draft_payload_contract() -> dict[str, Any]:
     """Return a compact provider contract derived from strict API schemas.
@@ -818,7 +825,7 @@ class AnthropicGraphDraftClient:
             )
         payload = _provider_response_json(response, "Anthropic")
         if payload.get("stop_reason") == "max_tokens":
-            raise GraphDraftingError(
+            raise GraphDraftOutputTruncatedError(
                 "Anthropic stopped at the output limit of "
                 f"{self.max_output_tokens} tokens before finishing the graph patch; "
                 "raise LAB_TRACKER_ANTHROPIC_MAX_OUTPUT_TOKENS (within the model's "
