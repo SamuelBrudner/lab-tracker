@@ -471,10 +471,21 @@ class ContextQueries:
         base_url: str,
     ) -> dict[str, object]:
         claim = self.api.get_claim_for_read(claim_id, actor=actor)
-        analyses = [
-            self.api.get_analysis(analysis_id)
-            for analysis_id in claim.supported_by_analysis_ids
-        ]
+        visualizations, _ = self.repository.query_visualizations(
+            claim_id=claim_id,
+            limit=None,
+            offset=0,
+        )
+        # Every related visualization is exported with its generating analysis,
+        # including analyses that do not themselves support the claim.
+        analysis_ids = list(dict.fromkeys(claim.supported_by_analysis_ids))
+        for generating_analysis_id in sorted(
+            {visualization.analysis_id for visualization in visualizations},
+            key=str,
+        ):
+            if generating_analysis_id not in analysis_ids:
+                analysis_ids.append(generating_analysis_id)
+        analyses = [self.api.get_analysis(analysis_id) for analysis_id in analysis_ids]
         dataset_ids = set(claim.supported_by_dataset_ids)
         for analysis in analyses:
             dataset_ids.update(analysis.dataset_ids)
@@ -487,11 +498,6 @@ class ContextQueries:
         questions = [
             self.api.get_question(question_id) for question_id in sorted(question_ids)
         ]
-        visualizations, _ = self.repository.query_visualizations(
-            claim_id=claim_id,
-            limit=None,
-            offset=0,
-        )
         claim_edges, _ = self.repository.query_claim_edges(
             project_id=claim.project_id,
             limit=None,
