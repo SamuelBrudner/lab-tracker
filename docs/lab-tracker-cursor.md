@@ -101,7 +101,7 @@ For a shared lab endpoint, run the optional compose MCP service with a read-only
 ```bash
 export LT_MCP_READONLY_TOKEN=lpat_...
 export LT_MCP_INBOUND_TOKEN="$(openssl rand -hex 32)"
-docker compose up mcp
+docker compose --profile mcp up mcp
 ```
 
 The service starts Lab Tracker MCP with `LAB_TRACKER_MCP_TRANSPORT=streamable-http`

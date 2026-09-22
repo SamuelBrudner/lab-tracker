@@ -21,7 +21,10 @@ commands on this page never need `LT_MCP_INBOUND_TOKEN` or
 ## Reverse Proxy and Client Addresses
 
 Uvicorn in the app container trusts `X-Forwarded-For` and `X-Forwarded-Proto`
-only from peers listed in `FORWARDED_ALLOW_IPS`. The compose default is
+only from peers listed in `FORWARDED_ALLOW_IPS`. The proxy must also send those
+headers: Caddy's `reverse_proxy` does by default, while nginx needs
+`proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;` and
+`proxy_set_header X-Forwarded-Proto $scheme;`. The compose default is
 `127.0.0.1`, which matches no proxy outside the container, so forwarded headers
 are ignored and every proxied request appears to come from the proxy's own
 address. That address is private, so in the `local`

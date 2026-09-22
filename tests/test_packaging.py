@@ -328,7 +328,6 @@ def test_wheel_installed_migrations_can_upgrade_sqlite(tmp_path: Path, built_whe
     db_path = tmp_path / "wheel-install.db"
     smoke_script = f"""
 import os
-import re
 from alembic import command
 from lab_tracker.cli import _alembic_config
 

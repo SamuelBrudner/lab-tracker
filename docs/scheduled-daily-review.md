@@ -80,6 +80,9 @@ updates the existing job. Both \*nix installers take the same optional arguments
 (`~/.config/lab-tracker/daily-review.secrets.json`). The scheduled process reads
 that file structurally at run time; it is never sourced or shell-evaluated, and
 secret values never appear in the crontab or launchd plist.
+Re-running an installer from a shell where none of those credentials is
+exported keeps the existing secrets file (and resets its mode to `0600`);
+export a new credential to replace it, or delete the file to clear it.
 
 ### One thing to turn on first
 

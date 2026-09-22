@@ -237,7 +237,7 @@ def _read_existing_secrets(path: str) -> dict[str, object]:
     with os.fdopen(fd, encoding="utf-8") as handle:
         try:
             data = json.load(handle)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError):
             raise SchedulerConfigError(
                 f"Existing secrets file {path} is not valid JSON; refusing to overwrite "
                 "it. Inspect it, delete it, and re-run the installer."
@@ -248,6 +248,15 @@ def _read_existing_secrets(path: str) -> dict[str, object]:
             "it. Inspect it, delete it, and re-run the installer."
         )
     return data
+
+
+def _restrict_to_owner(path: str) -> None:
+    """Re-tighten a kept secrets file to 0600 without following a symlink."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        os.fchmod(fd, 0o600)
+    finally:
+        os.close(fd)
 
 
 def write_secrets_file(path: str, values: dict[str, str]) -> bool:
@@ -264,6 +273,7 @@ def write_secrets_file(path: str, values: dict[str, str]) -> bool:
     """
     data = {key: value for key, value in values.items() if value}
     if not data and any(_read_existing_secrets(path).values()):
+        _restrict_to_owner(path)
         return False
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:

@@ -298,6 +298,24 @@ class TestSecretsFile:
         assert mod.read_secret(path, "LAB_TRACKER_API_KEY") == "lpat_persisted"
         assert stat.S_IMODE(Path(path).stat().st_mode) == 0o600
 
+    def test_kept_secrets_file_is_retightened_to_private_mode(self, tmp_path):
+        # Keeping the persisted token must not also keep a loosened mode.
+        path = tmp_path / "daily-review.secrets.json"
+        mod.write_secrets_file(str(path), {"LAB_TRACKER_API_KEY": "lpat_persisted"})
+        path.chmod(0o644)
+        assert mod.write_secrets_file(str(path), {"LAB_TRACKER_API_KEY": ""}) is False
+        assert mod.read_secret(str(path), "LAB_TRACKER_API_KEY") == "lpat_persisted"
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+    def test_non_utf8_existing_secrets_file_fails_loudly_instead_of_overwriting(
+        self, tmp_path
+    ):
+        path = tmp_path / "daily-review.secrets.json"
+        path.write_bytes(b"\xff\xfe not utf-8")
+        with pytest.raises(mod.SchedulerConfigError, match="not valid JSON"):
+            mod.write_secrets_file(str(path), {"LAB_TRACKER_API_KEY": ""})
+        assert path.read_bytes() == b"\xff\xfe not utf-8"
+
     def test_new_credentials_replace_an_existing_secrets_file(self, tmp_path):
         path = str(tmp_path / "daily-review.secrets.json")
         mod.write_secrets_file(path, {"LAB_TRACKER_API_KEY": "lpat_old"})

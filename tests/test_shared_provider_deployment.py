@@ -20,7 +20,11 @@ def test_pinned_overlay_removes_builds_and_requires_one_release_image() -> None:
     assert "LAB_TRACKER_PROVIDER_ENV_FILE" in compose
     assert "LAB_TRACKER_RUNTIME_ENV_FILE" in compose
     assert compose.count("required: true") == 2
-    assert 'socket.create_connection(("127.0.0.1", 8000)' in compose
+    # The overlay's MCP probe follows the configured port, like the base file.
+    assert (
+        'socket.create_connection(("127.0.0.1", '
+        'int(os.environ.get("LAB_TRACKER_MCP_PORT", "8000")))'
+    ) in compose
 
 
 def test_pinned_overlay_documentation_has_fail_closed_preflight() -> None:

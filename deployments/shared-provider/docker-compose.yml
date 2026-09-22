@@ -18,7 +18,7 @@ services:
         - CMD
         - python
         - -c
-        - import socket; connection = socket.create_connection(("127.0.0.1", 8000), timeout=3); connection.close()
+        - import os, socket; socket.create_connection(("127.0.0.1", int(os.environ.get("LAB_TRACKER_MCP_PORT", "8000"))), timeout=3).close()
       interval: 10s
       timeout: 5s
       retries: 3
