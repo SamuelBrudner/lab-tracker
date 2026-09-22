@@ -29,26 +29,18 @@ _DIAGNOSTIC_SAMPLE_LIMIT = 5
 
 
 def upgrade() -> None:
-    _set_sqlite_foreign_keys(enabled=False)
-    try:
-        _acquire_sqlite_write_lock()
-        _preflight_existing_confidence_values()
-        with op.batch_alter_table("claims") as batch_op:
-            batch_op.create_check_constraint(
-                _CONSTRAINT_NAME,
-                _CONSTRAINT_SQL,
-            )
-    finally:
-        _set_sqlite_foreign_keys(enabled=True)
+    _acquire_sqlite_write_lock()
+    _preflight_existing_confidence_values()
+    with op.batch_alter_table("claims") as batch_op:
+        batch_op.create_check_constraint(
+            _CONSTRAINT_NAME,
+            _CONSTRAINT_SQL,
+        )
 
 
 def downgrade() -> None:
-    _set_sqlite_foreign_keys(enabled=False)
-    try:
-        with op.batch_alter_table("claims") as batch_op:
-            batch_op.drop_constraint(_CONSTRAINT_NAME, type_="check")
-    finally:
-        _set_sqlite_foreign_keys(enabled=True)
+    with op.batch_alter_table("claims") as batch_op:
+        batch_op.drop_constraint(_CONSTRAINT_NAME, type_="check")
 
 
 def _preflight_existing_confidence_values() -> None:
@@ -96,24 +88,16 @@ def _preflight_existing_confidence_values() -> None:
 def _acquire_sqlite_write_lock() -> None:
     """Serialize SQLite writers from preflight through the table rebuild.
 
-    Alembic deliberately configures SQLite with ``transactional_ddl=False``.
-    With pysqlite's legacy transaction behavior, the read-only preflight would
-    otherwise run before SQLite starts a physical transaction.  A writer could
-    then commit an invalid value between that clean read and the batch copy,
-    causing a raw constraint error and leaving Alembic's temporary table behind.
-
-    ``BEGIN IMMEDIATE`` takes the database's writer reservation up front.  The
-    logical SQLAlchemy/Alembic transaction already exists at this point, but no
-    physical SQLite transaction has begun; Alembic commits or rolls it back
-    together with the revision stamp.
+    A writer that committed an invalid value between the clean preflight read
+    and the batch copy would otherwise cause a raw constraint error.  env.py
+    runs every SQLite migration inside one ``BEGIN IMMEDIATE`` transaction, so
+    the writer reservation is normally already held here; this helper only
+    starts one when the revision runs on a connection without a physical
+    transaction (for example when exercised directly by a test).
     """
 
     connection = op.get_bind()
-    if connection.dialect.name == "sqlite":
+    if connection.dialect.name != "sqlite":
+        return
+    if not connection.connection.driver_connection.in_transaction:
         connection.exec_driver_sql("BEGIN IMMEDIATE")
-
-
-def _set_sqlite_foreign_keys(*, enabled: bool) -> None:
-    if op.get_context().dialect.name == "sqlite":
-        value = "ON" if enabled else "OFF"
-        op.execute(f"PRAGMA foreign_keys={value}")
