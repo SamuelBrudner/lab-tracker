@@ -235,6 +235,27 @@ def test_cache_is_scoped_to_server_and_project(tmp_path: Path) -> None:
     assert len(list(cache_dir.glob("*.json"))) == 2
 
 
+@pytest.mark.parametrize("corrupt", [b"{not json", b"\xff\xfe\x00garbage"])
+def test_unreadable_cache_file_is_rebuilt_from_the_server(
+    tmp_path: Path, corrupt: bytes
+) -> None:
+    server = FakeNotesServer()
+    _seed(server, 3)
+    cache_dir = tmp_path / "cache"
+
+    with _client(server) as lt:
+        lt.build_evidence_note_index(project_id=PROJECT_ID, cache_dir=cache_dir)
+        (cache_file,) = cache_dir.glob("*.json")
+        cache_file.write_bytes(corrupt)
+        server.requests.clear()
+        index = lt.build_evidence_note_index(project_id=PROJECT_ID, cache_dir=cache_dir)
+        hit = index.get(("local-folder", "file-1", "hash-1"))
+
+    assert hit is not None and hit["note_id"] == "note-2"
+    assert "since" not in server.list_requests()[0].url.params
+    assert json.loads(cache_file.read_text(encoding="utf-8"))["project_id"] == PROJECT_ID
+
+
 def test_watch_resync_does_not_relist_every_project_note(tmp_path, monkeypatch) -> None:
     """Two scheduled syncs of one new capture each: the second must not page
     through the whole project note list again."""

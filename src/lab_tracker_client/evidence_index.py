@@ -251,17 +251,17 @@ def _read_cache(
 ) -> tuple[dict[EvidenceNoteKey, _Entry], datetime | None, datetime] | None:
     """Decode a cache file, or ``None`` when it must be rebuilt from the server.
 
-    A missing file, or one that is not a cache for this server and project in
-    the current format, is rebuilt; other read errors propagate.
+    A missing or undecodable file, or one that is not a cache for this server
+    and project in the current format, is rebuilt; other read errors propagate.
     """
 
     try:
-        text = path.read_text(encoding="utf-8")
+        raw = path.read_bytes()
     except FileNotFoundError:
         return None
     try:
-        payload = json.loads(text)
-    except json.JSONDecodeError:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
         return None
     if (
         not isinstance(payload, dict)
