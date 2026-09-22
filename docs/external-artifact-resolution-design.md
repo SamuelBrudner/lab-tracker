@@ -526,6 +526,12 @@ authority boundary.
 
 ### Bounded advisory local-store health
 
+This probe is not composed in this build: `GET /data-stores/{id}/health`
+answers every `local_fs` store with the static `unsupported` detail `Local store
+health is not supported in this build.` until the local-use slice retains each
+store's revalidated grant inside the filesystem helper. This section records
+the deferred design.
+
 Application composition parses `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS` once using
 the host's `os.pathsep` (`:` on POSIX, `;` on Windows). Unset, empty, and
 whitespace-only configuration creates a deny-all runtime authority. The

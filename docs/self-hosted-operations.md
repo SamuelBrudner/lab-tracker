@@ -103,8 +103,7 @@ Keep that namespace under deployment-operator control:
   volume-map, or device-map changes.
 
 If an untrusted principal can mutate that topology, disable local resolution
-and local-store health or isolate the service in a namespace the principal
-cannot change. Directory handles make one operation resistant to pathname
+or isolate the service in a namespace the principal cannot change. Directory handles make one operation resistant to pathname
 replacement; they are not a durable mount-topology lease.
 
 ## Backup

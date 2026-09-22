@@ -208,8 +208,9 @@ metadata.
 
 ### Local filesystem policy
 
-Local artifact resolution and registered `local_fs` store health share one
-operator authority:
+Local artifact resolution uses one operator authority. (Registered `local_fs`
+store health is not supported in this build; see
+[Local-store health](#local-store-health-deferred).)
 
 - `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS`: a list of host-local roots separated by
   `os.pathsep` (`:` on POSIX, `;` on Windows). An unset, empty, or
@@ -265,9 +266,9 @@ inside the selected grant.
 Application composition builds one filesystem-I/O-free
 `LocalFilesystemAuthority` inside one bounded local-filesystem operations
 broker and shares one bounded process executor. The runtime retains the broker,
-not a parallel authority or path policy. Local-store health, registered local
-artifact reads, recovery enumeration, and every recovery candidate read receive
-that exact broker. Candidate authorization, alias traversal, enumeration, open,
+not a parallel authority or path policy. Registered local artifact reads,
+recovery enumeration, and every recovery candidate read receive that exact
+broker. Candidate authorization, alias traversal, enumeration, open,
 regular-file validation, and byte reads therefore occur in the isolated helper,
 not in the application process.
 
@@ -484,6 +485,14 @@ redirects may proceed, and an HTTPS-to-HTTP downgrade is denied. A terminal
 loops or limit exhaustion, transport/deadline failures, and other terminal
 statuses all return the same static redacted health detail.
 
+<a id="local-store-health-deferred"></a>
+Local-store health is not supported in this build: `GET
+/data-stores/{id}/health` answers every `local_fs` store with status
+`unsupported` and the static detail `Local store health is not supported in
+this build.`, and the runtime composes no local probe. It stays deferred until
+the local-use slice retains each store's revalidated grant inside the
+filesystem helper. The rest of this section describes that deferred probe.
+
 Local-store health is a bounded, read-only reachability hint, not registration
 validation or a durable filesystem capability. Registration performs no host
 I/O. For an explicit health request, the probe creates one absolute process
@@ -573,16 +582,16 @@ optional host binaries, through the shared bounded process executor. The
 configured budget is one monotonic deadline for the entire logical operation:
 a local direct read and all of its recovery candidate reads share one deadline;
 rclone metadata lookup, transfer, and verification share one deadline; and Git
-fetch, object inspection, transfer, and verification share one deadline. A
-local, rclone, or Git store-health probe receives a fresh deadline; Git's URL
+fetch, object inspection, transfer, and verification share one deadline. An
+rclone or Git store-health probe receives a fresh deadline; Git's URL
 preflight and HEAD query share it. Progress, recovery, or moving between
-subprocesses does not reset it. Local health creates the deadline before lexical
-admission; local artifact resolution creates it once for the logical read. Both
-pass the exact deadline object through the bounded filesystem broker.
+subprocesses does not reset it. Local artifact resolution creates the deadline
+once for the logical read and passes the exact deadline object through the
+bounded filesystem broker.
 
 - `LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS`: execution and verification
-  budget for one local, rclone, or Git artifact resolution, or one local,
-  rclone, or Git store-health probe (default: `30`). The value must be finite,
+  budget for one local, rclone, or Git artifact resolution, or one rclone or
+  Git store-health probe (default: `30`). The value must be finite,
   greater than zero, and no greater than `86400` seconds (one day); invalid
   values fail application startup. This setting is independent of
   `LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS`.
