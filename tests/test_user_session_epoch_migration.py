@@ -30,7 +30,11 @@ def test_session_epoch_revision_extends_the_single_chain() -> None:
     script = ScriptDirectory.from_config(_alembic_config())
 
     assert script.get_revision(_REVISION).down_revision == _PREVIOUS_REVISION
-    assert script.get_heads() == [_REVISION]
+    heads = script.get_heads()
+    assert len(heads) == 1
+    assert _REVISION in {
+        revision.revision for revision in script.iterate_revisions(heads[0], "base")
+    }
 
 
 def test_session_epoch_migration_round_trips_users_and_dependents(monkeypatch, tmp_path) -> None:
