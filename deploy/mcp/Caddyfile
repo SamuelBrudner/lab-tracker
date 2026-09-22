@@ -26,16 +26,12 @@ mcp.lab.internal {
         }
     }
 
-    # The @badhost/@badorigin checks above are the public Host/Origin policy.
-    # lt-mcp also validates Host/Origin (DNS-rebinding protection) against a
-    # loopback-only allowlist by default, so forward the upstream host and drop
-    # the Origin Caddy already vetted. To have lt-mcp check the public names
-    # instead, delete these two header_up lines and set, on the lt-mcp process,
-    # LAB_TRACKER_MCP_ALLOWED_HOSTS=mcp.lab.internal and
-    # LAB_TRACKER_MCP_ALLOWED_ORIGINS to the same origins allowed above.
+    # The @badhost/@badorigin checks above are the public Host/Origin policy;
+    # Caddy forwards the client's Host and Origin unchanged. lt-mcp checks
+    # Host/Origin itself only when given an allowlist; to add that second
+    # check, set on the lt-mcp process LAB_TRACKER_MCP_ALLOWED_HOSTS=mcp.lab.internal
+    # and LAB_TRACKER_MCP_ALLOWED_ORIGINS to the same origins allowed above.
     reverse_proxy 127.0.0.1:9000 {
-        header_up Host {upstream_hostport}
-        header_up -Origin
         header_up X-Forwarded-Proto {scheme}
     }
 }

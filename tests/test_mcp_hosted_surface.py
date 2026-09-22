@@ -5,8 +5,9 @@
   refuses to start unless the server-held API credential is proven read-only.
 * M36: the hosted startup open-ADMIN guard fails closed when it cannot confirm
   that the API enforces authentication; stdio still boots but warns loudly.
-* M34: DNS-rebinding Host/Origin validation is always on for the hosted
-  transport, with an allowlist configurable through the runtime settings.
+* M34: Host/Origin (DNS-rebinding) validation never rejects requests through a
+  Host-preserving reverse proxy by default, whatever the bind address, and is
+  enabled by an operator-configured allowlist.
 """
 
 from __future__ import annotations
@@ -518,19 +519,25 @@ def test_stdio_target_guard_warns_loudly_when_probe_fails(
 # --- M34: configurable DNS-rebinding Host/Origin allowlist -------------------
 
 
-def test_runtime_settings_default_to_loopback_host_and_origin_allowlists(
+def test_runtime_settings_default_to_no_host_or_origin_allowlist(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _hosted_env(monkeypatch)
 
     settings = mcp_server.MCPServerRuntimeSettings.from_env()
 
-    assert settings.allowed_hosts == ("127.0.0.1:*", "localhost:*", "[::1]:*")
-    assert settings.allowed_origins == (
-        "http://127.0.0.1:*",
-        "http://localhost:*",
-        "http://[::1]:*",
-    )
+    assert settings.allowed_hosts == ()
+    assert settings.allowed_origins == ()
+
+
+def test_runtime_settings_refuse_origin_allowlist_without_host_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _hosted_env(monkeypatch)
+    monkeypatch.setenv("LAB_TRACKER_MCP_ALLOWED_ORIGINS", "https://github.com")
+
+    with pytest.raises(SystemExit, match="LAB_TRACKER_MCP_ALLOWED_HOSTS"):
+        mcp_server.MCPServerRuntimeSettings.from_env()
 
 
 def test_runtime_settings_parse_allowed_hosts_and_origins(
@@ -571,7 +578,7 @@ def test_runtime_settings_reject_malformed_allowlists(
 
 
 @pytest.mark.parametrize("bind_host", ["127.0.0.1", "0.0.0.0"])
-def test_build_server_always_enables_host_validation_with_configured_allowlist(
+def test_build_server_enables_host_validation_with_configured_allowlist(
     bind_host: str,
 ) -> None:
     server = mcp_server.build_server(
@@ -587,6 +594,17 @@ def test_build_server_always_enables_host_validation_with_configured_allowlist(
     assert security.enable_dns_rebinding_protection is True
     assert security.allowed_hosts == ["mcp.lab.internal"]
     assert security.allowed_origins == ["https://github.com"]
+
+
+@pytest.mark.parametrize("bind_host", ["127.0.0.1", "0.0.0.0"])
+def test_build_server_disables_host_validation_without_allowlist(bind_host: str) -> None:
+    # FastMCP would otherwise auto-enable a loopback-only allowlist for a
+    # loopback bind; the inbound bearer already defeats DNS rebinding.
+    server = mcp_server.build_server(_hosted_settings(host=bind_host))
+
+    security = server.settings.transport_security
+    assert security is not None
+    assert security.enable_dns_rebinding_protection is False
 
 
 def _initialize_status(
@@ -662,11 +680,34 @@ def test_unexpected_host_and_origin_are_rejected() -> None:
 
 
 @pytest.mark.parametrize("bind_host", ["127.0.0.1", "0.0.0.0"])
-def test_default_allowlist_accepts_loopback_and_rejects_other_hosts(bind_host: str) -> None:
+@pytest.mark.parametrize(
+    "host_header",
+    # Direct loopback, a Host-preserving `tailscale serve` / nginx / Traefik
+    # front, the checked-in Caddyfile's public name, and a compose service name.
+    ["127.0.0.1:9000", "labhost.tail1234.ts.net", "mcp.lab.internal", "mcp:8000"],
+)
+def test_host_preserving_proxy_is_accepted_without_allowlist(
+    bind_host: str, host_header: str
+) -> None:
     settings = _hosted_settings(host=bind_host)
 
-    assert _initialize_status(settings, host_header="127.0.0.1:9000") == 200
-    assert _initialize_status(settings, host_header="mcp.lab.internal") == 421
+    assert _initialize_status(settings, host_header=host_header) == 200
+    assert (
+        _initialize_status(settings, host_header=host_header, origin="https://github.com")
+        == 200
+    )
+
+
+def test_host_allowlist_without_origins_rejects_every_origin() -> None:
+    settings = _hosted_settings(allowed_hosts=("mcp.lab.internal",))
+
+    assert _initialize_status(settings, host_header="mcp.lab.internal") == 200
+    assert (
+        _initialize_status(
+            settings, host_header="mcp.lab.internal", origin="https://github.com"
+        )
+        == 403
+    )
 
 
 def test_hosted_initialize_through_proxied_host_completes_session() -> None:
@@ -697,11 +738,19 @@ def test_hosted_initialize_through_proxied_host_completes_session() -> None:
     assert set(asyncio.run(exercise())) == READ_TOOL_NAMES
 
 
-def test_caddyfile_forwards_a_host_the_default_allowlist_accepts() -> None:
+def test_caddyfile_preserves_public_host_and_names_the_allowlist() -> None:
     caddy = Path("deploy/mcp/Caddyfile").read_text(encoding="utf-8")
 
-    # Caddy owns the public Host/Origin policy (421/403 above); it forwards the
-    # upstream host so the MCP process's loopback allowlist accepts proxied calls.
-    assert "header_up Host {upstream_hostport}" in caddy
-    assert "header_up -Origin" in caddy
-    assert "LAB_TRACKER_MCP_ALLOWED_HOSTS" in caddy
+    # Caddy owns the public Host/Origin policy (421/403 above) and forwards the
+    # client's Host unchanged; an operator who also wants lt-mcp to check it
+    # lists that same public name.
+    assert "header_up Host" not in caddy
+    assert "header_up -Origin" not in caddy
+    assert "LAB_TRACKER_MCP_ALLOWED_HOSTS=mcp.lab.internal" in caddy
+
+
+def test_quickstart_does_not_promise_write_tools_a_hosted_server_lacks() -> None:
+    text = mcp_server.lab_tracker_quickstart()
+
+    assert "Read and write tools call" not in text
+    assert "LAB_TRACKER_MCP_ALLOW_WRITES" in text

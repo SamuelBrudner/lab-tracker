@@ -110,19 +110,24 @@ the hosted server never registers tools that read files on the MCP host:
 `lab_tracker_record_evidence_bundle` refuses `upload_file`/`upload_file_path`.
 Local stdio servers keep the full tool set.
 
-The hosted server always validates `Host` and `Origin` (DNS-rebinding
-protection), whatever `LAB_TRACKER_MCP_HOST` it binds. By default only loopback
-names are accepted (`127.0.0.1:*`, `localhost:*`, `[::1]:*` and the matching
-`http://` origins); a request with another `Host` gets `421`, another `Origin`
-gets `403`. The checked-in Caddyfile forwards its upstream host and drops the
-`Origin` it already vetted, so it works with the defaults. To have `lt-mcp`
-check public names instead, set comma-separated allowlists (`:*` matches any
-port):
+By default the hosted server does not validate `Host` or `Origin`, whatever
+`LAB_TRACKER_MCP_HOST` it binds: the inbound bearer already defeats DNS
+rebinding, and the reverse proxy in front (the checked-in Caddyfile,
+`tailscale serve`, nginx, Traefik) owns the public Host/Origin policy and may
+forward the client's `Host` unchanged. To have `lt-mcp` check them too, set a
+comma-separated Host allowlist (`:*` matches any port) naming the public host
+the proxy forwards, plus any browser origins your clients send:
 
 ```bash
 LAB_TRACKER_MCP_ALLOWED_HOSTS=mcp.lab.internal
 LAB_TRACKER_MCP_ALLOWED_ORIGINS=https://github.com
 ```
+
+With a Host allowlist set, a request with another `Host` gets `421` and one
+whose `Origin` is not listed gets `403` (requests without `Origin` pass).
+`LAB_TRACKER_MCP_ALLOWED_ORIGINS` without `LAB_TRACKER_MCP_ALLOWED_HOSTS` is a
+startup error. The docker-compose `mcp` service does not forward these two
+variables; add them to its `environment:` list to use them there.
 
 For a remote agent, the graph-native read sequence is:
 

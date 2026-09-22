@@ -13,8 +13,12 @@ def lab_tracker_quickstart() -> str:
     return (
         "# Lab Tracker MCP Quickstart\n\n"
         "Use `lab_tracker_health` and `lab_tracker_readiness` first. "
-        "Read and write tools call the running Lab Tracker API, so start the app "
+        "Every tool calls the running Lab Tracker API, so start the app "
         "and set `LAB_TRACKER_BASE_URL` in the MCP client environment. "
+        "Local stdio servers register read and create tools; a hosted "
+        "(streamable-http) server registers only read tools unless its operator "
+        "sets `LAB_TRACKER_MCP_ALLOW_WRITES=true`, and never registers tools that "
+        "read files on the MCP host. "
         "Use `http://127.0.0.1:8000` only when the MCP process runs on the same "
         "machine as the API; remote agents should use the workstation HTTPS "
         "endpoint, for example `https://<workstation>.ts.net`. "

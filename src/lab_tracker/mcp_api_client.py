@@ -291,6 +291,15 @@ class LabTrackerAPIClient:
         refused with ``403 service_forbidden``; one that may write falls through to
         routing and gets 404/405. No handler can run either way. Any other answer
         is indeterminate and raised to the caller.
+
+        Caveats: the API records each ``service_forbidden`` refusal as a PAT auth
+        failure, so every successful read-only check spends one attempt of the
+        PAT rate limit (default 10 per 60s); a tight restart loop can briefly
+        lock the token out, and the probe then fails closed on 429. A token
+        whose only write grant is the narrow ``batch_run_due`` scope is reported
+        as read-only, since only ``POST /batches/run-due`` accepts it and no
+        hosted tool calls that route. A dedicated introspection endpoint for
+        service tokens would remove both caveats.
         """
 
         try:

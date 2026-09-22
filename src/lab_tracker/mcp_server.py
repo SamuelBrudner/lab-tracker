@@ -97,15 +97,6 @@ _VALID_TRANSPORTS: set[str] = {"stdio", "streamable-http"}
 ALLOW_WRITES_ENV = "LAB_TRACKER_MCP_ALLOW_WRITES"
 ALLOWED_HOSTS_ENV = "LAB_TRACKER_MCP_ALLOWED_HOSTS"
 ALLOWED_ORIGINS_ENV = "LAB_TRACKER_MCP_ALLOWED_ORIGINS"
-# Loopback-only defaults (the same values FastMCP picks for a loopback bind). A
-# reverse proxy either forwards its upstream host (deploy/mcp/Caddyfile) or the
-# operator lists the public host in LAB_TRACKER_MCP_ALLOWED_HOSTS.
-DEFAULT_ALLOWED_HOSTS: tuple[str, ...] = ("127.0.0.1:*", "localhost:*", "[::1]:*")
-DEFAULT_ALLOWED_ORIGINS: tuple[str, ...] = (
-    "http://127.0.0.1:*",
-    "http://localhost:*",
-    "http://[::1]:*",
-)
 _TRUE_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
 _FALSE_ENV_VALUES = frozenset({"", "0", "false", "no", "off"})
 _ALLOWED_HOST_PATTERN = (
@@ -124,8 +115,10 @@ class MCPServerRuntimeSettings:
     inbound_token: str | None = field(default=None, repr=False)
     # Hosted (streamable-http) only: stdio always serves the full local tool set.
     allow_writes: bool = False
-    allowed_hosts: tuple[str, ...] = DEFAULT_ALLOWED_HOSTS
-    allowed_origins: tuple[str, ...] = DEFAULT_ALLOWED_ORIGINS
+    # Host/Origin (DNS-rebinding) validation is opt-in: empty means the reverse
+    # proxy owns Host/Origin policy and the inbound bearer defeats rebinding.
+    allowed_hosts: tuple[str, ...] = ()
+    allowed_origins: tuple[str, ...] = ()
 
     @classmethod
     def from_env(cls) -> MCPServerRuntimeSettings:
@@ -140,6 +133,21 @@ class MCPServerRuntimeSettings:
         inbound_token = os.getenv("LAB_TRACKER_MCP_INBOUND_TOKEN")
         if transport == "streamable-http":
             inbound_token = _validated_inbound_token(inbound_token)
+        allowed_hosts = _env_allowlist(
+            ALLOWED_HOSTS_ENV,
+            pattern=_ALLOWED_HOST_RE,
+            example="mcp.lab.internal or 127.0.0.1:*",
+        )
+        allowed_origins = _env_allowlist(
+            ALLOWED_ORIGINS_ENV,
+            pattern=_ALLOWED_ORIGIN_RE,
+            example="https://github.com or http://localhost:*",
+        )
+        if allowed_origins and not allowed_hosts:
+            raise SystemExit(
+                f"{ALLOWED_ORIGINS_ENV} requires {ALLOWED_HOSTS_ENV}: Host/Origin "
+                "validation is enabled only by a Host allowlist."
+            )
         return cls(
             transport=transport,  # type: ignore[arg-type]
             host=os.getenv("LAB_TRACKER_MCP_HOST", "127.0.0.1").strip()
@@ -148,18 +156,8 @@ class MCPServerRuntimeSettings:
             path=path,
             inbound_token=inbound_token,
             allow_writes=_env_bool(ALLOW_WRITES_ENV),
-            allowed_hosts=_env_allowlist(
-                ALLOWED_HOSTS_ENV,
-                default=DEFAULT_ALLOWED_HOSTS,
-                pattern=_ALLOWED_HOST_RE,
-                example="mcp.lab.internal or 127.0.0.1:*",
-            ),
-            allowed_origins=_env_allowlist(
-                ALLOWED_ORIGINS_ENV,
-                default=DEFAULT_ALLOWED_ORIGINS,
-                pattern=_ALLOWED_ORIGIN_RE,
-                example="https://github.com or http://localhost:*",
-            ),
+            allowed_hosts=allowed_hosts,
+            allowed_origins=allowed_origins,
         )
 
 
@@ -216,11 +214,14 @@ def build_server(settings: MCPServerRuntimeSettings | None = None) -> FastMCP:
             "streamable_http_path": settings.path,
             "json_response": True,
             "stateless_http": True,
-            # Always validate Host/Origin, whatever the bind address; FastMCP
-            # would otherwise enable it only for loopback binds, with a fixed
-            # allowlist that rejects every reverse-proxied request.
+            # Validate Host/Origin only against an operator-configured
+            # allowlist, whatever the bind address. Left to itself FastMCP
+            # enables a loopback-only allowlist for loopback binds, which
+            # rejects every request through a Host-preserving reverse proxy
+            # (Caddy, `tailscale serve`, nginx, Traefik); the inbound bearer
+            # already defeats DNS rebinding.
             "transport_security": TransportSecuritySettings(
-                enable_dns_rebinding_protection=True,
+                enable_dns_rebinding_protection=bool(settings.allowed_hosts),
                 allowed_hosts=list(settings.allowed_hosts),
                 allowed_origins=list(settings.allowed_origins),
             ),
@@ -449,13 +450,12 @@ def _env_bool(name: str) -> bool:
 def _env_allowlist(
     name: str,
     *,
-    default: tuple[str, ...],
     pattern: re.Pattern[str],
     example: str,
 ) -> tuple[str, ...]:
     raw = os.getenv(name)
     if raw is None or not raw.strip():
-        return default
+        return ()
     entries = tuple(entry.strip() for entry in raw.split(","))
     invalid = [entry for entry in entries if pattern.fullmatch(entry) is None]
     if not entries or invalid:
@@ -515,8 +515,6 @@ __all__ = [
     "ALLOW_WRITES_ENV",
     "ALLOWED_HOSTS_ENV",
     "ALLOWED_ORIGINS_ENV",
-    "DEFAULT_ALLOWED_HOSTS",
-    "DEFAULT_ALLOWED_ORIGINS",
     "MCP_SERVER_INSTRUCTIONS",
     "MCPTransport",
     "SERVER_NAME",
