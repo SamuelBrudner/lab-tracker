@@ -8,6 +8,9 @@ JsonObject = dict[str, Any]
 
 OPEN_GOAL_STATUSES = ("planned", "in_progress")
 OPEN_QUESTION_STATUSES = ("active", "staged")
+# Only a supported claim settles a question; proposed/testing claims are still
+# open work and a rejected claim means the question needs a new attempt.
+ANSWERING_CLAIM_STATUSES = ("supported",)
 
 RESEARCH_PROMPT_TRIGGERS = (
     "analysis",
@@ -196,6 +199,8 @@ def _empty_payload(reason: str) -> JsonObject:
 def _answered_question_ids(claims: list[JsonObject]) -> set[str]:
     answered: set[str] = set()
     for claim in claims:
+        if str(claim.get("status") or "") not in ANSWERING_CLAIM_STATUSES:
+            continue
         for value in claim.get("answers_question_ids") or []:
             answered.add(str(value))
     return answered
