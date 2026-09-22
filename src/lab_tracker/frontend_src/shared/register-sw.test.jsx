@@ -235,6 +235,28 @@ describe("installOfflineRetry", () => {
     cleanup();
   });
 
+  it("logs a failed drain instead of swallowing it", async () => {
+    const failure = new TypeError("drain exploded");
+    const queue = { drain: vi.fn(async () => Promise.reject(failure)) };
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const cleanup = installOfflineRetry({
+      getSession: () => ({ token: "t", ownerId: "owner-1" }),
+      queue,
+    });
+    await vi.waitFor(() =>
+      expect(consoleError).toHaveBeenCalledWith("Offline capture retry failed:", failure)
+    );
+
+    consoleError.mockClear();
+    window.dispatchEvent(new Event("online"));
+    await vi.waitFor(() =>
+      expect(consoleError).toHaveBeenCalledWith("Offline capture retry failed:", failure)
+    );
+
+    cleanup();
+  });
+
   it("forwards an auth-disabled session so owner-only drains can run", async () => {
     const queue = {
       drain: vi.fn(async () => ({ dropped: [], uploaded: [], stillQueued: [] })),

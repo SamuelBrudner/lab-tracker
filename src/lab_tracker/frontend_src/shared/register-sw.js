@@ -186,17 +186,19 @@ export function installOfflineRetry({
   if (!queue || typeof window === "undefined") {
     return () => {};
   }
-  const handleOnline = () => {
+  const drain = () => {
     queue
       .drain(readSession(getSession))
       .then((result) => surfaceDroppedUploads(result, onDropped))
-      .catch(() => {});
+      .catch((error) => {
+        // Queued captures stay queued for the next retry; make the failure
+        // visible rather than silently holding them.
+        // eslint-disable-next-line no-console
+        console.error("Offline capture retry failed:", error);
+      });
   };
-  window.addEventListener("online", handleOnline);
+  window.addEventListener("online", drain);
   // Drain at boot too, in case the app was relaunched after going offline.
-  queue
-    .drain(readSession(getSession))
-    .then((result) => surfaceDroppedUploads(result, onDropped))
-    .catch(() => {});
-  return () => window.removeEventListener("online", handleOnline);
+  drain();
+  return () => window.removeEventListener("online", drain);
 }
