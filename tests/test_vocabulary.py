@@ -212,3 +212,15 @@ def test_terms_route_is_public_and_content_negotiated(client: TestClient):
     document = jsonld_response.json()
     labels = {node["label"] for node in document["@graph"]}
     assert "falsificationCriteria" in labels
+
+
+def test_terms_route_roots_iris_under_a_mounted_root_path(client: TestClient):
+    # With LAB_TRACKER_BASE_URL unset the base URL falls back to the request,
+    # whose base URL carries the ASGI root_path of a reverse-proxied mount.
+    client.app.state.settings.base_url = ""
+    mounted = TestClient(client.app, root_path="/lab")
+
+    response = mounted.get("/terms", headers={"Accept": "application/ld+json"})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["@id"] == "http://testserver/lab/terms"

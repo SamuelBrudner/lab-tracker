@@ -7,7 +7,7 @@ import re
 import unicodedata
 from datetime import datetime
 from typing import Annotated, Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit, urlunsplit
 from uuid import UUID
 
 from fastapi import Query
@@ -183,13 +183,19 @@ def provenance_base_url(request: Request) -> str:
 
     Prefers the configured ``LAB_TRACKER_BASE_URL`` so identifiers are stable
     names independent of the serving host; falls back to the request's own base
-    URL when unset.
+    URL when unset. That fallback keeps the ASGI ``root_path`` of a
+    reverse-proxied mount (``https://host/lab``) so identifiers dereference to
+    where the app is actually served; only the origin part is normalized.
     """
     settings = getattr(request.app.state, "settings", None)
     configured = settings.resolved_base_url() if settings is not None else ""
     if configured:
         return configured
-    return normalize_instance_base_url(str(request.base_url))
+    request_base = urlsplit(str(request.base_url))
+    origin = normalize_instance_base_url(
+        urlunsplit((request_base.scheme, request_base.netloc, "", "", ""))
+    )
+    return f"{origin}{request_base.path.rstrip('/')}"
 
 
 def safe_attachment_filename(filename: str) -> str:
