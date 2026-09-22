@@ -27,6 +27,7 @@ from lab_tracker.auth import (
     service_principal_can_access,
 )
 from lab_tracker.errors import AuthError, RateLimitError
+from lab_tracker.rate_limit import rate_limit_client
 from lab_tracker.schemas import ErrorEnvelope, ErrorInfo
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 from lab_tracker.store_health import (
@@ -188,7 +189,7 @@ def configure_auth_middleware(app: FastAPI) -> None:
                     device_token_id=principal.device_token_id,
                 )
             elif token.startswith(LPAT_TOKEN_PREFIX):
-                pat_rate_client = _rate_limit_client(request)
+                pat_rate_client = rate_limit_client(request)
                 pat_rate_key = _pat_rate_key(pat_rate_client, token)
                 app.state.pat_rate_limiter.check(pat_rate_key)
                 principal = await run_in_threadpool(
@@ -207,9 +208,10 @@ def configure_auth_middleware(app: FastAPI) -> None:
                     role=principal.role,
                     scope=principal.scope,
                 ):
-                    app.state.pat_rate_limiter.record_failure(
-                        pat_rate_key, client=pat_rate_client
-                    )
+                    # The token verified, so this is a policy denial, not a
+                    # credential failure: charging it would lock a valid token
+                    # out of the requests it may make, and at the client's
+                    # quota would turn this 403 into a 429.
                     return _service_forbidden_response("Not permitted for this token.")
                 user = await run_in_threadpool(
                     app.state.auth_service.get_user_by_id,
@@ -350,10 +352,6 @@ def _should_apply_csp(path: str) -> bool:
     if path == "/" or path.startswith("/openapi"):
         return False
     return any(path.startswith(prefix) for prefix in _CSP_PATH_PREFIXES)
-
-
-def _rate_limit_client(request: Request) -> str:
-    return request.client.host if request.client is not None else "unknown"
 
 
 def _pat_rate_key(client_host: str, token: str) -> str:

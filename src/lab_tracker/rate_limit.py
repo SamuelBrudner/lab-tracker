@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import time
 from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from threading import Lock
+
+from starlette.requests import HTTPConnection
 
 from lab_tracker.errors import RateLimitError
 
@@ -19,6 +22,10 @@ DEFAULT_RATE_LIMIT_CLIENT_SHARE_DIVISOR = 10
 MAX_RATE_LIMIT_KEY_LENGTH = 256
 _HASHED_KEY_PREFIX = "sha256:"
 _LIMITED_MESSAGE = "Too many authentication attempts. Try again later."
+# An IPv6 host is routinely delegated a whole /64 and can source requests from
+# any address in it, so the /64 is the smallest unit that identifies a client.
+IPV6_CLIENT_PREFIX_LENGTH = 64
+_UNKNOWN_CLIENT = "unknown"
 
 
 @dataclass
@@ -187,6 +194,34 @@ class InMemoryRateLimiter:
             if oldest.reset_at > now:
                 return
             self._discard(oldest_key)
+
+
+def rate_limit_client(connection: HTTPConnection) -> str:
+    """Return the rate-limit client for a request: its connection peer.
+
+    IPv4 peers are used as is. IPv6 peers are reduced to their /64 prefix, so a
+    host cannot gain a fresh per-client share by rotating addresses within its
+    own delegated prefix. IPv4-mapped IPv6 peers count as their IPv4 address.
+    A peer that is not an IP address (for example a test transport) is used
+    verbatim. Behind a reverse proxy the peer is the proxy unless the server
+    trusts its forwarded headers, so every client would share one quota.
+    """
+
+    peer = connection.client
+    if peer is None:
+        return _UNKNOWN_CLIENT
+    host = peer.host
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return host
+    if isinstance(address, ipaddress.IPv4Address):
+        return str(address)
+    if address.ipv4_mapped is not None:
+        return str(address.ipv4_mapped)
+    host_bits = 128 - IPV6_CLIENT_PREFIX_LENGTH
+    network_address = (int(address) >> host_bits) << host_bits
+    return str(ipaddress.IPv6Network((network_address, IPV6_CLIENT_PREFIX_LENGTH)))
 
 
 def _storage_key(key: str) -> str:

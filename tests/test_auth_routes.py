@@ -1168,6 +1168,32 @@ def test_one_host_login_flood_does_not_rate_limit_other_hosts(monkeypatch, tmp_p
     assert app.state.register_rate_limiter is not app.state.auth_rate_limiter
 
 
+def test_login_flood_rotating_addresses_in_one_ipv6_64_shares_one_quota(monkeypatch, tmp_path):
+    """Rotating source addresses inside one IPv6 /64 does not mint new clients."""
+    _bootstrap_database(monkeypatch, tmp_path)
+    app = create_app()
+    with TestClient(app) as client:
+        app.state.auth_rate_limiter = InMemoryRateLimiter(
+            max_attempts=1,
+            window_seconds=60,
+            max_buckets=10,
+            max_buckets_per_client=2,
+        )
+        flood = [
+            TestClient(app, client=(f"2001:db8:1:2::{index + 1:x}", 40000)).post(
+                "/auth/login", json={"username": f"nobody-{index}", "password": "x"}
+            )
+            for index in range(6)
+        ]
+        other_prefix = TestClient(app, client=("2001:db8:1:3::1", 40000)).post(
+            "/auth/login", json={"username": "ghost", "password": "x"}
+        )
+        assert client.app is app
+
+    assert [response.status_code for response in flood] == [401, 401, 429, 429, 429, 429]
+    assert other_prefix.status_code == 401
+
+
 def test_public_viewer_registration_can_be_disabled(monkeypatch, tmp_path):
     _bootstrap_database(monkeypatch, tmp_path)
     monkeypatch.setenv("LAB_TRACKER_AUTH_PUBLIC_VIEWER_REGISTRATION_ENABLED", "false")

@@ -503,6 +503,76 @@ def test_one_host_invalid_token_flood_does_not_rate_limit_other_hosts(
     assert forbidden.json()["error"]["code"] == "service_forbidden"
 
 
+def test_invalid_token_flood_from_one_ipv6_64_shares_one_client_quota(
+    client: TestClient,
+):
+    """Rotating source addresses inside one IPv6 /64 does not mint new clients."""
+    client.app.state.pat_rate_limiter = InMemoryRateLimiter(
+        max_attempts=1,
+        window_seconds=60,
+        max_buckets=10,
+        max_buckets_per_client=2,
+    )
+
+    flood = [
+        TestClient(client.app, client=(f"2001:db8:1:2::{index + 1:x}", 40000)).get(
+            "/projects", headers=_bearer(f"lpat_guess-{index}")
+        )
+        for index in range(6)
+    ]
+    other_prefix = TestClient(client.app, client=("2001:db8:1:3::1", 40000)).get(
+        "/projects", headers=_bearer("lpat_typo")
+    )
+
+    assert [response.status_code for response in flood] == [401, 401, 429, 429, 429, 429]
+    assert other_prefix.status_code == 401
+
+
+def test_valid_token_forbidden_requests_stay_403_and_never_lock_the_token(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    """Policy denials are not credential failures (L35).
+
+    A valid token that repeatedly asks for something its policy forbids keeps
+    getting 403, is never locked out of the requests it may make, and still
+    gets 403 (not 429) when its client is at its failure quota.
+    """
+    issued = _create_token(client, admin_auth_headers, role="viewer", read_only=True)
+    client.app.state.pat_rate_limiter = InMemoryRateLimiter(
+        max_attempts=2,
+        window_seconds=60,
+        max_buckets=10,
+        max_buckets_per_client=2,
+    )
+    headers = _bearer(issued["secret"])
+
+    forbidden = [
+        client.post("/projects", json={"name": "Blocked"}, headers=headers)
+        for _attempt in range(5)
+    ]
+    allowed = client.get("/projects", headers=headers)
+    # Fill this client's failure quota with blocked guesses.
+    guesses = [
+        client.get("/projects", headers=_bearer(f"lpat_guess-{index}"))
+        for index in range(2)
+        for _attempt in range(2)
+    ]
+    forbidden_at_quota = client.post(
+        "/projects", json={"name": "Blocked"}, headers=headers
+    )
+
+    assert {response.status_code for response in forbidden} == {403}
+    assert {response.json()["error"]["code"] for response in forbidden} == {
+        "service_forbidden"
+    }
+    assert allowed.status_code == 200
+    assert [response.status_code for response in guesses] == [401, 401, 401, 401]
+    assert client.get("/projects", headers=_bearer("lpat_guess-new")).status_code == 429
+    assert forbidden_at_quota.status_code == 403
+    assert forbidden_at_quota.json()["error"]["code"] == "service_forbidden"
+
+
 def _register_and_login(
     client: TestClient,
     *,

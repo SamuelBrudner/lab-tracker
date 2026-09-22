@@ -74,15 +74,21 @@ that destination through your normal off-machine backup process.
   attempts from one caller, allowed per window (default: `10`)
 - `LAB_TRACKER_AUTH_RATE_LIMIT_WINDOW_SECONDS`: rate-limit window in seconds
   (default: `60`). These two settings apply to three separate limiters: login,
-  registration, and personal access tokens (failed or forbidden `lpat_`
-  requests, counted per token and client address). Each limiter is in-process
+  registration, and personal access tokens (failed `lpat_` requests, counted
+  per token and client address; a valid token that its policy forbids gets
+  `403` and is not counted). Each limiter is in-process
   and tracks at most 10,000 callers at once, and one client address at most
   1,000 of them. Once a client address tracks 1,000 callers, its failed
   attempts for new callers get `429` until its oldest window ends; it never
   forgets its own callers to make room. When the whole table is full it forgets
   the oldest caller that is not yet blocked, and never forgets a blocked
   caller; if every tracked caller is blocked, new addresses' failed attempts
-  get `429` too. Correct credentials still sign in either way.
+  get `429` too. Correct credentials still sign in either way. The client
+  address is the connection peer: an IPv4 address, or the /64 prefix of an
+  IPv6 address. Behind a reverse proxy the peer is the proxy, so set
+  `FORWARDED_ALLOW_IPS` to the proxy's address (see
+  [Reverse Proxy and Client Addresses](self-hosted-operations.md#reverse-proxy-and-client-addresses));
+  otherwise every client shares one client address and one quota.
 - `LAB_TRACKER_AUTH_PUBLIC_VIEWER_REGISTRATION_ENABLED`: allow public
   self-registration for viewer accounts (default: `true`). Set to `false` to
   require invites or an admin bearer token for new users.

@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import pytest
+from starlette.requests import HTTPConnection
 
 from lab_tracker.errors import RateLimitError
-from lab_tracker.rate_limit import MAX_RATE_LIMIT_KEY_LENGTH, InMemoryRateLimiter
+from lab_tracker.rate_limit import (
+    MAX_RATE_LIMIT_KEY_LENGTH,
+    InMemoryRateLimiter,
+    rate_limit_client,
+)
 
 
 class _Clock:
@@ -289,3 +294,33 @@ def test_global_cap_still_fails_closed_when_many_clients_block_their_quota(
     with pytest.raises(RateLimitError):
         limiter.record_failure("h3-a", client="h3")
     assert limiter.bucket_count == 4
+
+
+def _connection(client: tuple[str, int] | None) -> HTTPConnection:
+    return HTTPConnection({"type": "http", "headers": [], "client": client})
+
+
+@pytest.mark.parametrize(
+    ("peer", "expected"),
+    [
+        ("203.0.113.9", "203.0.113.9"),
+        ("2001:db8:1:2:aaaa:bbbb:cccc:dddd", "2001:db8:1:2::/64"),
+        ("2001:db8:1:2::1", "2001:db8:1:2::/64"),
+        ("2001:DB8:1:2::1", "2001:db8:1:2::/64"),
+        ("fe80::1%eth0", "fe80::/64"),
+        ("::ffff:203.0.113.9", "203.0.113.9"),
+        ("testclient", "testclient"),
+    ],
+)
+def test_rate_limit_client_groups_ipv6_peers_by_their_64_prefix(
+    peer: str, expected: str
+) -> None:
+    """One IPv6 /64 is one client: a host there can rotate through 2**64 addresses."""
+    assert rate_limit_client(_connection((peer, 40000))) == expected
+
+
+def test_rate_limit_client_distinguishes_ipv6_prefixes_and_missing_peers() -> None:
+    assert rate_limit_client(_connection(("2001:db8:1:2::1", 1))) != rate_limit_client(
+        _connection(("2001:db8:1:3::1", 1))
+    )
+    assert rate_limit_client(_connection(None)) == "unknown"
