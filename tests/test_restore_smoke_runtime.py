@@ -63,7 +63,8 @@ case "$*" in
     attempts="$(bump restore_attempts)"
     if [ ! -f "${state}/tcp_up" ] \
       || [ "${attempts}" -le "${FAKE_RESTORE_CONNECTION_FAILURES:-0}" ]; then
-      echo 'pg_restore: error: connection to server at "postgres" (172.18.0.2), port 5432 failed: Connection refused' >&2
+      printf '%s%s\n' 'pg_restore: error: connection to server at "postgres" ' \
+        '(172.18.0.2), port 5432 failed: Connection refused' >&2
       exit 1
     fi
     if [ -n "${FAKE_RESTORE_FATAL:-}" ]; then
