@@ -47,12 +47,14 @@ class InMemoryRateLimiter:
       with ``RateLimitError`` until the oldest window expires. Keys without a
       bucket still pass ``check``, so correct credentials keep working.
     * Updates may name the ``client`` (the connection peer) that owns the key.
-      One client holds at most ``max_buckets_per_client`` live buckets: past
-      that it evicts its own oldest unblocked bucket, and once all of its
-      buckets are blocking its new failures fail closed. A single host can
-      therefore only limit itself; it cannot fill the table with blocked
-      buckets and push every other host into the fail-closed state. Keys
-      recorded without a client count only against ``max_buckets``.
+      One client holds at most ``max_buckets_per_client`` live buckets; once it
+      has that many, its failures for new keys fail closed until one of its
+      windows ends. It never evicts its own buckets, so failing many junk keys
+      cannot flush a partly used bucket (for example one username's guesses)
+      and restart its count. A single host can therefore only limit itself; it
+      cannot fill the table with blocked buckets and push every other host into
+      the fail-closed state. Keys recorded without a client count only against
+      ``max_buckets``.
 
     Keys longer than ``MAX_RATE_LIMIT_KEY_LENGTH`` are stored as their SHA-256
     digest.
@@ -88,10 +90,9 @@ class InMemoryRateLimiter:
         # Attempts only grow within a window, so a key leaves this set once and
         # never returns until its bucket is recreated.
         self._evictable: OrderedDict[str, None] = OrderedDict()
-        # Per-client live bucket counts and evictable keys (same order). Entries
-        # are removed when a client has no live bucket, so both stay bounded.
+        # Per-client live bucket counts. Entries are removed when a client has no
+        # live bucket, so the map stays bounded.
         self._client_bucket_counts: dict[str, int] = {}
-        self._client_evictable: dict[str, OrderedDict[str, None]] = {}
         self._lock = Lock()
 
     @property
@@ -133,8 +134,6 @@ class InMemoryRateLimiter:
         bucket.attempts += 1
         if self._is_blocked(bucket):
             self._evictable.pop(stored_key, None)
-            if bucket.client is not None:
-                self._drop_client_evictable(bucket.client, stored_key)
 
     def _live_bucket(self, stored_key: str) -> _Bucket | None:
         bucket = self._buckets.get(stored_key)
@@ -155,12 +154,10 @@ class InMemoryRateLimiter:
             client is not None
             and self._client_bucket_counts.get(client, 0) >= self.max_buckets_per_client
         ):
-            client_evictable = self._client_evictable.get(client)
-            if not client_evictable:
-                # Every live bucket of this client is blocking; the client is
-                # limited itself and cannot take another host's share.
-                raise RateLimitError(_LIMITED_MESSAGE)
-            self._discard(next(iter(client_evictable)))
+            # The client has used its share. It is limited itself: it cannot
+            # take another host's share, and evicting its own bucket would let
+            # junk failures reset a partly used one.
+            raise RateLimitError(_LIMITED_MESSAGE)
         if len(self._buckets) >= self.max_buckets:
             if not self._evictable:
                 # Every live bucket is blocking; evicting one would lift a block.
@@ -171,7 +168,6 @@ class InMemoryRateLimiter:
         self._evictable[stored_key] = None
         if client is not None:
             self._client_bucket_counts[client] = self._client_bucket_counts.get(client, 0) + 1
-            self._client_evictable.setdefault(client, OrderedDict())[stored_key] = None
         return bucket
 
     def _discard(self, stored_key: str) -> None:
@@ -179,20 +175,11 @@ class InMemoryRateLimiter:
         self._evictable.pop(stored_key, None)
         if bucket is None or bucket.client is None:
             return
-        self._drop_client_evictable(bucket.client, stored_key)
         remaining = self._client_bucket_counts[bucket.client] - 1
         if remaining:
             self._client_bucket_counts[bucket.client] = remaining
         else:
             del self._client_bucket_counts[bucket.client]
-
-    def _drop_client_evictable(self, client: str, stored_key: str) -> None:
-        client_evictable = self._client_evictable.get(client)
-        if client_evictable is None:
-            return
-        client_evictable.pop(stored_key, None)
-        if not client_evictable:
-            del self._client_evictable[client]
 
     def _prune_expired(self, now: float) -> None:
         while self._buckets:

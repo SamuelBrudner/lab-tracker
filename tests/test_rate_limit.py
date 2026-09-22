@@ -211,27 +211,40 @@ def test_one_client_filling_its_quota_is_limited_without_saturating_others(
     assert list(limiter.stored_keys()) == ["login:attacker:a3"]
 
 
-def test_client_over_quota_evicts_its_own_oldest_unblocked_bucket(clock: _Clock) -> None:
+def test_client_at_quota_fails_closed_without_evicting_its_own_buckets(
+    clock: _Clock,
+) -> None:
+    """A client cannot flush its own partly used bucket by failing junk keys.
+
+    Otherwise a host could make max_attempts - 1 guesses for one username, fail
+    enough distinct junk usernames to evict that bucket, and guess again.
+    """
     limiter = InMemoryRateLimiter(
-        max_attempts=2,
+        max_attempts=3,
         window_seconds=60,
         max_buckets=10,
         max_buckets_per_client=2,
         clock=clock,
     )
     limiter.record_failure("other-1", client="other")
-    clock.now += 1
-    limiter.record_failure("mine-1", client="mine")
-    clock.now += 1
-    limiter.record_failure("mine-2", client="mine")
-    limiter.record_failure("mine-2", client="mine")  # blocked, never evicted
-    clock.now += 1
+    limiter.record_failure("login:mine:alice", client="mine")
+    limiter.record_failure("login:mine:alice", client="mine")
+    limiter.record_failure("login:mine:junk-0", client="mine")
 
-    limiter.record_failure("mine-3", client="mine")
+    for index in range(1, 20):
+        with pytest.raises(RateLimitError):
+            limiter.record_failure(f"login:mine:junk-{index}", client="mine")
 
-    assert list(limiter.stored_keys()) == ["other-1", "mine-2", "mine-3"]
+    assert list(limiter.stored_keys()) == [
+        "other-1",
+        "login:mine:alice",
+        "login:mine:junk-0",
+    ]
+    limiter.check("login:mine:alice")  # correct credentials still get through
+    limiter.record_failure("login:mine:alice", client="mine")
     with pytest.raises(RateLimitError):
-        limiter.check("mine-2")
+        limiter.check("login:mine:alice")
+    limiter.record_failure("other-2", client="other")
 
 
 def test_per_client_quota_is_released_when_buckets_expire_or_reset(clock: _Clock) -> None:

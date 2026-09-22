@@ -188,14 +188,17 @@ def configure_auth_middleware(app: FastAPI) -> None:
                     device_token_id=principal.device_token_id,
                 )
             elif token.startswith(LPAT_TOKEN_PREFIX):
-                pat_rate_key = _pat_rate_key(request, token)
+                pat_rate_client = _rate_limit_client(request)
+                pat_rate_key = _pat_rate_key(pat_rate_client, token)
                 app.state.pat_rate_limiter.check(pat_rate_key)
                 principal = await run_in_threadpool(
                     app.state.personal_access_token_service.verify_token,
                     token,
                 )
                 if principal is None:
-                    app.state.pat_rate_limiter.record_failure(pat_rate_key)
+                    app.state.pat_rate_limiter.record_failure(
+                        pat_rate_key, client=pat_rate_client
+                    )
                     raise AuthError("Invalid personal access token.")
                 if not service_principal_can_access(
                     request.method,
@@ -204,14 +207,18 @@ def configure_auth_middleware(app: FastAPI) -> None:
                     role=principal.role,
                     scope=principal.scope,
                 ):
-                    app.state.pat_rate_limiter.record_failure(pat_rate_key)
+                    app.state.pat_rate_limiter.record_failure(
+                        pat_rate_key, client=pat_rate_client
+                    )
                     return _service_forbidden_response("Not permitted for this token.")
                 user = await run_in_threadpool(
                     app.state.auth_service.get_user_by_id,
                     principal.user_id,
                 )
                 if user is None:
-                    app.state.pat_rate_limiter.record_failure(pat_rate_key)
+                    app.state.pat_rate_limiter.record_failure(
+                        pat_rate_key, client=pat_rate_client
+                    )
                     raise AuthError("Invalid personal access token.")
                 app.state.pat_rate_limiter.reset(pat_rate_key)
                 request.state.auth_context = AuthContext(
@@ -345,12 +352,16 @@ def _should_apply_csp(path: str) -> bool:
     return any(path.startswith(prefix) for prefix in _CSP_PATH_PREFIXES)
 
 
-def _pat_rate_key(request: Request, token: str) -> str:
+def _rate_limit_client(request: Request) -> str:
+    return request.client.host if request.client is not None else "unknown"
+
+
+def _pat_rate_key(client_host: str, token: str) -> str:
     # Keyed per token on purpose. lpat_ secrets carry 256 bits of entropy, so
     # guessing is infeasible and needs no host-wide throttle. A host-only key
     # would let one misconfigured agent behind a shared proxy lock out every
-    # PAT user behind that proxy. Memory stays bounded by the limiter's cap.
-    client_host = request.client.host if request.client is not None else "unknown"
+    # PAT user behind that proxy. Failures are charged to the client host, so
+    # one host flooding distinct tokens only fills its own share of the table.
     token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
     return f"lpat:{client_host}:{token_hash[:24]}"
 

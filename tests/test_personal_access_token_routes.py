@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from lab_tracker.auth import Role, utc_now
+from lab_tracker.rate_limit import InMemoryRateLimiter
 
 
 def _bearer(secret: str) -> dict[str, str]:
@@ -462,6 +463,44 @@ def test_invalid_personal_access_token_attempts_are_rate_limited(
     assert first.status_code == 401
     assert second.status_code == 401
     assert third.status_code == 429
+
+
+def test_one_host_invalid_token_flood_does_not_rate_limit_other_hosts(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    """A host that fills its share of blocked token buckets is limited itself.
+
+    Other hosts keep their share of the PAT table, so their mistyped tokens
+    still get 401 and their forbidden requests still get 403, not 429.
+    """
+    issued = _create_token(client, admin_auth_headers, role="viewer", read_only=True)
+    client.app.state.pat_rate_limiter = InMemoryRateLimiter(
+        max_attempts=2,
+        window_seconds=60,
+        max_buckets=6,
+        max_buckets_per_client=3,
+    )
+    attacker = TestClient(client.app, client=("203.0.113.9", 40000))
+    other = TestClient(client.app, client=("198.51.100.7", 40000))
+
+    flood = [
+        attacker.get("/projects", headers=_bearer(f"lpat_guess-{index}"))
+        for index in range(10)
+        for _attempt in range(2)
+    ]
+    mistyped = other.get("/projects", headers=_bearer("lpat_typo"))
+    allowed = other.get("/projects", headers=_bearer(issued["secret"]))
+    forbidden = other.post(
+        "/projects", json={"name": "Blocked"}, headers=_bearer(issued["secret"])
+    )
+
+    assert [response.status_code for response in flood[:6]] == [401] * 6
+    assert {response.status_code for response in flood[6:]} == {429}
+    assert mistyped.status_code == 401
+    assert allowed.status_code == 200
+    assert forbidden.status_code == 403
+    assert forbidden.json()["error"]["code"] == "service_forbidden"
 
 
 def _register_and_login(
