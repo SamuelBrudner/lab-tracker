@@ -10,8 +10,17 @@ from datetime import date, datetime
 from typing import Annotated, Any, ClassVar, Generic, Literal, TypeVar
 from uuid import UUID
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    GetCoreSchemaHandler,
+    field_validator,
+    model_validator,
+)
 from pydantic.json_schema import SkipJsonSchema
+from pydantic_core import CoreSchema, core_schema
 
 from lab_tracker.auth import Role
 from lab_tracker.data_store_definition import (
@@ -30,6 +39,7 @@ from lab_tracker.models import (
     ClaimRelation,
     ClaimStatus,
     DatasetCommitManifestInput,
+    DatasetFile,
     DatasetStatus,
     DataStore,
     EntityRef,
@@ -131,6 +141,92 @@ class PatchRequestModel(RequestModel):
             if field_name in value and value[field_name] is None:
                 raise ValueError(f"{field_name} must not be null.")
         return value
+
+
+class _ValidatedAsRequest:
+    """Validate a nested domain model through its closed request-side twin.
+
+    Domain models keep pydantic's default ``extra="ignore"`` so stored and
+    provider-produced data stay readable, but inside a request payload an unknown
+    or misspelled nested key must fail like a top-level one does under
+    ``RequestModel``. The annotated field validates with ``request_model``
+    (``extra="forbid"``) and then re-validates the provided fields as the domain
+    type, so callers still receive plain domain instances and responses still
+    serialize through the domain schema.
+    """
+
+    def __init__(self, request_model: type[BaseModel]) -> None:
+        self.request_model = request_model
+
+    def __get_pydantic_core_schema__(
+        self,
+        source_type: Any,
+        handler: GetCoreSchemaHandler,
+    ) -> CoreSchema:
+        return core_schema.chain_schema(
+            [
+                handler.generate_schema(self.request_model),
+                core_schema.no_info_plain_validator_function(_as_domain_payload),
+                handler(source_type),
+            ]
+        )
+
+
+def _as_domain_payload(value: BaseModel) -> dict[str, Any]:
+    return value.model_dump(exclude_unset=True)
+
+
+_CLOSED_NESTED_CONFIG = ConfigDict(from_attributes=True, extra="forbid")
+
+
+class EntityRefRequest(EntityRef):
+    model_config = _CLOSED_NESTED_CONFIG
+
+
+class QuestionLinkRequest(QuestionLink):
+    model_config = _CLOSED_NESTED_CONFIG
+
+
+class DatasetFileRequest(DatasetFile):
+    model_config = _CLOSED_NESTED_CONFIG
+
+
+class ExternalArtifactReferenceRequest(ExternalArtifactReference):
+    model_config = ConfigDict(from_attributes=True, frozen=True, extra="forbid")
+
+
+class DatasetCommitManifestInputRequest(DatasetCommitManifestInput):
+    model_config = _CLOSED_NESTED_CONFIG
+
+    files: list[DatasetFileRequest] = Field(default_factory=list)
+    external_artifacts: list[ExternalArtifactReferenceRequest] = Field(default_factory=list)
+
+
+class ClaimInputRequest(ClaimInput):
+    model_config = ConfigDict(from_attributes=True, frozen=True, extra="forbid")
+
+    external_citations: list[ExternalArtifactReferenceRequest] = Field(default_factory=list)
+
+
+class VisualizationInputRequest(VisualizationInput):
+    model_config = ConfigDict(from_attributes=True, frozen=True, extra="forbid")
+
+
+EntityRefIn = Annotated[EntityRef, _ValidatedAsRequest(EntityRefRequest)]
+QuestionLinkIn = Annotated[QuestionLink, _ValidatedAsRequest(QuestionLinkRequest)]
+DatasetCommitManifestIn = Annotated[
+    DatasetCommitManifestInput,
+    _ValidatedAsRequest(DatasetCommitManifestInputRequest),
+]
+ExternalArtifactReferenceIn = Annotated[
+    ExternalArtifactReference,
+    _ValidatedAsRequest(ExternalArtifactReferenceRequest),
+]
+ClaimInputIn = Annotated[ClaimInput, _ValidatedAsRequest(ClaimInputRequest)]
+VisualizationInputIn = Annotated[
+    VisualizationInput,
+    _ValidatedAsRequest(VisualizationInputRequest),
+]
 
 
 class Envelope(BaseModel, Generic[T]):
@@ -516,7 +612,7 @@ class ExperimentUpdate(PatchRequestModel):
 
 class DatasetCreate(RequestModel):
     project_id: UUID
-    commit_manifest: DatasetCommitManifestInput | None = None
+    commit_manifest: DatasetCommitManifestIn | None = None
     commit_hash: str | None = None
     primary_question_id: UUID
     secondary_question_ids: list[UUID] | None = None
@@ -534,18 +630,18 @@ class DatasetUpdate(PatchRequestModel):
         {"commit_manifest", "commit_hash", "status", "question_links"}
     )
 
-    commit_manifest: DatasetCommitManifestInput | SkipJsonSchema[None] = None
+    commit_manifest: DatasetCommitManifestIn | SkipJsonSchema[None] = None
     commit_hash: str | SkipJsonSchema[None] = None
     status: DatasetStatus | SkipJsonSchema[None] = None
     terminal_reason: NonBlankStr | None = None
-    question_links: list[QuestionLink] | SkipJsonSchema[None] = None
+    question_links: list[QuestionLinkIn] | SkipJsonSchema[None] = None
 
 
 class NoteCreate(RequestModel):
     project_id: UUID
     raw_content: NonBlankStr
     transcribed_text: str | None = None
-    targets: list[EntityRef] | None = None
+    targets: list[EntityRefIn] | None = None
     metadata: dict[str, NoteMetadataScalar] | None = None
     client_capture_id: str | None = None
     status: NoteStatus | None = None
@@ -563,7 +659,7 @@ class NoteUpdate(PatchRequestModel):
     non_nullable_fields = frozenset({"targets", "metadata", "status"})
 
     transcribed_text: str | None = None
-    targets: list[EntityRef] | SkipJsonSchema[None] = None
+    targets: list[EntityRefIn] | SkipJsonSchema[None] = None
     metadata: dict[str, NoteMetadataScalar] | SkipJsonSchema[None] = None
     status: NoteStatus | SkipJsonSchema[None] = None
 
@@ -869,7 +965,7 @@ class SessionPromotionRequest(RequestModel):
 class SessionDatasetPromotionRequest(RequestModel):
     primary_question_id: UUID
     secondary_question_ids: list[UUID] | None = None
-    commit_manifest: DatasetCommitManifestInput | None = None
+    commit_manifest: DatasetCommitManifestIn | None = None
     status: DatasetStatus | None = None
 
     @field_validator("secondary_question_ids")
@@ -890,7 +986,7 @@ class AnalysisCreate(RequestModel):
     method_hash: NonBlankStr
     code_version: NonBlankStr
     environment_hash: str | None = None
-    external_artifacts: list[ExternalArtifactReference] | None = None
+    external_artifacts: list[ExternalArtifactReferenceIn] | None = None
     status: AnalysisStatus | None = None
     terminal_reason: NonBlankStr | None = None
 
@@ -905,7 +1001,7 @@ class AnalysisUpdate(PatchRequestModel):
 
     status: AnalysisStatus | SkipJsonSchema[None] = None
     environment_hash: str | None = None
-    external_artifacts: list[ExternalArtifactReference] | SkipJsonSchema[None] = None
+    external_artifacts: list[ExternalArtifactReferenceIn] | SkipJsonSchema[None] = None
     terminal_reason: NonBlankStr | None = None
 
 
@@ -921,7 +1017,7 @@ class ClaimCreate(RequestModel):
     supported_by_dataset_ids: list[UUID] | None = None
     supported_by_analysis_ids: list[UUID] | None = None
     answers_question_ids: list[UUID] | None = None
-    external_citations: list[ExternalArtifactReference] | None = None
+    external_citations: list[ExternalArtifactReferenceIn] | None = None
 
     @field_validator(
         "supported_by_dataset_ids", "supported_by_analysis_ids", "answers_question_ids"
@@ -954,7 +1050,7 @@ class ClaimUpdate(PatchRequestModel):
     supported_by_dataset_ids: list[UUID] | SkipJsonSchema[None] = None
     supported_by_analysis_ids: list[UUID] | SkipJsonSchema[None] = None
     answers_question_ids: list[UUID] | SkipJsonSchema[None] = None
-    external_citations: list[ExternalArtifactReference] | SkipJsonSchema[None] = None
+    external_citations: list[ExternalArtifactReferenceIn] | SkipJsonSchema[None] = None
 
     @field_validator(
         "supported_by_dataset_ids", "supported_by_analysis_ids", "answers_question_ids"
@@ -973,12 +1069,12 @@ class ExplorationNodeCreate(RequestModel):
     project_id: UUID
     node_type: ExplorationNodeType
     title: NonBlankStr
-    target: EntityRef
+    target: EntityRefIn
     status: ExplorationNodeStatus | None = None
     choice: NonBlankStr | None = None
     alternatives_considered: list[NonBlankStr] | None = None
     rationale: NonBlankStr | None = None
-    evidence_refs: list[EntityRef] | None = None
+    evidence_refs: list[EntityRefIn] | None = None
     hypothesis: NonBlankStr | None = None
     failure_mode: NonBlankStr | None = None
     lesson: NonBlankStr | None = None
@@ -1012,7 +1108,7 @@ class ExplorationNodeUpdate(PatchRequestModel):
     choice: NonBlankStr | None = None
     alternatives_considered: list[NonBlankStr] | SkipJsonSchema[None] = None
     rationale: NonBlankStr | None = None
-    evidence_refs: list[EntityRef] | SkipJsonSchema[None] = None
+    evidence_refs: list[EntityRefIn] | SkipJsonSchema[None] = None
     hypothesis: NonBlankStr | None = None
     failure_mode: NonBlankStr | None = None
     lesson: NonBlankStr | None = None
@@ -1190,7 +1286,7 @@ class EvidenceBundleCreateDataset(RequestModel):
     kind: Literal["create"]
     primary_question_id: UUID | None = None
     secondary_question_ids: list[UUID] | None = None
-    commit_manifest: DatasetCommitManifestInput | None = None
+    commit_manifest: DatasetCommitManifestIn | None = None
     commit_hash: str | None = None
     status: DatasetStatus = DatasetStatus.STAGED
     terminal_reason: NonBlankStr | None = None
@@ -1218,7 +1314,7 @@ class EvidenceBundleCreateAnalysis(RequestModel):
     method_hash: NonBlankStr
     code_version: NonBlankStr
     environment_hash: str | None = None
-    external_artifacts: list[ExternalArtifactReference] | None = None
+    external_artifacts: list[ExternalArtifactReferenceIn] | None = None
     status: AnalysisStatus = AnalysisStatus.STAGED
     terminal_reason: NonBlankStr | None = None
     derive_code_provenance: bool = False
@@ -1255,7 +1351,7 @@ class EvidenceBundleCreateClaim(RequestModel):
     supported_by_dataset_ids: list[UUID] | None = None
     supported_by_analysis_ids: list[UUID] | None = None
     answers_question_ids: list[UUID] | None = None
-    external_citations: list[ExternalArtifactReference] | None = None
+    external_citations: list[ExternalArtifactReferenceIn] | None = None
 
     @field_validator(
         "supported_by_dataset_ids",
@@ -1312,7 +1408,7 @@ class EvidenceBundleCreateSourceNote(RequestModel):
     kind: Literal["create"]
     raw_content: NonBlankStr
     transcribed_text: str | None = None
-    targets: list[EntityRef] | None = None
+    targets: list[EntityRefIn] | None = None
     metadata: dict[str, NoteMetadataScalar] | None = None
     status: NoteStatus = NoteStatus.STAGED
 
@@ -1585,9 +1681,9 @@ class PortfolioProjectGroupSummary(BaseModel):
 
 class AnalysisCommitRequest(RequestModel):
     environment_hash: str | None = None
-    external_artifacts: list[ExternalArtifactReference] | None = None
-    claims: list[ClaimInput] | None = None
-    visualizations: list[VisualizationInput] | None = None
+    external_artifacts: list[ExternalArtifactReferenceIn] | None = None
+    claims: list[ClaimInputIn] | None = None
+    visualizations: list[VisualizationInputIn] | None = None
 
 
 class AnalysisCommitResult(BaseModel):

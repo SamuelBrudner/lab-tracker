@@ -4,7 +4,16 @@ import pytest
 from pydantic import ValidationError
 
 from lab_tracker import schemas
-from lab_tracker.models import QuestionType
+from lab_tracker.models import (
+    ClaimInput,
+    DatasetCommitManifestInput,
+    DatasetFile,
+    EntityRef,
+    ExternalArtifactReference,
+    QuestionLink,
+    QuestionType,
+    VisualizationInput,
+)
 from lab_tracker.schemas import (
     AnalysisCreate,
     ClaimCreate,
@@ -260,3 +269,205 @@ def _json_schema_allows_null(value: object) -> bool:
         for key in ("anyOf", "oneOf")
         for item in value.get(key, [])
     )
+
+
+# --- M39: nested request objects forbid unknown keys like their parents -------
+
+_ARTIFACT = {"source_system": "s3", "uri": "s3://lab/run-1/manifest.json", "content_hash": "h1"}
+
+
+def _nested_extra_cases() -> list[tuple[str, dict[str, object], tuple[object, ...]]]:
+    project_id = str(uuid4())
+    question_id = str(uuid4())
+    entity_ref = {"entity_type": "claim", "entity_id": str(uuid4())}
+    return [
+        (
+            "NoteCreate",
+            {
+                "project_id": project_id,
+                "raw_content": "x",
+                "targets": [{**entity_ref, "role": "support"}],
+            },
+            ("targets", 0, "role"),
+        ),
+        ("NoteUpdate", {"targets": [{**entity_ref, "role": "x"}]}, ("targets", 0, "role")),
+        (
+            "DatasetCreate",
+            {
+                "project_id": project_id,
+                "primary_question_id": question_id,
+                "commit_manifest": {
+                    "files": [{"path": "a.nwb", "checksum": "c1", "sizeBytes": 5}],
+                },
+            },
+            ("commit_manifest", "files", 0, "sizeBytes"),
+        ),
+        (
+            "DatasetCreate",
+            {
+                "project_id": project_id,
+                "primary_question_id": question_id,
+                "commit_manifest": {"files": [], "noteIds": []},
+            },
+            ("commit_manifest", "noteIds"),
+        ),
+        (
+            "DatasetUpdate",
+            {"commit_manifest": {"external_artifacts": [{**_ARTIFACT, "hash": "x"}]}},
+            ("commit_manifest", "external_artifacts", 0, "hash"),
+        ),
+        (
+            "DatasetUpdate",
+            {"question_links": [{"question_id": question_id, "role": "primary", "outcome": "x"}]},
+            ("question_links", 0, "outcome"),
+        ),
+        (
+            "SessionDatasetPromotionRequest",
+            {
+                "primary_question_id": question_id,
+                "commit_manifest": {"bogus": 1},
+            },
+            ("commit_manifest", "bogus"),
+        ),
+        (
+            "AnalysisCreate",
+            {
+                "project_id": project_id,
+                "dataset_ids": [str(uuid4())],
+                "method_hash": "m",
+                "code_version": "v",
+                "external_artifacts": [{**_ARTIFACT, "bogus": 1}],
+            },
+            ("external_artifacts", 0, "bogus"),
+        ),
+        (
+            "ClaimCreate",
+            {
+                "project_id": project_id,
+                "statement": "s",
+                "confidence": 5,
+                "external_citations": [{**_ARTIFACT, "bogus": 1}],
+            },
+            ("external_citations", 0, "bogus"),
+        ),
+        (
+            "AnalysisCommitRequest",
+            {"claims": [{"statement": "s", "confidence": 5, "falsifcation_criteria": "typo"}]},
+            ("claims", 0, "falsifcation_criteria"),
+        ),
+        (
+            "AnalysisCommitRequest",
+            {"claims": [{"statement": "s", "confidence": 5, "external_citations": [
+                {**_ARTIFACT, "bogus": 1}
+            ]}]},
+            ("claims", 0, "external_citations", 0, "bogus"),
+        ),
+        (
+            "AnalysisCommitRequest",
+            {"visualizations": [{"viz_type": "line", "file_path": "f.png", "title": "t"}]},
+            ("visualizations", 0, "title"),
+        ),
+        (
+            "ExplorationNodeUpdate",
+            {"evidence_refs": [{**entity_ref, "note": "x"}]},
+            ("evidence_refs", 0, "note"),
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("schema_name", "payload", "extra_loc"),
+    _nested_extra_cases(),
+    ids=lambda value: value if isinstance(value, str) else None,
+)
+def test_nested_request_objects_reject_unknown_keys(
+    schema_name: str,
+    payload: dict[str, object],
+    extra_loc: tuple[object, ...],
+) -> None:
+    with pytest.raises(ValidationError) as excinfo:
+        getattr(schemas, schema_name).model_validate(payload)
+
+    # PATCH fields typed ``X | SkipJsonSchema[None]`` are unions, so pydantic
+    # also reports the rejected ``none`` branch and tags locs with the branch;
+    # only the extra-key error carries the nested path.
+    forbidden = [
+        tuple(part for part in error["loc"] if not (isinstance(part, str) and "[" in part))
+        for error in excinfo.value.errors()
+        if error["type"] == "extra_forbidden"
+    ]
+    assert forbidden == [extra_loc]
+    assert {error["type"] for error in excinfo.value.errors()} <= {
+        "extra_forbidden",
+        "none_required",
+    }
+
+
+def test_nested_request_objects_still_validate_into_domain_models() -> None:
+    question_id = uuid4()
+    update = schemas.DatasetUpdate.model_validate(
+        {
+            "commit_manifest": {
+                "files": [{"path": "a.nwb", "checksum": "c1"}],
+                "external_artifacts": [_ARTIFACT],
+            },
+            "question_links": [{"question_id": str(question_id), "role": "primary"}],
+        }
+    )
+    assert type(update.commit_manifest) is DatasetCommitManifestInput
+    assert type(update.commit_manifest.files[0]) is DatasetFile
+    assert update.commit_manifest.files[0].model_fields_set == {"path", "checksum"}
+    assert type(update.commit_manifest.external_artifacts[0]) is ExternalArtifactReference
+    assert update.question_links == [QuestionLink(question_id=question_id, role="primary")]
+
+    commit = schemas.AnalysisCommitRequest.model_validate(
+        {
+            "claims": [{"statement": "s", "confidence": 5, "falsification_criteria": "c"}],
+            "visualizations": [{"viz_type": "line", "file_path": "f.png"}],
+        }
+    )
+    assert type(commit.claims[0]) is ClaimInput
+    assert commit.claims[0].falsification_criteria == "c"
+    assert type(commit.visualizations[0]) is VisualizationInput
+
+    # Python callers may keep passing domain instances.
+    target = EntityRef(entity_type="claim", entity_id=uuid4())
+    note = NoteCreate(project_id=uuid4(), raw_content="x", targets=[target])
+    assert note.targets == [target]
+    assert type(note.targets[0]) is EntityRef
+
+
+def test_nested_request_objects_advertise_closed_json_schemas() -> None:
+    definitions = schemas.DatasetCreate.model_json_schema()["$defs"]
+
+    closed = {
+        name
+        for name, definition in definitions.items()
+        if definition.get("additionalProperties") is False
+    }
+    assert {"DatasetCommitManifestInputRequest", "DatasetFileRequest"} <= closed
+    assert "ExternalArtifactReferenceRequest" in closed
+
+
+def test_http_note_target_with_misspelled_key_is_rejected(
+    client,
+    admin_auth_headers,
+) -> None:
+    project = client.post("/projects", json={"name": "Nested keys"}, headers=admin_auth_headers)
+    project_id = project.json()["data"]["project_id"]
+
+    response = client.post(
+        "/notes",
+        json={
+            "project_id": project_id,
+            "raw_content": "Pointing at the project",
+            "targets": [
+                {"entity_type": "project", "entity_id": project_id, "entityRole": "x"}
+            ],
+        },
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 422
+    issues = response.json()["error"]["issues"]
+    assert [issue["field"] for issue in issues] == ["targets.0.entityRole"]
