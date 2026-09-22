@@ -126,7 +126,7 @@ def build_auth_router(
                 token_service=token_service,
             )
             if actor.role != Role.ADMIN:
-                raise AuthError("Public viewer registration is disabled.")
+                raise PermissionDeniedError("Public viewer registration is disabled.")
         if not payload.invite_token:
             user = auth_service.register_user(
                 username=username,

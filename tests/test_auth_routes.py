@@ -1140,10 +1140,30 @@ def test_public_viewer_registration_can_be_disabled(monkeypatch, tmp_path):
             json={"username": "viewer-1", "password": "secret"},
         )
         assert denied.status_code == 401
+        assert denied.json()["error"]["code"] == "auth_error"
         assert "disabled" in denied.json()["error"]["message"]
 
         _seed_admin(client)
         admin_token = _login(client, "root", "secret")
+        _seed_admin(client, username="plain-editor", password="secret")
+        client.app.state.auth_service.update_user(
+            client.app.state.auth_service.get_user("plain-editor").user_id,
+            role=Role.EDITOR,
+        )
+        editor_token = _login(client, "plain-editor", "secret")
+        # A valid non-admin credential is not rejected; it lacks permission.
+        denied_editor = client.post(
+            "/auth/register",
+            json={"username": "viewer-3", "password": "secret"},
+            headers=_auth_headers(editor_token),
+        )
+        assert denied_editor.status_code == 403, denied_editor.text
+        assert denied_editor.json()["error"] == {
+            "code": "forbidden",
+            "message": "Public viewer registration is disabled.",
+            "issues": None,
+        }
+
         created_by_admin = client.post(
             "/auth/register",
             json={"username": "viewer-2", "password": "secret"},
