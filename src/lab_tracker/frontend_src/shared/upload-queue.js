@@ -245,7 +245,12 @@ function createUploadQueue({
     return { ...item, token: "", quarantined: true };
   }
 
-  async function drainOnce({ token = "", ownerId = "" } = {}) {
+  async function drainOnce({ token = "", ownerId = "", authEnabled = true } = {}) {
+    if (typeof authEnabled !== "boolean") {
+      throw new TypeError(
+        `drain requires a boolean authEnabled flag; received ${typeof authEnabled}.`
+      );
+    }
     const items = await adapter.list();
     const results = {
       dropped: [],
@@ -263,8 +268,10 @@ function createUploadQueue({
         continue;
       }
       // No active session identity -> nothing may drain. This closes the
-      // post-logout path: a blanked token/owner sends no queued job.
-      if (!token || !ownerId) {
+      // post-logout path: a blanked token/owner sends no queued job. When the
+      // server reports auth disabled there is no bearer token to hold, so the
+      // owner identity reported by /auth/me alone authorises the drain.
+      if (!ownerId || (authEnabled && !token)) {
         results.stillQueued.push(queuedItem);
         continue;
       }
@@ -296,8 +303,9 @@ function createUploadQueue({
         }
         payload.append(key, value);
       }
-      // Only ever the live session token — never a value persisted with the job.
-      const headers = token ? { Authorization: `Bearer ${token}` } : {};
+      // Only ever the live session token — never a value persisted with the job,
+      // and never any token when the server reports auth disabled.
+      const headers = authEnabled ? { Authorization: `Bearer ${token}` } : {};
       const endpoint = queuedItem.endpoint || QUICK_CAPTURE_PATH;
       let response;
       try {

@@ -44,6 +44,7 @@ function clearShareTargetStatus() {
 function useMobileCapture({
   token,
   ownerId = "",
+  authEnabled = true,
   canWrite,
   selectedProjectId,
   questions,
@@ -180,7 +181,7 @@ function useMobileCapture({
             : `${result.migrated} shared captures imported.`
         );
         return queue
-          .drain({ token, ownerId })
+          .drain({ token, ownerId, authEnabled })
           .then((drainResult) => {
             if (drainResult.dropped.length > 0) {
               setFlash("", droppedUploadsMessage(drainResult.dropped));
@@ -196,7 +197,7 @@ function useMobileCapture({
     return () => {
       canceled = true;
     };
-  }, [selectedProjectId, token, ownerId, setFlash]);
+  }, [selectedProjectId, token, ownerId, authEnabled, setFlash]);
 
   function currentTargets() {
     return buildTargets({

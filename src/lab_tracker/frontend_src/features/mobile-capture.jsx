@@ -10,6 +10,7 @@ import { readCaptureLaunchContext } from "./mobile-capture/capture-helpers.js";
 function MobileCaptureCard({
   token,
   ownerId = "",
+  authEnabled = true,
   canWrite,
   projects,
   selectedProjectId,
@@ -31,6 +32,7 @@ function MobileCaptureCard({
   const capture = useMobileCapture({
     token,
     ownerId,
+    authEnabled,
     canWrite,
     selectedProjectId,
     questions,

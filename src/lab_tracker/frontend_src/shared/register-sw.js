@@ -54,15 +54,21 @@ function defaultSession() {
   // Boot-time default: a stored token but no proven owner identity. Because the
   // queue only drains under a session with a matching ownerId, a boot drain with
   // no owner is a safe no-op until the app supplies { token, ownerId }.
-  return { token: storedToken(), ownerId: "" };
+  return { token: storedToken(), ownerId: "", authEnabled: true };
 }
 
 function readSession(getSession) {
   try {
     const session = getSession?.() || {};
-    return { token: session.token || "", ownerId: session.ownerId || "" };
+    return {
+      token: session.token || "",
+      ownerId: session.ownerId || "",
+      // Only an explicit `false` (the server reported auth disabled) lifts the
+      // live-token requirement; anything else keeps the auth-enabled guard.
+      authEnabled: session.authEnabled !== false,
+    };
   } catch {
-    return { token: "", ownerId: "" };
+    return { token: "", ownerId: "", authEnabled: true };
   }
 }
 
