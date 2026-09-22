@@ -24,44 +24,49 @@ from lab_tracker.models import (
 from lab_tracker.patching import provided_fields
 from lab_tracker.schemas import (
     Envelope,
+    GraphBatchSummary,
     GraphDraftBatchRunRequest,
     GraphDraftBatchSettingsUpdate,
     ListEnvelope,
 )
+from lab_tracker.services.graph_draft_batch_policy import BatchReviewQuery, BatchRunQuery
 
 from .graph_draft_clients import (
     draft_client_factory_from_request as _draft_client_factory_from_request,
 )
 from .graph_draft_clients import draft_client_from_request as _draft_client_from_request
-from .graph_drafts import attach_graph_usernames
+from .graph_drafts import attach_graph_usernames, graph_change_set_summary
 from .shared import (
+    accessible_project_ids_from_request,
     actor_from_request,
     api_from_request,
     ensure_project_contributor,
     ensure_project_owner,
     ensure_project_read,
-    filter_project_scoped_items,
     list_response,
-    paginate,
     record_usage_view,
     validate_pagination,
 )
 
-_PENDING_BATCH_STATUSES = {
-    GraphChangeSetStatus.READY,
-    GraphChangeSetStatus.SUBMITTED,
-    GraphChangeSetStatus.CHANGES_REQUESTED,
-}
-_PERSONAL_ACTION_STATUSES = {
-    GraphChangeSetStatus.READY,
-    GraphChangeSetStatus.CHANGES_REQUESTED,
-}
+_PENDING_BATCH_STATUSES = frozenset(
+    {
+        GraphChangeSetStatus.READY,
+        GraphChangeSetStatus.SUBMITTED,
+        GraphChangeSetStatus.CHANGES_REQUESTED,
+    }
+)
+_PERSONAL_ACTION_STATUSES = frozenset(
+    {
+        GraphChangeSetStatus.READY,
+        GraphChangeSetStatus.CHANGES_REQUESTED,
+    }
+)
 
 
 def build_graph_batches_router(api: LabTrackerAPI) -> APIRouter:
     router = APIRouter()
 
-    @router.get("/batches", response_model=ListEnvelope[GraphChangeSet])
+    @router.get("/batches", response_model=ListEnvelope[GraphBatchSummary])
     def list_batches(
         request: Request,
         project_id: UUID | None = None,
@@ -93,52 +98,33 @@ def build_graph_batches_router(api: LabTrackerAPI) -> APIRouter:
         elif project_id is not None:
             ensure_project_read(request, project_id)
         effective_status = GraphChangeSetStatus.SUBMITTED if needs_commit else status
-        change_sets = api_from_request(request, api).list_batch_graph_drafts(
-            project_id=project_id,
-            status=effective_status,
+        if effective_status is not None:
+            statuses = frozenset({effective_status})
+        elif mine or unassigned_oversight:
+            statuses = _PERSONAL_ACTION_STATUSES
+        else:
+            statuses = _PENDING_BATCH_STATUSES
+        request_api = api_from_request(request, api)
+        project_scope = (
+            _owner_project_scope(request, request_api, project_id)
+            if needs_commit or unassigned_oversight
+            else _read_project_scope(request, project_id)
         )
-        if effective_status is None:
-            default_statuses = (
-                _PERSONAL_ACTION_STATUSES
-                if mine or unassigned_oversight
-                else _PENDING_BATCH_STATUSES
+        change_sets, total = request_api.query_batch_graph_drafts(
+            BatchReviewQuery(
+                statuses=statuses,
+                project_ids=project_scope,
+                assigned_to_user_id=_personal_queue_user_id(request, mine=mine),
+                unassigned_only=unassigned_oversight,
+                limit=limit,
+                offset=offset,
             )
-            change_sets = [
-                change_set for change_set in change_sets if change_set.status in default_statuses
-            ]
-        visible = filter_project_scoped_items(request, change_sets)
-        if mine and getattr(request.app.state, "auth_enabled", True):
-            actor = actor_from_request(request)
-            visible = [
-                change_set for change_set in visible if _assigned_to_actor(change_set, actor)
-            ]
-        if needs_commit:
-            actor = actor_from_request(request)
-            request_api = api_from_request(request, api)
-            visible = [
-                change_set
-                for change_set in visible
-                if request_api.project_membership_role(change_set.project_id, actor)
-                == ProjectMembershipRole.OWNER
-            ]
-        if unassigned_oversight:
-            actor = actor_from_request(request)
-            request_api = api_from_request(request, api)
-            owner_visible = [
-                change_set
-                for change_set in visible
-                if request_api.project_membership_role(change_set.project_id, actor)
-                == ProjectMembershipRole.OWNER
-            ]
-            visible = [
-                change_set
-                for change_set in owner_visible
-                if change_set.review_assignee_user_id is None
-                and change_set.review_assignee is None
-            ]
-        items, total = paginate(visible, limit, offset)
+        )
         return list_response(
-            [attach_graph_usernames(request, item) for item in items],
+            [
+                _batch_summary(attach_graph_usernames(request, change_set))
+                for change_set in change_sets
+            ],
             limit=limit,
             offset=offset,
             total=total,
@@ -266,16 +252,16 @@ def build_graph_batches_router(api: LabTrackerAPI) -> APIRouter:
         validate_pagination(limit, offset)
         if project_id is not None:
             ensure_project_read(request, project_id)
-        runs = api_from_request(request, api).list_graph_draft_batch_runs(
-            project_id=project_id,
-            status=status,
+        runs, total = api_from_request(request, api).query_graph_draft_batch_runs(
+            BatchRunQuery(
+                project_ids=_read_project_scope(request, project_id),
+                status=status,
+                assigned_to_user_id=_personal_queue_user_id(request, mine=mine),
+                limit=limit,
+                offset=offset,
+            )
         )
-        visible = filter_project_scoped_items(request, runs)
-        if mine and getattr(request.app.state, "auth_enabled", True):
-            actor = actor_from_request(request)
-            visible = [run for run in visible if _assigned_to_actor(run, actor)]
-        items, total = paginate(visible, limit, offset)
-        return list_response(items, limit=limit, offset=offset, total=total)
+        return list_response(runs, limit=limit, offset=offset, total=total)
 
     @router.post(
         "/batches/run-now",
@@ -333,18 +319,54 @@ def build_graph_batches_router(api: LabTrackerAPI) -> APIRouter:
     return router
 
 
-def _assigned_to_actor(
-    item: GraphChangeSet | GraphDraftBatchRun,
-    actor: AuthContext,
-) -> bool:
-    if item.review_assignee_user_id is not None:
-        return item.review_assignee_user_id == actor.user_id
-    actor_id = str(actor.user_id)
-    if item.review_assignee is not None:
-        return item.review_assignee == actor_id
-    # Rows with no assignee are legacy project-oversight work. Creator
-    # attribution (often SYSTEM/admin for scheduled drafts) is not assignment.
-    return False
+def _read_project_scope(
+    request: Request,
+    project_id: UUID | None,
+) -> frozenset[UUID] | None:
+    """Projects a list view may show: the checked project, or every readable one.
+
+    ``None`` means unrestricted (global readers such as admins).
+    """
+
+    if project_id is not None:
+        return frozenset({project_id})
+    accessible = accessible_project_ids_from_request(request)
+    return None if accessible is None else frozenset(accessible)
+
+
+def _owner_project_scope(
+    request: Request,
+    request_api: LabTrackerAPI,
+    project_id: UUID | None,
+) -> frozenset[UUID] | None:
+    """Projects the actor owns, bounded by project count rather than batch history."""
+
+    actor = actor_from_request(request)
+    candidates = _read_project_scope(request, project_id)
+    if candidates is None:
+        # Only global readers see every project, and they own them all.
+        return None
+    return frozenset(
+        candidate
+        for candidate in candidates
+        if request_api.project_membership_role(candidate, actor)
+        == ProjectMembershipRole.OWNER
+    )
+
+
+def _personal_queue_user_id(request: Request, *, mine: bool) -> UUID | None:
+    # Auth-disabled deployments have one reviewer bucket, so "mine" is the
+    # whole (legacy) queue rather than an assignee filter.
+    if not mine or not getattr(request.app.state, "auth_enabled", True):
+        return None
+    return actor_from_request(request).user_id
+
+
+def _batch_summary(change_set: GraphChangeSet) -> GraphBatchSummary:
+    return GraphBatchSummary(
+        **graph_change_set_summary(change_set).model_dump(),
+        meeting_note_count=change_set.meeting_note_count,
+    )
 
 
 def _personal_settings_user_id(

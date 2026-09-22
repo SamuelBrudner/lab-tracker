@@ -12,22 +12,20 @@ from lab_tracker.graph_drafting import GraphDraftClient
 from lab_tracker.models import (
     GraphChangeSet,
     GraphDraftBatchRun,
-    GraphDraftBatchRunStatus,
     GraphDraftBatchSettings,
     Note,
     Project,
 )
+from lab_tracker.services.graph_draft_batch_policy import BatchRunQuery
 
 
 class SchedulingRecords(Protocol):
     def get_graph_draft_batch_run(self, run_id: UUID) -> GraphDraftBatchRun: ...
 
-    def list_graph_draft_batch_runs(
+    def query_graph_draft_batch_runs(
         self,
-        *,
-        project_id: UUID | None = None,
-        status: GraphDraftBatchRunStatus | None = None,
-    ) -> list[GraphDraftBatchRun]: ...
+        query: BatchRunQuery,
+    ) -> tuple[list[GraphDraftBatchRun], int]: ...
 
 
 class BatchDraftGenerator(Protocol):

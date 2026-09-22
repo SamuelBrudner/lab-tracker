@@ -10,10 +10,12 @@ from uuid import UUID
 
 from sqlalchemy import and_, delete, func, or_, select, text, update
 from sqlalchemy.orm import Session as OrmSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from lab_tracker.db_models import (
     GraphChangeOperationModel,
     GraphChangeSetModel,
+    GraphDraftBatchRunModel,
     NoteModel,
     UserModel,
 )
@@ -57,6 +59,26 @@ def _uuid(value: str | None) -> UUID | None:
 
 def _uuid_str(value: UUID | None) -> str | None:
     return str(value) if value is not None else None
+
+
+def review_assignee_matches(
+    model: type[GraphChangeSetModel] | type[GraphDraftBatchRunModel],
+    user_id: UUID,
+) -> ColumnElement[bool]:
+    """SQL form of "assigned to this user" for batch reviews and their runs.
+
+    ``review_assignee_user_id`` wins when set; legacy rows carry only the
+    string ``review_assignee``. Unassigned rows are project oversight work and
+    never match.
+    """
+
+    return or_(
+        model.review_assignee_user_id == str(user_id),
+        and_(
+            model.review_assignee_user_id.is_(None),
+            model.review_assignee == str(user_id),
+        ),
+    )
 
 
 def _dict(value: Any) -> dict[str, Any]:
@@ -728,6 +750,9 @@ class SQLAlchemyGraphChangeSetRepository(EntityRepository[GraphChangeSet]):
         draft_mode: str | None = None,
         purpose: str | None = None,
         batch_key: str | None = None,
+        statuses: set[str] | None = None,
+        assigned_to_user_id: UUID | None = None,
+        unassigned_only: bool = False,
         limit: int | None = None,
         offset: int = 0,
         include_operations: bool = True,
@@ -735,8 +760,27 @@ class SQLAlchemyGraphChangeSetRepository(EntityRepository[GraphChangeSet]):
         self._session.flush()
         if project_ids is not None and not project_ids:
             return [], 0
+        if statuses is not None and not statuses:
+            return [], 0
+        if status is not None and statuses is not None:
+            raise ValueError("Pass either status or statuses, not both.")
+        if assigned_to_user_id is not None and unassigned_only:
+            raise ValueError("assigned_to_user_id and unassigned_only are exclusive.")
         stmt = select(GraphChangeSetModel)
         count_stmt = select(GraphChangeSetModel.change_set_id)
+        review_filters = []
+        if statuses is not None:
+            review_filters.append(GraphChangeSetModel.status.in_(sorted(statuses)))
+        if assigned_to_user_id is not None:
+            review_filters.append(
+                review_assignee_matches(GraphChangeSetModel, assigned_to_user_id)
+            )
+        if unassigned_only:
+            review_filters.append(GraphChangeSetModel.review_assignee_user_id.is_(None))
+            review_filters.append(GraphChangeSetModel.review_assignee.is_(None))
+        if review_filters:
+            stmt = stmt.where(*review_filters)
+            count_stmt = count_stmt.where(*review_filters)
         if project_id is not None:
             stmt = stmt.where(GraphChangeSetModel.project_id == str(project_id))
             count_stmt = count_stmt.where(GraphChangeSetModel.project_id == str(project_id))

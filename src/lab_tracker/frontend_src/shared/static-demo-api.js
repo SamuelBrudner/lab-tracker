@@ -825,7 +825,16 @@ function demoPayload(url) {
       (status && status !== GRAPH_DRAFT.status) ||
       needsCommit
         ? []
-        : [GRAPH_DRAFT];
+        : [
+            // List endpoints return summaries: a count instead of operations.
+            {
+              ...GRAPH_DRAFT,
+              context_packet: undefined,
+              meeting_note_count: 0,
+              operation_count: GRAPH_DRAFT.operations.length,
+              operations: undefined,
+            },
+          ];
     return listResponse(drafts, searchParams);
   }
   if (pathname === "/batches/runs") {

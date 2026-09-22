@@ -15,13 +15,13 @@ from lab_tracker.models import (
     GraphChangeSet,
     GraphChangeSetStatus,
     GraphDraftBatchRun,
-    GraphDraftBatchRunStatus,
     GraphDraftMode,
     GraphDraftPurpose,
     Note,
     Question,
 )
 from lab_tracker.services.base import BaseService, ServiceContext
+from lab_tracker.services.graph_draft_batch_policy import BatchReviewQuery, BatchRunQuery
 
 
 class GraphDraftReadAuthorization(Protocol):
@@ -223,19 +223,16 @@ class GraphDraftRecords(BaseService):
             raise NotFoundError("Graph draft batch run does not exist.")
         return run
 
-    def list_graph_draft_batch_runs(
+    def query_graph_draft_batch_runs(
         self,
-        *,
-        project_id: UUID | None = None,
-        status: GraphDraftBatchRunStatus | None = None,
-    ) -> list[GraphDraftBatchRun]:
-        return self.query_from_repository(
-            loader=lambda repository: repository.query_graph_draft_batch_runs(
-                project_id=project_id,
-                status=status.value if status is not None else None,
-                limit=None,
-                offset=0,
-            ),
+        query: BatchRunQuery,
+    ) -> tuple[list[GraphDraftBatchRun], int]:
+        return self.repository.query_graph_draft_batch_runs(
+            project_ids=None if query.project_ids is None else set(query.project_ids),
+            status=query.status.value if query.status is not None else None,
+            assigned_to_user_id=query.assigned_to_user_id,
+            limit=query.limit,
+            offset=query.offset,
         )
 
     def get_graph_change_set(self, change_set_id: UUID) -> GraphChangeSet:
@@ -309,14 +306,19 @@ class GraphDraftRecords(BaseService):
             include_operations=include_operations,
         )
 
-    def list_batch_graph_drafts(
+    def query_batch_graph_drafts(
         self,
-        *,
-        project_id: UUID | None = None,
-        status: GraphChangeSetStatus | None = None,
-    ) -> list[GraphChangeSet]:
-        return self.list_graph_change_sets(
-            project_id=project_id,
-            status=status,
-            draft_mode=GraphDraftMode.GRAPH_BATCH,
+        query: BatchReviewQuery,
+    ) -> tuple[list[GraphChangeSet], int]:
+        """Page Daily Review batches in SQL, without operations, for list views."""
+
+        return self.repository.query_graph_change_sets(
+            project_ids=None if query.project_ids is None else set(query.project_ids),
+            draft_mode=GraphDraftMode.GRAPH_BATCH.value,
+            statuses={status.value for status in query.statuses},
+            assigned_to_user_id=query.assigned_to_user_id,
+            unassigned_only=query.unassigned_only,
+            limit=query.limit,
+            offset=query.offset,
+            include_operations=False,
         )

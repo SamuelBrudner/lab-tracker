@@ -993,6 +993,12 @@ class GraphChangeSetSummary(BaseModel):
     committed_by_username: str | None = None
 
 
+class GraphBatchSummary(GraphChangeSetSummary):
+    """Daily Review list item: a change-set summary plus its meeting nudge count."""
+
+    meeting_note_count: int = 0
+
+
 class GraphDraftListFilters(BaseModel):
     project_id: UUID | None = None
     status: GraphChangeSetStatus | None = None

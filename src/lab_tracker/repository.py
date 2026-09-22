@@ -1096,11 +1096,18 @@ class LabTrackerRepository(Protocol):
         draft_mode: str | None = None,
         purpose: str | None = None,
         batch_key: str | None = None,
+        statuses: set[str] | None = None,
+        assigned_to_user_id: UUID | None = None,
+        unassigned_only: bool = False,
         limit: int | None = None,
         offset: int = 0,
         include_operations: bool = True,
     ) -> tuple[list[GraphChangeSet], int]:
-        """Query graph draft change sets with filters and pagination."""
+        """Query graph draft change sets with filters and pagination.
+
+        ``statuses`` matches any listed status; ``assigned_to_user_id`` and
+        ``unassigned_only`` select a reviewer's queue or unassigned oversight.
+        """
 
     def claim_graph_change_set_for_commit(
         self,
@@ -1202,7 +1209,9 @@ class LabTrackerRepository(Protocol):
         self,
         *,
         project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
         status: str | None = None,
+        assigned_to_user_id: UUID | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> tuple[list[GraphDraftBatchRun], int]:

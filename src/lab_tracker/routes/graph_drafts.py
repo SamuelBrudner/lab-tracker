@@ -379,3 +379,4 @@ def _graph_change_set_summary(change_set: GraphChangeSet) -> GraphChangeSetSumma
 
 
 attach_graph_usernames = _attach_graph_usernames
+graph_change_set_summary = _graph_change_set_summary

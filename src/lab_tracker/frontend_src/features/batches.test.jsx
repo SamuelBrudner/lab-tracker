@@ -98,7 +98,7 @@ describe("BatchReviewPage", () => {
                         {
                           change_set_id: `ready-${projectId}`,
                           created_at: "2026-07-16T12:00:00Z",
-                          operations: [],
+                          operation_count: 0,
                           source_note_count: 1,
                           status: "ready",
                           summary: `Ready in ${projectId}`,

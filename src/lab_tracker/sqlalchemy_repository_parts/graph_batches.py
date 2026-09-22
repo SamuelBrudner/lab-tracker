@@ -27,7 +27,8 @@ from lab_tracker.models import (
 from lab_tracker.repository import EntityRepository, ReviewEmailOutboxRepository
 from lab_tracker.sqlalchemy_mapper_parts.common import as_utc
 
-from .common import apply_pagination, count_from_statement
+from .common import apply_pagination, count_from_statement, uuid_values
+from .graph_drafts import review_assignee_matches
 
 
 def _uuid(value: str | None) -> UUID | None:
@@ -688,13 +689,25 @@ class SQLAlchemyGraphDraftBatchRunRepository(EntityRepository[GraphDraftBatchRun
         self,
         *,
         project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
         status: str | None = None,
+        assigned_to_user_id: UUID | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> tuple[list[GraphDraftBatchRun], int]:
         self._session.flush()
+        if project_ids is not None and not project_ids:
+            return [], 0
         stmt = select(GraphDraftBatchRunModel)
         count_stmt = select(GraphDraftBatchRunModel.run_id)
+        if project_ids is not None:
+            project_values = uuid_values(project_ids)
+            stmt = stmt.where(GraphDraftBatchRunModel.project_id.in_(project_values))
+            count_stmt = count_stmt.where(GraphDraftBatchRunModel.project_id.in_(project_values))
+        if assigned_to_user_id is not None:
+            assigned = review_assignee_matches(GraphDraftBatchRunModel, assigned_to_user_id)
+            stmt = stmt.where(assigned)
+            count_stmt = count_stmt.where(assigned)
         if project_id is not None:
             stmt = stmt.where(GraphDraftBatchRunModel.project_id == str(project_id))
             count_stmt = count_stmt.where(GraphDraftBatchRunModel.project_id == str(project_id))

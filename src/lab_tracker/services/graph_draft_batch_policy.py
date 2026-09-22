@@ -17,6 +17,7 @@ from lab_tracker.member_onboarding import (
 )
 from lab_tracker.models import (
     GraphChangeSetStatus,
+    GraphDraftBatchRunStatus,
     GraphDraftBatchSettings,
     Note,
     NoteStatus,
@@ -29,6 +30,33 @@ from lab_tracker.services.shared import actor_user_id
 class BatchReviewer:
     reviewer: str | None
     reviewer_user_id: UUID | None
+
+
+@dataclass(frozen=True)
+class BatchReviewQuery:
+    """One SQL-paged Daily Review list view (never loads operations).
+
+    ``project_ids=None`` means unrestricted (global readers). A reviewer queue
+    sets ``assigned_to_user_id``; owner oversight sets ``unassigned_only``.
+    """
+
+    statuses: frozenset[GraphChangeSetStatus]
+    project_ids: frozenset[UUID] | None = None
+    assigned_to_user_id: UUID | None = None
+    unassigned_only: bool = False
+    limit: int | None = None
+    offset: int = 0
+
+
+@dataclass(frozen=True)
+class BatchRunQuery:
+    """One SQL-paged batch-run history view; ``project_ids=None`` is unrestricted."""
+
+    project_ids: frozenset[UUID] | None = None
+    status: GraphDraftBatchRunStatus | None = None
+    assigned_to_user_id: UUID | None = None
+    limit: int | None = None
+    offset: int = 0
 
 
 BATCH_NOTE_LIMIT = 100

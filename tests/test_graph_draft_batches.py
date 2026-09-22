@@ -9,6 +9,7 @@ from threading import Event
 from typing import Any
 from uuid import UUID, uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -2210,3 +2211,86 @@ def test_revise_rejects_daily_review_batch_drafts_explicitly(
     draft = client.get(f"/batches/{run['change_set_id']}", headers=admin_auth_headers)
     assert draft.json()["data"]["status"] == "ready"
     assert len(draft.json()["data"]["operations"]) == 1
+
+
+def test_batch_lists_paginate_in_sql_without_operations_or_context_packets(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """List views must cost O(page), not O(batch history across all projects)."""
+    from lab_tracker.sqlalchemy_repository_parts.graph_batches import (
+        SQLAlchemyGraphDraftBatchRunRepository,
+    )
+    from lab_tracker.sqlalchemy_repository_parts.graph_drafts import (
+        SQLAlchemyGraphChangeSetRepository,
+    )
+
+    project_ids = []
+    for index in range(3):
+        project_id = _project(client, admin_auth_headers)
+        project_ids.append(project_id)
+        _note(client, admin_auth_headers, project_id, f"Observation {index}")
+        client.app.state.graph_draft_client_factory = (
+            lambda settings, project_id=project_id: FakeBatchDraftClient(
+                _batch_patch(project_id)
+            )
+        )
+        run = client.post(
+            "/batches/run-now",
+            json={"project_id": project_id},
+            headers=admin_auth_headers,
+        )
+        assert run.status_code == 201, run.text
+
+    hydrated_rows: list[int] = []
+    operation_loads: list[int] = []
+    run_query_limits: list[int | None] = []
+    original_from_rows = SQLAlchemyGraphChangeSetRepository._from_rows
+    original_operations_for = SQLAlchemyGraphChangeSetRepository._operations_for
+    original_run_query = SQLAlchemyGraphDraftBatchRunRepository.query
+
+    def spy_from_rows(self, rows, **kwargs):  # noqa: ANN001, ANN003, ANN202
+        hydrated_rows.append(len(rows))
+        return original_from_rows(self, rows, **kwargs)
+
+    def spy_operations_for(self, change_set_ids):  # noqa: ANN001, ANN202
+        operation_loads.append(len(change_set_ids))
+        return original_operations_for(self, change_set_ids)
+
+    def spy_run_query(self, **kwargs):  # noqa: ANN001, ANN003, ANN202
+        run_query_limits.append(kwargs.get("limit"))
+        return original_run_query(self, **kwargs)
+
+    monkeypatch.setattr(SQLAlchemyGraphChangeSetRepository, "_from_rows", spy_from_rows)
+    monkeypatch.setattr(
+        SQLAlchemyGraphChangeSetRepository, "_operations_for", spy_operations_for
+    )
+    monkeypatch.setattr(SQLAlchemyGraphDraftBatchRunRepository, "query", spy_run_query)
+
+    listed = client.get("/batches?limit=2", headers=admin_auth_headers)
+
+    assert listed.status_code == 200, listed.text
+    body = listed.json()
+    assert body["meta"]["total"] == 3
+    assert len(body["data"]) == 2
+    for item in body["data"]:
+        assert "operations" not in item
+        assert "context_packet" not in item
+        assert item["operation_count"] == 1
+        assert item["meeting_note_count"] == 0
+        assert item["draft_mode"] == "graph_batch"
+    assert hydrated_rows and max(hydrated_rows) <= 2
+    assert operation_loads == []
+
+    scoped = client.get(
+        f"/batches?project_id={project_ids[1]}", headers=admin_auth_headers
+    ).json()
+    assert [item["project_id"] for item in scoped["data"]] == [project_ids[1]]
+    assert scoped["meta"]["total"] == 1
+
+    runs = client.get("/batches/runs?limit=1&offset=1", headers=admin_auth_headers)
+    assert runs.status_code == 200, runs.text
+    assert runs.json()["meta"]["total"] == 3
+    assert len(runs.json()["data"]) == 1
+    assert run_query_limits == [1]

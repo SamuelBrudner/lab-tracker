@@ -491,16 +491,11 @@ class BatchSchedulingCoordinator(BaseService):
     def get_graph_draft_batch_run(self, run_id: UUID) -> GraphDraftBatchRun:
         return self.records.get_graph_draft_batch_run(run_id)
 
-    def list_graph_draft_batch_runs(
+    def query_graph_draft_batch_runs(
         self,
-        *,
-        project_id: UUID | None = None,
-        status: GraphDraftBatchRunStatus | None = None,
-    ) -> list[GraphDraftBatchRun]:
-        return self.records.list_graph_draft_batch_runs(
-            project_id=project_id,
-            status=status,
-        )
+        query: batch_policy.BatchRunQuery,
+    ) -> tuple[list[GraphDraftBatchRun], int]:
+        return self.records.query_graph_draft_batch_runs(query)
 
     def _fail_batch_run(
         self,
