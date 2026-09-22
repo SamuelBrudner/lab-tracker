@@ -184,3 +184,65 @@ def test_local_note_storage_cleans_temp_file_when_atomic_replace_fails(
         )
 
     assert list(tmp_path.iterdir()) == []
+
+
+class _UnreadableNoteStorage(LocalNoteStorage):
+    """Storage whose volume became unreadable after the asset was written."""
+
+    unreadable = False
+
+    def read(self, storage_id):  # noqa: ANN001, ANN201
+        if self.unreadable:
+            raise PermissionError(13, "Permission denied", str(self._path_for(storage_id)))
+        return super().read(storage_id)
+
+
+class _NeverCalledTranscriber:
+    provider = "fake"
+    transcription_model = "fake-transcribe"
+
+    def transcribe_audio(self, **_kwargs):  # noqa: ANN003, ANN201
+        raise AssertionError("audio must not reach the provider when storage is unreadable")
+
+
+def test_voice_transcription_storage_failure_is_a_server_error_not_a_client_error(tmp_path):
+    storage = _UnreadableNoteStorage(tmp_path)
+    api = repository_backed_api(raw_storage=storage)
+    actor = _actor()
+    project = api.create_project("Unreadable audio", actor=actor)
+    note = api.upload_note_raw(
+        project_id=project.project_id,
+        content=b"RIFF-audio",
+        filename="memo.wav",
+        content_type="audio/wav",
+        actor=actor,
+    )
+    storage.unreadable = True
+
+    # A server-side storage fault must propagate as itself (mapped to HTTP 500
+    # and logged with its traceback), never be relabelled a 422 client error.
+    with pytest.raises(PermissionError):
+        api.transcribe_voice_note(
+            note.note_id,
+            transcription_client=_NeverCalledTranscriber(),
+            actor=actor,
+        )
+
+
+def test_graph_draft_image_storage_failure_is_a_server_error_not_a_client_error(tmp_path):
+    storage = _UnreadableNoteStorage(tmp_path)
+    api = repository_backed_api(raw_storage=storage)
+    actor = _actor()
+    project = api.create_project("Unreadable image", actor=actor)
+    note = api.upload_note_raw(
+        project_id=project.project_id,
+        content=b"\xff\xd8\xff\x00jpeg",
+        filename="board.jpg",
+        content_type="image/jpeg",
+        actor=actor,
+    )
+    storage.unreadable = True
+
+    with pytest.raises(PermissionError):
+        api.build_graph_context_for_note(note.note_id, actor=actor)
+

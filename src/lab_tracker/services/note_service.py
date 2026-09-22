@@ -654,16 +654,15 @@ class NoteService(BaseService):
         if not note.raw_asset.content_type.lower().startswith("audio/"):
             raise ValidationError("Voice transcription only supports audio note uploads.")
         raw_asset = note.raw_asset
+        if self.raw_storage is None:
+            raise ValidationError("Raw storage backend is not configured.")
+        # Any other storage failure (OSError, permissions, a lost volume) is a
+        # server fault: let it propagate so it maps to HTTP 500 and is logged
+        # with its traceback instead of being relabelled a client error.
         try:
-            if self.raw_storage is None:
-                raise ValidationError("Raw storage backend is not configured.")
             audio_bytes = self.raw_storage.read(raw_asset.storage_id)
         except NotFoundError as exc:
             raise NotFoundError("Source audio file is unavailable.") from exc
-        except ValidationError:
-            raise
-        except Exception as exc:
-            raise ValidationError("Source audio file could not be read.") from exc
         transcribe_audio = getattr(transcription_client, "transcribe_audio", None)
         if not callable(transcribe_audio):
             raise ValidationError("Configured transcription client does not support audio.")

@@ -234,10 +234,8 @@ class GraphContextBuilder:
                 raw_asset, image_bytes = self.notes.download_note_raw(image_note.note_id)
             except NotFoundError as exc:
                 raise NotFoundError("Source image file is unavailable.") from exc
-            except ValidationError:
-                raise
-            except Exception as exc:
-                raise ValidationError("Source image file could not be read.") from exc
+            # Other storage failures are server faults and propagate (HTTP 500
+            # with a logged traceback) rather than posing as client errors.
             if not image_bytes:
                 raise ValidationError("Source image file is empty.")
             image_content_type = raw_asset.content_type
