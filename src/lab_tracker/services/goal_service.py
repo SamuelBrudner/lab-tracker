@@ -509,6 +509,13 @@ class GoalService(BaseService):
         holding the same lock for every project its links reach can neither
         link a target whose delete is in flight nor restore a link that such
         a delete just removed.
+
+        Known lock-order gap: a graph draft commit pre-locks its own project
+        before applying operations, so a goal operation in it whose links
+        reach other projects takes those locks after the draft project's,
+        not in global sorted order. On PostgreSQL that can deadlock with a
+        plain goal write over the same projects; the database aborts one
+        side rather than corrupting links.
         """
 
         locked_project_ids = frozenset(project_ids)

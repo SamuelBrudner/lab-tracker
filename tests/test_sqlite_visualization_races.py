@@ -9,6 +9,7 @@ a second request race it through the real HTTP stack.
 from __future__ import annotations
 
 import hashlib
+import time
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from pathlib import Path
@@ -228,3 +229,59 @@ def test_sqlite_conditional_uploads_serialize_and_reject_the_stale_loser(
     assert download.status_code == 200, download.text
     assert download.content == b"first-replacement"
     assert _stored_blob_count(client) == 1
+
+
+def _updated_at(client: TestClient, headers: dict[str, str], viz_id: str) -> str:
+    response = client.get(f"/visualizations/{viz_id}", headers=headers)
+    assert response.status_code == 200, response.text
+    return str(response.json()["data"]["updated_at"])
+
+
+def test_sqlite_write_fence_leaves_noop_patch_updated_at_unchanged(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    headers = admin_auth_headers
+    viz_id = _create_visualization(client, headers)
+    patch = {"caption": "Unchanged caption."}
+    first = client.patch(f"/visualizations/{viz_id}", json=patch, headers=headers)
+    assert first.status_code == 200, first.text
+    before = _updated_at(client, headers, viz_id)
+    time.sleep(0.05)
+
+    repeated = client.patch(f"/visualizations/{viz_id}", json=patch, headers=headers)
+
+    assert repeated.status_code == 200, repeated.text
+    assert _updated_at(client, headers, viz_id) == before
+
+
+def test_sqlite_write_fence_leaves_reused_upload_updated_at_unchanged(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    headers = admin_auth_headers
+    viz_id = _create_visualization(client, headers)
+    content = b"idempotent-figure"
+    data = {
+        "checksum_sha256": hashlib.sha256(content).hexdigest(),
+        "size_bytes": str(len(content)),
+    }
+
+    def upload() -> httpx.Response:
+        return client.post(
+            f"/visualizations/{viz_id}/file",
+            files={"file": ("figure.png", content, "image/png")},
+            data=data,
+            headers=headers,
+        )
+
+    first = upload()
+    assert first.status_code == 201, first.text
+    before = _updated_at(client, headers, viz_id)
+    time.sleep(0.05)
+
+    retried = upload()
+
+    assert retried.status_code == 200, retried.text
+    assert retried.json()["meta"] == {"asset_outcome": "reused"}
+    assert _updated_at(client, headers, viz_id) == before

@@ -57,7 +57,7 @@ def fence_sqlite_visualization_writes(
     SQLite ignores ``FOR UPDATE``, and legacy pysqlite transaction control
     (see ``lab_tracker.db.configure_sqlite_connection``) runs a SELECT outside
     any write transaction, so a "locked" read could go stale before its
-    UPDATE. A no-op UPDATE of the matching rows makes pysqlite begin the write
+    UPDATE. A true no-op UPDATE of the matching rows makes pysqlite begin the write
     transaction and reserve SQLite's single writer slot first (even when no
     row matches), so the following read observes the newest commit and no
     other writer can commit until this transaction ends. Loaded ORM state is
@@ -69,10 +69,19 @@ def fence_sqlite_visualization_writes(
     if session.get_bind().dialect.name != "sqlite":
         return
     session.flush()
+    # Assign every column that has an ``onupdate`` default to itself too;
+    # otherwise SQLAlchemy would add ``updated_at = now()`` and the fence
+    # would change data on every locked read.
+    table = VisualizationModel.__table__
+    self_assignments = {
+        column: column
+        for column in table.columns
+        if column.primary_key or column.onupdate is not None
+    }
     session.execute(
         update(VisualizationModel)
         .where(criterion)
-        .values(viz_id=VisualizationModel.viz_id)
+        .values(self_assignments)
         .execution_options(synchronize_session=False)
     )
     session.expire_all()
