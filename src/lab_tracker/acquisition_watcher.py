@@ -20,6 +20,8 @@ from lab_tracker.models import AcquisitionOutput
 
 _logger = logging.getLogger(__name__)
 
+_DEFAULT_MAX_FAILURE_BACKOFF_SECONDS = 300.0
+
 
 @dataclass(frozen=True)
 class RegistrationFailure:
@@ -69,7 +71,7 @@ class AcquisitionOutputWatcher:
         base_path: str | Path | None = None,
         ignore_hidden: bool = True,
         failure_backoff_seconds: float = 5.0,
-        max_failure_backoff_seconds: float = 300.0,
+        max_failure_backoff_seconds: float | None = None,
         persistent_failure_threshold: int = 5,
     ) -> None:
         self._api = api
@@ -79,7 +81,13 @@ class AcquisitionOutputWatcher:
             raise ValueError("watch_paths must not be empty.")
         if failure_backoff_seconds < 0:
             raise ValueError("failure_backoff_seconds must be 0 or greater.")
-        if max_failure_backoff_seconds < failure_backoff_seconds:
+        if max_failure_backoff_seconds is None:
+            # Default cap; never below the base so callers that predate the cap
+            # and pass a larger base backoff keep working.
+            max_failure_backoff_seconds = max(
+                _DEFAULT_MAX_FAILURE_BACKOFF_SECONDS, failure_backoff_seconds
+            )
+        elif max_failure_backoff_seconds < failure_backoff_seconds:
             raise ValueError(
                 "max_failure_backoff_seconds must be at least failure_backoff_seconds."
             )

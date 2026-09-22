@@ -331,6 +331,53 @@ def test_acquisition_output_watcher_backs_off_exponentially(tmp_path, monkeypatc
     assert watcher.failures[tmp_path / "bad.bin"].retry_after == pytest.approx(clock[0] + 12)
 
 
+def test_acquisition_output_watcher_accepts_base_backoff_above_default_max(tmp_path, monkeypatch):
+    # Callers written before max_failure_backoff_seconds existed may pass a
+    # base backoff above its 300s default; the default cap must follow the base.
+    (tmp_path / "bad.bin").write_text("bad")
+    clock = [1000.0]
+    monkeypatch.setattr("lab_tracker.acquisition_watcher.time.monotonic", lambda: clock[0])
+
+    def failing_register(session_id, *, file_path, **kwargs):
+        raise RuntimeError("database unavailable")
+
+    watcher, _ = _watcher_with_register(tmp_path, failing_register, failure_backoff_seconds=600)
+
+    watcher.scan()  # attempt 1 -> retry after the 600s base
+    assert watcher.failures[tmp_path / "bad.bin"].retry_after == pytest.approx(clock[0] + 600)
+    clock[0] += 600.1
+    watcher.scan()  # attempt 2 -> capped at the base, never below it
+    assert watcher.failures[tmp_path / "bad.bin"].attempts == 2
+    assert watcher.failures[tmp_path / "bad.bin"].retry_after == pytest.approx(clock[0] + 600)
+
+
+def test_acquisition_output_watcher_keeps_300s_default_cap_for_small_base(tmp_path, monkeypatch):
+    (tmp_path / "bad.bin").write_text("bad")
+    clock = [1000.0]
+    monkeypatch.setattr("lab_tracker.acquisition_watcher.time.monotonic", lambda: clock[0])
+
+    def failing_register(session_id, *, file_path, **kwargs):
+        raise RuntimeError("database unavailable")
+
+    watcher, _ = _watcher_with_register(tmp_path, failing_register, failure_backoff_seconds=200)
+
+    watcher.scan()  # attempt 1 -> 200s
+    clock[0] += 200.1
+    watcher.scan()  # attempt 2 -> 400s capped at the 300s default
+    assert watcher.failures[tmp_path / "bad.bin"].retry_after == pytest.approx(clock[0] + 300)
+
+
+def test_acquisition_output_watcher_rejects_explicit_max_below_base(tmp_path):
+    with pytest.raises(ValueError, match="max_failure_backoff_seconds"):
+        AcquisitionOutputWatcher(
+            repository_backed_api(),
+            uuid4(),
+            [tmp_path],
+            failure_backoff_seconds=600,
+            max_failure_backoff_seconds=300,
+        )
+
+
 def test_acquisition_output_watcher_escalates_persistent_failures(
     tmp_path, caplog: pytest.LogCaptureFixture
 ):
