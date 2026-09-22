@@ -37,9 +37,9 @@ jobs:
       - name: Audit frontend dependencies
         run: npm audit --audit-level=high
       - name: Lint
-        run: uv run ruff check .
+        run: uv run --frozen ruff check .
       - name: Typecheck Python architecture contracts
-        run: uv run mypy
+        run: uv run --frozen mypy
       - name: Lint frontend
         run: npm run lint:frontend -- --quiet
       - name: Check frontend OpenAPI declarations
@@ -53,9 +53,9 @@ jobs:
       - name: Check frontend bundle is committed
         run: git diff --exit-code -- src/lab_tracker/frontend
       - name: Check skill API reference is current
-        run: uv run python scripts/generate_lab_tracker_skill_reference.py --check
+        run: uv run --frozen python scripts/generate_lab_tracker_skill_reference.py --check
       - name: Test
-        run: uv run pytest -q
+        run: uv run --frozen pytest -q
 
   python-minimum:
     name: Python 3.10 compatibility
@@ -73,7 +73,30 @@ jobs:
       - name: Install frozen Python dependencies
         run: uv sync --frozen --extra test
       - name: Test declared minimum Python
-        run: uv run pytest -q
+        run: uv run --frozen pytest -q
+
+  unlocked-install:
+    name: Install from declared dependency ranges
+    # pip installs and `uv tool install` resolve the pyproject.toml ranges, not
+    # uv.lock, so a release inside a declared range (for example an `mcp` minor)
+    # can break them while every locked job stays green.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v7
+      - name: Install the project without the lockfile
+        run: |
+          uv venv "${RUNNER_TEMP}/unlocked"
+          uv pip install --python "${RUNNER_TEMP}/unlocked/bin/python" .
+      - name: Smoke-test the MCP server and CLI entry points
+        working-directory: ${{ runner.temp }}
+        run: |
+          "${RUNNER_TEMP}/unlocked/bin/python" -c "import lab_tracker.mcp_server, lab_tracker.cli, lab_tracker_client.cli"
+          test -x "${RUNNER_TEMP}/unlocked/bin/lt-mcp"
 
   e2e:
     # Browser E2E in its own job so a browser download or a service-worker
@@ -141,7 +164,7 @@ jobs:
       - name: Test Postgres integration subset
         env:
           LAB_TRACKER_POSTGRES_TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/postgres
-        run: uv run pytest -q -m postgres
+        run: uv run --frozen pytest -q -m postgres
 
   linux-local-filesystem-mounts:
     name: Linux local filesystem mount authority
@@ -179,7 +202,7 @@ jobs:
           sudo mount --bind "${bind_source}" "${bind_mount}"
           export LAB_TRACKER_TEST_ORDINARY_MOUNT_ROOT="${ordinary_mount}"
           export LAB_TRACKER_TEST_BIND_MOUNT_ROOT="${bind_mount}"
-          uv run pytest -q tests/test_posix_pre_follow_local_store_health_helper.py
+          uv run --frozen pytest -q tests/test_posix_pre_follow_local_store_health_helper.py
 
   windows-containment:
     name: Windows containment and registered artifacts
@@ -198,19 +221,19 @@ jobs:
       - name: Install frozen Python dependencies
         run: uv sync --frozen --extra test --extra lint
       - name: Lint
-        run: uv run ruff check .
+        run: uv run --frozen ruff check .
       - name: Typecheck Python architecture contracts
-        run: uv run mypy
+        run: uv run --frozen mypy
       - name: Test bounded subprocess containment
         run: >-
-          uv run pytest -q
+          uv run --frozen pytest -q
           tests/test_bounded_subprocess.py
           tests/test_windows_job.py
       # This focused gate runs complete host-I/O control-plane modules. The
       # full Windows pytest suite remains owned by lab-tracker-n5kp.56.6.
       - name: Test Windows registered artifacts and store health
         run: >-
-          uv run pytest -q
+          uv run --frozen pytest -q
           tests/test_local_store_locator.py
           tests/test_registered_http_prefix.py
           tests/test_rclone_store_locator.py
@@ -257,7 +280,7 @@ jobs:
         run: uv sync --frozen --extra test
       - name: Test handle-bound local store health
         run: >-
-          uv run pytest -q
+          uv run --frozen pytest -q
           tests/test_local_filesystem_authority.py
           tests/test_local_filesystem_operations.py
           tests/test_windows_local_store_health_helper.py
@@ -282,7 +305,7 @@ jobs:
         run: uv sync --frozen --extra test
       - name: Test O_SEARCH helper and wheel
         run: >-
-          uv run pytest -q
+          uv run --frozen pytest -q
           tests/test_local_filesystem_authority.py
           tests/test_local_filesystem_operations.py
           tests/test_local_store_health.py

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -327,6 +328,7 @@ def test_wheel_installed_migrations_can_upgrade_sqlite(tmp_path: Path, built_whe
     db_path = tmp_path / "wheel-install.db"
     smoke_script = f"""
 import os
+import re
 from alembic import command
 from lab_tracker.cli import _alembic_config
 
@@ -414,6 +416,27 @@ def test_ci_checks_lock_freshness_before_every_locked_install() -> None:
     for name, body in installing_jobs.items():
         assert "run: uv lock --check" in body, name
         assert body.index("run: uv lock --check") < body.index("uv sync"), name
+
+
+def test_ci_runs_project_commands_without_relocking() -> None:
+    repo_root = Path(__file__).resolve().parent.parent
+    workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+    unfrozen = re.findall(r"\buv run\b(?! --frozen\b).*", workflow)
+    assert "uv run --frozen" in workflow
+    assert not unfrozen, unfrozen
+
+
+def test_ci_smoke_tests_an_install_resolved_from_declared_ranges() -> None:
+    """pip and ``uv tool install`` users resolve pyproject ranges, not uv.lock."""
+    repo_root = Path(__file__).resolve().parent.parent
+    workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    body = _ci_job_blocks(workflow)["unlocked-install"]
+
+    assert "uv sync" not in body
+    assert "uv pip install --python" in body
+    assert "import lab_tracker.mcp_server" in body
+    assert "bin/lt-mcp" in body
 
 
 def test_dependabot_updates_python_dependencies_with_the_lockfile() -> None:
