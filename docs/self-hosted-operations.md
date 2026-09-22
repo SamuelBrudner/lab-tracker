@@ -178,6 +178,14 @@ checkout with `docker compose --profile mcp up -d --build mcp`.
 If migrations fail after the configured retry budget, the app container exits
 with an error. Restore from backup or fix the migration before restarting.
 
+SQLite migrations run as one all-or-nothing transaction: a failing revision
+rolls back the whole run, and an upgrade that would leave new foreign-key
+violations is refused. Take a backup before upgrading a SQLite instance. If
+your SQLite database was upgraded with code from 26 July 2026 until the fix for
+review finding C1, read the
+[SQLite migration cascade advisory](advisories/2026-09-sqlite-migration-cascade.md)
+to check for lost AI-draft provenance and restore it from a pre-upgrade backup.
+
 ### Pinned provider-backed instances
 
 A live instance that uses a reviewed immutable image must not be operated with
