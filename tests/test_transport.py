@@ -116,6 +116,8 @@ def test_upload_visualization_file_rejects_oversize_and_streams(
 ) -> None:
     viz = tmp_path / "figure.png"
     viz.write_bytes(b"streamed viz bytes")
+    # MCP path ids must be canonical UUIDs (review H7).
+    viz_id = "77777777-7777-4777-8777-777777777777"
 
     def _forbid_read_bytes(self: Path) -> bytes:
         raise AssertionError("visualization upload must stream, not read into memory")
@@ -128,7 +130,7 @@ def test_upload_visualization_file_rejects_oversize_and_streams(
             return _json_response(200, {"data": {"access_token": "token"}})
         if path.endswith("/file"):
             uploaded.append(request.content)
-            return _json_response(200, {"data": {"viz_id": "viz-1"}})
+            return _json_response(200, {"data": {"viz_id": viz_id}})
         return _json_response(404, {"error": {"message": "not found"}})
 
     monkeypatch.setattr(Path, "read_bytes", _forbid_read_bytes)
@@ -137,8 +139,8 @@ def test_upload_visualization_file_rejects_oversize_and_streams(
         transport=httpx.MockTransport(handler),
     )
     try:
-        result = client.upload_visualization_file(viz_id="viz-1", file_path=str(viz))
-        assert result["data"]["viz_id"] == "viz-1"
+        result = client.upload_visualization_file(viz_id=viz_id, file_path=str(viz))
+        assert result["data"]["viz_id"] == viz_id
         assert b"streamed viz bytes" in uploaded[0]
 
         # Oversize is rejected before transfer (upload passes its module-level
@@ -147,6 +149,6 @@ def test_upload_visualization_file_rejects_oversize_and_streams(
 
         monkeypatch.setattr(mcp_module, "MAX_UPLOAD_BYTES", 4)
         with pytest.raises(LabTrackerAPIValidationError, match="over the"):
-            client.upload_visualization_file(viz_id="viz-1", file_path=str(viz))
+            client.upload_visualization_file(viz_id=viz_id, file_path=str(viz))
     finally:
         client.close()
