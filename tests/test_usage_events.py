@@ -217,6 +217,50 @@ def test_usage_event_routes_export_search_without_query_terms(
     assert "hidden retention sentinel" not in csv_response.text
 
 
+def test_project_delete_usage_event_survives_the_cascade_delete(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from lab_tracker import api as api_module
+
+    warnings: list[str] = []
+
+    def record_warning(message: str, *args: object, **_kwargs: object) -> None:
+        warnings.append(message % args if args else message)
+
+    monkeypatch.setattr(api_module._logger, "warning", record_warning)  # noqa: SLF001
+    monkeypatch.setattr(service_base._logger, "warning", record_warning)  # noqa: SLF001
+    client.app.state.settings.usage_events = True
+
+    project_response = client.post(
+        "/projects",
+        json={"name": "Project deleted with telemetry"},
+        headers=admin_auth_headers,
+    )
+    assert project_response.status_code == 201
+    project_id = project_response.json()["data"]["project_id"]
+
+    delete_response = client.delete(f"/projects/{project_id}", headers=admin_auth_headers)
+    assert delete_response.status_code == 200
+
+    with client.app.state.db_session_factory() as session:
+        delete_events = list(
+            session.scalars(
+                select(UsageEventModel).where(
+                    UsageEventModel.verb == "delete",
+                    UsageEventModel.resource_type == "project",
+                )
+            )
+        )
+    assert not [message for message in warnings if "after_commit" in message], warnings
+    assert len(delete_events) == 1
+    [event] = delete_events
+    assert str(event.resource_id) == project_id
+    assert event.project_id is None
+    assert event.outcome == "ok"
+
+
 def test_usage_event_retention_rolls_up_and_prunes_raw_events(
     client: TestClient,
     admin_auth_headers: dict[str, str],

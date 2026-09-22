@@ -103,9 +103,12 @@ class ProjectsApiMixin:
             resource_type=UsageEventResourceType.PROJECT,
             actor=actor,
             resource_id=project_id,
-            project_id=project_id,
+            # The OK event is persisted after the cascade delete commits, so a
+            # project_id reference would violate usage_events.project_id's FK and
+            # the event would be dropped. resource_id (no FK) keeps the identity.
+            project_id=None,
             resource_id_attr="project_id",
-            project_id_attr="project_id",
+            project_id_attr=None,
         )
 
     def create_project_group(self, *args: Any, **kwargs: Any) -> Any:
