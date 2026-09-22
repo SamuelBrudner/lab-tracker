@@ -1,4 +1,4 @@
-"""Migration 0063 adds users.session_epoch reversibly without touching users."""
+"""Migration 0063 adds users.session_epoch reversibly, keeping users and their dependents."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from sqlalchemy import create_engine, inspect, text
 
 _PREVIOUS_REVISION = "0062_member_onboarding_purpose"
 _REVISION = "0063_user_session_epoch"
+_USER_ID = "00000000-0000-4000-8000-0000000000aa"
 
 
 def _alembic_config() -> Config:
@@ -32,7 +33,7 @@ def test_session_epoch_revision_extends_the_single_chain() -> None:
     assert script.get_heads() == [_REVISION]
 
 
-def test_session_epoch_migration_round_trips_existing_users(monkeypatch, tmp_path) -> None:
+def test_session_epoch_migration_round_trips_users_and_dependents(monkeypatch, tmp_path) -> None:
     database_url = f"sqlite+pysqlite:///{tmp_path / 'session-epoch.db'}"
     monkeypatch.setenv("LAB_TRACKER_DATABASE_URL", database_url)
     config = _alembic_config()
@@ -46,7 +47,28 @@ def test_session_epoch_migration_round_trips_existing_users(monkeypatch, tmp_pat
                     "INSERT INTO users (user_id, username, password_hash, role, created_at) "
                     "VALUES (:user_id, 'existing', 'hash', 'admin', CURRENT_TIMESTAMP)"
                 ),
-                {"user_id": "00000000-0000-4000-8000-0000000000aa"},
+                {"user_id": _USER_ID},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO personal_access_tokens (token_id, user_id, label, token_hash, "
+                    "role, read_only, expires_at, created_at, scope) VALUES (:token_id, "
+                    ":user_id, 'laptop', :token_hash, 'admin', 1, CURRENT_TIMESTAMP, "
+                    "CURRENT_TIMESTAMP, 'all')"
+                ),
+                {
+                    "token_id": "00000000-0000-4000-8000-0000000000bb",
+                    "user_id": _USER_ID,
+                    "token_hash": "a" * 64,
+                },
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO projects (project_id, name, status, created_at, updated_at, "
+                    "created_by, created_by_user_id) VALUES (:project_id, 'Existing', "
+                    "'active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'existing', :user_id)"
+                ),
+                {"project_id": "00000000-0000-4000-8000-0000000000cc", "user_id": _USER_ID},
             )
     finally:
         engine.dispose()
@@ -56,9 +78,12 @@ def test_session_epoch_migration_round_trips_existing_users(monkeypatch, tmp_pat
     engine = create_engine(database_url, future=True)
     try:
         with engine.connect() as connection:
-            assert connection.scalar(
-                text("SELECT session_epoch FROM users WHERE username = 'existing'")
-            ) == 0
+            assert (
+                connection.scalar(
+                    text("SELECT session_epoch FROM users WHERE username = 'existing'")
+                )
+                == 0
+            )
     finally:
         engine.dispose()
 
@@ -69,5 +94,9 @@ def test_session_epoch_migration_round_trips_existing_users(monkeypatch, tmp_pat
     try:
         with engine.connect() as connection:
             assert connection.scalar(text("SELECT count(*) FROM users")) == 1
+            # The SQLite downgrade rebuilds users; with foreign keys enforced the
+            # DROP TABLE would cascade into dependents and null their creators.
+            assert connection.scalar(text("SELECT count(*) FROM personal_access_tokens")) == 1
+            assert connection.scalar(text("SELECT created_by_user_id FROM projects")) == _USER_ID
     finally:
         engine.dispose()

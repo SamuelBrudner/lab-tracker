@@ -24,5 +24,23 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    with op.batch_alter_table("users") as batch_op:
-        batch_op.drop_column("session_epoch")
+    # SQLite drops the column by rebuilding ``users`` (copy, DROP, rename).
+    # With foreign keys enforced that DROP fires ON DELETE CASCADE / SET NULL
+    # on every table referencing users, so disable them around the rebuild.
+    _set_sqlite_foreign_keys(enabled=False)
+    try:
+        with op.batch_alter_table("users") as batch_op:
+            batch_op.drop_column("session_epoch")
+    finally:
+        _set_sqlite_foreign_keys(enabled=True)
+
+
+def _set_sqlite_foreign_keys(*, enabled: bool) -> None:
+    """Toggle SQLite FKs around batch table rebuilds.
+
+    env.py configures SQLite migrations with transactional_ddl=False so this
+    PRAGMA is honored before Alembic recreates the parent table.
+    """
+    if op.get_context().dialect.name == "sqlite":
+        value = "ON" if enabled else "OFF"
+        op.execute(f"PRAGMA foreign_keys={value}")
