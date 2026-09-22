@@ -126,6 +126,16 @@ function BatchReviewPage({
   // Each load bumps the generation; results, failures and the loading reset of
   // a superseded load (e.g. for a previously selected project) are ignored.
   const loadGenerationRef = useRef(0);
+  // The project this page currently shows (null once unmounted). An async
+  // action started for another project must not touch this page's state.
+  const shownProjectIdRef = useRef(selectedProjectId);
+
+  useEffect(() => {
+    shownProjectIdRef.current = selectedProjectId;
+    return () => {
+      shownProjectIdRef.current = null;
+    };
+  }, [selectedProjectId]);
 
   const activeProject = useMemo(
     () => projects.find((project) => project.project_id === selectedProjectId) || null,
@@ -217,15 +227,33 @@ function BatchReviewPage({
     if (!selectedProjectId || !canManageGraph) {
       return;
     }
+    const runProjectId = selectedProjectId;
+    const runProjectName = activeProject?.name || "the previous project";
     setBusy(true);
     setFlash("", "");
     try {
       const run = await apiRequest("/batches/run-now", {
-        body: { project_id: selectedProjectId },
+        body: { project_id: runProjectId },
         method: "POST",
         token,
       });
+      // If the user moved to another project while the run (or the reload) was
+      // in flight, this closure's loadBatches would replace that project's
+      // queues with the old project's, and navigating would pull them away.
+      const projectChanged = () => {
+        if (shownProjectIdRef.current === runProjectId) {
+          return false;
+        }
+        setFlash(`Daily review run for ${runProjectName} finished. Select it to see the results.`);
+        return true;
+      };
+      if (projectChanged()) {
+        return;
+      }
       await loadBatches();
+      if (projectChanged()) {
+        return;
+      }
       if (run.change_set_id) {
         navigate(`/app/batches/${run.change_set_id}`);
       } else {

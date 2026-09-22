@@ -79,9 +79,10 @@ describe("PendingBatchBanner", () => {
 });
 
 describe("BatchReviewPage", () => {
-  function installGatedProjectQueues() {
+  function installGatedProjectQueues(extraRoutes = []) {
     const resolvers = { "project-a": [], "project-b": [] };
     installFetchMock([
+      ...extraRoutes,
       {
         match: /^\/batches(\/runs)?\?project_id=project-(a|b)&/,
         response: (request) => {
@@ -139,6 +140,7 @@ describe("BatchReviewPage", () => {
     const view = render(<BatchReviewPage {...props} selectedProjectId={selectedProjectId} />);
     return {
       ...view,
+      props,
       select: (projectId) =>
         view.rerender(<BatchReviewPage {...props} selectedProjectId={projectId} />),
     };
@@ -179,6 +181,70 @@ describe("BatchReviewPage", () => {
     await settle("project-b");
     expect(await screen.findByText("Ready in project-b")).toBeInTheDocument();
     await waitFor(() => expect(screen.queryByText("Loading...")).not.toBeInTheDocument());
+  });
+
+  it("reloads the queues and opens the drafted batch after run now", async () => {
+    const { resolvers, settle } = installGatedProjectQueues([
+      {
+        match: "/batches/run-now",
+        method: "POST",
+        response: (request) => {
+          expect(JSON.parse(request.init.body)).toEqual({ project_id: "project-a" });
+          return apiResponse({ change_set_id: "cs-from-a", summary: "Drafted A" });
+        },
+      },
+    ]);
+    const page = renderPage("project-a");
+    await settle("project-a");
+    expect(await screen.findByText("Ready in project-a")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Run now" })).toBeEnabled());
+
+    fireEvent.click(screen.getByRole("button", { name: "Run now" }));
+    await waitFor(() => expect(resolvers["project-a"]).toHaveLength(8));
+    resolvers["project-a"].slice(4).forEach((release) => release());
+
+    await waitFor(() =>
+      expect(page.props.navigate).toHaveBeenCalledWith("/app/batches/cs-from-a")
+    );
+    expect(page.props.setBusy).toHaveBeenLastCalledWith(false);
+  });
+
+  it("does not reload or report a run-now result after the user switches projects", async () => {
+    let releaseRun = null;
+    const { resolvers, settle } = installGatedProjectQueues([
+      {
+        match: "/batches/run-now",
+        method: "POST",
+        response: () =>
+          new Promise((resolve) => {
+            releaseRun = (body) => resolve(apiResponse(body));
+          }),
+      },
+    ]);
+    const page = renderPage("project-a");
+    await settle("project-a");
+    expect(await screen.findByText("Ready in project-a")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Run now" })).toBeEnabled());
+
+    fireEvent.click(screen.getByRole("button", { name: "Run now" }));
+    await waitFor(() => expect(releaseRun).toBeTypeOf("function"));
+    page.select("project-b");
+    await settle("project-b");
+    expect(await screen.findByText("Ready in project-b")).toBeInTheDocument();
+
+    releaseRun({ change_set_id: "cs-from-a", summary: "Drafted A" });
+    await flushResponses();
+    await flushResponses();
+
+    // Project A's run must not reload A's queues over B's, nor navigate away.
+    expect(resolvers["project-a"]).toHaveLength(4);
+    expect(screen.getByText("Ready in project-b")).toBeInTheDocument();
+    expect(screen.queryByText("Ready in project-a")).not.toBeInTheDocument();
+    expect(page.props.navigate).not.toHaveBeenCalled();
+    expect(page.props.setFlash).toHaveBeenLastCalledWith(
+      "Daily review run for Project A finished. Select it to see the results."
+    );
+    expect(page.props.setBusy).toHaveBeenLastCalledWith(false);
   });
 
   it("shows distinct personal, waiting, and owner-commit queues", async () => {
