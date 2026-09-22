@@ -34,6 +34,9 @@ from lab_tracker.models import (
     Visualization,
     utc_now,
 )
+from lab_tracker.sqlalchemy_repository_parts.analyses import (
+    fence_sqlite_visualization_writes,
+)
 from lab_tracker.upload_security import validate_upload_content_type
 
 from .types import AssetMutationResult, FileDownload, Page
@@ -175,7 +178,11 @@ def locked_visualization_rows(
     analysis_id: UUID | None = None,
     project_id: UUID | None = None,
 ) -> list[VisualizationModel]:
-    """Reload and lock visualization rows in stable order until transaction end."""
+    """Reload and lock visualization rows in stable order until transaction end.
+
+    On SQLite, which ignores ``FOR UPDATE``, the database write fence is taken
+    first so the read cannot go stale before the caller's write.
+    """
 
     statement = select(VisualizationModel)
     if viz_id is not None:
@@ -189,6 +196,12 @@ def locked_visualization_rows(
             AnalysisModel,
             AnalysisModel.analysis_id == VisualizationModel.analysis_id,
         ).where(AnalysisModel.project_id == str(project_id))
+    fence_sqlite_visualization_writes(
+        session,
+        VisualizationModel.viz_id.in_(
+            statement.with_only_columns(VisualizationModel.viz_id)
+        ),
+    )
     statement = (
         statement.order_by(VisualizationModel.viz_id)
         .with_for_update(of=VisualizationModel)

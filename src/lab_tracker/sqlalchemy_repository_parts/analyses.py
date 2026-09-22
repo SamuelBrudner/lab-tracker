@@ -6,7 +6,7 @@ from collections import defaultdict
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import or_, select
+from sqlalchemy import ColumnElement, or_, select, update
 from sqlalchemy.orm import Session as OrmSession
 
 from lab_tracker.db_models import (
@@ -46,6 +46,36 @@ from lab_tracker.sqlalchemy_mappers import (
 )
 
 from .common import apply_pagination, count_from_statement, replace_child_rows, uuid_values
+
+
+def fence_sqlite_visualization_writes(
+    session: OrmSession,
+    criterion: ColumnElement[bool],
+) -> None:
+    """On SQLite, take the database write lock before a locked visualization read.
+
+    SQLite ignores ``FOR UPDATE``, and legacy pysqlite transaction control
+    (see ``lab_tracker.db.configure_sqlite_connection``) runs a SELECT outside
+    any write transaction, so a "locked" read could go stale before its
+    UPDATE. A no-op UPDATE of the matching rows makes pysqlite begin the write
+    transaction and reserve SQLite's single writer slot first (even when no
+    row matches), so the following read observes the newest commit and no
+    other writer can commit until this transaction ends. Loaded ORM state is
+    expired so later reads in the transaction observe that commit too. This
+    is the same write fence ``lock_project_references`` takes on SQLite. On
+    other dialects this does nothing; callers rely on ``FOR UPDATE``.
+    """
+
+    if session.get_bind().dialect.name != "sqlite":
+        return
+    session.flush()
+    session.execute(
+        update(VisualizationModel)
+        .where(criterion)
+        .values(viz_id=VisualizationModel.viz_id)
+        .execution_options(synchronize_session=False)
+    )
+    session.expire_all()
 
 
 class SQLAlchemyAnalysisRepository(EntityRepository[Analysis]):
@@ -499,10 +529,15 @@ class SQLAlchemyVisualizationRepository(EntityRepository[Visualization]):
         PostgreSQL waits here for a concurrent asset mutation to commit, and
         ``populate_existing`` replaces any stale identity-map state, so a
         metadata write never saves asset columns from an older snapshot.
-        SQLite serializes writers itself and ignores ``FOR UPDATE``.
+        SQLite ignores ``FOR UPDATE``, so there the database write fence is
+        taken before the read (:func:`fence_sqlite_visualization_writes`).
         """
 
         self._session.flush()
+        fence_sqlite_visualization_writes(
+            self._session,
+            VisualizationModel.viz_id == str(entity_id),
+        )
         row = self._session.scalars(
             select(VisualizationModel)
             .where(VisualizationModel.viz_id == str(entity_id))
