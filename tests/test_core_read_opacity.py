@@ -729,6 +729,70 @@ def test_denied_raw_note_read_never_touches_storage(
     assert reads == []
 
 
+@pytest.mark.parametrize("endpoint", ["/notes/quick-capture", "/notes/upload-file"])
+@pytest.mark.parametrize("project_kind", ["hidden", "viewer_only", "missing"])
+def test_denied_note_capture_never_touches_raw_storage(
+    client: TestClient,
+    scoped_project_member,
+    monkeypatch: pytest.MonkeyPatch,
+    endpoint: str,
+    project_kind: str,
+) -> None:
+    writes: list[str] = []
+
+    def fail_if_written(*_args: object, **_kwargs: object) -> None:
+        writes.append("write")
+        raise AssertionError("raw storage must not run before write authorization")
+
+    storage = client.app.state.raw_note_storage
+    monkeypatch.setattr(storage, "store", fail_if_written)
+    monkeypatch.setattr(storage, "store_stream", fail_if_written)
+    project_id = {
+        "hidden": scoped_project_member.hidden_project_id,
+        "viewer_only": scoped_project_member.visible_project_id,
+        "missing": str(uuid4()),
+    }[project_kind]
+
+    response = client.post(
+        endpoint,
+        data={"project_id": project_id},
+        files={"file": ("capture.txt", b"denied capture", "text/plain")},
+        headers=scoped_project_member.member_headers,
+    )
+
+    assert response.status_code == 401, response.text
+    assert response.json()["error"]["code"] == "auth_error"
+    assert writes == []
+
+
+@pytest.mark.parametrize("endpoint", ["/notes/quick-capture", "/notes/upload-file"])
+def test_note_capture_for_missing_project_never_touches_raw_storage(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    endpoint: str,
+) -> None:
+    writes: list[str] = []
+
+    def fail_if_written(*_args: object, **_kwargs: object) -> None:
+        writes.append("write")
+        raise AssertionError("raw storage must not run before the project exists")
+
+    storage = client.app.state.raw_note_storage
+    monkeypatch.setattr(storage, "store", fail_if_written)
+    monkeypatch.setattr(storage, "store_stream", fail_if_written)
+
+    response = client.post(
+        endpoint,
+        data={"project_id": str(uuid4())},
+        files={"file": ("capture.txt", b"orphan capture", "text/plain")},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 404, response.text
+    assert writes == []
+
+
 def test_denied_session_outputs_never_query_output_rows(
     client: TestClient,
     scoped_project_member,

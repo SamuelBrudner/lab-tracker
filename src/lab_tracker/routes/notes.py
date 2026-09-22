@@ -110,8 +110,8 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         status: Annotated[NoteStatus | None, Form()] = None,
     ):
         actor = actor_from_request(request)
-        ensure_project_contributor(request, project_id)
         request_api = api_from_request(request, api)
+        _ensure_capture_project_writable(request, request_api, project_id)
         filename = (file.filename or "").strip()
         if not filename:
             raise ValidationError("filename must not be empty.")
@@ -166,6 +166,7 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
     ):
         actor = actor_from_request(request)
         request_api = api_from_request(request, api)
+        _ensure_capture_project_writable(request, request_api, project_id)
         filename = (file.filename or "").strip()
         if not filename:
             raise ValidationError("filename must not be empty.")
@@ -435,6 +436,20 @@ def _optional_epoch_ms(value: object) -> str | None:
     if milliseconds < 0:
         raise ValidationError("source_file_last_modified_ms must be non-negative.")
     return str(milliseconds)
+
+
+def _ensure_capture_project_writable(
+    request: Request,
+    request_api: LabTrackerAPI,
+    project_id: UUID,
+) -> None:
+    """Authorize and resolve the capture's project before any raw bytes are stored.
+
+    The note service re-checks both inside its transaction; this pre-check keeps
+    denied or orphaned uploads from writing (and then deleting) raw assets.
+    """
+    ensure_project_contributor(request, project_id)
+    request_api.get_project(project_id)
 
 
 def _maybe_schedule_auto_transcription(
