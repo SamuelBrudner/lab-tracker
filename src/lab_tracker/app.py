@@ -11,6 +11,7 @@ from lab_tracker.app_parts.middleware import (
     configure_database_session_middleware,
     configure_security_headers_middleware,
     configure_store_health_admission_middleware,
+    configure_upload_body_size_limit_middleware,
 )
 from lab_tracker.app_parts.observability import register_observability_routes
 from lab_tracker.app_parts.runtime import (
@@ -36,6 +37,7 @@ def create_app(*, verify_schema: bool = True) -> FastAPI:
         lifespan=make_lifespan(runtime),
     )
     configure_app_state(app, runtime)
+    configure_upload_body_size_limit_middleware(app)
     configure_database_session_middleware(app, api=app.state.lab_tracker_api)
     configure_artifact_resolution_admission_middleware(app)
     configure_store_health_admission_middleware(app)

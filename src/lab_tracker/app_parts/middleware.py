@@ -10,6 +10,7 @@ from fastapi import FastAPI, Request
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.base import RequestResponseEndpoint
 from starlette.responses import JSONResponse, Response
+from starlette.types import Scope
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.application import RequestHandlers
@@ -34,6 +35,7 @@ from lab_tracker.store_health import (
     StoreProbe,
     StoreProbeTarget,
 )
+from lab_tracker.upload_security import UploadBodySizeLimitMiddleware
 
 _APP_CONTENT_SECURITY_POLICY = "; ".join(
     [
@@ -351,6 +353,20 @@ def _pat_rate_key(request: Request, token: str) -> str:
     client_host = request.client.host if request.client is not None else "unknown"
     token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
     return f"lpat:{client_host}:{token_hash[:24]}"
+
+
+def configure_upload_body_size_limit_middleware(app: FastAPI) -> None:
+    """Enforce ``max_upload_bytes`` on multipart bodies before and while they stream.
+
+    Register it before the other middleware so it wraps the router most
+    closely: authentication still answers first, and the 413 passes through
+    the security-header and database-scope layers like any other response.
+    """
+
+    def max_upload_bytes(scope: Scope) -> int:
+        return int(scope["app"].state.settings.max_upload_bytes)
+
+    app.add_middleware(UploadBodySizeLimitMiddleware, max_bytes=max_upload_bytes)
 
 
 def configure_database_session_middleware(
