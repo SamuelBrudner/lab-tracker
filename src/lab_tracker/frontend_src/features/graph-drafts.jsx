@@ -46,6 +46,7 @@ function GraphDraftDetailCard({
     operationReviewNotes,
     loading,
     error,
+    accessError,
     commitMessage,
     setCommitMessage,
     reviewNote,
@@ -98,6 +99,7 @@ function GraphDraftDetailCard({
         {loading ? <span className="pill">Loading...</span> : null}
       </div>
       {error ? <p className="flash error">{error}</p> : null}
+      {accessError ? <p className="flash error">{accessError}</p> : null}
 
       {changeSet ? (
         <div className="daily-review-report">

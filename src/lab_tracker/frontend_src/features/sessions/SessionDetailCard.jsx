@@ -123,6 +123,7 @@ function SessionDetailCard({
         {loading ? <span className="pill">Loading...</span> : null}
       </div>
       {error ? <p className="flash error">{error}</p> : null}
+      {sessionAccess.error ? <p className="flash error">{sessionAccess.error}</p> : null}
 
       {session ? (
         <div className="stack">

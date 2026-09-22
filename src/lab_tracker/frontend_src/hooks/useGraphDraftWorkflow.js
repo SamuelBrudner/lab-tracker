@@ -35,6 +35,7 @@ function useGraphDraftWorkflow({
   const [bulkAcceptedIds, setBulkAcceptedIds] = useState([]);
   const [draftProjectRole, setDraftProjectRole] = useState("");
   const [draftProjectId, setDraftProjectId] = useState("");
+  const [draftAccessError, setDraftAccessError] = useState("");
   const [onboardingAccess, setOnboardingAccess] = useState({
     capabilities: null,
     projectId: "",
@@ -194,6 +195,7 @@ function useGraphDraftWorkflow({
   useEffect(() => {
     let canceled = false;
     const projectId = changeSet?.project_id || "";
+    setDraftAccessError("");
     if (!projectId) {
       setDraftProjectId("");
       setDraftProjectRole("");
@@ -224,9 +226,15 @@ function useGraphDraftWorkflow({
         const membership = data.find((member) => member.user_id === user.user_id);
         setDraftProjectRole(membership?.role || "");
       })
-      .catch(() => {
+      .catch((err) => {
         if (!canceled) {
+          // Stay fail-closed (no role) but say why the review actions are off.
           setDraftProjectRole("");
+          setDraftAccessError(
+            `Could not confirm your access to this project: ${
+              err?.message || "membership lookup failed."
+            } Review actions stay disabled until it loads.`
+          );
         }
       });
     return () => {
@@ -621,6 +629,7 @@ function useGraphDraftWorkflow({
     operationReviewNotes,
     loading,
     error,
+    accessError: draftAccessError,
     commitMessage,
     setCommitMessage,
     reviewNote,

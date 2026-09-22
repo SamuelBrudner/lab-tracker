@@ -418,6 +418,7 @@ function NoteDetailCard({
         {loading ? <span className="pill">Loading...</span> : null}
       </div>
       {error ? <p className="flash error">{error}</p> : null}
+      {noteAccess.error ? <p className="flash error">{noteAccess.error}</p> : null}
       {note ? (
         <div className="stack">
           <div className="inline">

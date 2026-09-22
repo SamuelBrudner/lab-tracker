@@ -209,6 +209,26 @@ describe("GraphDraftDetailCard narrative review", () => {
     expect(screen.getByRole("button", { name: "Revise with AI" })).toBeDisabled();
   });
 
+  it("says why review actions are disabled when the membership lookup fails", async () => {
+    renderDraft(draftFixture({ status: "submitted" }), {
+      canManageGraph: false,
+      user: { role: "viewer", user_id: "owner-1", username: "owner" },
+      routes: [
+        {
+          match: "/projects/project-1/members?limit=200",
+          response: errorResponse("Members service unavailable.", 503),
+        },
+      ],
+    });
+
+    expect(
+      await screen.findByText(
+        "Could not confirm your access to this project: Members service unavailable. Review actions stay disabled until it loads."
+      )
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Accept all" })).toBeDisabled();
+  });
+
   it("honors server-derived inherited owner capability for onboarding commit", async () => {
     const submitted = draftFixture({
       purpose: "member_checkpoint_alignment",

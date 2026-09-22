@@ -245,6 +245,7 @@ function QuestionDetailCard({
         {loading ? <span className="pill">Loading...</span> : null}
       </div>
       {error ? <p className="flash error">{error}</p> : null}
+      {questionAccess.error ? <p className="flash error">{questionAccess.error}</p> : null}
       {question ? (
         <div className="stack">
           {question.status === "superseded" ? (
