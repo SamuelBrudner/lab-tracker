@@ -157,6 +157,7 @@ class ReviewEmailService(BaseService):
                     now=claimed_at,
                     lease_until=claimed_at + timedelta(seconds=max(1, lease_seconds)),
                     claim_token=claim_token,
+                    max_attempts=self.max_attempts,
                 )
             if delivery is None:
                 return None

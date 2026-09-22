@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from uuid import UUID
 
 import pytest
@@ -10,7 +11,7 @@ from lab_tracker.api import LabTrackerAPI
 from lab_tracker.app_parts.middleware import system_auth_context
 from lab_tracker.auth import AuthContext, Role
 from lab_tracker.errors import ValidationError
-from lab_tracker.models import ReviewEmailDeliveryStatus
+from lab_tracker.models import ReviewEmailDeliveryStatus, utc_now
 from lab_tracker.review_links import sign_review_link
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 
@@ -324,4 +325,43 @@ def test_globally_disabled_review_email_cannot_opt_in_enqueue_or_claim(
         assert disabled_api.review_emails.claim_next(lease_seconds=60) is None
         assert disabled_api.review_emails.get(pending.delivery_id).status == (
             ReviewEmailDeliveryStatus.PENDING
+        )
+
+
+def test_expired_leases_count_as_attempts_and_dead_letter_at_max_attempts(
+    client: TestClient,
+) -> None:
+    """A worker that dies after every claim must not re-lease a delivery forever."""
+    _enable_review_email(client)
+    client.app.state.settings.review_email_max_attempts = 2
+    with client.app.state.db_session_factory() as session:
+        api = LabTrackerAPI(
+            repository=SQLAlchemyLabTrackerRepository(session),
+            settings=client.app.state.settings,
+        )
+        assert api.review_emails.max_attempts == 2
+        delivery = api.review_emails.enqueue_test("poison@example.org")
+        start = utc_now()
+
+        first = api.review_emails.claim_next(lease_seconds=60, now=start)
+        second = api.review_emails.claim_next(
+            lease_seconds=60, now=start + timedelta(seconds=61)
+        )
+        third = api.review_emails.claim_next(
+            lease_seconds=60, now=start + timedelta(seconds=122)
+        )
+
+        assert first is not None and first.attempt_count == 1
+        assert second is not None and second.attempt_count == 2
+        assert third is None
+        dead = api.review_emails.get(delivery.delivery_id)
+        assert dead.status == ReviewEmailDeliveryStatus.FAILED
+        assert dead.attempt_count == 2
+        assert dead.claim_token is None
+        assert dead.lease_expires_at is None
+        assert dead.next_attempt_at is None
+        assert "lease expired" in (dead.last_error or "").lower()
+        assert (
+            api.review_emails.claim_next(lease_seconds=60, now=start + timedelta(hours=1))
+            is None
         )

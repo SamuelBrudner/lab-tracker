@@ -444,13 +444,45 @@ class SQLAlchemyReviewEmailOutboxRepository(ReviewEmailOutboxRepository):
         now: datetime,
         lease_until: datetime,
         claim_token: UUID,
+        max_attempts: int,
     ) -> ReviewEmailDelivery | None:
-        """Lease one due delivery without allowing two workers to own it."""
+        """Lease one due delivery without allowing two workers to own it.
+
+        Every claim counts as an attempt, including one whose worker died
+        before reporting a result. A stale lease that already used
+        ``max_attempts`` is dead-lettered as FAILED (visible in the delivery
+        list) instead of being re-leased forever.
+        """
 
         if lease_until <= now:
             raise ValueError("lease_until must be later than now.")
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be at least 1.")
 
         self._session.flush()
+        expired_lease = and_(
+            ReviewEmailOutboxModel.status == ReviewEmailDeliveryStatus.SENDING,
+            ReviewEmailOutboxModel.lease_expires_at.is_not(None),
+            ReviewEmailOutboxModel.lease_expires_at <= now,
+        )
+        self._session.execute(
+            update(ReviewEmailOutboxModel)
+            .where(expired_lease)
+            .where(ReviewEmailOutboxModel.attempt_count >= max_attempts)
+            .values(
+                status=ReviewEmailDeliveryStatus.FAILED,
+                last_error=(
+                    f"Delivery lease expired after {max_attempts} attempt(s) "
+                    "without a reported result."
+                ),
+                next_attempt_at=None,
+                claim_token=None,
+                claimed_at=None,
+                lease_expires_at=None,
+                updated_at=now,
+            )
+            .execution_options(synchronize_session=False)
+        )
         due_unclaimed = and_(
             ReviewEmailOutboxModel.status.in_(
                 [
@@ -461,9 +493,8 @@ class SQLAlchemyReviewEmailOutboxRepository(ReviewEmailOutboxRepository):
             ReviewEmailOutboxModel.next_attempt_at <= now,
         )
         stale_claim = and_(
-            ReviewEmailOutboxModel.status == ReviewEmailDeliveryStatus.SENDING,
-            ReviewEmailOutboxModel.lease_expires_at.is_not(None),
-            ReviewEmailOutboxModel.lease_expires_at <= now,
+            expired_lease,
+            ReviewEmailOutboxModel.attempt_count < max_attempts,
         )
         eligible = or_(due_unclaimed, stale_claim)
         candidate_stmt = (

@@ -449,8 +449,13 @@ class ReviewEmailOutboxRepository(Protocol):
         now: datetime,
         lease_until: datetime,
         claim_token: UUID,
+        max_attempts: int,
     ) -> ReviewEmailDelivery | None:
-        """Atomically lease the next due or stale delivery."""
+        """Atomically lease the next due or stale delivery.
+
+        Expired leases count as attempts: a stale lease that already used
+        ``max_attempts`` is dead-lettered as FAILED instead of re-leased.
+        """
 
 
 class LabTrackerRepository(Protocol):
