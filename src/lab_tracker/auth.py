@@ -1338,11 +1338,9 @@ class PersonalAccessTokenService:
             owner = session.get(UserModel, row.user_id)
             if owner is None:
                 return None
-            # The stored role is the issuance-time cap. The effective role is
-            # the lower of that cap and the owner's live role, so demoting a
-            # user immediately narrows every token they minted while promotion
-            # never widens one.
-            effective_role = _cap_role(Role(row.role), issuer_role=Role(owner.role))
+            effective_role = effective_personal_access_token_role(
+                Role(row.role), owner_role=Role(owner.role)
+            )
             last_used_at = _as_utc(row.last_used_at) if row.last_used_at is not None else None
             if (
                 last_used_at is None
@@ -1374,6 +1372,17 @@ def require_role(actor: AuthContext | None, allowed_roles: Iterable[Role]) -> No
         raise AuthError("Authentication required.")
     if actor.role not in set(allowed_roles):
         raise PermissionDeniedError("Insufficient role.")
+
+
+def effective_personal_access_token_role(token_role: Role, *, owner_role: Role) -> Role:
+    """The role an lpat_ token acts with right now.
+
+    The stored role is the issuance-time cap. The effective role is the lower
+    of that cap and the owner's live role, so demoting a user immediately
+    narrows every token they minted while promotion never widens one.
+    """
+
+    return _cap_role(token_role, issuer_role=owner_role)
 
 
 def _cap_role(role: Role, *, issuer_role: Role) -> Role:

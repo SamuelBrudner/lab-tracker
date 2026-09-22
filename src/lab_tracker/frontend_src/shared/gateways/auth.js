@@ -134,6 +134,7 @@ const deviceConsumeShape = object({
 /** @satisfies {PersonalAccessTokenValidator} */
 const personalAccessTokenShape = object({
   created_at: string,
+  effective_role: roleShape,
   expires_at: string,
   label: string,
   last_used_at: nullish(string),
@@ -147,6 +148,7 @@ const personalAccessTokenShape = object({
 /** @satisfies {PersonalAccessTokenIssuedValidator} */
 const personalAccessTokenIssuedShape = object({
   created_at: string,
+  effective_role: roleShape,
   expires_at: string,
   label: string,
   last_used_at: nullish(string),

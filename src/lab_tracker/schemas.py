@@ -426,7 +426,12 @@ class PersonalAccessTokenCreate(RequestModel):
 class PersonalAccessTokenRead(BaseModel):
     token_id: UUID
     label: str
-    role: Role
+    role: Role = Field(description="Role stored when the token was issued.")
+    effective_role: Role = Field(
+        description=(
+            "Role the token acts with now: the lower of role and the owner's current role."
+        )
+    )
     read_only: bool
     scope: str
     expires_at: datetime

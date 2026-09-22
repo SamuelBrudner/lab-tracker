@@ -1048,6 +1048,7 @@ export interface components {
     };
     "PersonalAccessTokenIssuedRead": {
       "created_at": string;
+      "effective_role": components["schemas"]["Role"];
       "expires_at": string;
       "label": string;
       "last_used_at"?: (string | null);
@@ -1060,6 +1061,7 @@ export interface components {
     };
     "PersonalAccessTokenRead": {
       "created_at": string;
+      "effective_role": components["schemas"]["Role"];
       "expires_at": string;
       "label": string;
       "last_used_at"?: (string | null);

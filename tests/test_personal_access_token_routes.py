@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -589,3 +589,64 @@ def test_admin_token_management_requires_an_interactive_admin(
     assert by_service.status_code == 403
     assert revoke_by_service.status_code == 403
     assert client.get("/projects", headers=_bearer(issued["secret"])).status_code == 200
+
+
+def _login_headers(client: TestClient, user_id: str) -> dict[str, str]:
+    user = client.app.state.auth_service.get_user_by_id(UUID(user_id))
+    login = client.post("/auth/login", json={"username": user.username, "password": "secret"})
+    assert login.status_code == 200, login.text
+    return _bearer(login.json()["data"]["access_token"])
+
+
+def test_token_listings_report_the_effective_role_after_the_owner_is_demoted(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    second_id, second_headers = _register_and_login(client, role=Role.ADMIN, prefix="second")
+    issued = _create_token(client, second_headers, role="admin", read_only=False)
+    assert (issued["role"], issued["effective_role"]) == ("admin", "admin")
+
+    demoted = client.patch(
+        f"/auth/users/{second_id}",
+        json={"role": "viewer"},
+        headers=admin_auth_headers,
+    )
+    assert demoted.status_code == 200, demoted.text
+    # The role change ended the old session; sign in again as the demoted user.
+    second_headers = _login_headers(client, second_id)
+
+    own = client.get("/auth/tokens", headers=second_headers)
+    by_admin = client.get(f"/auth/users/{second_id}/tokens", headers=admin_auth_headers)
+    revoked = client.delete(
+        f"/auth/users/{second_id}/tokens/{issued['token_id']}",
+        headers=admin_auth_headers,
+    )
+
+    assert own.status_code == 200, own.text
+    assert by_admin.status_code == 200, by_admin.text
+    assert revoked.status_code == 200, revoked.text
+    for item in (own.json()["data"][0], by_admin.json()["data"][0], revoked.json()["data"]):
+        assert item["token_id"] == issued["token_id"]
+        assert item["role"] == "admin"
+        assert item["effective_role"] == "viewer"
+
+
+def test_token_listings_do_not_widen_the_effective_role_after_promotion(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    owner_id, owner_headers = _register_and_login(client, role=Role.EDITOR, prefix="owner")
+    issued = _create_token(client, owner_headers, role="admin", read_only=False)
+    assert (issued["role"], issued["effective_role"]) == ("editor", "editor")
+
+    promoted = client.patch(
+        f"/auth/users/{owner_id}",
+        json={"role": "admin"},
+        headers=admin_auth_headers,
+    )
+    assert promoted.status_code == 200, promoted.text
+
+    listed = client.get(f"/auth/users/{owner_id}/tokens", headers=admin_auth_headers)
+    assert listed.status_code == 200, listed.text
+    item = listed.json()["data"][0]
+    assert (item["role"], item["effective_role"]) == ("editor", "editor")

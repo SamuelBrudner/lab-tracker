@@ -41,6 +41,8 @@ function installFetchMock(routes, readinessOverrides = {}) {
 function issuedTokenPayload(overrides = {}) {
   return {
     created_at: "2026-07-07T12:00:00Z",
+    // At issuance the effective role always equals the (already capped) role.
+    effective_role: overrides.role ?? "viewer",
     expires_at: "2026-08-06T12:00:00Z",
     label: "Coding agent",
     last_used_at: null,
@@ -505,6 +507,24 @@ describe("AgentAccessPage", () => {
       `/auth/tokens/${TOKEN_ID}`,
       expect.objectContaining({ method: "DELETE" })
     );
+  });
+
+  it("shows the narrower effective role of a token whose owner was demoted", async () => {
+    installFetchMock([
+      {
+        match: "/auth/tokens",
+        response: apiResponse(
+          [issuedTokenPayload({ role: "admin", effective_role: "viewer", read_only: false })],
+          200,
+          { limit: 1, offset: 0, total: 1 }
+        ),
+      },
+    ]);
+
+    renderPage();
+
+    const detail = await screen.findByText(/viewer \(issued as admin\)/);
+    expect(detail.textContent).toMatch(/^viewer \(issued as admin\) · read-write/);
   });
 
   it("copies the minted secret", async () => {

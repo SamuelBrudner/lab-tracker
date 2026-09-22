@@ -422,6 +422,7 @@ describe("auth gateway", () => {
   it("validates personal access token responses", async () => {
     const personalToken = {
       created_at: "2026-07-20T00:00:00Z",
+      effective_role: "viewer",
       expires_at: "2026-08-20T00:00:00Z",
       label: "Agent",
       last_used_at: null,
@@ -448,7 +449,9 @@ describe("auth gateway", () => {
       },
     ]);
 
-    expect((await auth.listPersonalAccessTokens({ token: "tok" })).data).toHaveLength(1);
+    const listed = await auth.listPersonalAccessTokens({ token: "tok" });
+    expect(listed.data).toHaveLength(1);
+    expect(listed.data[0].effective_role).toBe("viewer");
     expect(
       (
         await auth.createPersonalAccessToken(
