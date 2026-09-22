@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from enum import Enum
 from typing import Protocol, TypeVar
 from uuid import UUID
@@ -701,6 +701,25 @@ def build_commit_manifest(
         question_links=list(question_links),
         source_session_id=manifest_input.source_session_id,
     )
+
+
+def ensure_manifest_notes_in_project(
+    note_ids: Iterable[UUID],
+    project_id: UUID,
+    load_note: Callable[[UUID], Note | None],
+) -> None:
+    """Require every manifest note id to name an existing note in the dataset's project.
+
+    Manifest note ids become part of the content-addressed, immutable commit and
+    of provenance exports, so a dangling or cross-project id must never land.
+    """
+
+    for note_id in note_ids:
+        note = load_note(note_id)
+        if note is None:
+            raise NotFoundError("Dataset manifest note does not exist.")
+        if note.project_id != project_id:
+            raise ValidationError("Dataset manifest notes must belong to the same project.")
 
 
 def validate_commit_hash(provided: str | None, expected: str) -> None:

@@ -12,8 +12,10 @@ from uuid import UUID, uuid4
 
 import pytest
 from api_helpers import repository_backed_api
+from sqlalchemy import update
 
 from lab_tracker.auth import AuthContext, Role
+from lab_tracker.db_models import DatasetModel
 from lab_tracker.errors import ValidationError
 from lab_tracker.models import (
     ClaimRelation,
@@ -303,8 +305,9 @@ def test_delete_note_refuses_while_dataset_manifests_cite_it(status: DatasetStat
 
 
 def test_delete_note_refuses_while_another_projects_dataset_manifest_cites_it() -> None:
-    # Manifest note_ids are not validated for project membership on write, so
-    # the guard must see citations from any project's (immutable) manifest.
+    # Writes now reject cross-project manifest note_ids, but manifests committed
+    # before that check can still cite another project's note; the guard must
+    # see citations from any project's (immutable) manifest.
     ctx = _Context()
     note_id = ctx.note()
     other_project = ctx.api.create_project("Citing project", actor=ctx.actor)
@@ -321,10 +324,16 @@ def test_delete_note_refuses_while_another_projects_dataset_manifest_cites_it() 
         status=DatasetStatus.COMMITTED,
         commit_manifest=DatasetCommitManifestInput(
             files=[DatasetFile(path="data.csv", checksum="abc123")],
-            note_ids=[note_id],
         ),
         actor=ctx.actor,
     ).dataset_id
+    _engine, session = ctx.api._test_resources
+    session.execute(
+        update(DatasetModel)
+        .where(DatasetModel.dataset_id == dataset_id)
+        .values(manifest_note_ids=[str(note_id)])
+    )
+    session.commit()
 
     with pytest.raises(
         ValidationError,

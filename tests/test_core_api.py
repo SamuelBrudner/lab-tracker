@@ -8,7 +8,7 @@ from sqlalchemy import update
 
 from lab_tracker.auth import AuthContext, AuthService, Role
 from lab_tracker.db_models import ExplorationNodeModel
-from lab_tracker.errors import AuthError, ValidationError
+from lab_tracker.errors import AuthError, NotFoundError, ValidationError
 from lab_tracker.models import (
     AnalysisStatus,
     ClaimStatus,
@@ -1037,6 +1037,99 @@ def test_dataset_commit_requires_active_question():
     api.update_question(question.question_id, status=QuestionStatus.ACTIVE, actor=actor)
     committed = api.update_dataset(dataset.dataset_id, status=DatasetStatus.COMMITTED, actor=actor)
     assert committed.status == DatasetStatus.COMMITTED
+
+
+def _manifest_note_fixture():
+    api = repository_backed_api()
+    actor = _actor()
+    project = api.create_project("Manifest notes", actor=actor)
+    other_project = api.create_project("Someone else's notes", actor=actor)
+    question = api.create_question(
+        project_id=project.project_id,
+        text="Which notes explain this dataset?",
+        question_type=QuestionType.DESCRIPTIVE,
+        status=QuestionStatus.ACTIVE,
+        actor=actor,
+    )
+    own_note = api.create_note(
+        project_id=project.project_id,
+        raw_content="Rig drifted after lunch.",
+        actor=actor,
+    )
+    foreign_note = api.create_note(
+        project_id=other_project.project_id,
+        raw_content="Different project entirely.",
+        actor=actor,
+    )
+    return api, actor, project, question, own_note, foreign_note
+
+
+def _manifest_with_notes(*note_ids: UUID) -> DatasetCommitManifestInput:
+    return DatasetCommitManifestInput(
+        files=[DatasetFile(path="data.csv", checksum="abc123")],
+        note_ids=list(note_ids),
+    )
+
+
+@pytest.mark.parametrize("status", [DatasetStatus.STAGED, DatasetStatus.COMMITTED])
+def test_dataset_manifest_rejects_nonexistent_and_cross_project_note_ids(status):
+    api, actor, project, question, _own_note, foreign_note = _manifest_note_fixture()
+
+    with pytest.raises(NotFoundError, match="Dataset manifest note does not exist."):
+        api.create_dataset(
+            project_id=project.project_id,
+            primary_question_id=question.question_id,
+            status=status,
+            commit_manifest=_manifest_with_notes(uuid4()),
+            actor=actor,
+        )
+    with pytest.raises(
+        ValidationError,
+        match="Dataset manifest notes must belong to the same project.",
+    ):
+        api.create_dataset(
+            project_id=project.project_id,
+            primary_question_id=question.question_id,
+            status=status,
+            commit_manifest=_manifest_with_notes(foreign_note.note_id),
+            actor=actor,
+        )
+    assert api.list_datasets(project_id=project.project_id) == []
+
+
+def test_dataset_manifest_update_rejects_cross_project_and_missing_note_ids():
+    api, actor, project, question, own_note, foreign_note = _manifest_note_fixture()
+    dataset = api.create_dataset(
+        project_id=project.project_id,
+        primary_question_id=question.question_id,
+        commit_manifest=_manifest_with_notes(own_note.note_id),
+        actor=actor,
+    )
+    assert dataset.commit_manifest.note_ids == [own_note.note_id]
+
+    with pytest.raises(
+        ValidationError,
+        match="Dataset manifest notes must belong to the same project.",
+    ):
+        api.update_dataset(
+            dataset.dataset_id,
+            commit_manifest=_manifest_with_notes(own_note.note_id, foreign_note.note_id),
+            actor=actor,
+        )
+    with pytest.raises(NotFoundError, match="Dataset manifest note does not exist."):
+        api.update_dataset(
+            dataset.dataset_id,
+            commit_manifest=_manifest_with_notes(uuid4()),
+            actor=actor,
+        )
+    assert api.get_dataset(dataset.dataset_id).commit_manifest.note_ids == [own_note.note_id]
+
+    committed = api.update_dataset(
+        dataset.dataset_id,
+        status=DatasetStatus.COMMITTED,
+        actor=actor,
+    )
+    assert committed.commit_manifest.note_ids == [own_note.note_id]
 
 
 def test_dataset_commit_requires_evidence_source():

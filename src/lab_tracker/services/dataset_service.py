@@ -37,6 +37,7 @@ from lab_tracker.services.shared import (
     actor_user_id,
     build_commit_manifest,
     compute_commit_hash,
+    ensure_manifest_notes_in_project,
     ensure_primary_question_active,
     terminal_reason_for_patch,
     terminal_reason_for_status,
@@ -151,6 +152,11 @@ class DatasetService(BaseService):
             question_links,
         )
         self.validate_source_session(resolved_manifest.source_session_id, project_id)
+        ensure_manifest_notes_in_project(
+            resolved_manifest.note_ids,
+            project_id,
+            self.repository.notes.get,
+        )
         if (
             status == DatasetStatus.COMMITTED
             and not resolved_manifest.files
@@ -406,6 +412,11 @@ class DatasetService(BaseService):
                 dataset.question_links,
             )
             self.validate_source_session(resolved_manifest.source_session_id, dataset.project_id)
+            ensure_manifest_notes_in_project(
+                resolved_manifest.note_ids,
+                dataset.project_id,
+                self.repository.notes.get,
+            )
             if (
                 commit_requested
                 and not resolved_manifest.files
