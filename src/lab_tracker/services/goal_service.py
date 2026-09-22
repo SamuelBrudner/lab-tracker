@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from datetime import date
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
@@ -13,6 +14,7 @@ from pydantic import ValidationError as PydanticValidationError
 from lab_tracker.auth import AuthContext
 from lab_tracker.errors import (
     AuthError,
+    ConflictError,
     NotFoundError,
     OpaqueTargetNotFoundError,
     PermissionDeniedError,
@@ -160,8 +162,10 @@ class GoalService(BaseService):
             )
         self._ensure_goal_has_scope(goal)
         self._require_goal_contributor(goal, actor=actor)
-        with self.unit_of_work() as repository:
-            repository.goals.save(goal)
+        with self.application_transaction():
+            locked_project_ids = self._lock_goal_projects(self._goal_scope_project_ids(goal))
+            self._validate_locked_goal(goal, locked_project_ids, actor=actor)
+            self._save_goal(goal)
         return goal
 
     def get_goal(self, goal_id: UUID) -> Goal:
@@ -289,9 +293,8 @@ class GoalService(BaseService):
         origin_model: str | None = None,
         origin_prompt_version: str | None = None,
     ) -> Goal:
-        goal = self.get_goal(goal_id)
-        self._require_goal_contributor(goal, actor=actor)
-        before = goal.model_copy(deep=True)
+        located_goal = self.get_goal(goal_id)
+        self._require_goal_contributor(located_goal, actor=actor)
         for field_name, value in (
             ("goal_type", goal_type),
             ("title", title),
@@ -302,6 +305,52 @@ class GoalService(BaseService):
         ):
             if is_provided(value) and value is None:
                 raise ValidationError(f"{field_name} must not be null.")
+        link_specs = list(links) if is_provided(links) and links is not None else None
+        target_project_ids = {
+            self._ensure_target_exists(link.target, located_goal.project_id)
+            for link in link_specs or []
+        }
+        with self._locked_goal(located_goal, target_project_ids) as (goal, locked_project_ids):
+            return self._apply_goal_update(
+                goal,
+                locked_project_ids,
+                goal_type=goal_type,
+                title=title,
+                summary=summary,
+                status=status,
+                target_date=target_date,
+                external_ref=external_ref,
+                attributes=attributes,
+                link_specs=link_specs,
+                actor=actor,
+                origin=origin,
+                change_set_id=change_set_id,
+                origin_provider=origin_provider,
+                origin_model=origin_model,
+                origin_prompt_version=origin_prompt_version,
+            )
+
+    def _apply_goal_update(
+        self,
+        goal: Goal,
+        locked_project_ids: frozenset[UUID],
+        *,
+        goal_type: PatchValue[GoalType | None],
+        title: PatchValue[str | None],
+        summary: PatchValue[str | None],
+        status: PatchValue[GoalStatus | None],
+        target_date: PatchValue[date | None],
+        external_ref: PatchValue[str | None],
+        attributes: PatchValue[dict[str, object] | None],
+        link_specs: list[GoalLinkSpec] | None,
+        actor: AuthContext | None,
+        origin: EntityOrigin | None,
+        change_set_id: UUID | None,
+        origin_provider: str | None,
+        origin_model: str | None,
+        origin_prompt_version: str | None,
+    ) -> Goal:
+        before = goal.model_copy(deep=True)
         next_goal_type = goal_type if is_provided(goal_type) else goal.goal_type
         if is_provided(title):
             ensure_non_empty(title, "title")
@@ -321,8 +370,8 @@ class GoalService(BaseService):
                 next_goal_type,
                 attributes if is_provided(attributes) else goal.attributes,
             )
-        if is_provided(links):
-            for link in links:
+        if link_specs is not None:
+            for link in link_specs:
                 self._ensure_target_exists(link.target, goal.project_id)
                 self._upsert_goal_link(
                     goal,
@@ -342,14 +391,11 @@ class GoalService(BaseService):
             goal.origin_model = origin_model
         if origin_prompt_version is not None:
             goal.origin_prompt_version = origin_prompt_version
-        self._ensure_unique_goal_links(goal.links)
-        self._ensure_goal_has_scope(goal)
-        self._require_goal_contributor(goal, actor=actor)
+        self._validate_locked_goal(goal, locked_project_ids, actor=actor)
         if goal == before:
             return goal
         goal.updated_at = utc_now()
-        with self.unit_of_work() as repository:
-            repository.goals.save(goal)
+        self._save_goal(goal)
         return goal
 
     def delete_goal(self, goal_id: UUID, *, actor: AuthContext | None = None) -> Goal:
@@ -369,23 +415,22 @@ class GoalService(BaseService):
         slot: str | None = None,
         actor: AuthContext | None = None,
     ) -> GoalLink:
-        goal = self.get_goal(goal_id)
-        self._require_goal_contributor(goal, actor=actor)
-        self._ensure_target_exists(target, goal.project_id)
-        link = self._upsert_goal_link(
-            goal,
-            target=target,
-            relation=relation,
-            link_status=link_status,
-            slot=slot,
-            actor=actor,
-        )
-        goal.updated_at = utc_now()
-        self._ensure_unique_goal_links(goal.links)
-        self._ensure_goal_has_scope(goal)
-        self._require_goal_contributor(goal, actor=actor)
-        with self.unit_of_work() as repository:
-            repository.goals.save(goal)
+        located_goal = self.get_goal(goal_id)
+        self._require_goal_contributor(located_goal, actor=actor)
+        target_project_id = self._ensure_target_exists(target, located_goal.project_id)
+        with self._locked_goal(located_goal, {target_project_id}) as (goal, locked_project_ids):
+            self._ensure_target_exists(target, goal.project_id)
+            link = self._upsert_goal_link(
+                goal,
+                target=target,
+                relation=relation,
+                link_status=link_status,
+                slot=slot,
+                actor=actor,
+            )
+            goal.updated_at = utc_now()
+            self._validate_locked_goal(goal, locked_project_ids, actor=actor)
+            self._save_goal(goal)
         return link
 
     def update_goal_link(
@@ -398,28 +443,27 @@ class GoalService(BaseService):
         slot: PatchValue[str | None] = NOT_PROVIDED,
         actor: AuthContext | None = None,
     ) -> GoalLink:
-        goal = self.get_goal(goal_id)
-        self._require_goal_contributor(goal, actor=actor)
-        link = self._find_goal_link(goal, link_id)
-        before = goal.model_copy(deep=True)
-        if is_provided(relation):
-            if relation is None:
-                raise ValidationError("relation must not be null.")
-            link.relation = relation
-        if is_provided(link_status):
-            if link_status is None:
-                raise ValidationError("link_status must not be null.")
-            link.link_status = link_status
-        if is_provided(slot):
-            link.slot = self._clean_slot(slot) if slot is not None else None
-        self._ensure_unique_goal_links(goal.links)
-        self._ensure_goal_has_scope(goal)
-        self._require_goal_contributor(goal, actor=actor)
-        if goal == before:
-            return link
-        goal.updated_at = utc_now()
-        with self.unit_of_work() as repository:
-            repository.goals.save(goal)
+        located_goal = self.get_goal(goal_id)
+        self._require_goal_contributor(located_goal, actor=actor)
+        self._find_goal_link(located_goal, link_id)
+        if is_provided(relation) and relation is None:
+            raise ValidationError("relation must not be null.")
+        if is_provided(link_status) and link_status is None:
+            raise ValidationError("link_status must not be null.")
+        with self._locked_goal(located_goal) as (goal, locked_project_ids):
+            link = self._find_goal_link(goal, link_id)
+            before = goal.model_copy(deep=True)
+            if is_provided(relation) and relation is not None:
+                link.relation = relation
+            if is_provided(link_status) and link_status is not None:
+                link.link_status = link_status
+            if is_provided(slot):
+                link.slot = self._clean_slot(slot) if slot is not None else None
+            self._validate_locked_goal(goal, locked_project_ids, actor=actor)
+            if goal == before:
+                return link
+            goal.updated_at = utc_now()
+            self._save_goal(goal)
         return link
 
     def delete_goal_link(
@@ -429,15 +473,15 @@ class GoalService(BaseService):
         *,
         actor: AuthContext | None = None,
     ) -> GoalLink:
-        goal = self.get_goal(goal_id)
-        self._require_goal_contributor(goal, actor=actor)
-        link = self._find_goal_link(goal, link_id)
-        goal.links = [item for item in goal.links if item.link_id != link_id]
-        goal.updated_at = utc_now()
-        self._ensure_goal_has_scope(goal)
-        self._require_goal_contributor(goal, actor=actor)
-        with self.unit_of_work() as repository:
-            repository.goals.save(goal)
+        located_goal = self.get_goal(goal_id)
+        self._require_goal_contributor(located_goal, actor=actor)
+        self._find_goal_link(located_goal, link_id)
+        with self._locked_goal(located_goal) as (goal, locked_project_ids):
+            link = self._find_goal_link(goal, link_id)
+            goal.links = [item for item in goal.links if item.link_id != link_id]
+            goal.updated_at = utc_now()
+            self._validate_locked_goal(goal, locked_project_ids, actor=actor)
+            self._save_goal(goal)
         return link
 
     def list_node_goals(
@@ -456,6 +500,68 @@ class GoalService(BaseService):
                 offset=0,
             ),
         )
+
+    def _lock_goal_projects(self, project_ids: Iterable[UUID]) -> frozenset[UUID]:
+        """Take the reference lock of every project in canonical UUID order.
+
+        Delete paths remove the goal links naming a deleted entity under
+        ``lock_project_references`` of the entity's project, so a goal write
+        holding the same lock for every project its links reach can neither
+        link a target whose delete is in flight nor restore a link that such
+        a delete just removed.
+        """
+
+        locked_project_ids = frozenset(project_ids)
+        for project_id in sorted(locked_project_ids, key=str):
+            self.repository.lock_project_references(project_id)
+        return locked_project_ids
+
+    @contextmanager
+    def _locked_goal(
+        self,
+        located_goal: Goal,
+        target_project_ids: Iterable[UUID] = (),
+    ) -> Iterator[tuple[Goal, frozenset[UUID]]]:
+        """Lock the goal's projects plus any new link targets', then re-read it.
+
+        The yielded goal is the latest committed state, so a write applied to
+        it cannot rewrite ``goal.links`` from a snapshot taken before a
+        concurrent goal write or target delete committed.
+        """
+
+        with self.application_transaction():
+            locked_project_ids = self._lock_goal_projects(
+                {*self._goal_scope_project_ids(located_goal), *target_project_ids}
+            )
+            yield self.get_goal(located_goal.goal_id), locked_project_ids
+
+    def _validate_locked_goal(
+        self,
+        goal: Goal,
+        locked_project_ids: frozenset[UUID],
+        *,
+        actor: AuthContext | None,
+    ) -> None:
+        """Re-verify every link target under the lock before a goal save.
+
+        Resolving the scope raises ``NotFoundError`` for a link target that a
+        delete holding the lock removed. A projectless goal whose links reach
+        a project this write did not lock (a concurrent write added it) fails
+        loudly instead of saving outside that project's lock.
+        """
+
+        self._ensure_unique_goal_links(goal.links)
+        self._ensure_goal_has_scope(goal)
+        scope_project_ids = self._goal_scope_project_ids(goal)
+        if not scope_project_ids <= locked_project_ids:
+            raise ConflictError(
+                "Goal links changed while waiting for the project lock; reload and retry."
+            )
+        self._require_goal_contributor(goal, actor=actor)
+
+    def _save_goal(self, goal: Goal) -> None:
+        with self.unit_of_work() as repository:
+            repository.goals.save(goal)
 
     def _validate_attributes(
         self,

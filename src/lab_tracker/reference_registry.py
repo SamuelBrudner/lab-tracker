@@ -31,8 +31,9 @@ Guards run inside the delete transaction after
 ``LabTrackerRepository.lock_project_references`` so that reference-adding
 writers that take the same project lock cannot slip a new referrer past the
 check. Today those writers are claim create/update, analysis create/commit,
-claim-edge create, exploration-node create/update and the question-DAG
-writers. Other reference-adding writers (note targets, visualization
+claim-edge create, exploration-node create/update, goal writes (which lock
+every project their links reach, re-read the goal and re-verify each link
+target) and the question-DAG writers. Other reference-adding writers (note targets, visualization
 ``claim_ids``, provenance-link acceptance, dataset manifest ``note_ids`` and
 ``source_session_id``) do not yet take the lock: the guards are exact for
 sequential callers, but on PostgreSQL one of those writes that commits while a

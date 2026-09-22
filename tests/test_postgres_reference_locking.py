@@ -18,7 +18,13 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select, text
 
-from lab_tracker.db_models import ClaimDatasetModel, ClaimEdgeModel, ClaimModel, DatasetModel
+from lab_tracker.db_models import (
+    ClaimDatasetModel,
+    ClaimEdgeModel,
+    ClaimModel,
+    DatasetModel,
+    GoalLinkModel,
+)
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 
 pytestmark = pytest.mark.postgres
@@ -255,3 +261,146 @@ def test_opposite_claim_edges_serialize_and_cannot_commit_a_cycle(
             session.execute(select(ClaimEdgeModel.claim_id, ClaimEdgeModel.target_claim_id))
         )
     assert [(str(source), str(target)) for source, target in edges] == [(claim_a, claim_b)]
+
+
+def _project_goal_and_question(
+    client: TestClient,
+    headers: dict[str, str],
+    name: str,
+) -> tuple[str, str]:
+    project = _post(client, headers, "/projects", {"name": name})
+    question = _post(
+        client,
+        headers,
+        "/questions",
+        {
+            "project_id": project["project_id"],
+            "text": "Which goal link survives?",
+            "question_type": "descriptive",
+        },
+    )
+    goal = _post(
+        client,
+        headers,
+        f"/projects/{project['project_id']}/goals",
+        {"goal_type": "paper", "title": "Paper", "summary": "Original summary."},
+    )
+    return goal["goal_id"], question["question_id"]
+
+
+def _link_goal(client: TestClient, headers: dict[str, str], goal_id: str, question_id: str):
+    return client.post(
+        f"/goals/{goal_id}/links",
+        json={"entity_type": "question", "entity_id": question_id, "relation": "addresses"},
+        headers=headers,
+    )
+
+
+def _goal_link_targets(client: TestClient) -> list[str]:
+    with client.app.state.db_session_factory() as session:
+        return [str(value) for value in session.scalars(select(GoalLinkModel.entity_id))]
+
+
+def test_question_delete_first_makes_concurrent_goal_link_fail_cleanly(
+    postgres_client: TestClient,
+    postgres_admin_auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    headers = postgres_admin_auth_headers
+    goal_id, question_id = _project_goal_and_question(
+        postgres_client, headers, "Delete beats goal link"
+    )
+
+    deleted, linked = _race(
+        postgres_client,
+        monkeypatch,
+        lambda: postgres_client.delete(f"/questions/{question_id}", headers=headers),
+        lambda: _link_goal(postgres_client, headers, goal_id, question_id),
+    )
+
+    assert deleted.status_code == 200, deleted.text
+    assert linked.status_code == 404, linked.text
+    assert linked.json()["error"]["message"] == "Question does not exist."
+    assert _goal_link_targets(postgres_client) == []
+
+
+def test_goal_link_first_is_cleaned_up_by_concurrent_question_delete(
+    postgres_client: TestClient,
+    postgres_admin_auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    headers = postgres_admin_auth_headers
+    goal_id, question_id = _project_goal_and_question(
+        postgres_client, headers, "Goal link beats delete"
+    )
+
+    linked, deleted = _race(
+        postgres_client,
+        monkeypatch,
+        lambda: _link_goal(postgres_client, headers, goal_id, question_id),
+        lambda: postgres_client.delete(f"/questions/{question_id}", headers=headers),
+    )
+
+    assert linked.status_code == 201, linked.text
+    assert deleted.status_code == 200, deleted.text
+    assert _goal_link_targets(postgres_client) == []
+    listed = postgres_client.get("/goals", headers=headers)
+    assert listed.status_code == 200, listed.text
+    assert [goal["goal_id"] for goal in listed.json()["data"]] == [goal_id]
+
+
+def _patch_goal(client: TestClient, headers: dict[str, str], goal_id: str, payload: dict):
+    return client.patch(f"/goals/{goal_id}", json=payload, headers=headers)
+
+
+def test_goal_patch_waits_for_a_concurrent_link_and_keeps_it(
+    postgres_client: TestClient,
+    postgres_admin_auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    headers = postgres_admin_auth_headers
+    goal_id, question_id = _project_goal_and_question(
+        postgres_client, headers, "Goal link then patch"
+    )
+
+    linked, patched = _race(
+        postgres_client,
+        monkeypatch,
+        lambda: _link_goal(postgres_client, headers, goal_id, question_id),
+        lambda: _patch_goal(
+            postgres_client, headers, goal_id, {"summary": "Edited during the link."}
+        ),
+    )
+
+    assert linked.status_code == 201, linked.text
+    assert patched.status_code == 200, patched.text
+    fetched = postgres_client.get(f"/goals/{goal_id}", headers=headers)
+    assert fetched.status_code == 200, fetched.text
+    goal = fetched.json()["data"]
+    assert goal["summary"] == "Edited during the link."
+    assert [link["link_id"] for link in goal["links"]] == [linked.json()["data"]["link_id"]]
+
+
+def test_concurrent_goal_patches_re_read_the_goal_under_the_lock(
+    postgres_client: TestClient,
+    postgres_admin_auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    headers = postgres_admin_auth_headers
+    goal_id, _question_id = _project_goal_and_question(
+        postgres_client, headers, "Goal patches serialize"
+    )
+
+    summary_patch, title_patch = _race(
+        postgres_client,
+        monkeypatch,
+        lambda: _patch_goal(postgres_client, headers, goal_id, {"summary": "From the winner."}),
+        lambda: _patch_goal(postgres_client, headers, goal_id, {"title": "From the loser"}),
+    )
+
+    assert summary_patch.status_code == 200, summary_patch.text
+    assert title_patch.status_code == 200, title_patch.text
+    fetched = postgres_client.get(f"/goals/{goal_id}", headers=headers)
+    assert fetched.status_code == 200, fetched.text
+    assert fetched.json()["data"]["title"] == "From the loser"
+    assert fetched.json()["data"]["summary"] == "From the winner."

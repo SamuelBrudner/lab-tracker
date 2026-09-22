@@ -391,15 +391,18 @@ def _is_note_question_link(operation: GraphChangeOperation) -> bool:
     )
 
 
-_PROJECT_REFERENCE_LOCKING_ENTITY_TYPES = frozenset({EntityType.CLAIM, EntityType.ANALYSIS})
+_PROJECT_REFERENCE_LOCKING_ENTITY_TYPES = frozenset(
+    {EntityType.CLAIM, EntityType.ANALYSIS, EntityType.GOAL}
+)
 
 
 def _takes_project_reference_lock(operations: list[GraphChangeOperation]) -> bool:
     """Whether applying ``operations`` takes the project reference lock.
 
     Claim create/update and analysis create re-validate their evidence
-    references under ``lock_project_references``; analysis updates are
-    included conservatively.
+    references under ``lock_project_references``, and goal create/update
+    re-verify their link targets under it; analysis updates are included
+    conservatively.
     """
 
     return any(

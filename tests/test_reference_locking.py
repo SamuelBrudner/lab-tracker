@@ -397,10 +397,10 @@ def _ready_graph_draft(api, actor, project, operations) -> UUID:  # noqa: ANN001
     return change_set_id
 
 
-@pytest.mark.parametrize("with_claim", [False, True])
+@pytest.mark.parametrize("reference_writer", [None, "claim", "goal"])
 def test_graph_commit_prelocks_project_only_for_reference_lock_writers(
     monkeypatch: pytest.MonkeyPatch,
-    with_claim: bool,
+    reference_writer: str | None,
 ) -> None:
     api = repository_backed_api()
     actor, project, question = _project_with_question(api)
@@ -420,7 +420,27 @@ def test_graph_commit_prelocks_project_only_for_reference_lock_writers(
             {"commit_manifest": {"metadata": {"lock": "plan"}}},
         )
     ]
-    if with_claim:
+    if reference_writer == "goal":
+        operations.append(
+            (
+                GraphChangeOp.CREATE,
+                EntityType.GOAL,
+                None,
+                {
+                    "project_id": str(project.project_id),
+                    "goal_type": "paper",
+                    "title": "Graph goal.",
+                    "links": [
+                        {
+                            "entity_type": "question",
+                            "entity_id": str(question.question_id),
+                            "relation": "addresses",
+                        }
+                    ],
+                },
+            )
+        )
+    if reference_writer == "claim":
         operations.append(
             (
                 GraphChangeOp.CREATE,
@@ -450,9 +470,10 @@ def test_graph_commit_prelocks_project_only_for_reference_lock_writers(
 
     assert committed.status == GraphChangeSetStatus.COMMITTED
     dataset_lock = ("lock_dataset_updates", project.project_id)
-    if with_claim:
-        # The claim create takes the project reference lock (the question-DAG
-        # key), so commit takes it first, ahead of any Dataset row lock.
+    if reference_writer is not None:
+        # Claim and goal creates take the project reference lock (the
+        # question-DAG key), so commit takes it first, ahead of any Dataset
+        # row lock.
         assert events[:2] == [
             ("lock_project_question_dag", project.project_id),
             dataset_lock,
