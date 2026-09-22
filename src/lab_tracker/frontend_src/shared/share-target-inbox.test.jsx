@@ -129,6 +129,31 @@ describe("migrateIncomingShares", () => {
     expect(await storage.list()).toHaveLength(1);
   });
 
+  it("refuses to queue a shared file without a known owner, leaving every share parked", async () => {
+    // The upload queue quarantines ownerless records forever; a share queued
+    // before the signed-in identity is known would never upload or resurface.
+    const storage = createMemoryShareStorage([
+      { text: "text share", receivedAt: 1 },
+      { file: makeFile("photo.jpg"), filename: "photo.jpg", receivedAt: 2 },
+    ]);
+    const createTextNote = vi.fn(async () => ({ note_id: "n" }));
+    const uploadQueue = makeQueue();
+
+    await expect(
+      migrateIncomingShares({
+        createTextNote,
+        projectId: "proj-a",
+        ownerId: "",
+        uploadQueue,
+        storage,
+        shareIds: await reviewedIds(storage),
+      })
+    ).rejects.toThrow(/signed-in account/);
+    expect(createTextNote).not.toHaveBeenCalled();
+    expect(await uploadQueue.pendingCount()).toBe(0);
+    expect(await storage.list()).toHaveLength(2);
+  });
+
   it("attaches project + token and hands each share to the upload queue", async () => {
     const storage = createMemoryShareStorage([
       {

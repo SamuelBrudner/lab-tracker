@@ -180,6 +180,14 @@ async function migrateIncomingShares({
   if (shares.length === 0) {
     return { migrated: 0, skipped: 0 };
   }
+  if (!ownerId && shares.some((share) => share.file)) {
+    // The upload queue quarantines ownerless records and never sends them, so
+    // a file queued now would vanish from both the inbox and the uploads.
+    // Refuse before importing anything; every share stays parked for review.
+    throw new Error(
+      "the signed-in account is not known yet, so shared files cannot be queued for upload"
+    );
+  }
   let migrated = 0;
   let skipped = 0;
   for (const share of shares) {
