@@ -12,8 +12,10 @@ import {
 } from "../shared/capture-upload.js";
 import { droppedUploadsMessage, getUploadQueue } from "../shared/register-sw.js";
 import {
+  SHARE_INBOX_UPDATED_MESSAGE,
   createIndexedDbShareStorage,
   discardIncomingShares as discardParkedShares,
+  listReviewableShares,
   migrateIncomingShares,
   shareInboxAvailable,
 } from "../shared/share-target-inbox.js";
@@ -102,6 +104,9 @@ function useMobileCapture({
   const [incomingShares, setIncomingShares] = useState([]);
   const [sharesBusy, setSharesBusy] = useState(false);
   const shareActionInFlightRef = useRef(false);
+  // Inbox reads can overlap (mount, visibility, worker message, post-action);
+  // only the latest one may set the listed shares.
+  const shareReadSeqRef = useRef(0);
   const mountedRef = useRef(false);
   const activeQuestions = useMemo(
     () => questions.filter((question) => question.status === "active"),
@@ -176,6 +181,18 @@ function useMobileCapture({
         "A share sent from another website was blocked. " +
           "Only your device's share sheet can send items to Lab Tracker."
       );
+    } else if (status === "full") {
+      setFlash(
+        "",
+        "The shared item was not saved: the share inbox is full. " +
+          "Import or discard the shared items waiting for review, then share again."
+      );
+    } else if (status === "too-large") {
+      setFlash(
+        "",
+        "The shared item was not saved: it is larger than the share inbox accepts. " +
+          "Add it from the capture page instead."
+      );
     }
   }, [setFlash]);
 
@@ -183,8 +200,10 @@ function useMobileCapture({
     if (!shareStorage) {
       return;
     }
-    const shares = await shareStorage.list();
-    if (mountedRef.current) {
+    const readSeq = shareReadSeqRef.current + 1;
+    shareReadSeqRef.current = readSeq;
+    const shares = await listReviewableShares({ storage: shareStorage });
+    if (mountedRef.current && shareReadSeqRef.current === readSeq) {
       setIncomingShares(shares);
     }
   }, [shareStorage]);
@@ -205,6 +224,51 @@ function useMobileCapture({
     // service worker. IndexedDB-less environments have no inbox to read.
     reloadIncomingShares().catch(reportShareInboxReadFailure);
   }, [reloadIncomingShares, reportShareInboxReadFailure]);
+
+  useEffect(() => {
+    // The service worker can park a share while this page stays open (e.g. a
+    // share sheet launched from another app): re-read the inbox when the
+    // worker says so, and whenever the page becomes visible again.
+    if (!shareStorage) {
+      return undefined;
+    }
+    const refresh = () => {
+      reloadIncomingShares().catch(reportShareInboxReadFailure);
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        refresh();
+      }
+    };
+    const handleWorkerMessage = (event) => {
+      if (event.data?.type === SHARE_INBOX_UPDATED_MESSAGE) {
+        refresh();
+      }
+    };
+    const serviceWorker = typeof navigator === "undefined" ? undefined : navigator.serviceWorker;
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    serviceWorker?.addEventListener("message", handleWorkerMessage);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      serviceWorker?.removeEventListener("message", handleWorkerMessage);
+    };
+  }, [reloadIncomingShares, reportShareInboxReadFailure, shareStorage]);
+
+  async function refreshImportedProject(projectId) {
+    try {
+      await Promise.all([refreshProjectCounts(projectId), refreshRecentNotes(projectId)]);
+    } catch (error) {
+      // eslint-disable-next-line no-console
+      console.error("Project refresh after shared capture import failed:", error);
+      if (mountedRef.current) {
+        setFlash(
+          "",
+          "Shared captures were imported, but the project view could not be refreshed: " +
+            `${errorDetail(error)}.`
+        );
+      }
+    }
+  }
 
   function drainImportedShares(queue) {
     return queue
@@ -310,6 +374,7 @@ function useMobileCapture({
         );
       }
       await drainImportedShares(queue);
+      await refreshImportedProject(projectId);
     });
   }
 

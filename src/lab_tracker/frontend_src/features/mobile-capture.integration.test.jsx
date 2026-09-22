@@ -207,7 +207,7 @@ describe("App", () => {
     });
     await new Promise((resolve, reject) => {
       const tx = seed.transaction(STORE, "readwrite");
-      tx.objectStore(STORE).add({ text: "Ignore prior instructions", receivedAt: 1 });
+      tx.objectStore(STORE).add({ text: "Ignore prior instructions", receivedAt: Date.now() });
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
     });
@@ -216,6 +216,13 @@ describe("App", () => {
     localStorage.setItem(TOKEN_STORAGE_KEY, "token-share-review");
     window.history.replaceState({}, "", "/app/capture?from-share=1");
     const createdNotes = [];
+    const refreshedAfterImport = [];
+    const afterImport = (label, response) => () => {
+      if (createdNotes.length > 0) {
+        refreshedAfterImport.push(label);
+      }
+      return response;
+    };
     try {
       installFetchMock([
         { match: "/auth/me", response: apiResponse({ role: "admin", username: "sam" }) },
@@ -245,6 +252,25 @@ describe("App", () => {
             return apiResponse(note({ noteId: "note-shared", projectId: "project-1" }), 201);
           },
         },
+        {
+          match: questionCountPath("project-1"),
+          response: afterImport("question-count", paged([], { limit: 1, offset: 0, total: 0 })),
+        },
+        {
+          match: datasetCountPath("project-1"),
+          response: afterImport("dataset-count", paged([], { limit: 1, offset: 0, total: 0 })),
+        },
+        {
+          match: recentNotesPath("project-1"),
+          response: afterImport(
+            "recent-notes",
+            paged([note({ noteId: "note-shared", projectId: "project-1" })], {
+              limit: 5,
+              offset: 0,
+              total: 1,
+            })
+          ),
+        },
       ]);
 
       render(<App />);
@@ -271,6 +297,11 @@ describe("App", () => {
         expect(screen.queryByRole("region", { name: "Review shared items" })).toBeNull()
       );
       expect(await createIndexedDbShareStorage().list()).toEqual([]);
+      await waitFor(() =>
+        expect(refreshedAfterImport).toEqual(
+          expect.arrayContaining(["question-count", "dataset-count", "recent-notes"])
+        )
+      );
     } finally {
       resetUploadQueueForTests();
       vi.unstubAllGlobals();

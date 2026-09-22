@@ -9,6 +9,12 @@
  * to the main upload queue, which is responsible for the actual POST + retry.
  * Storage is split from logic so callers can inject an in-memory adapter in
  * tests.
+ *
+ * The worker bounds the inbox (SHARE_INBOX_MAX_PENDING records, at most
+ * SHARE_INBOX_MAX_BYTES parked, nothing kept past SHARE_INBOX_MAX_AGE_MS) and
+ * refuses a share that does not fit rather than evicting one the user has not
+ * reviewed. sw.js is a standalone script, so it repeats these values; the
+ * service-worker share-target tests exercise it against the ones here.
  */
 
 import { UPLOAD_FILE_PATH } from "./upload-queue.js";
@@ -16,6 +22,11 @@ import { UPLOAD_FILE_PATH } from "./upload-queue.js";
 const DB_NAME = "lab-tracker-share-inbox";
 const DB_VERSION = 1;
 const STORE = "pending";
+const SHARE_INBOX_MAX_PENDING = 20;
+const SHARE_INBOX_MAX_BYTES = 50 * 1024 * 1024;
+const SHARE_INBOX_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+// Posted by the worker to open windows after it parks a share.
+const SHARE_INBOX_UPDATED_MESSAGE = "SHARE_INBOX_UPDATED";
 
 function openShareInbox() {
   return new Promise((resolve, reject) => {
@@ -115,6 +126,25 @@ function shareInboxAvailable() {
   return typeof globalThis.indexedDB !== "undefined";
 }
 
+function shareExpired(share, now) {
+  const receivedAt = Number(share.receivedAt);
+  return !Number.isFinite(receivedAt) || now - receivedAt >= SHARE_INBOX_MAX_AGE_MS;
+}
+
+// Lists the parked shares still eligible for review, dropping any past
+// SHARE_INBOX_MAX_AGE_MS (the same expiry the worker applies on intake).
+async function listReviewableShares({ storage, now = Date.now() }) {
+  const reviewable = [];
+  for (const share of await storage.list()) {
+    if (shareExpired(share, now)) {
+      await storage.remove(share.id);
+    } else {
+      reviewable.push(share);
+    }
+  }
+  return reviewable;
+}
+
 function requireReviewedShareIds(shareIds) {
   if (!Array.isArray(shareIds)) {
     throw new TypeError(
@@ -202,10 +232,15 @@ async function discardIncomingShares({ shareIds, storage = createIndexedDbShareS
 
 export {
   DB_NAME,
+  SHARE_INBOX_MAX_AGE_MS,
+  SHARE_INBOX_MAX_BYTES,
+  SHARE_INBOX_MAX_PENDING,
+  SHARE_INBOX_UPDATED_MESSAGE,
   STORE,
   createIndexedDbShareStorage,
   createMemoryShareStorage,
   discardIncomingShares,
+  listReviewableShares,
   migrateIncomingShares,
   shareInboxAvailable,
 };

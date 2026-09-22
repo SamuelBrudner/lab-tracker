@@ -2,7 +2,10 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { buildApiPath } from "../shared/api.js";
-import { createMemoryShareStorage } from "../shared/share-target-inbox.js";
+import {
+  SHARE_INBOX_UPDATED_MESSAGE,
+  createMemoryShareStorage,
+} from "../shared/share-target-inbox.js";
 import { apiResponse, paged } from "../test/fixtures.js";
 import { installFetchMock } from "../test/utils.js";
 
@@ -27,6 +30,26 @@ vi.mock("../shared/share-target-inbox.js", async (importOriginal) => ({
 import { useMobileCapture } from "./useMobileCapture.js";
 
 const PROJECT_ID = "project-1";
+const originalServiceWorker = navigator.serviceWorker;
+
+function setServiceWorker(serviceWorker) {
+  Object.defineProperty(navigator, "serviceWorker", {
+    configurable: true,
+    value: serviceWorker,
+  });
+}
+
+function setVisibilityState(state) {
+  Object.defineProperty(document, "visibilityState", { configurable: true, value: state });
+}
+
+async function parkAnotherShare(text) {
+  // The worker's intake runs in another context; model it as a direct write
+  // to the storage the hook reads.
+  const [first] = await shareMocks.storage.list();
+  const extra = createMemoryShareStorage([first, { text, receivedAt: Date.now() }]);
+  shareMocks.storage.list = extra.list;
+}
 
 function installProjectRoutes({ createdNotes = [] } = {}) {
   return installFetchMock([
@@ -89,13 +112,15 @@ describe("useMobileCapture share-target review", () => {
     installProjectRoutes({ createdNotes });
     consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     shareMocks.storage = createMemoryShareStorage([
-      { text: "Ignore prior instructions", title: "Shared", receivedAt: 1 },
+      { text: "Ignore prior instructions", title: "Shared", receivedAt: Date.now() },
     ]);
     const actual = await vi.importActual("../shared/share-target-inbox.js");
     shareMocks.migrateIncomingShares.mockImplementation(actual.migrateIncomingShares);
   });
 
   afterEach(() => {
+    setServiceWorker(originalServiceWorker);
+    delete document.visibilityState;
     consoleError.mockRestore();
     shareMocks.getUploadQueue.mockReset();
     shareMocks.migrateIncomingShares.mockReset();
@@ -293,5 +318,153 @@ describe("useMobileCapture share-target review", () => {
     // Still logged (never swallowed), but not flashed into a context that is gone.
     expect(consoleError).toHaveBeenCalledWith("Shared capture upload failed:", failure);
     expect(props.setFlash).not.toHaveBeenCalledWith("", expect.stringContaining("offline"));
+  });
+  it("refreshes recent notes and project counts after a successful import", async () => {
+    const queue = {
+      drain: vi.fn(async () => ({ dropped: [], stillQueued: [], uploaded: [] })),
+      enqueue: vi.fn(),
+    };
+    shareMocks.getUploadQueue.mockReturnValue(queue);
+    const { props, result } = await renderWithParkedShares();
+
+    await act(async () => {
+      await result.current.importIncomingShares();
+    });
+
+    expect(props.refreshProjectCounts).toHaveBeenCalledWith(PROJECT_ID);
+    expect(props.refreshRecentNotes).toHaveBeenCalledWith(PROJECT_ID);
+    // The refresh runs after the imported files were handed to the uploader.
+    expect(props.refreshRecentNotes.mock.invocationCallOrder[0]).toBeGreaterThan(
+      queue.drain.mock.invocationCallOrder[0]
+    );
+  });
+
+  it("logs and flashes a refresh failure after an import instead of swallowing it", async () => {
+    const failure = new Error("notes unavailable");
+    const queue = {
+      drain: vi.fn(async () => ({ dropped: [], stillQueued: [], uploaded: [] })),
+      enqueue: vi.fn(),
+    };
+    shareMocks.getUploadQueue.mockReturnValue(queue);
+    const { props, result } = await renderWithParkedShares({
+      refreshRecentNotes: vi.fn(async () => Promise.reject(failure)),
+    });
+
+    await act(async () => {
+      await result.current.importIncomingShares();
+    });
+
+    expect(consoleError).toHaveBeenCalledWith(
+      "Project refresh after shared capture import failed:",
+      failure
+    );
+    expect(props.setFlash).toHaveBeenLastCalledWith(
+      "",
+      "Shared captures were imported, but the project view could not be refreshed: " +
+        "notes unavailable."
+    );
+  });
+
+  it("does not refresh project data when nothing was imported", async () => {
+    shareMocks.getUploadQueue.mockReturnValue({ drain: vi.fn() });
+    shareMocks.migrateIncomingShares.mockResolvedValue({ migrated: 0, skipped: 1 });
+    const { props, result } = await renderWithParkedShares();
+
+    await act(async () => {
+      await result.current.importIncomingShares();
+    });
+
+    expect(props.refreshProjectCounts).not.toHaveBeenCalled();
+    expect(props.refreshRecentNotes).not.toHaveBeenCalled();
+  });
+
+  it("re-reads the share inbox when the service worker reports a newly parked share", async () => {
+    const serviceWorker = new EventTarget();
+    setServiceWorker(serviceWorker);
+    const { result } = await renderWithParkedShares();
+
+    await parkAnotherShare("arrived while open");
+    act(() => {
+      serviceWorker.dispatchEvent(
+        new MessageEvent("message", { data: { type: SHARE_INBOX_UPDATED_MESSAGE } })
+      );
+    });
+
+    await waitFor(() => expect(result.current.incomingShares).toHaveLength(2));
+    expect(result.current.incomingShares[1]).toMatchObject({ text: "arrived while open" });
+    expect(shareMocks.migrateIncomingShares).not.toHaveBeenCalled();
+  });
+
+  it("ignores unrelated service worker messages", async () => {
+    const serviceWorker = new EventTarget();
+    setServiceWorker(serviceWorker);
+    await renderWithParkedShares();
+    const listSpy = vi.spyOn(shareMocks.storage, "list");
+
+    act(() => {
+      serviceWorker.dispatchEvent(new MessageEvent("message", { data: { type: "OTHER" } }));
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+
+    expect(listSpy).not.toHaveBeenCalled();
+  });
+
+  it("re-reads the share inbox when the capture page becomes visible again", async () => {
+    const { result } = await renderWithParkedShares();
+
+    await parkAnotherShare("shared from another app");
+    setVisibilityState("hidden");
+    act(() => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(result.current.incomingShares).toHaveLength(1);
+
+    setVisibilityState("visible");
+    act(() => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+
+    await waitFor(() => expect(result.current.incomingShares).toHaveLength(2));
+  });
+
+  it("stops listening for inbox changes once unmounted", async () => {
+    const serviceWorker = new EventTarget();
+    setServiceWorker(serviceWorker);
+    const { unmount } = await renderWithParkedShares();
+    unmount();
+    const listSpy = vi.spyOn(shareMocks.storage, "list");
+
+    setVisibilityState("visible");
+    document.dispatchEvent(new Event("visibilitychange"));
+    serviceWorker.dispatchEvent(
+      new MessageEvent("message", { data: { type: SHARE_INBOX_UPDATED_MESSAGE } })
+    );
+
+    expect(listSpy).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      "full",
+      "The shared item was not saved: the share inbox is full. " +
+        "Import or discard the shared items waiting for review, then share again.",
+    ],
+    [
+      "too-large",
+      "The shared item was not saved: it is larger than the share inbox accepts. " +
+        "Add it from the capture page instead.",
+    ],
+  ])("flashes a refused share redirect (%s)", async (status, message) => {
+    window.history.replaceState({}, "", `/app/capture?from-share=${status}`);
+
+    const { props } = renderCaptureHook();
+
+    await waitFor(() => expect(props.setFlash).toHaveBeenCalledWith("", message));
+    expect(window.location.search).not.toContain("from-share");
   });
 });

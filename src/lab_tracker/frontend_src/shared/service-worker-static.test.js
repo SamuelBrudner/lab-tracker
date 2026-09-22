@@ -50,16 +50,15 @@ function expectedStaticAssetVersion() {
 describe("service worker source", () => {
   it("waits for share-inbox transaction completion before resolving writes", () => {
     expect(serviceWorkerSource).toContain("tx.oncomplete");
-    expect(serviceWorkerSource).toContain("resolve(insertedId)");
+    expect(serviceWorkerSource).toContain("resolve(outcome)");
     expect(serviceWorkerSource).toContain("IndexedDB transaction aborted");
   });
 
   it("stores fileless share-target text and URL records and redirects with explicit status", () => {
     expect(serviceWorkerSource).toContain('formData.get("url")');
-    expect(serviceWorkerSource).toContain("storedCount === 0 && (title || text || url)");
+    expect(serviceWorkerSource).toContain("records.length === 0 && (title || text || url)");
     expect(serviceWorkerSource).toContain("from-share=${redirectStatus}");
     expect(serviceWorkerSource).toContain('redirectStatus = "error"');
-    expect(serviceWorkerSource).toContain('redirectStatus = storedCount > 0 ? "1" : "empty"');
   });
 
   it("caches the canonical app shell and falls back for failed navigations", () => {

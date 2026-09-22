@@ -3,10 +3,12 @@ import { indexedDB as fakeIndexedDB } from "fake-indexeddb";
 
 import {
   DB_NAME,
+  SHARE_INBOX_MAX_AGE_MS,
   STORE,
   createIndexedDbShareStorage,
   createMemoryShareStorage,
   discardIncomingShares,
+  listReviewableShares,
   migrateIncomingShares,
 } from "./share-target-inbox.js";
 import {
@@ -378,5 +380,21 @@ describe("discardIncomingShares", () => {
     expect(await storage.list()).toEqual([
       expect.objectContaining({ text: "arrived after review" }),
     ]);
+  });
+});
+
+describe("listReviewableShares", () => {
+  it("drops shares past the maximum age and lists the rest for review", async () => {
+    const now = 1_800_000_000_000;
+    const storage = createMemoryShareStorage([
+      { text: "expired", receivedAt: now - SHARE_INBOX_MAX_AGE_MS - 1 },
+      { text: "no timestamp" },
+      { text: "fresh", receivedAt: now - SHARE_INBOX_MAX_AGE_MS + 1 },
+    ]);
+
+    const shares = await listReviewableShares({ storage, now });
+
+    expect(shares.map((share) => share.text)).toEqual(["fresh"]);
+    expect((await storage.list()).map((share) => share.text)).toEqual(["fresh"]);
   });
 });
