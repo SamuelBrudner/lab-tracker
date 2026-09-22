@@ -30,7 +30,14 @@ replay results, usage events) are not referrers.
 Guards run inside the delete transaction after
 ``LabTrackerRepository.lock_project_references`` so that reference-adding
 writers that take the same project lock cannot slip a new referrer past the
-check. ``tests/test_reference_registry.py`` enforces that every foreign key
+check. Today those writers are claim create/update, analysis create/commit,
+claim-edge create, exploration-node create/update and the question-DAG
+writers. Other reference-adding writers (note targets, visualization
+``claim_ids``, provenance-link acceptance, dataset manifest ``note_ids`` and
+``source_session_id``) do not yet take the lock: the guards are exact for
+sequential callers, but on PostgreSQL one of those writes that commits while a
+delete is between its guard and its commit can still leave a dangling
+reference. ``tests/test_reference_registry.py`` enforces that every foreign key
 targeting a deletable table is classified here and that every probe named here
 has a repository implementation.
 """

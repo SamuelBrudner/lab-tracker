@@ -206,7 +206,11 @@ class TransactionalDraftCommitCoordinator(BaseService):
                 self._validate_member_onboarding_change_set(change_set)
             self._lock_question_update_projects(
                 accepted,
-                project_id=change_set.project_id,
+                project_id=(
+                    change_set.project_id
+                    if _takes_project_reference_lock(accepted)
+                    else None
+                ),
             )
             self._lock_dataset_update_projects(
                 accepted,
@@ -271,10 +275,12 @@ class TransactionalDraftCommitCoordinator(BaseService):
     ) -> None:
         """Pre-lock every question project in canonical UUID order.
 
-        ``project_id`` names the draft's own project, which commit always
-        includes: its question-DAG lock is also the project reference lock
-        that claim/analysis creation and delete guards take, and it must
-        precede the Dataset locks taken next.
+        ``project_id``, when given, names the draft's own project. Commit
+        passes it only when an operation will take the project reference
+        lock (claim/analysis writes): that lock is this question-DAG lock, and
+        it must precede the Dataset locks taken next. Other drafts keep the
+        narrower plan so pure dataset or question updates in one project do
+        not serialize on the project lock.
         """
 
         project_ids: set[UUID] = set() if project_id is None else {project_id}
@@ -375,6 +381,23 @@ class TransactionalDraftCommitCoordinator(BaseService):
                 project_id,
                 sorted(dataset_ids_by_project[project_id], key=str),
             )
+
+
+_PROJECT_REFERENCE_LOCKING_ENTITY_TYPES = frozenset({EntityType.CLAIM, EntityType.ANALYSIS})
+
+
+def _takes_project_reference_lock(operations: list[GraphChangeOperation]) -> bool:
+    """Whether applying ``operations`` takes the project reference lock.
+
+    Claim create/update and analysis create re-validate their evidence
+    references under ``lock_project_references``; analysis updates are
+    included conservatively.
+    """
+
+    return any(
+        operation.entity_type in _PROJECT_REFERENCE_LOCKING_ENTITY_TYPES
+        for operation in operations
+    )
 
 
 def _ensure_accepted_operation_refs_available(

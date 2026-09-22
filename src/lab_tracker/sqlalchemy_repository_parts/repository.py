@@ -288,9 +288,10 @@ class SQLAlchemyLabTrackerRepository:
         """Serialize reference guards and reference-adding writes for one project.
 
         Delete guards (``lab_tracker.reference_registry``) and the writers that
-        add guarded references (claims, analyses, claim edges) read and write
-        under this lock, so a concurrent create can neither slip a new referrer
-        past a delete's guard nor commit a claim-edge cycle.
+        the registry lists as lock-takers (claims, analyses, claim edges,
+        exploration nodes) read and write under this lock, so such a
+        concurrent create can neither slip a new referrer past a delete's
+        guard nor commit a claim-edge cycle.
 
         This *is* the project question-DAG lock (PostgreSQL advisory key): one
         project graph lock keeps question-DAG edits, graph commits and

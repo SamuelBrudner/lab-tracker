@@ -93,52 +93,57 @@ class ExplorationService(BaseService):
         self.authorization.require_contributor(project_id, actor=actor)
         if self.repository.projects.get(project_id) is None:
             raise NotFoundError("Project does not exist.")
-        resolved_target = self._resolve_entity_ref(
-            target,
-            project_id=project_id,
-            allowed_types=_TARGET_TYPES,
-            field_name="target",
-        )
-        resolved_evidence_refs = [
-            self._resolve_entity_ref(
-                ref,
+        with self.application_transaction():
+            # Delete guards read targets, evidence, edges and invalidations
+            # under this project lock, so validation and insert cannot
+            # interleave with a delete of a referenced record.
+            self.repository.lock_project_references(project_id)
+            resolved_target = self._resolve_entity_ref(
+                target,
                 project_id=project_id,
-                allowed_types=_EVIDENCE_TYPES,
-                field_name="evidence_refs",
+                allowed_types=_TARGET_TYPES,
+                field_name="target",
             )
-            for ref in evidence_refs or []
-        ]
-        node = ExplorationNode(
-            node_id=uuid4(),
-            project_id=project_id,
-            node_type=node_type,
-            title=title.strip(),
-            target=resolved_target,
-            status=status,
-            choice=_normalize_optional_text(choice),
-            alternatives_considered=_normalize_text_list(alternatives_considered),
-            rationale=_normalize_optional_text(rationale),
-            evidence_refs=resolved_evidence_refs,
-            hypothesis=_normalize_optional_text(hypothesis),
-            failure_mode=_normalize_optional_text(failure_mode),
-            lesson=_normalize_optional_text(lesson),
-            tooling_context=_normalize_optional_text(tooling_context),
-            trigger=_normalize_optional_text(trigger),
-            invalidates_node_id=invalidates_node_id,
-            invalidates_claim_id=invalidates_claim_id,
-            parent_node_ids=unique_ids(parent_node_ids),
-            also_depends_on_node_ids=unique_ids(also_depends_on_node_ids),
-            created_by=actor_user_id(actor),
-            created_by_user_id=actor_user_fk(actor, self.repository),
-            origin=origin,
-            change_set_id=change_set_id,
-            origin_provider=origin_provider,
-            origin_model=origin_model,
-            origin_prompt_version=origin_prompt_version,
-        )
-        self._validate_node(node)
-        with self.unit_of_work() as repository:
-            repository.exploration_nodes.save(node)
+            resolved_evidence_refs = [
+                self._resolve_entity_ref(
+                    ref,
+                    project_id=project_id,
+                    allowed_types=_EVIDENCE_TYPES,
+                    field_name="evidence_refs",
+                )
+                for ref in evidence_refs or []
+            ]
+            node = ExplorationNode(
+                node_id=uuid4(),
+                project_id=project_id,
+                node_type=node_type,
+                title=title.strip(),
+                target=resolved_target,
+                status=status,
+                choice=_normalize_optional_text(choice),
+                alternatives_considered=_normalize_text_list(alternatives_considered),
+                rationale=_normalize_optional_text(rationale),
+                evidence_refs=resolved_evidence_refs,
+                hypothesis=_normalize_optional_text(hypothesis),
+                failure_mode=_normalize_optional_text(failure_mode),
+                lesson=_normalize_optional_text(lesson),
+                tooling_context=_normalize_optional_text(tooling_context),
+                trigger=_normalize_optional_text(trigger),
+                invalidates_node_id=invalidates_node_id,
+                invalidates_claim_id=invalidates_claim_id,
+                parent_node_ids=unique_ids(parent_node_ids),
+                also_depends_on_node_ids=unique_ids(also_depends_on_node_ids),
+                created_by=actor_user_id(actor),
+                created_by_user_id=actor_user_fk(actor, self.repository),
+                origin=origin,
+                change_set_id=change_set_id,
+                origin_provider=origin_provider,
+                origin_model=origin_model,
+                origin_prompt_version=origin_prompt_version,
+            )
+            self._validate_node(node)
+            with self.unit_of_work() as repository:
+                repository.exploration_nodes.save(node)
         return node
 
     def get_exploration_node(self, node_id: UUID) -> ExplorationNode:
@@ -215,142 +220,149 @@ class ExplorationService(BaseService):
     ) -> ExplorationNode:
         node = self.get_exploration_node(node_id)
         self.authorization.require_contributor(node.project_id, actor=actor)
-        before = node.model_copy(deep=True)
-        if is_provided(status):
-            if status is None:
-                raise ValidationError("status must not be null.")
-            next_status = status
-        else:
-            next_status = node.status
-        for field_name, value in (
-            ("title", title),
-            ("alternatives_considered", alternatives_considered),
-            ("evidence_refs", evidence_refs),
-            ("parent_node_ids", parent_node_ids),
-            ("also_depends_on_node_ids", also_depends_on_node_ids),
-        ):
-            if is_provided(value) and value is None:
-                raise ValidationError(f"{field_name} must not be null.")
-        self._ensure_status_transition(node.status, next_status)
-        content_edit = any(
-            is_provided(item)
-            for item in (
-                title,
-                choice,
-                alternatives_considered,
-                rationale,
-                evidence_refs,
-                hypothesis,
-                failure_mode,
-                lesson,
-                tooling_context,
-                trigger,
-                invalidates_node_id,
-                invalidates_claim_id,
-                parent_node_ids,
-                also_depends_on_node_ids,
-            )
-        )
-        if node.status != ExplorationNodeStatus.STAGED and content_edit:
-            raise ValidationError("Only staged exploration nodes can be edited.")
-        if is_provided(title):
-            ensure_non_empty(title, "title")
-            node.title = title.strip()
-        if is_provided(choice):
-            node.choice = _normalize_optional_text(choice) if choice is not None else None
-        if is_provided(alternatives_considered):
-            node.alternatives_considered = _normalize_text_list(alternatives_considered)
-        if is_provided(rationale):
-            node.rationale = _normalize_optional_text(rationale) if rationale is not None else None
-        if is_provided(evidence_refs):
-            node.evidence_refs = [
-                self._resolve_entity_ref(
-                    ref,
-                    project_id=node.project_id,
-                    allowed_types=_EVIDENCE_TYPES,
-                    field_name="evidence_refs",
+        with self.application_transaction():
+            # Same project lock as the delete guards: re-read and validate
+            # the new references under it (see create_exploration_node).
+            self.repository.lock_project_references(node.project_id)
+            node = self.get_exploration_node(node_id)
+            before = node.model_copy(deep=True)
+            if is_provided(status):
+                if status is None:
+                    raise ValidationError("status must not be null.")
+                next_status = status
+            else:
+                next_status = node.status
+            for field_name, value in (
+                ("title", title),
+                ("alternatives_considered", alternatives_considered),
+                ("evidence_refs", evidence_refs),
+                ("parent_node_ids", parent_node_ids),
+                ("also_depends_on_node_ids", also_depends_on_node_ids),
+            ):
+                if is_provided(value) and value is None:
+                    raise ValidationError(f"{field_name} must not be null.")
+            self._ensure_status_transition(node.status, next_status)
+            content_edit = any(
+                is_provided(item)
+                for item in (
+                    title,
+                    choice,
+                    alternatives_considered,
+                    rationale,
+                    evidence_refs,
+                    hypothesis,
+                    failure_mode,
+                    lesson,
+                    tooling_context,
+                    trigger,
+                    invalidates_node_id,
+                    invalidates_claim_id,
+                    parent_node_ids,
+                    also_depends_on_node_ids,
                 )
-                for ref in evidence_refs
-            ]
-        if is_provided(hypothesis):
-            node.hypothesis = (
-                _normalize_optional_text(hypothesis) if hypothesis is not None else None
             )
-        if is_provided(failure_mode):
-            node.failure_mode = (
-                _normalize_optional_text(failure_mode)
-                if failure_mode is not None
-                else None
-            )
-        if is_provided(lesson):
-            node.lesson = _normalize_optional_text(lesson) if lesson is not None else None
-        if is_provided(tooling_context):
-            node.tooling_context = (
-                _normalize_optional_text(tooling_context)
-                if tooling_context is not None
-                else None
-            )
-        if is_provided(trigger):
-            node.trigger = _normalize_optional_text(trigger) if trigger is not None else None
-        # Providing exactly one invalidation target re-points the pivot and
-        # clears the other kind, so a staged pivot can switch between
-        # invalidating a node and a claim without tripping the exactly-one
-        # rule mid-update. Providing both still fails validation below.
-        if is_provided(invalidates_node_id) or is_provided(invalidates_claim_id):
-            next_invalidates_node_id = (
-                invalidates_node_id
-                if is_provided(invalidates_node_id)
-                else node.invalidates_node_id
-            )
-            next_invalidates_claim_id = (
-                invalidates_claim_id
-                if is_provided(invalidates_claim_id)
-                else node.invalidates_claim_id
-            )
-            if (
-                is_provided(invalidates_node_id)
-                and invalidates_node_id is not None
-                and not is_provided(invalidates_claim_id)
-            ):
-                next_invalidates_claim_id = None
-            if (
-                is_provided(invalidates_claim_id)
-                and invalidates_claim_id is not None
-                and not is_provided(invalidates_node_id)
-            ):
-                next_invalidates_node_id = None
-            node.invalidates_node_id = next_invalidates_node_id
-            node.invalidates_claim_id = next_invalidates_claim_id
-        if is_provided(parent_node_ids):
-            node.parent_node_ids = unique_ids(parent_node_ids)
-        if is_provided(also_depends_on_node_ids):
-            node.also_depends_on_node_ids = unique_ids(also_depends_on_node_ids)
-        node.status = next_status
-        if origin is not None:
-            node.origin = origin
-        if change_set_id is not None:
-            node.change_set_id = change_set_id
-        if origin_provider is not None:
-            node.origin_provider = origin_provider
-        if origin_model is not None:
-            node.origin_model = origin_model
-        if origin_prompt_version is not None:
-            node.origin_prompt_version = origin_prompt_version
-        if content_edit:
-            self._validate_node(node)
-        # Status-only transitions skip re-validation: the content was validated
-        # on creation and on every staged edit, and the only drift since then is
-        # external — a referenced node/claim deleted out from under the pivot
-        # (invalidates_* are ondelete=SET NULL) before the reference-registry
-        # delete guards refused such deletes. Re-running the exactly-one check
-        # there would strand a legacy committed/archived pivot that can no
-        # longer be re-pointed.
-        if node == before:
+            if node.status != ExplorationNodeStatus.STAGED and content_edit:
+                raise ValidationError("Only staged exploration nodes can be edited.")
+            if is_provided(title):
+                ensure_non_empty(title, "title")
+                node.title = title.strip()
+            if is_provided(choice):
+                node.choice = _normalize_optional_text(choice) if choice is not None else None
+            if is_provided(alternatives_considered):
+                node.alternatives_considered = _normalize_text_list(alternatives_considered)
+            if is_provided(rationale):
+                node.rationale = (
+                    _normalize_optional_text(rationale) if rationale is not None else None
+                )
+            if is_provided(evidence_refs):
+                node.evidence_refs = [
+                    self._resolve_entity_ref(
+                        ref,
+                        project_id=node.project_id,
+                        allowed_types=_EVIDENCE_TYPES,
+                        field_name="evidence_refs",
+                    )
+                    for ref in evidence_refs
+                ]
+            if is_provided(hypothesis):
+                node.hypothesis = (
+                    _normalize_optional_text(hypothesis) if hypothesis is not None else None
+                )
+            if is_provided(failure_mode):
+                node.failure_mode = (
+                    _normalize_optional_text(failure_mode)
+                    if failure_mode is not None
+                    else None
+                )
+            if is_provided(lesson):
+                node.lesson = _normalize_optional_text(lesson) if lesson is not None else None
+            if is_provided(tooling_context):
+                node.tooling_context = (
+                    _normalize_optional_text(tooling_context)
+                    if tooling_context is not None
+                    else None
+                )
+            if is_provided(trigger):
+                node.trigger = _normalize_optional_text(trigger) if trigger is not None else None
+            # Providing exactly one invalidation target re-points the pivot and
+            # clears the other kind, so a staged pivot can switch between
+            # invalidating a node and a claim without tripping the exactly-one
+            # rule mid-update. Providing both still fails validation below.
+            if is_provided(invalidates_node_id) or is_provided(invalidates_claim_id):
+                next_invalidates_node_id = (
+                    invalidates_node_id
+                    if is_provided(invalidates_node_id)
+                    else node.invalidates_node_id
+                )
+                next_invalidates_claim_id = (
+                    invalidates_claim_id
+                    if is_provided(invalidates_claim_id)
+                    else node.invalidates_claim_id
+                )
+                if (
+                    is_provided(invalidates_node_id)
+                    and invalidates_node_id is not None
+                    and not is_provided(invalidates_claim_id)
+                ):
+                    next_invalidates_claim_id = None
+                if (
+                    is_provided(invalidates_claim_id)
+                    and invalidates_claim_id is not None
+                    and not is_provided(invalidates_node_id)
+                ):
+                    next_invalidates_node_id = None
+                node.invalidates_node_id = next_invalidates_node_id
+                node.invalidates_claim_id = next_invalidates_claim_id
+            if is_provided(parent_node_ids):
+                node.parent_node_ids = unique_ids(parent_node_ids)
+            if is_provided(also_depends_on_node_ids):
+                node.also_depends_on_node_ids = unique_ids(also_depends_on_node_ids)
+            node.status = next_status
+            if origin is not None:
+                node.origin = origin
+            if change_set_id is not None:
+                node.change_set_id = change_set_id
+            if origin_provider is not None:
+                node.origin_provider = origin_provider
+            if origin_model is not None:
+                node.origin_model = origin_model
+            if origin_prompt_version is not None:
+                node.origin_prompt_version = origin_prompt_version
+            if content_edit:
+                self._validate_node(node)
+            # Status-only transitions skip re-validation: the content was validated
+            # on creation and on every staged edit, and the only drift since then is
+            # external — a referenced node/claim deleted out from under the pivot
+            # (invalidates_* are ondelete=SET NULL) before the reference-registry
+            # delete guards refused such deletes. Re-running the exactly-one check
+            # there would strand a legacy committed/archived pivot that can no
+            # longer be re-pointed.
+            if node == before:
+                return node
+            node.updated_at = utc_now()
+            with self.unit_of_work() as repository:
+                repository.exploration_nodes.save(node)
             return node
-        node.updated_at = utc_now()
-        with self.unit_of_work() as repository:
-            repository.exploration_nodes.save(node)
-        return node
 
     def delete_exploration_node(
         self,

@@ -3,8 +3,11 @@
 Each probe answers "does any live record still reference this entity?" for one
 :class:`~lab_tracker.reference_registry.ReferenceProbe`. FK-less JSON payloads
 (manifest note ids, evidence refs, graph-draft source notes) are portable JSON
-columns on SQLite and PostgreSQL, so those probes scan the owning project's
-rows in Python; every other probe is a single ``EXISTS``-style query.
+columns on SQLite and PostgreSQL, so those probes scan rows in Python; every
+other probe is a single ``EXISTS``-style query. The evidence-ref and
+graph-draft source scans are limited to the deleted entity's project because
+their writers reject cross-project references; dataset manifest note ids are
+not validated that way, so their scan covers every project.
 """
 
 from __future__ import annotations
@@ -218,11 +221,12 @@ def _graph_draft_sources(
 
 
 def _dataset_manifest_notes(
-    session: OrmSession, _: DeletableEntity, entity_id: str, project_id: str
+    session: OrmSession, _: DeletableEntity, entity_id: str, __: str
 ) -> bool:
-    manifests = session.scalars(
-        select(DatasetModel.manifest_note_ids).where(DatasetModel.project_id == project_id)
-    )
+    # Unlike exploration evidence refs and graph-draft source notes, manifest
+    # note_ids are not validated for project membership when written, so an
+    # immutable manifest in any project may cite this note.
+    manifests = session.scalars(select(DatasetModel.manifest_note_ids))
     return any(
         str(note_id).lower() == entity_id.lower()
         for note_ids in manifests

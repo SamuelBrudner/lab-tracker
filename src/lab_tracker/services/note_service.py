@@ -920,17 +920,19 @@ class NoteService(BaseService):
     ) -> Note:
         note = self.get_note(note_id)
         self.authorization.require_contributor(note.project_id, actor=actor)
-        if is_member_checkpoint(note) and not allow_member_onboarding_checkpoint:
-            raise ValidationError(
-                "Member onboarding checkpoints cannot be deleted."
-            )
-        if self._member_onboarding_checkpoint_for_capture(note) is not None:
-            raise ValidationError(
-                "The designated first member-onboarding capture cannot be deleted."
-            )
         with self.application_transaction(), self.unit_of_work() as repository:
             repository.lock_project_references(note.project_id)
+            # Re-read and re-check under the lock so every guard, including
+            # the onboarding markers, sees the newest committed state.
             note = self.get_note(note_id)
+            if is_member_checkpoint(note) and not allow_member_onboarding_checkpoint:
+                raise ValidationError(
+                    "Member onboarding checkpoints cannot be deleted."
+                )
+            if self._member_onboarding_checkpoint_for_capture(note) is not None:
+                raise ValidationError(
+                    "The designated first member-onboarding capture cannot be deleted."
+                )
             prepare_entity_deletion(
                 repository,
                 DeletableEntity.NOTE,

@@ -302,6 +302,38 @@ def test_delete_note_refuses_while_dataset_manifests_cite_it(status: DatasetStat
     assert ctx.api.get_note(note_id).note_id == note_id
 
 
+def test_delete_note_refuses_while_another_projects_dataset_manifest_cites_it() -> None:
+    # Manifest note_ids are not validated for project membership on write, so
+    # the guard must see citations from any project's (immutable) manifest.
+    ctx = _Context()
+    note_id = ctx.note()
+    other_project = ctx.api.create_project("Citing project", actor=ctx.actor)
+    other_question = ctx.api.create_question(
+        project_id=other_project.project_id,
+        text="Which note does this manifest cite?",
+        question_type=QuestionType.DESCRIPTIVE,
+        status=QuestionStatus.ACTIVE,
+        actor=ctx.actor,
+    )
+    dataset_id = ctx.api.create_dataset(
+        project_id=other_project.project_id,
+        primary_question_id=other_question.question_id,
+        status=DatasetStatus.COMMITTED,
+        commit_manifest=DatasetCommitManifestInput(
+            files=[DatasetFile(path="data.csv", checksum="abc123")],
+            note_ids=[note_id],
+        ),
+        actor=ctx.actor,
+    ).dataset_id
+
+    with pytest.raises(
+        ValidationError,
+        match="^Note cannot be deleted while dataset manifests cite it\\.$",
+    ):
+        ctx.api.delete_note(note_id, actor=ctx.actor)
+    assert ctx.api.get_dataset(dataset_id).commit_manifest.note_ids == [note_id]
+
+
 def test_delete_note_refuses_while_exploration_nodes_cite_it_as_evidence() -> None:
     ctx = _Context()
     note_id = ctx.note()
