@@ -1,3 +1,4 @@
+import json
 from uuid import uuid4
 
 import pytest
@@ -471,3 +472,26 @@ def test_http_note_target_with_misspelled_key_is_rejected(
     assert response.status_code == 422
     issues = response.json()["error"]["issues"]
     assert [issue["field"] for issue in issues] == ["targets.0.entityRole"]
+
+
+def test_http_upload_target_with_unknown_key_is_rejected(
+    client,
+    admin_auth_headers,
+) -> None:
+    project = client.post("/projects", json={"name": "Upload keys"}, headers=admin_auth_headers)
+    project_id = project.json()["data"]["project_id"]
+
+    response = client.post(
+        "/notes/upload-file",
+        data={
+            "project_id": project_id,
+            "targets": json.dumps(
+                [{"entity_type": "project", "entity_id": project_id, "role": "x"}]
+            ),
+        },
+        files={"file": ("photo.png", b"not-really-a-png", "image/png")},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["message"] == "targets contains invalid entity refs."

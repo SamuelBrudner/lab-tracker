@@ -10,6 +10,7 @@ from urllib.parse import quote, unquote
 from uuid import UUID
 
 from fastapi import Query
+from pydantic import TypeAdapter
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
@@ -40,6 +41,7 @@ from lab_tracker.models import (
 from lab_tracker.schemas import (
     AuthTokenRead,
     AuthUserRead,
+    EntityRefIn,
     ErrorEnvelope,
     ErrorInfo,
     ListEnvelope,
@@ -260,6 +262,9 @@ def parse_json_form_field(raw_value: str | None, field_name: str) -> Any:
         raise ValidationError(f"{field_name} must be valid JSON.") from exc
 
 
+_ENTITY_REFS_ADAPTER: TypeAdapter[list[EntityRef]] = TypeAdapter(list[EntityRefIn])
+
+
 def parse_entity_refs_form(raw_value: str | None) -> list[EntityRef] | None:
     parsed = parse_json_form_field(raw_value, "targets")
     if parsed is None:
@@ -267,7 +272,9 @@ def parse_entity_refs_form(raw_value: str | None) -> list[EntityRef] | None:
     if not isinstance(parsed, list):
         raise ValidationError("targets must decode to a list.")
     try:
-        return [EntityRef.model_validate(item) for item in parsed]
+        # Multipart targets must be as strict as JSON ones: an unknown or
+        # misspelled key is rejected, not dropped.
+        return _ENTITY_REFS_ADAPTER.validate_python(parsed)
     except Exception as exc:
         raise ValidationError("targets contains invalid entity refs.") from exc
 

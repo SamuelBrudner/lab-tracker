@@ -225,7 +225,9 @@ For new projects or newly imported repo context:
    link their results back as notes, analyses, datasets, or conclusions.
 
 Question status transitions are one-way for review: `staged` can become
-`active`, `abandoned`, or `superseded`, but `active` cannot return to `staged`.
+`active` or `abandoned`, but `active` cannot return to `staged`. A question
+becomes `superseded` only through `POST /questions/{question_id}/refactor`, and
+a new question starts as `staged`, `active`, or `abandoned`.
 
 ## Joining An Ongoing Project
 
