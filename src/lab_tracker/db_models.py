@@ -411,15 +411,18 @@ class DatasetModel(Base):
         ForeignKey("questions.question_id"),
         nullable=False,
     )
-    manifest_files: Mapped[list[dict[str, object]]] = mapped_column(JSON, default=list)
-    manifest_external_artifacts: Mapped[list[dict[str, object]]] = mapped_column(
+    # The manifest columns hold NULL in rows that predate them (they were added
+    # to a populated table without a backfill); readers map NULL to the empty
+    # container, so they stay nullable.  Writes always store a container.
+    manifest_files: Mapped[list[dict[str, object]] | None] = mapped_column(JSON, default=list)
+    manifest_external_artifacts: Mapped[list[dict[str, object]] | None] = mapped_column(
         JSON,
         default=list,
     )
-    manifest_metadata: Mapped[dict[str, str]] = mapped_column(JSON, default=dict)
-    manifest_nwb_metadata: Mapped[dict[str, str]] = mapped_column(JSON, default=dict)
-    manifest_bids_metadata: Mapped[dict[str, str]] = mapped_column(JSON, default=dict)
-    manifest_note_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    manifest_metadata: Mapped[dict[str, str] | None] = mapped_column(JSON, default=dict)
+    manifest_nwb_metadata: Mapped[dict[str, str] | None] = mapped_column(JSON, default=dict)
+    manifest_bids_metadata: Mapped[dict[str, str] | None] = mapped_column(JSON, default=dict)
+    manifest_note_ids: Mapped[list[str] | None] = mapped_column(JSON, default=list)
     manifest_source_session_id: Mapped[UUID | None] = mapped_column(GUID)
     status: Mapped[DatasetStatus] = mapped_column(
         EnumType(DatasetStatus, length=20), default="staged"
@@ -525,7 +528,11 @@ class NoteModel(Base):
     raw_size_bytes: Mapped[int | None] = mapped_column(Integer)
     raw_checksum: Mapped[str | None] = mapped_column(String(64))
     transcribed_text: Mapped[str | None] = mapped_column(Text)
-    note_metadata: Mapped[dict[str, str]] = mapped_column("metadata", JSON, default=dict)
+    # NULL in rows that predate the column (added to a populated table without a
+    # backfill); readers map it to the empty container, so it stays nullable.
+    note_metadata: Mapped[dict[str, str] | None] = mapped_column(
+        "metadata", JSON, default=dict
+    )
     client_capture_id: Mapped[str | None] = mapped_column(String(120))
     status: Mapped[NoteStatus] = mapped_column(EnumType(NoteStatus, length=20), default="staged")
     archived_reason: Mapped[str | None] = mapped_column(String(32))
@@ -891,7 +898,9 @@ class GraphDraftBatchRunModel(Base):
     window_start: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
     window_end: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
     note_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    source_note_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    # NULL in rows that predate the column (added to a populated table without a
+    # backfill); readers map it to the empty container, so it stays nullable.
+    source_note_ids: Mapped[list[str] | None] = mapped_column(JSON, default=list)
     batch_key: Mapped[str] = mapped_column(String(120), nullable=False)
     user_hint: Mapped[str | None] = mapped_column(Text)
     change_set_id: Mapped[UUID | None] = mapped_column(
@@ -1016,7 +1025,11 @@ class AnalysisModel(Base):
     method_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     code_version: Mapped[str] = mapped_column(String(255), nullable=False)
     environment_hash: Mapped[str | None] = mapped_column(String(255))
-    external_artifacts: Mapped[list[dict[str, object]]] = mapped_column(JSON, default=list)
+    # NULL in rows that predate the column (added to a populated table without a
+    # backfill); readers map it to the empty container, so it stays nullable.
+    external_artifacts: Mapped[list[dict[str, object]] | None] = mapped_column(
+        JSON, default=list
+    )
     executed_by: Mapped[str | None] = mapped_column(String(255))
     executed_by_user_id: Mapped[UUID | None] = mapped_column(
         GUID,
@@ -1086,7 +1099,11 @@ class ClaimModel(Base):
     falsification_criteria: Mapped[str | None] = mapped_column(Text)
     verification_plan: Mapped[str | None] = mapped_column(Text)
     refuting_outcome: Mapped[str | None] = mapped_column(Text)
-    external_citations: Mapped[list[dict[str, object]]] = mapped_column(JSON, default=list)
+    # NULL in rows that predate the column (added to a populated table without a
+    # backfill); readers map it to the empty container, so it stays nullable.
+    external_citations: Mapped[list[dict[str, object]] | None] = mapped_column(
+        JSON, default=list
+    )
     created_by: Mapped[str | None] = mapped_column(String(255))
     created_by_user_id: Mapped[UUID | None] = mapped_column(
         GUID,
@@ -2166,6 +2183,26 @@ Index(
     VisualizationModel.created_at,
 )
 Index("ix_visualization_claims_claim_id", VisualizationClaimModel.claim_id)
+# Foreign-key and scheduler lookups created by migrations 0006, 0009, 0017 and
+# 0024; declared here so metadata-built schemas match migrated databases.
+Index("ix_dataset_files_dataset_id", DatasetFileModel.dataset_id)
+Index("ix_acquisition_outputs_session_id", AcquisitionOutputModel.session_id)
+Index("ix_device_tokens_user_id", DeviceTokenModel.user_id)
+Index("ix_device_enrollments_user_id", DeviceEnrollmentModel.user_id)
+Index(
+    "ix_graph_draft_batch_settings_next_run_at",
+    GraphDraftBatchSettingsModel.next_run_at,
+)
+Index(
+    "ix_graph_draft_batch_runs_project_window_end",
+    GraphDraftBatchRunModel.project_id,
+    GraphDraftBatchRunModel.window_end,
+)
+Index(
+    "ix_graph_draft_batch_runs_status_created_at",
+    GraphDraftBatchRunModel.status,
+    GraphDraftBatchRunModel.created_at,
+)
 
 # Keep high-cardinality manifests in a focused module while preserving the
 # guarantee that importing db_models registers the complete production schema.

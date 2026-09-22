@@ -140,7 +140,11 @@ def _assert_acquisition_schema(database_url: str) -> None:
 def test_acquisition_revisions_extend_current_main_in_one_chain() -> None:
     script = ScriptDirectory.from_config(_alembic_config())
 
-    assert script.get_heads() == [_SESSION_EPOCH_REVISION]
+    heads = script.get_heads()
+    assert len(heads) == 1
+    assert _MEMBER_ONBOARDING_REVISION in {
+        revision.revision for revision in script.iterate_revisions(heads[0], "base")
+    }
     assert (
         script.get_revision(_SESSION_EPOCH_REVISION).down_revision
         == _MEMBER_ONBOARDING_REVISION

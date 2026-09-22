@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import copy
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from alembic import command
@@ -1654,3 +1655,381 @@ def test_restored_migrated_database_supports_api_round_trip(monkeypatch, tmp_pat
         assert api.get_dataset(dataset.dataset_id).primary_question_id == question.question_id
 
     restored_engine.dispose()
+
+
+_ORM_PARITY_REVISION = "0064_orm_schema_parity"
+# Columns the application has always written non-NULL since their table was
+# created; 0064 makes the database enforce what the ORM already declares.
+_ORM_PARITY_NOT_NULL_COLUMNS = {
+    "claim_edges": {"created_at"},
+    "data_stores": {"capabilities", "updated_at"},
+    "entity_versions": {"snapshot", "created_at"},
+    "exploration_nodes": {"alternatives_considered", "evidence_refs"},
+    "group_memberships": {"created_at", "updated_at"},
+    "project_groups": {"description", "created_at", "updated_at"},
+    "supervision_edges": {"created_at", "updated_at"},
+}
+# Columns added to tables that already held rows, without a backfill: rows
+# predating the column legitimately hold NULL, and every reader maps it to the
+# empty container.  0064 must neither reject nor rewrite them.
+_LEGACY_NULLABLE_CONTAINER_COLUMNS = {
+    "analyses": {"external_artifacts"},
+    "claims": {"external_citations"},
+    "datasets": {
+        "manifest_files",
+        "manifest_external_artifacts",
+        "manifest_metadata",
+        "manifest_nwb_metadata",
+        "manifest_bids_metadata",
+        "manifest_note_ids",
+    },
+    "graph_draft_batch_runs": {"source_note_ids"},
+    "notes": {"metadata"},
+}
+
+
+def _revision_before(revision: str) -> str:
+    down_revision = ScriptDirectory.from_config(_alembic_config()).get_revision(
+        revision
+    ).down_revision
+    assert isinstance(down_revision, str)
+    return down_revision
+
+
+def _sqlite_engine(database_url: str):
+    return create_engine(
+        database_url,
+        future=True,
+        connect_args={"check_same_thread": False},
+    )
+
+
+def _normalized_options(options: dict[str, object] | None) -> tuple[tuple[str, str], ...]:
+    # Reflected partial-index predicates are TextClause objects; compare their SQL.
+    return tuple(sorted((str(key), str(value)) for key, value in (options or {}).items()))
+
+
+def _schema_signature(database_url: str) -> dict[str, dict[str, object]]:
+    """Every table's columns, indexes and constraints, as reflection sees them."""
+
+    engine = _sqlite_engine(database_url) if database_url.startswith("sqlite") else (
+        create_engine(database_url, future=True)
+    )
+    try:
+        inspector = inspect(engine)
+        signature: dict[str, dict[str, object]] = {}
+        for table_name in sorted(inspector.get_table_names()):
+            if table_name == "alembic_version":
+                continue
+            signature[table_name] = {
+                "columns": {
+                    column["name"]: (
+                        str(column["type"]),
+                        column["nullable"],
+                        _normalized_server_default(column.get("default")),
+                    )
+                    for column in inspector.get_columns(table_name)
+                },
+                "indexes": sorted(
+                    (
+                        str(index["name"]),
+                        tuple(str(name) for name in index["column_names"]),
+                        bool(index["unique"]),
+                        _normalized_options(index.get("dialect_options")),
+                    )
+                    for index in inspector.get_indexes(table_name)
+                ),
+                "unique_constraints": sorted(
+                    (str(constraint["name"]), tuple(constraint["column_names"]))
+                    for constraint in inspector.get_unique_constraints(table_name)
+                ),
+                "foreign_keys": sorted(
+                    (
+                        str(foreign_key["name"]),
+                        tuple(foreign_key["constrained_columns"]),
+                        str(foreign_key["referred_table"]),
+                        tuple(foreign_key["referred_columns"]),
+                        _normalized_options(foreign_key.get("options")),
+                    )
+                    for foreign_key in inspector.get_foreign_keys(table_name)
+                ),
+                "check_constraints": sorted(
+                    (str(check["name"]), " ".join(str(check["sqltext"]).split()))
+                    for check in inspector.get_check_constraints(table_name)
+                ),
+            }
+        return signature
+    finally:
+        engine.dispose()
+
+
+def _expected_orm_parity_signature(
+    previous: dict[str, dict[str, object]],
+) -> dict[str, dict[str, object]]:
+    expected = copy.deepcopy(previous)
+    for table_name, column_names in _ORM_PARITY_NOT_NULL_COLUMNS.items():
+        columns = expected[table_name]["columns"]
+        assert isinstance(columns, dict)
+        for column_name in column_names:
+            column_type, nullable, default = columns[column_name]
+            assert nullable is True, f"{table_name}.{column_name} was already NOT NULL"
+            columns[column_name] = (column_type, False, default)
+    note_foreign_keys = expected["notes"]["foreign_keys"]
+    assert isinstance(note_foreign_keys, list)
+    note_foreign_keys.append(
+        (
+            "fk_notes_archived_by_user_id_users",
+            ("archived_by_user_id",),
+            "users",
+            ("user_id",),
+            _normalized_options({"ondelete": "SET NULL"}),
+        )
+    )
+    note_foreign_keys.sort()
+    return expected
+
+
+def test_orm_parity_migration_changes_exactly_the_drifted_schema(monkeypatch, tmp_path):
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'orm-parity-round-trip.db'}"
+    config = _alembic_config()
+    _set_database_url(monkeypatch, database_url)
+    previous_revision = _revision_before(_ORM_PARITY_REVISION)
+    command.upgrade(config, previous_revision)
+    previous = _schema_signature(database_url)
+
+    command.upgrade(config, _ORM_PARITY_REVISION)
+    upgraded = _schema_signature(database_url)
+
+    assert upgraded == _expected_orm_parity_signature(previous)
+    engine = _sqlite_engine(database_url)
+    try:
+        inspector = inspect(engine)
+        _assert_columns_not_nullable(inspector, _ORM_PARITY_NOT_NULL_COLUMNS)
+        for table_name, column_names in _LEGACY_NULLABLE_CONTAINER_COLUMNS.items():
+            columns = {column["name"]: column for column in inspector.get_columns(table_name)}
+            for column_name in column_names:
+                assert columns[column_name]["nullable"] is True, (
+                    f"{table_name}.{column_name} must stay nullable for legacy rows"
+                )
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, previous_revision)
+    assert _schema_signature(database_url) == previous
+    command.upgrade(config, _ORM_PARITY_REVISION)
+    assert _schema_signature(database_url) == upgraded
+
+
+def _insert_project_group(connection, *, description, created_at="CURRENT_TIMESTAMP") -> str:
+    group_id = str(uuid4())
+    connection.execute(
+        text(
+            "INSERT INTO project_groups (group_id, name, description, created_at, updated_at) "
+            f"VALUES (:group_id, :name, :description, {created_at}, CURRENT_TIMESTAMP)"
+        ),
+        {"group_id": group_id, "name": f"Group {group_id}", "description": description},
+    )
+    return group_id
+
+
+def test_orm_parity_migration_refuses_nulls_without_rewriting_them(monkeypatch, tmp_path):
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'orm-parity-null-preflight.db'}"
+    config = _alembic_config()
+    _set_database_url(monkeypatch, database_url)
+    previous_revision = _revision_before(_ORM_PARITY_REVISION)
+    command.upgrade(config, previous_revision)
+    engine = _sqlite_engine(database_url)
+    with engine.begin() as connection:
+        null_description_ids = sorted(
+            _insert_project_group(connection, description=None) for _ in range(7)
+        )
+        null_created_at_id = _insert_project_group(
+            connection, description="", created_at="NULL"
+        )
+        _insert_project_group(connection, description="complete")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        command.upgrade(config, _ORM_PARITY_REVISION)
+
+    message = str(excinfo.value)
+    assert _ORM_PARITY_REVISION in message
+    assert "project_groups.description: 7 row(s)" in message
+    assert ", ".join(f"group_id={group_id}" for group_id in null_description_ids[:5]) in message
+    assert "plus 2 more" in message
+    assert f"project_groups.created_at: 1 row(s) (group_id={null_created_at_id})" in message
+    assert "project_groups.updated_at" not in message
+    assert "No rows were changed" in message
+    assert _current_revision(database_url) == previous_revision
+    with engine.connect() as connection:
+        remaining_nulls = connection.execute(
+            text(
+                "SELECT COUNT(*) FROM project_groups "
+                "WHERE description IS NULL OR created_at IS NULL"
+            )
+        ).scalar_one()
+    assert remaining_nulls == 8
+    engine.dispose()
+
+
+def test_orm_parity_migration_refuses_orphaned_note_archivers(monkeypatch, tmp_path):
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'orm-parity-fk-preflight.db'}"
+    config = _alembic_config()
+    _set_database_url(monkeypatch, database_url)
+    previous_revision = _revision_before(_ORM_PARITY_REVISION)
+    command.upgrade(config, previous_revision)
+    project_id, note_id, missing_user_id = str(uuid4()), str(uuid4()), str(uuid4())
+    engine = _sqlite_engine(database_url)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO projects (project_id, name, created_at, updated_at) "
+                "VALUES (:project_id, 'Archive project', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ),
+            {"project_id": project_id},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO notes (note_id, project_id, raw_content, status, "
+                "archived_reason, archived_at, archived_by_user_id, created_at, updated_at) "
+                "VALUES (:note_id, :project_id, 'archived', 'archived', 'superseded', "
+                "CURRENT_TIMESTAMP, :user_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ),
+            {"note_id": note_id, "project_id": project_id, "user_id": missing_user_id},
+        )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        command.upgrade(config, _ORM_PARITY_REVISION)
+
+    message = str(excinfo.value)
+    assert "notes.archived_by_user_id" in message
+    assert f"note_id={note_id} -> {missing_user_id}" in message
+    assert _current_revision(database_url) == previous_revision
+    with engine.connect() as connection:
+        assert connection.execute(
+            text("SELECT archived_by_user_id FROM notes WHERE note_id = :note_id"),
+            {"note_id": note_id},
+        ).scalar_one() == missing_user_id
+    engine.dispose()
+
+
+def test_orm_parity_migration_keeps_legacy_null_containers(monkeypatch, tmp_path):
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'orm-parity-legacy-nulls.db'}"
+    config = _alembic_config()
+    _set_database_url(monkeypatch, database_url)
+    command.upgrade(config, _revision_before(_ORM_PARITY_REVISION))
+    project_id, question_id, dataset_id = str(uuid4()), str(uuid4()), str(uuid4())
+    note_id, analysis_id, claim_id, run_id = (str(uuid4()) for _ in range(4))
+    engine = _sqlite_engine(database_url)
+    with engine.begin() as connection:
+        for statement, parameters in (
+            (
+                "INSERT INTO projects (project_id, name, created_at, updated_at) "
+                "VALUES (:project_id, 'Legacy project', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                {"project_id": project_id},
+            ),
+            (
+                "INSERT INTO questions (question_id, project_id, text, question_type, status, "
+                "created_at, updated_at) VALUES (:question_id, :project_id, 'Q?', "
+                "'descriptive', 'active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                {"question_id": question_id, "project_id": project_id},
+            ),
+            (
+                "INSERT INTO datasets (dataset_id, project_id, commit_hash, "
+                "primary_question_id, status, created_at, updated_at) VALUES (:dataset_id, "
+                ":project_id, 'legacy-hash', :question_id, 'staged', CURRENT_TIMESTAMP, "
+                "CURRENT_TIMESTAMP)",
+                {
+                    "dataset_id": dataset_id,
+                    "project_id": project_id,
+                    "question_id": question_id,
+                },
+            ),
+            (
+                "INSERT INTO notes (note_id, project_id, raw_content, status, created_at, "
+                "updated_at) VALUES (:note_id, :project_id, 'legacy note', 'staged', "
+                "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                {"note_id": note_id, "project_id": project_id},
+            ),
+            (
+                "INSERT INTO analyses (analysis_id, project_id, method_hash, code_version, "
+                "executed_at, status, created_at, updated_at) VALUES (:analysis_id, "
+                ":project_id, 'method', 'code', CURRENT_TIMESTAMP, 'staged', "
+                "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                {"analysis_id": analysis_id, "project_id": project_id},
+            ),
+            (
+                "INSERT INTO claims (claim_id, project_id, statement, confidence, status, "
+                "created_at, updated_at) VALUES (:claim_id, :project_id, 'Legacy claim', 50, "
+                "'proposed', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                {"claim_id": claim_id, "project_id": project_id},
+            ),
+            (
+                "INSERT INTO graph_draft_batch_runs (run_id, project_id, trigger, status, "
+                "window_start, window_end, batch_key, summary, error_metadata, created_at, "
+                "updated_at, started_at) VALUES (:run_id, :project_id, 'scheduled', "
+                "'succeeded', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, :batch_key, '', '{}', "
+                "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                {"run_id": run_id, "project_id": project_id, "batch_key": f"legacy:{run_id}"},
+            ),
+        ):
+            connection.execute(text(statement), parameters)
+
+    command.upgrade(config, "head")
+
+    with engine.connect() as connection:
+        for table_name, column_names in _LEGACY_NULLABLE_CONTAINER_COLUMNS.items():
+            for column_name in column_names:
+                non_null = connection.execute(
+                    text(
+                        f"SELECT COUNT(*) FROM {table_name} "  # noqa: S608
+                        f"WHERE {column_name} IS NOT NULL"
+                    )
+                ).scalar_one()
+                assert non_null == 0, f"{table_name}.{column_name} was rewritten"
+    session_factory = get_session_factory(engine=engine)
+    with session_factory() as session:
+        api = LabTrackerAPI(repository=SQLAlchemyLabTrackerRepository(session))
+        dataset = api.get_dataset(UUID(dataset_id))
+        assert dataset.commit_manifest.files == []
+        assert dataset.commit_manifest.note_ids == []
+        assert dataset.commit_manifest.metadata == {}
+        assert api.get_note(UUID(note_id)).metadata == {}
+        assert api.get_analysis(UUID(analysis_id)).external_artifacts == []
+        assert api.get_claim(UUID(claim_id)).external_citations == []
+    engine.dispose()
+
+
+@pytest.mark.postgres
+def test_postgres_orm_parity_migration_refuses_nulls_then_round_trips(
+    migrated_postgres_database_url: str,
+) -> None:
+    database_url = migrated_postgres_database_url
+    config = _alembic_config()
+    upgraded = _schema_signature(database_url)
+    previous_revision = _revision_before(_ORM_PARITY_REVISION)
+    command.downgrade(config, previous_revision)
+    previous = _schema_signature(database_url)
+    assert upgraded == _expected_orm_parity_signature(previous)
+
+    engine = create_engine(database_url, future=True)
+    try:
+        with engine.begin() as connection:
+            group_id = _insert_project_group(connection, description=None)
+
+        with pytest.raises(RuntimeError) as excinfo:
+            command.upgrade(config, _ORM_PARITY_REVISION)
+        assert f"project_groups.description: 1 row(s) (group_id={group_id})" in str(
+            excinfo.value
+        )
+        assert _current_revision(database_url) == previous_revision
+
+        with engine.begin() as connection:
+            connection.execute(
+                text("UPDATE project_groups SET description = '' WHERE group_id = :group_id"),
+                {"group_id": group_id},
+            )
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+    assert _schema_signature(database_url) == upgraded
