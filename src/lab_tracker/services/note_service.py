@@ -39,11 +39,12 @@ from lab_tracker.models import (
 from lab_tracker.note_text import NoteTextExcerpt, decode_utf8_excerpt, is_text_content_type
 from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
 from lab_tracker.provider_error_redaction import provider_error_message
+from lab_tracker.reference_registry import DeletableEntity
 from lab_tracker.services.analysis_service import AnalysisService
 from lab_tracker.services.base import BaseService, IdempotentCreateResult, ServiceContext
 from lab_tracker.services.claim_service import ClaimService
 from lab_tracker.services.dataset_service import DatasetService
-from lab_tracker.services.goal_link_cleanup import remove_goal_links_to_entity
+from lab_tracker.services.deletion_references import prepare_entity_deletion
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.question_service import QuestionService
@@ -927,12 +928,14 @@ class NoteService(BaseService):
             raise ValidationError(
                 "The designated first member-onboarding capture cannot be deleted."
             )
-        self._ensure_note_can_be_deleted(note)
-        with self.unit_of_work() as repository:
-            remove_goal_links_to_entity(
+        with self.application_transaction(), self.unit_of_work() as repository:
+            repository.lock_project_references(note.project_id)
+            note = self.get_note(note_id)
+            prepare_entity_deletion(
                 repository,
-                entity_type=EntityType.NOTE,
-                entity_id=note_id,
+                DeletableEntity.NOTE,
+                note_id,
+                project_id=note.project_id,
             )
             repository.notes.delete(note_id)
         if note.raw_asset is not None:
@@ -940,20 +943,6 @@ class NoteService(BaseService):
                 lambda raw_asset=note.raw_asset: self._delete_raw_asset(raw_asset)
             )
         return note
-
-    def _ensure_note_can_be_deleted(self, note: Note) -> None:
-        change_sets = self.query_from_repository(
-            loader=lambda repository: repository.query_graph_change_sets(
-                project_id=note.project_id,
-                limit=None,
-                offset=0,
-            ),
-        )
-        if any(
-            change_set.source_note_id == note.note_id or note.note_id in change_set.source_note_ids
-            for change_set in change_sets
-        ):
-            raise ValidationError("Note cannot be deleted while graph drafts reference it.")
 
     def add_member_onboarding_question_target(
         self,

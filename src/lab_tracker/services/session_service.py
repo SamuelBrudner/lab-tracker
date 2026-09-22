@@ -16,7 +16,6 @@ from lab_tracker.models import (
     DatasetCommitManifestInput,
     DatasetStatus,
     EntityOrigin,
-    EntityType,
     QuestionStatus,
     Session,
     SessionStatus,
@@ -25,8 +24,9 @@ from lab_tracker.models import (
     utc_now,
 )
 from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
+from lab_tracker.reference_registry import DeletableEntity
 from lab_tracker.services.base import BaseService, ServiceContext
-from lab_tracker.services.goal_link_cleanup import remove_goal_links_to_entity
+from lab_tracker.services.deletion_references import prepare_entity_deletion
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.question_service import QuestionService
@@ -228,43 +228,19 @@ class SessionService(BaseService):
         session = self.get_session(session_id)
         self.authorization.require_contributor(session.project_id, actor=actor)
         with self.application_transaction(), self.unit_of_work() as repository:
+            # The project reference lock precedes the Session acquisition lock.
+            repository.lock_project_references(session.project_id)
             repository.lock_session_acquisition_state(session_id)
             session = self.get_session(session_id)
             self.authorization.require_contributor(session.project_id, actor=actor)
-            self._ensure_session_can_be_deleted(session)
-            remove_goal_links_to_entity(
+            prepare_entity_deletion(
                 repository,
-                entity_type=EntityType.SESSION,
-                entity_id=session_id,
+                DeletableEntity.SESSION,
+                session_id,
+                project_id=session.project_id,
             )
             repository.sessions.delete(session_id)
         return session
-
-    def _ensure_session_can_be_deleted(self, session: Session) -> None:
-        experiments, _ = self.repository.query_experiments(
-            session_id=session.session_id,
-            limit=None,
-            offset=0,
-        )
-        if experiments:
-            raise ValidationError(
-                "Session cannot be deleted while Experiments reference it."
-            )
-        datasets = self.query_from_repository(
-            loader=lambda repository: repository.query_datasets(
-                project_id=session.project_id,
-                limit=None,
-                offset=0,
-            ),
-        )
-        for dataset in datasets:
-            if (
-                dataset.status != DatasetStatus.STAGED
-                and dataset.commit_manifest.source_session_id == session.session_id
-            ):
-                raise ValidationError(
-                    "Session cannot be deleted while non-staged datasets reference it."
-                )
 
     def register_acquisition_output(
         self,

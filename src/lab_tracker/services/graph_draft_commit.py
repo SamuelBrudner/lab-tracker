@@ -204,7 +204,10 @@ class TransactionalDraftCommitCoordinator(BaseService):
                         "Member onboarding proposal could not be claimed for commit."
                     )
                 self._validate_member_onboarding_change_set(change_set)
-            self._lock_question_update_projects(accepted)
+            self._lock_question_update_projects(
+                accepted,
+                project_id=change_set.project_id,
+            )
             self._lock_dataset_update_projects(
                 accepted,
                 project_id=change_set.project_id,
@@ -263,10 +266,18 @@ class TransactionalDraftCommitCoordinator(BaseService):
     def _lock_question_update_projects(
         self,
         operations: list[GraphChangeOperation],
+        *,
+        project_id: UUID | None = None,
     ) -> None:
-        """Pre-lock every question project in canonical UUID order."""
+        """Pre-lock every question project in canonical UUID order.
 
-        project_ids: set[UUID] = set()
+        ``project_id`` names the draft's own project, which commit always
+        includes: its question-DAG lock is also the project reference lock
+        that claim/analysis creation and delete guards take, and it must
+        precede the Dataset locks taken next.
+        """
+
+        project_ids: set[UUID] = set() if project_id is None else {project_id}
         for operation in operations:
             if (
                 operation.op == GraphChangeOp.UPDATE

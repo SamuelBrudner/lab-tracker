@@ -15,15 +15,15 @@ from lab_tracker.models import (
     DatasetFile,
     DatasetStatus,
     EntityOrigin,
-    EntityType,
     QuestionLink,
     QuestionLinkRole,
     SessionType,
     utc_now,
 )
 from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
+from lab_tracker.reference_registry import DeletableEntity
 from lab_tracker.services.base import BaseService, ServiceContext
-from lab_tracker.services.goal_link_cleanup import remove_goal_links_to_entity
+from lab_tracker.services.deletion_references import prepare_entity_deletion
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.question_service import QuestionService
@@ -452,6 +452,9 @@ class DatasetService(BaseService):
         self.authorization.require_contributor(located_dataset.project_id, actor=actor)
         with self.application_transaction(), self.unit_of_work() as repository:
             if not experiment_dataset_locks_held:
+                # Reference guards and claim/analysis creation serialize on
+                # this project lock; it precedes Experiment and Dataset locks.
+                repository.lock_project_references(located_dataset.project_id)
                 parent_experiments, _ = repository.query_experiments(
                     dataset_id=dataset_id,
                     limit=None,
@@ -467,47 +470,19 @@ class DatasetService(BaseService):
                 )
             dataset = self.get_dataset(dataset_id)
             self.authorization.require_contributor(dataset.project_id, actor=actor)
-            self._ensure_dataset_can_be_deleted(dataset)
-            remove_goal_links_to_entity(
+            if dataset.status != DatasetStatus.STAGED:
+                raise ValidationError(
+                    "Only staged, unreferenced datasets can be deleted; "
+                    "archive committed datasets."
+                )
+            prepare_entity_deletion(
                 repository,
-                entity_type=EntityType.DATASET,
-                entity_id=dataset_id,
+                DeletableEntity.DATASET,
+                dataset_id,
+                project_id=dataset.project_id,
             )
             repository.datasets.delete(dataset_id)
         return dataset
-
-    def _ensure_dataset_can_be_deleted(self, dataset: Dataset) -> None:
-        if dataset.status != DatasetStatus.STAGED:
-            raise ValidationError(
-                "Only staged, unreferenced datasets can be deleted; archive committed datasets."
-            )
-        experiments, _ = self.repository.query_experiments(
-            dataset_id=dataset.dataset_id,
-            limit=None,
-            offset=0,
-        )
-        if experiments:
-            raise ValidationError(
-                "Dataset cannot be deleted while Experiments reference it."
-            )
-        claims = self.query_from_repository(
-            loader=lambda repository: repository.query_claims(
-                dataset_id=dataset.dataset_id,
-                limit=None,
-                offset=0,
-            ),
-        )
-        if claims:
-            raise ValidationError("Dataset cannot be deleted while claims reference it.")
-        analyses = self.query_from_repository(
-            loader=lambda repository: repository.query_analyses(
-                dataset_id=dataset.dataset_id,
-                limit=None,
-                offset=0,
-            ),
-        )
-        if analyses:
-            raise ValidationError("Dataset cannot be deleted while analyses reference it.")
 
     def validate_source_session(self, source_session_id: UUID | None, project_id: UUID) -> None:
         """Validate an optional dataset source session without writing."""

@@ -51,6 +51,7 @@ from lab_tracker.models import (
     UsageEventRollup,
     Visualization,
 )
+from lab_tracker.reference_registry import BlockingReference, DeletableEntity
 
 EntityT = TypeVar("EntityT")
 
@@ -562,6 +563,25 @@ class LabTrackerRepository(Protocol):
 
     def lock_experiment_updates(self, experiment_ids: Iterable[UUID]) -> None:
         """Serialize lifecycle and membership mutations for Experiments."""
+
+    def lock_project_references(self, project_id: UUID) -> None:
+        """Serialize reference guards and reference-adding writes for one project."""
+
+    def find_blocking_references(
+        self,
+        entity: DeletableEntity,
+        entity_id: UUID,
+        *,
+        project_id: UUID,
+    ) -> list[BlockingReference]:
+        """Return every registry referrer that must block deleting this entity."""
+
+    def remove_unaccepted_provenance_links(
+        self,
+        entity: DeletableEntity,
+        entity_ids: Iterable[UUID],
+    ) -> None:
+        """Delete proposed/rejected provenance links naming deleted entities."""
 
     def lock_project_deletion_guard(self, project_id: UUID) -> None:
         """Keep a project alive while a graph command locks its child rows."""

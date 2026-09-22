@@ -1,0 +1,257 @@
+"""PostgreSQL races between reference guards and reference-adding writes.
+
+Each test holds the first transaction inside ``lock_project_references`` until
+the second request is provably blocked on the same advisory lock, then lets
+the first commit and checks the loser observed the winner (M56, M52).
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
+from threading import Event, Lock
+from time import monotonic
+from typing import Any
+from uuid import UUID
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import func, select, text
+
+from lab_tracker.db_models import ClaimDatasetModel, ClaimEdgeModel, ClaimModel, DatasetModel
+from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
+
+pytestmark = pytest.mark.postgres
+
+
+def _post(client: TestClient, headers: dict[str, str], path: str, payload: dict[str, Any]):
+    response = client.post(path, json=payload, headers=headers)
+    assert response.status_code == 201, response.text
+    return response.json()["data"]
+
+
+def _project_with_dataset(
+    client: TestClient,
+    headers: dict[str, str],
+    name: str,
+) -> tuple[UUID, UUID]:
+    project = _post(client, headers, "/projects", {"name": name})
+    question = _post(
+        client,
+        headers,
+        "/questions",
+        {
+            "project_id": project["project_id"],
+            "text": "Which dataset survives?",
+            "question_type": "descriptive",
+            "status": "active",
+        },
+    )
+    dataset = _post(
+        client,
+        headers,
+        "/datasets",
+        {
+            "project_id": project["project_id"],
+            "primary_question_id": question["question_id"],
+        },
+    )
+    return UUID(project["project_id"]), UUID(dataset["dataset_id"])
+
+
+def _create_claim(
+    client: TestClient,
+    headers: dict[str, str],
+    project_id: UUID,
+    *,
+    statement: str,
+    dataset_id: UUID | None = None,
+):
+    payload: dict[str, Any] = {
+        "project_id": str(project_id),
+        "statement": statement,
+        "confidence": 0.5,
+    }
+    if dataset_id is not None:
+        payload["supported_by_dataset_ids"] = [str(dataset_id)]
+    return client.post("/claims", json=payload, headers=headers)
+
+
+def _blocking_pids(client: TestClient, blocked_pid: int) -> list[int]:
+    with client.app.state.db_engine.connect() as connection:
+        result = connection.scalar(
+            text("SELECT pg_blocking_pids(:blocked_pid)"),
+            {"blocked_pid": blocked_pid},
+        )
+    return [int(value) for value in result or []]
+
+
+def _wait_until_blocked(client: TestClient, *, blocked_pid: int, blocker_pid: int) -> None:
+    deadline = monotonic() + 10
+    poll = Event()
+    while monotonic() < deadline:
+        if blocker_pid in _blocking_pids(client, blocked_pid):
+            return
+        poll.wait(timeout=0.01)
+    pytest.fail(f"Backend {blocked_pid} was not blocked by {blocker_pid} before the deadline.")
+
+
+def _backend_pid(repository: SQLAlchemyLabTrackerRepository) -> int:
+    value = repository._session.scalar(text("SELECT pg_backend_pid()"))  # noqa: SLF001
+    assert value is not None
+    return int(value)
+
+
+def _race(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    first: Callable[[], Any],
+    second: Callable[[], Any],
+) -> tuple[Any, Any]:
+    """Run ``first`` holding the project reference lock, then ``second`` behind it."""
+
+    original_lock = SQLAlchemyLabTrackerRepository.lock_project_references
+    state_lock = Lock()
+    first_locked = Event()
+    second_entered = Event()
+    release_first = Event()
+    call_count = 0
+    backend_pids: dict[int, int] = {}
+
+    def coordinated_lock(repository: SQLAlchemyLabTrackerRepository, project_id: UUID) -> None:
+        nonlocal call_count
+        with state_lock:
+            call_index = call_count
+            call_count += 1
+            if call_index < 2:
+                backend_pids[call_index] = _backend_pid(repository)
+        if call_index == 0:
+            original_lock(repository, project_id)
+            first_locked.set()
+            if not release_first.wait(timeout=20):
+                raise RuntimeError("Timed out holding the first reference lock.")
+            return
+        if call_index == 1:
+            second_entered.set()
+        original_lock(repository, project_id)
+
+    monkeypatch.setattr(
+        SQLAlchemyLabTrackerRepository,
+        "lock_project_references",
+        coordinated_lock,
+    )
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first_future: Future[Any] = executor.submit(first)
+        assert first_locked.wait(timeout=10)
+        second_future: Future[Any] = executor.submit(second)
+        try:
+            assert second_entered.wait(timeout=10)
+            assert backend_pids[0] != backend_pids[1]
+            _wait_until_blocked(
+                client,
+                blocked_pid=backend_pids[1],
+                blocker_pid=backend_pids[0],
+            )
+        finally:
+            release_first.set()
+        return first_future.result(timeout=20), second_future.result(timeout=20)
+
+
+def test_dataset_delete_first_makes_concurrent_claim_create_fail_cleanly(
+    postgres_client: TestClient,
+    postgres_admin_auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    headers = postgres_admin_auth_headers
+    project_id, dataset_id = _project_with_dataset(postgres_client, headers, "Delete wins")
+
+    deleted, created = _race(
+        postgres_client,
+        monkeypatch,
+        lambda: postgres_client.delete(f"/datasets/{dataset_id}", headers=headers),
+        lambda: _create_claim(
+            postgres_client,
+            headers,
+            project_id,
+            statement="Supported by a dataset being deleted.",
+            dataset_id=dataset_id,
+        ),
+    )
+
+    assert deleted.status_code == 200, deleted.text
+    assert created.status_code == 404, created.text
+    assert created.json()["error"]["code"] == "not_found"
+    with postgres_client.app.state.db_session_factory() as session:
+        assert session.get(DatasetModel, str(dataset_id)) is None
+        assert session.scalar(select(func.count()).select_from(ClaimModel)) == 0
+        assert session.scalar(select(func.count()).select_from(ClaimDatasetModel)) == 0
+
+
+def test_claim_create_first_blocks_concurrent_dataset_delete(
+    postgres_client: TestClient,
+    postgres_admin_auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    headers = postgres_admin_auth_headers
+    project_id, dataset_id = _project_with_dataset(postgres_client, headers, "Claim wins")
+
+    created, deleted = _race(
+        postgres_client,
+        monkeypatch,
+        lambda: _create_claim(
+            postgres_client,
+            headers,
+            project_id,
+            statement="Supported before the delete.",
+            dataset_id=dataset_id,
+        ),
+        lambda: postgres_client.delete(f"/datasets/{dataset_id}", headers=headers),
+    )
+
+    assert created.status_code == 201, created.text
+    assert deleted.status_code == 422, deleted.text
+    assert deleted.json()["error"]["message"] == (
+        "Dataset cannot be deleted while claims reference it."
+    )
+    with postgres_client.app.state.db_session_factory() as session:
+        assert session.get(DatasetModel, str(dataset_id)) is not None
+        assert session.scalar(select(func.count()).select_from(ClaimDatasetModel)) == 1
+
+
+def test_opposite_claim_edges_serialize_and_cannot_commit_a_cycle(
+    postgres_client: TestClient,
+    postgres_admin_auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    headers = postgres_admin_auth_headers
+    project = _post(postgres_client, headers, "/projects", {"name": "Claim edge race"})
+    project_id = UUID(project["project_id"])
+    claims = []
+    for statement in ("Claim A.", "Claim B."):
+        response = _create_claim(postgres_client, headers, project_id, statement=statement)
+        assert response.status_code == 201, response.text
+        claims.append(response.json()["data"]["claim_id"])
+    claim_a, claim_b = claims
+
+    def create_edge(source: str, target: str):
+        return postgres_client.post(
+            f"/claims/{source}/edges",
+            json={"target_claim_id": target, "relation": "depends_on"},
+            headers=headers,
+        )
+
+    first, second = _race(
+        postgres_client,
+        monkeypatch,
+        lambda: create_edge(claim_a, claim_b),
+        lambda: create_edge(claim_b, claim_a),
+    )
+
+    assert first.status_code == 201, first.text
+    assert second.status_code == 422, second.text
+    assert second.json()["error"]["message"] == "Claim edge would create a cycle."
+    with postgres_client.app.state.db_session_factory() as session:
+        edges = list(
+            session.execute(select(ClaimEdgeModel.claim_id, ClaimEdgeModel.target_claim_id))
+        )
+    assert [(str(source), str(target)) for source, target in edges] == [(claim_a, claim_b)]

@@ -346,6 +346,9 @@ class EvidenceBundleService(BaseService):
 
         try:
             with self.application_transaction():
+                # Components below take the project reference lock one by one;
+                # take it once up front so no row lock precedes it.
+                self.repository.lock_project_references(normalized_command.project_id)
                 existing = self.repository.evidence_bundles.get_by_key(
                     project_id=normalized_command.project_id,
                     created_by=created_by,

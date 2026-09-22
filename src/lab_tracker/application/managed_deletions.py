@@ -39,6 +39,13 @@ class DeleteStorage(Protocol):
     def delete(self, storage_id: UUID) -> None: ...
 
 
+class ManagedDeletionLocking(DatasetFileLocking, Protocol):
+    """Lock intents for managed deletes, in canonical acquisition order."""
+
+    def lock_project_references(self, project_id: UUID) -> None:
+        """Serialize reference guards; taken before row, Experiment and file locks."""
+
+
 class ManagedDeletionAccess(Protocol):
     """Domain commands and transaction callbacks required by managed deletes."""
 
@@ -116,7 +123,7 @@ class ManagedDeletionCommands:
     """Deletes whose database cascade must coordinate with blob cleanup."""
 
     api: ManagedDeletionAccess
-    locks: DatasetFileLocking
+    locks: ManagedDeletionLocking
     session: OrmSession
     file_storage: DeleteStorage
     raw_note_storage: DeleteStorage
@@ -210,6 +217,9 @@ class ManagedDeletionCommands:
     ) -> Dataset:
         existing = self.api.get_dataset(dataset_id)
         self.api.require_project_read(existing.project_id, actor=actor)
+        # The reference guard inside delete_dataset runs under this project
+        # lock, which concurrent claim/analysis creation also takes.
+        self.locks.lock_project_references(existing.project_id)
         experiment_ids = [
             ensure_uuid(value)
             for value in self.session.scalars(
@@ -254,6 +264,9 @@ class ManagedDeletionCommands:
     ) -> Analysis:
         existing = self.api.get_analysis(analysis_id)
         self.api.require_project_read(existing.project_id, actor=actor)
+        # Claim creation holds this lock while its FK checks touch the analysis
+        # row, so take it before the row lock below.
+        self.locks.lock_project_references(existing.project_id)
         locked_analysis = self.session.scalar(
             select(AnalysisModel)
             .where(AnalysisModel.analysis_id == str(analysis_id))
@@ -292,6 +305,7 @@ class ManagedDeletionCommands:
         existing = self.api.get_visualization(viz_id)
         analysis = self.api.get_analysis(existing.analysis_id)
         self.api.require_project_read(analysis.project_id, actor=actor)
+        self.locks.lock_project_references(analysis.project_id)
         row = file_commands.locked_visualization_row(self.session, viz_id)
         if row is None:
             raise NotFoundError("Visualization does not exist.")

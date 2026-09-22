@@ -7,12 +7,13 @@ from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext
 from lab_tracker.errors import NotFoundError, OpaqueTargetNotFoundError, ValidationError
-from lab_tracker.models import EntityOrigin, EntityType, Visualization, utc_now
+from lab_tracker.models import EntityOrigin, Visualization, utc_now
 from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
+from lab_tracker.reference_registry import DeletableEntity
 from lab_tracker.services.analysis_service import AnalysisService
 from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.claim_service import ClaimService
-from lab_tracker.services.goal_link_cleanup import remove_goal_links_to_entity
+from lab_tracker.services.deletion_references import prepare_entity_deletion
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.shared import (
     actor_user_fk,
@@ -187,14 +188,19 @@ class VisualizationService(BaseService):
         *,
         actor: AuthContext | None = None,
     ) -> Visualization:
-        visualization = self.get_visualization(viz_id)
-        analysis = self.analyses.get_analysis(visualization.analysis_id)
-        self.authorization.require_contributor(analysis.project_id, actor=actor)
-        with self.unit_of_work() as repository:
-            remove_goal_links_to_entity(
+        located_visualization = self.get_visualization(viz_id)
+        located_analysis = self.analyses.get_analysis(located_visualization.analysis_id)
+        self.authorization.require_contributor(located_analysis.project_id, actor=actor)
+        with self.application_transaction(), self.unit_of_work() as repository:
+            repository.lock_project_references(located_analysis.project_id)
+            visualization = self.get_visualization(viz_id)
+            analysis = self.analyses.get_analysis(visualization.analysis_id)
+            self.authorization.require_contributor(analysis.project_id, actor=actor)
+            prepare_entity_deletion(
                 repository,
-                entity_type=EntityType.VISUALIZATION,
-                entity_id=viz_id,
+                DeletableEntity.VISUALIZATION,
+                viz_id,
+                project_id=analysis.project_id,
             )
             repository.visualizations.delete(viz_id)
         return visualization

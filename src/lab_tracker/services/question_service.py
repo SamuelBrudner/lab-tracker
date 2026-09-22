@@ -28,8 +28,9 @@ from lab_tracker.models import (
     utc_now,
 )
 from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
+from lab_tracker.reference_registry import DeletableEntity
 from lab_tracker.services.base import BaseService, IdempotentCreateResult, ServiceContext
-from lab_tracker.services.goal_link_cleanup import remove_goal_links_to_entity
+from lab_tracker.services.deletion_references import prepare_entity_deletion
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.shared import (
@@ -749,83 +750,17 @@ class QuestionService(BaseService):
             actor=actor,
         )
         with self.application_transaction(), self.unit_of_work() as repository:
-            repository.lock_project_question_dag(located_question.project_id)
+            repository.lock_project_references(located_question.project_id)
             question = self.get_question(question_id)
             self.authorization.require_contributor(question.project_id, actor=actor)
-            self._ensure_question_not_referenced(question)
-            remove_goal_links_to_entity(
+            prepare_entity_deletion(
                 repository,
-                entity_type=EntityType.QUESTION,
-                entity_id=question_id,
+                DeletableEntity.QUESTION,
+                question_id,
+                project_id=question.project_id,
             )
             repository.questions.delete(question_id)
         return question
-
-    def _ensure_question_not_referenced(self, question: Question) -> None:
-        linked_notes = self.query_from_repository(
-            loader=lambda repository: repository.query_notes(
-                project_id=question.project_id,
-                target_entity_type=EntityType.QUESTION.value,
-                target_entity_id=question.question_id,
-                limit=1,
-                offset=0,
-            ),
-        )
-        if linked_notes:
-            raise ValidationError(
-                "Question cannot be deleted while notes target it."
-            )
-        experiments, _ = self.repository.query_experiments(
-            primary_question_id=question.question_id,
-            limit=None,
-            offset=0,
-        )
-        if experiments:
-            raise ValidationError(
-                "Question cannot be deleted while Experiments use it as their "
-                "primary question."
-            )
-        datasets = self.query_from_repository(
-            loader=lambda repository: repository.query_datasets(
-                project_id=question.project_id,
-                limit=None,
-                offset=0,
-            ),
-        )
-        if any(dataset.primary_question_id == question.question_id for dataset in datasets):
-            raise ValidationError(
-                "Question cannot be deleted while datasets use it as their primary question."
-            )
-        if any(
-            link.question_id == question.question_id
-            for dataset in datasets
-            for link in dataset.question_links
-        ):
-            raise ValidationError(
-                "Question cannot be deleted while datasets link to it."
-            )
-        sessions = self.query_from_repository(
-            loader=lambda repository: repository.query_sessions(
-                project_id=question.project_id,
-                limit=None,
-                offset=0,
-            ),
-        )
-        if any(session.primary_question_id == question.question_id for session in sessions):
-            raise ValidationError(
-                "Question cannot be deleted while sessions use it as their primary question."
-            )
-        claims = self.query_from_repository(
-            loader=lambda repository: repository.query_claims(
-                project_id=question.project_id,
-                limit=None,
-                offset=0,
-            ),
-        )
-        if any(question.question_id in claim.answers_question_ids for claim in claims):
-            raise ValidationError(
-                "Question cannot be deleted while claims answer it."
-            )
 
 
 def _targets_question(targets: Iterable[EntityRef], question_id: UUID) -> bool:

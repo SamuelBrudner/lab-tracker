@@ -17,7 +17,9 @@ from lab_tracker.models import (
     utc_now,
 )
 from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
+from lab_tracker.reference_registry import DeletableEntity
 from lab_tracker.services.base import BaseService, ServiceContext
+from lab_tracker.services.deletion_references import prepare_entity_deletion
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.shared import actor_user_fk, actor_user_id, ensure_non_empty, unique_ids
 
@@ -339,8 +341,9 @@ class ExplorationService(BaseService):
         # Status-only transitions skip re-validation: the content was validated
         # on creation and on every staged edit, and the only drift since then is
         # external — a referenced node/claim deleted out from under the pivot
-        # (invalidates_* are ondelete=SET NULL). Re-running the exactly-one
-        # check there would strand a committed/archived pivot that can no
+        # (invalidates_* are ondelete=SET NULL) before the reference-registry
+        # delete guards refused such deletes. Re-running the exactly-one check
+        # there would strand a legacy committed/archived pivot that can no
         # longer be re-pointed.
         if node == before:
             return node
@@ -355,9 +358,18 @@ class ExplorationService(BaseService):
         *,
         actor: AuthContext | None = None,
     ) -> ExplorationNode:
-        node = self.get_exploration_node(node_id)
-        self.authorization.require_contributor(node.project_id, actor=actor)
-        with self.unit_of_work() as repository:
+        located_node = self.get_exploration_node(node_id)
+        self.authorization.require_contributor(located_node.project_id, actor=actor)
+        with self.application_transaction(), self.unit_of_work() as repository:
+            repository.lock_project_references(located_node.project_id)
+            node = self.get_exploration_node(node_id)
+            self.authorization.require_contributor(node.project_id, actor=actor)
+            prepare_entity_deletion(
+                repository,
+                DeletableEntity.EXPLORATION_NODE,
+                node_id,
+                project_id=node.project_id,
+            )
             repository.exploration_nodes.delete(node_id)
         return node
 

@@ -4,8 +4,10 @@ from uuid import UUID, uuid4
 
 import pytest
 from api_helpers import repository_backed_api
+from sqlalchemy import update
 
 from lab_tracker.auth import AuthContext, AuthService, Role
+from lab_tracker.db_models import ExplorationNodeModel
 from lab_tracker.errors import AuthError, ValidationError
 from lab_tracker.models import (
     AnalysisStatus,
@@ -403,7 +405,7 @@ def _create_pivot_node(api, project, question, actor, *, title: str, **invalidat
     )
 
 
-def test_deleting_invalidated_target_does_not_strand_committed_pivot():
+def test_invalidated_target_cannot_be_deleted_under_a_committed_pivot():
     api, actor, project, question, _dataset, _claim = _create_exploration_context()
     decision = _create_decision_node(api, project, question, actor, title="Old path")
     pivot = _create_pivot_node(
@@ -418,19 +420,19 @@ def test_deleting_invalidated_target_does_not_strand_committed_pivot():
         pivot.node_id, status=ExplorationNodeStatus.COMMITTED, actor=actor
     )
 
-    # Deleting the invalidated target SET NULLs the committed pivot's ref.
-    api.delete_exploration_node(decision.node_id, actor=actor)
-    stranded = api.get_exploration_node(pivot.node_id)
-    assert stranded.invalidates_node_id is None
+    # The pivot's exactly-one invalidation target cannot be deleted out from
+    # under it (previously the FK SET NULL stranded the committed pivot).
+    with pytest.raises(ValidationError, match="exploration pivots invalidate it"):
+        api.delete_exploration_node(decision.node_id, actor=actor)
+    assert api.get_exploration_node(pivot.node_id).invalidates_node_id == decision.node_id
 
-    # The pivot can still be transitioned (status-only) despite the nulled ref.
     archived = api.update_exploration_node(
         pivot.node_id, status=ExplorationNodeStatus.ARCHIVED, actor=actor
     )
     assert archived.status == ExplorationNodeStatus.ARCHIVED
 
 
-def test_status_only_commit_tolerates_since_deleted_invalidation_target():
+def test_status_only_commit_tolerates_legacy_stranded_invalidation_target():
     api, actor, project, question, _dataset, claim = _create_exploration_context()
     pivot = _create_pivot_node(
         api,
@@ -440,8 +442,18 @@ def test_status_only_commit_tolerates_since_deleted_invalidation_target():
         title="Pivot invalidating a claim",
         invalidates_claim_id=claim.claim_id,
     )
+    with pytest.raises(ValidationError, match="exploration pivots invalidate it"):
+        api.delete_claim(claim.claim_id, actor=actor)
 
-    api.delete_claim(claim.claim_id, actor=actor)
+    # Rows stranded before delete guards existed (FK SET NULL) must still be
+    # able to make status-only transitions.
+    _engine, session = api._test_resources  # type: ignore[attr-defined]
+    session.execute(
+        update(ExplorationNodeModel)
+        .where(ExplorationNodeModel.node_id == str(pivot.node_id))
+        .values(invalidates_claim_id=None)
+    )
+    session.commit()
 
     committed = api.update_exploration_node(
         pivot.node_id, status=ExplorationNodeStatus.COMMITTED, actor=actor

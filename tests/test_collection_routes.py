@@ -307,7 +307,7 @@ def test_ten_thousand_members_create_constant_database_records(
     assert counts == [1, 1, 1, 1]
 
 
-def test_deleting_session_cascades_collection_rows(
+def test_deleting_session_with_captured_collections_is_refused(
     client: TestClient,
     admin_auth_headers: dict[str, str],
 ) -> None:
@@ -333,10 +333,26 @@ def test_deleting_session_cascades_collection_rows(
         f"/sessions/{session_id}",
         headers=admin_auth_headers,
     )
-    assert deleted.status_code == 200, deleted.text
+    assert deleted.status_code == 422, deleted.text
+    assert deleted.json()["error"]["message"] == (
+        "Session cannot be deleted while acquisition collections capture it."
+    )
+    assert _collection_row_counts(client) == [1, 1, 1, 1]
 
+    # Project deletion still cascades the captured rows with their Session.
+    session = client.get(f"/sessions/{session_id}", headers=admin_auth_headers)
+    assert session.status_code == 200
+    project_deleted = client.delete(
+        f"/projects/{session.json()['data']['project_id']}",
+        headers=admin_auth_headers,
+    )
+    assert project_deleted.status_code == 200, project_deleted.text
+    assert _collection_row_counts(client) == [0, 0, 0, 0]
+
+
+def _collection_row_counts(client: TestClient) -> list[int | None]:
     with client.app.state.db_session_factory() as db_session:
-        counts = [
+        return [
             db_session.scalar(select(func.count()).select_from(model))
             for model in (
                 AcquisitionCollectionModel,
@@ -345,7 +361,6 @@ def test_deleting_session_cascades_collection_rows(
                 AcquisitionCollectionCaptureModel,
             )
         ]
-    assert counts == [0, 0, 0, 0]
 
 
 def test_equal_observation_ties_use_the_newest_capture_receipt(

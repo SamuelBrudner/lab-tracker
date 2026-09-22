@@ -57,6 +57,7 @@ from lab_tracker.models import (
     UsageEvent,
     Visualization,
 )
+from lab_tracker.reference_registry import BlockingReference, DeletableEntity
 from lab_tracker.sqlalchemy_mappers import session_from_model
 
 from .analyses import (
@@ -93,6 +94,7 @@ from .ownership import (
     SQLAlchemyRecordExportEventRepository,
 )
 from .provenance_links import SQLAlchemyProvenanceLinkRepository
+from .references import find_blocking_references, remove_unaccepted_provenance_links
 from .sessions import SQLAlchemyAcquisitionOutputRepository, SQLAlchemySessionRepository
 from .supervision import SQLAlchemySupervisionEdgeRepository
 from .usage import (
@@ -281,6 +283,55 @@ class SQLAlchemyLabTrackerRepository:
             {"lock_key": _project_question_dag_lock_key(project_id)},
         )
         self._session.expire_all()
+
+    def lock_project_references(self, project_id: UUID) -> None:
+        """Serialize reference guards and reference-adding writes for one project.
+
+        Delete guards (``lab_tracker.reference_registry``) and the writers that
+        add guarded references (claims, analyses, claim edges) read and write
+        under this lock, so a concurrent create can neither slip a new referrer
+        past a delete's guard nor commit a claim-edge cycle.
+
+        This *is* the project question-DAG lock (PostgreSQL advisory key): one
+        project graph lock keeps question-DAG edits, graph commits and
+        reference guards free of lock-order inversions between two
+        project-level keys. Take it before Session, Experiment and
+        Dataset/file locks. SQLite, where the DAG lock is a no-op, first takes
+        its coarse database write fence, so later guard reads observe the
+        newest commit and no other writer can commit until this one ends.
+        """
+
+        self._session.flush()
+        is_sqlite = self._session.get_bind().dialect.name == "sqlite"
+        if is_sqlite:
+            self._session.execute(
+                text("UPDATE projects SET project_id = project_id WHERE project_id = :project_id"),
+                {"project_id": str(project_id)},
+            )
+        self.lock_project_question_dag(project_id)
+        if is_sqlite:
+            self._session.expire_all()
+
+    def find_blocking_references(
+        self,
+        entity: DeletableEntity,
+        entity_id: UUID,
+        *,
+        project_id: UUID,
+    ) -> list[BlockingReference]:
+        return find_blocking_references(
+            self._session,
+            entity,
+            entity_id,
+            project_id=project_id,
+        )
+
+    def remove_unaccepted_provenance_links(
+        self,
+        entity: DeletableEntity,
+        entity_ids: Iterable[UUID],
+    ) -> None:
+        remove_unaccepted_provenance_links(self._session, entity, entity_ids)
 
     def lock_graph_draft_batch_reviewer(
         self,

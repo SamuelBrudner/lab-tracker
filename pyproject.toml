@@ -133,6 +133,9 @@ show_error_codes = true
 files = [
   "src/lab_tracker/patching.py",
   "src/lab_tracker/repository.py",
+  "src/lab_tracker/reference_registry.py",
+  "src/lab_tracker/sqlalchemy_repository_parts/references.py",
+  "src/lab_tracker/services/deletion_references.py",
   "src/lab_tracker/decision_context_types.py",
   "src/lab_tracker/decision_context_query.py",
   "src/lab_tracker/decision_context_use_case.py",
