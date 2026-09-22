@@ -1,6 +1,10 @@
+import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
+
 from api_helpers import app_test_client, stamp_schema_at_head
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 
 from lab_tracker.app import create_app
 from lab_tracker.auth import Role
@@ -24,6 +28,31 @@ def _bootstrap_database(monkeypatch, tmp_path, name: str) -> str:
     stamp_schema_at_head(engine)
     engine.dispose()
     return database_url
+
+
+class _RecordingHandler(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__(level=logging.DEBUG)
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.messages.append(record.getMessage())
+
+
+@contextmanager
+def _observability_log() -> Iterator[list[str]]:
+    # App startup replaces the root handlers, so pytest's caplog handler never
+    # sees these records; attach directly to the module logger instead.
+    handler = _RecordingHandler()
+    target = logging.getLogger("lab_tracker.app_parts.observability")
+    original_level = target.level
+    target.addHandler(handler)
+    target.setLevel(logging.DEBUG)
+    try:
+        yield handler.messages
+    finally:
+        target.removeHandler(handler)
+        target.setLevel(original_level)
 
 
 def _auth_headers(token: str) -> dict[str, str]:
@@ -232,3 +261,70 @@ def test_test_prefix_is_not_a_public_auth_bypass(monkeypatch, tmp_path):
     assert unauthenticated.status_code == 401
     assert authenticated.status_code == 200
     assert authenticated.json() == {"status": "ok"}
+
+
+def test_database_failures_do_not_leak_raw_driver_errors(monkeypatch, tmp_path):
+    db_path = tmp_path / "broken-detail.db"
+    monkeypatch.setenv("LAB_TRACKER_DATABASE_URL", f"sqlite+pysqlite:///{db_path}")
+    monkeypatch.setenv("LAB_TRACKER_FILE_STORAGE_PATH", str(tmp_path / "file-storage"))
+    monkeypatch.setenv("LAB_TRACKER_NOTE_STORAGE_PATH", str(tmp_path))
+    client = app_test_client(verify_schema=False)
+
+    with _observability_log() as messages:
+        readiness = client.get("/readiness")
+        metrics = client.get("/metrics")
+
+    database_check = next(
+        check for check in readiness.json()["checks"] if check["name"] == "database"
+    )
+    assert database_check["detail"] == "database unavailable (OperationalError)"
+    assert metrics.json()["errors"] == [
+        {"name": "database", "detail": "database unavailable (OperationalError)"}
+    ]
+    for body in (readiness.text, metrics.text):
+        assert "no such table" not in body
+        assert "SELECT" not in body
+    # The raw driver error stays available to operators in the server log.
+    assert any("no such table" in message for message in messages)
+
+
+def test_readiness_checks_connectivity_without_counting_rows(monkeypatch, tmp_path):
+    _bootstrap_database(monkeypatch, tmp_path, "readiness-cheap.db")
+    client = app_test_client()
+    statements: list[str] = []
+
+    def _record(_conn, _cursor, statement, *_args):
+        statements.append(statement)
+
+    event.listen(client.app.state.db_engine, "before_cursor_execute", _record)
+    try:
+        response = client.get("/readiness")
+    finally:
+        event.remove(client.app.state.db_engine, "before_cursor_execute", _record)
+
+    assert response.status_code == 200
+    assert statements, "readiness must still touch the database"
+    assert not [statement for statement in statements if "count(" in statement.lower()]
+
+
+def test_readiness_does_not_expose_server_storage_paths(monkeypatch, tmp_path):
+    _bootstrap_database(monkeypatch, tmp_path, "readiness-paths.db")
+    blocked = tmp_path / "not-a-directory"
+    blocked.write_text("file, not a directory")
+    monkeypatch.setenv("LAB_TRACKER_NOTE_STORAGE_PATH", str(blocked))
+    client = app_test_client()
+
+    with _observability_log() as messages:
+        response = client.get("/readiness")
+
+    assert response.status_code == 503
+    assert str(tmp_path) not in response.text
+    note_check = next(
+        check for check in response.json()["checks"] if check["name"] == "note_storage"
+    )
+    assert note_check == {
+        "name": "note_storage",
+        "status": "fail",
+        "detail": "path exists but is not a directory",
+    }
+    assert any(str(blocked) in message for message in messages)
