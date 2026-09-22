@@ -416,7 +416,10 @@ Shipped:
   inherited by every project in the group — `get_by_name` resolves a project's
   own store first, then its group's, so `store://` resolution inherits with no
   endpoint change. Group stores require group-owner RBAC; a project's listing
-  returns its effective (own + inherited) set.
+  returns its effective (own + inherited) set. Reads follow the same
+  inheritance: anyone who can read the group or any project in it can fetch a
+  group store and check its health, and the unscoped `GET /data-stores`
+  includes those group stores.
 - ✅ Structured field form: `ExternalArtifactReference` carries optional
   `store_name` + `locator` (paired) with a `for_store(...)` constructor, so a
   store-relative artifact has an explicit representation. For `local_fs` and

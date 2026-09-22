@@ -186,12 +186,57 @@ class DataStoreService(BaseService):
         if store.project_id is not None:
             can_read = self.authorization.can_read(store.project_id, actor=actor)
         elif store.group_id is not None:
-            can_read = self.authorization.can_group_read(store.group_id, actor=actor)
+            can_read = self._can_read_group_store(store.group_id, actor=actor)
         else:
             can_read = False
         if not can_read:
             raise OpaqueTargetNotFoundError("Data store does not exist.")
         return store
+
+    def _can_read_group_store(self, group_id: UUID, *, actor: AuthContext | None) -> bool:
+        """Group stores are inherited by every project in the group.
+
+        Whoever can read the group, or any project in it (and so sees the store
+        in that project's effective listing), can read the store.
+        """
+
+        if self.authorization.can_group_read(group_id, actor=actor):
+            return True
+        projects, _ = self.repository.query_projects(group_id=group_id, limit=None, offset=0)
+        return any(
+            self.authorization.can_read(project.project_id, actor=actor) for project in projects
+        )
+
+    def _readable_store_group_ids(
+        self,
+        project_ids: set[UUID],
+        *,
+        actor: AuthContext,
+    ) -> set[UUID]:
+        """Groups whose stores the actor inherits or can read directly."""
+
+        group_ids: set[UUID] = set()
+        if project_ids:
+            projects, _ = self.repository.query_projects(
+                project_ids=project_ids,
+                limit=None,
+                offset=0,
+            )
+            group_ids.update(
+                project.group_id for project in projects if project.group_id is not None
+            )
+        memberships, _ = self.repository.query_group_memberships(
+            group_id=None,
+            user_id=actor.user_id,
+            limit=None,
+            offset=0,
+        )
+        group_ids.update(
+            membership.group_id
+            for membership in memberships
+            if self.authorization.can_group_read(membership.group_id, actor=actor)
+        )
+        return group_ids
 
     def list_data_stores(
         self,
@@ -213,10 +258,20 @@ class DataStoreService(BaseService):
         project_ids = self.authorization.accessible_project_ids(actor)
         if project_ids is None:
             return self.repository.data_stores.list()
-        if not project_ids:
-            return []
-        stores, _ = self.repository.data_stores.query(project_ids=project_ids)
-        return stores
+        if actor is None:  # pragma: no cover - accessible_project_ids requires an actor
+            raise RuntimeError("Scoped data-store listing requires an actor.")
+        stores: list[DataStore] = []
+        if project_ids:
+            project_stores, _ = self.repository.data_stores.query(project_ids=project_ids)
+            stores.extend(project_stores)
+        for group_id in sorted(
+            self._readable_store_group_ids(project_ids, actor=actor),
+            key=str,
+        ):
+            group_stores, _ = self.repository.data_stores.query(group_id=group_id)
+            stores.extend(group_stores)
+        # Match the repository's (created_at, store_id) listing order.
+        return sorted(stores, key=lambda store: (store.created_at, str(store.store_id)))
 
 
 def _bounded_effective_capabilities(
