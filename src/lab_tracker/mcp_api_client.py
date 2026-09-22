@@ -57,6 +57,8 @@ SERVER_NAME = "lab-tracker-mcp"
 DEFAULT_TIMEOUT_SECONDS = 10.0
 UNAVAILABLE_CODE = "lab_tracker_unavailable"
 UNAVAILABLE_MESSAGE = "Lab Tracker unavailable - proceeding without graph context."
+# No API route serves this path; see LabTrackerAPIClient.credential_can_write.
+CREDENTIAL_WRITE_PROBE_PATH = "/_lab-tracker-mcp/credential-write-probe"
 NOTE_STATUS_VALUES = tuple(status.value for status in NoteStatus)
 NOTE_STATUS_TEXT = ", ".join(NOTE_STATUS_VALUES)
 QUESTION_STATUS_VALUES = tuple(status.value for status in QuestionStatus)
@@ -279,6 +281,32 @@ class LabTrackerAPIClient:
 
     def readiness(self) -> JsonObject:
         return self._request("GET", "/readiness")
+
+    def credential_can_write(self) -> bool:
+        """Ask the API's service-token policy whether this credential may write.
+
+        Service tokens cannot call ``/auth`` token introspection, so this sends an
+        empty POST to a path no route serves. The API auth middleware applies the
+        token's write policy before routing: a credential that may not write is
+        refused with ``403 service_forbidden``; one that may write falls through to
+        routing and gets 404/405. No handler can run either way. Any other answer
+        is indeterminate and raised to the caller.
+        """
+
+        try:
+            self._request("POST", CREDENTIAL_WRITE_PROBE_PATH, json_payload={})
+        except LabTrackerAPIAuthError as exc:
+            if exc.status_code == 403 and exc.code == "service_forbidden":
+                return False
+            raise
+        except LabTrackerAPIUnavailableError:
+            raise
+        except LabTrackerAPIError as exc:
+            if exc.status_code in {404, 405}:
+                return True
+            raise
+        # A 2xx means something accepted a write for this credential.
+        return True
 
     def describe_schema(self, *, entity_type: str | None = None) -> JsonObject:
         return self._request(

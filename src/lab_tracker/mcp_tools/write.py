@@ -495,6 +495,72 @@ def lab_tracker_record_evidence_bundle(
     client-side follow-up after that commit; an attachment failure is reported explicitly
     and does not roll the graph records back.
     """
+    return _record_evidence_bundle_tool(
+        project_id=project_id,
+        primary_question_id=primary_question_id,
+        dataset=dataset,
+        analysis=analysis,
+        claim=claim,
+        visualization=visualization,
+        source_note=source_note,
+        dry_run=dry_run,
+        idempotency_key=idempotency_key,
+        allow_local_files=True,
+    )
+
+
+def _hosted_record_evidence_bundle(
+    project_id: str,
+    primary_question_id: str | None = None,
+    dataset: JsonObject | None = None,
+    analysis: JsonObject | None = None,
+    claim: JsonObject | None = None,
+    visualization: JsonObject | None = None,
+    source_note: JsonObject | None = None,
+    dry_run: bool = True,
+    idempotency_key: str | None = None,
+) -> JsonObject:
+    """Preview or atomically record an evidence bundle; defaults to dry-run.
+
+    dry_run defaults to true and only previews. Pass dry_run=false to commit ONLY when
+    the user has explicitly asked you to record the bundle — the created dataset, analysis,
+    claim, visualization, and source note are canonical graph records, not proposals for
+    later review. A non-blank idempotency_key is required whenever dry_run=false; an
+    identical replay reuses the first result and conflicting key reuse is rejected.
+
+    Component inputs remain flat MCP objects. Supply dataset_id, analysis_id, claim_id,
+    viz_id/visualization_id, or note_id to reuse an existing component; otherwise supply
+    that component's create fields. This hosted server never reads local files, so
+    visualization upload_file/upload_file_path are refused; record the visualization's
+    file_path locator instead.
+    """
+    return _record_evidence_bundle_tool(
+        project_id=project_id,
+        primary_question_id=primary_question_id,
+        dataset=dataset,
+        analysis=analysis,
+        claim=claim,
+        visualization=visualization,
+        source_note=source_note,
+        dry_run=dry_run,
+        idempotency_key=idempotency_key,
+        allow_local_files=False,
+    )
+
+
+def _record_evidence_bundle_tool(
+    *,
+    project_id: str,
+    primary_question_id: str | None,
+    dataset: JsonObject | None,
+    analysis: JsonObject | None,
+    claim: JsonObject | None,
+    visualization: JsonObject | None,
+    source_note: JsonObject | None,
+    dry_run: bool,
+    idempotency_key: str | None,
+    allow_local_files: bool,
+) -> JsonObject:
     return _write_tool(
         "lab_tracker_record_evidence_bundle",
         lambda client: record_evidence_bundle(
@@ -508,6 +574,7 @@ def lab_tracker_record_evidence_bundle(
             source_note=source_note,
             dry_run=dry_run,
             idempotency_key=idempotency_key,
+            allow_local_files=allow_local_files,
         ),
         hint=next_action(
             "lab_tracker_get_decision_context",
@@ -534,7 +601,33 @@ WRITE_TOOLS = (
 )
 
 
+# Tools that read files from the MCP host's filesystem. A hosted server serves
+# remote callers, so it must never register these (review M35).
+LOCAL_FILE_WRITE_TOOLS = (lab_tracker_upload_visualization_file,)
+
+
 def register_write_tools(server: Any) -> None:
     for tool in WRITE_TOOLS:
         title = _tool_title(tool)
         server.tool(title=title, annotations=_write_tool_annotations(tool))(tool)
+
+
+def register_hosted_write_tools(server: Any) -> None:
+    """Register write tools for a hosted server that explicitly opted into writes.
+
+    Tools that read local host files are skipped, and the evidence-bundle tool is
+    registered under its usual name in a variant that refuses local uploads.
+    """
+    for tool in WRITE_TOOLS:
+        if tool in LOCAL_FILE_WRITE_TOOLS:
+            continue
+        implementation = (
+            _hosted_record_evidence_bundle
+            if tool is lab_tracker_record_evidence_bundle
+            else tool
+        )
+        server.tool(
+            name=tool.__name__,
+            title=_tool_title(tool),
+            annotations=_write_tool_annotations(tool),
+        )(implementation)

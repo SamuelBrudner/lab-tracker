@@ -88,6 +88,7 @@ def record_evidence_bundle(
     source_note: JsonObject | None = None,
     dry_run: bool = True,
     idempotency_key: str | None = None,
+    allow_local_files: bool = True,
 ) -> JsonObject:
     """Preview or atomically record one evidence bundle through the HTTP API.
 
@@ -95,7 +96,13 @@ def record_evidence_bundle(
     visualization file remains on the MCP host: a private immutable snapshot is
     checked and fingerprinted before the bundle request, then that exact snapshot
     is uploaded only after a created/reused response.
+
+    ``allow_local_files=False`` (the hosted server) refuses any requested local
+    upload before the filesystem or the API is touched, so a remote caller can
+    neither exfiltrate host files nor probe for their existence.
     """
+    if not allow_local_files:
+        _refuse_local_file_upload(visualization)
     upload = _snapshot_upload(visualization)
     try:
         server_components = {
@@ -238,6 +245,22 @@ def _component_request(
         canonical_id_field = id_fields[0]
         return {"kind": "existing", canonical_id_field: explicit_id}
     return {"kind": "create", **public_payload}
+
+
+def _refuse_local_file_upload(visualization: JsonObject | None) -> None:
+    if not isinstance(visualization, dict):
+        return
+    if (
+        visualization.get("upload_file") not in (None, False)
+        or visualization.get("upload_file_path") is not None
+    ):
+        raise LabTrackerAPIValidationError(
+            "This hosted Lab Tracker MCP server does not read local files: "
+            "visualization upload_file/upload_file_path are unavailable here. Record "
+            "the visualization with its file_path locator, then attach the file from a "
+            "local (stdio) MCP server or the Lab Tracker API.",
+            code="validation_error",
+        )
 
 
 def _snapshot_upload(visualization: JsonObject | None) -> _VisualizationUpload | None:

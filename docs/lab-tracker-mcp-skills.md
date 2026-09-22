@@ -87,6 +87,43 @@ header before dispatch. The LPAT is used only for the MCP-to-API hop. Keep the
 endpoint private behind TLS or a tailnet; the inbound token is an access gate,
 not per-user graph authorization or attribution.
 
+The hosted (`streamable-http`) server is read-only by default and checks that
+at startup; it refuses to start (non-zero exit, so a container restart policy
+retries) unless:
+
+- `GET /readiness` on the API target succeeds and reports `auth.enabled=true`.
+  Unlike stdio, this probe also runs for loopback API targets, and an
+  unreachable API, a 404/5xx, or a rejected credential stops startup instead of
+  booting unguarded.
+- `LAB_TRACKER_MCP_API_KEY` is an `lpat_` token the API refuses to let write.
+  The API exposes no token introspection to service tokens, so `lt-mcp` sends an
+  empty `POST` to a path no API route serves: the API's token policy answers
+  `403 service_forbidden` for a read-only token before any route runs, while a
+  write-capable token gets `404`. Only the explicit refusal counts as read-only;
+  username/password logins cannot be verified and are refused.
+
+A default hosted server registers only the read tools and resources. Set
+`LAB_TRACKER_MCP_ALLOW_WRITES=true` to deliberately serve write tools as well
+(the startup read-only check is then skipped and a warning is logged). Even then
+the hosted server never registers tools that read files on the MCP host:
+`lab_tracker_upload_visualization_file` is absent and
+`lab_tracker_record_evidence_bundle` refuses `upload_file`/`upload_file_path`.
+Local stdio servers keep the full tool set.
+
+The hosted server always validates `Host` and `Origin` (DNS-rebinding
+protection), whatever `LAB_TRACKER_MCP_HOST` it binds. By default only loopback
+names are accepted (`127.0.0.1:*`, `localhost:*`, `[::1]:*` and the matching
+`http://` origins); a request with another `Host` gets `421`, another `Origin`
+gets `403`. The checked-in Caddyfile forwards its upstream host and drops the
+`Origin` it already vetted, so it works with the defaults. To have `lt-mcp`
+check public names instead, set comma-separated allowlists (`:*` matches any
+port):
+
+```bash
+LAB_TRACKER_MCP_ALLOWED_HOSTS=mcp.lab.internal
+LAB_TRACKER_MCP_ALLOWED_ORIGINS=https://github.com
+```
+
 For a remote agent, the graph-native read sequence is:
 
 1. `lab_tracker_graph_overview(project_id)` for bounded counts, open entry

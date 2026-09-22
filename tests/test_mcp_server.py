@@ -457,7 +457,12 @@ def test_main_runs_streamable_http_transport_from_env(monkeypatch) -> None:
     monkeypatch.setattr(
         mcp_server,
         "_ensure_mcp_target_safe",
-        lambda _settings: guard_calls.append("guard"),
+        lambda _settings, *, hosted: guard_calls.append(f"guard hosted={hosted}"),
+    )
+    monkeypatch.setattr(
+        mcp_server,
+        "_ensure_hosted_api_credential_is_read_only",
+        lambda _settings: guard_calls.append("read-only credential"),
     )
     monkeypatch.setattr(mcp_server, "build_server", fake_build)
     monkeypatch.setattr(
@@ -468,7 +473,7 @@ def test_main_runs_streamable_http_transport_from_env(monkeypatch) -> None:
 
     mcp_server.main()
 
-    assert guard_calls == ["guard"]
+    assert guard_calls == ["guard hosted=True", "read-only credential"]
     assert [settings.transport for settings in built_settings] == ["streamable-http"]
     assert run_calls == ["streamable-http"]
 
