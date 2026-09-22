@@ -11,8 +11,15 @@ upgrade to head.
 
 from __future__ import annotations
 
+import logging
+import re
+import shlex
+import sqlite3
+import subprocess
+import sys
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
+from importlib.metadata import entry_points
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -20,17 +27,90 @@ from uuid import uuid4
 import pytest
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.engine import Connection, Engine
 
+from lab_tracker.backup import create_sqlite_backup
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-_VERSIONS_DIR = _REPO_ROOT / "src" / "lab_tracker" / "alembic" / "versions"
+_ALEMBIC_DIR = _REPO_ROOT / "src" / "lab_tracker" / "alembic"
+_VERSIONS_DIR = _ALEMBIC_DIR / "versions"
+_ADVISORY = "docs/advisories/2026-09-sqlite-migration-cascade.md"
 
 Statement = tuple[str, dict[str, Any]]
 
 
 def _alembic_config() -> Config:
     return Config(str(_REPO_ROOT / "alembic.ini"))
+
+
+def _serve_alembic_config() -> Config:
+    """Config as ``lab-tracker serve`` builds it: no alembic.ini.
+
+    Without an ini file env.py skips ``logging.config.fileConfig``, which
+    would otherwise strip pytest's capture handler from the root logger.
+    """
+
+    config = Config()
+    config.set_main_option("script_location", str(_ALEMBIC_DIR))
+    return config
+
+
+def _head_revision() -> str:
+    head = ScriptDirectory.from_config(_alembic_config()).get_current_head()
+    assert head is not None
+    return head
+
+
+@contextmanager
+def _recorded_statements() -> Iterator[list[str]]:
+    statements: list[str] = []
+
+    def record(
+        _connection: Connection,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        statements.append(" ".join(statement.split()))
+
+    event.listen(Engine, "before_cursor_execute", record)
+    try:
+        yield statements
+    finally:
+        event.remove(Engine, "before_cursor_execute", record)
+
+
+@contextmanager
+def _lossy_rebuild_of(table: str) -> Iterator[None]:
+    """Simulate a faulty batch rebuild that loses every copied parent row.
+
+    Emptying ``_alembic_tmp_<table>`` right after Alembic copies into it
+    orphans every child of ``table`` once the copy is renamed into place:
+    violations this migration run introduces, not ones it found.
+    """
+
+    copy_prefix = f"INSERT INTO _alembic_tmp_{table} "
+
+    def drop_copied_rows(
+        _connection: Connection,
+        cursor: sqlite3.Cursor,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        if " ".join(statement.split()).startswith(copy_prefix):
+            cursor.connection.execute(f"DELETE FROM _alembic_tmp_{table}")  # noqa: S608
+
+    event.listen(Engine, "after_cursor_execute", drop_copied_rows)
+    try:
+        yield
+    finally:
+        event.remove(Engine, "after_cursor_execute", drop_copied_rows)
 
 
 def _database_url(tmp_path: Path, name: str) -> str:
@@ -130,6 +210,29 @@ def _graph_change_set(change_set_id: str, project_id: str, note_id: str) -> Stat
         "'openai', 'm', 'v1', 'graph_context', '{}', '', '[]', '[]', 'committed', '{}', "
         f"{_NOW}, {_NOW})",
         {"change_set_id": change_set_id, "project_id": project_id, "note_id": note_id},
+    )
+
+
+def _orphan_operation() -> Statement:
+    """A graph_change_operations row whose change set does not exist."""
+
+    return (
+        "INSERT INTO graph_change_operations (operation_id, change_set_id, sequence, op, "
+        "entity_type, payload, rationale, source_refs, status, error_metadata, created_at, "
+        "updated_at) VALUES (:operation_id, :change_set_id, 1, 'create', 'question', '{}', "
+        f"'', '[]', 'accepted', '{{}}', {_NOW}, {_NOW})",
+        {"operation_id": str(uuid4()), "change_set_id": str(uuid4())},
+    )
+
+
+def _orphan_goal_link() -> Statement:
+    """A goal_links row whose goal does not exist."""
+
+    return (
+        "INSERT INTO goal_links (link_id, goal_id, entity_type, entity_id, relation, slot, "
+        "link_status, created_at) VALUES (:link_id, :goal_id, 'question', :entity_id, "
+        f"'milestone', '', 'candidate', {_NOW})",
+        {"link_id": str(uuid4()), "goal_id": str(uuid4()), "entity_id": str(uuid4())},
     )
 
 
@@ -379,43 +482,204 @@ def test_sqlite_upgrade_to_head_preserves_children_of_rebuilt_tables(
     assert _stale_batch_tables(database_url) == []
 
 
-def test_sqlite_upgrade_refuses_to_commit_foreign_key_violations(
+def _violation_rowids(violations: Sequence[tuple], table: str) -> list[int]:
+    return sorted(int(row[1]) for row in violations if row[0] == table)
+
+
+def _foreign_key_scans(statements: Sequence[str]) -> int:
+    return sum("foreign_key_check" in statement.lower() for statement in statements)
+
+
+def _assert_preexisting_violations_warned(
+    caplog: pytest.LogCaptureFixture,
+    expected: Sequence[str],
+) -> None:
+    warnings = [
+        record
+        for record in caplog.records
+        if record.levelno == logging.WARNING and record.name.startswith(("alembic", "lab_tracker"))
+    ]
+    assert len(warnings) == 1, [record.getMessage() for record in caplog.records]
+    message = warnings[0].getMessage()
+    for reference in expected:
+        assert reference in message, message
+    assert _ADVISORY in message
+
+
+def test_sqlite_migration_tolerates_foreign_key_violations_it_did_not_introduce(
+    caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    database_url = _database_url(tmp_path, "fk-violation")
+    """Orphans that predate a run are reported loudly but do not block it.
+
+    SQLite databases that ran without runtime FK enforcement can hold orphan
+    rows no migration created. ``alembic upgrade head`` runs at server start,
+    so refusing to migrate over them would stop the server on every release
+    that ships a revision.
+    """
+
+    database_url = _database_url(tmp_path, "fk-preexisting")
     monkeypatch.setenv("LAB_TRACKER_DATABASE_URL", database_url)
-    config = _alembic_config()
+    config = _serve_alembic_config()
     start_revision = "0060_acquisition_collections"
     command.upgrade(config, start_revision)
-    statements, _watched = _graph_draft_scenario()
+    statements, watched = _graph_draft_scenario()
     _seed(database_url, statements)
-    orphan_change_set_id = str(uuid4())
+    filler_id, orphan_change_set_id = str(uuid4()), str(uuid4())
     _seed_without_foreign_keys(
         database_url,
         [
+            _graph_change_set(filler_id, str(uuid4()), str(uuid4())),
+            # Missing project and missing source note: two violations.
+            _graph_change_set(orphan_change_set_id, str(uuid4()), str(uuid4())),
+            # Leave a rowid gap below the orphan change set.
             (
-                "INSERT INTO graph_change_operations (operation_id, change_set_id, sequence, "
-                "op, entity_type, payload, rationale, source_refs, status, error_metadata, "
-                "created_at, updated_at) VALUES (:operation_id, :change_set_id, 1, 'create', "
-                f"'question', '{{}}', '', '[]', 'accepted', '{{}}', {_NOW}, {_NOW})",
-                {"operation_id": str(uuid4()), "change_set_id": orphan_change_set_id},
-            )
+                "DELETE FROM graph_change_sets WHERE change_set_id = :change_set_id",
+                {"change_set_id": filler_id},
+            ),
+            _orphan_operation(),
         ],
     )
-    columns_before = _column_names(database_url, "graph_change_sets")
+    before = _snapshot(database_url, watched)
+    violations_before = _foreign_key_violations(database_url)
+    assert len(violations_before) == 3, violations_before
+    expected = (
+        "graph_change_operations -> graph_change_sets: 1 row(s)",
+        "graph_change_sets -> notes: 1 row(s)",
+        "graph_change_sets -> projects: 1 row(s)",
+    )
+    caplog.set_level(logging.WARNING)
 
-    with pytest.raises(RuntimeError) as error:
+    command.upgrade(config, "head")
+
+    assert _current_revision(database_url) == _head_revision()
+    assert _snapshot(database_url, watched) == before
+    violations_after = _foreign_key_violations(database_url)
+    assert len(violations_after) == len(violations_before)
+    # 0061 rebuilds graph_change_sets without copying the implicit rowid, so
+    # the orphan change set was renumbered past the deleted filler row. A
+    # baseline keyed on rowid would have mistaken it for a new violation.
+    assert _violation_rowids(violations_after, "graph_change_sets") != _violation_rowids(
+        violations_before, "graph_change_sets"
+    )
+    _assert_preexisting_violations_warned(caplog, expected)
+
+    caplog.clear()
+    command.downgrade(config, start_revision)
+
+    assert _current_revision(database_url) == start_revision
+    assert _snapshot(database_url, watched) == before
+    assert len(_foreign_key_violations(database_url)) == len(violations_before)
+    _assert_preexisting_violations_warned(caplog, expected)
+
+
+def test_sqlite_preexisting_violation_warning_reaches_stderr_at_serve_startup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``lab-tracker serve`` migrates before anything configures logging.
+
+    Alembic attaches a NullHandler to its "alembic" logger, so a warning
+    logged under it would be swallowed there instead of reaching stderr
+    through the root logger's last-resort handler.
+    """
+
+    database_url = _database_url(tmp_path, "fk-serve-stderr")
+    monkeypatch.setenv("LAB_TRACKER_DATABASE_URL", database_url)
+    command.upgrade(_alembic_config(), "0060_acquisition_collections")
+    _seed_without_foreign_keys(database_url, [_orphan_goal_link()])
+
+    # The same call serve_app makes, in a process with pristine logging.
+    result = subprocess.run(  # noqa: S603
+        [
+            sys.executable,
+            "-c",
+            "from alembic import command\n"
+            "from lab_tracker.cli import _alembic_config\n"
+            "command.upgrade(_alembic_config(), 'head')\n",
+        ],
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=300,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "goal_links -> goals: 1 row(s)" in result.stderr
+    assert _ADVISORY in result.stderr
+    assert _current_revision(database_url) == _head_revision()
+
+
+@pytest.mark.parametrize("direction", ["upgrade", "downgrade"])
+def test_sqlite_migration_refuses_to_commit_foreign_key_violations_it_introduces(
+    direction: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    database_url = _database_url(tmp_path, f"fk-introduced-{direction}")
+    monkeypatch.setenv("LAB_TRACKER_DATABASE_URL", database_url)
+    config = _alembic_config()
+    lower_revision = "0060_acquisition_collections"
+    command.upgrade(config, lower_revision)
+    statements, watched = _graph_draft_scenario()
+    _seed(database_url, statements)
+    # Pre-existing and unrelated to the rebuilt table: it must not be blamed.
+    _seed_without_foreign_keys(database_url, [_orphan_goal_link()])
+    if direction == "downgrade":
         command.upgrade(config, "head")
+    start_revision = _current_revision(database_url)
+    columns_before = _column_names(database_url, "graph_change_sets")
+    before = _snapshot(database_url, watched)
+
+    with _lossy_rebuild_of("graph_change_sets"), pytest.raises(RuntimeError) as error:
+        if direction == "upgrade":
+            command.upgrade(config, "head")
+        else:
+            command.downgrade(config, lower_revision)
 
     message = str(error.value)
     assert "PRAGMA foreign_key_check" in message
-    assert "graph_change_operations" in message
-    assert "graph_change_sets" in message
-    # The whole run rolled back: nothing from 0061+ was committed.
+    assert "graph_change_operations -> graph_change_sets: 1 row(s)" in message
+    assert "goal_links" not in message
+    # The whole run rolled back: no revision step was committed.
     assert _current_revision(database_url) == start_revision
     assert _column_names(database_url, "graph_change_sets") == columns_before
     assert _stale_batch_tables(database_url) == []
+    assert _snapshot(database_url, watched) == before
+
+
+@pytest.mark.parametrize(
+    ("direction", "target"),
+    [
+        ("upgrade", "head"),
+        ("upgrade", "heads"),
+        ("upgrade", "<head id>"),
+        ("downgrade", "<head id>"),
+    ],
+)
+def test_sqlite_noop_migration_run_skips_foreign_key_scans(
+    direction: str,
+    target: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    database_url = _database_url(tmp_path, "fk-noop")
+    monkeypatch.setenv("LAB_TRACKER_DATABASE_URL", database_url)
+    config = _alembic_config()
+    head = _head_revision()
+    with _recorded_statements() as pending_run:
+        command.upgrade(config, "head")
+    # With revisions pending, the scan runs as a baseline and again before commit.
+    assert _foreign_key_scans(pending_run) == 2
+    _seed_without_foreign_keys(database_url, [_orphan_goal_link()])
+
+    with _recorded_statements() as noop_run:
+        getattr(command, direction)(config, head if target == "<head id>" else target)
+
+    assert noop_run, "the listener saw no statements from the no-op run"
+    assert _foreign_key_scans(noop_run) == 0, noop_run
+    assert _current_revision(database_url) == head
 
 
 def test_sqlite_failed_migration_rolls_back_ddl_and_batch_residue(
@@ -474,6 +738,8 @@ def test_sqlite_upgrade_refuses_to_run_over_stale_batch_tables(
     config = _alembic_config()
     start_revision = "0061_graph_draft_generation_fencing"
     command.upgrade(config, start_revision)
+    backup_path = create_sqlite_backup(database_url, backup_dir=tmp_path / "backups").backup_path
+    assert backup_path is not None
     _seed(database_url, [("CREATE TABLE _alembic_tmp_claims (claim_id VARCHAR(36))", {})])
 
     with pytest.raises(RuntimeError) as error:
@@ -483,6 +749,21 @@ def test_sqlite_upgrade_refuses_to_run_over_stale_batch_tables(
     assert "_alembic_tmp_claims" in message
     assert "backup" in message
     assert _current_revision(database_url) == start_revision
+
+    # Follow the recovery the message prescribes, through the installed
+    # console script and its real argument parser.
+    cli_commands = re.findall(r"`(lab-tracker [^`]+)`", message)
+    assert cli_commands, message
+    for cli_command in cli_commands:
+        program, *arguments = shlex.split(
+            cli_command.replace("<backup>", shlex.quote(str(backup_path)))
+        )
+        (console_script,) = entry_points(group="console_scripts", name=program)
+        console_script.load()(arguments)
+
+    assert _stale_batch_tables(database_url) == []
+    command.upgrade(config, "head")
+    assert _current_revision(database_url) == _head_revision()
 
 
 def test_no_revision_toggles_sqlite_foreign_keys() -> None:

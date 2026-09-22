@@ -49,7 +49,10 @@ SQLite migrations now:
   migration rolls back its schema changes, any `_alembic_tmp_*` table and the version
   stamp together;
 - run `PRAGMA foreign_key_check` before committing, and refuse to commit (rolling back
-  the entire run) if any row points at a missing parent;
+  the entire run) if the run left a row pointing at a missing parent that was not
+  already orphaned before it started;
+- log a warning, but still commit, when rows were already orphaned before the run. See
+  [If an upgrade warns about foreign-key violations](#if-an-upgrade-warns-about-foreign-key-violations);
 - refuse to start if an `_alembic_tmp_*` table from an earlier failed run is still
   present.
 
@@ -167,7 +170,43 @@ database instead:
 3. Start the fixed release and spot-check draft provenance in the review UI.
 
 If `alembic upgrade head` now refuses to run because an `_alembic_tmp_*` table is present,
-an earlier upgrade failed part-way. The safest fix is to restore the snapshot taken before
-that upgrade. If instead you have confirmed that the original table (the name without the
+an earlier upgrade failed part-way. The safest fix is to stop Lab Tracker, restore the
+snapshot taken before that upgrade, and upgrade again:
+
+```sh
+lab-tracker restore /path/to/BACKUP.sqlite3 --force   # with the server stopped
+lab-tracker serve
+```
+
+If instead you have confirmed that the original table (the name without the
 `_alembic_tmp_` prefix) still exists with all of its rows, drop the leftover table and
 re-run the upgrade.
+
+## If an upgrade warns about foreign-key violations
+
+Some rows may already point at a parent that does not exist when an upgrade starts. The
+upgrade still commits, because it did not create those rows. It logs a warning that names
+each child → parent table pair and its row count, for example:
+
+```text
+SQLite database has 2 foreign-key violation(s) that predate this migration run
+(goal_links -> goals: 2 row(s)). ...
+```
+
+Such rows date from before Lab Tracker enforced SQLite foreign keys, or from one of the
+damaging upgrades above. They stay in place, but any write that touches them can fail with
+`FOREIGN KEY constraint failed`. To list them, run this against the live database:
+
+```sql
+PRAGMA foreign_key_check;   -- child table, rowid, parent table, constraint index
+```
+
+If the parents were lost in a damaging upgrade, recover them as described in
+[How to restore](#how-to-restore). Otherwise, stop the server and copy the database aside.
+Then delete each orphan, or point it at a valid parent. Where the column allows NULL, you
+can instead set it to NULL.
+
+Foreign-key violations stop an upgrade only when the run itself would leave new ones. The
+upgrade then rolls back and leaves the database at its previous revision, still usable. The
+error names the affected tables. The cause is a migration that lost parent rows or wrote a
+dangling reference, or a new constraint that rows already in the database do not satisfy.
