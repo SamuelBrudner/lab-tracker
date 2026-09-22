@@ -55,6 +55,81 @@ def test_repo_note_capture_extracts_state() -> None:
     assert capture.artifacts[0]["title"] == "results.csv"
 
 
+def test_repo_note_capture_reads_dirty_tree() -> None:
+    capture = repo_note_capture(_repo_note_metadata(repo_git_dirty=True))
+
+    assert capture is not None
+    assert capture.dirty is True
+    assert capture.status_error == ""
+
+
+def test_repo_note_capture_keeps_unknown_dirty_state_unknown() -> None:
+    # The client records an unanswered `git status` as repo_git_status_error
+    # with no repo_git_dirty key; that must not be read as a clean tree.
+    metadata = _repo_note_metadata(repo_git_status_error="git status --porcelain timed out")
+    del metadata["repo_git_dirty"]
+
+    capture = repo_note_capture(metadata)
+
+    assert capture is not None
+    assert capture.dirty is None
+    assert capture.status_error == "git status --porcelain timed out"
+
+
+def test_repo_note_capture_without_dirty_flag_is_unknown() -> None:
+    # CI-script notes never record a dirty flag; absence is not "clean".
+    metadata = _repo_note_metadata()
+    del metadata["repo_git_dirty"]
+
+    capture = repo_note_capture(metadata)
+
+    assert capture is not None
+    assert capture.dirty is None
+    assert capture.status_error == ""
+
+
+@pytest.mark.parametrize(
+    ("source", "expected_dirty", "expected_error"),
+    [
+        ({"git_dirty": True}, True, ""),
+        ({"git_dirty": False}, False, ""),
+        (
+            {"git_dirty": None, "git_status_error": "timed out after 10s"},
+            None,
+            "timed out after 10s",
+        ),
+    ],
+)
+def test_repo_note_capture_round_trips_client_dirty_metadata(
+    source, expected_dirty, expected_error
+) -> None:
+    # Producer/consumer contract: whatever the client adapter writes for the
+    # dirty state (lab_tracker_client.gitinfo.dirty_metadata, "repo_" prefix)
+    # reads back with the same meaning here.
+    from lab_tracker_client.gitinfo import dirty_metadata
+
+    metadata = _repo_note_metadata()
+    del metadata["repo_git_dirty"]
+    metadata.update(dirty_metadata(source, "repo_"))
+
+    capture = repo_note_capture(metadata)
+
+    assert capture is not None
+    assert capture.dirty is expected_dirty
+    assert capture.status_error == expected_error
+
+
+@pytest.mark.parametrize("raw", ["false", "true", 0, 1])
+def test_repo_note_capture_rejects_non_boolean_dirty_flag(raw) -> None:
+    # A non-boolean flag is not guessed at (bool("false") is True): it is
+    # recorded as unknown with an explicit marker naming the bad value.
+    capture = repo_note_capture(_repo_note_metadata(repo_git_dirty=raw))
+
+    assert capture is not None
+    assert capture.dirty is None
+    assert "repo_git_dirty" in capture.status_error
+
+
 def test_repo_note_capture_rejects_non_git_notes() -> None:
     assert repo_note_capture({"evidence_source_provider": "hpc-outbox"}) is None
     assert repo_note_capture({"evidence_source_provider": "git"}) is None  # no commit

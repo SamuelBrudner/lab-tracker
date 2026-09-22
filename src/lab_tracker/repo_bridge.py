@@ -37,12 +37,21 @@ REPO_EVIDENCE_PROVIDER = "git"
 
 @dataclass(frozen=True)
 class RepoNoteCapture:
-    """The repo state a staged ``lt repo`` note captured."""
+    """The repo state a staged ``lt repo`` note captured.
+
+    ``dirty`` is ``True``/``False`` only when the capture recorded a boolean
+    ``repo_git_dirty``. It is ``None`` (unknown) when the flag is absent — the
+    client records an unanswered ``git status`` as ``repo_git_status_error``
+    instead, and CI-script notes carry no flag — or is not a boolean;
+    ``status_error`` then carries the recorded reason, if any. Never read an
+    unknown state as a clean tree.
+    """
 
     commit: str
     remote: str = ""
     branch: str = ""
-    dirty: bool = False
+    dirty: bool | None = None
+    status_error: str = ""
     environment_hash: str = ""
     artifacts: list[dict[str, Any]] = field(default_factory=list)
 
@@ -61,13 +70,15 @@ def repo_note_capture(
     commit = str(meta.get("repo_git_commit") or meta.get("git_commit") or "").strip()
     if provider != REPO_EVIDENCE_PROVIDER or not commit:
         return None
+    dirty, status_error = _dirty_state(meta)
     return RepoNoteCapture(
         commit=commit,
         remote=str(
             meta.get("repo_remote_url") or meta.get("git_remote_origin_url") or ""
         ).strip(),
         branch=str(meta.get("repo_git_branch") or meta.get("git_branch") or "").strip(),
-        dirty=bool(meta.get("repo_git_dirty")),
+        dirty=dirty,
+        status_error=status_error,
         environment_hash=str(meta.get("repo_environment_hash") or "").strip(),
         artifacts=_parse_artifacts(meta.get("repo_artifacts")),
     )
@@ -145,6 +156,19 @@ def _artifact_reference(
         content_hash=content_hash,
         metadata=metadata,
     )
+
+
+def _dirty_state(meta: Mapping[str, Any]) -> tuple[bool | None, str]:
+    """Read the captured dirty flag without guessing: bool, else unknown."""
+
+    status_error = str(meta.get("repo_git_status_error") or "").strip()
+    raw = meta.get("repo_git_dirty")
+    if isinstance(raw, bool):
+        return raw, status_error
+    if raw is None:
+        return None, status_error
+    marker = f"unrecognized repo_git_dirty value {raw!r}"
+    return None, f"{marker}; {status_error}" if status_error else marker
 
 
 def _parse_artifacts(raw: Any) -> list[dict[str, Any]]:
