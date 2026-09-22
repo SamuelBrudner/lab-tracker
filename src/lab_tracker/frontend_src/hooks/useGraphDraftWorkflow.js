@@ -133,7 +133,10 @@ function useGraphDraftWorkflow({
     (changeSet?.purpose === "member_checkpoint_alignment"
       ? changeSet?.status === "submitted"
       : ["ready", "submitted"].includes(changeSet?.status || ""));
-  const canReviseDraft = canEditDraft && !isMemberOnboarding;
+  // Daily Review batches are reviewed per operation; the API refuses to
+  // regenerate them, so AI revision is not offered for them at all.
+  const supportsAiRevision = changeSet?.draft_mode !== "graph_batch";
+  const canReviseDraft = canEditDraft && supportsAiRevision && !isMemberOnboarding;
 
   const loadDraft = useCallback(async () => {
     if (!changeSetId) {
@@ -628,6 +631,7 @@ function useGraphDraftWorkflow({
     spokenReview,
     canEditDraft,
     canReviseDraft,
+    supportsAiRevision,
     canSubmitDraft,
     canReviewDraft,
     canCommitDraft,

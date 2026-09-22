@@ -55,6 +55,7 @@ function GraphDraftDetailCard({
     undoableOperationIds,
     canEditDraft,
     canReviseDraft,
+    supportsAiRevision,
     canSubmitDraft,
     canReviewDraft,
     canCommitDraft,
@@ -128,6 +129,7 @@ function GraphDraftDetailCard({
             recordingSupported={dictation.recordingSupported}
             isRecording={dictation.isRecording}
             canEditDraft={canReviseDraft}
+            revisionSupported={supportsAiRevision}
             spokenReview={workflow.spokenReview}
             reviseAudio={dictation.reviseAudio}
             reviseFeedback={dictation.reviseFeedback}

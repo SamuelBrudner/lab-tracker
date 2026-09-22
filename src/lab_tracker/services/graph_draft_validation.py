@@ -17,6 +17,8 @@ from lab_tracker.models import (
     GraphChangeOp,
     GraphChangeOperation,
     GraphChangeSet,
+    GraphDraftMode,
+    GraphDraftPurpose,
     GraphDraftSemanticType,
 )
 from lab_tracker.schemas import (
@@ -112,6 +114,24 @@ _SOURCE_NOTE_ID_KEYS = ("source_note_ids", "source_note_id", "note_id")
 _SOURCE_NOTE_IDS_RESOLUTION_EXPLICIT = "explicit"
 _SOURCE_NOTE_IDS_RESOLUTION_SINGLE_SOURCE_FALLBACK = "single_source_fallback"
 _SOURCE_NOTE_IDS_RESOLUTION_AMBIGUOUS_BUNDLE = "ambiguous_bundle"
+
+
+def ensure_graph_change_set_revisable(change_set: GraphChangeSet) -> None:
+    """Reject whole-draft AI revision for drafts reviewed only per operation."""
+
+    if change_set.purpose == GraphDraftPurpose.MEMBER_CHECKPOINT_ALIGNMENT:
+        raise ValidationError(
+            "Member onboarding proposals can be changed only through "
+            "individual operation review."
+        )
+    if change_set.draft_mode == GraphDraftMode.GRAPH_BATCH:
+        # Daily Review batches are reviewed per proposal (see
+        # docs/daily-draft-batch-design.md); regenerating a whole batch would
+        # need the batch context, not the note-scoped revision path.
+        raise ValidationError(
+            "Daily Review batch drafts cannot be revised; accept, edit, or "
+            "reject individual operations instead."
+        )
 
 
 class GraphPatchValidator:

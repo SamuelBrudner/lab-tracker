@@ -8,6 +8,7 @@ function AudioReviewConsole({
   recordingSupported,
   isRecording,
   canEditDraft,
+  revisionSupported,
   spokenReview,
   reviseAudio,
   reviseFeedback,
@@ -34,7 +35,9 @@ function AudioReviewConsole({
         <div>
           <h3 id="audio-review-title">Listen &amp; respond</h3>
           <p className="subtle">
-            Hear the summary and proposals, then speak or type corrections for the AI.
+            {revisionSupported
+              ? "Hear the summary and proposals, then speak or type corrections for the AI."
+              : "Hear the summary and proposals read aloud."}
           </p>
         </div>
         {speechStatus !== "idle" ? (
@@ -65,100 +68,111 @@ function AudioReviewConsole({
             Stop audio
           </button>
         ) : null}
-        <button
-          type="button"
-          className={`btn-secondary${isRecording ? " recording" : ""}`}
-          disabled={isRecording ? false : !canEditDraft || !recordingSupported}
-          title={
-            recordingSupported
-              ? undefined
-              : "Microphone recording isn't supported in this browser."
-          }
-          onClick={onToggleRecording}
-          aria-pressed={isRecording}
-        >
-          {isRecording ? "Stop recording" : "Dictate feedback"}
-        </button>
-      </div>
-
-      {isRecording ? (
-        <p className="audio-recording-status" role="status">
-          Recording feedback… tap Stop recording when you&apos;re finished.
-        </p>
-      ) : null}
-      {reviseAudio ? (
-        <div className="ai-revise-attachment audio-review-recording">
-          <audio
-            aria-label="Recorded feedback preview"
-            controls
-            src={reviseAudio.url}
-            className="ai-revise-audio"
-          />
+        {revisionSupported ? (
           <button
             type="button"
-            className="btn-link"
-            onClick={onClearReviseAudio}
-            disabled={!canEditDraft}
+            className={`btn-secondary${isRecording ? " recording" : ""}`}
+            disabled={isRecording ? false : !canEditDraft || !recordingSupported}
+            title={
+              recordingSupported
+                ? undefined
+                : "Microphone recording isn't supported in this browser."
+            }
+            onClick={onToggleRecording}
+            aria-pressed={isRecording}
           >
-            Remove voice note
+            {isRecording ? "Stop recording" : "Dictate feedback"}
           </button>
-        </div>
-      ) : null}
+        ) : null}
+      </div>
 
-      <details className="context-details audio-review-more">
-        <summary>Type feedback or attach an image</summary>
-        <div className="audio-review-more-body">
-          <textarea
-            className="ai-revise-input"
-            rows={2}
-            placeholder="Tell the AI how to revise these proposals — e.g. 'drop the dataset link; the claim isn't supported yet, make it a clarification instead'. You can also dictate feedback or attach an image."
-            value={reviseFeedback}
-            disabled={!canEditDraft || isRecording}
-            onChange={(event) => setReviseFeedback(event.target.value)}
-          />
-          <label className={`btn-secondary ai-revise-attach${canEditDraft ? "" : " disabled"}`}>
-            Attach image
-            <input
-              type="file"
-              accept="image/*"
-              multiple
-              className="sr-only"
-              disabled={!canEditDraft}
-              onChange={onAttachmentChange}
-            />
-          </label>
-          {reviseAttachments.length ? (
-            <ul className="ai-revise-files">
-              {reviseAttachments.map((file, index) => (
-                <li key={`${file.name}-${index}`} className="ai-revise-attachment">
-                  <span className="ai-revise-file-name">{file.name}</span>
-                  <button
-                    type="button"
-                    className="btn-link"
-                    onClick={() => onRemoveAttachment(index)}
-                    disabled={!canEditDraft}
-                  >
-                    Remove
-                  </button>
-                </li>
-              ))}
-            </ul>
+      {revisionSupported ? (
+        <>
+          {isRecording ? (
+            <p className="audio-recording-status" role="status">
+              Recording feedback… tap Stop recording when you&apos;re finished.
+            </p>
           ) : null}
-        </div>
-      </details>
-      <button
-        type="button"
-        className="btn-primary audio-review-submit"
-        disabled={
-          !canEditDraft ||
-          isRecording ||
-          reviseInFlight ||
-          (!reviseFeedback.trim() && !reviseAudio && reviseAttachments.length === 0)
-        }
-        onClick={onRevise}
-      >
-        Revise with AI
-      </button>
+          {reviseAudio ? (
+            <div className="ai-revise-attachment audio-review-recording">
+              <audio
+                aria-label="Recorded feedback preview"
+                controls
+                src={reviseAudio.url}
+                className="ai-revise-audio"
+              />
+              <button
+                type="button"
+                className="btn-link"
+                onClick={onClearReviseAudio}
+                disabled={!canEditDraft}
+              >
+                Remove voice note
+              </button>
+            </div>
+          ) : null}
+
+          <details className="context-details audio-review-more">
+            <summary>Type feedback or attach an image</summary>
+            <div className="audio-review-more-body">
+              <textarea
+                className="ai-revise-input"
+                rows={2}
+                placeholder="Tell the AI how to revise these proposals — e.g. 'drop the dataset link; the claim isn't supported yet, make it a clarification instead'. You can also dictate feedback or attach an image."
+                value={reviseFeedback}
+                disabled={!canEditDraft || isRecording}
+                onChange={(event) => setReviseFeedback(event.target.value)}
+              />
+              <label className={`btn-secondary ai-revise-attach${canEditDraft ? "" : " disabled"}`}>
+                Attach image
+                <input
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  className="sr-only"
+                  disabled={!canEditDraft}
+                  onChange={onAttachmentChange}
+                />
+              </label>
+              {reviseAttachments.length ? (
+                <ul className="ai-revise-files">
+                  {reviseAttachments.map((file, index) => (
+                    <li key={`${file.name}-${index}`} className="ai-revise-attachment">
+                      <span className="ai-revise-file-name">{file.name}</span>
+                      <button
+                        type="button"
+                        className="btn-link"
+                        onClick={() => onRemoveAttachment(index)}
+                        disabled={!canEditDraft}
+                      >
+                        Remove
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+          </details>
+          <button
+            type="button"
+            className="btn-primary audio-review-submit"
+            disabled={
+              !canEditDraft ||
+              isRecording ||
+              reviseInFlight ||
+              (!reviseFeedback.trim() && !reviseAudio && reviseAttachments.length === 0)
+            }
+            onClick={onRevise}
+          >
+            Revise with AI
+          </button>
+        </>
+      ) : (
+        <p className="subtle audio-review-unavailable">
+          Daily Review batches are reviewed proposal by proposal: accept, edit, or reject
+          each proposal below. AI revision is available on single-capture drafts.
+        </p>
+      )}
     </section>
   );
 }

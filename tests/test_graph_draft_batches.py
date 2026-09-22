@@ -2173,3 +2173,33 @@ def test_run_due_rejects_non_admin_user(
         "message": "Only admins can run scheduled batch drafts.",
         "issues": None,
     }
+
+
+def test_revise_rejects_daily_review_batch_drafts_explicitly(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    """Batch drafts are reviewed per operation; whole-draft revision is unsupported."""
+    project_id = _project(client, admin_auth_headers)
+    _note(client, admin_auth_headers, project_id, "Gel photo A looked clean.")
+    fake_client = FakeBatchDraftClient(_batch_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: fake_client
+    run = client.post(
+        "/batches/run-now",
+        json={"project_id": project_id},
+        headers=admin_auth_headers,
+    ).json()["data"]
+    assert run["status"] == "ready"
+
+    revised = client.post(
+        f"/graph-drafts/{run['change_set_id']}/revise",
+        data={"feedback": "Split this into two questions."},
+        headers=admin_auth_headers,
+    )
+
+    assert revised.status_code == 422, revised.text
+    assert "Daily Review batch drafts cannot be revised" in revised.json()["error"]["message"]
+    assert len(fake_client.calls) == 1
+    draft = client.get(f"/batches/{run['change_set_id']}", headers=admin_auth_headers)
+    assert draft.json()["data"]["status"] == "ready"
+    assert len(draft.json()["data"]["operations"]) == 1

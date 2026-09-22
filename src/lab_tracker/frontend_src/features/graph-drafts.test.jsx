@@ -160,8 +160,28 @@ describe("GraphDraftDetailCard narrative review", () => {
     expect(screen.getByRole("button", { name: "Commit accepted changes" })).toBeEnabled();
   });
 
+  it("hides AI revision for Daily Review batch drafts, which the API cannot revise", async () => {
+    installSpeechSynthesis();
+    renderDraft(draftFixture({ draft_mode: "graph_batch", status: "ready" }));
+
+    expect(await screen.findByText(/reviewed proposal by proposal/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Listen to review" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Revise with AI" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Dictate feedback" })).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText(/Tell the AI how to revise/)).not.toBeInTheDocument();
+  });
+
+  it("offers AI revision for note-scoped drafts", async () => {
+    renderDraft(draftFixture({ draft_mode: "graph_context", status: "ready" }));
+
+    expect(await screen.findByRole("button", { name: "Revise with AI" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Dictate feedback" })).toBeInTheDocument();
+    expect(screen.queryByText(/reviewed proposal by proposal/)).not.toBeInTheDocument();
+  });
+
   it("keeps another member's onboarding draft read-only on the generic review route", async () => {
     const ready = draftFixture({
+      draft_mode: "graph_context",
       created_by: "author-2",
       created_by_user_id: "author-2",
       purpose: "member_checkpoint_alignment",
@@ -1160,7 +1180,7 @@ describe("GraphDraftDetailCard audio review", () => {
 
   it("records, previews, and submits voice feedback through the revision endpoint", async () => {
     installSpeechSynthesis();
-    const draft = draftFixture();
+    const draft = draftFixture({ draft_mode: "graph_context" });
     const track = { stop: vi.fn() };
     Object.defineProperty(navigator, "mediaDevices", {
       configurable: true,
