@@ -430,9 +430,10 @@ def test_admin_device_management_requires_an_interactive_admin(
     by_device = client.get(list_path, headers=_device_headers(admin_device_secret))
     revoke_by_device = client.delete(revoke_path, headers=_device_headers(admin_device_secret))
 
-    assert by_editor.status_code == 401
+    # A signed-in non-admin is an authorization denial (403), not a credential failure.
+    assert by_editor.status_code == 403
     assert by_editor.json()["error"]["message"] == "Admin privileges required."
-    assert revoke_by_editor.status_code == 401
+    assert revoke_by_editor.status_code == 403
     assert by_service.status_code == 403
     assert revoke_by_service.status_code == 403
     assert by_device.status_code == 403
