@@ -93,27 +93,25 @@ def test_every_documented_variable_is_consumed_by_the_code() -> None:
 _SETUP_DOC_PATH = _REPO_ROOT / "docs" / "setup.md"
 
 
-def _non_docker_first_admin_exports() -> list[str]:
+def _non_docker_first_admin_commands() -> list[str]:
     text = _SETUP_DOC_PATH.read_text(encoding="utf-8")
     section = text.split("### Non-Docker\n", 1)[1].split("\n### ", 1)[0]
     block = section.split("```bash\n", 1)[1].split("```", 1)[0]
-    exports = [line for line in block.splitlines() if line.startswith("export ")]
-    assert "lab-tracker serve" in block
-    return exports
+    lines = block.splitlines()
+    assert lines[-1] == "lab-tracker serve"
+    return lines[:-1]
 
 
-def test_setup_non_docker_first_admin_environment_is_accepted() -> None:
-    """The documented first-admin exports must build valid auth-enabled settings."""
-    exports = _non_docker_first_admin_exports()
+def _run_non_docker_first_admin_block(home: Path) -> str:
     script = "\n".join(
         [
-            "set -eu",
-            *exports,
+            "set -eu -o pipefail",
+            *_non_docker_first_admin_commands(),
             'exec "$PYTHON" -c "from lab_tracker.config import Settings; '
             "settings = Settings(_env_file=None); "
             "assert settings.is_auth_enabled(); "
             "assert settings.bootstrap_admin_token; "
-            'print(len(settings.auth_secret_key))"',
+            'print(settings.auth_secret_key)"',
         ]
     )
     environment = {
@@ -125,6 +123,7 @@ def test_setup_non_docker_first_admin_environment_is_accepted() -> None:
         [str(Path(sys.executable).parent), environment.get("PATH", "")]
     )
     environment["PYTHON"] = sys.executable
+    environment["HOME"] = str(home)
 
     result = subprocess.run(
         ["bash", "-c", script],
@@ -137,7 +136,23 @@ def test_setup_non_docker_first_admin_environment_is_accepted() -> None:
     )
 
     assert result.returncode == 0, result.stderr
-    assert int(result.stdout.strip()) >= 32
+    return result.stdout.strip()
+
+
+def test_setup_non_docker_first_admin_environment_is_accepted(tmp_path: Path) -> None:
+    """The documented first-admin block builds valid auth-enabled settings.
+
+    The block is run twice: the secret is generated once into a private file and
+    reused on restart, because a new secret signs every user out.
+    """
+    first = _run_non_docker_first_admin_block(tmp_path)
+    second = _run_non_docker_first_admin_block(tmp_path)
+
+    assert len(first) >= 32
+    assert second == first
+    secret_files = [path for path in tmp_path.rglob("*") if path.is_file()]
+    assert len(secret_files) == 1, secret_files
+    assert secret_files[0].stat().st_mode & 0o077 == 0
 
 
 _AUTH_ENABLE_INSTRUCTION_DOCS = (

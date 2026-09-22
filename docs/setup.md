@@ -240,18 +240,21 @@ viewer/contributor/owner access.
 ### Non-Docker
 
 Authentication needs a strong signing secret; the built-in placeholder is
-rejected at startup whenever auth is enabled. Generate one, then set the token
-before starting the app:
+rejected at startup whenever auth is enabled. The first line below generates
+one into a private file outside the checkout only if that file does not exist
+yet, so the same block is safe to rerun on every restart:
 
 ```bash
+[ -f ~/.lab-tracker-auth-secret ] || (umask 077 && python3 -c 'import secrets; print(secrets.token_urlsafe(48))' > ~/.lab-tracker-auth-secret)
 export LAB_TRACKER_AUTH_ENABLED=true
-export LAB_TRACKER_AUTH_SECRET_KEY="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
+export LAB_TRACKER_AUTH_SECRET_KEY="$(cat ~/.lab-tracker-auth-secret)"
 export LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN="<one-time-admin-token>"
 lab-tracker serve
 ```
 
-Keep that secret private and reuse the same value on later restarts; a new
-secret signs every user out and invalidates outstanding invitation links.
+Keep that file private (or move the value into your secrets manager) and keep
+using the same value; a new secret signs every user out and invalidates
+outstanding invitation links.
 
 Open `http://127.0.0.1:8000/app` and use `Create First Admin`. The setup screen
 loads the bootstrap token while the instance has no users.
