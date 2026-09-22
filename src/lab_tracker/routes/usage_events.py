@@ -11,7 +11,7 @@ from io import StringIO
 from typing import Any, Literal
 from uuid import UUID
 
-from fastapi import APIRouter
+from fastapi import APIRouter, FastAPI
 from fastapi.encoders import jsonable_encoder
 from starlette.requests import Request
 from starlette.responses import StreamingResponse
@@ -151,7 +151,7 @@ class _UsageExportFilters:
 
 
 def _usage_event_export_pages(
-    app: Any,
+    app: FastAPI,
     filters: _UsageExportFilters,
     first_page: list[UsageEvent],
 ) -> Iterator[list[dict[str, object]]]:
