@@ -77,8 +77,14 @@ def test_publication_readiness_flags_structural_failures(
         admin_auth_headers,
         project_id,
         text="Answered without any committed dataset?",
-        status="answered",
     )
+    # A question is answered by moving it from active; it cannot be created answered.
+    answered = client.patch(
+        f"/questions/{answered_question_id}",
+        json={"status": "answered"},
+        headers=admin_auth_headers,
+    )
+    assert answered.status_code == 200
     grounded_question_id = _create_question(
         client,
         admin_auth_headers,

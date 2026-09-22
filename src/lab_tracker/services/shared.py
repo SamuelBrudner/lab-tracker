@@ -222,18 +222,19 @@ def unique_ids(values: Iterable[UUID] | None) -> list[UUID]:
     return unique
 
 
+# SUPERSEDED is deliberately absent from every plain transition: only the
+# refactor command may supersede a question, because it is the path that records
+# the replacement pointer and the QuestionRefactor audit row.
 _QUESTION_STATUS_TRANSITIONS: dict[QuestionStatus, set[QuestionStatus]] = {
     QuestionStatus.STAGED: {
         QuestionStatus.STAGED,
         QuestionStatus.ACTIVE,
         QuestionStatus.ABANDONED,
-        QuestionStatus.SUPERSEDED,
     },
     QuestionStatus.ACTIVE: {
         QuestionStatus.ACTIVE,
         QuestionStatus.ANSWERED,
         QuestionStatus.ABANDONED,
-        QuestionStatus.SUPERSEDED,
     },
     QuestionStatus.ANSWERED: {QuestionStatus.ANSWERED},
     QuestionStatus.ABANDONED: {QuestionStatus.ABANDONED},
@@ -293,10 +294,20 @@ def _ensure_status_transition(
         )
 
 
+# A new question starts life staged; any other requested creation status must be
+# reachable from there through the ordinary transition table.
+QUESTION_CREATION_START_STATUS = QuestionStatus.STAGED
+
+
 def _ensure_question_status_transition(
     current_status: QuestionStatus,
     next_status: QuestionStatus,
 ) -> None:
+    if next_status == QuestionStatus.SUPERSEDED and current_status != QuestionStatus.SUPERSEDED:
+        raise ValidationError(
+            "Questions become superseded only through the refactor command "
+            "(POST /questions/{question_id}/refactor), which records the replacement."
+        )
     _ensure_status_transition(
         current_status,
         next_status,

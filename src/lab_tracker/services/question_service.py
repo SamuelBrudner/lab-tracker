@@ -34,6 +34,7 @@ from lab_tracker.services.deletion_references import prepare_entity_deletion
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.shared import (
+    QUESTION_CREATION_START_STATUS,
     _ensure_question_parents_dag,
     _ensure_question_status_transition,
     actor_user_fk,
@@ -164,6 +165,7 @@ class QuestionService(BaseService):
             raise ValidationError(
                 "member-question: client_capture_id values are reserved for member onboarding."
             )
+        _ensure_question_status_transition(QUESTION_CREATION_START_STATUS, status)
         question_id = uuid4()
         parent_ids = unique_ids(parent_question_ids)
         for parent_id in parent_ids:
