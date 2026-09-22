@@ -3358,3 +3358,118 @@ def test_edited_update_commits_user_revised_origin(
     note = client.get(f"/notes/{note_id}", headers=admin_auth_headers)
     assert note.status_code == 200
     assert note.json()["data"]["origin"] == "user_revised"
+
+
+def _link_note_to_new_question_draft(project_id: str, note_id: str) -> dict[str, Any]:
+    """A general draft that creates a question and links a note to it by ``$ref``."""
+    return {
+        "summary": "create a question and link the note to it",
+        "uncertain_fields": [],
+        "clarification_requests": [],
+        "operations": [
+            {
+                "client_ref": "q1",
+                "op": "create",
+                "entity_type": "question",
+                "semantic_type": "suggest_new_question",
+                "target_entity_id": None,
+                "payload_json": json.dumps(
+                    {
+                        "project_id": project_id,
+                        "text": "Does the new protocol improve yield?",
+                        "question_type": "descriptive",
+                        "status": "staged",
+                    }
+                ),
+                "rationale": "The note raises a new question.",
+                "confidence": 0.8,
+                "source_refs": [],
+            },
+            {
+                "client_ref": None,
+                "op": "update",
+                "entity_type": "note",
+                "semantic_type": "link_note_to_question",
+                "target_entity_id": note_id,
+                "payload_json": json.dumps(
+                    {"targets": [{"entity_type": "question", "entity_id": {"$ref": "q1"}}]}
+                ),
+                "rationale": "The note is about the new question.",
+                "confidence": 0.8,
+                "source_refs": [],
+            },
+        ],
+    }
+
+
+def _accept_all_and_commit(
+    client: TestClient, headers: dict[str, str], change_set_id: str
+) -> httpx.Response:
+    accepted = client.post(f"/graph-drafts/{change_set_id}/accept-all", headers=headers)
+    assert accepted.status_code == 200, accepted.text
+    return client.post(
+        f"/graph-drafts/{change_set_id}/commit",
+        json={"message": "link note"},
+        headers=headers,
+    )
+
+
+def test_general_draft_commits_note_link_to_question_created_by_ref(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    """Onboarding-only target rules must not reject ordinary ``$ref`` note links."""
+    project_id = _project(client, admin_auth_headers)
+    note_id = _image_note(client, admin_auth_headers, project_id)
+    client.app.state.graph_draft_client_factory = lambda settings: FakeDraftClient(
+        _link_note_to_new_question_draft(project_id, note_id)
+    )
+    draft = client.post(f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers)
+    assert draft.status_code == 201, draft.text
+    assert draft.json()["data"]["status"] == "ready"
+    change_set_id = draft.json()["data"]["change_set_id"]
+
+    commit = _accept_all_and_commit(client, admin_auth_headers, change_set_id)
+
+    assert commit.status_code == 200, commit.text
+    operations = sorted(commit.json()["data"]["operations"], key=lambda op: op["sequence"])
+    question_id = operations[0]["result_entity_id"]
+    note = client.get(f"/notes/{note_id}", headers=admin_auth_headers).json()["data"]
+    assert note["targets"] == [{"entity_type": "question", "entity_id": question_id}]
+
+
+def test_general_draft_commits_note_link_with_mixed_targets(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    """A general link that keeps a non-question target alongside a question commits."""
+    project_id, note_id, question_id = _project_note_question(client, admin_auth_headers)
+    session = client.post(
+        "/sessions",
+        json={"project_id": project_id, "session_type": "operational"},
+        headers=admin_auth_headers,
+    )
+    assert session.status_code == 201, session.text
+    session_id = session.json()["data"]["session_id"]
+    patch = _link_note_update_draft(note_id, question_id)
+    patch["operations"][0]["payload_json"] = json.dumps(
+        {
+            "targets": [
+                {"entity_type": "question", "entity_id": question_id},
+                {"entity_type": "session", "entity_id": session_id},
+            ]
+        }
+    )
+    client.app.state.graph_draft_client_factory = lambda settings: FakeDraftClient(patch)
+    draft = client.post(f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers)
+    assert draft.status_code == 201, draft.text
+    assert draft.json()["data"]["status"] == "ready"
+
+    commit = _accept_all_and_commit(
+        client, admin_auth_headers, draft.json()["data"]["change_set_id"]
+    )
+
+    assert commit.status_code == 200, commit.text
+    note = client.get(f"/notes/{note_id}", headers=admin_auth_headers).json()["data"]
+    assert {(t["entity_type"], t["entity_id"]) for t in note["targets"]} == {
+        ("question", question_id),
+        ("session", session_id),
+    }

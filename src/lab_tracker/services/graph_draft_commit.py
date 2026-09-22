@@ -206,6 +206,7 @@ class TransactionalDraftCommitCoordinator(BaseService):
                 self._validate_member_onboarding_change_set(change_set)
             self._lock_question_update_projects(
                 accepted,
+                member_onboarding=is_member_onboarding,
                 project_id=(
                     change_set.project_id
                     if _takes_project_reference_lock(accepted)
@@ -271,6 +272,7 @@ class TransactionalDraftCommitCoordinator(BaseService):
         self,
         operations: list[GraphChangeOperation],
         *,
+        member_onboarding: bool,
         project_id: UUID | None = None,
     ) -> None:
         """Pre-lock every question project in canonical UUID order.
@@ -281,6 +283,12 @@ class TransactionalDraftCommitCoordinator(BaseService):
         it must precede the Dataset locks taken next. Other drafts keep the
         narrower plan so pure dataset or question updates in one project do
         not serialize on the project lock.
+
+        ``member_onboarding`` enables the relation-only onboarding link rules
+        (concrete question targets that must stay active or staged). Ordinary
+        drafts apply ``link_note_to_question`` as a plain note update whose
+        targets may be ``$ref`` placeholders resolved at apply time or mixed
+        entity types, validated by the note service.
         """
 
         project_ids: set[UUID] = set() if project_id is None else {project_id}
@@ -294,12 +302,7 @@ class TransactionalDraftCommitCoordinator(BaseService):
                 question = self.questions.get_question(operation.target_entity_id)
                 project_ids.add(question.project_id)
                 continue
-            if (
-                operation.entity_type == EntityType.NOTE
-                and operation.op == GraphChangeOp.UPDATE
-                and operation.semantic_type
-                == GraphDraftSemanticType.LINK_NOTE_TO_QUESTION
-            ):
+            if member_onboarding and _is_note_question_link(operation):
                 raw_targets = operation.payload.get("targets")
                 if not isinstance(raw_targets, list):
                     raise ValidationError("Onboarding note links require targets.")
@@ -322,13 +325,10 @@ class TransactionalDraftCommitCoordinator(BaseService):
         # Re-read after lock acquisition. A concurrent delete, terminal
         # transition, or refactor that won the same project DAG lock must be
         # observed before the relation-only checkpoint insert.
+        if not member_onboarding:
+            return
         for operation in operations:
-            if (
-                operation.entity_type != EntityType.NOTE
-                or operation.op != GraphChangeOp.UPDATE
-                or operation.semantic_type
-                != GraphDraftSemanticType.LINK_NOTE_TO_QUESTION
-            ):
+            if not _is_note_question_link(operation):
                 continue
             for target in operation.payload.get("targets", []):
                 question = self.questions.get_question(
@@ -381,6 +381,14 @@ class TransactionalDraftCommitCoordinator(BaseService):
                 project_id,
                 sorted(dataset_ids_by_project[project_id], key=str),
             )
+
+
+def _is_note_question_link(operation: GraphChangeOperation) -> bool:
+    return (
+        operation.entity_type == EntityType.NOTE
+        and operation.op == GraphChangeOp.UPDATE
+        and operation.semantic_type == GraphDraftSemanticType.LINK_NOTE_TO_QUESTION
+    )
 
 
 _PROJECT_REFERENCE_LOCKING_ENTITY_TYPES = frozenset({EntityType.CLAIM, EntityType.ANALYSIS})
