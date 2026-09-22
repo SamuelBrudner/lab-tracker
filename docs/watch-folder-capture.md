@@ -178,7 +178,11 @@ Use generic `lt watch` for non-HPC folders and manifest-producing tools. Use
 - `Watch config not found`: run `lt watch init`, pass `--config`, or set
   `LAB_TRACKER_WATCH_CONFIG`.
 - `watched file changed since scan`: the file was modified before sync. Run
-  `lt watch scan` again to capture the new checksum.
+  `lt watch scan` again to capture the new checksum. The event is marked
+  `stale`, which is terminal: later syncs skip it without spending `--limit`,
+  so pending captures are never starved. The next scan (`lt watch run` scans
+  first) captures changed content as a new event, or re-arms the stale event
+  as `pending` when the file again matches its original content hash.
 - `session_id must not be empty`: `acquisition-output` events need
   `--session <SESSION_UUID>` or a configured `session_id`.
 - Sync fails but events remain local: fix connectivity/authentication and rerun
