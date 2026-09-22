@@ -1,4 +1,4 @@
-"""Claim/record-export provenance completeness (review findings M40, M41)."""
+"""Claim/record-export/Ara provenance completeness (review findings M40, M41)."""
 
 from __future__ import annotations
 
@@ -16,11 +16,20 @@ from lab_tracker.models import (
     Dataset,
     DatasetCommitManifest,
     DatasetStatus,
+    EntityRef,
+    EntityType,
+    ExplorationNode,
+    ExplorationNodeStatus,
+    ExplorationNodeType,
+    Question,
+    QuestionType,
     RecordExportRecords,
     SupervisionEdge,
     Visualization,
 )
 from lab_tracker.provenance import (
+    AraArtifactRecords,
+    build_ara_artifact_document,
     build_claim_provenance_document,
     build_dataset_provenance_document,
     build_record_export_provenance_document,
@@ -126,6 +135,96 @@ def test_record_export_document_keeps_dataset_time_supervision() -> None:
         RecordExportRecords(datasets=[dataset], claims=[_claim(dataset)]),
         supervision_edges=_edges(),
     )
+
+    creator = _nodes(document)[_agent(CREATOR)]
+    assert _supervisor_ids(creator) == {_agent(SUPERVISOR), _agent(CLAIM_SUPERVISOR)}
+
+
+DATASET_TIME = datetime(2025, 6, 1, tzinfo=timezone.utc)
+CLAIM_TIME = datetime(2026, 3, 1, tzinfo=timezone.utc)
+
+
+def _ara_layer(layer_name: str, **records: object) -> dict[str, object]:
+    base: dict[str, object] = {
+        "questions": [],
+        "datasets": [],
+        "analyses": [],
+        "claims": [],
+        "claim_edges": [],
+        "notes": [],
+        "visualizations": [],
+        "entity_versions": [],
+    }
+    base.update(records)
+    return build_ara_artifact_document(
+        BASE,
+        scope_type=EntityType.PROJECT,
+        scope_id=PROJECT,
+        records=AraArtifactRecords(**base),  # type: ignore[arg-type]
+        generated_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        layer_name=layer_name,
+        supervision_edges=_edges(),
+    )
+
+
+def _exploration_node(created_at: datetime, target: EntityRef) -> ExplorationNode:
+    return ExplorationNode(
+        node_id=UUID("77777777-7777-7777-7777-000000000001"),
+        project_id=PROJECT,
+        node_type=ExplorationNodeType.DECISION,
+        title="Pick the supervised method",
+        target=target,
+        status=ExplorationNodeStatus.COMMITTED,
+        created_at=created_at,
+        created_by_user_id=CREATOR,
+    )
+
+
+def test_ara_evidence_layer_keeps_dataset_time_supervision() -> None:
+    dataset = _dataset()
+    visualization = Visualization(
+        viz_id=UUID("66666666-6666-6666-6666-000000000003"),
+        analysis_id=UUID("44444444-4444-4444-4444-000000000003"),
+        viz_type="line",
+        file_path="figs/supervised.png",
+        created_at=CLAIM_TIME,
+        created_by_user_id=CREATOR,
+    )
+
+    document = _ara_layer("evidence", datasets=[dataset], visualizations=[visualization])
+
+    creator = _nodes(document)[_agent(CREATOR)]
+    assert _supervisor_ids(creator) == {_agent(SUPERVISOR), _agent(CLAIM_SUPERVISOR)}
+
+
+def test_ara_logic_layer_keeps_supervision_from_each_activity_time() -> None:
+    claim = _claim(_dataset())
+    exploration = _exploration_node(
+        DATASET_TIME,
+        EntityRef(entity_type=EntityType.CLAIM, entity_id=claim.claim_id),
+    )
+
+    document = _ara_layer("logic", claims=[claim], exploration_nodes=[exploration])
+
+    creator = _nodes(document)[_agent(CREATOR)]
+    assert _supervisor_ids(creator) == {_agent(SUPERVISOR), _agent(CLAIM_SUPERVISOR)}
+
+
+def test_ara_trace_layer_keeps_supervision_from_each_activity_time() -> None:
+    question = Question(
+        question_id=UUID("22222222-2222-2222-2222-000000000001"),
+        project_id=PROJECT,
+        text="Does supervision survive the trace layer?",
+        question_type=QuestionType.DESCRIPTIVE,
+        created_at=DATASET_TIME,
+        created_by_user_id=CREATOR,
+    )
+    exploration = _exploration_node(
+        CLAIM_TIME,
+        EntityRef(entity_type=EntityType.QUESTION, entity_id=question.question_id),
+    )
+
+    document = _ara_layer("trace", questions=[question], exploration_nodes=[exploration])
 
     creator = _nodes(document)[_agent(CREATOR)]
     assert _supervisor_ids(creator) == {_agent(SUPERVISOR), _agent(CLAIM_SUPERVISOR)}

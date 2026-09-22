@@ -1560,9 +1560,7 @@ def _ara_logic_graph(
     for link in records.goal_links or []:
         link_node = _goal_link_node(base_url, link)
         merged[str(link_node["@id"])] = link_node
-    for user_id in sorted(people):
-        person = people[user_id]
-        merged[str(person["@id"])] = person
+    _merge_person_nodes(merged, people)
     return list(merged.values())
 
 
@@ -1655,9 +1653,7 @@ def _ara_trace_graph(
     for version in records.entity_versions:
         node = _entity_version_node(base_url, version)
         merged[str(node["@id"])] = node
-    for user_id in sorted(people):
-        person = people[user_id]
-        merged[str(person["@id"])] = person
+    _merge_person_nodes(merged, people)
     return list(merged.values())
 
 
@@ -1719,9 +1715,7 @@ def _ara_evidence_graph(
         )
         merged[str(node["@id"])] = node
         _merge_graph_nodes(merged, _origin_provenance_nodes(base_url, exploration_node))
-    for user_id in sorted(people):
-        person = people[user_id]
-        merged[str(person["@id"])] = person
+    _merge_person_nodes(merged, people)
     return list(merged.values())
 
 
