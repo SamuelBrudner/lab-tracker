@@ -3,11 +3,12 @@ from __future__ import annotations
 import json
 import logging
 from datetime import timedelta
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import event
+from sqlalchemy.exc import OperationalError
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.app_parts.middleware import system_auth_context
@@ -15,6 +16,7 @@ from lab_tracker.auth import AuthContext, Role
 from lab_tracker.errors import ValidationError
 from lab_tracker.models import ReviewEmailDeliveryStatus, utc_now
 from lab_tracker.review_links import sign_review_link
+from lab_tracker.services.review_email_service import ReviewEmailService
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 
 
@@ -406,3 +408,47 @@ def test_dead_lettering_is_logged_and_idle_polls_do_not_write(
     assert api.review_emails.get(delivery.delivery_id).status == ReviewEmailDeliveryStatus.FAILED
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert any(str(delivery.delivery_id) in r.getMessage() for r in warnings)
+
+
+def _unbound_review_link(client: TestClient) -> str:
+    return sign_review_link(
+        client.app.state.settings.auth_secret_key,
+        uuid4(),
+        recipient_user_id=uuid4(),
+        delivery_id=uuid4(),
+    )
+
+
+def test_review_link_redirects_invalid_or_unknown_links_to_app_root(
+    client: TestClient,
+) -> None:
+    tampered = client.get("/r/not-a-valid-token", follow_redirects=False)
+    unknown_delivery = client.get(
+        f"/r/{_unbound_review_link(client)}",
+        follow_redirects=False,
+    )
+
+    for response in (tampered, unknown_delivery):
+        assert response.status_code == 302
+        assert response.headers["location"] == "/app/"
+
+
+def test_review_link_surfaces_backend_failures_instead_of_redirecting(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Anti-enumeration only needs a uniform answer for bad tokens and missing
+    # deliveries; a database outage must fail loudly, not look like a bad link.
+    def _database_down(_self, _delivery_id):
+        raise OperationalError("SELECT 1", {}, Exception("database is down"))
+
+    monkeypatch.setattr(ReviewEmailService, "get", _database_down)
+    failing_client = TestClient(client.app, raise_server_exceptions=False)
+
+    response = failing_client.get(
+        f"/r/{_unbound_review_link(client)}",
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 500
+    assert "location" not in response.headers

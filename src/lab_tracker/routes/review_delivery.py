@@ -8,7 +8,7 @@ from starlette.responses import RedirectResponse
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.auth import Role
-from lab_tracker.errors import PermissionDeniedError
+from lab_tracker.errors import NotFoundError, PermissionDeniedError
 from lab_tracker.models import ReviewEmailDelivery
 from lab_tracker.review_links import InvalidReviewLinkToken, verify_review_link
 from lab_tracker.schemas import Envelope, ListEnvelope, ReviewEmailTestRequest
@@ -43,8 +43,10 @@ def build_review_delivery_router(api: LabTrackerAPI) -> APIRouter:
             )
             if delivery.change_set_id != claims.change_set_id:
                 raise InvalidReviewLinkToken("Review link token is invalid or expired.")
-        except Exception:
-            # Do not leak whether a delivery or review exists.
+        except (InvalidReviewLinkToken, NotFoundError):
+            # Do not leak whether a delivery or review exists. Anything else
+            # (database outage, misconfigured secret, bug) must fail loudly
+            # instead of masquerading as a bad link.
             return RedirectResponse(url="/app/", status_code=302)
         return RedirectResponse(
             url=f"/app/batches/{claims.change_set_id}",
