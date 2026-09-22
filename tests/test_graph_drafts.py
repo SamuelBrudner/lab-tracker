@@ -12,6 +12,7 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import select
 
 from lab_tracker.app_parts.middleware import system_auth_context
@@ -3547,3 +3548,82 @@ def test_redrafting_analysis_note_after_rejection_generates_new_draft(
     assert second.json()["data"]["change_set_id"] != first_id
     assert second.json()["data"]["status"] == "ready"
     assert len(fake.calls) == 2
+
+
+def _anthropic_patch_response(*, stop_reason: str, text: str) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={"stop_reason": stop_reason, "content": [{"type": "text", "text": text}]},
+    )
+
+
+def test_anthropic_client_sends_configured_output_token_budget() -> None:
+    requests: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content.decode("utf-8")))
+        return _anthropic_patch_response(
+            stop_reason="end_turn",
+            text=json.dumps({"summary": "ok", "operations": []}),
+        )
+
+    client = AnthropicGraphDraftClient(
+        api_key="anthropic-key",
+        model="claude-test",
+        max_output_tokens=32000,
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        client.draft_from_batch(
+            batch_context={"mode": "graph_batch", "batch_notes": [{"id": "note-1"}]}
+        )
+    finally:
+        client.close()
+    assert requests[0]["max_tokens"] == 32000
+
+    configured = make_graph_draft_client(
+        Settings(
+            environment="local",
+            auth_enabled=False,
+            graph_draft_provider="anthropic",
+            anthropic_api_key="anthropic-key",
+            anthropic_max_output_tokens=24000,
+        )
+    )
+    try:
+        assert isinstance(configured, AnthropicGraphDraftClient)
+        assert configured.max_output_tokens == 24000
+    finally:
+        configured.close()
+    assert Settings(environment="local").anthropic_max_output_tokens == 16000
+
+
+def test_settings_reject_non_positive_anthropic_output_budget() -> None:
+    with pytest.raises(PydanticValidationError, match="anthropic_max_output_tokens"):
+        Settings(environment="local", anthropic_max_output_tokens=0)
+
+
+def test_anthropic_client_reports_output_truncation_explicitly() -> None:
+    client = AnthropicGraphDraftClient(
+        api_key="anthropic-key",
+        model="claude-test",
+        max_output_tokens=4096,
+        transport=httpx.MockTransport(
+            lambda request: _anthropic_patch_response(
+                stop_reason="max_tokens",
+                text='{"summary": "A long day narrative that was cut o',
+            )
+        ),
+    )
+    try:
+        with pytest.raises(GraphDraftingError) as raised:
+            client.draft_from_batch(
+                batch_context={"mode": "graph_batch", "batch_notes": [{"id": "note-1"}]}
+            )
+    finally:
+        client.close()
+
+    message = str(raised.value)
+    assert "4096" in message
+    assert "LAB_TRACKER_ANTHROPIC_MAX_OUTPUT_TOKENS" in message
+    assert "malformed" not in message

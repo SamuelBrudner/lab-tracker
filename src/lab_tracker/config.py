@@ -185,6 +185,9 @@ class Settings(BaseSettings):
     anthropic_model: str = "claude-3-5-sonnet-latest"
     anthropic_base_url: str = "https://api.anthropic.com/v1"
     anthropic_timeout_seconds: float = 60.0
+    # Output budget per Messages call. Batch drafts carry a multi-paragraph
+    # narrative plus one operation per finding, so 4096 truncated real days.
+    anthropic_max_output_tokens: int = Field(default=16000, ge=1)
     google_api_key: str = ""
     google_model: str = "gemini-2.5-flash"
     google_base_url: str = "https://generativelanguage.googleapis.com/v1beta"

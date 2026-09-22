@@ -636,10 +636,14 @@ class AnthropicGraphDraftClient:
         model: str,
         base_url: str = "https://api.anthropic.com/v1",
         timeout_seconds: float = 60.0,
+        max_output_tokens: int = 16000,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
+        if max_output_tokens < 1:
+            raise GraphDraftingError("Anthropic max_output_tokens must be positive.")
         self.model = model
         self.timeout_seconds = float(timeout_seconds)
+        self.max_output_tokens = int(max_output_tokens)
         self._api_key = api_key.strip()
         self._client = httpx.Client(
             base_url=base_url.rstrip("/"),
@@ -654,6 +658,7 @@ class AnthropicGraphDraftClient:
             model=settings.anthropic_model,
             base_url=settings.anthropic_base_url,
             timeout_seconds=settings.anthropic_timeout_seconds,
+            max_output_tokens=settings.anthropic_max_output_tokens,
         )
 
     def close(self) -> None:
@@ -796,7 +801,7 @@ class AnthropicGraphDraftClient:
             },
             json={
                 "model": self.model,
-                "max_tokens": 4096,
+                "max_tokens": self.max_output_tokens,
                 "system": instructions
                 + "\nReturn only valid JSON matching this schema: "
                 + json.dumps(graph_patch_response_schema(), sort_keys=True),
@@ -812,6 +817,13 @@ class AnthropicGraphDraftClient:
                 )
             )
         payload = _provider_response_json(response, "Anthropic")
+        if payload.get("stop_reason") == "max_tokens":
+            raise GraphDraftingError(
+                "Anthropic stopped at the output limit of "
+                f"{self.max_output_tokens} tokens before finishing the graph patch; "
+                "raise LAB_TRACKER_ANTHROPIC_MAX_OUTPUT_TOKENS (within the model's "
+                "output limit) or draft fewer notes per batch."
+            )
         output_text = _anthropic_output_text(payload)
         return _parse_graph_patch_text(output_text, "Anthropic")
 
