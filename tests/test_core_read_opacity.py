@@ -760,8 +760,11 @@ def test_denied_note_capture_never_touches_raw_storage(
         headers=scoped_project_member.member_headers,
     )
 
-    assert response.status_code == 401, response.text
-    assert response.json()["error"]["code"] == "auth_error"
+    # Hidden, viewer-only and missing projects get one indistinguishable
+    # authorization denial (403, not a credential failure).
+    assert response.status_code == 403, response.text
+    assert response.json()["error"]["code"] == "forbidden"
+    assert response.json()["error"]["message"] == "Project contributor access required."
     assert writes == []
 
 
