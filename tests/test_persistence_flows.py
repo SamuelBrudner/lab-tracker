@@ -3,7 +3,7 @@ from __future__ import annotations
 from uuid import uuid4
 
 import pytest
-from api_helpers import repository_backed_api
+from api_helpers import repository_backed_api, stamp_schema_at_head
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 
@@ -188,6 +188,7 @@ def test_repository_backed_api_persists_core_entities(tmp_path):
         connect_args={"check_same_thread": False},
     )
     Base.metadata.create_all(bind=engine)
+    stamp_schema_at_head(engine)
     session_factory = get_session_factory(engine=engine)
     actor = _actor()
 
@@ -250,6 +251,7 @@ def test_repository_backed_api_dual_writes_attribution_user_fk_columns(tmp_path)
         connect_args={"check_same_thread": False},
     )
     Base.metadata.create_all(bind=engine)
+    stamp_schema_at_head(engine)
     session_factory = get_session_factory(engine=engine)
     actor_id = uuid4()
     target_user_id = uuid4()
@@ -404,6 +406,7 @@ def test_repository_backed_api_leaves_local_attribution_fk_null(tmp_path):
         connect_args={"check_same_thread": False},
     )
     Base.metadata.create_all(bind=engine)
+    stamp_schema_at_head(engine)
     session_factory = get_session_factory(engine=engine)
     actor = AuthContext(user_id=LOCAL_AUTH_USER_ID, role=Role.ADMIN)
 
@@ -435,6 +438,7 @@ def test_repository_backed_api_updates_existing_acquisition_output_without_store
         connect_args={"check_same_thread": False},
     )
     Base.metadata.create_all(bind=engine)
+    stamp_schema_at_head(engine)
     session_factory = get_session_factory(engine=engine)
     actor = _actor()
 
@@ -477,6 +481,7 @@ def test_repository_backed_api_rejects_question_parent_cycles_without_store_cach
         connect_args={"check_same_thread": False},
     )
     Base.metadata.create_all(bind=engine)
+    stamp_schema_at_head(engine)
     session_factory = get_session_factory(engine=engine)
     actor = _actor()
 
@@ -515,6 +520,7 @@ def test_repository_backed_api_search_helpers_delegate_to_repository_queries(tmp
         connect_args={"check_same_thread": False},
     )
     Base.metadata.create_all(bind=engine)
+    stamp_schema_at_head(engine)
     session_factory = get_session_factory(engine=engine)
     actor = _actor()
 
@@ -609,6 +615,7 @@ def test_repository_backed_api_list_helpers_delegate_to_repository_queries(tmp_p
         connect_args={"check_same_thread": False},
     )
     Base.metadata.create_all(bind=engine)
+    stamp_schema_at_head(engine)
     session_factory = get_session_factory(engine=engine)
     actor = _actor()
 
@@ -855,6 +862,7 @@ def test_fastapi_routes_persist_across_app_restarts(monkeypatch, tmp_path):
         connect_args={"check_same_thread": False},
     )
     Base.metadata.create_all(bind=engine)
+    stamp_schema_at_head(engine)
     engine.dispose()
 
     app_first = create_app()
@@ -967,6 +975,7 @@ def test_fastapi_routes_read_database_changes_after_app_start(monkeypatch, tmp_p
         connect_args={"check_same_thread": False},
     )
     Base.metadata.create_all(bind=engine)
+    stamp_schema_at_head(engine)
     engine.dispose()
 
     app = create_app()
@@ -1010,6 +1019,7 @@ def test_fastapi_search_reads_database_changes_after_app_start(monkeypatch, tmp_
         connect_args={"check_same_thread": False},
     )
     Base.metadata.create_all(bind=engine)
+    stamp_schema_at_head(engine)
     engine.dispose()
 
     app = create_app()
@@ -1077,6 +1087,7 @@ def test_note_transcribed_text_search_survives_app_restart(monkeypatch, tmp_path
         connect_args={"check_same_thread": False},
     )
     Base.metadata.create_all(bind=engine)
+    stamp_schema_at_head(engine)
     engine.dispose()
 
     app_first = create_app()

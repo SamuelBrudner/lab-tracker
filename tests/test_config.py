@@ -1047,7 +1047,7 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(
         rclone_allowed_remotes="settings-remote",
         git_allowed_remotes="https://settings.example/lab",
     )
-    runtime = build_app_runtime(settings)
+    runtime = build_app_runtime(settings, verify_schema=False)
     app = FastAPI()
     git_health_workdir = runtime.git_health_workdir
     try:
@@ -1212,7 +1212,7 @@ def test_runtime_retains_one_store_authority_snapshot_without_environment_reread
         "environment-must-not-be-reread",
     )
 
-    runtime = build_app_runtime(settings)
+    runtime = build_app_runtime(settings, verify_schema=False)
     app = FastAPI()
     try:
         configure_app_state(app, runtime)
@@ -1294,7 +1294,8 @@ def test_lifespan_removes_app_owned_git_health_workdir(monkeypatch):
         Settings(
             _env_file=None,
             database_url="sqlite+pysqlite:///:memory:",
-        )
+        ),
+        verify_schema=False,
     )
     git_health_workdir = runtime.git_health_workdir
     app = FastAPI(lifespan=make_lifespan(runtime))
@@ -1321,7 +1322,8 @@ def test_lifespan_removes_git_health_workdir_when_engine_disposal_fails(
         Settings(
             _env_file=None,
             database_url="sqlite+pysqlite:///:memory:",
-        )
+        ),
+        verify_schema=False,
     )
     git_health_workdir = runtime.git_health_workdir
     original_dispose = runtime.engine.dispose
@@ -1355,7 +1357,8 @@ def test_git_health_workdir_gc_fallback_is_silent(monkeypatch):
         Settings(
             _env_file=None,
             database_url="sqlite+pysqlite:///:memory:",
-        )
+        ),
+        verify_schema=False,
     )
     git_health_workdir = runtime.git_health_workdir
     runtime.engine.dispose()

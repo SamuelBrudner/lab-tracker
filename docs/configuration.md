@@ -31,7 +31,14 @@ suitable for local development.
 
 ### Database and storage
 
-- `LAB_TRACKER_DATABASE_URL`: SQLAlchemy database URL (default: `sqlite+pysqlite:///./lab_tracker.db`)
+- `LAB_TRACKER_DATABASE_URL`: SQLAlchemy database URL (default: `sqlite+pysqlite:///./lab_tracker.db`).
+  The app refuses to start unless this database is at the Alembic head: an
+  unmigrated database (no `alembic_version`) or one at an older known revision
+  fails startup with a message naming the revisions. Run
+  `uv run alembic upgrade head` first, or start with `lab-tracker serve` (or
+  the Docker entrypoint), which migrate before serving. A revision newer than
+  the running build is logged as a warning and allowed, because image-only
+  rollback runs the previous image against an already-migrated database.
 - `LAB_TRACKER_BACKUP_PATH`: SQLite snapshot directory used by `lab-tracker
   serve` and `lab-tracker backup` (default: `~/.lab-tracker/backups`)
 - `LAB_TRACKER_BACKUP_KEEP`: number of newest SQLite snapshots to keep when a

@@ -22,9 +22,15 @@ from lab_tracker.config import get_settings
 from lab_tracker.routes import register_routes
 
 
-def create_app() -> FastAPI:
+def create_app(*, verify_schema: bool = True) -> FastAPI:
+    """Build the FastAPI app.
+
+    Startup fails with ``DatabaseSchemaError`` unless the database is at the
+    Alembic head. ``verify_schema=False`` is only for tooling that reads the
+    OpenAPI schema without serving (see ``build_app_runtime``).
+    """
     settings = get_settings()
-    runtime = build_app_runtime(settings)
+    runtime = build_app_runtime(settings, verify_schema=verify_schema)
     app = FastAPI(
         title=settings.app_name,
         lifespan=make_lifespan(runtime),

@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+from api_helpers import stamp_schema_at_head
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from starlette.requests import Request
@@ -39,6 +40,7 @@ def _bootstrap_database(monkeypatch, tmp_path) -> None:
         connect_args={"check_same_thread": False},
     )
     Base.metadata.create_all(bind=engine)
+    stamp_schema_at_head(engine)
     engine.dispose()
 
 

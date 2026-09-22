@@ -10,9 +10,15 @@ import weakref
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
+from functools import lru_cache
+from importlib import resources
 from pathlib import Path
 from tempfile import mkdtemp
 
+from alembic.config import Config as AlembicConfig
+from alembic.runtime.migration import MigrationContext
+from alembic.script import ScriptDirectory
+from alembic.util.exc import CommandError
 from fastapi import FastAPI
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
@@ -182,7 +188,85 @@ class AppRuntime:
         self._git_health_workdir_owner.cleanup()
 
 
-def build_app_runtime(settings: Settings) -> AppRuntime:
+_MIGRATE_HINT = (
+    "Apply migrations before starting the app: run `uv run alembic upgrade head` "
+    "from a repository checkout (or `python -m alembic upgrade head` with the "
+    "same LAB_TRACKER_DATABASE_URL), or start with `lab-tracker serve`, which "
+    "migrates first."
+)
+
+
+class DatabaseSchemaError(RuntimeError):
+    """The database is not at a schema revision this build can serve."""
+
+
+@lru_cache(maxsize=1)
+def _migration_script_directory() -> ScriptDirectory:
+    config = AlembicConfig()
+    config.set_main_option("script_location", str(resources.files("lab_tracker") / "alembic"))
+    return ScriptDirectory.from_config(config)
+
+
+def _is_known_revision(script: ScriptDirectory, revision: str) -> bool:
+    try:
+        return script.get_revision(revision) is not None
+    except CommandError:
+        return False
+
+
+def verify_database_schema(engine: Engine) -> None:
+    """Fail loudly unless the database is at this build's Alembic head.
+
+    A database with no Alembic revision (unmigrated) or at a known revision
+    other than the head (stale) raises ``DatabaseSchemaError``. A revision this
+    build does not know is newer than the build -- the image-only rollback case
+    in deployments/dedicated-instance, which requires backward-compatible
+    migrations -- so it is logged as a warning and allowed.
+    """
+
+    script = _migration_script_directory()
+    expected = set(script.get_heads())
+    database = engine.url.render_as_string(hide_password=True)
+    try:
+        with engine.connect() as connection:
+            current = set(MigrationContext.configure(connection).get_current_heads())
+    except SQLAlchemyError as exc:
+        raise DatabaseSchemaError(
+            f"Could not read the database migration revision from {database}: {exc}"
+        ) from exc
+    if current == expected:
+        return
+    if not current:
+        raise DatabaseSchemaError(
+            f"Database {database} has no Alembic revision (it has not been "
+            f"migrated); this build expects head {', '.join(sorted(expected))}. "
+            f"{_MIGRATE_HINT}"
+        )
+    unknown = sorted(revision for revision in current if not _is_known_revision(script, revision))
+    if unknown:
+        _logger.warning(
+            "Database %s is at revision %s, newer than this build's head %s; "
+            "continuing because routine migrations must stay backward-compatible "
+            "with the previous image.",
+            database,
+            ", ".join(unknown),
+            ", ".join(sorted(expected)),
+        )
+        return
+    raise DatabaseSchemaError(
+        f"Database {database} is at revision {', '.join(sorted(current))} but this "
+        f"build expects head {', '.join(sorted(expected))}. {_MIGRATE_HINT}"
+    )
+
+
+def build_app_runtime(settings: Settings, *, verify_schema: bool = True) -> AppRuntime:
+    """Build the app's runtime dependencies.
+
+    ``verify_schema=False`` skips the startup schema check and the auth-disabled
+    local user bootstrap, so no database access happens. It exists only for
+    tooling that builds the app to read its OpenAPI schema (code generation),
+    never for serving requests.
+    """
     store_authority_registry = StoreAuthorityRegistry.from_json(
         settings.store_authority_grants_json
     )
@@ -249,6 +333,7 @@ def build_app_runtime(settings: Settings) -> AppRuntime:
             process_executor=process_executor,
             resolver_registry=resolver_registry,
             git_health_workdir_owner=git_health_workdir_owner,
+            verify_schema=verify_schema,
         )
     except BaseException:
         git_health_workdir_owner.cleanup()
@@ -268,17 +353,21 @@ def _build_app_runtime(
     process_executor: ProcessExecutor,
     resolver_registry: ResolverRegistry,
     git_health_workdir_owner: _OwnedGitHealthWorkdir,
+    verify_schema: bool,
 ) -> AppRuntime:
     git_health_workdir = git_health_workdir_owner.path
     engine = get_engine(settings)
     session_factory = get_session_factory(engine=engine)
     auth_enabled = settings.is_auth_enabled()
     _log_startup_config_summary(settings, engine=engine, auth_enabled=auth_enabled)
-    if not auth_enabled:
+    if verify_schema:
         try:
-            ensure_local_auth_user(session_factory)
-        except SQLAlchemyError as exc:
-            _logger.warning("Local auth user bootstrap skipped: %s", exc)
+            verify_database_schema(engine)
+            if not auth_enabled:
+                ensure_local_auth_user(session_factory)
+        except BaseException:
+            engine.dispose()
+            raise
 
     auth_service = AuthService(session_factory=session_factory)
     device_auth_service = DeviceAuthService(session_factory=session_factory)

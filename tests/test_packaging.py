@@ -354,7 +354,8 @@ def test_wheel_installed_frontend_serves_pwa_assets(tmp_path: Path, built_wheel:
 from fastapi.testclient import TestClient
 from lab_tracker.app import create_app
 
-client = TestClient(create_app())
+# Static PWA assets only: skip the startup database schema check.
+client = TestClient(create_app(verify_schema=False))
 sw_response = client.get("/app/sw.js")
 assert sw_response.status_code == 200
 assert "lab-tracker-shell-" in sw_response.text

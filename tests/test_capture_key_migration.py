@@ -171,7 +171,9 @@ def _exercise_valid_existing_data_cycle(database_url: str) -> None:
     assert "ck_projects_client_capture_creator" in check_constraints
     _assert_capture_creator_check(database_url)
 
-    application = create_app()
+    # Deliberately exercises the app against the 0054 schema (not the head),
+    # so the startup schema check is bypassed.
+    application = create_app(verify_schema=False)
     try:
         with TestClient(application) as client:
             replay = client.post(

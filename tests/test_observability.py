@@ -1,4 +1,4 @@
-from api_helpers import app_test_client
+from api_helpers import app_test_client, stamp_schema_at_head
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 
@@ -21,6 +21,7 @@ def _bootstrap_database(monkeypatch, tmp_path, name: str) -> str:
         connect_args={"check_same_thread": False},
     )
     Base.metadata.create_all(bind=engine)
+    stamp_schema_at_head(engine)
     engine.dispose()
     return database_url
 
@@ -42,6 +43,7 @@ def test_readiness_endpoint(monkeypatch, tmp_path):
         connect_args={"check_same_thread": False},
     )
     Base.metadata.create_all(bind=engine)
+    stamp_schema_at_head(engine)
     engine.dispose()
 
     client = app_test_client()
@@ -92,6 +94,7 @@ def test_metrics_endpoint(monkeypatch, tmp_path):
         connect_args={"check_same_thread": False},
     )
     Base.metadata.create_all(bind=engine)
+    stamp_schema_at_head(engine)
     engine.dispose()
 
     client = app_test_client()
@@ -111,7 +114,9 @@ def test_observability_reports_database_failures(monkeypatch, tmp_path):
     monkeypatch.setenv("LAB_TRACKER_FILE_STORAGE_PATH", str(tmp_path / "file-storage"))
     monkeypatch.setenv("LAB_TRACKER_NOTE_STORAGE_PATH", str(tmp_path))
 
-    client = app_test_client()
+    # Startup refuses an unmigrated database; skip that check to simulate a
+    # database that fails after the app has started.
+    client = app_test_client(verify_schema=False)
 
     readiness = client.get("/readiness")
     assert readiness.status_code == 503
@@ -142,6 +147,7 @@ def test_metrics_endpoint_reads_database_counts(monkeypatch, tmp_path):
         connect_args={"check_same_thread": False},
     )
     Base.metadata.create_all(bind=engine)
+    stamp_schema_at_head(engine)
     engine.dispose()
 
     app = create_app()

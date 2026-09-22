@@ -101,7 +101,9 @@ def main(argv: list[str] | None = None) -> int:
 def build_openapi_schema() -> dict[str, Any]:
     from lab_tracker.app import create_app
 
-    app = create_app()
+    # Only the OpenAPI schema is needed; skip the startup database check so
+    # code generation does not require a migrated database.
+    app = create_app(verify_schema=False)
     try:
         return app.openapi()
     finally:
