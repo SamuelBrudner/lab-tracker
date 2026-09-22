@@ -33,6 +33,16 @@ from lab_tracker.cli import _cursor_mcp_json, _mcp_json
 from lab_tracker.decision_context_constants import code_facing_idioms
 from lab_tracker.mcp_tools import READ_TOOLS, WRITE_TOOLS
 
+# Path-bound ids must be canonical UUIDs; the client refuses anything else (H7).
+PROJECT_ID = "11111111-1111-4111-8111-111111111111"
+DATASET_ID = "22222222-2222-4222-8222-222222222222"
+ANALYSIS_ID = "33333333-3333-4333-8333-333333333333"
+CLAIM_ID = "44444444-4444-4444-8444-444444444444"
+GOAL_ID = "55555555-5555-4555-8555-555555555555"
+QUESTION_ID = "66666666-6666-4666-8666-666666666666"
+VIZ_ID = "77777777-7777-4777-8777-777777777777"
+SESSION_ID = "88888888-8888-4888-8888-888888888888"
+
 
 def _json_response(status_code: int, payload: dict) -> httpx.Response:
     return httpx.Response(status_code, json=payload)
@@ -888,39 +898,39 @@ def test_client_low_level_read_tools_call_retained_routes() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         if request.url.path == "/sessions":
-            assert request.url.params["project_id"] == "project-1"
+            assert request.url.params["project_id"] == PROJECT_ID
             assert request.url.params["session_type"] == "scientific"
-            return _json_response(200, {"data": [{"session_id": "session-1"}]})
+            return _json_response(200, {"data": [{"session_id": SESSION_ID}]})
         if request.url.path == "/datasets":
             assert request.url.params["status"] == "committed"
-            return _json_response(200, {"data": [{"dataset_id": "dataset-1"}]})
+            return _json_response(200, {"data": [{"dataset_id": DATASET_ID}]})
         if request.url.path == "/analyses":
-            assert request.url.params["dataset_id"] == "dataset-1"
-            return _json_response(200, {"data": [{"analysis_id": "analysis-1"}]})
+            assert request.url.params["dataset_id"] == DATASET_ID
+            return _json_response(200, {"data": [{"analysis_id": ANALYSIS_ID}]})
         if request.url.path == "/claims":
-            assert request.url.params["analysis_id"] == "analysis-1"
-            return _json_response(200, {"data": [{"claim_id": "claim-1"}]})
+            assert request.url.params["analysis_id"] == ANALYSIS_ID
+            return _json_response(200, {"data": [{"claim_id": CLAIM_ID}]})
         if request.url.path == "/visualizations":
-            assert request.url.params["claim_id"] == "claim-1"
-            return _json_response(200, {"data": [{"viz_id": "viz-1"}]})
-        if request.url.path == "/datasets/dataset-1/provenance":
-            return _json_response(200, {"data": {"@id": "dataset-1"}})
-        if request.url.path == "/analyses/analysis-1/provenance":
-            return _json_response(200, {"data": {"@id": "analysis-1"}})
-        if request.url.path == "/claims/claim-1/provenance":
-            return _json_response(200, {"data": {"@id": "claim-1"}})
-        if request.url.path == "/goals/goal-1":
-            return _json_response(200, {"data": {"goal_id": "goal-1"}})
-        if request.url.path == "/goals/goal-1/ara-artifact/src":
+            assert request.url.params["claim_id"] == CLAIM_ID
+            return _json_response(200, {"data": [{"viz_id": VIZ_ID}]})
+        if request.url.path == f"/datasets/{DATASET_ID}/provenance":
+            return _json_response(200, {"data": {"@id": DATASET_ID}})
+        if request.url.path == f"/analyses/{ANALYSIS_ID}/provenance":
+            return _json_response(200, {"data": {"@id": ANALYSIS_ID}})
+        if request.url.path == f"/claims/{CLAIM_ID}/provenance":
+            return _json_response(200, {"data": {"@id": CLAIM_ID}})
+        if request.url.path == f"/goals/{GOAL_ID}":
+            return _json_response(200, {"data": {"goal_id": GOAL_ID}})
+        if request.url.path == f"/goals/{GOAL_ID}/ara-artifact/src":
             return _json_response(200, {"data": {"@id": "goal-src"}})
-        if request.url.path == "/questions/question-1/ara-artifact":
+        if request.url.path == f"/questions/{QUESTION_ID}/ara-artifact":
             return _json_response(200, {"data": {"@id": "question-artifact"}})
-        if request.url.path == "/projects/project-1/publication-readiness":
+        if request.url.path == f"/projects/{PROJECT_ID}/publication-readiness":
             return _json_response(
                 200,
                 {
                     "data": {
-                        "project_id": "project-1",
+                        "project_id": PROJECT_ID,
                         "unsupported_claims": [],
                         "ungrounded_questions": [],
                         "orphaned_entities": [],
@@ -939,24 +949,24 @@ def test_client_low_level_read_tools_call_retained_routes() -> None:
     try:
         assert (
             client.list_sessions(
-                project_id="project-1",
+                project_id=PROJECT_ID,
                 session_type="scientific",
             )["data"][0]["session_id"]
-            == "session-1"
+            == SESSION_ID
         )
-        assert client.list_datasets(status="committed")["data"][0]["dataset_id"] == ("dataset-1")
-        assert client.list_analyses(dataset_id="dataset-1")["data"][0]["analysis_id"] == (
-            "analysis-1"
+        assert client.list_datasets(status="committed")["data"][0]["dataset_id"] == DATASET_ID
+        assert client.list_analyses(dataset_id=DATASET_ID)["data"][0]["analysis_id"] == (
+            ANALYSIS_ID
         )
-        assert client.list_claims(analysis_id="analysis-1")["data"][0]["claim_id"] == ("claim-1")
-        assert client.list_visualizations(claim_id="claim-1")["data"][0]["viz_id"] == ("viz-1")
-        assert client.get_dataset_provenance("dataset-1")["data"]["@id"] == "dataset-1"
-        assert client.get_analysis_provenance("analysis-1")["data"]["@id"] == ("analysis-1")
-        assert client.get_claim_provenance("claim-1")["data"]["@id"] == "claim-1"
-        assert client.get_goal("goal-1")["data"]["goal_id"] == "goal-1"
-        assert client.export_goal_artifact("goal-1", layer="src")["data"]["@id"] == ("goal-src")
-        assert client.export_question_subtree("question-1")["data"]["@id"] == ("question-artifact")
-        assert client.publication_readiness("project-1")["data"]["seal_level"] == "ara_l1"
+        assert client.list_claims(analysis_id=ANALYSIS_ID)["data"][0]["claim_id"] == CLAIM_ID
+        assert client.list_visualizations(claim_id=CLAIM_ID)["data"][0]["viz_id"] == VIZ_ID
+        assert client.get_dataset_provenance(DATASET_ID)["data"]["@id"] == DATASET_ID
+        assert client.get_analysis_provenance(ANALYSIS_ID)["data"]["@id"] == ANALYSIS_ID
+        assert client.get_claim_provenance(CLAIM_ID)["data"]["@id"] == CLAIM_ID
+        assert client.get_goal(GOAL_ID)["data"]["goal_id"] == GOAL_ID
+        assert client.export_goal_artifact(GOAL_ID, layer="src")["data"]["@id"] == ("goal-src")
+        assert client.export_question_subtree(QUESTION_ID)["data"]["@id"] == ("question-artifact")
+        assert client.publication_readiness(PROJECT_ID)["data"]["seal_level"] == "ara_l1"
     finally:
         client.close()
 
@@ -966,13 +976,13 @@ def test_client_low_level_read_tools_call_retained_routes() -> None:
         "/analyses",
         "/claims",
         "/visualizations",
-        "/datasets/dataset-1/provenance",
-        "/analyses/analysis-1/provenance",
-        "/claims/claim-1/provenance",
-        "/goals/goal-1",
-        "/goals/goal-1/ara-artifact/src",
-        "/questions/question-1/ara-artifact",
-        "/projects/project-1/publication-readiness",
+        f"/datasets/{DATASET_ID}/provenance",
+        f"/analyses/{ANALYSIS_ID}/provenance",
+        f"/claims/{CLAIM_ID}/provenance",
+        f"/goals/{GOAL_ID}",
+        f"/goals/{GOAL_ID}/ara-artifact/src",
+        f"/questions/{QUESTION_ID}/ara-artifact",
+        f"/projects/{PROJECT_ID}/publication-readiness",
     ]
 
 
@@ -2013,7 +2023,7 @@ def test_client_does_not_remint_or_retry_after_opaque_not_found() -> None:
         calls.append((request.method, request.url.path, request.headers.get("authorization")))
         if request.url.path == "/auth/login":
             return _json_response(200, {"data": {"access_token": "token-1"}})
-        if request.url.path == "/projects/project-1/publication-readiness":
+        if request.url.path == f"/projects/{PROJECT_ID}/publication-readiness":
             return _json_response(
                 404,
                 {
@@ -2037,7 +2047,7 @@ def test_client_does_not_remint_or_retry_after_opaque_not_found() -> None:
 
     try:
         with pytest.raises(mcp_server.LabTrackerAPIError) as excinfo:
-            client.publication_readiness("project-1")
+            client.publication_readiness(PROJECT_ID)
     finally:
         client.close()
 
@@ -2049,7 +2059,7 @@ def test_client_does_not_remint_or_retry_after_opaque_not_found() -> None:
         ("POST", "/auth/login", None),
         (
             "GET",
-            "/projects/project-1/publication-readiness",
+            f"/projects/{PROJECT_ID}/publication-readiness",
             "Bearer token-1",
         ),
     ]
@@ -2324,8 +2334,8 @@ def test_client_update_goal_omits_absent_fields_and_sends_explicit_clears() -> N
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         assert request.method == "PATCH"
-        assert request.url.path == "/goals/goal-1"
-        return _json_response(200, {"data": {"goal_id": "goal-1"}})
+        assert request.url.path == f"/goals/{GOAL_ID}"
+        return _json_response(200, {"data": {"goal_id": GOAL_ID}})
 
     client = mcp_server.LabTrackerAPIClient(
         mcp_server.MCPSettings(base_url="http://testserver"),
@@ -2333,9 +2343,9 @@ def test_client_update_goal_omits_absent_fields_and_sends_explicit_clears() -> N
     )
 
     try:
-        client.update_goal(goal_id="goal-1", title="Renamed goal")
+        client.update_goal(goal_id=GOAL_ID, title="Renamed goal")
         client.update_goal(
-            goal_id="goal-1",
+            goal_id=GOAL_ID,
             clear_target_date=True,
             clear_external_ref=True,
         )
@@ -2357,7 +2367,7 @@ def test_client_update_goal_retries_401_without_dropping_explicit_nulls(
         requests.append(request)
         if len(requests) == 1:
             return _json_response(401, {"error": {"message": "expired"}})
-        return _json_response(200, {"data": {"goal_id": "goal-1"}})
+        return _json_response(200, {"data": {"goal_id": GOAL_ID}})
 
     client = mcp_server.LabTrackerAPIClient(
         mcp_server.MCPSettings(base_url="http://testserver"),
@@ -2367,7 +2377,7 @@ def test_client_update_goal_retries_401_without_dropping_explicit_nulls(
     monkeypatch.setattr(client, "refresh_bearer", lambda _response: "refreshed-token")
 
     try:
-        client.update_goal(goal_id="goal-1", clear_target_date=True)
+        client.update_goal(goal_id=GOAL_ID, clear_target_date=True)
     finally:
         client.close()
 
@@ -2402,7 +2412,7 @@ def test_client_update_goal_rejects_value_and_clear_conflicts(
 
     try:
         with pytest.raises(mcp_server.LabTrackerAPIValidationError) as exc_info:
-            client.update_goal(goal_id="goal-1", **kwargs)
+            client.update_goal(goal_id=GOAL_ID, **kwargs)
     finally:
         client.close()
 
@@ -2447,7 +2457,7 @@ def test_client_upload_visualization_file_posts_multipart(tmp_path) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(request)
         assert request.method == "POST"
-        assert request.url.path == "/visualizations/viz-1/file"
+        assert request.url.path == f"/visualizations/{VIZ_ID}/file"
         assert request.headers["content-type"].startswith("multipart/form-data")
         assert b"figure.png" in request.content
         assert b"figure-bytes" in request.content
@@ -2458,7 +2468,7 @@ def test_client_upload_visualization_file_posts_multipart(tmp_path) -> None:
             201,
             {
                 "data": {
-                    "viz_id": "viz-1",
+                    "viz_id": VIZ_ID,
                     "asset": {"filename": "figure.png"},
                 }
             },
@@ -2471,7 +2481,7 @@ def test_client_upload_visualization_file_posts_multipart(tmp_path) -> None:
 
     try:
         payload = client.upload_visualization_file(
-            viz_id="viz-1",
+            viz_id=VIZ_ID,
             file_path=str(figure_path),
             checksum_sha256=checksum,
             size_bytes=len(figure_bytes),
@@ -2481,7 +2491,7 @@ def test_client_upload_visualization_file_posts_multipart(tmp_path) -> None:
         client.close()
 
     assert payload["data"]["asset"]["filename"] == "figure.png"
-    assert [request.url.path for request in seen] == ["/visualizations/viz-1/file"]
+    assert [request.url.path for request in seen] == [f"/visualizations/{VIZ_ID}/file"]
 
 
 @pytest.mark.parametrize(
@@ -2754,7 +2764,7 @@ def test_graph_api_client_forwards_repeated_filters_and_bounds() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         if request.url.path.endswith("/graph/overview"):
-            return _json_response(200, {"data": {"project": {"project_id": "project-1"}}})
+            return _json_response(200, {"data": {"project": {"project_id": PROJECT_ID}}})
         if request.url.path.endswith("/graph/search"):
             assert request.url.params["q"] == "control"
             assert request.url.params.get_list("entity_types") == ["question", "claim"]
@@ -2762,7 +2772,7 @@ def test_graph_api_client_forwards_repeated_filters_and_bounds() -> None:
             assert request.url.params["limit"] == "7"
             assert request.url.params["offset"] == "3"
             return _json_response(200, {"data": {"items": []}})
-        if "/graph/neighborhood/claim/claim-1" in request.url.path:
+        if f"/graph/neighborhood/claim/{CLAIM_ID}" in request.url.path:
             assert request.url.params["direction"] == "incoming"
             assert request.url.params.get_list("relationships") == [
                 "claim_analysis_support"
@@ -2780,11 +2790,11 @@ def test_graph_api_client_forwards_repeated_filters_and_bounds() -> None:
         transport=httpx.MockTransport(handler),
     )
     try:
-        assert client.graph_overview("project-1")["data"]["project"]["project_id"] == (
-            "project-1"
+        assert client.graph_overview(PROJECT_ID)["data"]["project"]["project_id"] == (
+            PROJECT_ID
         )
         assert client.search_graph(
-            "project-1",
+            PROJECT_ID,
             "control",
             entity_types=["question", "claim"],
             statuses=["active", "supported"],
@@ -2792,9 +2802,9 @@ def test_graph_api_client_forwards_repeated_filters_and_bounds() -> None:
             offset=3,
         )["data"]["items"] == []
         assert client.get_graph_neighborhood(
-            "project-1",
+            PROJECT_ID,
             "claim",
-            "claim-1",
+            CLAIM_ID,
             direction="incoming",
             relationships=["claim_analysis_support"],
             node_types=["analysis"],
@@ -2807,9 +2817,9 @@ def test_graph_api_client_forwards_repeated_filters_and_bounds() -> None:
         client.close()
 
     assert [request.url.path for request in requests] == [
-        "/projects/project-1/graph/overview",
-        "/projects/project-1/graph/search",
-        "/projects/project-1/graph/neighborhood/claim/claim-1",
+        f"/projects/{PROJECT_ID}/graph/overview",
+        f"/projects/{PROJECT_ID}/graph/search",
+        f"/projects/{PROJECT_ID}/graph/neighborhood/claim/{CLAIM_ID}",
     ]
 
 

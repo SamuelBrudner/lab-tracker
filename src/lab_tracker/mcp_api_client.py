@@ -8,7 +8,8 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
+from urllib.parse import quote
 
 import httpx
 
@@ -32,6 +33,7 @@ from lab_tracker.models import (
     AnalysisStatus,
     ClaimStatus,
     DatasetStatus,
+    EntityType,
     GoalLinkStatus,
     GoalStatus,
     GoalType,
@@ -39,6 +41,8 @@ from lab_tracker.models import (
     NoteStatus,
     QuestionStatus,
 )
+from lab_tracker.provenance import ARA_LAYER_NAMES
+from lab_tracker.schemas import PersistedGraphEntityType
 from lab_tracker_client.client import load_connection_profile
 from lab_tracker_client.transport import (
     MAX_UPLOAD_BYTES,
@@ -71,6 +75,15 @@ GOAL_LINK_STATUS_VALUES = tuple(status.value for status in GoalLinkStatus)
 GOAL_LINK_STATUS_TEXT = ", ".join(GOAL_LINK_STATUS_VALUES)
 _BEARER_SECRET_RE = re.compile(r"Bearer\s+[^\s\"'\\,}\]]+", re.IGNORECASE)
 _LPAT_SECRET_RE = re.compile(r"lpat_[A-Za-z0-9_-]+")
+# Canonical hyphenated UUID only: ``uuid.UUID`` also accepts braces, ``urn:uuid:``
+# and bare hex, none of which is a safe, predictable path segment.
+_UUID_PATH_ID_RE = re.compile(
+    r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"
+)
+_DOT_PATH_SEGMENTS = frozenset({"", ".", ".."})
+NODE_GOAL_ENTITY_TYPE_VALUES = tuple(entity_type.value for entity_type in EntityType)
+GRAPH_NEIGHBORHOOD_ENTITY_TYPE_VALUES: tuple[str, ...] = get_args(PersistedGraphEntityType)
+ARA_LAYER_VALUES: tuple[str, ...] = tuple(ARA_LAYER_NAMES)
 
 
 def suppress_unverified_artifact_content(payload: JsonObject) -> JsonObject:
@@ -365,7 +378,10 @@ class LabTrackerAPIClient:
         )
 
     def graph_overview(self, project_id: str) -> JsonObject:
-        return self._request("GET", f"/projects/{project_id}/graph/overview")
+        return self._request(
+            "GET",
+            _api_path("projects", _uuid_path_id(project_id, "project_id"), "graph", "overview"),
+        )
 
     def search_graph(
         self,
@@ -379,7 +395,7 @@ class LabTrackerAPIClient:
     ) -> JsonObject:
         return self._request(
             "GET",
-            f"/projects/{project_id}/graph/search",
+            _api_path("projects", _uuid_path_id(project_id, "project_id"), "graph", "search"),
             params={
                 "q": query,
                 "entity_types": entity_types,
@@ -405,7 +421,18 @@ class LabTrackerAPIClient:
     ) -> JsonObject:
         return self._request(
             "GET",
-            f"/projects/{project_id}/graph/neighborhood/{entity_type}/{entity_id}",
+            _api_path(
+                "projects",
+                _uuid_path_id(project_id, "project_id"),
+                "graph",
+                "neighborhood",
+                _path_choice(
+                    entity_type,
+                    "entity_type",
+                    GRAPH_NEIGHBORHOOD_ENTITY_TYPE_VALUES,
+                ),
+                _uuid_path_id(entity_id, "entity_id"),
+            ),
             params={
                 "direction": direction,
                 "relationships": relationships,
@@ -531,7 +558,10 @@ class LabTrackerAPIClient:
         )
 
     def get_visualization(self, visualization_id: str) -> JsonObject:
-        return self._request("GET", f"/visualizations/{visualization_id}")
+        return self._request(
+            "GET",
+            _api_path("visualizations", _uuid_path_id(visualization_id, "visualization_id")),
+        )
 
     def list_goals(
         self,
@@ -542,7 +572,11 @@ class LabTrackerAPIClient:
         limit: int = 50,
         offset: int = 0,
     ) -> JsonObject:
-        path = "/goals" if project_id is None else f"/projects/{project_id}/goals"
+        path = (
+            "/goals"
+            if project_id is None
+            else _api_path("projects", _uuid_path_id(project_id, "project_id"), "goals")
+        )
         return self._request(
             "GET",
             path,
@@ -555,19 +589,35 @@ class LabTrackerAPIClient:
         )
 
     def get_goal(self, goal_id: str) -> JsonObject:
-        return self._request("GET", f"/goals/{goal_id}")
+        return self._request("GET", _api_path("goals", _uuid_path_id(goal_id, "goal_id")))
 
     def publication_readiness(self, project_id: str) -> JsonObject:
-        return self._request("GET", f"/projects/{project_id}/publication-readiness")
+        return self._request(
+            "GET",
+            _api_path(
+                "projects",
+                _uuid_path_id(project_id, "project_id"),
+                "publication-readiness",
+            ),
+        )
 
     def get_dataset_provenance(self, dataset_id: str) -> JsonObject:
-        return self._request("GET", f"/datasets/{dataset_id}/provenance")
+        return self._request(
+            "GET",
+            _api_path("datasets", _uuid_path_id(dataset_id, "dataset_id"), "provenance"),
+        )
 
     def get_analysis_provenance(self, analysis_id: str) -> JsonObject:
-        return self._request("GET", f"/analyses/{analysis_id}/provenance")
+        return self._request(
+            "GET",
+            _api_path("analyses", _uuid_path_id(analysis_id, "analysis_id"), "provenance"),
+        )
 
     def get_claim_provenance(self, claim_id: str) -> JsonObject:
-        return self._request("GET", f"/claims/{claim_id}/provenance")
+        return self._request(
+            "GET",
+            _api_path("claims", _uuid_path_id(claim_id, "claim_id"), "provenance"),
+        )
 
     def resolve_external_artifact(
         self,
@@ -614,10 +664,10 @@ class LabTrackerAPIClient:
         *,
         layer: str | None = None,
     ) -> JsonObject:
-        path = f"/goals/{goal_id}/ara-artifact"
-        if layer:
-            path = f"{path}/{layer}"
-        return self._request("GET", path)
+        return self._request(
+            "GET",
+            _ara_artifact_path("goals", _uuid_path_id(goal_id, "goal_id"), layer),
+        )
 
     def export_question_subtree(
         self,
@@ -625,10 +675,10 @@ class LabTrackerAPIClient:
         *,
         layer: str | None = None,
     ) -> JsonObject:
-        path = f"/questions/{question_id}/ara-artifact"
-        if layer:
-            path = f"{path}/{layer}"
-        return self._request("GET", path)
+        return self._request(
+            "GET",
+            _ara_artifact_path("questions", _uuid_path_id(question_id, "question_id"), layer),
+        )
 
     def get_decision_context(
         self,
@@ -746,7 +796,7 @@ class LabTrackerAPIClient:
     ) -> JsonObject:
         return self._request(
             "POST",
-            f"/questions/{question_id}/refactor",
+            _api_path("questions", _uuid_path_id(question_id, "question_id"), "refactor"),
             json_payload={
                 "replacement": {
                     "text": replacement_text,
@@ -770,7 +820,7 @@ class LabTrackerAPIClient:
     ) -> JsonObject:
         return self._request(
             "GET",
-            f"/questions/{question_id}/refactors",
+            _api_path("questions", _uuid_path_id(question_id, "question_id"), "refactors"),
             params={"limit": limit, "offset": offset},
         )
 
@@ -890,7 +940,7 @@ class LabTrackerAPIClient:
     ) -> JsonObject:
         return self._request(
             "POST",
-            f"/claims/{claim_id}/edges",
+            _api_path("claims", _uuid_path_id(claim_id, "claim_id"), "edges"),
             json_payload={
                 "target_claim_id": target_claim_id,
                 "relation": relation,
@@ -906,7 +956,7 @@ class LabTrackerAPIClient:
     ) -> JsonObject:
         return self._request(
             "GET",
-            f"/claims/{claim_id}/edges",
+            _api_path("claims", _uuid_path_id(claim_id, "claim_id"), "edges"),
             params={"limit": limit, "offset": offset},
         )
 
@@ -983,7 +1033,7 @@ class LabTrackerAPIClient:
     ) -> JsonObject:
         return self._request(
             "POST",
-            f"/projects/{project_id}/goals",
+            _api_path("projects", _uuid_path_id(project_id, "project_id"), "goals"),
             json_payload={
                 "goal_type": _validate_goal_type(goal_type),
                 "title": title,
@@ -1038,7 +1088,7 @@ class LabTrackerAPIClient:
             payload["external_ref"] = None
         return self._request(
             "PATCH",
-            f"/goals/{goal_id}",
+            _api_path("goals", _uuid_path_id(goal_id, "goal_id")),
             json_payload=payload,
             preserve_json_nulls=clear_target_date or clear_external_ref,
         )
@@ -1055,7 +1105,7 @@ class LabTrackerAPIClient:
     ) -> JsonObject:
         return self._request(
             "POST",
-            f"/goals/{goal_id}/links",
+            _api_path("goals", _uuid_path_id(goal_id, "goal_id"), "links"),
             json_payload={
                 "entity_type": entity_type,
                 "entity_id": entity_id,
@@ -1076,7 +1126,14 @@ class LabTrackerAPIClient:
     ) -> JsonObject:
         return self._request(
             "GET",
-            f"/projects/{project_id}/nodes/{entity_type}/{entity_id}/goals",
+            _api_path(
+                "projects",
+                _uuid_path_id(project_id, "project_id"),
+                "nodes",
+                _path_choice(entity_type, "entity_type", NODE_GOAL_ENTITY_TYPE_VALUES),
+                _uuid_path_id(entity_id, "entity_id"),
+                "goals",
+            ),
             params={"limit": limit, "offset": offset},
         )
 
@@ -1090,6 +1147,8 @@ class LabTrackerAPIClient:
         size_bytes: int | None = None,
         expected_current_storage_id: str | None = None,
     ) -> JsonObject:
+        # Validate the target id before touching the local filesystem.
+        upload_path = _api_path("visualizations", _uuid_path_id(viz_id, "viz_id"), "file")
         path = Path(file_path).expanduser()
         if not path.is_file():
             raise LabTrackerAPIError(f"Visualization file does not exist: {file_path}")
@@ -1104,7 +1163,7 @@ class LabTrackerAPIClient:
         # re-opens per attempt so a 401 retry replays cleanly.
         response = self._transport.upload(
             "POST",
-            f"/visualizations/{viz_id}/file",
+            upload_path,
             field_name="file",
             open_file=lambda: path.open("rb"),
             filename=path.name,
@@ -1194,6 +1253,62 @@ class LabTrackerAPIClient:
             raise LabTrackerAPIError("Login response did not include an access token.") from exc
         self._access_token = token
         return token
+
+
+def _uuid_path_id(value: object, field: str) -> str:
+    """Return ``value`` only if it is a canonical hyphenated UUID string.
+
+    Every entity id interpolated into an API path is agent-supplied; anything
+    else could retarget the request via dot segments or ``?``/``#`` delimiters.
+    """
+
+    if not isinstance(value, str) or _UUID_PATH_ID_RE.fullmatch(value) is None:
+        raise LabTrackerAPIValidationError(
+            f"{field} must be a Lab Tracker UUID "
+            f"(for example 123e4567-e89b-12d3-a456-426614174000); got {value!r:.80}.",
+            code="validation_error",
+        )
+    return value
+
+
+def _path_choice(value: object, field: str, allowed_values: tuple[str, ...]) -> str:
+    """Return ``value`` only if it is one of the route's closed literal values."""
+
+    if not isinstance(value, str) or value not in allowed_values:
+        raise LabTrackerAPIValidationError(
+            f"Invalid {field} {value!r:.80}. Allowed values: {', '.join(allowed_values)}.",
+            code="validation_error",
+        )
+    return value
+
+
+def _api_path(*segments: str) -> str:
+    """Build an API path from individually percent-encoded segments.
+
+    This is the only place path-parameterised requests are assembled. Each
+    segment is encoded with no safe characters, so ``/``, ``?``, ``#`` and ``%``
+    cannot change the request target, and dot segments (which percent-encoding
+    leaves intact and httpx would collapse) are refused outright.
+    """
+
+    for segment in segments:
+        if segment in _DOT_PATH_SEGMENTS:
+            raise LabTrackerAPIValidationError(
+                f"Refusing to build an API path with the segment {segment!r}.",
+                code="validation_error",
+            )
+    return "/" + "/".join(quote(segment, safe="") for segment in segments)
+
+
+def _ara_artifact_path(collection: str, entity_id: str, layer: str | None) -> str:
+    if layer is None or layer == "":
+        return _api_path(collection, entity_id, "ara-artifact")
+    return _api_path(
+        collection,
+        entity_id,
+        "ara-artifact",
+        _path_choice(layer, "layer", ARA_LAYER_VALUES),
+    )
 
 
 def _is_note_metadata_scalar(value: object) -> bool:
