@@ -40,14 +40,6 @@ def find_by_id(
     return next((item for item in items if str(item.get(id_key)) == entity_id), None)
 
 
-def project_lookup(projects: list[JsonObject]) -> dict[str, JsonObject]:
-    return {
-        str(project["project_id"]): project
-        for project in projects
-        if project.get("project_id") is not None
-    }
-
-
 def merge_entities(
     id_key: str,
     *groups: tuple[list[JsonObject], str],
