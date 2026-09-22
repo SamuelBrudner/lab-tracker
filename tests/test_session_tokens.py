@@ -70,9 +70,7 @@ def test_verification_enforces_a_lowered_absolute_lifetime(clock) -> None:
     clock["value"] = _SIGNED_IN_AT + timedelta(hours=3)
 
     with pytest.raises(AuthError, match="maximum lifetime"):
-        TokenService("secret", ttl_minutes=60, max_session_age_hours=2).verify_access_token(
-            token
-        )
+        TokenService("secret", ttl_minutes=60, max_session_age_hours=2).verify_access_token(token)
 
 
 def test_tokens_without_session_claims_are_rejected(clock) -> None:
