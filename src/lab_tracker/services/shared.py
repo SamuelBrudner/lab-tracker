@@ -14,10 +14,8 @@ from lab_tracker.auth import LOCAL_AUTH_USER_ID, AuthContext, Role
 from lab_tracker.errors import NotFoundError, ValidationError
 from lab_tracker.models import (
     AcquisitionOutput,
-    Analysis,
     AnalysisStatus,
     ClaimStatus,
-    Dataset,
     DatasetCommitManifest,
     DatasetCommitManifestInput,
     DatasetFile,
@@ -445,20 +443,6 @@ def _ensure_claim_support_links(
 ) -> None:
     if status == ClaimStatus.SUPPORTED and not (dataset_ids or analysis_ids):
         raise ValidationError("Supported claims require supporting datasets or analyses.")
-
-
-def _analysis_has_question_link(
-    analysis: Analysis,
-    question_id: UUID,
-    datasets: dict[UUID, Dataset],
-) -> bool:
-    for dataset_id in analysis.dataset_ids:
-        dataset = datasets.get(dataset_id)
-        if dataset is None:
-            continue
-        if any(link.question_id == question_id for link in dataset.question_links):
-            return True
-    return False
 
 
 def _normalize_dataset_file(file: DatasetFile) -> DatasetFile:

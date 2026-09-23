@@ -463,3 +463,53 @@ def test_delete_analysis_allows_rejected_claim_support_link():
 
     assert deleted.analysis_id == analysis.analysis_id
     assert api.get_claim(claim.claim_id).supported_by_analysis_ids == []
+
+
+def test_list_analyses_by_question_uses_the_repository_filter_without_loading_datasets(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """L97: the repository already joins dataset question links for question_id."""
+
+    api = repository_backed_api()
+    actor = _actor()
+    project, question = _setup_project_with_question(api, actor)
+    other_question = api.create_question(
+        project_id=project.project_id,
+        text="Is the other signal stable?",
+        question_type=QuestionType.DESCRIPTIVE,
+        status=QuestionStatus.ACTIVE,
+        actor=actor,
+    )
+    linked_dataset = api.create_dataset(
+        project_id=project.project_id,
+        primary_question_id=question.question_id,
+        actor=actor,
+    )
+    other_dataset = api.create_dataset(
+        project_id=project.project_id,
+        primary_question_id=other_question.question_id,
+        actor=actor,
+    )
+    linked = api.create_analysis(
+        project_id=project.project_id,
+        dataset_ids=[linked_dataset.dataset_id],
+        method_hash="method-linked",
+        code_version="v1",
+        actor=actor,
+    )
+    api.create_analysis(
+        project_id=project.project_id,
+        dataset_ids=[other_dataset.dataset_id],
+        method_hash="method-other",
+        code_version="v1",
+        actor=actor,
+    )
+
+    def no_dataset_scan(*_args, **_kwargs):
+        raise AssertionError("list_analyses must not load every dataset")
+
+    monkeypatch.setattr(api.analyses.datasets, "list_datasets", no_dataset_scan)
+
+    by_question = api.list_analyses(question_id=question.question_id)
+
+    assert [item.analysis_id for item in by_question] == [linked.analysis_id]

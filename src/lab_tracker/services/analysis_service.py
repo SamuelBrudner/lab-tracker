@@ -30,7 +30,6 @@ from lab_tracker.services.deletion_references import prepare_entity_deletion
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.shared import (
-    _analysis_has_question_link,
     _ensure_analysis_status_transition,
     actor_user_fk,
     actor_user_id,
@@ -175,7 +174,9 @@ class AnalysisService(BaseService):
         dataset_id: UUID | None = None,
         question_id: UUID | None = None,
     ) -> list[Analysis]:
-        analyses = self.query_from_repository(
+        # The repository applies every filter in SQL (question_id joins the
+        # dataset question links), so the result needs no re-filtering here.
+        return self.query_from_repository(
             loader=lambda repository: repository.query_analyses(
                 project_id=project_id,
                 dataset_id=dataset_id,
@@ -184,22 +185,6 @@ class AnalysisService(BaseService):
                 offset=0,
             ),
         )
-        if project_id is not None:
-            analyses = [analysis for analysis in analyses if analysis.project_id == project_id]
-        if dataset_id is not None:
-            analyses = [analysis for analysis in analyses if dataset_id in analysis.dataset_ids]
-        if question_id is not None:
-            dataset_map = {dataset.dataset_id: dataset for dataset in self.datasets.list_datasets()}
-            analyses = [
-                analysis
-                for analysis in analyses
-                if _analysis_has_question_link(
-                    analysis,
-                    question_id,
-                    dataset_map,
-                )
-            ]
-        return analyses
 
     def update_analysis(
         self,
