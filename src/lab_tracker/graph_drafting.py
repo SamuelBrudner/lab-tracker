@@ -230,11 +230,14 @@ def graph_patch_response_schema() -> dict[str, Any]:
 class GraphDraftClient(Protocol):
     """Provider-agnostic surface for graph draft generation.
 
-    Implementations: OpenAI (this file). Anthropic and Google are tracked
-    as separate beads. ``transcribe_audio`` is optional on providers that
-    do not natively expose transcription; if so, the implementation should
-    raise ``GraphDraftingError`` with a clear message so callers fall back
-    to a configured transcription provider.
+    Implementations (all in this module; ``make_graph_draft_client`` picks
+    one from ``graph_draft_provider``): ``OpenAIGraphDraftClient``,
+    ``AnthropicGraphDraftClient``, ``GoogleGraphDraftClient``, and
+    ``AgenticGraphDraftClient``, a background-only read-only wrapper around
+    one of the others. ``transcribe_audio`` is optional on providers that
+    do not natively expose transcription (Anthropic); if so, the
+    implementation should raise ``GraphDraftingError`` with a clear message
+    so callers fall back to a configured transcription provider.
     """
 
     def draft_from_note(

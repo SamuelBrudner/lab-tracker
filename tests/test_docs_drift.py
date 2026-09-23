@@ -7,6 +7,7 @@ code moves instead of silently going stale.
 
 from __future__ import annotations
 
+import inspect
 import json
 import re
 from pathlib import Path
@@ -14,6 +15,7 @@ from pathlib import Path
 import pytest
 from read_opacity_inventory import READ_OPACITY_VARIANTS_BY_SUITE
 
+from lab_tracker import graph_drafting
 from lab_tracker.cli import update_consumer_repo
 from lab_tracker.mcp_tools import READ_TOOLS, WRITE_TOOLS
 from lab_tracker_client.auth import auth_doctor
@@ -202,3 +204,19 @@ def test_docs_state_mcp_tool_counts_that_match_the_registered_tuples() -> None:
         if tuple(int(group) for group in match.groups()) != expected
     ]
     assert not stale, f"stale MCP tool counts (expected {expected}): {stale}"
+
+
+# L76: the protocol docstring names every implementation in the module.
+def test_graph_draft_client_docstring_names_every_implementation() -> None:
+    implementations = sorted(
+        name
+        for name, member in inspect.getmembers(graph_drafting, inspect.isclass)
+        if name.endswith("GraphDraftClient")
+        and member is not graph_drafting.GraphDraftClient
+        and member.__module__ == graph_drafting.__name__
+    )
+    assert "AnthropicGraphDraftClient" in implementations
+    docstring = graph_drafting.GraphDraftClient.__doc__ or ""
+    missing = [name for name in implementations if f"``{name}``" not in docstring]
+    assert not missing, missing
+    assert "tracked as separate beads" not in docstring
