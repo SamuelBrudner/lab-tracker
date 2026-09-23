@@ -129,6 +129,35 @@ def _create_batch(
     return run["change_set_id"]
 
 
+def _create_provenance_link(
+    client: TestClient,
+    headers: dict[str, str],
+    project_id: str,
+    label: str,
+) -> str:
+    # Provenance links have no create endpoint: the batch detector proposes one
+    # for two notes that share an evidence content hash.
+    for suffix in ("a", "b"):
+        _post_created(
+            client,
+            "/notes",
+            json={
+                "project_id": project_id,
+                "raw_content": f"{label} shared evidence {suffix}.",
+                "status": "staged",
+                "metadata": {"evidence_content_hash": f"{label}-hash"},
+            },
+            headers=headers,
+        )
+    client.app.state.graph_draft_client_factory = lambda settings: FakeBatchDraftClient()
+    _post_created(client, "/batches/run-now", json={"project_id": project_id}, headers=headers)
+    response = client.get("/provenance-links", params={"project_id": project_id}, headers=headers)
+    assert response.status_code == 200, response.json()
+    links = response.json()["data"]
+    assert len(links) == 1, links
+    return links[0]["link_id"]
+
+
 def _create_entity_for_endpoint(
     client: TestClient,
     headers: dict[str, str],
@@ -186,6 +215,38 @@ def _create_entity_for_endpoint(
             )["goal_id"]
         case "/batches":
             return _create_batch(client, headers, project_id, label)
+        case "/questions":
+            return _create_question(client, headers, project_id, label)
+        case "/experiments":
+            question_id = _create_question(client, headers, project_id, label)
+            return _post_created(
+                client,
+                endpoint,
+                json={
+                    "project_id": project_id,
+                    "name": f"{label} scoped experiment",
+                    "primary_question_id": question_id,
+                },
+                headers=headers,
+            )["experiment_id"]
+        case "/exploration-nodes":
+            question_id = _create_question(client, headers, project_id, label)
+            return _post_created(
+                client,
+                endpoint,
+                json={
+                    "project_id": project_id,
+                    "node_type": "decision",
+                    "title": f"{label} scoped decision",
+                    "target": {"entity_type": "question", "entity_id": question_id},
+                    "choice": f"{label} choice",
+                    "alternatives_considered": [f"{label} alternative"],
+                    "rationale": f"{label} rationale",
+                },
+                headers=headers,
+            )["node_id"]
+        case "/provenance-links":
+            return _create_provenance_link(client, headers, project_id, label)
     raise AssertionError(f"Unhandled endpoint case: {endpoint}")
 
 
@@ -200,6 +261,10 @@ def _create_entity_for_endpoint(
         ("/visualizations", "viz_id"),
         ("/goals", "goal_id"),
         ("/batches", "change_set_id"),
+        ("/questions", "question_id"),
+        ("/experiments", "experiment_id"),
+        ("/exploration-nodes", "node_id"),
+        ("/provenance-links", "link_id"),
     ],
 )
 def test_project_scoped_list_endpoints_hide_non_member_project_rows(
