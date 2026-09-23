@@ -38,6 +38,8 @@ dependencies = [
   "python-multipart",
   "segno>=1.6",
   "sqlalchemy>=2.0",
+  # lab_tracker_client.auth reads TOML config; tomllib is stdlib from 3.11.
+  "tomli; python_version < '3.11'",
   "uvicorn",
 ]
 
@@ -53,7 +55,6 @@ test = [
   "pytest-cov",
   "pytest-xdist",
   "pyld",
-  "tomli; python_version < '3.11'",
 ]
 lint = [
   "mypy>=1.15,<3",

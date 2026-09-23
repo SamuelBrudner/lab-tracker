@@ -389,6 +389,20 @@ def test_mcp_dependency_excludes_sdk_without_bundled_fastmcp() -> None:
     assert "2.2.0" not in mcp.specifier
 
 
+def test_client_toml_fallback_is_a_runtime_dependency_on_python_310() -> None:
+    """``lab_tracker_client.auth`` imports ``tomli`` at module load on 3.10."""
+    repo_root = Path(__file__).resolve().parent.parent
+    project = tomllib.loads((repo_root / "pyproject.toml").read_text(encoding="utf-8"))
+    requirements = [Requirement(value) for value in project["project"]["dependencies"]]
+    tomli = [requirement for requirement in requirements if requirement.name == "tomli"]
+
+    assert len(tomli) == 1, "tomli must be a runtime dependency for Python < 3.11"
+    marker = tomli[0].marker
+    assert marker is not None
+    assert marker.evaluate({"python_version": "3.10"})
+    assert not marker.evaluate({"python_version": "3.11"})
+
+
 def _ci_job_blocks(workflow: str) -> dict[str, str]:
     jobs_section = workflow.split("\njobs:\n", 1)[1]
     blocks: dict[str, str] = {}

@@ -974,6 +974,7 @@ dependencies = [
     { name = "python-multipart" },
     { name = "segno" },
     { name = "sqlalchemy" },
+    { name = "tomli", marker = "python_full_version < '3.11'" },
     { name = "uvicorn" },
 ]
 
@@ -992,7 +993,6 @@ test = [
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "pytest-xdist" },
-    { name = "tomli", marker = "python_full_version < '3.11'" },
 ]
 
 [package.metadata]
@@ -1016,7 +1016,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'lint'" },
     { name = "segno", specifier = ">=1.6" },
     { name = "sqlalchemy", specifier = ">=2.0" },
-    { name = "tomli", marker = "python_full_version < '3.11' and extra == 'test'" },
+    { name = "tomli", marker = "python_full_version < '3.11'" },
     { name = "uvicorn" },
 ]
 provides-extras = ["test", "lint", "figure"]
