@@ -17,5 +17,6 @@ test("share-target POST falls back to a 303 redirect to capture", async ({ reque
   });
 
   expect(response.status()).toBe(303);
-  expect(response.headers()["location"]).toBe("/app/capture");
+  // The fallback cannot keep the payload, so it marks the share as lost.
+  expect(response.headers()["location"]).toBe("/app/capture?from-share=error");
 });
