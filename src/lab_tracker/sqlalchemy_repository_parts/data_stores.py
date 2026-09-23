@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -25,6 +26,8 @@ from lab_tracker.sqlalchemy_mappers import (
 )
 
 from .common import apply_pagination, count_from_statement
+
+logger = logging.getLogger(__name__)
 
 DATA_STORE_PROJECT_NAME_CONSTRAINT = "uq_data_stores_project_name"
 DATA_STORE_GROUP_NAME_CONSTRAINT = "uq_data_stores_group_name"
@@ -50,6 +53,32 @@ _SQLITE_DATA_STORE_NAME_COLUMNS = frozenset(
     }
 )
 _SQLITE_DATA_STORE_PRIMARY_KEY_COLUMNS = ("data_stores.store_id",)
+
+
+def _log_unclassified_failure(operation: str, exc: SQLAlchemyError) -> None:
+    """Log a parameter-free diagnostic for a failure raised without its chain.
+
+    The translated DataStoreInsertError deliberately drops ``__cause__`` so the
+    driver message (which can echo bound roots and grant ids) never reaches
+    callers. Operators still need to tell a deadlock from a lost connection, so
+    record only exception types, SQLSTATE, SQLite error name and constraint
+    name, never the message or parameters.
+    """
+
+    orig = getattr(exc, "orig", None)
+    details = [f"error={type(exc).__name__}"]
+    if orig is not None:
+        details.append(f"driver_error={type(orig).__module__}.{type(orig).__qualname__}")
+        sqlstate = getattr(orig, "sqlstate", None) or getattr(orig, "pgcode", None)
+        if isinstance(sqlstate, str):
+            details.append(f"sqlstate={sqlstate}")
+        sqlite_error_name = getattr(orig, "sqlite_errorname", None)
+        if isinstance(sqlite_error_name, str):
+            details.append(f"sqlite_error={sqlite_error_name}")
+        constraint_name = getattr(getattr(orig, "diag", None), "constraint_name", None)
+        if isinstance(constraint_name, str):
+            details.append(f"constraint={constraint_name}")
+    logger.error("Data-store %s failed: %s", operation, " ".join(details))
 
 
 def _is_data_store_name_race(exc: IntegrityError) -> bool:
@@ -189,15 +218,18 @@ class SQLAlchemyDataStoreRepository(DataStoreRepository):
                         )
                         is not None
                     )
-                except SQLAlchemyError:
+                except SQLAlchemyError as lookup_exc:
+                    _log_unclassified_failure("insert conflict lookup", lookup_exc)
                     insert_failure = True
                 else:
                     name_race = not append_only_conflict
             elif _is_data_store_foreign_key_race(exc):
                 foreign_key_race = True
             else:
+                _log_unclassified_failure("insert", exc)
                 insert_failure = True
-        except SQLAlchemyError:
+        except SQLAlchemyError as exc:
+            _log_unclassified_failure("insert", exc)
             insert_failure = True
         if append_only_conflict:
             raise ValueError("Data-store registrations are append-only.")
@@ -337,7 +369,8 @@ class SQLAlchemyDataStoreRepository(DataStoreRepository):
                 if str(row.store_id) != keep:
                     row.is_default = False
             self._session.flush()
-        except SQLAlchemyError:
+        except SQLAlchemyError as exc:
+            _log_unclassified_failure("clear_default", exc)
             update_failure = True
         if update_failure:
             raise DataStoreInsertError
