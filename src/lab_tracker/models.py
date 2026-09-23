@@ -191,6 +191,8 @@ class UsageEventResourceType(str, Enum):
     SEARCH = "search"
     SUPERVISION_EDGE = "supervision_edge"
     ACQUISITION_OUTPUT = "acquisition_output"
+    ACQUISITION_COLLECTION = "acquisition_collection"
+    EVIDENCE_BUNDLE = "evidence_bundle"
     USAGE_EVENT = "usage_event"
 
 
@@ -835,7 +837,8 @@ class ReviewEmailDelivery(_DomainModel):
     status: ReviewEmailDeliveryStatus = ReviewEmailDeliveryStatus.PENDING
     attempt_count: int = Field(default=0, ge=0)
     next_attempt_at: datetime | None = Field(default_factory=utc_now)
-    claim_token: UUID | None = None
+    # The lease token authorises mark_accepted/mark_failed; never serialise it.
+    claim_token: UUID | None = Field(default=None, exclude=True)
     claimed_at: datetime | None = None
     lease_expires_at: datetime | None = None
     provider_message_id: str | None = None

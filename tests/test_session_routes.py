@@ -268,5 +268,5 @@ def test_session_lifecycle_routes_reject_non_member(
 
     for request in requests:
         response = request()
-        assert response.status_code == 401
+        assert response.status_code == 403
         assert response.json()["error"]["message"] == "Project access required."

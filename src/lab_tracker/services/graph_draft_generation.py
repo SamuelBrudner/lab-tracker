@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import math
 import time
 from collections.abc import Callable
@@ -21,6 +19,7 @@ from lab_tracker.graph_drafting import (
     PROVIDER,
     GraphDraftClient,
     GraphDraftingError,
+    GraphDraftOutputTruncatedError,
 )
 from lab_tracker.member_onboarding import is_member_checkpoint
 from lab_tracker.models import (
@@ -36,6 +35,11 @@ from lab_tracker.note_text import is_text_content_type
 from lab_tracker.provider_error_redaction import provider_error_message
 from lab_tracker.services import graph_draft_batch_policy as batch_policy
 from lab_tracker.services.base import BaseService, ServiceContext
+from lab_tracker.services.graph_draft_generation_keys import (
+    note_generation_key,
+    successor_generation_key,
+    text_checksum,
+)
 from lab_tracker.services.graph_draft_generation_ports import (
     DraftFromImageCallable,
     DraftFromNoteCallable,
@@ -159,6 +163,23 @@ class GraphDraftGenerationCoordinator(BaseService):
             acquired=acquired,
         )
 
+    def claim_note_generation(
+        self,
+        candidate: GraphChangeSet,
+        *,
+        draft_client: GraphDraftClient,
+    ) -> GenerationClaim:
+        """Claim a note-scoped generation; a rejected draft is never reused.
+
+        Re-drafting keys a fresh row off the rejected one (deterministically, so
+        concurrent re-drafts converge) and leaves the rejected review intact.
+        """
+        claim = self.claim_generation(candidate, draft_client=draft_client)
+        while not claim.acquired and claim.change_set.status == GraphChangeSetStatus.REJECTED:
+            candidate.batch_key = successor_generation_key(claim.change_set)
+            claim = self.claim_generation(candidate, draft_client=draft_client)
+        return claim
+
     def renew_generation_claim(
         self,
         change_set_id: UUID,
@@ -258,7 +279,7 @@ class GraphDraftGenerationCoordinator(BaseService):
             model=getattr(draft_client, "model", "unknown"),
             prompt_version=PROMPT_VERSION,
             draft_mode=mode,
-            batch_key=_note_generation_key(
+            batch_key=note_generation_key(
                 note=note,
                 source_notes=prepared["source_notes"],
                 mode=mode,
@@ -270,7 +291,7 @@ class GraphDraftGenerationCoordinator(BaseService):
             created_by=actor_user_id(actor),
             created_by_user_id=actor_user_fk(actor, self.user_reader),
         )
-        claim = self.claim_generation(change_set, draft_client=draft_client)
+        claim = self.claim_note_generation(change_set, draft_client=draft_client)
         if not claim.acquired:
             return claim.change_set
         change_set = claim.change_set
@@ -350,7 +371,7 @@ class GraphDraftGenerationCoordinator(BaseService):
             project_id=note.project_id,
             source_note_id=note.note_id,
             source_note_ids=[note.note_id],
-            source_checksum=_text_checksum(evidence_text),
+            source_checksum=text_checksum(evidence_text),
             source_content_type="text/markdown",
             source_filename=(
                 note.raw_asset.filename
@@ -361,20 +382,20 @@ class GraphDraftGenerationCoordinator(BaseService):
             model=getattr(draft_client, "model", "unknown"),
             prompt_version=ANALYSIS_PROMPT_VERSION,
             draft_mode=GraphDraftMode.GRAPH_CONTEXT,
-            batch_key=_note_generation_key(
+            batch_key=note_generation_key(
                 note=note,
                 source_notes=[note],
                 mode=GraphDraftMode.GRAPH_CONTEXT,
                 prompt_version=ANALYSIS_PROMPT_VERSION,
                 user_hint=None,
-                evidence_checksum=_text_checksum(evidence_text),
+                evidence_checksum=text_checksum(evidence_text),
                 kind="analysis",
             ),
             context_packet=context_packet,
             created_by=actor_user_id(actor),
             created_by_user_id=actor_user_fk(actor, self.user_reader),
         )
-        claim = self.claim_generation(change_set, draft_client=draft_client)
+        claim = self.claim_note_generation(change_set, draft_client=draft_client)
         if not claim.acquired:
             return claim.change_set
         change_set = claim.change_set
@@ -435,14 +456,21 @@ class GraphDraftGenerationCoordinator(BaseService):
         """Generate a valid patch with bounded, trusted schema feedback."""
 
         attempts = max(1, max_attempts)
+        attempts_made = 0
         attempt_context = context_packet
         last_error: GraphDraftingError | None = None
         last_error_category = "model_error"
         for attempt in range(1, attempts + 1):
             if before_attempt is not None and not before_attempt(attempt):
                 raise _GenerationOwnershipLost
+            attempts_made = attempt
             try:
                 graph_patch = draft(attempt_context)
+            except GraphDraftOutputTruncatedError as exc:
+                # The same output budget would truncate again; fail now.
+                last_error = exc
+                last_error_category = "output_truncated"
+                break
             except GraphDraftingError as exc:
                 last_error = exc
                 last_error_category = "model_error"
@@ -480,7 +508,7 @@ class GraphDraftGenerationCoordinator(BaseService):
                 if last_error is not None
                 else "Model did not return a patch."
             ),
-            "attempts": attempts,
+            "attempts": attempts_made,
         }
         return None
 
@@ -823,42 +851,6 @@ class GraphDraftGenerationCoordinator(BaseService):
                 draft_mode=draft_mode.value,
             )
         raise GraphDraftingError("Configured draft client does not support this note source.")
-
-
-def _text_checksum(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-def _note_generation_key(
-    *,
-    note: Note,
-    source_notes: list[Note],
-    mode: GraphDraftMode,
-    prompt_version: str,
-    user_hint: str | None,
-    evidence_checksum: str | None,
-    kind: str = "note",
-) -> str:
-    """Identify one exact note-source generation request across retries."""
-
-    payload = {
-        "version": "v1",
-        "kind": kind,
-        "project_id": str(note.project_id),
-        "note_id": str(note.note_id),
-        "source_versions": [
-            {"note_id": str(item.note_id), "updated_at": item.updated_at.isoformat()}
-            for item in source_notes
-        ],
-        "mode": mode.value,
-        "prompt_version": prompt_version,
-        "user_hint": user_hint,
-        "evidence_checksum": evidence_checksum,
-    }
-    digest = hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
-    return f"generation:{digest[:48]}"
 
 
 def _batch_input_snapshot(context_packet: dict[str, Any]) -> dict[str, Any]:

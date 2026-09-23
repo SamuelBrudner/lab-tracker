@@ -43,9 +43,11 @@ function UsersPage({ token, canManageUsers, setBusy, setFlash }) {
     refreshInvitations();
   }, [refreshInvitations, refreshUsers]);
 
+  // Resolves true only when the update was applied, so callers can keep
+  // user input (e.g. a typed replacement password) after a failure.
   async function updateUser(userId, body, successMessage) {
     if (!canManageUsers) {
-      return;
+      return false;
     }
     setBusy(true);
     setFlash("", "");
@@ -53,8 +55,10 @@ function UsersPage({ token, canManageUsers, setBusy, setFlash }) {
       await authGateway.updateUser(userId, body, { token });
       await refreshUsers();
       setFlash(successMessage);
+      return true;
     } catch (err) {
       setFlash("", err.message || "Failed to update user.");
+      return false;
     } finally {
       setBusy(false);
     }
@@ -118,8 +122,9 @@ function UsersPage({ token, canManageUsers, setBusy, setFlash }) {
       setFlash("", "Password is required.");
       return;
     }
-    await updateUser(userId, { password }, "Password reset.");
-    updatePasswordDraft(userId, "");
+    if (await updateUser(userId, { password }, "Password reset.")) {
+      updatePasswordDraft(userId, "");
+    }
   }
 
   if (!canManageUsers) {

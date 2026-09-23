@@ -2,20 +2,62 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext, require_role
-from lab_tracker.errors import ConflictError, NotFoundError, ValidationError
+from lab_tracker.errors import (
+    ConflictError,
+    NotFoundError,
+    OpaqueTargetNotFoundError,
+    PermissionDeniedError,
+    ValidationError,
+)
 from lab_tracker.models import SupervisionEdge, utc_now
 from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
 from lab_tracker.services.base import BaseService, ServiceContext
+from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.shared import WRITE_ROLES
+
+_EDGE_NOT_FOUND_MESSAGE = "Supervision edge does not exist."
+_MANAGE_DENIED_MESSAGE = "Supervision edges can only be managed by an admin."
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Read a naive timestamp as UTC, as ``UtcDateTime`` storage already does.
+
+    Without this, a naive bound compared with an aware one (such as the
+    defaulted ``started_at``) raises ``TypeError`` instead of validating.
+    """
+
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 class SupervisionService(BaseService):
-    def __init__(self, context: ServiceContext) -> None:
+    """Dated supervision edges, which feed ``actedOnBehalfOf`` in provenance.
+
+    Authority (global role ``editor`` or ``admin`` is required throughout):
+
+    - Manage (create, update, delete): global admins only. Being one of the two
+      users is not authority, and neither is owning a project group: any
+      editor can create a group and add arbitrary users to it without their
+      consent, so group ownership is self-grantable and cannot vouch for a
+      supervision relationship.
+    - Read (get, list): global admins, plus the supervisor and supervisee of
+      the edge. An edge outside the caller's read scope is an opaque ``404``;
+      a readable edge the caller may not manage is an explicit ``403``.
+    """
+
+    def __init__(
+        self,
+        context: ServiceContext,
+        *,
+        authorization: ProjectAuthorizationPolicy,
+    ) -> None:
         super().__init__(context)
+        self.authorization = authorization
 
     def create_supervision_edge(
         self,
@@ -27,13 +69,14 @@ class SupervisionService(BaseService):
         actor: AuthContext | None = None,
     ) -> SupervisionEdge:
         require_role(actor, WRITE_ROLES)
+        self._require_manage(actor)
         now = utc_now()
         edge = SupervisionEdge(
             edge_id=uuid4(),
             supervisor_user_id=supervisor_user_id,
             supervisee_user_id=supervisee_user_id,
-            started_at=started_at or now,
-            ended_at=ended_at,
+            started_at=_as_utc(started_at) if started_at is not None else now,
+            ended_at=_as_utc(ended_at) if ended_at is not None else None,
             created_at=now,
             updated_at=now,
         )
@@ -52,11 +95,14 @@ class SupervisionService(BaseService):
         actor: AuthContext | None = None,
     ) -> SupervisionEdge:
         require_role(actor, WRITE_ROLES)
-        return self.get_from_repository(
+        edge: SupervisionEdge = self.get_from_repository(
             entity_id=edge_id,
             label="Supervision edge",
             loader=lambda repository: repository.supervision_edges.get(edge_id),
         )
+        if not self._can_read_edge(actor, edge):
+            raise OpaqueTargetNotFoundError(_EDGE_NOT_FOUND_MESSAGE)
+        return edge
 
     def list_supervision_edges(
         self,
@@ -70,14 +116,29 @@ class SupervisionService(BaseService):
         actor: AuthContext | None = None,
     ) -> tuple[list[SupervisionEdge], int]:
         require_role(actor, WRITE_ROLES)
-        return self.repository.query_supervision_edges(
+        if self.authorization.has_global_admin(actor):
+            return self.repository.query_supervision_edges(
+                supervisor_user_id=supervisor_user_id,
+                supervisee_user_id=supervisee_user_id,
+                active_only=active_only,
+                as_of=as_of,
+                limit=limit,
+                offset=offset,
+            )
+        # Scope before paginating so hidden edges never consume a page. The
+        # edge set is people-scale, so filtering the matching rows in memory is
+        # bounded by the lab's supervision history.
+        candidates, _ = self.repository.query_supervision_edges(
             supervisor_user_id=supervisor_user_id,
             supervisee_user_id=supervisee_user_id,
             active_only=active_only,
             as_of=as_of,
-            limit=limit,
-            offset=offset,
+            limit=None,
+            offset=0,
         )
+        visible = [edge for edge in candidates if self._can_read_edge(actor, edge)]
+        end = None if limit is None else offset + limit
+        return visible[offset:end], len(visible)
 
     def update_supervision_edge(
         self,
@@ -91,6 +152,7 @@ class SupervisionService(BaseService):
     ) -> SupervisionEdge:
         require_role(actor, WRITE_ROLES)
         edge = self.get_supervision_edge(edge_id, actor=actor)
+        self._require_manage(actor)
         before = edge.model_copy(deep=True)
         if is_provided(supervisor_user_id):
             if supervisor_user_id is None:
@@ -103,9 +165,9 @@ class SupervisionService(BaseService):
         if is_provided(started_at):
             if started_at is None:
                 raise ValidationError("started_at must not be null.")
-            edge.started_at = started_at
+            edge.started_at = _as_utc(started_at)
         if is_provided(ended_at):
-            edge.ended_at = ended_at
+            edge.ended_at = _as_utc(ended_at) if ended_at is not None else None
         self._validate_edge(edge)
         if edge.ended_at is None:
             self._ensure_active_pair_available(edge, excluding_edge_id=edge.edge_id)
@@ -125,9 +187,22 @@ class SupervisionService(BaseService):
     ) -> SupervisionEdge:
         require_role(actor, WRITE_ROLES)
         edge = self.get_supervision_edge(edge_id, actor=actor)
+        self._require_manage(actor)
         with self.unit_of_work() as repository:
             repository.supervision_edges.delete(edge_id)
         return edge
+
+    def _can_read_edge(self, actor: AuthContext | None, edge: SupervisionEdge) -> bool:
+        if self.authorization.has_global_admin(actor):
+            return True
+        return actor is not None and actor.user_id in {
+            edge.supervisor_user_id,
+            edge.supervisee_user_id,
+        }
+
+    def _require_manage(self, actor: AuthContext | None) -> None:
+        if not self.authorization.has_global_admin(actor):
+            raise PermissionDeniedError(_MANAGE_DENIED_MESSAGE)
 
     def _validate_edge(self, edge: SupervisionEdge) -> None:
         if edge.supervisor_user_id == edge.supervisee_user_id:

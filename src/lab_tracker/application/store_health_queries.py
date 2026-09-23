@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Final, Protocol
 from uuid import UUID
 
 from lab_tracker.auth import AuthContext
@@ -23,9 +23,22 @@ from lab_tracker.store_health import (
     StoreProbeTarget,
 )
 
+LOCAL_STORE_HEALTH_UNSUPPORTED_MESSAGE: Final = (
+    "Local store health is not supported in this build."
+)
+
 _STORE_HEALTH_UNAVAILABLE = StoreHealth(
     StoreHealthStatus.UNSUPPORTED,
     STORE_HEALTH_PROBE_UNAVAILABLE_MESSAGE,
+)
+# Local store I/O stays disabled until the retained store grant boundary is
+# threaded into the handle-bound filesystem helper (the local-use slice). The
+# helper's inspect-directory role selects only the global lexical operator
+# grant, so probing a registered local root now would bypass the store's own
+# revalidated grant. This is a static build property, not a transient outage.
+LOCAL_STORE_HEALTH_UNSUPPORTED: Final = StoreHealth(
+    StoreHealthStatus.UNSUPPORTED,
+    LOCAL_STORE_HEALTH_UNSUPPORTED_MESSAGE,
 )
 _REMOTE_HEALTH_STORE_KINDS = frozenset(
     {StoreKind.HTTP, StoreKind.GIT, *RCLONE_BACKED_STORE_KINDS}
@@ -77,6 +90,12 @@ class StoreHealthQueries:
         )
         self.release_read_scope()
 
+        if result_kind is StoreKind.LOCAL_FS:
+            return DataStoreHealthResult(
+                store_id=result_store_id,
+                kind=result_kind,
+                health=LOCAL_STORE_HEALTH_UNSUPPORTED,
+            )
         if binding is None:
             return DataStoreHealthResult(
                 store_id=result_store_id,

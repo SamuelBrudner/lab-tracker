@@ -4,6 +4,7 @@ import sqlite3
 from uuid import uuid4
 
 import pytest
+from api_helpers import isolate_default_database_url, stamp_schema_at_head
 from fastapi import Request
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, delete, select
@@ -23,6 +24,11 @@ from lab_tracker.db_models import ProjectModel, QuestionModel
 from lab_tracker.errors import ValidationError
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 from lab_tracker.store_authority_registry import StoreAuthorityRegistry
+
+
+@pytest.fixture(autouse=True)
+def _database_outside_the_working_directory(monkeypatch, tmp_path) -> None:  # noqa: ANN001
+    isolate_default_database_url(monkeypatch, tmp_path)
 
 
 class _SessionSpy:
@@ -80,8 +86,22 @@ class _LoggerSpy:
         self.records.append(("error", message, args, kwargs))
 
 
+def test_default_apps_in_this_module_leave_the_working_directory_alone(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    working_directory = tmp_path / "cwd"
+    working_directory.mkdir()
+    monkeypatch.chdir(working_directory)
+
+    with TestClient(create_app(verify_schema=False)) as client:
+        assert client.get("/health").status_code == 200
+
+    assert list(working_directory.iterdir()) == []
+
+
 def test_db_session_middleware_commits_and_closes_on_success():
-    app = create_app()
+    app = create_app(verify_schema=False)
     factory = _SessionFactorySpy()
     app.state.db_session_factory = factory
 
@@ -97,7 +117,7 @@ def test_db_session_middleware_commits_and_closes_on_success():
 
 
 def test_db_session_middleware_rolls_back_and_closes_on_error():
-    app = create_app()
+    app = create_app(verify_schema=False)
     factory = _SessionFactorySpy()
     app.state.db_session_factory = factory
 
@@ -182,7 +202,7 @@ def test_scope_commit_base_exception_rolls_back_before_close():
 
 
 def test_unhandled_exceptions_return_error_envelope_and_log(monkeypatch):
-    app = create_app()
+    app = create_app(verify_schema=False)
     logger = _LoggerSpy()
     monkeypatch.setattr("lab_tracker.routes.errors._logger", logger)
 
@@ -210,7 +230,7 @@ def test_unhandled_exceptions_return_error_envelope_and_log(monkeypatch):
 
 
 def test_handled_lab_tracker_errors_are_logged(monkeypatch):
-    app = create_app()
+    app = create_app(verify_schema=False)
     logger = _LoggerSpy()
     monkeypatch.setattr("lab_tracker.routes.errors._logger", logger)
 
@@ -233,7 +253,7 @@ def test_handled_lab_tracker_errors_are_logged(monkeypatch):
 
 
 def test_request_handlers_share_the_middleware_transaction_identity():
-    app = create_app()
+    app = create_app(verify_schema=False)
 
     @app.get("/_test/handlers")
     def handler_probe(request: Request):
@@ -303,6 +323,7 @@ def test_sqlite_engine_enforces_foreign_keys_and_busy_wal_pragmas(tmp_path):
     engine = get_engine(settings)
     try:
         Base.metadata.create_all(bind=engine)
+        stamp_schema_at_head(engine)
 
         with engine.connect() as connection:
             assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar_one() == 1
@@ -364,6 +385,50 @@ def test_sqlite_connection_configuration_overrides_modern_transaction_mode() -> 
         connection.close()
 
 
+class _ModernTransactionModeConnection:
+    """Stand-in for a Python 3.12+ sqlite3 connection opened with autocommit=False.
+
+    CI runs Python 3.10/3.11, whose sqlite3 has no ``autocommit`` attribute, so
+    the real-connection test above is skipped there. This fake keeps the
+    mode-pin branch of ``configure_sqlite_connection`` exercised everywhere.
+    """
+
+    def __init__(self) -> None:
+        self.autocommit: object = False
+        # PEP 249 mode opens a physical transaction as soon as it connects.
+        self.in_transaction = True
+        self.rollbacks = 0
+        self._real = sqlite3.connect(":memory:")
+
+    def rollback(self) -> None:
+        self.rollbacks += 1
+        self.in_transaction = False
+
+    def cursor(self) -> sqlite3.Cursor:
+        return self._real.cursor()
+
+    def close(self) -> None:
+        self._real.close()
+
+
+def test_sqlite_connection_configuration_pins_legacy_mode_on_every_python(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    legacy = object()
+    monkeypatch.setattr(sqlite3, "LEGACY_TRANSACTION_CONTROL", legacy, raising=False)
+    connection = _ModernTransactionModeConnection()
+    try:
+        configure_sqlite_connection(connection)  # type: ignore[arg-type]
+
+        assert connection.autocommit is legacy
+        assert connection.rollbacks == 1
+        assert connection.in_transaction is False
+        foreign_keys = connection.cursor().execute("PRAGMA foreign_keys").fetchone()
+        assert foreign_keys == (1,)
+    finally:
+        connection.close()
+
+
 def test_startup_config_summary_logs_environment_db_backend_and_auth(
     tmp_path,
     monkeypatch,
@@ -407,7 +472,7 @@ def test_raw_sqlite_test_engines_enforce_foreign_keys_and_busy_wal_pragmas(tmp_p
 
 
 def test_db_session_middleware_runs_after_commit_actions_once():
-    app = create_app()
+    app = create_app(verify_schema=False)
     events: list[str] = []
 
     @app.get("/_test/after-commit")
@@ -425,7 +490,7 @@ def test_db_session_middleware_runs_after_commit_actions_once():
 
 
 def test_db_session_middleware_runs_after_rollback_actions_on_error_response():
-    app = create_app()
+    app = create_app(verify_schema=False)
     events: list[str] = []
 
     @app.get("/_test/after-rollback")
@@ -443,7 +508,7 @@ def test_db_session_middleware_runs_after_rollback_actions_on_error_response():
 
 
 def test_db_session_middleware_runs_after_rollback_actions_on_exception():
-    app = create_app()
+    app = create_app(verify_schema=False)
     events: list[str] = []
 
     @app.get("/_test/after-rollback-exception")

@@ -28,6 +28,7 @@ from .shared import (
     CreatedByFilter,
     actor_from_request,
     api_from_request,
+    created_by_filter_value,
     ensure_project_read,
     handlers_from_request,
     list_response,
@@ -91,7 +92,7 @@ def build_exploration_router(api: LabTrackerAPI) -> APIRouter:
                 target_entity_type.value if target_entity_type is not None else None
             ),
             target_entity_id=target_entity_id,
-            created_by=created_by,
+            created_by=created_by_filter_value(created_by),
             limit=limit,
             offset=offset,
         )

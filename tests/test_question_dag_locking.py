@@ -139,7 +139,10 @@ def test_graph_draft_prelocks_question_projects_in_canonical_order(
         locked_projects.append,
     )
 
-    api.graph_drafts.commit._lock_question_update_projects(operations)  # noqa: SLF001
+    api.graph_drafts.commit._lock_question_update_projects(  # noqa: SLF001
+        operations,
+        member_onboarding=False,
+    )
 
     assert locked_projects == sorted(
         [first_project.project_id, second_project.project_id],

@@ -3,8 +3,9 @@
 // Typed gateway for every auth-domain response consumed by the frontend. The
 // typedefs are generated from FastAPI's OpenAPI document; runtime validators
 // remain explicit so a malformed 2xx response fails at the network boundary.
-import { apiFetch, buildApiPath } from "../api.js";
+import { apiFetch, fetchAllPages } from "../api.js";
 import {
+  arrayOf,
   boolean,
   nullish,
   object,
@@ -134,6 +135,7 @@ const deviceConsumeShape = object({
 /** @satisfies {PersonalAccessTokenValidator} */
 const personalAccessTokenShape = object({
   created_at: string,
+  effective_role: roleShape,
   expires_at: string,
   label: string,
   last_used_at: nullish(string),
@@ -147,6 +149,7 @@ const personalAccessTokenShape = object({
 /** @satisfies {PersonalAccessTokenIssuedValidator} */
 const personalAccessTokenIssuedShape = object({
   created_at: string,
+  effective_role: roleShape,
   expires_at: string,
   label: string,
   last_used_at: nullish(string),
@@ -185,9 +188,11 @@ async function refreshSession(options = {}) {
   return parseResource(envelope, authTokenShape);
 }
 
+// Users and invitations are listed in full (every page), so an instance with
+// more rows than one page holds never silently truncates the admin tables.
 async function listUsers(options = {}) {
-  const envelope = await apiFetch(buildApiPath("/auth/users", { limit: 200 }), options);
-  return parseCollection(envelope, authUserShape);
+  const items = await fetchAllPages("/auth/users", options);
+  return { data: arrayOf(authUserShape)(items, "users") };
 }
 
 /** @param {string} userId @param {Record<string, unknown>} body */
@@ -201,11 +206,8 @@ async function updateUser(userId, body, options = {}) {
 }
 
 async function listInvitations(options = {}) {
-  const envelope = await apiFetch(
-    buildApiPath("/auth/invitations", { limit: 200 }),
-    options
-  );
-  return parseCollection(envelope, authInvitationShape);
+  const items = await fetchAllPages("/auth/invitations", options);
+  return { data: arrayOf(authInvitationShape)(items, "invitations") };
 }
 
 /** @param {Record<string, unknown>} body */

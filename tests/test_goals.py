@@ -734,7 +734,7 @@ def test_spanning_goal_index_requires_access_to_all_linked_projects(
         f"/goals/{goal_id}",
         headers=viewer_headers,
     )
-    assert unauthorized_patch.status_code == unauthorized_delete.status_code == 401
+    assert unauthorized_patch.status_code == unauthorized_delete.status_code == 403
 
     _add_project_member(
         client,
@@ -943,9 +943,9 @@ def test_spanning_goal_search_is_opaque_until_the_full_scope_is_authorized(
         headers=viewer_headers,
     )
 
-    assert unreadable_mismatch.status_code == 401
+    assert unreadable_mismatch.status_code == 403
     assert unreadable_mismatch.json()["error"] == {
-        "code": "auth_error",
+        "code": "forbidden",
         "message": "Project access required.",
         "issues": None,
     }

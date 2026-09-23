@@ -66,7 +66,7 @@ class _FakeSyncClient:
         self.uploads: list[dict[str, object]] = []
         self.draft_requests: list[str] = []
 
-    def build_evidence_note_index(self, *, project_id: str) -> dict:
+    def build_evidence_note_index(self, *, project_id: str, cache_dir: object = None) -> dict:
         return {}
 
     def _upload_note_file_payload(self, **kwargs: object) -> LTRecord:
@@ -400,6 +400,36 @@ def test_git_snapshot_strips_remote_credentials(git_repo, capsys) -> None:
     assert "https://example.com/lab/repo.git" in raw
 
 
+@pytest.mark.parametrize(
+    ("remote", "expected"),
+    [
+        # GitHub's bare-token form: the token is the whole userinfo.
+        ("https://ghp_SEKRET123@github.com/lab/repo.git", "https://github.com/lab/repo.git"),
+        ("https://oauth2:SEKRET123@gitlab.example.com/lab/repo.git",
+         "https://gitlab.example.com/lab/repo.git"),
+        ("https://github.com/lab/repo.git?access_token=SEKRET123",
+         "https://github.com/lab/repo.git"),
+        ("ssh://git:SEKRET123@example.com/lab/repo.git", "ssh://git@example.com/lab/repo.git"),
+        ("git@github.com:lab/repo.git", "git@github.com:lab/repo.git"),
+    ],
+)
+def test_git_snapshot_never_records_remote_credentials(
+    git_repo, capsys, remote: str, expected: str
+) -> None:
+    from lab_tracker_client.watch import read_event
+
+    _git(git_repo, "remote", "add", "origin", remote)
+    lt_cli.main(["git", "snapshot", "--repo", str(git_repo), "--project", "p-1", "--no-sync"])
+    payload = json.loads(capsys.readouterr().out)
+
+    event_path = Path(payload["event_path"])
+    assert "SEKRET123" not in event_path.read_text(encoding="utf-8")
+    event = read_event(event_path)
+    assert event["source"]["git_remote_origin_url"] == expected
+    assert event["source"]["uri"] == expected
+    assert f"- remote_origin: {expected}\n" in event["payload"]["body"]
+
+
 def test_git_snapshot_fail_silent_swallows_errors(git_repo, capsys) -> None:
     # No project resolvable: fails loudly without the flag, silently with it.
     lt_cli.main(["git", "snapshot", "--repo", str(git_repo), "--no-sync", "--fail-silent"])
@@ -653,3 +683,60 @@ def test_hooks_install_refuses_repo_capture_hook_without_force(git_repo) -> None
     content = hook_path.read_text(encoding="utf-8")
     assert HOOK_BLOCK_BEGIN in content
     assert HOOK_BEGIN_MARKER in content
+
+
+@pytest.mark.parametrize(
+    "unsafe",
+    ["p}rm", 'p"x', "p$(touch pwned)", "p`id`", "p\\x", "p\nx"],
+)
+@pytest.mark.parametrize("field", ["project_id", "base_url", "lt_path"])
+def test_hooks_install_refuses_values_that_would_escape_the_sh_default(
+    git_repo, field: str, unsafe: str
+) -> None:
+    from lab_tracker_client.client import LTValidationError
+    from lab_tracker_client.hooks import install_hook
+
+    if field == "lt_path" and unsafe == "p\\x":
+        unsafe = "p\\}x"  # lt paths fold backslashes to "/" first
+    kwargs = {"project_id": "p-1", "base_url": "http://lab:8000", "lt_path": "/opt/lt"}
+    kwargs[field] = unsafe
+
+    with pytest.raises(LTValidationError, match="cannot be baked into the post-commit hook"):
+        install_hook(repo=git_repo, **kwargs)
+
+    assert not (git_repo / ".git" / "hooks" / "post-commit").exists()
+
+
+@pytest.mark.parametrize(
+    ("line", "flag"),
+    [
+        ('LAB_TRACKER_PROJECT_ID="${LAB_TRACKER_PROJECT_ID:-p$(id)}"', "--project"),
+        ('LAB_TRACKER_BASE_URL="${LAB_TRACKER_BASE_URL:-http://lab`id`}"', "--base-url"),
+    ],
+)
+def test_hooks_install_names_an_unsafe_value_carried_from_a_legacy_block(
+    git_repo, line: str, flag: str
+) -> None:
+    from lab_tracker_client.client import LTValidationError
+    from lab_tracker_client.hooks import install_hook
+
+    hook_path = git_repo / ".git" / "hooks" / "post-commit"
+    hook_path.parent.mkdir(parents=True, exist_ok=True)
+    legacy = f"#!/usr/bin/env sh\n{HOOK_BLOCK_BEGIN}\n{line}\n{HOOK_BLOCK_END}\n"
+    hook_path.write_text(legacy, encoding="utf-8", newline="\n")
+
+    # The user never passed this value: say where it came from and how to override it.
+    with pytest.raises(LTValidationError, match="carried forward") as excinfo:
+        install_hook(repo=git_repo, lt_path="/opt/lt")
+
+    assert flag in str(excinfo.value)
+    assert hook_path.read_text(encoding="utf-8") == legacy
+
+
+def test_hooks_install_keeps_spaces_in_baked_values(git_repo) -> None:
+    from lab_tracker_client.hooks import install_hook
+
+    install_hook(repo=git_repo, project_id="p-1", lt_path="/opt/my tools/lt")
+
+    content = (git_repo / ".git" / "hooks" / "post-commit").read_text(encoding="utf-8")
+    assert 'LAB_TRACKER_LT="${LAB_TRACKER_LT:-/opt/my tools/lt}"' in content

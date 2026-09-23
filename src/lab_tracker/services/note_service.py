@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, BinaryIO
 from uuid import UUID, uuid4
@@ -39,16 +39,19 @@ from lab_tracker.models import (
 from lab_tracker.note_text import NoteTextExcerpt, decode_utf8_excerpt, is_text_content_type
 from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
 from lab_tracker.provider_error_redaction import provider_error_message
+from lab_tracker.reference_registry import DeletableEntity
 from lab_tracker.services.analysis_service import AnalysisService
 from lab_tracker.services.base import BaseService, IdempotentCreateResult, ServiceContext
 from lab_tracker.services.claim_service import ClaimService
 from lab_tracker.services.dataset_service import DatasetService
-from lab_tracker.services.goal_link_cleanup import remove_goal_links_to_entity
+from lab_tracker.services.deletion_references import prepare_entity_deletion
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.question_service import QuestionService
 from lab_tracker.services.session_service import SessionService
 from lab_tracker.services.shared import (
+    NOTE_CREATION_START_STATUS,
+    _ensure_note_status_transition,
     actor_user_fk,
     actor_user_id,
     normalize_note_metadata,
@@ -228,6 +231,7 @@ class NoteService(BaseService):
     ) -> IdempotentCreateResult[Note]:
         self.authorization.require_contributor(project_id, actor=actor)
         self.projects.get_project(project_id)
+        _ensure_note_status_transition(NOTE_CREATION_START_STATUS, status)
         raw_text = raw_content.strip() if raw_content else ""
         if not raw_text and raw_asset is None:
             raise ValidationError("raw_content or raw_asset must be provided.")
@@ -650,16 +654,15 @@ class NoteService(BaseService):
         if not note.raw_asset.content_type.lower().startswith("audio/"):
             raise ValidationError("Voice transcription only supports audio note uploads.")
         raw_asset = note.raw_asset
+        if self.raw_storage is None:
+            raise ValidationError("Raw storage backend is not configured.")
+        # Any other storage failure (OSError, permissions, a lost volume) is a
+        # server fault: let it propagate so it maps to HTTP 500 and is logged
+        # with its traceback instead of being relabelled a client error.
         try:
-            if self.raw_storage is None:
-                raise ValidationError("Raw storage backend is not configured.")
             audio_bytes = self.raw_storage.read(raw_asset.storage_id)
         except NotFoundError as exc:
             raise NotFoundError("Source audio file is unavailable.") from exc
-        except ValidationError:
-            raise
-        except Exception as exc:
-            raise ValidationError("Source audio file could not be read.") from exc
         transcribe_audio = getattr(transcription_client, "transcribe_audio", None)
         if not callable(transcribe_audio):
             raise ValidationError("Configured transcription client does not support audio.")
@@ -720,11 +723,13 @@ class NoteService(BaseService):
         status: NoteStatus | None = None,
         target_entity_type: EntityType | None = None,
         target_entity_id: UUID | None = None,
+        capture_bundle_id: str | None = None,
     ) -> list[Note]:
         return self.query_from_repository(
             loader=lambda repository: repository.query_notes(
                 project_id=project_id,
                 status=status.value if status is not None else None,
+                capture_bundle_id=capture_bundle_id,
                 target_entity_type=(
                     target_entity_type.value if target_entity_type is not None else None
                 ),
@@ -807,6 +812,13 @@ class NoteService(BaseService):
         if is_provided(status):
             if status is None:
                 raise ValidationError("status must not be null.")
+            _ensure_note_status_transition(note.status, status)
+            if note.status == NoteStatus.ARCHIVED and status != NoteStatus.ARCHIVED:
+                # Restoring a capture must not leave it reporting a stale archive.
+                note.archived_reason = None
+                note.archived_at = None
+                note.archived_by = None
+                note.archived_by_user_id = None
             note.status = status
         if origin is not None:
             note.origin = origin
@@ -870,6 +882,17 @@ class NoteService(BaseService):
         content = self.raw_storage.read(note.raw_asset.storage_id)
         return note.raw_asset, content
 
+    def stream_note_raw(self, note_id: UUID) -> tuple[NoteRawAsset, Iterator[bytes]]:
+        """Return the raw asset and its bytes as a bounded-chunk stream."""
+
+        note = self.get_note(note_id)
+        if note.raw_asset is None:
+            raise NotFoundError("Note does not have raw content.")
+        if self.raw_storage is None:
+            raise ValidationError("Raw storage backend is not configured.")
+        chunks = self.raw_storage.iter_chunks(note.raw_asset.storage_id)
+        return note.raw_asset, chunks
+
     def read_note_raw_text(
         self,
         note_id: UUID,
@@ -919,20 +942,24 @@ class NoteService(BaseService):
     ) -> Note:
         note = self.get_note(note_id)
         self.authorization.require_contributor(note.project_id, actor=actor)
-        if is_member_checkpoint(note) and not allow_member_onboarding_checkpoint:
-            raise ValidationError(
-                "Member onboarding checkpoints cannot be deleted."
-            )
-        if self._member_onboarding_checkpoint_for_capture(note) is not None:
-            raise ValidationError(
-                "The designated first member-onboarding capture cannot be deleted."
-            )
-        self._ensure_note_can_be_deleted(note)
-        with self.unit_of_work() as repository:
-            remove_goal_links_to_entity(
+        with self.application_transaction(), self.unit_of_work() as repository:
+            repository.lock_project_references(note.project_id)
+            # Re-read and re-check under the lock so every guard, including
+            # the onboarding markers, sees the newest committed state.
+            note = self.get_note(note_id)
+            if is_member_checkpoint(note) and not allow_member_onboarding_checkpoint:
+                raise ValidationError(
+                    "Member onboarding checkpoints cannot be deleted."
+                )
+            if self._member_onboarding_checkpoint_for_capture(note) is not None:
+                raise ValidationError(
+                    "The designated first member-onboarding capture cannot be deleted."
+                )
+            prepare_entity_deletion(
                 repository,
-                entity_type=EntityType.NOTE,
-                entity_id=note_id,
+                DeletableEntity.NOTE,
+                note_id,
+                project_id=note.project_id,
             )
             repository.notes.delete(note_id)
         if note.raw_asset is not None:
@@ -940,20 +967,6 @@ class NoteService(BaseService):
                 lambda raw_asset=note.raw_asset: self._delete_raw_asset(raw_asset)
             )
         return note
-
-    def _ensure_note_can_be_deleted(self, note: Note) -> None:
-        change_sets = self.query_from_repository(
-            loader=lambda repository: repository.query_graph_change_sets(
-                project_id=note.project_id,
-                limit=None,
-                offset=0,
-            ),
-        )
-        if any(
-            change_set.source_note_id == note.note_id or note.note_id in change_set.source_note_ids
-            for change_set in change_sets
-        ):
-            raise ValidationError("Note cannot be deleted while graph drafts reference it.")
 
     def add_member_onboarding_question_target(
         self,

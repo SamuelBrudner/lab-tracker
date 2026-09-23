@@ -529,6 +529,7 @@ class SQLAlchemyNoteRepository(EntityRepository[Note]):
         since: datetime | None = None,
         until: datetime | None = None,
         client_capture_id: str | None = None,
+        capture_bundle_id: str | None = None,
         target_entity_type: str | None = None,
         target_entity_id: UUID | None = None,
         limit: int | None = None,
@@ -568,6 +569,12 @@ class SQLAlchemyNoteRepository(EntityRepository[Note]):
         if client_capture_id is not None:
             stmt = stmt.where(NoteModel.client_capture_id == client_capture_id)
             count_stmt = count_stmt.where(NoteModel.client_capture_id == client_capture_id)
+        if capture_bundle_id is not None:
+            bundle_clause = (
+                NoteModel.note_metadata["capture_bundle_id"].as_string() == capture_bundle_id
+            )
+            stmt = stmt.where(bundle_clause)
+            count_stmt = count_stmt.where(bundle_clause)
         pattern = substring_pattern(search)
         if pattern is not None:
             search_clause = or_(

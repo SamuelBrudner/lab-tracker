@@ -13,7 +13,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 import httpx
 
@@ -197,6 +197,14 @@ class LTStoreAuthorityDeniedError(LTAPIError):
     """Raised when a data-store authority grant cannot authorize registration."""
 
 
+class LTPermissionDeniedError(LTAPIError):
+    """Raised on HTTP 403: the credential is valid but lacks permission.
+
+    Unlike a 401, the client neither refreshes the token nor logs in again;
+    the fix is project or role access, not new credentials.
+    """
+
+
 class LTValidationError(LTError):
     """Raised when client-side validation catches a bad request shape."""
 
@@ -221,7 +229,16 @@ class LTRecord(dict[str, Any]):
         return dict(self)
 
 
-EvidenceNoteIndex = dict[EvidenceNoteKey, LTRecord]
+class EvidenceNoteIndex(Protocol):
+    """Evidence-key -> existing note lookup used to dedupe evidence uploads.
+
+    A plain ``dict[EvidenceNoteKey, LTRecord]`` satisfies it, as does the
+    persistent :class:`~lab_tracker_client.evidence_index.CachedEvidenceNoteIndex`.
+    """
+
+    def get(self, key: EvidenceNoteKey, /) -> LTRecord | None: ...
+
+    def __setitem__(self, key: EvidenceNoteKey, note: LTRecord, /) -> None: ...
 
 # Sentinel distinguishing "caller did not supply this field" from an explicit
 # empty/None value, so get_or_create only compares fields the caller actually
@@ -338,6 +355,9 @@ class LabTracker:
         self.default_project_id = default_project_id
         self._access_token = access_token
         self._supplied_access_token = bool(access_token)
+        # Set by ``from_env`` when the token came from the saved connection
+        # profile, so a rejection points at the file that holds it.
+        self._access_token_profile_path: Path | None = None
         self._transport = HttpTransport(
             base_url=self.base_url,
             timeout_seconds=timeout_seconds,
@@ -362,6 +382,15 @@ class LabTracker:
     def refresh_bearer(self, response: httpx.Response) -> str:
         supplied_token_used = bool(self._access_token and self._supplied_access_token)
         if supplied_token_used and not self._has_login_credentials():
+            if self._access_token_profile_path is not None:
+                raise LTAPIError(
+                    "The access token saved in the connection profile "
+                    f"({self._access_token_profile_path}) was rejected by the Lab "
+                    "Tracker API. Save a fresh one with 'lt setup connect "
+                    "--save-token', or set LAB_TRACKER_ACCESS_TOKEN, or set "
+                    "LAB_TRACKER_USERNAME and LAB_TRACKER_PASSWORD so the client "
+                    "can log in."
+                )
             raise LTAPIError(
                 "LAB_TRACKER_ACCESS_TOKEN was rejected by the Lab Tracker API. "
                 "Refresh the token or set LAB_TRACKER_USERNAME and "
@@ -399,6 +428,7 @@ class LabTracker:
             )
         env_username = os.getenv("LAB_TRACKER_USERNAME") or os.getenv("LAB_TRACKER_MCP_USERNAME")
         profile_token = profile.get("access_token")
+        profile_project_id = profile.get("default_project_id")
         try:
             profile_base_url = normalize_instance_base_url(
                 profile.get("base_url") or DEFAULT_BASE_URL,
@@ -407,15 +437,21 @@ class LabTracker:
         except ValueError:
             profile_base_url = DEFAULT_BASE_URL
             profile_token = None
-        if env_username or (env_base_url and env_base_url != profile_base_url):
+            profile_project_id = None
+        if env_base_url and env_base_url != profile_base_url:
+            # The profile's token and project id belong to the profile's
+            # server; project ids are per-server, so neither carries over.
             profile_token = None
-        return cls(
+            profile_project_id = None
+        if env_username:
+            profile_token = None
+        env_token = os.getenv("LAB_TRACKER_ACCESS_TOKEN")
+        client = cls(
             base_url=env_base_url or profile_base_url,
             username=env_username,
             password=os.getenv("LAB_TRACKER_PASSWORD") or os.getenv("LAB_TRACKER_MCP_PASSWORD"),
-            access_token=os.getenv("LAB_TRACKER_ACCESS_TOKEN") or profile_token,
-            default_project_id=os.getenv("LAB_TRACKER_PROJECT_ID")
-            or profile.get("default_project_id"),
+            access_token=env_token or profile_token,
+            default_project_id=os.getenv("LAB_TRACKER_PROJECT_ID") or profile_project_id,
             timeout_seconds=(
                 timeout_seconds
                 if timeout_seconds is not None
@@ -427,6 +463,9 @@ class LabTracker:
                 )
             ),
         )
+        if not env_token and profile_token:
+            client._access_token_profile_path = connection_profile_path()
+        return client
 
     @property
     def access_token(self) -> str | None:
@@ -1135,8 +1174,26 @@ class LabTracker:
                 return note
         return None
 
-    def build_evidence_note_index(self, *, project_id: str) -> EvidenceNoteIndex:
-        index: EvidenceNoteIndex = {}
+    def build_evidence_note_index(
+        self,
+        *,
+        project_id: str,
+        cache_dir: str | Path | None = None,
+    ) -> EvidenceNoteIndex:
+        """Index the project's evidence notes by evidence key.
+
+        Without ``cache_dir`` this lists every note in the project. Outbox
+        syncs pass their cache directory instead, so repeated syncs refresh a
+        persistent index incrementally (see
+        :mod:`lab_tracker_client.evidence_index`) rather than re-listing every
+        note on each run.
+        """
+
+        if cache_dir is not None:
+            from lab_tracker_client.evidence_index import CachedEvidenceNoteIndex
+
+            return CachedEvidenceNoteIndex.load(self, project_id=project_id, cache_dir=cache_dir)
+        index: dict[EvidenceNoteKey, LTRecord] = {}
         for note in self._iter_all("/notes", params={"project_id": str(project_id)}):
             key = _evidence_note_key(note)
             if key is not None:
@@ -1290,6 +1347,8 @@ class LabTracker:
             raise LTValidationError(_response_error(response))
         if response.status_code == 409:
             raise LTConflictError(_response_error(response))
+        if response.status_code == 403:
+            raise LTPermissionDeniedError(_response_error(response))
         if response.status_code >= 400:
             raise LTAPIError(_response_error(response))
         return self._data_record(_response_json(response))
@@ -1646,6 +1705,8 @@ class LabTracker:
             and _response_error_code(response) == _STORE_AUTHORITY_DENIED_ERROR_CODE
         ):
             raise LTStoreAuthorityDeniedError(_response_error(response))
+        if response.status_code == 403:
+            raise LTPermissionDeniedError(_response_error(response))
         if response.status_code >= 400:
             raise LTAPIError(_response_error(response))
         return _response_json(response), response.status_code

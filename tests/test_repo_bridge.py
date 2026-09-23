@@ -55,6 +55,116 @@ def test_repo_note_capture_extracts_state() -> None:
     assert capture.artifacts[0]["title"] == "results.csv"
 
 
+def test_repo_note_capture_reads_dirty_tree() -> None:
+    capture = repo_note_capture(_repo_note_metadata(repo_git_dirty=True))
+
+    assert capture is not None
+    assert capture.dirty is True
+    assert capture.status_error == ""
+
+
+def test_repo_note_capture_keeps_unknown_dirty_state_unknown() -> None:
+    # The client records an unanswered `git status` as repo_git_status_error
+    # with no repo_git_dirty key; that must not be read as a clean tree.
+    metadata = _repo_note_metadata(repo_git_status_error="git status --porcelain timed out")
+    del metadata["repo_git_dirty"]
+
+    capture = repo_note_capture(metadata)
+
+    assert capture is not None
+    assert capture.dirty is None
+    assert capture.status_error == "git status --porcelain timed out"
+
+
+def test_repo_note_capture_without_dirty_flag_is_unknown() -> None:
+    # CI-script notes never record a dirty flag; absence is not "clean".
+    metadata = _repo_note_metadata()
+    del metadata["repo_git_dirty"]
+
+    capture = repo_note_capture(metadata)
+
+    assert capture is not None
+    assert capture.dirty is None
+    assert capture.status_error == ""
+
+
+@pytest.mark.parametrize(
+    ("source", "expected_dirty", "expected_error"),
+    [
+        ({"git_dirty": True}, True, ""),
+        ({"git_dirty": False}, False, ""),
+        (
+            {"git_dirty": None, "git_status_error": "timed out after 10s"},
+            None,
+            "timed out after 10s",
+        ),
+    ],
+)
+def test_repo_note_capture_round_trips_client_dirty_metadata(
+    source, expected_dirty, expected_error
+) -> None:
+    # Producer/consumer contract: whatever the client adapter writes for the
+    # dirty state (lab_tracker_client.gitinfo.dirty_metadata, "repo_" prefix)
+    # reads back with the same meaning here.
+    from lab_tracker_client.gitinfo import dirty_metadata
+
+    metadata = _repo_note_metadata()
+    del metadata["repo_git_dirty"]
+    metadata.update(dirty_metadata(source, "repo_"))
+
+    capture = repo_note_capture(metadata)
+
+    assert capture is not None
+    assert capture.dirty is expected_dirty
+    assert capture.status_error == expected_error
+
+
+@pytest.mark.parametrize("dirty", [True, False])
+def test_repo_note_capture_reads_dirty_flag_stored_by_the_server(
+    client, admin_auth_headers, dirty
+) -> None:
+    # The real producer of the metadata read here is the server: POST /notes
+    # stores every note metadata value as a string (str(True) == "True"), so a
+    # note that went through the API must still yield its known dirty state.
+    from lab_tracker_client.gitinfo import dirty_metadata
+
+    project = client.post("/projects", json={"name": "Repo"}, headers=admin_auth_headers)
+    assert project.status_code == 201, project.text
+    metadata = _repo_note_metadata()
+    del metadata["repo_git_dirty"]
+    metadata.update(dirty_metadata({"git_dirty": dirty}, "repo_"))
+    response = client.post(
+        "/notes",
+        json={
+            "project_id": project.json()["data"]["project_id"],
+            "raw_content": "lt repo capture",
+            "metadata": metadata,
+        },
+        headers=admin_auth_headers,
+    )
+    assert response.status_code == 201, response.text
+    stored = response.json()["data"]["metadata"]
+    assert stored["repo_git_dirty"] == str(dirty)
+
+    capture = repo_note_capture(stored)
+
+    assert capture is not None
+    assert capture.dirty is dirty
+    assert capture.status_error == ""
+
+
+@pytest.mark.parametrize("raw", ["false", "true", "FALSE", " True", "yes", "", 0, 1])
+def test_repo_note_capture_rejects_non_boolean_dirty_flag(raw) -> None:
+    # Only a bool or the server's canonical str(bool) encoding ("True" /
+    # "False") is read; anything else is not guessed at (bool("false") is
+    # True) and is recorded as unknown with an explicit marker naming it.
+    capture = repo_note_capture(_repo_note_metadata(repo_git_dirty=raw))
+
+    assert capture is not None
+    assert capture.dirty is None
+    assert "repo_git_dirty" in capture.status_error
+
+
 def test_repo_note_capture_rejects_non_git_notes() -> None:
     assert repo_note_capture({"evidence_source_provider": "hpc-outbox"}) is None
     assert repo_note_capture({"evidence_source_provider": "git"}) is None  # no commit
@@ -75,6 +185,48 @@ def test_repo_note_capture_reads_ci_script_keys() -> None:
     assert capture is not None
     assert capture.commit == COMMIT
     assert capture.remote == "git@example.com:org/repo.git"
+
+
+# Notes stored before the H9/H10 client and CI fixes can still carry a
+# credentialed remote; the bridge must not copy it into Analysis metadata.
+SECRET = "SEKRET_TOKEN_123"
+REMOTE_FORMS = [
+    "https://github.com/lab/repo.git",
+    "git@github.com:lab/repo.git",
+    "ssh://git@github.com:2222/lab/repo.git",
+    "file:///srv/git/repo.git",
+    "/srv/git/repo.git",
+    "  https://github.com/lab/repo.git\n",
+    f"https://oauth2:{SECRET}@gitlab.example.com/lab/repo.git",
+    f"https://{SECRET}@github.com/lab/repo.git",
+    f"HTTPS://{SECRET}@github.com/lab/repo.git",
+    f"http://x-access-token:{SECRET}@example.com:8080/lab/repo",
+    f"https://user:p@ss{SECRET}@example.com/lab/repo.git",
+    f"https://github.com/lab/repo.git?access_token={SECRET}",
+    f"https://github.com/lab/repo.git#{SECRET}",
+    f"ssh://git:{SECRET}@example.com/lab/repo.git",
+    f"git+ssh://deploy:{SECRET}@example.com:22/lab/repo",
+    f"git://{SECRET}@example.com/lab/repo.git",
+    "deploy@example.com:lab/repo@v2.git",
+]
+
+
+@pytest.mark.parametrize("key", ["repo_remote_url", "git_remote_origin_url"])
+@pytest.mark.parametrize("remote", REMOTE_FORMS)
+def test_repo_note_capture_strips_stored_remote_credentials(key: str, remote: str) -> None:
+    from lab_tracker_client.gitinfo import sanitize_remote_url
+
+    metadata = _repo_note_metadata()
+    del metadata["repo_remote_url"]
+    metadata[key] = remote
+
+    capture = repo_note_capture(metadata)
+    fields = analysis_fields_from_repo_note(metadata)
+
+    assert capture is not None
+    assert capture.remote == sanitize_remote_url(remote)
+    assert fields is not None
+    assert SECRET not in repr(fields)
 
 
 def test_repo_note_capture_tolerates_malformed_artifacts() -> None:

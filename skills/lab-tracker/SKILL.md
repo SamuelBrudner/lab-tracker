@@ -71,10 +71,11 @@ After upgrading the installed package, run `lt update` inside a consumer repo to
 refresh everything to the new version in one step: managed prompt blocks are
 re-rendered in place (consent decisions preserved; add missing conventions
 blocks with `--yes`), and scaffolded files (`.claude/settings.json` hooks,
-`.mcp.json`, `.cursor/mcp.json`, `scripts/lt.py`, `AGENTS.lt.md`) are rewritten
-to the current canonical text with any customised previous file kept next to it
-as `*.bak-lt-update`. `lt_ids.json` is never touched. Use `--dry-run` to preview
-and `lt doctor` to confirm the repo is in sync afterwards.
+`.mcp.json`, `.cursor/mcp.json`, `.gemini/settings.json`, `scripts/lt.py`,
+`AGENTS.lt.md`) are rewritten to the current canonical text with any customised
+previous file kept next to it as `*.bak-lt-update`. `lt_ids.json` is never
+touched. Use `--dry-run` to preview and `lt doctor` to confirm the repo is in
+sync afterwards.
 
 For substantive, rerunnable notes, prefer `lab_tracker_client.LabTracker` or
 the generated `scripts.lt.upsert_note(...)`. Notes are idempotent by the first
@@ -96,8 +97,7 @@ MCP environment:
 
 ```bash
 LAB_TRACKER_BASE_URL=http://127.0.0.1:8000
-LAB_TRACKER_MCP_USERNAME=<service-account-username>
-LAB_TRACKER_MCP_PASSWORD=<service-account-password>
+LAB_TRACKER_MCP_API_KEY=<lpat-personal-access-token>
 ```
 
 For agents running somewhere other than the serving machine, use that
@@ -105,12 +105,16 @@ deployment's reachable HTTPS origin instead of localhost:
 
 ```bash
 LAB_TRACKER_BASE_URL=https://lab-tracker.example.org
-LAB_TRACKER_MCP_USERNAME=<service-account-username>
-LAB_TRACKER_MCP_PASSWORD=<service-account-password>
+LAB_TRACKER_MCP_API_KEY=<lpat-personal-access-token>
 ```
 
-MCP username/password are only required when `LAB_TRACKER_AUTH_ENABLED=true`.
-Local auth-disabled testing can omit them.
+`LAB_TRACKER_MCP_API_KEY` holds a Lab Tracker personal access token (LPAT),
+the sanctioned MCP credential; mint one on the web app's **Agents** page
+(`/app/agents`) or with `POST /auth/tokens`. The older
+`LAB_TRACKER_MCP_USERNAME` / `LAB_TRACKER_MCP_PASSWORD` login is deprecated;
+run `lt auth doctor` to find MCP configs still using it. A credential is only
+required when `LAB_TRACKER_AUTH_ENABLED=true`; local auth-disabled testing can
+omit it.
 
 <!-- BEGIN GENERATED MCP TOOL LIST -->
 Use these tools when available. This list is generated from `lab_tracker.mcp_tools.READ_TOOLS` and `WRITE_TOOLS`; do not edit it by hand.
@@ -225,7 +229,9 @@ For new projects or newly imported repo context:
    link their results back as notes, analyses, datasets, or conclusions.
 
 Question status transitions are one-way for review: `staged` can become
-`active`, `abandoned`, or `superseded`, but `active` cannot return to `staged`.
+`active` or `abandoned`, but `active` cannot return to `staged`. A question
+becomes `superseded` only through `POST /questions/{question_id}/refactor`, and
+a new question starts as `staged`, `active`, or `abandoned`.
 
 ## Joining An Ongoing Project
 
@@ -291,9 +297,9 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 #### Projects: `ProjectCreate`
 - Required: `name`
 - `client_capture_id` (optional): string | null
-- `description` (optional): string | null
+- `description` (optional): string; max length 1000 | null
 - `group_id` (optional): string(uuid) | null
-- `name` (required): string; min length 1
+- `name` (required): string; min length 1, max length 255
 - `status` (optional): ProjectStatus enum: active, archived | null
 
 #### Questions: `QuestionCreate`
@@ -351,11 +357,11 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 
 #### Analyses: `AnalysisCreate`
 - Required: `project_id`, `dataset_ids`, `method_hash`, `code_version`
-- `code_version` (required): string; min length 1
+- `code_version` (required): string; min length 1, max length 255
 - `dataset_ids` (required): list[string(uuid)]
-- `environment_hash` (optional): string | null
+- `environment_hash` (optional): string; max length 255 | null
 - `external_artifacts` (optional): list[object] | null
-- `method_hash` (required): string; min length 1
+- `method_hash` (required): string; min length 1, max length 255
 - `project_id` (required): string(uuid)
 - `status` (optional): AnalysisStatus enum: staged, committed, archived | null
 - `terminal_reason` (optional): string; min length 1 | null
@@ -378,20 +384,20 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 #### Goals: `GoalCreateFields`
 - Required: `goal_type`, `title`
 - `attributes` (optional): object | null
-- `external_ref` (optional): string | null
+- `external_ref` (optional): string; max length 1000 | null
 - `goal_type` (required): GoalType enum: paper, grant, talk, other
 - `status` (optional): GoalStatus enum: planned, in_progress, submitted, accepted, abandoned | null
 - `summary` (optional): string | null
 - `target_date` (optional): string(date) | null
-- `title` (required): string; min length 1
+- `title` (required): string; min length 1, max length 255
 
 #### Visualizations: `VisualizationCreate`
 - Required: `analysis_id`, `viz_type`, `file_path`
 - `analysis_id` (required): string(uuid)
 - `caption` (optional): string | null
-- `file_path` (required): string; min length 1
+- `file_path` (required): string; min length 1, max length 1000
 - `related_claim_ids` (optional): list[string(uuid)] | null
-- `viz_type` (required): string; min length 1
+- `viz_type` (required): string; min length 1, max length 40
 
 #### Graph Drafts: `GraphDraftCreateRequest`
 - Required: none
@@ -443,7 +449,7 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 - `question_type` (optional): QuestionType enum: descriptive, hypothesis_driven, method_dev, other | null
 - `search` (optional): string | null
 - `q` (optional): string | null
-- `created_by` (optional): string | null
+- `created_by` (optional): string(uuid) | null
 - `parent_question_id` (optional): string(uuid) | null
 - `ancestor_question_id` (optional): string(uuid) | null
 - `limit` (optional): integer; default 50; maximum 200 from shared route validation
@@ -452,7 +458,7 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 #### `GET /notes`
 - `project_id` (optional): string(uuid) | null
 - `status` (optional): NoteStatus enum: staged, committed, archived | null
-- `created_by` (optional): string | null
+- `created_by` (optional): string(uuid) | null
 - `since` (optional): string(date-time) | null
 - `until` (optional): string(date-time) | null
 - `target_entity_type` (optional): EntityType enum: project, question, dataset, note, session, analysis, claim, visualization, goal | null
@@ -470,7 +476,7 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 #### `GET /datasets`
 - `project_id` (optional): string(uuid) | null
 - `status` (optional): DatasetStatus enum: staged, committed, archived | null
-- `created_by` (optional): string | null
+- `created_by` (optional): string(uuid) | null
 - `since` (optional): string(date-time) | null
 - `until` (optional): string(date-time) | null
 - `limit` (optional): integer; default 50; maximum 200 from shared route validation
@@ -487,7 +493,7 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 - `dataset_id` (optional): string(uuid) | null
 - `question_id` (optional): string(uuid) | null
 - `status` (optional): AnalysisStatus enum: staged, committed, archived | null
-- `created_by` (optional): string | null
+- `created_by` (optional): string(uuid) | null
 - `since` (optional): string(date-time) | null
 - `until` (optional): string(date-time) | null
 - `recent_first` (optional): boolean; default False
@@ -499,7 +505,7 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 - `status` (optional): ClaimStatus enum: proposed, testing, supported, rejected | null
 - `dataset_id` (optional): string(uuid) | null
 - `analysis_id` (optional): string(uuid) | null
-- `created_by` (optional): string | null
+- `created_by` (optional): string(uuid) | null
 - `since` (optional): string(date-time) | null
 - `until` (optional): string(date-time) | null
 - `limit` (optional): integer; default 50; maximum 200 from shared route validation
@@ -516,7 +522,7 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 - `project_id` (optional): string(uuid) | null
 - `analysis_id` (optional): string(uuid) | null
 - `claim_id` (optional): string(uuid) | null
-- `created_by` (optional): string | null
+- `created_by` (optional): string(uuid) | null
 - `since` (optional): string(date-time) | null
 - `until` (optional): string(date-time) | null
 - `recent_first` (optional): boolean; default False

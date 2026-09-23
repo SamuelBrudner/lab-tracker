@@ -324,9 +324,11 @@ def _attach_graph_usernames(request: Request, change_set: GraphChangeSet) -> Gra
         if not user_id or getattr(change_set, username_field, None):
             continue
         try:
-            user = auth_service.get_user_by_id(ensure_uuid(str(user_id)))
-        except Exception:
-            user = None
+            parsed_user_id = ensure_uuid(str(user_id))
+        except ValueError:
+            # Legacy attribution is a free-text name, not a user id.
+            continue
+        user = auth_service.get_user_by_id(parsed_user_id)
         if user is not None:
             setattr(change_set, username_field, user.username)
     return change_set
@@ -379,3 +381,4 @@ def _graph_change_set_summary(change_set: GraphChangeSet) -> GraphChangeSetSumma
 
 
 attach_graph_usernames = _attach_graph_usernames
+graph_change_set_summary = _graph_change_set_summary

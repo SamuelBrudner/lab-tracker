@@ -169,8 +169,10 @@ function useReviewDictation({ changeSetId, spokenReview, canEditDraft, setFlash 
     startingRef.current = true;
     stopSpeech();
     setFlash("", "");
+    let microphoneGranted = false;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      microphoneGranted = true;
       if (!mountedRef.current) {
         stream.getTracks().forEach((track) => track.stop());
         return;
@@ -206,14 +208,25 @@ function useReviewDictation({ changeSetId, spokenReview, canEditDraft, setFlash 
         }
         setIsRecording(false);
       });
-      mediaRecorderRef.current = recorder;
+      // Publish the recorder only once it has started: a recorder whose
+      // start() threw must not stay in the ref, or every later start is
+      // refused as already recording until remount.
       recorder.start();
+      mediaRecorderRef.current = recorder;
       setIsRecording(true);
-    } catch {
+    } catch (err) {
+      mediaRecorderRef.current = null;
       stopAudioStream();
       if (mountedRef.current) {
         setIsRecording(false);
-        setFlash("", "Could not access the microphone. Check browser permissions.");
+        // Only a refused getUserMedia is a permissions problem; a recorder that
+        // failed after access was granted needs its own, truthful message.
+        setFlash(
+          "",
+          microphoneGranted
+            ? `Could not start recording: ${err?.message || "the recorder failed to start."}`
+            : "Could not access the microphone. Check browser permissions."
+        );
       }
     } finally {
       startingRef.current = false;

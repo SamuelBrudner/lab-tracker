@@ -5,7 +5,7 @@ from __future__ import annotations
 from uuid import UUID
 
 from lab_tracker.auth import AuthContext, Role
-from lab_tracker.errors import AuthError
+from lab_tracker.errors import AuthError, PermissionDeniedError
 from lab_tracker.models import ProjectMembershipRole
 from lab_tracker.services.base import BaseService, ServiceContext
 
@@ -28,6 +28,16 @@ PROJECT_OWNER_ROLES = {ProjectMembershipRole.OWNER}
 
 
 class ProjectAuthorizationPolicy(BaseService):
+    """Project-scoped access comes from membership, not the global role.
+
+    Project and group memberships are the grants a project owner controls, so
+    a viewer account that an owner makes a project contributor can write in
+    that project. Only the global admin role bypasses membership; the editor
+    and viewer roles gate instance-wide actions and service-token writes
+    (``service_principal_can_access``) but add or remove nothing here. The
+    existing membership tests pin this contract.
+    """
+
     def __init__(self, context: ServiceContext) -> None:
         super().__init__(context)
 
@@ -48,12 +58,14 @@ class ProjectAuthorizationPolicy(BaseService):
         or commit them: only a person in the loop turns a proposal into a
         committed graph edge. Pairs with :attr:`AuthContext.is_interactive`, and
         is fail-closed: only an interactive human session (USER or DEVICE) is
-        admitted; SERVICE and SYSTEM principals and a missing (None) actor are
-        all rejected.
+        admitted; SERVICE and SYSTEM principals are denied, and a missing
+        (None) actor is an authentication failure.
         """
 
-        if actor is None or not actor.is_interactive:
-            raise AuthError(
+        if actor is None:
+            raise AuthError("Authentication required.")
+        if not actor.is_interactive:
+            raise PermissionDeniedError(
                 f"{action} requires an interactive human session; service "
                 "tokens and automation principals may draft graph proposals "
                 "but not accept or commit them."
@@ -82,7 +94,7 @@ class ProjectAuthorizationPolicy(BaseService):
     ) -> None:
         role = self.group_membership_role(group_id, actor)
         if role not in GROUP_READ_ROLES:
-            raise AuthError("Group access required.")
+            raise PermissionDeniedError("Group access required.")
 
     def can_group_read(
         self,
@@ -106,7 +118,7 @@ class ProjectAuthorizationPolicy(BaseService):
             return
         role = self.group_membership_role(group_id, actor)
         if role not in GROUP_OWNER_ROLES:
-            raise AuthError("Group owner access required.")
+            raise PermissionDeniedError("Group owner access required.")
 
     def accessible_project_ids(self, actor: AuthContext | None) -> set[UUID] | None:
         if self.has_global_read(actor):
@@ -189,7 +201,7 @@ class ProjectAuthorizationPolicy(BaseService):
     ) -> None:
         role = self.membership_role(project_id, actor)
         if role not in PROJECT_READ_ROLES:
-            raise AuthError("Project access required.")
+            raise PermissionDeniedError("Project access required.")
 
     def can_read(
         self,
@@ -213,7 +225,7 @@ class ProjectAuthorizationPolicy(BaseService):
             return
         role = self.membership_role(project_id, actor)
         if role not in PROJECT_CONTRIBUTOR_ROLES:
-            raise AuthError("Project contributor access required.")
+            raise PermissionDeniedError("Project contributor access required.")
 
     def require_owner(
         self,
@@ -225,4 +237,4 @@ class ProjectAuthorizationPolicy(BaseService):
             return
         role = self.membership_role(project_id, actor)
         if role not in PROJECT_OWNER_ROLES:
-            raise AuthError("Project owner access required.")
+            raise PermissionDeniedError("Project owner access required.")

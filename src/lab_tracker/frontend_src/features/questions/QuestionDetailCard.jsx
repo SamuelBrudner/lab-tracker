@@ -1,12 +1,44 @@
 import * as React from "react";
 
 import { QUESTION_TYPES } from "../../shared/constants.js";
-import { apiRequest, buildApiPath } from "../../shared/api.js";
+import { apiRequest, buildApiPath, fetchAllPages } from "../../shared/api.js";
 import { formatDate } from "../../shared/formatters.js";
 import { useApiResource } from "../../hooks/useApiResource.js";
 import { useProjectAccess } from "../../hooks/useProjectAccess.js";
 
-const { useEffect, useMemo, useState } = React;
+const { useEffect, useMemo, useRef, useState } = React;
+
+// The refactor form must offer every question and targeted note in the
+// project, so its option lists read all pages rather than the first 200.
+function useAllPagesResource(path, token, errorMessage) {
+  const [state, setState] = useState({ data: null, error: "" });
+
+  useEffect(() => {
+    let canceled = false;
+    setState({ data: null, error: "" });
+    if (!path) {
+      return () => {
+        canceled = true;
+      };
+    }
+    fetchAllPages(path, { token })
+      .then((items) => {
+        if (!canceled) {
+          setState({ data: items, error: "" });
+        }
+      })
+      .catch((err) => {
+        if (!canceled) {
+          setState({ data: null, error: err.message || errorMessage });
+        }
+      });
+    return () => {
+      canceled = true;
+    };
+  }, [errorMessage, path, token]);
+
+  return state;
+}
 
 function getParentQuestionIds(question) {
   return Array.isArray(question?.parent_question_ids) ? question.parent_question_ids : [];
@@ -42,25 +74,19 @@ function QuestionDetailCard({
     enabled: Boolean(question?.project_id),
   });
   const canWrite = question?.project_id ? questionAccess.canContribute : dashboardCanWrite;
-  const { data: projectQuestions } = useApiResource(
+  const { data: projectQuestions, error: projectQuestionsError } = useAllPagesResource(
     token && question?.project_id
-      ? buildApiPath("/questions", {
-          project_id: question.project_id,
-          limit: 200,
-          offset: 0,
-        })
+      ? buildApiPath("/questions", { project_id: question.project_id })
       : "",
     token,
     "Failed to load project questions."
   );
-  const { data: targetedNotes } = useApiResource(
+  const { data: targetedNotes, error: targetedNotesError } = useAllPagesResource(
     token && question?.project_id
       ? buildApiPath("/notes", {
           project_id: question.project_id,
           target_entity_type: "question",
           target_entity_id: question.question_id,
-          limit: 200,
-          offset: 0,
         })
       : "",
     token,
@@ -74,6 +100,10 @@ function QuestionDetailCard({
     "Failed to load question refactors."
   );
   const [refactorOpen, setRefactorOpen] = useState(false);
+  // A double click must not send two refactor requests: the ref blocks the
+  // second submit synchronously, the state disables the button.
+  const refactorInFlightRef = useRef(false);
+  const [refactorSubmitting, setRefactorSubmitting] = useState(false);
   const [form, setForm] = useState({
     childQuestionIds: [],
     hypothesis: "",
@@ -161,7 +191,7 @@ function QuestionDetailCard({
 
   async function submitRefactor(event) {
     event.preventDefault();
-    if (!question || !canWrite) {
+    if (!question || !canWrite || refactorInFlightRef.current) {
       return;
     }
     if (!form.text.trim()) {
@@ -173,6 +203,8 @@ function QuestionDetailCard({
       return;
     }
 
+    refactorInFlightRef.current = true;
+    setRefactorSubmitting(true);
     setBusy(true);
     setFlash("", "");
     try {
@@ -200,6 +232,8 @@ function QuestionDetailCard({
     } catch (err) {
       setFlash("", err.message || "Failed to refactor question.");
     } finally {
+      refactorInFlightRef.current = false;
+      setRefactorSubmitting(false);
       setBusy(false);
     }
   }
@@ -211,6 +245,7 @@ function QuestionDetailCard({
         {loading ? <span className="pill">Loading...</span> : null}
       </div>
       {error ? <p className="flash error">{error}</p> : null}
+      {questionAccess.error ? <p className="flash error">{questionAccess.error}</p> : null}
       {question ? (
         <div className="stack">
           {question.status === "superseded" ? (
@@ -404,7 +439,17 @@ function QuestionDetailCard({
                       ))}
                     </fieldset>
                   ) : null}
-                  <button type="submit" className="btn-primary">
+                  {projectQuestionsError ? (
+                    <p className="flash error">{projectQuestionsError}</p>
+                  ) : null}
+                  {targetedNotesError ? (
+                    <p className="flash error">{targetedNotesError}</p>
+                  ) : null}
+                  <button
+                    type="submit"
+                    className="btn-primary"
+                    disabled={refactorSubmitting}
+                  >
                     Create replacement
                   </button>
                 </form>

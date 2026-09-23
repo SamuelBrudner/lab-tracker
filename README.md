@@ -187,11 +187,12 @@ The shortest source install on macOS or Linux uses
 ```bash
 git clone https://github.com/SamuelBrudner/lab-tracker.git
 cd lab-tracker
-uv venv
+uv sync --frozen
 source .venv/bin/activate
-uv pip install -e .
 lab-tracker serve
 ```
+
+`uv sync --frozen` installs the exact dependency versions recorded in `uv.lock`.
 
 `lab-tracker serve` applies migrations, snapshots a file-backed SQLite database
 before migrating it, opens `http://127.0.0.1:8000/app`, and starts the server.

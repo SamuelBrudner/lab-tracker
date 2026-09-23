@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import logging
 import threading
@@ -8,15 +9,20 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+from api_helpers import stamp_schema_at_head
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
+from sqlalchemy.exc import OperationalError
 from starlette.requests import Request
 
+from lab_tracker import auth as auth_module
 from lab_tracker.app import create_app
-from lab_tracker.auth import Role
+from lab_tracker.app_parts import runtime as runtime_module
+from lab_tracker.auth import AuthService, InvitationTokenService, PasswordHasher, Role
 from lab_tracker.db import Base
 from lab_tracker.errors import AuthError, ConflictError, ValidationError
 from lab_tracker.logging import JsonFormatter
+from lab_tracker.rate_limit import InMemoryRateLimiter
 from lab_tracker.routes.auth import _bootstrap_token_for_status
 
 
@@ -38,6 +44,7 @@ def _bootstrap_database(monkeypatch, tmp_path) -> None:
         connect_args={"check_same_thread": False},
     )
     Base.metadata.create_all(bind=engine)
+    stamp_schema_at_head(engine)
     engine.dispose()
 
 
@@ -292,6 +299,23 @@ def test_local_auth_disabled_allows_write_without_authorization(monkeypatch, tmp
         assert create_response.json()["data"]["created_by"] == me_payload["data"]["user_id"]
 
 
+def test_local_auth_disabled_startup_fails_when_the_local_user_cannot_be_stored(
+    monkeypatch, tmp_path
+):
+    """Auth-disabled mode needs the local user row (FK target), so failing to store it
+    fails startup instead of logging a warning (L39)."""
+    _bootstrap_database(monkeypatch, tmp_path)
+    monkeypatch.setenv("LAB_TRACKER_AUTH_ENABLED", "false")
+
+    def failing_bootstrap(_session_factory):
+        raise OperationalError("INSERT INTO users", {}, Exception("database is locked"))
+
+    monkeypatch.setattr(runtime_module, "ensure_local_auth_user", failing_bootstrap)
+
+    with pytest.raises(OperationalError, match="database is locked"), TestClient(create_app()):
+        pass
+
+
 def test_protected_routes_accept_valid_authorization(monkeypatch, tmp_path):
     _bootstrap_database(monkeypatch, tmp_path)
     with TestClient(create_app()) as client:
@@ -334,8 +358,8 @@ def test_register_non_viewer_requires_admin_token(monkeypatch, tmp_path):
             json={"username": "editor-2", "password": "secret", "role": "editor"},
             headers=_auth_headers(viewer_token),
         )
-        assert viewer_auth_response.status_code == 401
-        assert viewer_auth_response.json()["error"]["code"] == "auth_error"
+        assert viewer_auth_response.status_code == 403
+        assert viewer_auth_response.json()["error"]["code"] == "forbidden"
 
         _seed_admin(client)
         admin_token = _login(client, "root", "secret")
@@ -481,6 +505,63 @@ def test_bootstrap_status_can_opt_into_public_first_run_disclosure(
         assert status_payload["bootstrap_token_warning"] is None
 
 
+@pytest.mark.parametrize(
+    "peer",
+    [
+        ("172.18.0.1", 50000),  # Docker bridge gateway in front of a host proxy
+        ("192.168.65.1", 50000),  # Docker Desktop
+        ("127.0.0.1", 50000),  # same-host reverse proxy
+    ],
+)
+def test_bootstrap_token_is_never_disclosed_by_peer_address_outside_local(
+    monkeypatch,
+    tmp_path,
+    peer,
+):
+    _bootstrap_database(monkeypatch, tmp_path)
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "production")
+    monkeypatch.delenv("LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE", raising=False)
+    monkeypatch.setenv("LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN", "bootstrap-secret")
+    app = create_app()
+    request = _bootstrap_status_request(app, client=peer, host="lab.example.org")
+
+    token, warning = _bootstrap_token_for_status(
+        request, bootstrap_token="bootstrap-secret", has_users=False
+    )
+
+    assert token is None
+    assert warning is not None
+    assert "LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN" in warning
+    assert "runtime-env/bootstrap-admin-token" in warning
+
+
+def test_bootstrap_status_hides_token_by_default_outside_local(monkeypatch, tmp_path):
+    _bootstrap_database(monkeypatch, tmp_path)
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "production")
+    monkeypatch.delenv("LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE", raising=False)
+    monkeypatch.setenv("LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN", "bootstrap-secret")
+    with TestClient(
+        create_app(),
+        base_url="http://127.0.0.1",
+        client=("127.0.0.1", 50000),
+    ) as client:
+        status_payload = client.get("/auth/bootstrap-status").json()["data"]
+        assert status_payload["bootstrap_token"] is None
+        assert status_payload["first_admin_available"] is True
+
+        # The operator pastes the token retrieved from the host; registration works.
+        created = client.post(
+            "/auth/register",
+            json={
+                "username": "root",
+                "password": "secret",
+                "role": "admin",
+                "bootstrap_token": "bootstrap-secret",
+            },
+        )
+        assert created.status_code == 201, created.text
+
+
 def test_admin_can_manage_users(monkeypatch, tmp_path):
     _bootstrap_database(monkeypatch, tmp_path)
     with TestClient(create_app()) as client:
@@ -496,7 +577,7 @@ def test_admin_can_manage_users(monkeypatch, tmp_path):
         viewer_token = viewer_response.json()["data"]["access_token"]
 
         denied_response = client.get("/auth/users", headers=_auth_headers(viewer_token))
-        assert denied_response.status_code == 401
+        assert denied_response.status_code == 403
 
         users_response = client.get("/auth/users", headers=_auth_headers(admin_token))
         assert users_response.status_code == 200
@@ -787,6 +868,54 @@ def test_invitation_claim_failure_rolls_back_user_creation(monkeypatch, tmp_path
         assert client.app.state.invitation_token_service.verify_invitation_token(invite_token)
 
 
+def test_invited_registration_over_an_existing_username_reports_the_conflict(
+    monkeypatch, tmp_path
+):
+    """An invitation to an already-registered email is not "already used" (L44)."""
+    _bootstrap_database(monkeypatch, tmp_path)
+    with TestClient(create_app()) as client:
+        auth_service = client.app.state.auth_service
+        invitation_service = client.app.state.invitation_token_service
+        auth_service.register_user(
+            username="member@example.org", password="secret", role=Role.VIEWER
+        )
+        issued = invitation_service.issue_invitation(
+            email="member@example.org", role=Role.EDITOR
+        )
+
+        response = client.post(
+            "/auth/register",
+            json={
+                "invite_token": issued.token,
+                "password": "long-enough-secret",
+                "password_confirmation": "long-enough-secret",
+                "username": "member@example.org",
+            },
+        )
+
+        assert response.status_code == 409, response.text
+        assert response.json()["error"]["message"] == "Username already exists."
+        assert invitation_service.list_invitations()[0].status == "pending"
+        assert auth_service.get_user("member@example.org").role is Role.VIEWER
+
+
+def test_in_memory_invited_registration_over_an_existing_username_reports_the_conflict():
+    auth_service = AuthService()
+    invitation_service = InvitationTokenService()
+    auth_service.register_user(username="member@example.org", password="secret", role=Role.VIEWER)
+    issued = invitation_service.issue_invitation(email="member@example.org", role=Role.EDITOR)
+
+    with pytest.raises(ConflictError, match="Username already exists."):
+        auth_service.register_invited_user(
+            invitation_token_service=invitation_service,
+            invite_token=issued.token,
+            username="member@example.org",
+            password="long-enough-secret",
+            password_confirmation="long-enough-secret",
+        )
+    assert invitation_service.list_invitations()[0].status == "pending"
+
+
 def test_concurrent_invitation_acceptance_creates_exactly_one_user(monkeypatch, tmp_path):
     _bootstrap_database(monkeypatch, tmp_path)
     app = create_app()
@@ -1023,6 +1152,27 @@ def test_refresh_rejects_expired_token(monkeypatch, tmp_path):
         assert refresh_response.json()["error"]["code"] == "auth_error"
 
 
+def test_login_spends_the_same_key_derivation_work_for_unknown_usernames(monkeypatch):
+    """Response time must not reveal whether a username exists (L43)."""
+    service = AuthService()
+    service.register_user(username="alice", password="secret", role=Role.VIEWER)
+    real_pbkdf2_hmac = hashlib.pbkdf2_hmac
+    iterations_used: list[int] = []
+
+    def counting_pbkdf2_hmac(hash_name, password, salt, iterations, *args, **kwargs):
+        iterations_used.append(iterations)
+        return real_pbkdf2_hmac(hash_name, password, salt, iterations, *args, **kwargs)
+
+    monkeypatch.setattr(auth_module.hashlib, "pbkdf2_hmac", counting_pbkdf2_hmac)
+
+    with pytest.raises(AuthError, match="Invalid credentials."):
+        service.authenticate("alice", "wrong-password")
+    with pytest.raises(AuthError, match="Invalid credentials."):
+        service.authenticate("nobody", "wrong-password")
+
+    assert iterations_used == [PasswordHasher.iterations, PasswordHasher.iterations]
+
+
 def test_login_rate_limits_repeated_invalid_credentials(monkeypatch, tmp_path):
     _bootstrap_database(monkeypatch, tmp_path)
     monkeypatch.setenv("LAB_TRACKER_AUTH_RATE_LIMIT_ATTEMPTS", "2")
@@ -1047,6 +1197,110 @@ def test_login_rate_limits_repeated_invalid_credentials(monkeypatch, tmp_path):
     assert limited.json()["error"]["code"] == "rate_limited"
 
 
+def test_login_block_survives_a_flood_of_unknown_usernames(monkeypatch, tmp_path):
+    _bootstrap_database(monkeypatch, tmp_path)
+    monkeypatch.setenv("LAB_TRACKER_AUTH_RATE_LIMIT_ATTEMPTS", "3")
+    monkeypatch.setenv("LAB_TRACKER_AUTH_RATE_LIMIT_WINDOW_SECONDS", "60")
+
+    with TestClient(create_app()) as client:
+        client.app.state.auth_rate_limiter = InMemoryRateLimiter(
+            max_attempts=3, window_seconds=60, max_buckets=20
+        )
+        _seed_admin(client, username="sam", password="secret")
+        for _ in range(3):
+            response = client.post("/auth/login", json={"username": "sam", "password": "wrong"})
+            assert response.status_code == 401
+
+        for index in range(60):
+            client.post("/auth/login", json={"username": f"nobody-{index}", "password": "x"})
+
+        limited = client.post("/auth/login", json={"username": "sam", "password": "secret"})
+
+    assert limited.status_code == 429
+    assert limited.json()["error"]["code"] == "rate_limited"
+
+
+def test_one_host_login_flood_does_not_rate_limit_other_hosts(monkeypatch, tmp_path):
+    """A host that fills its share of blocked login buckets is limited itself.
+
+    Registration uses its own limiter and other hosts keep their share of the
+    login table, so signup and ordinary failed logins elsewhere are unaffected.
+    """
+    _bootstrap_database(monkeypatch, tmp_path)
+    app = create_app()
+    with TestClient(app, client=("203.0.113.9", 40000)) as attacker:
+        app.state.auth_rate_limiter = InMemoryRateLimiter(
+            max_attempts=1,
+            window_seconds=60,
+            max_buckets=6,
+            max_buckets_per_client=3,
+        )
+        flood = [
+            attacker.post("/auth/login", json={"username": f"nobody-{index}", "password": "x"})
+            for index in range(20)
+        ]
+        other = TestClient(app, client=("198.51.100.7", 40000))
+        registered = other.post(
+            "/auth/register",
+            json={"username": "newcomer", "password": "secret-pass-1"},
+        )
+        failed_login = other.post("/auth/login", json={"username": "ghost", "password": "x"})
+        attacker_register = attacker.post(
+            "/auth/register",
+            json={"username": "attacker-signup", "password": "secret-pass-1"},
+        )
+
+    assert [response.status_code for response in flood[:3]] == [401, 401, 401]
+    assert {response.status_code for response in flood[3:]} == {429}
+    assert registered.status_code == 201
+    assert failed_login.status_code == 401
+    assert attacker_register.status_code == 201
+    assert app.state.register_rate_limiter is not app.state.auth_rate_limiter
+
+
+def test_login_flood_rotating_addresses_in_one_ipv6_64_shares_one_quota(monkeypatch, tmp_path):
+    """Rotating source addresses inside one IPv6 /64 does not mint new clients."""
+    _bootstrap_database(monkeypatch, tmp_path)
+    app = create_app()
+    with TestClient(app) as client:
+        app.state.auth_rate_limiter = InMemoryRateLimiter(
+            max_attempts=1,
+            window_seconds=60,
+            max_buckets=10,
+            max_buckets_per_client=2,
+        )
+        flood = [
+            TestClient(app, client=(f"2001:db8:1:2::{index + 1:x}", 40000)).post(
+                "/auth/login", json={"username": f"nobody-{index}", "password": "x"}
+            )
+            for index in range(6)
+        ]
+        other_prefix = TestClient(app, client=("2001:db8:1:3::1", 40000)).post(
+            "/auth/login", json={"username": "ghost", "password": "x"}
+        )
+        assert client.app is app
+
+    assert [response.status_code for response in flood] == [401, 401, 429, 429, 429, 429]
+    assert other_prefix.status_code == 401
+
+
+def test_public_viewer_registration_is_off_by_default_outside_local(monkeypatch, tmp_path):
+    """A non-local instance does not mint anonymous viewers unless opted in (L52)."""
+
+    _bootstrap_database(monkeypatch, tmp_path)
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "production")
+    monkeypatch.delenv("LAB_TRACKER_AUTH_PUBLIC_VIEWER_REGISTRATION_ENABLED", raising=False)
+
+    with TestClient(create_app()) as client:
+        denied = client.post(
+            "/auth/register",
+            json={"username": "anonymous-viewer", "password": "secret"},
+        )
+
+    assert denied.status_code == 401, denied.text
+    assert denied.json()["error"]["message"] == "Public viewer registration is disabled."
+
+
 def test_public_viewer_registration_can_be_disabled(monkeypatch, tmp_path):
     _bootstrap_database(monkeypatch, tmp_path)
     monkeypatch.setenv("LAB_TRACKER_AUTH_PUBLIC_VIEWER_REGISTRATION_ENABLED", "false")
@@ -1057,10 +1311,30 @@ def test_public_viewer_registration_can_be_disabled(monkeypatch, tmp_path):
             json={"username": "viewer-1", "password": "secret"},
         )
         assert denied.status_code == 401
+        assert denied.json()["error"]["code"] == "auth_error"
         assert "disabled" in denied.json()["error"]["message"]
 
         _seed_admin(client)
         admin_token = _login(client, "root", "secret")
+        _seed_admin(client, username="plain-editor", password="secret")
+        client.app.state.auth_service.update_user(
+            client.app.state.auth_service.get_user("plain-editor").user_id,
+            role=Role.EDITOR,
+        )
+        editor_token = _login(client, "plain-editor", "secret")
+        # A valid non-admin credential is not rejected; it lacks permission.
+        denied_editor = client.post(
+            "/auth/register",
+            json={"username": "viewer-3", "password": "secret"},
+            headers=_auth_headers(editor_token),
+        )
+        assert denied_editor.status_code == 403, denied_editor.text
+        assert denied_editor.json()["error"] == {
+            "code": "forbidden",
+            "message": "Public viewer registration is disabled.",
+            "issues": None,
+        }
+
         created_by_admin = client.post(
             "/auth/register",
             json={"username": "viewer-2", "password": "secret"},
@@ -1069,3 +1343,153 @@ def test_public_viewer_registration_can_be_disabled(monkeypatch, tmp_path):
 
     assert created_by_admin.status_code == 201
     assert created_by_admin.json()["data"]["user"]["role"] == "viewer"
+
+
+def _frozen_auth_clock(monkeypatch) -> dict[str, datetime]:
+    import lab_tracker.auth as auth_module
+
+    current_time = {"value": datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)}
+    monkeypatch.setattr(auth_module, "utc_now", lambda: current_time["value"])
+    return current_time
+
+
+def _user_id(client: TestClient, token: str) -> str:
+    response = client.get("/auth/me", headers=_auth_headers(token))
+    assert response.status_code == 200, response.text
+    return response.json()["data"]["user_id"]
+
+
+@pytest.mark.parametrize(
+    "update",
+    [{"password": "rotated-secret"}, {"role": "editor"}],
+    ids=["password-reset", "role-change"],
+)
+def test_admin_credential_change_revokes_existing_sessions(monkeypatch, tmp_path, update):
+    _bootstrap_database(monkeypatch, tmp_path)
+    with TestClient(create_app()) as client:
+        _seed_admin(client)
+        admin_token = _login(client, "root", "secret")
+        _seed_admin(client, username="victim", password="secret")
+        client.app.state.auth_service.update_user(
+            client.app.state.auth_service.get_user("victim").user_id,
+            role=Role.VIEWER,
+        )
+        stolen_token = _login(client, "victim", "secret")
+        victim_id = _user_id(client, stolen_token)
+
+        updated = client.patch(
+            f"/auth/users/{victim_id}",
+            json=update,
+            headers=_auth_headers(admin_token),
+        )
+        assert updated.status_code == 200, updated.text
+
+        me = client.get("/auth/me", headers=_auth_headers(stolen_token))
+        refresh = client.post("/auth/refresh", headers=_auth_headers(stolen_token))
+        assert me.status_code == 401
+        assert me.json()["error"]["message"] == "Session has been revoked."
+        assert refresh.status_code == 401
+        # Unrelated sessions keep working.
+        assert client.get("/auth/me", headers=_auth_headers(admin_token)).status_code == 200
+        password = update.get("password", "secret")
+        assert _user_id(client, _login(client, "victim", password)) == victim_id
+
+
+@pytest.mark.parametrize(
+    "update",
+    [{"password": "rotated-secret"}, {"role": "editor"}],
+    ids=["own-password", "own-role"],
+)
+def test_admin_changing_own_credentials_ends_their_current_session(
+    monkeypatch, tmp_path, update
+):
+    """Documented in self-hosted-operations.md: the admin must sign in again."""
+    _bootstrap_database(monkeypatch, tmp_path)
+    with TestClient(create_app()) as client:
+        _seed_admin(client)
+        _seed_admin(client, username="second-admin")
+        admin_token = _login(client, "root", "secret")
+        admin_id = _user_id(client, admin_token)
+
+        updated = client.patch(
+            f"/auth/users/{admin_id}",
+            json=update,
+            headers=_auth_headers(admin_token),
+        )
+
+        assert updated.status_code == 200, updated.text
+        me = client.get("/auth/me", headers=_auth_headers(admin_token))
+        assert me.status_code == 401
+        assert me.json()["error"]["message"] == "Session has been revoked."
+        password = update.get("password", "secret")
+        assert _user_id(client, _login(client, "root", password)) == admin_id
+
+
+def test_sign_out_everywhere_revokes_every_session_of_the_caller(monkeypatch, tmp_path):
+    _bootstrap_database(monkeypatch, tmp_path)
+    with TestClient(create_app()) as client:
+        _seed_admin(client)
+        _seed_admin(client, username="other")
+        laptop = _login(client, "root", "secret")
+        phone = _login(client, "root", "secret")
+        other = _login(client, "other", "secret")
+
+        revoked = client.post("/auth/sessions/revoke", headers=_auth_headers(laptop))
+
+        assert revoked.status_code == 200, revoked.text
+        assert revoked.json()["data"]["username"] == "root"
+        assert client.get("/auth/me", headers=_auth_headers(laptop)).status_code == 401
+        assert client.get("/auth/me", headers=_auth_headers(phone)).status_code == 401
+        assert client.post("/auth/refresh", headers=_auth_headers(phone)).status_code == 401
+        # A revoked admin session can no longer authorize privileged registration.
+        register = client.post(
+            "/auth/register",
+            json={"username": "editor-x", "password": "secret", "role": "editor"},
+            headers=_auth_headers(phone),
+        )
+        assert register.status_code == 401
+        assert client.get("/auth/me", headers=_auth_headers(other)).status_code == 200
+        fresh = _login(client, "root", "secret")
+        assert client.get("/auth/me", headers=_auth_headers(fresh)).status_code == 200
+
+
+def test_sign_out_everywhere_is_unavailable_when_auth_is_disabled(monkeypatch, tmp_path):
+    _bootstrap_database(monkeypatch, tmp_path)
+    monkeypatch.setenv("LAB_TRACKER_AUTH_ENABLED", "false")
+    with TestClient(create_app()) as client:
+        response = client.post("/auth/sessions/revoke")
+        assert response.status_code == 401
+        assert "authentication is disabled" in response.json()["error"]["message"]
+
+
+def test_refresh_cannot_extend_a_session_past_its_absolute_lifetime(monkeypatch, tmp_path):
+    _bootstrap_database(monkeypatch, tmp_path)
+    monkeypatch.setenv("LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES", "60")
+    monkeypatch.setenv("LAB_TRACKER_AUTH_SESSION_MAX_AGE_HOURS", "2")
+    clock = _frozen_auth_clock(monkeypatch)
+    signed_in_at = clock["value"]
+
+    with TestClient(create_app()) as client:
+        _seed_admin(client, username="sam")
+        token = _login(client, "sam", "secret")
+        for minutes in (50, 100):
+            clock["value"] = signed_in_at + timedelta(minutes=minutes)
+            refreshed = client.post("/auth/refresh", headers=_auth_headers(token))
+            assert refreshed.status_code == 200, refreshed.text
+            token = refreshed.json()["data"]["access_token"]
+        expires_at = datetime.fromisoformat(
+            refreshed.json()["data"]["expires_at"].replace("Z", "+00:00")
+        )
+        # The refresh at +100 min would normally run to +160 min; it is capped.
+        assert expires_at == signed_in_at + timedelta(hours=2)
+
+        clock["value"] = signed_in_at + timedelta(minutes=119)
+        assert client.get("/auth/me", headers=_auth_headers(token)).status_code == 200
+        clock["value"] = signed_in_at + timedelta(hours=2)
+        assert client.post("/auth/refresh", headers=_auth_headers(token)).status_code == 401
+        assert client.get("/auth/me", headers=_auth_headers(token)).status_code == 401
+
+        # Signing in again starts a new session.
+        assert client.get(
+            "/auth/me", headers=_auth_headers(_login(client, "sam", "secret"))
+        ).status_code == 200

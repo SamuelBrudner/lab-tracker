@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta
 from email.headerregistry import Address
+from email.utils import quote
 from uuid import UUID, uuid4
 
 from lab_tracker.errors import NotFoundError, ValidationError
@@ -17,6 +19,8 @@ from lab_tracker.models import (
     utc_now,
 )
 from lab_tracker.services.base import BaseService, ServiceContext
+
+logger = logging.getLogger(__name__)
 
 REVIEW_READY_EVENT = "review_ready"
 TEST_EVENT = "test"
@@ -38,7 +42,25 @@ def normalize_review_email(value: str) -> str:
         raise ValidationError("notification_email must be one valid email address.") from exc
     if not address.username or not address.domain:
         raise ValidationError("notification_email must be one valid email address.")
-    return f"{address.username}@{address.domain.lower()}"
+    # Rebuild via addr_spec so a quoted local part stays quoted; a bare
+    # username@domain would not re-parse and would fail every later send.
+    domain = address.domain.lower()
+    normalized = Address(username=address.username, domain=domain).addr_spec
+    if not _reparses_to(normalized, username=address.username, domain=domain):
+        # The stdlib only quotes local parts containing specials, so a quoted
+        # local part with a leading, trailing or doubled dot comes back bare.
+        normalized = f'"{quote(address.username)}"@{domain}'
+    if not _reparses_to(normalized, username=address.username, domain=domain):
+        raise ValidationError("notification_email must be one valid email address.")
+    return normalized
+
+
+def _reparses_to(addr_spec: str, *, username: str, domain: str) -> bool:
+    try:
+        reparsed = Address(addr_spec=addr_spec)
+    except Exception:
+        return False
+    return reparsed.username == username and reparsed.domain == domain
 
 
 class ReviewEmailService(BaseService):
@@ -119,6 +141,10 @@ class ReviewEmailService(BaseService):
 
         if not self.delivery_enabled:
             raise ValidationError("Review email delivery is not enabled.")
+        if recipient_user_id is not None and not self.repository.user_exists(
+            recipient_user_id
+        ):
+            raise ValidationError("recipient_user_id does not reference an existing user.")
         now = utc_now()
         delivery_id = uuid4()
         delivery = ReviewEmailDelivery(
@@ -150,6 +176,18 @@ class ReviewEmailService(BaseService):
         if not self.delivery_enabled:
             return None
         claimed_at = now or utc_now()
+        with self.unit_of_work():
+            dead_lettered = self.repository.review_email_outbox.dead_letter_expired_leases(
+                now=claimed_at,
+                max_attempts=self.max_attempts,
+            )
+        for delivery_id in dead_lettered:
+            logger.warning(
+                "Review email delivery %s failed: its lease expired after %d attempt(s) "
+                "without a reported result.",
+                delivery_id,
+                self.max_attempts,
+            )
         while True:
             claim_token = uuid4()
             with self.unit_of_work():
@@ -157,6 +195,7 @@ class ReviewEmailService(BaseService):
                     now=claimed_at,
                     lease_until=claimed_at + timedelta(seconds=max(1, lease_seconds)),
                     claim_token=claim_token,
+                    max_attempts=self.max_attempts,
                 )
             if delivery is None:
                 return None

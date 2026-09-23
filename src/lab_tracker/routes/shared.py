@@ -3,19 +3,27 @@
 from __future__ import annotations
 
 import json
+import re
 import unicodedata
 from datetime import datetime
 from typing import Annotated, Any
-from urllib.parse import quote, unquote
+from urllib.parse import quote, urlsplit, urlunsplit
 from uuid import UUID
 
 from fastapi import Query
+from pydantic import TypeAdapter
 from starlette.requests import Request
-from starlette.responses import JSONResponse
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.application import RequestHandlers
-from lab_tracker.auth import AuthContext, AuthService, TokenService, User, extract_bearer_token
+from lab_tracker.auth import (
+    AuthContext,
+    AuthService,
+    TokenService,
+    User,
+    extract_bearer_token,
+    resolve_session_user,
+)
 from lab_tracker.errors import AuthError, ValidationError
 from lab_tracker.instance_url import normalize_instance_base_url
 from lab_tracker.models import (
@@ -26,21 +34,19 @@ from lab_tracker.models import (
     NoteStatus,
     ProjectStatus,
     QuestionStatus,
-    SessionStatus,
     UsageEventResourceType,
     UsageEventVerb,
 )
 from lab_tracker.schemas import (
     AuthTokenRead,
     AuthUserRead,
-    ErrorEnvelope,
-    ErrorInfo,
+    EntityRefIn,
     ListEnvelope,
     PaginationMeta,
 )
 
 CreatedByFilter = Annotated[
-    str | None,
+    UUID | None,
     Query(
         description=(
             "Filter by the FK-backed attribution user UUID. Legacy string-only "
@@ -48,6 +54,11 @@ CreatedByFilter = Annotated[
         ),
     ),
 ]
+
+
+def created_by_filter_value(created_by: UUID | None) -> str | None:
+    """Return the canonical string form of a validated ``CreatedByFilter`` value."""
+    return str(created_by) if created_by is not None else None
 
 
 def auth_user_read(user: User) -> AuthUserRead:
@@ -65,11 +76,6 @@ def auth_token_read(user: User, token: str, expires_at: datetime) -> AuthTokenRe
         expires_at=expires_at,
         user=auth_user_read(user),
     )
-
-
-def auth_error_response(message: str) -> JSONResponse:
-    payload = ErrorEnvelope(error=ErrorInfo(code="auth_error", message=message))
-    return JSONResponse(status_code=401, content=payload.model_dump())
 
 
 def actor_from_request(request: Request | None) -> AuthContext:
@@ -101,11 +107,6 @@ def ensure_project_owner(request: Request, project_id: Any) -> None:
     api_from_request(request).require_project_owner(project_id, actor=actor)
 
 
-def ensure_group_read(request: Request, group_id: Any) -> None:
-    actor = actor_from_request(request)
-    api_from_request(request).require_group_read(group_id, actor=actor)
-
-
 def ensure_group_owner(request: Request, group_id: Any) -> None:
     actor = actor_from_request(request)
     api_from_request(request).require_group_owner(group_id, actor=actor)
@@ -127,13 +128,6 @@ def record_usage_view(
     )
 
 
-def filter_project_scoped_items(request: Request, items: list[Any]) -> list[Any]:
-    allowed = accessible_project_ids_from_request(request)
-    if allowed is None:
-        return items
-    return [item for item in items if getattr(item, "project_id", None) in allowed]
-
-
 def api_from_request(request: Request, fallback: LabTrackerAPI | None = None) -> LabTrackerAPI:
     api = getattr(request.state, "lab_tracker_api", None)
     if api is not None:
@@ -150,10 +144,11 @@ def actor_from_authorization_header(
     token_service: TokenService,
 ) -> AuthContext:
     token = extract_bearer_token(request.headers.get("authorization"))
-    claims = token_service.verify_access_token(token)
-    user = auth_service.get_user_by_id(claims.user_id)
-    if user is None:
-        raise AuthError("Invalid token.")
+    _claims, user = resolve_session_user(
+        token,
+        token_service=token_service,
+        auth_service=auth_service,
+    )
     return AuthContext(user_id=user.user_id, role=user.role)
 
 
@@ -167,18 +162,19 @@ def provenance_base_url(request: Request) -> str:
 
     Prefers the configured ``LAB_TRACKER_BASE_URL`` so identifiers are stable
     names independent of the serving host; falls back to the request's own base
-    URL when unset.
+    URL when unset. That fallback keeps the ASGI ``root_path`` of a
+    reverse-proxied mount (``https://host/lab``) so identifiers dereference to
+    where the app is actually served; only the origin part is normalized.
     """
     settings = getattr(request.app.state, "settings", None)
     configured = settings.resolved_base_url() if settings is not None else ""
     if configured:
         return configured
-    return normalize_instance_base_url(str(request.base_url))
-
-
-def safe_attachment_filename(filename: str) -> str:
-    cleaned = _clean_attachment_filename(filename)
-    return _ascii_attachment_fallback(cleaned)
+    request_base = urlsplit(str(request.base_url))
+    origin = normalize_instance_base_url(
+        urlunsplit((request_base.scheme, request_base.netloc, "", "", ""))
+    )
+    return f"{origin}{request_base.path.rstrip('/')}"
 
 
 def content_disposition_header(disposition: str, filename: str) -> str:
@@ -190,8 +186,22 @@ def content_disposition_header(disposition: str, filename: str) -> str:
     return header
 
 
+# HTML form-data encoding (and httpx) escapes only these characters in a
+# multipart ``filename``, and Starlette stores the name without undoing them.
+# Every other ``%`` is part of the real filename, so no general percent-decoding.
+_FORM_DATA_FILENAME_ESCAPES = re.compile("%(22|0D|0A)", re.IGNORECASE)
+_FORM_DATA_FILENAME_UNESCAPED = {"22": '"', "0D": "\r", "0A": "\n"}
+
+
+def _undo_form_data_filename_escapes(filename: str) -> str:
+    return _FORM_DATA_FILENAME_ESCAPES.sub(
+        lambda match: _FORM_DATA_FILENAME_UNESCAPED[match.group(1).upper()],
+        filename,
+    )
+
+
 def _clean_attachment_filename(filename: str) -> str:
-    cleaned = unquote((filename or "").strip())
+    cleaned = _undo_form_data_filename_escapes((filename or "").strip())
     if not cleaned:
         return "download"
     cleaned = cleaned.replace("\r", "_").replace("\n", "_")
@@ -205,7 +215,9 @@ def _clean_attachment_filename(filename: str) -> str:
 def _ascii_attachment_fallback(filename: str) -> str:
     normalized = unicodedata.normalize("NFKD", filename)
     fallback = "".join(ch for ch in normalized if 32 <= ord(ch) < 127)
-    fallback = fallback.replace("\\", "_").replace("/", "_").strip()
+    # Some user agents percent-decode the plain ``filename`` parameter, so a
+    # literal ``%`` is carried only by the exact ``filename*`` parameter.
+    fallback = fallback.replace("\\", "_").replace("/", "_").replace("%", "_").strip()
     if fallback and not fallback.startswith("."):
         return fallback
     suffix = ""
@@ -247,6 +259,9 @@ def parse_json_form_field(raw_value: str | None, field_name: str) -> Any:
         raise ValidationError(f"{field_name} must be valid JSON.") from exc
 
 
+_ENTITY_REFS_ADAPTER: TypeAdapter[list[EntityRef]] = TypeAdapter(list[EntityRefIn])
+
+
 def parse_entity_refs_form(raw_value: str | None) -> list[EntityRef] | None:
     parsed = parse_json_form_field(raw_value, "targets")
     if parsed is None:
@@ -254,7 +269,9 @@ def parse_entity_refs_form(raw_value: str | None) -> list[EntityRef] | None:
     if not isinstance(parsed, list):
         raise ValidationError("targets must decode to a list.")
     try:
-        return [EntityRef.model_validate(item) for item in parsed]
+        # Multipart targets must be as strict as JSON ones: an unknown or
+        # misspelled key is rejected, not dropped.
+        return _ENTITY_REFS_ADAPTER.validate_python(parsed)
     except Exception as exc:
         raise ValidationError("targets contains invalid entity refs.") from exc
 
@@ -297,10 +314,6 @@ def dataset_default_status() -> DatasetStatus:
 
 def note_default_status() -> NoteStatus:
     return NoteStatus.STAGED
-
-
-def session_default_status() -> SessionStatus:
-    return SessionStatus.ACTIVE
 
 
 def analysis_default_status() -> AnalysisStatus:

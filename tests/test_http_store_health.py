@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import FrozenInstanceError, fields
 from uuid import UUID
 
@@ -328,21 +329,16 @@ def test_other_terminal_statuses_have_one_static_redacted_failure(
 
 
 @pytest.mark.parametrize("status_code", sorted(HTTP_REDIRECT_STATUS_CODES))
-def test_every_redirect_status_reauthorizes_cross_origin_and_preserves_head(
+def test_every_redirect_status_within_prefix_reauthorizes_and_preserves_head(
     status_code: int,
 ) -> None:
     redirect = FakeHttpResponse(
         status_code=status_code,
-        headers={"Location": "https://archive.example/final"},
+        headers={"Location": "https://store.example/base/final"},
         chunks=(b"redirect body must not be read",),
     )
     final = FakeHttpResponse(status_code=204, chunks=(b"must not be read",))
-    dns = FakeAddressResolver(
-        {
-            "store.example": [_PUBLIC_IP],
-            "archive.example": [_SECOND_PUBLIC_IP],
-        }
-    )
+    dns = FakeAddressResolver({"store.example": [_PUBLIC_IP]})
     clock = FakeClock(100.0)
     probe, client, _ = _probe(
         redirect,
@@ -357,12 +353,12 @@ def test_every_redirect_status_reauthorizes_cross_origin_and_preserves_head(
     assert result == StoreHealth(StoreHealthStatus.HEALTHY)
     assert dns.calls == [
         ("store.example", 443),
-        ("archive.example", 443),
+        ("store.example", 443),
     ]
     assert [method for method, _ in client.calls] == ["HEAD", "HEAD"]
-    assert [target.hostname for _, target in client.calls] == [
-        "store.example",
-        "archive.example",
+    assert [target.absolute_url for _, target in client.calls] == [
+        "https://store.example/base/",
+        "https://store.example/base/final",
     ]
     shared_deadline = dns.deadlines[0]
     assert shared_deadline is not None
@@ -375,6 +371,39 @@ def test_every_redirect_status_reauthorizes_cross_origin_and_preserves_head(
     assert final.iterated_chunks == 0
     assert redirect.closed is True
     assert final.closed is True
+
+
+@pytest.mark.parametrize(
+    "location",
+    (
+        # Artifact resolution refuses every redirect that leaves the
+        # registered prefix, so health must not report such a root HEALTHY.
+        "https://archive.example/final",
+        "https://store.example/elsewhere",
+        "/elsewhere",
+        "https://store.example:8443/base/final",
+    ),
+)
+def test_redirect_leaving_registered_prefix_is_unreachable_and_never_opened(
+    location: str,
+) -> None:
+    redirect = FakeHttpResponse(status_code=302, headers={"Location": location})
+    never_opened = FakeHttpResponse(status_code=204)
+    dns = FakeAddressResolver(
+        {
+            "store.example": [_PUBLIC_IP],
+            "archive.example": [_SECOND_PUBLIC_IP],
+        }
+    )
+    probe, client, _ = _probe(redirect, never_opened, dns=dns)
+
+    result = probe(_target())
+
+    _assert_static_failure(result)
+    assert dns.calls == [("store.example", 443)]
+    assert len(client.calls) == 1
+    assert redirect.closed is True
+    assert never_opened.closed is False
 
 
 @pytest.mark.parametrize(
@@ -426,7 +455,7 @@ def test_redirect_without_location_is_static_failure_and_closes_response(
 
 
 def test_redirect_rebinding_is_denied_before_second_request() -> None:
-    redirect = FakeHttpResponse(status_code=302, headers={"Location": "/next"})
+    redirect = FakeHttpResponse(status_code=302, headers={"Location": "/base/next"})
     dns = FakeAddressResolver(
         sequences={
             "store.example": (
@@ -477,20 +506,14 @@ def test_canonical_redirect_loop_is_detected_before_second_request() -> None:
 def test_redirect_limit_bounds_requests_and_closes_every_response() -> None:
     first = FakeHttpResponse(
         status_code=302,
-        headers={"Location": "https://archive.example/middle"},
+        headers={"Location": "https://store.example/base/middle"},
     )
     second = FakeHttpResponse(
         status_code=307,
-        headers={"Location": "https://final.example/end"},
+        headers={"Location": "https://store.example/base/end"},
     )
     never_opened = FakeHttpResponse()
-    dns = FakeAddressResolver(
-        {
-            "store.example": [_PUBLIC_IP],
-            "archive.example": [_SECOND_PUBLIC_IP],
-            "final.example": ["151.101.1.69"],
-        }
-    )
+    dns = FakeAddressResolver({"store.example": [_PUBLIC_IP]})
     probe, client, _ = _probe(
         first,
         second,
@@ -504,7 +527,7 @@ def test_redirect_limit_bounds_requests_and_closes_every_response() -> None:
     _assert_static_failure(result)
     assert dns.calls == [
         ("store.example", 443),
-        ("archive.example", 443),
+        ("store.example", 443),
     ]
     assert [method for method, _ in client.calls] == ["HEAD", "HEAD"]
     assert first.closed is True
@@ -695,3 +718,27 @@ def test_real_safe_client_sends_head_without_credentials_or_proxy_headers(
     assert b"\r\ncookie:" not in lowered
     assert b"\r\nproxy-authorization:" not in lowered
     assert connector.socket.closed is True
+
+
+def test_ordinary_probe_exception_is_logged_without_its_message(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    secret = "hunter2"
+    probe, _, _ = _probe(RuntimeError(f"failed https://user:{secret}@store.example/"))
+    target = _target(credential_ref=f"vault:{secret}")
+
+    with caplog.at_level(logging.WARNING, logger="lab_tracker.http_store_health"):
+        result = probe(target)
+
+    _assert_static_failure(result)
+
+    records = [
+        record for record in caplog.records if record.name == "lab_tracker.http_store_health"
+    ]
+    assert len(records) == 1
+    assert records[0].levelno == logging.WARNING
+    message = records[0].getMessage()
+    assert str(target.store_id) in message
+    assert "RuntimeError" in message
+    assert secret not in message
+    assert records[0].exc_info is None

@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
+from alembic.config import Config
+from alembic.runtime.migration import MigrationContext
+from alembic.script import ScriptDirectory
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -25,6 +29,21 @@ from lab_tracker.store_authority_registry import (
 from lab_tracker.store_authority_use import FixedStoreAuthoritySnapshotProvider
 
 TEST_STORE_AUTHORITY_GRANT_ID = "test-store-authority"
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def stamp_schema_at_head(engine: Engine) -> None:
+    """Record the Alembic head on a schema built with ``Base.metadata.create_all``.
+
+    ``create_app()`` refuses to start against a database that is not at the
+    Alembic head. Tests that build their schema from ORM metadata (which
+    test_schema_parity keeps identical to the migrations) stamp it so the
+    startup schema check accepts it.
+    """
+
+    script = ScriptDirectory.from_config(Config(str(_REPO_ROOT / "alembic.ini")))
+    with engine.begin() as connection:
+        MigrationContext.configure(connection).stamp(script, "heads")
 
 
 class ExactCandidateTestStoreAuthority:
@@ -174,7 +193,21 @@ def drain_test_resources() -> None:
         raise failure
 
 
-def app_test_client(**client_kwargs) -> TestClient:
+def isolate_default_database_url(monkeypatch: Any, tmp_path: Path) -> None:
+    """Point ``create_app()``'s default database at ``tmp_path``.
+
+    Without ``LAB_TRACKER_DATABASE_URL`` the app defaults to
+    ``./lab_tracker.db``, so a test that builds it bare would open (and lock)
+    a database in the developer's working directory.
+    """
+
+    monkeypatch.setenv(
+        "LAB_TRACKER_DATABASE_URL",
+        f"sqlite+pysqlite:///{tmp_path / 'lab_tracker.db'}",
+    )
+
+
+def app_test_client(*, verify_schema: bool = True, **client_kwargs) -> TestClient:
     """A TestClient over a fresh app whose DB engine is disposed at teardown.
 
     ``TestClient(create_app())`` used without a ``with`` block never runs the
@@ -182,9 +215,13 @@ def app_test_client(**client_kwargs) -> TestClient:
     connection. This preserves that no-lifespan behavior while enrolling the
     engine and app-owned Git health directory for deterministic teardown via the
     autouse drain fixture.
+
+    ``verify_schema=False`` builds the app without the startup database schema
+    check, for tests that only exercise routes that never touch the database or
+    that simulate a database failing after startup.
     """
 
-    app = create_app()
+    app = create_app(verify_schema=verify_schema)
     register_test_resources(
         app.state.db_engine,
         None,

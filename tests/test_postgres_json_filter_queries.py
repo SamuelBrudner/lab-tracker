@@ -447,3 +447,48 @@ def test_postgres_note_target_filters_do_not_compare_json_columns(
         if item["note_id"] == str(multi_target_note["note_id"])
     )
     assert returned_multi_target_note["metadata"] == multi_target_note["metadata"]
+
+
+def test_postgres_note_capture_bundle_filter_matches_the_metadata_text(
+    postgres_client: TestClient,
+    postgres_admin_auth_headers: dict[str, str],
+) -> None:
+    """L102: capture bundling filters ``metadata.capture_bundle_id`` in SQL."""
+
+    from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
+
+    project_id = _create_project(
+        postgres_client,
+        postgres_admin_auth_headers,
+        label="Capture bundle filter",
+    )
+    note_ids: dict[str, str] = {}
+    for label, bundle_id in (("image", "bundle-pg"), ("voice", "bundle-pg"), ("other", "x")):
+        response = postgres_client.post(
+            "/notes",
+            json={
+                "project_id": str(project_id),
+                "raw_content": f"{label} note",
+                "metadata": {"capture_bundle_id": bundle_id},
+            },
+            headers=postgres_admin_auth_headers,
+        )
+        assert response.status_code == 201, response.text
+        note_ids[label] = response.json()["data"]["note_id"]
+    _create_note(
+        postgres_client,
+        postgres_admin_auth_headers,
+        project_id=project_id,
+        label="unbundled",
+    )
+
+    with postgres_client.app.state.db_session_factory() as session:
+        notes, total = SQLAlchemyLabTrackerRepository(session).query_notes(
+            project_id=project_id,
+            capture_bundle_id="bundle-pg",
+            limit=None,
+            offset=0,
+        )
+
+    assert total == 2
+    assert {str(note.note_id) for note in notes} == {note_ids["image"], note_ids["voice"]}

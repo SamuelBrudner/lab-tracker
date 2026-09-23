@@ -34,6 +34,10 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m alembic upgrade head
 ```
 
+With `uv`, `uv sync --frozen --extra test --extra lint` installs the exact
+versions recorded in `uv.lock` instead; pip resolves the ranges in
+`pyproject.toml`.
+
 PowerShell execution policy may block `npm.ps1`. Use `npm.cmd` from PowerShell:
 
 ```powershell

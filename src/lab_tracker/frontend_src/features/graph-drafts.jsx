@@ -46,6 +46,7 @@ function GraphDraftDetailCard({
     operationReviewNotes,
     loading,
     error,
+    accessError,
     commitMessage,
     setCommitMessage,
     reviewNote,
@@ -55,6 +56,7 @@ function GraphDraftDetailCard({
     undoableOperationIds,
     canEditDraft,
     canReviseDraft,
+    supportsAiRevision,
     canSubmitDraft,
     canReviewDraft,
     canCommitDraft,
@@ -97,6 +99,7 @@ function GraphDraftDetailCard({
         {loading ? <span className="pill">Loading...</span> : null}
       </div>
       {error ? <p className="flash error">{error}</p> : null}
+      {accessError ? <p className="flash error">{accessError}</p> : null}
 
       {changeSet ? (
         <div className="daily-review-report">
@@ -128,6 +131,7 @@ function GraphDraftDetailCard({
             recordingSupported={dictation.recordingSupported}
             isRecording={dictation.isRecording}
             canEditDraft={canReviseDraft}
+            revisionSupported={supportsAiRevision}
             spokenReview={workflow.spokenReview}
             reviseAudio={dictation.reviseAudio}
             reviseFeedback={dictation.reviseFeedback}

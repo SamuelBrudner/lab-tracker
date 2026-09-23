@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -175,6 +176,18 @@ def test_dockerfile_runs_app_as_non_root_user():
     assert "USER labtracker" in dockerfile
 
 
+def test_dockerfile_reaps_orphans_under_every_runtime():
+    """Render and plain ``docker run`` have no ``init: true``; the image must reap."""
+    repo_root = Path(__file__).resolve().parent.parent
+    dockerfile = (repo_root / "Dockerfile").read_text(encoding="utf-8")
+
+    assert "apt-get install --no-install-recommends -y ca-certificates tini" in dockerfile
+    assert (
+        'ENTRYPOINT ["/usr/bin/tini", "-s", "--", "/app/docker-entrypoint.sh"]'
+        in dockerfile
+    )
+
+
 def test_docker_entrypoint_has_short_migration_retry_budget():
     repo_root = Path(__file__).resolve().parent.parent
     entrypoint = (repo_root / "deploy" / "docker-entrypoint.sh").read_text(encoding="utf-8")
@@ -341,7 +354,8 @@ def test_wheel_installed_frontend_serves_pwa_assets(tmp_path: Path, built_wheel:
 from fastapi.testclient import TestClient
 from lab_tracker.app import create_app
 
-client = TestClient(create_app())
+# Static PWA assets only: skip the startup database schema check.
+client = TestClient(create_app(verify_schema=False))
 sw_response = client.get("/app/sw.js")
 assert sw_response.status_code == 200
 assert "lab-tracker-shell-" in sw_response.text
@@ -373,3 +387,155 @@ def test_mcp_dependency_excludes_sdk_without_bundled_fastmcp() -> None:
     assert "1.26.0" not in mcp.specifier
     assert "2.0.0" not in mcp.specifier
     assert "2.2.0" not in mcp.specifier
+
+
+def test_client_toml_fallback_is_a_runtime_dependency_on_python_310() -> None:
+    """``lab_tracker_client.auth`` imports ``tomli`` at module load on 3.10."""
+    repo_root = Path(__file__).resolve().parent.parent
+    project = tomllib.loads((repo_root / "pyproject.toml").read_text(encoding="utf-8"))
+    requirements = [Requirement(value) for value in project["project"]["dependencies"]]
+    tomli = [requirement for requirement in requirements if requirement.name == "tomli"]
+
+    assert len(tomli) == 1, "tomli must be a runtime dependency for Python < 3.11"
+    marker = tomli[0].marker
+    assert marker is not None
+    assert marker.evaluate({"python_version": "3.10"})
+    assert not marker.evaluate({"python_version": "3.11"})
+
+
+def _ci_job_blocks(workflow: str) -> dict[str, str]:
+    jobs_section = workflow.split("\njobs:\n", 1)[1]
+    blocks: dict[str, str] = {}
+    name: str | None = None
+    lines: list[str] = []
+    for line in jobs_section.splitlines():
+        if line.startswith("  ") and not line.startswith("   ") and line.endswith(":"):
+            if name is not None:
+                blocks[name] = "\n".join(lines)
+            name, lines = line.strip().rstrip(":"), []
+        else:
+            lines.append(line)
+    if name is not None:
+        blocks[name] = "\n".join(lines)
+    return blocks
+
+
+def test_ci_checks_lock_freshness_before_every_locked_install() -> None:
+    repo_root = Path(__file__).resolve().parent.parent
+    workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    blocks = _ci_job_blocks(workflow)
+    installing_jobs = {name: body for name, body in blocks.items() if "uv sync" in body}
+
+    assert "test" in installing_jobs
+    for name, body in installing_jobs.items():
+        assert "run: uv lock --check" in body, name
+        assert body.index("run: uv lock --check") < body.index("uv sync"), name
+
+
+def test_docker_and_ci_pin_one_exact_uv_version() -> None:
+    """``uv sync --frozen`` and lock handling depend on the uv release itself."""
+    repo_root = Path(__file__).resolve().parent.parent
+    dockerfile = (repo_root / "Dockerfile").read_text(encoding="utf-8")
+    workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+    docker_pins = re.findall(r"pip install --no-cache-dir uv==(\d+\.\d+\.\d+)\b", dockerfile)
+    assert len(docker_pins) == 1, "Dockerfile must install one exact uv version"
+    pip_installs = [line.strip() for line in re.findall(r"\bpip install\b[^\n\\]*", dockerfile)]
+    assert pip_installs == [f"pip install --no-cache-dir uv=={docker_pins[0]}"]
+
+    setup_steps = re.findall(
+        r"- uses: astral-sh/setup-uv@\S+\n((?: {8,}\S.*\n)*)", workflow
+    )
+    assert setup_steps, "CI must install uv with astral-sh/setup-uv"
+    assert workflow.count("astral-sh/setup-uv@") == len(setup_steps)
+    for step in setup_steps:
+        assert f'version: "{docker_pins[0]}"' in step, step
+
+
+def test_ci_builds_and_boots_the_docker_image() -> None:
+    """String tests cannot catch a Dockerfile or entrypoint that fails to run."""
+    repo_root = Path(__file__).resolve().parent.parent
+    workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    body = _ci_job_blocks(workflow)["docker-image"]
+
+    boot = "docker compose up --build --detach --wait --wait-timeout 300 app"
+    assert boot in body
+    assert "http://127.0.0.1:8000/health" in body
+    assert "python -m lab_tracker.deployment_probe" in body
+    assert "--alembic-config /app/alembic.ini" in body
+    assert 'test "$(docker compose exec -T app id -u)" != "0"' in body
+    assert "-f deployments/dedicated-instance/docker-compose.yml" in body
+    assert "config --quiet" in body
+    assert body.index("config --quiet") < body.index(boot)
+    assert "if: failure()" in body and "docker compose logs" in body
+    assert "if: always()" in body and "docker compose down --volumes" in body
+
+
+def test_render_blueprint_matches_the_image() -> None:
+    repo_root = Path(__file__).resolve().parent.parent
+    blueprint = (repo_root / "render.yaml").read_text(encoding="utf-8")
+    dockerfile = (repo_root / "Dockerfile").read_text(encoding="utf-8")
+
+    dockerfile_path = re.search(r"^\s+dockerfilePath: (\S+)$", blueprint, re.MULTILINE)
+    assert dockerfile_path is not None
+    assert (repo_root / dockerfile_path.group(1)).is_file()
+    assert re.search(r"^\s+dockerContext: \.$", blueprint, re.MULTILINE)
+    assert "    healthCheckPath: /health\n" in blueprint
+    assert "http://127.0.0.1:8000/health" in dockerfile
+
+    mount = re.search(r"^\s+mountPath: (\S+)$", blueprint, re.MULTILINE)
+    assert mount is not None
+    assert f"mkdir -p /app/data {mount.group(1)}" in dockerfile
+    assert f"chown -R labtracker:labtracker /app {mount.group(1)}" in dockerfile
+    storage_keys = (
+        "LAB_TRACKER_FILE_STORAGE_PATH",
+        "LAB_TRACKER_NOTE_STORAGE_PATH",
+        "LAB_TRACKER_RUNTIME_ENV_DIR",
+    )
+    for key in storage_keys:
+        value = re.search(
+            rf"- key: {key}\n\s+value: (\S+)\n", blueprint
+        )
+        assert value is not None, key
+        assert value.group(1).startswith(f"{mount.group(1)}/"), key
+
+
+def test_ci_runs_project_commands_without_relocking() -> None:
+    repo_root = Path(__file__).resolve().parent.parent
+    workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+    unfrozen = re.findall(r"\buv run\b(?! --frozen\b).*", workflow)
+    assert "uv run --frozen" in workflow
+    assert not unfrozen, unfrozen
+
+
+def test_ci_smoke_tests_an_install_resolved_from_declared_ranges() -> None:
+    """pip and ``uv tool install`` users resolve pyproject ranges, not uv.lock."""
+    repo_root = Path(__file__).resolve().parent.parent
+    workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    body = _ci_job_blocks(workflow)["unlocked-install"]
+
+    assert "uv sync" not in body
+    assert "uv pip install --python" in body
+    assert "import lab_tracker.mcp_server" in body
+    assert "bin/lt-mcp" in body
+
+
+def test_dependabot_updates_python_dependencies_with_the_lockfile() -> None:
+    repo_root = Path(__file__).resolve().parent.parent
+    config = (repo_root / ".github" / "dependabot.yml").read_text(encoding="utf-8")
+    entries = config.split("  - package-ecosystem: ")[1:]
+    ecosystems = {entry.split("\n", 1)[0].strip().strip('"'): entry for entry in entries}
+
+    assert "pip" not in ecosystems
+    uv_entry = ecosystems["uv"]
+    assert 'dependency-name: "mcp"' in uv_entry
+    assert "version-update:semver-major" in uv_entry
+
+
+def test_contributor_install_commands_respect_the_lockfile() -> None:
+    repo_root = Path(__file__).resolve().parent.parent
+    for relative in ("README.md", "CLAUDE.md", "docs/setup.md"):
+        text = (repo_root / relative).read_text(encoding="utf-8")
+        assert "uv pip install -e" not in text, relative
+        assert "uv sync --frozen" in text, relative

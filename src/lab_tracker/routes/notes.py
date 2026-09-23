@@ -11,7 +11,7 @@ from uuid import UUID
 from fastapi import APIRouter, BackgroundTasks, FastAPI, File, Form, Query, UploadFile
 from starlette import status as http_status
 from starlette.requests import Request
-from starlette.responses import Response
+from starlette.responses import Response, StreamingResponse
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.auth import AuthContext
@@ -53,6 +53,7 @@ from .shared import (
     actor_from_request,
     api_from_request,
     content_disposition_header,
+    created_by_filter_value,
     ensure_project_contributor,
     handlers_from_request,
     list_response,
@@ -109,8 +110,8 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         status: Annotated[NoteStatus | None, Form()] = None,
     ):
         actor = actor_from_request(request)
-        ensure_project_contributor(request, project_id)
         request_api = api_from_request(request, api)
+        _ensure_capture_project_writable(request, request_api, project_id)
         filename = (file.filename or "").strip()
         if not filename:
             raise ValidationError("filename must not be empty.")
@@ -165,6 +166,7 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
     ):
         actor = actor_from_request(request)
         request_api = api_from_request(request, api)
+        _ensure_capture_project_writable(request, request_api, project_id)
         filename = (file.filename or "").strip()
         if not filename:
             raise ValidationError("filename must not be empty.")
@@ -218,7 +220,7 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
             actor=actor_from_request(request),
             project_id=project_id,
             status=status.value if status is not None else None,
-            created_by=created_by,
+            created_by=created_by_filter_value(created_by),
             since=since,
             until=until,
             target_entity_type=target_entity_type.value if target_entity_type is not None else None,
@@ -253,14 +255,21 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
             note_id,
             actor=actor_from_request(request),
         )
-        raw_asset, content = api_from_request(request, api).download_note_raw(note_id)
         accept = (request.headers.get("accept") or "").lower()
         if "application/json" not in accept:
+            raw_asset, chunks = api_from_request(request, api).stream_note_raw(note_id)
             headers = {
                 "Content-Disposition": content_disposition_header("attachment", raw_asset.filename),
                 "Content-Length": str(raw_asset.size_bytes),
             }
-            return Response(content=content, media_type=raw_asset.content_type, headers=headers)
+            return StreamingResponse(
+                chunks,
+                media_type=raw_asset.content_type,
+                headers=headers,
+            )
+        # The JSON envelope embeds the whole asset as base64, so it is
+        # inherently whole-payload; binary clients get the stream above.
+        raw_asset, content = api_from_request(request, api).download_note_raw(note_id)
         encoded = base64.b64encode(content).decode("ascii")
         payload = NoteRawDownloadRead(
             storage_id=raw_asset.storage_id,
@@ -434,6 +443,20 @@ def _optional_epoch_ms(value: object) -> str | None:
     if milliseconds < 0:
         raise ValidationError("source_file_last_modified_ms must be non-negative.")
     return str(milliseconds)
+
+
+def _ensure_capture_project_writable(
+    request: Request,
+    request_api: LabTrackerAPI,
+    project_id: UUID,
+) -> None:
+    """Authorize and resolve the capture's project before any raw bytes are stored.
+
+    The note service re-checks both inside its transaction; this pre-check keeps
+    denied or orphaned uploads from writing (and then deleting) raw assets.
+    """
+    ensure_project_contributor(request, project_id)
+    request_api.get_project(project_id)
 
 
 def _maybe_schedule_auto_transcription(

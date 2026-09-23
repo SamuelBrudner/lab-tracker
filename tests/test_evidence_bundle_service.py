@@ -320,6 +320,33 @@ def test_direct_bundle_enforces_key_and_upload_intent_bounds(
         api.record_evidence_bundle(command, actor=actor)
 
 
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_direct_bundle_rejects_upload_intent_larger_than_the_upload_limit(
+    dry_run: bool,
+) -> None:
+    api = repository_backed_api()
+    actor = _actor()
+    project = api.create_project("Oversized upload intent", actor=actor)
+    max_bytes = api.evidence_bundles._context.active_settings().max_upload_bytes
+    command = RecordEvidenceBundleCommand(
+        project_id=project.project_id,
+        visualization=ExistingVisualizationIntent(
+            visualization_id=uuid4(),
+            upload_intent=EvidenceBundleUploadIntent(
+                checksum_sha256="a" * 64,
+                size_bytes=max_bytes + 1,
+                filename="figure.png",
+                content_type="image/png",
+            ),
+        ),
+        dry_run=dry_run,
+        idempotency_key="oversized-upload",
+    )
+
+    with pytest.raises(ValidationError, match="upload limit"):
+        api.record_evidence_bundle(command, actor=actor)
+
+
 def test_direct_bundle_rejects_an_ambient_application_transaction() -> None:
     api = repository_backed_api()
     actor = _actor()

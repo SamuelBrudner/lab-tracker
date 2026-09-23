@@ -4,13 +4,90 @@ Use this for the Docker/Postgres path in `docker-compose.yml`.
 
 ## Data Locations
 
-- Postgres data lives in the Docker volume `lab-tracker_postgres_data`.
+- Postgres data lives in the Compose volume `postgres_data`.
 - App files, note storage, generated auth secret, and generated bootstrap token
-  live in the Docker volume `lab-tracker_app_data`.
+  live in the Compose volume `app_data`.
+- Docker names each volume `<project>_<volume>`, where the Compose project name
+  is the checkout directory name unless `COMPOSE_PROJECT_NAME` (or
+  `docker compose -p`) sets it; `docker volume ls` shows the actual names. The
+  commands below reach the app data volume through the `app` container, so they
+  work under any project name.
 - The app container runs `alembic upgrade head` on startup before serving.
 
 Back up before updating the image or pulling new code because startup can run
 schema migrations.
+
+The optional hosted MCP service is behind the `mcp` Compose profile, so the
+commands on this page never need `LT_MCP_INBOUND_TOKEN` or
+`LT_MCP_READONLY_TOKEN`. When you run it, add `--profile mcp` (or set
+`COMPOSE_PROFILES=mcp` in `.env`); see
+[`deployment-options.md`](deployment-options.md#dockerpostgres-lab-instance).
+
+## Reverse Proxy and Client Addresses
+
+Uvicorn in the app container trusts `X-Forwarded-For` and `X-Forwarded-Proto`
+only from peers listed in `FORWARDED_ALLOW_IPS`. The proxy must also send those
+headers: Caddy's `reverse_proxy` does by default, while nginx needs
+`proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;` and
+`proxy_set_header X-Forwarded-Proto $scheme;`. The compose default is
+`127.0.0.1`, which matches no proxy outside the container, so forwarded headers
+are ignored and every proxied request appears to come from the proxy's own
+address. Rate-limit buckets and HSTS then key off the proxy instead of the
+client. (The first-admin token is never disclosed by peer address outside
+`LAB_TRACKER_ENVIRONMENT=local`; see [First Admin Token](#first-admin-token).)
+
+When a TLS reverse proxy (Caddy, nginx, or `tailscale serve`) on the Docker host
+forwards to the published app port, the app sees the Compose network gateway
+as its peer. Find it and set it in the ignored `.env` before creating the first
+admin:
+
+```bash
+docker network inspect lab-tracker_default \
+  --format '{{(index .IPAM.Config 0).Gateway}}'
+```
+
+The network name is `<project>_default`, where the Compose project name is the
+checkout directory name unless `COMPOSE_PROJECT_NAME` (or `docker compose -p`)
+sets it; `docker network ls` shows the actual name.
+
+```dotenv
+FORWARDED_ALLOW_IPS=172.18.0.1
+```
+
+For a proxy container on the same Compose network, use that container's
+address instead. Recreate the app with `docker compose up -d app` after a
+change. Never set `FORWARDED_ALLOW_IPS=*` while the app port is reachable
+without going through the proxy: any client could then choose the address the
+app sees.
+
+Trusting the gateway is only safe when the proxy is the sole path to the app.
+The root compose file publishes the app on every host interface
+(`8000:8000`), so clients could still reach it directly, and Docker's userland
+proxy relays some of those connections (IPv6 clients, Docker Desktop) from the
+same gateway address, letting them forge `X-Forwarded-For`. When a proxy fronts
+the app, publish the app port on loopback only with a local
+`docker-compose.override.yml` next to `docker-compose.yml` (Compose loads it
+automatically; keep it out of commits). `!override` replaces the published
+ports instead of appending to them:
+
+```yaml
+services:
+  app:
+    ports: !override
+      - "127.0.0.1:8000:8000"
+```
+
+A proxy container on the Compose network reaches `app:8000` directly and needs
+no published port at all.
+
+## Process Reaping
+
+The image entrypoint runs under `tini`, which reaps orphaned grandchildren of
+the bounded subprocesses used for registered Git and rclone stores. That covers
+Render and plain `docker run` as well as Compose. The compose `app` and `mcp`
+services also set `init: true`; `tini -s` then stays a child subreaper under
+Docker's init. A custom `entrypoint:` bypasses `tini`, so keep `init: true` (or
+`docker run --init`) wherever you override it, as the root `mcp` service does.
 
 ## Local Filesystem Stores
 
@@ -31,8 +108,7 @@ Keep that namespace under deployment-operator control:
   volume-map, or device-map changes.
 
 If an untrusted principal can mutate that topology, disable local resolution
-and local-store health or isolate the service in a namespace the principal
-cannot change. Directory handles make one operation resistant to pathname
+or isolate the service in a namespace the principal cannot change. Directory handles make one operation resistant to pathname
 replacement; they are not a durable mount-topology lease.
 
 ## Backup
@@ -48,13 +124,21 @@ docker compose exec -T postgres pg_dump \
   > "backups/lab-tracker-$(date +%Y%m%d-%H%M%S).dump"
 ```
 
-Archive the app data volume:
+Archive the app data volume (mounted from the `app` container, which may be
+running or stopped). `--volumes-from` mounts every volume and bind mount of the
+`app` container, so mounts a Compose override adds to `app` are mounted too;
+only `/app/data` is archived.
 
 ```bash
-docker run --rm \
-  -v lab-tracker_app_data:/data:ro \
-  -v "$PWD/backups:/backup" \
-  alpine tar -czf /backup/lab-tracker-app-data.tar.gz -C /data .
+APP_CONTAINER="$(docker compose ps --all --quiet app)"
+if [ "$(printf '%s\n' "$APP_CONTAINER" | grep -c .)" -ne 1 ]; then
+  echo "expected exactly one app container, got: ${APP_CONTAINER:-none}" >&2
+else
+  docker run --rm \
+    --volumes-from "$APP_CONTAINER:ro" \
+    -v "$PWD/backups:/backup" \
+    alpine tar -czf /backup/lab-tracker-app-data.tar.gz -C /app/data .
+fi
 ```
 
 ## Restore
@@ -76,13 +160,19 @@ cat backups/lab-tracker-YYYYMMDD-HHMMSS.dump | docker compose exec -T postgres \
   --if-exists
 ```
 
-Restore app data:
+Restore app data (on a fresh host, first create the stopped `app` container
+and its volume with `docker compose create app`):
 
 ```bash
-docker run --rm \
-  -v lab-tracker_app_data:/data \
-  -v "$PWD/backups:/backup:ro" \
-  alpine sh -c 'rm -rf /data/* && tar -xzf /backup/lab-tracker-app-data.tar.gz -C /data'
+APP_CONTAINER="$(docker compose ps --all --quiet app)"
+if [ "$(printf '%s\n' "$APP_CONTAINER" | grep -c .)" -ne 1 ]; then
+  echo "expected exactly one app container, got: ${APP_CONTAINER:-none}" >&2
+else
+  docker run --rm \
+    --volumes-from "$APP_CONTAINER" \
+    -v "$PWD/backups:/backup:ro" \
+    alpine sh -c 'rm -rf /app/data/* && tar -xzf /backup/lab-tracker-app-data.tar.gz -C /app/data'
+fi
 ```
 
 Start the app:
@@ -100,8 +190,31 @@ docker compose up -d app
 docker compose logs -f app
 ```
 
+Upgrading past revision `0063_user_session_epoch` signs every browser user out
+once: session tokens now carry a revocation epoch and an absolute lifetime
+(`LAB_TRACKER_AUTH_SESSION_MAX_AGE_HOURS`, default 168), and older tokens lack
+both. Personal access tokens and paired devices keep working. Changing a user's
+password or role, or `POST /auth/sessions/revoke`, ends that user's sessions.
+This includes an admin changing their own password or role through
+`PATCH /auth/users/{user_id}`: the request succeeds, and then that admin's
+current session is signed out and they must sign in again. Session changes do
+not revoke a user's personal access tokens or paired devices; an admin revokes
+those with `DELETE /auth/users/{user_id}/tokens/{token_id}` and
+`DELETE /auth/users/{user_id}/devices/{device_token_id}`.
+
+If you run the optional MCP service, rebuild and restart it from the same
+checkout with `docker compose --profile mcp up -d --build mcp`.
+
 If migrations fail after the configured retry budget, the app container exits
 with an error. Restore from backup or fix the migration before restarting.
+
+SQLite migrations run as one all-or-nothing transaction: a failing revision
+rolls back the whole run, and an upgrade that would leave new foreign-key
+violations is refused. Take a backup before upgrading a SQLite instance. If
+your SQLite database was upgraded with code from 26 July 2026 until the fix for
+review finding C1, read the
+[SQLite migration cascade advisory](advisories/2026-09-sqlite-migration-cascade.md)
+to check for lost AI-draft provenance and restore it from a pre-upgrade backup.
 
 ### Pinned provider-backed instances
 
@@ -125,9 +238,16 @@ generates one and stores it in:
 /app/data/runtime-env/bootstrap-admin-token
 ```
 
-Open the app through `http://127.0.0.1:8000/app` or another local/LAN/VPN host
-and choose `Create First Admin`; the first-run setup screen loads the generated
-token while no users exist. The token is not shown after the first user is
-created. Public deployments can opt into browser display with
-`LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE=first_run`; otherwise the token is
-hidden on public hosts.
+The app never shows that token in the browser outside
+`LAB_TRACKER_ENVIRONMENT=local`, whatever address you connect from. Read it
+from the container and paste it into `Create First Admin`:
+
+```bash
+docker compose exec app cat /app/data/runtime-env/bootstrap-admin-token
+```
+
+The token stops working once the first user exists. Managed platforms without
+shell access can opt into browser display with
+`LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE=first_run` (the Render blueprint
+does); `local` is accepted only when `LAB_TRACKER_ENVIRONMENT=local`, and
+startup fails if it is set anywhere else.

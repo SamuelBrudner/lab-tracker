@@ -360,6 +360,7 @@ def test_sqlite_migration_exposes_fencing_columns_defaults_and_indexes(
     engine.dispose()
 
 
+@pytest.mark.postgres
 def test_postgres_first_claim_race_reclaim_and_stale_completion_are_fenced(
     migrated_postgres_database_url: str,
 ) -> None:

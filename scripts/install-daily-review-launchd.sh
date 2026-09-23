@@ -63,6 +63,8 @@ INTERVAL_SECONDS=$((INTERVAL * 60))
 # reads them back structurally (json.load) -- never `. env`, so a credential
 # containing spaces, quotes, $(...) or newlines can neither corrupt the file nor
 # execute.
+# A re-run with no credential exported keeps an existing non-empty secrets
+# file (write-secrets says so on stderr) instead of wiping it.
 umask 077
 LAB_TRACKER_API_KEY="${LAB_TRACKER_API_KEY:-}" \
 LAB_TRACKER_ADMIN_USER="${LAB_TRACKER_ADMIN_USER:-}" \

@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime
+from datetime import date, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import ColumnElement, and_, delete, func, or_, select
 from sqlalchemy.orm import Session as OrmSession
 
 from lab_tracker.db_models import UsageEventModel, UsageEventRollupModel
@@ -22,6 +22,9 @@ from lab_tracker.repository import EntityRepository
 from lab_tracker.sqlalchemy_mapper_parts.common import uuid_from_db, uuid_to_db
 
 from .common import apply_pagination, count_from_statement
+
+UsageEventPageCursor = tuple[datetime, UUID]
+"""``(occurred_at, event_id)`` of the last usage event on a keyset page."""
 
 
 def usage_event_to_model(event: UsageEvent) -> UsageEventModel:
@@ -143,28 +146,97 @@ class SQLAlchemyUsageEventRepository(EntityRepository[UsageEvent]):
         offset: int = 0,
     ) -> tuple[list[UsageEvent], int]:
         self._session.flush()
-        stmt = select(UsageEventModel)
-        count_stmt = select(UsageEventModel.event_id)
-        for column, value in (
-            (UsageEventModel.project_id, str(project_id) if project_id is not None else None),
-            (UsageEventModel.verb, verb),
-            (UsageEventModel.resource_type, resource_type),
-            (UsageEventModel.surface, surface),
-            (UsageEventModel.outcome, outcome),
-        ):
-            if value is not None:
-                stmt = stmt.where(column == value)
-                count_stmt = count_stmt.where(column == value)
-        if occurred_before is not None:
-            stmt = stmt.where(UsageEventModel.occurred_at < occurred_before)
-            count_stmt = count_stmt.where(UsageEventModel.occurred_at < occurred_before)
-        if occurred_on_or_after is not None:
-            stmt = stmt.where(UsageEventModel.occurred_at >= occurred_on_or_after)
-            count_stmt = count_stmt.where(UsageEventModel.occurred_at >= occurred_on_or_after)
+        clauses = _usage_event_filter_clauses(
+            project_id=project_id,
+            verb=verb,
+            resource_type=resource_type,
+            surface=surface,
+            outcome=outcome,
+            occurred_before=occurred_before,
+            occurred_on_or_after=occurred_on_or_after,
+        )
+        stmt = select(UsageEventModel).where(*clauses)
+        count_stmt = select(UsageEventModel.event_id).where(*clauses)
         stmt = stmt.order_by(UsageEventModel.occurred_at.desc(), UsageEventModel.event_id.desc())
         total = count_from_statement(self._session, count_stmt)
         rows = self._session.scalars(apply_pagination(stmt, limit=limit, offset=offset))
         return [usage_event_from_model(row) for row in rows], total
+
+    def query_page(
+        self,
+        *,
+        project_id: UUID | None = None,
+        verb: str | None = None,
+        resource_type: str | None = None,
+        surface: str | None = None,
+        outcome: str | None = None,
+        after: UsageEventPageCursor | None = None,
+        limit: int,
+    ) -> list[UsageEvent]:
+        """Return one keyset page in ``query`` order (newest first), without a count.
+
+        ``after`` is the ``(occurred_at, event_id)`` of the last event of the
+        previous page. Keyset paging keeps pages stable while new events are
+        written, unlike offsets, which shift as rows are inserted ahead of them.
+        """
+
+        if limit < 1:
+            raise ValueError("Usage event page limit must be positive.")
+        self._session.flush()
+        clauses = _usage_event_filter_clauses(
+            project_id=project_id,
+            verb=verb,
+            resource_type=resource_type,
+            surface=surface,
+            outcome=outcome,
+            occurred_before=None,
+            occurred_on_or_after=None,
+        )
+        if after is not None:
+            after_occurred_at, after_event_id = after
+            clauses.append(
+                or_(
+                    UsageEventModel.occurred_at < after_occurred_at,
+                    and_(
+                        UsageEventModel.occurred_at == after_occurred_at,
+                        UsageEventModel.event_id < after_event_id,
+                    ),
+                )
+            )
+        stmt = (
+            select(UsageEventModel)
+            .where(*clauses)
+            .order_by(UsageEventModel.occurred_at.desc(), UsageEventModel.event_id.desc())
+            .limit(limit)
+        )
+        return [usage_event_from_model(row) for row in self._session.scalars(stmt)]
+
+
+def _usage_event_filter_clauses(
+    *,
+    project_id: UUID | None,
+    verb: str | None,
+    resource_type: str | None,
+    surface: str | None,
+    outcome: str | None,
+    occurred_before: datetime | None,
+    occurred_on_or_after: datetime | None,
+) -> list[ColumnElement[bool]]:
+    clauses: list[ColumnElement[bool]] = []
+    for column, value in (
+        (UsageEventModel.project_id, str(project_id) if project_id is not None else None),
+        (UsageEventModel.verb, verb),
+        (UsageEventModel.resource_type, resource_type),
+        (UsageEventModel.surface, surface),
+        (UsageEventModel.outcome, outcome),
+    ):
+        if value is not None:
+            clauses.append(column == value)
+    if occurred_before is not None:
+        clauses.append(UsageEventModel.occurred_at < occurred_before)
+    if occurred_on_or_after is not None:
+        clauses.append(UsageEventModel.occurred_at >= occurred_on_or_after)
+    return clauses
 
 
 class SQLAlchemyUsageEventRollupRepository(EntityRepository[UsageEventRollup]):
@@ -230,18 +302,38 @@ def summarize_usage_events(
     return [dict(row._mapping) for row in session.execute(stmt)]
 
 
+_ROLLUP_READ_BATCH_SIZE = 1000
+"""Rows fetched per round trip while streaming pre-cutoff usage events."""
+
+RollupBucketKey = tuple[
+    date, str, str, UUID | None, str | None, str | None, str | None, str
+]
+"""``(day, verb, resource_type, project_id, actor_role, principal_type, surface, outcome)``."""
+
+
 def rollup_usage_events_before(session: OrmSession, cutoff: datetime) -> int:
-    rows = list(
-        session.scalars(
-            select(UsageEventModel)
-            .where(UsageEventModel.occurred_at < cutoff)
-            .order_by(UsageEventModel.occurred_at, UsageEventModel.event_id)
+    # Stream only the bucket columns in batches instead of hydrating every
+    # pre-cutoff event as an ORM row; the bucket map stays small.
+    events = session.execute(
+        select(
+            UsageEventModel.occurred_at,
+            UsageEventModel.verb,
+            UsageEventModel.resource_type,
+            UsageEventModel.project_id,
+            UsageEventModel.actor_role,
+            UsageEventModel.principal_type,
+            UsageEventModel.surface,
+            UsageEventModel.outcome,
+            UsageEventModel.duration_ms,
+            UsageEventModel.result_count,
         )
+        .where(UsageEventModel.occurred_at < cutoff)
+        .execution_options(yield_per=_ROLLUP_READ_BATCH_SIZE)
     )
-    buckets: dict[tuple[object, ...], dict[str, int]] = defaultdict(
+    buckets: dict[RollupBucketKey, dict[str, int]] = defaultdict(
         lambda: {"event_count": 0, "duration": 0, "result_count": 0}
     )
-    for row in rows:
+    for row in events:
         key = (
             row.occurred_at.date(),
             row.verb,
@@ -255,6 +347,7 @@ def rollup_usage_events_before(session: OrmSession, cutoff: datetime) -> int:
         buckets[key]["event_count"] += 1
         buckets[key]["duration"] += int(row.duration_ms or 0)
         buckets[key]["result_count"] += int(row.result_count or 0)
+    existing_rollups = _existing_rollups_by_bucket(session, {key[0] for key in buckets})
     for key, values in buckets.items():
         (
             day,
@@ -266,18 +359,7 @@ def rollup_usage_events_before(session: OrmSession, cutoff: datetime) -> int:
             surface,
             outcome,
         ) = key
-        existing = session.scalars(
-            select(UsageEventRollupModel).where(
-                UsageEventRollupModel.day == day,
-                UsageEventRollupModel.verb == verb,
-                UsageEventRollupModel.resource_type == resource_type,
-                _nullable_bucket_match(UsageEventRollupModel.project_id, project_id),
-                _nullable_bucket_match(UsageEventRollupModel.actor_role, actor_role),
-                _nullable_bucket_match(UsageEventRollupModel.principal_type, principal_type),
-                _nullable_bucket_match(UsageEventRollupModel.surface, surface),
-                UsageEventRollupModel.outcome == outcome,
-            )
-        ).first()
+        existing = existing_rollups.get(key)
         if existing is not None:
             existing.event_count += values["event_count"]
             existing.total_duration_ms += values["duration"]
@@ -306,10 +388,37 @@ def rollup_usage_events_before(session: OrmSession, cutoff: datetime) -> int:
     return int(deleted or 0)
 
 
-def _nullable_bucket_match(column, value: object):
-    if value is None:
-        return column.is_(None)
-    return column == value
+def _existing_rollups_by_bucket(
+    session: OrmSession,
+    days: set[date],
+) -> dict[RollupBucketKey, UsageEventRollupModel]:
+    """Load, in one query, the rollups the new buckets may merge into."""
+
+    if not days:
+        return {}
+    rows = session.scalars(
+        select(UsageEventRollupModel)
+        .where(UsageEventRollupModel.day.between(min(days), max(days)))
+        .order_by(UsageEventRollupModel.day, UsageEventRollupModel.rollup_id)
+    )
+    existing: dict[RollupBucketKey, UsageEventRollupModel] = {}
+    for row in rows:
+        # NULL dimensions never collide under the unique constraint, so a
+        # bucket can have duplicates; merge into the first, as before.
+        existing.setdefault(
+            (
+                row.day,
+                row.verb,
+                row.resource_type,
+                row.project_id,
+                row.actor_role,
+                row.principal_type,
+                row.surface,
+                row.outcome,
+            ),
+            row,
+        )
+    return existing
 
 
 def _uuid_to_db_optional(value: UUID | None) -> str | None:

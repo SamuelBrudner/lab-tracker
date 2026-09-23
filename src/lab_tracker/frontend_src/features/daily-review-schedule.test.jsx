@@ -3,7 +3,7 @@ import * as React from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import { apiResponse, installFetchMock } from "../test/utils.js";
+import { apiResponse, errorResponse, installFetchMock } from "../test/utils.js";
 import { DailyReviewScheduleForm } from "./daily-review-schedule.jsx";
 
 describe("DailyReviewScheduleForm", () => {
@@ -269,6 +269,348 @@ describe("DailyReviewScheduleForm", () => {
         run_at_local_time: "18:00",
         timezone_name: "America/New_York",
       });
+    });
+  });
+  it("ignores a late settings response for a previously selected project", async () => {
+    const pending = {};
+    function settingsFor(projectId, overrides) {
+      return apiResponse({
+        cadence_minutes: 1440,
+        email_notifications_enabled: false,
+        enabled: true,
+        next_run_at: null,
+        notification_email: null,
+        project_id: projectId,
+        review_email_available: false,
+        run_at_local_time: "18:00",
+        settings_id: `settings-${projectId}`,
+        timezone_name: "UTC",
+        user_id: "user-1",
+        ...overrides,
+      });
+    }
+    function gated(projectId) {
+      return () =>
+        new Promise((resolve) => {
+          pending[projectId] = resolve;
+        });
+    }
+    let patchBody = null;
+    installFetchMock([
+      {
+        match: "/projects/project-a/graph-draft-batch-settings",
+        response: gated("project-a"),
+      },
+      {
+        match: "/projects/project-b/graph-draft-batch-settings",
+        response: gated("project-b"),
+      },
+      {
+        match: "/projects/project-b/graph-draft-batch-settings",
+        method: "PATCH",
+        response: (request) => {
+          patchBody = JSON.parse(request.init.body);
+          return settingsFor("project-b", patchBody);
+        },
+      },
+    ]);
+    const props = {
+      token: "token-1",
+      canManage: true,
+      setBusy: vi.fn(),
+      setFlash: vi.fn(),
+    };
+
+    const { rerender } = render(
+      <DailyReviewScheduleForm {...props} projectId="project-a" />
+    );
+    await waitFor(() => expect(pending["project-a"]).toBeTypeOf("function"));
+    rerender(<DailyReviewScheduleForm {...props} projectId="project-b" />);
+    await waitFor(() => expect(pending["project-b"]).toBeTypeOf("function"));
+
+    pending["project-b"](
+      settingsFor("project-b", { cadence_minutes: 720, timezone_name: "UTC" })
+    );
+    await waitFor(() => expect(screen.getByLabelText("Cadence")).toHaveValue("720"));
+    expect(screen.getByLabelText("Cadence")).toBeEnabled();
+
+    // Project A's slower response lands last; it must not overwrite B's form.
+    pending["project-a"](
+      settingsFor("project-a", {
+        cadence_minutes: 10080,
+        run_at_local_time: "07:30",
+        timezone_name: "Asia/Tokyo",
+      })
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(screen.getByLabelText("Cadence")).toHaveValue("720");
+    expect(screen.getByLabelText("Time zone")).toHaveValue("UTC");
+    expect(screen.getByLabelText("Local run time")).toHaveValue("18:00");
+
+    fireEvent.click(screen.getByRole("button", { name: "Save cadence" }));
+    await waitFor(() => expect(patchBody).not.toBeNull());
+    expect(patchBody).toMatchObject({
+      cadence_minutes: 720,
+      run_at_local_time: "18:00",
+      timezone_name: "UTC",
+    });
+  });
+
+  it("keeps the current project's loading state when a stale request settles", async () => {
+    const pending = {};
+    installFetchMock([
+      {
+        match: "/projects/project-a/graph-draft-batch-settings",
+        response: () =>
+          new Promise((resolve) => {
+            pending["project-a"] = resolve;
+          }),
+      },
+      {
+        match: "/projects/project-b/graph-draft-batch-settings",
+        response: () =>
+          new Promise((resolve) => {
+            pending["project-b"] = resolve;
+          }),
+      },
+    ]);
+    const props = { token: "token-1", canManage: true, setBusy: vi.fn(), setFlash: vi.fn() };
+
+    const { rerender } = render(<DailyReviewScheduleForm {...props} projectId="project-a" />);
+    await waitFor(() => expect(pending["project-a"]).toBeTypeOf("function"));
+    rerender(<DailyReviewScheduleForm {...props} projectId="project-b" />);
+    await waitFor(() => expect(pending["project-b"]).toBeTypeOf("function"));
+
+    pending["project-a"](apiResponse({ cadence_minutes: 10080, project_id: "project-a" }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // B is still loading, so the form must stay disabled.
+    expect(screen.getByLabelText("Cadence")).toBeDisabled();
+    expect(screen.getByLabelText("Cadence")).toHaveValue("1440");
+  });
+  it("never offers a previous project's values for saving when the next load fails", async () => {
+    const fetchMock = installFetchMock([
+      {
+        match: "/projects/project-a/graph-draft-batch-settings",
+        response: apiResponse({
+          cadence_minutes: 10080,
+          email_notifications_enabled: false,
+          enabled: false,
+          next_run_at: null,
+          notification_email: null,
+          project_id: "project-a",
+          review_email_available: false,
+          run_at_local_time: "07:00",
+          timezone_name: "Asia/Tokyo",
+        }),
+      },
+      {
+        match: "/projects/project-b/graph-draft-batch-settings",
+        response: errorResponse("Settings unavailable.", 500),
+      },
+    ]);
+    const props = { token: "token-1", canManage: true, setBusy: vi.fn(), setFlash: vi.fn() };
+
+    const { rerender } = render(<DailyReviewScheduleForm {...props} projectId="project-a" />);
+    await waitFor(() => expect(screen.getByLabelText("Cadence")).toHaveValue("10080"));
+    rerender(<DailyReviewScheduleForm {...props} projectId="project-b" />);
+
+    // While B loads, A's values must not be shown under B.
+    expect(screen.getByLabelText("Cadence")).toHaveValue("1440");
+    expect(screen.getByLabelText("Local run time")).toHaveValue("18:00");
+    expect(screen.getByLabelText("Enabled")).toBeChecked();
+
+    await waitFor(() =>
+      expect(props.setFlash).toHaveBeenCalledWith("", "Settings unavailable.")
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Save cadence" })).toHaveTextContent(
+        "Save cadence"
+      )
+    );
+    expect(screen.getByLabelText("Cadence")).toHaveValue("1440");
+    expect(screen.getByLabelText("Time zone")).not.toHaveValue("Asia/Tokyo");
+    expect(screen.getByRole("button", { name: "Save cadence" })).toBeDisabled();
+    expect(screen.getByLabelText("Cadence")).toBeDisabled();
+
+    fireEvent.submit(screen.getByRole("button", { name: "Save cadence" }).closest("form"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === "PATCH")).toBe(false);
+  });
+
+  async function saveThenSwitchProject() {
+    let releasePatch = null;
+    const onSaved = vi.fn();
+    installFetchMock([
+      {
+        match: "/projects/project-a/graph-draft-batch-settings",
+        response: apiResponse({
+          cadence_minutes: 1440,
+          enabled: true,
+          next_run_at: null,
+          project_id: "project-a",
+          review_email_available: false,
+          run_at_local_time: "18:00",
+          timezone_name: "UTC",
+        }),
+      },
+      {
+        match: "/projects/project-a/graph-draft-batch-settings",
+        method: "PATCH",
+        response: () =>
+          new Promise((resolve) => {
+            releasePatch = resolve;
+          }),
+      },
+      {
+        match: "/projects/project-b/graph-draft-batch-settings",
+        response: apiResponse({
+          cadence_minutes: 720,
+          enabled: true,
+          next_run_at: null,
+          project_id: "project-b",
+          review_email_available: false,
+          run_at_local_time: "18:00",
+          timezone_name: "UTC",
+        }),
+      },
+    ]);
+    const props = {
+      token: "token-1",
+      canManage: true,
+      setBusy: vi.fn(),
+      setFlash: vi.fn(),
+      onSaved,
+    };
+
+    const { rerender } = render(<DailyReviewScheduleForm {...props} projectId="project-a" />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Save cadence" })).toBeEnabled()
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save cadence" }));
+    await waitFor(() => expect(releasePatch).toBeTypeOf("function"));
+
+    rerender(<DailyReviewScheduleForm {...props} projectId="project-b" />);
+    await waitFor(() => expect(screen.getByLabelText("Cadence")).toHaveValue("720"));
+    expect(screen.getByText(/Email cues are unavailable/)).toBeInTheDocument();
+
+    const settle = async (response) => {
+      releasePatch(response);
+      await waitFor(() => expect(props.setBusy).toHaveBeenLastCalledWith(false));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    };
+    return { onSaved, props, settle };
+  }
+
+  it("does not apply a previous project's save response to the current project", async () => {
+    const { onSaved, props, settle } = await saveThenSwitchProject();
+
+    await settle(
+      apiResponse({
+        cadence_minutes: 1440,
+        enabled: true,
+        next_run_at: "2026-07-24T01:15:00Z",
+        project_id: "project-a",
+        review_email_available: true,
+        run_at_local_time: "18:00",
+        timezone_name: "UTC",
+      })
+    );
+
+    // The stale save must not report success into project B's context; it
+    // says which project the save applied to instead.
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(props.setFlash).not.toHaveBeenCalledWith("Daily review schedule updated.");
+    expect(props.setFlash).toHaveBeenLastCalledWith(
+      "Daily review schedule saved for the project you were editing."
+    );
+    expect(screen.queryByText(/Next run:/)).not.toBeInTheDocument();
+    expect(screen.getByText(/Email cues are unavailable/)).toBeInTheDocument();
+    expect(screen.getByLabelText("Cadence")).toHaveValue("720");
+  });
+
+  it("names the previous project when its in-flight save fails after a switch", async () => {
+    const { onSaved, props, settle } = await saveThenSwitchProject();
+
+    await settle(errorResponse("Timezone rejected.", 422));
+
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(props.setFlash).toHaveBeenLastCalledWith(
+      "",
+      "Failed to update daily review timing for the project you were editing: Timezone rejected."
+    );
+    expect(screen.getByLabelText("Cadence")).toHaveValue("720");
+  });
+
+  it("shows and preserves a stored cadence that is not one of the presets", async () => {
+    let settingsBody = null;
+    installFetchMock([
+      {
+        match: "/projects/project-1/graph-draft-batch-settings",
+        response: apiResponse({
+          cadence_minutes: 180,
+          email_notifications_enabled: false,
+          enabled: true,
+          next_run_at: null,
+          notification_email: null,
+          project_id: "project-1",
+          review_email_available: false,
+          run_at_local_time: "18:00",
+          settings_id: "settings-1",
+          timezone_name: "UTC",
+          user_id: "user-1",
+        }),
+      },
+      {
+        match: "/projects/project-1/graph-draft-batch-settings",
+        method: "PATCH",
+        response: (request) => {
+          settingsBody = JSON.parse(request.init.body);
+          return apiResponse({
+            ...settingsBody,
+            project_id: "project-1",
+            settings_id: "settings-1",
+            user_id: "user-1",
+          });
+        },
+      },
+    ]);
+
+    render(
+      <DailyReviewScheduleForm
+        token="token-1"
+        projectId="project-1"
+        canManage={true}
+        setBusy={vi.fn()}
+        setFlash={vi.fn()}
+      />
+    );
+
+    const cadence = await screen.findByLabelText("Cadence");
+    await waitFor(() => {
+      expect(cadence).toHaveValue("180");
+    });
+    expect(
+      screen.getByRole("option", { name: "Every 3 hours (custom)" }).selected
+    ).toBe(true);
+
+    // Trying a preset must not strand the stored cadence: it stays selectable.
+    fireEvent.change(cadence, { target: { value: "1440" } });
+    expect(cadence).toHaveValue("1440");
+    expect(
+      screen.getByRole("option", { name: "Every 3 hours (custom)" })
+    ).toBeInTheDocument();
+    fireEvent.change(cadence, { target: { value: "180" } });
+    expect(cadence).toHaveValue("180");
+
+    fireEvent.click(screen.getByRole("button", { name: "Save cadence" }));
+    await waitFor(() => {
+      expect(settingsBody).toEqual(
+        expect.objectContaining({ cadence_minutes: 180 })
+      );
     });
   });
 });

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import tempfile
+from collections.abc import Iterator
 from contextlib import suppress
 from pathlib import Path
 from typing import BinaryIO
@@ -24,7 +25,7 @@ class LocalNoteStorage:
         *,
         max_bytes: int | None = None,
     ) -> None:
-        self._base_path = Path(base_path)
+        self._base_path = Path(base_path).expanduser()
         self._max_bytes = max_bytes
 
     def store(self, content: bytes, *, filename: str, content_type: str) -> NoteRawAsset:
@@ -100,6 +101,27 @@ class LocalNoteStorage:
         if not path.exists():
             raise NotFoundError("Raw note content not found.")
         return path.read_bytes()
+
+    def iter_chunks(
+        self,
+        storage_id: UUID,
+        *,
+        chunk_size: int = 1024 * 1024,
+    ) -> Iterator[bytes]:
+        """Yield the stored bytes in bounded chunks; a missing asset raises now."""
+
+        if chunk_size < 1:
+            raise ValueError("chunk_size must be positive.")
+        path = self._path_for(storage_id)
+        if not path.exists():
+            raise NotFoundError("Raw note content not found.")
+
+        def _generate() -> Iterator[bytes]:
+            with path.open("rb") as handle:
+                while chunk := handle.read(chunk_size):
+                    yield chunk
+
+        return _generate()
 
     def read_prefix(self, storage_id: UUID, max_bytes: int) -> bytes:
         if max_bytes < 0:

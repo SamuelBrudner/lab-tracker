@@ -176,6 +176,22 @@ Collection reads instead filter to accessible scopes, and mutations retain
 explicit permission errors. The frozen targeted-read inventory and behavioral
 suites are in [Read Opacity Inventory](read-opacity-inventory.md).
 
+### Authentication versus authorization status codes
+
+`AuthError` (`401 auth_error`) is reserved for a missing, invalid, expired, or
+revoked credential, so clients may refresh it once or sign the user out.
+`PermissionDeniedError` (`403 forbidden`) is raised when a valid principal lacks
+the role, project or group membership, admin privilege, or principal kind an
+action requires; clients keep the credential and surface the denial. It
+subclasses `AuthError`, so opaque targeted reads still convert either failure to
+the canonical `404`. The middleware's `403 device_forbidden` and
+`403 service_forbidden` are the same class of denial for paired devices and
+personal access tokens. The browser app, the `lt` SDK (`LTPermissionDeniedError`),
+and the MCP client (`LabTrackerAPIPermissionError`, next action
+`request_access`, or `use_capable_credential` for the two middleware codes)
+only treat `401` as credential rejection. The executable
+contract is `tests/test_authorization_status_codes.py`.
+
 Known scope-adjacent exceptions:
 
 - `GET /groups/{group_id}` is the equivalent group-scoped boundary.

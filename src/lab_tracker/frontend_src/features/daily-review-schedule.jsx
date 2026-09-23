@@ -3,13 +3,41 @@ import * as React from "react";
 import { apiRequest } from "../shared/api.js";
 import { formatDate } from "../shared/formatters.js";
 
-const { useCallback, useEffect, useState } = React;
+const { useCallback, useEffect, useRef, useState } = React;
 
 const BATCH_CADENCE_OPTIONS = [
   { label: "Daily", value: "1440" },
   { label: "Every 12 hours", value: "720" },
   { label: "Weekly", value: "10080" },
 ];
+
+// The API accepts any cadence of at least an hour (settable via the API, CLI
+// or MCP), so a stored cadence outside the presets is shown as its own option
+// rather than letting the select display a preset it did not load.
+function customCadenceLabel(minutesValue) {
+  const minutes = Number(minutesValue);
+  if (minutes % 1440 === 0) {
+    const days = minutes / 1440;
+    return `Every ${days} day${days === 1 ? "" : "s"} (custom)`;
+  }
+  if (minutes % 60 === 0) {
+    const hours = minutes / 60;
+    return `Every ${hours} hour${hours === 1 ? "" : "s"} (custom)`;
+  }
+  return `Every ${minutes} minutes (custom)`;
+}
+
+// Built from both the stored cadence and the current selection, so switching
+// to a preset never removes the stored custom cadence from the choices.
+function cadenceOptions(storedCadenceMinutes, cadenceMinutes) {
+  const options = [...BATCH_CADENCE_OPTIONS];
+  for (const value of [storedCadenceMinutes, cadenceMinutes]) {
+    if (value && !options.some((option) => option.value === value)) {
+      options.push({ label: customCadenceLabel(value), value });
+    }
+  }
+  return options;
+}
 
 function detectedTimeZone() {
   try {
@@ -37,10 +65,35 @@ function DailyReviewScheduleForm({
   const [emailNotificationsEnabled, setEmailNotificationsEnabled] =
     useState(false);
   const [notificationEmail, setNotificationEmail] = useState("");
+  // Each load bumps the generation; a response (or failure) from an older
+  // load — e.g. for a previously selected project — is ignored so it can never
+  // populate the form that "Save cadence" PATCHes into the current project.
+  const loadGenerationRef = useRef(0);
+  // The project the form currently belongs to (null once unmounted), so a save
+  // response for a previously selected project is not shown under this one.
+  const currentProjectIdRef = useRef(projectId);
+
+  useEffect(() => {
+    currentProjectIdRef.current = projectId;
+    return () => {
+      currentProjectIdRef.current = null;
+    };
+  }, [projectId]);
 
   const loadSettings = useCallback(async () => {
+    const generation = ++loadGenerationRef.current;
+    const isCurrent = () => generation === loadGenerationRef.current;
+    // Until this project's settings load, the form must neither show nor be
+    // able to save values loaded (or edited) for a previous project.
+    setSettings(null);
+    setEnabled(true);
+    setCadenceMinutes("1440");
+    setRunAtLocalTime("18:00");
+    setTimezoneName(detectedTimeZone());
+    setEmailNotificationsEnabled(false);
+    setNotificationEmail("");
     if (!projectId) {
-      setSettings(null);
+      setLoading(false);
       return;
     }
     setLoading(true);
@@ -49,6 +102,9 @@ function DailyReviewScheduleForm({
         `/projects/${projectId}/graph-draft-batch-settings`,
         { token }
       );
+      if (!isCurrent()) {
+        return;
+      }
       setSettings(nextSettings);
       setEnabled(Boolean(nextSettings.enabled));
       setCadenceMinutes(String(nextSettings.cadence_minutes || 1440));
@@ -64,22 +120,36 @@ function DailyReviewScheduleForm({
         reviewEmailAvailable ? nextSettings.notification_email || "" : ""
       );
     } catch (err) {
-      setSettings(null);
+      if (!isCurrent()) {
+        return;
+      }
       setFlash("", err.message || "Failed to load daily review timing.");
     } finally {
-      setLoading(false);
+      if (isCurrent()) {
+        setLoading(false);
+      }
     }
   }, [projectId, setFlash, token]);
 
   useEffect(() => {
     loadSettings();
+    return () => {
+      // Invalidate the in-flight load on project change or unmount.
+      loadGenerationRef.current += 1;
+    };
   }, [loadSettings]);
 
   async function saveSettings(event) {
     event.preventDefault();
-    if (!projectId || !canManage) {
+    if (!projectId || !canManage || !settings) {
       return;
     }
+    const savedProjectId = projectId;
+    // The form moved to another project (or unmounted) while this save was in
+    // flight: its result belongs to the project that was being edited, so it
+    // must neither populate nor be reported as the current project's. The
+    // messages avoid saying "previous" because an unmount is not a switch.
+    const projectChanged = () => currentProjectIdRef.current !== savedProjectId;
     setBusy(true);
     setFlash("", "");
     try {
@@ -104,17 +174,33 @@ function DailyReviewScheduleForm({
           token,
         }
       );
+      if (projectChanged()) {
+        setFlash("Daily review schedule saved for the project you were editing.");
+        return;
+      }
       setSettings(nextSettings);
       onSaved(nextSettings);
       setFlash("Daily review schedule updated.");
     } catch (err) {
+      if (projectChanged()) {
+        setFlash(
+          "",
+          `Failed to update daily review timing for the project you were editing: ${
+            err.message || "unknown error"
+          }`
+        );
+        return;
+      }
       setFlash("", err.message || "Failed to update daily review timing.");
     } finally {
       setBusy(false);
     }
   }
 
-  const disabled = !canManage || !projectId || loading;
+  const runNowDisabled = !canManage || !projectId || loading;
+  // Editing and saving are only possible once the current project's settings
+  // have loaded, so a failed load can never PATCH values it did not return.
+  const disabled = runNowDisabled || !settings;
   const reviewEmailAvailable = settings?.review_email_available === true;
 
   return (
@@ -135,7 +221,10 @@ function DailyReviewScheduleForm({
           disabled={disabled}
           onChange={(event) => setCadenceMinutes(event.target.value)}
         >
-          {BATCH_CADENCE_OPTIONS.map((option) => (
+          {cadenceOptions(
+            settings ? String(settings.cadence_minutes || 1440) : null,
+            cadenceMinutes
+          ).map((option) => (
             <option key={option.value} value={option.value}>
               {option.label}
             </option>
@@ -238,7 +327,7 @@ function DailyReviewScheduleForm({
           <button
             type="button"
             className="btn-secondary"
-            disabled={disabled}
+            disabled={runNowDisabled}
             onClick={onRunNow}
           >
             Run now

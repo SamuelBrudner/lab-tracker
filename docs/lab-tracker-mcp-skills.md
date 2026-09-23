@@ -42,8 +42,6 @@ Environment for read/write tools:
 ```bash
 LAB_TRACKER_BASE_URL=http://127.0.0.1:8000
 LAB_TRACKER_MCP_API_KEY=<lpat-personal-access-token>
-LAB_TRACKER_MCP_USERNAME=<service-account-username>
-LAB_TRACKER_MCP_PASSWORD=<service-account-password>
 ```
 
 For agents that are not running on the graph workstation, use the current
@@ -52,25 +50,35 @@ workstation HTTPS base URL:
 ```bash
 LAB_TRACKER_BASE_URL=https://lab-tracker.example.org
 LAB_TRACKER_MCP_API_KEY=<read-only-lpat-token>
-LAB_TRACKER_MCP_USERNAME=<service-account-username>
-LAB_TRACKER_MCP_PASSWORD=<service-account-password>
 ```
 
 The server does not store bearer tokens. When `LAB_TRACKER_MCP_API_KEY` (or
 `LAB_TRACKER_MCP_TOKEN`) is set, the client sends that `lpat_` token directly
-and does not call `/auth/login`. Otherwise it logs in with the configured
-username/password and retries once after a 401. Credentials are only required
-when `LAB_TRACKER_AUTH_ENABLED=true`; local auth-disabled testing can omit them.
+and does not call `/auth/login`. An LPAT is the sanctioned MCP credential; the
+older `LAB_TRACKER_MCP_USERNAME` / `LAB_TRACKER_MCP_PASSWORD` login is
+deprecated (run `lt auth doctor` to find configs still using it). Without a
+token, the client logs in with that username/password and retries once after a
+401. A `403 forbidden` means the
+credential is valid but lacks project or role access: tools return it with
+`next_action.action = "request_access"` and never refresh the credential. A
+`403 service_forbidden` or `403 device_forbidden` means the credential's kind or
+scope (for example a read-only `lpat_` token attempting a write) cannot reach
+the route: tools return `next_action.action = "use_capable_credential"`, and the
+fix is a token minted with the needed scope. Credentials are only required when `LAB_TRACKER_AUTH_ENABLED=true`;
+local auth-disabled testing can omit them.
 
-For a private hosted read-only MCP endpoint, use the compose `mcp` service:
+For a private hosted read-only MCP endpoint, enable the compose `mcp` profile:
 
 ```bash
 export LT_MCP_READONLY_TOKEN=lpat_...
 export LT_MCP_INBOUND_TOKEN="$(openssl rand -hex 32)"
-docker compose up mcp
+docker compose --profile mcp up mcp
 ```
 
-It runs `lt-mcp` with `LAB_TRACKER_MCP_TRANSPORT=streamable-http`, points the MCP
+The service is opt-in, so other compose commands never need these tokens, and
+its container refuses to start while either token is empty. It runs the
+image's installed MCP server (the `lt-mcp` entry point) with
+`LAB_TRACKER_MCP_TRANSPORT=streamable-http`, points the MCP
 process at the internal API hop (`http://app:8000`), and publishes only
 `127.0.0.1:9000` on the host. Put a private TLS proxy in front of that loopback
 port; `deploy/mcp/Caddyfile` is the checked-in example with Origin/Host checks,
@@ -83,6 +91,49 @@ process rejects missing or invalid credentials before FastMCP and removes the
 header before dispatch. The LPAT is used only for the MCP-to-API hop. Keep the
 endpoint private behind TLS or a tailnet; the inbound token is an access gate,
 not per-user graph authorization or attribution.
+
+The hosted (`streamable-http`) server is read-only by default and checks that
+at startup; it refuses to start (non-zero exit, so a container restart policy
+retries) unless:
+
+- `GET /readiness` on the API target succeeds and reports `auth.enabled=true`.
+  Unlike stdio, this probe also runs for loopback API targets, and an
+  unreachable API, a 404/5xx, or a rejected credential stops startup instead of
+  booting unguarded.
+- `LAB_TRACKER_MCP_API_KEY` is an `lpat_` token the API refuses to let write.
+  The API exposes no token introspection to service tokens, so `lt-mcp` sends an
+  empty `POST` to a path no API route serves: the API's token policy answers
+  `403 service_forbidden` for a read-only token before any route runs, while a
+  write-capable token gets `404`. Only the explicit refusal counts as read-only;
+  username/password logins cannot be verified and are refused.
+
+A default hosted server registers only the read tools and resources. Set
+`LAB_TRACKER_MCP_ALLOW_WRITES=true` to deliberately serve write tools as well
+(the startup read-only check is then skipped and a warning is logged). Even then
+the hosted server never registers tools that read files on the MCP host:
+`lab_tracker_upload_visualization_file` is absent and
+`lab_tracker_record_evidence_bundle` refuses `upload_file`/`upload_file_path`.
+Local stdio servers keep the full tool set.
+
+By default the hosted server does not validate `Host` or `Origin`, whatever
+`LAB_TRACKER_MCP_HOST` it binds: the inbound bearer already defeats DNS
+rebinding, and the reverse proxy in front (the checked-in Caddyfile,
+`tailscale serve`, nginx, Traefik) owns the public Host/Origin policy and may
+forward the client's `Host` unchanged. To have `lt-mcp` check them too, set a
+comma-separated Host allowlist (`:*` matches any port) naming the public host
+the proxy forwards, plus any browser origins your clients send:
+
+```bash
+LAB_TRACKER_MCP_ALLOWED_HOSTS=mcp.lab.internal
+LAB_TRACKER_MCP_ALLOWED_ORIGINS=https://github.com
+```
+
+With a Host allowlist set, a request with another `Host` gets `421` and one
+whose `Origin` is not listed gets `403` (requests without `Origin` pass).
+`LAB_TRACKER_MCP_ALLOWED_ORIGINS` without `LAB_TRACKER_MCP_ALLOWED_HOSTS` is a
+startup error. The docker-compose `mcp` service forwards
+`LAB_TRACKER_MCP_ALLOW_WRITES`, `LAB_TRACKER_MCP_ALLOWED_HOSTS` and
+`LAB_TRACKER_MCP_ALLOWED_ORIGINS` from the ignored `.env`.
 
 For a remote agent, the graph-native read sequence is:
 
@@ -111,9 +162,7 @@ than a hardcoded absolute Python path:
       "command": "lt-mcp",
       "env": {
         "LAB_TRACKER_BASE_URL": "http://127.0.0.1:8000",
-        "LAB_TRACKER_MCP_API_KEY": "<lpat-personal-access-token>",
-        "LAB_TRACKER_MCP_USERNAME": "<service-account-username>",
-        "LAB_TRACKER_MCP_PASSWORD": "<service-account-password>"
+        "LAB_TRACKER_MCP_API_KEY": "<lpat-personal-access-token>"
       }
     }
   }
@@ -240,8 +289,8 @@ docker compose up app
 SQLite remains the local fallback for simple single-client development.
 
 Local development starts with authentication disabled. Set
-`LAB_TRACKER_AUTH_ENABLED=true` when you want to test login, roles, or service
-account credentials.
+`LAB_TRACKER_AUTH_ENABLED=true` and set `LAB_TRACKER_AUTH_SECRET_KEY` to a strong
+random value when you want to test login, roles, or service account credentials.
 
 For MCP clients on other computers, use the reachable shared-server URL instead
 of localhost, for example:
@@ -276,7 +325,12 @@ Defaults:
 - Override mirror path with `LAB_TRACKER_DOLT_MIRROR_PATH`
 
 The exporter mirrors retained Lab Tracker tables, including graph draft review
-tables, and excludes `users`.
+tables, and excludes account, credential, and telemetry tables (`users`,
+`invitations`, `personal_access_tokens`, `device_tokens`, `device_enrollments`,
+`usage_events`, `usage_event_rollups`, `review_email_outbox`), plus the
+review notification e-mail columns of `graph_draft_batch_settings`. A table that was
+exported by an older version is dropped from the next snapshot, but it remains
+in earlier Dolt commits.
 
 ## Skill
 

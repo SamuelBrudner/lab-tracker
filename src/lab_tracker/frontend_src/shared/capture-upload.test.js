@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { apiResponse, errorResponse, installFetchMock } from "../test/utils.js";
+import { ContractError } from "./contract.js";
+import { apiResponse, errorResponse, installFetchMock, textResponse } from "../test/utils.js";
 import { UPLOAD_FILE_PATH } from "./upload-queue.js";
 import {
   OFFLINE_QUEUED,
@@ -131,6 +132,26 @@ describe("uploadOrQueueRawFile", () => {
     expect(enqueued.ownerId).toBe("owner-1");
     expect(enqueued.fields.project_id).toBe("p1");
     expect(JSON.parse(enqueued.fields.targets)).toHaveLength(1);
+  });
+
+  it("rethrows a malformed successful upload response instead of queueing it as offline", async () => {
+    // The server accepted the upload (2xx) but the envelope drifted: queueing
+    // would replay an already-created note, so the contract error must surface.
+    installFetchMock([
+      { match: "/notes/upload-file", method: "POST", response: textResponse("created", 201) },
+    ]);
+    const queue = fakeQueue();
+    await expect(
+      uploadOrQueueRawFile({
+        token: "t",
+        projectId: "p1",
+        ownerId: "owner-1",
+        fileToUpload: new Blob(["x"]),
+        metadata: {},
+        queue,
+      })
+    ).rejects.toBeInstanceOf(ContractError);
+    expect(queue.enqueue).not.toHaveBeenCalled();
   });
 
   it("rethrows a server rejection instead of queueing", async () => {

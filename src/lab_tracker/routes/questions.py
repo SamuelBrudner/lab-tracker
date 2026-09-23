@@ -34,6 +34,7 @@ from .shared import (
     CreatedByFilter,
     actor_from_request,
     api_from_request,
+    created_by_filter_value,
     ensure_project_read,
     handlers_from_request,
     list_response,
@@ -91,7 +92,7 @@ def build_questions_router(api: LabTrackerAPI) -> APIRouter:
             status=status.value if status is not None else None,
             question_type=question_type.value if question_type is not None else None,
             search=resolved_search,
-            created_by=created_by,
+            created_by=created_by_filter_value(created_by),
             parent_question_id=parent_question_id,
             ancestor_question_id=ancestor_question_id,
             limit=limit,
@@ -215,17 +216,10 @@ def build_questions_router(api: LabTrackerAPI) -> APIRouter:
             question_id,
             actor=actor_from_request(request),
         )
-        refactors = api_from_request(request, api).list_question_refactors(
+        refactors, total = api_from_request(request, api).list_question_refactors_page(
             question_id,
             limit=limit,
             offset=offset,
-        )
-        total = len(
-            api_from_request(request, api).list_question_refactors(
-                question_id,
-                limit=None,
-                offset=0,
-            )
         )
         return list_response(refactors, limit=limit, offset=offset, total=total)
 

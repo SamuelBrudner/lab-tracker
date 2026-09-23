@@ -15,7 +15,6 @@ from lab_tracker.models import (
     GraphChangeSet,
     GraphChangeSetStatus,
     GraphDraftBatchRun,
-    GraphDraftBatchRunStatus,
     GraphDraftBatchSettings,
     GraphDraftBatchTrigger,
     GraphDraftMode,
@@ -23,6 +22,7 @@ from lab_tracker.models import (
     Note,
 )
 from lab_tracker.patching import NOT_PROVIDED, PatchValue
+from lab_tracker.services.graph_draft_batch_policy import BatchReviewQuery, BatchRunQuery
 from lab_tracker.services.graph_draft_commit import TransactionalDraftCommitCoordinator
 from lab_tracker.services.graph_draft_generation import (
     DEFAULT_BATCH_RETRY_ATTEMPTS,
@@ -171,16 +171,11 @@ class GraphDraftService:
             include_operations=include_operations,
         )
 
-    def list_batch_graph_drafts(
+    def query_batch_graph_drafts(
         self,
-        *,
-        project_id: UUID | None = None,
-        status: GraphChangeSetStatus | None = None,
-    ) -> list[GraphChangeSet]:
-        return self.records.list_batch_graph_drafts(
-            project_id=project_id,
-            status=status,
-        )
+        query: BatchReviewQuery,
+    ) -> tuple[list[GraphChangeSet], int]:
+        return self.records.query_batch_graph_drafts(query)
 
     def update_graph_change_operation(
         self,
@@ -438,13 +433,8 @@ class GraphDraftService:
             now=now,
         )
 
-    def list_graph_draft_batch_runs(
+    def query_graph_draft_batch_runs(
         self,
-        *,
-        project_id: UUID | None = None,
-        status: GraphDraftBatchRunStatus | None = None,
-    ) -> list[GraphDraftBatchRun]:
-        return self.scheduling.list_graph_draft_batch_runs(
-            project_id=project_id,
-            status=status,
-        )
+        query: BatchRunQuery,
+    ) -> tuple[list[GraphDraftBatchRun], int]:
+        return self.scheduling.query_graph_draft_batch_runs(query)

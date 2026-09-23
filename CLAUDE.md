@@ -63,8 +63,7 @@ This protocol applies when ending a Beads implementation workflow. It is subordi
 Python setup:
 
 ```bash
-uv venv
-uv pip install -e ".[test,lint]"
+uv sync --frozen --extra test --extra lint
 uv run alembic upgrade head
 ```
 

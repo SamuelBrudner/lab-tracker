@@ -3,7 +3,7 @@ from fastapi.testclient import TestClient
 from lab_tracker.app import create_app
 
 
-def test_app_boots_with_core_routes_and_state():
+def test_app_boots_with_core_routes_and_state(migrated_sqlite_database_url: str):
     app = create_app()
 
     route_paths = set(app.openapi()["paths"])

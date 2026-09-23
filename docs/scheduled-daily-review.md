@@ -80,6 +80,32 @@ updates the existing job. Both \*nix installers take the same optional arguments
 (`~/.config/lab-tracker/daily-review.secrets.json`). The scheduled process reads
 that file structurally at run time; it is never sourced or shell-evaluated, and
 secret values never appear in the crontab or launchd plist.
+Re-running an installer from a shell where none of those credentials is
+exported keeps the existing secrets file (and resets its mode to `0600`);
+export a new credential to replace it, or delete the file to clear it.
+Exporting only one of `LAB_TRACKER_ADMIN_USER` / `LAB_TRACKER_ADMIN_PASS` (for
+example to rotate the password) keeps the other from the existing file. If the
+file has none and `LAB_TRACKER_API_KEY` is also exported, the lone variable is
+ignored and only the API key is persisted: the key is a complete credential and
+takes precedence over the admin login at run time. Without an API key the
+installer refuses and changes nothing; unset the lone variable, or export its
+pair too, and re-run it.
+
+The Windows installer does the same: a Scheduled Task does not inherit
+`$env:` assignments from the installing PowerShell session, so
+`install-daily-review.ps1` persists `LAB_TRACKER_API_KEY` or the fallback
+`LAB_TRACKER_ADMIN_USER` / `LAB_TRACKER_ADMIN_PASS` from that session to
+`%LOCALAPPDATA%\LabTracker\daily-review.secrets.json`, with inheritance
+disabled and access granted to the current user only. The task definition
+carries only that file's path; the trigger reads it with `ConvertFrom-Json` at
+run time. Re-running without a credential set keeps the existing file, and
+setting only one of the admin user/password keeps the other from it; when the
+file has none it is ignored if `LAB_TRACKER_API_KEY` is also set, and
+otherwise the installer refuses. Each
+scheduled run appends a timestamped success or failure line to
+`%LOCALAPPDATA%\LabTracker\daily-review.log` and exits non-zero on failure,
+so Task Scheduler's **Last Run Result** shows it too. Installing against a
+non-local `-BaseUrl` with no credential persisted prints a warning.
 
 ### One thing to turn on first
 
@@ -112,7 +138,7 @@ signed-in reviewer's assignment.
 
 ### Remove it
 
-- **Windows:** `Unregister-ScheduledTask -TaskName LabTrackerDailyReview -Confirm:$false`
+- **Windows:** `Unregister-ScheduledTask -TaskName LabTrackerDailyReview -Confirm:$false; Remove-Item "$env:LOCALAPPDATA\LabTracker\daily-review.secrets.json"`
 - **macOS (launchd):** `launchctl bootout gui/$(id -u)/com.lab-tracker.daily-review; rm -f ~/Library/LaunchAgents/com.lab-tracker.daily-review.plist ~/.config/lab-tracker/daily-review.secrets.json`
 - **Linux / cron:** `crontab -l | grep -v '# lab-tracker-daily-review' | crontab -; rm -f ~/.config/lab-tracker/daily-review.secrets.json`
 
@@ -154,7 +180,9 @@ disabled, so no credentials are needed. Two things change when Lab Tracker is
   On macOS/Linux both installers write whatever secret you export to a `0600`
   JSON file that the scheduled process reads structurally at run time — it is
   never sourced or shell-evaluated, so a credential containing shell
-  metacharacters cannot execute.
+  metacharacters cannot execute. On Windows, set the same variables with
+  `$env:LAB_TRACKER_API_KEY = "lpat_…"` in the PowerShell session that runs the
+  installer; it persists them to a current-user-only JSON file (see above).
 
   Pass a non-local URL to the installer with `-BaseUrl` (Windows) or as the
   second argument (`install-daily-review.sh 15 https://lab.example.org`).

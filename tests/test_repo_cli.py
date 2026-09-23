@@ -412,3 +412,63 @@ def test_install_hook_updates_own_block_despite_draft_block(tmp_path, monkeypatc
     assert "/new/lt" in content
     assert "/old/lt" not in content
     assert HOOK_BLOCK_BEGIN in content  # draft block untouched
+
+
+def test_install_hook_refuses_when_no_lt_can_be_found(tmp_path, monkeypatch) -> None:
+    import shutil
+
+    _clear_repo_env(monkeypatch)
+    _init_git_repo(tmp_path)
+    _init_repo_config(tmp_path)
+    real_which = shutil.which
+    monkeypatch.setattr(
+        shutil, "which", lambda name, *a, **k: None if name == "lt" else real_which(name)
+    )
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "no-venv" / "bin" / "python"))
+
+    with pytest.raises(LTValidationError, match="--lt-command"):
+        install_post_commit_hook(tmp_path)
+
+    assert not (tmp_path / ".git" / "hooks" / "post-commit").exists()
+
+
+def test_install_hook_falls_back_to_the_interpreter_sibling_lt(tmp_path, monkeypatch) -> None:
+    import shutil
+
+    _clear_repo_env(monkeypatch)
+    _init_git_repo(tmp_path)
+    _init_repo_config(tmp_path)
+    real_which = shutil.which
+    monkeypatch.setattr(
+        shutil, "which", lambda name, *a, **k: None if name == "lt" else real_which(name)
+    )
+    bin_dir = tmp_path / "venv" / "bin"
+    bin_dir.mkdir(parents=True)
+    sibling = bin_dir / ("lt.exe" if sys.platform == "win32" else "lt")
+    sibling.write_text("", encoding="utf-8")
+    monkeypatch.setattr(sys, "executable", str(bin_dir / "python"))
+
+    result = install_post_commit_hook(tmp_path)
+
+    assert result["lt_command"] == str(sibling).replace("\\", "/")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="sh hook execution test is POSIX-only")
+def test_hook_warns_when_lt_is_not_found_at_commit_time(tmp_path, monkeypatch) -> None:
+    _clear_repo_env(monkeypatch)
+    _init_git_repo(tmp_path)
+    _init_repo_config(tmp_path)
+    install_post_commit_hook(tmp_path, lt_command=str(tmp_path / "missing" / "lt"))
+
+    (tmp_path / "analysis.py").write_text("print('v5')\n", encoding="utf-8")
+    _git(tmp_path, "add", "analysis.py")
+    completed = subprocess.run(
+        ["git", "-C", str(tmp_path), "commit", "-q", "-m", "lt missing"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "lab-tracker:" in completed.stderr
+    assert "not found" in completed.stderr
+    assert _git(tmp_path, "log", "-1", "--pretty=%s") == "lt missing"

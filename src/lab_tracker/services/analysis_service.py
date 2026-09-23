@@ -16,7 +16,6 @@ from lab_tracker.models import (
     ClaimStatus,
     DatasetStatus,
     EntityOrigin,
-    EntityType,
     ExternalArtifactReference,
     Visualization,
     VisualizationInput,
@@ -24,13 +23,13 @@ from lab_tracker.models import (
     utc_now,
 )
 from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
+from lab_tracker.reference_registry import DeletableEntity
 from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.dataset_service import DatasetService
-from lab_tracker.services.goal_link_cleanup import remove_goal_links_to_targets
+from lab_tracker.services.deletion_references import prepare_entity_deletion
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.shared import (
-    _analysis_has_question_link,
     _ensure_analysis_status_transition,
     actor_user_fk,
     actor_user_id,
@@ -100,47 +99,51 @@ class AnalysisService(BaseService):
         dataset_id_list = unique_ids(dataset_ids)
         if not dataset_id_list:
             raise ValidationError("Analysis must reference at least one dataset.")
-        datasets = []
-        for dataset_id in dataset_id_list:
-            dataset = self.datasets.get_dataset(dataset_id)
-            if dataset.project_id != project_id:
-                raise ValidationError("Datasets must belong to the same project.")
-            datasets.append(dataset)
         ensure_non_empty(method_hash, "method_hash")
         ensure_non_empty(code_version, "code_version")
-        if status == AnalysisStatus.COMMITTED:
-            for dataset in datasets:
-                if dataset.status != DatasetStatus.COMMITTED:
-                    raise ValidationError(
-                        "Analyses can only be created as committed with committed datasets."
-                    )
-        resolved_terminal_reason = terminal_reason_for_status(
-            None,
-            status,
-            AnalysisStatus.ARCHIVED,
-            terminal_reason,
-            entity_name="Analysis",
-        )
-        analysis = Analysis(
-            analysis_id=uuid4(),
-            project_id=project_id,
-            dataset_ids=dataset_id_list,
-            method_hash=method_hash.strip(),
-            code_version=code_version.strip(),
-            environment_hash=environment_hash.strip() if environment_hash else None,
-            external_artifacts=_normalize_external_artifacts(external_artifacts),
-            status=status,
-            terminal_reason=resolved_terminal_reason,
-            executed_by=actor_user_id(actor),
-            executed_by_user_id=actor_user_fk(actor, self.repository),
-            origin=origin,
-            change_set_id=change_set_id,
-            origin_provider=origin_provider,
-            origin_model=origin_model,
-            origin_prompt_version=origin_prompt_version,
-        )
-        with self.unit_of_work() as repository:
-            repository.analyses.save(analysis)
+        with self.application_transaction():
+            # Dataset delete guards read analysis inputs under this project
+            # lock, so dataset validation and insert cannot interleave.
+            self.repository.lock_project_references(project_id)
+            datasets = []
+            for dataset_id in dataset_id_list:
+                dataset = self.datasets.get_dataset(dataset_id)
+                if dataset.project_id != project_id:
+                    raise ValidationError("Datasets must belong to the same project.")
+                datasets.append(dataset)
+            if status == AnalysisStatus.COMMITTED:
+                for dataset in datasets:
+                    if dataset.status != DatasetStatus.COMMITTED:
+                        raise ValidationError(
+                            "Analyses can only be created as committed with committed datasets."
+                        )
+            resolved_terminal_reason = terminal_reason_for_status(
+                None,
+                status,
+                AnalysisStatus.ARCHIVED,
+                terminal_reason,
+                entity_name="Analysis",
+            )
+            analysis = Analysis(
+                analysis_id=uuid4(),
+                project_id=project_id,
+                dataset_ids=dataset_id_list,
+                method_hash=method_hash.strip(),
+                code_version=code_version.strip(),
+                environment_hash=environment_hash.strip() if environment_hash else None,
+                external_artifacts=_normalize_external_artifacts(external_artifacts),
+                status=status,
+                terminal_reason=resolved_terminal_reason,
+                executed_by=actor_user_id(actor),
+                executed_by_user_id=actor_user_fk(actor, self.repository),
+                origin=origin,
+                change_set_id=change_set_id,
+                origin_provider=origin_provider,
+                origin_model=origin_model,
+                origin_prompt_version=origin_prompt_version,
+            )
+            with self.unit_of_work() as repository:
+                repository.analyses.save(analysis)
         return analysis
 
     def get_analysis(self, analysis_id: UUID) -> Analysis:
@@ -171,7 +174,9 @@ class AnalysisService(BaseService):
         dataset_id: UUID | None = None,
         question_id: UUID | None = None,
     ) -> list[Analysis]:
-        analyses = self.query_from_repository(
+        # The repository applies every filter in SQL (question_id joins the
+        # dataset question links), so the result needs no re-filtering here.
+        return self.query_from_repository(
             loader=lambda repository: repository.query_analyses(
                 project_id=project_id,
                 dataset_id=dataset_id,
@@ -180,22 +185,6 @@ class AnalysisService(BaseService):
                 offset=0,
             ),
         )
-        if project_id is not None:
-            analyses = [analysis for analysis in analyses if analysis.project_id == project_id]
-        if dataset_id is not None:
-            analyses = [analysis for analysis in analyses if dataset_id in analysis.dataset_ids]
-        if question_id is not None:
-            dataset_map = {dataset.dataset_id: dataset for dataset in self.datasets.list_datasets()}
-            analyses = [
-                analysis
-                for analysis in analyses
-                if _analysis_has_question_link(
-                    analysis,
-                    question_id,
-                    dataset_map,
-                )
-            ]
-        return analyses
 
     def update_analysis(
         self,
@@ -274,23 +263,28 @@ class AnalysisService(BaseService):
         return analysis
 
     def delete_analysis(self, analysis_id: UUID, *, actor: AuthContext | None = None) -> Analysis:
-        analysis = self.get_analysis(analysis_id)
-        self.authorization.require_contributor(analysis.project_id, actor=actor)
-        self._ensure_analysis_can_be_deleted(analysis)
-        with self.unit_of_work() as repository:
+        located_analysis = self.get_analysis(analysis_id)
+        self.authorization.require_contributor(located_analysis.project_id, actor=actor)
+        with self.application_transaction(), self.unit_of_work() as repository:
+            repository.lock_project_references(located_analysis.project_id)
+            analysis = self.get_analysis(analysis_id)
+            self.authorization.require_contributor(analysis.project_id, actor=actor)
+            self._ensure_analysis_can_be_deleted(analysis)
             visualizations, _ = repository.query_visualizations(
                 analysis_id=analysis_id,
                 limit=None,
                 offset=0,
             )
-            targets = {
-                (EntityType.ANALYSIS, analysis_id),
-                *(
-                    (EntityType.VISUALIZATION, visualization.viz_id)
+            prepare_entity_deletion(
+                repository,
+                DeletableEntity.ANALYSIS,
+                analysis_id,
+                project_id=analysis.project_id,
+                cascaded=(
+                    (DeletableEntity.VISUALIZATION, visualization.viz_id)
                     for visualization in visualizations
                 ),
-            }
-            remove_goal_links_to_targets(repository, targets)
+            )
             repository.analyses.delete(analysis_id)
         return analysis
 
@@ -322,6 +316,10 @@ class AnalysisService(BaseService):
         created_claims: list[Claim] = []
         created_visualizations: list[Visualization] = []
         with self.application_transaction():
+            # Claim creation below takes the project reference lock; take it
+            # before this analysis row is written so a concurrent delete that
+            # holds the lock and waits on the row cannot deadlock with us.
+            self.repository.lock_project_references(analysis.project_id)
             with self.unit_of_work() as repository:
                 repository.analyses.save(analysis)
             for claim_input in claims or []:

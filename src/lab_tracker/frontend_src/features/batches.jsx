@@ -4,7 +4,7 @@ import { apiListRequest, apiRequest, buildApiPath } from "../shared/api.js";
 import { formatDate } from "../shared/formatters.js";
 import { DailyReviewScheduleForm } from "./daily-review-schedule.jsx";
 
-const { useCallback, useEffect, useMemo, useState } = React;
+const { useCallback, useEffect, useMemo, useRef, useState } = React;
 
 function batchNoteCount(batch) {
   return batch?.source_note_count || batch?.source_note_ids?.length || 1;
@@ -23,9 +23,11 @@ function pendingBatchStatus(status) {
 function PendingBatchBanner({ enabled = true, token, navigate }) {
   const [batches, setBatches] = useState([]);
   const [batchTotal, setBatchTotal] = useState(0);
+  const [loadError, setLoadError] = useState("");
 
   useEffect(() => {
     let canceled = false;
+    setLoadError("");
     if (!enabled) {
       setBatches([]);
       setBatchTotal(0);
@@ -40,10 +42,13 @@ function PendingBatchBanner({ enabled = true, token, navigate }) {
           setBatchTotal(Number(meta?.total ?? data?.length ?? 0));
         }
       })
-      .catch(() => {
+      .catch((err) => {
         if (!canceled) {
           setBatches([]);
           setBatchTotal(0);
+          setLoadError(
+            `Could not load your daily reviews: ${err?.message || "request failed."}`
+          );
         }
       });
     return () => {
@@ -51,6 +56,13 @@ function PendingBatchBanner({ enabled = true, token, navigate }) {
     };
   }, [enabled, token]);
 
+  if (loadError) {
+    return (
+      <p className="flash error" role="alert">
+        {loadError}
+      </p>
+    );
+  }
   if (batchTotal === 0 || batches.length === 0) {
     return null;
   }
@@ -92,7 +104,7 @@ function BatchCards({ batches, emptyMessage, navigate }) {
       <div className="inline">
         <span className="pill">{formatDate(batch.created_at)}</span>
         <span className="pill">{batchNoteCount(batch)} notes</span>
-        <span className="pill">{(batch.operations || []).length} ops</span>
+        <span className="pill">{batch.operation_count ?? 0} ops</span>
         {batch.model ? <span className="pill">{batch.model}</span> : null}
       </div>
       <button
@@ -123,6 +135,19 @@ function BatchReviewPage({
   const [unassignedOversightBatches, setUnassignedOversightBatches] = useState([]);
   const [runs, setRuns] = useState([]);
   const [loading, setLoading] = useState(false);
+  // Each load bumps the generation; results, failures and the loading reset of
+  // a superseded load (e.g. for a previously selected project) are ignored.
+  const loadGenerationRef = useRef(0);
+  // The project this page currently shows (null once unmounted). An async
+  // action started for another project must not touch this page's state.
+  const shownProjectIdRef = useRef(selectedProjectId);
+
+  useEffect(() => {
+    shownProjectIdRef.current = selectedProjectId;
+    return () => {
+      shownProjectIdRef.current = null;
+    };
+  }, [selectedProjectId]);
 
   const activeProject = useMemo(
     () => projects.find((project) => project.project_id === selectedProjectId) || null,
@@ -138,6 +163,8 @@ function BatchReviewPage({
   }, [needsCommitBatches, waitingBatches]);
 
   const loadBatches = useCallback(async () => {
+    const generation = ++loadGenerationRef.current;
+    const isCurrent = () => generation === loadGenerationRef.current;
     setLoading(true);
     try {
       const batchPath = buildApiPath("/batches", {
@@ -181,35 +208,64 @@ function BatchReviewPage({
           : Promise.resolve({ data: [] }),
         apiListRequest(runPath, { token }),
       ]);
+      if (!isCurrent()) {
+        return;
+      }
       setBatches(batchData || []);
       setWaitingBatches(waitingData || []);
       setNeedsCommitBatches(needsCommitData || []);
       setUnassignedOversightBatches(unassignedOversightData || []);
       setRuns(runData || []);
     } catch (err) {
-      setFlash("", err.message || "Failed to load daily reviews.");
+      if (isCurrent()) {
+        setFlash("", err.message || "Failed to load daily reviews.");
+      }
     } finally {
-      setLoading(false);
+      if (isCurrent()) {
+        setLoading(false);
+      }
     }
   }, [canManageProject, selectedProjectId, setFlash, token]);
 
   useEffect(() => {
     loadBatches();
+    return () => {
+      // Invalidate the in-flight load on project change or unmount.
+      loadGenerationRef.current += 1;
+    };
   }, [loadBatches]);
 
   async function runNow() {
     if (!selectedProjectId || !canManageGraph) {
       return;
     }
+    const runProjectId = selectedProjectId;
+    const runProjectName = activeProject?.name || "the previous project";
     setBusy(true);
     setFlash("", "");
     try {
       const run = await apiRequest("/batches/run-now", {
-        body: { project_id: selectedProjectId },
+        body: { project_id: runProjectId },
         method: "POST",
         token,
       });
+      // If the user moved to another project while the run (or the reload) was
+      // in flight, this closure's loadBatches would replace that project's
+      // queues with the old project's, and navigating would pull them away.
+      const projectChanged = () => {
+        if (shownProjectIdRef.current === runProjectId) {
+          return false;
+        }
+        setFlash(`Daily review run for ${runProjectName} finished. Select it to see the results.`);
+        return true;
+      };
+      if (projectChanged()) {
+        return;
+      }
       await loadBatches();
+      if (projectChanged()) {
+        return;
+      }
       if (run.change_set_id) {
         navigate(`/app/batches/${run.change_set_id}`);
       } else {

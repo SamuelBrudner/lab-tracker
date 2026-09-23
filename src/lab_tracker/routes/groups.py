@@ -153,7 +153,7 @@ def build_groups_router(api: LabTrackerAPI) -> APIRouter:
         request: Request,
     ):
         actor = actor_from_request(request)
-        membership = api_from_request(request, api).upsert_group_membership(
+        membership = api_from_request(request, api).update_group_membership(
             group_id,
             user_id,
             payload.role,

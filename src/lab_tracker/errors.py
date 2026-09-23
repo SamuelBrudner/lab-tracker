@@ -18,7 +18,22 @@ class OpaqueTargetNotFoundError(NotFoundError):
 
 
 class AuthError(LabTrackerError):
-    """Authentication or authorization failure."""
+    """Authentication failure: the credential is missing, invalid, or rejected.
+
+    Maps to HTTP ``401 auth_error``; clients may refresh the credential or sign
+    the user out. Authorization denials for an authenticated principal use the
+    :class:`PermissionDeniedError` subtype instead.
+    """
+
+
+class PermissionDeniedError(AuthError):
+    """An authenticated principal lacks permission for the requested action.
+
+    Maps to HTTP ``403 forbidden``; the credential stays valid, so clients must
+    not refresh it or sign the user out. It subclasses :class:`AuthError` so
+    existing ``except AuthError`` sites (for example opaque-read conversion to
+    ``404``) keep treating it as an access failure.
+    """
 
 
 class StoreAuthorityDeniedError(LabTrackerError):

@@ -2,7 +2,10 @@ import * as React from "react";
 
 import { formatDate } from "../../shared/formatters.js";
 import { useApiResource } from "../../hooks/useApiResource.js";
-import { downloadProtectedResource } from "../../shared/api.js";
+import {
+  downloadProtectedResource,
+  fetchProtectedBlobResource,
+} from "../../shared/api.js";
 
 function VisualizationDetailCard({ token, vizId, navigate }) {
   const { data: viz, error, loading } = useApiResource(
@@ -11,36 +14,31 @@ function VisualizationDetailCard({ token, vizId, navigate }) {
     "Failed to load visualization."
   );
   const [assetPreview, setAssetPreview] = React.useState("");
+  const [assetPreviewError, setAssetPreviewError] = React.useState("");
+  const [downloadError, setDownloadError] = React.useState("");
   const isImageAsset = Boolean(viz?.asset?.content_type?.startsWith("image/"));
 
   React.useEffect(() => {
     let canceled = false;
     let objectUrl = "";
     setAssetPreview("");
+    setAssetPreviewError("");
     if (!viz?.asset_download_path || !isImageAsset) {
       return () => {
         canceled = true;
       };
     }
-    const headers = token ? { Authorization: `Bearer ${token}` } : {};
-    fetch(viz.asset_download_path, { headers })
-      .then((response) => {
-        if (!response.ok) {
-          throw new Error("Unable to load visualization asset.");
-        }
-        return response.blob();
-      })
-      .then((blob) => {
-        objectUrl = URL.createObjectURL(blob);
+    fetchProtectedBlobResource({ path: viz.asset_download_path, token })
+      .then((resource) => {
         if (canceled) {
-          URL.revokeObjectURL(objectUrl);
           return;
         }
+        objectUrl = URL.createObjectURL(resource.blob);
         setAssetPreview(objectUrl);
       })
-      .catch(() => {
+      .catch((err) => {
         if (!canceled) {
-          setAssetPreview("");
+          setAssetPreviewError(err?.message || "Unable to load visualization asset.");
         }
       });
     return () => {
@@ -55,11 +53,16 @@ function VisualizationDetailCard({ token, vizId, navigate }) {
     if (!viz?.asset_download_path) {
       return;
     }
-    await downloadProtectedResource({
-      path: viz.asset_download_path,
-      token,
-      filename: viz.asset?.filename || "visualization",
-    });
+    setDownloadError("");
+    try {
+      await downloadProtectedResource({
+        path: viz.asset_download_path,
+        token,
+        filename: viz.asset?.filename || "visualization",
+      });
+    } catch (err) {
+      setDownloadError(err?.message || "Failed to download visualization asset.");
+    }
   }
 
   return (
@@ -92,6 +95,9 @@ function VisualizationDetailCard({ token, vizId, navigate }) {
                     alt={viz.asset.filename || "Visualization asset"}
                   />
                 ) : null}
+                {assetPreviewError ? (
+                  <p className="flash error">Preview unavailable: {assetPreviewError}</p>
+                ) : null}
                 <div className="mono">{viz.asset.filename}</div>
                 <div className="mono">
                   {viz.asset.content_type} - {viz.asset.size_bytes} bytes
@@ -104,6 +110,7 @@ function VisualizationDetailCard({ token, vizId, navigate }) {
                 >
                   Download asset
                 </button>
+                {downloadError ? <p className="flash error">{downloadError}</p> : null}
               </div>
             ) : (
               <div className="subtle">(none)</div>

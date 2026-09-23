@@ -33,6 +33,7 @@ from lab_tracker.provenance import (
     build_ara_artifact_document,
     build_record_export_provenance_document,
 )
+from lab_tracker.provenance_supervision import build_with_people_supervision
 from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.shared import actor_user_fk, actor_user_id
@@ -92,11 +93,13 @@ class RecordExportService(BaseService):
             raise NotFoundError("User does not exist.")
         records = self._collect_records(user_id=user_id, project_ids=project_ids)
         exported_project_ids = self._project_ids_for_records(records, fallback=project_ids)
-        supervision_edges, _ = repository.query_supervision_edges(limit=None, offset=0)
-        provenance = build_record_export_provenance_document(
-            base_url,
-            records,
-            supervision_edges=supervision_edges,
+        provenance = build_with_people_supervision(
+            repository,
+            lambda supervision_edges: build_record_export_provenance_document(
+                base_url,
+                records,
+                supervision_edges=supervision_edges,
+            ),
         )
         generated_at = utc_now()
         event = RecordExportEvent(
@@ -141,15 +144,18 @@ class RecordExportService(BaseService):
             # Under READ COMMITTED, a linked target can disappear after scope
             # authorization but before artifact assembly re-reads it.
             raise NotFoundError("Goal does not exist.") from exc
-        supervision_edges, _ = self.repository.query_supervision_edges(limit=None, offset=0)
-        return build_ara_artifact_document(
-            base_url,
-            scope_type=EntityType.GOAL,
-            scope_id=goal.goal_id,
-            records=records,
-            generated_at=utc_now(),
-            layer_name=layer_name,
-            supervision_edges=supervision_edges,
+        generated_at = utc_now()
+        return build_with_people_supervision(
+            self.repository,
+            lambda supervision_edges: build_ara_artifact_document(
+                base_url,
+                scope_type=EntityType.GOAL,
+                scope_id=goal.goal_id,
+                records=records,
+                generated_at=generated_at,
+                layer_name=layer_name,
+                supervision_edges=supervision_edges,
+            ),
         )
 
     def export_question_subtree(
@@ -163,15 +169,18 @@ class RecordExportService(BaseService):
         self._validate_layer_name(layer_name)
         root = self.questions.get_question_for_read(root_id, actor=actor)
         records = self._collect_question_subtree_records(root)
-        supervision_edges, _ = self.repository.query_supervision_edges(limit=None, offset=0)
-        return build_ara_artifact_document(
-            base_url,
-            scope_type=EntityType.QUESTION,
-            scope_id=root.question_id,
-            records=records,
-            generated_at=utc_now(),
-            layer_name=layer_name,
-            supervision_edges=supervision_edges,
+        generated_at = utc_now()
+        return build_with_people_supervision(
+            self.repository,
+            lambda supervision_edges: build_ara_artifact_document(
+                base_url,
+                scope_type=EntityType.QUESTION,
+                scope_id=root.question_id,
+                records=records,
+                generated_at=generated_at,
+                layer_name=layer_name,
+                supervision_edges=supervision_edges,
+            ),
         )
 
     def _validate_layer_name(self, layer_name: str | None) -> None:
@@ -312,6 +321,10 @@ class RecordExportService(BaseService):
         notes: dict[UUID, Note],
         visualizations: dict[UUID, Visualization],
     ) -> AraArtifactRecords:
+        if not project_ids:
+            # An empty scope authorizes nothing; it must never widen into an
+            # unfiltered, every-project export.
+            raise ValueError("An artifact export scope must name at least one project.")
         changed = True
         while changed:
             changed = False
@@ -395,16 +408,15 @@ class RecordExportService(BaseService):
                     lambda _node_id, item=related_node: item,
                 )
 
-        if project_ids:
-            self._drop_out_of_scope(
-                project_ids,
-                questions,
-                datasets,
-                analyses,
-                claims,
-                exploration_nodes,
-                notes,
-            )
+        self._drop_out_of_scope(
+            project_ids,
+            questions,
+            datasets,
+            analyses,
+            claims,
+            exploration_nodes,
+            notes,
+        )
         project_visualizations = self._visualizations_for_records(project_ids, analyses, claims)
         visualizations.update({item.viz_id: item for item in project_visualizations})
         notes.update(
@@ -601,13 +613,11 @@ class RecordExportService(BaseService):
                 offset=0,
             )
             visualizations.update({item.viz_id: item for item in items})
-        if project_ids:
-            visualizations = {
-                viz_id: viz
-                for viz_id, viz in visualizations.items()
-                if self._visualization_project_id(viz) in project_ids
-            }
-        return list(visualizations.values())
+        return [
+            viz
+            for viz in visualizations.values()
+            if self._visualization_project_id(viz) in project_ids
+        ]
 
     def _notes_for_records(
         self,
@@ -620,8 +630,6 @@ class RecordExportService(BaseService):
         visualizations: dict[UUID, Visualization],
         notes: dict[UUID, Note],
     ) -> list[Note]:
-        if not project_ids:
-            return list(notes.values())
         scoped_notes: dict[UUID, Note] = dict(notes)
         target_map = {
             EntityType.QUESTION: set(questions),
@@ -653,8 +661,6 @@ class RecordExportService(BaseService):
         visualizations: dict[UUID, Visualization],
         exploration_nodes: dict[UUID, ExplorationNode],
     ) -> list[ExplorationNode]:
-        if not project_ids:
-            return list(exploration_nodes.values())
         target_map = {
             EntityType.QUESTION: set(questions),
             EntityType.DATASET: set(datasets),
@@ -698,29 +704,14 @@ class RecordExportService(BaseService):
             return []
         claim_ids = set(claims)
         edges: dict[UUID, object] = {}
-        if project_ids:
-            for project_id in project_ids:
-                items, _ = self.repository.query_claim_edges(
-                    project_id=project_id,
-                    limit=None,
-                    offset=0,
-                )
-                for edge in items:
-                    if edge.claim_id in claim_ids or edge.target_claim_id in claim_ids:
-                        edges[edge.edge_id] = edge
-        else:
-            for claim_id in claim_ids:
-                outgoing, _ = self.repository.query_claim_edges(
-                    claim_id=claim_id,
-                    limit=None,
-                    offset=0,
-                )
-                incoming, _ = self.repository.query_claim_edges(
-                    target_claim_id=claim_id,
-                    limit=None,
-                    offset=0,
-                )
-                for edge in [*outgoing, *incoming]:
+        for project_id in project_ids:
+            items, _ = self.repository.query_claim_edges(
+                project_id=project_id,
+                limit=None,
+                offset=0,
+            )
+            for edge in items:
+                if edge.claim_id in claim_ids or edge.target_claim_id in claim_ids:
                     edges[edge.edge_id] = edge
         return list(edges.values())
 

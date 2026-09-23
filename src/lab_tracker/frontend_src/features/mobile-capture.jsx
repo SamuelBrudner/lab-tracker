@@ -5,11 +5,13 @@ import { CaptureComposer } from "./mobile-capture/CaptureComposer.jsx";
 import { CaptureContextFields } from "./mobile-capture/CaptureContextFields.jsx";
 import { MobileInstallPrompt } from "./mobile-capture/MobileInstallPrompt.jsx";
 import { PendingReviewList } from "./mobile-capture/PendingReviewList.jsx";
+import { SharedInboxReview } from "./mobile-capture/SharedInboxReview.jsx";
 import { readCaptureLaunchContext } from "./mobile-capture/capture-helpers.js";
 
 function MobileCaptureCard({
   token,
   ownerId = "",
+  authEnabled = true,
   canWrite,
   projects,
   selectedProjectId,
@@ -31,6 +33,7 @@ function MobileCaptureCard({
   const capture = useMobileCapture({
     token,
     ownerId,
+    authEnabled,
     canWrite,
     selectedProjectId,
     questions,
@@ -46,6 +49,16 @@ function MobileCaptureCard({
   return (
     <article className="card span-12 capture-card">
       <MobileInstallPrompt />
+
+      <SharedInboxReview
+        shares={capture.incomingShares}
+        projects={projects}
+        selectedProjectId={selectedProjectId}
+        canWrite={canWrite}
+        busy={capture.sharesBusy}
+        onImport={capture.importIncomingShares}
+        onDiscard={capture.discardIncomingShares}
+      />
 
       <div className="capture-layout">
         <form className="form capture-form" onSubmit={(event) => event.preventDefault()}>
@@ -67,6 +80,7 @@ function MobileCaptureCard({
             onStartTextCapture={capture.startTextCapture}
             onStartBundleCapture={capture.startBundleCapture}
             readyToCapture={capture.readyToCapture()}
+            uploading={capture.uploading}
             needsVoice={capture.needsVoice()}
             voiceNoteType={capture.voiceNoteType}
             setVoiceNoteType={capture.setVoiceNoteType}

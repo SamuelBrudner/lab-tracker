@@ -51,6 +51,7 @@ from lab_tracker.models import (
     UsageEventRollup,
     Visualization,
 )
+from lab_tracker.reference_registry import BlockingReference, DeletableEntity
 
 EntityT = TypeVar("EntityT")
 
@@ -85,6 +86,25 @@ class EntityRepository(Protocol, Generic[EntityT]):
 
     def delete(self, entity_id: UUID) -> EntityT | None:
         """Delete one entity by ID and return the removed value."""
+
+
+class ProvenanceLinkRepository(EntityRepository[ProvenanceLink], Protocol):
+    """Provenance-link persistence with the project-scoped listing detectors use."""
+
+    def list_by_project(
+        self,
+        project_id: UUID,
+        *,
+        status: str | None = None,
+    ) -> list[ProvenanceLink]:
+        """Return a project's links (optionally one status) in creation order."""
+
+
+class VisualizationRepository(EntityRepository[Visualization], Protocol):
+    """Visualization persistence with the row lock asset mutations hold."""
+
+    def get_for_update(self, entity_id: UUID) -> Visualization | None:
+        """Lock one visualization row until transaction end and return it fresh."""
 
 
 class NoteRepository(EntityRepository[Note], Protocol):
@@ -435,14 +455,27 @@ class ReviewEmailOutboxRepository(Protocol):
     ) -> ReviewEmailDelivery | None:
         """Return the delivery for one globally unique idempotency key."""
 
+    def dead_letter_expired_leases(
+        self,
+        *,
+        now: datetime,
+        max_attempts: int,
+    ) -> builtins.list[UUID]:
+        """Fail expired leases that already used ``max_attempts``; return their ids."""
+
     def claim_next(
         self,
         *,
         now: datetime,
         lease_until: datetime,
         claim_token: UUID,
+        max_attempts: int,
     ) -> ReviewEmailDelivery | None:
-        """Atomically lease the next due or stale delivery."""
+        """Atomically lease the next due or stale delivery.
+
+        Expired leases count as attempts: a stale lease that already used
+        ``max_attempts`` is never re-leased (see ``dead_letter_expired_leases``).
+        """
 
 
 class LabTrackerRepository(Protocol):
@@ -516,7 +549,7 @@ class LabTrackerRepository(Protocol):
     def exploration_nodes(self) -> EntityRepository[ExplorationNode]: ...
 
     @property
-    def provenance_links(self) -> EntityRepository[ProvenanceLink]: ...
+    def provenance_links(self) -> ProvenanceLinkRepository: ...
 
     @property
     def entity_versions(self) -> EntityRepository[EntityVersion]: ...
@@ -531,7 +564,7 @@ class LabTrackerRepository(Protocol):
     def evidence_bundles(self) -> EvidenceBundleRepository: ...
 
     @property
-    def visualizations(self) -> EntityRepository[Visualization]: ...
+    def visualizations(self) -> VisualizationRepository: ...
 
     @property
     def graph_change_sets(self) -> GraphChangeSetRepository: ...
@@ -562,6 +595,25 @@ class LabTrackerRepository(Protocol):
 
     def lock_experiment_updates(self, experiment_ids: Iterable[UUID]) -> None:
         """Serialize lifecycle and membership mutations for Experiments."""
+
+    def lock_project_references(self, project_id: UUID) -> None:
+        """Serialize reference guards and reference-adding writes for one project."""
+
+    def find_blocking_references(
+        self,
+        entity: DeletableEntity,
+        entity_id: UUID,
+        *,
+        project_id: UUID,
+    ) -> list[BlockingReference]:
+        """Return every registry referrer that must block deleting this entity."""
+
+    def remove_unaccepted_provenance_links(
+        self,
+        entity: DeletableEntity,
+        entity_ids: Iterable[UUID],
+    ) -> None:
+        """Delete proposed/rejected provenance links naming deleted entities."""
 
     def lock_project_deletion_guard(self, project_id: UUID) -> None:
         """Keep a project alive while a graph command locks its child rows."""
@@ -634,17 +686,25 @@ class LabTrackerRepository(Protocol):
     ) -> GroupMembership | None:
         """Return one group membership by group and user."""
 
+    def lock_group_owner_memberships(self, group_id: UUID) -> None:
+        """Lock owner membership rows for a group during invariant checks."""
+
     def query_supervision_edges(
         self,
         *,
         supervisor_user_id: UUID | None = None,
         supervisee_user_id: UUID | None = None,
+        supervisee_user_ids: set[UUID] | None = None,
         active_only: bool = False,
         as_of: datetime | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> tuple[list[SupervisionEdge], int]:
-        """Query dated supervision edges."""
+        """Query dated supervision edges.
+
+        ``supervisee_user_ids`` restricts the result to those supervisees; an
+        empty set matches nothing.
+        """
 
     def query_ownership_reassignments(
         self,
@@ -693,6 +753,19 @@ class LabTrackerRepository(Protocol):
         offset: int = 0,
     ) -> tuple[list[UsageEvent], int]:
         """Query local usage telemetry events."""
+
+    def page_usage_events(
+        self,
+        *,
+        project_id: UUID | None = None,
+        verb: str | None = None,
+        resource_type: str | None = None,
+        surface: str | None = None,
+        outcome: str | None = None,
+        after: tuple[datetime, UUID] | None = None,
+        limit: int,
+    ) -> list[UsageEvent]:
+        """Return one newest-first keyset page of usage events after ``after``."""
 
     def usage_event_summary(
         self,
@@ -858,13 +931,19 @@ class LabTrackerRepository(Protocol):
         since: datetime | None = None,
         until: datetime | None = None,
         client_capture_id: str | None = None,
+        capture_bundle_id: str | None = None,
         target_entity_type: str | None = None,
         target_entity_id: UUID | None = None,
         limit: int | None = None,
         offset: int = 0,
         recent_first: bool = False,
     ) -> tuple[list[Note], int]:
-        """Query notes with filters and pagination."""
+        """Query notes with filters and pagination.
+
+        ``capture_bundle_id`` matches the text of the note's
+        ``metadata.capture_bundle_id``; callers compare the exact metadata
+        value themselves when non-string values matter.
+        """
 
     def project_ids_with_search_matches(
         self,
@@ -1048,11 +1127,18 @@ class LabTrackerRepository(Protocol):
         draft_mode: str | None = None,
         purpose: str | None = None,
         batch_key: str | None = None,
+        statuses: set[str] | None = None,
+        assigned_to_user_id: UUID | None = None,
+        unassigned_only: bool = False,
         limit: int | None = None,
         offset: int = 0,
         include_operations: bool = True,
     ) -> tuple[list[GraphChangeSet], int]:
-        """Query graph draft change sets with filters and pagination."""
+        """Query graph draft change sets with filters and pagination.
+
+        ``statuses`` matches any listed status; ``assigned_to_user_id`` and
+        ``unassigned_only`` select a reviewer's queue or unassigned oversight.
+        """
 
     def claim_graph_change_set_for_commit(
         self,
@@ -1154,7 +1240,9 @@ class LabTrackerRepository(Protocol):
         self,
         *,
         project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
         status: str | None = None,
+        assigned_to_user_id: UUID | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> tuple[list[GraphDraftBatchRun], int]:

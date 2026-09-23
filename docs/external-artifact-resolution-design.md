@@ -406,7 +406,7 @@ locators never select this configuration.
 ```
 [registered store: project-onedrive]
 kind = "local_fs"
-root = "/home/sam/OneDrive"
+root = "/home/<user>/OneDrive"
 ```
 
 The `content_hash` is what makes this safe: even when the path differs across
@@ -525,6 +525,12 @@ syntax is also unchanged here; each remote adapter owns a separate typed
 authority boundary.
 
 ### Bounded advisory local-store health
+
+This probe is not composed in this build: `GET /data-stores/{id}/health`
+answers every `local_fs` store with the static `unsupported` detail `Local store
+health is not supported in this build.` until the local-use slice retains each
+store's revalidated grant inside the filesystem helper. This section records
+the deferred design.
 
 Application composition parses `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS` once using
 the host's `os.pathsep` (`:` on POSIX, `;` on Windows). Unset, empty, and

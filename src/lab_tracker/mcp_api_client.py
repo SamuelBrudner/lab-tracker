@@ -6,9 +6,12 @@ import mimetypes
 import os
 import re
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
+from urllib.parse import quote
 
 import httpx
 
@@ -17,6 +20,7 @@ from lab_tracker.artifact_resolution_limits import (
     ArtifactContentBoundsError,
 )
 from lab_tracker.assistant_next_questions import (
+    ANSWERING_CLAIM_STATUSES,
     OPEN_GOAL_STATUSES,
     OPEN_QUESTION_STATUSES,
     build_next_questions_payload,
@@ -32,6 +36,7 @@ from lab_tracker.models import (
     AnalysisStatus,
     ClaimStatus,
     DatasetStatus,
+    EntityType,
     GoalLinkStatus,
     GoalStatus,
     GoalType,
@@ -39,6 +44,8 @@ from lab_tracker.models import (
     NoteStatus,
     QuestionStatus,
 )
+from lab_tracker.provenance import ARA_LAYER_NAMES
+from lab_tracker.schemas import PersistedGraphEntityType
 from lab_tracker_client.client import load_connection_profile
 from lab_tracker_client.transport import (
     MAX_UPLOAD_BYTES,
@@ -52,7 +59,13 @@ JsonObject = dict[str, Any]
 SERVER_NAME = "lab-tracker-mcp"
 DEFAULT_TIMEOUT_SECONDS = 10.0
 UNAVAILABLE_CODE = "lab_tracker_unavailable"
+# The list endpoints cap ``limit`` at 200; next_questions pages through each list
+# up to this many rows and reports any list it had to cut in ``meta``.
+LIST_PAGE_SIZE = 200
+NEXT_QUESTIONS_MAX_ROWS_PER_LIST = 2000
 UNAVAILABLE_MESSAGE = "Lab Tracker unavailable - proceeding without graph context."
+# No API route serves this path; see LabTrackerAPIClient.credential_can_write.
+CREDENTIAL_WRITE_PROBE_PATH = "/_lab-tracker-mcp/credential-write-probe"
 NOTE_STATUS_VALUES = tuple(status.value for status in NoteStatus)
 NOTE_STATUS_TEXT = ", ".join(NOTE_STATUS_VALUES)
 QUESTION_STATUS_VALUES = tuple(status.value for status in QuestionStatus)
@@ -71,6 +84,15 @@ GOAL_LINK_STATUS_VALUES = tuple(status.value for status in GoalLinkStatus)
 GOAL_LINK_STATUS_TEXT = ", ".join(GOAL_LINK_STATUS_VALUES)
 _BEARER_SECRET_RE = re.compile(r"Bearer\s+[^\s\"'\\,}\]]+", re.IGNORECASE)
 _LPAT_SECRET_RE = re.compile(r"lpat_[A-Za-z0-9_-]+")
+# Canonical hyphenated UUID only: ``uuid.UUID`` also accepts braces, ``urn:uuid:``
+# and bare hex, none of which is a safe, predictable path segment.
+_UUID_PATH_ID_RE = re.compile(
+    r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"
+)
+_DOT_PATH_SEGMENTS = frozenset({"", ".", ".."})
+NODE_GOAL_ENTITY_TYPE_VALUES = tuple(entity_type.value for entity_type in EntityType)
+GRAPH_NEIGHBORHOOD_ENTITY_TYPE_VALUES: tuple[str, ...] = get_args(PersistedGraphEntityType)
+ARA_LAYER_VALUES: tuple[str, ...] = tuple(ARA_LAYER_NAMES)
 
 
 def suppress_unverified_artifact_content(payload: JsonObject) -> JsonObject:
@@ -132,7 +154,16 @@ class LabTrackerAPIUnavailableError(LabTrackerAPIError):
 
 
 class LabTrackerAPIAuthError(LabTrackerAPIError):
-    """Raised when Lab Tracker rejects MCP credentials or permissions."""
+    """Raised when Lab Tracker rejects the MCP credential itself (HTTP 401)."""
+
+
+class LabTrackerAPIPermissionError(LabTrackerAPIError):
+    """Raised on HTTP 403: the MCP credential is valid but lacks permission.
+
+    Deliberately not a :class:`LabTrackerAPIAuthError`: the credential must not
+    be refreshed or reported as rejected; the caller needs project or role
+    access instead.
+    """
 
 
 class LabTrackerAPIValidationError(LabTrackerAPIError):
@@ -267,6 +298,41 @@ class LabTrackerAPIClient:
     def readiness(self) -> JsonObject:
         return self._request("GET", "/readiness")
 
+    def credential_can_write(self) -> bool:
+        """Ask the API's service-token policy whether this credential may write.
+
+        Service tokens cannot call ``/auth`` token introspection, so this sends an
+        empty POST to a path no route serves. The API auth middleware applies the
+        token's write policy before routing: a credential that may not write is
+        refused with ``403 service_forbidden``; one that may write falls through to
+        routing and gets 404/405. No handler can run either way. Any other answer
+        is indeterminate and raised to the caller.
+
+        Caveats: the API records each ``service_forbidden`` refusal as a PAT auth
+        failure, so every successful read-only check spends one attempt of the
+        PAT rate limit (default 10 per 60s); a tight restart loop can briefly
+        lock the token out, and the probe then fails closed on 429. A token
+        whose only write grant is the narrow ``batch_run_due`` scope is reported
+        as read-only, since only ``POST /batches/run-due`` accepts it and no
+        hosted tool calls that route. A dedicated introspection endpoint for
+        service tokens would remove both caveats.
+        """
+
+        try:
+            self._request("POST", CREDENTIAL_WRITE_PROBE_PATH, json_payload={})
+        except LabTrackerAPIPermissionError as exc:
+            if exc.code == "service_forbidden":
+                return False
+            raise
+        except LabTrackerAPIUnavailableError:
+            raise
+        except LabTrackerAPIError as exc:
+            if exc.status_code in {404, 405}:
+                return True
+            raise
+        # A 2xx means something accepted a write for this credential.
+        return True
+
     def describe_schema(self, *, entity_type: str | None = None) -> JsonObject:
         return self._request(
             "GET",
@@ -365,7 +431,10 @@ class LabTrackerAPIClient:
         )
 
     def graph_overview(self, project_id: str) -> JsonObject:
-        return self._request("GET", f"/projects/{project_id}/graph/overview")
+        return self._request(
+            "GET",
+            _api_path("projects", _uuid_path_id(project_id, "project_id"), "graph", "overview"),
+        )
 
     def search_graph(
         self,
@@ -379,7 +448,7 @@ class LabTrackerAPIClient:
     ) -> JsonObject:
         return self._request(
             "GET",
-            f"/projects/{project_id}/graph/search",
+            _api_path("projects", _uuid_path_id(project_id, "project_id"), "graph", "search"),
             params={
                 "q": query,
                 "entity_types": entity_types,
@@ -405,7 +474,18 @@ class LabTrackerAPIClient:
     ) -> JsonObject:
         return self._request(
             "GET",
-            f"/projects/{project_id}/graph/neighborhood/{entity_type}/{entity_id}",
+            _api_path(
+                "projects",
+                _uuid_path_id(project_id, "project_id"),
+                "graph",
+                "neighborhood",
+                _path_choice(
+                    entity_type,
+                    "entity_type",
+                    GRAPH_NEIGHBORHOOD_ENTITY_TYPE_VALUES,
+                ),
+                _uuid_path_id(entity_id, "entity_id"),
+            ),
             params={
                 "direction": direction,
                 "relationships": relationships,
@@ -531,7 +611,10 @@ class LabTrackerAPIClient:
         )
 
     def get_visualization(self, visualization_id: str) -> JsonObject:
-        return self._request("GET", f"/visualizations/{visualization_id}")
+        return self._request(
+            "GET",
+            _api_path("visualizations", _uuid_path_id(visualization_id, "visualization_id")),
+        )
 
     def list_goals(
         self,
@@ -542,7 +625,11 @@ class LabTrackerAPIClient:
         limit: int = 50,
         offset: int = 0,
     ) -> JsonObject:
-        path = "/goals" if project_id is None else f"/projects/{project_id}/goals"
+        path = (
+            "/goals"
+            if project_id is None
+            else _api_path("projects", _uuid_path_id(project_id, "project_id"), "goals")
+        )
         return self._request(
             "GET",
             path,
@@ -555,19 +642,35 @@ class LabTrackerAPIClient:
         )
 
     def get_goal(self, goal_id: str) -> JsonObject:
-        return self._request("GET", f"/goals/{goal_id}")
+        return self._request("GET", _api_path("goals", _uuid_path_id(goal_id, "goal_id")))
 
     def publication_readiness(self, project_id: str) -> JsonObject:
-        return self._request("GET", f"/projects/{project_id}/publication-readiness")
+        return self._request(
+            "GET",
+            _api_path(
+                "projects",
+                _uuid_path_id(project_id, "project_id"),
+                "publication-readiness",
+            ),
+        )
 
     def get_dataset_provenance(self, dataset_id: str) -> JsonObject:
-        return self._request("GET", f"/datasets/{dataset_id}/provenance")
+        return self._request(
+            "GET",
+            _api_path("datasets", _uuid_path_id(dataset_id, "dataset_id"), "provenance"),
+        )
 
     def get_analysis_provenance(self, analysis_id: str) -> JsonObject:
-        return self._request("GET", f"/analyses/{analysis_id}/provenance")
+        return self._request(
+            "GET",
+            _api_path("analyses", _uuid_path_id(analysis_id, "analysis_id"), "provenance"),
+        )
 
     def get_claim_provenance(self, claim_id: str) -> JsonObject:
-        return self._request("GET", f"/claims/{claim_id}/provenance")
+        return self._request(
+            "GET",
+            _api_path("claims", _uuid_path_id(claim_id, "claim_id"), "provenance"),
+        )
 
     def resolve_external_artifact(
         self,
@@ -614,10 +717,10 @@ class LabTrackerAPIClient:
         *,
         layer: str | None = None,
     ) -> JsonObject:
-        path = f"/goals/{goal_id}/ara-artifact"
-        if layer:
-            path = f"{path}/{layer}"
-        return self._request("GET", path)
+        return self._request(
+            "GET",
+            _ara_artifact_path("goals", _uuid_path_id(goal_id, "goal_id"), layer),
+        )
 
     def export_question_subtree(
         self,
@@ -625,10 +728,10 @@ class LabTrackerAPIClient:
         *,
         layer: str | None = None,
     ) -> JsonObject:
-        path = f"/questions/{question_id}/ara-artifact"
-        if layer:
-            path = f"{path}/{layer}"
-        return self._request("GET", path)
+        return self._request(
+            "GET",
+            _ara_artifact_path("questions", _uuid_path_id(question_id, "question_id"), layer),
+        )
 
     def get_decision_context(
         self,
@@ -641,8 +744,22 @@ class LabTrackerAPIClient:
         analysis_id: str | None = None,
         claim_id: str | None = None,
         visualization_id: str | None = None,
+        created_by: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
         limit: int = 20,
     ) -> JsonObject:
+        resolved_created_by = (
+            _uuid_path_id(created_by, "created_by") if created_by is not None else None
+        )
+        since_at = _parse_aware_datetime(since, "since")
+        until_at = _parse_aware_datetime(until, "until")
+        if since_at is not None and until_at is not None and since_at > until_at:
+            raise LabTrackerAPIValidationError(
+                f"since must not be later than until; got since={since!r:.40} "
+                f"until={until!r:.40}.",
+                code="validation_error",
+            )
         try:
             return self._request(
                 "POST",
@@ -656,6 +773,9 @@ class LabTrackerAPIClient:
                     "analysis_id": analysis_id,
                     "claim_id": claim_id,
                     "visualization_id": visualization_id,
+                    "created_by": resolved_created_by,
+                    "since": since_at.isoformat() if since_at is not None else None,
+                    "until": until_at.isoformat() if until_at is not None else None,
                     "limit": limit,
                 },
             )
@@ -671,25 +791,65 @@ class LabTrackerAPIClient:
         project_id: str | None = None,
         limit: int = 5,
     ) -> JsonObject:
+        truncated_inputs: list[JsonObject] = []
+
+        def collect(
+            label: str,
+            list_fn: Callable[..., JsonObject],
+            lookup_project_id: str | None,
+            status: str,
+        ) -> list[JsonObject]:
+            rows, total = _collect_list_pages(
+                lambda page_limit, offset: list_fn(
+                    project_id=lookup_project_id,
+                    status=status,
+                    limit=page_limit,
+                    offset=offset,
+                ),
+                label=label,
+            )
+            if len(rows) < total:
+                truncated_inputs.append(
+                    {
+                        "list": label,
+                        "project_id": lookup_project_id,
+                        "status": status,
+                        "fetched": len(rows),
+                        "total": total,
+                        # Either the per-list row cap stopped paging, or rows
+                        # disappeared between pages (an empty page came early).
+                        "reason": (
+                            "row_cap"
+                            if len(rows) >= NEXT_QUESTIONS_MAX_ROWS_PER_LIST
+                            else "list_changed_while_paging"
+                        ),
+                    }
+                )
+            return rows
+
         goals: list[JsonObject] = []
-        for status in OPEN_GOAL_STATUSES:
-            payload = self.list_goals(project_id=project_id, status=status, limit=200)
-            goals.extend(_payload_items(payload))
+        for goal_status in OPEN_GOAL_STATUSES:
+            goals.extend(collect("goals", self.list_goals, project_id, goal_status))
 
         project_ids = _project_ids_for_next_question_lookup(goals, project_id)
         questions: list[JsonObject] = []
         claims: list[JsonObject] = []
         for lookup_project_id in project_ids:
-            for status in OPEN_QUESTION_STATUSES:
-                payload = self.list_questions(
-                    project_id=lookup_project_id,
-                    status=status,
-                    limit=200,
+            for question_status in OPEN_QUESTION_STATUSES:
+                questions.extend(
+                    collect("questions", self.list_questions, lookup_project_id, question_status)
                 )
-                questions.extend(_payload_items(payload))
-            claims.extend(_payload_items(self.list_claims(project_id=lookup_project_id, limit=200)))
+            # Only supported claims settle a question, so spend the row budget on them.
+            for claim_status in ANSWERING_CLAIM_STATUSES:
+                claims.extend(collect("claims", self.list_claims, lookup_project_id, claim_status))
 
-        return build_next_questions_payload(goals, questions, claims, limit=limit)
+        return build_next_questions_payload(
+            goals,
+            questions,
+            claims,
+            limit=limit,
+            truncated_inputs=truncated_inputs,
+        )
 
     def create_project(
         self,
@@ -746,7 +906,7 @@ class LabTrackerAPIClient:
     ) -> JsonObject:
         return self._request(
             "POST",
-            f"/questions/{question_id}/refactor",
+            _api_path("questions", _uuid_path_id(question_id, "question_id"), "refactor"),
             json_payload={
                 "replacement": {
                     "text": replacement_text,
@@ -770,7 +930,7 @@ class LabTrackerAPIClient:
     ) -> JsonObject:
         return self._request(
             "GET",
-            f"/questions/{question_id}/refactors",
+            _api_path("questions", _uuid_path_id(question_id, "question_id"), "refactors"),
             params={"limit": limit, "offset": offset},
         )
 
@@ -890,7 +1050,7 @@ class LabTrackerAPIClient:
     ) -> JsonObject:
         return self._request(
             "POST",
-            f"/claims/{claim_id}/edges",
+            _api_path("claims", _uuid_path_id(claim_id, "claim_id"), "edges"),
             json_payload={
                 "target_claim_id": target_claim_id,
                 "relation": relation,
@@ -906,7 +1066,7 @@ class LabTrackerAPIClient:
     ) -> JsonObject:
         return self._request(
             "GET",
-            f"/claims/{claim_id}/edges",
+            _api_path("claims", _uuid_path_id(claim_id, "claim_id"), "edges"),
             params={"limit": limit, "offset": offset},
         )
 
@@ -983,7 +1143,7 @@ class LabTrackerAPIClient:
     ) -> JsonObject:
         return self._request(
             "POST",
-            f"/projects/{project_id}/goals",
+            _api_path("projects", _uuid_path_id(project_id, "project_id"), "goals"),
             json_payload={
                 "goal_type": _validate_goal_type(goal_type),
                 "title": title,
@@ -1038,7 +1198,7 @@ class LabTrackerAPIClient:
             payload["external_ref"] = None
         return self._request(
             "PATCH",
-            f"/goals/{goal_id}",
+            _api_path("goals", _uuid_path_id(goal_id, "goal_id")),
             json_payload=payload,
             preserve_json_nulls=clear_target_date or clear_external_ref,
         )
@@ -1055,7 +1215,7 @@ class LabTrackerAPIClient:
     ) -> JsonObject:
         return self._request(
             "POST",
-            f"/goals/{goal_id}/links",
+            _api_path("goals", _uuid_path_id(goal_id, "goal_id"), "links"),
             json_payload={
                 "entity_type": entity_type,
                 "entity_id": entity_id,
@@ -1076,7 +1236,14 @@ class LabTrackerAPIClient:
     ) -> JsonObject:
         return self._request(
             "GET",
-            f"/projects/{project_id}/nodes/{entity_type}/{entity_id}/goals",
+            _api_path(
+                "projects",
+                _uuid_path_id(project_id, "project_id"),
+                "nodes",
+                _path_choice(entity_type, "entity_type", NODE_GOAL_ENTITY_TYPE_VALUES),
+                _uuid_path_id(entity_id, "entity_id"),
+                "goals",
+            ),
             params={"limit": limit, "offset": offset},
         )
 
@@ -1090,6 +1257,8 @@ class LabTrackerAPIClient:
         size_bytes: int | None = None,
         expected_current_storage_id: str | None = None,
     ) -> JsonObject:
+        # Validate the target id before touching the local filesystem.
+        upload_path = _api_path("visualizations", _uuid_path_id(viz_id, "viz_id"), "file")
         path = Path(file_path).expanduser()
         if not path.is_file():
             raise LabTrackerAPIError(f"Visualization file does not exist: {file_path}")
@@ -1104,7 +1273,7 @@ class LabTrackerAPIClient:
         # re-opens per attempt so a 401 retry replays cleanly.
         response = self._transport.upload(
             "POST",
-            f"/visualizations/{viz_id}/file",
+            upload_path,
             field_name="file",
             open_file=lambda: path.open("rb"),
             filename=path.name,
@@ -1194,6 +1363,85 @@ class LabTrackerAPIClient:
             raise LabTrackerAPIError("Login response did not include an access token.") from exc
         self._access_token = token
         return token
+
+
+def _uuid_path_id(value: object, field: str) -> str:
+    """Return ``value`` only if it is a canonical hyphenated UUID string.
+
+    Every entity id interpolated into an API path is agent-supplied; anything
+    else could retarget the request via dot segments or ``?``/``#`` delimiters.
+    """
+
+    if not isinstance(value, str) or _UUID_PATH_ID_RE.fullmatch(value) is None:
+        raise LabTrackerAPIValidationError(
+            f"{field} must be a Lab Tracker UUID "
+            f"(for example 123e4567-e89b-12d3-a456-426614174000); got {value!r:.80}.",
+            code="validation_error",
+        )
+    return value
+
+
+def _parse_aware_datetime(value: object, field: str) -> datetime | None:
+    """Parse an optional ISO 8601 timestamp that must carry a timezone offset."""
+
+    if value is None:
+        return None
+    parsed: datetime | None = None
+    if isinstance(value, str):
+        text = value.strip()
+        if text[-1:] in ("Z", "z"):
+            text = f"{text[:-1]}+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            parsed = None
+    if parsed is None or parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise LabTrackerAPIValidationError(
+            f"{field} must be an ISO 8601 datetime with a timezone offset "
+            f"(for example 2025-07-01T00:00:00Z); got {value!r:.80}.",
+            code="validation_error",
+        )
+    return parsed
+
+
+def _path_choice(value: object, field: str, allowed_values: tuple[str, ...]) -> str:
+    """Return ``value`` only if it is one of the route's closed literal values."""
+
+    if not isinstance(value, str) or value not in allowed_values:
+        raise LabTrackerAPIValidationError(
+            f"Invalid {field} {value!r:.80}. Allowed values: {', '.join(allowed_values)}.",
+            code="validation_error",
+        )
+    return value
+
+
+def _api_path(*segments: str) -> str:
+    """Build an API path from individually percent-encoded segments.
+
+    This is the only place path-parameterised requests are assembled. Each
+    segment is encoded with no safe characters, so ``/``, ``?``, ``#`` and ``%``
+    cannot change the request target, and dot segments (which percent-encoding
+    leaves intact and httpx would collapse) are refused outright.
+    """
+
+    for segment in segments:
+        if segment in _DOT_PATH_SEGMENTS:
+            raise LabTrackerAPIValidationError(
+                f"Refusing to build an API path with the segment {segment!r}.",
+                code="validation_error",
+            )
+    return "/" + "/".join(quote(segment, safe="") for segment in segments)
+
+
+def _ara_artifact_path(collection: str, entity_id: str, layer: str | None) -> str:
+    if layer is None or layer == "":
+        return _api_path(collection, entity_id, "ara-artifact")
+    return _api_path(
+        collection,
+        entity_id,
+        "ara-artifact",
+        _path_choice(layer, "layer", ARA_LAYER_VALUES),
+    )
 
 
 def _is_note_metadata_scalar(value: object) -> bool:
@@ -1324,6 +1572,11 @@ def lab_tracker_unavailable(operation: str, **metadata: object) -> JsonObject:
     }
 
 
+# Middleware 403 codes meaning the credential's kind or scope, not the user's
+# project or role access, blocks the route.
+_CREDENTIAL_CAPABILITY_CODES = frozenset({"service_forbidden", "device_forbidden"})
+
+
 def lab_tracker_api_error(operation: str, exc: LabTrackerAPIError) -> JsonObject:
     error: JsonObject = {
         "code": exc.code or "lab_tracker_api_error",
@@ -1334,10 +1587,32 @@ def lab_tracker_api_error(operation: str, exc: LabTrackerAPIError) -> JsonObject
         error["status_code"] = exc.status_code
     if exc.issues:
         error["issues"] = _redact_error_issues(exc.issues)
-    return {
-        "error": error,
-        "data": None,
-        "next_action": {
+    if isinstance(exc, LabTrackerAPIPermissionError) and exc.code in _CREDENTIAL_CAPABILITY_CODES:
+        next_action: JsonObject = {
+            "action": "use_capable_credential",
+            "tool": None,
+            "arguments": {},
+            "reason": (
+                "The credential is valid, but its kind or scope cannot reach this route "
+                "(for example a read-only or narrowly scoped personal access token). "
+                "Mint a personal access token with the needed scope, and read_only=false "
+                "for writes, and set it as LAB_TRACKER_MCP_API_KEY; requesting project "
+                "access will not help."
+            ),
+        }
+    elif isinstance(exc, LabTrackerAPIPermissionError):
+        next_action = {
+            "action": "request_access",
+            "tool": None,
+            "arguments": {},
+            "reason": (
+                "The credential is valid but lacks permission for this action. Ask a "
+                "project owner or Lab Tracker admin for the needed access; do not "
+                "replace or refresh the credential."
+            ),
+        }
+    else:
+        next_action = {
             "action": "revise_request_or_credentials",
             "tool": None,
             "arguments": {},
@@ -1345,7 +1620,11 @@ def lab_tracker_api_error(operation: str, exc: LabTrackerAPIError) -> JsonObject
                 "Use the structured error details to correct the request, credentials, "
                 "or Lab Tracker permissions before retrying."
             ),
-        },
+        }
+    return {
+        "error": error,
+        "data": None,
+        "next_action": next_action,
     }
 
 
@@ -1372,6 +1651,34 @@ def _payload_items(payload: JsonObject) -> list[JsonObject]:
     if not isinstance(data, list):
         raise LabTrackerAPIError("Lab Tracker API response did not include list data.")
     return [item for item in data if isinstance(item, dict)]
+
+
+def _collect_list_pages(
+    fetch: Callable[[int, int], JsonObject],
+    *,
+    label: str,
+) -> tuple[list[JsonObject], int]:
+    """Page a list endpoint via ``fetch(limit, offset)``.
+
+    Returns the rows read (at most ``NEXT_QUESTIONS_MAX_ROWS_PER_LIST``) and the
+    server-reported total, so callers can detect and report truncation.
+    """
+
+    max_rows = NEXT_QUESTIONS_MAX_ROWS_PER_LIST
+    rows: list[JsonObject] = []
+    while True:
+        page_limit = min(LIST_PAGE_SIZE, max_rows - len(rows))
+        payload = fetch(page_limit, len(rows))
+        page = _payload_items(payload)
+        meta = payload.get("meta")
+        total = meta.get("total") if isinstance(meta, dict) else None
+        if not isinstance(total, int) or isinstance(total, bool) or total < 0:
+            raise LabTrackerAPIError(
+                f"Lab Tracker API {label} response did not include an integer meta.total."
+            )
+        rows.extend(page)
+        if not page or len(rows) >= total or len(rows) >= max_rows:
+            return rows, total
 
 
 def _project_ids_for_next_question_lookup(
@@ -1448,8 +1755,10 @@ def _login_rejected_error(
 def _api_error_from_response(response: httpx.Response) -> LabTrackerAPIError:
     message, code, issues = _response_error_parts(response)
     kwargs = {"status_code": response.status_code, "code": code, "issues": issues}
-    if response.status_code in {401, 403}:
+    if response.status_code == 401:
         return LabTrackerAPIAuthError(message, **kwargs)
+    if response.status_code == 403:
+        return LabTrackerAPIPermissionError(message, **kwargs)
     if response.status_code == 422:
         return LabTrackerAPIValidationError(message, **kwargs)
     if response.status_code >= 500:

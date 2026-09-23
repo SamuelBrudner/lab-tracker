@@ -11,30 +11,50 @@ import {
   uploadOrQueueRawFile,
 } from "../shared/capture-upload.js";
 import { droppedUploadsMessage, getUploadQueue } from "../shared/register-sw.js";
-import { migrateIncomingShares } from "../shared/share-target-inbox.js";
+import {
+  SHARE_INBOX_UPDATED_MESSAGE,
+  createIndexedDbShareStorage,
+  discardIncomingShares as discardParkedShares,
+  expiredSharesMessage,
+  listReviewableShares,
+  migrateIncomingShares,
+  shareInboxAvailable,
+  shareTooLargeMessage,
+} from "../shared/share-target-inbox.js";
 import { captureHint, captureNotes, isAudioCapture } from "../features/mobile-capture/capture-helpers.js";
 
-const { useEffect, useMemo, useState } = React;
+const { useCallback, useEffect, useMemo, useRef, useState } = React;
 
+// The service worker's share-target redirect: `from-share` is the intake
+// outcome and `share-expired` counts unreviewed shares it removed as expired.
 function readShareTargetStatus() {
   try {
-    return new URLSearchParams(window.location.search || "").get("from-share") || "";
+    const params = new URLSearchParams(window.location.search || "");
+    return {
+      expired: Number.parseInt(params.get("share-expired") || "0", 10) || 0,
+      status: params.get("from-share") || "",
+    };
   } catch {
-    return "";
+    return { expired: 0, status: "" };
   }
 }
 
 function clearShareTargetStatus() {
   try {
     const url = new URL(window.location.href);
-    if (!url.searchParams.has("from-share")) {
+    if (!url.searchParams.has("from-share") && !url.searchParams.has("share-expired")) {
       return;
     }
     url.searchParams.delete("from-share");
+    url.searchParams.delete("share-expired");
     window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
   } catch {
     // Query cleanup is cosmetic; the inbox migration still runs independently.
   }
+}
+
+function errorDetail(error) {
+  return (error && error.message) || String(error) || "unknown error";
 }
 
 // Controller for the mobile capture surface: owns capture-composer state, the
@@ -44,6 +64,7 @@ function clearShareTargetStatus() {
 function useMobileCapture({
   token,
   ownerId = "",
+  authEnabled = true,
   canWrite,
   selectedProjectId,
   questions,
@@ -77,6 +98,25 @@ function useMobileCapture({
   const [analyses, setAnalyses] = useState([]);
   const [claims, setClaims] = useState([]);
   const [pendingError, setPendingError] = useState("");
+  // A capture save spans several awaited requests; `uploading` disables the
+  // composer actions, and the ref closes the window before React re-renders
+  // (two taps delivered to the same render closure).
+  const [uploading, setUploading] = useState(false);
+  const uploadInFlightRef = useRef(false);
+  // OS share-sheet items parked by the service worker. Anyone's web page can
+  // POST to the share target, so they are only listed for review here and
+  // imported when the user explicitly confirms (importIncomingShares).
+  const shareStorage = useMemo(
+    () => (shareInboxAvailable() ? createIndexedDbShareStorage() : null),
+    []
+  );
+  const [incomingShares, setIncomingShares] = useState([]);
+  const [sharesBusy, setSharesBusy] = useState(false);
+  const shareActionInFlightRef = useRef(false);
+  // Inbox reads can overlap (mount, visibility, worker message, post-action);
+  // only the latest one may set the listed shares.
+  const shareReadSeqRef = useRef(0);
+  const mountedRef = useRef(false);
   const activeQuestions = useMemo(
     () => questions.filter((question) => question.status === "active"),
     [questions]
@@ -128,75 +168,252 @@ function useMobileCapture({
   }, [selectedProjectId, token]);
 
   useEffect(() => {
-    const status = readShareTargetStatus();
-    if (!status) {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    const { expired, status } = readShareTargetStatus();
+    if (!status && expired === 0) {
       return;
     }
     clearShareTargetStatus();
+    const notices = [];
     if (status === "error") {
-      setFlash("", "Shared capture could not be saved. Open Lab Tracker and try again.");
+      notices.push("Shared capture could not be saved. Open Lab Tracker and try again.");
     } else if (status === "empty") {
-      setFlash("", "Shared content was empty.");
+      notices.push("Shared content was empty.");
+    } else if (status === "rejected") {
+      notices.push(
+        "A share sent from another website was blocked. " +
+          "Only your device's share sheet can send items to Lab Tracker."
+      );
+    } else if (status === "full") {
+      notices.push(
+        "The shared item was not saved: the share inbox is full. " +
+          "Import or discard the shared items waiting for review, then share again."
+      );
+    } else if (status === "too-large") {
+      notices.push(shareTooLargeMessage());
+    }
+    if (expired > 0) {
+      notices.push(expiredSharesMessage(expired));
+    }
+    if (notices.length > 0) {
+      setFlash("", notices.join(" "));
     }
   }, [setFlash]);
 
+  const reloadIncomingShares = useCallback(async () => {
+    if (!shareStorage) {
+      return;
+    }
+    const readSeq = shareReadSeqRef.current + 1;
+    shareReadSeqRef.current = readSeq;
+    const { expired, shares } = await listReviewableShares({ storage: shareStorage });
+    if (expired > 0 && mountedRef.current) {
+      // The expired shares are gone whichever read removed them; say so.
+      setFlash("", expiredSharesMessage(expired));
+    }
+    if (mountedRef.current && shareReadSeqRef.current === readSeq) {
+      setIncomingShares(shares);
+    }
+  }, [setFlash, shareStorage]);
+
+  const reportShareInboxReadFailure = useCallback(
+    (error) => {
+      // eslint-disable-next-line no-console
+      console.error("Shared capture inbox could not be read:", error);
+      if (mountedRef.current) {
+        setFlash("", `Shared items could not be loaded for review: ${errorDetail(error)}.`);
+      }
+    },
+    [setFlash]
+  );
+
   useEffect(() => {
-    // Pick up anything the OS share sheet handed off via the service worker
-    // and route it through the standard offline upload queue. Runs only once
-    // a project is selected so the migrated shares get attached to a real
-    // project. IndexedDB-less environments (jsdom in unit tests) silently
-    // no-op via the queue's null check.
-    if (!selectedProjectId) {
+    // List (never import) whatever the OS share sheet handed off via the
+    // service worker. IndexedDB-less environments have no inbox to read.
+    reloadIncomingShares().catch(reportShareInboxReadFailure);
+  }, [reloadIncomingShares, reportShareInboxReadFailure]);
+
+  useEffect(() => {
+    // The service worker can park a share while this page stays open (e.g. a
+    // share sheet launched from another app): re-read the inbox when the
+    // worker says so, and whenever the page becomes visible again.
+    if (!shareStorage) {
       return undefined;
+    }
+    const refresh = () => {
+      reloadIncomingShares().catch(reportShareInboxReadFailure);
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        refresh();
+      }
+    };
+    const handleWorkerMessage = (event) => {
+      if (event.data?.type === SHARE_INBOX_UPDATED_MESSAGE) {
+        refresh();
+      }
+    };
+    const serviceWorker = typeof navigator === "undefined" ? undefined : navigator.serviceWorker;
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    serviceWorker?.addEventListener("message", handleWorkerMessage);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      serviceWorker?.removeEventListener("message", handleWorkerMessage);
+    };
+  }, [reloadIncomingShares, reportShareInboxReadFailure, shareStorage]);
+
+  async function refreshImportedProject(projectId) {
+    try {
+      await Promise.all([refreshProjectCounts(projectId), refreshRecentNotes(projectId)]);
+    } catch (error) {
+      // eslint-disable-next-line no-console
+      console.error("Project refresh after shared capture import failed:", error);
+      if (mountedRef.current) {
+        setFlash(
+          "",
+          "Shared captures were imported, but the project view could not be refreshed: " +
+            `${errorDetail(error)}.`
+        );
+      }
+    }
+  }
+
+  function drainImportedShares(queue) {
+    return queue
+      .drain({ token, ownerId, authEnabled })
+      .then((drainResult) => {
+        if (drainResult.dropped.length > 0 && mountedRef.current) {
+          setFlash("", droppedUploadsMessage(drainResult.dropped));
+        }
+        return drainResult;
+      })
+      .catch((error) => {
+        // The imported captures stay queued for the next online/boot
+        // retry; make the failure visible rather than silently holding them.
+        // eslint-disable-next-line no-console
+        console.error("Shared capture upload failed:", error);
+        if (mountedRef.current) {
+          setFlash(
+            "",
+            `Shared captures were imported but could not be uploaded yet: ${errorDetail(error)}. ` +
+              "They stay queued and will retry when you're back online."
+          );
+        }
+      });
+  }
+
+  async function runShareAction(action) {
+    shareActionInFlightRef.current = true;
+    setSharesBusy(true);
+    try {
+      await action();
+    } finally {
+      shareActionInFlightRef.current = false;
+      if (mountedRef.current) {
+        setSharesBusy(false);
+      }
+      await reloadIncomingShares().catch(reportShareInboxReadFailure);
+    }
+  }
+
+  // Imports exactly the shares currently shown for review into the selected
+  // project. Only ever called from an explicit user action.
+  async function importIncomingShares() {
+    if (shareActionInFlightRef.current || !canWrite || incomingShares.length === 0) {
+      return;
+    }
+    if (!selectedProjectId) {
+      setFlash("", "Choose a project before importing shared items.");
+      return;
     }
     const queue = getUploadQueue();
-    if (!queue) {
-      return undefined;
+    if (!queue || !shareStorage) {
+      setFlash("", "Shared items cannot be imported: this browser has no offline upload storage.");
+      return;
     }
-    let canceled = false;
-    migrateIncomingShares({
-      createTextNote: ({ metadata, rawContent }) =>
-        apiRequest("/notes", {
-          body: {
-            metadata,
-            project_id: selectedProjectId,
-            raw_content: rawContent,
-            targets: [],
-          },
-          method: "POST",
-          token,
-        }),
-      projectId: selectedProjectId,
-      ownerId,
-      uploadQueue: queue,
-    })
-      .then((result) => {
-        if (canceled || result.migrated === 0) {
-          return undefined;
+    const projectId = selectedProjectId;
+    const shareIds = incomingShares.map((share) => share.id);
+    setFlash("", "");
+    await runShareAction(async () => {
+      let result;
+      try {
+        result = await migrateIncomingShares({
+          createTextNote: ({ metadata, rawContent }) =>
+            apiRequest("/notes", {
+              body: {
+                metadata,
+                project_id: projectId,
+                raw_content: rawContent,
+                targets: [],
+              },
+              method: "POST",
+              token,
+            }),
+          projectId,
+          ownerId,
+          shareIds,
+          storage: shareStorage,
+          uploadQueue: queue,
+        });
+      } catch (error) {
+        // eslint-disable-next-line no-console
+        console.error("Shared capture import failed:", error);
+        if (mountedRef.current) {
+          setFlash(
+            "",
+            `Shared captures could not be imported: ${errorDetail(error)}. ` +
+              "Shares not yet imported stay in the share inbox for review."
+          );
         }
+        // The import can fail partway, after earlier shares were already
+        // queued: upload those now instead of holding them until the next
+        // online/boot drain.
+        await drainImportedShares(queue);
+        return;
+      }
+      if (result.migrated === 0) {
+        return;
+      }
+      if (mountedRef.current) {
         setFlash(
           result.migrated === 1
             ? "1 shared capture imported."
             : `${result.migrated} shared captures imported.`
         );
-        return queue
-          .drain({ token, ownerId })
-          .then((drainResult) => {
-            if (drainResult.dropped.length > 0) {
-              setFlash("", droppedUploadsMessage(drainResult.dropped));
-            }
-            return drainResult;
-          })
-          .catch(() => undefined);
-      })
-      .catch(() => {
-        // Migration failures shouldn't block the rest of the capture UI;
-        // the shares stay in the inbox for the next attempt.
-      });
-    return () => {
-      canceled = true;
-    };
-  }, [selectedProjectId, token, ownerId, setFlash]);
+      }
+      await drainImportedShares(queue);
+      await refreshImportedProject(projectId);
+    });
+  }
+
+  async function discardIncomingShares() {
+    if (shareActionInFlightRef.current || !shareStorage || incomingShares.length === 0) {
+      return;
+    }
+    const shareIds = incomingShares.map((share) => share.id);
+    await runShareAction(async () => {
+      try {
+        const { discarded } = await discardParkedShares({ shareIds, storage: shareStorage });
+        if (mountedRef.current) {
+          setFlash(
+            discarded === 1 ? "1 shared item discarded." : `${discarded} shared items discarded.`
+          );
+        }
+      } catch (error) {
+        // eslint-disable-next-line no-console
+        console.error("Shared capture discard failed:", error);
+        if (mountedRef.current) {
+          setFlash("", `Shared items could not be discarded: ${errorDetail(error)}.`);
+        }
+      }
+    });
+  }
 
   function currentTargets() {
     return buildTargets({
@@ -394,7 +611,7 @@ function useMobileCapture({
   }
 
   async function uploadCapture() {
-    if (!canWrite) {
+    if (uploadInFlightRef.current || !canWrite) {
       return;
     }
     if (!selectedProjectId) {
@@ -405,6 +622,8 @@ function useMobileCapture({
       setFlash("", "Choose the required capture input before upload.");
       return;
     }
+    uploadInFlightRef.current = true;
+    setUploading(true);
     setBusy(true);
     setFlash("", "");
     try {
@@ -483,6 +702,7 @@ function useMobileCapture({
         setPhotoFile(null);
         setAudioFile(null);
         setTextNote("");
+        clearUploadProgress();
         if (returnPath) {
           navigate(returnPath);
         }
@@ -499,12 +719,17 @@ function useMobileCapture({
       setPhotoFile(null);
       setAudioFile(null);
       setTextNote("");
+      // The composer is reset, so the finished capture's ids must not keep
+      // readyToCapture() true and let an empty Save report another success.
+      clearUploadProgress();
       if (returnPath) {
         navigate(returnPath);
       }
     } catch (err) {
       setFlash("", err.message || "Capture failed.");
     } finally {
+      uploadInFlightRef.current = false;
+      setUploading(false);
       setBusy(false);
     }
   }
@@ -534,6 +759,11 @@ function useMobileCapture({
     activeQuestions,
     analyses,
     claims,
+    // OS share-sheet items awaiting explicit review
+    incomingShares,
+    sharesBusy,
+    importIncomingShares,
+    discardIncomingShares,
     // pending-review queue
     pendingDrafts,
     pendingNotes,
@@ -541,6 +771,7 @@ function useMobileCapture({
     pendingActionErrors,
     pendingError,
     // derived predicates
+    uploading,
     composerTextValue,
     needsVoice,
     readyToCapture,

@@ -373,7 +373,7 @@ _PROPERTY_TERMS: tuple[Term, ...] = (
     Term(
         "questionType",
         "lab:questionType",
-        "Kind of question (for example descriptive, causal, mechanistic).",
+        "Kind of question (for example descriptive, hypothesis_driven, method_dev).",
     ),
     Term(
         "hypothesis",
@@ -415,8 +415,8 @@ _PROPERTY_TERMS: tuple[Term, ...] = (
     Term(
         "outcomeStatus",
         "lab:outcomeStatus",
-        "What the data said about the linked question: supported, refuted, "
-        "or inconclusive.",
+        "What the data said about the linked question: unknown, supports, "
+        "refutes, or inconclusive.",
     ),
     # --- Datasets and acquisition ---
     Term(
@@ -433,7 +433,7 @@ _PROPERTY_TERMS: tuple[Term, ...] = (
     Term(
         "sessionType",
         "lab:sessionType",
-        "Kind of acquisition session (for example operational, pilot).",
+        "Kind of acquisition session (for example scientific, operational).",
     ),
     Term(
         "metadata",
@@ -536,8 +536,8 @@ _PROPERTY_TERMS: tuple[Term, ...] = (
     Term(
         "claimRelationType",
         "lab:claimRelationType",
-        "Kind of claim relation (for example supports, contradicts, "
-        "refines).",
+        "Kind of claim relation (for example extends, contradicts, "
+        "refutes).",
     ),
     Term(
         "relatedClaim",

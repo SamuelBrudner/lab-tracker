@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from enum import Enum
 from typing import Protocol, TypeVar
 from uuid import UUID
@@ -14,10 +14,8 @@ from lab_tracker.auth import LOCAL_AUTH_USER_ID, AuthContext, Role
 from lab_tracker.errors import NotFoundError, ValidationError
 from lab_tracker.models import (
     AcquisitionOutput,
-    Analysis,
     AnalysisStatus,
     ClaimStatus,
-    Dataset,
     DatasetCommitManifest,
     DatasetCommitManifestInput,
     DatasetFile,
@@ -25,6 +23,7 @@ from lab_tracker.models import (
     ExternalArtifactReference,
     Note,
     NoteMetadataScalar,
+    NoteStatus,
     Question,
     QuestionLink,
     QuestionLinkRole,
@@ -222,23 +221,37 @@ def unique_ids(values: Iterable[UUID] | None) -> list[UUID]:
     return unique
 
 
+# SUPERSEDED is deliberately absent from every plain transition: only the
+# refactor command may supersede a question, because it is the path that records
+# the replacement pointer and the QuestionRefactor audit row.
 _QUESTION_STATUS_TRANSITIONS: dict[QuestionStatus, set[QuestionStatus]] = {
     QuestionStatus.STAGED: {
         QuestionStatus.STAGED,
         QuestionStatus.ACTIVE,
         QuestionStatus.ABANDONED,
-        QuestionStatus.SUPERSEDED,
     },
     QuestionStatus.ACTIVE: {
         QuestionStatus.ACTIVE,
         QuestionStatus.ANSWERED,
         QuestionStatus.ABANDONED,
-        QuestionStatus.SUPERSEDED,
     },
     QuestionStatus.ANSWERED: {QuestionStatus.ANSWERED},
     QuestionStatus.ABANDONED: {QuestionStatus.ABANDONED},
     QuestionStatus.SUPERSEDED: {QuestionStatus.SUPERSEDED},
 }
+
+# ARCHIVED is deliberately absent as a plain-status target: archiving a note goes
+# through the archive command, which always records a reason, an actor and a time.
+# Leaving ARCHIVED (restoring a capture) is allowed; the service clears the stamps.
+_NOTE_STATUS_TRANSITIONS: dict[NoteStatus, set[NoteStatus]] = {
+    NoteStatus.STAGED: {NoteStatus.STAGED, NoteStatus.COMMITTED},
+    NoteStatus.COMMITTED: {NoteStatus.COMMITTED, NoteStatus.STAGED},
+    NoteStatus.ARCHIVED: {NoteStatus.ARCHIVED, NoteStatus.STAGED, NoteStatus.COMMITTED},
+}
+
+# A new note starts life staged; a requested creation status must be reachable
+# from there through the ordinary note transition table.
+NOTE_CREATION_START_STATUS = NoteStatus.STAGED
 
 _ANALYSIS_STATUS_TRANSITIONS: dict[AnalysisStatus, set[AnalysisStatus]] = {
     AnalysisStatus.STAGED: {
@@ -293,15 +306,42 @@ def _ensure_status_transition(
         )
 
 
+# A new question starts life staged; any other requested creation status must be
+# reachable from there through the ordinary transition table.
+QUESTION_CREATION_START_STATUS = QuestionStatus.STAGED
+
+
 def _ensure_question_status_transition(
     current_status: QuestionStatus,
     next_status: QuestionStatus,
 ) -> None:
+    if next_status == QuestionStatus.SUPERSEDED and current_status != QuestionStatus.SUPERSEDED:
+        raise ValidationError(
+            "Questions become superseded only through the refactor command "
+            "(POST /questions/{question_id}/refactor), which records the replacement."
+        )
     _ensure_status_transition(
         current_status,
         next_status,
         _QUESTION_STATUS_TRANSITIONS,
         entity_name="Question",
+    )
+
+
+def _ensure_note_status_transition(
+    current_status: NoteStatus,
+    next_status: NoteStatus,
+) -> None:
+    if next_status == NoteStatus.ARCHIVED and current_status != NoteStatus.ARCHIVED:
+        raise ValidationError(
+            "Notes are archived only through POST /notes/{note_id}/archive, "
+            "which records why the capture was set aside."
+        )
+    _ensure_status_transition(
+        current_status,
+        next_status,
+        _NOTE_STATUS_TRANSITIONS,
+        entity_name="Note",
     )
 
 
@@ -403,20 +443,6 @@ def _ensure_claim_support_links(
 ) -> None:
     if status == ClaimStatus.SUPPORTED and not (dataset_ids or analysis_ids):
         raise ValidationError("Supported claims require supporting datasets or analyses.")
-
-
-def _analysis_has_question_link(
-    analysis: Analysis,
-    question_id: UUID,
-    datasets: dict[UUID, Dataset],
-) -> bool:
-    for dataset_id in analysis.dataset_ids:
-        dataset = datasets.get(dataset_id)
-        if dataset is None:
-            continue
-        if any(link.question_id == question_id for link in dataset.question_links):
-            return True
-    return False
 
 
 def _normalize_dataset_file(file: DatasetFile) -> DatasetFile:
@@ -659,6 +685,25 @@ def build_commit_manifest(
         question_links=list(question_links),
         source_session_id=manifest_input.source_session_id,
     )
+
+
+def ensure_manifest_notes_in_project(
+    note_ids: Iterable[UUID],
+    project_id: UUID,
+    load_note: Callable[[UUID], Note | None],
+) -> None:
+    """Require every manifest note id to name an existing note in the dataset's project.
+
+    Manifest note ids become part of the content-addressed, immutable commit and
+    of provenance exports, so a dangling or cross-project id must never land.
+    """
+
+    for note_id in note_ids:
+        note = load_note(note_id)
+        if note is None:
+            raise NotFoundError("Dataset manifest note does not exist.")
+        if note.project_id != project_id:
+            raise ValidationError("Dataset manifest notes must belong to the same project.")
 
 
 def validate_commit_hash(provided: str | None, expected: str) -> None:

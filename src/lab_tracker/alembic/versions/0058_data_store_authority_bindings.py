@@ -110,9 +110,11 @@ def _acquire_writer_fence() -> None:
 
     connection = op.get_bind()
     if connection.dialect.name == "sqlite":
-        # Alembic uses transactional_ddl=False for SQLite and pysqlite does not
-        # start a physical transaction for a read. Reserve the writer slot now.
-        connection.exec_driver_sql("BEGIN IMMEDIATE")
+        # env.py runs every SQLite migration inside one BEGIN IMMEDIATE
+        # transaction, which already holds the writer reservation. Reserve it
+        # here only when running on a connection without a physical transaction.
+        if not connection.connection.driver_connection.in_transaction:
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
     elif connection.dialect.name == "postgresql":
         connection.execute(sa.text("LOCK TABLE data_stores IN ACCESS EXCLUSIVE MODE"))
 

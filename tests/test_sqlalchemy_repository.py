@@ -213,6 +213,41 @@ def test_supervision_edge_repository_queries_active_and_as_of_edges(db_session):
     assert repo.supervision_edges.get(active_edge.edge_id) is None
 
 
+def test_supervision_edge_repository_filters_by_a_set_of_supervisees(db_session):
+    repo = SQLAlchemyLabTrackerRepository(db_session)
+    supervisor_user_id = uuid4()
+    first_supervisee = uuid4()
+    second_supervisee = uuid4()
+    other_supervisee = uuid4()
+    _add_user(db_session, supervisor_user_id, "set-supervisor")
+    edges = []
+    for index, supervisee_user_id in enumerate(
+        (first_supervisee, second_supervisee, other_supervisee)
+    ):
+        _add_user(db_session, supervisee_user_id, f"set-supervisee-{index}")
+        edge = SupervisionEdge(
+            edge_id=uuid4(),
+            supervisor_user_id=supervisor_user_id,
+            supervisee_user_id=supervisee_user_id,
+            started_at=_ts(index + 1),
+            created_at=_ts(index + 1),
+            updated_at=_ts(index + 1),
+        )
+        repo.supervision_edges.save(edge)
+        edges.append(edge)
+    repo.commit()
+
+    selected, total = repo.query_supervision_edges(
+        supervisee_user_ids={first_supervisee, second_supervisee},
+    )
+    none_selected, none_total = repo.query_supervision_edges(supervisee_user_ids=set())
+
+    assert selected == edges[:2]
+    assert total == 2
+    assert none_selected == []
+    assert none_total == 0
+
+
 def test_question_repository_persists_parent_links(db_session):
     repo = SQLAlchemyLabTrackerRepository(db_session)
     project = Project(
@@ -1438,3 +1473,69 @@ def test_graph_change_set_commit_claim_is_conditional(db_session):
     assert claimed is not None
     assert claimed.status == GraphChangeSetStatus.COMMITTING
     assert second_claim is None
+
+
+def _attribution_change_set(db_session, repo, **attribution):  # noqa: ANN001, ANN202
+    project = Project(
+        project_id=uuid4(),
+        name="Attribution project",
+        status=ProjectStatus.ACTIVE,
+        created_at=_ts(),
+        updated_at=_ts(),
+    )
+    source_note = Note(
+        note_id=uuid4(),
+        project_id=project.project_id,
+        raw_content="attribution source",
+        status=NoteStatus.COMMITTED,
+        created_at=_ts(),
+        updated_at=_ts(),
+    )
+    change_set = GraphChangeSet(
+        change_set_id=uuid4(),
+        project_id=project.project_id,
+        source_note_id=source_note.note_id,
+        source_note_ids=[source_note.note_id],
+        model="test-model",
+        prompt_version="test-prompt",
+        created_at=_ts(1),
+        updated_at=_ts(1),
+        **attribution,
+    )
+    repo.projects.save(project)
+    db_session.flush()
+    repo.notes.save(source_note)
+    repo.graph_change_sets.save(change_set)
+    repo.commit()
+    return change_set
+
+
+def test_graph_change_set_hydration_tolerates_free_text_attribution(db_session):
+    repo = SQLAlchemyLabTrackerRepository(db_session)
+    reviewer_id = uuid4()
+    _add_user(db_session, reviewer_id, "graph-reviewer")
+    change_set = _attribution_change_set(
+        db_session,
+        repo,
+        created_by="operator-1",
+        review_assignee=str(reviewer_id),
+    )
+
+    loaded = repo.graph_change_sets.get(change_set.change_set_id)
+
+    assert loaded is not None
+    assert loaded.created_by == "operator-1"
+    assert loaded.created_by_username is None
+    assert loaded.review_assignee_username == "graph-reviewer"
+
+
+def test_graph_change_set_hydration_resolves_uuid_attribution_usernames(db_session):
+    repo = SQLAlchemyLabTrackerRepository(db_session)
+    creator_id = uuid4()
+    _add_user(db_session, creator_id, "graph-creator")
+    change_set = _attribution_change_set(db_session, repo, created_by=str(creator_id))
+
+    loaded = repo.graph_change_sets.get(change_set.change_set_id)
+
+    assert loaded is not None
+    assert loaded.created_by_username == "graph-creator"

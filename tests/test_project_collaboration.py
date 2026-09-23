@@ -140,7 +140,7 @@ def test_project_membership_scopes_reads_and_contributor_notes(
         json={"project_id": other_project, "raw_content": "Should not land."},
         headers=undergrad_headers,
     )
-    assert denied_note.status_code == 401
+    assert denied_note.status_code == 403
 
     search = client.get(
         "/search",
@@ -179,7 +179,7 @@ def test_project_member_patch_updates_existing_member_without_creating_new_one(
         json={"project_id": project_id, "raw_content": "Viewer cannot write yet."},
         headers=member_headers,
     )
-    assert denied_note.status_code == 401
+    assert denied_note.status_code == 403
 
     update_member = client.patch(
         f"/projects/{project_id}/members/{member_user_id}",
@@ -250,8 +250,8 @@ def test_project_member_create_checks_owner_before_resolving_user(
         headers=nonowner_headers,
     )
 
-    assert missing_user.status_code == 401
-    assert existing_user.status_code == 401
+    assert missing_user.status_code == 403
+    assert existing_user.status_code == 403
     assert missing_user.json()["error"]["message"] == "Project owner access required."
     assert existing_user.json()["error"]["message"] == "Project owner access required."
 
@@ -350,7 +350,7 @@ def test_project_contributor_can_use_core_write_routes(
         },
         headers=viewer_headers,
     )
-    assert denied_question.status_code == 401
+    assert denied_question.status_code == 403
 
     question = client.post(
         "/questions",
@@ -472,7 +472,7 @@ def test_contributor_submits_graph_change_set_for_admin_review(
         json={"message": "undergrad self merge"},
         headers=undergrad_headers,
     )
-    assert denied_commit.status_code == 401
+    assert denied_commit.status_code == 403
 
     submitted = client.post(
         f"/graph-drafts/{draft['change_set_id']}/submit",

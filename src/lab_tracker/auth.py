@@ -22,6 +22,10 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
+from lab_tracker.config import (
+    DEFAULT_AUTH_SESSION_MAX_AGE_HOURS,
+    MAX_AUTH_SESSION_MAX_AGE_HOURS,
+)
 from lab_tracker.db_models import (
     DeviceEnrollmentModel,
     DeviceTokenModel,
@@ -30,7 +34,13 @@ from lab_tracker.db_models import (
     UserModel,
 )
 from lab_tracker.db_types import ensure_uuid
-from lab_tracker.errors import AuthError, ConflictError, NotFoundError, ValidationError
+from lab_tracker.errors import (
+    AuthError,
+    ConflictError,
+    NotFoundError,
+    PermissionDeniedError,
+    ValidationError,
+)
 from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
 
 LOCAL_AUTH_USER_ID = ensure_uuid("00000000-0000-4000-8000-000000000001")
@@ -102,6 +112,7 @@ class User:
     password_hash: str
     role: Role
     created_at: datetime = field(default_factory=utc_now)
+    session_epoch: int = 0
 
 
 class PasswordHasher:
@@ -155,6 +166,14 @@ def _validate_invited_password(password: str, password_confirmation: str) -> Non
             "Invited-account passwords must be at least "
             f"{MIN_INVITED_PASSWORD_LENGTH} characters long."
         )
+
+
+# Well-formed hash with an all-zero digest that no real password derives;
+# see AuthService.authenticate.
+_UNKNOWN_USER_PASSWORD_HASH = (
+    f"{PasswordHasher.algorithm}${PasswordHasher.iterations}$"
+    f"{'00' * PasswordHasher.salt_bytes}${'00' * hashlib.sha256().digest_size}"
+)
 
 
 class AuthService:
@@ -239,7 +258,9 @@ class AuthService:
                 if normalized != invited_email:
                     raise AuthError("Invitation token does not match this email address.")
                 if invited_email in self._users_by_username:
-                    raise ConflictError("Invitation has already been used.")
+                    # The invitation is still pending (checked above); the
+                    # email already belongs to an account.
+                    raise ConflictError("Username already exists.")
                 user = User(
                     user_id=uuid4(),
                     username=invited_email,
@@ -293,13 +314,22 @@ class AuthService:
                     raise AuthError("Invitation is no longer available.")
                 user = _user_from_model(user_row)
         except IntegrityError as exc:
-            raise ConflictError("Invitation has already been used.") from exc
+            # The insert collided on users.username. If this invitation was
+            # consumed meanwhile, a concurrent acceptance of it won; otherwise
+            # the invited email already belongs to an account.
+            current = invitation_token_service._invitation_for_token(invite_token)
+            if current.consumed_at is not None:
+                raise ConflictError("Invitation has already been used.") from exc
+            raise ConflictError("Username already exists.") from exc
         return user
 
     def authenticate(self, username: str, password: str) -> User:
         normalized = self._normalize_username(username)
         user = self.get_user(normalized)
         if user is None:
+            # Spend the same key-derivation work as a real check so the
+            # response time does not reveal whether the username exists.
+            PasswordHasher.verify_password(password, _UNKNOWN_USER_PASSWORD_HASH)
             raise AuthError("Invalid credentials.")
         if not PasswordHasher.verify_password(password, user.password_hash):
             raise AuthError("Invalid credentials.")
@@ -354,9 +384,12 @@ class AuthService:
                 raise NotFoundError("User does not exist.")
             if is_provided(role):
                 self._ensure_not_demoting_last_admin(user, role, self.list_users())
-                user.role = role
+                if user.role != role:
+                    user.role = role
+                    user.session_epoch += 1
             if is_provided(password):
                 user.password_hash = PasswordHasher.hash_password(password)
+                user.session_epoch += 1
             return user
 
         with self._session_factory() as session:
@@ -376,6 +409,27 @@ class AuthService:
                 changed = True
             if not changed:
                 return _user_from_model(row)
+            # A role or password change ends every existing session.
+            row.session_epoch = UserModel.session_epoch + 1
+            session.commit()
+            session.refresh(row)
+            return _user_from_model(row)
+
+    def revoke_sessions(self, user_id: UUID) -> User:
+        """Invalidate every session JWT issued to ``user_id`` so far."""
+
+        if self._session_factory is None:
+            with self._memory_lock:
+                user = self.get_user_by_id(user_id)
+                if user is None:
+                    raise NotFoundError("User does not exist.")
+                user.session_epoch += 1
+                return user
+        with self._session_factory() as session:
+            row = session.get(UserModel, str(user_id))
+            if row is None:
+                raise NotFoundError("User does not exist.")
+            row.session_epoch = UserModel.session_epoch + 1
             session.commit()
             session.refresh(row)
             return _user_from_model(row)
@@ -445,6 +499,8 @@ class TokenClaims:
     role: Role
     expires_at: datetime
     issued_at: datetime
+    session_epoch: int
+    auth_time: datetime
 
 
 @dataclass(frozen=True)
@@ -485,25 +541,65 @@ class IssuedInvitation:
 
 
 class TokenService:
-    """HMAC-signed JWT-style token issuer and verifier."""
+    """HMAC-signed JWT-style session token issuer and verifier.
 
-    def __init__(self, secret_key: str, *, ttl_minutes: int = 60) -> None:
+    Every token carries the user's ``session_epoch`` (``sv``), checked against
+    the live user by :func:`resolve_session_user`, and the time of the original
+    sign-in (``auth_time``). Refreshing carries ``auth_time`` forward, and no
+    token outlives ``auth_time + max_session_age_hours``, so refresh cannot
+    extend a session indefinitely.
+    """
+
+    def __init__(
+        self,
+        secret_key: str,
+        *,
+        ttl_minutes: int = 60,
+        max_session_age_hours: int = DEFAULT_AUTH_SESSION_MAX_AGE_HOURS,
+    ) -> None:
         if not secret_key or not secret_key.strip():
             raise ValidationError("auth_secret_key must not be empty.")
         if ttl_minutes < 1:
             raise ValidationError("auth_token_ttl_minutes must be at least 1.")
+        if not 1 <= max_session_age_hours <= MAX_AUTH_SESSION_MAX_AGE_HOURS:
+            raise ValidationError(
+                "max_session_age_hours must be between 1 and "
+                f"{MAX_AUTH_SESSION_MAX_AGE_HOURS}."
+            )
+        if max_session_age_hours * 60 < ttl_minutes:
+            raise ValidationError(
+                "max_session_age_hours must be no shorter than auth_token_ttl_minutes."
+            )
         self._secret = secret_key.encode("utf-8")
         self._ttl_minutes = ttl_minutes
+        self._max_session_age = timedelta(hours=max_session_age_hours)
 
-    def issue_access_token(self, user: User) -> AccessToken:
+    def issue_access_token(
+        self,
+        user: User,
+        *,
+        auth_time: datetime | None = None,
+    ) -> AccessToken:
+        """Issue a session token; pass the verified ``auth_time`` to refresh."""
+
         issued_at = utc_now()
-        expires_at = issued_at + timedelta(minutes=self._ttl_minutes)
+        # JWT times are whole seconds; truncate so refreshes round-trip exactly.
+        session_started_at = datetime.fromtimestamp(
+            int((issued_at if auth_time is None else auth_time).timestamp()),
+            tz=timezone.utc,
+        )
+        session_ends_at = session_started_at + self._max_session_age
+        if session_ends_at <= issued_at:
+            raise AuthError(_SESSION_LIFETIME_EXCEEDED)
+        expires_at = min(issued_at + timedelta(minutes=self._ttl_minutes), session_ends_at)
         header = {"alg": "HS256", "typ": "JWT"}
         payload = {
             "sub": str(user.user_id),
             "role": user.role.value,
             "iat": int(issued_at.timestamp()),
             "exp": int(expires_at.timestamp()),
+            "auth_time": int(session_started_at.timestamp()),
+            "sv": user.session_epoch,
         }
         header_segment = _b64url_encode_json(header)
         payload_segment = _b64url_encode_json(payload)
@@ -528,19 +624,53 @@ class TokenService:
             role = Role(str(payload["role"]))
             issued_at = datetime.fromtimestamp(int(payload["iat"]), tz=timezone.utc)
             expires_at = datetime.fromtimestamp(int(payload["exp"]), tz=timezone.utc)
-        except (KeyError, ValueError, TypeError) as exc:
+            auth_time = datetime.fromtimestamp(int(payload["auth_time"]), tz=timezone.utc)
+            session_epoch = payload["sv"]
+        except (KeyError, ValueError, TypeError, OverflowError) as exc:
             raise AuthError("Invalid token.") from exc
-        if expires_at <= utc_now():
+        if type(session_epoch) is not int or auth_time > issued_at:
+            raise AuthError("Invalid token.")
+        now = utc_now()
+        if expires_at <= now:
             raise AuthError("Token has expired.")
+        if auth_time + self._max_session_age <= now:
+            raise AuthError(_SESSION_LIFETIME_EXCEEDED)
         return TokenClaims(
             user_id=user_id,
             role=role,
             expires_at=expires_at,
             issued_at=issued_at,
+            session_epoch=session_epoch,
+            auth_time=auth_time,
         )
 
     def _sign(self, data: bytes) -> bytes:
         return hmac.new(self._secret, data, hashlib.sha256).digest()
+
+
+_SESSION_LIFETIME_EXCEEDED = "Session has reached its maximum lifetime. Sign in again."
+
+
+def resolve_session_user(
+    token: str,
+    *,
+    token_service: TokenService,
+    auth_service: AuthService,
+) -> tuple[TokenClaims, User]:
+    """Verify a session JWT against the live user it names.
+
+    Rejects tokens for users that no longer exist and tokens minted before the
+    user's current ``session_epoch`` (password or role change, or an explicit
+    sign-out-everywhere).
+    """
+
+    claims = token_service.verify_access_token(token)
+    user = auth_service.get_user_by_id(claims.user_id)
+    if user is None:
+        raise AuthError("Invalid token.")
+    if claims.session_epoch != user.session_epoch:
+        raise AuthError("Session has been revoked.")
+    return claims, user
 
 
 class InvitationTokenService:
@@ -548,16 +678,12 @@ class InvitationTokenService:
 
     def __init__(
         self,
-        secret_key: str,
         *,
         ttl_hours: int = 168,
         session_factory: sessionmaker[Session] | None = None,
     ) -> None:
-        if not secret_key or not secret_key.strip():
-            raise ValidationError("auth_secret_key must not be empty.")
         if ttl_hours < 1:
             raise ValidationError("auth_invite_ttl_hours must be at least 1.")
-        self._secret = secret_key.encode("utf-8")
         self._ttl_hours = ttl_hours
         self._session_factory = session_factory
         self._memory_invitations_by_hash: dict[str, InvitationModel] = {}
@@ -588,10 +714,6 @@ class InvitationTokenService:
             session.refresh(row)
             return IssuedInvitation(invitation=_invitation_from_model(row), token=token)
 
-    def issue_invitation_token(self, *, email: str, role: Role) -> tuple[str, datetime]:
-        issued = self.issue_invitation(email=email, role=role)
-        return issued.token, issued.invitation.expires_at
-
     def verify_invitation_token(self, token: str) -> InvitationClaims:
         _ensure_non_empty(token, "invite_token")
         invitation = self._invitation_for_token(token)
@@ -603,44 +725,6 @@ class InvitationTokenService:
             expires_at=invitation.expires_at,
             issued_at=invitation.created_at,
         )
-
-    def consume_invitation_token(self, token: str, *, consumed_by_user_id: UUID) -> Invitation:
-        _ensure_non_empty(token, "invite_token")
-        token_hash = _hash_token(token)
-        if self._session_factory is None:
-            with self._memory_lock:
-                row = self._memory_invitations_by_hash.get(token_hash)
-                if row is None:
-                    raise AuthError("Invitation token is invalid.")
-                invitation = _invitation_from_model(row)
-                self._ensure_invitation_pending(invitation)
-                row.consumed_at = utc_now()
-                row.consumed_by_user_id = consumed_by_user_id
-                return _invitation_from_model(row)
-
-        with self._session_factory() as session:
-            row = session.scalar(
-                select(InvitationModel).where(InvitationModel.token_hash == token_hash)
-            )
-            if row is None:
-                raise AuthError("Invitation token is invalid.")
-            invitation = _invitation_from_model(row)
-            self._ensure_invitation_pending(invitation)
-            consumed_at = utc_now()
-            if not self._claim_persistent_invitation(
-                session,
-                invitation_id=invitation.invitation_id,
-                token_hash=token_hash,
-                consumed_by_user_id=consumed_by_user_id,
-                consumed_at=consumed_at,
-            ):
-                session.rollback()
-                raise AuthError("Invitation is no longer available.")
-            session.commit()
-            consumed_row = session.get(InvitationModel, str(invitation.invitation_id))
-            if consumed_row is None:  # pragma: no cover - protected by the primary key
-                raise AuthError("Invitation token is invalid.")
-            return _invitation_from_model(consumed_row)
 
     @staticmethod
     def _claim_persistent_invitation(
@@ -763,9 +847,6 @@ class InvitationTokenService:
         if not local_part or "." not in domain or domain.endswith("."):
             raise ValidationError("Invite email must be a valid email address.")
         return normalized
-
-    def _sign(self, data: bytes) -> bytes:
-        return hmac.new(self._secret, data, hashlib.sha256).digest()
 
 
 DEVICE_TOKEN_PREFIX = "ldev_"
@@ -1224,6 +1305,12 @@ class PersonalAccessTokenService:
             now = utc_now()
             if row is None or row.revoked_at is not None or _as_utc(row.expires_at) <= now:
                 return None
+            owner = session.get(UserModel, row.user_id)
+            if owner is None:
+                return None
+            effective_role = effective_personal_access_token_role(
+                Role(row.role), owner_role=Role(owner.role)
+            )
             last_used_at = _as_utc(row.last_used_at) if row.last_used_at is not None else None
             if (
                 last_used_at is None
@@ -1235,7 +1322,7 @@ class PersonalAccessTokenService:
                 user_id=ensure_uuid(row.user_id),
                 token_id=ensure_uuid(row.token_id),
                 label=row.label,
-                role=Role(row.role),
+                role=effective_role,
                 read_only=bool(row.read_only),
                 scope=row.scope,
             )
@@ -1254,7 +1341,31 @@ def require_role(actor: AuthContext | None, allowed_roles: Iterable[Role]) -> No
     if actor is None:
         raise AuthError("Authentication required.")
     if actor.role not in set(allowed_roles):
-        raise AuthError("Insufficient role.")
+        raise PermissionDeniedError("Insufficient role.")
+
+
+def require_interactive_admin(actor: AuthContext) -> None:
+    """Managing another user's devices or tokens needs a person at an admin session.
+
+    Paired devices and lpat_ service tokens are already fenced off /auth/* by
+    the middleware; this re-check keeps those routes fail-closed on their own.
+    """
+
+    if actor.principal_type is not PrincipalType.USER:
+        raise PermissionDeniedError("Managing another user's credentials requires a user session.")
+    if actor.role is not Role.ADMIN:
+        raise PermissionDeniedError("Admin privileges required.")
+
+
+def effective_personal_access_token_role(token_role: Role, *, owner_role: Role) -> Role:
+    """The role an lpat_ token acts with right now.
+
+    The stored role is the issuance-time cap. The effective role is the lower
+    of that cap and the owner's live role, so demoting a user immediately
+    narrows every token they minted while promotion never widens one.
+    """
+
+    return _cap_role(token_role, issuer_role=owner_role)
 
 
 def _cap_role(role: Role, *, issuer_role: Role) -> Role:
@@ -1328,4 +1439,5 @@ def _user_from_model(row: UserModel) -> User:
         password_hash=row.password_hash,
         role=Role(row.role),
         created_at=_as_utc(row.created_at),
+        session_epoch=int(row.session_epoch),
     )

@@ -93,6 +93,31 @@ def test_capture_client_uses_saved_connection_profile(tmp_path: Path) -> None:
     client.close()
 
 
+def test_capture_client_ignores_profile_project_saved_for_another_server(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_dir = tmp_path / "lt-config"
+    config_dir.mkdir()
+    (config_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "base_url": "https://profile.example.test",
+                "default_project_id": "project-on-profile-server",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("LAB_TRACKER_BASE_URL", "https://other.example.test")
+    monkeypatch.setenv("LAB_TRACKER_ACCESS_TOKEN", "env-token")
+
+    client, project_id, should_close = figure_module._resolve_capture_client(
+        client=None,
+        project_id=None,
+    )
+
+    assert (client, project_id, should_close) == (None, None, False)
+
+
 def test_savefig_forwards_kwargs_and_uploads_under_cap(tmp_path: Path) -> None:
     figure_path = tmp_path / "plot.png"
     seen: list[httpx.Request] = []
@@ -794,3 +819,32 @@ def test_capture_requires_patterns_and_kind(tmp_path: Path) -> None:
         capture(tmp_path, patterns=[], kind="dataset")
     with pytest.raises(LTValidationError):
         capture(tmp_path, patterns=["*.csv"], kind="   ")
+
+
+def test_distinct_capture_failures_each_reach_stderr_once(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    messages = iter(
+        ["first failure cause", "second failure cause", "second failure cause"]
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _json_response(422, {"error": {"message": next(messages)}})
+
+    with LabTracker(
+        base_url="http://testserver",
+        default_project_id="project-1",
+        transport=httpx.MockTransport(handler),
+    ) as lt:
+        results = [
+            savefig(FakeFigure(bytes([index])), tmp_path / f"plot-{index}.png", client=lt)
+            for index in range(3)
+        ]
+
+    assert [result.action for result in results] == ["failed", "failed", "failed"]
+    stderr = capsys.readouterr().err
+    assert stderr.count("first failure cause") == 1
+    # A later failure with a different cause is not hidden behind the first
+    # warning; an identical repeat is not re-printed.
+    assert stderr.count("second failure cause") == 1

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy.exc import IntegrityError
@@ -19,6 +20,7 @@ from lab_tracker.models import (
     utc_now,
 )
 from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
+from lab_tracker.repository import LabTrackerRepository
 from lab_tracker.services.base import BaseService, IdempotentCreateResult, ServiceContext
 from lab_tracker.services.goal_link_cleanup import remove_goal_links_to_project_contents
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
@@ -235,7 +237,12 @@ class ProjectService(BaseService):
         self.authorization.require_owner(project_id, actor=actor)
         project = self.get_project(project_id)
         before = project.model_copy(deep=True)
-        if is_provided(group_id):
+        if is_provided(group_id) and group_id != project.group_id:
+            # Group owners inherit owner access for PI oversight, so moving a
+            # project out of its group needs the current group's consent just as
+            # moving it into a group needs the target group's.
+            if project.group_id is not None:
+                self.authorization.require_group_owner(project.group_id, actor=actor)
             if group_id is not None:
                 self.authorization.require_group_owner(group_id, actor=actor)
                 self.get_project_group(group_id)
@@ -263,6 +270,9 @@ class ProjectService(BaseService):
     def delete_project(self, project_id: UUID, *, actor: AuthContext | None = None) -> Project:
         self.authorization.require_owner(project_id, actor=actor)
         project = self.get_project(project_id)
+        if project.group_id is not None:
+            # Deleting a grouped project removes it from group oversight too.
+            self.authorization.require_group_owner(project.group_id, actor=actor)
         with self.unit_of_work() as repository:
             remove_goal_links_to_project_contents(repository, project_id=project_id)
             repository.projects.delete(project_id)
@@ -394,6 +404,14 @@ class ProjectService(BaseService):
         self.authorization.require_group_owner(group_id, actor=actor)
         group = self.get_project_group(group_id)
         with self.unit_of_work() as repository:
+            # projects.group_id is ON DELETE SET NULL, so deleting a group with
+            # children would silently strip their group-inherited owner access.
+            _, child_count = repository.query_projects(group_id=group_id, limit=0)
+            if child_count:
+                raise ValidationError(
+                    f"Group cannot be deleted while it contains {child_count} project(s); "
+                    "move or delete them first."
+                )
             repository.project_groups.delete(group_id)
         return group
 
@@ -460,26 +478,67 @@ class ProjectService(BaseService):
     ) -> GroupMembership:
         self.authorization.require_group_owner(group_id, actor=actor)
         self.get_project_group(group_id)
-        existing = self.get_group_membership_for_user(group_id, user_id)
-        if existing is None:
-            membership = GroupMembership(
-                membership_id=uuid4(),
-                group_id=group_id,
-                user_id=user_id,
-                role=role,
-                created_by=actor_user_id(actor),
-                created_by_user_id=actor_user_fk(actor, self.repository),
-            )
-        else:
-            membership = existing
-            if membership.role == role:
-                return membership
-            membership.role = role
-            membership.updated_at = utc_now()
         with self.unit_of_work() as repository:
+            existing = repository.get_group_membership(group_id=group_id, user_id=user_id)
+            if existing is None:
+                membership = GroupMembership(
+                    membership_id=uuid4(),
+                    group_id=group_id,
+                    user_id=user_id,
+                    role=role,
+                    created_by=actor_user_id(actor),
+                    created_by_user_id=actor_user_fk(actor, self.repository),
+                )
+            else:
+                if existing.role == role:
+                    return existing
+                membership = self._change_group_membership_role(
+                    repository,
+                    existing,
+                    role,
+                )
             repository.group_memberships.save(membership)
             saved = repository.group_memberships.get(membership.membership_id)
         return saved or membership
+
+    def update_group_membership(
+        self,
+        group_id: UUID,
+        user_id: UUID,
+        role: ProjectMembershipRole,
+        *,
+        actor: AuthContext | None = None,
+    ) -> GroupMembership:
+        """Change an existing member's role; never adds a new member."""
+
+        self.authorization.require_group_owner(group_id, actor=actor)
+        self.get_project_group(group_id)
+        with self.unit_of_work() as repository:
+            existing = repository.get_group_membership(group_id=group_id, user_id=user_id)
+            if existing is None:
+                raise NotFoundError("Group membership does not exist.")
+            if existing.role == role:
+                return existing
+            membership = self._change_group_membership_role(repository, existing, role)
+            repository.group_memberships.save(membership)
+            saved = repository.group_memberships.get(membership.membership_id)
+        return saved or membership
+
+    def _change_group_membership_role(
+        self,
+        repository: LabTrackerRepository,
+        membership: GroupMembership,
+        role: ProjectMembershipRole,
+    ) -> GroupMembership:
+        if membership.role == ProjectMembershipRole.OWNER:
+            membership = self._require_group_keeps_owner(
+                repository,
+                group_id=membership.group_id,
+                user_id=membership.user_id,
+            )
+        membership.role = role
+        membership.updated_at = utc_now()
+        return membership
 
     def delete_group_membership(
         self,
@@ -489,20 +548,52 @@ class ProjectService(BaseService):
         actor: AuthContext | None = None,
     ) -> GroupMembership:
         self.authorization.require_group_owner(group_id, actor=actor)
-        membership = self.get_group_membership_for_user(group_id, user_id)
+        with self.unit_of_work() as repository:
+            membership = repository.get_group_membership(group_id=group_id, user_id=user_id)
+            if membership is None:
+                raise NotFoundError("Group membership does not exist.")
+            if membership.role == ProjectMembershipRole.OWNER:
+                membership = self._require_group_keeps_owner(
+                    repository,
+                    group_id=group_id,
+                    user_id=user_id,
+                )
+            project_ids = self._project_ids_for_group(group_id)
+            self._ensure_offboarding_records_released(user_id, project_ids)
+            repository.group_memberships.delete(membership.membership_id)
+        return membership
+
+    @staticmethod
+    def _require_group_keeps_owner(
+        repository: LabTrackerRepository,
+        *,
+        group_id: UUID,
+        user_id: UUID,
+    ) -> GroupMembership:
+        """Lock the group's owner rows and reject losing its last owner.
+
+        Callers invoke this before demoting or removing a group owner. The owner
+        rows are locked first so two concurrent demotions/removals cannot both
+        observe a second owner, and the membership is re-read under the lock.
+        Returns the refreshed membership for the caller to change.
+        """
+
+        repository.lock_group_owner_memberships(group_id)
+        membership = repository.get_group_membership(group_id=group_id, user_id=user_id)
         if membership is None:
             raise NotFoundError("Group membership does not exist.")
-        owner_count = sum(
-            1
-            for item in self.list_group_memberships(group_id=group_id, actor=actor)
-            if item.role == ProjectMembershipRole.OWNER
+        if membership.role != ProjectMembershipRole.OWNER:
+            return membership
+        memberships, _ = repository.query_group_memberships(
+            group_id=group_id,
+            limit=None,
+            offset=0,
         )
-        if membership.role == ProjectMembershipRole.OWNER and owner_count <= 1:
+        owner_count = sum(
+            1 for item in memberships if item.role == ProjectMembershipRole.OWNER
+        )
+        if owner_count <= 1:
             raise ValidationError("Groups must keep at least one owner.")
-        project_ids = self._project_ids_for_group(group_id)
-        self._ensure_offboarding_records_released(user_id, project_ids)
-        with self.unit_of_work() as repository:
-            repository.group_memberships.delete(membership.membership_id)
         return membership
 
     def upsert_group_project_memberships(
@@ -771,54 +862,83 @@ class ProjectService(BaseService):
         user_id: UUID,
         candidate_project_ids: set[UUID],
     ) -> None:
-        record_project_ids = self._attributed_record_project_ids(
+        """Reject revoking access while attributed records lack a fresh export.
+
+        A project's attributed records count as released only when an export
+        event covering that project was generated at or after the latest
+        creation or update of any of those records; an older export misses
+        records written after it. Reassignment releases records by moving
+        their attribution away from the user.
+        """
+
+        record_watermarks = self._attributed_record_watermarks(
             user_id,
             candidate_project_ids,
         )
-        if not record_project_ids:
+        if not record_watermarks:
             return
         export_events, _ = self.repository.query_record_export_events(
             user_id=user_id,
             limit=None,
             offset=0,
         )
-        for event in export_events:
-            if record_project_ids.issubset(set(event.project_ids)):
-                return
-        project_list = ", ".join(str(project_id) for project_id in sorted(record_project_ids))
+        unreleased_project_ids = {
+            project_id
+            for project_id, last_changed_at in record_watermarks.items()
+            if not any(
+                project_id in event.project_ids and event.created_at >= last_changed_at
+                for event in export_events
+            )
+        }
+        if not unreleased_project_ids:
+            return
+        project_list = ", ".join(
+            str(project_id) for project_id in sorted(unreleased_project_ids)
+        )
         raise ValidationError(
             "Export or reassign this user's records before revoking membership "
             f"for projects: {project_list}."
         )
 
-    def _attributed_record_project_ids(
+    def _attributed_record_watermarks(
         self,
         user_id: UUID,
         candidate_project_ids: set[UUID],
-    ) -> set[UUID]:
+    ) -> dict[UUID, datetime]:
+        """Map each project holding the user's attributed records to its latest change."""
+
         if not candidate_project_ids:
-            return set()
+            return {}
         records = self.repository.records_attributed_to_user(
             user_id=user_id,
             project_ids=candidate_project_ids,
         )
-        project_ids = {
-            item.project_id
-            for collection in (
-                records.questions,
-                records.datasets,
-                records.sessions,
-                records.notes,
-                records.analyses,
-                records.claims,
-            )
-            for item in collection
-        }
+        changes: list[tuple[UUID, datetime]] = []
+        for item in (
+            *records.questions,
+            *records.datasets,
+            *records.notes,
+            *records.analyses,
+            *records.claims,
+        ):
+            changes.append((item.project_id, max(item.created_at, item.updated_at)))
+        for session in records.sessions:
+            changes.append((session.project_id, session.updated_at))
         for visualization in records.visualizations:
             analysis = self.repository.analyses.get(visualization.analysis_id)
             if analysis is not None:
-                project_ids.add(analysis.project_id)
-        return project_ids
+                changes.append(
+                    (
+                        analysis.project_id,
+                        max(visualization.created_at, visualization.updated_at),
+                    )
+                )
+        watermarks: dict[UUID, datetime] = {}
+        for project_id, changed_at in changes:
+            current = watermarks.get(project_id)
+            if current is None or changed_at > current:
+                watermarks[project_id] = changed_at
+        return watermarks
 
     def accessible_project_ids(self, actor: AuthContext | None) -> set[UUID] | None:
         return self.authorization.accessible_project_ids(actor)

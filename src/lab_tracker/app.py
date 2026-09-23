@@ -11,6 +11,7 @@ from lab_tracker.app_parts.middleware import (
     configure_database_session_middleware,
     configure_security_headers_middleware,
     configure_store_health_admission_middleware,
+    configure_upload_body_size_limit_middleware,
 )
 from lab_tracker.app_parts.observability import register_observability_routes
 from lab_tracker.app_parts.runtime import (
@@ -22,14 +23,21 @@ from lab_tracker.config import get_settings
 from lab_tracker.routes import register_routes
 
 
-def create_app() -> FastAPI:
+def create_app(*, verify_schema: bool = True) -> FastAPI:
+    """Build the FastAPI app.
+
+    Startup fails with ``DatabaseSchemaError`` unless the database is at the
+    Alembic head. ``verify_schema=False`` is only for tooling that reads the
+    OpenAPI schema without serving (see ``build_app_runtime``).
+    """
     settings = get_settings()
-    runtime = build_app_runtime(settings)
+    runtime = build_app_runtime(settings, verify_schema=verify_schema)
     app = FastAPI(
         title=settings.app_name,
         lifespan=make_lifespan(runtime),
     )
     configure_app_state(app, runtime)
+    configure_upload_body_size_limit_middleware(app)
     configure_database_session_middleware(app, api=app.state.lab_tracker_api)
     configure_artifact_resolution_admission_middleware(app)
     configure_store_health_admission_middleware(app)

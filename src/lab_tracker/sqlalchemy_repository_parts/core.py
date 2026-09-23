@@ -399,6 +399,18 @@ class SQLAlchemyGroupMembershipRepository(EntityRepository[GroupMembership]):
         row, user = result
         return self._from_row(row, user)
 
+    def lock_group_owners(self, group_id: UUID) -> None:
+        self._session.flush()
+        self._session.execute(
+            select(GroupMembershipModel.membership_id)
+            .where(
+                GroupMembershipModel.group_id == str(group_id),
+                GroupMembershipModel.role == ProjectMembershipRole.OWNER.value,
+            )
+            .order_by(GroupMembershipModel.membership_id)
+            .with_for_update()
+        ).all()
+
 
 class SQLAlchemyQuestionRepository(EntityRepository[Question]):
     def __init__(self, session: OrmSession) -> None:

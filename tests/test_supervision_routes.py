@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from uuid import uuid4
 
+import pytest
 from fastapi.testclient import TestClient
+
+from lab_tracker.auth import Role
 
 
 def _auth_headers(token: str) -> dict[str, str]:
@@ -133,5 +137,303 @@ def test_supervision_edge_management_requires_write_role(
         headers=_auth_headers(viewer_token),
     )
 
-    assert response.status_code == 401
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "forbidden"
     assert response.json()["error"]["message"] == "Insufficient role."
+
+
+@dataclass(frozen=True)
+class _LabUser:
+    headers: dict[str, str]
+    user_id: str
+
+
+@dataclass(frozen=True)
+class _Lab:
+    pi: _LabUser
+    student: _LabUser
+    labmate: _LabUser
+    outsider: _LabUser
+    group_id: str
+
+
+def _lab_user(client: TestClient, prefix: str, role: Role = Role.EDITOR) -> _LabUser:
+    username = f"{prefix}-{uuid4().hex[:8]}"
+    user = client.app.state.auth_service.register_user(
+        username=username,
+        password="secret",
+        role=role,
+    )
+    login = client.post("/auth/login", json={"username": username, "password": "secret"})
+    assert login.status_code == 200
+    return _LabUser(
+        headers=_auth_headers(login.json()["data"]["access_token"]),
+        user_id=str(user.user_id),
+    )
+
+
+@pytest.fixture()
+def lab(client: TestClient, admin_auth_headers: dict[str, str]) -> _Lab:
+    pi = _lab_user(client, "pi")
+    student = _lab_user(client, "student")
+    labmate = _lab_user(client, "labmate")
+    outsider = _lab_user(client, "outsider")
+    group = client.post("/groups", json={"name": "Lab"}, headers=admin_auth_headers)
+    assert group.status_code == 201
+    group_id = group.json()["data"]["group_id"]
+    for member, role in ((pi, "owner"), (student, "contributor"), (labmate, "contributor")):
+        response = client.post(
+            f"/groups/{group_id}/members",
+            json={"user_id": member.user_id, "role": role},
+            headers=admin_auth_headers,
+        )
+        assert response.status_code == 201, response.text
+    return _Lab(pi=pi, student=student, labmate=labmate, outsider=outsider, group_id=group_id)
+
+
+def _create_edge(
+    client: TestClient,
+    headers: dict[str, str],
+    supervisor: _LabUser,
+    supervisee: _LabUser,
+):
+    return client.post(
+        "/supervision-edges",
+        json={
+            "supervisor_user_id": supervisor.user_id,
+            "supervisee_user_id": supervisee.user_id,
+            "started_at": "2026-01-01T00:00:00+00:00",
+        },
+        headers=headers,
+    )
+
+
+def _assert_forbidden(response) -> None:
+    assert response.status_code == 403, response.text
+    assert response.json()["error"]["code"] == "forbidden"
+
+
+def test_editor_outside_the_lab_cannot_assert_supervision(client: TestClient, lab: _Lab):
+    # Arbitrary pair, and the finding's scenario: naming oneself the PI's supervisor.
+    _assert_forbidden(_create_edge(client, lab.outsider.headers, lab.pi, lab.student))
+    _assert_forbidden(_create_edge(client, lab.outsider.headers, lab.outsider, lab.pi))
+
+
+def test_group_members_who_do_not_own_the_group_cannot_assert_supervision(
+    client: TestClient,
+    lab: _Lab,
+):
+    # Being one endpoint is not authority: a student cannot claim a supervisor,
+    # and a labmate cannot claim to supervise the PI.
+    _assert_forbidden(_create_edge(client, lab.student.headers, lab.pi, lab.student))
+    _assert_forbidden(_create_edge(client, lab.labmate.headers, lab.labmate, lab.pi))
+
+
+def test_group_owner_cannot_manage_supervision(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    lab: _Lab,
+):
+    # Group ownership is not supervision authority: an owner can add any user
+    # to their group without that user's consent, so it grants nothing here.
+    _assert_forbidden(_create_edge(client, lab.pi.headers, lab.pi, lab.student))
+
+    created = _create_edge(client, admin_auth_headers, lab.pi, lab.student)
+    assert created.status_code == 201, created.text
+    edge_id = created.json()["data"]["edge_id"]
+
+    _assert_forbidden(
+        client.patch(
+            f"/supervision-edges/{edge_id}",
+            json={"supervisee_user_id": lab.labmate.user_id},
+            headers=lab.pi.headers,
+        )
+    )
+    _assert_forbidden(client.delete(f"/supervision-edges/{edge_id}", headers=lab.pi.headers))
+    assert client.get(f"/supervision-edges/{edge_id}", headers=admin_auth_headers).json()["data"][
+        "supervisee_user_id"
+    ] == (lab.student.user_id)
+
+
+def test_self_created_group_grants_no_supervision_authority(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    lab: _Lab,
+):
+    real = _create_edge(client, admin_auth_headers, lab.pi, lab.student)
+    assert real.status_code == 201, real.text
+    real_id = real.json()["data"]["edge_id"]
+
+    # Any editor can create a group (becoming its owner) and add the PI and the
+    # student to it without their consent.
+    group = client.post("/groups", json={"name": "Mine"}, headers=lab.outsider.headers)
+    assert group.status_code == 201, group.text
+    group_id = group.json()["data"]["group_id"]
+    for member in (lab.pi, lab.student):
+        added = client.post(
+            f"/groups/{group_id}/members",
+            json={"user_id": member.user_id, "role": "viewer"},
+            headers=lab.outsider.headers,
+        )
+        assert added.status_code == 201, added.text
+
+    listed = client.get("/supervision-edges", headers=lab.outsider.headers)
+    assert listed.status_code == 200, listed.text
+    assert listed.json()["data"] == []
+    assert listed.json()["meta"]["total"] == 0
+    assert (
+        client.get(f"/supervision-edges/{real_id}", headers=lab.outsider.headers).status_code == 404
+    )
+    _assert_forbidden(_create_edge(client, lab.outsider.headers, lab.outsider, lab.pi))
+    _assert_forbidden(_create_edge(client, lab.outsider.headers, lab.student, lab.pi))
+    assert (
+        client.delete(f"/supervision-edges/{real_id}", headers=lab.outsider.headers).status_code
+        == 404
+    )
+    assert (
+        client.get(f"/supervision-edges/{real_id}", headers=admin_auth_headers).status_code == 200
+    )
+
+
+def test_supervision_reads_are_scoped_to_admins_and_endpoints(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    lab: _Lab,
+):
+    lab_edge = _create_edge(client, admin_auth_headers, lab.pi, lab.student)
+    assert lab_edge.status_code == 201
+    lab_edge_id = lab_edge.json()["data"]["edge_id"]
+    outside_edge = _create_edge(client, admin_auth_headers, lab.outsider, lab.labmate)
+    assert outside_edge.status_code == 201
+    outside_edge_id = outside_edge.json()["data"]["edge_id"]
+    # Both endpoints are in the PI's group, but the PI is neither of them.
+    peer_edge = _create_edge(client, admin_auth_headers, lab.labmate, lab.student)
+    assert peer_edge.status_code == 201
+    peer_edge_id = peer_edge.json()["data"]["edge_id"]
+
+    def listed(headers: dict[str, str]) -> tuple[set[str], int]:
+        response = client.get("/supervision-edges", headers=headers)
+        assert response.status_code == 200, response.text
+        body = response.json()
+        return {item["edge_id"] for item in body["data"]}, body["meta"]["total"]
+
+    assert listed(admin_auth_headers) == ({lab_edge_id, outside_edge_id, peer_edge_id}, 3)
+    # Owning the group grants no read scope beyond the edges naming the owner.
+    assert listed(lab.pi.headers) == ({lab_edge_id}, 1)
+    # Endpoints see the edges that name them, and nothing else.
+    assert listed(lab.student.headers) == ({lab_edge_id, peer_edge_id}, 2)
+    assert listed(lab.outsider.headers) == ({outside_edge_id}, 1)
+    assert listed(lab.labmate.headers) == ({outside_edge_id, peer_edge_id}, 2)
+
+    # Targeted reads of an edge outside the caller's scope are opaque 404s.
+    hidden = client.get(f"/supervision-edges/{peer_edge_id}", headers=lab.pi.headers)
+    assert hidden.status_code == 404
+    missing = client.get(f"/supervision-edges/{uuid4()}", headers=lab.pi.headers)
+    assert missing.status_code == 404
+    assert hidden.json()["error"] == missing.json()["error"]
+    assert (
+        client.patch(
+            f"/supervision-edges/{lab_edge_id}",
+            json={"ended_at": "2026-03-01T00:00:00+00:00"},
+            headers=lab.outsider.headers,
+        ).status_code
+        == 404
+    )
+    assert (
+        client.delete(f"/supervision-edges/{lab_edge_id}", headers=lab.outsider.headers)
+    ).status_code == 404
+
+    # A visible edge the caller cannot manage is an explicit permission failure.
+    visible = client.get(f"/supervision-edges/{lab_edge_id}", headers=lab.student.headers)
+    assert visible.status_code == 200
+    _assert_forbidden(
+        client.patch(
+            f"/supervision-edges/{lab_edge_id}",
+            json={"ended_at": "2026-03-01T00:00:00+00:00"},
+            headers=lab.student.headers,
+        )
+    )
+    _assert_forbidden(
+        client.delete(f"/supervision-edges/{lab_edge_id}", headers=lab.student.headers)
+    )
+
+
+def test_supervision_list_paginates_after_scoping(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    lab: _Lab,
+):
+    # Unscoped edges ahead of the caller's edge must not consume its page.
+    for _ in range(3):
+        first = _lab_user(client, "other-a")
+        second = _lab_user(client, "other-b")
+        assert _create_edge(client, admin_auth_headers, first, second).status_code == 201
+    mine = _create_edge(client, admin_auth_headers, lab.pi, lab.student)
+    assert mine.status_code == 201
+
+    response = client.get(
+        "/supervision-edges",
+        params={"limit": 1, "offset": 0},
+        headers=lab.student.headers,
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [item["edge_id"] for item in body["data"]] == [mine.json()["data"]["edge_id"]]
+    assert body["meta"]["total"] == 1
+
+
+def test_supervision_edge_mixes_naive_and_aware_timestamps_as_utc(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    _, supervisor_user_id = _register_user(client, f"supervisor-{uuid4().hex[:8]}")
+    _, supervisee_user_id = _register_user(client, f"supervisee-{uuid4().hex[:8]}")
+
+    # started_at defaults to the aware current time; a naive ended_at in the
+    # past must be compared as UTC and rejected, not crash with a TypeError.
+    past_end = client.post(
+        "/supervision-edges",
+        json={
+            "supervisor_user_id": supervisor_user_id,
+            "supervisee_user_id": supervisee_user_id,
+            "ended_at": "2020-01-01T00:00:00",
+        },
+        headers=admin_auth_headers,
+    )
+    assert past_end.status_code == 422
+    assert "ended_at must be after started_at" in past_end.text
+
+    # A naive started_at is read as UTC, so it is after this aware ended_at.
+    mixed_invalid = client.post(
+        "/supervision-edges",
+        json={
+            "supervisor_user_id": supervisor_user_id,
+            "supervisee_user_id": supervisee_user_id,
+            "started_at": "2026-01-01T01:00:00",
+            "ended_at": "2026-01-01T00:30:00+00:00",
+        },
+        headers=admin_auth_headers,
+    )
+    assert mixed_invalid.status_code == 422
+
+    created = client.post(
+        "/supervision-edges",
+        json={
+            "supervisor_user_id": supervisor_user_id,
+            "supervisee_user_id": supervisee_user_id,
+            "started_at": "2026-01-01T00:00:00",
+            "ended_at": "2026-01-01T02:00:00+01:00",
+        },
+        headers=admin_auth_headers,
+    )
+    assert created.status_code == 201
+    edge = created.json()["data"]
+
+    patched = client.patch(
+        f"/supervision-edges/{edge['edge_id']}",
+        json={"started_at": "2026-01-01T01:30:00"},
+        headers=admin_auth_headers,
+    )
+    assert patched.status_code == 422
+    assert "ended_at must be after started_at" in patched.text

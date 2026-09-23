@@ -25,44 +25,25 @@ def downgrade() -> None:
 
 def _replace_batch_key_index_with_constraint() -> None:
     op.drop_index("ix_graph_change_sets_batch_key", table_name="graph_change_sets")
-    _set_sqlite_foreign_keys(enabled=False)
-    try:
-        with op.batch_alter_table("graph_change_sets") as batch_op:
-            batch_op.create_unique_constraint(
-                "uq_graph_change_sets_batch_key",
-                ["batch_key"],
-            )
-    finally:
-        _set_sqlite_foreign_keys(enabled=True)
+    with op.batch_alter_table("graph_change_sets") as batch_op:
+        batch_op.create_unique_constraint(
+            "uq_graph_change_sets_batch_key",
+            ["batch_key"],
+        )
 
 
 def _replace_batch_key_constraint_with_index() -> None:
-    _set_sqlite_foreign_keys(enabled=False)
-    try:
-        with op.batch_alter_table("graph_change_sets") as batch_op:
-            batch_op.drop_constraint(
-                "uq_graph_change_sets_batch_key",
-                type_="unique",
-            )
-    finally:
-        _set_sqlite_foreign_keys(enabled=True)
+    with op.batch_alter_table("graph_change_sets") as batch_op:
+        batch_op.drop_constraint(
+            "uq_graph_change_sets_batch_key",
+            type_="unique",
+        )
     op.create_index(
         "ix_graph_change_sets_batch_key",
         "graph_change_sets",
         ["batch_key"],
         unique=True,
     )
-
-
-def _set_sqlite_foreign_keys(*, enabled: bool) -> None:
-    """Toggle SQLite FKs around batch table rebuilds.
-
-    env.py configures SQLite migrations with transactional_ddl=False so this
-    PRAGMA is honored before Alembic recreates parent tables.
-    """
-    if op.get_context().dialect.name == "sqlite":
-        value = "ON" if enabled else "OFF"
-        op.execute(f"PRAGMA foreign_keys={value}")
 
 
 def _create_daily_graph_review_tables() -> None:

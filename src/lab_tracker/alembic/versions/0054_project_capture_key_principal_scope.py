@@ -17,42 +17,34 @@ depends_on = None
 
 def upgrade() -> None:
     _preflight_scoped_keys()
-    _set_sqlite_foreign_keys(enabled=False)
-    try:
-        with op.batch_alter_table("projects") as batch_op:
-            batch_op.drop_constraint("uq_projects_client_capture", type_="unique")
-            batch_op.create_unique_constraint(
-                "uq_projects_creator_client_capture",
-                ["created_by", "client_capture_id"],
-            )
-            batch_op.create_check_constraint(
-                "ck_projects_client_capture_creator",
-                "client_capture_id IS NULL OR "
-                "(created_by IS NOT NULL AND TRIM(created_by) <> '')",
-            )
-    finally:
-        _set_sqlite_foreign_keys(enabled=True)
+    with op.batch_alter_table("projects") as batch_op:
+        batch_op.drop_constraint("uq_projects_client_capture", type_="unique")
+        batch_op.create_unique_constraint(
+            "uq_projects_creator_client_capture",
+            ["created_by", "client_capture_id"],
+        )
+        batch_op.create_check_constraint(
+            "ck_projects_client_capture_creator",
+            "client_capture_id IS NULL OR "
+            "(created_by IS NOT NULL AND TRIM(created_by) <> '')",
+        )
 
 
 def downgrade() -> None:
     _preflight_global_keys()
-    _set_sqlite_foreign_keys(enabled=False)
-    try:
-        with op.batch_alter_table("projects") as batch_op:
-            batch_op.drop_constraint(
-                "ck_projects_client_capture_creator",
-                type_="check",
-            )
-            batch_op.drop_constraint(
-                "uq_projects_creator_client_capture",
-                type_="unique",
-            )
-            batch_op.create_unique_constraint(
-                "uq_projects_client_capture",
-                ["client_capture_id"],
-            )
-    finally:
-        _set_sqlite_foreign_keys(enabled=True)
+    with op.batch_alter_table("projects") as batch_op:
+        batch_op.drop_constraint(
+            "ck_projects_client_capture_creator",
+            type_="check",
+        )
+        batch_op.drop_constraint(
+            "uq_projects_creator_client_capture",
+            type_="unique",
+        )
+        batch_op.create_unique_constraint(
+            "uq_projects_client_capture",
+            ["client_capture_id"],
+        )
 
 
 def _preflight_scoped_keys() -> None:
@@ -99,9 +91,3 @@ def _preflight_global_keys() -> None:
             "Cannot restore globally unique project capture keys: "
             f"client_capture_id {duplicate[0]!r} is used by {duplicate[1]} principals."
         )
-
-
-def _set_sqlite_foreign_keys(*, enabled: bool) -> None:
-    if op.get_context().dialect.name == "sqlite":
-        value = "ON" if enabled else "OFF"
-        op.execute(f"PRAGMA foreign_keys={value}")

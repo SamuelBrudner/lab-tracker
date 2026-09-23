@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 from datetime import datetime
 from typing import Any
 from uuid import UUID
@@ -27,7 +28,8 @@ from lab_tracker.models import (
 from lab_tracker.repository import EntityRepository, ReviewEmailOutboxRepository
 from lab_tracker.sqlalchemy_mapper_parts.common import as_utc
 
-from .common import apply_pagination, count_from_statement
+from .common import apply_pagination, count_from_statement, uuid_values
+from .graph_drafts import review_assignee_matches
 
 
 def _uuid(value: str | None) -> UUID | None:
@@ -395,6 +397,14 @@ class SQLAlchemyGraphDraftBatchSettingsRepository(
         return entity
 
 
+def _expired_lease(now: datetime) -> Any:
+    return and_(
+        ReviewEmailOutboxModel.status == ReviewEmailDeliveryStatus.SENDING,
+        ReviewEmailOutboxModel.lease_expires_at.is_not(None),
+        ReviewEmailOutboxModel.lease_expires_at <= now,
+    )
+
+
 class SQLAlchemyReviewEmailOutboxRepository(ReviewEmailOutboxRepository):
     """SQLAlchemy-backed durable queue for review-email deliveries."""
 
@@ -438,19 +448,75 @@ class SQLAlchemyReviewEmailOutboxRepository(ReviewEmailOutboxRepository):
         )
         return email_delivery_from_model(row) if row is not None else None
 
+    def dead_letter_expired_leases(
+        self,
+        *,
+        now: datetime,
+        max_attempts: int,
+    ) -> builtins.list[UUID]:
+        """Fail expired leases that already used ``max_attempts``; return their ids.
+
+        Every claim counts as an attempt, including one whose worker died
+        before reporting a result, so such a delivery is dead-lettered as FAILED
+        (visible in the delivery list) instead of being re-leased forever. An
+        idle poll only reads: the write runs only when a row qualifies.
+        """
+
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be at least 1.")
+        self._session.flush()
+        over_budget = and_(
+            _expired_lease(now),
+            ReviewEmailOutboxModel.attempt_count >= max_attempts,
+        )
+        candidate_ids = list(
+            self._session.scalars(select(ReviewEmailOutboxModel.delivery_id).where(over_budget))
+        )
+        dead_lettered: builtins.list[UUID] = []
+        for delivery_id in candidate_ids:
+            result = self._session.execute(
+                update(ReviewEmailOutboxModel)
+                .where(ReviewEmailOutboxModel.delivery_id == delivery_id)
+                .where(over_budget)
+                .values(
+                    status=ReviewEmailDeliveryStatus.FAILED,
+                    last_error=(
+                        f"Delivery lease expired after {max_attempts} attempt(s) "
+                        "without a reported result."
+                    ),
+                    next_attempt_at=None,
+                    claim_token=None,
+                    claimed_at=None,
+                    lease_expires_at=None,
+                    updated_at=now,
+                )
+                .execution_options(synchronize_session=False)
+            )
+            if getattr(result, "rowcount", 0) == 1:
+                dead_lettered.append(ensure_uuid(str(delivery_id)))
+        return dead_lettered
+
     def claim_next(
         self,
         *,
         now: datetime,
         lease_until: datetime,
         claim_token: UUID,
+        max_attempts: int,
     ) -> ReviewEmailDelivery | None:
-        """Lease one due delivery without allowing two workers to own it."""
+        """Lease one due delivery without allowing two workers to own it.
+
+        A stale lease is reclaimable only while it has attempts left; one that
+        used ``max_attempts`` waits for :meth:`dead_letter_expired_leases`.
+        """
 
         if lease_until <= now:
             raise ValueError("lease_until must be later than now.")
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be at least 1.")
 
         self._session.flush()
+        expired_lease = _expired_lease(now)
         due_unclaimed = and_(
             ReviewEmailOutboxModel.status.in_(
                 [
@@ -461,9 +527,8 @@ class SQLAlchemyReviewEmailOutboxRepository(ReviewEmailOutboxRepository):
             ReviewEmailOutboxModel.next_attempt_at <= now,
         )
         stale_claim = and_(
-            ReviewEmailOutboxModel.status == ReviewEmailDeliveryStatus.SENDING,
-            ReviewEmailOutboxModel.lease_expires_at.is_not(None),
-            ReviewEmailOutboxModel.lease_expires_at <= now,
+            expired_lease,
+            ReviewEmailOutboxModel.attempt_count < max_attempts,
         )
         eligible = or_(due_unclaimed, stale_claim)
         candidate_stmt = (
@@ -657,13 +722,25 @@ class SQLAlchemyGraphDraftBatchRunRepository(EntityRepository[GraphDraftBatchRun
         self,
         *,
         project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
         status: str | None = None,
+        assigned_to_user_id: UUID | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> tuple[list[GraphDraftBatchRun], int]:
         self._session.flush()
+        if project_ids is not None and not project_ids:
+            return [], 0
         stmt = select(GraphDraftBatchRunModel)
         count_stmt = select(GraphDraftBatchRunModel.run_id)
+        if project_ids is not None:
+            project_values = uuid_values(project_ids)
+            stmt = stmt.where(GraphDraftBatchRunModel.project_id.in_(project_values))
+            count_stmt = count_stmt.where(GraphDraftBatchRunModel.project_id.in_(project_values))
+        if assigned_to_user_id is not None:
+            assigned = review_assignee_matches(GraphDraftBatchRunModel, assigned_to_user_id)
+            stmt = stmt.where(assigned)
+            count_stmt = count_stmt.where(assigned)
         if project_id is not None:
             stmt = stmt.where(GraphDraftBatchRunModel.project_id == str(project_id))
             count_stmt = count_stmt.where(GraphDraftBatchRunModel.project_id == str(project_id))

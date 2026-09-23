@@ -40,40 +40,23 @@ such as manuscripts, grants, abstracts, results, discussion text, and figure
 legends.
 
 Prefer `lab_tracker_get_decision_context` when available. Otherwise use
-`lab_tracker_list_projects`, `lab_tracker_search`, `lab_tracker_list_questions`,
-`lab_tracker_list_notes`, and the low-level dataset, analysis, claim, and
-visualization read tools.
+`lab_tracker_list_projects`, `lab_tracker_graph_overview`,
+`lab_tracker_search_graph`, `lab_tracker_get_graph_neighborhood`, and the
+low-level list/read tools. Graph-native reads are for orientation and navigation;
+decision context remains mandatory before a research-facing decision.
 
 If Lab Tracker is unavailable or ambiguous, state that explicitly. Do not create
 or mutate Lab Tracker records unless the user explicitly asks.
 
 ## Landing the Plane (Session Completion)
 
-**When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
-
-**MANDATORY WORKFLOW:**
-
-1. **File issues for remaining work** - Create issues for anything that needs follow-up
-2. **Run quality gates** (if code changed) - Tests, linters, builds
-3. **Update issue status** - Close finished work, update in-progress items
-4. **PUSH TO REMOTE** - This is MANDATORY:
-   ```bash
-   git pull --rebase
-   bd export
-   git push
-   git status  # MUST show "up to date with origin"
-   ```
-   Only if `bd dolt remote list` shows a configured Dolt remote, also run
-   `bd dolt push` before `git push`. With no Dolt remote configured, skip it.
-5. **Clean up** - Clear stashes, prune remote branches
-6. **Verify** - All changes committed AND pushed
-7. **Hand off** - Provide context for next session
-
-**CRITICAL RULES:**
-- Work is NOT complete until `git push` succeeds
-- NEVER stop before pushing - that leaves work stranded locally
-- NEVER say "ready to push when you are" - YOU must push
-- If push fails, resolve and retry until it succeeds
+Follow the **Session Completion** section below, using the git policy of the
+active **Agent Context Profile**; explicit user or orchestrator instructions
+take precedence over it. Under the default conservative profile, do not commit, push, or run Dolt remote sync unless
+explicitly asked: report changed files, validation, and the suggested next
+commands instead. When publishing is authorized (the team-maintainer opt-in or
+an explicit request), run `bd export` so `.beads/issues.jsonl` is current, and
+run `bd dolt push` only if `bd dolt remote list` shows a configured Dolt remote.
 
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:full hash:19cc25d9 -->
@@ -171,7 +154,7 @@ bd stores issue history in Dolt:
 - ❌ Do NOT use external issue trackers
 - ❌ Do NOT duplicate tracking systems
 
-For more details, see README.md and docs/QUICKSTART.md.
+For more details, see README.md and run `bd prime`.
 
 ## Agent Context Profiles
 

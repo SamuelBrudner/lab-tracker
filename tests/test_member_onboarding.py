@@ -280,7 +280,7 @@ def test_viewer_and_noninteractive_principal_are_read_only(
         json=_checkpoint_payload(),
         headers=viewer_user.headers,
     )
-    assert denied.status_code == 401
+    assert denied.status_code == 403
 
     actor = AuthContext(
         user_id=uuid4(),
@@ -604,7 +604,7 @@ def test_ai_accepted_path_is_author_reviewed_owner_committed_and_additive(
         json={"message": "not owner"},
         headers=author_headers,
     )
-    assert contributor_commit.status_code == 401
+    assert contributor_commit.status_code == 403
     queue = client.get(
         f"/projects/{project_id}/member-onboarding/owner-queue",
         headers=admin_auth_headers,
@@ -954,6 +954,7 @@ def test_member_onboarding_usage_events_are_first_only_and_content_free(
     assert "sensitive-forward-capture-sentinel" not in serialized
 
 
+@pytest.mark.postgres
 def test_postgres_first_capture_serializes_with_manual_alignment(
     postgres_client: TestClient,
     postgres_admin_auth_headers: dict[str, str],
@@ -1052,6 +1053,7 @@ def test_postgres_first_capture_serializes_with_manual_alignment(
     assert current["checkpoint"]["metadata"][FIRST_CAPTURE_NOTE_ID_KEY] == str(capture_id)
 
 
+@pytest.mark.postgres
 def test_postgres_manual_link_serializes_against_question_delete(
     postgres_client: TestClient,
     postgres_admin_auth_headers: dict[str, str],

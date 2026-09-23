@@ -8,7 +8,7 @@ import { useApiResource } from "../hooks/useApiResource.js";
 import { useLocalDraft } from "../hooks/useLocalDraft.js";
 import { useProjectAccess } from "../hooks/useProjectAccess.js";
 
-const { useEffect, useMemo, useState } = React;
+const { useEffect, useMemo, useRef, useState } = React;
 
 function NotePanel({
   canWrite,
@@ -166,7 +166,12 @@ function NoteDetailCard({
   setBusy,
   setFlash,
 }) {
-  const { data: note, error, loading } = useApiResource(
+  const {
+    data: note,
+    error,
+    loading,
+    setData: setNote,
+  } = useApiResource(
     noteId ? `/notes/${noteId}` : "",
     token,
     "Failed to load note.",
@@ -189,6 +194,9 @@ function NoteDetailCard({
   const isImage = Boolean(note?.raw_asset?.content_type?.startsWith("image/"));
   const isAudio = Boolean(note?.raw_asset?.content_type?.startsWith("audio/"));
   const isText = Boolean(note?.raw_asset?.is_text);
+  // Previews are keyed by note identity so refreshing `note` after a mutation
+  // does not re-download the raw asset.
+  const loadedNoteId = note?.note_id || "";
   const isMemberOnboardingCheckpoint =
     note?.metadata?.member_onboarding_role === "checkpoint";
   const canDraft = Boolean(
@@ -208,12 +216,12 @@ function NoteDetailCard({
     setAudioPreview("");
     setTextPreview(null);
     setTextPreviewError("");
-    if (!note || (!isImage && !isAudio && !isText)) {
+    if (!loadedNoteId || (!isImage && !isAudio && !isText)) {
       return () => {
         canceled = true;
       };
     }
-    const path = isText ? `/notes/${note.note_id}/raw-text` : `/notes/${note.note_id}/raw`;
+    const path = isText ? `/notes/${loadedNoteId}/raw-text` : `/notes/${loadedNoteId}/raw`;
     apiRequest(path, { token })
       .then((raw) => {
         if (!canceled && isText && typeof raw?.text === "string") {
@@ -242,34 +250,78 @@ function NoteDetailCard({
     return () => {
       canceled = true;
     };
-  }, [isAudio, isImage, isText, note, token]);
+  }, [isAudio, isImage, isText, loadedNoteId, token]);
 
+  // Sync the editor from the server copy without discarding unsaved edits. A
+  // different note always resets it. For the same note, a new server
+  // transcript replaces the editor text only when the editor still holds the
+  // previously synced text; this effect runs after the render that adopted
+  // the response, so the user may already have typed in between.
+  const syncedTranscriptRef = useRef({ noteId: "", text: "" });
+  const serverTranscript = note?.transcribed_text || "";
   useEffect(() => {
-    setTranscriptText(note?.transcribed_text || "");
-  }, [note]);
+    const synced = syncedTranscriptRef.current;
+    syncedTranscriptRef.current = { noteId: loadedNoteId, text: serverTranscript };
+    if (synced.noteId !== loadedNoteId) {
+      setTranscriptText(serverTranscript);
+      return;
+    }
+    if (synced.text !== serverTranscript) {
+      setTranscriptText((current) => (current === synced.text ? serverTranscript : current));
+    }
+  }, [loadedNoteId, serverTranscript]);
+
+  // A mutation response is adopted only while the card still shows that note:
+  // the card is reused across note routes, so a slow response for the note the
+  // user just left must not replace the one now loaded. Returns whether the
+  // response belongs to the routed note.
+  const routedNoteIdRef = useRef(noteId);
+  useEffect(() => {
+    routedNoteIdRef.current = noteId;
+  }, [noteId]);
+
+  function adoptUpdatedNote(updated) {
+    if (routedNoteIdRef.current !== updated.note_id) {
+      return false;
+    }
+    setNote((current) => (current?.note_id === updated.note_id ? updated : current));
+    return true;
+  }
+
+  // The transcript editor is locked while a save or transcription is in
+  // flight: its response replaces the text, which would drop anything typed.
+  const [transcriptLocked, setTranscriptLocked] = useState(false);
 
   async function saveTranscript({ silent = false } = {}) {
     if (!note || !canWrite) {
       return null;
     }
     setBusy(true);
+    setTranscriptLocked(true);
     if (!silent) {
       setFlash("", "");
     }
     try {
+      // PATCH replaces the whole metadata bag, so build it from the server's
+      // current copy: provenance written since this page loaded (by /transcript
+      // or background auto-transcription) must survive a transcript edit.
+      const latest = noteShape(await apiRequest(`/notes/${note.note_id}`, { token }));
       const metadata = {
-        ...(note.metadata || {}),
+        ...(latest.metadata || {}),
         transcript_status: transcriptText.trim() ? "ready" : "pending",
         transcript_edited_at: new Date().toISOString(),
       };
-      const updated = await apiRequest(`/notes/${note.note_id}`, {
-        body: {
-          metadata,
-          transcribed_text: transcriptText,
-        },
-        method: "PATCH",
-        token,
-      });
+      const updated = noteShape(
+        await apiRequest(`/notes/${note.note_id}`, {
+          body: {
+            metadata,
+            transcribed_text: transcriptText,
+          },
+          method: "PATCH",
+          token,
+        })
+      );
+      adoptUpdatedNote(updated);
       if (!silent) {
         setFlash("Transcript saved.");
       }
@@ -278,6 +330,7 @@ function NoteDetailCard({
       setFlash("", err.message || "Failed to save transcript.");
       return null;
     } finally {
+      setTranscriptLocked(false);
       setBusy(false);
     }
   }
@@ -287,18 +340,29 @@ function NoteDetailCard({
       return;
     }
     setBusy(true);
+    setTranscriptLocked(true);
     setFlash("", "");
     try {
-      const updated = await apiRequest(`/notes/${note.note_id}/transcript`, {
-        body: {},
-        method: "POST",
-        token,
-      });
-      setTranscriptText(updated?.transcribed_text || "");
+      const updated = noteShape(
+        await apiRequest(`/notes/${note.note_id}/transcript`, {
+          body: {},
+          method: "POST",
+          token,
+        })
+      );
+      // Adopt the server copy (text plus provider provenance) so later saves
+      // and the draft flow's "transcript changed?" check start from it. The
+      // editor was locked while the request was in flight, so nothing typed can
+      // be lost by showing the new transcript in the same render; the sync
+      // effect then leaves any edit made after this render alone.
+      if (adoptUpdatedNote(updated)) {
+        setTranscriptText(updated.transcribed_text || "");
+      }
       setFlash("Voice transcript ready.");
     } catch (err) {
       setFlash("", err.message || "Failed to transcribe voice note.");
     } finally {
+      setTranscriptLocked(false);
       setBusy(false);
     }
   }
@@ -354,6 +418,7 @@ function NoteDetailCard({
         {loading ? <span className="pill">Loading...</span> : null}
       </div>
       {error ? <p className="flash error">{error}</p> : null}
+      {noteAccess.error ? <p className="flash error">{noteAccess.error}</p> : null}
       {note ? (
         <div className="stack">
           <div className="inline">
@@ -376,7 +441,7 @@ function NoteDetailCard({
               <div className="subtle">Transcribed text</div>
               <textarea
                 className="transcript-editor"
-                disabled={!canWrite || isMemberOnboardingCheckpoint}
+                disabled={!canWrite || isMemberOnboardingCheckpoint || transcriptLocked}
                 onChange={(event) => setTranscriptText(event.target.value)}
                 value={transcriptText}
               />

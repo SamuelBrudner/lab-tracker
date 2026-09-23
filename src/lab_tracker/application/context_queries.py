@@ -76,6 +76,7 @@ from lab_tracker.provenance import (
     build_claim_provenance_document,
     build_dataset_provenance_document,
 )
+from lab_tracker.provenance_supervision import build_with_people_supervision
 from lab_tracker.rclone_store_definition import is_rclone_store_kind
 from lab_tracker.schemas import (
     AssistantDecisionContextRequest,
@@ -97,6 +98,8 @@ from lab_tracker.store_authority_use import (
 )
 
 from .types import Page
+
+_SEARCH_INCLUDE_KINDS = frozenset({"questions", "notes"})
 
 ExternalArtifactEntityType = Literal["analysis", "claim", "dataset"]
 
@@ -227,8 +230,9 @@ class ContextRepository(DecisionContextRepository, Protocol):
     def query_supervision_edges(
         self,
         *,
-        limit: int | None,
-        offset: int,
+        supervisee_user_ids: set[UUID] | None = None,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> tuple[list[SupervisionEdge], int]: ...
 
     def query_claim_edges(
@@ -411,14 +415,13 @@ class ContextQueries:
         base_url: str,
     ) -> dict[str, object]:
         dataset = self.api.get_dataset_for_read(dataset_id, actor=actor)
-        supervision_edges, _ = self.repository.query_supervision_edges(
-            limit=None,
-            offset=0,
-        )
-        return build_dataset_provenance_document(
-            base_url,
-            dataset,
-            supervision_edges=supervision_edges,
+        return build_with_people_supervision(
+            self.repository,
+            lambda supervision_edges: build_dataset_provenance_document(
+                base_url,
+                dataset,
+                supervision_edges=supervision_edges,
+            ),
         )
 
     def analysis_provenance(
@@ -449,18 +452,17 @@ class ContextQueries:
             limit=None,
             offset=0,
         )
-        supervision_edges, _ = self.repository.query_supervision_edges(
-            limit=None,
-            offset=0,
-        )
-        return build_analysis_provenance_document(
-            base_url,
-            analysis,
-            datasets=datasets,
-            claims=claims,
-            visualizations=visualizations,
-            claim_edges=claim_edges,
-            supervision_edges=supervision_edges,
+        return build_with_people_supervision(
+            self.repository,
+            lambda supervision_edges: build_analysis_provenance_document(
+                base_url,
+                analysis,
+                datasets=datasets,
+                claims=claims,
+                visualizations=visualizations,
+                claim_edges=claim_edges,
+                supervision_edges=supervision_edges,
+            ),
         )
 
     def claim_provenance(
@@ -471,10 +473,21 @@ class ContextQueries:
         base_url: str,
     ) -> dict[str, object]:
         claim = self.api.get_claim_for_read(claim_id, actor=actor)
-        analyses = [
-            self.api.get_analysis(analysis_id)
-            for analysis_id in claim.supported_by_analysis_ids
-        ]
+        visualizations, _ = self.repository.query_visualizations(
+            claim_id=claim_id,
+            limit=None,
+            offset=0,
+        )
+        # Every related visualization is exported with its generating analysis,
+        # including analyses that do not themselves support the claim.
+        analysis_ids = list(dict.fromkeys(claim.supported_by_analysis_ids))
+        for generating_analysis_id in sorted(
+            {visualization.analysis_id for visualization in visualizations},
+            key=str,
+        ):
+            if generating_analysis_id not in analysis_ids:
+                analysis_ids.append(generating_analysis_id)
+        analyses = [self.api.get_analysis(analysis_id) for analysis_id in analysis_ids]
         dataset_ids = set(claim.supported_by_dataset_ids)
         for analysis in analyses:
             dataset_ids.update(analysis.dataset_ids)
@@ -487,11 +500,6 @@ class ContextQueries:
         questions = [
             self.api.get_question(question_id) for question_id in sorted(question_ids)
         ]
-        visualizations, _ = self.repository.query_visualizations(
-            claim_id=claim_id,
-            limit=None,
-            offset=0,
-        )
         claim_edges, _ = self.repository.query_claim_edges(
             project_id=claim.project_id,
             limit=None,
@@ -502,19 +510,18 @@ class ContextQueries:
             for edge in claim_edges
             if edge.claim_id == claim_id or edge.target_claim_id == claim_id
         ]
-        supervision_edges, _ = self.repository.query_supervision_edges(
-            limit=None,
-            offset=0,
-        )
-        return build_claim_provenance_document(
-            base_url,
-            claim,
-            analyses=analyses,
-            datasets=datasets,
-            questions=questions,
-            visualizations=visualizations,
-            claim_edges=claim_edges,
-            supervision_edges=supervision_edges,
+        return build_with_people_supervision(
+            self.repository,
+            lambda supervision_edges: build_claim_provenance_document(
+                base_url,
+                claim,
+                analyses=analyses,
+                datasets=datasets,
+                questions=questions,
+                visualizations=visualizations,
+                claim_edges=claim_edges,
+                supervision_edges=supervision_edges,
+            ),
         )
 
     def search(
@@ -533,6 +540,17 @@ class ContextQueries:
             for item in (include.split(",") if include else ["questions", "notes"])
             if item.strip()
         }
+        unknown_includes = include_set - _SEARCH_INCLUDE_KINDS
+        if include and not include_set:
+            raise ValidationError(
+                f"include must name at least one of {', '.join(sorted(_SEARCH_INCLUDE_KINDS))}."
+            )
+        if unknown_includes:
+            raise ValidationError(
+                "include must be a comma-separated subset of "
+                f"{', '.join(sorted(_SEARCH_INCLUDE_KINDS))}; "
+                f"unknown: {', '.join(sorted(unknown_includes))}."
+            )
         project_ids: set[UUID] | None
         linked_question_ids: set[UUID] | None = None
         linked_note_ids: set[UUID] | None = None

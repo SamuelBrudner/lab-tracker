@@ -18,6 +18,7 @@ from lab_tracker.errors import (
     LabTrackerError,
     NotFoundError,
     PayloadTooLargeError,
+    PermissionDeniedError,
     RateLimitError,
     StoreAuthorityDeniedError,
     ValidationError,
@@ -94,6 +95,18 @@ def register_error_handlers(app: FastAPI) -> None:
             exc=exc,
         )
         return error_response(http_status.HTTP_401_UNAUTHORIZED, "auth_error", str(exc))
+
+    @app.exception_handler(PermissionDeniedError)
+    def _handle_permission_denied_error(request: Request, exc: PermissionDeniedError):
+        # A valid principal without permission: 403 so clients keep the
+        # credential instead of refreshing it or signing the user out.
+        _log_handled_error(
+            request,
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            code="forbidden",
+            exc=exc,
+        )
+        return error_response(http_status.HTTP_403_FORBIDDEN, "forbidden", str(exc))
 
     @app.exception_handler(StoreAuthorityDeniedError)
     def _handle_store_authority_denied_error(

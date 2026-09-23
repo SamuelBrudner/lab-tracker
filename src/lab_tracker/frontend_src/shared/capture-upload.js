@@ -2,7 +2,7 @@
 // network and the offline queue, extracted from the component so it can be
 // tested without rendering. Every function takes its inputs explicitly (no
 // closure over component state), and the online/offline decision lives here.
-import { apiRequest } from "./api.js";
+import { NetworkError, apiRequest } from "./api.js";
 import { getUploadQueue } from "./register-sw.js";
 import { UPLOAD_FILE_PATH } from "./upload-queue.js";
 
@@ -159,10 +159,10 @@ async function uploadOrQueueRawFile({
       targets,
     });
   } catch (err) {
-    // err.status is set by apiFetch for server-rejected responses; absence
-    // means the fetch itself failed (offline, DNS, CORS, etc.). Only queue in
-    // that case — real validation/auth errors must surface as before.
-    if (err && err.status === undefined) {
+    // Only queue when no HTTP response arrived (offline, DNS, CORS, etc.).
+    // Server rejections (ApiError) and malformed 2xx bodies (ContractError)
+    // must surface: the latter may already have created the note.
+    if (err instanceof NetworkError) {
       const queued = await queueRawFileNoteOffline({
         ownerId,
         projectId,

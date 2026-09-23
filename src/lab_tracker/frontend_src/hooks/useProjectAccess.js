@@ -4,6 +4,12 @@ import { projects } from "../shared/gateways/index.js";
 
 const { useCallback, useEffect, useRef, useState } = React;
 
+function accessErrorMessage(err) {
+  return `Could not confirm your access to this project: ${
+    err?.message || "membership lookup failed."
+  }`;
+}
+
 function roleContributes(userRole, projectRole) {
   return userRole === "admin" || projectRole === "contributor" || projectRole === "owner";
 }
@@ -31,6 +37,7 @@ function useProjectAccess(projectId, { token, user, enabled = true } = {}) {
     status: "idle",
     role: "",
     members: [],
+    error: "",
   });
   const requestIdRef = useRef(0);
   const [reloadNonce, setReloadNonce] = useState(0);
@@ -39,12 +46,18 @@ function useProjectAccess(projectId, { token, user, enabled = true } = {}) {
   useEffect(() => {
     const requestId = (requestIdRef.current += 1);
     if (!enabled || !projectId) {
-      setState({ projectId: projectId || null, status: "idle", role: "", members: [] });
+      setState({
+        projectId: projectId || null,
+        status: "idle",
+        role: "",
+        members: [],
+        error: "",
+      });
       return undefined;
     }
     // Drop the previous project's membership immediately so nothing derived from
     // it survives into the new project's loading window.
-    setState({ projectId, status: "loading", role: "", members: [] });
+    setState({ projectId, status: "loading", role: "", members: [], error: "" });
     let canceled = false;
     projects
       .listMembers(projectId, { token })
@@ -54,13 +67,27 @@ function useProjectAccess(projectId, { token, user, enabled = true } = {}) {
         }
         const members = Array.isArray(data) ? data : [];
         const membership = members.find((member) => member.user_id === userId) || null;
-        setState({ projectId, status: "ready", role: membership?.role || "", members });
+        setState({
+          projectId,
+          status: "ready",
+          role: membership?.role || "",
+          members,
+          error: "",
+        });
       })
-      .catch(() => {
+      .catch((err) => {
         if (canceled || requestId !== requestIdRef.current) {
           return;
         }
-        setState({ projectId, status: "ready", role: "", members: [] });
+        // Stay fail-closed (no role) but say so: a transient lookup failure
+        // must not silently look like a read-only membership.
+        setState({
+          projectId,
+          status: "error",
+          role: "",
+          members: [],
+          error: accessErrorMessage(err),
+        });
       });
     return () => {
       canceled = true;
@@ -74,6 +101,7 @@ function useProjectAccess(projectId, { token, user, enabled = true } = {}) {
     status: state.status,
     role: state.role,
     members: state.members,
+    error: state.projectId === projectId ? state.error : "",
     canContribute: isAdmin || (isReady && roleContributes(userRole, state.role)),
     canManage: isAdmin || (isReady && roleManages(userRole, state.role)),
     refresh,

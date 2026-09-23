@@ -12,6 +12,7 @@ from lab_tracker_client import (
     STORE_KIND_VALUES,
     LabTracker,
     LTAPIError,
+    LTPermissionDeniedError,
     LTStoreAuthorityDeniedError,
     LTValidationError,
     create_data_store,
@@ -288,7 +289,7 @@ def test_create_data_store_preserves_opaque_server_denial_without_retry(
     assert bodies[0]["capabilities"] == capabilities
 
 
-def test_non_authority_403_remains_generic_api_error() -> None:
+def test_non_authority_403_is_a_permission_error_not_a_store_denial() -> None:
     requests = 0
 
     def handler(_request: httpx.Request) -> httpx.Response:
@@ -315,7 +316,8 @@ def test_non_authority_403_remains_generic_api_error() -> None:
     ):
         lt.create_data_store(**_create_kwargs())
 
-    assert type(captured.value) is LTAPIError
+    assert type(captured.value) is LTPermissionDeniedError
+    assert not isinstance(captured.value, LTStoreAuthorityDeniedError)
     assert requests == 1
 
 

@@ -15,14 +15,17 @@ from sqlalchemy.orm import Session, sessionmaker
 from lab_tracker.auth import (
     DEVICE_TOKEN_PREFIX,
     ENROLLMENT_OFFER_PREFIX,
+    AuthContext,
     AuthError,
     DeviceAuthService,
+    PrincipalType,
     Role,
     _as_utc,
+    require_interactive_admin,
     utc_now,
 )
 from lab_tracker.db_models import DeviceEnrollmentModel, DeviceTokenModel, UserModel
-from lab_tracker.errors import NotFoundError, ValidationError
+from lab_tracker.errors import NotFoundError, PermissionDeniedError, ValidationError
 
 
 @pytest.fixture()
@@ -288,3 +291,27 @@ def uuid_from(value):
     if isinstance(value, UUID):
         return value
     return UUID(str(value))
+
+
+@pytest.mark.parametrize(
+    ("principal_type", "role"),
+    [
+        (PrincipalType.DEVICE, Role.ADMIN),
+        (PrincipalType.SERVICE, Role.ADMIN),
+        (PrincipalType.SYSTEM, Role.ADMIN),
+        (PrincipalType.USER, Role.EDITOR),
+        (PrincipalType.USER, Role.VIEWER),
+    ],
+)
+def test_require_interactive_admin_denies_with_permission_error(
+    principal_type: PrincipalType, role: Role
+) -> None:
+    """Managing another user's devices or tokens is a 403 for anything but an admin session."""
+    actor = AuthContext(user_id=uuid4(), role=role, principal_type=principal_type)
+
+    with pytest.raises(PermissionDeniedError):
+        require_interactive_admin(actor)
+
+
+def test_require_interactive_admin_admits_an_admin_user_session() -> None:
+    require_interactive_admin(AuthContext(user_id=uuid4(), role=Role.ADMIN))

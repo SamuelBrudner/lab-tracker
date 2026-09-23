@@ -913,7 +913,7 @@ export interface components {
       "meta": components["schemas"]["PaginationMeta"];
     };
     "MemberOnboardingAiAlignmentRequest": {
-      "external_provider_acknowledged": boolean;
+      "external_provider_acknowledged": true;
     };
     "MemberOnboardingAlignment": {
       "draft"?: (components["schemas"]["GraphChangeSet"] | null);
@@ -1048,6 +1048,7 @@ export interface components {
     };
     "PersonalAccessTokenIssuedRead": {
       "created_at": string;
+      "effective_role": components["schemas"]["Role"];
       "expires_at": string;
       "label": string;
       "last_used_at"?: (string | null);
@@ -1060,6 +1061,7 @@ export interface components {
     };
     "PersonalAccessTokenRead": {
       "created_at": string;
+      "effective_role": components["schemas"]["Role"];
       "expires_at": string;
       "label": string;
       "last_used_at"?: (string | null);
@@ -1109,7 +1111,6 @@ export interface components {
       "accepted_at"?: (string | null);
       "attempt_count"?: number;
       "change_set_id"?: (string | null);
-      "claim_token"?: (string | null);
       "claimed_at"?: (string | null);
       "created_at"?: string;
       "delivery_id": string;

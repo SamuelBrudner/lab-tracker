@@ -13,6 +13,16 @@ import { buildApiPath } from "./shared/api.js";
 
 import { TOKEN_STORAGE_KEY } from "./shared/constants.js";
 
+import { indexedDB as fakeIndexedDB } from "fake-indexeddb";
+
+import { getUploadQueue, resetUploadQueueForTests } from "./shared/register-sw.js";
+
+import {
+  UPLOAD_FILE_PATH,
+  createMemoryStorage,
+  createUploadQueue,
+} from "./shared/upload-queue.js";
+
 import { errorResponse, installFetchMock, textResponse } from "./test/utils.js";
 
 import {
@@ -229,6 +239,61 @@ describe("App", () => {
     expect(requestedUrls(fetchMock)).toContain(projectsPath);
   });
 
+  it("drains offline captures under the local owner when auth is disabled", async () => {
+    vi.stubGlobal("indexedDB", fakeIndexedDB);
+    resetUploadQueueForTests();
+    const uploads = [];
+    try {
+      installFetchMock([
+        {
+          match: "/auth/me",
+          response: apiResponse(
+            { role: "admin", username: "local-tester", user_id: "local-user" },
+            200,
+            { auth_enabled: false }
+          ),
+        },
+        {
+          match: UPLOAD_FILE_PATH,
+          method: "POST",
+          response: (request) => {
+            uploads.push(request);
+            return apiResponse({ note_id: "note-drained" }, 201);
+          },
+        },
+        { match: projectsPath, response: apiResponse([]) },
+      ]);
+      // fake-indexeddb cannot structured-clone a jsdom File, so the app's cached
+      // queue delegates its drain to a memory-backed queue with the real logic.
+      const memoryQueue = createUploadQueue({ storage: createMemoryStorage() });
+      await memoryQueue.enqueue({
+        endpoint: UPLOAD_FILE_PATH,
+        file: new File(["voice"], "voice.webm", { type: "audio/webm" }),
+        fields: { project_id: "project-1", client_capture_id: "capture-offline" },
+        ownerId: "local-user",
+      });
+      const appQueue = getUploadQueue();
+      const drainSpy = vi
+        .spyOn(appQueue, "drain")
+        .mockImplementation((session) => memoryQueue.drain(session));
+
+      render(<App />);
+
+      await waitFor(() => expect(uploads).toHaveLength(1));
+      expect(drainSpy).toHaveBeenCalledWith({
+        token: "",
+        ownerId: "local-user",
+        authEnabled: false,
+      });
+      expect(uploads[0].init.headers).toEqual({});
+      expect(uploads[0].init.body.get("client_capture_id")).toBe("capture-offline");
+      expect(await memoryQueue.pendingCount()).toBe(0);
+    } finally {
+      resetUploadQueueForTests();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("shows portfolio home for multi-project local auth sessions", async () => {
     const portfolioPath = buildApiPath("/portfolio/summary", { limit: 100, offset: 0 });
     const fetchMock = installFetchMock([
@@ -426,6 +491,39 @@ describe("App", () => {
     // Genuinely global actions stay gated on the global role.
     expect(screen.getByRole("button", { name: "Create project" })).toBeDisabled();
     expect(document.querySelector('[name="new-project-name"]')).toBeDisabled();
+  });
+
+  it("restores the last-used project once auth resolves instead of the first project", async () => {
+    // The workspace hook is mounted before /auth/me resolves; the stored
+    // selection must survive that window and be validated against the loaded
+    // project list, not wiped and replaced by the first project.
+    localStorage.setItem(TOKEN_STORAGE_KEY, "token-last-used-project");
+    localStorage.setItem("lab-tracker:last-used-project-id", "project-2");
+    window.history.replaceState({}, "", "/app/capture");
+    const requested = [];
+    installFetchMock([
+      { match: "/auth/me", response: apiResponse({ role: "admin", username: "sam" }) },
+      {
+        match: projectsPath,
+        response: apiResponse([
+          project("project-1", "Project One"),
+          project("project-2", "Project Two"),
+        ]),
+      },
+      {
+        match: /[?&]project_id=project-[12](&|$)/,
+        response: (request) => {
+          requested.push(request.url);
+          return paged([], { limit: 1, offset: 0, total: 0 });
+        },
+      },
+    ]);
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByLabelText("Project")).toHaveValue("project-2"));
+    expect(localStorage.getItem("lab-tracker:last-used-project-id")).toBe("project-2");
+    expect(requested.some((url) => url.includes("project_id=project-1"))).toBe(false);
   });
 
   it("restores a stored session and signs out", async () => {

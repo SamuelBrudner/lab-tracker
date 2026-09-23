@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI
-from sqlalchemy import func, select
+from fastapi import FastAPI, Request
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 from starlette.responses import JSONResponse
 
+from lab_tracker.auth import Role
 from lab_tracker.db_models import (
     AcquisitionOutputModel,
     AnalysisModel,
@@ -25,8 +27,10 @@ from lab_tracker.db_models import (
     SessionModel,
     VisualizationModel,
 )
+from lab_tracker.errors import AuthError, PermissionDeniedError
 
 _START_TIME = datetime.now(timezone.utc)
+_logger = logging.getLogger(__name__)
 
 
 def _nearest_existing_parent(path: Path) -> Path | None:
@@ -39,45 +43,54 @@ def _nearest_existing_parent(path: Path) -> Path | None:
 
 
 def _storage_dir_check(name: str, path: Path) -> dict[str, str]:
+    """Report storage writability without exposing server filesystem paths.
+
+    The resolved path (and any blocking parent) is only written to the server
+    log; the HTTP payload carries the check name, status, and a static detail.
+    """
     resolved = path.expanduser()
     if resolved.exists():
         if not resolved.is_dir():
-            return {
-                "name": name,
-                "status": "fail",
-                "path": str(resolved),
-                "detail": "path exists but is not a directory",
-            }
+            return _storage_failure(name, resolved, "path exists but is not a directory")
         if os.access(resolved, os.W_OK):
-            return {"name": name, "status": "ok", "path": str(resolved)}
-        return {
-            "name": name,
-            "status": "fail",
-            "path": str(resolved),
-            "detail": "path is not writable",
-        }
+            return {"name": name, "status": "ok"}
+        return _storage_failure(name, resolved, "path is not writable")
 
     parent = _nearest_existing_parent(resolved)
     if parent is None:
-        return {
-            "name": name,
-            "status": "fail",
-            "path": str(resolved),
-            "detail": "no existing parent directory",
-        }
+        return _storage_failure(name, resolved, "no existing parent directory")
     if os.access(parent, os.W_OK):
         return {
             "name": name,
             "status": "ok",
-            "path": str(resolved),
             "detail": "path will be created on first write",
         }
-    return {
-        "name": name,
-        "status": "fail",
-        "path": str(resolved),
-        "detail": f"parent directory not writable: {parent}",
-    }
+    return _storage_failure(
+        name,
+        resolved,
+        "parent directory not writable",
+        blocking_parent=parent,
+    )
+
+
+def _storage_failure(
+    name: str,
+    path: Path,
+    detail: str,
+    *,
+    blocking_parent: Path | None = None,
+) -> dict[str, str]:
+    if blocking_parent is None:
+        _logger.warning("Readiness check %s failed for %s: %s.", name, path, detail)
+    else:
+        _logger.warning(
+            "Readiness check %s failed for %s: %s (%s).",
+            name,
+            path,
+            detail,
+            blocking_parent,
+        )
+    return {"name": name, "status": "fail", "detail": detail}
 
 
 def _note_storage_check(path: Path) -> dict[str, str]:
@@ -125,12 +138,36 @@ def _store_counts_from_database(
             counts["visualizations"] = _count_rows(session, VisualizationModel)
             counts["graph_change_sets"] = _count_rows(session, GraphChangeSetModel)
     except SQLAlchemyError as exc:
-        return _empty_store_counts(), f"{exc.__class__.__name__}: {exc}"
+        return _empty_store_counts(), _database_failure_detail("metrics", exc)
     return counts, None
 
 
+def _database_failure_detail(probe: str, exc: SQLAlchemyError) -> str:
+    """Log the raw driver error server-side and return a redacted public detail.
+
+    Driver messages can carry SQL text, bound parameters, hostnames, and
+    database user names, so only the exception class leaves the process.
+    """
+    _logger.warning("Database %s probe failed: %s: %s", probe, exc.__class__.__name__, exc)
+    return f"database unavailable ({exc.__class__.__name__})"
+
+
+def _database_connectivity_error(session_factory: sessionmaker[Session]) -> str | None:
+    """Cheap readiness probe: one read of the single-row Alembic version table.
+
+    Unlike a bare ``SELECT 1`` this also fails when the connected database has
+    no Lab Tracker schema, without scanning any domain table.
+    """
+    try:
+        with session_factory() as session:
+            session.execute(text("SELECT version_num FROM alembic_version")).first()
+    except SQLAlchemyError as exc:
+        return _database_failure_detail("readiness", exc)
+    return None
+
+
 def _database_check(session_factory: sessionmaker[Session]) -> dict[str, str]:
-    _, database_error = _store_counts_from_database(session_factory)
+    database_error = _database_connectivity_error(session_factory)
     if database_error is None:
         return {"name": "database", "status": "ok"}
     return {
@@ -161,6 +198,14 @@ def _metrics_snapshot(
     if errors:
         payload["errors"] = errors
     return payload
+
+
+def _require_admin(request: Request) -> None:
+    actor = getattr(request.state, "auth_context", None)
+    if actor is None:
+        raise AuthError("Authentication required.")
+    if actor.role != Role.ADMIN:
+        raise PermissionDeniedError("Only admins can read instance metrics.")
 
 
 def register_observability_routes(
@@ -204,7 +249,12 @@ def register_observability_routes(
         return JSONResponse(status_code=503, content=payload)
 
     @app.get("/metrics")
-    def metrics():
+    def metrics(request: Request):
+        # Readiness stays open to any authenticated principal (hosted MCP
+        # startup and ``lt readiness`` probe it with non-admin credentials);
+        # metrics carries instance-wide entity counts across every project,
+        # so only admins may read it.
+        _require_admin(request)
         payload = _metrics_snapshot(
             session_factory,
             environment=environment,

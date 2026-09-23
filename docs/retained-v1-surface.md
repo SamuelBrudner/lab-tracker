@@ -19,6 +19,12 @@ research record:
   while group viewers and contributors inherit no child-project access unless
   the explicit `group_read_all` flag is enabled for that group; when enabled,
   that inherited access is read-only.
+- Dated supervision edges, projected as `actedOnBehalfOf` in provenance
+  exports. Only a global admin may create, retarget, end, or delete an edge;
+  being the supervisor or supervisee is not authority, and neither is owning a
+  project group (any editor can create a group and add users to it without
+  their consent). Admins list and read every edge; other editors see only the
+  edges that name them, and any other edge is an opaque `404`.
 - Questions created, staged, activated, maintained explicitly by users, and
   connected with `parent_question_ids` to form broad-to-atomic hierarchies.
 - Simple query/search flows over questions and notes using the built-in
@@ -94,7 +100,10 @@ research record:
   project-default endpoint. Manual and scheduled batches carry
   `review_assignee` attribution, and the personal queue, waiting, and
   owner-commit projections remain distinct. Legacy drafts with no assignee are
-  recoverable only through an explicit owner oversight projection.
+  recoverable only through an explicit owner oversight projection. `GET
+  /batches` pages these projections in the database and returns summaries
+  (`operation_count`, `meeting_note_count`) without operations or the context
+  packet; `GET /batches/{change_set_id}` returns the full draft.
 - Opt-in, per-user review-ready email cues backed by a transactional delivery
   outbox, retry leases, and signed short-lived links. Email contains no project
   or research content, and links still require normal authentication and
@@ -116,7 +125,19 @@ research record:
   and MCP setup commands, and token listing/revocation. Service principals
   stay blocked from `/auth/*`, and device principals from everything under
   `/auth/*` except read-only `/auth/me` session introspection; see
-  [agent-setup.md](agent-setup.md).
+  [agent-setup.md](agent-setup.md). Token reads report the issued `role` and
+  the `effective_role` the token acts with now: the lower of that role and the
+  owner's current role.
+- Session sign-out and admin credential management: `POST /auth/sessions/revoke`
+  ends every session of the caller (sign out everywhere). An admin at an
+  interactive session lists and revokes another user's personal access tokens
+  with `GET /auth/users/{user_id}/tokens` and
+  `DELETE /auth/users/{user_id}/tokens/{token_id}`, and their paired devices
+  with `GET /auth/users/{user_id}/devices` and
+  `DELETE /auth/users/{user_id}/devices/{device_token_id}`. Changing a user's
+  role or password through `PATCH /auth/users/{user_id}` ends that user's
+  sessions and narrows their tokens and devices to the new role, but does not
+  revoke the tokens or devices; use these routes to cut them off.
 - Project graph views and exports for inspecting the retained question,
   evidence, goal, analysis, claim, dataset, session, and visualization graph.
   Agent-oriented reads add a bounded project overview, deterministic
@@ -187,8 +208,8 @@ research record:
   platform-path-separated
   `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS` once into one filesystem-I/O-free lexical
   authority, bounded local-filesystem broker, and bounded process executor.
-  Registered local-store health, registered local reads, and every recovery
-  candidate read receive those exact shared objects. The helper anchors the
+  Registered local reads and every recovery candidate read receive those exact
+  shared objects. The helper anchors the
   trusted grant, resolves aliases component-by-component from no-follow retained
   descriptors/handles, and rejects an escape before target traversal. A
   registered read adds the retained store root as a nested boundary before its
@@ -209,13 +230,24 @@ research record:
   read-only). Recovery enumeration is a single pre-follow-safe helper traversal
   under the same absolute deadline. It returns only bounded path-free relative
   locators after cleanup and fails terminally on malformed, partial, ambiguous,
-  timed-out, or cleanup-uncertain results.
+  timed-out, or cleanup-uncertain results. Static conditions beneath the
+  retained root/store boundary do not abort the scan: a dangling alias is
+  skipped like an escaping one, and a subdirectory or alias target the host
+  refuses to open (`EACCES`/`EPERM`, Windows access denied) is skipped and
+  marks the traversal limited, so a miss is never reported as exhaustive. An
+  unreadable boundary, an escape the Windows helper cannot prove safe, or an
+  object replaced or removed after it was listed still fails closed.
 
   The root authority grants the subtree visible in the operator-controlled
   service namespace rather than one device identity, and the application
-  runtime denies all local roots when it is unset or empty. Local health remains
-  an isolated, output-free, point-in-time advisory operation rather than
-  registration validation or a durable filesystem lease. POSIX ordinary/bind
+  runtime denies all local roots when it is unset or empty. Registered
+  local-store health is not supported in this build: `GET
+  /data-stores/{id}/health` answers every `local_fs` store with status
+  `unsupported` and the static detail `Local store health is not supported in
+  this build.` before any authority snapshot, cache, or host I/O, and the
+  runtime composes no local health probe. It stays deferred until the local-use
+  slice retains the store's revalidated grant boundary inside the filesystem
+  helper; it is never registration validation or a durable filesystem lease. POSIX ordinary/bind
   mounts beneath a root are allowed; unsupported Windows nested
   volume/UNC/device/GUID namespaces fail closed; eligible Cloud directories
   remain traversable; untrusted topology mutation makes the local surface
@@ -227,7 +259,7 @@ research record:
   a fetch size cap, and a bounded cache — never by cloning or polling. Rclone
   resolution and store health are likewise gated by one immutable exact
   remote-name policy (`LAB_TRACKER_RCLONE_ALLOWED_REMOTES`, deny-by-default).
-  Local, rclone, and Git health commands reuse resolution's bounded
+  Rclone and Git health commands reuse resolution's bounded
   cross-platform process executor and expose only static adapter-specific
   failures. See
   [external-artifact-resolution-design.md](external-artifact-resolution-design.md).

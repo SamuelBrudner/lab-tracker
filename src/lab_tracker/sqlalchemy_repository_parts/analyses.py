@@ -6,7 +6,7 @@ from collections import defaultdict
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import or_, select
+from sqlalchemy import ColumnElement, or_, select, update
 from sqlalchemy.orm import Session as OrmSession
 
 from lab_tracker.db_models import (
@@ -46,6 +46,53 @@ from lab_tracker.sqlalchemy_mappers import (
 )
 
 from .common import apply_pagination, count_from_statement, replace_child_rows, uuid_values
+
+
+def fence_sqlite_visualization_writes(
+    session: OrmSession,
+    criterion: ColumnElement[bool],
+) -> None:
+    """On SQLite, take the database write lock before a locked visualization read.
+
+    SQLite ignores ``FOR UPDATE``, and legacy pysqlite transaction control
+    (see ``lab_tracker.db.configure_sqlite_connection``) runs a SELECT outside
+    any write transaction, so a "locked" read could go stale before its
+    UPDATE. A true no-op UPDATE of the matching rows makes pysqlite begin the write
+    transaction and reserve SQLite's single writer slot first (even when no
+    row matches), so the following read observes the newest commit and no
+    other writer can commit until this transaction ends. Loaded ORM state is
+    expired so later reads in the transaction observe that commit too. This
+    is the same write fence ``lock_project_references`` takes on SQLite. On
+    other dialects this does nothing; callers rely on ``FOR UPDATE``.
+
+    The fence is database-wide and held until the transaction ends. The
+    visualization upload command takes it before it streams, stores and
+    validates the blob, so on SQLite every other writer waits (up to the
+    connection's ``busy_timeout``) for the whole upload and may fail with
+    "database is locked" during a large one. That is accepted: SQLite is the
+    single-process local backend, where one writer at a time is the model;
+    PostgreSQL deployments lock only the visualization row.
+    """
+
+    if session.get_bind().dialect.name != "sqlite":
+        return
+    session.flush()
+    # Assign every column that has an ``onupdate`` default to itself too;
+    # otherwise SQLAlchemy would add ``updated_at = now()`` and the fence
+    # would change data on every locked read.
+    table = VisualizationModel.__table__
+    self_assignments = {
+        column: column
+        for column in table.columns
+        if column.primary_key or column.onupdate is not None
+    }
+    session.execute(
+        update(VisualizationModel)
+        .where(criterion)
+        .values(self_assignments)
+        .execution_options(synchronize_session=False)
+    )
+    session.expire_all()
 
 
 class SQLAlchemyAnalysisRepository(EntityRepository[Analysis]):
@@ -489,6 +536,31 @@ class SQLAlchemyVisualizationRepository(EntityRepository[Visualization]):
     def get(self, entity_id: UUID) -> Visualization | None:
         self._session.flush()
         row = self._session.get(VisualizationModel, str(entity_id))
+        if row is None:
+            return None
+        return self.visualizations_from_rows([row])[0]
+
+    def get_for_update(self, entity_id: UUID) -> Visualization | None:
+        """Take the row lock the file upload/delete commands hold, then re-read.
+
+        PostgreSQL waits here for a concurrent asset mutation to commit, and
+        ``populate_existing`` replaces any stale identity-map state, so a
+        metadata write never saves asset columns from an older snapshot.
+        SQLite ignores ``FOR UPDATE``, so there the database write fence is
+        taken before the read (:func:`fence_sqlite_visualization_writes`).
+        """
+
+        self._session.flush()
+        fence_sqlite_visualization_writes(
+            self._session,
+            VisualizationModel.viz_id == str(entity_id),
+        )
+        row = self._session.scalars(
+            select(VisualizationModel)
+            .where(VisualizationModel.viz_id == str(entity_id))
+            .with_for_update(of=VisualizationModel)
+            .execution_options(populate_existing=True)
+        ).first()
         if row is None:
             return None
         return self.visualizations_from_rows([row])[0]

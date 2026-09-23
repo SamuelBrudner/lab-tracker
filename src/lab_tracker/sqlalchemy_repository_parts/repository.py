@@ -57,6 +57,7 @@ from lab_tracker.models import (
     UsageEvent,
     Visualization,
 )
+from lab_tracker.reference_registry import BlockingReference, DeletableEntity
 from lab_tracker.sqlalchemy_mappers import session_from_model
 
 from .analyses import (
@@ -93,6 +94,7 @@ from .ownership import (
     SQLAlchemyRecordExportEventRepository,
 )
 from .provenance_links import SQLAlchemyProvenanceLinkRepository
+from .references import find_blocking_references, remove_unaccepted_provenance_links
 from .sessions import SQLAlchemyAcquisitionOutputRepository, SQLAlchemySessionRepository
 from .supervision import SQLAlchemySupervisionEdgeRepository
 from .usage import (
@@ -281,6 +283,56 @@ class SQLAlchemyLabTrackerRepository:
             {"lock_key": _project_question_dag_lock_key(project_id)},
         )
         self._session.expire_all()
+
+    def lock_project_references(self, project_id: UUID) -> None:
+        """Serialize reference guards and reference-adding writes for one project.
+
+        Delete guards (``lab_tracker.reference_registry``) and the writers that
+        the registry lists as lock-takers (claims, analyses, claim edges,
+        exploration nodes) read and write under this lock, so such a
+        concurrent create can neither slip a new referrer past a delete's
+        guard nor commit a claim-edge cycle.
+
+        This *is* the project question-DAG lock (PostgreSQL advisory key): one
+        project graph lock keeps question-DAG edits, graph commits and
+        reference guards free of lock-order inversions between two
+        project-level keys. Take it before Session, Experiment and
+        Dataset/file locks. SQLite, where the DAG lock is a no-op, first takes
+        its coarse database write fence, so later guard reads observe the
+        newest commit and no other writer can commit until this one ends.
+        """
+
+        self._session.flush()
+        is_sqlite = self._session.get_bind().dialect.name == "sqlite"
+        if is_sqlite:
+            self._session.execute(
+                text("UPDATE projects SET project_id = project_id WHERE project_id = :project_id"),
+                {"project_id": str(project_id)},
+            )
+        self.lock_project_question_dag(project_id)
+        if is_sqlite:
+            self._session.expire_all()
+
+    def find_blocking_references(
+        self,
+        entity: DeletableEntity,
+        entity_id: UUID,
+        *,
+        project_id: UUID,
+    ) -> list[BlockingReference]:
+        return find_blocking_references(
+            self._session,
+            entity,
+            entity_id,
+            project_id=project_id,
+        )
+
+    def remove_unaccepted_provenance_links(
+        self,
+        entity: DeletableEntity,
+        entity_ids: Iterable[UUID],
+    ) -> None:
+        remove_unaccepted_provenance_links(self._session, entity, entity_ids)
 
     def lock_graph_draft_batch_reviewer(
         self,
@@ -542,11 +594,15 @@ class SQLAlchemyLabTrackerRepository:
             user_id=user_id,
         )
 
+    def lock_group_owner_memberships(self, group_id: UUID) -> None:
+        self.group_memberships.lock_group_owners(group_id)
+
     def query_supervision_edges(
         self,
         *,
         supervisor_user_id: UUID | None = None,
         supervisee_user_id: UUID | None = None,
+        supervisee_user_ids: set[UUID] | None = None,
         active_only: bool = False,
         as_of: datetime | None = None,
         limit: int | None = None,
@@ -555,6 +611,7 @@ class SQLAlchemyLabTrackerRepository:
         return self.supervision_edges.query(
             supervisor_user_id=supervisor_user_id,
             supervisee_user_id=supervisee_user_id,
+            supervisee_user_ids=supervisee_user_ids,
             active_only=active_only,
             as_of=as_of,
             limit=limit,
@@ -635,6 +692,27 @@ class SQLAlchemyLabTrackerRepository:
             occurred_on_or_after=occurred_on_or_after,
             limit=limit,
             offset=offset,
+        )
+
+    def page_usage_events(
+        self,
+        *,
+        project_id: UUID | None = None,
+        verb: str | None = None,
+        resource_type: str | None = None,
+        surface: str | None = None,
+        outcome: str | None = None,
+        after: tuple[datetime, UUID] | None = None,
+        limit: int,
+    ) -> list[UsageEvent]:
+        return self.usage_events.query_page(
+            project_id=project_id,
+            verb=verb,
+            resource_type=resource_type,
+            surface=surface,
+            outcome=outcome,
+            after=after,
+            limit=limit,
         )
 
     def usage_event_summary(
@@ -1091,6 +1169,7 @@ class SQLAlchemyLabTrackerRepository:
         since: datetime | None = None,
         until: datetime | None = None,
         client_capture_id: str | None = None,
+        capture_bundle_id: str | None = None,
         target_entity_type: str | None = None,
         target_entity_id: UUID | None = None,
         limit: int | None = None,
@@ -1107,6 +1186,7 @@ class SQLAlchemyLabTrackerRepository:
             since=since,
             until=until,
             client_capture_id=client_capture_id,
+            capture_bundle_id=capture_bundle_id,
             target_entity_type=target_entity_type,
             target_entity_id=target_entity_id,
             limit=limit,
@@ -1422,6 +1502,9 @@ class SQLAlchemyLabTrackerRepository:
         draft_mode: str | None = None,
         purpose: str | None = None,
         batch_key: str | None = None,
+        statuses: set[str] | None = None,
+        assigned_to_user_id: UUID | None = None,
+        unassigned_only: bool = False,
         limit: int | None = None,
         offset: int = 0,
         include_operations: bool = True,
@@ -1434,6 +1517,9 @@ class SQLAlchemyLabTrackerRepository:
             draft_mode=draft_mode,
             purpose=purpose,
             batch_key=batch_key,
+            statuses=statuses,
+            assigned_to_user_id=assigned_to_user_id,
+            unassigned_only=unassigned_only,
             limit=limit,
             offset=offset,
             include_operations=include_operations,
@@ -1546,13 +1632,17 @@ class SQLAlchemyLabTrackerRepository:
         self,
         *,
         project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
         status: str | None = None,
+        assigned_to_user_id: UUID | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> tuple[list[GraphDraftBatchRun], int]:
         return self.graph_draft_batch_runs.query(
             project_id=project_id,
+            project_ids=project_ids,
             status=status,
+            assigned_to_user_id=assigned_to_user_id,
             limit=limit,
             offset=offset,
         )

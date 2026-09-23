@@ -144,6 +144,7 @@ class AcquisitionCollectionService(BaseService):
                     ),
                     snapshot_reused=True,
                     current_pointer_changed=False,
+                    capture_replayed=True,
                 )
 
             snapshot = store.get_snapshot_by_hash(

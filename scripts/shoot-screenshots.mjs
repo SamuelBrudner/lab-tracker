@@ -1,8 +1,8 @@
 // Regenerate the committed screenshots used in the README.
 //
 // These are dark-mode, retina (deviceScaleFactor 2) captures shot against the
-// offline demo dataset (`?demo=1`, no DB or login needed) so they are fully
-// reproducible.
+// offline demo dataset (the static demo flag set by an init script; no DB or
+// login needed) so they are fully reproducible.
 //
 // Usage:
 //   node scripts/shoot-screenshots.mjs                 # spawns its own server
@@ -123,11 +123,15 @@ async function shoot() {
       deviceScaleFactor: DEVICE_SCALE_FACTOR,
       viewport: VIEWPORT,
     });
+    // Demo mode is only switchable by the build's explicit flag, never a URL.
+    await context.addInitScript(() => {
+      window.__LAB_TRACKER_STATIC_DEMO__ = true;
+    });
     const page = await context.newPage();
     for (const view of views) {
       if (GRAPH_VIEWS.has(view)) {
         await page.setViewportSize(VIEWPORT);
-        const url = `${baseUrl}/app/graph?demo=1&view=${view}`;
+        const url = `${baseUrl}/app/graph?view=${view}`;
         await page.goto(url, { waitUntil: "networkidle" });
         await page.waitForSelector(NODE_SELECTOR, { timeout: 15000 });
         await page.evaluate(() => document.fonts.ready);
@@ -139,7 +143,7 @@ async function shoot() {
         continue;
       }
 
-      const url = `${baseUrl}/app/batches/${NARRATIVE_DRAFT_ID}?demo=1`;
+      const url = `${baseUrl}/app/batches/${NARRATIVE_DRAFT_ID}`;
       await page.setViewportSize({ width: 1200, height: 1800 });
       await page.goto(url, { waitUntil: "networkidle" });
       await page.addStyleTag({

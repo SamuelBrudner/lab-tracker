@@ -4,22 +4,28 @@ from __future__ import annotations
 
 import csv
 import json
+from collections.abc import Iterable, Iterator
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from io import StringIO
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
-from fastapi import APIRouter
+from fastapi import APIRouter, FastAPI
 from fastapi.encoders import jsonable_encoder
 from starlette.requests import Request
-from starlette.responses import Response
+from starlette.responses import StreamingResponse
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.auth import Role
-from lab_tracker.errors import AuthError
+from lab_tracker.errors import PermissionDeniedError
+from lab_tracker.models import UsageEvent
 from lab_tracker.schemas import Envelope, ListEnvelope
 
 from .shared import actor_from_request, api_from_request, list_response, validate_pagination
+
+# Rows read per database round trip while streaming /usage-events/export.
+_USAGE_EXPORT_PAGE_SIZE = 1000
 
 _USAGE_EXPORT_FIELDS = [
     "event_id",
@@ -87,28 +93,31 @@ def build_usage_events_router(api: LabTrackerAPI) -> APIRouter:
         outcome: str | None = None,
     ):
         _ensure_admin(request)
-        events, _ = api_from_request(request, api).query_usage_events(
+        filters = _UsageExportFilters(
             project_id=project_id,
             verb=verb,
             resource_type=resource_type,
             surface=surface,
             outcome=outcome,
-            limit=None,
-            offset=0,
         )
-        encoded = [jsonable_encoder(event) for event in events]
+        # The first page is read in the request scope so query failures still
+        # become ordinary error responses before any bytes are streamed.
+        first_page = api_from_request(request, api).page_usage_events(
+            **filters.as_kwargs(),
+            after=None,
+            limit=_USAGE_EXPORT_PAGE_SIZE,
+        )
+        pages = _usage_event_export_pages(request.app, filters, first_page)
         if format == "csv":
-            body = _usage_events_csv(encoded)
+            body = _usage_events_csv_chunks(pages)
             media_type = "text/csv"
             filename = "usage-events.csv"
         else:
-            body = "\n".join(json.dumps(row, separators=(",", ":")) for row in encoded)
-            if body:
-                body += "\n"
+            body = _usage_events_jsonl_chunks(pages)
             media_type = "application/x-ndjson"
             filename = "usage-events.jsonl"
-        return Response(
-            content=body,
+        return StreamingResponse(
+            body,
             media_type=media_type,
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
@@ -123,16 +132,76 @@ def build_usage_events_router(api: LabTrackerAPI) -> APIRouter:
     return router
 
 
-def _usage_events_csv(rows: list[dict[str, object]]) -> str:
+@dataclass(frozen=True)
+class _UsageExportFilters:
+    project_id: UUID | None
+    verb: str | None
+    resource_type: str | None
+    surface: str | None
+    outcome: str | None
+
+    def as_kwargs(self) -> dict[str, Any]:
+        return {
+            "project_id": self.project_id,
+            "verb": self.verb,
+            "resource_type": self.resource_type,
+            "surface": self.surface,
+            "outcome": self.outcome,
+        }
+
+
+def _usage_event_export_pages(
+    app: FastAPI,
+    filters: _UsageExportFilters,
+    first_page: list[UsageEvent],
+) -> Iterator[list[dict[str, object]]]:
+    """Yield encoded export pages, reading each later page in its own short session.
+
+    Memory stays bounded by ``_USAGE_EXPORT_PAGE_SIZE`` rows and no database
+    connection is held while the client drains a page.
+    """
+
+    page = first_page
+    while page:
+        yield [jsonable_encoder(event) for event in page]
+        if len(page) < _USAGE_EXPORT_PAGE_SIZE:
+            return
+        last = page[-1]
+        with app.state.db_session_factory() as session:
+            page_api = app.state.session_api_factory(session, surface="http")
+            page = page_api.page_usage_events(
+                **filters.as_kwargs(),
+                after=(last.occurred_at, last.event_id),
+                limit=_USAGE_EXPORT_PAGE_SIZE,
+            )
+
+
+def _usage_events_jsonl_chunks(
+    pages: Iterable[list[dict[str, object]]],
+) -> Iterator[str]:
+    for rows in pages:
+        yield "".join(json.dumps(row, separators=(",", ":")) + "\n" for row in rows)
+
+
+def _usage_events_csv_chunks(
+    pages: Iterable[list[dict[str, object]]],
+) -> Iterator[str]:
     buffer = StringIO()
     writer = csv.DictWriter(buffer, fieldnames=_USAGE_EXPORT_FIELDS, extrasaction="ignore")
     writer.writeheader()
-    for row in rows:
-        writer.writerow(row)
-    return buffer.getvalue()
+    for rows in pages:
+        for row in rows:
+            writer.writerow(row)
+        yield buffer.getvalue()
+        buffer.seek(0)
+        buffer.truncate(0)
+    unsent = buffer.getvalue()
+    if unsent:
+        # No rows matched: the export is just the header line.
+        yield unsent
 
 
 def _ensure_admin(request: Request) -> None:
     actor = actor_from_request(request)
     if actor.role != Role.ADMIN:
-        raise AuthError("Admin privileges required.")
+        raise PermissionDeniedError("Admin privileges required.")

@@ -26,6 +26,11 @@ mcp.lab.internal {
         }
     }
 
+    # The @badhost/@badorigin checks above are the public Host/Origin policy;
+    # Caddy forwards the client's Host and Origin unchanged. lt-mcp checks
+    # Host/Origin itself only when given an allowlist; to add that second
+    # check, set on the lt-mcp process LAB_TRACKER_MCP_ALLOWED_HOSTS=mcp.lab.internal
+    # and LAB_TRACKER_MCP_ALLOWED_ORIGINS to the same origins allowed above.
     reverse_proxy 127.0.0.1:9000 {
         header_up X-Forwarded-Proto {scheme}
     }

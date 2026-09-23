@@ -7,12 +7,13 @@ from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext
 from lab_tracker.errors import NotFoundError, OpaqueTargetNotFoundError, ValidationError
-from lab_tracker.models import EntityOrigin, EntityType, Visualization, utc_now
+from lab_tracker.models import EntityOrigin, Visualization, utc_now
 from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
+from lab_tracker.reference_registry import DeletableEntity
 from lab_tracker.services.analysis_service import AnalysisService
 from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.claim_service import ClaimService
-from lab_tracker.services.goal_link_cleanup import remove_goal_links_to_entity
+from lab_tracker.services.deletion_references import prepare_entity_deletion
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.shared import (
     actor_user_fk,
@@ -139,47 +140,55 @@ class VisualizationService(BaseService):
         origin_model: str | None = None,
         origin_prompt_version: str | None = None,
     ) -> Visualization:
-        visualization = self.get_visualization(viz_id)
-        analysis = self.analyses.get_analysis(visualization.analysis_id)
-        self.authorization.require_contributor(analysis.project_id, actor=actor)
-        before = visualization.model_copy(deep=True)
-        if is_provided(viz_type):
-            if viz_type is None:
-                raise ValidationError("viz_type must not be null.")
-            ensure_non_empty(viz_type, "viz_type")
-            visualization.viz_type = viz_type.strip()
-        if is_provided(file_path):
-            if file_path is None:
-                raise ValidationError("file_path must not be null.")
-            ensure_non_empty(file_path, "file_path")
-            visualization.file_path = file_path.strip()
-        if is_provided(caption):
-            visualization.caption = caption.strip() if caption else None
-        if is_provided(related_claim_ids):
-            if related_claim_ids is None:
-                raise ValidationError("related_claim_ids must not be null.")
-            claim_ids = unique_ids(related_claim_ids)
-            for claim_id in claim_ids:
-                claim = self.claims.get_claim(claim_id)
-                if claim.project_id != analysis.project_id:
-                    raise ValidationError("Related claims must belong to the same project.")
-            visualization.related_claim_ids = claim_ids
-        if origin is not None:
-            visualization.origin = origin
-        if change_set_id is not None:
-            visualization.change_set_id = change_set_id
-        if origin_provider is not None:
-            visualization.origin_provider = origin_provider
-        if origin_model is not None:
-            visualization.origin_model = origin_model
-        if origin_prompt_version is not None:
-            visualization.origin_prompt_version = origin_prompt_version
-        if visualization == before:
-            return visualization
-        visualization.updated_at = utc_now()
-        with self.unit_of_work() as repository:
+        located_visualization = self.get_visualization(viz_id)
+        located_analysis = self.analyses.get_analysis(located_visualization.analysis_id)
+        self.authorization.require_contributor(located_analysis.project_id, actor=actor)
+        with self.application_transaction(), self.unit_of_work() as repository:
+            # Lock the row as the file upload/delete commands do and patch the
+            # fresh state, so saving metadata cannot write back asset columns
+            # from a snapshot taken before a concurrent upload committed.
+            visualization = repository.visualizations.get_for_update(viz_id)
+            if visualization is None:
+                raise NotFoundError("Visualization does not exist.")
+            analysis = self.analyses.get_analysis(visualization.analysis_id)
+            self.authorization.require_contributor(analysis.project_id, actor=actor)
+            before = visualization.model_copy(deep=True)
+            if is_provided(viz_type):
+                if viz_type is None:
+                    raise ValidationError("viz_type must not be null.")
+                ensure_non_empty(viz_type, "viz_type")
+                visualization.viz_type = viz_type.strip()
+            if is_provided(file_path):
+                if file_path is None:
+                    raise ValidationError("file_path must not be null.")
+                ensure_non_empty(file_path, "file_path")
+                visualization.file_path = file_path.strip()
+            if is_provided(caption):
+                visualization.caption = caption.strip() if caption else None
+            if is_provided(related_claim_ids):
+                if related_claim_ids is None:
+                    raise ValidationError("related_claim_ids must not be null.")
+                claim_ids = unique_ids(related_claim_ids)
+                for claim_id in claim_ids:
+                    claim = self.claims.get_claim(claim_id)
+                    if claim.project_id != analysis.project_id:
+                        raise ValidationError("Related claims must belong to the same project.")
+                visualization.related_claim_ids = claim_ids
+            if origin is not None:
+                visualization.origin = origin
+            if change_set_id is not None:
+                visualization.change_set_id = change_set_id
+            if origin_provider is not None:
+                visualization.origin_provider = origin_provider
+            if origin_model is not None:
+                visualization.origin_model = origin_model
+            if origin_prompt_version is not None:
+                visualization.origin_prompt_version = origin_prompt_version
+            if visualization == before:
+                return visualization
+            visualization.updated_at = utc_now()
             repository.visualizations.save(visualization)
-        return visualization
+            return visualization
 
     def delete_visualization(
         self,
@@ -187,14 +196,19 @@ class VisualizationService(BaseService):
         *,
         actor: AuthContext | None = None,
     ) -> Visualization:
-        visualization = self.get_visualization(viz_id)
-        analysis = self.analyses.get_analysis(visualization.analysis_id)
-        self.authorization.require_contributor(analysis.project_id, actor=actor)
-        with self.unit_of_work() as repository:
-            remove_goal_links_to_entity(
+        located_visualization = self.get_visualization(viz_id)
+        located_analysis = self.analyses.get_analysis(located_visualization.analysis_id)
+        self.authorization.require_contributor(located_analysis.project_id, actor=actor)
+        with self.application_transaction(), self.unit_of_work() as repository:
+            repository.lock_project_references(located_analysis.project_id)
+            visualization = self.get_visualization(viz_id)
+            analysis = self.analyses.get_analysis(visualization.analysis_id)
+            self.authorization.require_contributor(analysis.project_id, actor=actor)
+            prepare_entity_deletion(
                 repository,
-                entity_type=EntityType.VISUALIZATION,
-                entity_id=viz_id,
+                DeletableEntity.VISUALIZATION,
+                viz_id,
+                project_id=analysis.project_id,
             )
             repository.visualizations.delete(viz_id)
         return visualization

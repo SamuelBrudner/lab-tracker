@@ -26,6 +26,8 @@ services:
       - "127.0.0.1:${DEDICATED_HOST_PORT:?Set DEDICATED_HOST_PORT}:8000"
     volumes:
       - app_data:/app/data
+    # Reap orphaned grandchildren of bounded subprocesses (uvicorn does not).
+    init: true
     restart: unless-stopped
     healthcheck:
       test:

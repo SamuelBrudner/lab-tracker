@@ -51,13 +51,19 @@ else:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
+class ProcessLockUnavailableError(RuntimeError):
+    """Raised when the context manager cannot take a lock another holder owns."""
+
+
 class ProcessLock:
     """A non-blocking, cross-process exclusive lock on a sidecar file.
 
     ``acquire()`` returns ``True`` when the lock was taken and ``False`` when it
     is already held by another open file description (typically a different
-    process). Acquisition never blocks. The lock is released by ``release()``,
-    by leaving the context manager, or by the process exiting.
+    process). Acquisition never blocks. Entering the context manager raises
+    ``ProcessLockUnavailableError`` instead of running the body unlocked. The
+    lock is released by ``release()``, by leaving the context manager, or by
+    the process exiting.
     """
 
     def __init__(self, path: str | Path) -> None:
@@ -94,7 +100,10 @@ class ProcessLock:
             handle.close()
 
     def __enter__(self) -> ProcessLock:
-        self.acquire()
+        if not self.acquire():
+            raise ProcessLockUnavailableError(
+                f"Could not acquire the process lock at {self._path}; it is held elsewhere."
+            )
         return self
 
     def __exit__(

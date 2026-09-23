@@ -19,7 +19,28 @@ from lab_tracker.db import Base, get_engine
 
 DEFAULT_MIRROR_PATH = ".lab-tracker-dolt"
 DEFAULT_EXPORT_DIR = "_export"
-EXCLUDED_TABLES = frozenset({"users"})
+# The mirror is meant to be versioned and shared, so it carries research
+# records only: no accounts, credential/token hashes, enrollment offers,
+# invitation or notification e-mail addresses, or usage telemetry. Whole
+# tables are dropped via EXCLUDED_TABLES; personal columns of otherwise
+# retained tables via EXCLUDED_COLUMNS.
+EXCLUDED_TABLES = frozenset(
+    {
+        "users",
+        "invitations",
+        "personal_access_tokens",
+        "device_tokens",
+        "device_enrollments",
+        "usage_events",
+        "usage_event_rollups",
+        "review_email_outbox",
+    }
+)
+EXCLUDED_COLUMNS: dict[str, frozenset[str]] = {
+    "graph_draft_batch_settings": frozenset(
+        {"notification_email", "notification_email_confirmed_at"}
+    ),
+}
 NULL_SENTINEL = "__LAB_TRACKER_NULL__"
 
 
@@ -77,6 +98,13 @@ def retained_tables() -> list[Table]:
     return sorted(tables, key=lambda table: table.name)
 
 
+def exported_column_names(table: Table) -> list[str]:
+    """Column names of ``table`` that the mirror carries (personal columns dropped)."""
+
+    excluded = EXCLUDED_COLUMNS.get(table.name, frozenset())
+    return [column.name for column in table.columns if column.name not in excluded]
+
+
 def export_tables(export_dir: Path) -> tuple[TableExport, ...]:
     export_dir.mkdir(parents=True, exist_ok=True)
     engine = get_engine()
@@ -90,7 +118,8 @@ def export_tables(export_dir: Path) -> tuple[TableExport, ...]:
                     primary_keys = tuple(column.name for column in table.primary_key.columns)
                     csv_path = export_dir / f"{table.name}.csv"
                     order_by = [table.c[name] for name in primary_keys]
-                    rows = connection.execute(select(table).order_by(*order_by)).mappings()
+                    columns = [table.c[name] for name in exported_column_names(table)]
+                    rows = connection.execute(select(*columns).order_by(*order_by)).mappings()
                     row_count = _write_csv(table, rows, csv_path)
                     exports.append(
                         TableExport(
@@ -147,7 +176,7 @@ def export_to_dolt(
 
 
 def _write_csv(table: Table, rows: Any, csv_path: Path) -> int:
-    fieldnames = [column.name for column in table.columns]
+    fieldnames = exported_column_names(table)
     count = 0
     with csv_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)

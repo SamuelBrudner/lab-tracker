@@ -75,6 +75,8 @@ fi
 # interactive shell used to run this installer, so the generated command points
 # at the same structurally-read 0600 JSON format as the launchd adapter. Secret
 # values never appear in the crontab and are never sourced or shell-evaluated.
+# A re-run with no credential exported keeps an existing non-empty secrets
+# file (write-secrets says so on stderr) instead of wiping it.
 umask 077
 mkdir -p "$SECRETS_DIR"
 LAB_TRACKER_API_KEY="${LAB_TRACKER_API_KEY:-}" \
@@ -82,7 +84,9 @@ LAB_TRACKER_ADMIN_USER="${LAB_TRACKER_ADMIN_USER:-}" \
 LAB_TRACKER_ADMIN_PASS="${LAB_TRACKER_ADMIN_PASS:-}" \
     "$PYTHON" "$SCHED" write-secrets "$SECRETS_FILE"
 
-printf '%s' "$MERGED" | crontab -
+# Command substitution stripped merge-crontab's trailing newline; restore it.
+# Debian/Ubuntu cron refuses a crontab without a newline before EOF.
+printf '%s\n' "$MERGED" | crontab -
 
 echo "Installed cron entry (every $INTERVAL min -> $BASE_URL/batches/run-due):"
 echo "  $LINE"

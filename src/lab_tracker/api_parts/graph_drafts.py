@@ -22,7 +22,6 @@ from lab_tracker.models import (
     GraphChangeSet,
     GraphChangeSetStatus,
     GraphDraftBatchRun,
-    GraphDraftBatchRunStatus,
     GraphDraftBatchSettings,
     GraphDraftBatchTrigger,
     GraphDraftMode,
@@ -32,6 +31,7 @@ from lab_tracker.models import (
     UsageEventVerb,
 )
 from lab_tracker.patching import NOT_PROVIDED, PatchValue
+from lab_tracker.services.graph_draft_batch_policy import BatchReviewQuery, BatchRunQuery
 from lab_tracker.services.graph_draft_generation import DEFAULT_BATCH_RETRY_ATTEMPTS
 from lab_tracker.services.graph_draft_review import RevisionInputs
 from lab_tracker.services.graph_draft_service import GraphDraftService
@@ -193,16 +193,11 @@ class GraphDraftsApiMixin:
             include_operations=include_operations,
         )
 
-    def list_batch_graph_drafts(
+    def query_batch_graph_drafts(
         self,
-        *,
-        project_id: UUID | None = None,
-        status: GraphChangeSetStatus | None = None,
-    ) -> list[GraphChangeSet]:
-        return self.graph_drafts.list_batch_graph_drafts(
-            project_id=project_id,
-            status=status,
-        )
+        query: BatchReviewQuery,
+    ) -> tuple[list[GraphChangeSet], int]:
+        return self.graph_drafts.query_batch_graph_drafts(query)
 
     def update_graph_change_operation(
         self,
@@ -299,12 +294,19 @@ class GraphDraftsApiMixin:
         draft_client: GraphDraftClient,
         actor: AuthContext | None = None,
     ) -> GraphChangeSet:
-        return self.graph_drafts.revise_graph_change_set(
-            change_set_id,
-            feedback=feedback,
-            inputs=inputs,
-            draft_client=draft_client,
+        return self._with_usage_event(
+            lambda: self.graph_drafts.revise_graph_change_set(
+                change_set_id,
+                feedback=feedback,
+                inputs=inputs,
+                draft_client=draft_client,
+                actor=actor,
+            ),
+            verb=UsageEventVerb.UPDATE,
+            resource_type=UsageEventResourceType.GRAPH_CHANGE_SET,
             actor=actor,
+            resource_id=change_set_id,
+            resource_id_attr="change_set_id",
         )
 
     def commit_graph_change_set(
@@ -512,13 +514,8 @@ class GraphDraftsApiMixin:
             now=now,
         )
 
-    def list_graph_draft_batch_runs(
+    def query_graph_draft_batch_runs(
         self,
-        *,
-        project_id: UUID | None = None,
-        status: GraphDraftBatchRunStatus | None = None,
-    ) -> list[GraphDraftBatchRun]:
-        return self.graph_drafts.list_graph_draft_batch_runs(
-            project_id=project_id,
-            status=status,
-        )
+        query: BatchRunQuery,
+    ) -> tuple[list[GraphDraftBatchRun], int]:
+        return self.graph_drafts.query_graph_draft_batch_runs(query)

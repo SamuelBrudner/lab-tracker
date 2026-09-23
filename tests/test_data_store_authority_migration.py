@@ -13,6 +13,7 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.exc import IntegrityError, OperationalError
 
+import lab_tracker.db as lab_db
 from lab_tracker.db_models import DataStoreModel
 
 _REVISION = "0058_data_store_authority_bindings"
@@ -121,6 +122,28 @@ def test_alembic_sqlite_engine_overrides_modern_transaction_mode(
             assert connection.scalar(text("SELECT version_num FROM alembic_version")) == _REVISION
     finally:
         engine.dispose()
+
+
+def test_alembic_sqlite_engine_installs_the_production_connection_pin(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """Runs on every Python, unlike the modern-transaction-mode test above."""
+
+    _set_database_url(monkeypatch, f"sqlite+pysqlite:///{tmp_path / 'pinned-alembic.db'}")
+    configured: list[object] = []
+    original = lab_db.configure_sqlite_connection
+
+    def recording_configure(dbapi_connection):  # noqa: ANN001, ANN202
+        configured.append(dbapi_connection)
+        original(dbapi_connection)
+
+    monkeypatch.setattr(lab_db, "configure_sqlite_connection", recording_configure)
+
+    command.upgrade(_alembic_config(), "+1")
+
+    assert configured
+    assert all(isinstance(connection, sqlite3.Connection) for connection in configured)
 
 
 def test_0058_preserves_legacy_rows_without_inferred_binding_across_cycle(

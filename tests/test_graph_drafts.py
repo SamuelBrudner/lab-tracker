@@ -12,17 +12,24 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import select
 
 from lab_tracker.app_parts.middleware import system_auth_context
 from lab_tracker.auth import AuthContext, PrincipalType, Role, utc_now
 from lab_tracker.config import Settings
-from lab_tracker.db_models import GraphChangeOperationModel, GraphChangeSetModel
-from lab_tracker.errors import AuthError, ValidationError
+from lab_tracker.db_models import (
+    GraphChangeOperationModel,
+    GraphChangeSetModel,
+    UsageEventModel,
+)
+from lab_tracker.errors import AuthError, PermissionDeniedError, ValidationError
 from lab_tracker.graph_drafting import (
+    AgenticGraphDraftClient,
     AnthropicGraphDraftClient,
     GoogleGraphDraftClient,
     GraphDraftingError,
+    GraphDraftOutputTruncatedError,
     OpenAIGraphDraftClient,
     make_graph_draft_client,
 )
@@ -59,6 +66,7 @@ class FakeDraftClient:
         graph_context: dict[str, Any] | None = None,
         user_hint: str | None = None,
         draft_mode: str = "graph_context",
+        project_context: dict[str, Any] | None = None,
         source_artifacts: list[dict[str, Any]] | None = None,
         image_bytes: bytes | None = None,
         image_content_type: str | None = None,
@@ -3021,7 +3029,7 @@ def test_writable_service_token_cannot_accept_or_commit_graph_draft(
     # ...but the accept and commit gates reject it.
     assert (
         client.post(f"/graph-drafts/{change_set_id}/accept-all", headers=token).status_code
-        == 401
+        == 403
     )
     assert (
         client.post(
@@ -3029,7 +3037,7 @@ def test_writable_service_token_cannot_accept_or_commit_graph_draft(
             json={"message": "token commit"},
             headers=token,
         ).status_code
-        == 401
+        == 403
     )
 
 
@@ -3039,8 +3047,17 @@ def test_system_actor_is_admin_but_not_interactive(client: TestClient) -> None:
     system = system_auth_context()
     assert authz.has_global_admin(system) is True
     authz.require_interactive(_human_actor(), action="Committing")
-    with pytest.raises(AuthError):
+    with pytest.raises(PermissionDeniedError):
         authz.require_interactive(system, action="Committing")
+
+
+def test_require_interactive_without_an_actor_is_an_authentication_failure(
+    client: TestClient,
+) -> None:
+    authz = client.app.state.lab_tracker_api.project_authorization
+    with pytest.raises(AuthError, match="Authentication required.") as excinfo:
+        authz.require_interactive(None, action="Committing")
+    assert not isinstance(excinfo.value, PermissionDeniedError)
 
 
 def test_system_actor_cannot_commit_graph_change_set(
@@ -3358,3 +3375,354 @@ def test_edited_update_commits_user_revised_origin(
     note = client.get(f"/notes/{note_id}", headers=admin_auth_headers)
     assert note.status_code == 200
     assert note.json()["data"]["origin"] == "user_revised"
+
+
+def _link_note_to_new_question_draft(project_id: str, note_id: str) -> dict[str, Any]:
+    """A general draft that creates a question and links a note to it by ``$ref``."""
+    return {
+        "summary": "create a question and link the note to it",
+        "uncertain_fields": [],
+        "clarification_requests": [],
+        "operations": [
+            {
+                "client_ref": "q1",
+                "op": "create",
+                "entity_type": "question",
+                "semantic_type": "suggest_new_question",
+                "target_entity_id": None,
+                "payload_json": json.dumps(
+                    {
+                        "project_id": project_id,
+                        "text": "Does the new protocol improve yield?",
+                        "question_type": "descriptive",
+                        "status": "staged",
+                    }
+                ),
+                "rationale": "The note raises a new question.",
+                "confidence": 0.8,
+                "source_refs": [],
+            },
+            {
+                "client_ref": None,
+                "op": "update",
+                "entity_type": "note",
+                "semantic_type": "link_note_to_question",
+                "target_entity_id": note_id,
+                "payload_json": json.dumps(
+                    {"targets": [{"entity_type": "question", "entity_id": {"$ref": "q1"}}]}
+                ),
+                "rationale": "The note is about the new question.",
+                "confidence": 0.8,
+                "source_refs": [],
+            },
+        ],
+    }
+
+
+def _accept_all_and_commit(
+    client: TestClient, headers: dict[str, str], change_set_id: str
+) -> httpx.Response:
+    accepted = client.post(f"/graph-drafts/{change_set_id}/accept-all", headers=headers)
+    assert accepted.status_code == 200, accepted.text
+    return client.post(
+        f"/graph-drafts/{change_set_id}/commit",
+        json={"message": "link note"},
+        headers=headers,
+    )
+
+
+def test_general_draft_commits_note_link_to_question_created_by_ref(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    """Onboarding-only target rules must not reject ordinary ``$ref`` note links."""
+    project_id = _project(client, admin_auth_headers)
+    note_id = _image_note(client, admin_auth_headers, project_id)
+    client.app.state.graph_draft_client_factory = lambda settings: FakeDraftClient(
+        _link_note_to_new_question_draft(project_id, note_id)
+    )
+    draft = client.post(f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers)
+    assert draft.status_code == 201, draft.text
+    assert draft.json()["data"]["status"] == "ready"
+    change_set_id = draft.json()["data"]["change_set_id"]
+
+    commit = _accept_all_and_commit(client, admin_auth_headers, change_set_id)
+
+    assert commit.status_code == 200, commit.text
+    operations = sorted(commit.json()["data"]["operations"], key=lambda op: op["sequence"])
+    question_id = operations[0]["result_entity_id"]
+    note = client.get(f"/notes/{note_id}", headers=admin_auth_headers).json()["data"]
+    assert note["targets"] == [{"entity_type": "question", "entity_id": question_id}]
+
+
+def test_general_draft_commits_note_link_with_mixed_targets(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    """A general link that keeps a non-question target alongside a question commits."""
+    project_id, note_id, question_id = _project_note_question(client, admin_auth_headers)
+    session = client.post(
+        "/sessions",
+        json={"project_id": project_id, "session_type": "operational"},
+        headers=admin_auth_headers,
+    )
+    assert session.status_code == 201, session.text
+    session_id = session.json()["data"]["session_id"]
+    patch = _link_note_update_draft(note_id, question_id)
+    patch["operations"][0]["payload_json"] = json.dumps(
+        {
+            "targets": [
+                {"entity_type": "question", "entity_id": question_id},
+                {"entity_type": "session", "entity_id": session_id},
+            ]
+        }
+    )
+    client.app.state.graph_draft_client_factory = lambda settings: FakeDraftClient(patch)
+    draft = client.post(f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers)
+    assert draft.status_code == 201, draft.text
+    assert draft.json()["data"]["status"] == "ready"
+
+    commit = _accept_all_and_commit(
+        client, admin_auth_headers, draft.json()["data"]["change_set_id"]
+    )
+
+    assert commit.status_code == 200, commit.text
+    note = client.get(f"/notes/{note_id}", headers=admin_auth_headers).json()["data"]
+    assert {(t["entity_type"], t["entity_id"]) for t in note["targets"]} == {
+        ("question", question_id),
+        ("session", session_id),
+    }
+
+
+def _submit_and_reject(
+    client: TestClient, headers: dict[str, str], change_set_id: str
+) -> None:
+    submitted = client.post(f"/graph-drafts/{change_set_id}/submit", headers=headers)
+    assert submitted.status_code == 200, submitted.text
+    rejected = client.post(
+        f"/graph-drafts/{change_set_id}/review",
+        json={"status": "rejected", "note": "Try a different framing."},
+        headers=headers,
+    )
+    assert rejected.status_code == 200, rejected.text
+    assert rejected.json()["data"]["status"] == "rejected"
+
+
+def test_redrafting_note_after_rejection_generates_new_draft(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    """A rejected draft must not satisfy idempotent reuse for the same note."""
+    project_id = _project(client, admin_auth_headers)
+    note_id = _image_note(client, admin_auth_headers, project_id)
+    fake = FakeDraftClient(_draft_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: fake
+    first = client.post(f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers)
+    assert first.status_code == 201, first.text
+    first_id = first.json()["data"]["change_set_id"]
+    _submit_and_reject(client, admin_auth_headers, first_id)
+
+    second = client.post(f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers)
+
+    assert second.status_code == 201, second.text
+    second_data = second.json()["data"]
+    assert second_data["change_set_id"] != first_id
+    assert second_data["status"] == "ready"
+    assert len(fake.calls) == 2
+    # The rejected draft keeps its review history.
+    original = client.get(f"/graph-drafts/{first_id}", headers=admin_auth_headers)
+    assert original.json()["data"]["status"] == "rejected"
+    assert original.json()["data"]["review_note"] == "Try a different framing."
+    assert len(original.json()["data"]["operations"]) == 2
+
+    # The live re-draft is itself idempotent until it is rejected too.
+    repeat = client.post(f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers)
+    assert repeat.json()["data"]["change_set_id"] == second_data["change_set_id"]
+    assert len(fake.calls) == 2
+
+    _submit_and_reject(client, admin_auth_headers, second_data["change_set_id"])
+    third = client.post(f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers)
+    assert third.json()["data"]["change_set_id"] not in {
+        first_id,
+        second_data["change_set_id"],
+    }
+    assert third.json()["data"]["status"] == "ready"
+    assert len(fake.calls) == 3
+
+
+def test_redrafting_analysis_note_after_rejection_generates_new_draft(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    note_id = _analysis_note(client, admin_auth_headers, project_id)
+    fake = FakeDraftClient(_draft_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: fake
+    path = f"/notes/{note_id}/analysis-graph-drafts"
+    first_id = client.post(path, headers=admin_auth_headers).json()["data"]["change_set_id"]
+    _submit_and_reject(client, admin_auth_headers, first_id)
+
+    second = client.post(path, headers=admin_auth_headers)
+
+    assert second.status_code == 201, second.text
+    assert second.json()["data"]["change_set_id"] != first_id
+    assert second.json()["data"]["status"] == "ready"
+    assert len(fake.calls) == 2
+
+
+def _anthropic_patch_response(*, stop_reason: str, text: str) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={"stop_reason": stop_reason, "content": [{"type": "text", "text": text}]},
+    )
+
+
+def test_anthropic_client_sends_configured_output_token_budget() -> None:
+    requests: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content.decode("utf-8")))
+        return _anthropic_patch_response(
+            stop_reason="end_turn",
+            text=json.dumps({"summary": "ok", "operations": []}),
+        )
+
+    client = AnthropicGraphDraftClient(
+        api_key="anthropic-key",
+        model="claude-test",
+        max_output_tokens=32000,
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        client.draft_from_batch(
+            batch_context={"mode": "graph_batch", "batch_notes": [{"id": "note-1"}]}
+        )
+    finally:
+        client.close()
+    assert requests[0]["max_tokens"] == 32000
+
+    configured = make_graph_draft_client(
+        Settings(
+            environment="local",
+            auth_enabled=False,
+            graph_draft_provider="anthropic",
+            anthropic_api_key="anthropic-key",
+            anthropic_max_output_tokens=24000,
+        )
+    )
+    try:
+        assert isinstance(configured, AnthropicGraphDraftClient)
+        assert configured.max_output_tokens == 24000
+    finally:
+        configured.close()
+    assert Settings(environment="local").anthropic_max_output_tokens == 16000
+
+
+def test_settings_reject_non_positive_anthropic_output_budget() -> None:
+    with pytest.raises(PydanticValidationError, match="anthropic_max_output_tokens"):
+        Settings(environment="local", anthropic_max_output_tokens=0)
+
+
+def test_anthropic_client_reports_output_truncation_explicitly() -> None:
+    client = AnthropicGraphDraftClient(
+        api_key="anthropic-key",
+        model="claude-test",
+        max_output_tokens=4096,
+        transport=httpx.MockTransport(
+            lambda request: _anthropic_patch_response(
+                stop_reason="max_tokens",
+                text='{"summary": "A long day narrative that was cut o',
+            )
+        ),
+    )
+    try:
+        with pytest.raises(GraphDraftingError) as raised:
+            client.draft_from_batch(
+                batch_context={"mode": "graph_batch", "batch_notes": [{"id": "note-1"}]}
+            )
+    finally:
+        client.close()
+
+    assert isinstance(raised.value, GraphDraftOutputTruncatedError)
+    message = str(raised.value)
+    assert "4096" in message
+    assert "LAB_TRACKER_ANTHROPIC_MAX_OUTPUT_TOKENS" in message
+    assert "malformed" not in message
+
+
+@pytest.mark.parametrize("provider", ["agentic", " Agentic-OpenAI ", "agentic_openai"])
+def test_settings_reject_agentic_provider_without_background_worker(provider: str) -> None:
+    with pytest.raises(
+        PydanticValidationError, match="LAB_TRACKER_GRAPH_DRAFT_BACKGROUND_ENABLED"
+    ):
+        Settings(environment="local", graph_draft_provider=provider)
+
+    assert Settings(
+        environment="local",
+        graph_draft_provider=provider,
+        graph_draft_background_enabled=True,
+    ).graph_draft_background_enabled
+    # The scheduler also runs the background worker.
+    assert Settings(
+        environment="local",
+        graph_draft_provider=provider,
+        graph_draft_scheduler_enabled=True,
+    ).graph_draft_scheduler_enabled
+
+
+def test_agentic_provider_note_drafts_use_the_wrapped_single_shot_client(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    """Note-scoped and analysis drafts must work when the agentic batch drafter is active."""
+    project_id = _project(client, admin_auth_headers)
+    note_id = _image_note(client, admin_auth_headers, project_id)
+    analysis_note_id = _analysis_note(client, admin_auth_headers, project_id)
+    base = FakeDraftClient(_draft_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: AgenticGraphDraftClient(
+        base_client=base
+    )
+
+    note_draft = client.post(f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers)
+    analysis_draft = client.post(
+        f"/notes/{analysis_note_id}/analysis-graph-drafts", headers=admin_auth_headers
+    )
+
+    assert note_draft.status_code == 201, note_draft.text
+    assert note_draft.json()["data"]["status"] == "ready"
+    assert analysis_draft.status_code == 201, analysis_draft.text
+    assert analysis_draft.json()["data"]["status"] == "ready"
+    assert base.calls[0]["draft_mode"] == "graph_context"
+    assert "method_hash=abc123" in base.calls[1]["evidence_text"]
+
+
+def test_revise_graph_draft_records_exactly_one_usage_event(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    client.app.state.settings.usage_events = True
+    project_id = _project(client, admin_auth_headers)
+    note_id = _image_note(client, admin_auth_headers, project_id)
+    initial = FakeDraftClient(_draft_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: initial
+    created = client.post(f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers)
+    assert created.status_code == 201, created.text
+    change_set_id = created.json()["data"]["change_set_id"]
+    with client.app.state.db_session_factory() as session:
+        before = set(session.scalars(select(UsageEventModel.event_id)).all())
+
+    revised_client = FakeDraftClient(_revised_draft_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: revised_client
+    response = client.post(
+        f"/graph-drafts/{change_set_id}/revise",
+        data={"feedback": "Keep only the protocol question."},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    with client.app.state.db_session_factory() as session:
+        new_events = [
+            row
+            for row in session.scalars(select(UsageEventModel)).all()
+            if row.event_id not in before
+        ]
+        assert [(row.verb, row.resource_type) for row in new_events] == [
+            ("update", "graph_change_set")
+        ]
+        assert str(new_events[0].resource_id) == change_set_id
+        assert str(new_events[0].project_id) == project_id

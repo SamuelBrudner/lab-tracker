@@ -160,8 +160,28 @@ describe("GraphDraftDetailCard narrative review", () => {
     expect(screen.getByRole("button", { name: "Commit accepted changes" })).toBeEnabled();
   });
 
+  it("hides AI revision for Daily Review batch drafts, which the API cannot revise", async () => {
+    installSpeechSynthesis();
+    renderDraft(draftFixture({ draft_mode: "graph_batch", status: "ready" }));
+
+    expect(await screen.findByText(/reviewed proposal by proposal/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Listen to review" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Revise with AI" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Dictate feedback" })).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText(/Tell the AI how to revise/)).not.toBeInTheDocument();
+  });
+
+  it("offers AI revision for note-scoped drafts", async () => {
+    renderDraft(draftFixture({ draft_mode: "graph_context", status: "ready" }));
+
+    expect(await screen.findByRole("button", { name: "Revise with AI" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Dictate feedback" })).toBeInTheDocument();
+    expect(screen.queryByText(/reviewed proposal by proposal/)).not.toBeInTheDocument();
+  });
+
   it("keeps another member's onboarding draft read-only on the generic review route", async () => {
     const ready = draftFixture({
+      draft_mode: "graph_context",
       created_by: "author-2",
       created_by_user_id: "author-2",
       purpose: "member_checkpoint_alignment",
@@ -187,6 +207,26 @@ describe("GraphDraftDetailCard narrative review", () => {
     expect(await screen.findByLabelText("Edit JSON payload")).toBeDisabled();
     expect(screen.getByRole("button", { name: "Submit for review" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Revise with AI" })).toBeDisabled();
+  });
+
+  it("says why review actions are disabled when the membership lookup fails", async () => {
+    renderDraft(draftFixture({ status: "submitted" }), {
+      canManageGraph: false,
+      user: { role: "viewer", user_id: "owner-1", username: "owner" },
+      routes: [
+        {
+          match: "/projects/project-1/members?limit=200",
+          response: errorResponse("Members service unavailable.", 503),
+        },
+      ],
+    });
+
+    expect(
+      await screen.findByText(
+        "Could not confirm your access to this project: Members service unavailable. Review actions stay disabled until it loads."
+      )
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Accept all" })).toBeDisabled();
   });
 
   it("honors server-derived inherited owner capability for onboarding commit", async () => {
@@ -1160,7 +1200,7 @@ describe("GraphDraftDetailCard audio review", () => {
 
   it("records, previews, and submits voice feedback through the revision endpoint", async () => {
     installSpeechSynthesis();
-    const draft = draftFixture();
+    const draft = draftFixture({ draft_mode: "graph_context" });
     const track = { stop: vi.fn() };
     Object.defineProperty(navigator, "mediaDevices", {
       configurable: true,
@@ -1231,5 +1271,97 @@ describe("GraphDraftDetailCard audio review", () => {
     await screen.findByRole("button", { name: "Stop recording" });
     unmount();
     expect(track.stop).toHaveBeenCalledTimes(2);
+  });
+
+  it("can dictate again after the recorder fails to start", async () => {
+    installSpeechSynthesis();
+    const draft = draftFixture({ draft_mode: "graph_context" });
+    const track = { stop: vi.fn() };
+    const getUserMedia = vi.fn().mockResolvedValue({ getTracks: () => [track] });
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: { getUserMedia },
+    });
+    let startAttempts = 0;
+
+    class FlakyMediaRecorder {
+      static isTypeSupported() {
+        return true;
+      }
+
+      constructor(_stream, options = {}) {
+        this.listeners = {};
+        this.mimeType = options.mimeType || "audio/webm";
+        this.state = "inactive";
+      }
+
+      addEventListener(name, callback) {
+        this.listeners[name] = callback;
+      }
+
+      start() {
+        startAttempts += 1;
+        if (startAttempts === 1) {
+          throw new DOMException("The stream is inactive.", "InvalidStateError");
+        }
+        this.state = "recording";
+      }
+
+      stop() {
+        this.state = "inactive";
+        this.listeners.stop?.();
+      }
+    }
+    vi.stubGlobal("MediaRecorder", FlakyMediaRecorder);
+    const setFlash = vi.fn();
+
+    renderDraft(draft, { setFlash });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Dictate feedback" }));
+    await waitFor(() =>
+      expect(setFlash).toHaveBeenLastCalledWith(
+        "",
+        "Could not start recording: The stream is inactive."
+      )
+    );
+    expect(track.stop).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Dictate feedback" }));
+
+    expect(await screen.findByRole("button", { name: "Stop recording" })).toBeInTheDocument();
+    expect(getUserMedia).toHaveBeenCalledTimes(2);
+  });
+
+  it("blames microphone permissions only when the microphone was refused", async () => {
+    installSpeechSynthesis();
+    const draft = draftFixture({ draft_mode: "graph_context" });
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: {
+        getUserMedia: vi
+          .fn()
+          .mockRejectedValue(new DOMException("Permission denied", "NotAllowedError")),
+      },
+    });
+    vi.stubGlobal(
+      "MediaRecorder",
+      class {
+        static isTypeSupported() {
+          return true;
+        }
+      }
+    );
+    const setFlash = vi.fn();
+
+    renderDraft(draft, { setFlash });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Dictate feedback" }));
+    await waitFor(() =>
+      expect(setFlash).toHaveBeenLastCalledWith(
+        "",
+        "Could not access the microphone. Check browser permissions."
+      )
+    );
+    expect(screen.getByRole("button", { name: "Dictate feedback" })).toBeInTheDocument();
   });
 });

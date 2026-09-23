@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext
 from lab_tracker.config import Settings
-from lab_tracker.errors import AuthError, NotFoundError, ValidationError
+from lab_tracker.errors import NotFoundError, PermissionDeniedError, ValidationError
 from lab_tracker.graph_drafting import GraphDraftClient, GraphDraftClientFactory
 from lab_tracker.member_onboarding import (
     SCHEDULED_DRAFT_EXCLUDE,
@@ -450,7 +450,7 @@ class BatchSchedulingCoordinator(BaseService):
             self._commit_request_claim_checkpoint()
             return True
 
-        notes = [self.notes.get_note(note_id) for note_id in run.source_note_ids]
+        notes = self._batch_source_notes(run.source_note_ids)
         if not notes:
             run.status = GraphDraftBatchRunStatus.SKIPPED
             run.summary = "No staged notes landed in this batch window."
@@ -488,19 +488,29 @@ class BatchSchedulingCoordinator(BaseService):
         run.updated_at = run.finished_at
         return self._finish_batch_run(run, claim_token)
 
+    def _batch_source_notes(self, note_ids: list[UUID]) -> list[Note]:
+        """Load a run's frozen source notes in one query, in reservation order."""
+
+        if not note_ids:
+            return []
+        loaded, _ = self.scheduling_repository.query_notes(
+            note_ids=set(note_ids),
+            limit=None,
+            offset=0,
+        )
+        by_id = {note.note_id: note for note in loaded}
+        if any(note_id not in by_id for note_id in note_ids):
+            raise NotFoundError("Note does not exist.")
+        return [by_id[note_id] for note_id in note_ids]
+
     def get_graph_draft_batch_run(self, run_id: UUID) -> GraphDraftBatchRun:
         return self.records.get_graph_draft_batch_run(run_id)
 
-    def list_graph_draft_batch_runs(
+    def query_graph_draft_batch_runs(
         self,
-        *,
-        project_id: UUID | None = None,
-        status: GraphDraftBatchRunStatus | None = None,
-    ) -> list[GraphDraftBatchRun]:
-        return self.records.list_graph_draft_batch_runs(
-            project_id=project_id,
-            status=status,
-        )
+        query: batch_policy.BatchRunQuery,
+    ) -> tuple[list[GraphDraftBatchRun], int]:
+        return self.records.query_graph_draft_batch_runs(query)
 
     def _fail_batch_run(
         self,
@@ -585,7 +595,7 @@ class BatchSchedulingCoordinator(BaseService):
         enqueue: bool,
     ) -> list[GraphDraftBatchRun]:
         if not self.authorization.has_global_admin(actor):
-            raise AuthError("Only admins can run scheduled batch drafts.")
+            raise PermissionDeniedError("Only admins can run scheduled batch drafts.")
         current_time = batch_policy.as_utc(now or utc_now())
         due_settings = self.scheduling_repository.list_due_graph_draft_batch_settings(current_time)
         runs: list[GraphDraftBatchRun] = []
@@ -715,9 +725,11 @@ class BatchSchedulingCoordinator(BaseService):
 
         staged_notes = [
             note
-            for note in self.notes.list_notes(project_id=settings.project_id)
-            if note.status == NoteStatus.STAGED
-            and note.metadata.get(SCHEDULED_DRAFT_POLICY_KEY)
+            for note in self.notes.list_notes(
+                project_id=settings.project_id,
+                status=NoteStatus.STAGED,
+            )
+            if note.metadata.get(SCHEDULED_DRAFT_POLICY_KEY)
             != SCHEDULED_DRAFT_EXCLUDE
         ]
         if settings.user_id is not None:

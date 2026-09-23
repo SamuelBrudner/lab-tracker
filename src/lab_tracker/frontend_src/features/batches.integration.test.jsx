@@ -65,6 +65,15 @@ describe("App", () => {
       uncertain_fields: [],
       updated_at: "2026-06-10T12:10:00Z",
     };
+    // GET /batches returns list summaries: an operation count, never the
+    // operations or the context packet.
+    const pendingBatchSummary = {
+      ...pendingBatch,
+      context_packet: undefined,
+      meeting_note_count: 0,
+      operation_count: 1,
+      operations: undefined,
+    };
 
     installFetchMock([
       {
@@ -105,11 +114,11 @@ describe("App", () => {
       },
       {
         match: buildApiPath("/batches", { limit: 5, mine: true }),
-        response: paged([pendingBatch], { limit: 5, offset: 0, total: 1 }),
+        response: paged([pendingBatchSummary], { limit: 5, offset: 0, total: 1 }),
       },
       {
         match: buildApiPath("/batches", { mine: true, limit: 100 }),
-        response: paged([pendingBatch], { limit: 100, offset: 0, total: 1 }),
+        response: paged([pendingBatchSummary], { limit: 100, offset: 0, total: 1 }),
       },
       {
         match: buildApiPath("/batches", {
@@ -140,7 +149,7 @@ describe("App", () => {
           mine: true,
           limit: 100,
         }),
-        response: paged([pendingBatch], { limit: 100, offset: 0, total: 1 }),
+        response: paged([pendingBatchSummary], { limit: 100, offset: 0, total: 1 }),
       },
       {
         match: buildApiPath("/batches", {

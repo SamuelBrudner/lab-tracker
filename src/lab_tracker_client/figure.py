@@ -7,7 +7,6 @@ import io
 import mimetypes
 import os
 import stat
-import subprocess
 import sys
 import time
 import uuid
@@ -34,6 +33,14 @@ from lab_tracker_client.client import (
     capture_host_metadata,
     file_sha256,
     load_connection_profile,
+)
+from lab_tracker_client.gitinfo import (
+    DirtyState,
+    HeadCommit,
+    git_dirty_state,
+    git_head_commit,
+    git_output,
+    sanitize_remote_url,
 )
 from lab_tracker_client.repo import normalize_remote
 
@@ -112,7 +119,9 @@ class RunContext:
     expires_at: float
     run_id: str = ""
     git_commit: str = ""
-    git_dirty: bool = False
+    git_commit_error: str = ""
+    git_dirty: bool | None = False
+    git_status_error: str = ""
     repo_remote_url: str = ""
     code_file: str = ""
     code_symbol: str = ""
@@ -124,14 +133,18 @@ class RunContext:
         return time.monotonic() >= self.expires_at
 
     def to_metadata(self) -> dict[str, NoteMetadataScalar]:
-        metadata: dict[str, NoteMetadataScalar] = {
-            "run_captured_at": self.captured_at,
-            "run_git_dirty": self.git_dirty,
-        }
+        metadata: dict[str, NoteMetadataScalar] = {"run_captured_at": self.captured_at}
+        if self.git_dirty is None:
+            # Unknown is never reported as clean; the marker says why.
+            metadata["run_git_status_error"] = self.git_status_error or "unknown"
+        else:
+            metadata["run_git_dirty"] = self.git_dirty
         if self.run_id:
             metadata["run_id"] = self.run_id
         if self.git_commit:
             metadata["run_git_commit"] = self.git_commit
+        elif self.git_commit_error:
+            metadata["run_git_commit_error"] = self.git_commit_error
         if self.repo_remote_url:
             metadata["run_repo_remote_url"] = self.repo_remote_url
         if self.code_file:
@@ -260,12 +273,17 @@ def run_context(
 
     resolved_extra = dict(_validate_metadata(extra) or {})
     pointer = _run_code_pointer()
+    head = git_head_commit(None)
+    git_commit = head.commit
+    dirty_state = _git_dirty_state(head)
     context = RunContext(
         captured_at=datetime.now(timezone.utc).isoformat(),
         expires_at=time.monotonic() + max(0.0, float(ttl_seconds)),
         run_id=uuid.uuid4().hex,
-        git_commit=_git_output("rev-parse", "HEAD"),
-        git_dirty=bool(_git_output("status", "--porcelain")),
+        git_commit=git_commit,
+        git_commit_error=head.error,
+        git_dirty=dirty_state.dirty,
+        git_status_error=dirty_state.error,
         repo_remote_url=_credential_free_repo_remote(
             _git_output("config", "--get", "remote.origin.url")
         ),
@@ -582,7 +600,12 @@ def _capture_saved_figure(
     except Exception as exc:
         if _is_transport_failure(exc):
             _trip_circuit(endpoint_key, str(exc))
-        _warn_once("capture-failed", f"Lab Tracker figure capture failed: {exc}")
+        # Keyed by cause: a repeat of the same failure is printed once, but a
+        # later failure with a different cause is never hidden behind it.
+        _warn_once(
+            f"capture-failed:{type(exc).__name__}:{exc}",
+            f"Lab Tracker figure capture failed: {exc}",
+        )
         return FigureCaptureResult(
             **{
                 **result_defaults,
@@ -845,29 +868,31 @@ def _resolve_capture_client(
         resolved_project_id = project_id or client.default_project_id
         return client, str(resolved_project_id) if resolved_project_id else None, False
     profile = load_connection_profile()
-    resolved_project_id = (
-        project_id
-        or os.getenv("LAB_TRACKER_PROJECT_ID")
-        or profile.get("default_project_id")
-    )
     configured_base_url = (
         os.getenv("LAB_TRACKER_BASE_URL")
         or os.getenv("LAB_TRACKER_MCP_BASE_URL")
         or profile.get("base_url")
     )
-    if not resolved_project_id or not configured_base_url:
+    if not configured_base_url or not (
+        project_id
+        or os.getenv("LAB_TRACKER_PROJECT_ID")
+        or profile.get("default_project_id")
+    ):
         return None, None, False
     resolved_client = LabTracker.from_env(
         timeout_seconds=FIGURE_CAPTURE_TIMEOUT_SECONDS,
     )
-    resolved_client.default_project_id = str(resolved_project_id)
+    # from_env only applies the profile's project when the profile describes
+    # the server being targeted; project ids are per-server.
+    resolved_project_id = project_id or resolved_client.default_project_id
     has_credentials = bool(
         resolved_client.access_token
         or (resolved_client.username and resolved_client.password)
     )
-    if not has_credentials:
+    if not resolved_project_id or not has_credentials:
         resolved_client.close()
         return None, None, False
+    resolved_client.default_project_id = str(resolved_project_id)
     return resolved_client, str(resolved_project_id), True
 
 
@@ -951,27 +976,17 @@ def _active_run_context() -> RunContext | None:
 
 
 def _git_output(*args: str) -> str:
-    try:
-        result = subprocess.run(
-            ["git", *args],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=1,
-        )
-    except Exception:
-        return ""
-    if result.returncode != 0:
-        return ""
-    return result.stdout.strip()
+    return git_output(None, *args)
+
+
+def _git_dirty_state(head: HeadCommit) -> DirtyState:
+    return git_dirty_state(None, head=head)
 
 
 def _credential_free_repo_remote(remote: str) -> str:
     """Return a stable remote identity without URL-carried credentials."""
 
-    without_query = remote.partition("?")[0]
-    without_fragment = without_query.partition("#")[0]
-    return normalize_remote(without_fragment)
+    return normalize_remote(sanitize_remote_url(remote))
 
 
 def _is_transport_failure(exc: BaseException) -> bool:

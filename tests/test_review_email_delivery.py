@@ -1,17 +1,25 @@
 from __future__ import annotations
 
 import json
-from uuid import UUID
+import logging
+from datetime import timedelta
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import event
+from sqlalchemy.exc import OperationalError
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.app_parts.middleware import system_auth_context
 from lab_tracker.auth import AuthContext, Role
 from lab_tracker.errors import ValidationError
-from lab_tracker.models import ReviewEmailDeliveryStatus
+from lab_tracker.models import ReviewEmailDeliveryStatus, utc_now
 from lab_tracker.review_links import sign_review_link
+from lab_tracker.services.review_email_service import (
+    ReviewEmailService,
+    normalize_review_email,
+)
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 
 
@@ -325,3 +333,196 @@ def test_globally_disabled_review_email_cannot_opt_in_enqueue_or_claim(
         assert disabled_api.review_emails.get(pending.delivery_id).status == (
             ReviewEmailDeliveryStatus.PENDING
         )
+
+
+def test_expired_leases_count_as_attempts_and_dead_letter_at_max_attempts(
+    client: TestClient,
+) -> None:
+    """A worker that dies after every claim must not re-lease a delivery forever."""
+    _enable_review_email(client)
+    client.app.state.settings.review_email_max_attempts = 2
+    with client.app.state.db_session_factory() as session:
+        api = LabTrackerAPI(
+            repository=SQLAlchemyLabTrackerRepository(session),
+            settings=client.app.state.settings,
+        )
+        assert api.review_emails.max_attempts == 2
+        delivery = api.review_emails.enqueue_test("poison@example.org")
+        start = utc_now()
+
+        first = api.review_emails.claim_next(lease_seconds=60, now=start)
+        second = api.review_emails.claim_next(
+            lease_seconds=60, now=start + timedelta(seconds=61)
+        )
+        third = api.review_emails.claim_next(
+            lease_seconds=60, now=start + timedelta(seconds=122)
+        )
+
+        assert first is not None and first.attempt_count == 1
+        assert second is not None and second.attempt_count == 2
+        assert third is None
+        dead = api.review_emails.get(delivery.delivery_id)
+        assert dead.status == ReviewEmailDeliveryStatus.FAILED
+        assert dead.attempt_count == 2
+        assert dead.claim_token is None
+        assert dead.lease_expires_at is None
+        assert dead.next_attempt_at is None
+        assert "lease expired" in (dead.last_error or "").lower()
+        assert (
+            api.review_emails.claim_next(lease_seconds=60, now=start + timedelta(hours=1))
+            is None
+        )
+
+
+def test_dead_lettering_is_logged_and_idle_polls_do_not_write(
+    client: TestClient,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An idle claim is a read; a dead-lettered delivery is named in a warning."""
+    _enable_review_email(client)
+    client.app.state.settings.review_email_max_attempts = 1
+    engine = client.app.state.db_engine
+    statements: list[str] = []
+
+    def record(conn, cursor, statement, parameters, context, executemany):  # noqa: ANN001
+        statements.append(statement.lstrip().split(None, 1)[0].upper())
+
+    with client.app.state.db_session_factory() as session:
+        api = LabTrackerAPI(
+            repository=SQLAlchemyLabTrackerRepository(session),
+            settings=client.app.state.settings,
+        )
+        event.listen(engine, "before_cursor_execute", record)
+        try:
+            assert api.review_emails.claim_next(lease_seconds=60, now=utc_now()) is None
+        finally:
+            event.remove(engine, "before_cursor_execute", record)
+        assert "UPDATE" not in statements
+
+        delivery = api.review_emails.enqueue_test("poison@example.org")
+        start = utc_now()
+        assert api.review_emails.claim_next(lease_seconds=60, now=start) is not None
+        with caplog.at_level(logging.WARNING, logger="lab_tracker.services.review_email_service"):
+            assert (
+                api.review_emails.claim_next(lease_seconds=60, now=start + timedelta(seconds=61))
+                is None
+            )
+
+    assert api.review_emails.get(delivery.delivery_id).status == ReviewEmailDeliveryStatus.FAILED
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(str(delivery.delivery_id) in r.getMessage() for r in warnings)
+
+
+def _unbound_review_link(client: TestClient) -> str:
+    return sign_review_link(
+        client.app.state.settings.auth_secret_key,
+        uuid4(),
+        recipient_user_id=uuid4(),
+        delivery_id=uuid4(),
+    )
+
+
+def test_review_link_redirects_invalid_or_unknown_links_to_app_root(
+    client: TestClient,
+) -> None:
+    tampered = client.get("/r/not-a-valid-token", follow_redirects=False)
+    unknown_delivery = client.get(
+        f"/r/{_unbound_review_link(client)}",
+        follow_redirects=False,
+    )
+
+    for response in (tampered, unknown_delivery):
+        assert response.status_code == 302
+        assert response.headers["location"] == "/app/"
+
+
+def test_review_link_surfaces_backend_failures_instead_of_redirecting(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Anti-enumeration only needs a uniform answer for bad tokens and missing
+    # deliveries; a database outage must fail loudly, not look like a bad link.
+    def _database_down(_self, _delivery_id):
+        raise OperationalError("SELECT 1", {}, Exception("database is down"))
+
+    monkeypatch.setattr(ReviewEmailService, "get", _database_down)
+    failing_client = TestClient(client.app, raise_server_exceptions=False)
+
+    response = failing_client.get(
+        f"/r/{_unbound_review_link(client)}",
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 500
+    assert "location" not in response.headers
+
+
+def test_admin_delivery_responses_do_not_expose_the_claim_token(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    _enable_review_email(client)
+    response = client.post(
+        "/review-email/test",
+        json={"destination_email": "lease@example.org"},
+        headers=admin_auth_headers,
+    )
+    assert response.status_code == 201
+    assert "claim_token" not in response.json()["data"]
+
+    with client.app.state.db_session_factory() as session:
+        api = LabTrackerAPI(
+            repository=SQLAlchemyLabTrackerRepository(session),
+            settings=client.app.state.settings,
+        )
+        claimed = api.review_emails.claim_next(lease_seconds=60)
+        assert claimed is not None
+        assert claimed.claim_token is not None
+        live_token = str(claimed.claim_token)
+
+    listing = client.get("/review-email/deliveries", headers=admin_auth_headers)
+    assert listing.status_code == 200
+    items = listing.json()["data"]
+    assert [item["status"] for item in items] == ["sending"]
+    assert "claim_token" not in items[0]
+    assert live_token not in listing.text
+
+
+def test_test_email_with_unknown_recipient_user_is_rejected(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    _enable_review_email(client)
+    response = client.post(
+        "/review-email/test",
+        json={
+            "destination_email": "nobody@example.org",
+            "recipient_user_id": "00000000-0000-4000-8000-000000000001",
+        },
+        headers=admin_auth_headers,
+    )
+    assert response.status_code == 422
+    assert "recipient_user_id" in response.text
+
+    listing = client.get("/review-email/deliveries", headers=admin_auth_headers)
+    assert listing.status_code == 200
+    assert listing.json()["data"] == []
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("Test.User@Example.ORG", "Test.User@example.org"),
+        ('"ab"@Example.org', "ab@example.org"),
+        ('"a b"@Example.org', '"a b"@example.org'),
+        ('"a\\"b"@example.org', '"a\\"b"@example.org'),
+        ('".ab"@example.org', '".ab"@example.org'),
+        ('"a."@example.org', '"a."@example.org'),
+        ('"a..b"@example.org', '"a..b"@example.org'),
+    ],
+)
+def test_normalize_review_email_is_idempotent(raw: str, expected: str) -> None:
+    normalized = normalize_review_email(raw)
+
+    assert normalized == expected
+    assert normalize_review_email(normalized) == normalized

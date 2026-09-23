@@ -1,10 +1,10 @@
 # Configuration reference
 
 This is the configuration reference for Lab Tracker: the `LAB_TRACKER_*`
-environment variables read by the application, the MCP service-client and
-export-only Dolt-mirror variables read outside the FastAPI app, the multimodal
-graph-draft-review configuration and behavior, and the local evidence-inbox
-import (`lt import-folder`) configuration.
+environment variables read by the application; the MCP service-client,
+export-only Dolt-mirror, client, script, and deploy variables read outside the
+FastAPI app; the multimodal graph-draft-review configuration and behavior; and
+the local evidence-inbox import (`lt import-folder`) configuration.
 
 The supported runtime surface is defined in
 [`retained-v1-surface.md`](retained-v1-surface.md); if it and this document
@@ -31,7 +31,15 @@ suitable for local development.
 
 ### Database and storage
 
-- `LAB_TRACKER_DATABASE_URL`: SQLAlchemy database URL (default: `sqlite+pysqlite:///./lab_tracker.db`)
+- `LAB_TRACKER_DATABASE_URL`: SQLAlchemy database URL (default: `sqlite+pysqlite:///./lab_tracker.db`).
+  The app refuses to start unless this database is at the Alembic head: an
+  unmigrated database (no `alembic_version`) or one at an older known revision
+  fails startup with a message naming the revisions. Run
+  `uv run alembic upgrade head` first, or start with `lab-tracker serve` (or
+  the Docker entrypoint), which migrate before serving. A revision this build
+  does not know (the wrong database, an abandoned migration branch, or a
+  database already migrated by a newer build) also fails startup; point the URL
+  at the right database or restore the build (or database backup) that matches.
 - `LAB_TRACKER_BACKUP_PATH`: SQLite snapshot directory used by `lab-tracker
   serve` and `lab-tracker backup` (default: `~/.lab-tracker/backups`)
 - `LAB_TRACKER_BACKUP_KEEP`: number of newest SQLite snapshots to keep when a
@@ -48,17 +56,44 @@ that destination through your normal off-machine backup process.
 
 ### Authentication and invitations
 
-- `LAB_TRACKER_AUTH_SECRET_KEY`: auth signing secret (default allowed only in `local`)
+- `LAB_TRACKER_AUTH_SECRET_KEY`: auth signing secret (the placeholder default is
+  rejected whenever authentication is enabled, including in `local`)
 - `LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES`: access token lifetime (default: `720`)
+- `LAB_TRACKER_AUTH_SESSION_MAX_AGE_HOURS`: absolute lifetime of a signed-in
+  session (default: `168`, i.e. 7 days; between `1` and `8760`, and no shorter
+  than `LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES`). `/auth/refresh` carries the
+  original sign-in time forward and never issues a token past this limit, so
+  users sign in again at least this often. Separately, changing a user's
+  password or role, or calling `POST /auth/sessions/revoke` (sign out
+  everywhere), immediately invalidates every session token that user holds;
+  personal access tokens and paired devices are managed separately under
+  `/auth/tokens` and `/auth/devices`.
 - `LAB_TRACKER_AUTH_INVITE_TTL_HOURS`: signed invitation link lifetime
   (default: `168`)
 - `LAB_TRACKER_AUTH_RATE_LIMIT_ATTEMPTS`: failed login attempts, or register
   attempts from one caller, allowed per window (default: `10`)
 - `LAB_TRACKER_AUTH_RATE_LIMIT_WINDOW_SECONDS`: rate-limit window in seconds
-  (default: `60`)
+  (default: `60`). These two settings apply to three separate limiters: login,
+  registration, and personal access tokens (failed `lpat_` requests, counted
+  per token and client address; a valid token that its policy forbids gets
+  `403` and is not counted). Each limiter is in-process
+  and tracks at most 10,000 callers at once, and one client address at most
+  1,000 of them. Once a client address tracks 1,000 callers, its failed
+  attempts for new callers get `429` until its oldest window ends; it never
+  forgets its own callers to make room. When the whole table is full it forgets
+  the oldest caller that is not yet blocked, and never forgets a blocked
+  caller; if every tracked caller is blocked, new addresses' failed attempts
+  get `429` too. Correct credentials still sign in either way. The client
+  address is the connection peer: an IPv4 address, or the /64 prefix of an
+  IPv6 address, so all hosts in one IPv6 /64 (like hosts behind one IPv4 NAT)
+  share one client address and one quota, including for registration and
+  invitation acceptance. Behind a reverse proxy the peer is the proxy, so set
+  `FORWARDED_ALLOW_IPS` to the proxy's address (see
+  [Reverse Proxy and Client Addresses](self-hosted-operations.md#reverse-proxy-and-client-addresses));
+  otherwise every client shares one client address and one quota.
 - `LAB_TRACKER_AUTH_PUBLIC_VIEWER_REGISTRATION_ENABLED`: allow public
-  self-registration for viewer accounts (default: `true`). Set to `false` to
-  require invites or an admin bearer token for new users.
+  self-registration for viewer accounts (default: `true` in `local`, `false`
+  otherwise). When off, new users need an invite or an admin bearer token.
 - `LAB_TRACKER_AUTH_ENABLED`: enable login and role enforcement (default: `false`
   in `local`, `true` otherwise; non-local environments cannot disable auth)
 - `LAB_TRACKER_PUBLIC_BASE_URL`: deprecated server-side alias for
@@ -187,8 +222,9 @@ metadata.
 
 ### Local filesystem policy
 
-Local artifact resolution and registered `local_fs` store health share one
-operator authority:
+Local artifact resolution uses one operator authority. (Registered `local_fs`
+store health is not supported in this build; see
+[Local-store health](#local-store-health-deferred).)
 
 - `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS`: a list of host-local roots separated by
   `os.pathsep` (`:` on POSIX, `;` on Windows). An unset, empty, or
@@ -244,9 +280,9 @@ inside the selected grant.
 Application composition builds one filesystem-I/O-free
 `LocalFilesystemAuthority` inside one bounded local-filesystem operations
 broker and shares one bounded process executor. The runtime retains the broker,
-not a parallel authority or path policy. Local-store health, registered local
-artifact reads, recovery enumeration, and every recovery candidate read receive
-that exact broker. Candidate authorization, alias traversal, enumeration, open,
+not a parallel authority or path policy. Registered local artifact reads,
+recovery enumeration, and every recovery candidate read receive that exact
+broker. Candidate authorization, alias traversal, enumeration, open,
 regular-file validation, and byte reads therefore occur in the isolated helper,
 not in the application process.
 
@@ -457,11 +493,21 @@ must pass the hardened registered-base structural grammar before host I/O. The
 health probe sends `HEAD` through the same
 outbound policy, pinned client, and total deadline as HTTP artifact resolution.
 Statuses `301`, `302`, `303`, `307`, and `308` are followed manually while
-preserving `HEAD`; every hop is reauthorized and repinned, safe cross-origin
-redirects may proceed, and an HTTPS-to-HTTP downgrade is denied. A terminal
+preserving `HEAD`; every hop is reauthorized and repinned, only redirects that
+stay inside the registered origin/path prefix may proceed (the rule HTTP
+artifact resolution applies, so a root that redirects elsewhere is reported
+unreachable), and an HTTPS-to-HTTP downgrade is denied. A terminal
 `2xx`, `403`, or `405` response counts as reachable. Policy denials, redirect
 loops or limit exhaustion, transport/deadline failures, and other terminal
 statuses all return the same static redacted health detail.
+
+<a id="local-store-health-deferred"></a>
+Local-store health is not supported in this build: `GET
+/data-stores/{id}/health` answers every `local_fs` store with status
+`unsupported` and the static detail `Local store health is not supported in
+this build.`, and the runtime composes no local probe. It stays deferred until
+the local-use slice retains each store's revalidated grant inside the
+filesystem helper. The rest of this section describes that deferred probe.
 
 Local-store health is a bounded, read-only reachability hint, not registration
 validation or a durable filesystem capability. Registration performs no host
@@ -552,16 +598,16 @@ optional host binaries, through the shared bounded process executor. The
 configured budget is one monotonic deadline for the entire logical operation:
 a local direct read and all of its recovery candidate reads share one deadline;
 rclone metadata lookup, transfer, and verification share one deadline; and Git
-fetch, object inspection, transfer, and verification share one deadline. A
-local, rclone, or Git store-health probe receives a fresh deadline; Git's URL
+fetch, object inspection, transfer, and verification share one deadline. An
+rclone or Git store-health probe receives a fresh deadline; Git's URL
 preflight and HEAD query share it. Progress, recovery, or moving between
-subprocesses does not reset it. Local health creates the deadline before lexical
-admission; local artifact resolution creates it once for the logical read. Both
-pass the exact deadline object through the bounded filesystem broker.
+subprocesses does not reset it. Local artifact resolution creates the deadline
+once for the logical read and passes the exact deadline object through the
+bounded filesystem broker.
 
 - `LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS`: execution and verification
-  budget for one local, rclone, or Git artifact resolution, or one local,
-  rclone, or Git store-health probe (default: `30`). The value must be finite,
+  budget for one local, rclone, or Git artifact resolution, or one rclone or
+  Git store-health probe (default: `30`). The value must be finite,
   greater than zero, and no greater than `86400` seconds (one day); invalid
   values fail application startup. This setting is independent of
   `LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS`.
@@ -578,6 +624,25 @@ pass the exact deadline object through the bounded filesystem broker.
   value denies every Git remote. Entries are not whitespace-trimmed; an empty,
   malformed, or semantically duplicate normalized entry fails startup without
   echoing the configured value.
+- `LAB_TRACKER_GIT_CACHE_ROOT`: absolute directory for the Git resolver's
+  per-remote fetch caches (`~` is expanded; a relative path fails startup). When
+  unset, each resolver uses a private, unpredictably named temporary directory
+  (mode `0700`) created on first use and removed when the process exits, so the
+  cache does not survive restarts. A configured root is created with mode `0700`
+  or tightened to it (a warning names the directory and its previous mode
+  whenever a root or per-remote cache is tightened); a root or per-remote cache
+  that is a symlink or is owned by another user is refused (the resolution is
+  `unresolved` and a warning is logged). A per-remote cache whose
+  repository-local Git config holds anything other than the keys `git init`
+  writes is refused, and every resolver Git command overrides `core.hooksPath`
+  and `core.fsmonitor`, so planted hooks or config cannot run commands.
+- `LAB_TRACKER_GIT_CACHE_MAX_BYTES`: positive byte quota for the Git resolver
+  cache (default: unset, unbounded). Least-recently-used per-remote caches are
+  evicted before a new fetch; a cache an in-flight resolution is using is never
+  evicted. Only directories named like the resolver's own per-remote caches (16
+  hex digits, optionally prefixed `sha1-` or `sha256-`) are counted or evicted;
+  anything else under the root is left alone. Anything other than a positive
+  decimal integer (for example `0`, `-5`, or `2GB`) fails startup.
 
 Each Git grant must use one of these forms:
 
@@ -601,9 +666,9 @@ fragment components, percent escapes, and malformed paths or authorities are
 also rejected. Credentials belong in operator-controlled Git credential helpers
 or SSH facilities, never in this setting or a persisted store root.
 
-The local root list, local recovery controls, and rclone and Git policies are
-parsed once from `Settings` at startup; no runtime consumer independently
-rereads the process environment. Runtime builds one local operations broker
+The local root list, local recovery controls, rclone and Git policies, and
+Git cache controls are parsed once from `Settings` at startup; no runtime
+consumer independently rereads the process environment. Runtime builds one local operations broker
 from that root list and passes the exact broker to health, artifact resolution,
 and bounded recovery enumeration. Rclone and Git resolution and health share
 one immutable instance of their corresponding policy. All subprocess-backed
@@ -670,13 +735,20 @@ containment remain a separate follow-up.
 
 - `LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN`: one-time token for creating the first
   admin on fresh auth-enabled deployments
-- `LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE`: `local` (default),
-  `first_run`, or `never`; controls whether `/auth/bootstrap-status` can return
-  the first-admin token before any users exist. In the default `local` mode the
-  setup screen shows the token only when the request originates from a local,
-  LAN, or VPN address and hides it on public hosts; use `first_run` to allow
-  first-run browser display on public deployments; `never` always hides it. The
-  token is never returned after any user exists.
+- `LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE`: `never`, `first_run`, or
+  `local`; controls whether the unauthenticated `/auth/bootstrap-status` can
+  return the first-admin token before any users exist. When unset it defaults to
+  `local` in `LAB_TRACKER_ENVIRONMENT=local` and to `never` everywhere else.
+  `local` shows the token only when the TCP peer is a loopback, LAN, or
+  link-local address; behind a reverse proxy, a Docker bridge, or Docker Desktop
+  every client arrives from such a private address, so setting `local` outside
+  the `local` environment is rejected at startup. `never` always hides the token:
+  paste it into `Create First Admin` yourself (the Docker entrypoint stores a
+  generated token in `/app/data/runtime-env/bootstrap-admin-token`, e.g.
+  `docker compose exec app cat /app/data/runtime-env/bootstrap-admin-token`).
+  `first_run` shows it to any caller until the first user exists; use it only
+  when you create the first admin immediately after deploy, as the Render
+  blueprint does. The token is never returned after any user exists.
 
 ### Graph draft providers and transcription
 
@@ -711,7 +783,10 @@ otherwise bounded and provider-side spending limits are acceptable. Exact
 - `LAB_TRACKER_GRAPH_DRAFT_PROVIDER`: active drafting provider (default:
   `openai`; accepted values are `openai`, `anthropic`/`claude`, and
   `google`/`gemini`; `agentic`/`agentic-openai` enables the read-only agentic
-  batch drafter and must be run through the background worker)
+  batch drafter, which runs only in the background worker, so startup fails
+  unless `LAB_TRACKER_GRAPH_DRAFT_BACKGROUND_ENABLED` or
+  `LAB_TRACKER_GRAPH_DRAFT_SCHEDULER_ENABLED` is `true`; note-scoped and
+  analysis drafts under this provider use the wrapped OpenAI client directly)
 - `LAB_TRACKER_GRAPH_DRAFT_BACKGROUND_ENABLED`: when `true`, run-now and
   run-due enqueue graph-draft batch jobs and the in-process worker executes
   them (default: `false`)
@@ -752,7 +827,15 @@ otherwise bounded and provider-side spending limits are acceptable. Exact
 - `LAB_TRACKER_ANTHROPIC_BASE_URL`: Anthropic API base URL (default:
   `https://api.anthropic.com/v1`)
 - `LAB_TRACKER_ANTHROPIC_TIMEOUT_SECONDS`: Anthropic graph draft API timeout in
-  seconds (default: `60`)
+  seconds (default: `300`, sized with the default output budget because the
+  request is not streamed and returns nothing until the model finishes)
+- `LAB_TRACKER_ANTHROPIC_MAX_OUTPUT_TOKENS`: `max_tokens` output budget for
+  each Anthropic graph-draft request (default: `16000`; must be positive and
+  within the configured model's output limit). A response that stops at this
+  limit fails with an explicit truncation error instead of a malformed-JSON
+  error, and is not retried because the same budget would truncate again;
+  raise it for large daily batches, together with
+  `LAB_TRACKER_ANTHROPIC_TIMEOUT_SECONDS`, since longer outputs take longer.
 - `LAB_TRACKER_GOOGLE_API_KEY`: required when the provider is `google` or
   `gemini`; also required for Google voice-note transcription
 - `LAB_TRACKER_GOOGLE_MODEL`: Google Gemini model for graph drafts and
@@ -806,7 +889,8 @@ authorization grant: normal sign-in and project access are still required.
   configure it together with the username or configure neither
 - `LAB_TRACKER_REVIEW_EMAIL_SMTP_FROM_ADDRESS`: required sender for SMTP
 - `LAB_TRACKER_REVIEW_EMAIL_SMTP_TLS_MODE`: `none`, `starttls` (default), or
-  `implicit`
+  `implicit`; `none` is refused at startup when a username/password is
+  configured, because the login would travel in plaintext
 - `LAB_TRACKER_REVIEW_EMAIL_SMTP_TIMEOUT_SECONDS`: bounded SMTP timeout
   (default: `10`, maximum: `30`)
 
@@ -838,8 +922,10 @@ MCP setup guides ([`lab-tracker-mcp-skills.md`](lab-tracker-mcp-skills.md),
   `LAB_TRACKER_BASE_URL`; the canonical name takes precedence when both exist
 - `LAB_TRACKER_MCP_API_KEY` / `LAB_TRACKER_MCP_TOKEN`: bearer token; either name
   works and bypasses `/auth/login`
-- `LAB_TRACKER_MCP_USERNAME` / `LAB_TRACKER_MCP_PASSWORD`: login credentials used
-  when no token is set and the target instance has auth enabled
+- `LAB_TRACKER_MCP_USERNAME` / `LAB_TRACKER_MCP_PASSWORD`: deprecated login
+  credentials used when no token is set and the target instance has auth
+  enabled; migrate to `LAB_TRACKER_MCP_API_KEY` (`lt auth doctor` lists configs
+  still using them)
 - `LAB_TRACKER_MCP_TIMEOUT_SECONDS`: API request timeout (default: `10`)
 
 The hosted read-only MCP endpoint (the optional `mcp` docker-compose service)
@@ -858,9 +944,18 @@ adds:
   `/mcp`)
 - `LAB_TRACKER_MCP_HOST_PORT`: host loopback port the compose `mcp` service is
   published on (default: `9000`)
+- `LAB_TRACKER_MCP_ALLOW_WRITES`: `false` (default) or `true`. A hosted server
+  registers only read tools and resources and refuses to start unless its API
+  token is a read-only `lpat_`; `true` deliberately serves write tools too.
+  Tools that read files on the MCP host are never registered when hosted.
+- `LAB_TRACKER_MCP_ALLOWED_HOSTS` / `LAB_TRACKER_MCP_ALLOWED_ORIGINS`: optional
+  comma-separated Host and Origin allowlists (for example `mcp.lab.internal`
+  and `https://github.com`; `:*` matches any port). Empty leaves Host policy to
+  the reverse proxy; an Origin list requires a Host list.
 
 The process refuses to start if the inbound token is absent, weak, or equal to
-the API LPAT. Requests with missing or invalid inbound credentials receive 401
+the API LPAT, if the API reports authentication disabled or cannot be reached,
+or if the API token can write while `LAB_TRACKER_MCP_ALLOW_WRITES` is off. Requests with missing or invalid inbound credentials receive 401
 before FastMCP dispatch, and the inbound `Authorization` header is stripped
 before the downstream app runs. This is a shared private endpoint, not per-user
 authorization; serve it only through TLS on a VPN or tailnet.
@@ -871,21 +966,147 @@ authorization; serve it only through TLS on a VPN or tailnet.
 - `LAB_TRACKER_DOLT_MIRROR_PATH`: local mirror directory (default:
   `.lab-tracker-dolt`)
 
+### Client, script, and deploy variables
+
+These variables are read straight from the environment by the `lt` client, the
+hooks it installs, the operator scripts under `scripts/`, the container
+entrypoint, and the pinned Compose deployments under `deployments/`. The
+FastAPI app does not read them. `LAB_TRACKER_BASE_URL` (see
+[Application](#application)) is also the API origin for all of them.
+
+#### `lt` client and agent setup
+
+- `LAB_TRACKER_ACCESS_TOKEN`: bearer token the client sends, preferably a
+  personal access token (`lpat_...`); it overrides the token saved in the
+  connection profile. `lt setup connect --save-token` saves it when `--token`
+  is not given.
+- `LAB_TRACKER_USERNAME` / `LAB_TRACKER_PASSWORD`: login credentials the client
+  uses when it has no token, or after the API rejects the one it has. Prefer an
+  access token. The client also accepts the deprecated
+  `LAB_TRACKER_MCP_USERNAME` / `LAB_TRACKER_MCP_PASSWORD` names.
+- `LAB_TRACKER_PROJECT_ID`: default project UUID for commands that take
+  `--project`; it overrides the profile's default project. Installed Git hooks
+  export it.
+- `LAB_TRACKER_HTTP_TIMEOUT`: client request timeout in seconds (default: `15`)
+- `LAB_TRACKER_DEBUG`: `1`, `true`, `yes`, or `on` shows tracebacks for API
+  errors, like `--debug`
+- `LAB_TRACKER_CONFIG_DIR`: per-user client directory for the connection
+  profile, install id, and enrolled-repo registry (default: `~/.lab-tracker`)
+- `LAB_TRACKER_CAPTURE_HOST`: machine label recorded on captures (default: the
+  hostname)
+- `LAB_TRACKER_SKILLS_HOME`: install the generated setup skill into this one
+  directory instead of both `~/.claude/skills` and `~/.agents/skills`
+
+#### Git, repo, HPC, and watch capture
+
+- `LAB_TRACKER_GIT_CAPTURE_ENABLED`: set to `0` to turn off the managed Git
+  commit-capture hook without uninstalling it (default: on)
+- `LAB_TRACKER_GIT_DRAFT_ENABLED`: older name for
+  `LAB_TRACKER_GIT_CAPTURE_ENABLED`, used only when the new name is unset
+- `LAB_TRACKER_LT`: `lt` executable the managed Git and repo hooks run
+  (default: the path recorded when the hook was installed)
+- `LAB_TRACKER_PYTHON`: Python interpreter the Windows graph-draft hook
+  (`scripts/install-git-graph-draft-hook.ps1`) and `scripts/matlab-smoke.sh`
+  run (default: the interpreter recorded at install, or `python3`)
+- `LAB_TRACKER_GIT_MAX_DIFF_LINES`: maximum diff lines a Git capture keeps
+  (default: `800`)
+- `LAB_TRACKER_GIT_CONTEXT_LINES`: unified-diff context lines in a Git capture
+  (default: `3`)
+- `LAB_TRACKER_GIT_TIMEOUT_SECONDS`: timeout in seconds for each `git` probe the
+  client runs (default: `10`)
+- `LAB_TRACKER_GIT_COMMIT` / `LAB_TRACKER_GIT_REPO`: default commit and
+  repository for `scripts/create-analysis-graph-draft.py` (repository default:
+  the current directory)
+- `LAB_TRACKER_TOKEN`: bearer token for `scripts/create-analysis-graph-draft.py`
+  when `--token` is not given
+- `LAB_TRACKER_REPO_HOOK_ENABLED`: set to `0` to turn off the `lt repo`
+  post-commit hook without uninstalling it (default: on)
+- `LAB_TRACKER_REPO_CONFIG` / `LAB_TRACKER_HPC_CONFIG` /
+  `LAB_TRACKER_WATCH_CONFIG`: path to the `repo.json`, `hpc.json`, or
+  `watch.json` config (default: the nearest `.lab-tracker/<name>.json` in the
+  current directory or a parent)
+- `LAB_TRACKER_REPO_OUTBOX` / `LAB_TRACKER_HPC_OUTBOX` /
+  `LAB_TRACKER_WATCH_OUTBOX`: outbox directory that overrides the config's
+  `outbox` (defaults: `.lab-tracker/outbox/repo`, `hpc`, and `watch`)
+- `LAB_TRACKER_REPO_RUN_ID` / `LAB_TRACKER_HPC_RUN_ID`: run id for `lt repo` and
+  `lt hpc` events when `--run` is not given. `lt hpc` sets the HPC run id,
+  outbox, and config for the job it submits.
+- `LAB_TRACKER_CONTAINER_REF`: container image reference folded into the
+  repository environment fingerprint
+
+#### Operator scripts
+
+- `LAB_TRACKER_HOST` / `LAB_TRACKER_PORT`: bind address and port for
+  `scripts/serve-lan.sh` (defaults: `0.0.0.0`, `8000`)
+- `LAB_TRACKER_ALLOW_INSECURE_AUTH_DISABLED`: `1`, `true`, or `yes` lets
+  `scripts/serve-lan.sh` and `scripts/serve-lan.ps1` serve on a non-loopback
+  address with authentication disabled, like `--allow-insecure-auth-disabled`
+- `LAB_TRACKER_API_KEY`: bearer token for the daily-review trigger scripts
+  (`scripts/daily-review-run-due.*` and the installers); use an `lpat_` token
+  with the `batch_run_due` scope
+- `LAB_TRACKER_ADMIN_USER` / `LAB_TRACKER_ADMIN_PASS`: fallback admin login for
+  the daily-review trigger scripts when no API key is set
+- `LAB_TRACKER_SECRETS_FILE`: private JSON file the daily-review trigger reads
+  its API key or admin login from (the scheduler installers write it with mode
+  `0600`)
+- `LAB_TRACKER_DAILY_REVIEW_LOG`: log file for the scheduled daily-review run
+  (default: `~/.lab-tracker-daily-review.log`)
+
+#### Container image and entrypoint
+
+- `LAB_TRACKER_SOURCE_VERSION`: Docker build argument recorded as the image's
+  OCI version label and environment (default: `0.1.0`)
+- `LAB_TRACKER_RUNTIME_ENV_DIR`: directory where the entrypoint keeps the
+  secrets it generates (default: `/app/data/runtime-env`)
+- `LAB_TRACKER_AUTH_SECRET_KEY_FILE`: file the entrypoint reads the auth secret
+  from, generating it when missing (default:
+  `<runtime-env dir>/auth-secret-key`). The one-shot external review-email
+  bridge reads the same file when `LAB_TRACKER_AUTH_SECRET_KEY` is unset.
+- `LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_FILE`: file the entrypoint reads the
+  first-admin token from, generating it when missing (default:
+  `<runtime-env dir>/bootstrap-admin-token`)
+
+#### Pinned shared-provider deployment
+
+Docker Compose interpolates these when
+`deployments/shared-provider/docker-compose.yml` is layered over the root
+Compose file, usually from the repository-root `.env`. See
+[`deployments/shared-provider/README.md`](../deployments/shared-provider/README.md).
+
+- `LAB_TRACKER_RELEASE_IMAGE`: the reviewed, immutable application image the
+  app and MCP services both run, e.g.
+  `lab-tracker-primary:sha-<full-git-revision>` (required; Compose refuses to
+  resolve the overlay when it is unset, and the overlay removes the source
+  build)
+- `LAB_TRACKER_PROVIDER_ENV_FILE`: env file holding only the graph-draft
+  provider credential, loaded into the app service (default:
+  `./deployments/shared-provider/.env`; the file must exist)
+- `LAB_TRACKER_RUNTIME_ENV_FILE`: env file holding the non-secret provider,
+  scheduler, model, timeout, and review-email policy, loaded into the app
+  service (default: `./deployments/shared-provider/runtime.env`, copied from
+  `runtime.env.example`; the file must exist)
+
 ## Authentication behavior
 
 Local development starts with authentication disabled so early testing can use
-the app without creating accounts. Set `LAB_TRACKER_AUTH_ENABLED=true` to test
-the login and role flow. Non-local environments keep authentication enabled by
+the app without creating accounts. Set `LAB_TRACKER_AUTH_ENABLED=true` and set
+`LAB_TRACKER_AUTH_SECRET_KEY` to a strong random value to test the login and
+role flow. Non-local environments keep authentication enabled by
 default and cannot disable auth.
 
 Public registration creates viewer accounts when
 `LAB_TRACKER_AUTH_PUBLIC_VIEWER_REGISTRATION_ENABLED=true`. Viewer accounts can
-inspect authorized records; write workflows (note upload, draft creation,
-operation edits, and graph commits) require an editor or admin role. A fresh
-auth-enabled instance shows first-admin setup when
+inspect authorized records. Project writes (note upload, draft creation,
+operation edits, and graph commits) come from project contributor or owner
+membership (some steps are owner-only) or the global admin role. Other global
+roles grant no project access on their own, and project membership is what a
+project owner grants: a viewer account made a project contributor can write in
+that project. Personal access tokens additionally need an editor or admin token
+role to write. A fresh auth-enabled instance shows first-admin setup when
 `LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN` is configured. `/health` remains public for
-uptime probes; `/readiness` and `/metrics` require credentials when
-authentication is enabled.
+uptime probes; `/readiness` requires credentials when authentication is
+enabled, and `/metrics` (instance-wide entity counts) additionally requires the
+admin role.
 
 ## Usage telemetry
 
@@ -954,8 +1175,9 @@ model endpoint.
 ### Auth, validation, and committed records
 
 Authentication and role checks apply to raw images, drafts, draft edits, and
-commits. Viewer accounts can inspect authorized records; editor/admin roles are
-required for note upload, draft creation, operation edits, and graph commits.
+commits. Viewer accounts can inspect authorized records; note upload, draft
+creation, operation edits, and graph commits require project contributor or
+owner membership or the global admin role (see Authentication behavior above).
 Raw images and draft operations are not committed automatically. Accepted
 operations still pass through the normal API validation path, and model output
 that references unknown entity IDs or unsupported semantic operations is rejected.
@@ -967,7 +1189,9 @@ The review screen records enough metadata to compare `graph_context` and
 fields, clarification requests, operation statuses, and commit timing. Suggested
 evaluation metrics are accepted/edited/rejected operations, duplicate entity
 proposals, reviewer edit burden, time from capture to commit, and uncertainty
-quality. Offline queued capture is intentionally deferred in this release.
+quality. Captures taken offline queue in the browser (IndexedDB) and upload
+when the network returns; see
+[`phone-capture-quickstart.md`](phone-capture-quickstart.md).
 
 ## Local evidence inbox imports
 

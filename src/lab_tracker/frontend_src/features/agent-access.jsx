@@ -771,7 +771,10 @@ function AgentAccessPage({
                     <div>
                       <strong>{item.label}</strong>
                       <div className="subtle">
-                        {item.role}
+                        {item.effective_role}
+                        {item.effective_role !== item.role
+                          ? ` (issued as ${item.role})`
+                          : ""}
                         {item.read_only ? " · read-only" : " · read-write"}
                         {` · expires ${formatDate(item.expires_at)}`}
                         {item.last_used_at

@@ -353,6 +353,12 @@ class EvidenceBundleService(BaseService):
                 )
                 if existing is not None:
                     return self._compare_replay(existing, request_fingerprint)
+                # Components below take the project reference lock one by one;
+                # take it once before any component write so no row lock
+                # precedes it. The idempotency lookup above is a plain read, so
+                # racing identical keys still reach the insert and replay the
+                # winner through EvidenceBundleKeyRaceError.
+                self.repository.lock_project_references(normalized_command.project_id)
                 prepared = self.prepare(
                     normalized_command,
                     actor=actor,
@@ -398,6 +404,7 @@ class EvidenceBundleService(BaseService):
         self.authorization.require_contributor(command.project_id, actor=actor)
         self.projects.get_project(command.project_id)
         normalized_command = _normalize_command(command)
+        self._validate_upload_intent_size(normalized_command)
         self._validate_primary_question(normalized_command)
         self._validate_dataset(normalized_command)
         self._validate_analysis(normalized_command)
@@ -423,6 +430,16 @@ class EvidenceBundleService(BaseService):
             raise ValidationError("At least one evidence-bundle component is required.")
         if not command.dry_run:
             _required_key(command.idempotency_key)
+
+    def _validate_upload_intent_size(self, command: RecordEvidenceBundleCommand) -> None:
+        upload_intent = getattr(command.visualization, "upload_intent", None)
+        if upload_intent is None:
+            return
+        max_bytes = self._context.active_settings().max_upload_bytes
+        if upload_intent.size_bytes > max_bytes:
+            raise ValidationError(
+                f"upload_intent size_bytes exceeds the upload limit of {max_bytes} bytes."
+            )
 
     def _validate_primary_question(self, command: RecordEvidenceBundleCommand) -> None:
         if command.primary_question_id is None:

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   AUTH_REJECTED_EVENT,
+  NetworkError,
   apiListRequest,
   apiRequest,
   fetchAllPages,
@@ -14,6 +15,39 @@ import {
   errorResponse,
   installFetchMock,
 } from "../test/utils.js";
+
+describe("network failures", () => {
+  it("wraps a rejected fetch in NetworkError, keeping its message and cause", async () => {
+    const offline = new TypeError("Failed to fetch");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw offline;
+      })
+    );
+
+    const error = await apiRequest("/resource").catch((caught) => caught);
+
+    expect(error).toBeInstanceOf(NetworkError);
+    expect(error.message).toBe("Failed to fetch");
+    expect(error.cause).toBe(offline);
+    expect(error.status).toBeUndefined();
+  });
+
+  it("does not report a malformed successful response as a network failure", async () => {
+    installFetchMock([
+      {
+        match: "/resource",
+        response: new Response("ok", { headers: { "content-type": "text/plain" }, status: 200 }),
+      },
+    ]);
+
+    const error = await apiRequest("/resource").catch((caught) => caught);
+
+    expect(error).toBeInstanceOf(ContractError);
+    expect(error).not.toBeInstanceOf(NetworkError);
+  });
+});
 
 describe("strict JSON envelope helpers", () => {
   it("apiRequest rejects malformed successful resource envelopes", async () => {
@@ -154,6 +188,72 @@ describe("strict JSON envelope helpers", () => {
         status: 401,
         token,
       });
+    } finally {
+      window.removeEventListener(AUTH_REJECTED_EVENT, authRejected);
+    }
+  });
+
+  it.each([
+    "Invalid device token.",
+    "Invalid personal access token.",
+    "Session has been revoked.",
+  ])("rejects authentication for any credential 401 (%s)", async (message) => {
+    const authRejected = vi.fn();
+    const token = "revoked-credential";
+    window.addEventListener(AUTH_REJECTED_EVENT, authRejected);
+    installFetchMock([{ match: "/notes", response: errorResponse(message, 401) }]);
+
+    try {
+      await expect(apiRequest("/notes", { token })).rejects.toMatchObject({
+        message,
+        status: 401,
+      });
+      expect(authRejected).toHaveBeenCalledTimes(1);
+      expect(authRejected.mock.calls[0][0].detail).toEqual({ message, status: 401, token });
+    } finally {
+      window.removeEventListener(AUTH_REJECTED_EVENT, authRejected);
+    }
+  });
+
+  it("does not reject the session for a credential-free 401", async () => {
+    // Unauthenticated flows (device pairing, invitation redemption, login) can
+    // return 401 while a user is signed in; they carry no session credential.
+    const authRejected = vi.fn();
+    window.addEventListener(AUTH_REJECTED_EVENT, authRejected);
+    installFetchMock([
+      {
+        match: "/auth/devices/consume",
+        method: "POST",
+        response: errorResponse("Enrollment offer has expired.", 401),
+      },
+    ]);
+
+    try {
+      await expect(
+        apiRequest("/auth/devices/consume", { method: "POST", body: { offer_token: "x" } })
+      ).rejects.toMatchObject({ message: "Enrollment offer has expired.", status: 401 });
+      expect(authRejected).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener(AUTH_REJECTED_EVENT, authRejected);
+    }
+  });
+
+  it.each([
+    "Project contributor access required.",
+    "Insufficient role.",
+    "This action is not permitted for paired devices.",
+  ])("keeps the session on a permission 403 (%s)", async (message) => {
+    const authRejected = vi.fn();
+    window.addEventListener(AUTH_REJECTED_EVENT, authRejected);
+    installFetchMock([
+      { match: "/notes", method: "POST", response: errorResponse(message, 403) },
+    ]);
+
+    try {
+      await expect(
+        apiRequest("/notes", { method: "POST", body: {}, token: "still-valid-token" })
+      ).rejects.toMatchObject({ message, status: 403 });
+      expect(authRejected).not.toHaveBeenCalled();
     } finally {
       window.removeEventListener(AUTH_REJECTED_EVENT, authRejected);
     }

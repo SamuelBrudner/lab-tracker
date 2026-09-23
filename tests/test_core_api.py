@@ -4,9 +4,11 @@ from uuid import UUID, uuid4
 
 import pytest
 from api_helpers import repository_backed_api
+from sqlalchemy import update
 
 from lab_tracker.auth import AuthContext, AuthService, Role
-from lab_tracker.errors import AuthError, ValidationError
+from lab_tracker.db_models import ExplorationNodeModel
+from lab_tracker.errors import AuthError, NotFoundError, ValidationError
 from lab_tracker.models import (
     AnalysisStatus,
     ClaimStatus,
@@ -403,7 +405,7 @@ def _create_pivot_node(api, project, question, actor, *, title: str, **invalidat
     )
 
 
-def test_deleting_invalidated_target_does_not_strand_committed_pivot():
+def test_invalidated_target_cannot_be_deleted_under_a_committed_pivot():
     api, actor, project, question, _dataset, _claim = _create_exploration_context()
     decision = _create_decision_node(api, project, question, actor, title="Old path")
     pivot = _create_pivot_node(
@@ -418,19 +420,19 @@ def test_deleting_invalidated_target_does_not_strand_committed_pivot():
         pivot.node_id, status=ExplorationNodeStatus.COMMITTED, actor=actor
     )
 
-    # Deleting the invalidated target SET NULLs the committed pivot's ref.
-    api.delete_exploration_node(decision.node_id, actor=actor)
-    stranded = api.get_exploration_node(pivot.node_id)
-    assert stranded.invalidates_node_id is None
+    # The pivot's exactly-one invalidation target cannot be deleted out from
+    # under it (previously the FK SET NULL stranded the committed pivot).
+    with pytest.raises(ValidationError, match="exploration pivots invalidate it"):
+        api.delete_exploration_node(decision.node_id, actor=actor)
+    assert api.get_exploration_node(pivot.node_id).invalidates_node_id == decision.node_id
 
-    # The pivot can still be transitioned (status-only) despite the nulled ref.
     archived = api.update_exploration_node(
         pivot.node_id, status=ExplorationNodeStatus.ARCHIVED, actor=actor
     )
     assert archived.status == ExplorationNodeStatus.ARCHIVED
 
 
-def test_status_only_commit_tolerates_since_deleted_invalidation_target():
+def test_status_only_commit_tolerates_legacy_stranded_invalidation_target():
     api, actor, project, question, _dataset, claim = _create_exploration_context()
     pivot = _create_pivot_node(
         api,
@@ -440,8 +442,18 @@ def test_status_only_commit_tolerates_since_deleted_invalidation_target():
         title="Pivot invalidating a claim",
         invalidates_claim_id=claim.claim_id,
     )
+    with pytest.raises(ValidationError, match="exploration pivots invalidate it"):
+        api.delete_claim(claim.claim_id, actor=actor)
 
-    api.delete_claim(claim.claim_id, actor=actor)
+    # Rows stranded before delete guards existed (FK SET NULL) must still be
+    # able to make status-only transitions.
+    _engine, session = api._test_resources  # type: ignore[attr-defined]
+    session.execute(
+        update(ExplorationNodeModel)
+        .where(ExplorationNodeModel.node_id == str(pivot.node_id))
+        .values(invalidates_claim_id=None)
+    )
+    session.commit()
 
     committed = api.update_exploration_node(
         pivot.node_id, status=ExplorationNodeStatus.COMMITTED, actor=actor
@@ -1025,6 +1037,99 @@ def test_dataset_commit_requires_active_question():
     api.update_question(question.question_id, status=QuestionStatus.ACTIVE, actor=actor)
     committed = api.update_dataset(dataset.dataset_id, status=DatasetStatus.COMMITTED, actor=actor)
     assert committed.status == DatasetStatus.COMMITTED
+
+
+def _manifest_note_fixture():
+    api = repository_backed_api()
+    actor = _actor()
+    project = api.create_project("Manifest notes", actor=actor)
+    other_project = api.create_project("Someone else's notes", actor=actor)
+    question = api.create_question(
+        project_id=project.project_id,
+        text="Which notes explain this dataset?",
+        question_type=QuestionType.DESCRIPTIVE,
+        status=QuestionStatus.ACTIVE,
+        actor=actor,
+    )
+    own_note = api.create_note(
+        project_id=project.project_id,
+        raw_content="Rig drifted after lunch.",
+        actor=actor,
+    )
+    foreign_note = api.create_note(
+        project_id=other_project.project_id,
+        raw_content="Different project entirely.",
+        actor=actor,
+    )
+    return api, actor, project, question, own_note, foreign_note
+
+
+def _manifest_with_notes(*note_ids: UUID) -> DatasetCommitManifestInput:
+    return DatasetCommitManifestInput(
+        files=[DatasetFile(path="data.csv", checksum="abc123")],
+        note_ids=list(note_ids),
+    )
+
+
+@pytest.mark.parametrize("status", [DatasetStatus.STAGED, DatasetStatus.COMMITTED])
+def test_dataset_manifest_rejects_nonexistent_and_cross_project_note_ids(status):
+    api, actor, project, question, _own_note, foreign_note = _manifest_note_fixture()
+
+    with pytest.raises(NotFoundError, match="Dataset manifest note does not exist."):
+        api.create_dataset(
+            project_id=project.project_id,
+            primary_question_id=question.question_id,
+            status=status,
+            commit_manifest=_manifest_with_notes(uuid4()),
+            actor=actor,
+        )
+    with pytest.raises(
+        ValidationError,
+        match="Dataset manifest notes must belong to the same project.",
+    ):
+        api.create_dataset(
+            project_id=project.project_id,
+            primary_question_id=question.question_id,
+            status=status,
+            commit_manifest=_manifest_with_notes(foreign_note.note_id),
+            actor=actor,
+        )
+    assert api.list_datasets(project_id=project.project_id) == []
+
+
+def test_dataset_manifest_update_rejects_cross_project_and_missing_note_ids():
+    api, actor, project, question, own_note, foreign_note = _manifest_note_fixture()
+    dataset = api.create_dataset(
+        project_id=project.project_id,
+        primary_question_id=question.question_id,
+        commit_manifest=_manifest_with_notes(own_note.note_id),
+        actor=actor,
+    )
+    assert dataset.commit_manifest.note_ids == [own_note.note_id]
+
+    with pytest.raises(
+        ValidationError,
+        match="Dataset manifest notes must belong to the same project.",
+    ):
+        api.update_dataset(
+            dataset.dataset_id,
+            commit_manifest=_manifest_with_notes(own_note.note_id, foreign_note.note_id),
+            actor=actor,
+        )
+    with pytest.raises(NotFoundError, match="Dataset manifest note does not exist."):
+        api.update_dataset(
+            dataset.dataset_id,
+            commit_manifest=_manifest_with_notes(uuid4()),
+            actor=actor,
+        )
+    assert api.get_dataset(dataset.dataset_id).commit_manifest.note_ids == [own_note.note_id]
+
+    committed = api.update_dataset(
+        dataset.dataset_id,
+        status=DatasetStatus.COMMITTED,
+        actor=actor,
+    )
+    assert committed.commit_manifest.note_ids == [own_note.note_id]
 
 
 def test_dataset_commit_requires_evidence_source():
@@ -2035,3 +2140,62 @@ def test_operational_session_disallows_primary_question():
             primary_question_id=question.question_id,
             actor=actor,
         )
+
+
+def test_question_refactor_records_entity_versions_for_every_changed_question():
+    """L109: refactors must appear in /questions/{id}/versions like other edits."""
+
+    api = repository_backed_api()
+    actor = _actor()
+    project = api.create_project("Question Refactor Versions", actor=actor)
+    source = api.create_question(
+        project_id=project.project_id,
+        text="Does the original wording hold?",
+        question_type=QuestionType.DESCRIPTIVE,
+        status=QuestionStatus.ACTIVE,
+        actor=actor,
+    )
+    moved_child = api.create_question(
+        project_id=project.project_id,
+        text="Which child moves?",
+        question_type=QuestionType.METHOD_DEV,
+        parent_question_ids=[source.question_id],
+        actor=actor,
+    )
+    retained_child = api.create_question(
+        project_id=project.project_id,
+        text="Which child stays?",
+        question_type=QuestionType.METHOD_DEV,
+        parent_question_ids=[source.question_id],
+        actor=actor,
+    )
+
+    result = api.refactor_question(
+        source.question_id,
+        replacement_text="Does the refined wording hold?",
+        replacement_question_type=QuestionType.DESCRIPTIVE,
+        replacement_status=QuestionStatus.ACTIVE,
+        reason="Sharpen the wording.",
+        child_question_ids_to_reparent=[moved_child.question_id],
+        actor=actor,
+    )
+
+    def versions(question_id):
+        return api.list_entity_versions(entity_type=EntityType.QUESTION, entity_id=question_id)
+
+    replacement_id = result.replacement_question.question_id
+    source_versions = versions(source.question_id)
+    assert [item.version_number for item in source_versions] == [1, 2]
+    assert source_versions[-1].snapshot == api.get_question(source.question_id).model_dump(
+        mode="json"
+    )
+    assert source_versions[-1].snapshot["status"] == QuestionStatus.SUPERSEDED.value
+    replacement_versions = versions(replacement_id)
+    assert [item.version_number for item in replacement_versions] == [1]
+    assert replacement_versions[0].snapshot == api.get_question(replacement_id).model_dump(
+        mode="json"
+    )
+    moved_versions = versions(moved_child.question_id)
+    assert [item.version_number for item in moved_versions] == [1, 2]
+    assert moved_versions[-1].snapshot["parent_question_ids"] == [str(replacement_id)]
+    assert [item.version_number for item in versions(retained_child.question_id)] == [1]

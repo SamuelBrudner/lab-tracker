@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -182,6 +184,36 @@ def test_concept_schemes_cover_every_domain_enum_value():
             assert concept_iri(name, value) == f"lab:{name}/{value}"
 
 
+# Property terms whose definitions cite example values of a concept scheme.
+_EXAMPLE_SCHEMES: dict[str, tuple[str, ...]] = {
+    "status": tuple(scheme.name for scheme in CONCEPT_SCHEMES if scheme.name.endswith("Status")),
+    "questionType": ("questionType",),
+    "outcomeStatus": ("outcomeStatus",),
+    "sessionType": ("sessionType",),
+    "claimRelationType": ("claimRelation",),
+    "explorationNodeType": ("explorationNodeType",),
+    "goalType": ("goalType",),
+}
+
+
+def _cited_examples(definition: str) -> list[str]:
+    match = re.search(r"\(for example ([^)]*)\)", definition) or re.search(
+        r": ([^.]*)\.$", definition
+    )
+    assert match is not None, f"no example list in {definition!r}"
+    items = re.split(r",\s*(?:or\s+)?|\s+or\s+", match.group(1))
+    return [item.strip().replace(" ", "_") for item in items if item.strip()]
+
+
+@pytest.mark.parametrize("term_name", sorted(_EXAMPLE_SCHEMES))
+def test_published_example_values_belong_to_their_concept_scheme(term_name: str):
+    term = next(term for term in TERMS if term.name == term_name)
+    schemes = {scheme.name: scheme for scheme in CONCEPT_SCHEMES}
+    allowed = {value for name in _EXAMPLE_SCHEMES[term_name] for value in schemes[name].values}
+    unknown = [value for value in _cited_examples(term.definition) if value not in allowed]
+    assert not unknown, f"{term_name} cites values outside its concept scheme: {unknown}"
+
+
 @pytest.mark.parametrize(
     ("scheme", "value"),
     [("notAScheme", "value"), ("goalType", "not_a_goal")],
@@ -212,3 +244,15 @@ def test_terms_route_is_public_and_content_negotiated(client: TestClient):
     document = jsonld_response.json()
     labels = {node["label"] for node in document["@graph"]}
     assert "falsificationCriteria" in labels
+
+
+def test_terms_route_roots_iris_under_a_mounted_root_path(client: TestClient):
+    # With LAB_TRACKER_BASE_URL unset the base URL falls back to the request,
+    # whose base URL carries the ASGI root_path of a reverse-proxied mount.
+    client.app.state.settings.base_url = ""
+    mounted = TestClient(client.app, root_path="/lab")
+
+    response = mounted.get("/terms", headers={"Accept": "application/ld+json"})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["@id"] == "http://testserver/lab/terms"

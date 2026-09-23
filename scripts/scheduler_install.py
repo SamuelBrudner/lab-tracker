@@ -28,6 +28,8 @@ from urllib.parse import urlsplit
 
 MAX_INTERVAL_MINUTES = 24 * 60
 _CRONTAB_ABSENT_MARKERS = ("no crontab for",)
+_SECRET_ENV_KEYS = ("LAB_TRACKER_API_KEY", "LAB_TRACKER_ADMIN_USER", "LAB_TRACKER_ADMIN_PASS")
+_ADMIN_PAIR = ("LAB_TRACKER_ADMIN_USER", "LAB_TRACKER_ADMIN_PASS")
 # A base API URL only ever needs scheme, host, optional port, and an optional
 # path prefix. Restricting to this charset rejects every byte that is dangerous
 # in a crontab command field (quotes, ; $ % ( ) { } < > | & backtick, control
@@ -227,18 +229,92 @@ def render_launchd_plist(
     return plistlib.dumps(document).decode("utf-8")
 
 
-def write_secrets_file(path: str, values: dict[str, str]) -> None:
+def _read_existing_secrets(path: str) -> dict[str, object]:
+    """Return the persisted secrets, ``{}`` if absent; raise if unreadable."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return {}
+    with os.fdopen(fd, encoding="utf-8") as handle:
+        try:
+            data = json.load(handle)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            raise SchedulerConfigError(
+                f"Existing secrets file {path} is not valid JSON; refusing to overwrite "
+                "it. Inspect it, delete it, and re-run the installer."
+            ) from None
+    if not isinstance(data, dict):
+        raise SchedulerConfigError(
+            f"Existing secrets file {path} is not a JSON object; refusing to overwrite "
+            "it. Inspect it, delete it, and re-run the installer."
+        )
+    return data
+
+
+def _restrict_to_owner(path: str) -> None:
+    """Re-tighten a kept secrets file to 0600 without following a symlink."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        os.fchmod(fd, 0o600)
+    finally:
+        os.close(fd)
+
+
+def lone_admin_half(values: dict[str, str]) -> str | None:
+    """Return the admin-pair key missing from ``values`` when exactly one half is set."""
+    present = [key for key in _ADMIN_PAIR if values.get(key)]
+    if len(present) != 1:
+        return None
+    return next(key for key in _ADMIN_PAIR if key not in present)
+
+
+def _other_admin_half(key: str) -> str:
+    return next(other for other in _ADMIN_PAIR if other != key)
+
+
+def write_secrets_file(path: str, values: dict[str, str]) -> bool:
     """Write non-empty secret values to a private 0600 JSON file.
+
+    The supplied credential replaces the stored one. Returns False, leaving the
+    file untouched, when every supplied value is empty and the file already
+    holds credentials: re-running an installer from a shell without the
+    credential exported (e.g. to change the interval) must not silently wipe the
+    persisted token. Delete the file to clear it.
+
+    When only one of ``LAB_TRACKER_ADMIN_USER`` / ``LAB_TRACKER_ADMIN_PASS`` is
+    supplied (for example a password rotation), the other half is carried over
+    from the stored file. If the file has no such value, a stray half next to a
+    supplied ``LAB_TRACKER_API_KEY`` is dropped (the key is a complete
+    credential that takes precedence at run time); without an API key the write
+    is refused with ``SchedulerConfigError`` rather than persisting a login that
+    cannot work.
 
     O_NOFOLLOW refuses to follow a pre-planted symlink at the fixed secrets path,
     so a local attacker cannot redirect the write (or the O_TRUNC) onto another
     file the user owns.
     """
     data = {key: value for key, value in values.items() if value}
+    missing = lone_admin_half(data)
+    if missing is not None:
+        stored = _read_existing_secrets(path).get(missing)
+        provided = _other_admin_half(missing)
+        if isinstance(stored, str) and stored:
+            data[missing] = stored
+        elif data.get("LAB_TRACKER_API_KEY"):
+            del data[provided]
+        else:
+            raise SchedulerConfigError(
+                f"{provided} is set but {missing} is not, and {path} has no stored "
+                f"{missing} to keep; unset {provided}, or export {missing} too."
+            )
+    if not data and any(_read_existing_secrets(path).values()):
+        _restrict_to_owner(path)
+        return False
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         json.dump(data, handle)
     os.chmod(path, 0o600)
+    return True
 
 
 def read_secret(path: str, key: str) -> str:
@@ -306,14 +382,28 @@ def _cmd_render_plist(args: argparse.Namespace) -> int:
 
 
 def _cmd_write_secrets(args: argparse.Namespace) -> int:
-    write_secrets_file(
-        args.path,
-        {
-            "LAB_TRACKER_API_KEY": os.environ.get("LAB_TRACKER_API_KEY", ""),
-            "LAB_TRACKER_ADMIN_USER": os.environ.get("LAB_TRACKER_ADMIN_USER", ""),
-            "LAB_TRACKER_ADMIN_PASS": os.environ.get("LAB_TRACKER_ADMIN_PASS", ""),
-        },
-    )
+    values = {key: os.environ.get(key, "") for key in _SECRET_ENV_KEYS}
+    missing = lone_admin_half(values)
+    stored = _read_existing_secrets(args.path).get(missing) if missing is not None else None
+    written = write_secrets_file(args.path, values)
+    if missing is not None and isinstance(stored, str) and stored:
+        sys.stderr.write(
+            f"lab-tracker scheduler: {missing} is not set; keeping the stored {missing} "
+            f"from {args.path}.\n"
+        )
+    elif missing is not None:
+        # write_secrets_file only accepts a lone half without a stored pair
+        # when an API key is supplied, and then drops the half.
+        sys.stderr.write(
+            f"lab-tracker scheduler: ignoring {_other_admin_half(missing)} without "
+            f"{missing}; LAB_TRACKER_API_KEY takes precedence and is persisted alone.\n"
+        )
+    if not written:
+        sys.stderr.write(
+            f"lab-tracker scheduler: none of {', '.join(_SECRET_ENV_KEYS)} is set; "
+            f"keeping the existing credentials in {args.path}. "
+            "Export a new credential to replace them, or delete the file to clear them.\n"
+        )
     return 0
 
 

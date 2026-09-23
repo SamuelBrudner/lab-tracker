@@ -62,9 +62,13 @@ def configure_frontend_routes(
         # in the share-target inbox before redirecting. This server-side
         # handler exists only as a graceful fallback for the brief window
         # between install and first activation, or for browsers without
-        # service worker support. The shared payload is lost in that path;
-        # we still redirect the user into the app so the failure is visible.
-        return RedirectResponse(url="/app/capture", status_code=303)
+        # service worker support. The shared payload is lost in that path
+        # (the request has no auth context to import it with), so the
+        # redirect carries the error marker the capture page reports.
+        _logger.warning(
+            "Share-target POST reached the server fallback; the shared payload was not saved."
+        )
+        return RedirectResponse(url="/app/capture?from-share=error", status_code=303)
 
     @app.get("/app/", include_in_schema=False)
     @app.get("/app/{_path:path}", include_in_schema=False)

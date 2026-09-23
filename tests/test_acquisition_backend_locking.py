@@ -145,6 +145,13 @@ def test_acquisition_commands_keep_lock_order_inside_one_transaction(
         question.question_id,
         actor=actor,
     )
+    # Captured collections keep ``session`` alive (reference registry), so the
+    # delete command's lock order is observed on an uncaptured Session.
+    disposable_session = api.create_session(
+        project.project_id,
+        SessionType.OPERATIONAL,
+        actor=actor,
+    )
     context = api.sessions._context
     repository = api.sessions.repository
     original_session_lock = repository.lock_session_acquisition_state
@@ -239,7 +246,7 @@ def test_acquisition_commands_keep_lock_order_inside_one_transaction(
         dataset.dataset_id,
         actor=actor,
     )
-    api.sessions.delete_session(session.session_id, actor=actor)
+    api.sessions.delete_session(disposable_session.session_id, actor=actor)
 
     assert lock_order == [
         ("session", (session.session_id,)),
@@ -252,7 +259,7 @@ def test_acquisition_commands_keep_lock_order_inside_one_transaction(
         ("experiment", (experiment.experiment_id,)),
         ("dataset", (dataset.dataset_id,)),
         ("experiment", (experiment.experiment_id,)),
-        ("session", (session.session_id,)),
+        ("session", (disposable_session.session_id,)),
     ]
     assert commit_count == 8
 

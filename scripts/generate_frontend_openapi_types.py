@@ -78,7 +78,9 @@ def main(argv: list[str] | None = None) -> int:
 
     from lab_tracker.app import create_app
 
-    app = create_app()
+    # Only the OpenAPI schema is needed; skip the startup database check so
+    # code generation does not require a migrated database.
+    app = create_app(verify_schema=False)
     try:
         expected = generate_declaration(app.openapi())
     finally:
@@ -297,6 +299,10 @@ def _schema_to_typescript(schema: dict[str, Any], indent: int = 0) -> str:
         if isinstance(variants, list):
             rendered = operator.join(_schema_to_typescript(item, indent) for item in variants)
             return f"({rendered})"
+
+    if "const" in schema:
+        # pydantic's Literal[...] fields; keep the literal, not its primitive.
+        return json.dumps(schema["const"])
 
     enum = schema.get("enum")
     if isinstance(enum, list):

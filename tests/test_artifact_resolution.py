@@ -4575,6 +4575,26 @@ def test_recovery_finds_moved_file_by_hash(tmp_path):
     )
 
 
+def test_recovery_finds_moved_file_despite_a_dangling_symlink(tmp_path):
+    root = tmp_path / "store"
+    root.mkdir()
+    data = b"analysis output beside a stale latest link"
+    moved = root / "new" / "result.csv"
+    moved.parent.mkdir(parents=True)
+    moved.write_bytes(data)
+    try:
+        (root / "latest").symlink_to("run-0042", target_is_directory=True)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"symlinks are unavailable: {exc}")
+    missing = root / "old" / "result.csv"
+    resolver = LocalFilesystemResolver(allowed_roots=[root], recovery=RecoveryPolicy(enabled=True))
+
+    result = resolver.resolve(_local_ref(missing, _sha256(data)))
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == data
+
+
 def test_recovery_caps_selected_range_while_verifying_full_moved_file(tmp_path):
     root = tmp_path / "store"
     root.mkdir()
@@ -6408,7 +6428,7 @@ def test_git_resolver_refuses_oversized_blob(tmp_path):
 def test_git_resolver_evicts_cache_over_quota(tmp_path):
     base = tmp_path / "gitcache"
     base.mkdir()
-    old = base / "oldremotecache"
+    old = base / "0123456789abcdef"  # named like a per-remote cache the resolver creates
     old.mkdir()
     (old / "objects.pack").write_bytes(b"x" * 5000)
     os.utime(old, (1, 1))  # mark as the least-recently-used cache

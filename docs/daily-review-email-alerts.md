@@ -20,7 +20,10 @@ same review from being queued twice. A worker leases one row, commits the
 lease, contacts the provider, and then records provider acceptance or a
 sanitized failure in a new transaction. Expired leases can be reclaimed after
 a worker crash; retryable failures use exponential backoff and a bounded
-attempt count.
+attempt count. Every lease counts as an attempt, so a delivery whose worker
+keeps dying before it reports a result is marked `failed` once its lease
+expires with `LAB_TRACKER_REVIEW_EMAIL_MAX_ATTEMPTS` attempts used. The next
+claim logs a warning naming each delivery it marks failed this way.
 
 `accepted` means the provider accepted the submission. It does not prove inbox
 delivery; that would require provider delivery webhooks.
@@ -56,7 +59,7 @@ the live Postgres configuration and persisted signing secret:
 ```bash
 docker compose \
   -p lab-tracker \
-  -f /Users/samuelbrudner/Documents/GitHub/lab-tracker/docker-compose.yml \
+  -f /path/to/lab-tracker/docker-compose.yml \
   exec -T app \
   python -m lab_tracker.review_email_external_worker claim
 ```
@@ -86,15 +89,19 @@ mailbox credentials, and can be used when a one-shot container is preferable:
 ```bash
 docker compose \
   -p lab-tracker \
-  -f /Users/samuelbrudner/Documents/GitHub/lab-tracker/docker-compose.yml \
+  -f /path/to/lab-tracker/docker-compose.yml \
   --profile review-email-external \
   run --rm --no-deps review-email-control claim
 ```
 
 Replace `claim` with the full `accepted ...`, `failed ...`, or `test --to ...`
-argument list as needed. The explicit project and root Compose path prevent
-this helper from attaching to Marion's separate `lab-tracker-marion` database
-and signing secret.
+argument list as needed. Replace `/path/to/lab-tracker` with the primary
+checkout, and `lab-tracker` after `-p` with the primary instance's Compose
+project name: the checkout directory name unless `COMPOSE_PROJECT_NAME` or
+`-p` set another (`docker compose ls` lists them). The explicit project name
+and root Compose path prevent this helper from attaching to another Compose
+project on the same host, such as a separate dedicated instance with its own
+database and signing secret.
 
 Admins can enqueue a fixed, non-graph diagnostic via
 `POST /review-email/test`. The diagnostic is visibly labeled as a test and
@@ -104,7 +111,7 @@ an application password. Under Docker, run it through the primary app:
 ```bash
 docker compose \
   -p lab-tracker \
-  -f /Users/samuelbrudner/Documents/GitHub/lab-tracker/docker-compose.yml \
+  -f /path/to/lab-tracker/docker-compose.yml \
   exec -T app \
   python -m lab_tracker.review_email_external_worker test --to user@example.org
 ```

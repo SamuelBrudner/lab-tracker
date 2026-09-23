@@ -26,6 +26,7 @@ from .managed_deletions import (
     DeleteStorage,
     ManagedDeletionAccess,
     ManagedDeletionCommands,
+    ManagedDeletionLocking,
 )
 from .store_health_queries import StoreHealthAccess, StoreHealthQueries
 
@@ -45,6 +46,7 @@ class RequestHandlerRepository(
     CatalogRepository,
     ContextRepository,
     DatasetFileRepository,
+    ManagedDeletionLocking,
     Protocol,
 ):
     """Aggregate of repository roles used by request handlers."""

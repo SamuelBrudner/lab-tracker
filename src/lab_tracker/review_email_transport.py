@@ -109,6 +109,11 @@ class SMTPSettings:
             raise ValueError("password is required when username is configured.")
         if password is not None and username is None:
             raise ValueError("username is required when password is configured.")
+        if username is not None and tls_mode is SMTPTLSMode.NONE:
+            raise ValueError(
+                "SMTP credentials require starttls or implicit TLS; "
+                "tls_mode none would send the password in plaintext."
+            )
         if not 0 < self.timeout_seconds <= MAX_SMTP_TIMEOUT_SECONDS:
             raise ValueError(
                 f"timeout_seconds must be greater than zero and no more than "

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildFlowGraph,
+  computeFlowLayout,
   computeQuestionLayout,
   defaultHiddenTypes,
   filterGraphByHiddenTypes,
@@ -257,6 +258,28 @@ describe("buildFlowGraph edge labels and selection", () => {
     expect(byId.e3.label).toBe("used by");
     expect(byId.e1.label).toBeUndefined();
     expect(byId.e2.label).toBeUndefined();
+  });
+
+  it("restyles hover and selection from a precomputed layout without re-running it", () => {
+    const graph = evidenceChain();
+    const layout = computeFlowLayout(graph, "evidence");
+    const hovered = buildFlowGraph(graph, "evidence", { hoveredEdgeId: "e3", layout });
+    const selected = buildFlowGraph(graph, "evidence", { layout, selectedNodeId: "Q" });
+
+    for (const result of [hovered, selected]) {
+      for (const node of result.nodes) {
+        // Same object, not an equal recomputation: the layout pass was skipped.
+        expect(node.position).toBe(layout.positions.get(node.id));
+      }
+      expect(result.edges.map((item) => item.id)).toEqual(
+        layout.edges.map((item) => item.id)
+      );
+    }
+    expect(Object.fromEntries(hovered.edges.map((item) => [item.id, item.label])).e3).toBe(
+      "used by"
+    );
+    // Without a supplied layout the result is identical to the layout-backed one.
+    expect(buildFlowGraph(graph, "evidence", { hoveredEdgeId: "e3" })).toEqual(hovered);
   });
 
   it("dims everything outside the selected node's neighborhood and labels its edges", () => {

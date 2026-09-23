@@ -9,7 +9,7 @@ import {
   TOKEN_STORAGE_KEY,
 } from "../shared/constants.js";
 import { isStaticDemoEnabled } from "../shared/static-demo-api.js";
-import { clearAllLocalDrafts } from "./useLocalDraft.js";
+import { claimLocalDraftsFor, clearAllLocalDrafts } from "./useLocalDraft.js";
 
 const { useCallback, useEffect, useLayoutEffect, useMemo, useState } = React;
 const REFRESH_MARGIN_MS = 5 * 60 * 1000;
@@ -116,6 +116,9 @@ function useAuthSession({ replace, setBusy, setFlash, storage }) {
   }, []);
 
   const applyAuthPayload = useCallback((payload) => {
+    // Claim before the user is set, so no draft UI mounted by this sign-in can
+    // read a different user's unsent text.
+    claimLocalDraftsFor(payload?.user?.user_id);
     setToken(payload?.access_token || "");
     setTokenExpiresAt(payload?.expires_at || "");
     setUser(payload?.user || null);
@@ -149,8 +152,11 @@ function useAuthSession({ replace, setBusy, setFlash, storage }) {
 
   useEffect(() => {
     function handleAuthRejected(event) {
+      // Only a rejection of the credential this session holds signs it out; a
+      // 401 from a request that sent another (or no) credential says nothing
+      // about the current session.
       const rejectedToken = event.detail?.token || "";
-      if (!token || (rejectedToken && rejectedToken !== token)) {
+      if (!token || rejectedToken !== token) {
         return;
       }
       clearSession();
@@ -191,6 +197,7 @@ function useAuthSession({ replace, setBusy, setFlash, storage }) {
       .then(({ authEnabled: nextAuthEnabled, user: nextUser }) => {
         if (!canceled) {
           setAuthEnabled(nextAuthEnabled);
+          claimLocalDraftsFor(nextUser?.user_id);
           setUser(nextUser);
           if (!nextAuthEnabled && token) {
             setToken("");

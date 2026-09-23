@@ -27,11 +27,12 @@ disagree, the retained-surface document wins.
 ### With uv (recommended)
 
 ```bash
-uv venv
+uv sync --frozen --extra test --extra lint
 source .venv/bin/activate
-uv pip install -e ".[test,lint]"
 ```
 
+`uv sync --frozen` creates `.venv` and installs the exact dependency versions
+recorded in `uv.lock`, so a new upstream release cannot change your install.
 Install `uv` first if needed (for example: `brew install uv` or `pipx install uv`).
 
 ### With pip and venv (fallback)
@@ -42,7 +43,9 @@ source .venv/bin/activate
 pip install -e ".[test,lint]"
 ```
 
-Commands below use `uv run`. If you used pip/venv instead, drop the `uv run` prefix.
+pip resolves the version ranges in `pyproject.toml` rather than the tested
+versions in `uv.lock`. Commands below use `uv run`. If you used pip/venv
+instead, drop the `uv run` prefix.
 
 The `[test,lint]` extras pull in the backend test and lint tooling. To capture
 Matplotlib figures with the Python client (`lab_tracker_client.savefig`,
@@ -50,7 +53,7 @@ Matplotlib figures with the Python client (`lab_tracker_client.savefig`,
 and `pillow`:
 
 ```bash
-uv pip install -e ".[test,lint,figure]"
+uv sync --frozen --extra test --extra lint --extra figure
 ```
 
 Windows fresh-clone notes, including Beads/Dolt setup, are in
@@ -113,6 +116,8 @@ lab-tracker seed-demo
 
 It runs migrations first (skip with `--skip-migrations`) and is a no-op if the
 default demo project already exists (force a fresh one with `--allow-duplicates`).
+It refuses to write into a non-local (`LAB_TRACKER_ENVIRONMENT` other than
+`local`) or auth-enabled database unless you pass `--allow-non-local`.
 This is the same seeded data behind the read-only public demo.
 
 ### Check managed idiom blocks
@@ -129,11 +134,11 @@ initialised consumer repo to the installed package version in one step:
 managed prompt blocks are re-rendered in place (your original consent choice
 is preserved; add missing conventions blocks with `--yes`), and scaffolded
 integration files — the `.claude/settings.json` prompt hook, `.mcp.json`,
-`.cursor/mcp.json`, the `scripts/lt.py` shim, and `AGENTS.lt.md` — are
-rewritten to the current canonical text. A file whose content differs is
-first preserved next to itself as `*.bak-lt-update`, and `lt_ids.json` is
-never touched. `--dry-run` previews the changes; run `lt doctor` afterwards
-to confirm the repo is in sync.
+`.cursor/mcp.json`, `.gemini/settings.json`, the `scripts/lt.py` shim, and
+`AGENTS.lt.md` — are rewritten to the current canonical text. A file whose
+content differs is first preserved next to itself as `*.bak-lt-update`, and
+`lt_ids.json` is never touched. `--dry-run` previews the changes; run
+`lt doctor` afterwards to confirm the repo is in sync.
 
 ## Multi-client Postgres runtime
 
@@ -236,13 +241,22 @@ viewer/contributor/owner access.
 
 ### Non-Docker
 
-Set the token before starting the app:
+Authentication needs a strong signing secret; the built-in placeholder is
+rejected at startup whenever auth is enabled. The first line below generates
+one into a private file outside the checkout only if that file does not exist
+yet, so the same block is safe to rerun on every restart:
 
 ```bash
+[ -f ~/.lab-tracker-auth-secret ] || (umask 077 && python3 -c 'import secrets; print(secrets.token_urlsafe(48))' > ~/.lab-tracker-auth-secret)
 export LAB_TRACKER_AUTH_ENABLED=true
+export LAB_TRACKER_AUTH_SECRET_KEY="$(cat ~/.lab-tracker-auth-secret)"
 export LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN="<one-time-admin-token>"
 lab-tracker serve
 ```
+
+Keep that file private (or move the value into your secrets manager) and keep
+using the same value; a new secret signs every user out and invalidates
+outstanding invitation links.
 
 Open `http://127.0.0.1:8000/app` and use `Create First Admin`. The setup screen
 loads the bootstrap token while the instance has no users.

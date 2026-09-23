@@ -7,7 +7,7 @@ from datetime import timedelta
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from lab_tracker.auth import (
@@ -483,3 +483,62 @@ def test_issue_token_rejects_an_unknown_scope(session_factory):
 
 def uuid_from(value: object) -> UUID:
     return UUID(str(value))
+
+
+def test_verify_token_narrows_role_to_the_live_user_role_after_demotion(session_factory):
+    auth_service, pat_service = _services(session_factory)
+    auth_service.register_user("root", "secret", Role.ADMIN)
+    demoted = auth_service.register_user("demoted", "secret", Role.ADMIN)
+    issued = pat_service.issue_token(
+        demoted,
+        label="Agent",
+        role=Role.ADMIN,
+        read_only=False,
+        scope=PAT_SCOPE_BATCH_RUN_DUE,
+        expires_at=utc_now() + timedelta(days=1),
+    )
+    before = pat_service.verify_token(issued.secret)
+    assert before is not None
+    assert before.role == Role.ADMIN
+
+    auth_service.update_user(demoted.user_id, role=Role.VIEWER)
+
+    after = pat_service.verify_token(issued.secret)
+    assert after is not None
+    assert after.role == Role.VIEWER
+    # The stored issuance cap is unchanged; only the effective role narrows.
+    assert pat_service.list_tokens(demoted.user_id)[0].role == Role.ADMIN
+    assert not service_principal_can_access(
+        "POST",
+        "/batches/run-due",
+        read_only=after.read_only,
+        role=after.role,
+        scope=after.scope,
+    )
+
+    # Re-promotion restores at most the issuance-time cap, never more.
+    auth_service.update_user(demoted.user_id, role=Role.ADMIN)
+    restored = pat_service.verify_token(issued.secret)
+    assert restored is not None
+    assert restored.role == Role.ADMIN
+
+
+def test_verify_token_rejects_a_token_whose_user_no_longer_exists(session_factory):
+    auth_service, pat_service = _services(session_factory)
+    user = auth_service.register_user("gone", "secret", Role.EDITOR)
+    issued = pat_service.issue_token(
+        user,
+        label="Orphan",
+        role=Role.EDITOR,
+        expires_at=utc_now() + timedelta(days=1),
+    )
+    with session_factory() as session:
+        session.execute(text("PRAGMA foreign_keys=OFF"))
+        session.execute(
+            text("DELETE FROM users WHERE user_id = :user_id"),
+            {"user_id": str(user.user_id)},
+        )
+        session.commit()
+
+    assert pat_service.verify_token(issued.secret) is None
+

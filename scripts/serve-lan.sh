@@ -49,6 +49,34 @@ if [ -x ".venv/bin/python" ]; then
     PYTHON_BIN=".venv/bin/python"
 fi
 
+# Refuse to serve an unauthenticated graph on any non-loopback interface
+# (0.0.0.0, ::, a LAN address, or a hostname), using the same rule as
+# `lab-tracker serve` so the two launchers cannot drift apart.
+case "${LAB_TRACKER_ALLOW_INSECURE_AUTH_DISABLED:-}" in
+    1|true|TRUE|yes|YES)
+        ALLOW_INSECURE_AUTH_DISABLED=1
+        ;;
+esac
+BIND_EXPOSURE="$("$PYTHON_BIN" - "$HOST" <<'PY'
+import sys
+
+from lab_tracker.cli import _is_non_loopback_host
+from lab_tracker.config import get_settings
+
+if not _is_non_loopback_host(sys.argv[1]):
+    print("loopback")
+elif get_settings().is_auth_enabled():
+    print("authenticated")
+else:
+    print("unauthenticated")
+PY
+)"
+if [ "$BIND_EXPOSURE" = "unauthenticated" ] && [ "$ALLOW_INSECURE_AUTH_DISABLED" -ne 1 ]; then
+    echo "Refusing to bind Lab Tracker to ${HOST} while authentication is disabled." >&2
+    echo "Set LAB_TRACKER_AUTH_ENABLED=true and LAB_TRACKER_AUTH_SECRET_KEY, or pass --allow-insecure-auth-disabled only for a trusted temporary LAN." >&2
+    exit 1
+fi
+
 LAN_IP="$("$PYTHON_BIN" - <<'PY'
 import socket
 
@@ -80,25 +108,6 @@ except ImportError:
 
 segno.make(sys.argv[1]).terminal(compact=True)
 PY
-
-if [ "$HOST" = "0.0.0.0" ] || [ "$HOST" = "::" ]; then
-    AUTH_ENABLED="$("$PYTHON_BIN" - <<'PY'
-from lab_tracker.config import get_settings
-
-print("true" if get_settings().is_auth_enabled() else "false")
-PY
-)"
-    case "${LAB_TRACKER_ALLOW_INSECURE_AUTH_DISABLED:-}" in
-        1|true|TRUE|yes|YES)
-            ALLOW_INSECURE_AUTH_DISABLED=1
-            ;;
-    esac
-    if [ "$AUTH_ENABLED" != "true" ] && [ "$ALLOW_INSECURE_AUTH_DISABLED" -ne 1 ]; then
-        echo "Refusing to bind Lab Tracker to ${HOST} while authentication is disabled." >&2
-        echo "Set LAB_TRACKER_AUTH_ENABLED=true and LAB_TRACKER_AUTH_SECRET_KEY, or pass --allow-insecure-auth-disabled only for a trusted temporary LAN." >&2
-        exit 1
-    fi
-fi
 
 "$PYTHON_BIN" -m alembic upgrade head
 exec "$PYTHON_BIN" -m uvicorn lab_tracker.asgi:app --host "$HOST" --port "$PORT"

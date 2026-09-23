@@ -25,6 +25,16 @@ from lab_tracker_client.client import (
     build_evidence_metadata,
     capture_host_metadata,
 )
+from lab_tracker_client.evidence_index import outbox_note_index
+from lab_tracker_client.gitinfo import (
+    dirty_label,
+    dirty_metadata,
+    dirty_state_fields,
+    git_dirty_state,
+    git_head_commit,
+    git_timeout_seconds,
+    head_commit_fields,
+)
 
 CONFIG_VERSION = 1
 EVENT_VERSION = 1
@@ -35,6 +45,7 @@ HPC_EVIDENCE_PROVIDER = "hpc-outbox"
 HPC_EVIDENCE_ADAPTER = "lt-hpc"
 ALLOWED_EVENT_TYPES = {"submit", "begin", "finish"}
 TERMINAL_SYNC_STATES = {"synced"}
+_UTF8_MAX_BYTES_PER_CHAR = 4
 
 
 JsonObject = dict[str, Any]
@@ -411,6 +422,9 @@ def run_submit_command(
     resolved_command = [str(part) for part in command if str(part)]
     if not resolved_command:
         raise LTValidationError("lt hpc submit requires a command after '--'.")
+    # Fail on a bad LAB_TRACKER_GIT_TIMEOUT_SECONDS before submitting: raising
+    # after the scheduler accepted the job would lose the job's record.
+    git_timeout_seconds()
     run_id = new_run_id()
     outbox = config.outbox_path()
     env = {
@@ -728,11 +742,10 @@ def finish_event(
 
 def git_context(cwd: str | Path | None = None) -> JsonObject:
     root = Path(cwd or Path.cwd()).expanduser()
-    commit = _git_output(root, "rev-parse", "HEAD")
-    dirty = bool(_git_output(root, "status", "--porcelain"))
+    head = git_head_commit(root)
     return {
-        "git_commit": commit,
-        "git_dirty": dirty,
+        **head_commit_fields(head),
+        **dirty_state_fields(git_dirty_state(root, head=head)),
     }
 
 
@@ -763,9 +776,13 @@ def _sync_event(
     note: LTRecord | None = None
     project_id = str(event["project_id"])
     if not note_id:
-        if project_id not in note_indexes:
-            note_indexes[project_id] = client.build_evidence_note_index(project_id=project_id)
-        index = note_indexes[project_id]
+        index = outbox_note_index(
+            client,
+            note_indexes,
+            project_id=project_id,
+            outbox=path.parent,
+            dry_run=dry_run,
+        )
         evidence_key = (
             str(metadata["evidence_source_provider"]),
             str(metadata["evidence_source_external_id"]),
@@ -855,7 +872,7 @@ def render_event_note(event: Mapping[str, Any]) -> str:
         lines.append(f"- Working directory: `{payload['cwd']}`")
     if source.get("git_commit"):
         lines.append(f"- Git commit: `{source['git_commit']}`")
-        lines.append(f"- Git dirty: {bool(source.get('git_dirty'))}")
+        lines.append(f"- Git dirty: {dirty_label(source)}")
     lines.extend(["", "## Research Context", f"- Project: `{payload['project_id']}`"])
     if payload.get("question_id"):
         lines.append(f"- Candidate question: `{payload['question_id']}`")
@@ -920,7 +937,9 @@ def event_metadata(
             metadata[f"hpc_{key}"] = scheduler[key]
     if source.get("git_commit"):
         metadata["hpc_git_commit"] = str(source["git_commit"])
-        metadata["hpc_git_dirty"] = bool(source.get("git_dirty"))
+        metadata.update(dirty_metadata(source, "hpc_"))
+    elif source.get("git_commit_error"):
+        metadata["hpc_git_commit_error"] = str(source["git_commit_error"])
     host = payload.get("host") if isinstance(payload.get("host"), Mapping) else {}
     for key in CAPTURE_HOST_METADATA_KEYS:
         if host.get(key):
@@ -1004,22 +1023,6 @@ def _job_from_token(token: str, *, fallback_cluster: str | None) -> SbatchJob:
     )
 
 
-def _git_output(root: Path, *args: str) -> str:
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(root), *args],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=1,
-        )
-    except Exception:
-        return ""
-    if result.returncode != 0:
-        return ""
-    return result.stdout.strip()
-
-
 def _path_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -1088,13 +1091,36 @@ def _read_log_excerpt(paths: Sequence[str | Path], *, max_chars: int = 4000) -> 
             break
         path = Path(item).expanduser()
         try:
-            text = path.read_text(encoding="utf-8", errors="replace")
+            text = _read_text_tail(path, max_chars=remaining)
         except OSError:
             continue
         excerpt = text[-remaining:]
         chunks.append(f"==> {path} <==\n{excerpt.strip()}")
         remaining -= len(excerpt)
     return "\n\n".join(chunks)
+
+
+def _read_text_tail(path: Path, *, max_chars: int) -> str:
+    """Decode at most the last ``max_chars`` characters of a UTF-8 text file.
+
+    Scheduler logs can be gigabytes, and ``lt hpc finish`` runs inside a
+    memory-limited job epilogue, so only the final ``4 * max_chars`` bytes (the
+    UTF-8 worst case per character) are read. A multi-byte character split by
+    the seek point is dropped rather than decoded as a replacement character.
+    """
+
+    max_bytes = _UTF8_MAX_BYTES_PER_CHAR * max_chars
+    with path.open("rb") as handle:
+        size = handle.seek(0, os.SEEK_END)
+        start = max(0, size - max_bytes)
+        handle.seek(start)
+        data = handle.read(size - start)
+    if start > 0:
+        skip = 0
+        while skip < min(len(data), _UTF8_MAX_BYTES_PER_CHAR - 1) and (data[skip] & 0xC0 == 0x80):
+            skip += 1
+        data = data[skip:]
+    return data.decode("utf-8", errors="replace")[-max_chars:]
 
 
 def _join_log_excerpt(*parts: str) -> str:

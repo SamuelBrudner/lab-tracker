@@ -1,10 +1,16 @@
 import json
 
-from api_helpers import app_test_client
+import pytest
+from api_helpers import app_test_client, isolate_default_database_url
+
+
+@pytest.fixture(autouse=True)
+def _database_outside_the_working_directory(monkeypatch, tmp_path) -> None:  # noqa: ANN001
+    isolate_default_database_url(monkeypatch, tmp_path)
 
 
 def test_frontend_routes_and_assets_are_served():
-    client = app_test_client()
+    client = app_test_client(verify_schema=False)
 
     root_response = client.get("/", follow_redirects=False)
     assert root_response.status_code in (302, 307)
@@ -47,7 +53,7 @@ def test_frontend_routes_and_assets_are_served():
 
 
 def test_https_responses_include_hsts():
-    client = app_test_client(base_url="https://lab.example.org")
+    client = app_test_client(verify_schema=False, base_url="https://lab.example.org")
 
     response = client.get("/app/")
 
@@ -56,7 +62,7 @@ def test_https_responses_include_hsts():
 
 
 def test_service_worker_is_served_with_app_scope():
-    client = app_test_client()
+    client = app_test_client(verify_schema=False)
 
     response = client.get("/app/sw.js")
     assert response.status_code == 200
@@ -71,8 +77,8 @@ def test_service_worker_is_served_with_app_scope():
     assert "<!doctype html>" not in body.lower()
 
 
-def test_share_target_post_falls_back_to_capture_redirect():
-    client = app_test_client()
+def test_share_target_post_falls_back_to_capture_redirect_marking_the_share_lost():
+    client = app_test_client(verify_schema=False)
 
     response = client.post(
         "/app/share-target",
@@ -80,11 +86,13 @@ def test_share_target_post_falls_back_to_capture_redirect():
         follow_redirects=False,
     )
     assert response.status_code == 303
-    assert response.headers["location"] == "/app/capture"
+    # Without the service worker the shared payload is not kept; the error
+    # marker makes the capture page tell the user instead of looking normal.
+    assert response.headers["location"] == "/app/capture?from-share=error"
 
 
 def test_manifest_declares_web_share_target():
-    client = app_test_client()
+    client = app_test_client(verify_schema=False)
 
     manifest = client.get("/app/static/manifest.json").json()
     share_target = manifest["share_target"]
@@ -98,7 +106,7 @@ def test_manifest_declares_web_share_target():
 
 
 def test_pwa_manifest_and_icons_are_served():
-    client = app_test_client()
+    client = app_test_client(verify_schema=False)
 
     app_response = client.get("/app/")
     assert '<link rel="manifest" href="/app/static/manifest.json" />' in app_response.text

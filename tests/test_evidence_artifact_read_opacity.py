@@ -1490,8 +1490,8 @@ def test_mutations_keep_permission_errors_and_never_write_file_storage(
             files=files,
             headers=scoped_project_member.member_headers,
         )
-        assert response.status_code == 401, f"{method} {path}: {response.text}"
-        assert response.json()["error"]["code"] == "auth_error", path
+        assert response.status_code == 403, f"{method} {path}: {response.text}"
+        assert response.json()["error"]["code"] == "forbidden", path
 
     assert storage_mutations == []
 

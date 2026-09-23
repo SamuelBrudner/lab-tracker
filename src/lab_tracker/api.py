@@ -140,7 +140,10 @@ class LabTrackerAPI(
             context,
             authorization=self.project_authorization,
         )
-        self.supervision: SupervisionService = SupervisionService(context)
+        self.supervision: SupervisionService = SupervisionService(
+            context,
+            authorization=self.project_authorization,
+        )
         self.ownership_reassignments: OwnershipReassignmentService = OwnershipReassignmentService(
             context
         )
@@ -320,6 +323,7 @@ class LabTrackerAPI(
             versions=self.entity_versions,
             questions=self.questions,
             datasets=self.datasets,
+            goals=self.goals,
             authorization=self.project_authorization,
         )
         graph_draft_scheduling = BatchSchedulingCoordinator(

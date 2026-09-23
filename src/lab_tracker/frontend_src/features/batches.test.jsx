@@ -4,7 +4,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { vi } from "vitest";
 
 import { BatchReviewPage, PendingBatchBanner } from "./batches.jsx";
-import { apiResponse, installFetchMock } from "../test/utils.js";
+import { apiResponse, errorResponse, installFetchMock } from "../test/utils.js";
 
 describe("PendingBatchBanner", () => {
   it("nudges the user to flesh out a meeting when a pending batch has meeting notes", async () => {
@@ -76,9 +76,194 @@ describe("PendingBatchBanner", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Review" }));
     expect(navigate).toHaveBeenCalledWith("/app/batches/cs-meeting");
   });
+  it("reports a failed pending-batch lookup instead of hiding the banner", async () => {
+    installFetchMock([
+      {
+        match: "/batches?limit=5&mine=true",
+        response: errorResponse("Batch service unavailable", 503),
+      },
+    ]);
+
+    render(<PendingBatchBanner token="token-1" navigate={vi.fn()} />);
+
+    expect(
+      await screen.findByText(
+        "Could not load your daily reviews: Batch service unavailable"
+      )
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Review" })).not.toBeInTheDocument();
+  });
 });
 
 describe("BatchReviewPage", () => {
+  function installGatedProjectQueues(extraRoutes = []) {
+    const resolvers = { "project-a": [], "project-b": [] };
+    installFetchMock([
+      ...extraRoutes,
+      {
+        match: /^\/batches(\/runs)?\?project_id=project-(a|b)&/,
+        response: (request) => {
+          const projectId = request.url.match(/project_id=(project-[ab])/)[1];
+          const isReadyQueue =
+            request.url === `/batches?project_id=${projectId}&mine=true&limit=100`;
+          return new Promise((resolve) => {
+            resolvers[projectId].push(() =>
+              resolve(
+                apiResponse(
+                  isReadyQueue
+                    ? [
+                        {
+                          change_set_id: `ready-${projectId}`,
+                          created_at: "2026-07-16T12:00:00Z",
+                          operation_count: 0,
+                          source_note_count: 1,
+                          status: "ready",
+                          summary: `Ready in ${projectId}`,
+                        },
+                      ]
+                    : []
+                )
+              )
+            );
+          });
+        },
+      },
+      {
+        match: /^\/projects\/project-(a|b)\/graph-draft-batch-settings$/,
+        response: () => apiResponse({ cadence_minutes: 1440, enabled: true }),
+      },
+    ]);
+    const settle = async (projectId) => {
+      await waitFor(() => expect(resolvers[projectId]).toHaveLength(4));
+      resolvers[projectId].forEach((release) => release());
+    };
+    return { resolvers, settle };
+  }
+
+  function renderPage(selectedProjectId) {
+    const props = {
+      token: "token-1",
+      projects: [
+        { name: "Project A", project_id: "project-a" },
+        { name: "Project B", project_id: "project-b" },
+      ],
+      onSelectedProjectChange: vi.fn(),
+      navigate: vi.fn(),
+      canManageGraph: true,
+      canManageProject: false,
+      setBusy: vi.fn(),
+      setFlash: vi.fn(),
+    };
+    const view = render(<BatchReviewPage {...props} selectedProjectId={selectedProjectId} />);
+    return {
+      ...view,
+      props,
+      select: (projectId) =>
+        view.rerender(<BatchReviewPage {...props} selectedProjectId={projectId} />),
+    };
+  }
+
+  const flushResponses = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  };
+
+  it("ignores late queue responses for a previously selected project", async () => {
+    const { settle } = installGatedProjectQueues();
+    const page = renderPage("project-a");
+    page.select("project-b");
+
+    await settle("project-b");
+    expect(await screen.findByText("Ready in project-b")).toBeInTheDocument();
+
+    await settle("project-a");
+    await flushResponses();
+
+    expect(screen.getByText("Ready in project-b")).toBeInTheDocument();
+    expect(screen.queryByText("Ready in project-a")).not.toBeInTheDocument();
+  });
+
+  it("keeps the current project's loading state when a stale load settles", async () => {
+    const { settle } = installGatedProjectQueues();
+    const page = renderPage("project-a");
+    expect(screen.getByText("Loading...")).toBeInTheDocument();
+    page.select("project-b");
+
+    await settle("project-a");
+    await flushResponses();
+
+    expect(screen.getByText("Loading...")).toBeInTheDocument();
+    expect(screen.queryByText("Ready in project-a")).not.toBeInTheDocument();
+
+    await settle("project-b");
+    expect(await screen.findByText("Ready in project-b")).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText("Loading...")).not.toBeInTheDocument());
+  });
+
+  it("reloads the queues and opens the drafted batch after run now", async () => {
+    const { resolvers, settle } = installGatedProjectQueues([
+      {
+        match: "/batches/run-now",
+        method: "POST",
+        response: (request) => {
+          expect(JSON.parse(request.init.body)).toEqual({ project_id: "project-a" });
+          return apiResponse({ change_set_id: "cs-from-a", summary: "Drafted A" });
+        },
+      },
+    ]);
+    const page = renderPage("project-a");
+    await settle("project-a");
+    expect(await screen.findByText("Ready in project-a")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Run now" })).toBeEnabled());
+
+    fireEvent.click(screen.getByRole("button", { name: "Run now" }));
+    await waitFor(() => expect(resolvers["project-a"]).toHaveLength(8));
+    resolvers["project-a"].slice(4).forEach((release) => release());
+
+    await waitFor(() =>
+      expect(page.props.navigate).toHaveBeenCalledWith("/app/batches/cs-from-a")
+    );
+    expect(page.props.setBusy).toHaveBeenLastCalledWith(false);
+  });
+
+  it("does not reload or report a run-now result after the user switches projects", async () => {
+    let releaseRun = null;
+    const { resolvers, settle } = installGatedProjectQueues([
+      {
+        match: "/batches/run-now",
+        method: "POST",
+        response: () =>
+          new Promise((resolve) => {
+            releaseRun = (body) => resolve(apiResponse(body));
+          }),
+      },
+    ]);
+    const page = renderPage("project-a");
+    await settle("project-a");
+    expect(await screen.findByText("Ready in project-a")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Run now" })).toBeEnabled());
+
+    fireEvent.click(screen.getByRole("button", { name: "Run now" }));
+    await waitFor(() => expect(releaseRun).toBeTypeOf("function"));
+    page.select("project-b");
+    await settle("project-b");
+    expect(await screen.findByText("Ready in project-b")).toBeInTheDocument();
+
+    releaseRun({ change_set_id: "cs-from-a", summary: "Drafted A" });
+    await flushResponses();
+    await flushResponses();
+
+    // Project A's run must not reload A's queues over B's, nor navigate away.
+    expect(resolvers["project-a"]).toHaveLength(4);
+    expect(screen.getByText("Ready in project-b")).toBeInTheDocument();
+    expect(screen.queryByText("Ready in project-a")).not.toBeInTheDocument();
+    expect(page.props.navigate).not.toHaveBeenCalled();
+    expect(page.props.setFlash).toHaveBeenLastCalledWith(
+      "Daily review run for Project A finished. Select it to see the results."
+    );
+    expect(page.props.setBusy).toHaveBeenLastCalledWith(false);
+  });
+
   it("shows distinct personal, waiting, and owner-commit queues", async () => {
     installFetchMock([
       {

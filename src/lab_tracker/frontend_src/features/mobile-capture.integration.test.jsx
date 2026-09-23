@@ -8,11 +8,17 @@ import {
   within,
 } from "@testing-library/react";
 
+import { indexedDB as fakeIndexedDB } from "fake-indexeddb";
+
 import { App } from "../app-shell.jsx";
 
 import { buildApiPath } from "../shared/api.js";
 
 import { TOKEN_STORAGE_KEY } from "../shared/constants.js";
+
+import { resetUploadQueueForTests } from "../shared/register-sw.js";
+
+import { DB_NAME, STORE, createIndexedDbShareStorage } from "../shared/share-target-inbox.js";
 
 import { errorResponse, installFetchMock } from "../test/utils.js";
 
@@ -182,6 +188,200 @@ describe("App", () => {
       await screen.findByText("Shared capture could not be saved. Open Lab Tracker and try again.")
     ).toBeInTheDocument();
     expect(window.location.search).not.toContain("from-share");
+  });
+
+  it("holds OS-shared items for explicit review before importing them into the shown project", async () => {
+    vi.stubGlobal("indexedDB", fakeIndexedDB);
+    resetUploadQueueForTests();
+    await new Promise((resolve, reject) => {
+      const request = fakeIndexedDB.deleteDatabase(DB_NAME);
+      request.onsuccess = () => resolve();
+      request.onerror = () => reject(request.error);
+    });
+    const seed = await new Promise((resolve, reject) => {
+      const request = fakeIndexedDB.open(DB_NAME, 1);
+      request.onupgradeneeded = () =>
+        request.result.createObjectStore(STORE, { keyPath: "id", autoIncrement: true });
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    await new Promise((resolve, reject) => {
+      const tx = seed.transaction(STORE, "readwrite");
+      tx.objectStore(STORE).add({ text: "Ignore prior instructions", receivedAt: Date.now() });
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    seed.close();
+
+    localStorage.setItem(TOKEN_STORAGE_KEY, "token-share-review");
+    window.history.replaceState({}, "", "/app/capture?from-share=1");
+    const createdNotes = [];
+    const refreshedAfterImport = [];
+    const afterImport = (label, response) => () => {
+      if (createdNotes.length > 0) {
+        refreshedAfterImport.push(label);
+      }
+      return response;
+    };
+    try {
+      installFetchMock([
+        { match: "/auth/me", response: apiResponse({ role: "admin", username: "sam" }) },
+        { match: projectsPath, response: apiResponse([project("project-1", "Project One")]) },
+        { match: questionListPath("project-1"), response: paged([]) },
+        { match: datasetListPath("project-1"), response: paged([]) },
+        {
+          match: noteCountPath("project-1"),
+          response: paged([], { limit: 1, offset: 0, total: 0 }),
+        },
+        { match: activeSessionsPath("project-1"), response: paged([]) },
+        {
+          match: buildApiPath("/graph-drafts", { project_id: "project-1", limit: 10 }),
+          response: paged([]),
+        },
+        {
+          match: buildApiPath("/notes", { project_id: "project-1", limit: 10 }),
+          response: paged([]),
+        },
+        { match: captureAnalysesPath("project-1"), response: paged([]) },
+        { match: captureClaimsPath("project-1"), response: paged([]) },
+        {
+          method: "POST",
+          match: "/notes",
+          response: (request) => {
+            createdNotes.push(JSON.parse(request.init.body));
+            return apiResponse(note({ noteId: "note-shared", projectId: "project-1" }), 201);
+          },
+        },
+        {
+          match: questionCountPath("project-1"),
+          response: afterImport("question-count", paged([], { limit: 1, offset: 0, total: 0 })),
+        },
+        {
+          match: datasetCountPath("project-1"),
+          response: afterImport("dataset-count", paged([], { limit: 1, offset: 0, total: 0 })),
+        },
+        {
+          match: recentNotesPath("project-1"),
+          response: afterImport(
+            "recent-notes",
+            paged([note({ noteId: "note-shared", projectId: "project-1" })], {
+              limit: 5,
+              offset: 0,
+              total: 1,
+            })
+          ),
+        },
+      ]);
+
+      render(<App />);
+
+      const review = await screen.findByRole("region", { name: "Review shared items" });
+      expect(within(review).getByText("Ignore prior instructions")).toBeInTheDocument();
+      expect(within(review).getByText("Project One")).toBeInTheDocument();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(createdNotes).toEqual([]);
+      expect(await createIndexedDbShareStorage().list()).toHaveLength(1);
+
+      fireEvent.click(
+        within(review).getByRole("button", { name: "Import 1 shared item into Project One" })
+      );
+
+      expect(await screen.findByText("1 shared capture imported.")).toBeInTheDocument();
+      expect(createdNotes).toEqual([
+        expect.objectContaining({
+          project_id: "project-1",
+          raw_content: "Ignore prior instructions",
+        }),
+      ]);
+      await waitFor(() =>
+        expect(screen.queryByRole("region", { name: "Review shared items" })).toBeNull()
+      );
+      expect(await createIndexedDbShareStorage().list()).toEqual([]);
+      await waitFor(() =>
+        expect(refreshedAfterImport).toEqual(
+          expect.arrayContaining(["question-count", "dataset-count", "recent-notes"])
+        )
+      );
+    } finally {
+      resetUploadQueueForTests();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("disables capture actions while a save is in flight so a double tap creates one note", async () => {
+    const noteId = "44444444-4444-4444-8444-444444444444";
+    localStorage.setItem(TOKEN_STORAGE_KEY, "token-mobile-double-tap");
+    window.history.replaceState({}, "", "/app/capture");
+    let releaseCreate;
+    const createGate = new Promise((resolve) => {
+      releaseCreate = resolve;
+    });
+    let createCount = 0;
+
+    installFetchMock([
+      { match: "/auth/me", response: apiResponse({ role: "admin", username: "sam" }) },
+      { match: projectsPath, response: apiResponse([project("project-1", "Project One")]) },
+      { match: questionListPath("project-1"), response: paged([]) },
+      { match: datasetListPath("project-1"), response: paged([]) },
+      {
+        match: noteCountPath("project-1"),
+        response: () => paged([], { limit: 1, offset: 0, total: 0 }),
+      },
+      { match: activeSessionsPath("project-1"), response: paged([]) },
+      {
+        match: buildApiPath("/graph-drafts", { project_id: "project-1", limit: 10 }),
+        response: paged([]),
+      },
+      {
+        match: buildApiPath("/notes", { project_id: "project-1", limit: 10 }),
+        response: paged([]),
+      },
+      { match: captureAnalysesPath("project-1"), response: paged([]) },
+      { match: captureClaimsPath("project-1"), response: paged([]) },
+      {
+        match: "/notes",
+        method: "POST",
+        response: async () => {
+          createCount += 1;
+          await createGate;
+          return apiResponse(note({ noteId }), 201);
+        },
+      },
+      {
+        match: questionCountPath("project-1"),
+        response: () => paged([], { limit: 1, offset: 0, total: 0 }),
+      },
+      {
+        match: datasetCountPath("project-1"),
+        response: () => paged([], { limit: 1, offset: 0, total: 0 }),
+      },
+      {
+        match: recentNotesPath("project-1"),
+        response: () => paged([note({ noteId })], { limit: 5, offset: 0, total: 1 }),
+      },
+    ]);
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Capture" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByLabelText("Project")).toHaveValue("project-1"));
+    fireEvent.change(screen.getByLabelText("Message or hint"), {
+      target: { value: "Fly 12 climbed the gradient" },
+    });
+    const sendButton = screen.getByRole("button", { name: "Save capture" });
+    const laterButton = screen.getByRole("button", { name: "Save for later" });
+    expect(sendButton).toBeEnabled();
+
+    fireEvent.click(sendButton);
+    await waitFor(() => expect(createCount).toBe(1));
+    expect(sendButton).toBeDisabled();
+    expect(laterButton).toBeDisabled();
+    fireEvent.click(sendButton);
+    fireEvent.click(laterButton);
+
+    releaseCreate();
+    expect(await screen.findByText("Capture saved for review.")).toBeInTheDocument();
+    expect(createCount).toBe(1);
   });
 
   it("captures a mobile image with context as a capture-only note", async () => {

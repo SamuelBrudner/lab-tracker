@@ -311,6 +311,71 @@ describe("createUploadQueue", () => {
     expect(await queue.pendingCount()).toBe(1);
   });
 
+  it("drains owned jobs with no Authorization header when the server reports auth disabled", async () => {
+    const storage = createMemoryStorage();
+    const fetchImpl = vi.fn(async () => ({ ok: true, status: 201 }));
+    const queue = createUploadQueue({ storage, fetch: fetchImpl });
+
+    await enqueueOwned(queue);
+    // Auth-disabled mode: useAuthSession keeps token "" while /auth/me reports
+    // the local user, so the owner identity alone authorises the drain.
+    const result = await queue.drain({ token: "", ownerId: OWNER, authEnabled: false });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(fetchImpl.mock.calls[0][1].headers).toEqual({});
+    expect(result.uploaded).toHaveLength(1);
+    expect(result.stillQueued).toHaveLength(0);
+    expect(await queue.pendingCount()).toBe(0);
+  });
+
+  it("never sends a token when auth is disabled, even if one is supplied", async () => {
+    const storage = createMemoryStorage();
+    const fetchImpl = vi.fn(async () => ({ ok: true, status: 201 }));
+    const queue = createUploadQueue({ storage, fetch: fetchImpl });
+
+    await enqueueOwned(queue);
+    await queue.drain({ token: "stale-token", ownerId: OWNER, authEnabled: false });
+
+    expect(fetchImpl.mock.calls[0][1].headers).toEqual({});
+  });
+
+  it("keeps owner gating when auth is disabled", async () => {
+    const storage = createMemoryStorage();
+    const fetchImpl = vi.fn(async () => ({ ok: true, status: 201 }));
+    const queue = createUploadQueue({ storage, fetch: fetchImpl });
+
+    await enqueueOwned(queue);
+    const noOwner = await queue.drain({ token: "", ownerId: "", authEnabled: false });
+    const otherOwner = await queue.drain({ token: "", ownerId: "owner-2", authEnabled: false });
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(noOwner.stillQueued).toHaveLength(1);
+    expect(otherOwner.skipped).toHaveLength(1);
+    expect(await queue.pendingCount()).toBe(1);
+  });
+
+  it("still requires a live token when auth is enabled", async () => {
+    const storage = createMemoryStorage();
+    const fetchImpl = vi.fn(async () => ({ ok: true, status: 201 }));
+    const queue = createUploadQueue({ storage, fetch: fetchImpl });
+
+    await enqueueOwned(queue);
+    const explicit = await queue.drain({ token: "", ownerId: OWNER, authEnabled: true });
+    const implicit = await queue.drain({ token: "", ownerId: OWNER });
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(explicit.stillQueued).toHaveLength(1);
+    expect(implicit.stillQueued).toHaveLength(1);
+  });
+
+  it("rejects a non-boolean authEnabled flag instead of guessing the auth mode", async () => {
+    const queue = createUploadQueue({ storage: createMemoryStorage(), fetch: vi.fn() });
+
+    await expect(
+      queue.drain({ token: "", ownerId: OWNER, authEnabled: "false" })
+    ).rejects.toThrow(/authEnabled/);
+  });
+
   it("skips a job whose owner does not match the active session (account switch)", async () => {
     const storage = createMemoryStorage();
     const fetchImpl = vi.fn(async () => ({ ok: true, status: 201 }));

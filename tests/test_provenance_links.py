@@ -352,3 +352,24 @@ def test_proposed_link_does_not_render_in_ara_export() -> None:
     derived_node = _find_node_with_id_suffix(document, f"/notes/{derived.note_id}")
     assert derived_node is not None
     assert "wasDerivedFrom" not in derived_node
+
+
+def test_provenance_link_repository_contract_declares_list_by_project() -> None:
+    # The content-hash detector calls provenance_links.list_by_project, so the
+    # repository protocol (not just the SQLAlchemy class) must declare it.
+    import inspect
+    from typing import get_type_hints
+
+    from lab_tracker.repository import LabTrackerRepository
+    from lab_tracker.sqlalchemy_repository_parts.provenance_links import (
+        SQLAlchemyProvenanceLinkRepository,
+    )
+
+    provenance_links = LabTrackerRepository.provenance_links
+    assert isinstance(provenance_links, property)
+    assert provenance_links.fget is not None
+    contract = get_type_hints(provenance_links.fget)["return"]
+    assert callable(getattr(contract, "list_by_project", None))
+    assert inspect.signature(contract.list_by_project) == inspect.signature(
+        SQLAlchemyProvenanceLinkRepository.list_by_project
+    )

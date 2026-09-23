@@ -22,12 +22,15 @@ from lab_tracker.decision_context_constants import (
 from lab_tracker.decision_context_selection import (
     envelope_items,
     merge_entities,
-    project_lookup,
     search_items,
 )
 from lab_tracker.decision_context_types import DecisionContextReader, JsonObject
 
 NOTE_TEXT_FIELD_LIMIT = 1000
+# An ambiguous_project error lists at most this many search-matched projects
+# (one get_project read each); the rest are counted, not read.
+AMBIGUOUS_PROJECT_CANDIDATE_LIMIT = 10
+AMBIGUOUS_PROJECT_MESSAGE = "Decision context needs a project or a more specific anchor."
 
 
 def build_decision_context(
@@ -58,16 +61,12 @@ def build_decision_context(
         return decision_error("invalid_query", "Decision-context query must not be empty.")
 
     resolved_limit = validate_context_limit(limit)
-    projects_payload = reader.list_projects(limit=CONTEXT_LOOKUP_LIMIT)
-    projects = envelope_items(projects_payload)
-    projects_by_id = project_lookup(projects)
 
+    # Projects are always resolved by id: a list_projects window (oldest first)
+    # would hide newer projects and produce false anchor_not_found errors.
     resolved_project_id = str(project_id) if project_id else None
-    if resolved_project_id:
-        project_anchor = reader.get_project(resolved_project_id)
-        if project_anchor is not None:
-            projects_by_id[resolved_project_id] = project_anchor
-    if resolved_project_id and resolved_project_id not in projects_by_id:
+    explicit_project = reader.get_project(resolved_project_id) if resolved_project_id else None
+    if resolved_project_id and explicit_project is None:
         return decision_error(
             "anchor_not_found",
             f"Project {resolved_project_id!r} was not found.",
@@ -170,32 +169,30 @@ def build_decision_context(
         resolved_project_id = next(iter(anchor_project_ids))
 
     if not resolved_project_id:
-        search_project_ids = _project_ids_with_search_matches(
-            reader,
+        search_project_ids = reader.project_ids_with_search_matches(
             cleaned_query,
-            projects,
+            limit=CONTEXT_LOOKUP_LIMIT,
         )
-        if len(search_project_ids) == 1:
+        # A lookup cut at its limit may hide further matching projects, so a
+        # single returned id is only unique when the lookup was not cut.
+        search_truncated = len(search_project_ids) >= CONTEXT_LOOKUP_LIMIT
+        if len(search_project_ids) == 1 and not search_truncated:
             resolved_project_id = next(iter(search_project_ids))
         else:
-            candidates = [
-                candidate_project(projects_by_id[item], "search_match")
-                for item in sorted(search_project_ids)
-                if item in projects_by_id
-            ]
-            if not candidates:
-                candidates = [
-                    candidate_project(project, "active_project")
-                    for project in projects
-                    if project.get("status") == "active"
-                ][:resolved_limit]
-            return decision_error(
-                "ambiguous_project",
-                "Decision context needs a project or a more specific anchor.",
-                candidate_projects=candidates,
+            return _ambiguous_project_error(
+                reader,
+                search_project_ids,
+                search_truncated=search_truncated,
+                limit=resolved_limit,
             )
 
-    project = projects_by_id.get(resolved_project_id)
+    # Every anchor was checked against an explicit project id, so it still
+    # names the resolved project; reuse that read instead of repeating it.
+    project = (
+        explicit_project
+        if explicit_project is not None
+        else reader.get_project(resolved_project_id)
+    )
     if project is None:
         return decision_error(
             "anchor_not_found",
@@ -408,20 +405,66 @@ def _matches_project_anchor(entity: JsonObject, project_id: str | None) -> bool:
     return str(entity.get("project_id")) == project_id
 
 
-def _project_ids_with_search_matches(
+def _ambiguous_project_error(
     reader: DecisionContextReader,
-    query: str,
-    projects: list[JsonObject],
-) -> set[str]:
-    known_project_ids = {
-        str(project["project_id"])
-        for project in projects
-        if project.get("project_id")
-    }
-    return reader.project_ids_with_search_matches(
-        query,
-        limit=CONTEXT_LOOKUP_LIMIT,
-    ) & known_project_ids
+    search_project_ids: set[str],
+    *,
+    search_truncated: bool,
+    limit: int,
+) -> JsonObject:
+    # The match lookup returns ids only, so each listed candidate costs one
+    # read; list a bounded prefix and count the rest instead of reading them.
+    # The prefix honours the caller's limit, as the active-project fallback
+    # does, and never exceeds the read budget.
+    listed_project_ids = sorted(search_project_ids)[
+        : min(limit, AMBIGUOUS_PROJECT_CANDIDATE_LIMIT)
+    ]
+    candidates: list[JsonObject] = []
+    for matched_project_id in listed_project_ids:
+        matched_project = reader.get_project(matched_project_id)
+        if matched_project is not None:
+            candidates.append(candidate_project(matched_project, "search_match"))
+    if candidates:
+        candidates_total = len(search_project_ids)
+        candidates_truncated = search_truncated or candidates_total > len(candidates)
+        matched_text = (
+            f"{candidates_total} or more projects match"
+            if search_truncated
+            else f"{candidates_total} projects match"
+        )
+        listed_text = (
+            "1 is listed" if len(candidates) == 1 else f"{len(candidates)} are listed"
+        )
+        message = (
+            f"{AMBIGUOUS_PROJECT_MESSAGE} {matched_text} the query; "
+            f"{listed_text}. Pass project_id, an entity anchor, "
+            "or a more specific query."
+        )
+    else:
+        active_payload = reader.list_projects(status="active", limit=limit)
+        candidates = [
+            candidate_project(item, "active_project")
+            for item in envelope_items(active_payload)
+        ]
+        candidates_total = _envelope_total(active_payload, "projects")
+        candidates_truncated = candidates_total > len(candidates)
+        message = AMBIGUOUS_PROJECT_MESSAGE
+    return decision_error(
+        "ambiguous_project",
+        message,
+        candidate_projects=candidates,
+        candidate_projects_total=candidates_total,
+        candidate_projects_truncated=candidates_truncated,
+        candidate_projects_omitted=candidates_total - len(candidates),
+    )
+
+
+def _envelope_total(payload: JsonObject, label: str) -> int:
+    meta = payload.get("meta")
+    total = meta.get("total") if isinstance(meta, dict) else None
+    if not isinstance(total, int) or isinstance(total, bool):
+        raise ValueError(f"Decision-context {label} listing did not report an integer total.")
+    return total
 
 
 def _compact_notes(notes: list[JsonObject]) -> list[JsonObject]:

@@ -44,6 +44,7 @@ from lab_tracker_client.client import (
     build_evidence_metadata,
     capture_host_metadata,
 )
+from lab_tracker_client.evidence_index import outbox_note_index
 
 CONFIG_VERSION = 1
 EVENT_VERSION = 1
@@ -57,7 +58,17 @@ ALLOWED_SINKS = {SINK_STAGED_NOTE, SINK_ACQUISITION_OUTPUT}
 MODE_MANIFEST = "manifest"
 MODE_FILES = "files"
 ALLOWED_MODES = {MODE_MANIFEST, MODE_FILES}
-TERMINAL_SYNC_STATES = {"synced"}
+STALE_SYNC_STATE = "stale"
+# Terminal states are never re-processed by ``lt watch sync`` and never spend
+# its ``--limit`` budget. ``stale`` is terminal: the event's source file or
+# manifest no longer matches what was scanned, so re-checking it can only fail
+# again (or, worse, keep consuming the limit ahead of pending captures).
+# Retry policy for stale events: the next ``lt watch scan`` (also run by
+# ``lt watch run``) either captures changed content as a *new* event, or, when
+# the source again matches the stale event's content hash (for example a file
+# that was only touched, or finished settling), re-arms that same event back to
+# ``pending`` with the fresh fingerprint.
+TERMINAL_SYNC_STATES = {"synced", STALE_SYNC_STATE}
 
 JsonObject = dict[str, Any]
 
@@ -589,6 +600,30 @@ def write_event(event: Mapping[str, Any], outbox: str | Path) -> Path:
     return path
 
 
+def _rearm_stale_event(path: Path, fresh_event: Mapping[str, Any]) -> bool:
+    """Reset a terminal ``stale`` event at ``path`` to ``pending`` from a fresh scan.
+
+    ``fresh_event`` was just built from the current source, and it maps to the
+    same event file only when the content hash is unchanged, so the stale
+    event's content is available again. Its fingerprint (mtime, size, manifest
+    hash) is replaced and the sync state goes back to ``pending``; every other
+    event state is left untouched.
+    """
+
+    existing = read_event(path)
+    existing_sync = existing.get("sync", {})
+    if str(existing_sync.get("status") or "") != STALE_SYNC_STATE:
+        return False
+    rearmed = validate_event(fresh_event)
+    rearmed["sync"] = {
+        "status": "pending",
+        "attempts": int(existing_sync.get("attempts") or 0),
+        "rearmed_at": utc_now(),
+    }
+    _write_json_atomic(path, rearmed)
+    return True
+
+
 def read_event(path: str | Path) -> JsonObject:
     resolved = Path(path).expanduser()
     try:
@@ -726,7 +761,10 @@ def scan_watch(
                 )
             target_path = event_path(event, config.outbox_path())
             already_present = target_path.exists()
+            rearmed = False
             if not dry_run:
+                if already_present:
+                    rearmed = _rearm_stale_event(target_path, event)
                 target_path = write_event(event, config.outbox_path())
             imported.append(
                 {
@@ -736,6 +774,7 @@ def scan_watch(
                     "capture_id": event["capture_id"],
                     "sink": event["sink"],
                     "already_present": already_present,
+                    "rearmed": rearmed,
                 }
             )
         except Exception as exc:  # noqa: BLE001 - report every bad source in the batch.
@@ -837,7 +876,11 @@ def sync_outbox(
             note_id=_optional_str(sync.get("note_id")),
             output_id=_optional_str(sync.get("output_id")),
             change_set_id=_optional_str(sync.get("change_set_id")),
-            reason="already_synced",
+            reason=(
+                STALE_SYNC_STATE
+                if str(sync.get("status") or "") == STALE_SYNC_STATE
+                else "already_synced"
+            ),
         ).to_dict()
 
     def _failed(path: Path, event: JsonObject, exc: Exception) -> JsonObject:
@@ -951,10 +994,14 @@ def _sync_event(
     dry_run: bool,
     request_draft: bool,
 ) -> WatchSyncResult:
-    stale_reason = _stale_reason(event)
+    sync = event.get("sync", {})
+    already_delivered = bool(sync.get("note_id") or sync.get("output_id"))
+    # Staleness only guards the upload itself; an event already delivered and
+    # revisited for a draft retry must keep its synced state.
+    stale_reason = "" if already_delivered else _stale_reason(event)
     if stale_reason:
         if not dry_run:
-            _record_sync_failure(path, event, stale_reason, dry_run=False, status="stale")
+            _record_sync_failure(path, event, stale_reason, dry_run=False, status=STALE_SYNC_STATE)
         return WatchSyncResult(
             action="stale",
             path=str(path),
@@ -991,9 +1038,6 @@ def _sync_staged_note(
     note: LTRecord | None = None
     change_set_id = _optional_str(event.get("sync", {}).get("change_set_id"))
     project_id = _non_empty(_optional_str(event["context"].get("project_id")) or "", "project_id")
-    if project_id not in note_indexes:
-        note_indexes[project_id] = client.build_evidence_note_index(project_id=project_id)
-    index = note_indexes[project_id]
     if not note_id and source_path:
         result = client.import_evidence_file(
             project_id=project_id,
@@ -1006,7 +1050,13 @@ def _sync_staged_note(
             metadata=_event_metadata(event),
             status=str(event["payload"].get("status") or "staged"),
             dry_run=dry_run,
-            evidence_note_index=index,
+            evidence_note_index=outbox_note_index(
+                client,
+                note_indexes,
+                project_id=project_id,
+                outbox=path.parent,
+                dry_run=dry_run,
+            ),
         )
         if dry_run:
             return WatchSyncResult(
@@ -1043,6 +1093,13 @@ def _sync_staged_note(
             str(metadata["evidence_source_provider"]),
             str(metadata["evidence_source_external_id"]),
             str(metadata["evidence_content_hash"]),
+        )
+        index = outbox_note_index(
+            client,
+            note_indexes,
+            project_id=project_id,
+            outbox=path.parent,
+            dry_run=dry_run,
         )
         note = index.get(evidence_key)
         if dry_run:

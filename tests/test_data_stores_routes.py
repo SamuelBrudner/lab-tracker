@@ -16,6 +16,9 @@ from http_security_fakes import (
 from starlette.testclient import TestClient
 
 import lab_tracker.routes.errors as route_errors
+from lab_tracker.application.store_health_queries import (
+    LOCAL_STORE_HEALTH_UNSUPPORTED_MESSAGE,
+)
 from lab_tracker.artifact_resolution import (
     HttpResolver,
     LocalFilesystemResolver,
@@ -538,7 +541,7 @@ def test_create_group_store_requires_group_owner(client, scoped_project_member, 
         json={"group_id": group_id, "name": "lab-fs", "kind": "s3", "root": "s3://x"},
         headers=scoped_project_member.member_headers,
     )
-    assert response.status_code == 401
+    assert response.status_code == 403
 
 
 def test_create_data_store_requires_exactly_one_scope(client, admin_auth_headers):
@@ -657,8 +660,8 @@ def test_create_data_store_authorizes_before_semantic_definition_validation(
             headers=scoped_project_member.member_headers,
         )
 
-    assert response.status_code == 401, response.text
-    assert response.json()["error"]["code"] == "auth_error"
+    assert response.status_code == 403, response.text
+    assert response.json()["error"]["code"] == "forbidden"
     assert secret not in response.text
     assert secret not in caplog.text
 
@@ -1033,7 +1036,7 @@ def test_create_data_store_requires_contributor(client, scoped_project_member):
         headers=scoped_project_member.member_headers,
     )
     # A viewer cannot register a store.
-    assert response.status_code == 401
+    assert response.status_code == 403
 
 
 def test_data_store_health_local_fs(client, admin_auth_headers, tmp_path):
@@ -1049,7 +1052,7 @@ def test_data_store_health_local_fs(client, admin_auth_headers, tmp_path):
     assert healthy.status_code == 200, healthy.text
     assert healthy.json()["data"]["status"] == "unsupported"
     assert (
-        healthy.json()["data"]["detail"] == STORE_HEALTH_PROBE_UNAVAILABLE_MESSAGE
+        healthy.json()["data"]["detail"] == LOCAL_STORE_HEALTH_UNSUPPORTED_MESSAGE
     )
 
 
@@ -1068,7 +1071,7 @@ def test_data_store_health_local_fs_missing_root(client, admin_auth_headers, tmp
     body = response.json()["data"]
     assert body["status"] == "unsupported"
     assert body["kind"] == "local_fs"
-    assert body["detail"] == STORE_HEALTH_PROBE_UNAVAILABLE_MESSAGE
+    assert body["detail"] == LOCAL_STORE_HEALTH_UNSUPPORTED_MESSAGE
 
 
 def test_data_store_health_local_fs_defaults_to_denied_and_redacted(
@@ -1117,7 +1120,7 @@ def test_data_store_health_local_fs_defaults_to_denied_and_redacted(
     assert response.status_code == 200
     assert response.json()["data"]["status"] == "unsupported"
     assert (
-        response.json()["data"]["detail"] == STORE_HEALTH_PROBE_UNAVAILABLE_MESSAGE
+        response.json()["data"]["detail"] == LOCAL_STORE_HEALTH_UNSUPPORTED_MESSAGE
     )
     assert secret not in response.text
     assert executor.calls == []
@@ -1351,7 +1354,7 @@ def test_group_member_can_read_group_scoped_store(
     assert health_response.json()["data"]["status"] == "unsupported"
     assert (
         health_response.json()["data"]["detail"]
-        == STORE_HEALTH_PROBE_UNAVAILABLE_MESSAGE
+        == LOCAL_STORE_HEALTH_UNSUPPORTED_MESSAGE
     )
 
 

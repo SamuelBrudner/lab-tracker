@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from collections.abc import Callable
@@ -21,7 +22,6 @@ from lab_tracker.outbound_http import (
     OutboundHttpPolicy,
     OutboundHttpResponse,
     RegisteredHttpPrefix,
-    resolve_direct_http_redirect,
 )
 from lab_tracker.store_health import (
     HTTP_STORE_HEALTH_FAILURE_DETAIL,
@@ -31,6 +31,8 @@ from lab_tracker.store_health import (
 )
 
 _HEALTHY_TERMINAL_STATUS_CODES: Final = frozenset({403, 405})
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,7 +84,14 @@ class HttpStoreHealthProbe:
 
         try:
             return self._probe(target)
-        except Exception:
+        except Exception as exc:
+            # Only the store id and exception class are logged: the message can
+            # carry remote URLs, credentials, or private filesystem paths.
+            _logger.warning(
+                "HTTP store health probe for store %s failed with %s.",
+                target.store_id,
+                type(exc).__name__,
+            )
             return _unreachable()
 
     def _probe(self, target: StoreProbeTarget) -> StoreHealth:
@@ -120,6 +129,7 @@ class HttpStoreHealthProbe:
                 result, next_url = self._inspect_response(
                     response,
                     approved,
+                    prefix=prefix,
                     redirect_count=redirect_count,
                     deadline=deadline,
                 )
@@ -142,6 +152,7 @@ class HttpStoreHealthProbe:
         response: OutboundHttpResponse,
         approved: ApprovedHttpTarget,
         *,
+        prefix: RegisteredHttpPrefix,
         redirect_count: int,
         deadline: OutboundHttpDeadline,
     ) -> tuple[StoreHealth | None, str | None]:
@@ -153,10 +164,10 @@ class HttpStoreHealthProbe:
             deadline.check()
             if not location or redirect_count >= self.max_redirects:
                 return _unreachable(), None
-            next_url = resolve_direct_http_redirect(
-                approved.absolute_url,
-                location,
-            )
+            # Follow only redirects artifact resolution would follow for this
+            # registered store; a root that redirects out of its prefix is
+            # unusable, so it must not be reported HEALTHY.
+            next_url = prefix.resolve_redirect(approved.absolute_url, location)
             deadline.check()
             if next_url is None:
                 return _unreachable(), None

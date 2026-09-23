@@ -54,15 +54,21 @@ function defaultSession() {
   // Boot-time default: a stored token but no proven owner identity. Because the
   // queue only drains under a session with a matching ownerId, a boot drain with
   // no owner is a safe no-op until the app supplies { token, ownerId }.
-  return { token: storedToken(), ownerId: "" };
+  return { token: storedToken(), ownerId: "", authEnabled: true };
 }
 
 function readSession(getSession) {
   try {
     const session = getSession?.() || {};
-    return { token: session.token || "", ownerId: session.ownerId || "" };
+    return {
+      token: session.token || "",
+      ownerId: session.ownerId || "",
+      // Only an explicit `false` (the server reported auth disabled) lifts the
+      // live-token requirement; anything else keeps the auth-enabled guard.
+      authEnabled: session.authEnabled !== false,
+    };
   } catch {
-    return { token: "", ownerId: "" };
+    return { token: "", ownerId: "", authEnabled: true };
   }
 }
 
@@ -180,17 +186,19 @@ export function installOfflineRetry({
   if (!queue || typeof window === "undefined") {
     return () => {};
   }
-  const handleOnline = () => {
+  const drain = () => {
     queue
       .drain(readSession(getSession))
       .then((result) => surfaceDroppedUploads(result, onDropped))
-      .catch(() => {});
+      .catch((error) => {
+        // Queued captures stay queued for the next retry; make the failure
+        // visible rather than silently holding them.
+        // eslint-disable-next-line no-console
+        console.error("Offline capture retry failed:", error);
+      });
   };
-  window.addEventListener("online", handleOnline);
+  window.addEventListener("online", drain);
   // Drain at boot too, in case the app was relaunched after going offline.
-  queue
-    .drain(readSession(getSession))
-    .then((result) => surfaceDroppedUploads(result, onDropped))
-    .catch(() => {});
-  return () => window.removeEventListener("online", handleOnline);
+  drain();
+  return () => window.removeEventListener("online", drain);
 }

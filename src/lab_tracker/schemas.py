@@ -10,8 +10,17 @@ from datetime import date, datetime
 from typing import Annotated, Any, ClassVar, Generic, Literal, TypeVar
 from uuid import UUID
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    GetCoreSchemaHandler,
+    field_validator,
+    model_validator,
+)
 from pydantic.json_schema import SkipJsonSchema
+from pydantic_core import CoreSchema, core_schema
 
 from lab_tracker.auth import Role
 from lab_tracker.data_store_definition import (
@@ -19,6 +28,18 @@ from lab_tracker.data_store_definition import (
     DATA_STORE_ENDPOINT_MAX_LENGTH,
     DATA_STORE_NAME_MAX_LENGTH,
     DATA_STORE_ROOT_MAX_LENGTH,
+)
+from lab_tracker.db import Base
+from lab_tracker.db_models import (
+    AcquisitionOutputModel,
+    AnalysisModel,
+    ExperimentModel,
+    GoalModel,
+    InvitationModel,
+    ProjectGroupModel,
+    ProjectModel,
+    UserModel,
+    VisualizationModel,
 )
 from lab_tracker.goals_attributes import validate_goal_attributes
 from lab_tracker.models import (
@@ -30,6 +51,7 @@ from lab_tracker.models import (
     ClaimRelation,
     ClaimStatus,
     DatasetCommitManifestInput,
+    DatasetFile,
     DatasetStatus,
     DataStore,
     EntityRef,
@@ -91,6 +113,100 @@ def _non_blank_string(value: str) -> str:
 NonBlankStr = Annotated[str, Field(min_length=1), AfterValidator(_non_blank_string)]
 
 
+def _orm_string_length(model: type[Base], column: str) -> int:
+    """Return the VARCHAR length of an ORM column so request limits cannot drift.
+
+    SQLite ignores declared lengths while Postgres rejects over-long values with
+    a DataError (HTTP 500), so request schemas bound every string they store in a
+    ``String(n)`` column by the same ``n`` and fail with a 422 on every backend.
+    """
+
+    length = getattr(model.__table__.columns[column].type, "length", None)
+    if not isinstance(length, int):
+        raise RuntimeError(f"{model.__name__}.{column} is not a bounded string column.")
+    return length
+
+
+# Bounded request strings: the constraint sits on the plain ``str`` so pydantic
+# reports ``string_too_long`` before the non-blank check runs.
+ProjectNameStr = Annotated[
+    str,
+    Field(min_length=1, max_length=_orm_string_length(ProjectModel, "name")),
+    AfterValidator(_non_blank_string),
+]
+ProjectDescriptionStr = Annotated[
+    str,
+    Field(max_length=_orm_string_length(ProjectModel, "description")),
+]
+ProjectGroupNameStr = Annotated[
+    str,
+    Field(min_length=1, max_length=_orm_string_length(ProjectGroupModel, "name")),
+    AfterValidator(_non_blank_string),
+]
+ProjectGroupDescriptionStr = Annotated[
+    str,
+    Field(max_length=_orm_string_length(ProjectGroupModel, "description")),
+]
+ExperimentNameStr = Annotated[
+    str,
+    Field(min_length=1, max_length=_orm_string_length(ExperimentModel, "name")),
+    AfterValidator(_non_blank_string),
+]
+AnalysisMethodHashStr = Annotated[
+    str,
+    Field(min_length=1, max_length=_orm_string_length(AnalysisModel, "method_hash")),
+    AfterValidator(_non_blank_string),
+]
+AnalysisCodeVersionStr = Annotated[
+    str,
+    Field(min_length=1, max_length=_orm_string_length(AnalysisModel, "code_version")),
+    AfterValidator(_non_blank_string),
+]
+AnalysisEnvironmentHashStr = Annotated[
+    str,
+    Field(max_length=_orm_string_length(AnalysisModel, "environment_hash")),
+]
+VisualizationTypeStr = Annotated[
+    str,
+    Field(min_length=1, max_length=_orm_string_length(VisualizationModel, "viz_type")),
+    AfterValidator(_non_blank_string),
+]
+VisualizationFilePathStr = Annotated[
+    str,
+    Field(min_length=1, max_length=_orm_string_length(VisualizationModel, "file_path")),
+    AfterValidator(_non_blank_string),
+]
+AcquisitionFilePathStr = Annotated[
+    str,
+    Field(min_length=1, max_length=_orm_string_length(AcquisitionOutputModel, "file_path")),
+    AfterValidator(_non_blank_string),
+]
+AcquisitionChecksumStr = Annotated[
+    str,
+    Field(min_length=1, max_length=_orm_string_length(AcquisitionOutputModel, "checksum")),
+    AfterValidator(_non_blank_string),
+]
+GoalTitleStr = Annotated[
+    str,
+    Field(min_length=1, max_length=_orm_string_length(GoalModel, "title")),
+    AfterValidator(_non_blank_string),
+]
+GoalExternalRefStr = Annotated[
+    str,
+    Field(max_length=_orm_string_length(GoalModel, "external_ref")),
+]
+UsernameStr = Annotated[
+    str,
+    Field(min_length=1, max_length=_orm_string_length(UserModel, "username")),
+    AfterValidator(_non_blank_string),
+]
+InvitationEmailStr = Annotated[
+    str,
+    Field(min_length=1, max_length=_orm_string_length(InvitationModel, "email")),
+    AfterValidator(_non_blank_string),
+]
+
+
 def _unique_uuid_list(value: list[UUID] | None) -> list[UUID] | None:
     if value is None:
         return None
@@ -131,6 +247,95 @@ class PatchRequestModel(RequestModel):
             if field_name in value and value[field_name] is None:
                 raise ValueError(f"{field_name} must not be null.")
         return value
+
+
+class _ValidatedAsRequest:
+    """Validate a nested domain model through its closed request-side twin.
+
+    Domain models keep pydantic's default ``extra="ignore"`` so stored and
+    provider-produced data stay readable, but inside a request payload an unknown
+    or misspelled nested key must fail like a top-level one does under
+    ``RequestModel``. The annotated field validates with ``request_model``
+    (``extra="forbid"``) and then re-validates the provided fields as the domain
+    type, so callers still receive plain domain instances and responses still
+    serialize through the domain schema.
+    """
+
+    def __init__(self, request_model: type[BaseModel]) -> None:
+        self.request_model = request_model
+
+    def __get_pydantic_core_schema__(
+        self,
+        source_type: Any,
+        handler: GetCoreSchemaHandler,
+    ) -> CoreSchema:
+        return core_schema.chain_schema(
+            [
+                handler.generate_schema(self.request_model),
+                core_schema.no_info_plain_validator_function(_as_domain_payload),
+                handler(source_type),
+            ]
+        )
+
+
+def _as_domain_payload(value: BaseModel) -> dict[str, Any]:
+    return value.model_dump(exclude_unset=True)
+
+
+_CLOSED_NESTED_CONFIG = ConfigDict(from_attributes=True, extra="forbid")
+
+
+class EntityRefRequest(EntityRef):
+    model_config = _CLOSED_NESTED_CONFIG
+
+
+class QuestionLinkRequest(QuestionLink):
+    model_config = _CLOSED_NESTED_CONFIG
+
+
+class DatasetFileRequest(DatasetFile):
+    model_config = _CLOSED_NESTED_CONFIG
+
+
+class ExternalArtifactReferenceRequest(ExternalArtifactReference):
+    model_config = ConfigDict(from_attributes=True, frozen=True, extra="forbid")
+
+
+class DatasetCommitManifestInputRequest(DatasetCommitManifestInput):
+    model_config = _CLOSED_NESTED_CONFIG
+
+    files: list[DatasetFileRequest] = Field(default_factory=list)
+    external_artifacts: list[ExternalArtifactReferenceRequest] = Field(default_factory=list)
+
+
+class ClaimInputRequest(ClaimInput):
+    model_config = ConfigDict(from_attributes=True, frozen=True, extra="forbid")
+
+    external_citations: list[ExternalArtifactReferenceRequest] = Field(default_factory=list)
+
+
+class VisualizationInputRequest(VisualizationInput):
+    model_config = ConfigDict(from_attributes=True, frozen=True, extra="forbid")
+
+    viz_type: VisualizationTypeStr
+    file_path: VisualizationFilePathStr
+
+
+EntityRefIn = Annotated[EntityRef, _ValidatedAsRequest(EntityRefRequest)]
+QuestionLinkIn = Annotated[QuestionLink, _ValidatedAsRequest(QuestionLinkRequest)]
+DatasetCommitManifestIn = Annotated[
+    DatasetCommitManifestInput,
+    _ValidatedAsRequest(DatasetCommitManifestInputRequest),
+]
+ExternalArtifactReferenceIn = Annotated[
+    ExternalArtifactReference,
+    _ValidatedAsRequest(ExternalArtifactReferenceRequest),
+]
+ClaimInputIn = Annotated[ClaimInput, _ValidatedAsRequest(ClaimInputRequest)]
+VisualizationInputIn = Annotated[
+    VisualizationInput,
+    _ValidatedAsRequest(VisualizationInputRequest),
+]
 
 
 class Envelope(BaseModel, Generic[T]):
@@ -221,7 +426,12 @@ class PersonalAccessTokenCreate(RequestModel):
 class PersonalAccessTokenRead(BaseModel):
     token_id: UUID
     label: str
-    role: Role
+    role: Role = Field(description="Role stored when the token was issued.")
+    effective_role: Role = Field(
+        description=(
+            "Role the token acts with now: the lower of role and the owner's current role."
+        )
+    )
     read_only: bool
     scope: str
     expires_at: datetime
@@ -235,7 +445,7 @@ class PersonalAccessTokenIssuedRead(PersonalAccessTokenRead):
 
 
 class AuthRegisterRequest(RequestModel):
-    username: NonBlankStr
+    username: UsernameStr
     password: NonBlankStr
     password_confirmation: NonBlankStr | None = None
     role: Role = Role.VIEWER
@@ -271,7 +481,7 @@ class AuthUserUpdate(PatchRequestModel):
 
 
 class AuthInvitationCreate(RequestModel):
-    email: NonBlankStr
+    email: InvitationEmailStr
     role: Role = Role.EDITOR
 
 
@@ -334,8 +544,8 @@ class NoteRawTextRead(BaseModel):
 
 
 class ProjectCreate(RequestModel):
-    name: NonBlankStr
-    description: str | None = None
+    name: ProjectNameStr
+    description: ProjectDescriptionStr | None = None
     status: ProjectStatus | None = None
     group_id: UUID | None = None
     client_capture_id: str | None = None
@@ -344,15 +554,15 @@ class ProjectCreate(RequestModel):
 class ProjectUpdate(PatchRequestModel):
     non_nullable_fields = frozenset({"name", "description", "status"})
 
-    name: NonBlankStr | SkipJsonSchema[None] = None
-    description: str | SkipJsonSchema[None] = None
+    name: ProjectNameStr | SkipJsonSchema[None] = None
+    description: ProjectDescriptionStr | SkipJsonSchema[None] = None
     status: ProjectStatus | SkipJsonSchema[None] = None
     group_id: UUID | None = None
 
 
 class ProjectGroupCreate(RequestModel):
-    name: NonBlankStr
-    description: str | None = None
+    name: ProjectGroupNameStr
+    description: ProjectGroupDescriptionStr | None = None
     kind: ProjectGroupKind | None = None
     group_read_all: bool | None = None
 
@@ -360,8 +570,8 @@ class ProjectGroupCreate(RequestModel):
 class ProjectGroupUpdate(PatchRequestModel):
     non_nullable_fields = frozenset({"name", "description", "kind", "group_read_all"})
 
-    name: NonBlankStr | SkipJsonSchema[None] = None
-    description: str | SkipJsonSchema[None] = None
+    name: ProjectGroupNameStr | SkipJsonSchema[None] = None
+    description: ProjectGroupDescriptionStr | SkipJsonSchema[None] = None
     kind: ProjectGroupKind | SkipJsonSchema[None] = None
     group_read_all: bool | SkipJsonSchema[None] = None
 
@@ -501,7 +711,7 @@ class QuestionRefactorResult(BaseModel):
 
 class ExperimentCreate(RequestModel):
     project_id: UUID
-    name: NonBlankStr
+    name: ExperimentNameStr
     primary_question_id: UUID
     description: str | None = None
 
@@ -509,14 +719,14 @@ class ExperimentCreate(RequestModel):
 class ExperimentUpdate(PatchRequestModel):
     non_nullable_fields = frozenset({"name", "status"})
 
-    name: NonBlankStr | SkipJsonSchema[None] = None
+    name: ExperimentNameStr | SkipJsonSchema[None] = None
     description: str | None = None
     status: ExperimentStatus | SkipJsonSchema[None] = None
 
 
 class DatasetCreate(RequestModel):
     project_id: UUID
-    commit_manifest: DatasetCommitManifestInput | None = None
+    commit_manifest: DatasetCommitManifestIn | None = None
     commit_hash: str | None = None
     primary_question_id: UUID
     secondary_question_ids: list[UUID] | None = None
@@ -534,18 +744,18 @@ class DatasetUpdate(PatchRequestModel):
         {"commit_manifest", "commit_hash", "status", "question_links"}
     )
 
-    commit_manifest: DatasetCommitManifestInput | SkipJsonSchema[None] = None
+    commit_manifest: DatasetCommitManifestIn | SkipJsonSchema[None] = None
     commit_hash: str | SkipJsonSchema[None] = None
     status: DatasetStatus | SkipJsonSchema[None] = None
     terminal_reason: NonBlankStr | None = None
-    question_links: list[QuestionLink] | SkipJsonSchema[None] = None
+    question_links: list[QuestionLinkIn] | SkipJsonSchema[None] = None
 
 
 class NoteCreate(RequestModel):
     project_id: UUID
     raw_content: NonBlankStr
     transcribed_text: str | None = None
-    targets: list[EntityRef] | None = None
+    targets: list[EntityRefIn] | None = None
     metadata: dict[str, NoteMetadataScalar] | None = None
     client_capture_id: str | None = None
     status: NoteStatus | None = None
@@ -563,7 +773,7 @@ class NoteUpdate(PatchRequestModel):
     non_nullable_fields = frozenset({"targets", "metadata", "status"})
 
     transcribed_text: str | None = None
-    targets: list[EntityRef] | SkipJsonSchema[None] = None
+    targets: list[EntityRefIn] | SkipJsonSchema[None] = None
     metadata: dict[str, NoteMetadataScalar] | SkipJsonSchema[None] = None
     status: NoteStatus | SkipJsonSchema[None] = None
 
@@ -788,6 +998,12 @@ class GraphChangeSetSummary(BaseModel):
     committed_by_username: str | None = None
 
 
+class GraphBatchSummary(GraphChangeSetSummary):
+    """Daily Review list item: a change-set summary plus its meeting nudge count."""
+
+    meeting_note_count: int = 0
+
+
 class GraphDraftListFilters(BaseModel):
     project_id: UUID | None = None
     status: GraphChangeSetStatus | None = None
@@ -869,7 +1085,7 @@ class SessionPromotionRequest(RequestModel):
 class SessionDatasetPromotionRequest(RequestModel):
     primary_question_id: UUID
     secondary_question_ids: list[UUID] | None = None
-    commit_manifest: DatasetCommitManifestInput | None = None
+    commit_manifest: DatasetCommitManifestIn | None = None
     status: DatasetStatus | None = None
 
     @field_validator("secondary_question_ids")
@@ -879,18 +1095,18 @@ class SessionDatasetPromotionRequest(RequestModel):
 
 
 class AcquisitionOutputCreate(RequestModel):
-    file_path: NonBlankStr
-    checksum: NonBlankStr
+    file_path: AcquisitionFilePathStr
+    checksum: AcquisitionChecksumStr
     size_bytes: int | None = Field(default=None, ge=0)
 
 
 class AnalysisCreate(RequestModel):
     project_id: UUID
     dataset_ids: list[UUID] = Field(..., min_length=1)
-    method_hash: NonBlankStr
-    code_version: NonBlankStr
-    environment_hash: str | None = None
-    external_artifacts: list[ExternalArtifactReference] | None = None
+    method_hash: AnalysisMethodHashStr
+    code_version: AnalysisCodeVersionStr
+    environment_hash: AnalysisEnvironmentHashStr | None = None
+    external_artifacts: list[ExternalArtifactReferenceIn] | None = None
     status: AnalysisStatus | None = None
     terminal_reason: NonBlankStr | None = None
 
@@ -904,8 +1120,8 @@ class AnalysisUpdate(PatchRequestModel):
     non_nullable_fields = frozenset({"status", "external_artifacts"})
 
     status: AnalysisStatus | SkipJsonSchema[None] = None
-    environment_hash: str | None = None
-    external_artifacts: list[ExternalArtifactReference] | SkipJsonSchema[None] = None
+    environment_hash: AnalysisEnvironmentHashStr | None = None
+    external_artifacts: list[ExternalArtifactReferenceIn] | SkipJsonSchema[None] = None
     terminal_reason: NonBlankStr | None = None
 
 
@@ -921,7 +1137,7 @@ class ClaimCreate(RequestModel):
     supported_by_dataset_ids: list[UUID] | None = None
     supported_by_analysis_ids: list[UUID] | None = None
     answers_question_ids: list[UUID] | None = None
-    external_citations: list[ExternalArtifactReference] | None = None
+    external_citations: list[ExternalArtifactReferenceIn] | None = None
 
     @field_validator(
         "supported_by_dataset_ids", "supported_by_analysis_ids", "answers_question_ids"
@@ -954,7 +1170,7 @@ class ClaimUpdate(PatchRequestModel):
     supported_by_dataset_ids: list[UUID] | SkipJsonSchema[None] = None
     supported_by_analysis_ids: list[UUID] | SkipJsonSchema[None] = None
     answers_question_ids: list[UUID] | SkipJsonSchema[None] = None
-    external_citations: list[ExternalArtifactReference] | SkipJsonSchema[None] = None
+    external_citations: list[ExternalArtifactReferenceIn] | SkipJsonSchema[None] = None
 
     @field_validator(
         "supported_by_dataset_ids", "supported_by_analysis_ids", "answers_question_ids"
@@ -973,12 +1189,12 @@ class ExplorationNodeCreate(RequestModel):
     project_id: UUID
     node_type: ExplorationNodeType
     title: NonBlankStr
-    target: EntityRef
+    target: EntityRefIn
     status: ExplorationNodeStatus | None = None
     choice: NonBlankStr | None = None
     alternatives_considered: list[NonBlankStr] | None = None
     rationale: NonBlankStr | None = None
-    evidence_refs: list[EntityRef] | None = None
+    evidence_refs: list[EntityRefIn] | None = None
     hypothesis: NonBlankStr | None = None
     failure_mode: NonBlankStr | None = None
     lesson: NonBlankStr | None = None
@@ -1012,7 +1228,7 @@ class ExplorationNodeUpdate(PatchRequestModel):
     choice: NonBlankStr | None = None
     alternatives_considered: list[NonBlankStr] | SkipJsonSchema[None] = None
     rationale: NonBlankStr | None = None
-    evidence_refs: list[EntityRef] | SkipJsonSchema[None] = None
+    evidence_refs: list[EntityRefIn] | SkipJsonSchema[None] = None
     hypothesis: NonBlankStr | None = None
     failure_mode: NonBlankStr | None = None
     lesson: NonBlankStr | None = None
@@ -1048,11 +1264,11 @@ ProvenanceLinkRead = ProvenanceLink
 
 class GoalCreateFields(RequestModel):
     goal_type: GoalType
-    title: NonBlankStr
+    title: GoalTitleStr
     summary: str | None = None
     status: GoalStatus | None = None
     target_date: date | None = None
-    external_ref: str | None = None
+    external_ref: GoalExternalRefStr | None = None
     attributes: dict[str, Any] | None = None
 
     @model_validator(mode="after")
@@ -1080,11 +1296,11 @@ class GoalUpdate(PatchRequestModel):
     )
 
     goal_type: GoalType | SkipJsonSchema[None] = None
-    title: NonBlankStr | SkipJsonSchema[None] = None
+    title: GoalTitleStr | SkipJsonSchema[None] = None
     summary: str | SkipJsonSchema[None] = None
     status: GoalStatus | SkipJsonSchema[None] = None
     target_date: date | None = None
-    external_ref: str | None = None
+    external_ref: GoalExternalRefStr | None = None
     attributes: dict[str, Any] | SkipJsonSchema[None] = None
     links: list[GoalLinkCreate] | SkipJsonSchema[None] = None
 
@@ -1144,8 +1360,8 @@ DataStoreRead = DataStore
 
 class VisualizationCreate(RequestModel):
     analysis_id: UUID
-    viz_type: NonBlankStr
-    file_path: NonBlankStr
+    viz_type: VisualizationTypeStr
+    file_path: VisualizationFilePathStr
     caption: str | None = None
     related_claim_ids: list[UUID] | None = None
 
@@ -1158,8 +1374,8 @@ class VisualizationCreate(RequestModel):
 class VisualizationUpdate(PatchRequestModel):
     non_nullable_fields = frozenset({"viz_type", "file_path", "related_claim_ids"})
 
-    viz_type: NonBlankStr | SkipJsonSchema[None] = None
-    file_path: NonBlankStr | SkipJsonSchema[None] = None
+    viz_type: VisualizationTypeStr | SkipJsonSchema[None] = None
+    file_path: VisualizationFilePathStr | SkipJsonSchema[None] = None
     caption: str | None = None
     related_claim_ids: list[UUID] | SkipJsonSchema[None] = None
 
@@ -1190,7 +1406,7 @@ class EvidenceBundleCreateDataset(RequestModel):
     kind: Literal["create"]
     primary_question_id: UUID | None = None
     secondary_question_ids: list[UUID] | None = None
-    commit_manifest: DatasetCommitManifestInput | None = None
+    commit_manifest: DatasetCommitManifestIn | None = None
     commit_hash: str | None = None
     status: DatasetStatus = DatasetStatus.STAGED
     terminal_reason: NonBlankStr | None = None
@@ -1215,10 +1431,10 @@ class EvidenceBundleExistingAnalysis(RequestModel):
 class EvidenceBundleCreateAnalysis(RequestModel):
     kind: Literal["create"]
     dataset_ids: list[UUID] | None = None
-    method_hash: NonBlankStr
-    code_version: NonBlankStr
-    environment_hash: str | None = None
-    external_artifacts: list[ExternalArtifactReference] | None = None
+    method_hash: AnalysisMethodHashStr
+    code_version: AnalysisCodeVersionStr
+    environment_hash: AnalysisEnvironmentHashStr | None = None
+    external_artifacts: list[ExternalArtifactReferenceIn] | None = None
     status: AnalysisStatus = AnalysisStatus.STAGED
     terminal_reason: NonBlankStr | None = None
     derive_code_provenance: bool = False
@@ -1255,7 +1471,7 @@ class EvidenceBundleCreateClaim(RequestModel):
     supported_by_dataset_ids: list[UUID] | None = None
     supported_by_analysis_ids: list[UUID] | None = None
     answers_question_ids: list[UUID] | None = None
-    external_citations: list[ExternalArtifactReference] | None = None
+    external_citations: list[ExternalArtifactReferenceIn] | None = None
 
     @field_validator(
         "supported_by_dataset_ids",
@@ -1282,8 +1498,8 @@ class EvidenceBundleExistingVisualization(RequestModel):
 class EvidenceBundleCreateVisualization(RequestModel):
     kind: Literal["create"]
     analysis_id: UUID | None = None
-    viz_type: NonBlankStr
-    file_path: NonBlankStr
+    viz_type: VisualizationTypeStr
+    file_path: VisualizationFilePathStr
     caption: str | None = None
     related_claim_ids: list[UUID] | None = None
     upload_intent: EvidenceBundleUploadIntent | None = None
@@ -1312,7 +1528,7 @@ class EvidenceBundleCreateSourceNote(RequestModel):
     kind: Literal["create"]
     raw_content: NonBlankStr
     transcribed_text: str | None = None
-    targets: list[EntityRef] | None = None
+    targets: list[EntityRefIn] | None = None
     metadata: dict[str, NoteMetadataScalar] | None = None
     status: NoteStatus = NoteStatus.STAGED
 
@@ -1584,10 +1800,10 @@ class PortfolioProjectGroupSummary(BaseModel):
 
 
 class AnalysisCommitRequest(RequestModel):
-    environment_hash: str | None = None
-    external_artifacts: list[ExternalArtifactReference] | None = None
-    claims: list[ClaimInput] | None = None
-    visualizations: list[VisualizationInput] | None = None
+    environment_hash: AnalysisEnvironmentHashStr | None = None
+    external_artifacts: list[ExternalArtifactReferenceIn] | None = None
+    claims: list[ClaimInputIn] | None = None
+    visualizations: list[VisualizationInputIn] | None = None
 
 
 class AnalysisCommitResult(BaseModel):

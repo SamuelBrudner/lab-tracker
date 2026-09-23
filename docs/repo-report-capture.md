@@ -178,6 +178,13 @@ credentials. See
   hashes. Declared data files never leave the host.
 - **Dirty working trees** are recorded as a flag on the capture, but there is
   no commit to pin — uncommitted state is metadata, not resolvable provenance.
+  If `git status` cannot answer within `LAB_TRACKER_GIT_TIMEOUT_SECONDS`
+  (default 10 seconds; raise it on slow network or parallel filesystems) or
+  fails, the state is recorded as *unknown* (`git_status_error`, rendered
+  "Dirty working tree: unknown (...)") with a stderr warning — never as clean.
+- **Remote URLs are recorded without credentials.** Userinfo (`user:token@` or
+  a bare `token@`) is dropped from http(s) remotes, passwords from `ssh://`
+  remotes, and query strings/fragments from every URL remote.
 - **No continuous monitoring.** Capture is event-based (commits, explicit
   reports, run finishes); Lab Tracker never clones or polls repositories.
 

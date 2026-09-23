@@ -20,9 +20,10 @@ from lab_tracker.models import (
     utc_now,
 )
 from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
+from lab_tracker.reference_registry import DeletableEntity
 from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.dataset_service import DatasetService
-from lab_tracker.services.goal_link_cleanup import remove_goal_links_to_entity
+from lab_tracker.services.deletion_references import prepare_entity_deletion
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.question_service import QuestionService
@@ -93,52 +94,56 @@ class ClaimService(BaseService):
         self.projects.get_project(project_id)
         ensure_non_empty(statement, "statement")
         _ensure_claim_confidence(confidence)
-        dataset_ids, analysis_ids = self._resolve_claim_support_links(
-            project_id,
-            supported_by_dataset_ids,
-            supported_by_analysis_ids,
-        )
-        question_ids = self._resolve_claim_question_links(project_id, answers_question_ids)
-        citations = _normalize_external_citations(external_citations)
-        _ensure_claim_support_links(status, dataset_ids, analysis_ids)
-        resolved_terminal_reason = terminal_reason_for_status(
-            None,
-            status,
-            ClaimStatus.REJECTED,
-            terminal_reason,
-            entity_name="Claim",
-        )
-        claim = Claim(
-            claim_id=uuid4(),
-            project_id=project_id,
-            statement=statement.strip(),
-            confidence=confidence,
-            status=status,
-            terminal_reason=resolved_terminal_reason,
-            falsification_criteria=_normalize_optional_text(falsification_criteria),
-            verification_plan=_normalize_optional_text(verification_plan),
-            refuting_outcome=_normalize_optional_text(refuting_outcome),
-            supported_by_dataset_ids=dataset_ids,
-            supported_by_analysis_ids=analysis_ids,
-            answers_question_ids=question_ids,
-            external_citations=citations,
-            created_by=actor_user_id(actor),
-            created_by_user_id=actor_user_fk(actor, self.repository),
-            origin=origin,
-            change_set_id=change_set_id,
-            origin_provider=origin_provider,
-            origin_model=origin_model,
-            origin_prompt_version=origin_prompt_version,
-        )
-        with self.unit_of_work() as repository:
-            repository.claims.save(claim)
-            self.versions.record_entity_version(
-                repository,
-                entity_type=EntityType.CLAIM,
-                entity_id=claim.claim_id,
-                entity=claim,
-                actor=actor,
+        with self.application_transaction():
+            # Dataset/analysis delete guards read claim support links under
+            # this project lock, so validation and insert cannot interleave.
+            self.repository.lock_project_references(project_id)
+            dataset_ids, analysis_ids = self._resolve_claim_support_links(
+                project_id,
+                supported_by_dataset_ids,
+                supported_by_analysis_ids,
             )
+            question_ids = self._resolve_claim_question_links(project_id, answers_question_ids)
+            citations = _normalize_external_citations(external_citations)
+            _ensure_claim_support_links(status, dataset_ids, analysis_ids)
+            resolved_terminal_reason = terminal_reason_for_status(
+                None,
+                status,
+                ClaimStatus.REJECTED,
+                terminal_reason,
+                entity_name="Claim",
+            )
+            claim = Claim(
+                claim_id=uuid4(),
+                project_id=project_id,
+                statement=statement.strip(),
+                confidence=confidence,
+                status=status,
+                terminal_reason=resolved_terminal_reason,
+                falsification_criteria=_normalize_optional_text(falsification_criteria),
+                verification_plan=_normalize_optional_text(verification_plan),
+                refuting_outcome=_normalize_optional_text(refuting_outcome),
+                supported_by_dataset_ids=dataset_ids,
+                supported_by_analysis_ids=analysis_ids,
+                answers_question_ids=question_ids,
+                external_citations=citations,
+                created_by=actor_user_id(actor),
+                created_by_user_id=actor_user_fk(actor, self.repository),
+                origin=origin,
+                change_set_id=change_set_id,
+                origin_provider=origin_provider,
+                origin_model=origin_model,
+                origin_prompt_version=origin_prompt_version,
+            )
+            with self.unit_of_work() as repository:
+                repository.claims.save(claim)
+                self.versions.record_entity_version(
+                    repository,
+                    entity_type=EntityType.CLAIM,
+                    entity_id=claim.claim_id,
+                    entity=claim,
+                    actor=actor,
+                )
         return claim
 
     def get_claim(self, claim_id: UUID) -> Claim:
@@ -182,6 +187,57 @@ class ClaimService(BaseService):
         )
 
     def update_claim(
+        self,
+        claim_id: UUID,
+        *,
+        statement: PatchValue[str | None] = NOT_PROVIDED,
+        confidence: PatchValue[float | None] = NOT_PROVIDED,
+        status: PatchValue[ClaimStatus | None] = NOT_PROVIDED,
+        terminal_reason: PatchValue[str | None] = NOT_PROVIDED,
+        falsification_criteria: PatchValue[str | None] = NOT_PROVIDED,
+        verification_plan: PatchValue[str | None] = NOT_PROVIDED,
+        refuting_outcome: PatchValue[str | None] = NOT_PROVIDED,
+        supported_by_dataset_ids: PatchValue[Iterable[UUID] | None] = NOT_PROVIDED,
+        supported_by_analysis_ids: PatchValue[Iterable[UUID] | None] = NOT_PROVIDED,
+        answers_question_ids: PatchValue[Iterable[UUID] | None] = NOT_PROVIDED,
+        external_citations: PatchValue[
+            Iterable[ExternalArtifactReference] | None
+        ] = NOT_PROVIDED,
+        actor: AuthContext | None = None,
+        origin: EntityOrigin | None = None,
+        change_set_id: UUID | None = None,
+        origin_provider: str | None = None,
+        origin_model: str | None = None,
+        origin_prompt_version: str | None = None,
+    ) -> Claim:
+        claim = self.get_claim(claim_id)
+        self.authorization.require_contributor(claim.project_id, actor=actor)
+        with self.application_transaction():
+            # Support links and status gate analysis/dataset deletion; change
+            # them under the same project lock those delete guards hold.
+            self.repository.lock_project_references(claim.project_id)
+            return self._update_claim_locked(
+                claim_id,
+                statement=statement,
+                confidence=confidence,
+                status=status,
+                terminal_reason=terminal_reason,
+                falsification_criteria=falsification_criteria,
+                verification_plan=verification_plan,
+                refuting_outcome=refuting_outcome,
+                supported_by_dataset_ids=supported_by_dataset_ids,
+                supported_by_analysis_ids=supported_by_analysis_ids,
+                answers_question_ids=answers_question_ids,
+                external_citations=external_citations,
+                actor=actor,
+                origin=origin,
+                change_set_id=change_set_id,
+                origin_provider=origin_provider,
+                origin_model=origin_model,
+                origin_prompt_version=origin_prompt_version,
+            )
+
+    def _update_claim_locked(
         self,
         claim_id: UUID,
         *,
@@ -347,13 +403,22 @@ class ClaimService(BaseService):
         return claim
 
     def delete_claim(self, claim_id: UUID, *, actor: AuthContext | None = None) -> Claim:
-        claim = self.get_claim(claim_id)
-        self.authorization.require_contributor(claim.project_id, actor=actor)
-        with self.unit_of_work() as repository:
-            remove_goal_links_to_entity(
+        located_claim = self.get_claim(claim_id)
+        self.authorization.require_contributor(located_claim.project_id, actor=actor)
+        with self.application_transaction(), self.unit_of_work() as repository:
+            repository.lock_project_references(located_claim.project_id)
+            claim = self.get_claim(claim_id)
+            self.authorization.require_contributor(claim.project_id, actor=actor)
+            if claim.status != ClaimStatus.PROPOSED:
+                raise ValidationError(
+                    "Only proposed claims can be deleted; reject a claim with a "
+                    "terminal_reason to retire it."
+                )
+            prepare_entity_deletion(
                 repository,
-                entity_type=EntityType.CLAIM,
-                entity_id=claim_id,
+                DeletableEntity.CLAIM,
+                claim_id,
+                project_id=claim.project_id,
             )
             repository.claims.delete(claim_id)
         return claim
@@ -366,35 +431,41 @@ class ClaimService(BaseService):
         relation: ClaimRelation,
         actor: AuthContext | None = None,
     ) -> ClaimEdge:
-        claim = self.get_claim(claim_id)
-        target_claim = self.get_claim(target_claim_id)
-        self.authorization.require_contributor(claim.project_id, actor=actor)
-        if claim.project_id != target_claim.project_id:
-            raise ValidationError("Claim edges must link claims in the same project.")
-        if claim.claim_id == target_claim.claim_id:
-            raise ValidationError("Claim edges cannot target the source claim.")
-        existing_edges = self.list_claim_edges(project_id=claim.project_id)
-        if any(
-            edge.claim_id == claim.claim_id
-            and edge.target_claim_id == target_claim.claim_id
-            and edge.relation == relation
-            for edge in existing_edges
-        ):
-            raise ValidationError("Duplicate claim edge.")
-        _ensure_claim_edge_would_not_cycle(
-            existing_edges,
-            claim_id=claim.claim_id,
-            target_claim_id=target_claim.claim_id,
-        )
-        edge = ClaimEdge(
-            edge_id=uuid4(),
-            claim_id=claim.claim_id,
-            target_claim_id=target_claim.claim_id,
-            relation=relation,
-            created_by=actor_user_id(actor),
-            created_by_user_id=actor_user_fk(actor, self.repository),
-        )
-        with self.unit_of_work() as repository:
+        located_claim = self.get_claim(claim_id)
+        self.authorization.require_contributor(located_claim.project_id, actor=actor)
+        with self.application_transaction(), self.unit_of_work() as repository:
+            # Serialize the read-validate-insert cycle check per project: two
+            # concurrent A->B and B->A creates must not both see an acyclic
+            # graph. Everything below re-reads after the lock.
+            repository.lock_project_references(located_claim.project_id)
+            claim = self.get_claim(claim_id)
+            target_claim = self.get_claim(target_claim_id)
+            self.authorization.require_contributor(claim.project_id, actor=actor)
+            if claim.project_id != target_claim.project_id:
+                raise ValidationError("Claim edges must link claims in the same project.")
+            if claim.claim_id == target_claim.claim_id:
+                raise ValidationError("Claim edges cannot target the source claim.")
+            existing_edges = self.list_claim_edges(project_id=claim.project_id)
+            if any(
+                edge.claim_id == claim.claim_id
+                and edge.target_claim_id == target_claim.claim_id
+                and edge.relation == relation
+                for edge in existing_edges
+            ):
+                raise ValidationError("Duplicate claim edge.")
+            _ensure_claim_edge_would_not_cycle(
+                existing_edges,
+                claim_id=claim.claim_id,
+                target_claim_id=target_claim.claim_id,
+            )
+            edge = ClaimEdge(
+                edge_id=uuid4(),
+                claim_id=claim.claim_id,
+                target_claim_id=target_claim.claim_id,
+                relation=relation,
+                created_by=actor_user_id(actor),
+                created_by_user_id=actor_user_fk(actor, repository),
+            )
             repository.claim_edges.save(edge)
         return edge
 

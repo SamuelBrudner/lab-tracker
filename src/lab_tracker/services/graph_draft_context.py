@@ -234,10 +234,8 @@ class GraphContextBuilder:
                 raw_asset, image_bytes = self.notes.download_note_raw(image_note.note_id)
             except NotFoundError as exc:
                 raise NotFoundError("Source image file is unavailable.") from exc
-            except ValidationError:
-                raise
-            except Exception as exc:
-                raise ValidationError("Source image file could not be read.") from exc
+            # Other storage failures are server faults and propagate (HTTP 500
+            # with a logged traceback) rather than posing as client errors.
             if not image_bytes:
                 raise ValidationError("Source image file is empty.")
             image_content_type = raw_asset.content_type
@@ -266,10 +264,16 @@ class GraphContextBuilder:
         bundle_id = note.metadata.get("capture_bundle_id")
         if not bundle_id:
             return [note]
+        # Capture clients write string bundle ids, which the repository matches
+        # in SQL; other scalar values keep the exact-value project scan. The
+        # exact comparison stays because SQL matches the value's text form.
+        candidates = (
+            self.notes.list_notes(project_id=note.project_id, capture_bundle_id=bundle_id)
+            if isinstance(bundle_id, str)
+            else self.notes.list_notes(project_id=note.project_id)
+        )
         bundle_notes = [
-            item
-            for item in self.notes.list_notes(project_id=note.project_id)
-            if item.metadata.get("capture_bundle_id") == bundle_id
+            item for item in candidates if item.metadata.get("capture_bundle_id") == bundle_id
         ]
         if not any(item.note_id == note.note_id for item in bundle_notes):
             bundle_notes.append(note)

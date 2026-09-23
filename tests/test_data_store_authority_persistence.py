@@ -369,6 +369,135 @@ def test_clear_default_translates_sqlalchemy_error_without_raw_chain(
     assert secret not in str(error.value)
 
 
+_DATA_STORE_LOGGER = "lab_tracker.sqlalchemy_repository_parts.data_stores"
+
+
+class _SecretDriverError(Exception):
+    """A driver error whose message carries bound values, as Postgres DETAIL does."""
+
+    sqlstate = "40P01"
+
+
+def test_unclassified_insert_failure_logs_a_parameter_free_diagnostic(
+    db_session,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    repository = SQLAlchemyLabTrackerRepository(db_session)
+    project = _project()
+    repository.projects.save(project)
+    db_session.commit()
+    secret = "logged-insert-secret-must-not-survive"
+
+    def fail_mapping(_entity: DataStore) -> DataStoreModel:
+        raise OperationalError(
+            "INSERT INTO data_stores (...) VALUES (...)",
+            {"root": secret},
+            _SecretDriverError(f"deadlock detected DETAIL: Key (root)=({secret})"),
+        )
+
+    monkeypatch.setattr(
+        "lab_tracker.sqlalchemy_repository_parts.data_stores.data_store_to_model",
+        fail_mapping,
+    )
+
+    with (
+        caplog.at_level("ERROR", logger=_DATA_STORE_LOGGER),
+        pytest.raises(DataStoreInsertError),
+    ):
+        repository.data_stores.insert(
+            _store(project_id=project.project_id, root=f"https://x.test/{secret}")
+        )
+
+    records = [
+        record
+        for record in caplog.records
+        if record.name == _DATA_STORE_LOGGER
+    ]
+    assert len(records) == 1
+    logged = records[0].getMessage()
+    assert "insert" in logged
+    assert "OperationalError" in logged
+    assert "_SecretDriverError" in logged
+    assert "sqlstate=40P01" in logged
+    assert records[0].exc_info is None
+    assert secret not in caplog.text
+
+
+def test_clear_default_failure_logs_a_parameter_free_diagnostic(
+    db_session,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    repository = SQLAlchemyLabTrackerRepository(db_session)
+    project = _project()
+    repository.projects.save(project)
+    db_session.commit()
+    secret = "logged-default-secret-must-not-survive"
+
+    def fail_default_query(*_args: object, **_kwargs: object) -> None:
+        raise OperationalError(
+            "SELECT * FROM data_stores WHERE root = :root",
+            {"root": secret},
+            RuntimeError(secret),
+        )
+
+    monkeypatch.setattr(db_session, "scalars", fail_default_query)
+
+    with (
+        caplog.at_level("ERROR", logger=_DATA_STORE_LOGGER),
+        pytest.raises(DataStoreInsertError),
+    ):
+        repository.data_stores.clear_default(project.project_id)
+
+    logged = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == _DATA_STORE_LOGGER
+    ]
+    assert len(logged) == 1
+    assert "clear_default" in logged[0]
+    assert "OperationalError" in logged[0]
+    assert "RuntimeError" in logged[0]
+    assert secret not in caplog.text
+
+
+def test_reserve_registration_write_failure_logs_a_parameter_free_diagnostic(
+    db_session,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    repository = SQLAlchemyLabTrackerRepository(db_session)
+    secret = "logged-reserve-secret-must-not-survive"
+
+    def fail_reservation(_session: object) -> None:
+        raise OperationalError("BEGIN IMMEDIATE", {"root": secret}, RuntimeError(secret))
+
+    monkeypatch.setattr(
+        "lab_tracker.sqlalchemy_repository_parts.data_stores._reserve_sqlite_registration_write",
+        fail_reservation,
+    )
+
+    with (
+        caplog.at_level("ERROR", logger=_DATA_STORE_LOGGER),
+        pytest.raises(DataStoreInsertError) as error,
+    ):
+        repository.data_stores.reserve_registration_write()
+
+    logged = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == _DATA_STORE_LOGGER
+    ]
+    assert len(logged) == 1
+    assert "reserve registration write" in logged[0]
+    assert "OperationalError" in logged[0]
+    assert "RuntimeError" in logged[0]
+    assert secret not in caplog.text
+    assert error.value.__cause__ is None
+    assert error.value.__suppress_context__
+
+
 class _Diagnostic:
     def __init__(self, constraint_name: str) -> None:
         self.constraint_name = constraint_name

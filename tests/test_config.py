@@ -22,7 +22,11 @@ from lab_tracker.app_parts.runtime import (
     configure_app_state,
     make_lifespan,
 )
+from lab_tracker.application.store_health_queries import (
+    LOCAL_STORE_HEALTH_UNSUPPORTED,
+)
 from lab_tracker.artifact_resolution import (
+    GitCacheSettings,
     ResolverRegistry,
     outbound_http_policy_from_config,
 )
@@ -280,6 +284,31 @@ def test_store_authority_grants_load_exact_dotenv_value(tmp_path, monkeypatch):
     )
 
     assert Settings(_env_file=dotenv_path).store_authority_grants_json == configured
+
+
+@pytest.mark.parametrize(
+    ("field_name", "secret"),
+    [
+        ("auth_secret_key", "auth-secret-sentinel-3c1d9e"),
+        ("bootstrap_admin_token", "bootstrap-token-sentinel-51af0b"),
+        ("review_email_smtp_password", "smtp-password-sentinel-a7e2c4"),
+        ("openai_api_key", "openai-key-sentinel-0d9b6f"),
+        ("anthropic_api_key", "anthropic-key-sentinel-e48a12"),
+        ("google_api_key", "google-key-sentinel-9f3c07"),
+        (
+            "database_url",
+            "postgresql+psycopg://lab:db-password-sentinel-6b2e@db:5432/lab",
+        ),
+    ],
+)
+def test_credential_settings_are_hidden_from_settings_repr(field_name, secret):
+    # Settings is embedded in AppRuntime, LabTrackerAPI and RequestHandlers, so
+    # any repr in a log line or traceback must not carry credentials.
+    settings = Settings(_env_file=None, **{field_name: secret})
+
+    assert getattr(settings, field_name) == secret
+    assert secret not in repr(settings)
+    assert secret not in str(settings)
 
 
 def test_store_authority_grants_are_hidden_from_settings_rendering():
@@ -907,8 +936,10 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(
         process_executor,
         http_deadline_seconds,
         subprocess_deadline_seconds,
+        git_cache,
     ):
         assert safe_http_client_timeouts == [12.5]
+        captured["registry_git_cache"] = git_cache
         captured["registry_local_file_reader"] = local_file_reader
         captured["registry_local_recovery_enumerator"] = local_recovery_enumerator
         captured["registry_local_resolution_limits"] = local_resolution_limits
@@ -926,26 +957,6 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(
         runtime_module,
         "registry_from_env",
         recording_registry_from_env,
-    )
-
-    def recording_local_store_health_probe(
-        *,
-        inspector,
-        deadline_seconds,
-    ):
-        captured["health_local_inspector"] = inspector
-        captured["health_local_deadline_seconds"] = deadline_seconds
-
-        def probe(target):
-            captured["local_health_target"] = target
-            return StoreHealth(StoreHealthStatus.HEALTHY)
-
-        return probe
-
-    monkeypatch.setattr(
-        runtime_module,
-        "LocalStoreHealthProbe",
-        recording_local_store_health_probe,
     )
 
     def recording_http_store_health_probe(
@@ -1046,8 +1057,10 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(
         store_health_singleflight_wait_seconds=2.25,
         rclone_allowed_remotes="settings-remote",
         git_allowed_remotes="https://settings.example/lab",
+        git_cache_root=str(tmp_path / "git-cache"),
+        git_cache_max_bytes=4096,
     )
-    runtime = build_app_runtime(settings)
+    runtime = build_app_runtime(settings, verify_schema=False)
     app = FastAPI()
     git_health_workdir = runtime.git_health_workdir
     try:
@@ -1091,7 +1104,6 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(
         assert recovery.max_files == 23
         assert recovery.max_directories == 29
         assert recovery.max_bytes == 1_048_576
-        assert captured["health_local_inspector"] is runtime.local_filesystem_operations
         assert runtime.local_filesystem_operations.executor is runtime.process_executor
         assert captured["registry_http_policy"] is runtime.outbound_http_policy
         assert captured["health_http_policy"] is runtime.outbound_http_policy
@@ -1108,7 +1120,10 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(
         assert captured["registry_http_deadline_seconds"] == 12.5
         assert captured["health_http_deadline_seconds"] == 12.5
         assert captured["registry_subprocess_deadline_seconds"] == 7.25
-        assert captured["health_local_deadline_seconds"] == 7.25
+        assert captured["registry_git_cache"] == GitCacheSettings(
+            root=str(tmp_path / "git-cache"),
+            max_bytes=4096,
+        )
         assert captured["health_rclone_deadline_seconds"] == 7.25
         assert captured["health_git_deadline_seconds"] == 7.25
 
@@ -1120,8 +1135,13 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(
             endpoint=None,
             credential_ref=None,
         )
-        assert runtime.store_health_checker(local_health_target).is_healthy
-        assert captured["local_health_target"] is local_health_target
+        # Local store health is statically unsupported in this build: the
+        # runtime composes no local probe and never inspects the root.
+        assert not hasattr(runtime_module, "LocalStoreHealthProbe")
+        assert (
+            runtime.store_health_checker(local_health_target)
+            == LOCAL_STORE_HEALTH_UNSUPPORTED
+        )
         assert "legacy_health_target" not in captured
 
         http_health_target = unsafe_probe_target_for_adapter_test(
@@ -1212,7 +1232,7 @@ def test_runtime_retains_one_store_authority_snapshot_without_environment_reread
         "environment-must-not-be-reread",
     )
 
-    runtime = build_app_runtime(settings)
+    runtime = build_app_runtime(settings, verify_schema=False)
     app = FastAPI()
     try:
         configure_app_state(app, runtime)
@@ -1269,6 +1289,7 @@ def test_lifespan_removes_app_owned_git_health_workdir(monkeypatch):
         process_executor,
         http_deadline_seconds,
         subprocess_deadline_seconds,
+        git_cache,
     ):
         del (
             local_file_reader,
@@ -1282,6 +1303,7 @@ def test_lifespan_removes_app_owned_git_health_workdir(monkeypatch):
             process_executor,
             http_deadline_seconds,
             subprocess_deadline_seconds,
+            git_cache,
         )
         return resolver_registry
 
@@ -1294,7 +1316,8 @@ def test_lifespan_removes_app_owned_git_health_workdir(monkeypatch):
         Settings(
             _env_file=None,
             database_url="sqlite+pysqlite:///:memory:",
-        )
+        ),
+        verify_schema=False,
     )
     git_health_workdir = runtime.git_health_workdir
     app = FastAPI(lifespan=make_lifespan(runtime))
@@ -1321,7 +1344,8 @@ def test_lifespan_removes_git_health_workdir_when_engine_disposal_fails(
         Settings(
             _env_file=None,
             database_url="sqlite+pysqlite:///:memory:",
-        )
+        ),
+        verify_schema=False,
     )
     git_health_workdir = runtime.git_health_workdir
     original_dispose = runtime.engine.dispose
@@ -1355,7 +1379,8 @@ def test_git_health_workdir_gc_fallback_is_silent(monkeypatch):
         Settings(
             _env_file=None,
             database_url="sqlite+pysqlite:///:memory:",
-        )
+        ),
+        verify_schema=False,
     )
     git_health_workdir = runtime.git_health_workdir
     runtime.engine.dispose()
@@ -1564,3 +1589,139 @@ def test_non_local_environment_rejects_disabled_auth(monkeypatch):
     monkeypatch.setenv("LAB_TRACKER_AUTH_SECRET_KEY", "custom-secret")
     with pytest.raises(ValidationError, match="LAB_TRACKER_AUTH_ENABLED=false"):
         _settings_from_environment()
+
+
+def _clear_bootstrap_disclosure_env(monkeypatch) -> None:
+    _clear_auth_env(monkeypatch)
+    monkeypatch.delenv("LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE", raising=False)
+
+
+def test_bootstrap_disclosure_defaults_to_local_only_in_local_environment(monkeypatch):
+    _clear_bootstrap_disclosure_env(monkeypatch)
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "local")
+
+    settings = _settings_from_environment()
+
+    assert settings.bootstrap_admin_token_disclosure is None
+    assert settings.effective_bootstrap_admin_token_disclosure() == "local"
+
+
+@pytest.mark.parametrize("environment", ["production", "staging", " Production "])
+def test_bootstrap_disclosure_defaults_to_never_outside_local(monkeypatch, environment):
+    _clear_bootstrap_disclosure_env(monkeypatch)
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", environment)
+    monkeypatch.setenv("LAB_TRACKER_AUTH_SECRET_KEY", "strong-production-secret")
+
+    settings = _settings_from_environment()
+
+    assert settings.effective_bootstrap_admin_token_disclosure() == "never"
+
+
+def test_explicit_local_bootstrap_disclosure_is_rejected_outside_local(monkeypatch):
+    _clear_bootstrap_disclosure_env(monkeypatch)
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "production")
+    monkeypatch.setenv("LAB_TRACKER_AUTH_SECRET_KEY", "strong-production-secret")
+    monkeypatch.setenv("LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE", "local")
+
+    with pytest.raises(
+        ValidationError,
+        match="LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE=local is only allowed",
+    ):
+        _settings_from_environment()
+
+
+@pytest.mark.parametrize("mode", ["first_run", "never"])
+def test_explicit_non_peer_bootstrap_disclosure_modes_are_valid_outside_local(
+    monkeypatch,
+    mode,
+):
+    # render.yaml pins first_run; the dedicated-instance deployment pins never.
+    _clear_bootstrap_disclosure_env(monkeypatch)
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "production")
+    monkeypatch.setenv("LAB_TRACKER_AUTH_SECRET_KEY", "strong-production-secret")
+    monkeypatch.setenv("LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE", mode)
+
+    assert _settings_from_environment().effective_bootstrap_admin_token_disclosure() == mode
+
+
+def test_explicit_local_bootstrap_disclosure_is_valid_in_local_environment(monkeypatch):
+    _clear_bootstrap_disclosure_env(monkeypatch)
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "local")
+    monkeypatch.setenv("LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE", "local")
+
+    assert _settings_from_environment().effective_bootstrap_admin_token_disclosure() == "local"
+
+
+def test_env_example_bootstrap_disclosure_is_valid_for_its_environment(monkeypatch):
+    _clear_bootstrap_disclosure_env(monkeypatch)
+    env_example = Path(__file__).resolve().parent.parent / ".env.example"
+    configured = dict(
+        line.split("=", 1)
+        for line in env_example.read_text(encoding="utf-8").splitlines()
+        if line and not line.startswith("#") and "=" in line
+    )
+
+    settings = Settings(
+        _env_file=None,
+        environment=configured["LAB_TRACKER_ENVIRONMENT"],
+        auth_secret_key="strong-production-secret",
+        bootstrap_admin_token_disclosure=configured["LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE"],
+    )
+
+    assert settings.effective_bootstrap_admin_token_disclosure() != "local"
+
+
+def test_auth_session_max_age_defaults_to_seven_days(monkeypatch):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.delenv("LAB_TRACKER_AUTH_SESSION_MAX_AGE_HOURS", raising=False)
+    monkeypatch.delenv("LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES", raising=False)
+
+    assert _settings_from_environment().auth_session_max_age_hours == 7 * 24
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "8761"])
+def test_auth_session_max_age_rejects_out_of_range_values(monkeypatch, value):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.delenv("LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES", raising=False)
+    monkeypatch.setenv("LAB_TRACKER_AUTH_SESSION_MAX_AGE_HOURS", value)
+
+    with pytest.raises(ValidationError, match="LAB_TRACKER_AUTH_SESSION_MAX_AGE_HOURS"):
+        _settings_from_environment()
+
+
+def test_auth_session_max_age_must_cover_one_token_lifetime(monkeypatch):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv("LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES", "180")
+    monkeypatch.setenv("LAB_TRACKER_AUTH_SESSION_MAX_AGE_HOURS", "2")
+
+    with pytest.raises(
+        ValidationError,
+        match="no shorter than LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES",
+    ):
+        _settings_from_environment()
+
+
+def test_public_viewer_registration_defaults_on_only_in_local(monkeypatch):
+    """Anonymous viewer self-registration is opt-in outside ``local`` (L52)."""
+
+    _clear_auth_env(monkeypatch)
+    monkeypatch.delenv("LAB_TRACKER_AUTH_PUBLIC_VIEWER_REGISTRATION_ENABLED", raising=False)
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "local")
+    assert _settings_from_environment().is_public_viewer_registration_enabled() is True
+
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "production")
+    monkeypatch.setenv("LAB_TRACKER_AUTH_SECRET_KEY", "custom-secret")
+    assert _settings_from_environment().is_public_viewer_registration_enabled() is False
+
+
+def test_public_viewer_registration_flag_overrides_environment(monkeypatch):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "production")
+    monkeypatch.setenv("LAB_TRACKER_AUTH_SECRET_KEY", "custom-secret")
+    monkeypatch.setenv("LAB_TRACKER_AUTH_PUBLIC_VIEWER_REGISTRATION_ENABLED", "true")
+    assert _settings_from_environment().is_public_viewer_registration_enabled() is True
+
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "local")
+    monkeypatch.delenv("LAB_TRACKER_AUTH_SECRET_KEY")
+    monkeypatch.setenv("LAB_TRACKER_AUTH_PUBLIC_VIEWER_REGISTRATION_ENABLED", "false")
+    assert _settings_from_environment().is_public_viewer_registration_enabled() is False

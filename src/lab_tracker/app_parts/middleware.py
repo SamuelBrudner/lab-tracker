@@ -10,6 +10,7 @@ from fastapi import FastAPI, Request
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.base import RequestResponseEndpoint
 from starlette.responses import JSONResponse, Response
+from starlette.types import Scope
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.application import RequestHandlers
@@ -22,9 +23,11 @@ from lab_tracker.auth import (
     Role,
     device_principal_can_access,
     extract_bearer_token,
+    resolve_session_user,
     service_principal_can_access,
 )
 from lab_tracker.errors import AuthError, RateLimitError
+from lab_tracker.rate_limit import rate_limit_client
 from lab_tracker.schemas import ErrorEnvelope, ErrorInfo
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 from lab_tracker.store_health import (
@@ -33,6 +36,7 @@ from lab_tracker.store_health import (
     StoreProbe,
     StoreProbeTarget,
 )
+from lab_tracker.upload_security import UploadBodySizeLimitMiddleware
 
 _APP_CONTENT_SECURITY_POLICY = "; ".join(
     [
@@ -157,7 +161,13 @@ def configure_auth_middleware(app: FastAPI) -> None:
         if not request.app.state.auth_enabled:
             request.state.auth_context = local_auth_context()
             return await call_next(request)
-        if request.method == "OPTIONS" or _is_public_path(request.url.path):
+        # Match the route-relative path the router sees: under a mounted root
+        # path, request.url.path carries the prefix and would miss every
+        # public path and /auth policy below.
+        path = _route_relative_path(request)
+        if not isinstance(path, str):
+            return _auth_error_response("Authentication required.")
+        if request.method == "OPTIONS" or _is_public_path(path):
             return await call_next(request)
         try:
             token = extract_bearer_token(request.headers.get("Authorization"))
@@ -168,7 +178,7 @@ def configure_auth_middleware(app: FastAPI) -> None:
                 )
                 if principal is None:
                     raise AuthError("Invalid device token.")
-                if not device_principal_can_access(request.method, request.url.path):
+                if not device_principal_can_access(request.method, path):
                     return _device_forbidden_response(
                         "This action is not permitted for paired devices."
                     )
@@ -185,31 +195,41 @@ def configure_auth_middleware(app: FastAPI) -> None:
                     device_token_id=principal.device_token_id,
                 )
             elif token.startswith(LPAT_TOKEN_PREFIX):
-                pat_rate_key = _pat_rate_key(request, token)
+                pat_rate_client = rate_limit_client(request)
+                pat_rate_key = _pat_rate_key(pat_rate_client, token)
                 app.state.pat_rate_limiter.check(pat_rate_key)
                 principal = await run_in_threadpool(
                     app.state.personal_access_token_service.verify_token,
                     token,
                 )
                 if principal is None:
-                    app.state.pat_rate_limiter.record_failure(pat_rate_key)
+                    app.state.pat_rate_limiter.record_failure(
+                        pat_rate_key, client=pat_rate_client
+                    )
                     raise AuthError("Invalid personal access token.")
-                if not service_principal_can_access(
-                    request.method,
-                    request.url.path,
-                    read_only=principal.read_only,
-                    role=principal.role,
-                    scope=principal.scope,
-                ):
-                    app.state.pat_rate_limiter.record_failure(pat_rate_key)
-                    return _service_forbidden_response("Not permitted for this token.")
+                # Resolve the owner first: a token without one is a counted
+                # credential failure, and must not learn the policy's answer.
                 user = await run_in_threadpool(
                     app.state.auth_service.get_user_by_id,
                     principal.user_id,
                 )
                 if user is None:
-                    app.state.pat_rate_limiter.record_failure(pat_rate_key)
+                    app.state.pat_rate_limiter.record_failure(
+                        pat_rate_key, client=pat_rate_client
+                    )
                     raise AuthError("Invalid personal access token.")
+                if not service_principal_can_access(
+                    request.method,
+                    path,
+                    read_only=principal.read_only,
+                    role=principal.role,
+                    scope=principal.scope,
+                ):
+                    # The token verified, so this is a policy denial, not a
+                    # credential failure: charging it would lock a valid token
+                    # out of the requests it may make, and at the client's
+                    # quota would turn this 403 into a 429.
+                    return _service_forbidden_response("Not permitted for this token.")
                 app.state.pat_rate_limiter.reset(pat_rate_key)
                 request.state.auth_context = AuthContext(
                     user_id=principal.user_id,
@@ -217,16 +237,13 @@ def configure_auth_middleware(app: FastAPI) -> None:
                     principal_type=PrincipalType.SERVICE,
                 )
             else:
-                claims = await run_in_threadpool(
-                    app.state.token_service.verify_access_token,
-                    token,
+                _claims, user = await run_in_threadpool(
+                    lambda: resolve_session_user(
+                        token,
+                        token_service=app.state.token_service,
+                        auth_service=app.state.auth_service,
+                    )
                 )
-                user = await run_in_threadpool(
-                    app.state.auth_service.get_user_by_id,
-                    claims.user_id,
-                )
-                if user is None:
-                    raise AuthError("Invalid token.")
                 request.state.auth_context = AuthContext(user_id=user.user_id, role=user.role)
         except RateLimitError as exc:
             return _rate_limited_response(str(exc))
@@ -247,7 +264,8 @@ def configure_security_headers_middleware(app: FastAPI) -> None:
                 "Strict-Transport-Security",
                 "max-age=31536000; includeSubDomains",
             )
-        if _should_apply_csp(request.url.path):
+        path = _route_relative_path(request)
+        if isinstance(path, str) and _should_apply_csp(path):
             response.headers.setdefault(
                 "Content-Security-Policy",
                 _APP_CONTENT_SECURITY_POLICY,
@@ -345,10 +363,28 @@ def _should_apply_csp(path: str) -> bool:
     return any(path.startswith(prefix) for prefix in _CSP_PATH_PREFIXES)
 
 
-def _pat_rate_key(request: Request, token: str) -> str:
-    client_host = request.client.host if request.client is not None else "unknown"
+def _pat_rate_key(client_host: str, token: str) -> str:
+    # Keyed per token on purpose. lpat_ secrets carry 256 bits of entropy, so
+    # guessing is infeasible and needs no host-wide throttle. A host-only key
+    # would let one misconfigured agent behind a shared proxy lock out every
+    # PAT user behind that proxy. Failures are charged to the client host, so
+    # one host flooding distinct tokens only fills its own share of the table.
     token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
     return f"lpat:{client_host}:{token_hash[:24]}"
+
+
+def configure_upload_body_size_limit_middleware(app: FastAPI) -> None:
+    """Enforce ``max_upload_bytes`` on multipart bodies before and while they stream.
+
+    Register it before the other middleware so it wraps the router most
+    closely: authentication still answers first, and the 413 passes through
+    the security-header and database-scope layers like any other response.
+    """
+
+    def max_upload_bytes(scope: Scope) -> int:
+        return int(scope["app"].state.settings.max_upload_bytes)
+
+    app.add_middleware(UploadBodySizeLimitMiddleware, max_bytes=max_upload_bytes)
 
 
 def configure_database_session_middleware(

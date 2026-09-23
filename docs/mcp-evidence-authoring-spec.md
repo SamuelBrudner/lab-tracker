@@ -48,7 +48,10 @@ The MCP server exposes:
 
 - reads for projects, questions, notes, sessions, datasets, analyses, claims, and
   visualizations;
-- provenance reads for datasets and analyses;
+- provenance reads for datasets, analyses, and claims
+  (`lab_tracker_get_dataset_provenance`, `lab_tracker_get_analysis_provenance`,
+  and `lab_tracker_get_claim_provenance`; check a claim's provenance before
+  reusing it as evidence);
 - creates for projects, questions, notes, datasets, analyses, claims,
   visualizations, goals, claim edges, and goal links;
 - `lab_tracker_record_evidence_bundle` for the one-result convenience workflow.

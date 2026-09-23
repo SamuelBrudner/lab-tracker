@@ -281,6 +281,274 @@ class TestSecretsFile:
         # The symlink target was never truncated/overwritten.
         assert target.read_text() == "do not clobber"
 
+    def test_empty_credentials_keep_an_existing_non_empty_secrets_file(self, tmp_path):
+        # Re-running an installer from a shell without the credential exported
+        # (e.g. to change the interval) must not wipe the persisted token.
+        path = str(tmp_path / "daily-review.secrets.json")
+        mod.write_secrets_file(path, {"LAB_TRACKER_API_KEY": "lpat_persisted"})
+        written = mod.write_secrets_file(
+            path,
+            {
+                "LAB_TRACKER_API_KEY": "",
+                "LAB_TRACKER_ADMIN_USER": "",
+                "LAB_TRACKER_ADMIN_PASS": "",
+            },
+        )
+        assert written is False
+        assert mod.read_secret(path, "LAB_TRACKER_API_KEY") == "lpat_persisted"
+        assert stat.S_IMODE(Path(path).stat().st_mode) == 0o600
+
+    def test_kept_secrets_file_is_retightened_to_private_mode(self, tmp_path):
+        # Keeping the persisted token must not also keep a loosened mode.
+        path = tmp_path / "daily-review.secrets.json"
+        mod.write_secrets_file(str(path), {"LAB_TRACKER_API_KEY": "lpat_persisted"})
+        path.chmod(0o644)
+        assert mod.write_secrets_file(str(path), {"LAB_TRACKER_API_KEY": ""}) is False
+        assert mod.read_secret(str(path), "LAB_TRACKER_API_KEY") == "lpat_persisted"
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+    def test_non_utf8_existing_secrets_file_fails_loudly_instead_of_overwriting(
+        self, tmp_path
+    ):
+        path = tmp_path / "daily-review.secrets.json"
+        path.write_bytes(b"\xff\xfe not utf-8")
+        with pytest.raises(mod.SchedulerConfigError, match="not valid JSON"):
+            mod.write_secrets_file(str(path), {"LAB_TRACKER_API_KEY": ""})
+        assert path.read_bytes() == b"\xff\xfe not utf-8"
+
+    def test_new_credentials_replace_an_existing_secrets_file(self, tmp_path):
+        path = str(tmp_path / "daily-review.secrets.json")
+        mod.write_secrets_file(path, {"LAB_TRACKER_API_KEY": "lpat_old"})
+        written = mod.write_secrets_file(
+            path,
+            {
+                "LAB_TRACKER_API_KEY": "",
+                "LAB_TRACKER_ADMIN_USER": "admin",
+                "LAB_TRACKER_ADMIN_PASS": "pw",
+            },
+        )
+        assert written is True
+        with open(path, encoding="utf-8") as handle:
+            assert json.load(handle) == {
+                "LAB_TRACKER_ADMIN_USER": "admin",
+                "LAB_TRACKER_ADMIN_PASS": "pw",
+            }
+
+    def test_lone_admin_password_keeps_the_stored_admin_user(self, tmp_path):
+        # Rotating only the password (only LAB_TRACKER_ADMIN_PASS exported) must
+        # not drop the persisted username, or every later login would fail.
+        path = str(tmp_path / "daily-review.secrets.json")
+        mod.write_secrets_file(
+            path, {"LAB_TRACKER_ADMIN_USER": "admin", "LAB_TRACKER_ADMIN_PASS": "old"}
+        )
+        written = mod.write_secrets_file(
+            path,
+            {
+                "LAB_TRACKER_API_KEY": "",
+                "LAB_TRACKER_ADMIN_USER": "",
+                "LAB_TRACKER_ADMIN_PASS": "new",
+            },
+        )
+        assert written is True
+        with open(path, encoding="utf-8") as handle:
+            assert json.load(handle) == {
+                "LAB_TRACKER_ADMIN_USER": "admin",
+                "LAB_TRACKER_ADMIN_PASS": "new",
+            }
+        assert stat.S_IMODE(Path(path).stat().st_mode) == 0o600
+
+    def test_lone_admin_user_keeps_the_stored_admin_password(self, tmp_path):
+        path = str(tmp_path / "daily-review.secrets.json")
+        mod.write_secrets_file(
+            path, {"LAB_TRACKER_ADMIN_USER": "old-admin", "LAB_TRACKER_ADMIN_PASS": "pw"}
+        )
+        assert mod.write_secrets_file(path, {"LAB_TRACKER_ADMIN_USER": "admin"}) is True
+        with open(path, encoding="utf-8") as handle:
+            assert json.load(handle) == {
+                "LAB_TRACKER_ADMIN_USER": "admin",
+                "LAB_TRACKER_ADMIN_PASS": "pw",
+            }
+
+    @pytest.mark.parametrize(
+        ("stored", "provided", "missing"),
+        [
+            (None, {"LAB_TRACKER_ADMIN_PASS": "pw"}, "LAB_TRACKER_ADMIN_USER"),
+            (
+                {"LAB_TRACKER_API_KEY": "lpat_old"},
+                {"LAB_TRACKER_ADMIN_PASS": "pw"},
+                "LAB_TRACKER_ADMIN_USER",
+            ),
+            (
+                {"LAB_TRACKER_API_KEY": "lpat_old"},
+                {"LAB_TRACKER_ADMIN_USER": "admin"},
+                "LAB_TRACKER_ADMIN_PASS",
+            ),
+        ],
+    )
+    def test_lone_admin_half_without_a_stored_other_half_fails_loudly(
+        self, tmp_path, stored, provided, missing
+    ):
+        path = tmp_path / "daily-review.secrets.json"
+        if stored is not None:
+            mod.write_secrets_file(str(path), stored)
+        before = path.read_bytes() if path.exists() else None
+        with pytest.raises(mod.SchedulerConfigError, match=missing):
+            mod.write_secrets_file(str(path), provided)
+        assert (path.read_bytes() if path.exists() else None) == before
+
+    def test_lone_admin_half_refusal_says_to_unset_it_or_export_its_pair(self, tmp_path):
+        path = tmp_path / "daily-review.secrets.json"
+        with pytest.raises(mod.SchedulerConfigError) as excinfo:
+            mod.write_secrets_file(str(path), {"LAB_TRACKER_ADMIN_PASS": "pw"})
+        message = str(excinfo.value)
+        assert "unset LAB_TRACKER_ADMIN_PASS" in message
+        assert "export LAB_TRACKER_ADMIN_USER" in message
+        assert "export both" not in message
+
+    @pytest.mark.parametrize(
+        ("stored", "stray"),
+        [
+            (None, {"LAB_TRACKER_ADMIN_PASS": "pw"}),
+            (None, {"LAB_TRACKER_ADMIN_USER": "admin"}),
+            ({"LAB_TRACKER_API_KEY": "lpat_old"}, {"LAB_TRACKER_ADMIN_PASS": "pw"}),
+        ],
+    )
+    def test_api_key_with_a_stray_admin_half_is_persisted_without_the_half(
+        self, tmp_path, stored, stray
+    ):
+        # The API key is a complete credential that takes precedence at run
+        # time, so a stray admin half next to it is not a reason to refuse;
+        # it is dropped rather than persisted as a login that cannot work.
+        path = tmp_path / "daily-review.secrets.json"
+        if stored is not None:
+            mod.write_secrets_file(str(path), stored)
+
+        assert mod.write_secrets_file(str(path), {"LAB_TRACKER_API_KEY": "lpat_new", **stray})
+
+        assert json.loads(path.read_text()) == {"LAB_TRACKER_API_KEY": "lpat_new"}
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+    def test_api_key_with_a_lone_admin_half_still_carries_a_stored_pair(self, tmp_path):
+        path = tmp_path / "daily-review.secrets.json"
+        mod.write_secrets_file(
+            str(path), {"LAB_TRACKER_ADMIN_USER": "admin", "LAB_TRACKER_ADMIN_PASS": "old"}
+        )
+
+        mod.write_secrets_file(
+            str(path), {"LAB_TRACKER_API_KEY": "lpat_new", "LAB_TRACKER_ADMIN_PASS": "new"}
+        )
+
+        assert json.loads(path.read_text()) == {
+            "LAB_TRACKER_API_KEY": "lpat_new",
+            "LAB_TRACKER_ADMIN_USER": "admin",
+            "LAB_TRACKER_ADMIN_PASS": "new",
+        }
+
+    def test_write_secrets_subcommand_reports_a_stray_admin_half_next_to_an_api_key(
+        self, tmp_path
+    ):
+        path = tmp_path / "daily-review.secrets.json"
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key
+            not in {"LAB_TRACKER_API_KEY", "LAB_TRACKER_ADMIN_USER", "LAB_TRACKER_ADMIN_PASS"}
+        }
+        env["LAB_TRACKER_API_KEY"] = "lpat_s3cret"
+        env["LAB_TRACKER_ADMIN_PASS"] = "stray-s3cret"
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "write-secrets", str(path)],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "ignoring LAB_TRACKER_ADMIN_PASS" in result.stderr
+        assert "LAB_TRACKER_API_KEY takes precedence" in result.stderr
+        assert "keeping the stored" not in result.stderr
+        assert "s3cret" not in result.stderr
+        assert json.loads(path.read_text()) == {"LAB_TRACKER_API_KEY": "lpat_s3cret"}
+
+    def test_write_secrets_subcommand_reports_the_carried_over_admin_user(self, tmp_path):
+        path = tmp_path / "daily-review.secrets.json"
+        mod.write_secrets_file(
+            str(path), {"LAB_TRACKER_ADMIN_USER": "admin", "LAB_TRACKER_ADMIN_PASS": "old"}
+        )
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key
+            not in {"LAB_TRACKER_API_KEY", "LAB_TRACKER_ADMIN_USER", "LAB_TRACKER_ADMIN_PASS"}
+        }
+        env["LAB_TRACKER_ADMIN_PASS"] = "s3cret-rotated"
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "write-secrets", str(path)],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "LAB_TRACKER_ADMIN_USER" in result.stderr
+        assert "s3cret-rotated" not in result.stderr
+        assert json.loads(path.read_text()) == {
+            "LAB_TRACKER_ADMIN_USER": "admin",
+            "LAB_TRACKER_ADMIN_PASS": "s3cret-rotated",
+        }
+
+    def test_write_secrets_subcommand_refuses_a_lone_admin_half(self, tmp_path):
+        path = tmp_path / "daily-review.secrets.json"
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key
+            not in {"LAB_TRACKER_API_KEY", "LAB_TRACKER_ADMIN_USER", "LAB_TRACKER_ADMIN_PASS"}
+        }
+        env["LAB_TRACKER_ADMIN_PASS"] = "pw"
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "write-secrets", str(path)],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert result.returncode == 2
+        assert "LAB_TRACKER_ADMIN_USER" in result.stderr
+        assert not path.exists()
+
+    def test_empty_credentials_without_existing_file_write_an_empty_file(self, tmp_path):
+        path = tmp_path / "daily-review.secrets.json"
+        assert mod.write_secrets_file(str(path), {"LAB_TRACKER_API_KEY": ""}) is True
+        assert json.loads(path.read_text()) == {}
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+    def test_unreadable_existing_secrets_file_fails_loudly_instead_of_overwriting(
+        self, tmp_path
+    ):
+        path = tmp_path / "daily-review.secrets.json"
+        path.write_text("{not json")
+        with pytest.raises(mod.SchedulerConfigError, match="not valid JSON"):
+            mod.write_secrets_file(str(path), {"LAB_TRACKER_API_KEY": ""})
+        assert path.read_text() == "{not json"
+
+    def test_write_secrets_subcommand_reports_kept_file_on_stderr(self, tmp_path):
+        path = tmp_path / "daily-review.secrets.json"
+        mod.write_secrets_file(str(path), {"LAB_TRACKER_API_KEY": "lpat_persisted"})
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key
+            not in {"LAB_TRACKER_API_KEY", "LAB_TRACKER_ADMIN_USER", "LAB_TRACKER_ADMIN_PASS"}
+        }
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "write-secrets", str(path)],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "keeping the existing credentials" in result.stderr
+        assert str(path) in result.stderr
+        assert json.loads(path.read_text()) == {"LAB_TRACKER_API_KEY": "lpat_persisted"}
+
 
 class TestCronInstallerAdapter:
     """End-to-end tests of install-daily-review.sh with a stub crontab on PATH."""
@@ -293,7 +561,7 @@ class TestCronInstallerAdapter:
         extra_env: dict[str, str] | None = None,
     ):
         stub_dir = tmp_path / "bin"
-        stub_dir.mkdir()
+        stub_dir.mkdir(exist_ok=True)
         crontab = stub_dir / "crontab"
         crontab.write_text(crontab_script)
         crontab.chmod(0o755)
@@ -342,6 +610,27 @@ class TestCronInstallerAdapter:
         content = installed.read_text()
         assert content.count("lab-tracker-daily-review") == 1
 
+    def test_installed_crontab_ends_with_newline_like_debian_cron_requires(self, tmp_path):
+        # Debian/Ubuntu cron (3.0pl1) aborts with "new crontab file is missing
+        # newline before EOF, can't install." when the piped crontab lacks a
+        # final newline. The stub mirrors that check instead of blindly `cat`.
+        installed = tmp_path / "installed-crontab"
+        script = (
+            "#!/bin/sh\n"
+            'if [ "$1" = "-l" ]; then echo "no crontab for tester" >&2; exit 1; fi\n'
+            f'cat > "{installed}"\n'
+            # $(...) strips a trailing newline, so a non-empty last byte means none.
+            f'if [ -n "$(tail -c 1 "{installed}")" ]; then\n'
+            '    echo "new crontab file is missing newline before EOF, can\'t install." >&2\n'
+            "    exit 1\n"
+            "fi\n"
+        )
+        result = self._run(tmp_path, script)
+        assert result.returncode == 0, result.stderr
+        content = installed.read_text()
+        assert content.endswith("\n")
+        assert content.count("lab-tracker-daily-review") == 1
+
     def test_success_merges_dedupes_tag_and_preserves_other_jobs(self, tmp_path):
         installed = tmp_path / "installed-crontab"
         script = (
@@ -356,6 +645,86 @@ class TestCronInstallerAdapter:
         content = installed.read_text()
         assert "unrelated-job" in content
         assert content.count("lab-tracker-daily-review") == 1
+
+    def test_rerun_without_exported_credentials_keeps_persisted_token(self, tmp_path):
+        installed = tmp_path / "installed-crontab"
+        script = (
+            "#!/bin/sh\n"
+            'if [ "$1" = "-l" ]; then echo "no crontab for tester" >&2; exit 1; fi\n'
+            f'cat > "{installed}"\n'
+        )
+        first = self._run(
+            tmp_path, script, extra_env={"LAB_TRACKER_API_KEY": "lpat_persisted"}
+        )
+        assert first.returncode == 0, first.stderr
+        secrets_file = tmp_path / ".config/lab-tracker/daily-review.secrets.json"
+        assert json.loads(secrets_file.read_text()) == {"LAB_TRACKER_API_KEY": "lpat_persisted"}
+
+        # Documented flow: re-run in a fresh shell just to change the interval.
+        second = self._run(tmp_path, script)
+        assert second.returncode == 0, second.stderr
+        assert "keeping the existing credentials" in second.stderr
+        assert json.loads(secrets_file.read_text()) == {"LAB_TRACKER_API_KEY": "lpat_persisted"}
+        assert stat.S_IMODE(secrets_file.stat().st_mode) == 0o600
+        assert installed.read_text().count("lab-tracker-daily-review") == 1
+
+    def test_rerun_with_only_a_new_admin_password_keeps_the_stored_admin_user(self, tmp_path):
+        installed = tmp_path / "installed-crontab"
+        script = (
+            "#!/bin/sh\n"
+            'if [ "$1" = "-l" ]; then echo "no crontab for tester" >&2; exit 1; fi\n'
+            f'cat > "{installed}"\n'
+        )
+        first = self._run(
+            tmp_path,
+            script,
+            extra_env={"LAB_TRACKER_ADMIN_USER": "admin", "LAB_TRACKER_ADMIN_PASS": "old"},
+        )
+        assert first.returncode == 0, first.stderr
+        secrets_file = tmp_path / ".config/lab-tracker/daily-review.secrets.json"
+
+        second = self._run(tmp_path, script, extra_env={"LAB_TRACKER_ADMIN_PASS": "rotated"})
+
+        assert second.returncode == 0, second.stderr
+        assert json.loads(secrets_file.read_text()) == {
+            "LAB_TRACKER_ADMIN_USER": "admin",
+            "LAB_TRACKER_ADMIN_PASS": "rotated",
+        }
+        assert stat.S_IMODE(secrets_file.stat().st_mode) == 0o600
+
+    def test_api_key_with_a_stray_admin_half_installs(self, tmp_path):
+        installed = tmp_path / "installed-crontab"
+        script = (
+            "#!/bin/sh\n"
+            'if [ "$1" = "-l" ]; then echo "no crontab for tester" >&2; exit 1; fi\n'
+            f'cat > "{installed}"\n'
+        )
+
+        result = self._run(
+            tmp_path,
+            script,
+            extra_env={"LAB_TRACKER_API_KEY": "lpat_key", "LAB_TRACKER_ADMIN_USER": "admin"},
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert installed.exists()
+        secrets_file = tmp_path / ".config/lab-tracker/daily-review.secrets.json"
+        assert json.loads(secrets_file.read_text()) == {"LAB_TRACKER_API_KEY": "lpat_key"}
+
+    def test_lone_admin_password_without_stored_user_aborts_before_installing(self, tmp_path):
+        installed = tmp_path / "installed-crontab"
+        script = (
+            "#!/bin/sh\n"
+            'if [ "$1" = "-l" ]; then echo "no crontab for tester" >&2; exit 1; fi\n'
+            f'cat > "{installed}"\n'
+        )
+
+        result = self._run(tmp_path, script, extra_env={"LAB_TRACKER_ADMIN_PASS": "pw"})
+
+        assert result.returncode != 0
+        assert "LAB_TRACKER_ADMIN_USER" in result.stderr
+        assert not installed.exists()
+        assert not (tmp_path / ".config/lab-tracker/daily-review.secrets.json").exists()
 
     def test_persists_adversarial_token_and_future_cron_run_uses_it(self, tmp_path):
         installed = tmp_path / "installed-crontab"

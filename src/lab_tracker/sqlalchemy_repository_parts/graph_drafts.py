@@ -10,10 +10,12 @@ from uuid import UUID
 
 from sqlalchemy import and_, delete, func, or_, select, text, update
 from sqlalchemy.orm import Session as OrmSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from lab_tracker.db_models import (
     GraphChangeOperationModel,
     GraphChangeSetModel,
+    GraphDraftBatchRunModel,
     NoteModel,
     UserModel,
 )
@@ -57,6 +59,26 @@ def _uuid(value: str | None) -> UUID | None:
 
 def _uuid_str(value: UUID | None) -> str | None:
     return str(value) if value is not None else None
+
+
+def review_assignee_matches(
+    model: type[GraphChangeSetModel] | type[GraphDraftBatchRunModel],
+    user_id: UUID,
+) -> ColumnElement[bool]:
+    """SQL form of "assigned to this user" for batch reviews and their runs.
+
+    ``review_assignee_user_id`` wins when set; legacy rows carry only the
+    string ``review_assignee``. Unassigned rows are project oversight work and
+    never match.
+    """
+
+    return or_(
+        model.review_assignee_user_id == str(user_id),
+        and_(
+            model.review_assignee_user_id.is_(None),
+            model.review_assignee == str(user_id),
+        ),
+    )
 
 
 def _dict(value: Any) -> dict[str, Any]:
@@ -337,26 +359,40 @@ class SQLAlchemyGraphChangeSetRepository(EntityRepository[GraphChangeSet]):
             if include_operations
             else self._operation_counts_for(change_set_ids)
         )
-        user_ids = sorted(
-            {
-                user_id
-                for row in rows
-                for user_id in (
-                    row.created_by,
-                    row.review_assignee,
-                    row.submitted_by,
-                    row.reviewed_by,
-                    row.committed_by,
-                )
-                if user_id
-            }
-        )
+        # Attribution columns are free-text strings (e.g. "operator-1"); only
+        # UUID-shaped values can name a user, and binding anything else to the
+        # GUID column would raise. Key the result by the raw stored string,
+        # which is what change_set_from_model looks up.
+        attribution_user_ids: dict[str, UUID] = {}
+        for row in rows:
+            for attribution in (
+                row.created_by,
+                row.review_assignee,
+                row.submitted_by,
+                row.reviewed_by,
+                row.committed_by,
+            ):
+                if not attribution or attribution in attribution_user_ids:
+                    continue
+                try:
+                    attribution_user_ids[attribution] = UUID(attribution)
+                except ValueError:
+                    continue
         usernames: dict[str, str] = {}
-        if user_ids:
+        if attribution_user_ids:
             user_rows = list(
-                self._session.scalars(select(UserModel).where(UserModel.user_id.in_(user_ids)))
+                self._session.scalars(
+                    select(UserModel).where(
+                        UserModel.user_id.in_(sorted(set(attribution_user_ids.values()), key=str))
+                    )
+                )
             )
-            usernames = {row.user_id: row.username for row in user_rows}
+            usernames_by_id = {user_row.user_id: user_row.username for user_row in user_rows}
+            usernames = {
+                attribution: usernames_by_id[user_id]
+                for attribution, user_id in attribution_user_ids.items()
+                if user_id in usernames_by_id
+            }
         return [
             change_set_from_model(
                 row,
@@ -728,6 +764,9 @@ class SQLAlchemyGraphChangeSetRepository(EntityRepository[GraphChangeSet]):
         draft_mode: str | None = None,
         purpose: str | None = None,
         batch_key: str | None = None,
+        statuses: set[str] | None = None,
+        assigned_to_user_id: UUID | None = None,
+        unassigned_only: bool = False,
         limit: int | None = None,
         offset: int = 0,
         include_operations: bool = True,
@@ -735,8 +774,27 @@ class SQLAlchemyGraphChangeSetRepository(EntityRepository[GraphChangeSet]):
         self._session.flush()
         if project_ids is not None and not project_ids:
             return [], 0
+        if statuses is not None and not statuses:
+            return [], 0
+        if status is not None and statuses is not None:
+            raise ValueError("Pass either status or statuses, not both.")
+        if assigned_to_user_id is not None and unassigned_only:
+            raise ValueError("assigned_to_user_id and unassigned_only are exclusive.")
         stmt = select(GraphChangeSetModel)
         count_stmt = select(GraphChangeSetModel.change_set_id)
+        review_filters = []
+        if statuses is not None:
+            review_filters.append(GraphChangeSetModel.status.in_(sorted(statuses)))
+        if assigned_to_user_id is not None:
+            review_filters.append(
+                review_assignee_matches(GraphChangeSetModel, assigned_to_user_id)
+            )
+        if unassigned_only:
+            review_filters.append(GraphChangeSetModel.review_assignee_user_id.is_(None))
+            review_filters.append(GraphChangeSetModel.review_assignee.is_(None))
+        if review_filters:
+            stmt = stmt.where(*review_filters)
+            count_stmt = count_stmt.where(*review_filters)
         if project_id is not None:
             stmt = stmt.where(GraphChangeSetModel.project_id == str(project_id))
             count_stmt = count_stmt.where(GraphChangeSetModel.project_id == str(project_id))

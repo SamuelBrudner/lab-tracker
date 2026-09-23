@@ -354,7 +354,7 @@ def test_watch_run_composes_scan_and_sync(home, monkeypatch, capsys) -> None:
     capsys.readouterr()
 
     class FakeClient:
-        def build_evidence_note_index(self, *, project_id):
+        def build_evidence_note_index(self, *, project_id, cache_dir=None):
             return {}
 
         def import_evidence_file(self, **kwargs):

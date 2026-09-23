@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 from collections.abc import Callable
 from typing import Any, Literal
 from urllib.parse import urlsplit
@@ -50,7 +51,13 @@ from lab_tracker.store_health_admission import (
 )
 
 DEFAULT_AUTH_SECRET_KEY = "dev-only-change-me"
+BootstrapAdminTokenDisclosure = Literal["local", "first_run", "never"]
+DEFAULT_AUTH_SESSION_MAX_AGE_HOURS = 7 * 24
+MAX_AUTH_SESSION_MAX_AGE_HOURS = 365 * 24
 MAX_COMBINED_HOST_IO_IN_FLIGHT_LIMIT = 32
+# Graph-draft providers whose batch drafter runs only inside the background
+# worker (``graph_drafting.AgenticGraphDraftClient``).
+BACKGROUND_ONLY_GRAPH_DRAFT_PROVIDERS = frozenset({"agentic", "agentic-openai", "agentic_openai"})
 INSECURE_AUTH_SECRET_KEYS = {
     DEFAULT_AUTH_SECRET_KEY,
     "replace-with-a-strong-secret",
@@ -96,20 +103,26 @@ class Settings(BaseSettings):
     environment: str = "local"
     source_revision: str = "unknown"
     log_level: str = "INFO"
-    database_url: str = "sqlite+pysqlite:///./lab_tracker.db"
+    # Credential-bearing fields stay out of repr(): Settings is embedded in
+    # AppRuntime, LabTrackerAPI and RequestHandlers, so a repr in a log line or
+    # traceback would otherwise print them.
+    database_url: str = Field(default="sqlite+pysqlite:///./lab_tracker.db", repr=False)
     backup_path: str = "~/.lab-tracker/backups"
     backup_keep: int = 10
     file_storage_path: str = "./file_storage"
     note_storage_path: str = "./note_storage"
-    auth_secret_key: str = DEFAULT_AUTH_SECRET_KEY
+    auth_secret_key: str = Field(default=DEFAULT_AUTH_SECRET_KEY, repr=False)
     auth_token_ttl_minutes: int = 60 * 12
+    auth_session_max_age_hours: int = DEFAULT_AUTH_SESSION_MAX_AGE_HOURS
     auth_invite_ttl_hours: int = 7 * 24
     auth_rate_limit_attempts: int = 10
     auth_rate_limit_window_seconds: int = 60
-    auth_public_viewer_registration_enabled: bool = True
+    # None resolves per environment; see is_public_viewer_registration_enabled().
+    auth_public_viewer_registration_enabled: bool | None = None
     usage_events: bool | None = None
-    bootstrap_admin_token: str = ""
-    bootstrap_admin_token_disclosure: Literal["local", "first_run", "never"] = "local"
+    bootstrap_admin_token: str = Field(default="", repr=False)
+    # None resolves per environment; see effective_bootstrap_admin_token_disclosure().
+    bootstrap_admin_token_disclosure: BootstrapAdminTokenDisclosure | None = None
     auth_enabled: bool | None = None
     max_upload_bytes: int = 100 * 1024 * 1024
     store_authority_grants_json: str = Field(
@@ -139,6 +152,8 @@ class Settings(BaseSettings):
     store_health_singleflight_wait_seconds: float = DEFAULT_STORE_HEALTH_SINGLEFLIGHT_WAIT_SECONDS
     rclone_allowed_remotes: str = ""
     git_allowed_remotes: str = ""
+    git_cache_root: str = ""
+    git_cache_max_bytes: int | None = None
     graph_draft_provider: str = "openai"
     graph_draft_background_enabled: bool = False
     graph_draft_scheduler_enabled: bool = False
@@ -162,22 +177,27 @@ class Settings(BaseSettings):
     review_email_smtp_host: str = ""
     review_email_smtp_port: int = 587
     review_email_smtp_username: str = ""
-    review_email_smtp_password: str = ""
+    review_email_smtp_password: str = Field(default="", repr=False)
     review_email_smtp_from_address: str = ""
     review_email_smtp_tls_mode: Literal["none", "starttls", "implicit"] = "starttls"
     review_email_smtp_timeout_seconds: float = 10.0
-    openai_api_key: str = ""
+    openai_api_key: str = Field(default="", repr=False)
     openai_model: str = "gpt-4o-mini"
     openai_reasoning_effort: Literal["none", "low", "medium", "high", "xhigh", "max"] | None = None
     openai_reasoning_mode: Literal["standard", "pro"] | None = None
     openai_transcription_model: str = "gpt-4o-mini-transcribe"
     openai_base_url: str = "https://api.openai.com/v1"
     openai_timeout_seconds: float = 60.0
-    anthropic_api_key: str = ""
+    anthropic_api_key: str = Field(default="", repr=False)
     anthropic_model: str = "claude-3-5-sonnet-latest"
     anthropic_base_url: str = "https://api.anthropic.com/v1"
-    anthropic_timeout_seconds: float = 60.0
-    google_api_key: str = ""
+    # Sized with the output budget below: a non-streaming call returns nothing
+    # until the model finishes, and 16000 output tokens can take minutes.
+    anthropic_timeout_seconds: float = 300.0
+    # Output budget per Messages call. Batch drafts carry a multi-paragraph
+    # narrative plus one operation per finding, so 4096 truncated real days.
+    anthropic_max_output_tokens: int = Field(default=16000, ge=1)
+    google_api_key: str = Field(default="", repr=False)
     google_model: str = "gemini-2.5-flash"
     google_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
     google_timeout_seconds: float = 60.0
@@ -191,6 +211,33 @@ class Settings(BaseSettings):
         if self.usage_events is not None:
             return self.usage_events
         return self.environment.strip().lower() != "local"
+
+    def is_public_viewer_registration_enabled(self) -> bool:
+        """Return whether anonymous callers may self-register viewer accounts.
+
+        Defaults on only in ``local``; any other environment must opt in, so a
+        deployment that forgets the setting does not mint anonymous accounts.
+        """
+
+        if self.auth_public_viewer_registration_enabled is not None:
+            return self.auth_public_viewer_registration_enabled
+        return self.is_local_environment()
+
+    def is_local_environment(self) -> bool:
+        return self.environment.strip().lower() == "local"
+
+    def effective_bootstrap_admin_token_disclosure(self) -> BootstrapAdminTokenDisclosure:
+        """Return the first-admin token disclosure policy in force.
+
+        ``local`` trusts the transport peer address, which behind a reverse
+        proxy, Docker bridge, or Docker Desktop is a private address for every
+        client. It is therefore only the default (and only allowed) in the
+        ``local`` environment; elsewhere the default is ``never``.
+        """
+
+        if self.bootstrap_admin_token_disclosure is not None:
+            return self.bootstrap_admin_token_disclosure
+        return "local" if self.is_local_environment() else "never"
 
     def resolved_base_url(self) -> str:
         """Return the configured canonical instance origin, if any."""
@@ -255,6 +302,32 @@ class Settings(BaseSettings):
             value,
             variable="LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS",
             maximum=MAX_PROCESS_DEADLINE_SECONDS,
+        )
+
+    @field_validator("git_cache_root")
+    @classmethod
+    def _validate_git_cache_root(cls, value: str) -> str:
+        cleaned = str(value or "").strip()
+        if not cleaned:
+            return ""
+        expanded = os.path.expanduser(cleaned)
+        if not os.path.isabs(expanded):
+            raise ValueError("LAB_TRACKER_GIT_CACHE_ROOT must be an absolute path.")
+        return expanded
+
+    @field_validator("git_cache_max_bytes", mode="before")
+    @classmethod
+    def _validate_git_cache_max_bytes(cls, value: object) -> int | None:
+        if value is None:
+            return None
+        if type(value) is int and value > 0:
+            return value
+        if type(value) is str:
+            stripped = value.strip()
+            if stripped.isascii() and stripped.isdecimal() and int(stripped) > 0:
+                return int(stripped)
+        raise ValueError(
+            "LAB_TRACKER_GIT_CACHE_MAX_BYTES must be a positive integer number of bytes."
         )
 
     @field_validator("resolver_recovery", mode="before")
@@ -368,6 +441,19 @@ class Settings(BaseSettings):
         )
 
     @model_validator(mode="after")
+    def _validate_graph_draft_provider_capabilities(self) -> Settings:
+        provider = (self.graph_draft_provider or "openai").strip().lower()
+        if provider in BACKGROUND_ONLY_GRAPH_DRAFT_PROVIDERS and not (
+            self.graph_draft_background_enabled or self.graph_draft_scheduler_enabled
+        ):
+            raise ValueError(
+                f"LAB_TRACKER_GRAPH_DRAFT_PROVIDER={provider} drafts batches only in "
+                "the background worker; set LAB_TRACKER_GRAPH_DRAFT_BACKGROUND_ENABLED=true "
+                "(or LAB_TRACKER_GRAPH_DRAFT_SCHEDULER_ENABLED=true) or choose another provider."
+            )
+        return self
+
+    @model_validator(mode="after")
     def _validate_auth_secret_key(self) -> Settings:
         is_local = self.environment.strip().lower() == "local"
         auth_secret_key = self.auth_secret_key.strip()
@@ -382,10 +468,28 @@ class Settings(BaseSettings):
                 "LAB_TRACKER_AUTH_SECRET_KEY must be set to a strong "
                 "non-placeholder value when authentication is enabled."
             )
+        if not is_local and self.bootstrap_admin_token_disclosure == "local":
+            raise ValueError(
+                "LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE=local is only allowed "
+                "when LAB_TRACKER_ENVIRONMENT is 'local': it trusts the connection "
+                "peer address, which behind a reverse proxy or Docker network is "
+                "private for every client. Use 'never' (the default outside local) "
+                "or 'first_run'."
+            )
         if self.max_upload_bytes < 1:
             raise ValueError("LAB_TRACKER_MAX_UPLOAD_BYTES must be at least 1.")
         if self.backup_keep < 1:
             raise ValueError("LAB_TRACKER_BACKUP_KEEP must be at least 1.")
+        if not 1 <= self.auth_session_max_age_hours <= MAX_AUTH_SESSION_MAX_AGE_HOURS:
+            raise ValueError(
+                "LAB_TRACKER_AUTH_SESSION_MAX_AGE_HOURS must be between 1 and "
+                f"{MAX_AUTH_SESSION_MAX_AGE_HOURS}."
+            )
+        if self.auth_session_max_age_hours * 60 < self.auth_token_ttl_minutes:
+            raise ValueError(
+                "LAB_TRACKER_AUTH_SESSION_MAX_AGE_HOURS must be no shorter than "
+                "LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES."
+            )
         if self.auth_rate_limit_attempts < 1:
             raise ValueError("LAB_TRACKER_AUTH_RATE_LIMIT_ATTEMPTS must be at least 1.")
         if self.auth_rate_limit_window_seconds < 1:

@@ -3,7 +3,7 @@ import * as React from "react";
 import { render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
-import { apiResponse, installFetchMock } from "../test/utils.js";
+import { apiResponse, errorResponse, installFetchMock } from "../test/utils.js";
 import { useProjectAccess } from "./useProjectAccess.js";
 
 const USER = { user_id: "user-1", role: "editor" };
@@ -16,6 +16,7 @@ function AccessHarness({ projectId, user = USER }) {
       <span data-testid="role">{access.role}</span>
       <span data-testid="canContribute">{String(access.canContribute)}</span>
       <span data-testid="canManage">{String(access.canManage)}</span>
+      <span data-testid="error">{access.error}</span>
     </>
   );
 }
@@ -72,5 +73,23 @@ describe("useProjectAccess", () => {
     render(<AccessHarness projectId="proj-a" user={{ user_id: "admin-1", role: "admin" }} />);
     expect(screen.getByTestId("canContribute")).toHaveTextContent("true");
     expect(screen.getByTestId("canManage")).toHaveTextContent("true");
+  });
+
+  it("reports a failed membership lookup instead of silently denying", async () => {
+    installFetchMock([
+      {
+        match: /\/projects\/proj-a\/members/,
+        response: errorResponse("Members service unavailable.", 503),
+      },
+    ]);
+
+    render(<AccessHarness projectId="proj-a" />);
+
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("error"));
+    expect(screen.getByTestId("error")).toHaveTextContent(
+      "Could not confirm your access to this project: Members service unavailable."
+    );
+    expect(screen.getByTestId("canContribute")).toHaveTextContent("false");
+    expect(screen.getByTestId("canManage")).toHaveTextContent("false");
   });
 });

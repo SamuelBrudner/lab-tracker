@@ -13,8 +13,11 @@ import { ContractError, parseCollection, parseResource, unknown } from "./contra
  */
 
 const AUTH_REJECTED_EVENT = "lab-tracker:auth-rejected";
-const AUTH_REJECTION_MESSAGE_PATTERN =
-  /auth(entication|orization)? required|authorization header|credential|invalid token|missing authorization|session|token (has )?expired|unrecognized token/i;
+// The API reserves 401 for a missing or rejected credential (expired or revoked
+// session, revoked device or personal access token). Permission denials for a
+// valid credential are 403 and must never sign the user out, so rejection is
+// decided by status alone rather than by matching message text.
+const AUTH_REJECTED_STATUS = 401;
 
 /** @param {unknown} payload @param {string} fallbackMessage */
 function parseApiError(payload, fallbackMessage) {
@@ -64,11 +67,6 @@ function notifyAuthRejected(error, token) {
   );
 }
 
-/** @param {unknown} message */
-function isAuthRejectedMessage(message) {
-  return AUTH_REJECTION_MESSAGE_PATTERN.test(String(message || ""));
-}
-
 /**
  * @param {Response} response
  * @param {{notifyAuthRejected?: boolean, token?: string}} [options]
@@ -84,7 +82,7 @@ async function throwApiError(
   );
   error.status = response.status;
   error.payload = payload;
-  if (shouldNotify && response.status === 401 && isAuthRejectedMessage(error.message)) {
+  if (shouldNotify && response.status === AUTH_REJECTED_STATUS) {
     notifyAuthRejected(error, token);
   }
   throw error;
@@ -121,12 +119,28 @@ function buildApiPath(path, params = {}) {
   return `${url.pathname}${url.search}${url.hash}`;
 }
 
+// The request never produced an HTTP response (offline, DNS, CORS, refused
+// connection). Distinct from an ApiError (the server answered with a status)
+// and from a ContractError (a 2xx whose body broke the contract), so callers
+// can queue for retry on exactly this case.
+class NetworkError extends Error {
+  /** @param {unknown} cause */
+  constructor(cause) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = "NetworkError";
+  }
+}
+
 /** @param {string} path @param {RequestInit} [init] @returns {Promise<Response>} */
-function appFetch(path, init = {}) {
+async function appFetch(path, init = {}) {
   if (isStaticDemoEnabled()) {
     return demoFetch(path, init);
   }
-  return fetch(path, init);
+  try {
+    return await fetch(path, init);
+  } catch (error) {
+    throw new NetworkError(error);
+  }
 }
 
 /** @param {string} path @param {ApiOptions} [options] @returns {Promise<unknown>} */
@@ -323,6 +337,7 @@ async function downloadProtectedResource({ path, token = "", filename = "" }) {
 
 export {
   AUTH_REJECTED_EVENT,
+  NetworkError,
   apiFetch,
   apiRequest,
   apiTextRequest,

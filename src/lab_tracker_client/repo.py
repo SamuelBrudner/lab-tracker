@@ -18,7 +18,7 @@ import hashlib
 import json
 import os
 import re
-import subprocess
+import sys
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -43,6 +43,17 @@ from lab_tracker_client.client import (
     build_evidence_metadata,
     capture_host_metadata,
 )
+from lab_tracker_client.evidence_index import outbox_note_index
+from lab_tracker_client.gitinfo import (
+    dirty_label,
+    dirty_metadata,
+    dirty_state_fields,
+    git_dirty_state,
+    git_head_commit,
+    git_output,
+    head_commit_fields,
+    sanitize_remote_url,
+)
 
 CONFIG_VERSION = 1
 EVENT_VERSION = 1
@@ -53,7 +64,6 @@ REPO_EVIDENCE_ADAPTER = "lt-repo"
 REPO_CAPTURE_KIND = "repo_event"
 ALLOWED_EVENT_TYPES = {"commit", "report", "finish"}
 TERMINAL_SYNC_STATES = {"synced"}
-_GIT_TIMEOUT_SECONDS = 1
 
 JsonObject = dict[str, Any]
 
@@ -220,6 +230,12 @@ def make_event(
     resolved_event_type = _event_type(event_type)
     resolved_cwd = str(Path(cwd or Path.cwd()).expanduser().resolve())
     resolved_source = {**git_context(resolved_cwd), **dict(source or {})}
+    if resolved_source.get("repo_remote_url"):
+        # Caller-supplied sources are sanitised too: no remote credential may
+        # reach the outbox event, the rendered note or its metadata.
+        resolved_source["repo_remote_url"] = sanitize_remote_url(
+            str(resolved_source["repo_remote_url"])
+        )
     commit = str(resolved_source.get("git_commit") or "")
     evidence_body = ""
     if resolved_event_type == "commit" and commit:
@@ -704,7 +720,20 @@ def _hook_command_path(lt_command: str | None) -> str:
 
     import shutil
 
-    resolved = lt_command or shutil.which("lt") or "lt"
+    resolved = lt_command or shutil.which("lt")
+    if not resolved:
+        # Git GUIs and IDEs often run hooks with a PATH that lacks the user's
+        # venv; the interpreter's sibling is the lt that shipped this module.
+        sibling = Path(sys.executable).parent / (
+            "lt.exe" if sys.platform == "win32" else "lt"
+        )
+        if not sibling.exists():
+            raise LTValidationError(
+                "Could not locate the lt executable for the hook body (not on "
+                "PATH and not next to this Python). Pass --lt-command with its "
+                "full path."
+            )
+        resolved = str(sibling)
     # Git hooks run under sh even on Windows; sh wants forward slashes.
     return resolved.replace("\\", "/")
 
@@ -770,6 +799,12 @@ def _hook_managed_block(lt_command: str, config_path: str) -> str:
             # tracebacks and the || branch surfaces a one-line warning instead.
             '    "$LT" repo report >/dev/null 2>&1 || '
             'echo "lab-tracker: repo hook could not record the commit; commit kept." >&2',
+            "  else",
+            # Without this branch a GUI/IDE commit whose PATH lacks lt would
+            # skip capture with no trace at all.
+            '    echo "lab-tracker: repo hook could not record the commit: lt command '
+            "'$LT' not found; set LAB_TRACKER_LT or re-run 'lt repo install-hook "
+            "--lt-command <path>'. Commit kept.\" >&2",
             "  fi",
             "fi",
             HOOK_END_MARKER,
@@ -840,10 +875,11 @@ def environment_fingerprint(
 
 def git_context(cwd: str | Path | None = None) -> JsonObject:
     root = Path(cwd or Path.cwd()).expanduser()
-    commit = _git_output(root, "rev-parse", "HEAD")
+    head = git_head_commit(root)
+    commit = head.commit
     context: JsonObject = {
-        "git_commit": commit,
-        "git_dirty": bool(_git_output(root, "status", "--porcelain")),
+        **head_commit_fields(head),
+        **dirty_state_fields(git_dirty_state(root, head=head)),
     }
     if commit:
         context["git_commit_short"] = commit[:12]
@@ -854,6 +890,8 @@ def git_context(cwd: str | Path | None = None) -> JsonObject:
         ("git_author", ("log", "-1", "--pretty=%an")),
     ):
         value = _git_output(root, *args)
+        if key == "repo_remote_url":
+            value = sanitize_remote_url(value)
         if value:
             context[key] = value
     if commit:
@@ -901,9 +939,13 @@ def _sync_event(
     action = "synced"
     reason = ""
     if not note_id:
-        if project_id not in note_indexes:
-            note_indexes[project_id] = client.build_evidence_note_index(project_id=project_id)
-        index = note_indexes[project_id]
+        index = outbox_note_index(
+            client,
+            note_indexes,
+            project_id=project_id,
+            outbox=path.parent,
+            dry_run=dry_run,
+        )
         evidence_key = (
             str(metadata["evidence_source_provider"]),
             str(metadata["evidence_source_external_id"]),
@@ -981,8 +1023,10 @@ def render_event_note(event: Mapping[str, Any]) -> str:
         "",
         "## Repository State",
     ]
+    remote = sanitize_remote_url(str(source.get("repo_remote_url") or ""))
+    if remote:
+        lines.append(f"- Remote: `{remote}`")
     for label, key in (
-        ("Remote", "repo_remote_url"),
         ("Branch", "git_branch"),
         ("Commit", "git_commit"),
         ("Author", "git_author"),
@@ -991,7 +1035,7 @@ def render_event_note(event: Mapping[str, Any]) -> str:
             lines.append(f"- {label}: `{source[key]}`")
     if source.get("git_subject"):
         lines.append(f"- Commit subject: {source['git_subject']}")
-    lines.append(f"- Dirty working tree: {bool(source.get('git_dirty'))}")
+    lines.append(f"- Dirty working tree: {dirty_label(source)}")
     if payload["cwd"]:
         lines.append(f"- Working directory: `{payload['cwd']}`")
     lines.extend(["", "## Research Context", f"- Project: `{payload['project_id']}`"])
@@ -1045,11 +1089,14 @@ def event_metadata(
         metadata["repo_tags"] = ",".join(payload["tags"])
     if source.get("git_commit"):
         metadata["repo_git_commit"] = str(source["git_commit"])
-    if source.get("repo_remote_url"):
-        metadata["repo_remote_url"] = str(source["repo_remote_url"])
+    elif source.get("git_commit_error"):
+        metadata["repo_git_commit_error"] = str(source["git_commit_error"])
+    remote = sanitize_remote_url(str(source.get("repo_remote_url") or ""))
+    if remote:
+        metadata["repo_remote_url"] = remote
     if source.get("git_branch"):
         metadata["repo_git_branch"] = str(source["git_branch"])
-    metadata["repo_git_dirty"] = bool(source.get("git_dirty"))
+    metadata.update(dirty_metadata(source, "repo_"))
     for key, value in payload["environment"].items():
         if isinstance(value, (str, bool, int, float)) and str(key).startswith("repo_environment"):
             metadata[str(key)] = value
@@ -1161,19 +1208,7 @@ def _write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
 
 
 def _git_output(root: Path, *args: str) -> str:
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(root), *args],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=_GIT_TIMEOUT_SECONDS,
-        )
-    except Exception:
-        return ""
-    if result.returncode != 0:
-        return ""
-    return result.stdout.strip()
+    return git_output(root, *args)
 
 
 def _default_event_id(event_type: str, source: Mapping[str, Any], commit: str) -> str:

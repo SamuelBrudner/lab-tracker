@@ -17,13 +17,17 @@ from lab_tracker.auth import (
     AuthService,
     Invitation,
     InvitationTokenService,
+    PrincipalType,
     Role,
     TokenService,
+    extract_bearer_token,
+    resolve_session_user,
 )
 from lab_tracker.db_types import ensure_uuid
-from lab_tracker.errors import AuthError
+from lab_tracker.errors import AuthError, PermissionDeniedError
 from lab_tracker.instance_url import build_instance_url
 from lab_tracker.patching import provided_fields
+from lab_tracker.rate_limit import InMemoryRateLimiter, rate_limit_client
 from lab_tracker.schemas import (
     AuthBootstrapStatus,
     AuthInvitationCreate,
@@ -83,7 +87,12 @@ def build_auth_router(
         status_code=http_status.HTTP_201_CREATED,
     )
     def register_auth(payload: AuthRegisterRequest, request: Request):
-        _record_auth_attempt(request, _auth_rate_key(request, "register"))
+        # Registration has its own limiter so a flood of blocked login buckets
+        # can never lock signup, invitation acceptance or the first admin out.
+        _register_rate_limiter(request).record_attempt(
+            _auth_rate_key(request, "register"),
+            client=rate_limit_client(request),
+        )
         registration_role = payload.role
         username = payload.username
         if payload.invite_token:
@@ -111,8 +120,10 @@ def build_auth_router(
                     token_service=token_service,
                 )
                 if actor.role != Role.ADMIN:
-                    raise AuthError("Admin privileges required to register non-viewer users.")
-        elif not request.app.state.settings.auth_public_viewer_registration_enabled:
+                    raise PermissionDeniedError(
+                        "Admin privileges required to register non-viewer users."
+                    )
+        elif not request.app.state.settings.is_public_viewer_registration_enabled():
             if not request.headers.get("authorization"):
                 raise AuthError("Public viewer registration is disabled.")
             actor = actor_from_authorization_header(
@@ -121,7 +132,7 @@ def build_auth_router(
                 token_service=token_service,
             )
             if actor.role != Role.ADMIN:
-                raise AuthError("Public viewer registration is disabled.")
+                raise PermissionDeniedError("Public viewer registration is disabled.")
         if not payload.invite_token:
             user = auth_service.register_user(
                 username=username,
@@ -221,11 +232,29 @@ def build_auth_router(
         if not request.app.state.auth_enabled:
             raise AuthError("Token refresh is unavailable when authentication is disabled.")
         actor = actor_from_request(request)
-        user = auth_service.get_user_by_id(actor.user_id)
-        if user is None:
-            raise AuthError("Authentication required.")
-        token = token_service.issue_access_token(user)
+        if actor.principal_type is not PrincipalType.USER:
+            raise PermissionDeniedError("Token refresh requires a user session.")
+        claims, user = resolve_session_user(
+            extract_bearer_token(request.headers.get("authorization")),
+            token_service=token_service,
+            auth_service=auth_service,
+        )
+        # Carry the original sign-in time so refresh cannot outlive the
+        # absolute session lifetime.
+        token = token_service.issue_access_token(user, auth_time=claims.auth_time)
         return Envelope(data=auth_token_read(user, token.token, token.expires_at))
+
+    @router.post("/auth/sessions/revoke", response_model=Envelope[AuthUserRead])
+    def revoke_auth_sessions(request: Request):
+        """Sign out everywhere: invalidate every session JWT of the caller."""
+
+        if not request.app.state.auth_enabled:
+            raise AuthError("Session revocation is unavailable when authentication is disabled.")
+        actor = actor_from_request(request)
+        if actor.principal_type is not PrincipalType.USER:
+            raise PermissionDeniedError("Session revocation requires a user session.")
+        user = auth_service.revoke_sessions(actor.user_id)
+        return Envelope(data=auth_user_read(user))
 
     @router.get("/auth/me", response_model=Envelope[AuthUserRead])
     def auth_me(request: Request):
@@ -292,31 +321,34 @@ def _graph_draft_provider_readiness(settings) -> tuple[str, bool]:
 def _ensure_admin(request: Request) -> None:
     actor = actor_from_request(request)
     if actor.role != Role.ADMIN:
-        raise AuthError("Admin privileges required.")
+        raise PermissionDeniedError("Admin privileges required.")
 
 
 def _auth_rate_key(request: Request, purpose: str, username: str | None = None) -> str:
-    client_host = request.client.host if request.client is not None else "unknown"
-    parts = [purpose, client_host]
+    parts = [purpose, rate_limit_client(request)]
     if username is not None:
         parts.append(username.strip().lower())
     return ":".join(parts)
 
 
-def _auth_rate_limiter(request: Request):
-    return request.app.state.auth_rate_limiter
+def _auth_rate_limiter(request: Request) -> InMemoryRateLimiter:
+    limiter: InMemoryRateLimiter = request.app.state.auth_rate_limiter
+    return limiter
+
+
+def _register_rate_limiter(request: Request) -> InMemoryRateLimiter:
+    limiter: InMemoryRateLimiter = request.app.state.register_rate_limiter
+    return limiter
 
 
 def _check_auth_rate_limit(request: Request, key: str) -> None:
     _auth_rate_limiter(request).check(key)
 
 
-def _record_auth_attempt(request: Request, key: str) -> None:
-    _auth_rate_limiter(request).record_attempt(key)
-
-
 def _record_auth_failure(request: Request, key: str) -> None:
-    _auth_rate_limiter(request).record_failure(key)
+    # Login buckets are keyed by attacker-chosen usernames, so each one is
+    # charged to the peer's per-client share of the table.
+    _auth_rate_limiter(request).record_failure(key, client=rate_limit_client(request))
 
 
 def _reset_auth_rate_limit(request: Request, key: str) -> None:
@@ -376,8 +408,8 @@ def _client_is_local(request: Request) -> bool:
 
     The peer comes from the transport (request.client), not the client-controlled
     Host header, so it cannot be spoofed by a remote attacker. Behind a reverse
-    proxy this is the proxy's address; configure trusted proxy headers (or use the
-    ``never``/``first_run`` disclosure modes) for hosted deployments.
+    proxy or Docker network this is the proxy's or gateway's private address,
+    so this check is only consulted in LAB_TRACKER_ENVIRONMENT=local.
     """
     client = request.client
     if client is None:
@@ -400,30 +432,18 @@ def _bootstrap_token_for_status(
 ) -> tuple[str | None, str | None]:
     if has_users or not bootstrap_token:
         return None, None
-    mode = (
-        str(
-            getattr(
-                request.app.state.settings,
-                "bootstrap_admin_token_disclosure",
-                "local",
-            )
-            or "local"
-        )
-        .strip()
-        .lower()
-    )
+    mode = request.app.state.settings.effective_bootstrap_admin_token_disclosure()
     if mode == "never":
-        return (
-            None,
-            "First-admin token display is disabled for this deployment.",
-        )
+        return None, _BOOTSTRAP_TOKEN_HIDDEN_WARNING
     if mode == "first_run":
         return bootstrap_token, None
-    # Default ('local') mode: disclose only to a real local/private-network peer.
-    # The trust boundary MUST come from the connection peer (request.client.host),
-    # never the client-controlled Host header — otherwise a remote attacker on an
-    # internet-exposed deploy can send `Host: 127.0.0.1`, read the token, and seize
-    # the first admin.
+    # 'local' mode (the default, and only allowed, in LAB_TRACKER_ENVIRONMENT=local):
+    # disclose only to a real local/private-network peer. The trust boundary MUST
+    # come from the connection peer (request.client.host), never the
+    # client-controlled Host header — otherwise a remote attacker can send
+    # `Host: 127.0.0.1`, read the token, and seize the first admin. Outside the
+    # local environment the peer is typically a proxy or Docker gateway with a
+    # private address, which is why Settings rejects this mode there.
     if _client_is_local(request):
         return bootstrap_token, None
     return (
@@ -431,6 +451,13 @@ def _bootstrap_token_for_status(
         "First-admin token display is available only from a local, LAN, or VPN "
         "address for this deployment.",
     )
+
+
+_BOOTSTRAP_TOKEN_HIDDEN_WARNING = (
+    "First-admin token display is disabled for this deployment. Paste the "
+    "LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN value; Docker deployments that generate it "
+    "store it in /app/data/runtime-env/bootstrap-admin-token inside the app container."
+)
 
 
 def _mailto_invitation_url(

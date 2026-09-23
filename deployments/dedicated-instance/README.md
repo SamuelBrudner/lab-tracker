@@ -74,7 +74,11 @@ therefore describes one maintenance-window checkpoint. Work is written to a
 `MANIFEST.sha256` is that directory atomically renamed as a completed backup.
 Restore smoke refuses partial directories and verifies the manifest first.
 
-The restore smoke uses uniquely named disposable Docker resources. It restores
+The restore smoke uses uniquely named disposable Docker resources. It waits
+until the scratch Postgres accepts TCP connections on the scratch network (the
+path `pg_restore` uses, so the image's socket-only init server cannot pass the
+gate), retries `pg_restore` a bounded number of times only on connection
+failures, restores
 the dump with ownership and grants omitted, checks the migration and user
 tables, restores the app-data archive, verifies that it is non-empty, and
 removes every scratch resource.
@@ -113,12 +117,25 @@ The release:
 7. Retries and verifies the same identity through both the loopback and
    configured public health endpoints.
 
-If a post-cutover gate fails, the script restores the previous immutable image
-ID and waits for it to become healthy. This is intentionally an **image-only
-rollback**: it reuses the current env files and database. Routine releases must
-therefore keep migrations backward-compatible with the previous image. For an
-incompatible migration or configuration change, stop automation and perform
-the documented full restore from the validated backup instead.
+If a post-cutover gate fails, the script restarts the previous immutable image
+ID against the current env files and database and waits for it to become
+healthy. That automatic recovery works only while the database is still at a
+revision the previous image knows, that is, for a release that adds no Alembic
+migration. When the new revision adds an Alembic migration, its entrypoint has
+already upgraded the database before any gate runs, and the previous image
+cannot start on it: its entrypoint fails at `alembic upgrade head` with "Can't
+locate revision", and the app itself refuses a database at an Alembic revision
+it does not know. The script then reports that the automatic rollback failed
+and prints the validated backup directory it took before cutover.
+
+To recover such a release, stop the app, restore the validated backup
+(`postgres.dump` into an empty database and `app-data.tar.gz` into the app-data
+volume, following the
+[restore steps](../../docs/self-hosted-operations.md#restore) with this
+instance's compose project and volume names), and then start the previous
+image. Plan every release that adds an Alembic migration as one whose rollback
+is that full restore. A configuration change the previous image cannot run
+with needs the same recovery.
 
 The provider key is server-held and must never be shown in setup, invitation,
 or troubleshooting output. Provider authorization, cost controls, and rotation

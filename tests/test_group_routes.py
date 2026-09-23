@@ -9,8 +9,13 @@ from fastapi.testclient import TestClient
 from sqlalchemy import delete, select
 
 from lab_tracker.auth import utc_now
-from lab_tracker.db_models import ProjectMembershipModel, UsageEventModel
+from lab_tracker.db_models import (
+    GroupMembershipModel,
+    ProjectMembershipModel,
+    UsageEventModel,
+)
 from lab_tracker.sqlalchemy_repository_parts.core import (
+    SQLAlchemyGroupMembershipRepository,
     SQLAlchemyProjectMembershipRepository,
 )
 
@@ -180,9 +185,9 @@ def test_group_read_opacity_does_not_change_group_mutation_authorization(
         headers=group_read_scope.member_headers,
     )
 
-    assert member_list.status_code == 401
-    assert member_patch.status_code == 401
-    assert member_delete.status_code == 401
+    assert member_list.status_code == 403
+    assert member_patch.status_code == 403
+    assert member_delete.status_code == 403
 
     after_denial = client.get(
         f"/groups/{group_read_scope.group_id}",
@@ -354,10 +359,10 @@ def test_group_member_management_requires_group_owner(
     )
 
     assert get_response.status_code == 200
-    assert list_members.status_code == 401
+    assert list_members.status_code == 403
     assert list_members.json()["error"]["message"] == "Group owner access required."
-    assert patch_group.status_code == 401
-    assert patch_member.status_code == 401
+    assert patch_group.status_code == 403
+    assert patch_member.status_code == 403
 
 
 def test_group_routes_reject_last_owner_removal_and_allow_group_delete(
@@ -389,6 +394,210 @@ def test_group_routes_reject_last_owner_removal_and_allow_group_delete(
     assert delete_group.status_code == 200
     assert delete_group.json()["data"]["group_id"] == group["group_id"]
     assert get_deleted.status_code == 404
+
+
+def test_group_delete_refuses_while_child_projects_remain(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    group = client.post(
+        "/groups",
+        json={"name": f"Group with children {uuid4().hex[:8]}"},
+        headers=admin_auth_headers,
+    ).json()["data"]
+    # An admin-created project in the group has no direct owner; its owner
+    # access comes only through the group, so deleting the group would orphan it.
+    project_id = _create_project(
+        client,
+        admin_auth_headers,
+        "Group child project",
+        group_id=group["group_id"],
+    )
+
+    refused = client.delete(f"/groups/{group['group_id']}", headers=admin_auth_headers)
+    still_there = client.get(f"/groups/{group['group_id']}", headers=admin_auth_headers)
+    project = client.get(f"/projects/{project_id}", headers=admin_auth_headers)
+
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["error"]["message"] == (
+        "Group cannot be deleted while it contains 1 project(s); "
+        "move or delete them first."
+    )
+    assert still_there.status_code == 200
+    assert project.json()["data"]["group_id"] == group["group_id"]
+
+    moved = client.patch(
+        f"/projects/{project_id}",
+        json={"group_id": None},
+        headers=admin_auth_headers,
+    )
+    assert moved.status_code == 200, moved.text
+    deleted = client.delete(f"/groups/{group['group_id']}", headers=admin_auth_headers)
+    assert deleted.status_code == 200, deleted.text
+
+
+def _group_owner_ids(
+    client: TestClient,
+    group_id: str,
+    headers: dict[str, str],
+) -> set[str]:
+    members = client.get(f"/groups/{group_id}/members", headers=headers)
+    assert members.status_code == 200, members.text
+    return {item["user_id"] for item in members.json()["data"] if item["role"] == "owner"}
+
+
+@pytest.mark.parametrize("method", ["patch", "post"])
+def test_group_routes_reject_last_owner_demotion(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    method: str,
+) -> None:
+    owner_name = f"group-demote-last-owner-{uuid4().hex[:8]}"
+    owner_token, owner_user_id = _register_user(
+        client,
+        owner_name,
+        role="editor",
+        headers=admin_auth_headers,
+    )
+    owner_headers = _auth_headers(owner_token)
+    group_id = client.post(
+        "/groups",
+        json={"name": "Last owner demotion group"},
+        headers=owner_headers,
+    ).json()["data"]["group_id"]
+
+    if method == "patch":
+        demote = client.patch(
+            f"/groups/{group_id}/members/{owner_user_id}",
+            json={"role": "viewer"},
+            headers=owner_headers,
+        )
+    else:
+        demote = client.post(
+            f"/groups/{group_id}/members",
+            json={"username": owner_name, "role": "contributor"},
+            headers=owner_headers,
+        )
+
+    assert demote.status_code == 422, demote.text
+    assert demote.json()["error"]["message"] == "Groups must keep at least one owner."
+    assert _group_owner_ids(client, group_id, owner_headers) == {owner_user_id}
+    still_manages = client.patch(
+        f"/groups/{group_id}",
+        json={"description": "Still owned"},
+        headers=owner_headers,
+    )
+    assert still_manages.status_code == 200, still_manages.text
+
+
+def test_group_owner_demotion_allowed_while_another_owner_remains(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    owner_token, owner_user_id = _register_user(
+        client,
+        f"group-demote-owner-{uuid4().hex[:8]}",
+        role="editor",
+        headers=admin_auth_headers,
+    )
+    owner_headers = _auth_headers(owner_token)
+    group_id = client.post(
+        "/groups",
+        json={"name": "Two owner group"},
+        headers=owner_headers,
+    ).json()["data"]["group_id"]
+    co_owner_name = f"group-co-owner-{uuid4().hex[:8]}"
+    _, co_owner_user_id = _register_user(client, co_owner_name)
+    promote = client.post(
+        f"/groups/{group_id}/members",
+        json={"username": co_owner_name, "role": "owner"},
+        headers=owner_headers,
+    )
+    assert promote.status_code == 201, promote.text
+
+    demote = client.patch(
+        f"/groups/{group_id}/members/{owner_user_id}",
+        json={"role": "viewer"},
+        headers=owner_headers,
+    )
+
+    assert demote.status_code == 200, demote.text
+    assert demote.json()["data"]["role"] == "viewer"
+    assert _group_owner_ids(client, group_id, admin_auth_headers) == {co_owner_user_id}
+
+
+@pytest.mark.parametrize("operation", ["demote", "remove"])
+def test_group_owner_guard_rechecks_owner_count_after_lock(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    monkeypatch,
+    operation: str,
+) -> None:
+    owner_token, owner_user_id = _register_user(
+        client,
+        f"group-race-owner-{uuid4().hex[:8]}",
+        role="editor",
+        headers=admin_auth_headers,
+    )
+    owner_headers = _auth_headers(owner_token)
+    group_id = client.post(
+        "/groups",
+        json={"name": "Owner race group"},
+        headers=owner_headers,
+    ).json()["data"]["group_id"]
+    target_name = f"group-race-target-{uuid4().hex[:8]}"
+    _, target_user_id = _register_user(client, target_name)
+    promote = client.post(
+        f"/groups/{group_id}/members",
+        json={"username": target_name, "role": "owner"},
+        headers=owner_headers,
+    )
+    assert promote.status_code == 201, promote.text
+
+    original_lock = SQLAlchemyGroupMembershipRepository.lock_group_owners
+
+    def remove_other_owner_after_lock(
+        self: SQLAlchemyGroupMembershipRepository,
+        locked_group_id,
+    ) -> None:
+        # Simulate a concurrent transaction that removed the other owner just
+        # before this one acquired the owner-row lock.
+        original_lock(self, locked_group_id)
+        if str(locked_group_id) != group_id:
+            return
+        self._session.execute(
+            delete(GroupMembershipModel).where(
+                GroupMembershipModel.group_id == group_id,
+                GroupMembershipModel.user_id == owner_user_id,
+            )
+        )
+        self._session.flush()
+
+    monkeypatch.setattr(
+        SQLAlchemyGroupMembershipRepository,
+        "lock_group_owners",
+        remove_other_owner_after_lock,
+    )
+
+    if operation == "demote":
+        response = client.patch(
+            f"/groups/{group_id}/members/{target_user_id}",
+            json={"role": "viewer"},
+            headers=admin_auth_headers,
+        )
+    else:
+        response = client.delete(
+            f"/groups/{group_id}/members/{target_user_id}",
+            headers=admin_auth_headers,
+        )
+
+    assert response.status_code == 422, response.text
+    assert response.json()["error"]["message"] == "Groups must keep at least one owner."
+    monkeypatch.undo()
+    assert _group_owner_ids(client, group_id, admin_auth_headers) == {
+        owner_user_id,
+        target_user_id,
+    }
 
 
 def test_group_owner_bulk_onboards_and_offboards_project_memberships(
@@ -609,3 +818,206 @@ def test_group_bulk_upsert_rejects_sole_project_owner_demotion(
         item for item in members.json()["data"] if item["user_id"] == viewer_user_id
     ]
     assert [item["role"] for item in matching_members] == ["owner"]
+
+
+@dataclass(frozen=True, slots=True)
+class GroupedProjectScope:
+    group_id: str
+    project_id: str
+    pi_headers: dict[str, str]
+    student_headers: dict[str, str]
+    student_group_id: str
+
+
+@pytest.fixture
+def grouped_project_scope(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> GroupedProjectScope:
+    """A lab group owned by a PI with a child project directly owned by a student.
+
+    The student is also the owner of an unrelated group of their own, so moves
+    between groups exercise the current-group check separately from the
+    target-group check.
+    """
+
+    pi_token, _ = _register_user(
+        client,
+        f"group-oversight-pi-{uuid4().hex[:8]}",
+        role="editor",
+        headers=admin_auth_headers,
+    )
+    pi_headers = _auth_headers(pi_token)
+    group_response = client.post(
+        "/groups",
+        json={"name": "PI oversight lab"},
+        headers=pi_headers,
+    )
+    assert group_response.status_code == 201, group_response.text
+    group_id = group_response.json()["data"]["group_id"]
+    project_id = _create_project(
+        client,
+        admin_auth_headers,
+        "Thesis project",
+        group_id=group_id,
+    )
+    student_name = f"group-oversight-student-{uuid4().hex[:8]}"
+    student_token, _ = _register_user(
+        client,
+        student_name,
+        role="editor",
+        headers=admin_auth_headers,
+    )
+    student_headers = _auth_headers(student_token)
+    add_owner = client.post(
+        f"/projects/{project_id}/members",
+        json={"username": student_name, "role": "owner"},
+        headers=admin_auth_headers,
+    )
+    assert add_owner.status_code == 201, add_owner.text
+    student_group = client.post(
+        "/groups",
+        json={"name": "Student side group"},
+        headers=student_headers,
+    )
+    assert student_group.status_code == 201, student_group.text
+    assert client.get(f"/projects/{project_id}", headers=pi_headers).status_code == 200
+    return GroupedProjectScope(
+        group_id=group_id,
+        project_id=project_id,
+        pi_headers=pi_headers,
+        student_headers=student_headers,
+        student_group_id=student_group.json()["data"]["group_id"],
+    )
+
+
+@pytest.mark.parametrize("new_group", ["detach", "student_group"])
+def test_direct_project_owner_cannot_move_project_out_of_group_without_group_owner(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    grouped_project_scope: GroupedProjectScope,
+    new_group: str,
+) -> None:
+    scope = grouped_project_scope
+    target = None if new_group == "detach" else scope.student_group_id
+
+    response = client.patch(
+        f"/projects/{scope.project_id}",
+        json={"group_id": target},
+        headers=scope.student_headers,
+    )
+
+    assert response.status_code == 403, response.text
+    assert response.json()["error"]["message"] == "Group owner access required."
+    stored = client.get(f"/projects/{scope.project_id}", headers=admin_auth_headers)
+    assert stored.json()["data"]["group_id"] == scope.group_id
+    assert client.get(f"/projects/{scope.project_id}", headers=scope.pi_headers).status_code == 200
+
+
+def test_direct_project_owner_keeps_non_group_edits_on_grouped_project(
+    client: TestClient,
+    grouped_project_scope: GroupedProjectScope,
+) -> None:
+    scope = grouped_project_scope
+
+    renamed = client.patch(
+        f"/projects/{scope.project_id}",
+        json={"name": "Renamed thesis project"},
+        headers=scope.student_headers,
+    )
+    # Echoing the unchanged group_id is not a group move and needs no group rights.
+    described = client.patch(
+        f"/projects/{scope.project_id}",
+        json={"description": "Still in the lab", "group_id": scope.group_id},
+        headers=scope.student_headers,
+    )
+
+    assert renamed.status_code == 200, renamed.text
+    assert renamed.json()["data"]["name"] == "Renamed thesis project"
+    assert described.status_code == 200, described.text
+    assert described.json()["data"]["description"] == "Still in the lab"
+    assert described.json()["data"]["group_id"] == scope.group_id
+
+
+def test_group_owner_and_admin_can_detach_grouped_project(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    grouped_project_scope: GroupedProjectScope,
+) -> None:
+    scope = grouped_project_scope
+
+    detached = client.patch(
+        f"/projects/{scope.project_id}",
+        json={"group_id": None},
+        headers=scope.pi_headers,
+    )
+    assert detached.status_code == 200, detached.text
+    assert detached.json()["data"]["group_id"] is None
+
+    reattached = client.patch(
+        f"/projects/{scope.project_id}",
+        json={"group_id": scope.group_id},
+        headers=admin_auth_headers,
+    )
+    assert reattached.status_code == 200, reattached.text
+    detached_by_admin = client.patch(
+        f"/projects/{scope.project_id}",
+        json={"group_id": None},
+        headers=admin_auth_headers,
+    )
+    assert detached_by_admin.status_code == 200, detached_by_admin.text
+    assert detached_by_admin.json()["data"]["group_id"] is None
+
+
+def test_direct_project_owner_cannot_delete_grouped_project_without_group_owner(
+    client: TestClient,
+    grouped_project_scope: GroupedProjectScope,
+) -> None:
+    scope = grouped_project_scope
+
+    denied = client.delete(f"/projects/{scope.project_id}", headers=scope.student_headers)
+
+    assert denied.status_code == 403, denied.text
+    assert denied.json()["error"]["message"] == "Group owner access required."
+    assert client.get(f"/projects/{scope.project_id}", headers=scope.pi_headers).status_code == 200
+
+    deleted = client.delete(f"/projects/{scope.project_id}", headers=scope.pi_headers)
+    assert deleted.status_code == 200, deleted.text
+
+
+def test_group_member_patch_requires_an_existing_membership(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    owner_token, _ = _register_user(
+        client,
+        f"group-patch-owner-{uuid4().hex[:8]}",
+        role="editor",
+        headers=admin_auth_headers,
+    )
+    owner_headers = _auth_headers(owner_token)
+    group_id = client.post(
+        "/groups",
+        json={"name": "Patch-only group"},
+        headers=owner_headers,
+    ).json()["data"]["group_id"]
+    _, outsider_user_id = _register_user(client, f"group-patch-outsider-{uuid4().hex[:8]}")
+
+    unknown_user = client.patch(
+        f"/groups/{group_id}/members/{uuid4()}",
+        json={"role": "viewer"},
+        headers=owner_headers,
+    )
+    non_member = client.patch(
+        f"/groups/{group_id}/members/{outsider_user_id}",
+        json={"role": "owner"},
+        headers=owner_headers,
+    )
+
+    assert unknown_user.status_code == 404, unknown_user.text
+    assert unknown_user.json()["error"]["message"] == "Group membership does not exist."
+    assert non_member.status_code == 404, non_member.text
+    assert non_member.json()["error"]["message"] == "Group membership does not exist."
+    members = client.get(f"/groups/{group_id}/members", headers=owner_headers)
+    assert members.status_code == 200, members.text
+    assert outsider_user_id not in {item["user_id"] for item in members.json()["data"]}

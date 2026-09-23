@@ -231,35 +231,25 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     sqlite = op.get_context().dialect.name == "sqlite"
-    _set_sqlite_foreign_keys(enabled=False)
-    try:
-        if not sqlite:
-            op.drop_constraint(
-                "fk_acquisition_collections_current_capture",
-                "acquisition_collections",
-                type_="foreignkey",
-            )
-        op.drop_index(
-            "ix_collection_captures_snapshot_id",
-            table_name="acquisition_collection_captures",
+    if not sqlite:
+        op.drop_constraint(
+            "fk_acquisition_collections_current_capture",
+            "acquisition_collections",
+            type_="foreignkey",
         )
-        op.drop_table("acquisition_collection_captures")
-        op.drop_table("acquisition_collection_manifests")
-        op.drop_index(
-            "ix_collection_snapshots_collection_observed",
-            table_name="acquisition_collection_snapshots",
-        )
-        op.drop_table("acquisition_collection_snapshots")
-        op.drop_index(
-            "ix_acquisition_collections_session_created",
-            table_name="acquisition_collections",
-        )
-        op.drop_table("acquisition_collections")
-    finally:
-        _set_sqlite_foreign_keys(enabled=True)
-
-
-def _set_sqlite_foreign_keys(*, enabled: bool) -> None:
-    if op.get_context().dialect.name == "sqlite":
-        value = "ON" if enabled else "OFF"
-        op.execute(f"PRAGMA foreign_keys={value}")
+    op.drop_index(
+        "ix_collection_captures_snapshot_id",
+        table_name="acquisition_collection_captures",
+    )
+    op.drop_table("acquisition_collection_captures")
+    op.drop_table("acquisition_collection_manifests")
+    op.drop_index(
+        "ix_collection_snapshots_collection_observed",
+        table_name="acquisition_collection_snapshots",
+    )
+    op.drop_table("acquisition_collection_snapshots")
+    op.drop_index(
+        "ix_acquisition_collections_session_created",
+        table_name="acquisition_collections",
+    )
+    op.drop_table("acquisition_collections")

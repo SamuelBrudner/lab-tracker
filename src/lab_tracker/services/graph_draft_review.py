@@ -42,6 +42,7 @@ from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
 from lab_tracker.provider_error_redaction import provider_error_message
 from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.graph_draft_generation import GeneratedDraftProposal
+from lab_tracker.services.graph_draft_validation import ensure_graph_change_set_revisable
 from lab_tracker.services.shared import UserExistenceReader, actor_user_fk, actor_user_id
 
 _REVISION_ATTACHMENT_EVIDENCE_MESSAGE = (
@@ -525,12 +526,10 @@ class GraphDraftReviewCoordinator(BaseService):
         """Regenerate the complete operation set without risking the old draft."""
 
         change_set = self.records.get_graph_change_set(change_set_id)
-        if change_set.purpose == GraphDraftPurpose.MEMBER_CHECKPOINT_ALIGNMENT:
-            raise ValidationError(
-                "Member onboarding proposals can be changed only through "
-                "individual operation review."
-            )
+        # Access first, so a caller who cannot edit the draft learns nothing
+        # about its mode; the mode check still precedes audio transcription.
         self._ensure_graph_change_set_editable(change_set, actor=actor)
+        ensure_graph_change_set_revisable(change_set)
         revision_inputs = inputs or RevisionInputs()
         cleaned, transcript = self._resolve_revision_feedback(
             feedback,

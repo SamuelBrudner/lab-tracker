@@ -67,36 +67,17 @@ _TABLE_COLUMNS: dict[str, list[tuple[str, sa.types.TypeEngine[object], str]]] = 
 
 
 def upgrade() -> None:
-    _set_sqlite_foreign_keys(enabled=False)
-    try:
-        for table_name, columns in _TABLE_COLUMNS.items():
-            for column_name, _column_type, default_sql in columns:
-                op.execute(
-                    f"UPDATE {table_name} SET {column_name} = {default_sql} "
-                    f"WHERE {column_name} IS NULL"
-                )
-        _set_nullable(False)
-    finally:
-        _set_sqlite_foreign_keys(enabled=True)
+    for table_name, columns in _TABLE_COLUMNS.items():
+        for column_name, _column_type, default_sql in columns:
+            op.execute(
+                f"UPDATE {table_name} SET {column_name} = {default_sql} "
+                f"WHERE {column_name} IS NULL"
+            )
+    _set_nullable(False)
 
 
 def downgrade() -> None:
-    _set_sqlite_foreign_keys(enabled=False)
-    try:
-        _set_nullable(True)
-    finally:
-        _set_sqlite_foreign_keys(enabled=True)
-
-
-def _set_sqlite_foreign_keys(*, enabled: bool) -> None:
-    """Toggle SQLite FKs around batch table rebuilds.
-
-    env.py configures SQLite migrations with transactional_ddl=False so this
-    PRAGMA is honored before Alembic recreates parent tables.
-    """
-    if op.get_context().dialect.name == "sqlite":
-        value = "ON" if enabled else "OFF"
-        op.execute(f"PRAGMA foreign_keys={value}")
+    _set_nullable(True)
 
 
 def _set_nullable(nullable: bool) -> None:

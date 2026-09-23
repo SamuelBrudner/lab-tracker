@@ -1,6 +1,32 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { apiFetch, apiListRequest, apiRequest, apiTextRequest } from "./api.js";
+import { isStaticDemoEnabled } from "./static-demo-api.js";
+import { apiResponse, installFetchMock } from "../test/utils.js";
+
+describe("static demo detection", () => {
+  it.each(["?demo=1", "?demo=true"])(
+    "ignores %s on a real deployment and keeps talking to the API",
+    async (search) => {
+      // A crafted link must not swap a live instance to fixture data and a
+      // fake signed-in session; only the demo build's explicit flag does.
+      window.history.replaceState({}, "", `/app/graph${search}`);
+      installFetchMock([{ match: "/auth/me", response: apiResponse({ username: "real.user" }) }]);
+
+      expect(isStaticDemoEnabled()).toBe(false);
+      expect((await apiFetch("/auth/me")).data.username).toBe("real.user");
+    }
+  );
+
+  it("is enabled by the demo build's explicit flag", () => {
+    globalThis.__LAB_TRACKER_STATIC_DEMO__ = true;
+    try {
+      expect(isStaticDemoEnabled()).toBe(true);
+    } finally {
+      delete globalThis.__LAB_TRACKER_STATIC_DEMO__;
+    }
+  });
+});
 
 describe("static demo API", () => {
   beforeEach(() => {

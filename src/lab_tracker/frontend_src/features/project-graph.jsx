@@ -371,12 +371,11 @@ function graphEdgeToFlowEdge(edge, selection, { hoveredEdgeId, showEdgeLabels })
   };
 }
 
-export function buildFlowGraph(graph, view, options = {}) {
-  const {
-    hoveredEdgeId = null,
-    selectedNodeId = null,
-    showEdgeLabels = false,
-  } = options;
+// The layout pass (question tree, column positions with overlap resolution,
+// mutual-edge dedupe) depends only on the graph and view. It is split from the
+// cheap restyling pass so hovering an edge or selecting a node does not re-run
+// it; callers memoise it and pass it to buildFlowGraph as `layout`.
+export function computeFlowLayout(graph, view) {
   const layerByType = TYPE_LAYER_BY_VIEW[view] || TYPE_LAYER_BY_VIEW.evidence;
   const qLayout = computeQuestionLayout(graph?.nodes || [], graph?.edges || []);
   const positions = computeNodePositions(
@@ -396,11 +395,23 @@ export function buildFlowGraph(graph, view, options = {}) {
     return aDown - bDown;
   });
   const keptPairs = new Set();
-  const dedupedEdges = orderedEdges.filter((edge) => {
+  const edges = orderedEdges.filter((edge) => {
     if (keptPairs.has(`${edge.target}->${edge.source}`)) return false;
     keptPairs.add(`${edge.source}->${edge.target}`);
     return true;
   });
+  return { edges, positions };
+}
+
+export function buildFlowGraph(graph, view, options = {}) {
+  const {
+    hoveredEdgeId = null,
+    selectedNodeId = null,
+    showEdgeLabels = false,
+  } = options;
+  const layout = options.layout || computeFlowLayout(graph, view);
+  const { positions } = layout;
+  const dedupedEdges = layout.edges;
   // Focus-on-selection: the selected node's 1-hop neighborhood keeps full
   // opacity (and its incident edges show their labels); everything else dims.
   // Selection only activates when the id is actually in the rendered graph,
@@ -536,14 +547,19 @@ function ProjectGraphExplorer({
       null,
     [filteredGraph, selectedNodeId],
   );
+  const flowLayout = React.useMemo(
+    () => computeFlowLayout(filteredGraph, view),
+    [filteredGraph, view],
+  );
   const flowGraph = React.useMemo(
     () =>
       buildFlowGraph(filteredGraph, view, {
         hoveredEdgeId,
+        layout: flowLayout,
         selectedNodeId,
         showEdgeLabels,
       }),
-    [filteredGraph, hoveredEdgeId, selectedNodeId, showEdgeLabels, view],
+    [filteredGraph, flowLayout, hoveredEdgeId, selectedNodeId, showEdgeLabels, view],
   );
   // Counts come from the unfiltered graph so a hidden type's chip still
   // reports how much it is hiding.

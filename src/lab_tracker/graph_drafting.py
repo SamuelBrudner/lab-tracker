@@ -16,7 +16,7 @@ from typing import Any, Protocol, TypeAlias, runtime_checkable
 
 import httpx
 
-from lab_tracker.config import Settings
+from lab_tracker.config import BACKGROUND_ONLY_GRAPH_DRAFT_PROVIDERS, Settings
 from lab_tracker.provider_error_redaction import provider_error_message
 
 PROMPT_VERSION = "multimodal-graph-draft-v3"
@@ -62,6 +62,13 @@ class GraphDraftingError(RuntimeError):
 
     def __init__(self, message: object, *, secrets: tuple[str, ...] = ()) -> None:
         super().__init__(provider_error_message(message, secrets=secrets))
+
+
+class GraphDraftOutputTruncatedError(GraphDraftingError):
+    """The provider stopped at its output-token budget before finishing.
+
+    Deterministic for a given budget, so generation does not retry it.
+    """
 
 
 @lru_cache(maxsize=1)
@@ -223,11 +230,18 @@ def graph_patch_response_schema() -> dict[str, Any]:
 class GraphDraftClient(Protocol):
     """Provider-agnostic surface for graph draft generation.
 
-    Implementations: OpenAI (this file). Anthropic and Google are tracked
-    as separate beads. ``transcribe_audio`` is optional on providers that
-    do not natively expose transcription; if so, the implementation should
-    raise ``GraphDraftingError`` with a clear message so callers fall back
-    to a configured transcription provider.
+    Implementations (all in this module; ``make_graph_draft_client`` picks
+    one from ``graph_draft_provider``): ``OpenAIGraphDraftClient``,
+    ``AnthropicGraphDraftClient``, ``GoogleGraphDraftClient``, and
+    ``AgenticGraphDraftClient``, a read-only wrapper around one of the
+    others that requires the background worker (batch drafts get its tool
+    pass; note and analysis drafts go straight to the wrapped client).
+
+    ``transcribe_audio`` support: OpenAI and Google transcribe natively;
+    Anthropic has no transcription API and raises ``GraphDraftingError`` so
+    callers fall back to a configured transcription provider; the agentic
+    wrapper delegates to its base client and raises ``GraphDraftingError`` if
+    that client cannot transcribe.
     """
 
     def draft_from_note(
@@ -636,10 +650,14 @@ class AnthropicGraphDraftClient:
         model: str,
         base_url: str = "https://api.anthropic.com/v1",
         timeout_seconds: float = 60.0,
+        max_output_tokens: int = 16000,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
+        if max_output_tokens < 1:
+            raise GraphDraftingError("Anthropic max_output_tokens must be positive.")
         self.model = model
         self.timeout_seconds = float(timeout_seconds)
+        self.max_output_tokens = int(max_output_tokens)
         self._api_key = api_key.strip()
         self._client = httpx.Client(
             base_url=base_url.rstrip("/"),
@@ -654,6 +672,7 @@ class AnthropicGraphDraftClient:
             model=settings.anthropic_model,
             base_url=settings.anthropic_base_url,
             timeout_seconds=settings.anthropic_timeout_seconds,
+            max_output_tokens=settings.anthropic_max_output_tokens,
         )
 
     def close(self) -> None:
@@ -796,7 +815,7 @@ class AnthropicGraphDraftClient:
             },
             json={
                 "model": self.model,
-                "max_tokens": 4096,
+                "max_tokens": self.max_output_tokens,
                 "system": instructions
                 + "\nReturn only valid JSON matching this schema: "
                 + json.dumps(graph_patch_response_schema(), sort_keys=True),
@@ -812,6 +831,13 @@ class AnthropicGraphDraftClient:
                 )
             )
         payload = _provider_response_json(response, "Anthropic")
+        if payload.get("stop_reason") == "max_tokens":
+            raise GraphDraftOutputTruncatedError(
+                "Anthropic stopped at the output limit of "
+                f"{self.max_output_tokens} tokens before finishing the graph patch; "
+                "raise LAB_TRACKER_ANTHROPIC_MAX_OUTPUT_TOKENS (within the model's "
+                "output limit) or draft fewer notes per batch."
+            )
         output_text = _anthropic_output_text(payload)
         return _parse_graph_patch_text(output_text, "Anthropic")
 
@@ -1038,6 +1064,8 @@ class AgenticGraphDraftClient:
     only inspect the batch context already assembled by Lab Tracker, search
     existing graph-node summaries inside that context, and attach a bounded
     trace before delegating to the same structured graph-patch provider.
+    Note-scoped and analysis drafts skip the tool pass and go straight to the
+    wrapped client, so interactive drafting keeps working under this provider.
     """
 
     provider = "agentic"
@@ -1069,8 +1097,17 @@ class AgenticGraphDraftClient:
         image_content_type: str | None = None,
         extra_images: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        raise GraphDraftingError(
-            "Agentic graph drafting is only supported for background batch drafts."
+        # The agentic tool pass is batch-only; note-scoped drafts use the
+        # wrapped single-shot (equally read-only) client directly.
+        return self._base_client.draft_from_note(
+            graph_context=graph_context,
+            user_hint=user_hint,
+            draft_mode=draft_mode,
+            project_context=project_context,
+            source_artifacts=source_artifacts,
+            image_bytes=image_bytes,
+            image_content_type=image_content_type,
+            extra_images=extra_images,
         )
 
     def draft_from_analysis_evidence(
@@ -1079,8 +1116,9 @@ class AgenticGraphDraftClient:
         evidence_text: str,
         project_context: dict[str, Any],
     ) -> dict[str, Any]:
-        raise GraphDraftingError(
-            "Agentic graph drafting is only supported for background batch drafts."
+        return self._base_client.draft_from_analysis_evidence(
+            evidence_text=evidence_text,
+            project_context=project_context,
         )
 
     def draft_from_batch(
@@ -1136,7 +1174,7 @@ def make_graph_draft_client(settings: Settings) -> GraphDraftClient:
         return AnthropicGraphDraftClient.from_settings(settings)
     if provider in {"google", "gemini"}:
         return GoogleGraphDraftClient.from_settings(settings)
-    if provider in {"agentic", "agentic-openai", "agentic_openai"}:
+    if provider in BACKGROUND_ONLY_GRAPH_DRAFT_PROVIDERS:
         return AgenticGraphDraftClient.from_settings(settings)
     raise GraphDraftingError(
         "Unknown graph_draft_provider "

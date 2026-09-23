@@ -32,15 +32,17 @@ product (OpenAPI/declarative-agent integration) and is an explicit non-goal.
   Lab Tracker API. `mcp_server.py` `main()` reads `LAB_TRACKER_MCP_TRANSPORT`
   and runs stdio by default or streamable HTTP for the hosted endpoint. It is
   **not mounted** in the FastAPI app.
-- **39 tools** (25 read / 14 write after reclassifying
-  `list_question_refactors`; write tools include `record_evidence_bundle`, whose
-  `dry_run` defaults to `True`). P0b registers MCP annotations:
+- Tools are registered from the `READ_TOOLS` and `WRITE_TOOLS` tuples in
+  `lab_tracker.mcp_tools` (the generated inventory in
+  `skills/lab-tracker/SKILL.md` lists them; `list_question_refactors` is a read
+  tool; write tools include `record_evidence_bundle`, whose `dry_run` defaults
+  to `True`). P0b registers MCP annotations:
   read tools carry `readOnlyHint=True`; write tools leave `readOnlyHint=False`;
   `refactor_question` and `update_goal` carry `destructiveHint=True`.
 - Auth: `LAB_TRACKER_MCP_API_KEY`/`LAB_TRACKER_MCP_TOKEN` sends a static
   `lpat_` bearer and skips `/auth/login`; otherwise
-  `LAB_TRACKER_MCP_USERNAME`/`_PASSWORD` → `POST /auth/login` → cached Bearer,
-  one 401 retry (`mcp_api_client.py`). The MCP client sends
+  the deprecated `LAB_TRACKER_MCP_USERNAME`/`_PASSWORD` → `POST /auth/login` →
+  cached Bearer, one 401 retry (`mcp_api_client.py`). The MCP client sends
   `X-LabTracker-Surface: mcp`.
 - Committed client configs now include `.mcp.json` in **Claude/Codex shape**
   (top-level `mcpServers`) plus the Copilot-shaped `.vscode/mcp.json`
@@ -66,7 +68,8 @@ mode and works today over stdio once a Copilot-shaped config file exists.
 
 - Auth-disabled local dev: no credential needed (config file is enough).
 - Auth-enabled: the dev supplies their own credential — an `lpat_` token is the
-  nicer, revocable, password-free option; username/password remains a fallback.
+  sanctioned, revocable, password-free option; username/password login is a
+  deprecated fallback.
 
 ### Mode 2 — Shared private read-only hosted endpoint (optional)
 

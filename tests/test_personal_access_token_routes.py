@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from datetime import timedelta
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 
 from lab_tracker.auth import Role, utc_now
+from lab_tracker.rate_limit import InMemoryRateLimiter
 
 
 def _bearer(secret: str) -> dict[str, str]:
@@ -291,10 +292,10 @@ def test_read_only_viewer_token_can_read_scoped_decision_context_opaquely(
         headers=pat_headers,
     )
 
-    assert hidden.status_code == missing.status_code == 401
+    assert hidden.status_code == missing.status_code == 403
     assert hidden.json() == missing.json() == {
         "error": {
-            "code": "auth_error",
+            "code": "forbidden",
             "message": "Project access required.",
             "issues": None,
         }
@@ -462,3 +463,374 @@ def test_invalid_personal_access_token_attempts_are_rate_limited(
     assert first.status_code == 401
     assert second.status_code == 401
     assert third.status_code == 429
+
+
+def test_one_host_invalid_token_flood_does_not_rate_limit_other_hosts(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    """A host that fills its share of blocked token buckets is limited itself.
+
+    Other hosts keep their share of the PAT table, so their mistyped tokens
+    still get 401 and their forbidden requests still get 403, not 429.
+    """
+    issued = _create_token(client, admin_auth_headers, role="viewer", read_only=True)
+    client.app.state.pat_rate_limiter = InMemoryRateLimiter(
+        max_attempts=2,
+        window_seconds=60,
+        max_buckets=6,
+        max_buckets_per_client=3,
+    )
+    attacker = TestClient(client.app, client=("203.0.113.9", 40000))
+    other = TestClient(client.app, client=("198.51.100.7", 40000))
+
+    flood = [
+        attacker.get("/projects", headers=_bearer(f"lpat_guess-{index}"))
+        for index in range(10)
+        for _attempt in range(2)
+    ]
+    mistyped = other.get("/projects", headers=_bearer("lpat_typo"))
+    allowed = other.get("/projects", headers=_bearer(issued["secret"]))
+    forbidden = other.post(
+        "/projects", json={"name": "Blocked"}, headers=_bearer(issued["secret"])
+    )
+
+    assert [response.status_code for response in flood[:6]] == [401] * 6
+    assert {response.status_code for response in flood[6:]} == {429}
+    assert mistyped.status_code == 401
+    assert allowed.status_code == 200
+    assert forbidden.status_code == 403
+    assert forbidden.json()["error"]["code"] == "service_forbidden"
+
+
+def test_invalid_token_flood_from_one_ipv6_64_shares_one_client_quota(
+    client: TestClient,
+):
+    """Rotating source addresses inside one IPv6 /64 does not mint new clients."""
+    client.app.state.pat_rate_limiter = InMemoryRateLimiter(
+        max_attempts=1,
+        window_seconds=60,
+        max_buckets=10,
+        max_buckets_per_client=2,
+    )
+
+    flood = [
+        TestClient(client.app, client=(f"2001:db8:1:2::{index + 1:x}", 40000)).get(
+            "/projects", headers=_bearer(f"lpat_guess-{index}")
+        )
+        for index in range(6)
+    ]
+    other_prefix = TestClient(client.app, client=("2001:db8:1:3::1", 40000)).get(
+        "/projects", headers=_bearer("lpat_typo")
+    )
+
+    assert [response.status_code for response in flood] == [401, 401, 429, 429, 429, 429]
+    assert other_prefix.status_code == 401
+
+
+def test_valid_token_forbidden_requests_stay_403_and_never_lock_the_token(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    """Policy denials are not credential failures (L35).
+
+    A valid token that repeatedly asks for something its policy forbids keeps
+    getting 403, is never locked out of the requests it may make, and still
+    gets 403 (not 429) when its client is at its failure quota.
+    """
+    issued = _create_token(client, admin_auth_headers, role="viewer", read_only=True)
+    client.app.state.pat_rate_limiter = InMemoryRateLimiter(
+        max_attempts=2,
+        window_seconds=60,
+        max_buckets=10,
+        max_buckets_per_client=2,
+    )
+    headers = _bearer(issued["secret"])
+
+    forbidden = [
+        client.post("/projects", json={"name": "Blocked"}, headers=headers)
+        for _attempt in range(5)
+    ]
+    allowed = client.get("/projects", headers=headers)
+    # Fill this client's failure quota with blocked guesses.
+    guesses = [
+        client.get("/projects", headers=_bearer(f"lpat_guess-{index}"))
+        for index in range(2)
+        for _attempt in range(2)
+    ]
+    forbidden_at_quota = client.post(
+        "/projects", json={"name": "Blocked"}, headers=headers
+    )
+
+    assert {response.status_code for response in forbidden} == {403}
+    assert {response.json()["error"]["code"] for response in forbidden} == {
+        "service_forbidden"
+    }
+    assert allowed.status_code == 200
+    assert [response.status_code for response in guesses] == [401, 401, 401, 401]
+    assert client.get("/projects", headers=_bearer("lpat_guess-new")).status_code == 429
+    assert forbidden_at_quota.status_code == 403
+    assert forbidden_at_quota.json()["error"]["code"] == "service_forbidden"
+
+
+def test_token_without_an_owner_is_a_counted_401_even_on_a_forbidden_path(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """An ownerless token never reaches the policy check, so a 403 cannot leak it."""
+    issued = _create_token(client, admin_auth_headers, role="viewer", read_only=True)
+    client.app.state.pat_rate_limiter = InMemoryRateLimiter(
+        max_attempts=2,
+        window_seconds=60,
+        max_buckets=10,
+        max_buckets_per_client=2,
+    )
+    monkeypatch.setattr(client.app.state.auth_service, "get_user_by_id", lambda _user_id: None)
+    headers = _bearer(issued["secret"])
+
+    responses = [
+        client.post("/projects", json={"name": "Blocked"}, headers=headers) for _ in range(3)
+    ]
+
+    assert [response.status_code for response in responses] == [401, 401, 429]
+    assert responses[0].json()["error"]["message"] == "Invalid personal access token."
+
+
+def test_auth_middleware_matches_paths_relative_to_the_root_path(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    """Under a mounted root path the public and /auth policies still apply (L33/L34).
+
+    ASGI servers put the root path in front of ``scope["path"]``; the router
+    strips it, so the auth middleware must match the same route-relative path.
+    """
+    target_id, _ = _register_and_login(client, role=Role.VIEWER, prefix="target")
+    admin_pat = _create_token(client, admin_auth_headers, role="admin", read_only=False)
+    rooted = TestClient(client.app, root_path="/lab")
+
+    health = rooted.get("/lab/health")
+    app_shell = rooted.get("/lab/app")
+    promote = rooted.patch(
+        f"/lab/auth/users/{target_id}",
+        json={"role": "admin"},
+        headers=_bearer(admin_pat["secret"]),
+    )
+
+    assert health.status_code == 200, health.text
+    assert app_shell.status_code == 200, app_shell.text
+    assert "frame-ancestors 'none'" in app_shell.headers["Content-Security-Policy"]
+    assert promote.status_code == 403, promote.text
+    assert promote.json()["error"]["code"] == "service_forbidden"
+    target = client.app.state.auth_service.get_user_by_id(UUID(target_id))
+    assert target.role is Role.VIEWER
+    # A path outside the root path reaches the router verbatim; the fence still holds.
+    unrooted = rooted.get("/auth/users", headers=_bearer(admin_pat["secret"]))
+    assert unrooted.status_code == 403, unrooted.text
+
+    enrollment = client.post("/auth/devices/enrollment", json={}, headers=admin_auth_headers)
+    assert enrollment.status_code == 201, enrollment.text
+    consume = client.post(
+        "/auth/devices/consume",
+        json={"offer_token": enrollment.json()["data"]["offer_token"], "label": "phone"},
+    )
+    assert consume.status_code == 201, consume.text
+    device = _bearer(consume.json()["data"]["secret"])
+
+    assert rooted.get("/lab/auth/me", headers=device).status_code == 200
+    for method, path in (
+        ("GET", "/lab/auth/users"),
+        ("GET", "/lab/auth/devices"),
+        ("POST", "/lab/projects"),
+    ):
+        denied = rooted.request(method, path, json={"name": "x"}, headers=device)
+        assert denied.status_code == 403, (path, denied.text)
+
+
+def _register_and_login(
+    client: TestClient,
+    *,
+    role: Role,
+    prefix: str,
+) -> tuple[str, dict[str, str]]:
+    username = f"{prefix}-{uuid4().hex[:8]}"
+    user = client.app.state.auth_service.register_user(
+        username=username,
+        password="secret",
+        role=role,
+    )
+    login = client.post("/auth/login", json={"username": username, "password": "secret"})
+    assert login.status_code == 200, login.text
+    return str(user.user_id), _bearer(login.json()["data"]["access_token"])
+
+
+def test_personal_access_token_loses_authority_when_its_user_is_demoted(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    root_project = client.post(
+        "/projects",
+        json={"name": "Root-only project"},
+        headers=admin_auth_headers,
+    )
+    assert root_project.status_code == 201, root_project.text
+    root_project_id = root_project.json()["data"]["project_id"]
+    second_id, second_headers = _register_and_login(client, role=Role.ADMIN, prefix="second")
+    issued = _create_token(client, second_headers, role="admin", read_only=False)
+    pat_headers = _bearer(issued["secret"])
+    before = client.get("/projects", headers=pat_headers)
+    assert root_project_id in {item["project_id"] for item in before.json()["data"]}
+
+    demoted = client.patch(
+        f"/auth/users/{second_id}",
+        json={"role": "viewer"},
+        headers=admin_auth_headers,
+    )
+    assert demoted.status_code == 200, demoted.text
+
+    listing = client.get("/projects", headers=pat_headers)
+    create = client.post("/projects", json={"name": "Blocked"}, headers=pat_headers)
+    delete = client.delete(f"/projects/{root_project_id}", headers=pat_headers)
+
+    assert listing.status_code == 200, listing.text
+    assert root_project_id not in {item["project_id"] for item in listing.json()["data"]}
+    assert create.status_code == 403
+    assert create.json()["error"]["code"] == "service_forbidden"
+    assert delete.status_code == 403
+    assert client.get(f"/projects/{root_project_id}", headers=admin_auth_headers).status_code == 200
+
+
+def test_admin_can_list_and_revoke_another_users_personal_access_tokens(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    owner_id, owner_headers = _register_and_login(client, role=Role.EDITOR, prefix="owner")
+    issued = _create_token(client, owner_headers, role="editor", read_only=False)
+    _create_token(client, admin_auth_headers, label="Admin's own")
+
+    listed = client.get(f"/auth/users/{owner_id}/tokens", headers=admin_auth_headers)
+    assert listed.status_code == 200, listed.text
+    body = listed.json()
+    assert [item["token_id"] for item in body["data"]] == [issued["token_id"]]
+    assert body["meta"] == {"limit": 50, "offset": 0, "total": 1}
+    assert "secret" not in body["data"][0]
+
+    revoked = client.delete(
+        f"/auth/users/{owner_id}/tokens/{issued['token_id']}",
+        headers=admin_auth_headers,
+    )
+    assert revoked.status_code == 200, revoked.text
+    assert revoked.json()["data"]["revoked_at"] is not None
+    assert client.get("/projects", headers=_bearer(issued["secret"])).status_code == 401
+
+
+def test_admin_token_management_rejects_mismatched_and_unknown_targets(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    owner_id, owner_headers = _register_and_login(client, role=Role.EDITOR, prefix="owner")
+    other_id, _ = _register_and_login(client, role=Role.VIEWER, prefix="other")
+    issued = _create_token(client, owner_headers)
+
+    mismatched = client.delete(
+        f"/auth/users/{other_id}/tokens/{issued['token_id']}",
+        headers=admin_auth_headers,
+    )
+    unknown_user = client.get(f"/auth/users/{uuid4()}/tokens", headers=admin_auth_headers)
+
+    assert mismatched.status_code == 404
+    assert unknown_user.status_code == 404
+    assert client.get("/projects", headers=_bearer(issued["secret"])).status_code == 200
+    assert owner_id != other_id
+
+
+def test_admin_token_management_requires_an_interactive_admin(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    owner_id, owner_headers = _register_and_login(client, role=Role.EDITOR, prefix="owner")
+    issued = _create_token(client, owner_headers)
+    admin_pat = _create_token(client, admin_auth_headers, role="admin", read_only=False)
+
+    by_editor = client.get(f"/auth/users/{owner_id}/tokens", headers=owner_headers)
+    revoke_by_editor = client.delete(
+        f"/auth/users/{owner_id}/tokens/{issued['token_id']}",
+        headers=owner_headers,
+    )
+    by_service = client.get(
+        f"/auth/users/{owner_id}/tokens",
+        headers=_bearer(admin_pat["secret"]),
+    )
+    revoke_by_service = client.delete(
+        f"/auth/users/{owner_id}/tokens/{issued['token_id']}",
+        headers=_bearer(admin_pat["secret"]),
+    )
+
+    assert by_editor.status_code == 403
+    assert by_editor.json()["error"]["message"] == "Admin privileges required."
+    assert revoke_by_editor.status_code == 403
+    assert by_service.status_code == 403
+    assert revoke_by_service.status_code == 403
+    assert client.get("/projects", headers=_bearer(issued["secret"])).status_code == 200
+
+
+def _login_headers(client: TestClient, user_id: str) -> dict[str, str]:
+    user = client.app.state.auth_service.get_user_by_id(UUID(user_id))
+    login = client.post("/auth/login", json={"username": user.username, "password": "secret"})
+    assert login.status_code == 200, login.text
+    return _bearer(login.json()["data"]["access_token"])
+
+
+def test_token_listings_report_the_effective_role_after_the_owner_is_demoted(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    second_id, second_headers = _register_and_login(client, role=Role.ADMIN, prefix="second")
+    issued = _create_token(client, second_headers, role="admin", read_only=False)
+    assert (issued["role"], issued["effective_role"]) == ("admin", "admin")
+
+    demoted = client.patch(
+        f"/auth/users/{second_id}",
+        json={"role": "viewer"},
+        headers=admin_auth_headers,
+    )
+    assert demoted.status_code == 200, demoted.text
+    # The role change ended the old session; sign in again as the demoted user.
+    second_headers = _login_headers(client, second_id)
+
+    own = client.get("/auth/tokens", headers=second_headers)
+    by_admin = client.get(f"/auth/users/{second_id}/tokens", headers=admin_auth_headers)
+    revoked = client.delete(
+        f"/auth/users/{second_id}/tokens/{issued['token_id']}",
+        headers=admin_auth_headers,
+    )
+
+    assert own.status_code == 200, own.text
+    assert by_admin.status_code == 200, by_admin.text
+    assert revoked.status_code == 200, revoked.text
+    for item in (own.json()["data"][0], by_admin.json()["data"][0], revoked.json()["data"]):
+        assert item["token_id"] == issued["token_id"]
+        assert item["role"] == "admin"
+        assert item["effective_role"] == "viewer"
+
+
+def test_token_listings_do_not_widen_the_effective_role_after_promotion(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    owner_id, owner_headers = _register_and_login(client, role=Role.EDITOR, prefix="owner")
+    issued = _create_token(client, owner_headers, role="admin", read_only=False)
+    assert (issued["role"], issued["effective_role"]) == ("editor", "editor")
+
+    promoted = client.patch(
+        f"/auth/users/{owner_id}",
+        json={"role": "admin"},
+        headers=admin_auth_headers,
+    )
+    assert promoted.status_code == 200, promoted.text
+
+    listed = client.get(f"/auth/users/{owner_id}/tokens", headers=admin_auth_headers)
+    assert listed.status_code == 200, listed.text
+    item = listed.json()["data"][0]
+    assert (item["role"], item["effective_role"]) == ("editor", "editor")

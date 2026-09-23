@@ -545,12 +545,23 @@ def seed_demo_database(
     *,
     run_migrations: bool = True,
     allow_duplicates: bool = False,
+    allow_non_local: bool = False,
 ) -> DemoSeedResult:
+    settings = get_settings()
+    if not allow_non_local and (
+        not settings.is_local_environment() or settings.is_auth_enabled()
+    ):
+        raise SystemExit(
+            "Refusing to seed demo data into a non-local or auth-enabled database "
+            f"(LAB_TRACKER_ENVIRONMENT={settings.environment!r}, auth "
+            f"{'enabled' if settings.is_auth_enabled() else 'disabled'}). The demo "
+            "project is for local development; pass --allow-non-local if you "
+            "really mean to write it into this database."
+        )
     if run_migrations:
         alembic_config = _alembic_config()
         command.upgrade(alembic_config, "head")
 
-    settings = get_settings()
     engine = get_engine(settings)
     session_factory = get_session_factory(engine=engine)
     try:
@@ -751,6 +762,14 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="Create a fresh demo project even if the default demo already exists.",
     )
+    seed_parser.add_argument(
+        "--allow-non-local",
+        action="store_true",
+        help=(
+            "Seed even when the configured database is non-local "
+            "(LAB_TRACKER_ENVIRONMENT != local) or has authentication enabled."
+        ),
+    )
     doctor_parser = subcommands.add_parser(
         "doctor",
         aliases=["check-idioms"],
@@ -845,6 +864,7 @@ def main(argv: list[str] | None = None) -> None:
             result = seed_demo_database(
                 run_migrations=not args.skip_migrations,
                 allow_duplicates=args.allow_duplicates,
+                allow_non_local=args.allow_non_local,
             )
         except Exception as exc:
             print(f"Failed to seed Lab Tracker demo data: {exc}", file=sys.stderr)
@@ -943,6 +963,14 @@ def _write_managed_block(
 ) -> None:
     if path.exists() or path in result._preview_contents:
         existing = _planned_or_disk_text(path, result)
+        _backup_before_unpaired_marker_repair(
+            path,
+            existing,
+            begin_marker=begin_marker,
+            end_marker=end_marker,
+            result=result,
+            dry_run=dry_run,
+        )
         content = _upsert_managed_block(
             existing,
             block,
@@ -1026,6 +1054,14 @@ def _strip_managed_block(
     if not removed:
         result.skipped.append(path)
         return
+    _backup_before_unpaired_marker_repair(
+        path,
+        existing,
+        begin_marker=begin_marker,
+        end_marker=end_marker,
+        result=result,
+        dry_run=dry_run,
+    )
     content = _join_surrounding_text(prefix, suffix)
     if path not in result.stripped:
         result.stripped.append(path)
@@ -1034,6 +1070,41 @@ def _strip_managed_block(
         return
     path.write_text(content, encoding="utf-8")
     result.overwritten.append(path)
+
+
+def _backup_before_unpaired_marker_repair(
+    path: Path,
+    existing: str,
+    *,
+    begin_marker: str,
+    end_marker: str,
+    result: InitResult,
+    dry_run: bool,
+) -> None:
+    """Save the file before a repair that drops text around a lone marker.
+
+    With only one marker present there is no way to tell where the stale
+    managed block ends, so the repair discards everything after a lone BEGIN
+    (or before a lone END). Keep the original next to the file so nothing the
+    user wrote there is lost, and say so.
+    """
+
+    if (begin_marker in existing) == (end_marker in existing):
+        return
+    if path in result.backups:
+        # An earlier repair in this run already saved the original text.
+        return
+    backup = path.with_name(path.name + _UPDATE_BACKUP_SUFFIX)
+    result.backups[path] = backup
+    lone_marker = begin_marker if begin_marker in existing else end_marker
+    tense = "would be" if dry_run else "was"
+    result.warnings.append(
+        f"{path} had an unpaired Lab Tracker marker ({lone_marker}); text "
+        f"around it {tense} replaced during repair, and the original {tense} "
+        f"saved at {backup}."
+    )
+    if not dry_run:
+        backup.write_text(existing, encoding="utf-8")
 
 
 def _managed_block_parts(

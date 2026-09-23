@@ -76,10 +76,27 @@ _DENIED_ERRNOS = frozenset(
     )
     if isinstance(error, int)
 )
+_PERMISSION_ERRNOS = frozenset(
+    error
+    for error in (
+        getattr(errno, "EACCES", None),
+        getattr(errno, "EPERM", None),
+    )
+    if isinstance(error, int)
+)
 
 
 class _Denied(Exception):
     """The request cannot be satisfied within its selected grant."""
+
+
+class _PermissionDenied(_Denied):
+    """The host refused access to one object (``EACCES``/``EPERM``).
+
+    Outside enumeration this is an ordinary denial. Beneath an enumeration
+    boundary it is a static, path-free reason to skip one subtree and report
+    the traversal as limited rather than abort the whole scan.
+    """
 
 
 class _Missing(Exception):
@@ -593,6 +610,8 @@ def _as_operation_error(
 ) -> Exception:
     if missing and exc.errno == getattr(errno, "ENOENT", object()):
         return _Missing()
+    if exc.errno in _PERMISSION_ERRNOS:
+        return _PermissionDenied()
     if exc.errno in _DENIED_ERRNOS or (
         race_safe_invalid and exc.errno == getattr(errno, "EINVAL", object())
     ):
@@ -988,18 +1007,26 @@ def _resolve_enumeration_components(
     components: tuple[str, ...],
     owned: list[int],
     directory_flags: int,
+    listed_alias: bool = False,
 ) -> tuple[str, int | None, tuple[str, ...], tuple[int, int]]:
     """Resolve a locator beneath ``boundary`` without opening a file leaf.
 
     The returned kind is ``"directory"`` with an owned enumerable descriptor,
     or ``"regular"`` with no descriptor. Statically proven escapes, symlink
     loops, and non-file/non-directory targets raise ``_StaticEnumerationSkip``.
+
+    ``listed_alias`` marks the final locator component as a just-listed
+    symlink. A component of its target that is cleanly absent at ``lstat``
+    time is a dangling alias and is also a static skip. Every other absence
+    (a previously verified locator component, or an object that disappears
+    after its ``lstat``) remains a fatal race.
     """
 
     try:
         pending = deque(components)
     except BaseException as exc:
         raise _Failed from exc
+    original_remaining = len(components)
     current = _open_directory(".", directory_flags, dir_fd=boundary.fd, missing=True)
     _track_descriptor(owned, current)
     current_components = list(boundary.components)
@@ -1012,7 +1039,10 @@ def _resolve_enumeration_components(
             steps += 1
             if steps > _MAX_RESOLUTION_STEPS or len(pending) > _MAX_COMPONENTS:
                 raise _StaticEnumerationSkip
+            original_component = len(pending) == original_remaining
             component = pending.popleft()
+            if original_component:
+                original_remaining -= 1
             if component in ("", "."):
                 continue
             if component == "..":
@@ -1037,7 +1067,12 @@ def _resolve_enumeration_components(
                     raise _Failed from exc
                 continue
 
-            metadata = _lstat_component(current, component, missing=True)
+            try:
+                metadata = _lstat_component(current, component, missing=True)
+            except _Missing:
+                if listed_alias and original_remaining == 0 and not original_component:
+                    raise _StaticEnumerationSkip from None
+                raise
             try:
                 mode = metadata.st_mode
             except BaseException as exc:
@@ -1710,7 +1745,12 @@ def _classify_enumeration_entry(
     queued_bytes: int,
     state: _EnumerationState,
 ) -> int:
-    metadata = _lstat_component(directory_fd, name, missing=True)
+    try:
+        metadata = _lstat_component(directory_fd, name, missing=True)
+    except _PermissionDenied:
+        # A listable but unsearchable directory hides this entry's type.
+        state.directory_limited = True
+        return queued_bytes
     try:
         mode = metadata.st_mode
     except BaseException as exc:
@@ -1770,8 +1810,13 @@ def _classify_enumeration_entry(
             components=locator,
             owned=owned,
             directory_flags=directory_flags,
+            listed_alias=True,
         )
     except _StaticEnumerationSkip:
+        return queued_bytes
+    except _PermissionDenied:
+        # The alias target lies in a subtree this helper may not read.
+        state.directory_limited = True
         return queued_bytes
     if kind == "regular":
         if resolved_fd is not None:
@@ -1898,6 +1943,13 @@ def _traverse_enumeration_boundary(
                 )
             except _StaticEnumerationSkip as exc:
                 raise _Failed from exc
+            except _PermissionDenied:
+                if not work.locator:
+                    raise
+                # An unreadable subdirectory is skipped; only the retained
+                # root/store boundary itself makes the whole request denied.
+                state.directory_limited = True
+                continue
             if kind != "directory" or directory_fd is None:
                 raise _Failed
             try:
@@ -2071,16 +2123,6 @@ def _enumerate_files(
 
 def _select_candidate(candidate: str, roots: tuple[str, ...]) -> _SelectedPath:
     return _select_path(_Request(candidate=candidate, roots=roots))
-
-
-def _inspect_request(environment: Mapping[str, str]) -> None:
-    if os.name != "posix":
-        raise _Failed
-    request = _parse_request(environment)
-    if not isinstance(request, _Request):
-        raise _Failed
-    selected = _select_path(request)
-    _inspect_selected_directory(selected)
 
 
 def _execute_request(environment: Mapping[str, str]) -> None:

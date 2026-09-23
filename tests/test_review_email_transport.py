@@ -171,7 +171,6 @@ def test_rendered_contract_is_the_same_content_used_by_smtp() -> None:
 @pytest.mark.parametrize(
     ("tls_mode", "smtp_type", "expected_starttls"),
     [
-        (SMTPTLSMode.NONE, _FakeSMTP, False),
         (SMTPTLSMode.STARTTLS, _FakeSMTP, True),
         (SMTPTLSMode.IMPLICIT, _FakeSMTPSSL, False),
     ],
@@ -218,6 +217,38 @@ def test_smtp_timeout_must_stay_within_bound(timeout: float) -> None:
             sender_email="notifications@example.test",
             timeout_seconds=timeout,
         )
+
+
+def test_smtp_settings_refuse_credentials_over_plaintext_connection() -> None:
+    with pytest.raises(ValueError, match="tls_mode none would send the password in plaintext"):
+        SMTPSettings(
+            host="smtp.example.test",
+            port=25,
+            sender_email="notifications@example.test",
+            username="smtp-user",
+            password="smtp-password",
+            tls_mode=SMTPTLSMode.NONE,
+        )
+
+
+def test_plaintext_smtp_without_credentials_never_logs_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(transport.smtplib, "SMTP", _FakeSMTP)
+    provider = SMTPReviewEmailProvider(
+        SMTPSettings(
+            host="smtp.example.test",
+            port=25,
+            sender_email="notifications@example.test",
+            tls_mode=SMTPTLSMode.NONE,
+        )
+    )
+
+    provider.send_review_ready(_delivery())
+
+    instance = _FakeSMTP.instances[-1]
+    assert not any(call[0] in {"starttls", "login"} for call in instance.calls)
+    assert instance.sent_message is not None
 
 
 def test_smtp_settings_repr_does_not_expose_password() -> None:
@@ -309,7 +340,7 @@ def test_provider_errors_are_typed_and_sanitized(
             sender_email="notifications@example.test",
             username="smtp-user",
             password="smtp-password",
-            tls_mode=SMTPTLSMode.NONE,
+            tls_mode=SMTPTLSMode.STARTTLS,
         )
     )
 

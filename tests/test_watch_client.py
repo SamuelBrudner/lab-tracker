@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 
 import httpx
 
@@ -441,3 +442,153 @@ def test_scan_manifest_batch_reports_malformed_without_aborting(tmp_path, monkey
     assert "bad" in summary["errors"][0]["source"]
     assert summary["errors"][0]["error"]
     assert len(list(config.outbox_path().glob("*.json"))) == 1
+
+
+def _notes_handler(uploads: list[str]):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/notes":
+            return _json_response(
+                200,
+                {"data": [], "meta": {"limit": 200, "offset": 0, "total": 0}},
+            )
+        if request.method == "POST" and request.url.path == "/notes/upload-file":
+            note_id = f"note-{len(uploads) + 1}"
+            uploads.append(note_id)
+            return _json_response(201, {"data": {"note_id": note_id}})
+        return _json_response(500, {"error": {"message": "unexpected request"}})
+
+    return handler
+
+
+def test_stale_events_are_terminal_and_do_not_starve_pending_under_limit(
+    tmp_path, monkeypatch
+) -> None:
+    """M80: a pending event behind N stale events still syncs under ``limit=N``."""
+
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1")
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    for name in ("a.md", "b.md", "c.md"):
+        (inbox / name).write_text(f"first {name}", encoding="utf-8")
+    scan = scan_watch(config, mode="files", root=inbox)
+    by_event_path = sorted(scan["imported"], key=lambda item: item["event_path"])
+    # Rewrite the two sources whose events sort first so they go stale and
+    # sit in front of the remaining pending event in drain order.
+    stale_sources = [item["source"] for item in by_event_path[:2]]
+    pending_event_path = by_event_path[2]["event_path"]
+    for source in stale_sources:
+        with open(source, "w", encoding="utf-8") as handle:
+            handle.write("rewritten after scan")
+
+    uploads: list[str] = []
+    handler = _notes_handler(uploads)
+    with LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler)) as lt:
+        first = sync_outbox(lt, config, limit=2)
+        second = sync_outbox(lt, config, limit=2)
+
+    assert [result["action"] for result in first["results"]] == ["stale", "stale"]
+    assert len(first["errors"]) == 2
+    # The stale events are terminal: reported as skipped without an error and
+    # without spending the limit, so the pending event is reached.
+    second_by_path = {result["path"]: result for result in second["results"]}
+    assert second_by_path[pending_event_path]["action"] == "imported"
+    assert [second_by_path[item["event_path"]]["reason"] for item in by_event_path[:2]] == [
+        "stale",
+        "stale",
+    ]
+    assert second["errors"] == []
+    assert uploads == ["note-1"]
+    assert read_event(pending_event_path)["sync"]["status"] == "synced"
+    status = outbox_status(config.outbox_path())
+    assert status["stale"] == 2
+    assert status.get("pending", 0) == 0
+
+
+def test_stale_event_is_not_rechecked_on_later_syncs(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1")
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    evidence = inbox / "capture.md"
+    evidence.write_text("first", encoding="utf-8")
+    scan_watch(config, mode="files", root=inbox)
+    event_path = next(config.outbox_path().glob("*.json"))
+    evidence.write_text("second", encoding="utf-8")
+
+    def handler(request: httpx.Request) -> httpx.Response:  # noqa: ARG001
+        raise AssertionError("stale events must not call the API")
+
+    with LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler)) as lt:
+        sync_outbox(lt, config)
+        after_first = read_event(event_path)
+        sync_outbox(lt, config)
+
+    after_second = read_event(event_path)
+    assert after_first["sync"]["status"] == "stale"
+    assert after_second["sync"] == after_first["sync"]
+
+
+def test_rescan_rearms_stale_event_when_file_matches_again(tmp_path, monkeypatch) -> None:
+    """A file touched between scan and sync (same bytes, new mtime) goes stale;
+
+    the next scan re-arms the same event with the fresh fingerprint so the
+    capture is not lost, which is the documented retry path for stale events.
+    """
+
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1")
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    evidence = inbox / "capture.md"
+    evidence.write_text("same bytes", encoding="utf-8")
+    scan_watch(config, mode="files", root=inbox)
+    event_path = next(config.outbox_path().glob("*.json"))
+    stat = evidence.stat()
+    os.utime(evidence, ns=(stat.st_atime_ns, stat.st_mtime_ns + 5_000_000_000))
+
+    uploads: list[str] = []
+    handler = _notes_handler(uploads)
+    with LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler)) as lt:
+        stale = sync_outbox(lt, config)
+        rescan = scan_watch(config, mode="files", root=inbox)
+        synced = sync_outbox(lt, config)
+
+    assert stale["results"][0]["action"] == "stale"
+    assert rescan["imported"][0]["event_path"] == str(event_path)
+    assert rescan["imported"][0]["rearmed"] is True
+    assert synced["results"][0]["action"] == "imported"
+    assert uploads == ["note-1"]
+    assert len(list(config.outbox_path().glob("*.json"))) == 1
+    assert read_event(event_path)["sync"]["status"] == "synced"
+
+
+def test_draft_retry_on_synced_event_ignores_later_source_changes(tmp_path, monkeypatch) -> None:
+    """Terminal ``stale`` must never overwrite an already-delivered event."""
+
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1")
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    evidence = inbox / "capture.md"
+    evidence.write_text("first", encoding="utf-8")
+    scan_watch(config, mode="files", root=inbox)
+    event_path = next(config.outbox_path().glob("*.json"))
+    uploads: list[str] = []
+    upload_handler = _notes_handler(uploads)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/analysis-graph-drafts"):
+            return _json_response(201, {"data": {"change_set_id": "draft-1"}})
+        return upload_handler(request)
+
+    with LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler)) as lt:
+        sync_outbox(lt, config)
+        evidence.write_text("second", encoding="utf-8")
+        retried = sync_outbox(lt, config, request_draft=True)
+
+    synced = read_event(event_path)
+    assert retried["results"][0]["action"] == "synced"
+    assert synced["sync"]["status"] == "synced"
+    assert synced["sync"]["note_id"] == "note-1"
+    assert synced["sync"]["change_set_id"] == "draft-1"

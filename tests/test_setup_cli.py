@@ -114,6 +114,113 @@ def test_from_env_ignores_profile_token_when_env_supplies_credentials(
         client.close()
 
 
+def _rejected_401() -> httpx.Response:
+    return httpx.Response(
+        401,
+        json={"error": {"message": "expired"}},
+        request=httpx.Request("GET", "http://profile:9000/projects"),
+    )
+
+
+def test_rejected_profile_token_error_names_the_profile_not_the_env_var(
+    config_home,
+) -> None:
+    from lab_tracker_client.client import LTAPIError
+
+    config_home.mkdir(parents=True)
+    (config_home / "config.json").write_text(
+        json.dumps({"base_url": "http://profile:9000", "access_token": "stale-profile"}),
+        encoding="utf-8",
+    )
+
+    client = LabTracker.from_env()
+    try:
+        with pytest.raises(LTAPIError) as excinfo:
+            client.refresh_bearer(_rejected_401())
+    finally:
+        client.close()
+
+    message = str(excinfo.value)
+    assert "LAB_TRACKER_ACCESS_TOKEN was rejected" not in message
+    assert str(config_home / "config.json") in message
+    assert "lt setup connect --save-token" in message
+
+
+def test_rejected_env_token_error_still_names_the_env_var(config_home, monkeypatch) -> None:
+    from lab_tracker_client.client import LTAPIError
+
+    config_home.mkdir(parents=True)
+    (config_home / "config.json").write_text(
+        json.dumps({"base_url": "http://profile:9000", "access_token": "stale-profile"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("LAB_TRACKER_ACCESS_TOKEN", "stale-env")
+
+    client = LabTracker.from_env()
+    try:
+        with pytest.raises(LTAPIError, match="LAB_TRACKER_ACCESS_TOKEN was rejected"):
+            client.refresh_bearer(_rejected_401())
+    finally:
+        client.close()
+
+
+def test_from_env_ignores_profile_project_for_a_different_server(
+    config_home, monkeypatch
+) -> None:
+    config_home.mkdir(parents=True)
+    (config_home / "config.json").write_text(
+        json.dumps(
+            {
+                "base_url": "http://profile:9000",
+                "default_project_id": "profile-project",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    # Project ids are per-server: a profile project saved for another server
+    # must not be applied to the env-selected one.
+    monkeypatch.setenv("LAB_TRACKER_BASE_URL", "http://other:8000")
+    client = LabTracker.from_env()
+    try:
+        assert client.default_project_id is None
+    finally:
+        client.close()
+
+    # Same server (modulo trailing slash) keeps the profile project.
+    monkeypatch.setenv("LAB_TRACKER_BASE_URL", "http://profile:9000/")
+    client = LabTracker.from_env()
+    try:
+        assert client.default_project_id == "profile-project"
+    finally:
+        client.close()
+
+    # An explicit env project always wins.
+    monkeypatch.setenv("LAB_TRACKER_BASE_URL", "http://other:8000")
+    monkeypatch.setenv("LAB_TRACKER_PROJECT_ID", "env-project")
+    client = LabTracker.from_env()
+    try:
+        assert client.default_project_id == "env-project"
+    finally:
+        client.close()
+
+
+def test_from_env_ignores_profile_project_when_profile_base_url_is_invalid(
+    config_home,
+) -> None:
+    config_home.mkdir(parents=True)
+    (config_home / "config.json").write_text(
+        json.dumps({"base_url": "not-a-url", "default_project_id": "profile-project"}),
+        encoding="utf-8",
+    )
+
+    client = LabTracker.from_env()
+    try:
+        assert client.default_project_id is None
+    finally:
+        client.close()
+
+
 def test_load_connection_profile_is_fail_soft(config_home) -> None:
     assert load_connection_profile() == {}
 

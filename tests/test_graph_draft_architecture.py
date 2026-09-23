@@ -52,7 +52,7 @@ DELEGATE_OWNERS = {
     "get_graph_change_set_for_read": "records",
     "list_graph_change_sets": "records",
     "query_graph_change_sets": "records",
-    "list_batch_graph_drafts": "records",
+    "query_batch_graph_drafts": "records",
     "update_graph_change_operation": "review",
     "bulk_accept_graph_change_operations": "review",
     "submit_graph_change_set": "review",
@@ -70,7 +70,7 @@ DELEGATE_OWNERS = {
     "get_graph_draft_batch_run": "scheduling",
     "run_due_graph_draft_batches": "scheduling",
     "enqueue_due_graph_draft_batches": "scheduling",
-    "list_graph_draft_batch_runs": "scheduling",
+    "query_graph_draft_batch_runs": "scheduling",
 }
 
 

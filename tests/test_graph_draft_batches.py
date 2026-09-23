@@ -27,6 +27,7 @@ from lab_tracker.graph_drafting import (
     READ_ONLY_AGENT_TOOLS,
     AgenticGraphDraftClient,
     GraphDraftingError,
+    GraphDraftOutputTruncatedError,
 )
 from lab_tracker.models import GraphChangeSetStatus
 from lab_tracker.services import graph_draft_batch_policy as batch_policy
@@ -513,7 +514,7 @@ def test_legacy_unassigned_reviews_are_owner_oversight_not_personal_work(
     assert [item["change_set_id"] for item in owner_oversight.json()["data"]] == [
         run["change_set_id"]
     ]
-    assert contributor_project_oversight.status_code == 401
+    assert contributor_project_oversight.status_code == 403
     assert contributor_all_oversight.status_code == 200
     assert contributor_all_oversight.json()["data"] == []
 
@@ -841,9 +842,9 @@ def test_personal_cadence_and_owner_project_template_are_independent(
         json={"enabled": True, "user_id": first_user_id},
         headers=admin_auth_headers,
     )
-    assert forbidden_default.status_code == 401
+    assert forbidden_default.status_code == 403
     assert spoofed_beneficiary.status_code == 422
-    assert spoofed_read.status_code == 401
+    assert spoofed_read.status_code == 403
     assert null_beneficiary.status_code == 422
     assert default_with_user.status_code == 422
 
@@ -993,7 +994,7 @@ def test_per_user_batch_notification_address_is_private_to_user_and_owner(
         params={"user_id": first_user_id},
         headers=second_headers,
     )
-    assert other.status_code == 401
+    assert other.status_code == 403
 
     owner = client.get(
         f"/projects/{project_id}/graph-draft-batch-settings",
@@ -1022,14 +1023,14 @@ def test_viewer_cannot_schedule_or_run_project_batch(
         json={"enabled": True},
         headers=viewer_headers,
     )
-    assert settings.status_code == 401
+    assert settings.status_code == 403
 
     run = client.post(
         "/batches/run-now",
         json={"project_id": project_id},
         headers=viewer_headers,
     )
-    assert run.status_code == 401
+    assert run.status_code == 403
 
 
 def test_background_run_now_enqueues_and_worker_processes(
@@ -1433,6 +1434,42 @@ def test_batch_retry_and_dead_letter_paths_are_persisted(
     draft = client.get(f"/batches/{failed_run['change_set_id']}", headers=admin_auth_headers)
     assert draft.json()["data"]["status"] == "failed"
     assert draft.json()["data"]["error_metadata"]["input_snapshot"]["source_note_ids"]
+
+
+def test_batch_output_truncation_fails_without_retrying(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    """An output-limit stop is deterministic: retrying the same budget only pays again."""
+    project_id = _project(client, admin_auth_headers)
+    _note(client, admin_auth_headers, project_id, "A long day of notes.")
+
+    class TruncatingBatchDraftClient(FakeBatchDraftClient):
+        def draft_from_batch(
+            self,
+            *,
+            batch_context: dict[str, Any],
+            user_hint: str | None = None,
+        ) -> dict[str, Any]:
+            self.calls.append({"batch_context": batch_context, "user_hint": user_hint})
+            raise GraphDraftOutputTruncatedError("stopped at the output limit of 16 tokens")
+
+    truncating_client = TruncatingBatchDraftClient()
+    client.app.state.graph_draft_client_factory = lambda settings: truncating_client
+
+    response = client.post(
+        "/batches/run-now",
+        json={"project_id": project_id},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 201
+    run = response.json()["data"]
+    assert run["status"] == "failed"
+    assert len(truncating_client.calls) == 1
+    assert run["error_metadata"]["category"] == "output_truncated"
+    assert run["error_metadata"]["attempts"] == 1
+    assert "output limit" in run["error_metadata"]["message"]
 
 
 def test_batch_retries_schema_invalid_patch_with_trusted_feedback(
@@ -1925,6 +1962,7 @@ def test_agentic_graph_draft_client_uses_read_only_context_trace() -> None:
         def __init__(self) -> None:
             self.batch_context: dict[str, Any] | None = None
             self.user_hint: str | None = None
+            self.note_calls: list[dict[str, Any]] = []
             self.closed = False
 
         def draft_from_batch(
@@ -1941,6 +1979,12 @@ def test_agentic_graph_draft_client_uses_read_only_context_trace() -> None:
                 "clarification_requests": [],
                 "operations": [],
             }
+
+        def draft_from_note(self, **kwargs: Any) -> dict[str, Any]:
+            self.note_calls.append(
+                {"user_hint": kwargs["user_hint"], "draft_mode": kwargs["draft_mode"]}
+            )
+            return {"summary": "note", "operations": []}
 
         def close(self) -> None:
             self.closed = True
@@ -1986,8 +2030,9 @@ def test_agentic_graph_draft_client_uses_read_only_context_trace() -> None:
     }
     assert trace["matched_existing_nodes"][0]["id"] == "question-1"
     assert "prefer existing questions" in (base.user_hint or "")
-    with pytest.raises(GraphDraftingError, match="background batch drafts"):
-        client.draft_from_note()
+    # Note-scoped drafts skip the batch tool pass and use the wrapped client.
+    assert client.draft_from_note(user_hint="note hint")["summary"] == "note"
+    assert base.note_calls == [{"user_hint": "note hint", "draft_mode": "graph_context"}]
 
 
 def test_batch_settings_claim_requires_observed_next_run_at(
@@ -2167,9 +2212,148 @@ def test_run_due_rejects_non_admin_user(
 
     response = client.post("/batches/run-due", headers=viewer_headers)
 
-    assert response.status_code == 401
+    assert response.status_code == 403
     assert response.json()["error"] == {
-        "code": "auth_error",
+        "code": "forbidden",
         "message": "Only admins can run scheduled batch drafts.",
         "issues": None,
     }
+
+
+def test_revise_rejects_daily_review_batch_drafts_explicitly(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    """Batch drafts are reviewed per operation; whole-draft revision is unsupported."""
+    project_id = _project(client, admin_auth_headers)
+    _note(client, admin_auth_headers, project_id, "Gel photo A looked clean.")
+    fake_client = FakeBatchDraftClient(_batch_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: fake_client
+    run = client.post(
+        "/batches/run-now",
+        json={"project_id": project_id},
+        headers=admin_auth_headers,
+    ).json()["data"]
+    assert run["status"] == "ready"
+
+    revised = client.post(
+        f"/graph-drafts/{run['change_set_id']}/revise",
+        data={"feedback": "Split this into two questions."},
+        headers=admin_auth_headers,
+    )
+
+    assert revised.status_code == 422, revised.text
+    assert "Daily Review batch drafts cannot be revised" in revised.json()["error"]["message"]
+    assert len(fake_client.calls) == 1
+    draft = client.get(f"/batches/{run['change_set_id']}", headers=admin_auth_headers)
+    assert draft.json()["data"]["status"] == "ready"
+    assert len(draft.json()["data"]["operations"]) == 1
+
+
+def test_revise_checks_draft_access_before_revealing_the_draft_mode(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    """An outsider holding a batch id must not learn it is a Daily Review batch."""
+    project_id = _project(client, admin_auth_headers)
+    _note(client, admin_auth_headers, project_id, "Gel photo A looked clean.")
+    fake_client = FakeBatchDraftClient(_batch_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: fake_client
+    run = client.post(
+        "/batches/run-now",
+        json={"project_id": project_id},
+        headers=admin_auth_headers,
+    ).json()["data"]
+    outsider_headers = _user_auth_headers(client, role=Role.EDITOR)
+
+    revised = client.post(
+        f"/graph-drafts/{run['change_set_id']}/revise",
+        data={"feedback": "Split this into two questions."},
+        headers=outsider_headers,
+    )
+
+    assert revised.status_code in {403, 404}, revised.text
+    assert "Daily Review" not in revised.text
+
+
+def test_batch_lists_paginate_in_sql_without_operations_or_context_packets(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """List views must cost O(page), not O(batch history across all projects)."""
+    from lab_tracker.sqlalchemy_repository_parts.graph_batches import (
+        SQLAlchemyGraphDraftBatchRunRepository,
+    )
+    from lab_tracker.sqlalchemy_repository_parts.graph_drafts import (
+        SQLAlchemyGraphChangeSetRepository,
+    )
+
+    project_ids = []
+    for index in range(3):
+        project_id = _project(client, admin_auth_headers)
+        project_ids.append(project_id)
+        _note(client, admin_auth_headers, project_id, f"Observation {index}")
+        client.app.state.graph_draft_client_factory = (
+            lambda settings, project_id=project_id: FakeBatchDraftClient(
+                _batch_patch(project_id)
+            )
+        )
+        run = client.post(
+            "/batches/run-now",
+            json={"project_id": project_id},
+            headers=admin_auth_headers,
+        )
+        assert run.status_code == 201, run.text
+
+    hydrated_rows: list[int] = []
+    operation_loads: list[int] = []
+    run_query_limits: list[int | None] = []
+    original_from_rows = SQLAlchemyGraphChangeSetRepository._from_rows
+    original_operations_for = SQLAlchemyGraphChangeSetRepository._operations_for
+    original_run_query = SQLAlchemyGraphDraftBatchRunRepository.query
+
+    def spy_from_rows(self, rows, **kwargs):  # noqa: ANN001, ANN003, ANN202
+        hydrated_rows.append(len(rows))
+        return original_from_rows(self, rows, **kwargs)
+
+    def spy_operations_for(self, change_set_ids):  # noqa: ANN001, ANN202
+        operation_loads.append(len(change_set_ids))
+        return original_operations_for(self, change_set_ids)
+
+    def spy_run_query(self, **kwargs):  # noqa: ANN001, ANN003, ANN202
+        run_query_limits.append(kwargs.get("limit"))
+        return original_run_query(self, **kwargs)
+
+    monkeypatch.setattr(SQLAlchemyGraphChangeSetRepository, "_from_rows", spy_from_rows)
+    monkeypatch.setattr(
+        SQLAlchemyGraphChangeSetRepository, "_operations_for", spy_operations_for
+    )
+    monkeypatch.setattr(SQLAlchemyGraphDraftBatchRunRepository, "query", spy_run_query)
+
+    listed = client.get("/batches?limit=2", headers=admin_auth_headers)
+
+    assert listed.status_code == 200, listed.text
+    body = listed.json()
+    assert body["meta"]["total"] == 3
+    assert len(body["data"]) == 2
+    for item in body["data"]:
+        assert "operations" not in item
+        assert "context_packet" not in item
+        assert item["operation_count"] == 1
+        assert item["meeting_note_count"] == 0
+        assert item["draft_mode"] == "graph_batch"
+    assert hydrated_rows and max(hydrated_rows) <= 2
+    assert operation_loads == []
+
+    scoped = client.get(
+        f"/batches?project_id={project_ids[1]}", headers=admin_auth_headers
+    ).json()
+    assert [item["project_id"] for item in scoped["data"]] == [project_ids[1]]
+    assert scoped["meta"]["total"] == 1
+
+    runs = client.get("/batches/runs?limit=1&offset=1", headers=admin_auth_headers)
+    assert runs.status_code == 200, runs.text
+    assert runs.json()["meta"]["total"] == 3
+    assert len(runs.json()["data"]) == 1
+    assert run_query_limits == [1]

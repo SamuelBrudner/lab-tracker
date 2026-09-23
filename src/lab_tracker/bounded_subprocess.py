@@ -9,6 +9,13 @@ stderr and command arguments never cross the boundary.
 The execution deadline does not include containment cleanup.  Cleanup has its
 own small, fixed upper bound (terminate grace plus kill/reap grace), so a
 command can exceed its execution deadline only by that documented bound.
+
+On Linux, a process group whose remaining members are all single-threaded
+zombies after a delivered ``SIGKILL`` counts as terminated.  Killed
+descendants are re-parented to PID 1, and a PID 1 that does not reap orphans
+(for example a server started with ``exec`` in a container without an init)
+would otherwise keep the group observable forever.  Zombie members keep the
+process-group ID reserved, so this check never widens the reuse race.
 """
 
 from __future__ import annotations
@@ -48,6 +55,11 @@ _DEFAULT_KILL_GRACE_SECONDS = 1.0
 _MAX_CLEANUP_PHASE_SECONDS = 5.0
 _MINIMUM_CLEANUP_SECONDS = 0.10
 _POLL_INTERVAL_SECONDS = 0.01
+_PROC_ROOT = "/proc"
+_PROC_STAT_STATE_INDEX = 0
+_PROC_STAT_PROCESS_GROUP_INDEX = 2
+_PROC_STAT_THREAD_COUNT_INDEX = 17
+_PROC_ZOMBIE_STATES = frozenset({b"Z", b"X"})
 
 _GENERIC_EXECUTION_DETAIL = "Subprocess execution failed."
 _GENERIC_DEADLINE_DETAIL = "Subprocess execution deadline exceeded."
@@ -208,6 +220,7 @@ class _ProcessGroupResult(Enum):
     MISSING = auto()
     DENIED = auto()
     FAILED = auto()
+    ZOMBIES_ONLY = auto()
 
 
 class _PosixProcessLifecycle:
@@ -270,6 +283,9 @@ class _PosixProcessLifecycle:
         )
         group_missing = term_result is _ProcessGroupResult.MISSING
         can_signal_group = term_result is _ProcessGroupResult.OK
+        # Zombie-only groups count as terminated only once SIGKILL reached
+        # the group: no member can fork or keep running after that.
+        group_killed = False
         terminate_expires_at = min(
             cleanup_expires_at,
             time.monotonic() + self._terminate_grace_seconds,
@@ -298,6 +314,7 @@ class _PosixProcessLifecycle:
                 expires_at=cleanup_expires_at,
             )
             group_missing = kill_result is _ProcessGroupResult.MISSING
+            group_killed = kill_result is _ProcessGroupResult.OK
             if kill_result is _ProcessGroupResult.DENIED:
                 can_signal_group = False
 
@@ -315,6 +332,9 @@ class _PosixProcessLifecycle:
                     expires_at=cleanup_expires_at,
                 )
                 group_missing = kill_result is _ProcessGroupResult.MISSING
+                group_killed = (
+                    group_killed or kill_result is _ProcessGroupResult.OK
+                )
             leader_reaped = _poll_reaped_process(self.process)
         except (OSError, subprocess.SubprocessError):
             reap_failed = True
@@ -326,9 +346,13 @@ class _PosixProcessLifecycle:
                     self.process.pid,
                     expires_at=cleanup_expires_at,
                     process=self.process,
+                    zombie_members_are_terminated=group_killed,
                 )
             )
-            group_missing = final_group_result is _ProcessGroupResult.MISSING
+            group_missing = final_group_result in {
+                _ProcessGroupResult.MISSING,
+                _ProcessGroupResult.ZOMBIES_ONLY,
+            }
 
         if not leader_reaped:
             # One final non-blocking reap avoids leaking a child that exited
@@ -621,7 +645,11 @@ class BoundedSubprocessExecutor:
                 "failure": failure,
             },
             name=name,
-            daemon=False,
+            # A descendant that escaped the process group (setsid) can keep the
+            # inherited pipe open after cleanup, leaving this reader blocked in
+            # os.read. run() already reports that as ProcessCleanupError; a
+            # daemon reader keeps it from also delaying interpreter shutdown.
+            daemon=True,
         )
 
     def _drain_pipe(
@@ -810,6 +838,7 @@ def _wait_for_process_group_exit(
     *,
     expires_at: float,
     process: subprocess.Popen[bytes],
+    zombie_members_are_terminated: bool = False,
 ) -> tuple[_ProcessGroupResult, bool]:
     while True:
         group_result = _process_group_state(
@@ -821,6 +850,15 @@ def _wait_for_process_group_exit(
             _ProcessGroupResult.FAILED,
         }:
             return group_result, False
+        if (
+            group_result is _ProcessGroupResult.OK
+            and zombie_members_are_terminated
+            and _process_group_has_only_zombies(process_group_id)
+        ):
+            # Linux reports success for signal 0 while killed members remain
+            # unreaped zombies of a non-reaping PID 1.  Zombies run no code
+            # and keep the process-group ID reserved.
+            return _ProcessGroupResult.ZOMBIES_ONLY, False
         if (
             group_result is _ProcessGroupResult.DENIED
             and process.returncode is None
@@ -840,6 +878,54 @@ def _wait_for_process_group_exit(
         if remaining <= 0:
             return group_result, False
         threading.Event().wait(min(_POLL_INTERVAL_SECONDS, remaining))
+
+
+def _process_group_has_only_zombies(process_group_id: int) -> bool:
+    """Return whether Linux ``/proc`` proves every group member is a zombie.
+
+    Any doubt returns ``False`` so callers keep treating the group as present:
+    non-Linux platforms, a ``/proc`` from another PID namespace, unreadable or
+    unparseable entries, a live or multi-threaded member (Linux shows a
+    process whose main thread exited as ``Z`` while other threads still run),
+    or no visible member at all.
+    """
+
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        if os.readlink(os.path.join(_PROC_ROOT, "self")) != str(os.getpid()):
+            return False
+        entries = os.listdir(_PROC_ROOT)
+    except OSError:
+        return False
+    zombie_members = 0
+    for entry in entries:
+        if not (entry.isascii() and entry.isdigit()):
+            continue
+        try:
+            with open(os.path.join(_PROC_ROOT, entry, "stat"), "rb") as stat_file:
+                raw_stat = stat_file.read()
+        except (FileNotFoundError, ProcessLookupError):
+            continue  # Exited and was reaped during the scan.
+        except OSError:
+            return False
+        # The command name is parenthesized and may itself contain ") ".
+        name_end = raw_stat.rfind(b")")
+        if name_end < 0:
+            return False
+        fields = raw_stat[name_end + 1 :].split()
+        try:
+            state = fields[_PROC_STAT_STATE_INDEX]
+            member_group_id = int(fields[_PROC_STAT_PROCESS_GROUP_INDEX])
+            thread_count = int(fields[_PROC_STAT_THREAD_COUNT_INDEX])
+        except (IndexError, ValueError):
+            return False
+        if member_group_id != process_group_id:
+            continue
+        if state not in _PROC_ZOMBIE_STATES or thread_count > 1:
+            return False
+        zombie_members += 1
+    return zombie_members > 0
 
 
 def _poll_reaped_process(process: subprocess.Popen[bytes]) -> bool:
