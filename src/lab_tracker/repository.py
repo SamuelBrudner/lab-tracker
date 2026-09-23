@@ -914,13 +914,19 @@ class LabTrackerRepository(Protocol):
         since: datetime | None = None,
         until: datetime | None = None,
         client_capture_id: str | None = None,
+        capture_bundle_id: str | None = None,
         target_entity_type: str | None = None,
         target_entity_id: UUID | None = None,
         limit: int | None = None,
         offset: int = 0,
         recent_first: bool = False,
     ) -> tuple[list[Note], int]:
-        """Query notes with filters and pagination."""
+        """Query notes with filters and pagination.
+
+        ``capture_bundle_id`` matches the text of the note's
+        ``metadata.capture_bundle_id``; callers compare the exact metadata
+        value themselves when non-string values matter.
+        """
 
     def project_ids_with_search_matches(
         self,

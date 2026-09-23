@@ -14,6 +14,7 @@ from lab_tracker.models import (
     GraphDraftBatchRun,
     GraphDraftBatchSettings,
     Note,
+    NoteStatus,
     Project,
 )
 from lab_tracker.services.graph_draft_batch_policy import BatchRunQuery
@@ -51,7 +52,12 @@ class SchedulingProjects(Protocol):
 class SchedulingNotes(Protocol):
     def get_note(self, note_id: UUID) -> Note: ...
 
-    def list_notes(self, *, project_id: UUID | None = None) -> list[Note]: ...
+    def list_notes(
+        self,
+        *,
+        project_id: UUID | None = None,
+        status: NoteStatus | None = None,
+    ) -> list[Note]: ...
 
 
 class SchedulingAuthorization(Protocol):
@@ -100,6 +106,14 @@ class BatchRunStore(Protocol):
 
 class SchedulingRepository(Protocol):
     def user_exists(self, user_id: UUID) -> bool: ...
+
+    def query_notes(
+        self,
+        *,
+        note_ids: set[UUID] | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[Note], int]: ...
 
     @property
     def graph_draft_batch_settings(self) -> BatchSettingsStore: ...

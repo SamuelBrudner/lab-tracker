@@ -723,11 +723,13 @@ class NoteService(BaseService):
         status: NoteStatus | None = None,
         target_entity_type: EntityType | None = None,
         target_entity_id: UUID | None = None,
+        capture_bundle_id: str | None = None,
     ) -> list[Note]:
         return self.query_from_repository(
             loader=lambda repository: repository.query_notes(
                 project_id=project_id,
                 status=status.value if status is not None else None,
+                capture_bundle_id=capture_bundle_id,
                 target_entity_type=(
                     target_entity_type.value if target_entity_type is not None else None
                 ),

@@ -14,6 +14,7 @@ from lab_tracker.models import (
     GraphDraftBatchRunStatus,
     GraphDraftBatchTrigger,
     Note,
+    NoteStatus,
     utc_now,
 )
 from lab_tracker.services import graph_draft_batch_policy as batch_policy
@@ -248,7 +249,7 @@ class GraphDraftBatchReservationCoordinator(BaseService):
             else set()
         )
         eligible_notes = batch_policy.staged_notes_in_window(
-            self.notes.list_notes(project_id=project_id),
+            self.notes.list_notes(project_id=project_id, status=NoteStatus.STAGED),
             since=window_start,
             until=window_end,
             include_start=continuing_auto_window,

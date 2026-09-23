@@ -692,6 +692,7 @@ def test_repository_backed_api_list_helpers_delegate_to_repository_queries(tmp_p
 
         assert api.list_notes(project_id=project.project_id) == [created_note]
         assert repository.calls["notes"] == {
+            "capture_bundle_id": None,
             "limit": None,
             "offset": 0,
             "project_id": project.project_id,
