@@ -7,7 +7,7 @@ from api_helpers import repository_backed_api
 
 from lab_tracker.auth import AuthContext, Role
 from lab_tracker.db_models import UserModel
-from lab_tracker.errors import AuthError, ValidationError
+from lab_tracker.errors import AuthError, PermissionDeniedError, ValidationError
 from lab_tracker.models import GroupMembership, ProjectGroup, ProjectMembershipRole
 
 
@@ -226,6 +226,27 @@ def test_read_predicates_are_non_throwing_for_absent_and_unrelated_actors() -> N
         is False
     )
     assert api.project_authorization.can_group_read(group.group_id, actor=None) is False
+
+
+def test_require_group_read_admits_members_and_denies_everyone_else() -> None:
+    api, admin, _ = _project_with_admin()
+    group = _create_group(api)
+    policy = api.project_authorization
+    members = {role: _registered_actor(api, Role.VIEWER) for role in ProjectMembershipRole}
+    for role, member in members.items():
+        _add_group_membership(api, group, member, role)
+    unrelated = _registered_actor(api, Role.EDITOR)
+
+    policy.require_group_read(group.group_id, actor=admin)
+    for member in members.values():
+        policy.require_group_read(group.group_id, actor=member)
+    with pytest.raises(PermissionDeniedError, match="Group access required."):
+        policy.require_group_read(group.group_id, actor=unrelated)
+    with pytest.raises(PermissionDeniedError, match="Group access required."):
+        policy.require_group_read(uuid4(), actor=unrelated)
+    with pytest.raises(AuthError, match="Authentication required.") as unauthenticated:
+        policy.require_group_read(group.group_id, actor=None)
+    assert not isinstance(unauthenticated.value, PermissionDeniedError)
 
 
 def test_group_owner_inherits_owner_access_to_child_projects() -> None:
