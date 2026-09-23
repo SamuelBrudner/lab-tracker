@@ -485,8 +485,10 @@ must pass the hardened registered-base structural grammar before host I/O. The
 health probe sends `HEAD` through the same
 outbound policy, pinned client, and total deadline as HTTP artifact resolution.
 Statuses `301`, `302`, `303`, `307`, and `308` are followed manually while
-preserving `HEAD`; every hop is reauthorized and repinned, safe cross-origin
-redirects may proceed, and an HTTPS-to-HTTP downgrade is denied. A terminal
+preserving `HEAD`; every hop is reauthorized and repinned, only redirects that
+stay inside the registered origin/path prefix may proceed (the rule HTTP
+artifact resolution applies, so a root that redirects elsewhere is reported
+unreachable), and an HTTPS-to-HTTP downgrade is denied. A terminal
 `2xx`, `403`, or `405` response counts as reachable. Policy denials, redirect
 loops or limit exhaustion, transport/deadline failures, and other terminal
 statuses all return the same static redacted health detail.
