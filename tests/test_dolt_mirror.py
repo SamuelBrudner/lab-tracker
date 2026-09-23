@@ -85,6 +85,33 @@ def test_retained_tables_never_export_token_hash_columns() -> None:
         assert hashed == [], f"{table.name} exports {hashed}"
 
 
+def test_excluded_columns_name_real_columns_of_retained_tables() -> None:
+    retained = {table.name: table for table in dolt_mirror.retained_tables()}
+    for table_name, columns in dolt_mirror.EXCLUDED_COLUMNS.items():
+        assert table_name in retained
+        assert columns <= set(retained[table_name].columns.keys())
+
+
+def test_export_tables_omit_notification_email_columns(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _bootstrap_db(monkeypatch, tmp_path)
+
+    exports = dolt_mirror.export_tables(tmp_path / "export")
+    settings_export = next(
+        export for export in exports if export.name == "graph_draft_batch_settings"
+    )
+
+    with settings_export.csv_path.open(encoding="utf-8", newline="") as handle:
+        header = next(csv.reader(handle))
+
+    assert "project_id" in header
+    assert "email_notifications_enabled" in header
+    assert "notification_email" not in header
+    assert "notification_email_confirmed_at" not in header
+
+
 def test_retained_tables_sort_without_graph_change_note_fk_cycle_warning() -> None:
     with warnings.catch_warnings():
         warnings.filterwarnings(

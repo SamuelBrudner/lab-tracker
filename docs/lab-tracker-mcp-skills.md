@@ -327,7 +327,8 @@ Defaults:
 The exporter mirrors retained Lab Tracker tables, including graph draft review
 tables, and excludes account, credential, and telemetry tables (`users`,
 `invitations`, `personal_access_tokens`, `device_tokens`, `device_enrollments`,
-`usage_events`, `usage_event_rollups`, `review_email_outbox`). A table that was
+`usage_events`, `usage_event_rollups`, `review_email_outbox`), plus the
+review notification e-mail columns of `graph_draft_batch_settings`. A table that was
 exported by an older version is dropped from the next snapshot, but it remains
 in earlier Dolt commits.
 
