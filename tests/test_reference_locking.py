@@ -636,3 +636,37 @@ def test_exploration_writers_revalidate_invalidated_node_after_the_reference_loc
                 invalidates_node_id=doomed.node_id,
                 actor=actor,
             )
+
+
+def test_session_promotion_to_dataset_rechecks_the_session_after_its_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """L113: a session deleted while promotion waited must not leave a dangling source."""
+
+    api = repository_backed_api()
+    actor, project, question = _project_with_question(api)
+    session = api.create_session(
+        project_id=project.project_id,
+        session_type=SessionType.OPERATIONAL,
+        actor=actor,
+    )
+    repository = api.sessions.repository
+    original_lock = repository.lock_session_acquisition_state
+
+    def session_delete_wins(session_id: UUID) -> None:
+        original_lock(session_id)
+        if repository.sessions.get(session_id) is not None:
+            repository.sessions.delete(session_id)
+
+    monkeypatch.setattr(repository, "lock_session_acquisition_state", session_delete_wins)
+
+    with pytest.raises(NotFoundError, match="Session does not exist"):
+        api.promote_operational_session_to_dataset(
+            session.session_id,
+            primary_question_id=question.question_id,
+            commit_manifest=DatasetCommitManifestInput(
+                files=[DatasetFile(path="rig.log", checksum="qa123")]
+            ),
+            actor=actor,
+        )
+    assert api.list_datasets(project_id=project.project_id) == []

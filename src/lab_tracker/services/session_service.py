@@ -371,18 +371,27 @@ class SessionService(BaseService):
     ) -> Dataset:
         session = self.get_session(session_id)
         self.authorization.require_contributor(session.project_id, actor=actor)
-        if session.session_type != SessionType.OPERATIONAL:
-            raise ValidationError("Only operational sessions can be promoted to datasets.")
-        if session.status != SessionStatus.ACTIVE:
-            raise ValidationError("Only active operational sessions can be promoted.")
-        outputs = self.list_acquisition_outputs(session_id=session.session_id)
-        merged_manifest = _merge_acquisition_outputs(commit_manifest, outputs)
-        manifest_with_session = _manifest_input_with_source(merged_manifest, session.session_id)
-        return self.datasets.create_dataset(
-            project_id=session.project_id,
-            primary_question_id=primary_question_id,
-            secondary_question_ids=secondary_question_ids,
-            status=status,
-            commit_manifest=manifest_with_session,
-            actor=actor,
-        )
+        with self.application_transaction():
+            # delete_session takes the same lock, so the dataset's
+            # source_session_id cannot outlive a concurrently deleted Session.
+            self.repository.lock_session_acquisition_state(session_id)
+            session = self.get_session(session_id)
+            self.authorization.require_contributor(session.project_id, actor=actor)
+            if session.session_type != SessionType.OPERATIONAL:
+                raise ValidationError("Only operational sessions can be promoted to datasets.")
+            if session.status != SessionStatus.ACTIVE:
+                raise ValidationError("Only active operational sessions can be promoted.")
+            outputs = self.list_acquisition_outputs(session_id=session.session_id)
+            merged_manifest = _merge_acquisition_outputs(commit_manifest, outputs)
+            manifest_with_session = _manifest_input_with_source(
+                merged_manifest,
+                session.session_id,
+            )
+            return self.datasets.create_dataset(
+                project_id=session.project_id,
+                primary_question_id=primary_question_id,
+                secondary_question_ids=secondary_question_ids,
+                status=status,
+                commit_manifest=manifest_with_session,
+                actor=actor,
+            )
