@@ -597,6 +597,15 @@ describe("DailyReviewScheduleForm", () => {
       screen.getByRole("option", { name: "Every 3 hours (custom)" }).selected
     ).toBe(true);
 
+    // Trying a preset must not strand the stored cadence: it stays selectable.
+    fireEvent.change(cadence, { target: { value: "1440" } });
+    expect(cadence).toHaveValue("1440");
+    expect(
+      screen.getByRole("option", { name: "Every 3 hours (custom)" })
+    ).toBeInTheDocument();
+    fireEvent.change(cadence, { target: { value: "180" } });
+    expect(cadence).toHaveValue("180");
+
     fireEvent.click(screen.getByRole("button", { name: "Save cadence" }));
     await waitFor(() => {
       expect(settingsBody).toEqual(

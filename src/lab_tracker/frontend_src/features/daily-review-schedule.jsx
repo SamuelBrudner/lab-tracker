@@ -27,14 +27,16 @@ function customCadenceLabel(minutesValue) {
   return `Every ${minutes} minutes (custom)`;
 }
 
-function cadenceOptions(cadenceMinutes) {
-  if (BATCH_CADENCE_OPTIONS.some((option) => option.value === cadenceMinutes)) {
-    return BATCH_CADENCE_OPTIONS;
+// Built from both the stored cadence and the current selection, so switching
+// to a preset never removes the stored custom cadence from the choices.
+function cadenceOptions(storedCadenceMinutes, cadenceMinutes) {
+  const options = [...BATCH_CADENCE_OPTIONS];
+  for (const value of [storedCadenceMinutes, cadenceMinutes]) {
+    if (value && !options.some((option) => option.value === value)) {
+      options.push({ label: customCadenceLabel(value), value });
+    }
   }
-  return [
-    ...BATCH_CADENCE_OPTIONS,
-    { label: customCadenceLabel(cadenceMinutes), value: cadenceMinutes },
-  ];
+  return options;
 }
 
 function detectedTimeZone() {
@@ -219,7 +221,10 @@ function DailyReviewScheduleForm({
           disabled={disabled}
           onChange={(event) => setCadenceMinutes(event.target.value)}
         >
-          {cadenceOptions(cadenceMinutes).map((option) => (
+          {cadenceOptions(
+            settings ? String(settings.cadence_minutes || 1440) : null,
+            cadenceMinutes
+          ).map((option) => (
             <option key={option.value} value={option.value}>
               {option.label}
             </option>
