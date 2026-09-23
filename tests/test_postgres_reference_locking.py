@@ -563,3 +563,79 @@ def test_project_delete_first_makes_concurrent_projectless_goal_link_fail_cleanl
     assert question_id not in _goal_link_targets(postgres_client)
     fetched = postgres_client.get(f"/goals/{goal_id}", headers=headers)
     assert fetched.status_code == 200, fetched.text
+
+
+def test_goal_delete_waits_for_a_goal_write_holding_the_lock(
+    postgres_client: TestClient,
+    postgres_admin_auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A goal delete cannot commit between a goal write's locked re-read and save.
+
+    The PATCH pauses in ``GoalService._save_goal`` holding its locks. The
+    DELETE must block on the goal's project reference lock. Before it took
+    that lock it committed at once, and the PATCH's save then found no row
+    and re-inserted the deleted goal (M58 follow-up).
+    """
+
+    from lab_tracker.services.goal_service import GoalService
+
+    headers = postgres_admin_auth_headers
+    goal_id, _question_id = _project_goal_and_question(
+        postgres_client, headers, "Delete waits for goal write"
+    )
+    patch_paused = Event()
+    release_patch = Event()
+    backend_pids: dict[str, int] = {}
+    original_save = GoalService._save_goal
+    original_lock_references = SQLAlchemyLabTrackerRepository.lock_project_references
+
+    def paused_save(self: GoalService, goal: Any) -> None:
+        backend_pids["patch"] = _backend_pid(self.repository)  # type: ignore[arg-type]
+        patch_paused.set()
+        if not release_patch.wait(timeout=20):
+            raise RuntimeError("Timed out holding the goal writer's locks.")
+        original_save(self, goal)
+
+    def record_delete_pid(
+        repository: SQLAlchemyLabTrackerRepository, project_id: UUID
+    ) -> None:
+        if patch_paused.is_set():
+            backend_pids.setdefault("delete", _backend_pid(repository))
+        original_lock_references(repository, project_id)
+
+    monkeypatch.setattr(GoalService, "_save_goal", paused_save)
+    monkeypatch.setattr(
+        SQLAlchemyLabTrackerRepository, "lock_project_references", record_delete_pid
+    )
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        patch_future: Future[Any] = executor.submit(
+            _patch_goal, postgres_client, headers, goal_id, {"summary": "Saved first."}
+        )
+        assert patch_paused.wait(timeout=10)
+        delete_future: Future[Any] = executor.submit(
+            postgres_client.delete, f"/goals/{goal_id}", headers=headers
+        )
+        try:
+            deadline = monotonic() + 10
+            while (
+                "delete" not in backend_pids
+                and not delete_future.done()
+                and monotonic() < deadline
+            ):
+                Event().wait(timeout=0.01)
+            assert not delete_future.done(), "The goal delete did not wait for the goal lock."
+            _wait_until_blocked(
+                postgres_client,
+                blocked_pid=backend_pids["delete"],
+                blocker_pid=backend_pids["patch"],
+            )
+        finally:
+            release_patch.set()
+        patched = patch_future.result(timeout=20)
+        deleted = delete_future.result(timeout=20)
+
+    assert patched.status_code == 200, patched.text
+    assert deleted.status_code == 200, deleted.text
+    fetched = postgres_client.get(f"/goals/{goal_id}", headers=headers)
+    assert fetched.status_code == 404, fetched.text

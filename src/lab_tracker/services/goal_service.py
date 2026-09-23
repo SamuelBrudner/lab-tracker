@@ -409,10 +409,19 @@ class GoalService(BaseService):
         return goal
 
     def delete_goal(self, goal_id: UUID, *, actor: AuthContext | None = None) -> Goal:
-        goal = self.get_goal(goal_id)
-        self._require_goal_owner(goal, actor=actor)
-        with self.unit_of_work() as repository:
-            repository.goals.delete(goal_id)
+        """Delete a goal under the same locks as every other goal write.
+
+        Without them a delete could commit between another goal write's
+        locked re-read and its save, and that save would re-insert the goal.
+        """
+
+        located_goal = self.get_goal(goal_id)
+        self._require_goal_owner(located_goal, actor=actor)
+        with self._locked_goal(located_goal) as (goal, locked_project_ids):
+            self._ensure_goal_scope_locked(goal, locked_project_ids)
+            self._require_goal_owner(goal, actor=actor)
+            with self.unit_of_work() as repository:
+                repository.goals.delete(goal_id)
         return goal
 
     def link_node_to_goal(
@@ -583,12 +592,18 @@ class GoalService(BaseService):
 
         self._ensure_unique_goal_links(goal.links)
         self._ensure_goal_has_scope(goal)
-        scope_project_ids = self._goal_scope_project_ids(goal)
-        if not scope_project_ids <= locked_project_ids:
+        self._ensure_goal_scope_locked(goal, locked_project_ids)
+        self._require_goal_contributor(goal, actor=actor)
+
+    def _ensure_goal_scope_locked(
+        self,
+        goal: Goal,
+        locked_project_ids: frozenset[UUID],
+    ) -> None:
+        if not self._goal_scope_project_ids(goal) <= locked_project_ids:
             raise ConflictError(
                 "Goal links changed while waiting for the project lock; reload and retry."
             )
-        self._require_goal_contributor(goal, actor=actor)
 
     def _save_goal(self, goal: Goal) -> None:
         with self.unit_of_work() as repository:

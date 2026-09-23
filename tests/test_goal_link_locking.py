@@ -328,3 +328,109 @@ def test_goal_update_reports_field_errors_before_resolving_link_targets(
 
     with pytest.raises(ValidationError):
         api.update_goal(goal.goal_id, links=[missing], actor=actor, **invalid_field)
+
+
+def test_goal_delete_takes_the_goal_write_locks_in_sorted_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A goal delete serializes with goal writes (M58 follow-up).
+
+    Without the reference locks a delete could commit between another goal
+    write's locked re-read and its save, which then updates a vanished row.
+    """
+
+    api = repository_backed_api()
+    actor = _actor()
+    home = api.create_project("Home", actor=actor)
+    other = api.create_project("Other", actor=actor)
+    goal = api.create_goal(
+        None,
+        goal_type=GoalType.PAPER,
+        title="Cross-project paper",
+        links=[
+            GoalLinkSpec(target=_project_ref(project_id), relation=GoalRelation.CONTRIBUTES_TO)
+            for project_id in (home.project_id, other.project_id)
+        ],
+        actor=actor,
+    )
+    repository = api.goals.repository
+    calls: list[tuple[str, UUID]] = []
+    original_references = repository.lock_project_references
+    original_guard = repository.lock_project_deletion_guard
+
+    def record_references(project_id: UUID) -> None:
+        calls.append(("references", project_id))
+        original_references(project_id)
+
+    def record_guard(project_id: UUID) -> None:
+        calls.append(("guard", project_id))
+        original_guard(project_id)
+
+    monkeypatch.setattr(repository, "lock_project_references", record_references)
+    monkeypatch.setattr(repository, "lock_project_deletion_guard", record_guard)
+
+    api.delete_goal(goal.goal_id, actor=actor)
+
+    ordered = sorted((home.project_id, other.project_id), key=str)
+    assert calls == [
+        *(("references", project_id) for project_id in ordered),
+        *(("guard", project_id) for project_id in ordered),
+    ]
+    with pytest.raises(NotFoundError, match="^Goal does not exist.$"):
+        api.get_goal(goal.goal_id)
+
+
+def test_goal_delete_rereads_the_goal_under_the_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A delete that waited for a concurrent delete reports the goal missing."""
+
+    api = repository_backed_api()
+    actor, _project, _questions, goal = _setup(api)
+    deleted: list[object] = []
+
+    def concurrent_delete_commits() -> None:
+        deleted.append(api.goals.repository.goals.delete(goal.goal_id))
+
+    _on_first_reference_lock(monkeypatch, api, concurrent_delete_commits)
+
+    with pytest.raises(NotFoundError, match="^Goal does not exist.$"):
+        api.delete_goal(goal.goal_id, actor=actor)
+    assert len(deleted) == 1
+
+
+def test_goal_delete_rejects_a_scope_that_grew_while_waiting_for_the_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = repository_backed_api()
+    actor = _actor()
+    home = api.create_project("Home", actor=actor)
+    other = api.create_project("Other", actor=actor)
+    goal = api.create_goal(
+        None,
+        goal_type=GoalType.PAPER,
+        title="Cross-project paper",
+        links=[
+            GoalLinkSpec(target=_project_ref(home.project_id), relation=GoalRelation.CONTRIBUTES_TO)
+        ],
+        actor=actor,
+    )
+
+    def concurrent_link_to_other_project() -> None:
+        latest: Goal = api.get_goal(goal.goal_id)
+        latest.links.append(
+            GoalLink(
+                link_id=uuid4(),
+                goal_id=goal.goal_id,
+                target=_project_ref(other.project_id),
+                relation=GoalRelation.CONTRIBUTES_TO,
+                link_status=GoalLinkStatus.CANDIDATE,
+            )
+        )
+        api.goals.repository.goals.save(latest)
+
+    _on_first_reference_lock(monkeypatch, api, concurrent_link_to_other_project)
+
+    with pytest.raises(ConflictError, match="changed while waiting"):
+        api.delete_goal(goal.goal_id, actor=actor)
+    assert api.get_goal(goal.goal_id).goal_id == goal.goal_id
