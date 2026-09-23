@@ -2,6 +2,7 @@ import * as React from "react";
 
 import { formatDate, sessionTypeClass } from "../../shared/formatters.js";
 import { AppLink } from "../../shared/routing.jsx";
+import { SessionCaptureLinkSection } from "./SessionCaptureLinkSection.jsx";
 import { SessionLinkedNotesSection } from "./SessionLinkedNotesSection.jsx";
 import { SessionOutputsSection } from "./SessionOutputsSection.jsx";
 import { useSessionDetailData } from "./useSessionDetailData.js";
@@ -204,6 +205,10 @@ function SessionDetailCard({
                 Promote to scientific
               </button>
             </div>
+          ) : null}
+
+          {session.status === "active" && canWrite ? (
+            <SessionCaptureLinkSection token={token} session={session} navigate={navigate} />
           ) : null}
 
           <SessionOutputsSection outputsState={outputsState} />

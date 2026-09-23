@@ -2,6 +2,7 @@ import * as React from "react";
 
 import { formatDate, sessionTypeClass } from "../../shared/formatters.js";
 import { AppLink } from "../../shared/routing.jsx";
+import { captureRoute } from "./SessionCaptureLinkSection.jsx";
 
 const { useMemo } = React;
 
@@ -187,6 +188,15 @@ function SessionPanel({
                     onClick={() => navigate(`/app/sessions/${session.session_id}`)}
                   >
                     View
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    disabled={!canWrite}
+                    onClick={() => navigate(captureRoute(session))}
+                    title="Open capture with this session preselected"
+                  >
+                    Capture
                   </button>
                   <button
                     type="button"

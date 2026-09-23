@@ -167,10 +167,20 @@ function FlashMessages({ message, error }) {
     return null;
   }
 
+  // Announced to assistive tech: a decision made far down the page is
+  // confirmed here without the person having to scroll up to check.
   return (
     <>
-      {message ? <p className="flash ok">{message}</p> : null}
-      {error ? <p className="flash error">{error}</p> : null}
+      {message ? (
+        <p className="flash ok" role="status" aria-live="polite">
+          {message}
+        </p>
+      ) : null}
+      {error ? (
+        <p className="flash error" role="alert">
+          {error}
+        </p>
+      ) : null}
     </>
   );
 }

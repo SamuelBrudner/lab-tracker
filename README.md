@@ -129,7 +129,13 @@ Switching views changes only how the draft is presented; it does not create,
 remove, or accept an edit.
 
 Review proposals one at a time when they deserve close attention, or use bulk
-acceptance for routine items. The record preserves which review mode you used,
+acceptance for routine items. On a keyboard, `j` and `k` move between
+proposals and `a`, `r`, and `d` accept, reject, or defer the focused one,
+moving on to the next undecided proposal. Claim statements and other free-text
+fields have their own editors, the commit message is optional (a dated
+summary of what was kept is used when it is left blank), and a committed
+review hands off to the next one waiting for you. Drafts started from a single
+capture appear on the same Daily review page as the scheduled batches. The record preserves which review mode you used,
 so bulk acceptance is never represented later as individual review. Proposal
 preparation can run on a schedule; judgment cannot. Some reviews take minutes,
 and some science deserves longer.

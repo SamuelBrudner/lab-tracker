@@ -3,13 +3,84 @@ import * as React from "react";
 import { useGraphDraftWorkflow } from "../hooks/useGraphDraftWorkflow.js";
 import { useReviewDictation } from "../hooks/useReviewDictation.js";
 import { useSourceArtifactPreviews } from "../hooks/useSourceArtifactPreviews.js";
+import { apiListRequest, buildApiPath } from "../shared/api.js";
 import { AudioReviewConsole } from "./graph-drafts/AudioReviewConsole.jsx";
 import { NarrativeReview } from "./graph-drafts/NarrativeReview.jsx";
 import { OperationRow } from "./graph-drafts/OperationRow.jsx";
 import { ProvenanceDetails } from "./graph-drafts/ProvenanceDetails.jsx";
 import { SourceArtifactEvidence } from "./graph-drafts/SourceArtifactEvidence.jsx";
-import { spokenReviewScript } from "./graph-drafts/format.js";
+import { decisionCounts, spokenReviewScript } from "./graph-drafts/format.js";
 import { buildSourceArtifactReview } from "./graph-drafts/source-artifacts.js";
+
+const DECISION_KEYS = { a: "accepted", d: "proposed", r: "rejected" };
+const REVIEWABLE_STATUSES = new Set(["ready", "changes_requested"]);
+
+function isTypingTarget(target) {
+  const tag = target?.tagName;
+  return (
+    tag === "INPUT" ||
+    tag === "TEXTAREA" ||
+    tag === "SELECT" ||
+    Boolean(target?.isContentEditable)
+  );
+}
+
+// After a commit: hand the reviewer straight to the next review that is
+// waiting for them, or back to the queue when there is none.
+function AfterCommitActions({ token, currentChangeSetId, navigate, backPath }) {
+  const [nextId, setNextId] = React.useState(null);
+  React.useEffect(() => {
+    let canceled = false;
+    apiListRequest(buildApiPath("/batches", { limit: 5, mine: true }), { token })
+      .then(({ data }) => {
+        if (canceled) {
+          return;
+        }
+        const next = (data || []).find(
+          (batch) =>
+            batch.change_set_id !== currentChangeSetId && REVIEWABLE_STATUSES.has(batch.status)
+        );
+        setNextId(next?.change_set_id || "");
+      })
+      .catch(() => {
+        if (!canceled) {
+          setNextId("");
+        }
+      });
+    return () => {
+      canceled = true;
+    };
+  }, [currentChangeSetId, token]);
+
+  return (
+    <div className="review-committed" role="status">
+      <div>
+        <strong>Committed.</strong>{" "}
+        <span className="subtle">
+          {nextId === null
+            ? "Checking for your next review…"
+            : nextId
+              ? "Another review is waiting for you."
+              : "Nothing else is waiting for your review."}
+        </span>
+      </div>
+      <div className="inline">
+        {nextId ? (
+          <button
+            type="button"
+            className="btn-primary"
+            onClick={() => navigate(`/app/batches/${nextId}`)}
+          >
+            Next review
+          </button>
+        ) : null}
+        <button type="button" className="btn-secondary" onClick={() => navigate(backPath)}>
+          Back to queue
+        </button>
+      </div>
+    </div>
+  );
+}
 
 function GraphDraftDetailCard({
   token,
@@ -49,6 +120,7 @@ function GraphDraftDetailCard({
     accessError,
     commitMessage,
     setCommitMessage,
+    suggestedCommitMessage,
     reviewNote,
     setReviewNote,
     pendingCommands,
@@ -65,6 +137,95 @@ function GraphDraftDetailCard({
     () => buildSourceArtifactReview(changeSet),
     [changeSet]
   );
+  const operations = React.useMemo(() => changeSet?.operations || [], [changeSet]);
+  const counts = React.useMemo(() => decisionCounts(changeSet), [changeSet]);
+
+  // Keyboard review loop over the proposal cards: j/k (or the arrows) move
+  // the focused card, a / r / d decide it and move on to the next undecided
+  // one. Shortcuts stay out of the way while a field is being typed in.
+  const [focusedOperationId, setFocusedOperationId] = React.useState("");
+  const rowRefs = React.useRef({});
+  const keyHandlerRef = React.useRef(null);
+
+  function focusOperationAt(index) {
+    const operation = operations[index];
+    if (!operation) {
+      return;
+    }
+    setFocusedOperationId(operation.operation_id);
+    const node = rowRefs.current[operation.operation_id];
+    if (node) {
+      node.focus?.({ preventScroll: true });
+      node.scrollIntoView?.({ block: "nearest" });
+    }
+  }
+
+  function nextUndecidedIndex(from) {
+    for (let index = from + 1; index < operations.length; index += 1) {
+      if (operations[index].status === "proposed") {
+        return index;
+      }
+    }
+    for (let index = 0; index < from; index += 1) {
+      if (operations[index].status === "proposed") {
+        return index;
+      }
+    }
+    return -1;
+  }
+
+  async function handleReviewKeyDown(event) {
+    if (
+      reviewView !== "proposals" ||
+      !changeSet ||
+      operations.length === 0 ||
+      event.defaultPrevented ||
+      event.altKey ||
+      event.ctrlKey ||
+      event.metaKey ||
+      isTypingTarget(event.target)
+    ) {
+      return;
+    }
+    const current = operations.findIndex(
+      (operation) => operation.operation_id === focusedOperationId
+    );
+    if (event.key === "j" || event.key === "ArrowDown") {
+      event.preventDefault();
+      focusOperationAt(current < 0 ? 0 : Math.min(current + 1, operations.length - 1));
+      return;
+    }
+    if (event.key === "k" || event.key === "ArrowUp") {
+      event.preventDefault();
+      focusOperationAt(current < 0 ? 0 : Math.max(current - 1, 0));
+      return;
+    }
+    const decision = DECISION_KEYS[event.key];
+    if (!decision || !canEditDraft || current < 0) {
+      return;
+    }
+    event.preventDefault();
+    const operation = operations[current];
+    if (pendingCommands[`op:${operation.operation_id}`]) {
+      return;
+    }
+    const saved = await workflow.saveOperation(operation, decision);
+    if (saved) {
+      const next = nextUndecidedIndex(current);
+      if (next >= 0) {
+        focusOperationAt(next);
+      }
+    }
+  }
+
+  React.useEffect(() => {
+    keyHandlerRef.current = handleReviewKeyDown;
+  });
+  React.useEffect(() => {
+    const listener = (event) => keyHandlerRef.current?.(event);
+    document.addEventListener("keydown", listener);
+    return () => document.removeEventListener("keydown", listener);
+  }, []);
   const sourcePreviews = useSourceArtifactPreviews(sourceReview.artifactsToLoad, token);
   const reviewAttachmentEvidence = changeSet?.context_packet?.review_attachment_evidence;
   const effectiveAllowBulkAccept =
@@ -196,7 +357,13 @@ function GraphDraftDetailCard({
             />
           ) : (
             <div className="review-report">
-              {(changeSet.operations || []).map((operation) => {
+              {canEditDraft && operations.length > 0 ? (
+                <p className="review-keys subtle" aria-label="Keyboard shortcuts">
+                  Keyboard: <kbd>j</kbd> / <kbd>k</kbd> next and previous proposal ·{" "}
+                  <kbd>a</kbd> accept · <kbd>r</kbd> reject · <kbd>d</kbd> defer
+                </p>
+              ) : null}
+              {operations.map((operation) => {
                 const sourceMapping = sourceReview.byOperationId[operation.operation_id] || {
                   ambiguous: false,
                   artifacts: [],
@@ -210,6 +377,11 @@ function GraphDraftDetailCard({
                     reviewNote={operationReviewNotes[operation.operation_id]}
                     canEditDraft={canEditDraft}
                     pending={pendingCommands[`op:${operation.operation_id}`]}
+                    focused={focusedOperationId === operation.operation_id}
+                    onFocusRow={() => setFocusedOperationId(operation.operation_id)}
+                    rowRef={(node) => {
+                      rowRefs.current[operation.operation_id] = node;
+                    }}
                     sourceArtifacts={sourceMapping.artifacts}
                     sourcePreviews={sourcePreviews}
                     usesSharedSourceEvidence={sourceMapping.ambiguous}
@@ -240,9 +412,15 @@ function GraphDraftDetailCard({
 
           <div className="review-actions">
             <div className="review-tally">
-              <strong>
-                {acceptedCount} of {(changeSet.operations || []).length} kept
-              </strong>
+              <span>
+                <strong>
+                  {acceptedCount} of {operations.length} kept
+                </strong>
+                <span className="subtle">
+                  {" "}
+                  · {counts.rejected} rejected · {counts.proposed} undecided
+                </span>
+              </span>
               {effectiveAllowBulkAccept ? (
                 <button
                   type="button"
@@ -319,11 +497,12 @@ function GraphDraftDetailCard({
                 </div>
               ) : null}
               <label>
-                Commit message
+                Commit message (optional)
                 <input
                   value={commitMessage}
                   onChange={(event) => setCommitMessage(event.target.value)}
                   disabled={!canCommitDraft}
+                  placeholder={suggestedCommitMessage}
                 />
               </label>
               <button
@@ -333,6 +512,15 @@ function GraphDraftDetailCard({
                 Commit accepted changes
               </button>
             </form>
+
+            {changeSet.status === "committed" ? (
+              <AfterCommitActions
+                token={token}
+                currentChangeSetId={changeSetId}
+                navigate={navigate}
+                backPath={backPath}
+              />
+            ) : null}
           </div>
 
           <ProvenanceDetails changeSet={changeSet} />

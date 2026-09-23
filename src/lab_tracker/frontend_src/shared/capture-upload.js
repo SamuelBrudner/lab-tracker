@@ -4,7 +4,7 @@
 // closure over component state), and the online/offline decision lives here.
 import { NetworkError, apiRequest } from "./api.js";
 import { getUploadQueue } from "./register-sw.js";
-import { UPLOAD_FILE_PATH } from "./upload-queue.js";
+import { TEXT_NOTE_PATH, UPLOAD_FILE_PATH } from "./upload-queue.js";
 
 // Returned by uploadOrQueueRawFile when the network failed and the file was
 // handed to the offline queue instead of uploaded.
@@ -180,23 +180,74 @@ async function uploadOrQueueRawFile({
   }
 }
 
-async function createTextCapture({ token, projectId, rawContent, targets = [], metadata }) {
-  return apiRequest("/notes", {
-    body: {
-      project_id: projectId,
-      raw_content: rawContent,
-      targets,
-      metadata,
-    },
+function textCaptureBody({ projectId, rawContent, targets = [], metadata, clientCaptureId }) {
+  const body = {
+    project_id: projectId,
+    raw_content: rawContent,
+    targets,
+    metadata,
+  };
+  if (clientCaptureId) {
+    body.client_capture_id = clientCaptureId;
+  }
+  return body;
+}
+
+async function createTextCapture({
+  token,
+  projectId,
+  rawContent,
+  targets = [],
+  metadata,
+  clientCaptureId = "",
+}) {
+  return apiRequest(TEXT_NOTE_PATH, {
+    body: textCaptureBody({ projectId, rawContent, targets, metadata, clientCaptureId }),
     method: "POST",
     token,
   });
+}
+
+// Text captures follow the same online/offline rule as files: a server answer
+// (success or rejection) is final, while a request that never reached the
+// server is queued and replayed under the same client_capture_id.
+async function createOrQueueTextCapture({
+  token,
+  projectId,
+  ownerId,
+  rawContent,
+  targets = [],
+  metadata,
+  queue = getUploadQueue(),
+}) {
+  const clientCaptureId = newCaptureId();
+  try {
+    return await createTextCapture({
+      token,
+      projectId,
+      rawContent,
+      targets,
+      metadata,
+      clientCaptureId,
+    });
+  } catch (err) {
+    if (err instanceof NetworkError && queue) {
+      await queue.enqueue({
+        endpoint: TEXT_NOTE_PATH,
+        json: textCaptureBody({ projectId, rawContent, targets, metadata, clientCaptureId }),
+        ownerId,
+      });
+      return OFFLINE_QUEUED;
+    }
+    throw err;
+  }
 }
 
 export {
   OFFLINE_QUEUED,
   buildCaptureMetadata,
   buildTargets,
+  createOrQueueTextCapture,
   createTextCapture,
   newCaptureId,
   queueRawFileNoteOffline,

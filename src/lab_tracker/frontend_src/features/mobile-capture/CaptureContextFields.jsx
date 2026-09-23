@@ -18,6 +18,7 @@ function CaptureContextFields({
   sessions,
   sessionId,
   setSessionId,
+  contextCarriedOver = false,
   datasets,
   datasetId,
   setDatasetId,
@@ -88,6 +89,12 @@ function CaptureContextFields({
           ))}
         </select>
       </label>
+      {contextCarriedOver ? (
+        <p className="subtle capture-context-carried" role="status">
+          Question and session carried over from your last capture here. Change them if this
+          one is different.
+        </p>
+      ) : null}
       <label>
         Dataset (optional)
         <select
