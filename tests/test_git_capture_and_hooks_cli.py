@@ -707,6 +707,32 @@ def test_hooks_install_refuses_values_that_would_escape_the_sh_default(
     assert not (git_repo / ".git" / "hooks" / "post-commit").exists()
 
 
+@pytest.mark.parametrize(
+    ("line", "flag"),
+    [
+        ('LAB_TRACKER_PROJECT_ID="${LAB_TRACKER_PROJECT_ID:-p$(id)}"', "--project"),
+        ('LAB_TRACKER_BASE_URL="${LAB_TRACKER_BASE_URL:-http://lab`id`}"', "--base-url"),
+    ],
+)
+def test_hooks_install_names_an_unsafe_value_carried_from_a_legacy_block(
+    git_repo, line: str, flag: str
+) -> None:
+    from lab_tracker_client.client import LTValidationError
+    from lab_tracker_client.hooks import install_hook
+
+    hook_path = git_repo / ".git" / "hooks" / "post-commit"
+    hook_path.parent.mkdir(parents=True, exist_ok=True)
+    legacy = f"#!/usr/bin/env sh\n{HOOK_BLOCK_BEGIN}\n{line}\n{HOOK_BLOCK_END}\n"
+    hook_path.write_text(legacy, encoding="utf-8", newline="\n")
+
+    # The user never passed this value: say where it came from and how to override it.
+    with pytest.raises(LTValidationError, match="carried forward") as excinfo:
+        install_hook(repo=git_repo, lt_path="/opt/lt")
+
+    assert flag in str(excinfo.value)
+    assert hook_path.read_text(encoding="utf-8") == legacy
+
+
 def test_hooks_install_keeps_spaces_in_baked_values(git_repo) -> None:
     from lab_tracker_client.hooks import install_hook
 

@@ -1023,7 +1023,6 @@ def _job_from_token(token: str, *, fallback_cluster: str | None) -> SbatchJob:
     )
 
 
-
 def _path_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:

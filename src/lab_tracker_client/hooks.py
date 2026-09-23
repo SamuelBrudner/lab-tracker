@@ -148,6 +148,8 @@ def install_hook(
             match = _BASE_URL_LINE_PATTERN.search(existing)
             carried_base_url = (match.group("value").strip() or None) if match else None
             base_url = carried_base_url
+        _require_safe_carried_value("project id", carried_project, "--project")
+        _require_safe_carried_value("base URL", carried_base_url, "--base-url")
     block = managed_hook_block(
         lt_path=resolved_lt,
         project_id=project_id,
@@ -400,8 +402,23 @@ def _default_lt_path() -> str:
 _SH_DEFAULT_UNSAFE = frozenset('"$`\\}\n\r\x00')
 
 
+def _sh_default_unsafe(value: str) -> list[str]:
+    return sorted({repr(ch) for ch in value if ch in _SH_DEFAULT_UNSAFE})
+
+
+def _require_safe_carried_value(label: str, value: str | None, flag: str) -> None:
+    unsafe = _sh_default_unsafe(value) if value else []
+    if unsafe:
+        raise LTValidationError(
+            f"The {label} {value!r} carried forward from the existing post-commit "
+            f"hook block cannot be baked into the new block: it contains "
+            f"{', '.join(unsafe)}, which sh would expand or execute. Pass {flag} "
+            "with a safe value to override it."
+        )
+
+
 def _sh_default_text(label: str, value: str) -> str:
-    unsafe = sorted({repr(ch) for ch in value if ch in _SH_DEFAULT_UNSAFE})
+    unsafe = _sh_default_unsafe(value)
     if unsafe:
         raise LTValidationError(
             f"The {label} {value!r} cannot be baked into the post-commit hook: it "
