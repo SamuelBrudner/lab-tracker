@@ -16,7 +16,10 @@ from lab_tracker.auth import AuthContext, Role
 from lab_tracker.errors import ValidationError
 from lab_tracker.models import ReviewEmailDeliveryStatus, utc_now
 from lab_tracker.review_links import sign_review_link
-from lab_tracker.services.review_email_service import ReviewEmailService
+from lab_tracker.services.review_email_service import (
+    ReviewEmailService,
+    normalize_review_email,
+)
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 
 
@@ -504,3 +507,19 @@ def test_test_email_with_unknown_recipient_user_is_rejected(
     listing = client.get("/review-email/deliveries", headers=admin_auth_headers)
     assert listing.status_code == 200
     assert listing.json()["data"] == []
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("Test.User@Example.ORG", "Test.User@example.org"),
+        ('"ab"@Example.org', "ab@example.org"),
+        ('"a b"@Example.org', '"a b"@example.org'),
+        ('"a\\"b"@example.org', '"a\\"b"@example.org'),
+    ],
+)
+def test_normalize_review_email_is_idempotent(raw: str, expected: str) -> None:
+    normalized = normalize_review_email(raw)
+
+    assert normalized == expected
+    assert normalize_review_email(normalized) == normalized

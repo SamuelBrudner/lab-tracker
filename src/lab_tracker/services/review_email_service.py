@@ -41,7 +41,9 @@ def normalize_review_email(value: str) -> str:
         raise ValidationError("notification_email must be one valid email address.") from exc
     if not address.username or not address.domain:
         raise ValidationError("notification_email must be one valid email address.")
-    return f"{address.username}@{address.domain.lower()}"
+    # Rebuild via addr_spec so a quoted local part stays quoted; a bare
+    # username@domain would not re-parse and would fail every later send.
+    return Address(username=address.username, domain=address.domain.lower()).addr_spec
 
 
 class ReviewEmailService(BaseService):
