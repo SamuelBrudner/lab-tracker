@@ -396,6 +396,79 @@ class TestSecretsFile:
             mod.write_secrets_file(str(path), provided)
         assert (path.read_bytes() if path.exists() else None) == before
 
+    def test_lone_admin_half_refusal_says_to_unset_it_or_export_its_pair(self, tmp_path):
+        path = tmp_path / "daily-review.secrets.json"
+        with pytest.raises(mod.SchedulerConfigError) as excinfo:
+            mod.write_secrets_file(str(path), {"LAB_TRACKER_ADMIN_PASS": "pw"})
+        message = str(excinfo.value)
+        assert "unset LAB_TRACKER_ADMIN_PASS" in message
+        assert "export LAB_TRACKER_ADMIN_USER" in message
+        assert "export both" not in message
+
+    @pytest.mark.parametrize(
+        ("stored", "stray"),
+        [
+            (None, {"LAB_TRACKER_ADMIN_PASS": "pw"}),
+            (None, {"LAB_TRACKER_ADMIN_USER": "admin"}),
+            ({"LAB_TRACKER_API_KEY": "lpat_old"}, {"LAB_TRACKER_ADMIN_PASS": "pw"}),
+        ],
+    )
+    def test_api_key_with_a_stray_admin_half_is_persisted_without_the_half(
+        self, tmp_path, stored, stray
+    ):
+        # The API key is a complete credential that takes precedence at run
+        # time, so a stray admin half next to it is not a reason to refuse;
+        # it is dropped rather than persisted as a login that cannot work.
+        path = tmp_path / "daily-review.secrets.json"
+        if stored is not None:
+            mod.write_secrets_file(str(path), stored)
+
+        assert mod.write_secrets_file(str(path), {"LAB_TRACKER_API_KEY": "lpat_new", **stray})
+
+        assert json.loads(path.read_text()) == {"LAB_TRACKER_API_KEY": "lpat_new"}
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+    def test_api_key_with_a_lone_admin_half_still_carries_a_stored_pair(self, tmp_path):
+        path = tmp_path / "daily-review.secrets.json"
+        mod.write_secrets_file(
+            str(path), {"LAB_TRACKER_ADMIN_USER": "admin", "LAB_TRACKER_ADMIN_PASS": "old"}
+        )
+
+        mod.write_secrets_file(
+            str(path), {"LAB_TRACKER_API_KEY": "lpat_new", "LAB_TRACKER_ADMIN_PASS": "new"}
+        )
+
+        assert json.loads(path.read_text()) == {
+            "LAB_TRACKER_API_KEY": "lpat_new",
+            "LAB_TRACKER_ADMIN_USER": "admin",
+            "LAB_TRACKER_ADMIN_PASS": "new",
+        }
+
+    def test_write_secrets_subcommand_reports_a_stray_admin_half_next_to_an_api_key(
+        self, tmp_path
+    ):
+        path = tmp_path / "daily-review.secrets.json"
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key
+            not in {"LAB_TRACKER_API_KEY", "LAB_TRACKER_ADMIN_USER", "LAB_TRACKER_ADMIN_PASS"}
+        }
+        env["LAB_TRACKER_API_KEY"] = "lpat_s3cret"
+        env["LAB_TRACKER_ADMIN_PASS"] = "stray-s3cret"
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "write-secrets", str(path)],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "ignoring LAB_TRACKER_ADMIN_PASS" in result.stderr
+        assert "LAB_TRACKER_API_KEY takes precedence" in result.stderr
+        assert "keeping the stored" not in result.stderr
+        assert "s3cret" not in result.stderr
+        assert json.loads(path.read_text()) == {"LAB_TRACKER_API_KEY": "lpat_s3cret"}
+
     def test_write_secrets_subcommand_reports_the_carried_over_admin_user(self, tmp_path):
         path = tmp_path / "daily-review.secrets.json"
         mod.write_secrets_file(
@@ -618,6 +691,25 @@ class TestCronInstallerAdapter:
             "LAB_TRACKER_ADMIN_PASS": "rotated",
         }
         assert stat.S_IMODE(secrets_file.stat().st_mode) == 0o600
+
+    def test_api_key_with_a_stray_admin_half_installs(self, tmp_path):
+        installed = tmp_path / "installed-crontab"
+        script = (
+            "#!/bin/sh\n"
+            'if [ "$1" = "-l" ]; then echo "no crontab for tester" >&2; exit 1; fi\n'
+            f'cat > "{installed}"\n'
+        )
+
+        result = self._run(
+            tmp_path,
+            script,
+            extra_env={"LAB_TRACKER_API_KEY": "lpat_key", "LAB_TRACKER_ADMIN_USER": "admin"},
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert installed.exists()
+        secrets_file = tmp_path / ".config/lab-tracker/daily-review.secrets.json"
+        assert json.loads(secrets_file.read_text()) == {"LAB_TRACKER_API_KEY": "lpat_key"}
 
     def test_lone_admin_password_without_stored_user_aborts_before_installing(self, tmp_path):
         installed = tmp_path / "installed-crontab"

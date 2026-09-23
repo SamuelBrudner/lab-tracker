@@ -96,7 +96,30 @@ def test_installer_completes_a_lone_admin_credential_from_the_stored_file() -> N
     assert completion < stored_read < write
     assert completion < carried < write
     assert completion < refusal < write
-    assert "export both LAB_TRACKER_ADMIN_USER and LAB_TRACKER_ADMIN_PASS" in installer
+    # The refusal names the way out: drop the lone variable or add its pair.
+    assert "unset $provided, or set $missing too" in installer
+    assert "export both" not in installer
+
+
+def test_installer_drops_a_stray_admin_half_next_to_an_api_key() -> None:
+    # LAB_TRACKER_API_KEY is a complete credential that takes precedence at run
+    # time, so a lone admin half beside it (with no stored pair to complete)
+    # is dropped with a notice instead of refusing the install.
+    installer = _text(INSTALLER)
+
+    completion = installer.index("-xor")
+    carried = installer.index("$credentials[$missing] = [string]$stored", completion)
+    api_key_branch = installer.index(
+        'elseif ($credentials.Contains("LAB_TRACKER_API_KEY"))', completion
+    )
+    dropped = installer.index("$credentials.Remove($provided)", completion)
+    refusal = installer.index("throw", completion)
+    write = installer.index("WriteAllText($SecretsFile")
+    assert completion < carried < api_key_branch < dropped < refusal < write
+    assert "LAB_TRACKER_API_KEY takes precedence" in installer
+    doc = " ".join(_text(DOC).split())
+    assert "takes precedence over the admin login at run time" in doc
+    assert "unset the lone variable, or export its pair too" in doc
 
 
 def test_installer_warns_for_a_remote_url_without_credentials() -> None:

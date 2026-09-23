@@ -268,6 +268,10 @@ def lone_admin_half(values: dict[str, str]) -> str | None:
     return next(key for key in _ADMIN_PAIR if key not in present)
 
 
+def _other_admin_half(key: str) -> str:
+    return next(other for other in _ADMIN_PAIR if other != key)
+
+
 def write_secrets_file(path: str, values: dict[str, str]) -> bool:
     """Write non-empty secret values to a private 0600 JSON file.
 
@@ -279,9 +283,11 @@ def write_secrets_file(path: str, values: dict[str, str]) -> bool:
 
     When only one of ``LAB_TRACKER_ADMIN_USER`` / ``LAB_TRACKER_ADMIN_PASS`` is
     supplied (for example a password rotation), the other half is carried over
-    from the stored file; if the file has no such value the write is refused
-    with ``SchedulerConfigError`` rather than persisting a login that cannot
-    work.
+    from the stored file. If the file has no such value, a stray half next to a
+    supplied ``LAB_TRACKER_API_KEY`` is dropped (the key is a complete
+    credential that takes precedence at run time); without an API key the write
+    is refused with ``SchedulerConfigError`` rather than persisting a login that
+    cannot work.
 
     O_NOFOLLOW refuses to follow a pre-planted symlink at the fixed secrets path,
     so a local attacker cannot redirect the write (or the O_TRUNC) onto another
@@ -291,13 +297,16 @@ def write_secrets_file(path: str, values: dict[str, str]) -> bool:
     missing = lone_admin_half(data)
     if missing is not None:
         stored = _read_existing_secrets(path).get(missing)
-        if not isinstance(stored, str) or not stored:
-            provided = next(key for key in _ADMIN_PAIR if key != missing)
+        provided = _other_admin_half(missing)
+        if isinstance(stored, str) and stored:
+            data[missing] = stored
+        elif data.get("LAB_TRACKER_API_KEY"):
+            del data[provided]
+        else:
             raise SchedulerConfigError(
                 f"{provided} is set but {missing} is not, and {path} has no stored "
-                f"{missing} to keep; export both {' and '.join(_ADMIN_PAIR)}."
+                f"{missing} to keep; unset {provided}, or export {missing} too."
             )
-        data[missing] = stored
     if not data and any(_read_existing_secrets(path).values()):
         _restrict_to_owner(path)
         return False
@@ -374,12 +383,20 @@ def _cmd_render_plist(args: argparse.Namespace) -> int:
 
 def _cmd_write_secrets(args: argparse.Namespace) -> int:
     values = {key: os.environ.get(key, "") for key in _SECRET_ENV_KEYS}
+    missing = lone_admin_half(values)
+    stored = _read_existing_secrets(args.path).get(missing) if missing is not None else None
     written = write_secrets_file(args.path, values)
-    carried = lone_admin_half(values)
-    if carried is not None:
+    if missing is not None and isinstance(stored, str) and stored:
         sys.stderr.write(
-            f"lab-tracker scheduler: {carried} is not set; keeping the stored {carried} "
+            f"lab-tracker scheduler: {missing} is not set; keeping the stored {missing} "
             f"from {args.path}.\n"
+        )
+    elif missing is not None:
+        # write_secrets_file only accepts a lone half without a stored pair
+        # when an API key is supplied, and then drops the half.
+        sys.stderr.write(
+            f"lab-tracker scheduler: ignoring {_other_admin_half(missing)} without "
+            f"{missing}; LAB_TRACKER_API_KEY takes precedence and is persisted alone.\n"
         )
     if not written:
         sys.stderr.write(

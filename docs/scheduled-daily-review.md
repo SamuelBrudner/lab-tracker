@@ -84,8 +84,12 @@ Re-running an installer from a shell where none of those credentials is
 exported keeps the existing secrets file (and resets its mode to `0600`);
 export a new credential to replace it, or delete the file to clear it.
 Exporting only one of `LAB_TRACKER_ADMIN_USER` / `LAB_TRACKER_ADMIN_PASS` (for
-example to rotate the password) keeps the other from the existing file; if the
-file has none, the installer refuses and changes nothing.
+example to rotate the password) keeps the other from the existing file. If the
+file has none and `LAB_TRACKER_API_KEY` is also exported, the lone variable is
+ignored and only the API key is persisted: the key is a complete credential and
+takes precedence over the admin login at run time. Without an API key the
+installer refuses and changes nothing; unset the lone variable, or export its
+pair too, and re-run it.
 
 The Windows installer does the same: a Scheduled Task does not inherit
 `$env:` assignments from the installing PowerShell session, so
@@ -95,8 +99,9 @@ The Windows installer does the same: a Scheduled Task does not inherit
 disabled and access granted to the current user only. The task definition
 carries only that file's path; the trigger reads it with `ConvertFrom-Json` at
 run time. Re-running without a credential set keeps the existing file, and
-setting only one of the admin user/password keeps the other from it (or
-refuses when the file has none). Each
+setting only one of the admin user/password keeps the other from it; when the
+file has none it is ignored if `LAB_TRACKER_API_KEY` is also set, and
+otherwise the installer refuses. Each
 scheduled run appends a timestamped success or failure line to
 `%LOCALAPPDATA%\LabTracker\daily-review.log` and exits non-zero on failure,
 so Task Scheduler's **Last Run Result** shows it too. Installing against a

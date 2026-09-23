@@ -20,8 +20,10 @@
   the trigger reads it structurally (ConvertFrom-Json) at run time. Re-running
   with no credential set keeps an existing secrets file; delete it to clear it.
   Setting only one of LAB_TRACKER_ADMIN_USER / LAB_TRACKER_ADMIN_PASS (e.g. to
-  rotate the password) keeps the other from the existing file, and fails if the
-  file has none.
+  rotate the password) keeps the other from the existing file. If the file has
+  none, the lone variable is ignored when LAB_TRACKER_API_KEY is also set (the
+  key takes precedence); otherwise the installer fails and asks you to unset
+  the lone variable or set its pair.
 
   Each run appends a timestamped result line to -LogFile (default
   %LOCALAPPDATA%\LabTracker\daily-review.log).
@@ -93,21 +95,28 @@ foreach ($pair in @(
 }
 
 # Only one half of the admin login set (e.g. a password rotation): carry the
-# other half over from the stored file, or refuse before anything is written,
-# so the file never ends up holding a login that cannot work.
+# other half over from the stored file. With nothing stored, a stray half next
+# to LAB_TRACKER_API_KEY (a complete credential that takes precedence at run
+# time) is dropped; otherwise refuse before anything is written, so the file
+# never ends up holding a login that cannot work.
 if ($credentials.Contains("LAB_TRACKER_ADMIN_USER") -xor $credentials.Contains("LAB_TRACKER_ADMIN_PASS")) {
     $missing = if ($credentials.Contains("LAB_TRACKER_ADMIN_USER")) { "LAB_TRACKER_ADMIN_PASS" } else { "LAB_TRACKER_ADMIN_USER" }
+    $provided = if ($missing -eq "LAB_TRACKER_ADMIN_USER") { "LAB_TRACKER_ADMIN_PASS" } else { "LAB_TRACKER_ADMIN_USER" }
     $stored = $null
     if (Test-Path -LiteralPath $SecretsFile) {
         # Fails loudly on malformed JSON rather than silently discarding it.
         $stored = (Get-Content -LiteralPath $SecretsFile -Raw | ConvertFrom-Json).$missing
     }
-    if (-not $stored) {
-        throw ("$missing is not set in this session and $SecretsFile has no stored $missing to keep; " +
-            "export both LAB_TRACKER_ADMIN_USER and LAB_TRACKER_ADMIN_PASS and re-run the installer.")
+    if ($stored) {
+        $credentials[$missing] = [string]$stored
+        Write-Host "$missing is not set; keeping the stored $missing from $SecretsFile."
+    } elseif ($credentials.Contains("LAB_TRACKER_API_KEY")) {
+        $credentials.Remove($provided)
+        Write-Host "Ignoring $provided without ${missing}: LAB_TRACKER_API_KEY takes precedence and is persisted alone."
+    } else {
+        throw ("$provided is set in this session but $missing is not, and $SecretsFile has no stored $missing to keep; " +
+            "unset $provided, or set $missing too, and re-run the installer.")
     }
-    $credentials[$missing] = [string]$stored
-    Write-Host "$missing is not set; keeping the stored $missing from $SecretsFile."
 }
 
 $hasCredential = $false
