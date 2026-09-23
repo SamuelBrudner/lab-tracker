@@ -1674,3 +1674,29 @@ def test_auth_session_max_age_must_cover_one_token_lifetime(monkeypatch):
         match="no shorter than LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES",
     ):
         _settings_from_environment()
+
+
+def test_public_viewer_registration_defaults_on_only_in_local(monkeypatch):
+    """Anonymous viewer self-registration is opt-in outside ``local`` (L52)."""
+
+    _clear_auth_env(monkeypatch)
+    monkeypatch.delenv("LAB_TRACKER_AUTH_PUBLIC_VIEWER_REGISTRATION_ENABLED", raising=False)
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "local")
+    assert _settings_from_environment().is_public_viewer_registration_enabled() is True
+
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "production")
+    monkeypatch.setenv("LAB_TRACKER_AUTH_SECRET_KEY", "custom-secret")
+    assert _settings_from_environment().is_public_viewer_registration_enabled() is False
+
+
+def test_public_viewer_registration_flag_overrides_environment(monkeypatch):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "production")
+    monkeypatch.setenv("LAB_TRACKER_AUTH_SECRET_KEY", "custom-secret")
+    monkeypatch.setenv("LAB_TRACKER_AUTH_PUBLIC_VIEWER_REGISTRATION_ENABLED", "true")
+    assert _settings_from_environment().is_public_viewer_registration_enabled() is True
+
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "local")
+    monkeypatch.delenv("LAB_TRACKER_AUTH_SECRET_KEY")
+    monkeypatch.setenv("LAB_TRACKER_AUTH_PUBLIC_VIEWER_REGISTRATION_ENABLED", "false")
+    assert _settings_from_environment().is_public_viewer_registration_enabled() is False

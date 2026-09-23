@@ -114,7 +114,8 @@ class Settings(BaseSettings):
     auth_invite_ttl_hours: int = 7 * 24
     auth_rate_limit_attempts: int = 10
     auth_rate_limit_window_seconds: int = 60
-    auth_public_viewer_registration_enabled: bool = True
+    # None resolves per environment; see is_public_viewer_registration_enabled().
+    auth_public_viewer_registration_enabled: bool | None = None
     usage_events: bool | None = None
     bootstrap_admin_token: str = ""
     # None resolves per environment; see effective_bootstrap_admin_token_disclosure().
@@ -207,6 +208,17 @@ class Settings(BaseSettings):
         if self.usage_events is not None:
             return self.usage_events
         return self.environment.strip().lower() != "local"
+
+    def is_public_viewer_registration_enabled(self) -> bool:
+        """Return whether anonymous callers may self-register viewer accounts.
+
+        Defaults on only in ``local``; any other environment must opt in, so a
+        deployment that forgets the setting does not mint anonymous accounts.
+        """
+
+        if self.auth_public_viewer_registration_enabled is not None:
+            return self.auth_public_viewer_registration_enabled
+        return self.is_local_environment()
 
     def is_local_environment(self) -> bool:
         return self.environment.strip().lower() == "local"

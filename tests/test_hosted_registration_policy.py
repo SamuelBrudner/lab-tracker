@@ -12,9 +12,9 @@ _SETTING = "LAB_TRACKER_AUTH_PUBLIC_VIEWER_REGISTRATION_ENABLED"
 def test_render_blueprint_disables_public_viewer_registration() -> None:
     blueprint = (REPO_ROOT / "render.yaml").read_text(encoding="utf-8")
 
-    assert re.search(
-        rf"^\s*- key: {_SETTING}\n\s+value: \"false\"$", blueprint, re.MULTILINE
-    ), f"render.yaml must set {_SETTING} to \"false\""
+    assert re.search(rf"^\s*- key: {_SETTING}\n\s+value: \"false\"$", blueprint, re.MULTILINE), (
+        f'render.yaml must set {_SETTING} to "false"'
+    )
 
 
 def test_shared_provider_runtime_env_disables_public_viewer_registration() -> None:
@@ -34,3 +34,16 @@ def test_dedicated_instance_disables_public_viewer_registration() -> None:
     )
 
     assert f'{_SETTING}: "false"' in compose
+
+
+def test_root_env_example_disables_public_viewer_registration() -> None:
+    """The root compose reads .env; its template must not re-enable signup."""
+
+    env_example = REPO_ROOT / ".env.example"
+    configured = dict(
+        line.split("=", 1)
+        for line in env_example.read_text(encoding="utf-8").splitlines()
+        if line and not line.startswith("#") and "=" in line
+    )
+
+    assert configured.get(_SETTING) == "false"

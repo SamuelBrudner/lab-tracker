@@ -123,7 +123,7 @@ def build_auth_router(
                     raise PermissionDeniedError(
                         "Admin privileges required to register non-viewer users."
                     )
-        elif not request.app.state.settings.auth_public_viewer_registration_enabled:
+        elif not request.app.state.settings.is_public_viewer_registration_enabled():
             if not request.headers.get("authorization"):
                 raise AuthError("Public viewer registration is disabled.")
             actor = actor_from_authorization_header(

@@ -1284,6 +1284,23 @@ def test_login_flood_rotating_addresses_in_one_ipv6_64_shares_one_quota(monkeypa
     assert other_prefix.status_code == 401
 
 
+def test_public_viewer_registration_is_off_by_default_outside_local(monkeypatch, tmp_path):
+    """A non-local instance does not mint anonymous viewers unless opted in (L52)."""
+
+    _bootstrap_database(monkeypatch, tmp_path)
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "production")
+    monkeypatch.delenv("LAB_TRACKER_AUTH_PUBLIC_VIEWER_REGISTRATION_ENABLED", raising=False)
+
+    with TestClient(create_app()) as client:
+        denied = client.post(
+            "/auth/register",
+            json={"username": "anonymous-viewer", "password": "secret"},
+        )
+
+    assert denied.status_code == 401, denied.text
+    assert denied.json()["error"]["message"] == "Public viewer registration is disabled."
+
+
 def test_public_viewer_registration_can_be_disabled(monkeypatch, tmp_path):
     _bootstrap_database(monkeypatch, tmp_path)
     monkeypatch.setenv("LAB_TRACKER_AUTH_PUBLIC_VIEWER_REGISTRATION_ENABLED", "false")
