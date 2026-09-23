@@ -181,7 +181,10 @@ def locked_visualization_rows(
     """Reload and lock visualization rows in stable order until transaction end.
 
     On SQLite, which ignores ``FOR UPDATE``, the database write fence is taken
-    first so the read cannot go stale before the caller's write.
+    first so the read cannot go stale before the caller's write. That fence
+    blocks every other SQLite writer until the caller's transaction ends,
+    including while an upload stores its blob (see
+    ``fence_sqlite_visualization_writes``).
     """
 
     statement = select(VisualizationModel)

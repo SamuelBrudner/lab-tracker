@@ -64,6 +64,14 @@ def fence_sqlite_visualization_writes(
     expired so later reads in the transaction observe that commit too. This
     is the same write fence ``lock_project_references`` takes on SQLite. On
     other dialects this does nothing; callers rely on ``FOR UPDATE``.
+
+    The fence is database-wide and held until the transaction ends. The
+    visualization upload command takes it before it streams, stores and
+    validates the blob, so on SQLite every other writer waits (up to the
+    connection's ``busy_timeout``) for the whole upload and may fail with
+    "database is locked" during a large one. That is accepted: SQLite is the
+    single-process local backend, where one writer at a time is the model;
+    PostgreSQL deployments lock only the visualization row.
     """
 
     if session.get_bind().dialect.name != "sqlite":
