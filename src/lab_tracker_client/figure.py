@@ -36,6 +36,7 @@ from lab_tracker_client.client import (
 )
 from lab_tracker_client.gitinfo import (
     DirtyState,
+    HeadCommit,
     git_dirty_state,
     git_head_commit,
     git_output,
@@ -274,7 +275,7 @@ def run_context(
     pointer = _run_code_pointer()
     head = git_head_commit(None)
     git_commit = head.commit
-    dirty_state = _git_dirty_state(git_commit)
+    dirty_state = _git_dirty_state(head)
     context = RunContext(
         captured_at=datetime.now(timezone.utc).isoformat(),
         expires_at=time.monotonic() + max(0.0, float(ttl_seconds)),
@@ -978,8 +979,8 @@ def _git_output(*args: str) -> str:
     return git_output(None, *args)
 
 
-def _git_dirty_state(commit: str) -> DirtyState:
-    return git_dirty_state(None, commit=commit)
+def _git_dirty_state(head: HeadCommit) -> DirtyState:
+    return git_dirty_state(None, head=head)
 
 
 def _credential_free_repo_remote(remote: str) -> str:

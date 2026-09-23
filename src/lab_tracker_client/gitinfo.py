@@ -104,23 +104,27 @@ class GitProbe:
     timed_out: bool = False
     # git itself could not be started (not installed, not executable).
     unavailable: bool = False
+    # git's own stderr when it ran and exited non-zero.
+    stderr: str = ""
 
     @property
     def ok(self) -> bool:
         return not self.error
 
 
-def run_git(root: str | Path | None, *args: str) -> GitProbe:
+def run_git(root: str | Path | None, *args: str, c_locale: bool = False) -> GitProbe:
     """Run ``git [-C root] args`` bounded by :func:`git_timeout_seconds`.
 
     Never raises for git trouble (missing executable, non-zero exit, timeout):
     capture adapters must not block their caller, so the failure is returned
-    for the caller to record honestly.
+    for the caller to record honestly. ``c_locale`` runs git untranslated so a
+    caller can recognise specific git messages in ``stderr``.
     """
 
     timeout = git_timeout_seconds()
     location = [] if root is None else ["-C", str(root)]
     label = f"git {' '.join(args)}"
+    env = {**os.environ, "LC_ALL": "C"} if c_locale else None
     try:
         result = subprocess.run(  # noqa: S603 - fixed executable, no shell.
             ["git", *location, *args],
@@ -130,14 +134,16 @@ def run_git(root: str | Path | None, *args: str) -> GitProbe:
             encoding="utf-8",
             errors="replace",
             timeout=timeout,
+            env=env,
         )
     except subprocess.TimeoutExpired:
         return GitProbe("", f"{label} timed out after {timeout:g}s", timed_out=True)
     except OSError as exc:
         return GitProbe("", f"{label} could not run: {exc}", unavailable=True)
     if result.returncode != 0:
-        detail = (result.stderr or "").strip() or f"exit status {result.returncode}"
-        return GitProbe("", f"{label} failed: {detail}")
+        stderr = (result.stderr or "").strip()
+        detail = stderr or f"exit status {result.returncode}"
+        return GitProbe("", f"{label} failed: {detail}", stderr=stderr)
     return GitProbe(result.stdout.strip())
 
 
@@ -155,19 +161,29 @@ class HeadCommit:
     error: str = ""
 
 
+# Untranslated (LC_ALL=C) git messages that mean "there is no commit here":
+# not inside a repository at all, or a repository whose HEAD is unborn.
+_NO_COMMIT_MESSAGES = (
+    "not a git repository",
+    "ambiguous argument 'HEAD': unknown revision",
+)
+
+
 def git_head_commit(root: str | Path | None) -> HeadCommit:
     """Ask ``git rev-parse HEAD`` for the commit a capture should record.
 
-    A normal non-zero exit (not a repository, unborn HEAD) means there is no
-    commit to record. A timeout, or git that cannot run at all, means the
-    commit is *unknown*: the error is returned for the caller to record and a
-    stderr warning is printed, so provenance is never dropped silently.
+    Only git clearly saying there is no commit (not a repository, unborn
+    HEAD) means there is no commit to record. Any other failure -- a timeout,
+    git that cannot run, or git refusing the repository (e.g. safe.directory
+    "dubious ownership") -- means the commit is *unknown*: the error is
+    returned for the caller to record and a stderr warning is printed, so
+    provenance is never dropped silently.
     """
 
-    probe = run_git(root, "rev-parse", "HEAD")
+    probe = run_git(root, "rev-parse", "HEAD", c_locale=True)
     if probe.ok:
         return HeadCommit(probe.stdout)
-    if not (probe.timed_out or probe.unavailable):
+    if any(message in probe.stderr for message in _NO_COMMIT_MESSAGES):
         return HeadCommit("")
     hint = (
         f" Set {GIT_TIMEOUT_ENV} (seconds, default {DEFAULT_GIT_TIMEOUT_SECONDS:g}) to allow "
@@ -201,20 +217,21 @@ class DirtyState:
     error: str = ""
 
 
-def git_dirty_state(root: str | Path | None, *, commit: str) -> DirtyState:
+def git_dirty_state(root: str | Path | None, *, head: HeadCommit) -> DirtyState:
     """Ask ``git status --porcelain`` whether the working tree is dirty.
 
-    ``commit`` is the HEAD the caller is about to record. When git cannot
-    answer (timeout, or an error inside a repository with a commit) the state is
-    unknown: ``DirtyState(None, reason)`` plus a stderr warning, so no caller
-    pairs a real commit SHA with a false "clean" claim. Outside a repository
-    (no commit and git exited normally) there is no working tree to be dirty.
+    ``head`` is the HEAD probe the caller is about to record. When git cannot
+    answer (timeout, or an error inside a repository with a commit, or where
+    the commit itself is unknown) the state is unknown: ``DirtyState(None,
+    reason)`` plus a stderr warning, so no caller pairs a commit with a false
+    "clean" claim. Only where git said there is no commit, and status then
+    failed normally, is there no working tree to be dirty.
     """
 
     probe = run_git(root, "status", "--porcelain")
     if probe.ok:
         return DirtyState(bool(probe.stdout))
-    if not commit and not (probe.timed_out or probe.unavailable):
+    if not head.commit and not head.error and not (probe.timed_out or probe.unavailable):
         return DirtyState(False)
     hint = (
         f" Set {GIT_TIMEOUT_ENV} (seconds, default {DEFAULT_GIT_TIMEOUT_SECONDS:g}) to allow "

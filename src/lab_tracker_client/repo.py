@@ -879,7 +879,7 @@ def git_context(cwd: str | Path | None = None) -> JsonObject:
     commit = head.commit
     context: JsonObject = {
         **head_commit_fields(head),
-        **dirty_state_fields(git_dirty_state(root, commit=commit)),
+        **dirty_state_fields(git_dirty_state(root, head=head)),
     }
     if commit:
         context["git_commit_short"] = commit[:12]

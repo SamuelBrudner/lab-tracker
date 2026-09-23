@@ -745,7 +745,7 @@ def git_context(cwd: str | Path | None = None) -> JsonObject:
     head = git_head_commit(root)
     return {
         **head_commit_fields(head),
-        **dirty_state_fields(git_dirty_state(root, commit=head.commit)),
+        **dirty_state_fields(git_dirty_state(root, head=head)),
     }
 
 
