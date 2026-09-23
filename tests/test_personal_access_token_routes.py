@@ -573,6 +573,36 @@ def test_valid_token_forbidden_requests_stay_403_and_never_lock_the_token(
     assert forbidden_at_quota.json()["error"]["code"] == "service_forbidden"
 
 
+def test_auth_middleware_matches_paths_relative_to_the_root_path(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    """Under a mounted root path the public and /auth policies still apply (L33/L34).
+
+    ASGI servers put the root path in front of ``scope["path"]``; the router
+    strips it, so the auth middleware must match the same route-relative path.
+    """
+    target_id, _ = _register_and_login(client, role=Role.VIEWER, prefix="target")
+    admin_pat = _create_token(client, admin_auth_headers, role="admin", read_only=False)
+    rooted = TestClient(client.app, root_path="/lab")
+
+    health = rooted.get("/lab/health")
+    app_shell = rooted.get("/lab/app")
+    promote = rooted.patch(
+        f"/lab/auth/users/{target_id}",
+        json={"role": "admin"},
+        headers=_bearer(admin_pat["secret"]),
+    )
+
+    assert health.status_code == 200, health.text
+    assert app_shell.status_code == 200, app_shell.text
+    assert "frame-ancestors 'none'" in app_shell.headers["Content-Security-Policy"]
+    assert promote.status_code == 403, promote.text
+    assert promote.json()["error"]["code"] == "service_forbidden"
+    target = client.app.state.auth_service.get_user_by_id(UUID(target_id))
+    assert target.role is Role.VIEWER
+
+
 def _register_and_login(
     client: TestClient,
     *,

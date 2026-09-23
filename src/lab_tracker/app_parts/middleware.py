@@ -161,7 +161,13 @@ def configure_auth_middleware(app: FastAPI) -> None:
         if not request.app.state.auth_enabled:
             request.state.auth_context = local_auth_context()
             return await call_next(request)
-        if request.method == "OPTIONS" or _is_public_path(request.url.path):
+        # Match the route-relative path the router sees: under a mounted root
+        # path, request.url.path carries the prefix and would miss every
+        # public path and /auth policy below.
+        path = _route_relative_path(request)
+        if not isinstance(path, str):
+            return _auth_error_response("Authentication required.")
+        if request.method == "OPTIONS" or _is_public_path(path):
             return await call_next(request)
         try:
             token = extract_bearer_token(request.headers.get("Authorization"))
@@ -172,7 +178,7 @@ def configure_auth_middleware(app: FastAPI) -> None:
                 )
                 if principal is None:
                     raise AuthError("Invalid device token.")
-                if not device_principal_can_access(request.method, request.url.path):
+                if not device_principal_can_access(request.method, path):
                     return _device_forbidden_response(
                         "This action is not permitted for paired devices."
                     )
@@ -203,7 +209,7 @@ def configure_auth_middleware(app: FastAPI) -> None:
                     raise AuthError("Invalid personal access token.")
                 if not service_principal_can_access(
                     request.method,
-                    request.url.path,
+                    path,
                     read_only=principal.read_only,
                     role=principal.role,
                     scope=principal.scope,
@@ -256,7 +262,8 @@ def configure_security_headers_middleware(app: FastAPI) -> None:
                 "Strict-Transport-Security",
                 "max-age=31536000; includeSubDomains",
             )
-        if _should_apply_csp(request.url.path):
+        path = _route_relative_path(request)
+        if isinstance(path, str) and _should_apply_csp(path):
             response.headers.setdefault(
                 "Content-Security-Policy",
                 _APP_CONTENT_SECURITY_POLICY,
