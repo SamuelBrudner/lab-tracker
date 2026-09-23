@@ -206,10 +206,14 @@ function useReviewDictation({ changeSetId, spokenReview, canEditDraft, setFlash 
         }
         setIsRecording(false);
       });
-      mediaRecorderRef.current = recorder;
+      // Publish the recorder only once it has started: a recorder whose
+      // start() threw must not stay in the ref, or every later start is
+      // refused as already recording until remount.
       recorder.start();
+      mediaRecorderRef.current = recorder;
       setIsRecording(true);
     } catch {
+      mediaRecorderRef.current = null;
       stopAudioStream();
       if (mountedRef.current) {
         setIsRecording(false);

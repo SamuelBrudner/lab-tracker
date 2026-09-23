@@ -1272,4 +1272,63 @@ describe("GraphDraftDetailCard audio review", () => {
     unmount();
     expect(track.stop).toHaveBeenCalledTimes(2);
   });
+
+  it("can dictate again after the recorder fails to start", async () => {
+    installSpeechSynthesis();
+    const draft = draftFixture({ draft_mode: "graph_context" });
+    const track = { stop: vi.fn() };
+    const getUserMedia = vi.fn().mockResolvedValue({ getTracks: () => [track] });
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: { getUserMedia },
+    });
+    let startAttempts = 0;
+
+    class FlakyMediaRecorder {
+      static isTypeSupported() {
+        return true;
+      }
+
+      constructor(_stream, options = {}) {
+        this.listeners = {};
+        this.mimeType = options.mimeType || "audio/webm";
+        this.state = "inactive";
+      }
+
+      addEventListener(name, callback) {
+        this.listeners[name] = callback;
+      }
+
+      start() {
+        startAttempts += 1;
+        if (startAttempts === 1) {
+          throw new DOMException("The stream is inactive.", "InvalidStateError");
+        }
+        this.state = "recording";
+      }
+
+      stop() {
+        this.state = "inactive";
+        this.listeners.stop?.();
+      }
+    }
+    vi.stubGlobal("MediaRecorder", FlakyMediaRecorder);
+    const setFlash = vi.fn();
+
+    renderDraft(draft, { setFlash });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Dictate feedback" }));
+    await waitFor(() =>
+      expect(setFlash).toHaveBeenLastCalledWith(
+        "",
+        "Could not access the microphone. Check browser permissions."
+      )
+    );
+    expect(track.stop).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Dictate feedback" }));
+
+    expect(await screen.findByRole("button", { name: "Stop recording" })).toBeInTheDocument();
+    expect(getUserMedia).toHaveBeenCalledTimes(2);
+  });
 });
