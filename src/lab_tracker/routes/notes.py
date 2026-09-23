@@ -11,7 +11,7 @@ from uuid import UUID
 from fastapi import APIRouter, BackgroundTasks, FastAPI, File, Form, Query, UploadFile
 from starlette import status as http_status
 from starlette.requests import Request
-from starlette.responses import Response
+from starlette.responses import Response, StreamingResponse
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.auth import AuthContext
@@ -255,14 +255,21 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
             note_id,
             actor=actor_from_request(request),
         )
-        raw_asset, content = api_from_request(request, api).download_note_raw(note_id)
         accept = (request.headers.get("accept") or "").lower()
         if "application/json" not in accept:
+            raw_asset, chunks = api_from_request(request, api).stream_note_raw(note_id)
             headers = {
                 "Content-Disposition": content_disposition_header("attachment", raw_asset.filename),
                 "Content-Length": str(raw_asset.size_bytes),
             }
-            return Response(content=content, media_type=raw_asset.content_type, headers=headers)
+            return StreamingResponse(
+                chunks,
+                media_type=raw_asset.content_type,
+                headers=headers,
+            )
+        # The JSON envelope embeds the whole asset as base64, so it is
+        # inherently whole-payload; binary clients get the stream above.
+        raw_asset, content = api_from_request(request, api).download_note_raw(note_id)
         encoded = base64.b64encode(content).decode("ascii")
         payload = NoteRawDownloadRead(
             storage_id=raw_asset.storage_id,

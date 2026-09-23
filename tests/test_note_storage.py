@@ -260,3 +260,17 @@ def test_graph_draft_image_storage_failure_is_a_server_error_not_a_client_error(
     with pytest.raises(PermissionError):
         api.build_graph_context_for_note(note.note_id, actor=actor)
 
+
+
+def test_local_note_storage_iter_chunks_streams_bounded_chunks(tmp_path):
+    storage = LocalNoteStorage(tmp_path)
+    asset = storage.store(b"abcdefghij", filename="capture.bin", content_type="image/png")
+
+    assert list(storage.iter_chunks(asset.storage_id, chunk_size=4)) == [b"abcd", b"efgh", b"ij"]
+
+
+def test_local_note_storage_iter_chunks_missing_asset_raises_before_iteration(tmp_path):
+    storage = LocalNoteStorage(tmp_path)
+
+    with pytest.raises(NotFoundError, match="Raw note content not found."):
+        storage.iter_chunks(uuid4())

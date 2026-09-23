@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, BinaryIO
 from uuid import UUID, uuid4
@@ -879,6 +879,17 @@ class NoteService(BaseService):
             raise ValidationError("Raw storage backend is not configured.")
         content = self.raw_storage.read(note.raw_asset.storage_id)
         return note.raw_asset, content
+
+    def stream_note_raw(self, note_id: UUID) -> tuple[NoteRawAsset, Iterator[bytes]]:
+        """Return the raw asset and its bytes as a bounded-chunk stream."""
+
+        note = self.get_note(note_id)
+        if note.raw_asset is None:
+            raise NotFoundError("Note does not have raw content.")
+        if self.raw_storage is None:
+            raise ValidationError("Raw storage backend is not configured.")
+        chunks = self.raw_storage.iter_chunks(note.raw_asset.storage_id)
+        return note.raw_asset, chunks
 
     def read_note_raw_text(
         self,
