@@ -11,6 +11,13 @@ const OWNER = {
   username: "e2e-offline-owner-a",
 };
 
+// All attempts share one long-lived server, and project creation replays by
+// client_capture_id, so every retry/repeat needs its own ids or it would get
+// back the previous attempt's already-onboarded project.
+function attemptId(testInfo) {
+  return `${testInfo.repeatEachIndex}-${testInfo.retry}`;
+}
+
 async function responseData(response) {
   return (await response.json()).data;
 }
@@ -54,12 +61,12 @@ async function signIn(page, account) {
 test("an ongoing-project member checkpoints, aligns manually, and completes a forward capture", async ({
   page,
   request,
-}) => {
+}, testInfo) => {
   const projectResponse = await request.post("/projects", {
     data: {
-      client_capture_id: "e2e-member-onboarding-project-v1",
+      client_capture_id: `e2e-member-onboarding-project-${attemptId(testInfo)}`,
       description: "A scientific project already in motion before Lab Tracker adoption.",
-      name: "E2E ongoing project orientation",
+      name: `E2E ongoing project orientation ${attemptId(testInfo)}`,
     },
   });
   expect([200, 201]).toContain(projectResponse.status());
@@ -145,16 +152,16 @@ test("an authenticated contributor reviews AI alignment before an owner commits 
   const contributorAccount = {
     password: "E2e-onboarding-contributor-password-2026!",
     role: "viewer",
-    username: `e2e-onboarding-contributor-${testInfo.retry}`,
+    username: `e2e-onboarding-contributor-${attemptId(testInfo)}`,
   };
   const owner = await registerOrLogin(apiRequest, OWNER);
   const contributor = await registerOrLogin(apiRequest, contributorAccount);
 
   const projectResponse = await apiRequest.post(`${authEnabledBaseURL}/projects`, {
     data: {
-      client_capture_id: `e2e-auth-member-onboarding-${testInfo.retry}`,
+      client_capture_id: `e2e-auth-member-onboarding-${attemptId(testInfo)}`,
       description: "An auth-enabled project for owner-gated onboarding review.",
-      name: `E2E authenticated onboarding ${testInfo.retry}`,
+      name: `E2E authenticated onboarding ${attemptId(testInfo)}`,
     },
     headers: { Authorization: `Bearer ${owner.access_token}` },
   });
@@ -225,6 +232,8 @@ test("an authenticated contributor reviews AI alignment before an owner commits 
     const ownerPage = await ownerContext.newPage();
     await ownerPage.goto("/app");
     await signIn(ownerPage, OWNER);
+    // An earlier attempt's project may also exist; open this attempt's one.
+    await ownerPage.getByLabel("Active project").selectOption(project.project_id);
 
     const ownerQueue = ownerPage.locator(".member-onboarding-owner-queue");
     await expect(ownerQueue).toContainText("1 member map awaits your commit");
