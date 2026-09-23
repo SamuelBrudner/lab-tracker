@@ -18,7 +18,11 @@ from sqlalchemy import select
 from lab_tracker.app_parts.middleware import system_auth_context
 from lab_tracker.auth import AuthContext, PrincipalType, Role, utc_now
 from lab_tracker.config import Settings
-from lab_tracker.db_models import GraphChangeOperationModel, GraphChangeSetModel
+from lab_tracker.db_models import (
+    GraphChangeOperationModel,
+    GraphChangeSetModel,
+    UsageEventModel,
+)
 from lab_tracker.errors import AuthError, PermissionDeniedError, ValidationError
 from lab_tracker.graph_drafting import (
     AgenticGraphDraftClient,
@@ -3685,3 +3689,40 @@ def test_agentic_provider_note_drafts_use_the_wrapped_single_shot_client(
     assert analysis_draft.json()["data"]["status"] == "ready"
     assert base.calls[0]["draft_mode"] == "graph_context"
     assert "method_hash=abc123" in base.calls[1]["evidence_text"]
+
+
+def test_revise_graph_draft_records_exactly_one_usage_event(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    client.app.state.settings.usage_events = True
+    project_id = _project(client, admin_auth_headers)
+    note_id = _image_note(client, admin_auth_headers, project_id)
+    initial = FakeDraftClient(_draft_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: initial
+    created = client.post(f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers)
+    assert created.status_code == 201, created.text
+    change_set_id = created.json()["data"]["change_set_id"]
+    with client.app.state.db_session_factory() as session:
+        before = set(session.scalars(select(UsageEventModel.event_id)).all())
+
+    revised_client = FakeDraftClient(_revised_draft_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: revised_client
+    response = client.post(
+        f"/graph-drafts/{change_set_id}/revise",
+        data={"feedback": "Keep only the protocol question."},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    with client.app.state.db_session_factory() as session:
+        new_events = [
+            row
+            for row in session.scalars(select(UsageEventModel)).all()
+            if row.event_id not in before
+        ]
+        assert [(row.verb, row.resource_type) for row in new_events] == [
+            ("update", "graph_change_set")
+        ]
+        assert str(new_events[0].resource_id) == change_set_id
+        assert str(new_events[0].project_id) == project_id

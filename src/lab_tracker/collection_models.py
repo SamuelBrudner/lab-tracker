@@ -101,6 +101,10 @@ class AcquisitionCollectionCaptureResult(_CollectionModel):
     # True only for an exact client_capture_id replay, which writes nothing.
     capture_replayed: bool = False
 
+    @property
+    def collection_id(self) -> UUID:
+        return self.collection.collection_id
+
 
 def snapshot_with_capture_observation(
     snapshot: AcquisitionCollectionSnapshot,

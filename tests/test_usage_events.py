@@ -24,6 +24,10 @@ from lab_tracker.db_models import UsageEventModel, UsageEventRollupModel
 from lab_tracker.mcp_api_client import LabTrackerAPIClient, MCPSettings
 from lab_tracker.models import StoreKind
 from lab_tracker.services import base as service_base
+from lab_tracker.services.evidence_bundle_service import (
+    CreateSourceNoteIntent,
+    RecordEvidenceBundleCommand,
+)
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 from lab_tracker_client.client import LabTracker
 
@@ -572,3 +576,160 @@ def _usage_api(*, usage_events: bool) -> LabTrackerAPI:
     api._test_resources = (engine, session)  # type: ignore[attr-defined]
     register_test_resources(engine, session)
     return api
+
+
+def _usage_rows(client: TestClient) -> list[UsageEventModel]:
+    with client.app.state.db_session_factory() as session:
+        rows = session.scalars(select(UsageEventModel)).all()
+        for row in rows:
+            session.expunge(row)
+        return list(rows)
+
+
+def _new_usage_rows(
+    client: TestClient,
+    before: list[UsageEventModel],
+) -> list[UsageEventModel]:
+    seen = {str(row.event_id) for row in before}
+    return [row for row in _usage_rows(client) if str(row.event_id) not in seen]
+
+
+def test_collection_snapshot_capture_records_exactly_one_usage_event(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    client.app.state.settings.usage_events = True
+    project = client.post(
+        "/projects",
+        json={"name": "Collection telemetry"},
+        headers=admin_auth_headers,
+    )
+    assert project.status_code == 201
+    session = client.post(
+        "/sessions",
+        json={
+            "project_id": project.json()["data"]["project_id"],
+            "session_type": "operational",
+        },
+        headers=admin_auth_headers,
+    )
+    assert session.status_code == 201
+    session_id = session.json()["data"]["session_id"]
+    before = _usage_rows(client)
+
+    response = client.post(
+        f"/sessions/{session_id}/collections/trials/snapshots",
+        json={
+            "client_capture_id": "capture-telemetry-1",
+            "observed_at": "2026-09-21T12:00:00Z",
+            "complete": True,
+            "manifest": {
+                "schema_version": 1,
+                "members": [{"path": "trial-0001/data.bin", "checksum": "a" * 64, "size_bytes": 3}],
+            },
+        },
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 201, response.text
+    [event] = _new_usage_rows(client, before)
+    assert event.verb == "create"
+    assert event.resource_type == "acquisition_collection"
+    assert str(event.resource_id) == response.json()["data"]["collection_id"]
+    assert event.outcome == "ok"
+
+
+@pytest.mark.parametrize(
+    ("dry_run", "expected_status", "expected_verb"),
+    [(False, 201, "create"), (True, 200, "view")],
+)
+def test_evidence_bundle_records_exactly_one_usage_event(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    dry_run: bool,
+    expected_status: int,
+    expected_verb: str,
+) -> None:
+    client.app.state.settings.usage_events = True
+    project = client.post(
+        "/projects",
+        json={"name": "Bundle telemetry"},
+        headers=admin_auth_headers,
+    )
+    assert project.status_code == 201
+    project_id = project.json()["data"]["project_id"]
+    before = _usage_rows(client)
+
+    response = client.post(
+        "/evidence-bundles",
+        json={
+            "project_id": project_id,
+            "source_note": {"kind": "create", "raw_content": "Telemetry evidence"},
+            "dry_run": dry_run,
+            "idempotency_key": "bundle-telemetry-key",
+        },
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == expected_status, response.text
+    [event] = _new_usage_rows(client, before)
+    assert event.verb == expected_verb
+    assert event.resource_type == "evidence_bundle"
+    assert str(event.project_id) == project_id
+    assert event.outcome == "ok"
+
+
+def test_failed_evidence_bundle_records_one_error_usage_event(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    client.app.state.settings.usage_events = True
+    project = client.post(
+        "/projects",
+        json={"name": "Bundle error telemetry"},
+        headers=admin_auth_headers,
+    )
+    assert project.status_code == 201
+    project_id = project.json()["data"]["project_id"]
+    before = _usage_rows(client)
+
+    response = client.post(
+        "/evidence-bundles",
+        json={
+            "project_id": project_id,
+            "source_note": {"kind": "existing", "note_id": str(uuid4())},
+            "dry_run": False,
+            "idempotency_key": "bundle-telemetry-missing-note",
+        },
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code >= 400, response.text
+    [event] = _new_usage_rows(client, before)
+    assert event.verb == "create"
+    assert event.resource_type == "evidence_bundle"
+    assert str(event.project_id) == project_id
+    assert event.outcome == "error"
+
+
+def test_direct_evidence_bundle_call_records_usage_without_nesting_its_transaction() -> None:
+    api = _usage_api(usage_events=True)
+    actor = AuthContext(user_id=uuid4(), role=Role.ADMIN)
+    project = api.create_project("Direct bundle telemetry", actor=actor)
+
+    result = api.record_evidence_bundle(
+        RecordEvidenceBundleCommand(
+            project_id=project.project_id,
+            source_note=CreateSourceNoteIntent(raw_content="Direct evidence"),
+            dry_run=False,
+            idempotency_key="direct-bundle-key",
+        ),
+        actor=actor,
+    )
+
+    assert result.outcome == "created"
+    events, _total = api.query_usage_events()
+    bundle_events = [event for event in events if event.resource_type == "evidence_bundle"]
+    assert len(bundle_events) == 1
+    assert bundle_events[0].verb == "create"
+    assert bundle_events[0].project_id == project.project_id

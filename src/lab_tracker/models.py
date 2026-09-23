@@ -191,6 +191,8 @@ class UsageEventResourceType(str, Enum):
     SEARCH = "search"
     SUPERVISION_EDGE = "supervision_edge"
     ACQUISITION_OUTPUT = "acquisition_output"
+    ACQUISITION_COLLECTION = "acquisition_collection"
+    EVIDENCE_BUNDLE = "evidence_bundle"
     USAGE_EVENT = "usage_event"
 
 

@@ -294,12 +294,19 @@ class GraphDraftsApiMixin:
         draft_client: GraphDraftClient,
         actor: AuthContext | None = None,
     ) -> GraphChangeSet:
-        return self.graph_drafts.revise_graph_change_set(
-            change_set_id,
-            feedback=feedback,
-            inputs=inputs,
-            draft_client=draft_client,
+        return self._with_usage_event(
+            lambda: self.graph_drafts.revise_graph_change_set(
+                change_set_id,
+                feedback=feedback,
+                inputs=inputs,
+                draft_client=draft_client,
+                actor=actor,
+            ),
+            verb=UsageEventVerb.UPDATE,
+            resource_type=UsageEventResourceType.GRAPH_CHANGE_SET,
             actor=actor,
+            resource_id=change_set_id,
+            resource_id_attr="change_set_id",
         )
 
     def commit_graph_change_set(
