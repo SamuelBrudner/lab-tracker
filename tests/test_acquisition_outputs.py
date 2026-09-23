@@ -152,7 +152,7 @@ def test_acquisition_output_watcher_skips_hash_for_unchanged_files(
         hash_calls.append(path.name)
         return "sha256:counted"
 
-    monkeypatch.setattr("lab_tracker.acquisition_watcher._hash_file", counting_hash)
+    monkeypatch.setattr("lab_tracker.file_watch.file_sha256", counting_hash)
     watcher = AcquisitionOutputWatcher(
         api,
         session.session_id,
@@ -205,7 +205,7 @@ def test_acquisition_output_watcher_waits_for_stable_file(
         path.write_text("second")
         return "first-hash"
 
-    monkeypatch.setattr("lab_tracker.acquisition_watcher._hash_file", changing_hash)
+    monkeypatch.setattr("lab_tracker.file_watch.file_sha256", changing_hash)
     watcher = AcquisitionOutputWatcher(
         api,
         session.session_id,

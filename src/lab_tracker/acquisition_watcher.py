@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import time
 from collections.abc import Iterable, Mapping
@@ -15,7 +14,7 @@ from uuid import UUID
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.auth import AuthContext
 from lab_tracker.errors import AuthError, NotFoundError, RateLimitError, ValidationError
-from lab_tracker.file_watch import discover_files
+from lab_tracker.file_watch import FileFingerprint, discover_files, stable_file_fingerprint
 from lab_tracker.models import AcquisitionOutput
 
 _logger = logging.getLogger(__name__)
@@ -33,29 +32,6 @@ class RegistrationFailure:
     retry_after: float | None
     """``time.monotonic()`` deadline for the next attempt; ``None`` when the
     file was rejected and is retried only after it changes."""
-
-
-@dataclass(frozen=True)
-class _FileFingerprint:
-    size_bytes: int
-    mtime: float
-    checksum: str
-
-
-def _hash_file(path: Path, *, chunk_size: int = 1024 * 1024) -> str:
-    hasher = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(chunk_size), b""):
-            hasher.update(chunk)
-    return hasher.hexdigest()
-
-
-def _is_hidden_relative(path: Path, *, relative_to: Path) -> bool:
-    try:
-        candidate = path.relative_to(relative_to)
-    except ValueError:
-        candidate = path
-    return any(part.startswith(".") for part in candidate.parts)
 
 
 class AcquisitionOutputWatcher:
@@ -99,9 +75,9 @@ class AcquisitionOutputWatcher:
         self._max_failure_backoff_seconds = max_failure_backoff_seconds
         self._persistent_failure_threshold = persistent_failure_threshold
         self._base_path = Path(base_path).resolve() if base_path is not None else None
-        self._fingerprints: dict[Path, _FileFingerprint] = {}
+        self._fingerprints: dict[Path, FileFingerprint] = {}
         self._failures: dict[Path, RegistrationFailure] = {}
-        self._rejected: dict[Path, _FileFingerprint] = {}
+        self._rejected: dict[Path, FileFingerprint] = {}
         self._failure_count = 0
 
     @property
@@ -154,7 +130,7 @@ class AcquisitionOutputWatcher:
                 and fingerprint.mtime == current_stat.st_mtime
             ):
                 continue
-            new_fingerprint = self._stable_fingerprint(file_path)
+            new_fingerprint = stable_file_fingerprint(file_path)
             if new_fingerprint is None:
                 continue
             if fingerprint and fingerprint.checksum == new_fingerprint.checksum:
@@ -227,7 +203,7 @@ class AcquisitionOutputWatcher:
         )
 
     def _record_rejection(
-        self, path: Path, fingerprint: _FileFingerprint, error: ValidationError
+        self, path: Path, fingerprint: FileFingerprint, error: ValidationError
     ) -> None:
         previous = self._failures.get(path)
         attempts = 1 if previous is None else previous.attempts + 1
@@ -266,21 +242,6 @@ class AcquisitionOutputWatcher:
             return str(resolved.relative_to(self._base_path))
         except ValueError:
             return str(resolved)
-
-    def _stable_fingerprint(self, path: Path) -> _FileFingerprint | None:
-        try:
-            before = path.stat()
-            checksum = _hash_file(path)
-            after = path.stat()
-        except (FileNotFoundError, PermissionError):
-            return None
-        if before.st_size != after.st_size or before.st_mtime != after.st_mtime:
-            return None
-        return _FileFingerprint(
-            size_bytes=after.st_size,
-            mtime=after.st_mtime,
-            checksum=checksum,
-        )
 
     def _iter_files(self) -> Iterable[Path]:
         for root in self._watch_paths:
