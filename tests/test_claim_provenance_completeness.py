@@ -197,7 +197,15 @@ def test_ara_evidence_layer_keeps_dataset_time_supervision() -> None:
     assert _supervisor_ids(creator) == {_agent(SUPERVISOR), _agent(CLAIM_SUPERVISOR)}
 
 
-def test_ara_logic_layer_keeps_supervision_from_each_activity_time() -> None:
+def test_ara_logic_layer_consistency_guard_keeps_supervision_from_each_activity_time() -> None:
+    """Consistency guard, not an M41 reproduction.
+
+    The logic layer never merges dataset/analysis sub-documents, so it never
+    had the overwrite M41 fixed and this passes with that fix reverted. It
+    pins that the layer keeps agreeing with the claim and evidence documents:
+    one person node carrying the supervision active at every activity time.
+    """
+
     claim = _claim(_dataset())
     exploration = _exploration_node(
         DATASET_TIME,
@@ -210,7 +218,15 @@ def test_ara_logic_layer_keeps_supervision_from_each_activity_time() -> None:
     assert _supervisor_ids(creator) == {_agent(SUPERVISOR), _agent(CLAIM_SUPERVISOR)}
 
 
-def test_ara_trace_layer_keeps_supervision_from_each_activity_time() -> None:
+def test_ara_trace_layer_consistency_guard_keeps_supervision_from_each_activity_time() -> None:
+    """Consistency guard, not an M41 reproduction.
+
+    The trace layer never merges sub-document person nodes, so it never had
+    the overwrite M41 fixed and this passes with that fix reverted. It pins
+    that the layer keeps agreeing with the claim and evidence documents: one
+    person node carrying the supervision active at every activity time.
+    """
+
     question = Question(
         question_id=UUID("22222222-2222-2222-2222-000000000001"),
         project_id=PROJECT,
