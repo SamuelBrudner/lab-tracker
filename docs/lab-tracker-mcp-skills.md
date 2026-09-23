@@ -325,7 +325,11 @@ Defaults:
 - Override mirror path with `LAB_TRACKER_DOLT_MIRROR_PATH`
 
 The exporter mirrors retained Lab Tracker tables, including graph draft review
-tables, and excludes `users`.
+tables, and excludes account, credential, and telemetry tables (`users`,
+`invitations`, `personal_access_tokens`, `device_tokens`, `device_enrollments`,
+`usage_events`, `usage_event_rollups`, `review_email_outbox`). A table that was
+exported by an older version is dropped from the next snapshot, but it remains
+in earlier Dolt commits.
 
 ## Skill
 

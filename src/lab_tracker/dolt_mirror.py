@@ -19,7 +19,21 @@ from lab_tracker.db import Base, get_engine
 
 DEFAULT_MIRROR_PATH = ".lab-tracker-dolt"
 DEFAULT_EXPORT_DIR = "_export"
-EXCLUDED_TABLES = frozenset({"users"})
+# The mirror is meant to be versioned and shared, so it carries research
+# records only: no accounts, credential/token hashes, enrollment offers,
+# invitation or notification e-mail addresses, or usage telemetry.
+EXCLUDED_TABLES = frozenset(
+    {
+        "users",
+        "invitations",
+        "personal_access_tokens",
+        "device_tokens",
+        "device_enrollments",
+        "usage_events",
+        "usage_event_rollups",
+        "review_email_outbox",
+    }
+)
 NULL_SENTINEL = "__LAB_TRACKER_NULL__"
 
 

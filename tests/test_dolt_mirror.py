@@ -57,6 +57,34 @@ def test_retained_table_exports_exclude_users() -> None:
     assert "graph_change_operations" in table_names
 
 
+@pytest.mark.parametrize(
+    "table_name",
+    [
+        "users",
+        "invitations",
+        "personal_access_tokens",
+        "device_tokens",
+        "device_enrollments",
+        "usage_events",
+        "usage_event_rollups",
+        "review_email_outbox",
+    ],
+)
+def test_retained_tables_exclude_credentials_personal_data_and_telemetry(
+    table_name: str,
+) -> None:
+    assert table_name in Base.metadata.tables
+    table_names = {table.name for table in dolt_mirror.retained_tables()}
+
+    assert table_name not in table_names
+
+
+def test_retained_tables_never_export_token_hash_columns() -> None:
+    for table in dolt_mirror.retained_tables():
+        hashed = [column.name for column in table.columns if "token_hash" in column.name]
+        assert hashed == [], f"{table.name} exports {hashed}"
+
+
 def test_retained_tables_sort_without_graph_change_note_fk_cycle_warning() -> None:
     with warnings.catch_warnings():
         warnings.filterwarnings(
