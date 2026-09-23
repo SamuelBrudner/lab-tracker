@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 
 from starlette.formparsers import MultiPartException
 from starlette.requests import Request
@@ -218,17 +218,3 @@ async def _send_payload_too_large(scope: Scope, send: Send, max_bytes: int) -> N
 def enforce_stream_size_limit(size_bytes: int, *, max_bytes: int | None) -> None:
     if max_bytes is not None and size_bytes > max_bytes:
         raise PayloadTooLargeError(_upload_limit_message(max_bytes))
-
-
-def size_limited_chunks(
-    chunks: Iterable[bytes],
-    *,
-    max_bytes: int | None,
-) -> Iterable[bytes]:
-    total = 0
-    for chunk in chunks:
-        if not chunk:
-            continue
-        total += len(chunk)
-        enforce_stream_size_limit(total, max_bytes=max_bytes)
-        yield chunk

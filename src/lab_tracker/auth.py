@@ -659,16 +659,12 @@ class InvitationTokenService:
 
     def __init__(
         self,
-        secret_key: str,
         *,
         ttl_hours: int = 168,
         session_factory: sessionmaker[Session] | None = None,
     ) -> None:
-        if not secret_key or not secret_key.strip():
-            raise ValidationError("auth_secret_key must not be empty.")
         if ttl_hours < 1:
             raise ValidationError("auth_invite_ttl_hours must be at least 1.")
-        self._secret = secret_key.encode("utf-8")
         self._ttl_hours = ttl_hours
         self._session_factory = session_factory
         self._memory_invitations_by_hash: dict[str, InvitationModel] = {}
@@ -699,10 +695,6 @@ class InvitationTokenService:
             session.refresh(row)
             return IssuedInvitation(invitation=_invitation_from_model(row), token=token)
 
-    def issue_invitation_token(self, *, email: str, role: Role) -> tuple[str, datetime]:
-        issued = self.issue_invitation(email=email, role=role)
-        return issued.token, issued.invitation.expires_at
-
     def verify_invitation_token(self, token: str) -> InvitationClaims:
         _ensure_non_empty(token, "invite_token")
         invitation = self._invitation_for_token(token)
@@ -714,44 +706,6 @@ class InvitationTokenService:
             expires_at=invitation.expires_at,
             issued_at=invitation.created_at,
         )
-
-    def consume_invitation_token(self, token: str, *, consumed_by_user_id: UUID) -> Invitation:
-        _ensure_non_empty(token, "invite_token")
-        token_hash = _hash_token(token)
-        if self._session_factory is None:
-            with self._memory_lock:
-                row = self._memory_invitations_by_hash.get(token_hash)
-                if row is None:
-                    raise AuthError("Invitation token is invalid.")
-                invitation = _invitation_from_model(row)
-                self._ensure_invitation_pending(invitation)
-                row.consumed_at = utc_now()
-                row.consumed_by_user_id = consumed_by_user_id
-                return _invitation_from_model(row)
-
-        with self._session_factory() as session:
-            row = session.scalar(
-                select(InvitationModel).where(InvitationModel.token_hash == token_hash)
-            )
-            if row is None:
-                raise AuthError("Invitation token is invalid.")
-            invitation = _invitation_from_model(row)
-            self._ensure_invitation_pending(invitation)
-            consumed_at = utc_now()
-            if not self._claim_persistent_invitation(
-                session,
-                invitation_id=invitation.invitation_id,
-                token_hash=token_hash,
-                consumed_by_user_id=consumed_by_user_id,
-                consumed_at=consumed_at,
-            ):
-                session.rollback()
-                raise AuthError("Invitation is no longer available.")
-            session.commit()
-            consumed_row = session.get(InvitationModel, str(invitation.invitation_id))
-            if consumed_row is None:  # pragma: no cover - protected by the primary key
-                raise AuthError("Invitation token is invalid.")
-            return _invitation_from_model(consumed_row)
 
     @staticmethod
     def _claim_persistent_invitation(
@@ -874,9 +828,6 @@ class InvitationTokenService:
         if not local_part or "." not in domain or domain.endswith("."):
             raise ValidationError("Invite email must be a valid email address.")
         return normalized
-
-    def _sign(self, data: bytes) -> bytes:
-        return hmac.new(self._secret, data, hashlib.sha256).digest()
 
 
 DEVICE_TOKEN_PREFIX = "ldev_"
