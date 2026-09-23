@@ -1103,8 +1103,9 @@ project owner grants: a viewer account made a project contributor can write in
 that project. Personal access tokens additionally need an editor or admin token
 role to write. A fresh auth-enabled instance shows first-admin setup when
 `LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN` is configured. `/health` remains public for
-uptime probes; `/readiness` and `/metrics` require credentials when
-authentication is enabled.
+uptime probes; `/readiness` requires credentials when authentication is
+enabled, and `/metrics` (instance-wide entity counts) additionally requires the
+admin role.
 
 ## Usage telemetry
 

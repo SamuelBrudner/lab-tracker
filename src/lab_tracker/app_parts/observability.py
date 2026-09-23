@@ -8,12 +8,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 from starlette.responses import JSONResponse
 
+from lab_tracker.auth import Role
 from lab_tracker.db_models import (
     AcquisitionOutputModel,
     AnalysisModel,
@@ -26,6 +27,7 @@ from lab_tracker.db_models import (
     SessionModel,
     VisualizationModel,
 )
+from lab_tracker.errors import AuthError, PermissionDeniedError
 
 _START_TIME = datetime.now(timezone.utc)
 _logger = logging.getLogger(__name__)
@@ -198,6 +200,14 @@ def _metrics_snapshot(
     return payload
 
 
+def _require_admin(request: Request) -> None:
+    actor = getattr(request.state, "auth_context", None)
+    if actor is None:
+        raise AuthError("Authentication required.")
+    if actor.role != Role.ADMIN:
+        raise PermissionDeniedError("Only admins can read instance metrics.")
+
+
 def register_observability_routes(
     app: FastAPI,
     *,
@@ -239,7 +249,12 @@ def register_observability_routes(
         return JSONResponse(status_code=503, content=payload)
 
     @app.get("/metrics")
-    def metrics():
+    def metrics(request: Request):
+        # Readiness stays open to any authenticated principal (hosted MCP
+        # startup and ``lt readiness`` probe it with non-admin credentials);
+        # metrics carries instance-wide entity counts across every project,
+        # so only admins may read it.
+        _require_admin(request)
         payload = _metrics_snapshot(
             session_factory,
             environment=environment,
