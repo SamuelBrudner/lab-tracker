@@ -404,6 +404,14 @@ class ProjectService(BaseService):
         self.authorization.require_group_owner(group_id, actor=actor)
         group = self.get_project_group(group_id)
         with self.unit_of_work() as repository:
+            # projects.group_id is ON DELETE SET NULL, so deleting a group with
+            # children would silently strip their group-inherited owner access.
+            _, child_count = repository.query_projects(group_id=group_id, limit=0)
+            if child_count:
+                raise ValidationError(
+                    f"Group cannot be deleted while it contains {child_count} project(s); "
+                    "move or delete them first."
+                )
             repository.project_groups.delete(group_id)
         return group
 

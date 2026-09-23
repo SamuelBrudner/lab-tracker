@@ -396,6 +396,46 @@ def test_group_routes_reject_last_owner_removal_and_allow_group_delete(
     assert get_deleted.status_code == 404
 
 
+def test_group_delete_refuses_while_child_projects_remain(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    group = client.post(
+        "/groups",
+        json={"name": f"Group with children {uuid4().hex[:8]}"},
+        headers=admin_auth_headers,
+    ).json()["data"]
+    # An admin-created project in the group has no direct owner; its owner
+    # access comes only through the group, so deleting the group would orphan it.
+    project_id = _create_project(
+        client,
+        admin_auth_headers,
+        "Group child project",
+        group_id=group["group_id"],
+    )
+
+    refused = client.delete(f"/groups/{group['group_id']}", headers=admin_auth_headers)
+    still_there = client.get(f"/groups/{group['group_id']}", headers=admin_auth_headers)
+    project = client.get(f"/projects/{project_id}", headers=admin_auth_headers)
+
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["error"]["message"] == (
+        "Group cannot be deleted while it contains 1 project(s); "
+        "move or delete them first."
+    )
+    assert still_there.status_code == 200
+    assert project.json()["data"]["group_id"] == group["group_id"]
+
+    moved = client.patch(
+        f"/projects/{project_id}",
+        json={"group_id": None},
+        headers=admin_auth_headers,
+    )
+    assert moved.status_code == 200, moved.text
+    deleted = client.delete(f"/groups/{group['group_id']}", headers=admin_auth_headers)
+    assert deleted.status_code == 200, deleted.text
+
+
 def _group_owner_ids(
     client: TestClient,
     group_id: str,
