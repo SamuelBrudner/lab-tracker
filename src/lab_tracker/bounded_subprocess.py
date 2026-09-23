@@ -645,7 +645,11 @@ class BoundedSubprocessExecutor:
                 "failure": failure,
             },
             name=name,
-            daemon=False,
+            # A descendant that escaped the process group (setsid) can keep the
+            # inherited pipe open after cleanup, leaving this reader blocked in
+            # os.read. run() already reports that as ProcessCleanupError; a
+            # daemon reader keeps it from also delaying interpreter shutdown.
+            daemon=True,
         )
 
     def _drain_pipe(

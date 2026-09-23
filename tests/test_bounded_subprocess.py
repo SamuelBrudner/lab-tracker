@@ -1210,7 +1210,7 @@ def test_invalid_commands_limits_and_cleanup_configuration_fail_before_spawn() -
         BoundedSubprocessExecutor(terminate_grace_seconds=float("inf"))
 
 
-def test_reader_threads_are_named_non_daemon_and_joined() -> None:
+def test_reader_threads_are_named_and_joined() -> None:
     before = {thread.ident for thread in threading.enumerate()}
     _run("print('ok')")
     leaked = [
@@ -1219,6 +1219,49 @@ def test_reader_threads_are_named_non_daemon_and_joined() -> None:
         if thread.ident not in before and thread.name.startswith("lab-tracker-process-")
     ]
     assert leaked == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX sessions")
+def test_readers_stranded_by_an_escaped_descendant_do_not_block_shutdown(
+    tmp_path: Path,
+) -> None:
+    pid_file = tmp_path / "escaped.pid"
+    source = f"""
+import subprocess
+import sys
+
+escaped = subprocess.Popen(
+    [sys.executable, "-c", "import time; time.sleep(30)"],
+    start_new_session=True,
+)
+open({str(pid_file)!r}, "w").write(str(escaped.pid))
+"""
+    before = {thread.ident for thread in threading.enumerate()}
+    try:
+        with pytest.raises(ProcessCleanupError):
+            BoundedSubprocessExecutor(
+                terminate_grace_seconds=0.1,
+                kill_grace_seconds=0.1,
+            ).run(
+                _python(source),
+                deadline=_deadline(1.0),
+                stdout_limit_bytes=1024,
+                stderr_limit_bytes=1024,
+            )
+        stranded = [
+            thread
+            for thread in threading.enumerate()
+            if thread.ident not in before
+            and thread.name.startswith("lab-tracker-process-")
+            and thread.is_alive()
+        ]
+        # The escaped descendant still holds the pipes, so the readers stay
+        # blocked; they must not keep the interpreter alive at exit.
+        assert stranded
+        assert all(thread.daemon for thread in stranded)
+    finally:
+        with suppress(FileNotFoundError, ValueError, ProcessLookupError):
+            os.kill(int(pid_file.read_text()), signal.SIGKILL)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires real Windows Job Objects")
