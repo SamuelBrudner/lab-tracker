@@ -3438,32 +3438,6 @@ def _execute_enumeration_request(
     return LOCAL_FILESYSTEM_COMPLETE_EXIT
 
 
-def enumerate_files_request(
-    raw_request: str | None,
-    *,
-    api: WindowsDirectoryApi | None = None,
-    output: _BinaryWriter | None = None,
-) -> int:
-    """Execute either canonical enumeration operation."""
-
-    try:
-        request = _parse_protocol_request(raw_request)
-    except WindowsLocalStoreHealthDenied:
-        return LOCAL_FILESYSTEM_DENIED_EXIT
-    except BaseException:
-        return LOCAL_FILESYSTEM_FAILED_EXIT
-    if not isinstance(
-        request,
-        (_EnumerateFilesRequest, _EnumerateRegisteredFilesRequest),
-    ) or output is None:
-        return LOCAL_FILESYSTEM_FAILED_EXIT
-    return _execute_enumeration_request(
-        request,
-        api=api,
-        output=output,
-    )
-
-
 def execute_request(
     raw_request: str | None,
     *,

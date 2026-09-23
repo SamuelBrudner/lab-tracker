@@ -2125,16 +2125,6 @@ def _select_candidate(candidate: str, roots: tuple[str, ...]) -> _SelectedPath:
     return _select_path(_Request(candidate=candidate, roots=roots))
 
 
-def _inspect_request(environment: Mapping[str, str]) -> None:
-    if os.name != "posix":
-        raise _Failed
-    request = _parse_request(environment)
-    if not isinstance(request, _Request):
-        raise _Failed
-    selected = _select_path(request)
-    _inspect_selected_directory(selected)
-
-
 def _execute_request(environment: Mapping[str, str]) -> None:
     if os.name != "posix":
         raise _Failed
