@@ -432,6 +432,26 @@ def test_ci_checks_lock_freshness_before_every_locked_install() -> None:
         assert body.index("run: uv lock --check") < body.index("uv sync"), name
 
 
+def test_docker_and_ci_pin_one_exact_uv_version() -> None:
+    """``uv sync --frozen`` and lock handling depend on the uv release itself."""
+    repo_root = Path(__file__).resolve().parent.parent
+    dockerfile = (repo_root / "Dockerfile").read_text(encoding="utf-8")
+    workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+    docker_pins = re.findall(r"pip install --no-cache-dir uv==(\d+\.\d+\.\d+)\b", dockerfile)
+    assert len(docker_pins) == 1, "Dockerfile must install one exact uv version"
+    pip_installs = [line.strip() for line in re.findall(r"\bpip install\b[^\n\\]*", dockerfile)]
+    assert pip_installs == [f"pip install --no-cache-dir uv=={docker_pins[0]}"]
+
+    setup_steps = re.findall(
+        r"- uses: astral-sh/setup-uv@\S+\n((?: {8,}\S.*\n)*)", workflow
+    )
+    assert setup_steps, "CI must install uv with astral-sh/setup-uv"
+    assert workflow.count("astral-sh/setup-uv@") == len(setup_steps)
+    for step in setup_steps:
+        assert f'version: "{docker_pins[0]}"' in step, step
+
+
 def test_ci_runs_project_commands_without_relocking() -> None:
     repo_root = Path(__file__).resolve().parent.parent
     workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")

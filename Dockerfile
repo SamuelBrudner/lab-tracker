@@ -26,7 +26,9 @@ RUN apt-get update \
 COPY pyproject.toml uv.lock README.md alembic.ini /app/
 COPY src /app/src
 
-RUN pip install --no-cache-dir uv \
+# Pin uv to the release CI uses (.github/workflows/ci.yml): lock-format handling
+# and `uv sync --frozen` semantics depend on the uv version.
+RUN pip install --no-cache-dir uv==0.12.18 \
     && uv sync --frozen --no-dev --no-editable --compile-bytecode
 
 COPY deploy/docker-entrypoint.sh /app/docker-entrypoint.sh
