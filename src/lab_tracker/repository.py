@@ -88,6 +88,18 @@ class EntityRepository(Protocol, Generic[EntityT]):
         """Delete one entity by ID and return the removed value."""
 
 
+class ProvenanceLinkRepository(EntityRepository[ProvenanceLink], Protocol):
+    """Provenance-link persistence with the project-scoped listing detectors use."""
+
+    def list_by_project(
+        self,
+        project_id: UUID,
+        *,
+        status: str | None = None,
+    ) -> list[ProvenanceLink]:
+        """Return a project's links (optionally one status) in creation order."""
+
+
 class VisualizationRepository(EntityRepository[Visualization], Protocol):
     """Visualization persistence with the row lock asset mutations hold."""
 
@@ -537,7 +549,7 @@ class LabTrackerRepository(Protocol):
     def exploration_nodes(self) -> EntityRepository[ExplorationNode]: ...
 
     @property
-    def provenance_links(self) -> EntityRepository[ProvenanceLink]: ...
+    def provenance_links(self) -> ProvenanceLinkRepository: ...
 
     @property
     def entity_versions(self) -> EntityRepository[EntityVersion]: ...
