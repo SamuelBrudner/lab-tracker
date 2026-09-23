@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta
 from email.headerregistry import Address
+from email.utils import quote
 from uuid import UUID, uuid4
 
 from lab_tracker.errors import NotFoundError, ValidationError
@@ -43,7 +44,23 @@ def normalize_review_email(value: str) -> str:
         raise ValidationError("notification_email must be one valid email address.")
     # Rebuild via addr_spec so a quoted local part stays quoted; a bare
     # username@domain would not re-parse and would fail every later send.
-    return Address(username=address.username, domain=address.domain.lower()).addr_spec
+    domain = address.domain.lower()
+    normalized = Address(username=address.username, domain=domain).addr_spec
+    if not _reparses_to(normalized, username=address.username, domain=domain):
+        # The stdlib only quotes local parts containing specials, so a quoted
+        # local part with a leading, trailing or doubled dot comes back bare.
+        normalized = f'"{quote(address.username)}"@{domain}'
+    if not _reparses_to(normalized, username=address.username, domain=domain):
+        raise ValidationError("notification_email must be one valid email address.")
+    return normalized
+
+
+def _reparses_to(addr_spec: str, *, username: str, domain: str) -> bool:
+    try:
+        reparsed = Address(addr_spec=addr_spec)
+    except Exception:
+        return False
+    return reparsed.username == username and reparsed.domain == domain
 
 
 class ReviewEmailService(BaseService):

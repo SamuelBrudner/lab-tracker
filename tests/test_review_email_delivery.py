@@ -516,6 +516,9 @@ def test_test_email_with_unknown_recipient_user_is_rejected(
         ('"ab"@Example.org', "ab@example.org"),
         ('"a b"@Example.org', '"a b"@example.org'),
         ('"a\\"b"@example.org', '"a\\"b"@example.org'),
+        ('".ab"@example.org', '".ab"@example.org'),
+        ('"a."@example.org', '"a."@example.org'),
+        ('"a..b"@example.org', '"a..b"@example.org'),
     ],
 )
 def test_normalize_review_email_is_idempotent(raw: str, expected: str) -> None:
