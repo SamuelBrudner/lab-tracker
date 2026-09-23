@@ -37,6 +37,7 @@ import os
 import re
 import shutil
 import stat
+import sys
 import tempfile
 import threading
 import time
@@ -2926,7 +2927,9 @@ class GitCacheUnsafeError(Exception):
 
 
 def _require_owned_by_server(entry_stat: os.stat_result, path: str) -> None:
-    if os.name == "nt":
+    # sys.platform (not os.name) so type checkers narrow away the POSIX-only
+    # os.geteuid on Windows, where st_uid carries no ownership.
+    if sys.platform == "win32":
         return
     if entry_stat.st_uid != os.geteuid():
         raise GitCacheUnsafeError(
