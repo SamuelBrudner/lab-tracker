@@ -14,7 +14,7 @@ from sqlalchemy import create_engine
 from starlette.requests import Request
 
 from lab_tracker.app import create_app
-from lab_tracker.auth import Role
+from lab_tracker.auth import AuthService, InvitationTokenService, Role
 from lab_tracker.db import Base
 from lab_tracker.errors import AuthError, ConflictError, ValidationError
 from lab_tracker.logging import JsonFormatter
@@ -845,6 +845,54 @@ def test_invitation_claim_failure_rolls_back_user_creation(monkeypatch, tmp_path
         assert "no longer available" in response.text
         assert client.app.state.auth_service.get_user("member@example.org") is None
         assert client.app.state.invitation_token_service.verify_invitation_token(invite_token)
+
+
+def test_invited_registration_over_an_existing_username_reports_the_conflict(
+    monkeypatch, tmp_path
+):
+    """An invitation to an already-registered email is not "already used" (L44)."""
+    _bootstrap_database(monkeypatch, tmp_path)
+    with TestClient(create_app()) as client:
+        auth_service = client.app.state.auth_service
+        invitation_service = client.app.state.invitation_token_service
+        auth_service.register_user(
+            username="member@example.org", password="secret", role=Role.VIEWER
+        )
+        issued = invitation_service.issue_invitation(
+            email="member@example.org", role=Role.EDITOR
+        )
+
+        response = client.post(
+            "/auth/register",
+            json={
+                "invite_token": issued.token,
+                "password": "long-enough-secret",
+                "password_confirmation": "long-enough-secret",
+                "username": "member@example.org",
+            },
+        )
+
+        assert response.status_code == 409, response.text
+        assert response.json()["error"]["message"] == "Username already exists."
+        assert invitation_service.list_invitations()[0].status == "pending"
+        assert auth_service.get_user("member@example.org").role is Role.VIEWER
+
+
+def test_in_memory_invited_registration_over_an_existing_username_reports_the_conflict():
+    auth_service = AuthService()
+    invitation_service = InvitationTokenService()
+    auth_service.register_user(username="member@example.org", password="secret", role=Role.VIEWER)
+    issued = invitation_service.issue_invitation(email="member@example.org", role=Role.EDITOR)
+
+    with pytest.raises(ConflictError, match="Username already exists."):
+        auth_service.register_invited_user(
+            invitation_token_service=invitation_service,
+            invite_token=issued.token,
+            username="member@example.org",
+            password="long-enough-secret",
+            password_confirmation="long-enough-secret",
+        )
+    assert invitation_service.list_invitations()[0].status == "pending"
 
 
 def test_concurrent_invitation_acceptance_creates_exactly_one_user(monkeypatch, tmp_path):

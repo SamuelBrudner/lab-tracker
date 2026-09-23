@@ -250,7 +250,9 @@ class AuthService:
                 if normalized != invited_email:
                     raise AuthError("Invitation token does not match this email address.")
                 if invited_email in self._users_by_username:
-                    raise ConflictError("Invitation has already been used.")
+                    # The invitation is still pending (checked above); the
+                    # email already belongs to an account.
+                    raise ConflictError("Username already exists.")
                 user = User(
                     user_id=uuid4(),
                     username=invited_email,
@@ -304,7 +306,13 @@ class AuthService:
                     raise AuthError("Invitation is no longer available.")
                 user = _user_from_model(user_row)
         except IntegrityError as exc:
-            raise ConflictError("Invitation has already been used.") from exc
+            # The insert collided on users.username. If this invitation was
+            # consumed meanwhile, a concurrent acceptance of it won; otherwise
+            # the invited email already belongs to an account.
+            current = invitation_token_service._invitation_for_token(invite_token)
+            if current.consumed_at is not None:
+                raise ConflictError("Invitation has already been used.") from exc
+            raise ConflictError("Username already exists.") from exc
         return user
 
     def authenticate(self, username: str, password: str) -> User:
