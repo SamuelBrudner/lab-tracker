@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import unicodedata
 from datetime import datetime
 from typing import Annotated, Any
@@ -205,10 +206,22 @@ def content_disposition_header(disposition: str, filename: str) -> str:
     return header
 
 
+# HTML form-data encoding (and httpx) escapes only these characters in a
+# multipart ``filename``, and Starlette stores the name without undoing them.
+# Every other ``%`` is part of the real filename, so no general percent-decoding.
+_FORM_DATA_FILENAME_ESCAPES = re.compile("%(22|0D|0A)", re.IGNORECASE)
+_FORM_DATA_FILENAME_UNESCAPED = {"22": '"', "0D": "\r", "0A": "\n"}
+
+
+def _undo_form_data_filename_escapes(filename: str) -> str:
+    return _FORM_DATA_FILENAME_ESCAPES.sub(
+        lambda match: _FORM_DATA_FILENAME_UNESCAPED[match.group(1).upper()],
+        filename,
+    )
+
+
 def _clean_attachment_filename(filename: str) -> str:
-    # Stored names are already decoded (they come from the multipart
-    # ``filename``); decoding again would rewrite names containing ``%``.
-    cleaned = (filename or "").strip()
+    cleaned = _undo_form_data_filename_escapes((filename or "").strip())
     if not cleaned:
         return "download"
     cleaned = cleaned.replace("\r", "_").replace("\n", "_")

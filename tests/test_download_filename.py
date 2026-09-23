@@ -31,6 +31,14 @@ def test_percent_in_stored_filename_is_preserved_not_decoded(stored: str) -> Non
     assert "%" not in fallback
 
 
+def test_form_data_escapes_are_undone_before_sanitizing() -> None:
+    # Browsers and httpx send '"', CR and LF in a multipart filename as
+    # %22, %0D and %0A; Starlette stores them escaped.
+    assert content_disposition_header("attachment", "bad%22%0D%0Aname.txt") == (
+        'attachment; filename="bad\'__name.txt"'
+    )
+
+
 def test_encoded_separator_is_not_decoded_into_a_path() -> None:
     header = content_disposition_header("attachment", "..%2Fsecret.txt")
 
