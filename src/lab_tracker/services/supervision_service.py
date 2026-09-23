@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext, require_role
@@ -21,6 +21,18 @@ from lab_tracker.services.shared import WRITE_ROLES
 
 _EDGE_NOT_FOUND_MESSAGE = "Supervision edge does not exist."
 _MANAGE_DENIED_MESSAGE = "Supervision edges can only be managed by an admin."
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Read a naive timestamp as UTC, as ``UtcDateTime`` storage already does.
+
+    Without this, a naive bound compared with an aware one (such as the
+    defaulted ``started_at``) raises ``TypeError`` instead of validating.
+    """
+
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 class SupervisionService(BaseService):
@@ -63,8 +75,8 @@ class SupervisionService(BaseService):
             edge_id=uuid4(),
             supervisor_user_id=supervisor_user_id,
             supervisee_user_id=supervisee_user_id,
-            started_at=started_at or now,
-            ended_at=ended_at,
+            started_at=_as_utc(started_at) if started_at is not None else now,
+            ended_at=_as_utc(ended_at) if ended_at is not None else None,
             created_at=now,
             updated_at=now,
         )
@@ -153,9 +165,9 @@ class SupervisionService(BaseService):
         if is_provided(started_at):
             if started_at is None:
                 raise ValidationError("started_at must not be null.")
-            edge.started_at = started_at
+            edge.started_at = _as_utc(started_at)
         if is_provided(ended_at):
-            edge.ended_at = ended_at
+            edge.ended_at = _as_utc(ended_at) if ended_at is not None else None
         self._validate_edge(edge)
         if edge.ended_at is None:
             self._ensure_active_pair_available(edge, excluding_edge_id=edge.edge_id)

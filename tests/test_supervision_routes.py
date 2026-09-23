@@ -381,3 +381,59 @@ def test_supervision_list_paginates_after_scoping(
     body = response.json()
     assert [item["edge_id"] for item in body["data"]] == [mine.json()["data"]["edge_id"]]
     assert body["meta"]["total"] == 1
+
+
+def test_supervision_edge_mixes_naive_and_aware_timestamps_as_utc(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    _, supervisor_user_id = _register_user(client, f"supervisor-{uuid4().hex[:8]}")
+    _, supervisee_user_id = _register_user(client, f"supervisee-{uuid4().hex[:8]}")
+
+    # started_at defaults to the aware current time; a naive ended_at in the
+    # past must be compared as UTC and rejected, not crash with a TypeError.
+    past_end = client.post(
+        "/supervision-edges",
+        json={
+            "supervisor_user_id": supervisor_user_id,
+            "supervisee_user_id": supervisee_user_id,
+            "ended_at": "2020-01-01T00:00:00",
+        },
+        headers=admin_auth_headers,
+    )
+    assert past_end.status_code == 422
+    assert "ended_at must be after started_at" in past_end.text
+
+    # A naive started_at is read as UTC, so it is after this aware ended_at.
+    mixed_invalid = client.post(
+        "/supervision-edges",
+        json={
+            "supervisor_user_id": supervisor_user_id,
+            "supervisee_user_id": supervisee_user_id,
+            "started_at": "2026-01-01T01:00:00",
+            "ended_at": "2026-01-01T00:30:00+00:00",
+        },
+        headers=admin_auth_headers,
+    )
+    assert mixed_invalid.status_code == 422
+
+    created = client.post(
+        "/supervision-edges",
+        json={
+            "supervisor_user_id": supervisor_user_id,
+            "supervisee_user_id": supervisee_user_id,
+            "started_at": "2026-01-01T00:00:00",
+            "ended_at": "2026-01-01T02:00:00+01:00",
+        },
+        headers=admin_auth_headers,
+    )
+    assert created.status_code == 201
+    edge = created.json()["data"]
+
+    patched = client.patch(
+        f"/supervision-edges/{edge['edge_id']}",
+        json={"started_at": "2026-01-01T01:30:00"},
+        headers=admin_auth_headers,
+    )
+    assert patched.status_code == 422
+    assert "ended_at must be after started_at" in patched.text
