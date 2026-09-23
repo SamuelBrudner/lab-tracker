@@ -12,10 +12,12 @@ import pytest
 from api_helpers import stamp_schema_at_head
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
+from sqlalchemy.exc import OperationalError
 from starlette.requests import Request
 
 from lab_tracker import auth as auth_module
 from lab_tracker.app import create_app
+from lab_tracker.app_parts import runtime as runtime_module
 from lab_tracker.auth import AuthService, InvitationTokenService, PasswordHasher, Role
 from lab_tracker.db import Base
 from lab_tracker.errors import AuthError, ConflictError, ValidationError
@@ -295,6 +297,23 @@ def test_local_auth_disabled_allows_write_without_authorization(monkeypatch, tmp
         create_response = client.post("/projects", json={"name": "No Login"})
         assert create_response.status_code == 201
         assert create_response.json()["data"]["created_by"] == me_payload["data"]["user_id"]
+
+
+def test_local_auth_disabled_startup_fails_when_the_local_user_cannot_be_stored(
+    monkeypatch, tmp_path
+):
+    """Auth-disabled mode needs the local user row (FK target), so failing to store it
+    fails startup instead of logging a warning (L39)."""
+    _bootstrap_database(monkeypatch, tmp_path)
+    monkeypatch.setenv("LAB_TRACKER_AUTH_ENABLED", "false")
+
+    def failing_bootstrap(_session_factory):
+        raise OperationalError("INSERT INTO users", {}, Exception("database is locked"))
+
+    monkeypatch.setattr(runtime_module, "ensure_local_auth_user", failing_bootstrap)
+
+    with pytest.raises(OperationalError, match="database is locked"), TestClient(create_app()):
+        pass
 
 
 def test_protected_routes_accept_valid_authorization(monkeypatch, tmp_path):
