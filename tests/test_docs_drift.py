@@ -197,6 +197,14 @@ def test_mcp_environment_examples_use_an_lpat_not_username_password(doc: Path) -
         assert "LAB_TRACKER_MCP_PASSWORD" not in block, block
 
 
+def test_vscode_mcp_inputs_mark_username_password_as_deprecated() -> None:
+    config = json.loads(_read(_REPO_ROOT / ".vscode" / "mcp.json"))
+    inputs = {entry["id"]: entry["description"] for entry in config["inputs"]}
+    for input_id in ("lt-username", "lt-password"):
+        assert "deprecated" in inputs[input_id].lower(), inputs[input_id]
+    assert "deprecated" not in inputs["lt-token"].lower(), inputs["lt-token"]
+
+
 def test_documented_mcp_json_example_passes_lt_auth_doctor(tmp_path: Path) -> None:
     examples = [
         json.loads(block)
