@@ -122,6 +122,10 @@ class ReviewEmailService(BaseService):
 
         if not self.delivery_enabled:
             raise ValidationError("Review email delivery is not enabled.")
+        if recipient_user_id is not None and not self.repository.user_exists(
+            recipient_user_id
+        ):
+            raise ValidationError("recipient_user_id does not reference an existing user.")
         now = utc_now()
         delivery_id = uuid4()
         delivery = ReviewEmailDelivery(

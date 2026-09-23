@@ -452,3 +452,55 @@ def test_review_link_surfaces_backend_failures_instead_of_redirecting(
 
     assert response.status_code == 500
     assert "location" not in response.headers
+
+
+def test_admin_delivery_responses_do_not_expose_the_claim_token(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    _enable_review_email(client)
+    response = client.post(
+        "/review-email/test",
+        json={"destination_email": "lease@example.org"},
+        headers=admin_auth_headers,
+    )
+    assert response.status_code == 201
+    assert "claim_token" not in response.json()["data"]
+
+    with client.app.state.db_session_factory() as session:
+        api = LabTrackerAPI(
+            repository=SQLAlchemyLabTrackerRepository(session),
+            settings=client.app.state.settings,
+        )
+        claimed = api.review_emails.claim_next(lease_seconds=60)
+        assert claimed is not None
+        assert claimed.claim_token is not None
+        live_token = str(claimed.claim_token)
+
+    listing = client.get("/review-email/deliveries", headers=admin_auth_headers)
+    assert listing.status_code == 200
+    items = listing.json()["data"]
+    assert [item["status"] for item in items] == ["sending"]
+    assert "claim_token" not in items[0]
+    assert live_token not in listing.text
+
+
+def test_test_email_with_unknown_recipient_user_is_rejected(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    _enable_review_email(client)
+    response = client.post(
+        "/review-email/test",
+        json={
+            "destination_email": "nobody@example.org",
+            "recipient_user_id": "00000000-0000-4000-8000-000000000001",
+        },
+        headers=admin_auth_headers,
+    )
+    assert response.status_code == 422
+    assert "recipient_user_id" in response.text
+
+    listing = client.get("/review-email/deliveries", headers=admin_auth_headers)
+    assert listing.status_code == 200
+    assert listing.json()["data"] == []

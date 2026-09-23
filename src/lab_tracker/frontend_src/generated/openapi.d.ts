@@ -1111,7 +1111,6 @@ export interface components {
       "accepted_at"?: (string | null);
       "attempt_count"?: number;
       "change_set_id"?: (string | null);
-      "claim_token"?: (string | null);
       "claimed_at"?: (string | null);
       "created_at"?: string;
       "delivery_id": string;
