@@ -71,10 +71,11 @@ After upgrading the installed package, run `lt update` inside a consumer repo to
 refresh everything to the new version in one step: managed prompt blocks are
 re-rendered in place (consent decisions preserved; add missing conventions
 blocks with `--yes`), and scaffolded files (`.claude/settings.json` hooks,
-`.mcp.json`, `.cursor/mcp.json`, `scripts/lt.py`, `AGENTS.lt.md`) are rewritten
-to the current canonical text with any customised previous file kept next to it
-as `*.bak-lt-update`. `lt_ids.json` is never touched. Use `--dry-run` to preview
-and `lt doctor` to confirm the repo is in sync afterwards.
+`.mcp.json`, `.cursor/mcp.json`, `.gemini/settings.json`, `scripts/lt.py`,
+`AGENTS.lt.md`) are rewritten to the current canonical text with any customised
+previous file kept next to it as `*.bak-lt-update`. `lt_ids.json` is never
+touched. Use `--dry-run` to preview and `lt doctor` to confirm the repo is in
+sync afterwards.
 
 For substantive, rerunnable notes, prefer `lab_tracker_client.LabTracker` or
 the generated `scripts.lt.upsert_note(...)`. Notes are idempotent by the first
@@ -96,8 +97,7 @@ MCP environment:
 
 ```bash
 LAB_TRACKER_BASE_URL=http://127.0.0.1:8000
-LAB_TRACKER_MCP_USERNAME=<service-account-username>
-LAB_TRACKER_MCP_PASSWORD=<service-account-password>
+LAB_TRACKER_MCP_API_KEY=<lpat-personal-access-token>
 ```
 
 For agents running somewhere other than the serving machine, use that
@@ -105,12 +105,16 @@ deployment's reachable HTTPS origin instead of localhost:
 
 ```bash
 LAB_TRACKER_BASE_URL=https://lab-tracker.example.org
-LAB_TRACKER_MCP_USERNAME=<service-account-username>
-LAB_TRACKER_MCP_PASSWORD=<service-account-password>
+LAB_TRACKER_MCP_API_KEY=<lpat-personal-access-token>
 ```
 
-MCP username/password are only required when `LAB_TRACKER_AUTH_ENABLED=true`.
-Local auth-disabled testing can omit them.
+`LAB_TRACKER_MCP_API_KEY` holds a Lab Tracker personal access token (LPAT),
+the sanctioned MCP credential; mint one on the web app's **Agents** page
+(`/app/agents`) or with `POST /auth/tokens`. The older
+`LAB_TRACKER_MCP_USERNAME` / `LAB_TRACKER_MCP_PASSWORD` login is deprecated;
+run `lt auth doctor` to find MCP configs still using it. A credential is only
+required when `LAB_TRACKER_AUTH_ENABLED=true`; local auth-disabled testing can
+omit it.
 
 <!-- BEGIN GENERATED MCP TOOL LIST -->
 Use these tools when available. This list is generated from `lab_tracker.mcp_tools.READ_TOOLS` and `WRITE_TOOLS`; do not edit it by hand.

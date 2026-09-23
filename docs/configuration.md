@@ -913,8 +913,10 @@ MCP setup guides ([`lab-tracker-mcp-skills.md`](lab-tracker-mcp-skills.md),
   `LAB_TRACKER_BASE_URL`; the canonical name takes precedence when both exist
 - `LAB_TRACKER_MCP_API_KEY` / `LAB_TRACKER_MCP_TOKEN`: bearer token; either name
   works and bypasses `/auth/login`
-- `LAB_TRACKER_MCP_USERNAME` / `LAB_TRACKER_MCP_PASSWORD`: login credentials used
-  when no token is set and the target instance has auth enabled
+- `LAB_TRACKER_MCP_USERNAME` / `LAB_TRACKER_MCP_PASSWORD`: deprecated login
+  credentials used when no token is set and the target instance has auth
+  enabled; migrate to `LAB_TRACKER_MCP_API_KEY` (`lt auth doctor` lists configs
+  still using them)
 - `LAB_TRACKER_MCP_TIMEOUT_SECONDS`: API request timeout (default: `10`)
 
 The hosted read-only MCP endpoint (the optional `mcp` docker-compose service)
@@ -1052,7 +1054,9 @@ The review screen records enough metadata to compare `graph_context` and
 fields, clarification requests, operation statuses, and commit timing. Suggested
 evaluation metrics are accepted/edited/rejected operations, duplicate entity
 proposals, reviewer edit burden, time from capture to commit, and uncertainty
-quality. Offline queued capture is intentionally deferred in this release.
+quality. Captures taken offline queue in the browser (IndexedDB) and upload
+when the network returns; see
+[`phone-capture-quickstart.md`](phone-capture-quickstart.md).
 
 ## Local evidence inbox imports
 

@@ -32,7 +32,8 @@ If local auth is disabled, leave the prompted token, username, and password
 blank. If auth is enabled, prefer a personal access token: mint one on the
 **Agents** page in the web app (`/app/agents`), or with `POST /auth/tokens`,
 paste the returned `lpat_...` secret into the token prompt, and leave
-username/password blank. Username/password still works as a fallback.
+username/password blank. Username/password login is deprecated; run
+`lt auth doctor` to find configs still using it.
 
 The token secret is returned once. Lab Tracker stores only its SHA-256 hash, and
 the MCP client sends it as `Authorization: Bearer ...` without calling

@@ -54,9 +54,9 @@ commands), or with `POST /auth/tokens`, then provide the returned
 `lpat_...` secret as
 `LAB_TRACKER_MCP_API_KEY`. The token secret is returned once; Lab Tracker stores
 only its SHA-256 hash, and the MCP client sends it as `Authorization: Bearer ...`
-without calling `/auth/login`. Username/password
-(`LAB_TRACKER_MCP_USERNAME` / `LAB_TRACKER_MCP_PASSWORD`) still works as a
-fallback.
+without calling `/auth/login`. Username/password login
+(`LAB_TRACKER_MCP_USERNAME` / `LAB_TRACKER_MCP_PASSWORD`) is deprecated; run
+`lt auth doctor` to find configs still using it.
 
 Cursor's `mcp.json` has no interactive secret prompt, so keep secrets out of the
 committed project file. Put them in one of:

@@ -12,10 +12,11 @@ capability failures and the explicit permission failures of mutations are
 
 | Slice | Behavioral variants | Distinct OpenAPI operations | Scope |
 | --- | ---: | ---: | --- |
-| Core | 15 | 15 | Projects 4; questions 6; notes 2; sessions 3 |
+| Core | 18 | 18 | Projects 7; questions 6; notes 2; sessions 3 |
 | Evidence and artifacts | 18 | 16 | Fifteen GET variants plus dataset, analysis, and claim modes of the artifact resolver |
 | Workflow and registry | 4 | 4 | Graph-draft detail, batch-detail alias, data-store detail, and data-store health |
-| **Total** | **37** | **35** | **15 + 18 + 4 behavioral variants** |
+| Acquisition | 10 | 10 | Experiments 3; session and dataset experiment links 2; collections and snapshots 5 |
+| **Total** | **50** | **48** | **18 + 18 + 4 + 10 behavioral variants** |
 
 The behavioral count is larger than the OpenAPI-operation count because the
 three entity modes all exercise the single semantic-read operation
@@ -24,8 +25,12 @@ one OpenAPI path-and-method operation.
 
 The 15 evidence GET variants comprise datasets 4, analyses 2, claims 5,
 visualizations 2, exploration nodes 1, and provenance links 1. Resolver modes
-add dataset, analysis, and claim. The 15 core variants and four
-workflow/registry variants are enumerated directly by their behavioral suites.
+add dataset, analysis, and claim. The seven core project variants are project
+detail, publication readiness, and the graph JSON, overview, search,
+neighborhood, and Mermaid reads. The 18 core, four workflow/registry, and ten
+acquisition variants are enumerated directly by their behavioral suites, and
+[`tests/read_opacity_inventory.py`](../tests/read_opacity_inventory.py) is the
+canonical list.
 
 ## Representations and exclusions
 
@@ -46,5 +51,6 @@ remain outside this inventory under open `lab-tracker-n5kp.32`.
 - [Core read opacity](../tests/test_core_read_opacity.py)
 - [Evidence and artifact read opacity](../tests/test_evidence_artifact_read_opacity.py)
 - [Workflow and registry read opacity](../tests/test_workflow_registry_read_opacity.py)
+- [Acquisition read opacity](../tests/test_acquisition_read_opacity.py)
 - [Internal boundary ordering](internal-boundaries.md#opaque-targeted-read-ordering)
 - [Resolver-specific authorization order](external-artifact-resolution-design.md#read-surface-integration)

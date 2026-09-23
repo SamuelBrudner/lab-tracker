@@ -4,9 +4,14 @@ Use this for the Docker/Postgres path in `docker-compose.yml`.
 
 ## Data Locations
 
-- Postgres data lives in the Docker volume `lab-tracker_postgres_data`.
+- Postgres data lives in the Compose volume `postgres_data`.
 - App files, note storage, generated auth secret, and generated bootstrap token
-  live in the Docker volume `lab-tracker_app_data`.
+  live in the Compose volume `app_data`.
+- Docker names each volume `<project>_<volume>`, where the Compose project name
+  is the checkout directory name unless `COMPOSE_PROJECT_NAME` (or
+  `docker compose -p`) sets it; `docker volume ls` shows the actual names. The
+  commands below reach the app data volume through the `app` container, so they
+  work under any project name.
 - The app container runs `alembic upgrade head` on startup before serving.
 
 Back up before updating the image or pulling new code because startup can run
@@ -119,13 +124,15 @@ docker compose exec -T postgres pg_dump \
   > "backups/lab-tracker-$(date +%Y%m%d-%H%M%S).dump"
 ```
 
-Archive the app data volume:
+Archive the app data volume (mounted from the `app` container, which may be
+running or stopped):
 
 ```bash
+APP_CONTAINER="$(docker compose ps --all --quiet app)"
 docker run --rm \
-  -v lab-tracker_app_data:/data:ro \
+  --volumes-from "${APP_CONTAINER:?no app container}:ro" \
   -v "$PWD/backups:/backup" \
-  alpine tar -czf /backup/lab-tracker-app-data.tar.gz -C /data .
+  alpine tar -czf /backup/lab-tracker-app-data.tar.gz -C /app/data .
 ```
 
 ## Restore
@@ -147,13 +154,15 @@ cat backups/lab-tracker-YYYYMMDD-HHMMSS.dump | docker compose exec -T postgres \
   --if-exists
 ```
 
-Restore app data:
+Restore app data (on a fresh host, first create the stopped `app` container
+and its volume with `docker compose create app`):
 
 ```bash
+APP_CONTAINER="$(docker compose ps --all --quiet app)"
 docker run --rm \
-  -v lab-tracker_app_data:/data \
+  --volumes-from "${APP_CONTAINER:?no app container}" \
   -v "$PWD/backups:/backup:ro" \
-  alpine sh -c 'rm -rf /data/* && tar -xzf /backup/lab-tracker-app-data.tar.gz -C /data'
+  alpine sh -c 'rm -rf /app/data/* && tar -xzf /backup/lab-tracker-app-data.tar.gz -C /app/data'
 ```
 
 Start the app:

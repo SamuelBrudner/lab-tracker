@@ -93,11 +93,13 @@ The first supported `task_kind` values are:
 | `progress_review` | Briefing on what a person did in a window — a PI's pre-meeting briefing on a trainee, or a trainee's own pre-lab-meeting recap. | Sessions, analyses, visualizations, claims, datasets, and notes committed by the named `created_by` within `since`/`until`, surfaced as the advances and plots under review. |
 
 When the caller supplies `created_by` (a user UUID) and/or `since`/`until`
-(ISO 8601 bounds), the assembled context — notes, sessions, datasets, analyses,
-claims, and visualizations — is filtered to that person and window. This is how
+(ISO 8601 bounds), the recency lists of notes, sessions, datasets, analyses,
+claims, and visualizations are filtered to that person and window. This is how
 a `progress_review` briefing is scoped; the caller supplies the meeting date
-(Lab Tracker stores no schedule), and cross-project scope follows the requester's
-existing access (a PI sees the projects they oversee).
+(Lab Tracker stores no schedule). Like every task kind, a `progress_review`
+covers exactly one resolved project: a PI who oversees several projects makes
+one call per project. Questions and search-matched notes are not filtered by
+person or window.
 
 Future task kinds may be added, but assistants should treat unknown values as
 errors rather than silently falling back to generic context.
@@ -251,19 +253,21 @@ Every returned entity must include:
 
 ### Low-Level Read Tools
 
-The high-level tool should not be the only way to inspect the graph. The MCP
-server should also expose retained-v1 read surfaces that currently exist in the
-HTTP API but are missing from MCP:
+The high-level tool is not the only way to inspect the graph. The MCP server
+also exposes the retained-v1 read surfaces of the HTTP API, including:
 
+- `lab_tracker_list_sessions`
 - `lab_tracker_list_datasets`
 - `lab_tracker_list_analyses`
 - `lab_tracker_list_claims`
 - `lab_tracker_list_visualizations`
 - `lab_tracker_get_dataset_provenance`
 - `lab_tracker_get_analysis_provenance`
+- `lab_tracker_get_claim_provenance`
 
-These tools should mirror the API filters, use the same envelopes, and remain
-read-only.
+These tools mirror the API filters, use the same envelopes, and are read-only.
+The authoritative tool inventory is generated in
+[`skills/lab-tracker/SKILL.md`](../skills/lab-tracker/SKILL.md).
 
 ### MCP Resources
 
@@ -298,15 +302,19 @@ The decision-context tool should use a deterministic retrieval policy.
    - Include matching questions and notes with match snippets.
    - Avoid semantic/vector ranking in the first implementation.
 5. Add bounded recency fallback.
-   - Include recent active or staged questions, recent notes, recent sessions,
-     recent datasets, recent analyses, recent claims, and recent visualizations
-     within the resolved project.
-6. Rank context by priority.
-   - Anchors and explicit graph links outrank search matches.
-   - Search matches outrank recency.
-   - Active/staged questions outrank archived or abandoned entities unless the
-     archived entity is an explicit anchor.
-   - Committed datasets and analyses outrank staged records for evidence claims.
+   - Include the most recently created questions (of any status), notes,
+     sessions, datasets, analyses, claims, and visualizations within the
+     resolved project.
+6. Order context by relevance reason.
+   - Each section lists anchors first, then search matches, then recent
+     records; an entity found more than once keeps its first position and
+     accumulates every reason in `relevance_reasons`.
+   - Search matches exist only for questions and notes, the retained substring
+     search surfaces.
+   - Status does not reorder entities: archived, abandoned, or staged records
+     keep their reason-based position, so read each entity's `status` before
+     relying on it. Status-aware ranking (for example committed evidence ahead
+     of staged records) is deferred.
 7. Bound output.
    - Default `limit` should cap each major section.
    - Return totals and truncation metadata when more items exist.
@@ -416,14 +424,16 @@ Update `skills/lab-tracker/SKILL.md` with the same policy after the tool ships.
 ## Security And Permissions
 
 - The decision-context tool must be read-only.
-- Use the existing API-backed MCP client path and service-account auth.
-- Prefer a read-only service account role when roles support it.
+- Use the existing API-backed MCP client path, authenticated with a Lab Tracker
+  personal access token (LPAT) in `LAB_TRACKER_MCP_API_KEY`.
+- Prefer a read-only LPAT.
 - Do not return raw dataset file contents.
 - Do not return full raw assets by default.
 - Truncate long note content and include note IDs so the assistant can request
   narrower context if needed.
-- Preserve existing auth behavior: username and password are only required when
-  `LAB_TRACKER_AUTH_ENABLED=true`.
+- Preserve existing auth behavior: a credential is only required when
+  `LAB_TRACKER_AUTH_ENABLED=true`. `LAB_TRACKER_MCP_USERNAME` /
+  `LAB_TRACKER_MCP_PASSWORD` login is deprecated.
 
 ## Implementation Shape
 

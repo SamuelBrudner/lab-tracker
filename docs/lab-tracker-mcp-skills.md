@@ -42,8 +42,6 @@ Environment for read/write tools:
 ```bash
 LAB_TRACKER_BASE_URL=http://127.0.0.1:8000
 LAB_TRACKER_MCP_API_KEY=<lpat-personal-access-token>
-LAB_TRACKER_MCP_USERNAME=<service-account-username>
-LAB_TRACKER_MCP_PASSWORD=<service-account-password>
 ```
 
 For agents that are not running on the graph workstation, use the current
@@ -52,14 +50,15 @@ workstation HTTPS base URL:
 ```bash
 LAB_TRACKER_BASE_URL=https://lab-tracker.example.org
 LAB_TRACKER_MCP_API_KEY=<read-only-lpat-token>
-LAB_TRACKER_MCP_USERNAME=<service-account-username>
-LAB_TRACKER_MCP_PASSWORD=<service-account-password>
 ```
 
 The server does not store bearer tokens. When `LAB_TRACKER_MCP_API_KEY` (or
 `LAB_TRACKER_MCP_TOKEN`) is set, the client sends that `lpat_` token directly
-and does not call `/auth/login`. Otherwise it logs in with the configured
-username/password and retries once after a 401. A `403 forbidden` means the
+and does not call `/auth/login`. An LPAT is the sanctioned MCP credential; the
+older `LAB_TRACKER_MCP_USERNAME` / `LAB_TRACKER_MCP_PASSWORD` login is
+deprecated (run `lt auth doctor` to find configs still using it). Without a
+token, the client logs in with that username/password and retries once after a
+401. A `403 forbidden` means the
 credential is valid but lacks project or role access: tools return it with
 `next_action.action = "request_access"` and never refresh the credential. A
 `403 service_forbidden` or `403 device_forbidden` means the credential's kind or
@@ -163,9 +162,7 @@ than a hardcoded absolute Python path:
       "command": "lt-mcp",
       "env": {
         "LAB_TRACKER_BASE_URL": "http://127.0.0.1:8000",
-        "LAB_TRACKER_MCP_API_KEY": "<lpat-personal-access-token>",
-        "LAB_TRACKER_MCP_USERNAME": "<service-account-username>",
-        "LAB_TRACKER_MCP_PASSWORD": "<service-account-password>"
+        "LAB_TRACKER_MCP_API_KEY": "<lpat-personal-access-token>"
       }
     }
   }

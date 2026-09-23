@@ -59,7 +59,7 @@ the live Postgres configuration and persisted signing secret:
 ```bash
 docker compose \
   -p lab-tracker \
-  -f /Users/samuelbrudner/Documents/GitHub/lab-tracker/docker-compose.yml \
+  -f /path/to/lab-tracker/docker-compose.yml \
   exec -T app \
   python -m lab_tracker.review_email_external_worker claim
 ```
@@ -89,15 +89,16 @@ mailbox credentials, and can be used when a one-shot container is preferable:
 ```bash
 docker compose \
   -p lab-tracker \
-  -f /Users/samuelbrudner/Documents/GitHub/lab-tracker/docker-compose.yml \
+  -f /path/to/lab-tracker/docker-compose.yml \
   --profile review-email-external \
   run --rm --no-deps review-email-control claim
 ```
 
 Replace `claim` with the full `accepted ...`, `failed ...`, or `test --to ...`
-argument list as needed. The explicit project and root Compose path prevent
-this helper from attaching to Marion's separate `lab-tracker-marion` database
-and signing secret.
+argument list as needed. Replace `/path/to/lab-tracker` with the primary
+checkout. The explicit project name and root Compose path prevent this helper
+from attaching to another Compose project on the same host, such as a separate
+dedicated instance with its own database and signing secret.
 
 Admins can enqueue a fixed, non-graph diagnostic via
 `POST /review-email/test`. The diagnostic is visibly labeled as a test and
@@ -107,7 +108,7 @@ an application password. Under Docker, run it through the primary app:
 ```bash
 docker compose \
   -p lab-tracker \
-  -f /Users/samuelbrudner/Documents/GitHub/lab-tracker/docker-compose.yml \
+  -f /path/to/lab-tracker/docker-compose.yml \
   exec -T app \
   python -m lab_tracker.review_email_external_worker test --to user@example.org
 ```

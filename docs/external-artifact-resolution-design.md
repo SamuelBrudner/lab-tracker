@@ -406,7 +406,7 @@ locators never select this configuration.
 ```
 [registered store: project-onedrive]
 kind = "local_fs"
-root = "/home/sam/OneDrive"
+root = "/home/<user>/OneDrive"
 ```
 
 The `content_hash` is what makes this safe: even when the path differs across
