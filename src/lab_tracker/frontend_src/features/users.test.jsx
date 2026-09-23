@@ -103,11 +103,11 @@ describe("UsersPage password reset", () => {
   function renderResetPage(patchResponse) {
     installFetchMock([
       {
-        match: "/auth/users?limit=200",
+        match: "/auth/users?limit=200&offset=0",
         response: () => apiResponse([listedUser], 200, { limit: 200, offset: 0, total: 1 }),
       },
       {
-        match: "/auth/invitations?limit=200",
+        match: "/auth/invitations?limit=200&offset=0",
         response: apiResponse([], 200, { limit: 200, offset: 0, total: 0 }),
       },
       { match: `/auth/users/${USER_ID}`, method: "PATCH", response: patchResponse },
