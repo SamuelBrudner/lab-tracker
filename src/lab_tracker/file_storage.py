@@ -105,12 +105,20 @@ class StoredFileMetadata:
 def _atomic_write_bytes(path: Path, content: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     # Write to a temp file in the same directory then atomically replace.
-    with tempfile.NamedTemporaryFile("wb", delete=False, dir=path.parent) as handle:
-        handle.write(content)
-        handle.flush()
-        os.fsync(handle.fileno())
-        tmp_name = handle.name
-    os.replace(tmp_name, path)
+    tmp_name: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile("wb", delete=False, dir=path.parent) as handle:
+            tmp_name = handle.name
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, path)
+        tmp_name = None
+    except BaseException:
+        if tmp_name is not None:
+            with suppress(FileNotFoundError):
+                Path(tmp_name).unlink()
+        raise
 
 
 class LocalFileStorageBackend(FileStorageBackend):
@@ -188,10 +196,16 @@ class LocalFileStorageBackend(FileStorageBackend):
             sha256=checksum,
             created_at=datetime.now(timezone.utc),
         )
-        _atomic_write_bytes(
-            self._meta_path(storage_id),
-            json.dumps(metadata.to_json_dict(), indent=2, sort_keys=True).encode("utf-8"),
-        )
+        try:
+            _atomic_write_bytes(
+                self._meta_path(storage_id),
+                json.dumps(metadata.to_json_dict(), indent=2, sort_keys=True).encode("utf-8"),
+            )
+        except BaseException:
+            # Without its sidecar the blob is an orphan nobody references.
+            with suppress(FileNotFoundError):
+                data_path.unlink()
+            raise
         return metadata
 
     def retrieve(self, storage_id: UUID) -> bytes:

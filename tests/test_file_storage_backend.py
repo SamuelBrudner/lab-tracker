@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 
 import pytest
 
@@ -94,6 +95,47 @@ def test_local_file_storage_backend_rejects_oversized_stream_and_cleans_temp_fil
     assert [path for path in tmp_path.rglob("*") if path.is_file()] == []
 
 
+@pytest.mark.parametrize("failing_call", ["fsync", "replace"])
+def test_local_file_storage_backend_removes_blob_when_metadata_sidecar_write_fails(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    failing_call: str,
+):
+    backend = LocalFileStorageBackend(tmp_path)
+    real_fsync = os.fsync
+    real_replace = os.replace
+    fsync_calls = 0
+    replace_calls = 0
+
+    def fsync_failing_on_sidecar(fd):
+        nonlocal fsync_calls
+        fsync_calls += 1
+        if fsync_calls == 2:
+            raise OSError(28, "No space left on device")
+        return real_fsync(fd)
+
+    def replace_failing_on_sidecar(source, target):
+        nonlocal replace_calls
+        replace_calls += 1
+        if replace_calls == 2:
+            raise OSError(28, "No space left on device")
+        return real_replace(source, target)
+
+    if failing_call == "fsync":
+        monkeypatch.setattr("lab_tracker.file_storage.os.fsync", fsync_failing_on_sidecar)
+    else:
+        monkeypatch.setattr("lab_tracker.file_storage.os.replace", replace_failing_on_sidecar)
+
+    with pytest.raises(OSError, match="No space left on device"):
+        backend.store_stream(
+            [b"payload"],
+            filename="blob.bin",
+            content_type="application/octet-stream",
+        )
+
+    assert [path for path in tmp_path.rglob("*") if path.is_file()] == []
+
+
 def test_local_file_storage_backend_uses_env_var_default(tmp_path, monkeypatch):
     monkeypatch.setenv(LAB_TRACKER_FILE_STORAGE_PATH_ENV, str(tmp_path))
     backend = LocalFileStorageBackend()
@@ -119,3 +161,4 @@ def test_local_file_storage_backend_validates_required_fields(tmp_path, filename
     backend = LocalFileStorageBackend(tmp_path)
     with pytest.raises(ValidationError):
         backend.store(b"x", filename=filename, content_type=content_type)
+
