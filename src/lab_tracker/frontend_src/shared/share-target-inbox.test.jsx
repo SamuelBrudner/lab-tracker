@@ -8,8 +8,10 @@ import {
   createIndexedDbShareStorage,
   createMemoryShareStorage,
   discardIncomingShares,
+  expiredSharesMessage,
   listReviewableShares,
   migrateIncomingShares,
+  shareTooLargeMessage,
 } from "./share-target-inbox.js";
 import {
   UPLOAD_FILE_PATH,
@@ -409,7 +411,7 @@ describe("discardIncomingShares", () => {
 });
 
 describe("listReviewableShares", () => {
-  it("drops shares past the maximum age and lists the rest for review", async () => {
+  it("drops shares past the maximum age, counts them, and lists the rest for review", async () => {
     const now = 1_800_000_000_000;
     const storage = createMemoryShareStorage([
       { text: "expired", receivedAt: now - SHARE_INBOX_MAX_AGE_MS - 1 },
@@ -417,9 +419,38 @@ describe("listReviewableShares", () => {
       { text: "fresh", receivedAt: now - SHARE_INBOX_MAX_AGE_MS + 1 },
     ]);
 
-    const shares = await listReviewableShares({ storage, now });
+    const { expired, shares } = await listReviewableShares({ storage, now });
 
+    expect(expired).toBe(2);
     expect(shares.map((share) => share.text)).toEqual(["fresh"]);
     expect((await storage.list()).map((share) => share.text)).toEqual(["fresh"]);
+  });
+
+  it("reports no expired shares when every parked share is fresh", async () => {
+    const now = 1_800_000_000_000;
+    const storage = createMemoryShareStorage([{ text: "fresh", receivedAt: now }]);
+
+    expect(await listReviewableShares({ storage, now })).toEqual({
+      expired: 0,
+      shares: [expect.objectContaining({ text: "fresh" })],
+    });
+  });
+});
+
+describe("share inbox notices", () => {
+  it("names how many unreviewed shares expired and why", () => {
+    expect(expiredSharesMessage(1)).toBe(
+      "1 shared item waited more than 7 days without review and was removed from the share inbox."
+    );
+    expect(expiredSharesMessage(3)).toBe(
+      "3 shared items waited more than 7 days without review and were removed from the share inbox."
+    );
+  });
+
+  it("states the per-share limits in the too-large notice", () => {
+    expect(shareTooLargeMessage()).toBe(
+      "The shared item was not saved: one share can hold at most 100 MB and 20 files. " +
+        "Add it from the capture page instead."
+    );
   });
 });

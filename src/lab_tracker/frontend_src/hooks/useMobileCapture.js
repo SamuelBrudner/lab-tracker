@@ -15,29 +15,38 @@ import {
   SHARE_INBOX_UPDATED_MESSAGE,
   createIndexedDbShareStorage,
   discardIncomingShares as discardParkedShares,
+  expiredSharesMessage,
   listReviewableShares,
   migrateIncomingShares,
   shareInboxAvailable,
+  shareTooLargeMessage,
 } from "../shared/share-target-inbox.js";
 import { captureHint, captureNotes, isAudioCapture } from "../features/mobile-capture/capture-helpers.js";
 
 const { useCallback, useEffect, useMemo, useRef, useState } = React;
 
+// The service worker's share-target redirect: `from-share` is the intake
+// outcome and `share-expired` counts unreviewed shares it removed as expired.
 function readShareTargetStatus() {
   try {
-    return new URLSearchParams(window.location.search || "").get("from-share") || "";
+    const params = new URLSearchParams(window.location.search || "");
+    return {
+      expired: Number.parseInt(params.get("share-expired") || "0", 10) || 0,
+      status: params.get("from-share") || "",
+    };
   } catch {
-    return "";
+    return { expired: 0, status: "" };
   }
 }
 
 function clearShareTargetStatus() {
   try {
     const url = new URL(window.location.href);
-    if (!url.searchParams.has("from-share")) {
+    if (!url.searchParams.has("from-share") && !url.searchParams.has("share-expired")) {
       return;
     }
     url.searchParams.delete("from-share");
+    url.searchParams.delete("share-expired");
     window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
   } catch {
     // Query cleanup is cosmetic; the inbox migration still runs independently.
@@ -166,33 +175,34 @@ function useMobileCapture({
   }, []);
 
   useEffect(() => {
-    const status = readShareTargetStatus();
-    if (!status) {
+    const { expired, status } = readShareTargetStatus();
+    if (!status && expired === 0) {
       return;
     }
     clearShareTargetStatus();
+    const notices = [];
     if (status === "error") {
-      setFlash("", "Shared capture could not be saved. Open Lab Tracker and try again.");
+      notices.push("Shared capture could not be saved. Open Lab Tracker and try again.");
     } else if (status === "empty") {
-      setFlash("", "Shared content was empty.");
+      notices.push("Shared content was empty.");
     } else if (status === "rejected") {
-      setFlash(
-        "",
+      notices.push(
         "A share sent from another website was blocked. " +
           "Only your device's share sheet can send items to Lab Tracker."
       );
     } else if (status === "full") {
-      setFlash(
-        "",
+      notices.push(
         "The shared item was not saved: the share inbox is full. " +
           "Import or discard the shared items waiting for review, then share again."
       );
     } else if (status === "too-large") {
-      setFlash(
-        "",
-        "The shared item was not saved: it is larger than the share inbox accepts. " +
-          "Add it from the capture page instead."
-      );
+      notices.push(shareTooLargeMessage());
+    }
+    if (expired > 0) {
+      notices.push(expiredSharesMessage(expired));
+    }
+    if (notices.length > 0) {
+      setFlash("", notices.join(" "));
     }
   }, [setFlash]);
 
@@ -202,11 +212,15 @@ function useMobileCapture({
     }
     const readSeq = shareReadSeqRef.current + 1;
     shareReadSeqRef.current = readSeq;
-    const shares = await listReviewableShares({ storage: shareStorage });
+    const { expired, shares } = await listReviewableShares({ storage: shareStorage });
+    if (expired > 0 && mountedRef.current) {
+      // The expired shares are gone whichever read removed them; say so.
+      setFlash("", expiredSharesMessage(expired));
+    }
     if (mountedRef.current && shareReadSeqRef.current === readSeq) {
       setIncomingShares(shares);
     }
-  }, [shareStorage]);
+  }, [setFlash, shareStorage]);
 
   const reportShareInboxReadFailure = useCallback(
     (error) => {

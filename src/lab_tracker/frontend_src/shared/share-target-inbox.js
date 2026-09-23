@@ -11,10 +11,13 @@
  * tests.
  *
  * The worker bounds the inbox (SHARE_INBOX_MAX_PENDING records, at most
- * SHARE_INBOX_MAX_BYTES parked, nothing kept past SHARE_INBOX_MAX_AGE_MS) and
- * refuses a share that does not fit rather than evicting one the user has not
- * reviewed. sw.js is a standalone script, so it repeats these values; the
- * service-worker share-target tests exercise it against the ones here.
+ * SHARE_INBOX_MAX_SHARE_BYTES per share and SHARE_INBOX_MAX_BYTES parked in
+ * total, nothing kept past SHARE_INBOX_MAX_AGE_MS) and refuses a share that
+ * does not fit rather than evicting one the user has not reviewed. Expired
+ * shares are removed, and the user is told how many (the worker reports them
+ * in its redirect; listReviewableShares returns its own count). sw.js is a
+ * standalone script, so it repeats these values; the service-worker
+ * share-target tests exercise it against the ones here.
  */
 
 import { UPLOAD_FILE_PATH } from "./upload-queue.js";
@@ -23,8 +26,13 @@ const DB_NAME = "lab-tracker-share-inbox";
 const DB_VERSION = 1;
 const STORE = "pending";
 const SHARE_INBOX_MAX_PENDING = 20;
-const SHARE_INBOX_MAX_BYTES = 50 * 1024 * 1024;
+// One share may be as large as the server's default upload limit
+// (Settings.max_upload_bytes, 100 MiB); the inbox holds a couple of those.
+const SHARE_INBOX_MAX_SHARE_BYTES = 100 * 1024 * 1024;
+const SHARE_INBOX_MAX_BYTES = 200 * 1024 * 1024;
 const SHARE_INBOX_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const MIB = 1024 * 1024;
+const DAY_MS = 24 * 60 * 60 * 1000;
 // Posted by the worker to open windows after it parks a share.
 const SHARE_INBOX_UPDATED_MESSAGE = "SHARE_INBOX_UPDATED";
 
@@ -132,17 +140,36 @@ function shareExpired(share, now) {
 }
 
 // Lists the parked shares still eligible for review, dropping any past
-// SHARE_INBOX_MAX_AGE_MS (the same expiry the worker applies on intake).
+// SHARE_INBOX_MAX_AGE_MS (the same expiry the worker applies on intake) and
+// counting them in `expired` so the caller can tell the user.
 async function listReviewableShares({ storage, now = Date.now() }) {
-  const reviewable = [];
+  const shares = [];
+  let expired = 0;
   for (const share of await storage.list()) {
     if (shareExpired(share, now)) {
       await storage.remove(share.id);
+      expired += 1;
     } else {
-      reviewable.push(share);
+      shares.push(share);
     }
   }
-  return reviewable;
+  return { expired, shares };
+}
+
+/** @param {number} count shares removed because they expired unreviewed */
+function expiredSharesMessage(count) {
+  const days = Math.round(SHARE_INBOX_MAX_AGE_MS / DAY_MS);
+  const subject = count === 1 ? "1 shared item" : `${count} shared items`;
+  const removed = count === 1 ? "was removed" : "were removed";
+  return `${subject} waited more than ${days} days without review and ${removed} from the share inbox.`;
+}
+
+function shareTooLargeMessage() {
+  return (
+    "The shared item was not saved: one share can hold at most " +
+    `${SHARE_INBOX_MAX_SHARE_BYTES / MIB} MB and ${SHARE_INBOX_MAX_PENDING} files. ` +
+    "Add it from the capture page instead."
+  );
 }
 
 function requireReviewedShareIds(shareIds) {
@@ -243,12 +270,15 @@ export {
   SHARE_INBOX_MAX_AGE_MS,
   SHARE_INBOX_MAX_BYTES,
   SHARE_INBOX_MAX_PENDING,
+  SHARE_INBOX_MAX_SHARE_BYTES,
   SHARE_INBOX_UPDATED_MESSAGE,
   STORE,
   createIndexedDbShareStorage,
   createMemoryShareStorage,
   discardIncomingShares,
+  expiredSharesMessage,
   listReviewableShares,
   migrateIncomingShares,
   shareInboxAvailable,
+  shareTooLargeMessage,
 };

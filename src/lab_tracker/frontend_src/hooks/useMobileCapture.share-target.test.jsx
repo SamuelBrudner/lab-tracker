@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { buildApiPath } from "../shared/api.js";
 import {
+  SHARE_INBOX_MAX_AGE_MS,
   SHARE_INBOX_UPDATED_MESSAGE,
   createMemoryShareStorage,
 } from "../shared/share-target-inbox.js";
@@ -456,7 +457,7 @@ describe("useMobileCapture share-target review", () => {
     ],
     [
       "too-large",
-      "The shared item was not saved: it is larger than the share inbox accepts. " +
+      "The shared item was not saved: one share can hold at most 100 MB and 20 files. " +
         "Add it from the capture page instead.",
     ],
   ])("flashes a refused share redirect (%s)", async (status, message) => {
@@ -466,5 +467,50 @@ describe("useMobileCapture share-target review", () => {
 
     await waitFor(() => expect(props.setFlash).toHaveBeenCalledWith("", message));
     expect(window.location.search).not.toContain("from-share");
+  });
+
+  it("tells the user how many expired shares the worker removed on intake", async () => {
+    window.history.replaceState({}, "", "/app/capture?from-share=full&share-expired=2&tab=x");
+
+    const { props } = renderCaptureHook();
+
+    await waitFor(() =>
+      expect(props.setFlash).toHaveBeenCalledWith(
+        "",
+        "The shared item was not saved: the share inbox is full. " +
+          "Import or discard the shared items waiting for review, then share again. " +
+          "2 shared items waited more than 7 days without review and were removed from the share inbox."
+      )
+    );
+    expect(window.location.search).toBe("?tab=x");
+  });
+
+  it("tells the user about expired shares removed from a successful share's inbox", async () => {
+    window.history.replaceState({}, "", "/app/capture?from-share=1&share-expired=1");
+
+    const { props } = renderCaptureHook();
+
+    await waitFor(() =>
+      expect(props.setFlash).toHaveBeenCalledWith(
+        "",
+        "1 shared item waited more than 7 days without review and was removed from the share inbox."
+      )
+    );
+    expect(window.location.search).toBe("");
+  });
+
+  it("tells the user when listing the inbox removed expired shares", async () => {
+    shareMocks.storage = createMemoryShareStorage([
+      { text: "stale", receivedAt: Date.now() - SHARE_INBOX_MAX_AGE_MS - 1 },
+      { text: "fresh", receivedAt: Date.now() },
+    ]);
+
+    const { props, result } = await renderWithParkedShares();
+
+    expect(result.current.incomingShares.map((share) => share.text)).toEqual(["fresh"]);
+    expect(props.setFlash).toHaveBeenCalledWith(
+      "",
+      "1 shared item waited more than 7 days without review and was removed from the share inbox."
+    );
   });
 });

@@ -50,7 +50,7 @@ function expectedStaticAssetVersion() {
 describe("service worker source", () => {
   it("waits for share-inbox transaction completion before resolving writes", () => {
     expect(serviceWorkerSource).toContain("tx.oncomplete");
-    expect(serviceWorkerSource).toContain("resolve(outcome)");
+    expect(serviceWorkerSource).toContain("resolve({ outcome, expired })");
     expect(serviceWorkerSource).toContain("IndexedDB transaction aborted");
   });
 

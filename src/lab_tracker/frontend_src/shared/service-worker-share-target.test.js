@@ -8,6 +8,7 @@ import {
   SHARE_INBOX_MAX_AGE_MS,
   SHARE_INBOX_MAX_BYTES,
   SHARE_INBOX_MAX_PENDING,
+  SHARE_INBOX_MAX_SHARE_BYTES,
   SHARE_INBOX_UPDATED_MESSAGE,
   createIndexedDbShareStorage,
 } from "./share-target-inbox.js";
@@ -196,26 +197,53 @@ describe("service worker share-target intake", () => {
     expect(openWindow.postMessage).not.toHaveBeenCalled();
   });
 
-  it("refuses a share that would push parked bytes over the cap", async () => {
+  it("accepts one share as large as the server's default 100 MiB upload limit", async () => {
+    // The inbox must not refuse an audio share the API would accept, and it
+    // must hold more than one such share in total.
+    expect(SHARE_INBOX_MAX_SHARE_BYTES).toBe(100 * 1024 * 1024);
+    expect(SHARE_INBOX_MAX_BYTES).toBeGreaterThan(SHARE_INBOX_MAX_SHARE_BYTES);
     const listeners = await loadServiceWorker();
-    const half = Math.floor(SHARE_INBOX_MAX_BYTES / 2) + 1;
-    expect(
-      await dispatchShareTarget(listeners, shareTargetRequest({ files: [sizedFile("a.bin", half)] }))
-    ).toEqual({ location: "/app/capture?from-share=1", status: 303 });
+
+    // The cap counts the share's text fields too, so leave them some room.
+    const recordingBytes = SHARE_INBOX_MAX_SHARE_BYTES - 1024;
 
     const response = await dispatchShareTarget(
       listeners,
-      shareTargetRequest({ files: [sizedFile("b.bin", half)] })
+      shareTargetRequest({ files: [sizedFile("recording.m4a", recordingBytes)] })
+    );
+
+    expect(response).toEqual({ location: "/app/capture?from-share=1", status: 303 });
+    const parked = await createIndexedDbShareStorage().list();
+    expect(parked.map((share) => share.filename)).toEqual(["recording.m4a"]);
+  });
+
+  it("refuses a share that would push parked bytes over the total cap", async () => {
+    const listeners = await loadServiceWorker();
+    await seedParkedRecord({
+      file: { size: SHARE_INBOX_MAX_BYTES - 1024 },
+      filename: "parked.bin",
+      receivedAt: Date.now(),
+    });
+
+    const response = await dispatchShareTarget(
+      listeners,
+      shareTargetRequest({ files: [sizedFile("b.bin", 2048)] })
     );
 
     expect(response).toEqual({ location: "/app/capture?from-share=full", status: 303 });
     const parked = await createIndexedDbShareStorage().list();
-    expect(parked.map((share) => share.filename)).toEqual(["a.bin"]);
+    expect(parked.map((share) => share.filename)).toEqual(["parked.bin"]);
   });
 
   it.each([
-    ["a file larger than the byte cap", () => ({ files: [sizedFile("huge.bin", SHARE_INBOX_MAX_BYTES + 1)] })],
-    ["text larger than the byte cap", () => ({ fields: { text: "x".repeat(SHARE_INBOX_MAX_BYTES + 1) } })],
+    [
+      "a file larger than the per-share cap",
+      () => ({ files: [sizedFile("huge.bin", SHARE_INBOX_MAX_SHARE_BYTES + 1)] }),
+    ],
+    [
+      "text larger than the per-share cap",
+      () => ({ fields: { text: "x".repeat(SHARE_INBOX_MAX_SHARE_BYTES + 1) } }),
+    ],
     [
       "more files than the pending cap",
       () => ({
@@ -245,9 +273,36 @@ describe("service worker share-target intake", () => {
       shareTargetRequest({ fields: { text: "fresh share" } })
     );
 
-    expect(response).toEqual({ location: "/app/capture?from-share=1", status: 303 });
+    // The redirect tells the capture page how many unreviewed shares expired.
+    expect(response).toEqual({
+      location: `/app/capture?from-share=1&share-expired=${SHARE_INBOX_MAX_PENDING}`,
+      status: 303,
+    });
     const parked = await createIndexedDbShareStorage().list();
     expect(parked.map((share) => share.text)).toEqual(["fresh share"]);
+  });
+
+  it("reports expired shares it removed even when the new share is refused", async () => {
+    const now = 1_800_000_000_000;
+    vi.spyOn(Date, "now").mockReturnValue(now);
+    const listeners = await loadServiceWorker();
+    await seedParkedRecord({ text: "stale", receivedAt: now - SHARE_INBOX_MAX_AGE_MS - 1 });
+    for (let index = 0; index < SHARE_INBOX_MAX_PENDING; index += 1) {
+      await seedParkedRecord({ text: `pending ${index}`, receivedAt: now });
+    }
+
+    const response = await dispatchShareTarget(
+      listeners,
+      shareTargetRequest({ fields: { text: "one too many" } })
+    );
+
+    expect(response).toEqual({
+      location: "/app/capture?from-share=full&share-expired=1",
+      status: 303,
+    });
+    const parked = await createIndexedDbShareStorage().list();
+    expect(parked).toHaveLength(SHARE_INBOX_MAX_PENDING);
+    expect(parked.map((share) => share.text)).not.toContain("stale");
   });
 
   it("does not drop unexpired shares when refusing a new one", async () => {

@@ -30,7 +30,9 @@ const SHARE_INBOX_STORE = "pending";
 // a hostile page must not be able to fill the origin's storage quota by
 // re-submitting. Keep these in step with shared/share-target-inbox.js.
 const SHARE_INBOX_MAX_PENDING = 20;
-const SHARE_INBOX_MAX_BYTES = 50 * 1024 * 1024;
+// One share may be as large as the server's default upload limit (100 MiB).
+const SHARE_INBOX_MAX_SHARE_BYTES = 100 * 1024 * 1024;
+const SHARE_INBOX_MAX_BYTES = 200 * 1024 * 1024;
 const SHARE_INBOX_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const SHARE_INBOX_UPDATED_MESSAGE = "SHARE_INBOX_UPDATED";
 const UPDATE_PROMPT_HANDSHAKE_MS = 1500;
@@ -222,11 +224,14 @@ async function handleShareTarget(request) {
     return Response.redirect("/app/capture?from-share=rejected", 303);
   }
   let redirectStatus = "empty";
+  let expiredCount = 0;
   try {
     const receivedAt = Date.now();
     const records = shareRecordsFromForm(await request.formData(), receivedAt);
     if (records.length > 0) {
-      redirectStatus = await parkIncomingShares(records, receivedAt);
+      const parked = await parkIncomingShares(records, receivedAt);
+      redirectStatus = parked.outcome;
+      expiredCount = parked.expired;
     }
   } catch (error) {
     // Stashing failed; navigate into the app with an explicit error marker so
@@ -245,7 +250,12 @@ async function handleShareTarget(request) {
   } else if (redirectStatus === "full" || redirectStatus === "too-large") {
     console.warn("share-target POST refused: share inbox limit", redirectStatus);
   }
-  return Response.redirect(`/app/capture?from-share=${redirectStatus}`, 303);
+  const location = `/app/capture?from-share=${redirectStatus}`;
+  // Expired shares are removed unreviewed; the capture page tells the user.
+  return Response.redirect(
+    expiredCount > 0 ? `${location}&share-expired=${expiredCount}` : location,
+    303
+  );
 }
 
 function openShareInbox() {
@@ -263,13 +273,14 @@ function openShareInbox() {
 }
 
 // Parks `records` (one share) in a single transaction, first dropping shares
-// past SHARE_INBOX_MAX_AGE_MS. Resolves "1" when parked, "too-large" when the
-// share alone exceeds a cap, or "full" when it does not fit beside the
-// unexpired shares still awaiting review, which are never evicted for it.
+// past SHARE_INBOX_MAX_AGE_MS. Resolves { outcome, expired }: outcome is "1"
+// when parked, "too-large" when the share alone exceeds a per-share cap, or
+// "full" when it does not fit beside the unexpired shares still awaiting
+// review, which are never evicted for it; expired counts the dropped shares.
 async function parkIncomingShares(records, now) {
   const incomingBytes = records.reduce((total, record) => total + shareRecordBytes(record), 0);
-  if (records.length > SHARE_INBOX_MAX_PENDING || incomingBytes > SHARE_INBOX_MAX_BYTES) {
-    return "too-large";
+  if (records.length > SHARE_INBOX_MAX_PENDING || incomingBytes > SHARE_INBOX_MAX_SHARE_BYTES) {
+    return { outcome: "too-large", expired: 0 };
   }
   const db = await openShareInbox();
   try {
@@ -277,6 +288,7 @@ async function parkIncomingShares(records, now) {
       const tx = db.transaction(SHARE_INBOX_STORE, "readwrite");
       const store = tx.objectStore(SHARE_INBOX_STORE);
       let outcome = "";
+      let expired = 0;
       let failure = null;
       const listing = store.getAll();
       listing.onsuccess = () => {
@@ -286,6 +298,7 @@ async function parkIncomingShares(records, now) {
           for (const parked of listing.result) {
             if (shareExpired(parked, now)) {
               store.delete(parked.id);
+              expired += 1;
             } else {
               pendingCount += 1;
               pendingBytes += shareRecordBytes(parked);
@@ -308,7 +321,9 @@ async function parkIncomingShares(records, now) {
         }
       };
       tx.oncomplete = () =>
-        outcome ? resolve(outcome) : reject(new Error("Share inbox listing did not complete."));
+        outcome
+          ? resolve({ outcome, expired })
+          : reject(new Error("Share inbox listing did not complete."));
       tx.onerror = () => reject(failure || tx.error);
       tx.onabort = () =>
         reject(failure || tx.error || new Error("IndexedDB transaction aborted."));
