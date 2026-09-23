@@ -3,6 +3,9 @@ import * as React from "react";
 const { useCallback, useEffect, useRef, useState } = React;
 
 const DRAFT_KEY_PREFIX = "lab-tracker:draft:";
+// The user the stored drafts belong to. Deliberately outside DRAFT_KEY_PREFIX so
+// clearing drafts does not forget whose they were.
+const DRAFT_OWNER_KEY = "lab-tracker:draft-owner";
 
 function storageKey(key) {
   return `${DRAFT_KEY_PREFIX}${key}`;
@@ -186,4 +189,27 @@ function useLocalDraft({ key, value, baseline = "", enabled = true }) {
   };
 }
 
-export { clearAllLocalDrafts, DRAFT_KEY_PREFIX, useLocalDraft };
+/**
+ * Bind stored drafts to the user who just signed in, before anything can offer
+ * them. Drafts intentionally survive a session expiry or rejection so the same
+ * person can recover their text after signing back in; but when a different
+ * user (or a user whose drafts have no recorded owner) signs in on this origin,
+ * the drafts are dropped rather than offered to them.
+ */
+function claimLocalDraftsFor(userId) {
+  if (!userId) {
+    return;
+  }
+  try {
+    const storage = globalThis.localStorage;
+    if (!storage || storage.getItem(DRAFT_OWNER_KEY) === userId) {
+      return;
+    }
+    clearAllLocalDrafts();
+    storage.setItem(DRAFT_OWNER_KEY, userId);
+  } catch {
+    // Same rationale as writeDraft: unavailable storage holds no drafts to leak.
+  }
+}
+
+export { claimLocalDraftsFor, clearAllLocalDrafts, DRAFT_KEY_PREFIX, useLocalDraft };

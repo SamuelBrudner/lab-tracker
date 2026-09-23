@@ -10,6 +10,7 @@ import {
 } from "../shared/constants.js";
 import { apiResponse, errorResponse, installFetchMock } from "../test/utils.js";
 import { MIN_REFRESH_DELAY_MS, useAuthSession } from "./useAuthSession.js";
+import { DRAFT_KEY_PREFIX, useLocalDraft } from "./useLocalDraft.js";
 
 const USER = {
   created_at: "2026-06-18T12:00:00Z",
@@ -422,5 +423,118 @@ describe("useAuthSession", () => {
     await waitFor(() =>
       expect(screen.getByTestId("auth-mode")).toHaveTextContent("setup")
     );
+  });
+});
+
+describe("useAuthSession local drafts across users", () => {
+  const PREVIOUS_USER_ID = "00000000-0000-0000-0000-00000000000a";
+  const DRAFT_KEY = "note:project-1";
+  const NEXT_USER = {
+    created_at: "2026-06-18T12:00:00Z",
+    role: "editor",
+    user_id: "00000000-0000-0000-0000-00000000000b",
+    username: "next-person",
+  };
+
+  function DraftProbe() {
+    const draft = useLocalDraft({ key: DRAFT_KEY, value: "" });
+    return <span data-testid="recovered">{draft.recoveredValue ?? "(none)"}</span>;
+  }
+
+  function SignInHarness() {
+    const session = useAuthSession({ replace: noop, setBusy: noop, setFlash: noop });
+    return (
+      <form onSubmit={session.handleAuthSubmit}>
+        <input
+          aria-label="Username"
+          value={session.authUsername}
+          onChange={(event) => session.setAuthUsername(event.target.value)}
+        />
+        <input
+          aria-label="Password"
+          value={session.authPassword}
+          onChange={(event) => session.setAuthPassword(event.target.value)}
+        />
+        <button type="submit">Sign in</button>
+        {session.user ? <DraftProbe /> : null}
+      </form>
+    );
+  }
+
+  function leavePreviousUsersDraft() {
+    // The previous person's session expired (no sign-out), leaving their text.
+    localStorage.setItem("lab-tracker:draft-owner", PREVIOUS_USER_ID);
+    localStorage.setItem(
+      `${DRAFT_KEY_PREFIX}${DRAFT_KEY}`,
+      JSON.stringify({ savedAt: 1, value: "Previous person's unsent notes" })
+    );
+  }
+
+  function signIn(user) {
+    installFetchMock([
+      {
+        match: "/auth/me",
+        response: [
+          errorResponse("Authentication required.", 401),
+          apiResponse(user, 200, { auth_enabled: true }),
+        ],
+      },
+      {
+        match: "/auth/login",
+        method: "POST",
+        response: apiResponse({
+          access_token: "fresh-token",
+          expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+          token_type: "bearer",
+          user,
+        }),
+      },
+    ]);
+    render(<SignInHarness />);
+    fireEvent.change(screen.getByLabelText("Username"), { target: { value: user.username } });
+    fireEvent.change(screen.getByLabelText("Password"), { target: { value: "secret-pass" } });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+  }
+
+  it("does not offer a previous user's draft to the next person who signs in", async () => {
+    leavePreviousUsersDraft();
+
+    signIn(NEXT_USER);
+
+    await screen.findByTestId("recovered");
+    await flushAuthEffects();
+    expect(screen.getByTestId("recovered")).toHaveTextContent("(none)");
+    expect(localStorage.getItem(`${DRAFT_KEY_PREFIX}${DRAFT_KEY}`)).toBeNull();
+    expect(localStorage.getItem("lab-tracker:draft-owner")).toBe(NEXT_USER.user_id);
+  });
+
+  it("still offers the same user's draft after their session expired", async () => {
+    leavePreviousUsersDraft();
+
+    signIn({ ...NEXT_USER, user_id: PREVIOUS_USER_ID, username: "previous-person" });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("recovered")).toHaveTextContent(
+        "Previous person's unsent notes"
+      )
+    );
+  });
+
+  it("drops a draft whose owner is unknown when a user resolves from a saved token", async () => {
+    localStorage.setItem(TOKEN_STORAGE_KEY, "saved-token");
+    localStorage.setItem(
+      `${DRAFT_KEY_PREFIX}${DRAFT_KEY}`,
+      JSON.stringify({ savedAt: 1, value: "Unattributed text" })
+    );
+    installFetchMock([
+      { match: "/auth/me", response: apiResponse(NEXT_USER, 200, { auth_enabled: true }) },
+    ]);
+
+    render(<SignInHarness />);
+
+    await screen.findByTestId("recovered");
+    await flushAuthEffects();
+    expect(screen.getByTestId("recovered")).toHaveTextContent("(none)");
+    expect(localStorage.getItem(`${DRAFT_KEY_PREFIX}${DRAFT_KEY}`)).toBeNull();
   });
 });
