@@ -214,6 +214,16 @@ class ProjectsApiMixin:
             project_id_attr=None,
         )
 
+    def update_group_membership(self, *args: Any, **kwargs: Any) -> Any:
+        return self._with_usage_event(
+            lambda: self.projects.update_group_membership(*args, **kwargs),
+            verb=UsageEventVerb.UPDATE,
+            resource_type=UsageEventResourceType.GROUP_MEMBERSHIP,
+            actor=kwargs.get("actor"),
+            resource_id_attr="membership_id",
+            project_id_attr=None,
+        )
+
     def delete_group_membership(self, *args: Any, **kwargs: Any) -> Any:
         return self._with_usage_event(
             lambda: self.projects.delete_group_membership(*args, **kwargs),

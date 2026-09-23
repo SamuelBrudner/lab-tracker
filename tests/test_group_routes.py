@@ -943,3 +943,41 @@ def test_direct_project_owner_cannot_delete_grouped_project_without_group_owner(
 
     deleted = client.delete(f"/projects/{scope.project_id}", headers=scope.pi_headers)
     assert deleted.status_code == 200, deleted.text
+
+
+def test_group_member_patch_requires_an_existing_membership(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    owner_token, _ = _register_user(
+        client,
+        f"group-patch-owner-{uuid4().hex[:8]}",
+        role="editor",
+        headers=admin_auth_headers,
+    )
+    owner_headers = _auth_headers(owner_token)
+    group_id = client.post(
+        "/groups",
+        json={"name": "Patch-only group"},
+        headers=owner_headers,
+    ).json()["data"]["group_id"]
+    _, outsider_user_id = _register_user(client, f"group-patch-outsider-{uuid4().hex[:8]}")
+
+    unknown_user = client.patch(
+        f"/groups/{group_id}/members/{uuid4()}",
+        json={"role": "viewer"},
+        headers=owner_headers,
+    )
+    non_member = client.patch(
+        f"/groups/{group_id}/members/{outsider_user_id}",
+        json={"role": "owner"},
+        headers=owner_headers,
+    )
+
+    assert unknown_user.status_code == 404, unknown_user.text
+    assert unknown_user.json()["error"]["message"] == "Group membership does not exist."
+    assert non_member.status_code == 404, non_member.text
+    assert non_member.json()["error"]["message"] == "Group membership does not exist."
+    members = client.get(f"/groups/{group_id}/members", headers=owner_headers)
+    assert members.status_code == 200, members.text
+    assert outsider_user_id not in {item["user_id"] for item in members.json()["data"]}

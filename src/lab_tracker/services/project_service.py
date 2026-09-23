@@ -484,18 +484,53 @@ class ProjectService(BaseService):
             else:
                 if existing.role == role:
                     return existing
-                if existing.role == ProjectMembershipRole.OWNER:
-                    existing = self._require_group_keeps_owner(
-                        repository,
-                        group_id=group_id,
-                        user_id=user_id,
-                    )
-                membership = existing
-                membership.role = role
-                membership.updated_at = utc_now()
+                membership = self._change_group_membership_role(
+                    repository,
+                    existing,
+                    role,
+                )
             repository.group_memberships.save(membership)
             saved = repository.group_memberships.get(membership.membership_id)
         return saved or membership
+
+    def update_group_membership(
+        self,
+        group_id: UUID,
+        user_id: UUID,
+        role: ProjectMembershipRole,
+        *,
+        actor: AuthContext | None = None,
+    ) -> GroupMembership:
+        """Change an existing member's role; never adds a new member."""
+
+        self.authorization.require_group_owner(group_id, actor=actor)
+        self.get_project_group(group_id)
+        with self.unit_of_work() as repository:
+            existing = repository.get_group_membership(group_id=group_id, user_id=user_id)
+            if existing is None:
+                raise NotFoundError("Group membership does not exist.")
+            if existing.role == role:
+                return existing
+            membership = self._change_group_membership_role(repository, existing, role)
+            repository.group_memberships.save(membership)
+            saved = repository.group_memberships.get(membership.membership_id)
+        return saved or membership
+
+    def _change_group_membership_role(
+        self,
+        repository: LabTrackerRepository,
+        membership: GroupMembership,
+        role: ProjectMembershipRole,
+    ) -> GroupMembership:
+        if membership.role == ProjectMembershipRole.OWNER:
+            membership = self._require_group_keeps_owner(
+                repository,
+                group_id=membership.group_id,
+                user_id=membership.user_id,
+            )
+        membership.role = role
+        membership.updated_at = utc_now()
+        return membership
 
     def delete_group_membership(
         self,
