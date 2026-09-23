@@ -36,3 +36,5 @@ lab_tracker.db.lock
 /playwright-report/
 /blob-report/
 /.playwright/
+# Timestamped run logs from external runners; review reports stay addable.
+/docs/runs/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9]*.md

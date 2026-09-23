@@ -33,6 +33,25 @@ def test_new_review_reports_are_not_git_ignored(report: str) -> None:
     )
 
 
+def test_generated_timestamped_run_logs_stay_git_ignored() -> None:
+    # External runners drop timestamped "Run Report" logs in docs/runs/; only
+    # those, not the review reports, should stay out of `git status`.
+    result = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(_REPO_ROOT),
+            "check-ignore",
+            "--no-index",
+            "docs/runs/20990101-000000-00000000.md",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, "timestamped run logs in docs/runs/ are not git-ignored"
+
+
 # L4: AGENTS.md must not contradict its own profile-based git policy.
 def test_agents_md_leaves_push_policy_to_the_session_completion_profiles() -> None:
     text = _read(_REPO_ROOT / "AGENTS.md")
