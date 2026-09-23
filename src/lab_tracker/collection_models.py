@@ -98,6 +98,8 @@ class AcquisitionCollectionCaptureResult(_CollectionModel):
     snapshot: AcquisitionCollectionSnapshot
     snapshot_reused: bool = False
     current_pointer_changed: bool = False
+    # True only for an exact client_capture_id replay, which writes nothing.
+    capture_replayed: bool = False
 
 
 def snapshot_with_capture_observation(

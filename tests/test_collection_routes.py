@@ -113,7 +113,9 @@ def test_collection_capture_is_idempotent_ordered_and_lazily_read(
         complete=False,
         members=list(reversed(members)),
     )
-    assert replay.status_code == 201
+    # An exact client_capture_id replay creates nothing, so it answers 200 like
+    # every other idempotent create route.
+    assert replay.status_code == 200
     assert replay.json()["data"]["snapshot_id"] == snapshot_id
     assert replay.json()["meta"]["snapshot_reused"] is True
 

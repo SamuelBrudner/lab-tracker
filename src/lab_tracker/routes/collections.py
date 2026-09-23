@@ -41,6 +41,7 @@ def build_collections_router(api: LabTrackerAPI) -> APIRouter:
         collection_key: str,
         payload: AcquisitionCollectionSnapshotCreate,
         request: Request,
+        response: Response,
     ):
         result = api_from_request(request, api).capture_collection_snapshot(
             session_id=session_id,
@@ -54,6 +55,8 @@ def build_collections_router(api: LabTrackerAPI) -> APIRouter:
             source_uri=payload.source_uri,
             actor=actor_from_request(request),
         )
+        if result.capture_replayed:
+            response.status_code = http_status.HTTP_200_OK
         return Envelope(
             data=result.snapshot,
             meta={
