@@ -28,6 +28,16 @@ PROJECT_OWNER_ROLES = {ProjectMembershipRole.OWNER}
 
 
 class ProjectAuthorizationPolicy(BaseService):
+    """Project-scoped access comes from membership, not the global role.
+
+    Project and group memberships are the grants a project owner controls, so
+    a viewer account that an owner makes a project contributor can write in
+    that project. Only the global admin role bypasses membership; the editor
+    and viewer roles gate instance-wide actions and service-token writes
+    (``service_principal_can_access``) but add or remove nothing here. The
+    existing membership tests pin this contract.
+    """
+
     def __init__(self, context: ServiceContext) -> None:
         super().__init__(context)
 
