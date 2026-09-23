@@ -126,6 +126,43 @@ analysis graph draft endpoint to propose human-reviewed graph changes for the
 staged note; it never commits analyses, claims, visualizations, or question
 links.
 
+## Sessions From Folder Names
+
+A capture that already names its session needs no linking in review. The
+watcher attaches a session to a file in three ways, in this order:
+
+1. `lt watch add --session <uuid-or-link-code>` on the watch entry.
+2. A session link code in the watched root's name or in the file's path under
+   it. The link code is printed on every session in the app (26 characters,
+   optionally written `LT-<code>`), so naming an acquisition folder
+   `session001_LT-<code>` claims everything saved inside it.
+3. The checkout's active session, set with `lt session use <uuid-or-link-code>`
+   (or the `LAB_TRACKER_SESSION_ID` environment variable). It expires after
+   twelve hours by default (`--hours`), so a stale session never keeps
+   claiming next week's captures. `lt session status` shows it and
+   `lt session clear` ends it early.
+
+The resolved session becomes a note target on the staged note (and the
+`watch_session_source` metadata says which rule matched), so the daily review
+starts from a linked capture instead of proposing the link. Figure saves made
+from the same checkout carry the active session the same way.
+
+## One Sync For Every Outbox
+
+`lt watch run` and `lt outbox sync` drain the watch outbox and then the repo
+and HPC outboxes beside it (an adapter without a config is skipped), so one
+scheduled job delivers every queued capture for the checkout. `lt setup
+schedule --request-draft` adds `--request-draft` to the scheduled run so newly
+synced captures also ask for a graph draft. On macOS the schedule is a launchd
+agent under `~/Library/LaunchAgents`; Windows uses Task Scheduler and other
+systems a managed crontab line.
+
+Figure saves that cannot reach the server (`lab_tracker_client.savefig`,
+`capture_figures`, or the autotrack hook) are queued into this same watch
+outbox instead of being dropped, under the same capture id a live save would
+use, and drain with the next sync. Set `LAB_TRACKER_CAPTURE_OUTBOX=0` to
+disable the queue.
+
 ## Configured Watches
 
 You can edit `.lab-tracker/watch.json` to scan repeatable roots:

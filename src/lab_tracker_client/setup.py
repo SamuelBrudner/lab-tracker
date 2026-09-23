@@ -227,6 +227,8 @@ def setup_status(target: str | Path = ".", *, brief: bool = False) -> JsonObject
         "hpc": _hpc_status(root),
         "hooks": _hooks_status(root),
         "skills": _skills_status(),
+        "autotrack": _autotrack_status(),
+        "session": _session_status(root),
     }
     payload["suggestions"] = _suggestions(payload)
     if not brief:
@@ -914,6 +916,24 @@ def _hpc_status(root: Path) -> JsonObject:
         "config_path": str(config.config_path),
         "cluster": config.cluster,
     }
+
+
+def _autotrack_status() -> JsonObject:
+    from lab_tracker_client.figure_autotrack import ipython_startup_status
+
+    with suppress(Exception):
+        return ipython_startup_status()
+    return {"startup_file": None, "installed": False, "up_to_date": None}
+
+
+def _session_status(root: Path) -> JsonObject:
+    from lab_tracker_client.session_context import active_session_status
+
+    with suppress(Exception):
+        status = active_session_status(root)
+        status.pop("command", None)
+        return status
+    return {"present": False, "active": False}
 
 
 def _hooks_status(root: Path) -> JsonObject:

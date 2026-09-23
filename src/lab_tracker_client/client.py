@@ -1364,6 +1364,7 @@ class LabTracker:
         content_type: str | None = None,
         transcribed_text: str | None = None,
         client_capture_id: str | None = None,
+        targets: Sequence[EntityRef] | None = None,
         timeout: Any = None,
     ) -> LTRecord:
         note, _status_code = self._upload_note_file_payload_with_status(
@@ -1375,6 +1376,7 @@ class LabTracker:
             content_type=content_type,
             transcribed_text=transcribed_text,
             client_capture_id=client_capture_id,
+            targets=targets,
             timeout=timeout,
         )
         return note
@@ -1390,6 +1392,7 @@ class LabTracker:
         content_type: str | None = None,
         transcribed_text: str | None = None,
         client_capture_id: str | None = None,
+        targets: Sequence[EntityRef] | None = None,
         timeout: Any = None,
     ) -> tuple[LTRecord, int]:
         if not payload:
@@ -1416,6 +1419,10 @@ class LabTracker:
             data["metadata"] = json.dumps(resolved_metadata, sort_keys=True)
         if transcribed_text:
             data["transcribed_text"] = transcribed_text
+        if targets:
+            # Client-authored links (a configured session or question) ride
+            # with the capture so it lands already attached, not orphaned.
+            data["targets"] = json.dumps([target.to_payload() for target in targets])
         response_payload, status_code = self._request_with_status(
             "POST",
             "/notes/upload-file",
@@ -1488,6 +1495,9 @@ class LabTracker:
         content_type: str | None = None,
         dry_run: bool = False,
         evidence_note_index: EvidenceNoteIndex | None = None,
+        observed_at: str | datetime | None = None,
+        targets: Sequence[EntityRef] | None = None,
+        client_capture_id: str | None = None,
     ) -> EvidenceImportResult:
         path = Path(file_path).expanduser().resolve()
         if not path.is_file():
@@ -1512,6 +1522,7 @@ class LabTracker:
             capture_kind="file",
             adapter=adapter,
             title=title or path.name,
+            observed_at=observed_at,
             metadata=metadata,
         )
         evidence_key = (
@@ -1556,6 +1567,8 @@ class LabTracker:
             metadata=evidence_metadata,
             status=status,
             content_type=content_type,
+            client_capture_id=client_capture_id,
+            targets=targets,
         )
         if evidence_note_index is not None:
             evidence_note_index[evidence_key] = note

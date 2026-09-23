@@ -7,6 +7,7 @@ import json
 import os
 import uuid
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,6 +38,7 @@ from lab_tracker.models import NoteMetadataScalar
 from lab_tracker_client import outbox as _outbox
 from lab_tracker_client.client import (
     CAPTURE_HOST_METADATA_KEYS,
+    EntityRef,
     EvidenceNoteIndex,
     LabTracker,
     LTRecord,
@@ -45,6 +47,11 @@ from lab_tracker_client.client import (
     capture_host_metadata,
 )
 from lab_tracker_client.evidence_index import outbox_note_index
+from lab_tracker_client.session_context import (
+    find_session_link_code,
+    read_active_session,
+    session_id_from_reference,
+)
 
 CONFIG_VERSION = 1
 EVENT_VERSION = 1
@@ -107,19 +114,20 @@ class WatchConfig:
             payload["project_id"] = self.project_id
         return payload
 
+    def checkout_root(self) -> Path:
+        """The checkout this config belongs to (parent of its .lab-tracker/)."""
+
+        if self.config_path is None:
+            return Path.cwd().resolve()
+        parent = self.config_path.parent
+        return (parent.parent if parent.name == ".lab-tracker" else parent).resolve()
+
     def outbox_path(self) -> Path:
         override = os.getenv("LAB_TRACKER_WATCH_OUTBOX")
         configured = Path(override or self.outbox).expanduser()
         if configured.is_absolute():
             return configured.resolve()
-        root = Path.cwd()
-        if self.config_path is not None:
-            root = (
-                self.config_path.parent.parent
-                if self.config_path.parent.name == ".lab-tracker"
-                else self.config_path.parent
-            )
-        return (root / configured).resolve()
+        return (self.checkout_root() / configured).resolve()
 
 
 @dataclass(frozen=True)
@@ -391,6 +399,34 @@ def observe_file(
     )
 
 
+def resolve_session_for_path(
+    observation: FileObservation,
+    *,
+    session_id: str | None = None,
+    checkout: Path | None = None,
+) -> tuple[str | None, str]:
+    """Pick the session a watched file belongs to, and say how it was found.
+
+    Precedence: an explicit ``--session`` (UUID or link code), then a session
+    link code in the root folder name or the root-relative path (a folder named
+    for the session claims everything inside it), then the checkout's active
+    session from ``lt session use``. Returns ``(session_id, source)`` where
+    source is ``"config"``, ``"path"``, ``"active"`` or ``""``.
+    """
+
+    explicit = session_id_from_reference(session_id)
+    if explicit:
+        return explicit, "config"
+    haystack = f"{observation.root.name}/{observation.relative_path}"
+    found = find_session_link_code(haystack)
+    if found is not None:
+        return found[1], "path"
+    active = read_active_session(checkout or observation.root)
+    if active and active.get("session_id"):
+        return str(active["session_id"]), "active"
+    return None, ""
+
+
 def event_from_file(
     config: WatchConfig,
     path: str | Path,
@@ -413,6 +449,9 @@ def event_from_file(
     resolved_capture_kind = capture_kind or (
         "acquisition_output" if resolved_sink == SINK_ACQUISITION_OUTPUT else "file"
     )
+    resolved_session_id, session_source = resolve_session_for_path(
+        observation, session_id=session_id, checkout=config.checkout_root()
+    )
     return make_event(
         capture_id=observation.source_external_id,
         event_id=f"file-{observation.content_hash[:16]}",
@@ -430,13 +469,14 @@ def event_from_file(
             "content_hash": observation.content_hash,
             "size_bytes": observation.size_bytes,
             "mtime": observation.mtime,
+            **({"session_source": session_source} if session_source else {}),
         },
         context={
             "project_id": _optional_str(project_id or config.project_id),
             "question_id": _optional_str(question_id),
             "dataset_ids": _string_list(dataset_ids),
             "tags": _string_list(tags),
-            "session_id": _optional_str(session_id),
+            "session_id": resolved_session_id,
         },
         payload={
             "title": title or observation.path.name,
@@ -843,6 +883,7 @@ def sync_outbox(
 ) -> JsonObject:
     outbox = config.outbox_path()
     note_indexes: dict[str, EvidenceNoteIndex] = {}
+    default_project_id = resolve_default_project_id(config, client)
 
     def _is_actionable(event: JsonObject) -> bool:
         sync = event.get("sync", {})
@@ -863,6 +904,7 @@ def sync_outbox(
             note_indexes=note_indexes,
             dry_run=dry_run,
             request_draft=request_draft,
+            default_project_id=default_project_id,
         ).to_dict()
 
     def _skipped(path: Path, event: JsonObject) -> JsonObject:
@@ -985,6 +1027,41 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def resolve_default_project_id(config: WatchConfig, client: LabTracker | None) -> str | None:
+    """Project for events that were queued before a project was bound.
+
+    Config first, then the checkout's ``lt_ids.json``, then the environment,
+    then the client's own default. An event that names its project keeps it.
+    """
+
+    if config.project_id:
+        return config.project_id
+    root = config.checkout_root()
+    with suppress(Exception):
+        payload = json.loads((root / "lt_ids.json").read_text(encoding="utf-8"))
+        if isinstance(payload, Mapping) and str(payload.get("project_id") or "").strip():
+            return str(payload["project_id"]).strip()
+    env_value = os.getenv("LAB_TRACKER_PROJECT_ID")
+    if env_value:
+        return env_value
+    default = getattr(client, "default_project_id", None)
+    return str(default) if default else None
+
+
+def _event_targets(event: Mapping[str, Any]) -> list[EntityRef]:
+    """Note targets a watch event already knows: its session, question, datasets."""
+
+    context = _context_payload(_json_mapping(event.get("context") or {}))
+    targets: list[EntityRef] = []
+    if context["session_id"]:
+        targets.append(EntityRef(entity_type="session", entity_id=str(context["session_id"])))
+    if context["question_id"]:
+        targets.append(EntityRef(entity_type="question", entity_id=str(context["question_id"])))
+    for dataset_id in context["dataset_ids"]:
+        targets.append(EntityRef(entity_type="dataset", entity_id=str(dataset_id)))
+    return targets
+
+
 def _sync_event(
     client: LabTracker,
     *,
@@ -993,6 +1070,7 @@ def _sync_event(
     note_indexes: dict[str, EvidenceNoteIndex],
     dry_run: bool,
     request_draft: bool,
+    default_project_id: str | None = None,
 ) -> WatchSyncResult:
     sync = event.get("sync", {})
     already_delivered = bool(sync.get("note_id") or sync.get("output_id"))
@@ -1018,6 +1096,7 @@ def _sync_event(
             note_indexes=note_indexes,
             dry_run=dry_run,
             request_draft=request_draft,
+            default_project_id=default_project_id,
         )
     if event["sink"] == SINK_ACQUISITION_OUTPUT:
         return _sync_acquisition_output(client, path=path, event=event, dry_run=dry_run)
@@ -1032,12 +1111,19 @@ def _sync_staged_note(
     note_indexes: dict[str, EvidenceNoteIndex],
     dry_run: bool,
     request_draft: bool,
+    default_project_id: str | None = None,
 ) -> WatchSyncResult:
     source_path = _optional_str(event["source"].get("path"))
     note_id = _optional_str(event.get("sync", {}).get("note_id"))
     note: LTRecord | None = None
     change_set_id = _optional_str(event.get("sync", {}).get("change_set_id"))
-    project_id = _non_empty(_optional_str(event["context"].get("project_id")) or "", "project_id")
+    project_id = _optional_str(event["context"].get("project_id")) or default_project_id
+    if not project_id:
+        raise LTValidationError(
+            "project_id must not be empty: bind the project with 'lt project bind' "
+            "or 'lt watch add --project' and sync again."
+        )
+    targets = _event_targets(event)
     if not note_id and source_path:
         result = client.import_evidence_file(
             project_id=project_id,
@@ -1057,6 +1143,9 @@ def _sync_staged_note(
                 outbox=path.parent,
                 dry_run=dry_run,
             ),
+            observed_at=str(event["observed_at"]),
+            targets=targets or None,
+            client_capture_id=_optional_str(event["payload"].get("client_capture_id")),
         )
         if dry_run:
             return WatchSyncResult(
@@ -1119,6 +1208,7 @@ def _sync_staged_note(
                 metadata=metadata,
                 status=str(event["payload"].get("status") or "staged"),
                 content_type="text/markdown",
+                targets=targets or None,
                 # Include the event id (which embeds the content hash) so the
                 # server-side first-wins capture-id dedupe agrees with the
                 # evidence-key dedupe: new content for the same source gets a
@@ -1312,6 +1402,17 @@ def _event_metadata(event: Mapping[str, Any]) -> dict[str, NoteMetadataScalar]:
     for key in ("project_id", "question_id", "session_id"):
         if context.get(key):
             metadata[f"watch_{key}"] = str(context[key])
+    if source.get("session_source"):
+        metadata["watch_session_source"] = str(source["session_source"])
+    # Adapters that queue through this outbox (figure capture offline) carry
+    # their own scalar metadata under the reserved payload.metadata key.
+    extra = payload["payload"].get("metadata")
+    if isinstance(extra, Mapping):
+        for key, value in extra.items():
+            if isinstance(value, (str, bool, int, float)) and not str(key).startswith(
+                "evidence_"
+            ):
+                metadata[str(key)] = value
     if context["dataset_ids"]:
         metadata["watch_dataset_ids"] = ",".join(context["dataset_ids"])
     if context["tags"]:

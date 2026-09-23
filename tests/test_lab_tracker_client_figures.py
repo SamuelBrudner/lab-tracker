@@ -51,6 +51,10 @@ def reset_figure_capture_state(
 ) -> None:
     _reset_figure_capture_state_for_tests()
     monkeypatch.setenv("LAB_TRACKER_CONFIG_DIR", str(tmp_path / "lt-config"))
+    # Offline captures queue into the checkout's watch outbox; keep that out of
+    # the repository the tests run from.
+    monkeypatch.setenv("LAB_TRACKER_WATCH_OUTBOX", str(tmp_path / "outbox"))
+    monkeypatch.delenv("LAB_TRACKER_SESSION_ID", raising=False)
     for key in (
         "LAB_TRACKER_PROJECT_ID",
         "LAB_TRACKER_BASE_URL",
@@ -247,9 +251,15 @@ def test_savefig_is_fail_soft_and_circuit_breaker_short_circuits(tmp_path: Path)
         first = savefig(FakeFigure(b"one"), tmp_path / "one.png", client=lt)
         second = savefig(FakeFigure(b"two"), tmp_path / "two.png", client=lt)
 
-    assert first.action == "failed"
-    assert second.action == "skipped"
-    assert second.reason == "circuit_open"
+    # A server that never answers is an outage, not a lost figure: both saves
+    # are queued for a later sync, and the open breaker spares the second one
+    # a connection attempt.
+    assert first.action == "queued"
+    assert first.reason == "offline_queued"
+    assert first.errors
+    assert Path(first.queued_event).is_file()
+    assert second.action == "queued"
+    assert second.reason == "offline_queued"
     assert attempts == 1
 
 
@@ -267,7 +277,7 @@ def test_circuit_open_skips_env_client_construction(
     ) as lt:
         failed = savefig(FakeFigure(b"one"), tmp_path / "one.png", client=lt)
 
-    assert failed.action == "failed"
+    assert failed.action == "queued"
     monkeypatch.setenv("LAB_TRACKER_PROJECT_ID", "project-1")
     monkeypatch.setenv("LAB_TRACKER_BASE_URL", "http://testserver")
     monkeypatch.setenv("LAB_TRACKER_ACCESS_TOKEN", "token")
@@ -278,8 +288,14 @@ def test_circuit_open_skips_env_client_construction(
 
     monkeypatch.setattr(figure_module, "LabTracker", ForbiddenAutoClient)
 
-    skipped = savefig(FakeFigure(b"two"), tmp_path / "two.png")
+    queued = savefig(FakeFigure(b"two"), tmp_path / "two.png")
 
+    # Still no client construction; the env project is enough to queue.
+    assert queued.action == "queued"
+    assert queued.reason == "offline_queued"
+
+    monkeypatch.setenv("LAB_TRACKER_CAPTURE_OUTBOX", "0")
+    skipped = savefig(FakeFigure(b"three"), tmp_path / "three.png")
     assert skipped.action == "skipped"
     assert skipped.reason == "circuit_open"
 
@@ -315,7 +331,7 @@ def test_breaker_is_per_endpoint_and_does_not_skip_a_healthy_endpoint(
         transport=httpx.MockTransport(connect_handler),
     ) as lt_a:
         failed = savefig(FakeFigure(b"a"), tmp_path / "a.png", client=lt_a)
-    assert failed.action == "failed"
+    assert failed.action == "queued"
 
     healthy_hits = 0
 
@@ -349,8 +365,8 @@ def test_breaker_recovers_after_cooldown_with_half_open_probe(tmp_path: Path) ->
     ) as lt:
         first = savefig(FakeFigure(b"one"), tmp_path / "one.png", client=lt)
         second = savefig(FakeFigure(b"two"), tmp_path / "two.png", client=lt)
-    assert first.action == "failed"
-    assert second.action == "skipped" and second.reason == "circuit_open"
+    assert first.action == "queued"
+    assert second.action == "queued" and second.reason == "offline_queued"
 
     # Simulate the cooldown elapsing without touching the global clock.
     for state in figure_module._BREAKERS.values():
@@ -481,8 +497,10 @@ def test_coalesced_metadata_patch_transport_failure_opens_circuit(tmp_path: Path
     assert first.action == "coalesced"
     assert first.reason == "metadata_patch_failed"
     assert first.stale_review_bytes is True
-    assert second.action == "skipped"
-    assert second.reason == "circuit_open"
+    # The failed metadata patch opened the breaker; the next save is queued
+    # rather than attempted (or lost).
+    assert second.action == "queued"
+    assert second.reason == "offline_queued"
     assert posts == 1
 
 
@@ -848,3 +866,90 @@ def test_distinct_capture_failures_each_reach_stderr_once(
     # A later failure with a different cause is not hidden behind the first
     # warning; an identical repeat is not re-printed.
     assert stderr.count("second failure cause") == 1
+
+
+def test_offline_capture_queues_an_event_that_later_syncs_with_its_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A save while the server is down lands in the watch outbox and drains
+    later through the ordinary sync, with the same capture id, the figure
+    metadata, and the active session as a note target."""
+
+    from lab_tracker_client.session_context import encode_session_link_code
+    from lab_tracker_client.watch import WatchConfig, read_event, sync_outbox
+
+    session_id = "3d4f6a1e-9c2b-4a8e-8f01-2b3c4d5e6f70"
+    monkeypatch.setenv("LAB_TRACKER_SESSION_ID", encode_session_link_code(session_id))
+    monkeypatch.chdir(tmp_path)
+    figure_path = tmp_path / "figs" / "trace.png"
+    figure_path.parent.mkdir()
+
+    def connect_handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("offline", request=request)
+
+    with LabTracker(
+        base_url="http://testserver",
+        default_project_id="project-1",
+        transport=httpx.MockTransport(connect_handler),
+    ) as lt:
+        queued = savefig(FakeFigure(b"trace"), figure_path, client=lt)
+
+    assert queued.action == "queued"
+    event_path = Path(queued.queued_event)
+    assert event_path.parent == (tmp_path / "outbox").resolve()
+    event = read_event(event_path)
+    assert event["capture_kind"] == "figure"
+    assert event["adapter"] == "lab-tracker-client-figure"
+    assert event["source"]["provider"] == "local-figure"
+    assert event["source"]["external_id"] == queued.client_capture_id
+    assert event["context"] == {
+        "project_id": "project-1",
+        "question_id": None,
+        "dataset_ids": [],
+        "tags": [],
+        "session_id": session_id,
+    }
+    assert event["payload"]["client_capture_id"] == queued.client_capture_id
+    assert event["payload"]["metadata"]["figure_full_size_bytes"] == len(b"trace")
+    assert event["payload"]["metadata"]["capture_session_id"] == session_id
+    assert not any(key.startswith("evidence_") for key in event["payload"]["metadata"])
+
+    uploads: list[dict[str, str]] = []
+
+    def sync_handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/notes":
+            return _json_response(
+                200, {"data": [], "meta": {"limit": 200, "offset": 0, "total": 0}}
+            )
+        if request.method == "POST" and request.url.path == "/notes/upload-file":
+            body = request.content
+            uploads.append(
+                {
+                    "client_capture_id": _multipart_field(body, "client_capture_id"),
+                    "targets": _multipart_field(body, "targets"),
+                    "metadata": _multipart_field(body, "metadata"),
+                }
+            )
+            assert b"trace" in body
+            return _json_response(201, {"data": {"note_id": "note-figure"}})
+        return _json_response(500, {"error": {"message": "unexpected"}})
+
+    config = WatchConfig(project_id="project-1", config_path=tmp_path / ".lab-tracker" / "w.json")
+    transport = httpx.MockTransport(sync_handler)
+    with LabTracker(base_url="http://testserver", transport=transport) as lt:
+        summary = sync_outbox(lt, config)
+
+    assert summary["errors"] == []
+    assert summary["results"][0]["note_id"] == "note-figure"
+    assert uploads[0]["client_capture_id"] == queued.client_capture_id
+    assert json.loads(uploads[0]["targets"]) == [
+        {"entity_type": "session", "entity_id": session_id}
+    ]
+    metadata = json.loads(uploads[0]["metadata"])
+    assert metadata["evidence_source_provider"] == "local-figure"
+    assert metadata["evidence_source_external_id"] == queued.client_capture_id
+    assert metadata["evidence_source_observed_at"] == event["observed_at"]
+    assert metadata["figure_full_size_bytes"] == len(b"trace")
+    assert metadata["watch_session_id"] == session_id
+

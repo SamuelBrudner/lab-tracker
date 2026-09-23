@@ -23,6 +23,7 @@ import httpx
 from lab_tracker.instance_url import normalize_instance_base_url
 from lab_tracker.models import NoteMetadataScalar
 from lab_tracker_client.client import (
+    EntityRef,
     LabTracker,
     LTAPIError,
     LTRecord,
@@ -43,13 +44,23 @@ from lab_tracker_client.gitinfo import (
     sanitize_remote_url,
 )
 from lab_tracker_client.repo import normalize_remote
+from lab_tracker_client.session_context import read_active_session
 
 FIGURE_CAPTURE_TIMEOUT_SECONDS = 2.5
 FIGURE_CIRCUIT_COOLDOWN_SECONDS = 30.0
 FIGURE_PREVIEW_MAX_BYTES = 2_000_000
 FIGURE_UPLOAD_MAX_BYTES = 100 * 1024 * 1024
-_DEFAULT_IMAGE_PATTERNS = ("*.png", "*.jpg", "*.jpeg", "*.svg", "*.pdf", "*.tif", "*.tiff")
+# SVG is deliberately absent: the server rejects image/svg+xml uploads
+# (scriptable), so a default pattern for it would only produce failures.
+_DEFAULT_IMAGE_PATTERNS = ("*.png", "*.jpg", "*.jpeg", "*.pdf", "*.tif", "*.tiff")
+CAPTURE_OUTBOX_ENV = "LAB_TRACKER_CAPTURE_OUTBOX"
 _RUN_CONTEXT: ContextVar[RunContext | None] = ContextVar("lab_tracker_run_context", default=None)
+# True while an explicit capture helper (savefig, capture_figures) is doing the
+# save itself, so an installed autotrack hook does not capture the same file
+# a second time.
+_AUTOTRACK_SUPPRESSED: ContextVar[bool] = ContextVar(
+    "lab_tracker_autotrack_suppressed", default=False
+)
 
 
 @dataclass
@@ -87,6 +98,7 @@ class FigureCaptureResult:
     stale_review_bytes: bool = False
     reason: str = ""
     errors: list[str] = field(default_factory=list)
+    queued_event: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -100,6 +112,8 @@ class FigureCaptureResult:
             "no_preview": self.no_preview,
             "stale_review_bytes": self.stale_review_bytes,
         }
+        if self.queued_event:
+            payload["queued_event"] = self.queued_event
         if self.note is not None:
             payload["note"] = self.note.to_dict()
             with suppress(AttributeError):
@@ -222,12 +236,15 @@ class CaptureContext:
         self.results: list[FigureCaptureResult] = []
         self.errors: list[str] = []
         self._snapshot: dict[Path, int] = {}
+        self._suppress_token: Any = None
 
     def __enter__(self) -> CaptureContext:
         self._snapshot = _snapshot_file_mtimes(self.root, self.patterns, recursive=self.recursive)
+        self._suppress_token = _AUTOTRACK_SUPPRESSED.set(True)
         return self
 
     def __exit__(self, *_: object) -> bool:
+        _AUTOTRACK_SUPPRESSED.reset(self._suppress_token)
         try:
             after = _snapshot_file_mtimes(self.root, self.patterns, recursive=self.recursive)
             for path, mtime in sorted(after.items(), key=lambda item: item[0].as_posix()):
@@ -368,7 +385,11 @@ def savefig(
 
     resolved_path = Path(path).expanduser()
     if fig is not None:
-        fig.savefig(resolved_path, **savefig_kwargs)
+        token = _AUTOTRACK_SUPPRESSED.set(True)
+        try:
+            fig.savefig(resolved_path, **savefig_kwargs)
+        finally:
+            _AUTOTRACK_SUPPRESSED.reset(token)
     return _capture_saved_figure(
         fig=fig,
         path=resolved_path,
@@ -513,6 +534,12 @@ def _capture_saved_figure(
                 "client_capture_id": client_capture_id,
             }
         )
+        session = read_active_session()
+        targets = (
+            [EntityRef(entity_type="session", entity_id=str(session["session_id"]))]
+            if session and session.get("session_id")
+            else None
+        )
         if _breaker_blocks(endpoint_key):
             remaining = _figure_circuit_state().get(endpoint_key or "", 0.0)
             _warn_once(
@@ -520,6 +547,26 @@ def _capture_saved_figure(
                 f"Lab Tracker figure capture is paused for {endpoint_key} after a "
                 f"connection or timeout failure (retrying in ~{remaining:.0f}s).",
             )
+            queued = _queue_capture_offline(
+                path=resolved_path,
+                kind=kind,
+                project_id=_queue_project_id(client, project_id),
+                session_id=str(session["session_id"]) if session else None,
+                client_capture_id=client_capture_id,
+                content_hash=content_hash,
+                size_bytes=file_size,
+                metadata=base_metadata,
+                reason="circuit_open",
+            )
+            if queued is not None:
+                return FigureCaptureResult(
+                    **{
+                        **result_defaults,
+                        "action": "queued",
+                        "reason": "offline_queued",
+                        "queued_event": str(queued),
+                    }
+                )
             return FigureCaptureResult(
                 **{**result_defaults, "action": "skipped", "reason": "circuit_open"}
             )
@@ -560,16 +607,52 @@ def _capture_saved_figure(
                     f"{kind}_review_bytes_stale": False,
                 }
             )
-            note, status_code = resolved_client._upload_note_file_payload_with_status(
-                project_id=resolved_project_id,
-                path=preview.path,
-                payload=preview.payload,
-                metadata=upload_metadata,
-                status="staged",
-                content_type=preview.content_type,
-                client_capture_id=client_capture_id,
-                timeout=capture_timeout,
-            )
+            try:
+                note, status_code = resolved_client._upload_note_file_payload_with_status(
+                    project_id=resolved_project_id,
+                    path=preview.path,
+                    payload=preview.payload,
+                    metadata=upload_metadata,
+                    status="staged",
+                    content_type=preview.content_type,
+                    client_capture_id=client_capture_id,
+                    targets=targets,
+                    timeout=capture_timeout,
+                )
+            except Exception as exc:
+                if not _is_transport_failure(exc):
+                    raise
+                # The server never answered the upload: keep the capture in the
+                # checkout's outbox so `lt outbox sync` (or the scheduled watch
+                # run) delivers it later instead of losing the save.
+                _trip_circuit(endpoint_key, str(exc))
+                queued = _queue_capture_offline(
+                    path=resolved_path,
+                    kind=kind,
+                    project_id=resolved_project_id,
+                    session_id=str(session["session_id"]) if session else None,
+                    client_capture_id=client_capture_id,
+                    content_hash=content_hash,
+                    size_bytes=file_size,
+                    metadata=base_metadata,
+                    reason=str(exc),
+                )
+                if queued is None:
+                    raise
+                _warn_once(
+                    f"queued:{endpoint_key}",
+                    f"Lab Tracker is unreachable ({exc}); the {kind} capture was queued "
+                    f"in {queued.parent} for a later `lt outbox sync`.",
+                )
+                return FigureCaptureResult(
+                    **{
+                        **result_defaults,
+                        "action": "queued",
+                        "reason": "offline_queued",
+                        "errors": [str(exc)],
+                        "queued_event": str(queued),
+                    }
+                )
             # The endpoint answered: close any open breaker for it.
             _close_circuit(endpoint_key)
             if status_code == 200:
@@ -698,6 +781,11 @@ def _base_figure_metadata(
     context = _active_run_context()
     if context is not None:
         merged.update(context.to_metadata())
+    session = read_active_session()
+    if session and session.get("session_id"):
+        merged["capture_session_id"] = str(session["session_id"])
+        merged["capture_session_link_code"] = str(session.get("link_code") or "")
+        merged["capture_session_source"] = str(session.get("source") or "")
     evidence = build_evidence_metadata(
         source_provider=f"local-{kind}",
         source_uri=source_uri,
@@ -857,6 +945,96 @@ def _clamped_timeout_value(value: Any) -> float:
     with suppress(TypeError, ValueError):
         return min(float(value), FIGURE_CAPTURE_TIMEOUT_SECONDS)
     return FIGURE_CAPTURE_TIMEOUT_SECONDS
+
+
+def _capture_outbox_enabled() -> bool:
+    return os.getenv(CAPTURE_OUTBOX_ENV, "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _queue_project_id(client: LabTracker | None, project_id: str | None) -> str | None:
+    if project_id:
+        return str(project_id)
+    if client is not None and getattr(client, "default_project_id", None):
+        return str(client.default_project_id)
+    profile = load_connection_profile()
+    return os.getenv("LAB_TRACKER_PROJECT_ID") or profile.get("default_project_id") or None
+
+
+def _queue_capture_offline(
+    *,
+    path: Path,
+    kind: str,
+    project_id: str | None,
+    session_id: str | None,
+    client_capture_id: str,
+    content_hash: str,
+    size_bytes: int,
+    metadata: Mapping[str, NoteMetadataScalar],
+    reason: str,
+) -> Path | None:
+    """Write the capture as a watch-outbox event so a later sync delivers it.
+
+    Returns the event path, or ``None`` when queueing is disabled, no project
+    is known, or the outbox cannot be written (never raises: the figure was
+    already saved to disk and the caller reports a plain failure instead).
+    """
+
+    if not _capture_outbox_enabled() or not project_id:
+        return None
+    try:
+        from lab_tracker_client import git_capture
+        from lab_tracker_client import watch as watch_capture
+
+        try:
+            root = git_capture.repo_toplevel(path.parent)
+        except Exception:  # noqa: BLE001 - not a repo: the checkout is the cwd.
+            root = Path.cwd().resolve()
+        config, _config_error = git_capture.resolve_watch_config(root)
+        try:
+            relative_path = path.resolve().relative_to(root).as_posix()
+        except ValueError:
+            relative_path = path.name
+        extra = {
+            str(key): value
+            for key, value in metadata.items()
+            if not str(key).startswith("evidence_")
+            and isinstance(value, (str, bool, int, float))
+        }
+        event = watch_capture.make_event(
+            capture_id=client_capture_id,
+            event_id=f"{kind}-{content_hash[:16]}",
+            capture_kind=kind,
+            adapter=f"lab-tracker-client-{kind}",
+            sink=watch_capture.SINK_STAGED_NOTE,
+            source={
+                "provider": f"local-{kind}",
+                "uri": path.resolve().as_uri(),
+                "external_id": client_capture_id,
+                "path": str(path.resolve()),
+                "root": str(root),
+                "root_uri": root.as_uri(),
+                "relative_path": relative_path,
+                "content_hash": content_hash,
+                "size_bytes": int(size_bytes),
+                "mtime": path.stat().st_mtime,
+            },
+            context={"project_id": project_id, "session_id": session_id},
+            payload={
+                "title": path.name,
+                "summary": f"Queued {kind} capture while Lab Tracker was unreachable.",
+                "status": "staged",
+                "metadata": extra,
+                "client_capture_id": client_capture_id,
+                "queue_reason": reason[:500],
+            },
+        )
+        return watch_capture.write_event(event, config.outbox_path())
+    except Exception as exc:  # noqa: BLE001 - queueing is best effort.
+        _warn_once(
+            f"queue-failed:{type(exc).__name__}",
+            f"Lab Tracker could not queue the {kind} capture offline: {exc}",
+        )
+        return None
 
 
 def _resolve_capture_client(

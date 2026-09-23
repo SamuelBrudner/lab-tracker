@@ -11,11 +11,14 @@ from pathlib import Path
 from typing import Any
 
 import lab_tracker_client.auth as auth_helpers
+import lab_tracker_client.figure_autotrack as autotrack_helpers
 import lab_tracker_client.git_capture as git_capture
 import lab_tracker_client.hooks as hook_install
+import lab_tracker_client.hpc as hpc_capture
 import lab_tracker_client.registry as repo_registry
 import lab_tracker_client.repo as repo_capture
 import lab_tracker_client.schedule as schedule_helpers
+import lab_tracker_client.session_context as session_context
 import lab_tracker_client.setup as setup_helpers
 import lab_tracker_client.watch as watch_capture
 from lab_tracker import repository_conventions as repo_context
@@ -254,6 +257,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     _add_watch_parsers(subcommands)
     _add_outbox_parsers(subcommands)
+    _add_session_parsers(subcommands)
     _add_hpc_parsers(subcommands)
     _add_repo_parsers(subcommands)
 
@@ -432,6 +436,24 @@ def _add_setup_parsers(subcommands: argparse._SubParsersAction) -> None:
     )
     verify_mcp_parser.set_defaults(func=_cmd_setup_verify_mcp, needs_client=False)
 
+    autotrack_parser = setup_commands.add_parser(
+        "autotrack",
+        help=(
+            "Capture every matplotlib figure saved from IPython or Jupyter by adding "
+            "a startup file that calls lab_tracker_client.autotrack()."
+        ),
+    )
+    autotrack_parser.add_argument(
+        "--uninstall", action="store_true", help="Remove the managed IPython startup file."
+    )
+    autotrack_parser.add_argument(
+        "--dry-run", action="store_true", help="Show the change without writing it."
+    )
+    autotrack_parser.add_argument(
+        "--yes", action="store_true", help="Consent to writing the IPython startup file."
+    )
+    autotrack_parser.set_defaults(func=_cmd_setup_autotrack, needs_client=False)
+
     schedule_parser = setup_commands.add_parser(
         "schedule",
         help="Register an OS-scheduler job running 'lt watch run' for this repo's config.",
@@ -449,6 +471,11 @@ def _add_setup_parsers(subcommands: argparse._SubParsersAction) -> None:
     schedule_parser.add_argument(
         "--lt-path",
         help="Absolute lt executable for the scheduled command. Defaults to the installed lt.",
+    )
+    schedule_parser.add_argument(
+        "--request-draft",
+        action="store_true",
+        help="Have each scheduled run also request AI drafts for newly synced captures.",
     )
     schedule_parser.add_argument(
         "--uninstall",
@@ -731,7 +758,13 @@ def _add_watch_parsers(subcommands: argparse._SubParsersAction) -> None:
     add_parser.add_argument("--name", help="Optional label for this watch entry.")
     add_parser.add_argument("--project", help="Project UUID override for this watch.")
     add_parser.add_argument("--question", help="Candidate question UUID recorded in metadata.")
-    add_parser.add_argument("--session", help="Session UUID for the acquisition-output sink.")
+    add_parser.add_argument(
+        "--session",
+        help=(
+            "Session UUID or link code every capture under this root attaches to "
+            "(required for the acquisition-output sink)."
+        ),
+    )
     add_parser.add_argument("--tag", action="append", default=[], help="Tag. Repeatable.")
     add_parser.add_argument("--config", help="Config path. Defaults to discovered config.")
     add_parser.add_argument(
@@ -892,6 +925,55 @@ def _add_outbox_parsers(subcommands: argparse._SubParsersAction) -> None:
         help="Suppress errors and error exit codes for hook/scheduler runs.",
     )
     sync_parser.set_defaults(func=_cmd_outbox_sync)
+
+
+def _add_session_parsers(subcommands: argparse._SubParsersAction) -> None:
+    session_parser = subcommands.add_parser(
+        "session",
+        help=(
+            "Point this checkout's captures at an acquisition session so figure "
+            "saves and watched files arrive already linked to it."
+        ),
+    )
+    session_commands = session_parser.add_subparsers(dest="session_command", required=True)
+
+    use_parser = session_commands.add_parser(
+        "use",
+        help="Record the active session (a UUID or the session's link code) for a bounded time.",
+    )
+    use_parser.add_argument(
+        "session", help="Session UUID or link code (as printed on the session)."
+    )
+    use_parser.add_argument(
+        "--hours",
+        type=float,
+        default=session_context.DEFAULT_ACTIVE_SESSION_HOURS,
+        help=(
+            "How long captures keep attaching to the session. Defaults to "
+            f"{session_context.DEFAULT_ACTIVE_SESSION_HOURS:g}."
+        ),
+    )
+    use_parser.add_argument("--project", help="Project UUID recorded with the context.")
+    use_parser.add_argument(
+        "--repo",
+        default=".",
+        help="Checkout whose .lab-tracker/session.json to write. Defaults to cwd.",
+    )
+    use_parser.add_argument("--dry-run", action="store_true", help="Preview without writing.")
+    use_parser.set_defaults(func=_cmd_session_use, needs_client=False)
+
+    clear_parser = session_commands.add_parser(
+        "clear", help="Stop attaching captures to a session."
+    )
+    clear_parser.add_argument("--repo", default=".", help="Checkout to clear. Defaults to cwd.")
+    clear_parser.add_argument("--dry-run", action="store_true", help="Preview without removing.")
+    clear_parser.set_defaults(func=_cmd_session_clear, needs_client=False)
+
+    status_parser = session_commands.add_parser(
+        "status", help="Show the session captures from this checkout attach to."
+    )
+    status_parser.add_argument("--repo", default=".", help="Checkout to inspect. Defaults to cwd.")
+    status_parser.set_defaults(func=_cmd_session_status, needs_client=False)
 
 
 def _add_auth_parsers(subcommands: argparse._SubParsersAction) -> None:
@@ -1282,7 +1364,7 @@ def _cmd_watch_add(args: argparse.Namespace) -> Any:
         name=args.name,
         project_id=args.project,
         question_id=args.question,
-        session_id=args.session,
+        session_id=session_context.session_id_from_reference(args.session),
         tags=args.tag or None,
         config_path=args.config,
         dry_run=args.dry_run,
@@ -1294,6 +1376,24 @@ def _cmd_watch_add(args: argparse.Namespace) -> Any:
             repo_registry.repo_root_for_config(payload["config"]), "watch-add"
         )
     return payload
+
+
+def _cmd_session_use(args: argparse.Namespace) -> Any:
+    return session_context.set_active_session(
+        args.session,
+        project_id=args.project,
+        hours=args.hours,
+        start=args.repo,
+        dry_run=args.dry_run,
+    )
+
+
+def _cmd_session_clear(args: argparse.Namespace) -> Any:
+    return session_context.clear_active_session(start=args.repo, dry_run=args.dry_run)
+
+
+def _cmd_session_status(args: argparse.Namespace) -> Any:
+    return session_context.active_session_status(args.repo)
 
 
 def _cmd_watch_list(args: argparse.Namespace) -> Any:
@@ -1660,13 +1760,83 @@ def _cmd_watch_run(client: LabTracker, args: argparse.Namespace) -> Any:
         request_draft=args.request_draft,
         limit=args.limit,
     )
+    siblings = _drain_sibling_outboxes(
+        client,
+        _watch_config_root(config),
+        dry_run=False,
+        request_draft=args.request_draft,
+        limit=args.limit,
+    )
     return {
         "command": "watch-run",
         "config": str(config.config_path),
         "scan": scan,
         "sync": sync,
-        "errors": list(scan.get("errors") or []) + list(sync.get("errors") or []),
+        **siblings,
+        "errors": (
+            list(scan.get("errors") or [])
+            + list(sync.get("errors") or [])
+            + siblings["sibling_errors"]
+        ),
     }
+
+
+def _watch_config_root(config: watch_capture.WatchConfig) -> Path:
+    return config.checkout_root()
+
+
+def _drain_sibling_outboxes(
+    client: LabTracker,
+    root: Path,
+    *,
+    dry_run: bool,
+    request_draft: bool,
+    limit: int | None,
+) -> dict[str, Any]:
+    """Drain the repo and HPC outboxes that live beside the watch outbox.
+
+    One scheduled `lt watch run` (or one `lt outbox sync`) then delivers
+    every queued capture for the checkout: watched files, figure saves that
+    were queued offline, commit reports, and HPC run events. An adapter whose
+    config is absent is reported as skipped, never as an error.
+    """
+
+    summaries: dict[str, Any] = {}
+    errors: list[dict[str, Any]] = []
+    for name, module in (("repo", repo_capture), ("hpc", hpc_capture)):
+        if module.find_config_path(root) is None:
+            summaries[name] = {"command": f"{name}-sync", "skipped": "no config"}
+            continue
+        try:
+            summary = module.sync_outbox(
+                client,
+                module.load_config(start=root),
+                dry_run=dry_run,
+                request_draft=request_draft,
+                limit=limit,
+            )
+        except Exception as exc:  # noqa: BLE001 - one adapter must not stop the others.
+            summary = {"command": f"{name}-sync", "errors": [{"error": str(exc)}]}
+        summaries[name] = summary
+        for item in summary.get("errors") or []:
+            errors.append(
+                {"adapter": name, **item}
+                if isinstance(item, dict)
+                else {"adapter": name, "error": item}
+            )
+    summaries["sibling_errors"] = errors
+    return summaries
+
+
+def _cmd_setup_autotrack(args: argparse.Namespace) -> Any:
+    if not (args.yes or args.dry_run):
+        raise SystemExit(
+            "lt setup autotrack writes an IPython startup file; "
+            "pass --yes to consent or --dry-run to preview."
+        )
+    return autotrack_helpers.install_ipython_startup(
+        dry_run=args.dry_run, uninstall=args.uninstall
+    )
 
 
 def _cmd_setup_schedule(args: argparse.Namespace) -> Any:
@@ -1685,6 +1855,7 @@ def _cmd_setup_schedule(args: argparse.Namespace) -> Any:
         config_path=config_path,
         interval_minutes=args.interval_minutes,
         lt_path=args.lt_path,
+        request_draft=args.request_draft,
         dry_run=args.dry_run,
     )
     if not args.dry_run:
@@ -1764,6 +1935,16 @@ def _cmd_outbox_sync(client: LabTracker, args: argparse.Namespace) -> Any:
     result["command"] = "outbox-sync"
     if config_error:
         result["config_error"] = config_error
+    siblings = _drain_sibling_outboxes(
+        client,
+        _watch_config_root(config),
+        dry_run=args.dry_run,
+        request_draft=args.request_draft,
+        limit=args.limit,
+    )
+    result["repo"] = siblings["repo"]
+    result["hpc"] = siblings["hpc"]
+    result["errors"] = list(result.get("errors") or []) + siblings["sibling_errors"]
     return result
 
 
