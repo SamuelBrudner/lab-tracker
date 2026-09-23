@@ -17,6 +17,7 @@ from read_opacity_inventory import READ_OPACITY_VARIANTS_BY_SUITE
 
 from lab_tracker import graph_drafting
 from lab_tracker.cli import update_consumer_repo
+from lab_tracker.decision_context_constants import AGENT_CONSULTATION_POLICY
 from lab_tracker.mcp_tools import READ_TOOLS, WRITE_TOOLS
 from lab_tracker_client.auth import auth_doctor
 
@@ -77,6 +78,28 @@ def test_decision_context_spec_matches_single_project_scope_and_merge_order() ->
     registered = {tool.__name__ for tool in (*READ_TOOLS, *WRITE_TOOLS)}
     named = set(re.findall(r"`(lab_tracker_(?!client`)[a-z_]+)`", text))
     assert named <= registered, sorted(named - registered)
+
+
+def _fallback_paragraph(text: str) -> str:
+    """The "Prefer `lab_tracker_get_decision_context` ..." paragraph, one line."""
+
+    for paragraph in re.split(r"\n\s*\n", text):
+        if paragraph.lstrip().startswith("Prefer `lab_tracker_get_decision_context`"):
+            return " ".join(paragraph.split())
+    raise AssertionError("no decision-context fallback paragraph found")
+
+
+# L14: agent-facing copies of the consultation fallback match the served policy.
+@pytest.mark.parametrize(
+    "path",
+    [_REPO_ROOT / "AGENTS.md", _DOCS / "mcp-decision-context-tooling.md"],
+    ids=lambda path: path.name,
+)
+def test_consultation_fallback_matches_the_served_policy(path: Path) -> None:
+    section = _read(path).split("## Lab Tracker Knowledge Graph Consultation", 1)[1]
+    assert _fallback_paragraph(section) == _fallback_paragraph(
+        AGENT_CONSULTATION_POLICY
+    )
 
 
 # L15: the authoring spec's status update names every shipped provenance read.
