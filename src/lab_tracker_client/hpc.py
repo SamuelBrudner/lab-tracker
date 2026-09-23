@@ -31,8 +31,9 @@ from lab_tracker_client.gitinfo import (
     dirty_metadata,
     dirty_state_fields,
     git_dirty_state,
-    git_output,
+    git_head_commit,
     git_timeout_seconds,
+    head_commit_fields,
 )
 
 CONFIG_VERSION = 1
@@ -741,10 +742,10 @@ def finish_event(
 
 def git_context(cwd: str | Path | None = None) -> JsonObject:
     root = Path(cwd or Path.cwd()).expanduser()
-    commit = _git_output(root, "rev-parse", "HEAD")
+    head = git_head_commit(root)
     return {
-        "git_commit": commit,
-        **dirty_state_fields(git_dirty_state(root, commit=commit)),
+        **head_commit_fields(head),
+        **dirty_state_fields(git_dirty_state(root, commit=head.commit)),
     }
 
 
@@ -937,6 +938,8 @@ def event_metadata(
     if source.get("git_commit"):
         metadata["hpc_git_commit"] = str(source["git_commit"])
         metadata.update(dirty_metadata(source, "hpc_"))
+    elif source.get("git_commit_error"):
+        metadata["hpc_git_commit_error"] = str(source["git_commit_error"])
     host = payload.get("host") if isinstance(payload.get("host"), Mapping) else {}
     for key in CAPTURE_HOST_METADATA_KEYS:
         if host.get(key):
@@ -1019,9 +1022,6 @@ def _job_from_token(token: str, *, fallback_cluster: str | None) -> SbatchJob:
         cluster=cluster if separator else fallback_cluster,
     )
 
-
-def _git_output(root: Path, *args: str) -> str:
-    return git_output(root, *args)
 
 
 def _path_sha256(path: Path) -> str:

@@ -339,3 +339,148 @@ def test_hpc_submit_rejects_invalid_git_timeout_before_running_the_command(
         hpc_capture.run_submit_command(config, ["touch", str(marker)], cwd=tmp_path)
 
     assert not marker.exists()
+
+
+# --- HEAD commit probe --------------------------------------------------------
+
+
+def _hide_git(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Leave git off PATH entirely, as on a bare HPC node or a GUI's PATH."""
+
+    empty = tmp_path / "no-git-bin"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+
+
+def _install_hanging_rev_parse(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    assert _REAL_GIT is not None
+    bin_dir = tmp_path / "hang-bin"
+    bin_dir.mkdir()
+    shim = bin_dir / "git"
+    shim.write_text(
+        "#!/bin/sh\n"
+        'for arg in "$@"; do\n'
+        '  if [ "$arg" = rev-parse ]; then exec sleep 30; fi\n'
+        "done\n"
+        f'exec "{_REAL_GIT}" "$@"\n',
+        encoding="utf-8",
+    )
+    shim.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{Path(_REAL_GIT).parent}")
+
+
+def test_repo_git_missing_records_commit_error_and_warns(
+    dirty_repo: tuple[Path, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo, _commit = dirty_repo
+    _hide_git(tmp_path, monkeypatch)
+
+    context = repo_capture.git_context(repo)
+
+    assert context["git_commit"] == ""
+    assert "could not run" in context["git_commit_error"]
+    # Git that cannot run says nothing about the tree: never "clean".
+    assert context["git_dirty"] is None
+    warning = capsys.readouterr().err
+    assert "git commit" in warning and "unknown" in warning
+
+
+def test_repo_head_probe_timeout_records_commit_error(
+    dirty_repo: tuple[Path, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo, _commit = dirty_repo
+    _install_hanging_rev_parse(tmp_path, monkeypatch)
+    monkeypatch.setenv(GIT_TIMEOUT_ENV, "0.5")
+
+    context = repo_capture.git_context(repo)
+
+    assert context["git_commit"] == ""
+    assert "timed out after 0.5s" in context["git_commit_error"]
+    assert GIT_TIMEOUT_ENV in capsys.readouterr().err
+
+
+def test_repo_outside_a_repository_has_no_commit_and_no_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    plain = tmp_path / "not-a-repo"
+    plain.mkdir()
+
+    context = repo_capture.git_context(plain)
+
+    assert context["git_commit"] == ""
+    assert "git_commit_error" not in context
+    assert context["git_dirty"] is False
+    assert capsys.readouterr().err == ""
+
+
+def test_repo_commit_error_reaches_note_metadata(
+    dirty_repo: tuple[Path, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, _commit = dirty_repo
+    monkeypatch.chdir(repo)
+    config = repo_capture.init_config(project_id="project-1")
+    _hide_git(tmp_path, monkeypatch)
+
+    event, path, _action = repo_capture.capture_commit(config, event_type="report")
+    metadata = repo_capture.event_metadata(
+        event,
+        source_uri=path.as_uri(),
+        source_external_id=repo_capture.event_source_external_id(event),
+        content_hash="0" * 64,
+    )
+
+    assert "could not run" in str(metadata["repo_git_commit_error"])
+    assert "repo_git_commit" not in metadata
+
+
+def test_hpc_git_missing_records_commit_error(
+    dirty_repo: tuple[Path, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo, _commit = dirty_repo
+    _hide_git(tmp_path, monkeypatch)
+    config = hpc_capture.HpcConfig(
+        project_id="project-1", cluster="test-cluster", outbox=str(tmp_path / "outbox")
+    )
+
+    event = hpc_capture.make_event(config, event_type="submit", run_id="run-1", cwd=repo)
+    metadata = hpc_capture.event_metadata(
+        event,
+        source_uri="file:///tmp/event.json",
+        source_external_id="hpc:run-1:submit",
+        content_hash="0" * 64,
+    )
+
+    assert event["source"]["git_commit"] == ""
+    assert "could not run" in event["source"]["git_commit_error"]
+    assert "could not run" in str(metadata["hpc_git_commit_error"])
+    assert "git commit" in capsys.readouterr().err
+
+
+def test_figure_run_context_git_missing_records_commit_error(
+    dirty_repo: tuple[Path, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo, _commit = dirty_repo
+    monkeypatch.chdir(repo)
+    _hide_git(tmp_path, monkeypatch)
+
+    with figure_module.run_context() as context:
+        metadata = context.to_metadata()
+
+    assert "run_git_commit" not in metadata
+    assert "could not run" in str(metadata["run_git_commit_error"])
+    assert "run_git_dirty" not in metadata
+    assert "git commit" in capsys.readouterr().err

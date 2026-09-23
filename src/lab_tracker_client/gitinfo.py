@@ -102,6 +102,8 @@ class GitProbe:
     stdout: str
     error: str = ""
     timed_out: bool = False
+    # git itself could not be started (not installed, not executable).
+    unavailable: bool = False
 
     @property
     def ok(self) -> bool:
@@ -132,7 +134,7 @@ def run_git(root: str | Path | None, *args: str) -> GitProbe:
     except subprocess.TimeoutExpired:
         return GitProbe("", f"{label} timed out after {timeout:g}s", timed_out=True)
     except OSError as exc:
-        return GitProbe("", f"{label} could not run: {exc}")
+        return GitProbe("", f"{label} could not run: {exc}", unavailable=True)
     if result.returncode != 0:
         detail = (result.stderr or "").strip() or f"exit status {result.returncode}"
         return GitProbe("", f"{label} failed: {detail}")
@@ -143,6 +145,52 @@ def git_output(root: str | Path | None, *args: str) -> str:
     """Stripped stdout of an optional git probe, or ``""`` if it failed."""
 
     return run_git(root, *args).stdout
+
+
+@dataclass(frozen=True)
+class HeadCommit:
+    """HEAD commit SHA (``""`` when there is none), or why git could not say."""
+
+    commit: str
+    error: str = ""
+
+
+def git_head_commit(root: str | Path | None) -> HeadCommit:
+    """Ask ``git rev-parse HEAD`` for the commit a capture should record.
+
+    A normal non-zero exit (not a repository, unborn HEAD) means there is no
+    commit to record. A timeout, or git that cannot run at all, means the
+    commit is *unknown*: the error is returned for the caller to record and a
+    stderr warning is printed, so provenance is never dropped silently.
+    """
+
+    probe = run_git(root, "rev-parse", "HEAD")
+    if probe.ok:
+        return HeadCommit(probe.stdout)
+    if not (probe.timed_out or probe.unavailable):
+        return HeadCommit("")
+    hint = (
+        f" Set {GIT_TIMEOUT_ENV} (seconds, default {DEFAULT_GIT_TIMEOUT_SECONDS:g}) to allow "
+        "a slower git."
+        if probe.timed_out
+        else ""
+    )
+    location = str(root) if root is not None else str(Path.cwd())
+    print(
+        f"lab-tracker: warning: could not determine the git commit at {location} "
+        f"({probe.error}); recording the git commit as unknown.{hint}",
+        file=sys.stderr,
+    )
+    return HeadCommit("", probe.error)
+
+
+def head_commit_fields(head: HeadCommit) -> dict[str, Any]:
+    """Event ``source`` fields for a HEAD probe (``git_commit_error`` if unknown)."""
+
+    fields: dict[str, Any] = {"git_commit": head.commit}
+    if head.error:
+        fields["git_commit_error"] = head.error
+    return fields
 
 
 @dataclass(frozen=True)
@@ -166,7 +214,7 @@ def git_dirty_state(root: str | Path | None, *, commit: str) -> DirtyState:
     probe = run_git(root, "status", "--porcelain")
     if probe.ok:
         return DirtyState(bool(probe.stdout))
-    if not commit and not probe.timed_out:
+    if not commit and not (probe.timed_out or probe.unavailable):
         return DirtyState(False)
     hint = (
         f" Set {GIT_TIMEOUT_ENV} (seconds, default {DEFAULT_GIT_TIMEOUT_SECONDS:g}) to allow "

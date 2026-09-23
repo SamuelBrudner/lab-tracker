@@ -37,6 +37,7 @@ from lab_tracker_client.client import (
 from lab_tracker_client.gitinfo import (
     DirtyState,
     git_dirty_state,
+    git_head_commit,
     git_output,
     sanitize_remote_url,
 )
@@ -117,6 +118,7 @@ class RunContext:
     expires_at: float
     run_id: str = ""
     git_commit: str = ""
+    git_commit_error: str = ""
     git_dirty: bool | None = False
     git_status_error: str = ""
     repo_remote_url: str = ""
@@ -140,6 +142,8 @@ class RunContext:
             metadata["run_id"] = self.run_id
         if self.git_commit:
             metadata["run_git_commit"] = self.git_commit
+        elif self.git_commit_error:
+            metadata["run_git_commit_error"] = self.git_commit_error
         if self.repo_remote_url:
             metadata["run_repo_remote_url"] = self.repo_remote_url
         if self.code_file:
@@ -268,13 +272,15 @@ def run_context(
 
     resolved_extra = dict(_validate_metadata(extra) or {})
     pointer = _run_code_pointer()
-    git_commit = _git_output("rev-parse", "HEAD")
+    head = git_head_commit(None)
+    git_commit = head.commit
     dirty_state = _git_dirty_state(git_commit)
     context = RunContext(
         captured_at=datetime.now(timezone.utc).isoformat(),
         expires_at=time.monotonic() + max(0.0, float(ttl_seconds)),
         run_id=uuid.uuid4().hex,
         git_commit=git_commit,
+        git_commit_error=head.error,
         git_dirty=dirty_state.dirty,
         git_status_error=dirty_state.error,
         repo_remote_url=_credential_free_repo_remote(

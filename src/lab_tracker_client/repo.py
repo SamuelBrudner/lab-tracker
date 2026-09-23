@@ -49,7 +49,9 @@ from lab_tracker_client.gitinfo import (
     dirty_metadata,
     dirty_state_fields,
     git_dirty_state,
+    git_head_commit,
     git_output,
+    head_commit_fields,
     sanitize_remote_url,
 )
 
@@ -873,9 +875,10 @@ def environment_fingerprint(
 
 def git_context(cwd: str | Path | None = None) -> JsonObject:
     root = Path(cwd or Path.cwd()).expanduser()
-    commit = _git_output(root, "rev-parse", "HEAD")
+    head = git_head_commit(root)
+    commit = head.commit
     context: JsonObject = {
-        "git_commit": commit,
+        **head_commit_fields(head),
         **dirty_state_fields(git_dirty_state(root, commit=commit)),
     }
     if commit:
@@ -1086,6 +1089,8 @@ def event_metadata(
         metadata["repo_tags"] = ",".join(payload["tags"])
     if source.get("git_commit"):
         metadata["repo_git_commit"] = str(source["git_commit"])
+    elif source.get("git_commit_error"):
+        metadata["repo_git_commit_error"] = str(source["git_commit_error"])
     remote = sanitize_remote_url(str(source.get("repo_remote_url") or ""))
     if remote:
         metadata["repo_remote_url"] = remote
