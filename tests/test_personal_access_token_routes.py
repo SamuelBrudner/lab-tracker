@@ -573,6 +573,30 @@ def test_valid_token_forbidden_requests_stay_403_and_never_lock_the_token(
     assert forbidden_at_quota.json()["error"]["code"] == "service_forbidden"
 
 
+def test_token_without_an_owner_is_a_counted_401_even_on_a_forbidden_path(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """An ownerless token never reaches the policy check, so a 403 cannot leak it."""
+    issued = _create_token(client, admin_auth_headers, role="viewer", read_only=True)
+    client.app.state.pat_rate_limiter = InMemoryRateLimiter(
+        max_attempts=2,
+        window_seconds=60,
+        max_buckets=10,
+        max_buckets_per_client=2,
+    )
+    monkeypatch.setattr(client.app.state.auth_service, "get_user_by_id", lambda _user_id: None)
+    headers = _bearer(issued["secret"])
+
+    responses = [
+        client.post("/projects", json={"name": "Blocked"}, headers=headers) for _ in range(3)
+    ]
+
+    assert [response.status_code for response in responses] == [401, 401, 429]
+    assert responses[0].json()["error"]["message"] == "Invalid personal access token."
+
+
 def test_auth_middleware_matches_paths_relative_to_the_root_path(
     client: TestClient,
     admin_auth_headers: dict[str, str],
@@ -601,6 +625,27 @@ def test_auth_middleware_matches_paths_relative_to_the_root_path(
     assert promote.json()["error"]["code"] == "service_forbidden"
     target = client.app.state.auth_service.get_user_by_id(UUID(target_id))
     assert target.role is Role.VIEWER
+    # A path outside the root path reaches the router verbatim; the fence still holds.
+    unrooted = rooted.get("/auth/users", headers=_bearer(admin_pat["secret"]))
+    assert unrooted.status_code == 403, unrooted.text
+
+    enrollment = client.post("/auth/devices/enrollment", json={}, headers=admin_auth_headers)
+    assert enrollment.status_code == 201, enrollment.text
+    consume = client.post(
+        "/auth/devices/consume",
+        json={"offer_token": enrollment.json()["data"]["offer_token"], "label": "phone"},
+    )
+    assert consume.status_code == 201, consume.text
+    device = _bearer(consume.json()["data"]["secret"])
+
+    assert rooted.get("/lab/auth/me", headers=device).status_code == 200
+    for method, path in (
+        ("GET", "/lab/auth/users"),
+        ("GET", "/lab/auth/devices"),
+        ("POST", "/lab/projects"),
+    ):
+        denied = rooted.request(method, path, json={"name": "x"}, headers=device)
+        assert denied.status_code == 403, (path, denied.text)
 
 
 def _register_and_login(

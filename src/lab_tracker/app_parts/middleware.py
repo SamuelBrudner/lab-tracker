@@ -207,6 +207,17 @@ def configure_auth_middleware(app: FastAPI) -> None:
                         pat_rate_key, client=pat_rate_client
                     )
                     raise AuthError("Invalid personal access token.")
+                # Resolve the owner first: a token without one is a counted
+                # credential failure, and must not learn the policy's answer.
+                user = await run_in_threadpool(
+                    app.state.auth_service.get_user_by_id,
+                    principal.user_id,
+                )
+                if user is None:
+                    app.state.pat_rate_limiter.record_failure(
+                        pat_rate_key, client=pat_rate_client
+                    )
+                    raise AuthError("Invalid personal access token.")
                 if not service_principal_can_access(
                     request.method,
                     path,
@@ -219,15 +230,6 @@ def configure_auth_middleware(app: FastAPI) -> None:
                     # out of the requests it may make, and at the client's
                     # quota would turn this 403 into a 429.
                     return _service_forbidden_response("Not permitted for this token.")
-                user = await run_in_threadpool(
-                    app.state.auth_service.get_user_by_id,
-                    principal.user_id,
-                )
-                if user is None:
-                    app.state.pat_rate_limiter.record_failure(
-                        pat_rate_key, client=pat_rate_client
-                    )
-                    raise AuthError("Invalid personal access token.")
                 app.state.pat_rate_limiter.reset(pat_rate_key)
                 request.state.auth_context = AuthContext(
                     user_id=principal.user_id,
