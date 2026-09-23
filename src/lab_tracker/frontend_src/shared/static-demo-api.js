@@ -365,6 +365,9 @@ const COLLECTIONS = {
   visualizations: VISUALIZATIONS,
 };
 
+// Demo mode swaps every API call for fixtures and a fake signed-in session,
+// so it is never switchable from a URL: the Pages demo build (and the
+// screenshot script) set window.__LAB_TRACKER_STATIC_DEMO__ explicitly.
 function isStaticDemoEnabled() {
   if (typeof globalThis === "undefined") {
     return false;
@@ -375,10 +378,6 @@ function isStaticDemoEnabled() {
   const location = globalThis.location;
   if (!location) {
     return false;
-  }
-  const search = new URLSearchParams(location.search || "");
-  if (search.get("demo") === "1" || search.get("demo") === "true") {
-    return true;
   }
   return (
     String(location.hostname || "").endsWith("github.io") &&
