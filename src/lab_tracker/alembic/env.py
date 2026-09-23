@@ -9,7 +9,7 @@ from typing import Any
 from alembic import context
 from alembic.runtime.migration import MigrationContext
 from alembic.util import CommandError
-from sqlalchemy import engine_from_config, event, pool
+from sqlalchemy import engine_from_config, event, pool, text
 from sqlalchemy.engine import Connection, Engine
 
 from lab_tracker import db_models  # noqa: F401
@@ -34,6 +34,11 @@ target_metadata = Base.metadata
 logger = logging.getLogger("lab_tracker.alembic.env")
 
 _ADVISORY = "docs/advisories/2026-09-sqlite-migration-cascade.md"
+
+# Transaction-scoped Postgres advisory lock that serializes concurrent
+# ``alembic upgrade head`` runs (every container's entrypoint runs one) against
+# the same database. The value is arbitrary but fixed ("LTMG").
+_POSTGRES_MIGRATION_LOCK_KEY = 1280593223
 
 # (child table, parent table, referencing columns, referencing values); see
 # _foreign_key_violations for why rowid and fkid are not part of the identity.
@@ -76,6 +81,13 @@ def run_migrations_online() -> None:
         context.configure(connection=connection, target_metadata=target_metadata)
 
         with context.begin_transaction():
+            if connection.dialect.name == "postgresql":
+                # Taken before Alembic reads alembic_version, so a waiting run
+                # sees the winner's committed head; released at commit/rollback.
+                connection.execute(
+                    text("SELECT pg_advisory_xact_lock(:key)"),
+                    {"key": _POSTGRES_MIGRATION_LOCK_KEY},
+                )
             context.run_migrations()
 
 
