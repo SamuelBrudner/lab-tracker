@@ -1,6 +1,6 @@
 """Drift guard: docs/configuration.md stays in step with the real env surface.
 
-Two directions, assert-only (the doc has rich per-var prose, so it is not
+Three checks, assert-only (the doc has rich per-var prose, so it is not
 generated):
 
 1. Every ``lab_tracker.config.Settings`` field must have a documented
@@ -10,6 +10,8 @@ generated):
    either a ``Settings`` field or a direct environment read (the MCP, Dolt
    mirror, and deploy surfaces read ``LAB_TRACKER_*`` without going through
    ``Settings``) — so a stale bullet after a rename/removal fails here.
+3. Every ``LAB_TRACKER_*`` variable ``.env.example`` sets must be documented
+   and consumed, so the operator template cannot drift from either.
 
 The canonical ``LAB_TRACKER_BASE_URL`` is shared by server and clients.
 Client-only variables are documented alongside the MCP service-client section.
@@ -27,15 +29,21 @@ from lab_tracker.config import Settings
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _DOC_PATH = _REPO_ROOT / "docs" / "configuration.md"
+_ENV_EXAMPLE_PATH = _REPO_ROOT / ".env.example"
 
-_BULLET_PATTERN = re.compile(r"(?m)^\s*-\s+`(LAB_TRACKER_[A-Z0-9_]+)`")
+# A bullet head names one variable or several joined by " / ", e.g.
+# "- `LAB_TRACKER_MCP_API_KEY` / `LAB_TRACKER_MCP_TOKEN`: ...".
+_BULLET_PATTERN = re.compile(
+    r"(?m)^\s*-\s+(`LAB_TRACKER_[A-Z0-9_]+`(?:\s*/\s*`LAB_TRACKER_[A-Z0-9_]+`)*)"
+)
 _VAR_PATTERN = re.compile(r"\bLAB_TRACKER_[A-Z0-9_]+\b")
 
 _SCAN_ROOTS = ("src", "scripts", "deploy")
+# Files that consume variables. .env.example only sets them, so it is checked
+# separately (every variable it sets must be documented and consumed).
 _SCAN_FILES = (
     "docker-compose.yml",
     "Dockerfile",
-    ".env.example",
     "render.yaml",
 )
 _SCAN_SUFFIXES = {".py", ".sh", ".yml", ".yaml", ""}
@@ -46,7 +54,11 @@ def _settings_env_vars() -> set[str]:
 
 
 def _documented_env_vars() -> set[str]:
-    return set(_BULLET_PATTERN.findall(_DOC_PATH.read_text()))
+    return {
+        name
+        for head in _BULLET_PATTERN.findall(_DOC_PATH.read_text())
+        for name in _VAR_PATTERN.findall(head)
+    }
 
 
 def _consumed_env_vars() -> set[str]:
@@ -79,6 +91,46 @@ def test_every_settings_field_is_documented() -> None:
     assert not missing, (
         "Settings fields without a docs/configuration.md bullet "
         f"(document them): {sorted(missing)}"
+    )
+
+
+def test_every_scan_file_is_actually_scanned() -> None:
+    unscanned = [
+        name
+        for name in _SCAN_FILES
+        if not (_REPO_ROOT / name).is_file()
+        or (_REPO_ROOT / name).suffix not in _SCAN_SUFFIXES
+    ]
+    assert not unscanned, f"_SCAN_FILES entries the scan silently skips: {unscanned}"
+
+
+def test_slash_joined_bullets_document_every_variable_they_name() -> None:
+    # e.g. "- `LAB_TRACKER_MCP_API_KEY` / `LAB_TRACKER_MCP_TOKEN`: ..."
+    assert {
+        "LAB_TRACKER_MCP_TOKEN",
+        "LAB_TRACKER_MCP_PASSWORD",
+        "LAB_TRACKER_MCP_PORT",
+        "LAB_TRACKER_MCP_PATH",
+    } <= _documented_env_vars()
+
+
+def _env_example_vars() -> set[str]:
+    return set(_VAR_PATTERN.findall(_ENV_EXAMPLE_PATH.read_text(encoding="utf-8")))
+
+
+def test_every_env_example_variable_is_documented() -> None:
+    undocumented = _env_example_vars() - _documented_env_vars()
+    assert not undocumented, (
+        ".env.example variables without a docs/configuration.md bullet "
+        f"(document them): {sorted(undocumented)}"
+    )
+
+
+def test_every_env_example_variable_is_consumed_by_the_code() -> None:
+    stale = _env_example_vars() - _consumed_env_vars()
+    assert not stale, (
+        ".env.example sets variables nothing consumes "
+        f"(stale after a rename/removal?): {sorted(stale)}"
     )
 
 
