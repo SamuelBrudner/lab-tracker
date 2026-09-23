@@ -104,8 +104,10 @@ function CaptureComposer({
           aria-disabled={!canWrite}
           className={`capture-composer-icon capture-composer-mic${canWrite ? "" : " disabled"}`}
           htmlFor="capture-audio-record-input"
+          title="Record voice note"
         >
           <CaptureIcon kind="voice" />
+          <span className="sr-only">Record voice note</span>
         </label>
         <button
           aria-label="Save capture"
@@ -126,6 +128,7 @@ function CaptureComposer({
           aria-label="Attachment options"
           className="capture-attachment-menu"
           id="capture-attachment-menu"
+          role="group"
         >
           <label className="capture-attachment-option" htmlFor="capture-photo-input">
             <CaptureIcon kind="photo" />
