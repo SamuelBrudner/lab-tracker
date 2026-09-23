@@ -452,6 +452,54 @@ def test_docker_and_ci_pin_one_exact_uv_version() -> None:
         assert f'version: "{docker_pins[0]}"' in step, step
 
 
+def test_ci_builds_and_boots_the_docker_image() -> None:
+    """String tests cannot catch a Dockerfile or entrypoint that fails to run."""
+    repo_root = Path(__file__).resolve().parent.parent
+    workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    body = _ci_job_blocks(workflow)["docker-image"]
+
+    boot = "docker compose up --build --detach --wait --wait-timeout 300 app"
+    assert boot in body
+    assert "http://127.0.0.1:8000/health" in body
+    assert "python -m lab_tracker.deployment_probe" in body
+    assert "--alembic-config /app/alembic.ini" in body
+    assert 'test "$(docker compose exec -T app id -u)" != "0"' in body
+    assert "-f deployments/dedicated-instance/docker-compose.yml" in body
+    assert "config --quiet" in body
+    assert body.index("config --quiet") < body.index(boot)
+    assert "if: failure()" in body and "docker compose logs" in body
+    assert "if: always()" in body and "docker compose down --volumes" in body
+
+
+def test_render_blueprint_matches_the_image() -> None:
+    repo_root = Path(__file__).resolve().parent.parent
+    blueprint = (repo_root / "render.yaml").read_text(encoding="utf-8")
+    dockerfile = (repo_root / "Dockerfile").read_text(encoding="utf-8")
+
+    dockerfile_path = re.search(r"^\s+dockerfilePath: (\S+)$", blueprint, re.MULTILINE)
+    assert dockerfile_path is not None
+    assert (repo_root / dockerfile_path.group(1)).is_file()
+    assert re.search(r"^\s+dockerContext: \.$", blueprint, re.MULTILINE)
+    assert "    healthCheckPath: /health\n" in blueprint
+    assert "http://127.0.0.1:8000/health" in dockerfile
+
+    mount = re.search(r"^\s+mountPath: (\S+)$", blueprint, re.MULTILINE)
+    assert mount is not None
+    assert f"mkdir -p /app/data {mount.group(1)}" in dockerfile
+    assert f"chown -R labtracker:labtracker /app {mount.group(1)}" in dockerfile
+    storage_keys = (
+        "LAB_TRACKER_FILE_STORAGE_PATH",
+        "LAB_TRACKER_NOTE_STORAGE_PATH",
+        "LAB_TRACKER_RUNTIME_ENV_DIR",
+    )
+    for key in storage_keys:
+        value = re.search(
+            rf"- key: {key}\n\s+value: (\S+)\n", blueprint
+        )
+        assert value is not None, key
+        assert value.group(1).startswith(f"{mount.group(1)}/"), key
+
+
 def test_ci_runs_project_commands_without_relocking() -> None:
     repo_root = Path(__file__).resolve().parent.parent
     workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
