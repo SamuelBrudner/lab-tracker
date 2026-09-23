@@ -50,9 +50,9 @@ or mutate Lab Tracker records unless the user explicitly asks.
 
 ## Landing the Plane (Session Completion)
 
-Follow **Session Completion** under **Agent Context Profiles** below; explicit
-user or orchestrator instructions take precedence over it. Under the default
-conservative profile, do not commit, push, or run Dolt remote sync unless
+Follow the **Session Completion** section below, using the git policy of the
+active **Agent Context Profile**; explicit user or orchestrator instructions
+take precedence over it. Under the default conservative profile, do not commit, push, or run Dolt remote sync unless
 explicitly asked: report changed files, validation, and the suggested next
 commands instead. When publishing is authorized (the team-maintainer opt-in or
 an explicit request), run `bd export` so `.beads/issues.jsonl` is current, and

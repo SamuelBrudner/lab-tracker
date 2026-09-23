@@ -233,11 +233,15 @@ class GraphDraftClient(Protocol):
     Implementations (all in this module; ``make_graph_draft_client`` picks
     one from ``graph_draft_provider``): ``OpenAIGraphDraftClient``,
     ``AnthropicGraphDraftClient``, ``GoogleGraphDraftClient``, and
-    ``AgenticGraphDraftClient``, a background-only read-only wrapper around
-    one of the others. ``transcribe_audio`` is optional on providers that
-    do not natively expose transcription (Anthropic); if so, the
-    implementation should raise ``GraphDraftingError`` with a clear message
-    so callers fall back to a configured transcription provider.
+    ``AgenticGraphDraftClient``, a read-only wrapper around one of the
+    others that requires the background worker (batch drafts get its tool
+    pass; note and analysis drafts go straight to the wrapped client).
+
+    ``transcribe_audio`` support: OpenAI and Google transcribe natively;
+    Anthropic has no transcription API and raises ``GraphDraftingError`` so
+    callers fall back to a configured transcription provider; the agentic
+    wrapper delegates to its base client and raises ``GraphDraftingError`` if
+    that client cannot transcribe.
     """
 
     def draft_from_note(
