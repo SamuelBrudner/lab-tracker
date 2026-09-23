@@ -4,7 +4,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { vi } from "vitest";
 
 import { BatchReviewPage, PendingBatchBanner } from "./batches.jsx";
-import { apiResponse, installFetchMock } from "../test/utils.js";
+import { apiResponse, errorResponse, installFetchMock } from "../test/utils.js";
 
 describe("PendingBatchBanner", () => {
   it("nudges the user to flesh out a meeting when a pending batch has meeting notes", async () => {
@@ -75,6 +75,23 @@ describe("PendingBatchBanner", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Review" }));
     expect(navigate).toHaveBeenCalledWith("/app/batches/cs-meeting");
+  });
+  it("reports a failed pending-batch lookup instead of hiding the banner", async () => {
+    installFetchMock([
+      {
+        match: "/batches?limit=5&mine=true",
+        response: errorResponse("Batch service unavailable", 503),
+      },
+    ]);
+
+    render(<PendingBatchBanner token="token-1" navigate={vi.fn()} />);
+
+    expect(
+      await screen.findByText(
+        "Could not load your daily reviews: Batch service unavailable"
+      )
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Review" })).not.toBeInTheDocument();
   });
 });
 

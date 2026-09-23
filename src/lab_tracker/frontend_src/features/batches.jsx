@@ -23,9 +23,11 @@ function pendingBatchStatus(status) {
 function PendingBatchBanner({ enabled = true, token, navigate }) {
   const [batches, setBatches] = useState([]);
   const [batchTotal, setBatchTotal] = useState(0);
+  const [loadError, setLoadError] = useState("");
 
   useEffect(() => {
     let canceled = false;
+    setLoadError("");
     if (!enabled) {
       setBatches([]);
       setBatchTotal(0);
@@ -40,10 +42,13 @@ function PendingBatchBanner({ enabled = true, token, navigate }) {
           setBatchTotal(Number(meta?.total ?? data?.length ?? 0));
         }
       })
-      .catch(() => {
+      .catch((err) => {
         if (!canceled) {
           setBatches([]);
           setBatchTotal(0);
+          setLoadError(
+            `Could not load your daily reviews: ${err?.message || "request failed."}`
+          );
         }
       });
     return () => {
@@ -51,6 +56,13 @@ function PendingBatchBanner({ enabled = true, token, navigate }) {
     };
   }, [enabled, token]);
 
+  if (loadError) {
+    return (
+      <p className="flash error" role="alert">
+        {loadError}
+      </p>
+    );
+  }
   if (batchTotal === 0 || batches.length === 0) {
     return null;
   }
