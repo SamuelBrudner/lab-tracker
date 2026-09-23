@@ -593,7 +593,12 @@ def _capture_saved_figure(
     except Exception as exc:
         if _is_transport_failure(exc):
             _trip_circuit(endpoint_key, str(exc))
-        _warn_once("capture-failed", f"Lab Tracker figure capture failed: {exc}")
+        # Keyed by cause: a repeat of the same failure is printed once, but a
+        # later failure with a different cause is never hidden behind it.
+        _warn_once(
+            f"capture-failed:{type(exc).__name__}:{exc}",
+            f"Lab Tracker figure capture failed: {exc}",
+        )
         return FigureCaptureResult(
             **{
                 **result_defaults,

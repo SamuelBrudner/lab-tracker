@@ -819,3 +819,32 @@ def test_capture_requires_patterns_and_kind(tmp_path: Path) -> None:
         capture(tmp_path, patterns=[], kind="dataset")
     with pytest.raises(LTValidationError):
         capture(tmp_path, patterns=["*.csv"], kind="   ")
+
+
+def test_distinct_capture_failures_each_reach_stderr_once(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    messages = iter(
+        ["first failure cause", "second failure cause", "second failure cause"]
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _json_response(422, {"error": {"message": next(messages)}})
+
+    with LabTracker(
+        base_url="http://testserver",
+        default_project_id="project-1",
+        transport=httpx.MockTransport(handler),
+    ) as lt:
+        results = [
+            savefig(FakeFigure(bytes([index])), tmp_path / f"plot-{index}.png", client=lt)
+            for index in range(3)
+        ]
+
+    assert [result.action for result in results] == ["failed", "failed", "failed"]
+    stderr = capsys.readouterr().err
+    assert stderr.count("first failure cause") == 1
+    # A later failure with a different cause is not hidden behind the first
+    # warning; an identical repeat is not re-printed.
+    assert stderr.count("second failure cause") == 1
