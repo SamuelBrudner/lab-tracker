@@ -97,9 +97,7 @@ def _fallback_paragraph(text: str) -> str:
 )
 def test_consultation_fallback_matches_the_served_policy(path: Path) -> None:
     section = _read(path).split("## Lab Tracker Knowledge Graph Consultation", 1)[1]
-    assert _fallback_paragraph(section) == _fallback_paragraph(
-        AGENT_CONSULTATION_POLICY
-    )
+    assert _fallback_paragraph(section) == _fallback_paragraph(AGENT_CONSULTATION_POLICY)
 
 
 # L15: the authoring spec's status update names every shipped provenance read.
@@ -190,9 +188,7 @@ def test_lt_update_docs_list_every_rewritten_scaffold_file(
 @pytest.mark.parametrize("doc", [_SKILL_PATH, _MCP_SKILLS_DOC])
 def test_mcp_environment_examples_use_an_lpat_not_username_password(doc: Path) -> None:
     blocks = [
-        block
-        for block in _fenced_blocks(_read(doc), "bash")
-        if "LAB_TRACKER_BASE_URL=" in block
+        block for block in _fenced_blocks(_read(doc), "bash") if "LAB_TRACKER_BASE_URL=" in block
     ]
     assert blocks
     for block in blocks:
