@@ -96,15 +96,17 @@ See [`docs/phone-capture-quickstart.md`](phone-capture-quickstart.md).
 
 ## Hosted Read-Only Demo
 
-The seeded read-only demo is live at
+A seeded read-only demo is hosted at
 [`samuelbrudner.github.io/lab-tracker/app/`](https://samuelbrudner.github.io/lab-tracker/app/)
-and linked from the repository homepage. It is the primary non-build preview
-path; README screenshots remain the fallback when the hosted demo is
-unavailable.
+and linked from the repository homepage. It is a preview, not a release
+channel: nothing in CI builds or publishes it. The site is the `gh-pages`
+branch, pushed by hand, so it can lag `main` and may lack recent features. README screenshots are the fallback when the demo
+is unavailable or out of date.
 
-Build the demo site with `npm run build:pages-demo` (output in
-`dist/pages-demo`). GitHub Pages serves `404.html` at the requested URL for
-every deep link, so its asset URLs are absolute; pass
+To refresh it, build the demo site with `npm run build:pages-demo` (output in
+`dist/pages-demo`) from the commit you want to show and publish that
+directory as the `gh-pages` branch. GitHub Pages serves `404.html` at the
+requested URL for every deep link, so its asset URLs are absolute; pass
 `node scripts/build-pages-demo.mjs <outDir> --base-path=/<repository>/` when
 publishing somewhere other than the default `/lab-tracker/`.
 
