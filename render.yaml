@@ -36,6 +36,8 @@ services:
         value: 720
       - key: LAB_TRACKER_AUTH_INVITE_TTL_HOURS
         value: 168
+      - key: LAB_TRACKER_AUTH_PUBLIC_VIEWER_REGISTRATION_ENABLED
+        value: "false"
 
 databases:
   - name: lab-tracker-db

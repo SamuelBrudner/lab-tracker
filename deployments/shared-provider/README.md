@@ -13,7 +13,9 @@ LAB_TRACKER_OPENAI_API_KEY=replace-with-provider-key
 ```
 
 Copy `runtime.env.example` to the ignored `runtime.env` beside it and set the
-non-secret provider, scheduler, model, timeout, and review-email policy there.
+non-secret provider, scheduler, model, timeout, review-email, and
+registration policy there. The example disables anonymous viewer
+self-registration, so new accounts come from invitations or an admin.
 Keeping this policy in a service-level environment file prevents production
 settings from leaking into host-side tests and CLI commands.
 
