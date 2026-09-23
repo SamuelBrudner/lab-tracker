@@ -17,13 +17,21 @@ function normalizeTextAssetBytes(buffer) {
   return Buffer.from(buffer.toString("utf8").replace(/\r\n/g, "\n"), "utf8");
 }
 
+// Every shell asset the service worker serves cache-first feeds the version,
+// so changing any of them (not just the bundle) rolls CACHE_NAME and the
+// ?v= tokens. Text assets hash with normalized line endings; icons raw.
+const VERSIONED_TEXT_ASSETS = ["app.js", "styles.css", "app.css", "manifest.json"];
+const VERSIONED_BINARY_ASSETS = ["icon-180.png", "icon-192.png", "icon-512.png"];
+const STAMPED_ASSET_PATTERN = /\/app\/static\/(app\.js|styles\.css|app\.css)\?v=[^"']+/g;
+
 async function staticAssetVersion() {
   const hash = createHash("sha256");
-  for (const filename of ["app.js", "styles.css"]) {
+  for (const filename of [...VERSIONED_TEXT_ASSETS, ...VERSIONED_BINARY_ASSETS]) {
+    const bytes = await readFile(resolve(frontendDir, filename));
     hash.update(filename);
     hash.update("\0");
     hash.update(
-      normalizeTextAssetBytes(await readFile(resolve(frontendDir, filename)))
+      VERSIONED_TEXT_ASSETS.includes(filename) ? normalizeTextAssetBytes(bytes) : bytes
     );
     hash.update("\0");
   }
@@ -41,7 +49,7 @@ async function stampShellAssetVersion(version) {
     writeFile(
       indexPath,
       indexHtml.replace(
-        /\/app\/static\/(app\.js|styles\.css)\?v=[^"']+/g,
+        STAMPED_ASSET_PATTERN,
         (match, asset) => `/app/static/${asset}?v=${version}`
       ),
       "utf8"
@@ -54,7 +62,7 @@ async function stampShellAssetVersion(version) {
           `const CACHE_VERSION = "v-${version}";`
         )
         .replace(
-          /\/app\/static\/(app\.js|styles\.css)\?v=[^"']+/g,
+          STAMPED_ASSET_PATTERN,
           (match, asset) => `/app/static/${asset}?v=${version}`
         ),
       "utf8"
