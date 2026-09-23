@@ -6,7 +6,7 @@ import json
 import unicodedata
 from datetime import datetime
 from typing import Annotated, Any
-from urllib.parse import quote, unquote
+from urllib.parse import quote
 from uuid import UUID
 
 from fastapi import Query
@@ -206,7 +206,9 @@ def content_disposition_header(disposition: str, filename: str) -> str:
 
 
 def _clean_attachment_filename(filename: str) -> str:
-    cleaned = unquote((filename or "").strip())
+    # Stored names are already decoded (they come from the multipart
+    # ``filename``); decoding again would rewrite names containing ``%``.
+    cleaned = (filename or "").strip()
     if not cleaned:
         return "download"
     cleaned = cleaned.replace("\r", "_").replace("\n", "_")
@@ -220,7 +222,9 @@ def _clean_attachment_filename(filename: str) -> str:
 def _ascii_attachment_fallback(filename: str) -> str:
     normalized = unicodedata.normalize("NFKD", filename)
     fallback = "".join(ch for ch in normalized if 32 <= ord(ch) < 127)
-    fallback = fallback.replace("\\", "_").replace("/", "_").strip()
+    # Some user agents percent-decode the plain ``filename`` parameter, so a
+    # literal ``%`` is carried only by the exact ``filename*`` parameter.
+    fallback = fallback.replace("\\", "_").replace("/", "_").replace("%", "_").strip()
     if fallback and not fallback.startswith("."):
         return fallback
     suffix = ""
