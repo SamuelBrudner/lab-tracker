@@ -1119,7 +1119,10 @@ def _add_repo_parsers(subcommands: argparse._SubParsersAction) -> None:
     )
     hook_parser.add_argument(
         "--lt-command",
-        help="Path to the lt executable the hook should call. Defaults to the lt on PATH.",
+        help=(
+            "Path to the lt executable the hook should call. Defaults to the lt "
+            "on PATH, then the lt next to this Python."
+        ),
     )
     hook_parser.add_argument(
         "--force",

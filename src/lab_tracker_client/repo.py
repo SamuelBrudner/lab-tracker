@@ -18,6 +18,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -717,7 +718,20 @@ def _hook_command_path(lt_command: str | None) -> str:
 
     import shutil
 
-    resolved = lt_command or shutil.which("lt") or "lt"
+    resolved = lt_command or shutil.which("lt")
+    if not resolved:
+        # Git GUIs and IDEs often run hooks with a PATH that lacks the user's
+        # venv; the interpreter's sibling is the lt that shipped this module.
+        sibling = Path(sys.executable).parent / (
+            "lt.exe" if sys.platform == "win32" else "lt"
+        )
+        if not sibling.exists():
+            raise LTValidationError(
+                "Could not locate the lt executable for the hook body (not on "
+                "PATH and not next to this Python). Pass --lt-command with its "
+                "full path."
+            )
+        resolved = str(sibling)
     # Git hooks run under sh even on Windows; sh wants forward slashes.
     return resolved.replace("\\", "/")
 
@@ -783,6 +797,12 @@ def _hook_managed_block(lt_command: str, config_path: str) -> str:
             # tracebacks and the || branch surfaces a one-line warning instead.
             '    "$LT" repo report >/dev/null 2>&1 || '
             'echo "lab-tracker: repo hook could not record the commit; commit kept." >&2',
+            "  else",
+            # Without this branch a GUI/IDE commit whose PATH lacks lt would
+            # skip capture with no trace at all.
+            '    echo "lab-tracker: repo hook could not record the commit: lt command '
+            "'$LT' not found; set LAB_TRACKER_LT or re-run 'lt repo install-hook "
+            "--lt-command <path>'. Commit kept.\" >&2",
             "  fi",
             "fi",
             HOOK_END_MARKER,
