@@ -171,3 +171,41 @@ def test_question_list_search_uses_database_filtering_and_pagination(
     assert payload["meta"]["total"] == 3
     assert len(payload["data"]) == 1
     assert payload["data"][0]["text"] == "Baseline question 1"
+
+
+def test_search_include_accepts_known_kinds_and_rejects_unknown_tokens(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    project_id = client.post(
+        "/projects",
+        json={"name": "Search include project", "description": ""},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    note_response = client.post(
+        "/notes",
+        json={"project_id": project_id, "raw_content": "include filter sentinel"},
+        headers=admin_auth_headers,
+    )
+    assert note_response.status_code == 201
+
+    notes_only = client.get(
+        "/search",
+        params={"q": "sentinel", "project_id": project_id, "include": " Notes, "},
+        headers=admin_auth_headers,
+    )
+    assert notes_only.status_code == 200
+    assert notes_only.json()["data"]["questions"] == []
+    assert len(notes_only.json()["data"]["notes"]) == 1
+
+    # A typo such as the singular "note" used to return an empty 200, which
+    # reads as "no matches" instead of "bad filter".
+    misspelled = client.get(
+        "/search",
+        params={"q": "sentinel", "project_id": project_id, "include": "note"},
+        headers=admin_auth_headers,
+    )
+    assert misspelled.status_code == 422
+    message = misspelled.json()["error"]["message"]
+    assert "note" in message
+    assert "questions" in message and "notes" in message

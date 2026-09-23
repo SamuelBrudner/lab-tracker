@@ -98,6 +98,8 @@ from lab_tracker.store_authority_use import (
 
 from .types import Page
 
+_SEARCH_INCLUDE_KINDS = frozenset({"questions", "notes"})
+
 ExternalArtifactEntityType = Literal["analysis", "claim", "dataset"]
 
 
@@ -539,6 +541,13 @@ class ContextQueries:
             for item in (include.split(",") if include else ["questions", "notes"])
             if item.strip()
         }
+        unknown_includes = include_set - _SEARCH_INCLUDE_KINDS
+        if unknown_includes:
+            raise ValidationError(
+                "include must be a comma-separated subset of "
+                f"{', '.join(sorted(_SEARCH_INCLUDE_KINDS))}; "
+                f"unknown: {', '.join(sorted(unknown_includes))}."
+            )
         project_ids: set[UUID] | None
         linked_question_ids: set[UUID] | None = None
         linked_note_ids: set[UUID] | None = None
