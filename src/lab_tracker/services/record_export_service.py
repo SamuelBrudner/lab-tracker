@@ -312,6 +312,10 @@ class RecordExportService(BaseService):
         notes: dict[UUID, Note],
         visualizations: dict[UUID, Visualization],
     ) -> AraArtifactRecords:
+        if not project_ids:
+            # An empty scope authorizes nothing; it must never widen into an
+            # unfiltered, every-project export.
+            raise ValueError("An artifact export scope must name at least one project.")
         changed = True
         while changed:
             changed = False
@@ -395,16 +399,15 @@ class RecordExportService(BaseService):
                     lambda _node_id, item=related_node: item,
                 )
 
-        if project_ids:
-            self._drop_out_of_scope(
-                project_ids,
-                questions,
-                datasets,
-                analyses,
-                claims,
-                exploration_nodes,
-                notes,
-            )
+        self._drop_out_of_scope(
+            project_ids,
+            questions,
+            datasets,
+            analyses,
+            claims,
+            exploration_nodes,
+            notes,
+        )
         project_visualizations = self._visualizations_for_records(project_ids, analyses, claims)
         visualizations.update({item.viz_id: item for item in project_visualizations})
         notes.update(
@@ -601,13 +604,11 @@ class RecordExportService(BaseService):
                 offset=0,
             )
             visualizations.update({item.viz_id: item for item in items})
-        if project_ids:
-            visualizations = {
-                viz_id: viz
-                for viz_id, viz in visualizations.items()
-                if self._visualization_project_id(viz) in project_ids
-            }
-        return list(visualizations.values())
+        return [
+            viz
+            for viz in visualizations.values()
+            if self._visualization_project_id(viz) in project_ids
+        ]
 
     def _notes_for_records(
         self,
@@ -620,8 +621,6 @@ class RecordExportService(BaseService):
         visualizations: dict[UUID, Visualization],
         notes: dict[UUID, Note],
     ) -> list[Note]:
-        if not project_ids:
-            return list(notes.values())
         scoped_notes: dict[UUID, Note] = dict(notes)
         target_map = {
             EntityType.QUESTION: set(questions),
@@ -653,8 +652,6 @@ class RecordExportService(BaseService):
         visualizations: dict[UUID, Visualization],
         exploration_nodes: dict[UUID, ExplorationNode],
     ) -> list[ExplorationNode]:
-        if not project_ids:
-            return list(exploration_nodes.values())
         target_map = {
             EntityType.QUESTION: set(questions),
             EntityType.DATASET: set(datasets),
@@ -698,29 +695,14 @@ class RecordExportService(BaseService):
             return []
         claim_ids = set(claims)
         edges: dict[UUID, object] = {}
-        if project_ids:
-            for project_id in project_ids:
-                items, _ = self.repository.query_claim_edges(
-                    project_id=project_id,
-                    limit=None,
-                    offset=0,
-                )
-                for edge in items:
-                    if edge.claim_id in claim_ids or edge.target_claim_id in claim_ids:
-                        edges[edge.edge_id] = edge
-        else:
-            for claim_id in claim_ids:
-                outgoing, _ = self.repository.query_claim_edges(
-                    claim_id=claim_id,
-                    limit=None,
-                    offset=0,
-                )
-                incoming, _ = self.repository.query_claim_edges(
-                    target_claim_id=claim_id,
-                    limit=None,
-                    offset=0,
-                )
-                for edge in [*outgoing, *incoming]:
+        for project_id in project_ids:
+            items, _ = self.repository.query_claim_edges(
+                project_id=project_id,
+                limit=None,
+                offset=0,
+            )
+            for edge in items:
+                if edge.claim_id in claim_ids or edge.target_claim_id in claim_ids:
                     edges[edge.edge_id] = edge
         return list(edges.values())
 
