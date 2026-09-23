@@ -188,7 +188,8 @@ class SQLAlchemyDataStoreRepository(DataStoreRepository):
 
         try:
             _reserve_sqlite_registration_write(self._session)
-        except SQLAlchemyError:
+        except SQLAlchemyError as exc:
+            _log_unclassified_failure("reserve registration write", exc)
             raise DataStoreInsertError from None
 
     def insert(self, entity: DataStore) -> None:

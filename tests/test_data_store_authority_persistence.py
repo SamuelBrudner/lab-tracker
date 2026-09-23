@@ -462,6 +462,42 @@ def test_clear_default_failure_logs_a_parameter_free_diagnostic(
     assert secret not in caplog.text
 
 
+def test_reserve_registration_write_failure_logs_a_parameter_free_diagnostic(
+    db_session,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    repository = SQLAlchemyLabTrackerRepository(db_session)
+    secret = "logged-reserve-secret-must-not-survive"
+
+    def fail_reservation(_session: object) -> None:
+        raise OperationalError("BEGIN IMMEDIATE", {"root": secret}, RuntimeError(secret))
+
+    monkeypatch.setattr(
+        "lab_tracker.sqlalchemy_repository_parts.data_stores._reserve_sqlite_registration_write",
+        fail_reservation,
+    )
+
+    with (
+        caplog.at_level("ERROR", logger=_DATA_STORE_LOGGER),
+        pytest.raises(DataStoreInsertError) as error,
+    ):
+        repository.data_stores.reserve_registration_write()
+
+    logged = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == _DATA_STORE_LOGGER
+    ]
+    assert len(logged) == 1
+    assert "reserve registration write" in logged[0]
+    assert "OperationalError" in logged[0]
+    assert "RuntimeError" in logged[0]
+    assert secret not in caplog.text
+    assert error.value.__cause__ is None
+    assert error.value.__suppress_context__
+
+
 class _Diagnostic:
     def __init__(self, constraint_name: str) -> None:
         self.constraint_name = constraint_name
