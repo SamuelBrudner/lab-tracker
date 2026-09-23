@@ -366,6 +366,50 @@ def test_sqlite_connection_configuration_overrides_modern_transaction_mode() -> 
         connection.close()
 
 
+class _ModernTransactionModeConnection:
+    """Stand-in for a Python 3.12+ sqlite3 connection opened with autocommit=False.
+
+    CI runs Python 3.10/3.11, whose sqlite3 has no ``autocommit`` attribute, so
+    the real-connection test above is skipped there. This fake keeps the
+    mode-pin branch of ``configure_sqlite_connection`` exercised everywhere.
+    """
+
+    def __init__(self) -> None:
+        self.autocommit: object = False
+        # PEP 249 mode opens a physical transaction as soon as it connects.
+        self.in_transaction = True
+        self.rollbacks = 0
+        self._real = sqlite3.connect(":memory:")
+
+    def rollback(self) -> None:
+        self.rollbacks += 1
+        self.in_transaction = False
+
+    def cursor(self) -> sqlite3.Cursor:
+        return self._real.cursor()
+
+    def close(self) -> None:
+        self._real.close()
+
+
+def test_sqlite_connection_configuration_pins_legacy_mode_on_every_python(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    legacy = object()
+    monkeypatch.setattr(sqlite3, "LEGACY_TRANSACTION_CONTROL", legacy, raising=False)
+    connection = _ModernTransactionModeConnection()
+    try:
+        configure_sqlite_connection(connection)  # type: ignore[arg-type]
+
+        assert connection.autocommit is legacy
+        assert connection.rollbacks == 1
+        assert connection.in_transaction is False
+        foreign_keys = connection.cursor().execute("PRAGMA foreign_keys").fetchone()
+        assert foreign_keys == (1,)
+    finally:
+        connection.close()
+
+
 def test_startup_config_summary_logs_environment_db_backend_and_auth(
     tmp_path,
     monkeypatch,
