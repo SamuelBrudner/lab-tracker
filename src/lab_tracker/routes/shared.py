@@ -13,7 +13,6 @@ from uuid import UUID
 from fastapi import Query
 from pydantic import TypeAdapter
 from starlette.requests import Request
-from starlette.responses import JSONResponse
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.application import RequestHandlers
@@ -35,7 +34,6 @@ from lab_tracker.models import (
     NoteStatus,
     ProjectStatus,
     QuestionStatus,
-    SessionStatus,
     UsageEventResourceType,
     UsageEventVerb,
 )
@@ -43,8 +41,6 @@ from lab_tracker.schemas import (
     AuthTokenRead,
     AuthUserRead,
     EntityRefIn,
-    ErrorEnvelope,
-    ErrorInfo,
     ListEnvelope,
     PaginationMeta,
 )
@@ -82,11 +78,6 @@ def auth_token_read(user: User, token: str, expires_at: datetime) -> AuthTokenRe
     )
 
 
-def auth_error_response(message: str) -> JSONResponse:
-    payload = ErrorEnvelope(error=ErrorInfo(code="auth_error", message=message))
-    return JSONResponse(status_code=401, content=payload.model_dump())
-
-
 def actor_from_request(request: Request | None) -> AuthContext:
     if request is None:
         raise AuthError("Authentication required.")
@@ -116,11 +107,6 @@ def ensure_project_owner(request: Request, project_id: Any) -> None:
     api_from_request(request).require_project_owner(project_id, actor=actor)
 
 
-def ensure_group_read(request: Request, group_id: Any) -> None:
-    actor = actor_from_request(request)
-    api_from_request(request).require_group_read(group_id, actor=actor)
-
-
 def ensure_group_owner(request: Request, group_id: Any) -> None:
     actor = actor_from_request(request)
     api_from_request(request).require_group_owner(group_id, actor=actor)
@@ -140,13 +126,6 @@ def record_usage_view(
         project_id=project_id,
         actor=actor_from_request(request),
     )
-
-
-def filter_project_scoped_items(request: Request, items: list[Any]) -> list[Any]:
-    allowed = accessible_project_ids_from_request(request)
-    if allowed is None:
-        return items
-    return [item for item in items if getattr(item, "project_id", None) in allowed]
 
 
 def api_from_request(request: Request, fallback: LabTrackerAPI | None = None) -> LabTrackerAPI:
@@ -196,11 +175,6 @@ def provenance_base_url(request: Request) -> str:
         urlunsplit((request_base.scheme, request_base.netloc, "", "", ""))
     )
     return f"{origin}{request_base.path.rstrip('/')}"
-
-
-def safe_attachment_filename(filename: str) -> str:
-    cleaned = _clean_attachment_filename(filename)
-    return _ascii_attachment_fallback(cleaned)
 
 
 def content_disposition_header(disposition: str, filename: str) -> str:
@@ -340,10 +314,6 @@ def dataset_default_status() -> DatasetStatus:
 
 def note_default_status() -> NoteStatus:
     return NoteStatus.STAGED
-
-
-def session_default_status() -> SessionStatus:
-    return SessionStatus.ACTIVE
 
 
 def analysis_default_status() -> AnalysisStatus:
