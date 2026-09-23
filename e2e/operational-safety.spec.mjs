@@ -370,7 +370,7 @@ test("a delayed graph response cannot replace or mutate the current route", asyn
   await page.getByRole("button", { name: "Save edit", exact: true }).click();
   expect((await saveResponse).status()).toBe(200);
   await expect(
-    page.getByText("Graph draft operation updated.", { exact: true })
+    page.getByText("Saved edits to: Question proposed by draft B, edited.", { exact: true })
   ).toBeVisible();
 
   const acceptResponse = page.waitForResponse(

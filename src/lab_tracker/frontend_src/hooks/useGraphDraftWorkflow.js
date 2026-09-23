@@ -334,7 +334,8 @@ function useGraphDraftWorkflow({
       setChangeSet(nextChangeSet);
       setPayloads(payloadText(nextChangeSet));
       setOperationReviewNotes(operationReviewNoteText(nextChangeSet));
-      setFlash(decisionFlashMessage(operation, decision));
+      // Name the proposal as just saved, not as it read before the edit.
+      setFlash(decisionFlashMessage({ ...operation, payload: parsedPayload }, decision));
       return true;
     } catch (err) {
       setFlash("", err.message || "Failed to update graph draft operation.");
