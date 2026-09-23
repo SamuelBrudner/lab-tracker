@@ -15,7 +15,11 @@ def test_context_manager_holds_the_lock_for_the_body(tmp_path: Path) -> None:
         assert ProcessLock(lock_path).acquire() is False
 
     assert lock.held is False
-    assert ProcessLock(lock_path).acquire() is True
+    reacquired = ProcessLock(lock_path)
+    try:
+        assert reacquired.acquire() is True
+    finally:
+        reacquired.release()
 
 
 def test_context_manager_refuses_to_run_the_body_unlocked(tmp_path: Path) -> None:
