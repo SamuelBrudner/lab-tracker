@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import logging
 import threading
@@ -13,8 +14,9 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from starlette.requests import Request
 
+from lab_tracker import auth as auth_module
 from lab_tracker.app import create_app
-from lab_tracker.auth import AuthService, InvitationTokenService, Role
+from lab_tracker.auth import AuthService, InvitationTokenService, PasswordHasher, Role
 from lab_tracker.db import Base
 from lab_tracker.errors import AuthError, ConflictError, ValidationError
 from lab_tracker.logging import JsonFormatter
@@ -1129,6 +1131,27 @@ def test_refresh_rejects_expired_token(monkeypatch, tmp_path):
         refresh_response = client.post("/auth/refresh", headers=_auth_headers(token))
         assert refresh_response.status_code == 401
         assert refresh_response.json()["error"]["code"] == "auth_error"
+
+
+def test_login_spends_the_same_key_derivation_work_for_unknown_usernames(monkeypatch):
+    """Response time must not reveal whether a username exists (L43)."""
+    service = AuthService()
+    service.register_user(username="alice", password="secret", role=Role.VIEWER)
+    real_pbkdf2_hmac = hashlib.pbkdf2_hmac
+    iterations_used: list[int] = []
+
+    def counting_pbkdf2_hmac(hash_name, password, salt, iterations, *args, **kwargs):
+        iterations_used.append(iterations)
+        return real_pbkdf2_hmac(hash_name, password, salt, iterations, *args, **kwargs)
+
+    monkeypatch.setattr(auth_module.hashlib, "pbkdf2_hmac", counting_pbkdf2_hmac)
+
+    with pytest.raises(AuthError, match="Invalid credentials."):
+        service.authenticate("alice", "wrong-password")
+    with pytest.raises(AuthError, match="Invalid credentials."):
+        service.authenticate("nobody", "wrong-password")
+
+    assert iterations_used == [PasswordHasher.iterations, PasswordHasher.iterations]
 
 
 def test_login_rate_limits_repeated_invalid_credentials(monkeypatch, tmp_path):

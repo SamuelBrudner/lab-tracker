@@ -168,6 +168,14 @@ def _validate_invited_password(password: str, password_confirmation: str) -> Non
         )
 
 
+# Well-formed hash with an all-zero digest that no real password derives;
+# see AuthService.authenticate.
+_UNKNOWN_USER_PASSWORD_HASH = (
+    f"{PasswordHasher.algorithm}${PasswordHasher.iterations}$"
+    f"{'00' * PasswordHasher.salt_bytes}${'00' * hashlib.sha256().digest_size}"
+)
+
+
 class AuthService:
     """Authentication user store with optional SQLAlchemy persistence."""
 
@@ -319,6 +327,9 @@ class AuthService:
         normalized = self._normalize_username(username)
         user = self.get_user(normalized)
         if user is None:
+            # Spend the same key-derivation work as a real check so the
+            # response time does not reveal whether the username exists.
+            PasswordHasher.verify_password(password, _UNKNOWN_USER_PASSWORD_HASH)
             raise AuthError("Invalid credentials.")
         if not PasswordHasher.verify_password(password, user.password_hash):
             raise AuthError("Invalid credentials.")
