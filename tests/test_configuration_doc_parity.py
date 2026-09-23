@@ -1,20 +1,26 @@
 """Drift guard: docs/configuration.md stays in step with the real env surface.
 
-Three checks, assert-only (the doc has rich per-var prose, so it is not
+Four checks, assert-only (the doc has rich per-var prose, so it is not
 generated):
 
 1. Every ``lab_tracker.config.Settings`` field must have a documented
    ``LAB_TRACKER_*`` bullet — adding or renaming a server setting without
    documenting it fails here.
-2. Every documented bullet must name a variable the code actually consumes —
-   either a ``Settings`` field or a direct environment read (the MCP, Dolt
-   mirror, and deploy surfaces read ``LAB_TRACKER_*`` without going through
-   ``Settings``) — so a stale bullet after a rename/removal fails here.
-3. Every ``LAB_TRACKER_*`` variable ``.env.example`` sets must be documented
+2. Every ``LAB_TRACKER_*`` name the code under ``src``, ``scripts`` and
+   ``deploy`` (plus the root Compose, Docker and Render files) mentions must
+   have a bullet too, unless ``_NOT_OPERATOR_CONFIGURATION`` says why it is not
+   operator configuration. That covers the variables the ``lt`` client, the
+   MCP server, the Git/repo/HPC/watch hooks, the operator scripts and the
+   container entrypoint read straight from the environment.
+3. Every documented bullet must name a variable the code actually consumes —
+   either a ``Settings`` field or a direct environment read — so a stale bullet
+   after a rename/removal fails here.
+4. Every ``LAB_TRACKER_*`` variable ``.env.example`` sets must be documented
    and consumed, so the operator template cannot drift from either.
 
-The canonical ``LAB_TRACKER_BASE_URL`` is shared by server and clients.
-Client-only variables are documented alongside the MCP service-client section.
+The canonical ``LAB_TRACKER_BASE_URL`` is shared by server and clients. The
+MCP service-client variables have their own section; the other client, script
+and deploy variables are under "Client, script, and deploy variables".
 """
 
 from __future__ import annotations
@@ -46,7 +52,7 @@ _SCAN_FILES = (
     "Dockerfile",
     "render.yaml",
 )
-_SCAN_SUFFIXES = {".py", ".sh", ".yml", ".yaml", ""}
+_SCAN_SUFFIXES = {".py", ".sh", ".ps1", ".yml", ".yaml", ""}
 
 
 def _settings_env_vars() -> set[str]:
@@ -82,6 +88,35 @@ def _consumed_env_vars() -> set[str]:
     return consumed
 
 
+# Names the scan finds that are not operator configuration, each with the
+# reason. Python constants holding a variable's name (``FOO_ENV = "FOO"``) are
+# skipped automatically when the name they hold is itself consumed.
+_NOT_OPERATOR_CONFIGURATION: dict[str, str] = {
+    "LAB_TRACKER_MCP_": (
+        "prefix match in lt auth doctor (any LAB_TRACKER_MCP_* key marks an "
+        "MCP registration), not a variable"
+    ),
+    "LAB_TRACKER_INTERNAL_LOCAL_FILESYSTEM_REQUEST": (
+        "internal request channel from the server to its local-store helper "
+        "subprocess; the server sets it itself"
+    ),
+    "LAB_TRACKER_ROOT": (
+        "assigned by the Windows graph-draft hook's managed block but never "
+        "read, so setting it changes nothing"
+    ),
+    "LAB_TRACKER_SMOKE_ACTION": "stdout marker the MATLAB smoke test greps for, not an input",
+    "LAB_TRACKER_SMOKE_PORT": (
+        "port of the throwaway server scripts/matlab-smoke.sh starts; a developer smoke-test knob"
+    ),
+}
+
+
+def _env_name_constant(name: str, consumed: set[str]) -> bool:
+    """``FOO_ENV`` is a Python constant holding ``FOO``, not a variable."""
+
+    return name.endswith("_ENV") and name.removesuffix("_ENV") in consumed
+
+
 def test_env_prefix_is_stable() -> None:
     assert Settings.model_config.get("env_prefix") == "LAB_TRACKER_"
 
@@ -89,17 +124,38 @@ def test_env_prefix_is_stable() -> None:
 def test_every_settings_field_is_documented() -> None:
     missing = _settings_env_vars() - _documented_env_vars()
     assert not missing, (
-        "Settings fields without a docs/configuration.md bullet "
-        f"(document them): {sorted(missing)}"
+        f"Settings fields without a docs/configuration.md bullet (document them): {sorted(missing)}"
     )
+
+
+def test_every_variable_the_code_reads_is_documented() -> None:
+    consumed = _consumed_env_vars()
+    undocumented = {
+        name
+        for name in consumed - _documented_env_vars()
+        if name not in _NOT_OPERATOR_CONFIGURATION and not _env_name_constant(name, consumed)
+    }
+    assert not undocumented, (
+        "LAB_TRACKER_* variables read under src/, scripts/ or deploy/ without "
+        "a docs/configuration.md bullet (document them, or add them to "
+        f"_NOT_OPERATOR_CONFIGURATION with the reason): {sorted(undocumented)}"
+    )
+
+
+def test_not_operator_configuration_entries_are_current() -> None:
+    consumed = _consumed_env_vars()
+    documented = _documented_env_vars()
+    stale = sorted(set(_NOT_OPERATOR_CONFIGURATION) - consumed)
+    assert not stale, f"_NOT_OPERATOR_CONFIGURATION names nothing reads: {stale}"
+    both = sorted(set(_NOT_OPERATOR_CONFIGURATION) & documented)
+    assert not both, f"documented yet listed as not configuration: {both}"
 
 
 def test_every_scan_file_is_actually_scanned() -> None:
     unscanned = [
         name
         for name in _SCAN_FILES
-        if not (_REPO_ROOT / name).is_file()
-        or (_REPO_ROOT / name).suffix not in _SCAN_SUFFIXES
+        if not (_REPO_ROOT / name).is_file() or (_REPO_ROOT / name).suffix not in _SCAN_SUFFIXES
     ]
     assert not unscanned, f"_SCAN_FILES entries the scan silently skips: {unscanned}"
 
@@ -167,9 +223,7 @@ def _run_non_docker_first_admin_block(home: Path) -> str:
         ]
     )
     environment = {
-        key: value
-        for key, value in os.environ.items()
-        if not key.startswith("LAB_TRACKER_")
+        key: value for key, value in os.environ.items() if not key.startswith("LAB_TRACKER_")
     }
     environment["PATH"] = os.pathsep.join(
         [str(Path(sys.executable).parent), environment.get("PATH", "")]
@@ -233,9 +287,7 @@ def test_auth_enable_instructions_also_require_a_strong_secret() -> None:
 
 def test_auth_secret_bullet_describes_when_the_placeholder_is_rejected() -> None:
     text = _DOC_PATH.read_text(encoding="utf-8")
-    match = re.search(
-        r"(?m)^- `LAB_TRACKER_AUTH_SECRET_KEY`.*(?:\n  .*)*", text
-    )
+    match = re.search(r"(?m)^- `LAB_TRACKER_AUTH_SECRET_KEY`.*(?:\n  .*)*", text)
     assert match is not None
     bullet = " ".join(match.group(0).split())
     assert "allowed only in `local`" not in bullet

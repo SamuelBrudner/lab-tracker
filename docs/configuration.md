@@ -1,10 +1,10 @@
 # Configuration reference
 
 This is the configuration reference for Lab Tracker: the `LAB_TRACKER_*`
-environment variables read by the application, the MCP service-client and
-export-only Dolt-mirror variables read outside the FastAPI app, the multimodal
-graph-draft-review configuration and behavior, and the local evidence-inbox
-import (`lt import-folder`) configuration.
+environment variables read by the application; the MCP service-client,
+export-only Dolt-mirror, client, script, and deploy variables read outside the
+FastAPI app; the multimodal graph-draft-review configuration and behavior; and
+the local evidence-inbox import (`lt import-folder`) configuration.
 
 The supported runtime surface is defined in
 [`retained-v1-surface.md`](retained-v1-surface.md); if it and this document
@@ -954,6 +954,105 @@ authorization; serve it only through TLS on a VPN or tailnet.
 - `LAB_TRACKER_DOLT_BIN`: Dolt executable (default: `dolt`)
 - `LAB_TRACKER_DOLT_MIRROR_PATH`: local mirror directory (default:
   `.lab-tracker-dolt`)
+
+### Client, script, and deploy variables
+
+These variables are read straight from the environment by the `lt` client, the
+hooks it installs, the operator scripts under `scripts/`, and the container
+entrypoint. The FastAPI app does not read them. `LAB_TRACKER_BASE_URL` (see
+[Application](#application)) is also the API origin for all of them.
+
+#### `lt` client and agent setup
+
+- `LAB_TRACKER_ACCESS_TOKEN`: bearer token the client sends, preferably a
+  personal access token (`lpat_...`); it overrides the token saved in the
+  connection profile. `lt setup connect --save-token` saves it when `--token`
+  is not given.
+- `LAB_TRACKER_USERNAME` / `LAB_TRACKER_PASSWORD`: login credentials the client
+  uses when it has no token, or after the API rejects the one it has. Prefer an
+  access token. The client also accepts the deprecated
+  `LAB_TRACKER_MCP_USERNAME` / `LAB_TRACKER_MCP_PASSWORD` names.
+- `LAB_TRACKER_PROJECT_ID`: default project UUID for commands that take
+  `--project`; it overrides the profile's default project. Installed Git hooks
+  export it.
+- `LAB_TRACKER_HTTP_TIMEOUT`: client request timeout in seconds (default: `15`)
+- `LAB_TRACKER_DEBUG`: `1`, `true`, `yes`, or `on` shows tracebacks for API
+  errors, like `--debug`
+- `LAB_TRACKER_CONFIG_DIR`: per-user client directory for the connection
+  profile, install id, and enrolled-repo registry (default: `~/.lab-tracker`)
+- `LAB_TRACKER_CAPTURE_HOST`: machine label recorded on captures (default: the
+  hostname)
+- `LAB_TRACKER_SKILLS_HOME`: install the generated setup skill into this one
+  directory instead of both `~/.claude/skills` and `~/.agents/skills`
+
+#### Git, repo, HPC, and watch capture
+
+- `LAB_TRACKER_GIT_CAPTURE_ENABLED`: set to `0` to turn off the managed Git
+  commit-capture hook without uninstalling it (default: on)
+- `LAB_TRACKER_GIT_DRAFT_ENABLED`: older name for
+  `LAB_TRACKER_GIT_CAPTURE_ENABLED`, used only when the new name is unset
+- `LAB_TRACKER_LT`: `lt` executable the managed Git and repo hooks run
+  (default: the path recorded when the hook was installed)
+- `LAB_TRACKER_PYTHON`: Python interpreter the Windows graph-draft hook
+  (`scripts/install-git-graph-draft-hook.ps1`) and `scripts/matlab-smoke.sh`
+  run (default: the interpreter recorded at install, or `python3`)
+- `LAB_TRACKER_GIT_MAX_DIFF_LINES`: maximum diff lines a Git capture keeps
+  (default: `800`)
+- `LAB_TRACKER_GIT_CONTEXT_LINES`: unified-diff context lines in a Git capture
+  (default: `3`)
+- `LAB_TRACKER_GIT_TIMEOUT_SECONDS`: timeout in seconds for each `git` probe the
+  client runs (default: `10`)
+- `LAB_TRACKER_GIT_COMMIT` / `LAB_TRACKER_GIT_REPO`: default commit and
+  repository for `scripts/create-analysis-graph-draft.py` (repository default:
+  the current directory)
+- `LAB_TRACKER_TOKEN`: bearer token for `scripts/create-analysis-graph-draft.py`
+  when `--token` is not given
+- `LAB_TRACKER_REPO_HOOK_ENABLED`: set to `0` to turn off the `lt repo`
+  post-commit hook without uninstalling it (default: on)
+- `LAB_TRACKER_REPO_CONFIG` / `LAB_TRACKER_HPC_CONFIG` /
+  `LAB_TRACKER_WATCH_CONFIG`: path to the `repo.json`, `hpc.json`, or
+  `watch.json` config (default: the nearest `.lab-tracker/<name>.json` in the
+  current directory or a parent)
+- `LAB_TRACKER_REPO_OUTBOX` / `LAB_TRACKER_HPC_OUTBOX` /
+  `LAB_TRACKER_WATCH_OUTBOX`: outbox directory that overrides the config's
+  `outbox` (defaults: `.lab-tracker/outbox/repo`, `hpc`, and `watch`)
+- `LAB_TRACKER_REPO_RUN_ID` / `LAB_TRACKER_HPC_RUN_ID`: run id for `lt repo` and
+  `lt hpc` events when `--run` is not given. `lt hpc` sets the HPC run id,
+  outbox, and config for the job it submits.
+- `LAB_TRACKER_CONTAINER_REF`: container image reference folded into the
+  repository environment fingerprint
+
+#### Operator scripts
+
+- `LAB_TRACKER_HOST` / `LAB_TRACKER_PORT`: bind address and port for
+  `scripts/serve-lan.sh` (defaults: `0.0.0.0`, `8000`)
+- `LAB_TRACKER_ALLOW_INSECURE_AUTH_DISABLED`: `1`, `true`, or `yes` lets
+  `scripts/serve-lan.sh` and `scripts/serve-lan.ps1` serve on a non-loopback
+  address with authentication disabled, like `--allow-insecure-auth-disabled`
+- `LAB_TRACKER_API_KEY`: bearer token for the daily-review trigger scripts
+  (`scripts/daily-review-run-due.*` and the installers); use an `lpat_` token
+  with the `batch_run_due` scope
+- `LAB_TRACKER_ADMIN_USER` / `LAB_TRACKER_ADMIN_PASS`: fallback admin login for
+  the daily-review trigger scripts when no API key is set
+- `LAB_TRACKER_SECRETS_FILE`: private JSON file the daily-review trigger reads
+  its API key or admin login from (the scheduler installers write it with mode
+  `0600`)
+- `LAB_TRACKER_DAILY_REVIEW_LOG`: log file for the scheduled daily-review run
+  (default: `~/.lab-tracker-daily-review.log`)
+
+#### Container image and entrypoint
+
+- `LAB_TRACKER_SOURCE_VERSION`: Docker build argument recorded as the image's
+  OCI version label and environment (default: `0.1.0`)
+- `LAB_TRACKER_RUNTIME_ENV_DIR`: directory where the entrypoint keeps the
+  secrets it generates (default: `/app/data/runtime-env`)
+- `LAB_TRACKER_AUTH_SECRET_KEY_FILE`: file the entrypoint reads the auth secret
+  from, generating it when missing (default:
+  `<runtime-env dir>/auth-secret-key`). The one-shot external review-email
+  bridge reads the same file when `LAB_TRACKER_AUTH_SECRET_KEY` is unset.
+- `LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_FILE`: file the entrypoint reads the
+  first-admin token from, generating it when missing (default:
+  `<runtime-env dir>/bootstrap-admin-token`)
 
 ## Authentication behavior
 
