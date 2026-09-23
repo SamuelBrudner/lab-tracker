@@ -33,6 +33,7 @@ from lab_tracker.provenance import (
     build_ara_artifact_document,
     build_record_export_provenance_document,
 )
+from lab_tracker.provenance_supervision import build_with_people_supervision
 from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.shared import actor_user_fk, actor_user_id
@@ -92,11 +93,13 @@ class RecordExportService(BaseService):
             raise NotFoundError("User does not exist.")
         records = self._collect_records(user_id=user_id, project_ids=project_ids)
         exported_project_ids = self._project_ids_for_records(records, fallback=project_ids)
-        supervision_edges, _ = repository.query_supervision_edges(limit=None, offset=0)
-        provenance = build_record_export_provenance_document(
-            base_url,
-            records,
-            supervision_edges=supervision_edges,
+        provenance = build_with_people_supervision(
+            repository,
+            lambda supervision_edges: build_record_export_provenance_document(
+                base_url,
+                records,
+                supervision_edges=supervision_edges,
+            ),
         )
         generated_at = utc_now()
         event = RecordExportEvent(
@@ -141,15 +144,18 @@ class RecordExportService(BaseService):
             # Under READ COMMITTED, a linked target can disappear after scope
             # authorization but before artifact assembly re-reads it.
             raise NotFoundError("Goal does not exist.") from exc
-        supervision_edges, _ = self.repository.query_supervision_edges(limit=None, offset=0)
-        return build_ara_artifact_document(
-            base_url,
-            scope_type=EntityType.GOAL,
-            scope_id=goal.goal_id,
-            records=records,
-            generated_at=utc_now(),
-            layer_name=layer_name,
-            supervision_edges=supervision_edges,
+        generated_at = utc_now()
+        return build_with_people_supervision(
+            self.repository,
+            lambda supervision_edges: build_ara_artifact_document(
+                base_url,
+                scope_type=EntityType.GOAL,
+                scope_id=goal.goal_id,
+                records=records,
+                generated_at=generated_at,
+                layer_name=layer_name,
+                supervision_edges=supervision_edges,
+            ),
         )
 
     def export_question_subtree(
@@ -163,15 +169,18 @@ class RecordExportService(BaseService):
         self._validate_layer_name(layer_name)
         root = self.questions.get_question_for_read(root_id, actor=actor)
         records = self._collect_question_subtree_records(root)
-        supervision_edges, _ = self.repository.query_supervision_edges(limit=None, offset=0)
-        return build_ara_artifact_document(
-            base_url,
-            scope_type=EntityType.QUESTION,
-            scope_id=root.question_id,
-            records=records,
-            generated_at=utc_now(),
-            layer_name=layer_name,
-            supervision_edges=supervision_edges,
+        generated_at = utc_now()
+        return build_with_people_supervision(
+            self.repository,
+            lambda supervision_edges: build_ara_artifact_document(
+                base_url,
+                scope_type=EntityType.QUESTION,
+                scope_id=root.question_id,
+                records=records,
+                generated_at=generated_at,
+                layer_name=layer_name,
+                supervision_edges=supervision_edges,
+            ),
         )
 
     def _validate_layer_name(self, layer_name: str | None) -> None:

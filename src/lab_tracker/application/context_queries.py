@@ -76,6 +76,7 @@ from lab_tracker.provenance import (
     build_claim_provenance_document,
     build_dataset_provenance_document,
 )
+from lab_tracker.provenance_supervision import build_with_people_supervision
 from lab_tracker.rclone_store_definition import is_rclone_store_kind
 from lab_tracker.schemas import (
     AssistantDecisionContextRequest,
@@ -229,8 +230,9 @@ class ContextRepository(DecisionContextRepository, Protocol):
     def query_supervision_edges(
         self,
         *,
-        limit: int | None,
-        offset: int,
+        supervisee_user_ids: set[UUID] | None = None,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> tuple[list[SupervisionEdge], int]: ...
 
     def query_claim_edges(
@@ -413,14 +415,13 @@ class ContextQueries:
         base_url: str,
     ) -> dict[str, object]:
         dataset = self.api.get_dataset_for_read(dataset_id, actor=actor)
-        supervision_edges, _ = self.repository.query_supervision_edges(
-            limit=None,
-            offset=0,
-        )
-        return build_dataset_provenance_document(
-            base_url,
-            dataset,
-            supervision_edges=supervision_edges,
+        return build_with_people_supervision(
+            self.repository,
+            lambda supervision_edges: build_dataset_provenance_document(
+                base_url,
+                dataset,
+                supervision_edges=supervision_edges,
+            ),
         )
 
     def analysis_provenance(
@@ -451,18 +452,17 @@ class ContextQueries:
             limit=None,
             offset=0,
         )
-        supervision_edges, _ = self.repository.query_supervision_edges(
-            limit=None,
-            offset=0,
-        )
-        return build_analysis_provenance_document(
-            base_url,
-            analysis,
-            datasets=datasets,
-            claims=claims,
-            visualizations=visualizations,
-            claim_edges=claim_edges,
-            supervision_edges=supervision_edges,
+        return build_with_people_supervision(
+            self.repository,
+            lambda supervision_edges: build_analysis_provenance_document(
+                base_url,
+                analysis,
+                datasets=datasets,
+                claims=claims,
+                visualizations=visualizations,
+                claim_edges=claim_edges,
+                supervision_edges=supervision_edges,
+            ),
         )
 
     def claim_provenance(
@@ -510,19 +510,18 @@ class ContextQueries:
             for edge in claim_edges
             if edge.claim_id == claim_id or edge.target_claim_id == claim_id
         ]
-        supervision_edges, _ = self.repository.query_supervision_edges(
-            limit=None,
-            offset=0,
-        )
-        return build_claim_provenance_document(
-            base_url,
-            claim,
-            analyses=analyses,
-            datasets=datasets,
-            questions=questions,
-            visualizations=visualizations,
-            claim_edges=claim_edges,
-            supervision_edges=supervision_edges,
+        return build_with_people_supervision(
+            self.repository,
+            lambda supervision_edges: build_claim_provenance_document(
+                base_url,
+                claim,
+                analyses=analyses,
+                datasets=datasets,
+                questions=questions,
+                visualizations=visualizations,
+                claim_edges=claim_edges,
+                supervision_edges=supervision_edges,
+            ),
         )
 
     def search(

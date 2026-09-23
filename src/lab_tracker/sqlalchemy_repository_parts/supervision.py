@@ -13,7 +13,7 @@ from lab_tracker.models import SupervisionEdge
 from lab_tracker.repository import EntityRepository
 from lab_tracker.sqlalchemy_mapper_parts.common import as_utc, uuid_from_db, uuid_to_db
 
-from .common import apply_pagination, count_from_statement
+from .common import apply_pagination, count_from_statement, uuid_values
 
 
 def supervision_edge_to_model(edge: SupervisionEdge) -> SupervisionEdgeModel:
@@ -96,12 +96,15 @@ class SQLAlchemySupervisionEdgeRepository(EntityRepository[SupervisionEdge]):
         *,
         supervisor_user_id: UUID | None = None,
         supervisee_user_id: UUID | None = None,
+        supervisee_user_ids: set[UUID] | None = None,
         active_only: bool = False,
         as_of: datetime | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> tuple[list[SupervisionEdge], int]:
         self._session.flush()
+        if supervisee_user_ids is not None and not supervisee_user_ids:
+            return [], 0
         stmt = select(SupervisionEdgeModel)
         count_stmt = select(SupervisionEdgeModel.edge_id)
         if supervisor_user_id is not None:
@@ -112,6 +115,10 @@ class SQLAlchemySupervisionEdgeRepository(EntityRepository[SupervisionEdge]):
             supervisee = str(supervisee_user_id)
             stmt = stmt.where(SupervisionEdgeModel.supervisee_user_id == supervisee)
             count_stmt = count_stmt.where(SupervisionEdgeModel.supervisee_user_id == supervisee)
+        if supervisee_user_ids is not None:
+            supervisees = uuid_values(supervisee_user_ids)
+            stmt = stmt.where(SupervisionEdgeModel.supervisee_user_id.in_(supervisees))
+            count_stmt = count_stmt.where(SupervisionEdgeModel.supervisee_user_id.in_(supervisees))
         if active_only:
             stmt = stmt.where(SupervisionEdgeModel.ended_at.is_(None))
             count_stmt = count_stmt.where(SupervisionEdgeModel.ended_at.is_(None))

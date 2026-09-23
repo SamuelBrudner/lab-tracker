@@ -602,6 +602,7 @@ class SQLAlchemyLabTrackerRepository:
         *,
         supervisor_user_id: UUID | None = None,
         supervisee_user_id: UUID | None = None,
+        supervisee_user_ids: set[UUID] | None = None,
         active_only: bool = False,
         as_of: datetime | None = None,
         limit: int | None = None,
@@ -610,6 +611,7 @@ class SQLAlchemyLabTrackerRepository:
         return self.supervision_edges.query(
             supervisor_user_id=supervisor_user_id,
             supervisee_user_id=supervisee_user_id,
+            supervisee_user_ids=supervisee_user_ids,
             active_only=active_only,
             as_of=as_of,
             limit=limit,

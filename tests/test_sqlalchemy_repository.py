@@ -213,6 +213,41 @@ def test_supervision_edge_repository_queries_active_and_as_of_edges(db_session):
     assert repo.supervision_edges.get(active_edge.edge_id) is None
 
 
+def test_supervision_edge_repository_filters_by_a_set_of_supervisees(db_session):
+    repo = SQLAlchemyLabTrackerRepository(db_session)
+    supervisor_user_id = uuid4()
+    first_supervisee = uuid4()
+    second_supervisee = uuid4()
+    other_supervisee = uuid4()
+    _add_user(db_session, supervisor_user_id, "set-supervisor")
+    edges = []
+    for index, supervisee_user_id in enumerate(
+        (first_supervisee, second_supervisee, other_supervisee)
+    ):
+        _add_user(db_session, supervisee_user_id, f"set-supervisee-{index}")
+        edge = SupervisionEdge(
+            edge_id=uuid4(),
+            supervisor_user_id=supervisor_user_id,
+            supervisee_user_id=supervisee_user_id,
+            started_at=_ts(index + 1),
+            created_at=_ts(index + 1),
+            updated_at=_ts(index + 1),
+        )
+        repo.supervision_edges.save(edge)
+        edges.append(edge)
+    repo.commit()
+
+    selected, total = repo.query_supervision_edges(
+        supervisee_user_ids={first_supervisee, second_supervisee},
+    )
+    none_selected, none_total = repo.query_supervision_edges(supervisee_user_ids=set())
+
+    assert selected == edges[:2]
+    assert total == 2
+    assert none_selected == []
+    assert none_total == 0
+
+
 def test_question_repository_persists_parent_links(db_session):
     repo = SQLAlchemyLabTrackerRepository(db_session)
     project = Project(

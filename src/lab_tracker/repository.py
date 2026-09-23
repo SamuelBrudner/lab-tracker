@@ -682,12 +682,17 @@ class LabTrackerRepository(Protocol):
         *,
         supervisor_user_id: UUID | None = None,
         supervisee_user_id: UUID | None = None,
+        supervisee_user_ids: set[UUID] | None = None,
         active_only: bool = False,
         as_of: datetime | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> tuple[list[SupervisionEdge], int]:
-        """Query dated supervision edges."""
+        """Query dated supervision edges.
+
+        ``supervisee_user_ids`` restricts the result to those supervisees; an
+        empty set matches nothing.
+        """
 
     def query_ownership_reassignments(
         self,
