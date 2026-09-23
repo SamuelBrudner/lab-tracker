@@ -4,7 +4,7 @@ import sqlite3
 from uuid import uuid4
 
 import pytest
-from api_helpers import stamp_schema_at_head
+from api_helpers import isolate_default_database_url, stamp_schema_at_head
 from fastapi import Request
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, delete, select
@@ -24,6 +24,11 @@ from lab_tracker.db_models import ProjectModel, QuestionModel
 from lab_tracker.errors import ValidationError
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 from lab_tracker.store_authority_registry import StoreAuthorityRegistry
+
+
+@pytest.fixture(autouse=True)
+def _database_outside_the_working_directory(monkeypatch, tmp_path) -> None:  # noqa: ANN001
+    isolate_default_database_url(monkeypatch, tmp_path)
 
 
 class _SessionSpy:
@@ -79,6 +84,20 @@ class _LoggerSpy:
 
     def error(self, message: str, *args: object, **kwargs: object) -> None:
         self.records.append(("error", message, args, kwargs))
+
+
+def test_default_apps_in_this_module_leave_the_working_directory_alone(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    working_directory = tmp_path / "cwd"
+    working_directory.mkdir()
+    monkeypatch.chdir(working_directory)
+
+    with TestClient(create_app(verify_schema=False)) as client:
+        assert client.get("/health").status_code == 200
+
+    assert list(working_directory.iterdir()) == []
 
 
 def test_db_session_middleware_commits_and_closes_on_success():

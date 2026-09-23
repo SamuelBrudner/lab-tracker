@@ -193,6 +193,20 @@ def drain_test_resources() -> None:
         raise failure
 
 
+def isolate_default_database_url(monkeypatch: Any, tmp_path: Path) -> None:
+    """Point ``create_app()``'s default database at ``tmp_path``.
+
+    Without ``LAB_TRACKER_DATABASE_URL`` the app defaults to
+    ``./lab_tracker.db``, so a test that builds it bare would open (and lock)
+    a database in the developer's working directory.
+    """
+
+    monkeypatch.setenv(
+        "LAB_TRACKER_DATABASE_URL",
+        f"sqlite+pysqlite:///{tmp_path / 'lab_tracker.db'}",
+    )
+
+
 def app_test_client(*, verify_schema: bool = True, **client_kwargs) -> TestClient:
     """A TestClient over a fresh app whose DB engine is disposed at teardown.
 
