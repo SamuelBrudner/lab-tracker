@@ -597,3 +597,46 @@ def test_figure_run_context_git_failure_inside_a_repository_records_commit_error
 
     assert "dubious ownership" in str(metadata["run_git_commit_error"])
     assert "run_git_dirty" not in metadata
+
+
+def test_figure_run_context_survives_a_deleted_working_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # A notebook kernel whose temp directory was removed: git cannot read the
+    # cwd, and the capture must record the commit as unknown, not crash.
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    monkeypatch.chdir(gone)
+    gone.rmdir()
+
+    with figure_module.run_context() as context:
+        metadata = context.to_metadata()
+
+    assert "run_id" in metadata
+    assert "run_git_commit" not in metadata
+    assert metadata["run_git_commit_error"]
+    warning = capsys.readouterr().err
+    assert "the current directory" in warning and "unknown" in warning
+
+
+def test_git_missing_warns_once_not_once_per_probe(
+    dirty_repo: tuple[Path, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo, _commit = dirty_repo
+    _hide_git(tmp_path, monkeypatch)
+
+    context = repo_capture.git_context(repo)
+
+    # Both probes are still recorded as unknown...
+    assert "could not run" in context["git_commit_error"]
+    assert context["git_dirty"] is None
+    assert "could not run" in context["git_status_error"]
+    # ...but git that cannot run at all is reported once, by the HEAD probe.
+    warnings = [line for line in capsys.readouterr().err.splitlines() if "warning" in line]
+    assert len(warnings) == 1, warnings
+    assert "git commit" in warnings[0]

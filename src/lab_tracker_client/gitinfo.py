@@ -159,6 +159,19 @@ class HeadCommit:
 
     commit: str
     error: str = ""
+    # git itself could not be started, so its warning already covers every probe.
+    git_unavailable: bool = False
+
+
+def _location_label(root: str | Path | None) -> str:
+    """Where a probe ran, for a warning; never raises (the cwd may be deleted)."""
+
+    if root is not None:
+        return str(root)
+    try:
+        return os.getcwd()
+    except OSError:
+        return "the current directory"
 
 
 # Untranslated (LC_ALL=C) git messages that mean "there is no commit here":
@@ -191,13 +204,12 @@ def git_head_commit(root: str | Path | None) -> HeadCommit:
         if probe.timed_out
         else ""
     )
-    location = str(root) if root is not None else str(Path.cwd())
     print(
-        f"lab-tracker: warning: could not determine the git commit at {location} "
+        f"lab-tracker: warning: could not determine the git commit at {_location_label(root)} "
         f"({probe.error}); recording the git commit as unknown.{hint}",
         file=sys.stderr,
     )
-    return HeadCommit("", probe.error)
+    return HeadCommit("", probe.error, git_unavailable=probe.unavailable)
 
 
 def head_commit_fields(head: HeadCommit) -> dict[str, Any]:
@@ -225,7 +237,9 @@ def git_dirty_state(root: str | Path | None, *, head: HeadCommit) -> DirtyState:
     the commit itself is unknown) the state is unknown: ``DirtyState(None,
     reason)`` plus a stderr warning, so no caller pairs a commit with a false
     "clean" claim. Only where git said there is no commit, and status then
-    failed normally, is there no working tree to be dirty.
+    failed normally, is there no working tree to be dirty. When git cannot
+    run at all, the HEAD probe's warning already said so and no second
+    warning is printed; the state is still recorded as unknown.
     """
 
     probe = run_git(root, "status", "--porcelain")
@@ -233,16 +247,18 @@ def git_dirty_state(root: str | Path | None, *, head: HeadCommit) -> DirtyState:
         return DirtyState(bool(probe.stdout))
     if not head.commit and not head.error and not (probe.timed_out or probe.unavailable):
         return DirtyState(False)
+    if probe.unavailable and head.git_unavailable:
+        # git cannot run at all: the HEAD probe already warned about it.
+        return DirtyState(None, probe.error)
     hint = (
         f" Set {GIT_TIMEOUT_ENV} (seconds, default {DEFAULT_GIT_TIMEOUT_SECONDS:g}) to allow "
         "a slower git status."
         if probe.timed_out
         else ""
     )
-    location = str(root) if root is not None else str(Path.cwd())
     print(
         f"lab-tracker: warning: could not determine whether the git working tree at "
-        f"{location} is dirty ({probe.error}); recording git_dirty as unknown.{hint}",
+        f"{_location_label(root)} is dirty ({probe.error}); recording git_dirty as unknown.{hint}",
         file=sys.stderr,
     )
     return DirtyState(None, probe.error)
