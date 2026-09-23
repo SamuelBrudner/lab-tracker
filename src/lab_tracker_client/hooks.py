@@ -72,19 +72,28 @@ def managed_hook_block(
             ':-${LAB_TRACKER_GIT_DRAFT_ENABLED:-1}}"'
         ),
         'if [ "$LAB_TRACKER_GIT_CAPTURE_ENABLED" != "0" ]; then',
-        f'  LAB_TRACKER_LT="${{LAB_TRACKER_LT:-{_hook_path_text(lt_path)}}}"',
+        (
+            '  LAB_TRACKER_LT="${LAB_TRACKER_LT:-'
+            f'{_sh_default_text("lt path", _hook_path_text(lt_path))}}}"'
+        ),
     ]
     if base_url:
         lines.extend(
             [
-                f'  LAB_TRACKER_BASE_URL="${{LAB_TRACKER_BASE_URL:-{base_url}}}"',
+                (
+                    '  LAB_TRACKER_BASE_URL="${LAB_TRACKER_BASE_URL:-'
+                    f'{_sh_default_text("base URL", base_url)}}}"'
+                ),
                 "  export LAB_TRACKER_BASE_URL",
             ]
         )
     if project_id:
         lines.extend(
             [
-                f'  LAB_TRACKER_PROJECT_ID="${{LAB_TRACKER_PROJECT_ID:-{project_id}}}"',
+                (
+                    '  LAB_TRACKER_PROJECT_ID="${LAB_TRACKER_PROJECT_ID:-'
+                    f'{_sh_default_text("project id", project_id)}}}"'
+                ),
                 "  export LAB_TRACKER_PROJECT_ID",
             ]
         )
@@ -383,6 +392,24 @@ def _default_lt_path() -> str:
     raise LTValidationError(
         "Could not locate the lt executable for the hook body; pass --lt-path."
     )
+
+
+# Characters that end or escape a double-quoted "${VAR:-default}" expansion, or
+# run code inside it. The baked-default line format is kept (hook_status and
+# the legacy-block carry-forward parse it), so such values are refused.
+_SH_DEFAULT_UNSAFE = frozenset('"$`\\}\n\r\x00')
+
+
+def _sh_default_text(label: str, value: str) -> str:
+    unsafe = sorted({repr(ch) for ch in value if ch in _SH_DEFAULT_UNSAFE})
+    if unsafe:
+        raise LTValidationError(
+            f"The {label} {value!r} cannot be baked into the post-commit hook: it "
+            f"contains {', '.join(unsafe)}, which sh would expand or execute. "
+            "Use a value without these characters, or leave it out and set it "
+            "in the environment the hook runs with."
+        )
+    return value
 
 
 def _hook_path_text(value: str) -> str:

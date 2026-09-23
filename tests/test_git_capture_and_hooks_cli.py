@@ -683,3 +683,34 @@ def test_hooks_install_refuses_repo_capture_hook_without_force(git_repo) -> None
     content = hook_path.read_text(encoding="utf-8")
     assert HOOK_BLOCK_BEGIN in content
     assert HOOK_BEGIN_MARKER in content
+
+
+@pytest.mark.parametrize(
+    "unsafe",
+    ["p}rm", 'p"x', "p$(touch pwned)", "p`id`", "p\\x", "p\nx"],
+)
+@pytest.mark.parametrize("field", ["project_id", "base_url", "lt_path"])
+def test_hooks_install_refuses_values_that_would_escape_the_sh_default(
+    git_repo, field: str, unsafe: str
+) -> None:
+    from lab_tracker_client.client import LTValidationError
+    from lab_tracker_client.hooks import install_hook
+
+    if field == "lt_path" and unsafe == "p\\x":
+        unsafe = "p\\}x"  # lt paths fold backslashes to "/" first
+    kwargs = {"project_id": "p-1", "base_url": "http://lab:8000", "lt_path": "/opt/lt"}
+    kwargs[field] = unsafe
+
+    with pytest.raises(LTValidationError, match="cannot be baked into the post-commit hook"):
+        install_hook(repo=git_repo, **kwargs)
+
+    assert not (git_repo / ".git" / "hooks" / "post-commit").exists()
+
+
+def test_hooks_install_keeps_spaces_in_baked_values(git_repo) -> None:
+    from lab_tracker_client.hooks import install_hook
+
+    install_hook(repo=git_repo, project_id="p-1", lt_path="/opt/my tools/lt")
+
+    content = (git_repo / ".git" / "hooks" / "post-commit").read_text(encoding="utf-8")
+    assert 'LAB_TRACKER_LT="${LAB_TRACKER_LT:-/opt/my tools/lt}"' in content
