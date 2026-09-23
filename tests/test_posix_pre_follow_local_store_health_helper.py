@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 import os
 import stat
@@ -2541,7 +2542,7 @@ def test_alias_target_vanishing_after_lstat_still_fails_closed(
 
 
 @pytest.mark.parametrize("registered", (False, True))
-@pytest.mark.parametrize("error_number", (13, 1))
+@pytest.mark.parametrize("error_number", (errno.EACCES, errno.EPERM))
 def test_unreadable_subdirectory_is_skipped_as_a_limited_enumeration(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2658,7 +2659,8 @@ def test_unreadable_enumeration_boundary_remains_denied(
     assert output == []
 
 
-@pytest.mark.parametrize("error_number", (40, 20))
+# Symbolic errnos: ELOOP is 40 on Linux but 62 on macOS (where 40 is EMSGSIZE).
+@pytest.mark.parametrize("error_number", (errno.ELOOP, errno.ENOTDIR))
 def test_queued_directory_replacement_race_remains_fatal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
