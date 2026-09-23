@@ -889,7 +889,8 @@ authorization grant: normal sign-in and project access are still required.
   configure it together with the username or configure neither
 - `LAB_TRACKER_REVIEW_EMAIL_SMTP_FROM_ADDRESS`: required sender for SMTP
 - `LAB_TRACKER_REVIEW_EMAIL_SMTP_TLS_MODE`: `none`, `starttls` (default), or
-  `implicit`
+  `implicit`; `none` is refused at startup when a username/password is
+  configured, because the login would travel in plaintext
 - `LAB_TRACKER_REVIEW_EMAIL_SMTP_TIMEOUT_SECONDS`: bounded SMTP timeout
   (default: `10`, maximum: `30`)
 
