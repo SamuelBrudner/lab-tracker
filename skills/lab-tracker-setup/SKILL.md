@@ -128,4 +128,4 @@ upgrades, and `lt update` is the refresh path.
 If Lab Tracker is unreachable and the user does not operate a server, point
 them at whoever runs their lab's instance instead of standing one up ad hoc.
 
-<!-- lab-tracker-setup-guide version=0.1.0 sha256=fce7c9fa6c1f -->
+<!-- lab-tracker-setup-guide version=0.1.0 sha256=fa46351dc874 -->

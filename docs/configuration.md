@@ -994,6 +994,12 @@ FastAPI app does not read them. `LAB_TRACKER_BASE_URL` (see
   profile, install id, and enrolled-repo registry (default: `~/.lab-tracker`)
 - `LAB_TRACKER_CAPTURE_HOST`: machine label recorded on captures (default: the
   hostname)
+- `LAB_TRACKER_AUTOTRACK`: `0`, `false`, `no`, or `off` disables the matplotlib
+  figure autotrack hook everywhere, including the IPython startup file that
+  `lt setup autotrack` installs (default: on)
+- `LAB_TRACKER_CAPTURE_OUTBOX`: `0`, `false`, `no`, or `off` stops figure
+  captures from queueing into the checkout's watch outbox when the server is
+  unreachable; the save then reports the failure instead (default: on)
 - `LAB_TRACKER_SKILLS_HOME`: install the generated setup skill into this one
   directory instead of both `~/.claude/skills` and `~/.agents/skills`
 
@@ -1031,6 +1037,12 @@ FastAPI app does not read them. `LAB_TRACKER_BASE_URL` (see
 - `LAB_TRACKER_REPO_RUN_ID` / `LAB_TRACKER_HPC_RUN_ID`: run id for `lt repo` and
   `lt hpc` events when `--run` is not given. `lt hpc` sets the HPC run id,
   outbox, and config for the job it submits.
+- `LAB_TRACKER_SESSION_ID`: session UUID or link code that every figure capture
+  and watch scan from this shell or job attaches to; it overrides the
+  checkout's active session recorded by `lt session use`
+- `LAB_TRACKER_SESSION_CONTEXT`: path of the active-session file that `lt
+  session use` writes and captures read (default: `.lab-tracker/session.json`
+  at the checkout root)
 - `LAB_TRACKER_CONTAINER_REF`: container image reference folded into the
   repository environment fingerprint
 

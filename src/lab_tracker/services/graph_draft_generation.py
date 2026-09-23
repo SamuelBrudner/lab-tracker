@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 import math
 import time
 from collections.abc import Callable
@@ -79,8 +78,6 @@ DEFAULT_PROVIDER_TIMEOUT_SECONDS = 60.0
 GENERATION_LEASE_MARGIN_SECONDS = 30
 
 
-logger = logging.getLogger(__name__)
-
 class _GenerationOwnershipLost(RuntimeError):
     """Internal control flow: never persist a stale provider result."""
 
@@ -149,20 +146,13 @@ class GraphDraftGenerationCoordinator(BaseService):
     ) -> tuple[list[GraphChangeOperation], dict[str, Any] | None]:
         if self.id_match_sources is None:
             return [], None
-        try:
-            return propose_id_match_operations(
-                notes,
-                change_set=change_set,
-                sources=self.id_match_sources,
-                validator=self.patch_validator,
-                starting_sequence=starting_sequence,
-            )
-        except Exception:  # noqa: BLE001 - a rule-pass failure must not fail the batch.
-            logger.exception(
-                "deterministic id-match pass failed for change set %s",
-                change_set.change_set_id,
-            )
-            return [], None
+        return propose_id_match_operations(
+            notes,
+            change_set=change_set,
+            sources=self.id_match_sources,
+            validator=self.patch_validator,
+            starting_sequence=starting_sequence,
+        )
 
     @property
     def user_reader(self) -> UserExistenceReader:
