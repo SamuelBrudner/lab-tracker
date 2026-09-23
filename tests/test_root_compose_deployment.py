@@ -250,6 +250,45 @@ def test_app_forwards_uvicorn_trusted_proxy_setting(tmp_path: Path) -> None:
     assert configured["FORWARDED_ALLOW_IPS"] == "172.18.0.1"
 
 
+def test_default_database_url_follows_postgres_credential_overrides(
+    tmp_path: Path,
+) -> None:
+    # An operator who changes only POSTGRES_* must not leave the app and the
+    # review-email control plane dialling the postgres service with the old
+    # built-in credentials.
+    profile = ("--profile", "review-email-external")
+    default = _resolved_services(tmp_path, *profile)
+    overridden = _resolved_services(
+        tmp_path,
+        *profile,
+        extra_env={
+            "POSTGRES_USER": "lab_owner",
+            "POSTGRES_PASSWORD": "rotated-secret",
+            "POSTGRES_DB": "lab_records",
+        },
+    )
+    explicit = _resolved_services(
+        tmp_path,
+        *profile,
+        extra_env={
+            "POSTGRES_PASSWORD": "rotated-secret",
+            "LAB_TRACKER_DATABASE_URL": "postgresql+psycopg://other:pw@db.example:5432/x",
+        },
+    )
+
+    for service in ("app", "review-email-control"):
+        assert default[service]["environment"]["LAB_TRACKER_DATABASE_URL"] == (
+            "postgresql+psycopg://lab_tracker:lab_tracker@postgres:5432/lab_tracker"
+        )
+        assert overridden[service]["environment"]["LAB_TRACKER_DATABASE_URL"] == (
+            "postgresql+psycopg://lab_owner:rotated-secret@postgres:5432/lab_records"
+        )
+        assert explicit[service]["environment"]["LAB_TRACKER_DATABASE_URL"] == (
+            "postgresql+psycopg://other:pw@db.example:5432/x"
+        )
+    assert overridden["postgres"]["environment"]["POSTGRES_PASSWORD"] == "rotated-secret"
+
+
 def test_explicitly_targeted_mcp_resolves_without_naming_the_profile(
     tmp_path: Path,
 ) -> None:

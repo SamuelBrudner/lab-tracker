@@ -11,7 +11,10 @@ services:
       LAB_TRACKER_ENVIRONMENT: ${LAB_TRACKER_ENVIRONMENT:-production}
       LAB_TRACKER_LOG_LEVEL: ${LAB_TRACKER_LOG_LEVEL:-INFO}
       LAB_TRACKER_BASE_URL: ${LAB_TRACKER_BASE_URL:-${LAB_TRACKER_PUBLIC_BASE_URL:-}}
-      LAB_TRACKER_DATABASE_URL: ${LAB_TRACKER_DATABASE_URL:-postgresql+psycopg://lab_tracker:lab_tracker@postgres:5432/lab_tracker}
+      # Defaults to the postgres service's POSTGRES_* credentials so changing
+      # them reaches the app too. The password is spliced into a URL: keep it
+      # URL-safe, or set LAB_TRACKER_DATABASE_URL with it percent-encoded.
+      LAB_TRACKER_DATABASE_URL: ${LAB_TRACKER_DATABASE_URL:-postgresql+psycopg://${POSTGRES_USER:-lab_tracker}:${POSTGRES_PASSWORD:-lab_tracker}@postgres:5432/${POSTGRES_DB:-lab_tracker}}
       LAB_TRACKER_FILE_STORAGE_PATH: ${LAB_TRACKER_FILE_STORAGE_PATH:-/app/data/file_storage}
       LAB_TRACKER_NOTE_STORAGE_PATH: ${LAB_TRACKER_NOTE_STORAGE_PATH:-/app/data/note_storage}
       LAB_TRACKER_AUTH_SECRET_KEY: ${LAB_TRACKER_AUTH_SECRET_KEY:-}
@@ -140,7 +143,7 @@ services:
         condition: service_healthy
     environment:
       LAB_TRACKER_ENVIRONMENT: ${LAB_TRACKER_ENVIRONMENT:-production}
-      LAB_TRACKER_DATABASE_URL: ${LAB_TRACKER_DATABASE_URL:-postgresql+psycopg://lab_tracker:lab_tracker@postgres:5432/lab_tracker}
+      LAB_TRACKER_DATABASE_URL: ${LAB_TRACKER_DATABASE_URL:-postgresql+psycopg://${POSTGRES_USER:-lab_tracker}:${POSTGRES_PASSWORD:-lab_tracker}@postgres:5432/${POSTGRES_DB:-lab_tracker}}
       LAB_TRACKER_AUTH_SECRET_KEY_FILE: /app/data/runtime-env/auth-secret-key
       LAB_TRACKER_BASE_URL: ${LAB_TRACKER_BASE_URL:-${LAB_TRACKER_PUBLIC_BASE_URL:-}}
       LAB_TRACKER_REVIEW_EMAIL_ENABLED: "true"
