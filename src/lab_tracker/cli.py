@@ -545,12 +545,23 @@ def seed_demo_database(
     *,
     run_migrations: bool = True,
     allow_duplicates: bool = False,
+    allow_non_local: bool = False,
 ) -> DemoSeedResult:
+    settings = get_settings()
+    if not allow_non_local and (
+        not settings.is_local_environment() or settings.is_auth_enabled()
+    ):
+        raise SystemExit(
+            "Refusing to seed demo data into a non-local or auth-enabled database "
+            f"(LAB_TRACKER_ENVIRONMENT={settings.environment!r}, auth "
+            f"{'enabled' if settings.is_auth_enabled() else 'disabled'}). The demo "
+            "project is for local development; pass --allow-non-local if you "
+            "really mean to write it into this database."
+        )
     if run_migrations:
         alembic_config = _alembic_config()
         command.upgrade(alembic_config, "head")
 
-    settings = get_settings()
     engine = get_engine(settings)
     session_factory = get_session_factory(engine=engine)
     try:
@@ -751,6 +762,14 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="Create a fresh demo project even if the default demo already exists.",
     )
+    seed_parser.add_argument(
+        "--allow-non-local",
+        action="store_true",
+        help=(
+            "Seed even when the configured database is non-local "
+            "(LAB_TRACKER_ENVIRONMENT != local) or has authentication enabled."
+        ),
+    )
     doctor_parser = subcommands.add_parser(
         "doctor",
         aliases=["check-idioms"],
@@ -845,6 +864,7 @@ def main(argv: list[str] | None = None) -> None:
             result = seed_demo_database(
                 run_migrations=not args.skip_migrations,
                 allow_duplicates=args.allow_duplicates,
+                allow_non_local=args.allow_non_local,
             )
         except Exception as exc:
             print(f"Failed to seed Lab Tracker demo data: {exc}", file=sys.stderr)

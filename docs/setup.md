@@ -116,6 +116,8 @@ lab-tracker seed-demo
 
 It runs migrations first (skip with `--skip-migrations`) and is a no-op if the
 default demo project already exists (force a fresh one with `--allow-duplicates`).
+It refuses to write into a non-local (`LAB_TRACKER_ENVIRONMENT` other than
+`local`) or auth-enabled database unless you pass `--allow-non-local`.
 This is the same seeded data behind the read-only public demo.
 
 ### Check managed idiom blocks

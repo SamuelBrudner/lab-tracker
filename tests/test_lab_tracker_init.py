@@ -569,11 +569,14 @@ def test_seed_demo_cli_prints_json_summary(monkeypatch, capsys) -> None:
     project_id = uuid4()
     calls: list[dict[str, bool]] = []
 
-    def fake_seed_demo_database(*, run_migrations: bool, allow_duplicates: bool):
+    def fake_seed_demo_database(
+        *, run_migrations: bool, allow_duplicates: bool, allow_non_local: bool
+    ):
         calls.append(
             {
                 "run_migrations": run_migrations,
                 "allow_duplicates": allow_duplicates,
+                "allow_non_local": allow_non_local,
             }
         )
         return DemoSeedResult(
@@ -590,9 +593,13 @@ def test_seed_demo_cli_prints_json_summary(monkeypatch, capsys) -> None:
 
     monkeypatch.setattr("lab_tracker.cli.seed_demo_database", fake_seed_demo_database)
 
-    lab_tracker_main(["seed-demo", "--skip-migrations", "--allow-duplicates"])
+    lab_tracker_main(
+        ["seed-demo", "--skip-migrations", "--allow-duplicates", "--allow-non-local"]
+    )
 
-    assert calls == [{"run_migrations": False, "allow_duplicates": True}]
+    assert calls == [
+        {"run_migrations": False, "allow_duplicates": True, "allow_non_local": True}
+    ]
     payload = json.loads(capsys.readouterr().out)
     assert payload["created"] is True
     assert payload["project_id"] == str(project_id)
@@ -762,3 +769,84 @@ def test_serve_app_refuses_lan_bind_when_auth_is_disabled(monkeypatch) -> None:
         )
 
     assert calls == []
+
+
+class _UpgradeReached(Exception):
+    pass
+
+
+_STRONG_TEST_SECRET = "seed-demo-guard-test-secret-0123456789abcdef"
+
+
+def _record_upgrade(calls: list[str]):
+    def fake_upgrade(_config, revision: str) -> None:
+        calls.append(revision)
+        raise _UpgradeReached
+
+    return fake_upgrade
+
+
+@pytest.mark.parametrize(
+    ("environment", "auth_enabled"),
+    [("production", None), ("local", "true")],
+)
+def test_seed_demo_refuses_non_local_or_auth_enabled_database(
+    monkeypatch, environment: str, auth_enabled: str | None
+) -> None:
+    from lab_tracker.cli import seed_demo_database
+
+    upgrades: list[str] = []
+    monkeypatch.setattr("lab_tracker.cli.command.upgrade", _record_upgrade(upgrades))
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", environment)
+    monkeypatch.setenv("LAB_TRACKER_AUTH_SECRET_KEY", _STRONG_TEST_SECRET)
+    if auth_enabled is None:
+        monkeypatch.delenv("LAB_TRACKER_AUTH_ENABLED", raising=False)
+    else:
+        monkeypatch.setenv("LAB_TRACKER_AUTH_ENABLED", auth_enabled)
+
+    with pytest.raises(SystemExit, match="Refusing to seed demo data"):
+        seed_demo_database()
+
+    assert upgrades == []
+
+
+def test_seed_demo_allow_non_local_opts_past_the_guard(monkeypatch) -> None:
+    from lab_tracker.cli import seed_demo_database
+
+    upgrades: list[str] = []
+    monkeypatch.setattr("lab_tracker.cli.command.upgrade", _record_upgrade(upgrades))
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "production")
+    monkeypatch.setenv("LAB_TRACKER_AUTH_SECRET_KEY", _STRONG_TEST_SECRET)
+    monkeypatch.delenv("LAB_TRACKER_AUTH_ENABLED", raising=False)
+
+    with pytest.raises(_UpgradeReached):
+        seed_demo_database(allow_non_local=True)
+
+    assert upgrades == ["head"]
+
+
+def test_seed_demo_local_auth_disabled_database_passes_the_guard(monkeypatch) -> None:
+    from lab_tracker.cli import seed_demo_database
+
+    upgrades: list[str] = []
+    monkeypatch.setattr("lab_tracker.cli.command.upgrade", _record_upgrade(upgrades))
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "local")
+    monkeypatch.setenv("LAB_TRACKER_AUTH_ENABLED", "false")
+
+    with pytest.raises(_UpgradeReached):
+        seed_demo_database()
+
+    assert upgrades == ["head"]
+
+
+def test_seed_demo_cli_refusal_exits_without_traceback(monkeypatch, capsys) -> None:
+    upgrades: list[str] = []
+    monkeypatch.setattr("lab_tracker.cli.command.upgrade", _record_upgrade(upgrades))
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "production")
+    monkeypatch.setenv("LAB_TRACKER_AUTH_SECRET_KEY", _STRONG_TEST_SECRET)
+    monkeypatch.delenv("LAB_TRACKER_AUTH_ENABLED", raising=False)
+
+    with pytest.raises(SystemExit, match="--allow-non-local"):
+        lab_tracker_main(["seed-demo"])
+
+    assert upgrades == []
