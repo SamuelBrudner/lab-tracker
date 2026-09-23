@@ -74,34 +74,36 @@ function renderCard(overrides = {}) {
 }
 
 describe("QuestionDetailCard refactor form", () => {
-  it("offers parents, children and notes beyond the first 200-item page", async () => {
+  it("offers parents, children and notes beyond the first page", async () => {
+    // The server clamps each page to two items (meta.limit), so the late child
+    // and the late note only arrive by following pagination past offset 0.
     const firstQuestionPage = [
       question({ questionId: SOURCE_ID, text: "Source question" }),
-      ...Array.from({ length: 199 }, (_, index) =>
-        question({ questionId: `question-${index}`, text: `Question ${index}` })
-      ),
+      question({ questionId: "question-0", text: "Question 0" }),
     ];
     const lateChild = question({
       parentQuestionIds: [SOURCE_ID],
       questionId: "question-late-child",
       text: "Late child question",
     });
-    const firstNotePage = Array.from({ length: 200 }, (_, index) =>
-      note({ noteId: `note-${index}`, transcribedText: `Note ${index}` })
-    );
+    const firstNotePage = [
+      note({ noteId: "note-0", transcribedText: "Note 0" }),
+      note({ noteId: "note-1", transcribedText: "Note 1" }),
+    ];
     const fetchMock = installFetchMock(
       baseRoutes({
         questionPages: [
-          { offset: 0, response: paged(firstQuestionPage, { total: 201 }) },
-          { offset: 200, response: paged([lateChild], { offset: 200, total: 201 }) },
+          { offset: 0, response: paged(firstQuestionPage, { limit: 2, total: 3 }) },
+          { offset: 2, response: paged([lateChild], { limit: 2, offset: 2, total: 3 }) },
         ],
         notePages: [
-          { offset: 0, response: paged(firstNotePage, { total: 201 }) },
+          { offset: 0, response: paged(firstNotePage, { limit: 2, total: 3 }) },
           {
-            offset: 200,
+            offset: 2,
             response: paged([note({ noteId: "note-late", transcribedText: "Late note" })], {
-              offset: 200,
-              total: 201,
+              limit: 2,
+              offset: 2,
+              total: 3,
             }),
           },
         ],
@@ -118,7 +120,7 @@ describe("QuestionDetailCard refactor form", () => {
       Array.from(screen.getByLabelText("Replacement parents").options).map((option) => option.value)
     ).toContain("question-late-child");
     expect(fetchMock.mock.calls.map(([url]) => url)).toContain(
-      questionListPath("project-1", { offset: 200 })
+      questionListPath("project-1", { offset: 2 })
     );
   });
 
