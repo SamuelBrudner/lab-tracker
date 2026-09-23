@@ -6,12 +6,13 @@ generated):
 1. Every ``lab_tracker.config.Settings`` field must have a documented
    ``LAB_TRACKER_*`` bullet — adding or renaming a server setting without
    documenting it fails here.
-2. Every ``LAB_TRACKER_*`` name the code under ``src``, ``scripts`` and
-   ``deploy`` (plus the root Compose, Docker and Render files) mentions must
-   have a bullet too, unless ``_NOT_OPERATOR_CONFIGURATION`` says why it is not
-   operator configuration. That covers the variables the ``lt`` client, the
-   MCP server, the Git/repo/HPC/watch hooks, the operator scripts and the
-   container entrypoint read straight from the environment.
+2. Every ``LAB_TRACKER_*`` name the code under ``src``, ``scripts``,
+   ``deploy`` and ``deployments`` (plus the root Compose, Docker and Render
+   files) mentions must have a bullet too, unless
+   ``_NOT_OPERATOR_CONFIGURATION`` says why it is not operator configuration.
+   That covers the variables the ``lt`` client, the MCP server, the
+   Git/repo/HPC/watch hooks, the operator scripts, the container entrypoint
+   and the pinned Compose deployments read straight from the environment.
 3. Every documented bullet must name a variable the code actually consumes —
    either a ``Settings`` field or a direct environment read — so a stale bullet
    after a rename/removal fails here.
@@ -44,7 +45,7 @@ _BULLET_PATTERN = re.compile(
 )
 _VAR_PATTERN = re.compile(r"\bLAB_TRACKER_[A-Z0-9_]+\b")
 
-_SCAN_ROOTS = ("src", "scripts", "deploy")
+_SCAN_ROOTS = ("src", "scripts", "deploy", "deployments")
 # Files that consume variables. .env.example only sets them, so it is checked
 # separately (every variable it sets must be documented and consumed).
 _SCAN_FILES = (
@@ -79,6 +80,10 @@ def _consumed_env_vars() -> set[str]:
             continue
         parts = set(path.parts)
         if "__pycache__" in parts or "node_modules" in parts:
+            continue
+        if any(part.endswith(".egg-info") for part in parts):
+            # Untracked build byproduct (PKG-INFO copies the README); it must
+            # not make a stale bullet look consumed in a local checkout.
             continue
         try:
             text = path.read_text()
@@ -136,7 +141,7 @@ def test_every_variable_the_code_reads_is_documented() -> None:
         if name not in _NOT_OPERATOR_CONFIGURATION and not _env_name_constant(name, consumed)
     }
     assert not undocumented, (
-        "LAB_TRACKER_* variables read under src/, scripts/ or deploy/ without "
+        "LAB_TRACKER_* variables read under src/, scripts/, deploy/ or deployments/ without "
         "a docs/configuration.md bullet (document them, or add them to "
         f"_NOT_OPERATOR_CONFIGURATION with the reason): {sorted(undocumented)}"
     )

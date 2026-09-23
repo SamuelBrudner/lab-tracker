@@ -958,8 +958,9 @@ authorization; serve it only through TLS on a VPN or tailnet.
 ### Client, script, and deploy variables
 
 These variables are read straight from the environment by the `lt` client, the
-hooks it installs, the operator scripts under `scripts/`, and the container
-entrypoint. The FastAPI app does not read them. `LAB_TRACKER_BASE_URL` (see
+hooks it installs, the operator scripts under `scripts/`, the container
+entrypoint, and the pinned Compose deployments under `deployments/`. The
+FastAPI app does not read them. `LAB_TRACKER_BASE_URL` (see
 [Application](#application)) is also the API origin for all of them.
 
 #### `lt` client and agent setup
@@ -1053,6 +1054,26 @@ entrypoint. The FastAPI app does not read them. `LAB_TRACKER_BASE_URL` (see
 - `LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_FILE`: file the entrypoint reads the
   first-admin token from, generating it when missing (default:
   `<runtime-env dir>/bootstrap-admin-token`)
+
+#### Pinned shared-provider deployment
+
+Docker Compose interpolates these when
+`deployments/shared-provider/docker-compose.yml` is layered over the root
+Compose file, usually from the repository-root `.env`. See
+[`deployments/shared-provider/README.md`](../deployments/shared-provider/README.md).
+
+- `LAB_TRACKER_RELEASE_IMAGE`: the reviewed, immutable application image the
+  app and MCP services both run, e.g.
+  `lab-tracker-primary:sha-<full-git-revision>` (required; Compose refuses to
+  resolve the overlay when it is unset, and the overlay removes the source
+  build)
+- `LAB_TRACKER_PROVIDER_ENV_FILE`: env file holding only the graph-draft
+  provider credential, loaded into the app service (default:
+  `./deployments/shared-provider/.env`; the file must exist)
+- `LAB_TRACKER_RUNTIME_ENV_FILE`: env file holding the non-secret provider,
+  scheduler, model, timeout, and review-email policy, loaded into the app
+  service (default: `./deployments/shared-provider/runtime.env`, copied from
+  `runtime.env.example`; the file must exist)
 
 ## Authentication behavior
 
