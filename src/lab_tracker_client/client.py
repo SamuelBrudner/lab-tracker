@@ -355,6 +355,9 @@ class LabTracker:
         self.default_project_id = default_project_id
         self._access_token = access_token
         self._supplied_access_token = bool(access_token)
+        # Set by ``from_env`` when the token came from the saved connection
+        # profile, so a rejection points at the file that holds it.
+        self._access_token_profile_path: Path | None = None
         self._transport = HttpTransport(
             base_url=self.base_url,
             timeout_seconds=timeout_seconds,
@@ -379,6 +382,15 @@ class LabTracker:
     def refresh_bearer(self, response: httpx.Response) -> str:
         supplied_token_used = bool(self._access_token and self._supplied_access_token)
         if supplied_token_used and not self._has_login_credentials():
+            if self._access_token_profile_path is not None:
+                raise LTAPIError(
+                    "The access token saved in the connection profile "
+                    f"({self._access_token_profile_path}) was rejected by the Lab "
+                    "Tracker API. Save a fresh one with 'lt setup connect "
+                    "--save-token', or set LAB_TRACKER_ACCESS_TOKEN, or set "
+                    "LAB_TRACKER_USERNAME and LAB_TRACKER_PASSWORD so the client "
+                    "can log in."
+                )
             raise LTAPIError(
                 "LAB_TRACKER_ACCESS_TOKEN was rejected by the Lab Tracker API. "
                 "Refresh the token or set LAB_TRACKER_USERNAME and "
@@ -416,6 +428,7 @@ class LabTracker:
             )
         env_username = os.getenv("LAB_TRACKER_USERNAME") or os.getenv("LAB_TRACKER_MCP_USERNAME")
         profile_token = profile.get("access_token")
+        profile_project_id = profile.get("default_project_id")
         try:
             profile_base_url = normalize_instance_base_url(
                 profile.get("base_url") or DEFAULT_BASE_URL,
@@ -424,15 +437,21 @@ class LabTracker:
         except ValueError:
             profile_base_url = DEFAULT_BASE_URL
             profile_token = None
-        if env_username or (env_base_url and env_base_url != profile_base_url):
+            profile_project_id = None
+        if env_base_url and env_base_url != profile_base_url:
+            # The profile's token and project id belong to the profile's
+            # server; project ids are per-server, so neither carries over.
             profile_token = None
-        return cls(
+            profile_project_id = None
+        if env_username:
+            profile_token = None
+        env_token = os.getenv("LAB_TRACKER_ACCESS_TOKEN")
+        client = cls(
             base_url=env_base_url or profile_base_url,
             username=env_username,
             password=os.getenv("LAB_TRACKER_PASSWORD") or os.getenv("LAB_TRACKER_MCP_PASSWORD"),
-            access_token=os.getenv("LAB_TRACKER_ACCESS_TOKEN") or profile_token,
-            default_project_id=os.getenv("LAB_TRACKER_PROJECT_ID")
-            or profile.get("default_project_id"),
+            access_token=env_token or profile_token,
+            default_project_id=os.getenv("LAB_TRACKER_PROJECT_ID") or profile_project_id,
             timeout_seconds=(
                 timeout_seconds
                 if timeout_seconds is not None
@@ -444,6 +463,9 @@ class LabTracker:
                 )
             ),
         )
+        if not env_token and profile_token:
+            client._access_token_profile_path = connection_profile_path()
+        return client
 
     @property
     def access_token(self) -> str | None:

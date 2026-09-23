@@ -856,29 +856,31 @@ def _resolve_capture_client(
         resolved_project_id = project_id or client.default_project_id
         return client, str(resolved_project_id) if resolved_project_id else None, False
     profile = load_connection_profile()
-    resolved_project_id = (
-        project_id
-        or os.getenv("LAB_TRACKER_PROJECT_ID")
-        or profile.get("default_project_id")
-    )
     configured_base_url = (
         os.getenv("LAB_TRACKER_BASE_URL")
         or os.getenv("LAB_TRACKER_MCP_BASE_URL")
         or profile.get("base_url")
     )
-    if not resolved_project_id or not configured_base_url:
+    if not configured_base_url or not (
+        project_id
+        or os.getenv("LAB_TRACKER_PROJECT_ID")
+        or profile.get("default_project_id")
+    ):
         return None, None, False
     resolved_client = LabTracker.from_env(
         timeout_seconds=FIGURE_CAPTURE_TIMEOUT_SECONDS,
     )
-    resolved_client.default_project_id = str(resolved_project_id)
+    # from_env only applies the profile's project when the profile describes
+    # the server being targeted; project ids are per-server.
+    resolved_project_id = project_id or resolved_client.default_project_id
     has_credentials = bool(
         resolved_client.access_token
         or (resolved_client.username and resolved_client.password)
     )
-    if not has_credentials:
+    if not resolved_project_id or not has_credentials:
         resolved_client.close()
         return None, None, False
+    resolved_client.default_project_id = str(resolved_project_id)
     return resolved_client, str(resolved_project_id), True
 
 
