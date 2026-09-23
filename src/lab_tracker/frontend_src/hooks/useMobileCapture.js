@@ -688,6 +688,7 @@ function useMobileCapture({
         setPhotoFile(null);
         setAudioFile(null);
         setTextNote("");
+        clearUploadProgress();
         if (returnPath) {
           navigate(returnPath);
         }
@@ -704,6 +705,9 @@ function useMobileCapture({
       setPhotoFile(null);
       setAudioFile(null);
       setTextNote("");
+      // The composer is reset, so the finished capture's ids must not keep
+      // readyToCapture() true and let an empty Save report another success.
+      clearUploadProgress();
       if (returnPath) {
         navigate(returnPath);
       }

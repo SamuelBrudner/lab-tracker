@@ -114,4 +114,32 @@ describe("useMobileCapture", () => {
     expect(attempts).toBe(2);
     expect(props.setFlash).toHaveBeenLastCalledWith("Capture saved for review.");
   });
+
+  it("is not ready to save again once a capture has been saved", async () => {
+    const fetchMock = installCaptureRoutes(() => apiResponse(note({ noteId: "note-3" }), 201));
+    const { props, result } = renderCaptureHook();
+
+    act(() => {
+      result.current.handleComposerTextChange({ target: { value: "Saved once" } });
+    });
+    await act(async () => {
+      await result.current.uploadCapture();
+    });
+    expect(props.setFlash).toHaveBeenLastCalledWith("Capture saved for review.");
+    expect(result.current.composerTextValue()).toBe("");
+    expect(result.current.readyToCapture()).toBe(false);
+
+    await act(async () => {
+      await result.current.uploadCapture();
+    });
+
+    expect(props.setFlash).toHaveBeenLastCalledWith(
+      "",
+      "Choose the required capture input before upload."
+    );
+    const creates = fetchMock.mock.calls.filter(
+      ([url, init]) => url === "/notes" && init?.method === "POST"
+    );
+    expect(creates).toHaveLength(1);
+  });
 });
