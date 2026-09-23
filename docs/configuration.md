@@ -85,13 +85,15 @@ that destination through your normal off-machine backup process.
   caller; if every tracked caller is blocked, new addresses' failed attempts
   get `429` too. Correct credentials still sign in either way. The client
   address is the connection peer: an IPv4 address, or the /64 prefix of an
-  IPv6 address. Behind a reverse proxy the peer is the proxy, so set
+  IPv6 address, so all hosts in one IPv6 /64 (like hosts behind one IPv4 NAT)
+  share one client address and one quota, including for registration and
+  invitation acceptance. Behind a reverse proxy the peer is the proxy, so set
   `FORWARDED_ALLOW_IPS` to the proxy's address (see
   [Reverse Proxy and Client Addresses](self-hosted-operations.md#reverse-proxy-and-client-addresses));
   otherwise every client shares one client address and one quota.
 - `LAB_TRACKER_AUTH_PUBLIC_VIEWER_REGISTRATION_ENABLED`: allow public
-  self-registration for viewer accounts (default: `true`). Set to `false` to
-  require invites or an admin bearer token for new users.
+  self-registration for viewer accounts (default: `true` in `local`, `false`
+  otherwise). When off, new users need an invite or an admin bearer token.
 - `LAB_TRACKER_AUTH_ENABLED`: enable login and role enforcement (default: `false`
   in `local`, `true` otherwise; non-local environments cannot disable auth)
 - `LAB_TRACKER_PUBLIC_BASE_URL`: deprecated server-side alias for
@@ -1093,9 +1095,13 @@ default and cannot disable auth.
 
 Public registration creates viewer accounts when
 `LAB_TRACKER_AUTH_PUBLIC_VIEWER_REGISTRATION_ENABLED=true`. Viewer accounts can
-inspect authorized records; write workflows (note upload, draft creation,
-operation edits, and graph commits) require an editor or admin role. A fresh
-auth-enabled instance shows first-admin setup when
+inspect authorized records. Project writes (note upload, draft creation,
+operation edits, and graph commits) come from project contributor or owner
+membership (some steps are owner-only) or the global admin role. Other global
+roles grant no project access on their own, and project membership is what a
+project owner grants: a viewer account made a project contributor can write in
+that project. Personal access tokens additionally need an editor or admin token
+role to write. A fresh auth-enabled instance shows first-admin setup when
 `LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN` is configured. `/health` remains public for
 uptime probes; `/readiness` and `/metrics` require credentials when
 authentication is enabled.
@@ -1167,8 +1173,9 @@ model endpoint.
 ### Auth, validation, and committed records
 
 Authentication and role checks apply to raw images, drafts, draft edits, and
-commits. Viewer accounts can inspect authorized records; editor/admin roles are
-required for note upload, draft creation, operation edits, and graph commits.
+commits. Viewer accounts can inspect authorized records; note upload, draft
+creation, operation edits, and graph commits require project contributor or
+owner membership or the global admin role (see Authentication behavior above).
 Raw images and draft operations are not committed automatically. Accepted
 operations still pass through the normal API validation path, and model output
 that references unknown entity IDs or unsupported semantic operations is rejected.
