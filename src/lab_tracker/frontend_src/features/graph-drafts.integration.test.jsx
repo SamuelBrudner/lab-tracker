@@ -404,12 +404,12 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "Accept" }));
 
     expect(await screen.findByText("accepted")).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText("Commit message"), {
+    fireEvent.change(screen.getByLabelText(/^Commit message/), {
       target: { value: "Commit image draft" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Commit accepted changes" }));
 
-    expect(await screen.findByText("Graph draft committed.")).toBeInTheDocument();
+    expect(await screen.findByText(/^Committed \d+ changes? to the graph\.$/)).toBeInTheDocument();
     expect(await screen.findByText("applied")).toBeInTheDocument();
     expect(await screen.findByText(questionId)).toBeInTheDocument();
   });
@@ -622,13 +622,13 @@ describe("App", () => {
 
     expect(await screen.findByRole("heading", { name: "Review" })).toBeInTheDocument();
     await waitFor(() => {
-      expect(screen.getByLabelText("Commit message")).toBeEnabled();
+      expect(screen.getByLabelText(/^Commit message/)).toBeEnabled();
     });
-    fireEvent.change(screen.getByLabelText("Commit message"), {
+    fireEvent.change(screen.getByLabelText(/^Commit message/), {
       target: { value: "Commit draft project" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Commit accepted changes" }));
 
-    expect(await screen.findByText("Graph draft committed.")).toBeInTheDocument();
+    expect(await screen.findByText(/^Committed \d+ changes? to the graph\.$/)).toBeInTheDocument();
   });
 });

@@ -156,6 +156,81 @@ function spokenReviewScript(changeSet, payloadTextById = {}) {
   return sections.join(" ");
 }
 
+// One-line confirmation for a per-proposal decision, so the feedback names
+// what was decided instead of a generic "operation updated". `decision` is
+// undefined when only edits were saved.
+function decisionFlashMessage(operation, decision) {
+  const verbs = { accepted: "Accepted", proposed: "Deferred", rejected: "Rejected" };
+  const verb = decision ? verbs[decision] : null;
+  const subject = operationProposalText(operation);
+  const clipped = subject.length > 80 ? `${subject.slice(0, 77)}...` : subject;
+  return `${verb || "Saved edits to"}: ${clipped}`;
+}
+
+// Undecided / kept / rejected tally for the review footer.
+function decisionCounts(changeSet) {
+  const counts = { accepted: 0, proposed: 0, rejected: 0, other: 0 };
+  (changeSet?.operations || []).forEach((operation) => {
+    if (operation.status in counts) {
+      counts[operation.status] += 1;
+    } else {
+      counts.other += 1;
+    }
+  });
+  return counts;
+}
+
+// A commit message that describes the review honestly when the person does
+// not want to write one: what kind of draft, when, and how much was kept.
+function defaultCommitMessage(changeSet, acceptedCount) {
+  if (!changeSet) {
+    return "";
+  }
+  const total = (changeSet.operations || []).length;
+  const day = String(changeSet.created_at || "").slice(0, 10);
+  const kind = changeSet.draft_mode === "graph_batch" ? "Daily review" : "Capture review";
+  return `${kind}${day ? ` ${day}` : ""}: kept ${acceptedCount} of ${total} proposals`;
+}
+
+// Top-level string payload fields that deserve a typed editor instead of the
+// raw JSON textarea: claim statements, hypotheses, falsification criteria,
+// reasons. Free text only: ids and enum-like fields stay in the JSON editor.
+const TYPED_TEXT_FIELDS = new Set(["text", "raw_content"]);
+const LONG_TEXT_FIELDS = new Set([
+  "description",
+  "falsification_criteria",
+  "hypothesis",
+  "rationale",
+  "reason",
+  "refuting_outcome",
+  "statement",
+  "verification_plan",
+]);
+const NON_EDITABLE_FIELDS = new Set(["entity_type", "op", "origin", "status"]);
+
+function humanizeFieldName(key) {
+  const words = String(key).replaceAll("_", " ").trim();
+  return words ? words[0].toUpperCase() + words.slice(1) : key;
+}
+
+function editableStringFields(payload) {
+  return Object.entries(payload || {})
+    .filter(
+      ([key, value]) =>
+        typeof value === "string" &&
+        !TYPED_TEXT_FIELDS.has(key) &&
+        !NON_EDITABLE_FIELDS.has(key) &&
+        !key.endsWith("_id") &&
+        !key.endsWith("_ids") &&
+        !key.endsWith("_type")
+    )
+    .map(([key, value]) => ({
+      key,
+      label: humanizeFieldName(key),
+      multiline: LONG_TEXT_FIELDS.has(key) || value.length > 80,
+    }));
+}
+
 function canSpeakReview() {
   const speech = typeof window !== "undefined" ? window.speechSynthesis : null;
   return (
@@ -312,6 +387,10 @@ export {
   canSpeakReview,
   contextCountLabel,
   contextOptions,
+  decisionCounts,
+  decisionFlashMessage,
+  defaultCommitMessage,
+  editableStringFields,
   imageDataUrl,
   nextPayloadWithTarget,
   normalizeSpeechText,

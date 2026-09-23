@@ -2,6 +2,7 @@ import * as React from "react";
 
 import {
   contextOptions,
+  editableStringFields,
   nextPayloadWithTarget,
   operationIntent,
   operationTitle,
@@ -15,7 +16,9 @@ import { SourceArtifactEvidence } from "./SourceArtifactEvidence.jsx";
 
 // Presentational per-proposal editor: proposal body, evidence, typed and raw
 // payload edits, and the accept/defer/reject decision controls. All edit and
-// decision handlers come from the workflow controller.
+// decision handlers come from the workflow controller. `focused` marks the
+// row the keyboard shortcuts act on; `onFocusRow` moves that mark here when
+// anything inside the row takes focus.
 function OperationRow({
   operation,
   changeSet,
@@ -23,6 +26,9 @@ function OperationRow({
   reviewNote,
   canEditDraft,
   pending,
+  focused = false,
+  onFocusRow = null,
+  rowRef = null,
   sourceArtifacts = [],
   sourcePreviews = {},
   usesSharedSourceEvidence = false,
@@ -35,8 +41,16 @@ function OperationRow({
   const proposed =
     parsed.text || parsed.raw_content || parsed.label || parsed.prompt || parsed.statement || "";
   const linkType = semanticLinkTargetType(operation);
+  const typedFields = editableStringFields(operation.payload || {});
   return (
-    <div className="review-proposal">
+    <div
+      aria-current={focused ? "true" : undefined}
+      className={`review-proposal${focused ? " focused" : ""}`}
+      id={`review-op-${operation.operation_id}`}
+      onFocusCapture={() => onFocusRow?.()}
+      ref={rowRef}
+      tabIndex={0}
+    >
       <div className="review-proposal-body">
         <p className="review-proposal-intent subtle">{operationIntent(operation)}</p>
         <p className="review-proposal-text">{proposed || operationTitle(operation)}</p>
@@ -128,6 +142,24 @@ function OperationRow({
                 />
               </label>
             ) : null}
+            {typedFields.map(({ key, label, multiline }) => {
+              const value = parsedPayloadFromText(payloadText)?.[key];
+              const fieldProps = {
+                disabled: !canEditDraft,
+                onChange: (event) =>
+                  onPatchOperationPayload(operation, (payload) => ({
+                    ...payload,
+                    [key]: event.target.value,
+                  })),
+                value: typeof value === "string" ? value : "",
+              };
+              return (
+                <label key={key}>
+                  {label}
+                  {multiline ? <textarea {...fieldProps} /> : <input type="text" {...fieldProps} />}
+                </label>
+              );
+            })}
             <details className="context-details advanced-json">
               <summary>Payload JSON (advanced)</summary>
               <label>

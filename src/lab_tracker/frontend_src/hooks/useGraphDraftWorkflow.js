@@ -5,6 +5,8 @@ import { graphDrafts, memberOnboarding } from "../shared/gateways/index.js";
 import {
   canContributeWithRole,
   canManageWithRole,
+  decisionFlashMessage,
+  defaultCommitMessage,
   operationReviewNoteText,
   parsedPayloadFromText,
   payloadText,
@@ -290,7 +292,10 @@ function useGraphDraftWorkflow({
     updatePayloadText(operation.operation_id, JSON.stringify(nextPayload, null, 2));
   }
 
-  async function saveOperation(operation, nextStatus = operation.status) {
+  // `decision` is one of accepted / rejected / proposed when a decision
+  // control was used, and undefined for a plain "save my edits".
+  async function saveOperation(operation, decision) {
+    const nextStatus = decision ?? operation.status;
     let parsedPayload;
     try {
       parsedPayload = JSON.parse(payloads[operation.operation_id] || "{}");
@@ -329,9 +334,11 @@ function useGraphDraftWorkflow({
       setChangeSet(nextChangeSet);
       setPayloads(payloadText(nextChangeSet));
       setOperationReviewNotes(operationReviewNoteText(nextChangeSet));
-      setFlash("Graph draft operation updated.");
+      setFlash(decisionFlashMessage(operation, decision));
+      return true;
     } catch (err) {
       setFlash("", err.message || "Failed to update graph draft operation.");
+      return false;
     } finally {
       endCommand(commandKey);
       setBusy(false);
@@ -492,15 +499,16 @@ function useGraphDraftWorkflow({
     }
   }
 
+  // Shown as the commit field's placeholder and used verbatim when the person
+  // leaves it empty, so a typed message is optional rather than a gate.
+  const suggestedCommitMessage = defaultCommitMessage(changeSet, acceptedCount);
+
   async function commitDraft(event) {
     event.preventDefault();
     if (!changeSet || !canCommitDraft) {
       return;
     }
-    if (!commitMessage.trim()) {
-      setFlash("", "Commit message is required.");
-      return;
-    }
+    const message = commitMessage.trim() || suggestedCommitMessage;
     if (!beginCommand("commit")) {
       return;
     }
@@ -508,14 +516,18 @@ function useGraphDraftWorkflow({
     setFlash("", "");
     try {
       const nextChangeSet = await apiRequest(`/graph-drafts/${changeSetId}/commit`, {
-        body: { message: commitMessage.trim() },
+        body: { message },
         method: "POST",
         token,
       });
       setChangeSet(nextChangeSet);
       setPayloads(payloadText(nextChangeSet));
       setOperationReviewNotes(operationReviewNoteText(nextChangeSet));
-      setFlash("Graph draft committed.");
+      setFlash(
+        acceptedCount === 1
+          ? "Committed 1 change to the graph."
+          : `Committed ${acceptedCount} changes to the graph.`
+      );
     } catch (err) {
       setFlash("", err.message || "Failed to commit graph draft.");
     } finally {
@@ -632,6 +644,7 @@ function useGraphDraftWorkflow({
     accessError: draftAccessError,
     commitMessage,
     setCommitMessage,
+    suggestedCommitMessage,
     reviewNote,
     setReviewNote,
     pendingCommands,

@@ -475,3 +475,70 @@ describe("BatchReviewPage", () => {
     expect(fetchMock).toHaveBeenCalled();
   });
 });
+
+describe("BatchReviewPage drafts from captures", () => {
+  it("lists single-capture drafts beside the batch queues and opens them with a way back", async () => {
+    const navigate = vi.fn();
+    installFetchMock([
+      { match: /^\/batches/, response: apiResponse([]) },
+      {
+        match: /graph-draft-batch-settings$/,
+        response: apiResponse({ cadence_minutes: 1440, enabled: true }),
+      },
+      {
+        match: "/graph-drafts?project_id=project-1&status=ready&limit=50",
+        response: apiResponse([
+          {
+            change_set_id: "note-draft-1",
+            created_at: "2026-07-16T12:00:00Z",
+            draft_mode: "graph_context",
+            status: "ready",
+            summary: "Whiteboard photo suggests a control question",
+          },
+          {
+            change_set_id: "batch-1",
+            created_at: "2026-07-16T13:00:00Z",
+            draft_mode: "graph_batch",
+            status: "ready",
+            summary: "A batch that belongs in the queues above",
+          },
+        ]),
+      },
+      {
+        match: "/graph-drafts?project_id=project-1&status=changes_requested&limit=50",
+        response: apiResponse([
+          {
+            change_set_id: "onboarding-1",
+            created_at: "2026-07-16T14:00:00Z",
+            draft_mode: "graph_context",
+            purpose: "member_checkpoint_alignment",
+            status: "changes_requested",
+            summary: "Onboarding alignment, reviewed elsewhere",
+          },
+        ]),
+      },
+    ]);
+
+    render(
+      <BatchReviewPage
+        token="token-1"
+        projects={[{ name: "Project One", project_id: "project-1" }]}
+        selectedProjectId="project-1"
+        onSelectedProjectChange={vi.fn()}
+        navigate={navigate}
+        canManageGraph={true}
+        canManageProject={false}
+        setBusy={vi.fn()}
+        setFlash={vi.fn()}
+      />
+    );
+
+    expect(await screen.findByText("Whiteboard photo suggests a control question")).toBeInTheDocument();
+    expect(screen.queryByText("A batch that belongs in the queues above")).not.toBeInTheDocument();
+    expect(screen.queryByText("Onboarding alignment, reviewed elsewhere")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Review draft" }));
+    expect(navigate).toHaveBeenCalledWith("/app/graph-drafts/note-draft-1?return_to=%2Fapp%2Fbatches");
+  });
+});
+
