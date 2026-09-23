@@ -615,26 +615,24 @@ bounded filesystem broker.
   malformed, or semantically duplicate normalized entry fails startup without
   echoing the configured value.
 - `LAB_TRACKER_GIT_CACHE_ROOT`: absolute directory for the Git resolver's
-  per-remote fetch caches (`~` is expanded; a relative path fails startup).
-  When unset, each resolver uses a private, unpredictably named temporary
-  directory (mode `0700`) created on first use and removed when the process
-  exits, so the cache does not survive restarts. A configured root is created
-  with mode `0700` or tightened to it (a warning names the directory and its
-  previous mode whenever a root or per-remote cache is tightened); a root or
-  per-remote cache that is a
-  symlink or is owned by another user is refused (the resolution is
+  per-remote fetch caches (`~` is expanded; a relative path fails startup). When
+  unset, each resolver uses a private, unpredictably named temporary directory
+  (mode `0700`) created on first use and removed when the process exits, so the
+  cache does not survive restarts. A configured root is created with mode `0700`
+  or tightened to it (a warning names the directory and its previous mode
+  whenever a root or per-remote cache is tightened); a root or per-remote cache
+  that is a symlink or is owned by another user is refused (the resolution is
   `unresolved` and a warning is logged). A per-remote cache whose
   repository-local Git config holds anything other than the keys `git init`
-  writes is refused, and every resolver Git command overrides
-  `core.hooksPath` and `core.fsmonitor`, so planted hooks or config cannot run
-  commands.
+  writes is refused, and every resolver Git command overrides `core.hooksPath`
+  and `core.fsmonitor`, so planted hooks or config cannot run commands.
 - `LAB_TRACKER_GIT_CACHE_MAX_BYTES`: positive byte quota for the Git resolver
   cache (default: unset, unbounded). Least-recently-used per-remote caches are
-  evicted before a new fetch; a cache an in-flight resolution is using is
-  never evicted. Only directories named like the resolver's own per-remote
-  caches (16 hex digits, optionally prefixed `sha1-` or `sha256-`) are counted
-  or evicted; anything else under the root is left alone. Anything other than a positive decimal integer (for example
-  `0`, `-5`, or `2GB`) fails startup.
+  evicted before a new fetch; a cache an in-flight resolution is using is never
+  evicted. Only directories named like the resolver's own per-remote caches (16
+  hex digits, optionally prefixed `sha1-` or `sha256-`) are counted or evicted;
+  anything else under the root is left alone. Anything other than a positive
+  decimal integer (for example `0`, `-5`, or `2GB`) fails startup.
 
 Each Git grant must use one of these forms:
 
