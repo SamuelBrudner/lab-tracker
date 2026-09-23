@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 
 
@@ -209,3 +210,25 @@ def test_search_include_accepts_known_kinds_and_rejects_unknown_tokens(
     message = misspelled.json()["error"]["message"]
     assert "note" in message
     assert "questions" in message and "notes" in message
+
+
+@pytest.mark.parametrize("include", [",", " ", " , "])
+def test_search_include_rejects_separator_only_values(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    include: str,
+):
+    project_id = client.post(
+        "/projects",
+        json={"name": "Search empty include project", "description": ""},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+
+    response = client.get(
+        "/search",
+        params={"q": "sentinel", "project_id": project_id, "include": include},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 422
+    assert "questions" in response.json()["error"]["message"]

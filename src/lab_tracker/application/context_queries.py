@@ -542,6 +542,10 @@ class ContextQueries:
             if item.strip()
         }
         unknown_includes = include_set - _SEARCH_INCLUDE_KINDS
+        if include and not include_set:
+            raise ValidationError(
+                f"include must name at least one of {', '.join(sorted(_SEARCH_INCLUDE_KINDS))}."
+            )
         if unknown_includes:
             raise ValidationError(
                 "include must be a comma-separated subset of "
