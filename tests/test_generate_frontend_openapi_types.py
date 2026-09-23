@@ -118,3 +118,21 @@ def test_endpoint_request_model_drives_request_body_and_component_declarations()
 
     assert changed != declaration
     assert '"authority_grant_fingerprint"?' in changed
+
+
+def test_const_schemas_render_as_literal_types() -> None:
+    # pydantic emits `const` for Literal[...] fields; widening them to their
+    # primitive type would let the frontend send a value the API rejects.
+    openapi = _openapi_with_response("ItemEnvelope")
+    openapi["components"]["schemas"]["ItemEnvelope"]["properties"] = {
+        "acknowledged": {"const": True, "type": "boolean"},
+        "kind": {"const": "member", "type": "string"},
+        "maybe_version": {"anyOf": [{"const": 2}, {"type": "null"}]},
+    }
+    openapi["components"]["schemas"]["ItemEnvelope"]["required"] = ["acknowledged", "kind"]
+
+    declaration = generate_declaration(openapi, (("get", "/items"),))
+
+    assert '"acknowledged": true;' in declaration
+    assert '"kind": "member";' in declaration
+    assert '"maybe_version"?: (2 | null);' in declaration

@@ -300,6 +300,10 @@ def _schema_to_typescript(schema: dict[str, Any], indent: int = 0) -> str:
             rendered = operator.join(_schema_to_typescript(item, indent) for item in variants)
             return f"({rendered})"
 
+    if "const" in schema:
+        # pydantic's Literal[...] fields; keep the literal, not its primitive.
+        return json.dumps(schema["const"])
+
     enum = schema.get("enum")
     if isinstance(enum, list):
         return " | ".join(json.dumps(item) for item in enum) or "never"

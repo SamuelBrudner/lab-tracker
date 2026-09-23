@@ -913,7 +913,7 @@ export interface components {
       "meta": components["schemas"]["PaginationMeta"];
     };
     "MemberOnboardingAiAlignmentRequest": {
-      "external_provider_acknowledged": boolean;
+      "external_provider_acknowledged": true;
     };
     "MemberOnboardingAlignment": {
       "draft"?: (components["schemas"]["GraphChangeSet"] | null);
