@@ -1473,3 +1473,69 @@ def test_graph_change_set_commit_claim_is_conditional(db_session):
     assert claimed is not None
     assert claimed.status == GraphChangeSetStatus.COMMITTING
     assert second_claim is None
+
+
+def _attribution_change_set(db_session, repo, **attribution):  # noqa: ANN001, ANN202
+    project = Project(
+        project_id=uuid4(),
+        name="Attribution project",
+        status=ProjectStatus.ACTIVE,
+        created_at=_ts(),
+        updated_at=_ts(),
+    )
+    source_note = Note(
+        note_id=uuid4(),
+        project_id=project.project_id,
+        raw_content="attribution source",
+        status=NoteStatus.COMMITTED,
+        created_at=_ts(),
+        updated_at=_ts(),
+    )
+    change_set = GraphChangeSet(
+        change_set_id=uuid4(),
+        project_id=project.project_id,
+        source_note_id=source_note.note_id,
+        source_note_ids=[source_note.note_id],
+        model="test-model",
+        prompt_version="test-prompt",
+        created_at=_ts(1),
+        updated_at=_ts(1),
+        **attribution,
+    )
+    repo.projects.save(project)
+    db_session.flush()
+    repo.notes.save(source_note)
+    repo.graph_change_sets.save(change_set)
+    repo.commit()
+    return change_set
+
+
+def test_graph_change_set_hydration_tolerates_free_text_attribution(db_session):
+    repo = SQLAlchemyLabTrackerRepository(db_session)
+    reviewer_id = uuid4()
+    _add_user(db_session, reviewer_id, "graph-reviewer")
+    change_set = _attribution_change_set(
+        db_session,
+        repo,
+        created_by="operator-1",
+        review_assignee=str(reviewer_id),
+    )
+
+    loaded = repo.graph_change_sets.get(change_set.change_set_id)
+
+    assert loaded is not None
+    assert loaded.created_by == "operator-1"
+    assert loaded.created_by_username is None
+    assert loaded.review_assignee_username == "graph-reviewer"
+
+
+def test_graph_change_set_hydration_resolves_uuid_attribution_usernames(db_session):
+    repo = SQLAlchemyLabTrackerRepository(db_session)
+    creator_id = uuid4()
+    _add_user(db_session, creator_id, "graph-creator")
+    change_set = _attribution_change_set(db_session, repo, created_by=str(creator_id))
+
+    loaded = repo.graph_change_sets.get(change_set.change_set_id)
+
+    assert loaded is not None
+    assert loaded.created_by_username == "graph-creator"

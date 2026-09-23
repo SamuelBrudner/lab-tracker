@@ -359,26 +359,40 @@ class SQLAlchemyGraphChangeSetRepository(EntityRepository[GraphChangeSet]):
             if include_operations
             else self._operation_counts_for(change_set_ids)
         )
-        user_ids = sorted(
-            {
-                user_id
-                for row in rows
-                for user_id in (
-                    row.created_by,
-                    row.review_assignee,
-                    row.submitted_by,
-                    row.reviewed_by,
-                    row.committed_by,
-                )
-                if user_id
-            }
-        )
+        # Attribution columns are free-text strings (e.g. "operator-1"); only
+        # UUID-shaped values can name a user, and binding anything else to the
+        # GUID column would raise. Key the result by the raw stored string,
+        # which is what change_set_from_model looks up.
+        attribution_user_ids: dict[str, UUID] = {}
+        for row in rows:
+            for attribution in (
+                row.created_by,
+                row.review_assignee,
+                row.submitted_by,
+                row.reviewed_by,
+                row.committed_by,
+            ):
+                if not attribution or attribution in attribution_user_ids:
+                    continue
+                try:
+                    attribution_user_ids[attribution] = UUID(attribution)
+                except ValueError:
+                    continue
         usernames: dict[str, str] = {}
-        if user_ids:
+        if attribution_user_ids:
             user_rows = list(
-                self._session.scalars(select(UserModel).where(UserModel.user_id.in_(user_ids)))
+                self._session.scalars(
+                    select(UserModel).where(
+                        UserModel.user_id.in_(sorted(set(attribution_user_ids.values()), key=str))
+                    )
+                )
             )
-            usernames = {row.user_id: row.username for row in user_rows}
+            usernames_by_id = {user_row.user_id: user_row.username for user_row in user_rows}
+            usernames = {
+                attribution: usernames_by_id[user_id]
+                for attribution, user_id in attribution_user_ids.items()
+                if user_id in usernames_by_id
+            }
         return [
             change_set_from_model(
                 row,
