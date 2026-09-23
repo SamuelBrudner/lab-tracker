@@ -5,12 +5,14 @@ import {
   OFFLINE_QUEUED,
   buildCaptureMetadata,
   buildTargets,
-  createTextCapture,
+  createOrQueueTextCapture,
   newCaptureId,
   queueRawFileNoteOffline,
   uploadOrQueueRawFile,
 } from "../shared/capture-upload.js";
 import { droppedUploadsMessage, getUploadQueue } from "../shared/register-sw.js";
+import { useAudioRecorder } from "./useAudioRecorder.js";
+import { useLocalDraft } from "./useLocalDraft.js";
 import {
   SHARE_INBOX_UPDATED_MESSAGE,
   createIndexedDbShareStorage,
@@ -21,9 +23,19 @@ import {
   shareInboxAvailable,
   shareTooLargeMessage,
 } from "../shared/share-target-inbox.js";
-import { captureHint, captureNotes, isAudioCapture } from "../features/mobile-capture/capture-helpers.js";
+import {
+  captureHint,
+  captureNotes,
+  isAudioCapture,
+  readRememberedCaptureContext,
+  writeRememberedCaptureContext,
+} from "../features/mobile-capture/capture-helpers.js";
 
 const { useCallback, useEffect, useMemo, useRef, useState } = React;
+
+// Stable default so a caller that passes no sessions does not re-run the
+// context effect on every render.
+const NO_SESSIONS = Object.freeze([]);
 
 // The service worker's share-target redirect: `from-share` is the intake
 // outcome and `share-expired` counts unreviewed shares it removed as expired.
@@ -68,12 +80,14 @@ function useMobileCapture({
   canWrite,
   selectedProjectId,
   questions,
+  sessions = NO_SESSIONS,
   navigate,
   setBusy,
   setFlash,
   refreshProjectCounts,
   refreshRecentNotes,
   lockedCheckpointNoteId = "",
+  launchSessionId = "",
   returnPath = "",
 }) {
   const [captureMode, setCaptureMode] = useState("text");
@@ -121,6 +135,64 @@ function useMobileCapture({
     () => questions.filter((question) => question.status === "active"),
     [questions]
   );
+  // Keep the typed capture text on the device until it is saved: a phone
+  // backgrounding the browser mid-sentence, or a failed save, must not lose
+  // the note. Recovery is offered, never applied (see useLocalDraft).
+  const composerDraft = useLocalDraft({
+    key: selectedProjectId ? `capture-composer:${selectedProjectId}` : "",
+    value: photoFile || audioFile ? hint : textNote,
+    baseline: "",
+  });
+  // Entity links belong to one project. On a project switch drop them, then
+  // start from the context this device last captured against for the new
+  // project (or the session a capture link named), once those lists confirm
+  // the ids still exist. Each is applied once, so clearing a field sticks.
+  const [contextCarriedOver, setContextCarriedOver] = useState(false);
+  const rememberedContextRef = useRef({
+    projectId: null,
+    questionId: "",
+    sessionId: "",
+    questionApplied: false,
+    sessionApplied: false,
+  });
+  useEffect(() => {
+    const remembered = rememberedContextRef.current;
+    if (remembered.projectId !== selectedProjectId) {
+      const stored = readRememberedCaptureContext(selectedProjectId);
+      rememberedContextRef.current = {
+        projectId: selectedProjectId,
+        questionId: stored.questionId,
+        sessionId: launchSessionId || stored.sessionId,
+        questionApplied: !stored.questionId,
+        sessionApplied: !(launchSessionId || stored.sessionId),
+      };
+      setQuestionId("");
+      setSessionId("");
+      setDatasetId("");
+      setAnalysisId("");
+      setClaimId("");
+      setContextCarriedOver(false);
+    }
+    const current = rememberedContextRef.current;
+    if (
+      !current.questionApplied &&
+      activeQuestions.some((question) => question.question_id === current.questionId)
+    ) {
+      current.questionApplied = true;
+      setQuestionId(current.questionId);
+      setContextCarriedOver(true);
+    }
+    if (
+      !current.sessionApplied &&
+      sessions.some((session) => session.session_id === current.sessionId)
+    ) {
+      current.sessionApplied = true;
+      setSessionId(current.sessionId);
+      if (current.sessionId !== launchSessionId) {
+        setContextCarriedOver(true);
+      }
+    }
+  }, [activeQuestions, launchSessionId, selectedProjectId, sessions]);
 
   useEffect(() => {
     let canceled = false;
@@ -459,8 +531,7 @@ function useMobileCapture({
     return photoFile || audioFile ? hint : textNote;
   }
 
-  function handleComposerTextChange(event) {
-    const value = event.target.value;
+  function setComposerText(value) {
     clearUploadProgress();
     if (photoFile || audioFile) {
       setHint(value);
@@ -470,6 +541,17 @@ function useMobileCapture({
       setCaptureMode("text");
     }
     setTextNote(value);
+  }
+
+  function handleComposerTextChange(event) {
+    setComposerText(event.target.value);
+  }
+
+  function restoreComposerText() {
+    const value = composerDraft.restore();
+    if (value !== null) {
+      setComposerText(value);
+    }
   }
 
   function handlePhotoFileChange(event) {
@@ -486,8 +568,7 @@ function useMobileCapture({
     }
   }
 
-  function handleAudioFileChange(event) {
-    const file = event.target.files?.[0] || null;
+  function applyAudioFile(file) {
     clearUploadProgress();
     setAudioFile(file);
     if (file) {
@@ -499,6 +580,20 @@ function useMobileCapture({
       setAttachmentMenuOpen(false);
     }
   }
+
+  function handleAudioFileChange(event) {
+    applyAudioFile(event.target.files?.[0] || null);
+  }
+
+  // In-page voice notes: record with the browser microphone and treat the
+  // result exactly like a picked audio file. Browsers without MediaRecorder
+  // keep the OS-recorder file input instead.
+  const recorder = useAudioRecorder({
+    enabled: canWrite,
+    filenameBase: "voice-note",
+    onRecorded: (file) => applyAudioFile(file),
+    setFlash,
+  });
 
   function clearPhotoFile() {
     setPhotoFile(null);
@@ -685,16 +780,26 @@ function useMobileCapture({
       }
 
       if (needsText() && !noteId && !queuedOffline) {
-        const textCapture = await createTextCapture({
+        const textCapture = await createOrQueueTextCapture({
           token,
           projectId: selectedProjectId,
+          ownerId,
           rawContent: textNote.trim(),
           targets: currentTargets(),
           metadata: captureMetadata({ kind: "text" }),
         });
-        noteId = textCapture.note_id;
-        noteCreated = true;
-        setUploadedNoteId(noteId);
+        if (textCapture === OFFLINE_QUEUED) {
+          queuedOffline = true;
+        } else {
+          noteId = textCapture.note_id;
+          noteCreated = true;
+          setUploadedNoteId(noteId);
+        }
+      }
+
+      if (queuedOffline || noteCreated) {
+        writeRememberedCaptureContext(selectedProjectId, { questionId, sessionId });
+        setContextCarriedOver(false);
       }
 
       if (queuedOffline) {
@@ -759,6 +864,7 @@ function useMobileCapture({
     activeQuestions,
     analyses,
     claims,
+    contextCarriedOver,
     // OS share-sheet items awaiting explicit review
     incomingShares,
     sharesBusy,
@@ -775,6 +881,14 @@ function useMobileCapture({
     composerTextValue,
     needsVoice,
     readyToCapture,
+    // unsent text recovered from this device
+    composerDraftSavedAt: composerDraft.recoveredAt,
+    restoreComposerText,
+    discardComposerDraft: composerDraft.discard,
+    // in-page microphone recording
+    recordingSupported: recorder.recordingSupported,
+    isRecording: recorder.isRecording,
+    toggleRecording: recorder.toggleRecording,
     // commands
     handleComposerTextChange,
     handlePhotoFileChange,

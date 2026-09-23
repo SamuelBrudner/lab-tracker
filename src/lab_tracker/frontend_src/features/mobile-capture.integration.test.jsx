@@ -369,15 +369,13 @@ describe("App", () => {
       target: { value: "Fly 12 climbed the gradient" },
     });
     const sendButton = screen.getByRole("button", { name: "Save capture" });
-    const laterButton = screen.getByRole("button", { name: "Save for later" });
     expect(sendButton).toBeEnabled();
 
     fireEvent.click(sendButton);
     await waitFor(() => expect(createCount).toBe(1));
     expect(sendButton).toBeDisabled();
-    expect(laterButton).toBeDisabled();
     fireEvent.click(sendButton);
-    fireEvent.click(laterButton);
+    fireEvent.click(sendButton);
 
     releaseCreate();
     expect(await screen.findByText("Capture saved for review.")).toBeInTheDocument();

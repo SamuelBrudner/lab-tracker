@@ -14,6 +14,15 @@ describe("SessionDetailCard", () => {
         response: apiResponse([{ role: "contributor", user_id: "user-1" }]),
       },
       {
+        match: "/sessions/session-1/capture-link",
+        response: apiResponse({
+          capture_qr_svg: "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>",
+          capture_url: "http://lab.example/app/capture?project_id=project-1&session_id=session-1",
+          project_id: "project-1",
+          session_id: "session-1",
+        }),
+      },
+      {
         match: "/sessions/session-1",
         response: apiResponse({
           created_at: "2026-04-20T00:00:00Z",
@@ -109,6 +118,15 @@ describe("SessionDetailCard", () => {
         response: apiResponse([{ role: "contributor", user_id: "user-1" }]),
       },
       {
+        match: "/sessions/session-1/capture-link",
+        response: apiResponse({
+          capture_qr_svg: "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>",
+          capture_url: "http://lab.example/app/capture?project_id=project-1&session_id=session-1",
+          project_id: "project-1",
+          session_id: "session-1",
+        }),
+      },
+      {
         match: "/sessions/session-1",
         response: apiResponse({
           created_at: "2026-04-20T00:00:00Z",
@@ -197,6 +215,15 @@ describe("SessionDetailCard", () => {
       {
         match: /\/projects\/project-1\/members/,
         response: apiResponse([{ role: "contributor", user_id: "user-1" }]),
+      },
+      {
+        match: "/sessions/session-1/capture-link",
+        response: apiResponse({
+          capture_qr_svg: "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>",
+          capture_url: "http://lab.example/app/capture?project_id=project-1&session_id=session-1",
+          project_id: "project-1",
+          session_id: "session-1",
+        }),
       },
       {
         match: "/sessions/session-1",

@@ -33,6 +33,21 @@ It also prints a terminal QR code when the `segno` Python package is available.
 The Windows helper prints the health and app URLs; append `/capture` to the app
 URL for phone capture.
 
+## Capture at the Bench
+
+- **Text, photo, or voice.** Type a note, attach a photo, or tap the
+  microphone to record a voice note in the page. Browsers without in-page
+  recording fall back to the phone's recorder app.
+- **Offline is fine.** Text, photo, and voice captures that cannot reach the
+  server are queued on the phone and upload when it is back online. Unsent
+  text is also kept on the device and offered back if the page reloads.
+- **Same context as last time.** The question and session from your previous
+  capture in a project are preselected for the next one; change them when the
+  work moves on.
+- **Scan into a session.** On the serving computer, open an active session
+  and scan its **Capture into this session** QR code (or tap **Capture** on the
+  session). Every capture from that page arrives linked to the session.
+
 ## Firewall Checks
 
 - macOS: allow Python or the terminal app through the incoming-connection prompt

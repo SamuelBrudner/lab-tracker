@@ -502,6 +502,15 @@ class DeviceEnrollmentRead(BaseModel):
     enrollment_qr_svg: str
 
 
+class SessionCaptureLink(BaseModel):
+    """A phone-scannable link that opens capture with this session preselected."""
+
+    session_id: UUID
+    project_id: UUID
+    capture_url: str
+    capture_qr_svg: str
+
+
 class DeviceConsumeRequest(RequestModel):
     offer_token: NonBlankStr
     label: Annotated[str, Field(min_length=1, max_length=150), AfterValidator(_non_blank_string)]

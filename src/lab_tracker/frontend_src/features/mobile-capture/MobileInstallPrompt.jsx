@@ -49,6 +49,32 @@ function readInstallIntent() {
   }
 }
 
+// Manual "Add to Home Screen" steps for browsers with no native install
+// prompt. iOS never fires beforeinstallprompt, so its Safari steps are the
+// common case; Android browsers that reach here have the menu path instead.
+function installStepsForUserAgent(userAgent = "") {
+  const ua = String(userAgent || "");
+  if (/iPhone|iPad|iPod/i.test(ua)) {
+    return [
+      "Tap the Share button in Safari.",
+      "Choose Add to Home Screen.",
+      "Tap Add.",
+    ];
+  }
+  if (/Android/i.test(ua)) {
+    return [
+      "Open the browser menu (the three dots).",
+      "Choose Add to Home screen or Install app.",
+      "Confirm.",
+    ];
+  }
+  return [
+    "Open your browser's menu.",
+    "Choose Add to Home screen or Install.",
+    "Confirm.",
+  ];
+}
+
 function MobileInstallPrompt() {
   const [dismissed, setDismissed] = useState(() => readInstallPromptDismissed());
   const [visible, setVisible] = useState(false);
@@ -127,9 +153,11 @@ function MobileInstallPrompt() {
       </div>
       {showSteps ? (
         <ol className="install-steps">
-          <li>Tap the Safari share button.</li>
-          <li>Choose Add to Home Screen.</li>
-          <li>Tap Add.</li>
+          {installStepsForUserAgent(
+            typeof navigator === "undefined" ? "" : navigator.userAgent
+          ).map((step) => (
+            <li key={step}>{step}</li>
+          ))}
         </ol>
       ) : null}
       <div className="install-actions">
@@ -147,4 +175,4 @@ function MobileInstallPrompt() {
   );
 }
 
-export { MobileInstallPrompt };
+export { MobileInstallPrompt, installStepsForUserAgent };

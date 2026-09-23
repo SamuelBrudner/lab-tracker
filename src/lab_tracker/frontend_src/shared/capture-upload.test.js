@@ -2,11 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 
 import { ContractError } from "./contract.js";
 import { apiResponse, errorResponse, installFetchMock, textResponse } from "../test/utils.js";
-import { UPLOAD_FILE_PATH } from "./upload-queue.js";
+import { TEXT_NOTE_PATH, UPLOAD_FILE_PATH } from "./upload-queue.js";
 import {
   OFFLINE_QUEUED,
   buildCaptureMetadata,
   buildTargets,
+  createOrQueueTextCapture,
   createTextCapture,
   queueRawFileNoteOffline,
   sourceFileMetadata,
@@ -207,5 +208,87 @@ describe("createTextCapture", () => {
       targets: [],
       metadata: { capture_kind: "text" },
     });
+  });
+});
+
+describe("createOrQueueTextCapture", () => {
+  it("returns the created note and stamps a client capture id for idempotent replays", async () => {
+    const fetchMock = installFetchMock([
+      { match: TEXT_NOTE_PATH, method: "POST", response: apiResponse({ note_id: "n1" }, 201) },
+    ]);
+    const queue = fakeQueue();
+    const result = await createOrQueueTextCapture({
+      token: "t",
+      projectId: "p1",
+      ownerId: "owner-1",
+      rawContent: "a note",
+      targets: [],
+      metadata: { capture_kind: "text" },
+      queue,
+    });
+    expect(result).toEqual({ note_id: "n1" });
+    expect(queue.enqueue).not.toHaveBeenCalled();
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.client_capture_id).toEqual(expect.any(String));
+    expect(body.client_capture_id).not.toBe("");
+  });
+
+  it("queues the JSON body offline when the request never reaches the server", async () => {
+    installFetchMock([]);
+    const queue = fakeQueue();
+    const result = await createOrQueueTextCapture({
+      token: "t",
+      projectId: "p1",
+      ownerId: "owner-1",
+      rawContent: "a note",
+      targets: [{ entity_id: "q1", entity_type: "question" }],
+      metadata: { capture_kind: "text" },
+      queue,
+    });
+    expect(result).toBe(OFFLINE_QUEUED);
+    expect(queue.enqueue).toHaveBeenCalledTimes(1);
+    const enqueued = queue.enqueue.mock.calls[0][0];
+    expect(enqueued.endpoint).toBe(TEXT_NOTE_PATH);
+    expect(enqueued.ownerId).toBe("owner-1");
+    expect(enqueued.file).toBeUndefined();
+    expect(enqueued.json).toMatchObject({
+      project_id: "p1",
+      raw_content: "a note",
+      targets: [{ entity_id: "q1", entity_type: "question" }],
+      metadata: { capture_kind: "text" },
+    });
+    expect(enqueued.json.client_capture_id).toEqual(expect.any(String));
+  });
+
+  it("rethrows a server rejection instead of queueing", async () => {
+    installFetchMock([
+      { match: TEXT_NOTE_PATH, method: "POST", response: errorResponse("Bad note.", 422) },
+    ]);
+    const queue = fakeQueue();
+    await expect(
+      createOrQueueTextCapture({
+        token: "t",
+        projectId: "p1",
+        ownerId: "owner-1",
+        rawContent: "a note",
+        metadata: {},
+        queue,
+      })
+    ).rejects.toThrow("Bad note.");
+    expect(queue.enqueue).not.toHaveBeenCalled();
+  });
+
+  it("rethrows the network failure when this browser has no offline queue", async () => {
+    installFetchMock([]);
+    await expect(
+      createOrQueueTextCapture({
+        token: "t",
+        projectId: "p1",
+        ownerId: "owner-1",
+        rawContent: "a note",
+        metadata: {},
+        queue: null,
+      })
+    ).rejects.toThrow();
   });
 });

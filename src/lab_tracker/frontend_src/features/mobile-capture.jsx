@@ -37,12 +37,14 @@ function MobileCaptureCard({
     canWrite,
     selectedProjectId,
     questions,
+    sessions,
     navigate,
     setBusy,
     setFlash,
     refreshProjectCounts,
     refreshRecentNotes,
     lockedCheckpointNoteId: launchContext.checkpointNoteId,
+    launchSessionId: launchContext.sessionId,
     returnPath: launchContext.returnPath,
   });
 
@@ -85,6 +87,12 @@ function MobileCaptureCard({
             voiceNoteType={capture.voiceNoteType}
             setVoiceNoteType={capture.setVoiceNoteType}
             onUploadCapture={capture.uploadCapture}
+            draftSavedAt={capture.composerDraftSavedAt}
+            onRestoreDraft={capture.restoreComposerText}
+            onDiscardDraft={capture.discardComposerDraft}
+            recordingSupported={capture.recordingSupported}
+            isRecording={capture.isRecording}
+            onToggleRecording={capture.toggleRecording}
           />
 
           <CaptureContextFields
@@ -100,6 +108,7 @@ function MobileCaptureCard({
             sessions={sessions}
             sessionId={capture.sessionId}
             setSessionId={capture.setSessionId}
+            contextCarriedOver={capture.contextCarriedOver}
             datasets={datasets}
             datasetId={capture.datasetId}
             setDatasetId={capture.setDatasetId}

@@ -87,6 +87,62 @@ def test_get_session_by_link_is_opaque_to_outsiders(
     }
 
 
+def test_session_capture_link_opens_capture_with_the_session_preselected(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    scoped_project_member,
+    viewer_user,
+) -> None:
+    project_id = scoped_project_member.visible_project_id
+    session = _create_operational_session(client, admin_auth_headers, project_id)
+
+    allowed = client.get(
+        f"/sessions/{session['session_id']}/capture-link",
+        headers=scoped_project_member.member_headers,
+    )
+    assert allowed.status_code == 200
+    payload = allowed.json()["data"]
+    assert payload["session_id"] == session["session_id"]
+    assert payload["project_id"] == project_id
+    # A full URL the phone can open, ending in the capture route with both
+    # the project and the session named so capture preselects them.
+    assert payload["capture_url"].startswith(("http://", "https://"))
+    assert payload["capture_url"].endswith(
+        f"/app/capture?project_id={project_id}&session_id={session['session_id']}"
+    )
+    qr_svg = payload["capture_qr_svg"]
+    assert qr_svg.startswith("<svg") and "</svg>" in qr_svg
+    assert 'fill="#000000"' in qr_svg
+
+    # Outsiders get the same opaque 404 as any other session read.
+    denied = client.get(
+        f"/sessions/{session['session_id']}/capture-link",
+        headers=viewer_user.headers,
+    )
+    assert denied.status_code == 404
+    assert denied.json()["error"]["code"] == "not_found"
+
+
+def test_session_capture_link_honors_base_url_override(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _create_project(client, admin_auth_headers, "Capture link base URL")
+    session = _create_operational_session(client, admin_auth_headers, project_id)
+    client.app.state.settings.base_url = "https://lab.example.com"
+    try:
+        response = client.get(
+            f"/sessions/{session['session_id']}/capture-link",
+            headers=admin_auth_headers,
+        )
+    finally:
+        client.app.state.settings.base_url = ""
+    assert response.status_code == 200
+    assert response.json()["data"]["capture_url"].startswith(
+        "https://lab.example.com/app/capture?"
+    )
+
+
 def test_promote_operational_session_to_scientific_over_http(
     client: TestClient,
     admin_auth_headers: dict[str, str],

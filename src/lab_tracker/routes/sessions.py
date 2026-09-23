@@ -9,6 +9,7 @@ from starlette import status as http_status
 from starlette.requests import Request
 
 from lab_tracker.api import LabTrackerAPI
+from lab_tracker.instance_url import build_instance_url
 from lab_tracker.models import (
     AcquisitionOutput,
     Dataset,
@@ -19,10 +20,12 @@ from lab_tracker.models import (
     UsageEventResourceType,
 )
 from lab_tracker.patching import provided_fields
+from lab_tracker.qr_svg import build_qr_svg, resolve_public_base_url
 from lab_tracker.schemas import (
     AcquisitionOutputCreate,
     Envelope,
     ListEnvelope,
+    SessionCaptureLink,
     SessionCreate,
     SessionDatasetPromotionRequest,
     SessionPromotionRequest,
@@ -110,6 +113,33 @@ def build_sessions_router(api: LabTrackerAPI) -> APIRouter:
             project_id=session.project_id,
         )
         return Envelope(data=session)
+
+    @router.get(
+        "/sessions/{session_id}/capture-link",
+        response_model=Envelope[SessionCaptureLink],
+    )
+    def get_session_capture_link(session_id: UUID, request: Request):
+        """A QR-able URL that opens phone capture with this session preselected.
+
+        Read access to the session's project is enough: the link carries no
+        credential, and the phone still signs in (or uses its device grant).
+        """
+        session = api_from_request(request, api).get_session_for_read(
+            session_id,
+            actor=actor_from_request(request),
+        )
+        capture_url = build_instance_url(resolve_public_base_url(request), "/app/capture")
+        capture_url = (
+            f"{capture_url}?project_id={session.project_id}&session_id={session.session_id}"
+        )
+        return Envelope(
+            data=SessionCaptureLink(
+                session_id=session.session_id,
+                project_id=session.project_id,
+                capture_url=capture_url,
+                capture_qr_svg=build_qr_svg(capture_url),
+            )
+        )
 
     @router.patch("/sessions/{session_id}", response_model=Envelope[Session])
     def update_session(session_id: UUID, payload: SessionUpdate, request: Request):
