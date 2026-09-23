@@ -96,9 +96,12 @@ docker compose \
 
 Replace `claim` with the full `accepted ...`, `failed ...`, or `test --to ...`
 argument list as needed. Replace `/path/to/lab-tracker` with the primary
-checkout. The explicit project name and root Compose path prevent this helper
-from attaching to another Compose project on the same host, such as a separate
-dedicated instance with its own database and signing secret.
+checkout, and `lab-tracker` after `-p` with the primary instance's Compose
+project name: the checkout directory name unless `COMPOSE_PROJECT_NAME` or
+`-p` set another (`docker compose ls` lists them). The explicit project name
+and root Compose path prevent this helper from attaching to another Compose
+project on the same host, such as a separate dedicated instance with its own
+database and signing secret.
 
 Admins can enqueue a fixed, non-graph diagnostic via
 `POST /review-email/test`. The diagnostic is visibly labeled as a test and

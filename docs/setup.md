@@ -133,10 +133,10 @@ managed prompt blocks are re-rendered in place (your original consent choice
 is preserved; add missing conventions blocks with `--yes`), and scaffolded
 integration files — the `.claude/settings.json` prompt hook, `.mcp.json`,
 `.cursor/mcp.json`, `.gemini/settings.json`, the `scripts/lt.py` shim, and
-`AGENTS.lt.md` — are rewritten to the current canonical text. A file whose content differs is
-first preserved next to itself as `*.bak-lt-update`, and `lt_ids.json` is
-never touched. `--dry-run` previews the changes; run `lt doctor` afterwards
-to confirm the repo is in sync.
+`AGENTS.lt.md` — are rewritten to the current canonical text. A file whose
+content differs is first preserved next to itself as `*.bak-lt-update`, and
+`lt_ids.json` is never touched. `--dry-run` previews the changes; run
+`lt doctor` afterwards to confirm the repo is in sync.
 
 ## Multi-client Postgres runtime
 

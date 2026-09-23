@@ -45,6 +45,10 @@ def test_agents_md_leaves_push_policy_to_the_session_completion_profiles() -> No
 
 
 def test_agents_md_links_only_existing_docs() -> None:
+    # Deliberately scans the bd-managed Beads block too: agents follow links
+    # there as much as anywhere. If `bd setup` regenerates the block with its
+    # upstream docs/QUICKSTART.md link, this fails on purpose; replace the link
+    # with `bd prime` again rather than narrowing the scan.
     text = _read(_REPO_ROOT / "AGENTS.md")
     referenced = set(re.findall(r"(?<![\w/.-])docs/[\w./-]+\.md\b", text))
     missing = sorted(path for path in referenced if not (_REPO_ROOT / path).is_file())

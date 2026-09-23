@@ -125,14 +125,20 @@ docker compose exec -T postgres pg_dump \
 ```
 
 Archive the app data volume (mounted from the `app` container, which may be
-running or stopped):
+running or stopped). `--volumes-from` mounts every volume and bind mount of the
+`app` container, so mounts a Compose override adds to `app` are mounted too;
+only `/app/data` is archived.
 
 ```bash
 APP_CONTAINER="$(docker compose ps --all --quiet app)"
-docker run --rm \
-  --volumes-from "${APP_CONTAINER:?no app container}:ro" \
-  -v "$PWD/backups:/backup" \
-  alpine tar -czf /backup/lab-tracker-app-data.tar.gz -C /app/data .
+if [ "$(printf '%s\n' "$APP_CONTAINER" | grep -c .)" -ne 1 ]; then
+  echo "expected exactly one app container, got: ${APP_CONTAINER:-none}" >&2
+else
+  docker run --rm \
+    --volumes-from "$APP_CONTAINER:ro" \
+    -v "$PWD/backups:/backup" \
+    alpine tar -czf /backup/lab-tracker-app-data.tar.gz -C /app/data .
+fi
 ```
 
 ## Restore
@@ -159,10 +165,14 @@ and its volume with `docker compose create app`):
 
 ```bash
 APP_CONTAINER="$(docker compose ps --all --quiet app)"
-docker run --rm \
-  --volumes-from "${APP_CONTAINER:?no app container}" \
-  -v "$PWD/backups:/backup:ro" \
-  alpine sh -c 'rm -rf /app/data/* && tar -xzf /backup/lab-tracker-app-data.tar.gz -C /app/data'
+if [ "$(printf '%s\n' "$APP_CONTAINER" | grep -c .)" -ne 1 ]; then
+  echo "expected exactly one app container, got: ${APP_CONTAINER:-none}" >&2
+else
+  docker run --rm \
+    --volumes-from "$APP_CONTAINER" \
+    -v "$PWD/backups:/backup:ro" \
+    alpine sh -c 'rm -rf /app/data/* && tar -xzf /backup/lab-tracker-app-data.tar.gz -C /app/data'
+fi
 ```
 
 Start the app:
