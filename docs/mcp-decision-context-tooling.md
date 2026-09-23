@@ -384,7 +384,7 @@ The tool should return structured errors that assistant clients can act on:
 | API unreachable or readiness failure | Return `unavailable` with readiness details. Assistant must state Lab Tracker was unavailable before proceeding. |
 | Invalid task kind | Return `invalid_task_kind` with allowed values. |
 | Empty query | Return `invalid_query`. |
-| Multiple plausible projects | Return `ambiguous_project` with candidate projects and reasons, plus `candidate_projects_total`, `candidate_projects_truncated`, and `candidate_projects_omitted` so a cut candidate list is never presented as complete. Search matches are listed up to 10 (the rest are counted, not read); the message says how many projects matched. |
+| Multiple plausible projects | Return `ambiguous_project` with candidate projects and reasons, plus `candidate_projects_total`, `candidate_projects_truncated`, and `candidate_projects_omitted` so a cut candidate list is never presented as complete. Search matches are listed up to the request's `limit`, at most 10 (the rest are counted, not read); the message says how many projects matched. |
 | Anchor not found | Return `anchor_not_found`. Projects are resolved by id, so an anchor in any readable project resolves regardless of how many projects exist. |
 | Anchors cross projects | Return `conflicting_anchors`. |
 | No direct matches | Return an empty direct-match section plus bounded project recency if a project is known. |

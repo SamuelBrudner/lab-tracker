@@ -414,7 +414,11 @@ def _ambiguous_project_error(
 ) -> JsonObject:
     # The match lookup returns ids only, so each listed candidate costs one
     # read; list a bounded prefix and count the rest instead of reading them.
-    listed_project_ids = sorted(search_project_ids)[:AMBIGUOUS_PROJECT_CANDIDATE_LIMIT]
+    # The prefix honours the caller's limit, as the active-project fallback
+    # does, and never exceeds the read budget.
+    listed_project_ids = sorted(search_project_ids)[
+        : min(limit, AMBIGUOUS_PROJECT_CANDIDATE_LIMIT)
+    ]
     candidates: list[JsonObject] = []
     for matched_project_id in listed_project_ids:
         matched_project = reader.get_project(matched_project_id)
@@ -428,9 +432,12 @@ def _ambiguous_project_error(
             if search_truncated
             else f"{candidates_total} projects match"
         )
+        listed_text = (
+            "1 is listed" if len(candidates) == 1 else f"{len(candidates)} are listed"
+        )
         message = (
             f"{AMBIGUOUS_PROJECT_MESSAGE} {matched_text} the query; "
-            f"{len(candidates)} are listed. Pass project_id, an entity anchor, "
+            f"{listed_text}. Pass project_id, an entity anchor, "
             "or a more specific query."
         )
     else:
