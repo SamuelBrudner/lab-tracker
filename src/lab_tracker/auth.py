@@ -1374,6 +1374,19 @@ def require_role(actor: AuthContext | None, allowed_roles: Iterable[Role]) -> No
         raise PermissionDeniedError("Insufficient role.")
 
 
+def require_interactive_admin(actor: AuthContext) -> None:
+    """Managing another user's devices or tokens needs a person at an admin session.
+
+    Paired devices and lpat_ service tokens are already fenced off /auth/* by
+    the middleware; this re-check keeps those routes fail-closed on their own.
+    """
+
+    if actor.principal_type is not PrincipalType.USER:
+        raise PermissionDeniedError("Managing another user's credentials requires a user session.")
+    if actor.role is not Role.ADMIN:
+        raise PermissionDeniedError("Admin privileges required.")
+
+
 def effective_personal_access_token_role(token_role: Role, *, owner_role: Role) -> Role:
     """The role an lpat_ token acts with right now.
 

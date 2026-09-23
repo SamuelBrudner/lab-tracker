@@ -10,12 +10,10 @@ from starlette import status as http_status
 from starlette.requests import Request
 
 from lab_tracker.auth import (
-    AuthContext,
     AuthService,
     DeviceAuthService,
     DeviceToken,
-    PrincipalType,
-    Role,
+    require_interactive_admin,
 )
 from lab_tracker.config import get_settings
 from lab_tracker.errors import NotFoundError, PermissionDeniedError
@@ -175,7 +173,7 @@ def build_device_auth_router(
         offset: int = 0,
     ):
         validate_pagination(limit, offset)
-        _ensure_interactive_admin(actor_from_request(request))
+        require_interactive_admin(actor_from_request(request))
         if auth_service.get_user_by_id(user_id) is None:
             raise NotFoundError("User does not exist.")
         devices = [
@@ -189,26 +187,13 @@ def build_device_auth_router(
         response_model=Envelope[DeviceTokenRead],
     )
     def revoke_user_device(user_id: UUID, device_token_id: UUID, request: Request):
-        _ensure_interactive_admin(actor_from_request(request))
+        require_interactive_admin(actor_from_request(request))
         if auth_service.get_user_by_id(user_id) is None:
             raise NotFoundError("User does not exist.")
         device = device_auth_service.revoke_device(user_id, device_token_id)
         return Envelope(data=_device_token_read(device))
 
     return router
-
-
-def _ensure_interactive_admin(actor: AuthContext) -> None:
-    """Revoking another user's devices needs a person at an admin session.
-
-    Paired devices and lpat_ service tokens are already fenced off /auth/* by
-    the middleware; this re-check keeps the routes fail-closed on their own.
-    """
-
-    if actor.principal_type is not PrincipalType.USER:
-        raise PermissionDeniedError("Managing devices requires user credentials.")
-    if actor.role is not Role.ADMIN:
-        raise PermissionDeniedError("Admin privileges required.")
 
 
 def _device_token_read(device: DeviceToken) -> DeviceTokenRead:

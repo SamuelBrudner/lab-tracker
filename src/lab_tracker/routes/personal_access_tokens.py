@@ -13,10 +13,10 @@ from lab_tracker.auth import (
     AuthService,
     PersonalAccessToken,
     PersonalAccessTokenService,
-    PrincipalType,
     Role,
     User,
     effective_personal_access_token_role,
+    require_interactive_admin,
 )
 from lab_tracker.errors import AuthError, NotFoundError, PermissionDeniedError
 from lab_tracker.schemas import (
@@ -99,7 +99,7 @@ def build_personal_access_tokens_router(
         offset: int = 0,
     ):
         validate_pagination(limit, offset)
-        _ensure_interactive_admin(actor_from_request(request))
+        require_interactive_admin(actor_from_request(request))
         owner = _target_user(auth_service, user_id)
         tokens = [
             _token_read(token, owner_role=owner.role)
@@ -113,25 +113,12 @@ def build_personal_access_tokens_router(
         response_model=Envelope[PersonalAccessTokenRead],
     )
     def revoke_user_personal_access_token(user_id: UUID, token_id: UUID, request: Request):
-        _ensure_interactive_admin(actor_from_request(request))
+        require_interactive_admin(actor_from_request(request))
         owner = _target_user(auth_service, user_id)
         token = personal_access_token_service.revoke_token(user_id, token_id)
         return Envelope(data=_token_read(token, owner_role=owner.role))
 
     return router
-
-
-def _ensure_interactive_admin(actor: AuthContext) -> None:
-    """Admin credential management needs a person at an admin session.
-
-    Paired devices and lpat_ service tokens are already fenced off /auth/* by
-    the middleware; this re-check keeps the routes fail-closed on their own.
-    """
-
-    if actor.principal_type is not PrincipalType.USER:
-        raise PermissionDeniedError("Personal access tokens require user credentials.")
-    if actor.role is not Role.ADMIN:
-        raise PermissionDeniedError("Admin privileges required.")
 
 
 def _token_owner(auth_service: AuthService, actor: AuthContext) -> User:
