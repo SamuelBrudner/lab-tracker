@@ -216,17 +216,10 @@ def build_questions_router(api: LabTrackerAPI) -> APIRouter:
             question_id,
             actor=actor_from_request(request),
         )
-        refactors = api_from_request(request, api).list_question_refactors(
+        refactors, total = api_from_request(request, api).list_question_refactors_page(
             question_id,
             limit=limit,
             offset=offset,
-        )
-        total = len(
-            api_from_request(request, api).list_question_refactors(
-                question_id,
-                limit=None,
-                offset=0,
-            )
         )
         return list_response(refactors, limit=limit, offset=offset, total=total)
 

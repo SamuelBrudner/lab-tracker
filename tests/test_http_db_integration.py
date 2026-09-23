@@ -5,12 +5,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from lab_tracker.auth import Role
 from lab_tracker.db_models import AnalysisModel, NoteModel
+from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 
 
 def _ids(payload: list[dict[str, object]], key: str) -> set[str]:
@@ -1197,6 +1199,67 @@ def test_question_refactor_routes_persist_supersession_and_relationship_moves(
     assert (
         replacement_history.json()["data"][0]["refactor_id"] == payload["refactor"]["refactor_id"]
     )
+
+
+def test_question_refactor_history_pages_without_an_unbounded_total_query(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    headers = admin_auth_headers
+    project_id = client.post(
+        "/projects",
+        json={"name": "Question refactor paging"},
+        headers=headers,
+    ).json()["data"]["project_id"]
+    question_id = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Which question starts the refactor chain?",
+            "question_type": "descriptive",
+            "status": "active",
+        },
+        headers=headers,
+    ).json()["data"]["question_id"]
+    middle_id = None
+    for step in range(2):
+        refactor = client.post(
+            f"/questions/{question_id}/refactor",
+            json={
+                "replacement": {
+                    "text": f"Refined question step {step}",
+                    "question_type": "descriptive",
+                    "status": "active",
+                },
+                "reason": f"Refactor step {step}.",
+            },
+            headers=headers,
+        )
+        assert refactor.status_code == 201, refactor.text
+        question_id = refactor.json()["data"]["replacement_question"]["question_id"]
+        if middle_id is None:
+            middle_id = question_id
+
+    requested_limits: list[int | None] = []
+    original_query = SQLAlchemyLabTrackerRepository.query_question_refactors
+
+    def _recording_query(self, *, question_id, limit=None, offset=0):
+        requested_limits.append(limit)
+        return original_query(self, question_id=question_id, limit=limit, offset=offset)
+
+    monkeypatch.setattr(
+        SQLAlchemyLabTrackerRepository,
+        "query_question_refactors",
+        _recording_query,
+    )
+
+    page = client.get(f"/questions/{middle_id}/refactors?limit=1", headers=headers)
+
+    assert page.status_code == 200
+    assert len(page.json()["data"]) == 1
+    assert page.json()["meta"]["total"] == 2
+    assert requested_limits == [1]
 
 
 def test_note_routes_support_target_filters_and_multipart_upload(

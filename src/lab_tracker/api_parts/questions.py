@@ -16,6 +16,7 @@ from lab_tracker.api_parts._base import _first_uuid
 from lab_tracker.auth import AuthContext
 from lab_tracker.models import (
     Question,
+    QuestionRefactor,
     UsageEventResourceType,
     UsageEventVerb,
 )
@@ -91,6 +92,21 @@ class QuestionsApiMixin:
 
     def list_question_refactors(self, *args: Any, **kwargs: Any) -> Any:
         return self.questions.list_question_refactors(*args, **kwargs)
+
+    def list_question_refactors_page(
+        self,
+        question_id: UUID,
+        *,
+        limit: int,
+        offset: int,
+    ) -> tuple[list[QuestionRefactor], int]:
+        """One bounded page of refactor history plus the repository's total."""
+        repository = self._service_context.active_repository()
+        return repository.query_question_refactors(
+            question_id=question_id,
+            limit=limit,
+            offset=offset,
+        )
 
     def refactor_question(self, *args: Any, **kwargs: Any) -> Any:
         return self._with_usage_event(
