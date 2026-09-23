@@ -3,7 +3,7 @@ import * as React from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import { apiResponse, installFetchMock } from "../test/utils.js";
+import { apiResponse, errorResponse, installFetchMock } from "../test/utils.js";
 import { UsersPage } from "./users.jsx";
 
 describe("UsersPage invitations", () => {
@@ -88,5 +88,58 @@ describe("UsersPage invitations", () => {
         method: "POST",
       })
     );
+  });
+});
+
+describe("UsersPage password reset", () => {
+  const USER_ID = "22222222-2222-4222-8222-222222222222";
+  const listedUser = {
+    created_at: "2026-06-16T12:00:00Z",
+    role: "editor",
+    user_id: USER_ID,
+    username: "member",
+  };
+
+  function renderResetPage(patchResponse) {
+    installFetchMock([
+      {
+        match: "/auth/users?limit=200",
+        response: () => apiResponse([listedUser], 200, { limit: 200, offset: 0, total: 1 }),
+      },
+      {
+        match: "/auth/invitations?limit=200",
+        response: apiResponse([], 200, { limit: 200, offset: 0, total: 0 }),
+      },
+      { match: `/auth/users/${USER_ID}`, method: "PATCH", response: patchResponse },
+    ]);
+    const setFlash = vi.fn();
+    render(<UsersPage token="admin-token" canManageUsers setBusy={vi.fn()} setFlash={setFlash} />);
+    return setFlash;
+  }
+
+  it("keeps the typed password when the reset is rejected", async () => {
+    const setFlash = renderResetPage(
+      errorResponse("Password must be at least 12 characters.", 422)
+    );
+
+    const input = await screen.findByLabelText("New password");
+    fireEvent.change(input, { target: { value: "short-pass" } });
+    fireEvent.click(screen.getByRole("button", { name: "Reset password" }));
+
+    await waitFor(() =>
+      expect(setFlash).toHaveBeenLastCalledWith("", "Password must be at least 12 characters.")
+    );
+    expect(screen.getByLabelText("New password")).toHaveValue("short-pass");
+  });
+
+  it("clears the typed password once the reset succeeds", async () => {
+    const setFlash = renderResetPage(apiResponse(listedUser));
+
+    const input = await screen.findByLabelText("New password");
+    fireEvent.change(input, { target: { value: "a-long-enough-password" } });
+    fireEvent.click(screen.getByRole("button", { name: "Reset password" }));
+
+    await waitFor(() => expect(setFlash).toHaveBeenLastCalledWith("Password reset."));
+    await waitFor(() => expect(screen.getByLabelText("New password")).toHaveValue(""));
   });
 });
