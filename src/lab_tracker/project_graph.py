@@ -1010,10 +1010,14 @@ def _entity_type_value(entity_type: EntityType | str) -> str:
 
 
 def _escape_mermaid(value: str) -> str:
+    # Mermaid quoted labels end at the next double quote and do not honour
+    # backslash escapes; its entity codes (#quot;, #35;) are the supported way
+    # to embed a quote. "#" is encoded first so literal text shaped like an
+    # entity code is not decoded.
     return (
         str(value)
-        .replace("\\", "\\\\")
-        .replace('"', '\\"')
+        .replace("#", "#35;")
+        .replace('"', "#quot;")
         .replace("\r", " ")
         .replace("\n", " ")
     )

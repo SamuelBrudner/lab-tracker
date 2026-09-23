@@ -23,7 +23,9 @@ from lab_tracker.project_graph import (
     PROJECT_GRAPH_QUALIFIED_RELATIONSHIP_SEMANTICS,
     PROJECT_GRAPH_SUPPRESSED_RELATIONSHIP_TOKENS,
     build_project_graph,
+    project_graph_to_mermaid,
 )
+from lab_tracker.schemas import ProjectGraphEdge, ProjectGraphNode, ProjectGraphRead
 from lab_tracker.vocabulary import TERMS
 
 
@@ -846,8 +848,41 @@ def test_project_graph_mermaid_export_is_stable_and_escaped(
     ).text
     assert first == second
     assert first.startswith("graph LR\n")
-    assert 'Can \\"escape\\" survive? Yes' in first
+    assert "Can #quot;escape#quot; survive? Yes" in first
     assert "\nYes" not in first
+
+
+def test_mermaid_labels_use_entity_codes_mermaid_understands():
+    graph = ProjectGraphRead(
+        project_id=uuid4(),
+        view="full",
+        nodes=[
+            ProjectGraphNode(
+                id="a",
+                entity_type="question",
+                entity_id="a",
+                label='Is "C:\\data" #quot; literal?',
+            ),
+            ProjectGraphNode(id="b", entity_type="claim", entity_id="b", label="Claim"),
+        ],
+        edges=[
+            ProjectGraphEdge(
+                id="a->b",
+                source="a",
+                target="b",
+                label='answers "why"',
+                relationship="answers",
+            )
+        ],
+    )
+
+    mermaid = project_graph_to_mermaid(graph)
+
+    # Mermaid labels run to the next double quote and ignore backslashes, so a
+    # quote is written as #quot; and a literal "#" as #35; (so text that looks
+    # like an entity code is not decoded).
+    assert '  n0["question: Is #quot;C:\\data#quot; #35;quot; literal?"]\n' in mermaid
+    assert '  n0 -- "answers #quot;why#quot;" --> n1\n' in mermaid
 
 
 def test_project_graph_routes_are_opaque_to_outsiders_but_require_authentication(
