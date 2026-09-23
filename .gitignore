@@ -3,7 +3,6 @@ __pycache__/
 *.egg-info/
 build/
 /outputs/
-docs/runs/
 node_modules/
 .env
 .env.*
