@@ -178,8 +178,15 @@ def test_examples_and_build_exclusions_are_generic() -> None:
 
     readme = _deployment_text("README.md")
     assert "only for an existing instance with exactly one running app" in readme
-    assert "image-only" in readme
-    assert "backward-compatible" in readme
+    # The app refuses an Alembic revision it does not know, and the previous
+    # image's entrypoint already fails at `alembic upgrade head`, so once a
+    # release applies a migration only the validated backup can recover.
+    normalized = " ".join(readme.split())
+    assert "backward-compatible" not in readme
+    assert "Can't locate revision" in normalized
+    assert "adds an Alembic migration" in normalized
+    assert "restore the validated backup" in normalized
+    assert "docs/self-hosted-operations.md#restore" in normalized
     assert "MANIFEST.sha256" in readme
 
 
