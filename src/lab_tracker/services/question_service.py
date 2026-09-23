@@ -683,10 +683,15 @@ class QuestionService(BaseService):
         )
 
         def _persist(repository) -> None:  # noqa: ANN001
-            repository.questions.save(replacement)
-            repository.questions.save(source)
-            for child in children:
-                repository.questions.save(child)
+            for question in (replacement, source, *children):
+                repository.questions.save(question)
+                self.versions.record_entity_version(
+                    repository,
+                    entity_type=EntityType.QUESTION,
+                    entity_id=question.question_id,
+                    entity=question,
+                    actor=actor,
+                )
             for note in notes:
                 repository.notes.save(note)
             repository.question_refactors.save(refactor)

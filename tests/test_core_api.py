@@ -2140,3 +2140,62 @@ def test_operational_session_disallows_primary_question():
             primary_question_id=question.question_id,
             actor=actor,
         )
+
+
+def test_question_refactor_records_entity_versions_for_every_changed_question():
+    """L109: refactors must appear in /questions/{id}/versions like other edits."""
+
+    api = repository_backed_api()
+    actor = _actor()
+    project = api.create_project("Question Refactor Versions", actor=actor)
+    source = api.create_question(
+        project_id=project.project_id,
+        text="Does the original wording hold?",
+        question_type=QuestionType.DESCRIPTIVE,
+        status=QuestionStatus.ACTIVE,
+        actor=actor,
+    )
+    moved_child = api.create_question(
+        project_id=project.project_id,
+        text="Which child moves?",
+        question_type=QuestionType.METHOD_DEV,
+        parent_question_ids=[source.question_id],
+        actor=actor,
+    )
+    retained_child = api.create_question(
+        project_id=project.project_id,
+        text="Which child stays?",
+        question_type=QuestionType.METHOD_DEV,
+        parent_question_ids=[source.question_id],
+        actor=actor,
+    )
+
+    result = api.refactor_question(
+        source.question_id,
+        replacement_text="Does the refined wording hold?",
+        replacement_question_type=QuestionType.DESCRIPTIVE,
+        replacement_status=QuestionStatus.ACTIVE,
+        reason="Sharpen the wording.",
+        child_question_ids_to_reparent=[moved_child.question_id],
+        actor=actor,
+    )
+
+    def versions(question_id):
+        return api.list_entity_versions(entity_type=EntityType.QUESTION, entity_id=question_id)
+
+    replacement_id = result.replacement_question.question_id
+    source_versions = versions(source.question_id)
+    assert [item.version_number for item in source_versions] == [1, 2]
+    assert source_versions[-1].snapshot == api.get_question(source.question_id).model_dump(
+        mode="json"
+    )
+    assert source_versions[-1].snapshot["status"] == QuestionStatus.SUPERSEDED.value
+    replacement_versions = versions(replacement_id)
+    assert [item.version_number for item in replacement_versions] == [1]
+    assert replacement_versions[0].snapshot == api.get_question(replacement_id).model_dump(
+        mode="json"
+    )
+    moved_versions = versions(moved_child.question_id)
+    assert [item.version_number for item in moved_versions] == [1, 2]
+    assert moved_versions[-1].snapshot["parent_question_ids"] == [str(replacement_id)]
+    assert [item.version_number for item in versions(retained_child.question_id)] == [1]
