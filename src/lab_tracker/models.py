@@ -1475,6 +1475,29 @@ class PublicationReadinessReport(_DomainModel):
     seal_level: Literal["blocked", "ara_l1"] = "blocked"
 
 
+class CaptureHealthSource(_DomainModel):
+    """One capture path (adapter on a host) and how recently it delivered."""
+
+    adapter: str
+    host_label: str = ""
+    last_captured_at: datetime
+    captured_recent: int = 0
+    captured_window: int = 0
+    staged_unreviewed: int = 0
+    quiet: bool = False
+
+
+class CaptureHealthReport(_DomainModel):
+    project_id: UUID
+    generated_at: datetime
+    window_days: int
+    recent_days: int
+    sources: list[CaptureHealthSource] = Field(default_factory=list)
+    captured_window: int = 0
+    staged_unreviewed: int = 0
+    quiet_sources: int = 0
+
+
 class RecordExportEvent(_DomainModel):
     export_id: UUID
     user_id: UUID

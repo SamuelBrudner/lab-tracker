@@ -5,6 +5,7 @@ import { AnalysisPanel } from "../analysis/AnalysisPanel.jsx";
 import { DatasetPanel } from "../datasets/index.js";
 import { NotePanel } from "../notes.jsx";
 import { PortfolioHome } from "../portfolio-home.jsx";
+import { CaptureHealthCard } from "./CaptureHealthCard.jsx";
 import { QuestionPanel } from "../questions/QuestionPanel.jsx";
 import { SessionPanel } from "../sessions/index.js";
 import { ProjectContextCard, RequestEditAccess } from "../../shared/ui.jsx";
@@ -113,6 +114,10 @@ function WorkspaceHome({
           <RequestEditAccess selectedProject={workspaceData.selectedProject} />
         }
       />
+
+      {hasProjects ? (
+        <CaptureHealthCard token={auth.token} projectId={workspaceData.selectedProjectId} />
+      ) : null}
 
       <QuestionPanel
         canWrite={canContribute}

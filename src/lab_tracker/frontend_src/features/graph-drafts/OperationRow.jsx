@@ -8,6 +8,7 @@ import {
   operationTitle,
   parsedPayloadFromText,
   payloadTargetId,
+  rationaleLabel,
   semanticLinkTargetType,
   sourceRefText,
   statusClass,
@@ -56,7 +57,7 @@ function OperationRow({
         <p className="review-proposal-text">{proposed || operationTitle(operation)}</p>
         {operation.rationale ? (
           <p className="review-because">
-            <span className="subtle">Model inference</span> {operation.rationale}
+            <span className="subtle">{rationaleLabel(operation)}</span> {operation.rationale}
             {operation.confidence !== null && operation.confidence !== undefined
               ? ` · ${Math.round(operation.confidence * 100)}% confident`
               : ""}

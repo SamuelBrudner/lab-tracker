@@ -106,6 +106,9 @@ class ProvenanceApiMixin:
     def check_publication_readiness(self, *args: Any, **kwargs: Any) -> Any:
         return self.publication_readiness.check(*args, **kwargs)
 
+    def check_capture_health(self, *args: Any, **kwargs: Any) -> Any:
+        return self.capture_health.report(*args, **kwargs)
+
     def list_entity_versions(self, *args: Any, **kwargs: Any) -> Any:
         return self.entity_versions.list_entity_versions(*args, **kwargs)
 

@@ -12,6 +12,7 @@ from starlette.responses import Response
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.errors import NotFoundError
 from lab_tracker.models import (
+    CaptureHealthReport,
     Project,
     ProjectMembership,
     ProjectStatus,
@@ -119,6 +120,21 @@ def build_projects_router(api: LabTrackerAPI) -> APIRouter:
         report = api_from_request(request, api).check_publication_readiness(
             project_id,
             actor=actor,
+        )
+        return Envelope(data=report)
+
+    @router.get(
+        "/projects/{project_id}/capture-health",
+        response_model=Envelope[CaptureHealthReport],
+    )
+    def capture_health(project_id: UUID, request: Request, window_days: int = 30):
+        """Which capture paths delivered recently, and which have gone quiet."""
+
+        actor = actor_from_request(request)
+        report = api_from_request(request, api).check_capture_health(
+            project_id,
+            actor=actor,
+            window_days=window_days,
         )
         return Envelope(data=report)
 

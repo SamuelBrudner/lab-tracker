@@ -96,6 +96,13 @@ CORE_READ_OPACITY_VARIANTS = (
     ),
     _variant(
         CORE_SUITE,
+        "capture-health",
+        method="GET",
+        route_template="/projects/{project_id}/capture-health",
+        operation_id="capture_health_projects__project_id__capture_health_get",
+    ),
+    _variant(
+        CORE_SUITE,
         "project-graph-json",
         method="GET",
         route_template="/projects/{project_id}/graph",

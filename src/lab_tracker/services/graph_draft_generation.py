@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from collections.abc import Callable
@@ -66,6 +67,10 @@ from lab_tracker.services.graph_draft_generation_ports import (
 from lab_tracker.services.graph_draft_generation_ports import (
     GenerationRecords as GenerationRecords,
 )
+from lab_tracker.services.graph_draft_id_matches import (
+    IdMatchSources,
+    propose_id_match_operations,
+)
 from lab_tracker.services.graph_draft_validation import string_list
 from lab_tracker.services.shared import UserExistenceReader, actor_user_fk, actor_user_id
 
@@ -73,6 +78,8 @@ DEFAULT_BATCH_RETRY_ATTEMPTS = 3
 DEFAULT_PROVIDER_TIMEOUT_SECONDS = 60.0
 GENERATION_LEASE_MARGIN_SECONDS = 30
 
+
+logger = logging.getLogger(__name__)
 
 class _GenerationOwnershipLost(RuntimeError):
     """Internal control flow: never persist a stale provider result."""
@@ -122,6 +129,7 @@ class GraphDraftGenerationCoordinator(BaseService):
         context_builder: GenerationContextBuilder,
         patch_validator: GenerationPatchValidator,
         review_email_outbox: ReviewEmailEnqueuer | None = None,
+        id_match_sources: IdMatchSources | None = None,
     ) -> None:
         super().__init__(context)
         self.records = records
@@ -130,6 +138,31 @@ class GraphDraftGenerationCoordinator(BaseService):
         self.context_builder = context_builder
         self.patch_validator = patch_validator
         self.review_email_outbox = review_email_outbox
+        self.id_match_sources = id_match_sources
+
+    def _id_match_operations(
+        self,
+        change_set: GraphChangeSet,
+        notes: list[Note],
+        *,
+        starting_sequence: int,
+    ) -> tuple[list[GraphChangeOperation], dict[str, Any] | None]:
+        if self.id_match_sources is None:
+            return [], None
+        try:
+            return propose_id_match_operations(
+                notes,
+                change_set=change_set,
+                sources=self.id_match_sources,
+                validator=self.patch_validator,
+                starting_sequence=starting_sequence,
+            )
+        except Exception:  # noqa: BLE001 - a rule-pass failure must not fail the batch.
+            logger.exception(
+                "deterministic id-match pass failed for change set %s",
+                change_set.change_set_id,
+            )
+            return [], None
 
     @property
     def user_reader(self) -> UserExistenceReader:
@@ -634,7 +667,16 @@ class GraphDraftGenerationCoordinator(BaseService):
                 )
                 return self._finish_failed_or_current(change_set, claim.claim_token)
             graph_patch, operations = generated
-            change_set.operations = operations
+            # Rule-based links from ids the captures already carry, appended
+            # after the model's proposals and never shown to the model.
+            id_match_operations, id_match_summary = self._id_match_operations(
+                change_set,
+                batch_notes,
+                starting_sequence=len(operations) + 1,
+            )
+            change_set.operations = [*operations, *id_match_operations]
+            if id_match_summary is not None:
+                change_set.context_packet["deterministic_id_matches"] = id_match_summary
             change_set.summary = str(graph_patch.get("summary") or "")
             change_set.uncertain_fields = string_list(
                 graph_patch.get("uncertain_fields")

@@ -10,6 +10,7 @@ import {
   operationProposalText,
   payloadTargetId,
   payloadText,
+  rationaleLabel,
   sourceRegionStyle,
   sourceRegions,
   spokenReviewScript,
@@ -246,3 +247,12 @@ describe("editableStringFields", () => {
     expect(editableStringFields(null)).toEqual([]);
   });
 });
+
+describe("rationaleLabel", () => {
+  it("labels rule-based id matches distinctly from model inference", () => {
+    expect(rationaleLabel({ source_refs: [{ basis: "exact_id_match" }] })).toBe("Exact id match");
+    expect(rationaleLabel({ source_refs: [{ label: "voice memo" }] })).toBe("Model inference");
+    expect(rationaleLabel({})).toBe("Model inference");
+  });
+});
+

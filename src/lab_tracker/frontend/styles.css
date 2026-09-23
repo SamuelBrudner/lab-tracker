@@ -1787,6 +1787,21 @@ button.project-graph-legend-item:hover {
   margin-top: 0.4rem;
 }
 
+.capture-health-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.35rem;
+}
+
+.capture-health-quiet strong {
+  color: var(--danger, #b42318);
+}
+
+.capture-health-flag {
+  margin-left: auto;
+}
+
 .review-proposal-intent {
   margin: 0;
   text-transform: uppercase;

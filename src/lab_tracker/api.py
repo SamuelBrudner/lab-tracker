@@ -74,6 +74,8 @@ from lab_tracker.services import (
     TransactionalDraftCommitCoordinator,
     VisualizationService,
 )
+from lab_tracker.services.capture_health_service import CaptureHealthService
+from lab_tracker.services.graph_draft_id_matches import RepositoryIdMatchSources
 from lab_tracker.store_authority_registry import StoreAuthorityRegistry
 
 _logger = logging.getLogger(__name__)
@@ -148,6 +150,10 @@ class LabTrackerAPI(
             context
         )
         self.publication_readiness: PublicationReadinessService = PublicationReadinessService(
+            context,
+            projects=self.projects,
+        )
+        self.capture_health: CaptureHealthService = CaptureHealthService(
             context,
             projects=self.projects,
         )
@@ -308,6 +314,10 @@ class LabTrackerAPI(
             context_builder=graph_context_builder,
             patch_validator=graph_patch_validator,
             review_email_outbox=self.review_emails,
+            id_match_sources=RepositoryIdMatchSources(
+                analyses=self.analyses,
+                sessions=self.sessions,
+            ),
         )
         graph_draft_review = GraphDraftReviewCoordinator(
             context,

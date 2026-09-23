@@ -118,6 +118,12 @@ class GenerationContextBuilder(Protocol):
 class GenerationPatchValidator(Protocol):
     def validate_top_level(self, graph_patch: dict[str, Any]) -> None: ...
 
+    def validate_operation(
+        self,
+        operation: GraphChangeOperation,
+        payload: dict[str, Any],
+    ) -> None: ...
+
     def operations_from_graph_patch(
         self,
         change_set: GraphChangeSet,

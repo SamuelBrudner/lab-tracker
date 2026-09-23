@@ -172,6 +172,22 @@ research record:
   graph entities they are created directly today; any future agent-harvested
   nodes stay human-gated through graph-draft review. See
   [ara-exploration-graph-design.md](ara-exploration-graph-design.md).
+- A per-project capture-health report
+  (`GET /projects/{project_id}/capture-health`) that groups the window's notes
+  by the adapter and host that captured them, counts recent and unreviewed
+  captures per source, and flags a source that captured earlier in the window
+  but not in the last seven days, so a stalled scheduler, expired token, or
+  moved folder is visible on the home page instead of showing up as an empty
+  review queue. Typed notes are never flagged.
+- A rule-based id-match pass in the daily batch draft: when a staged note's own
+  metadata names a session (`watch_session_id`, `capture_session_id`) or a git
+  commit (`run_git_commit`, `repo_git_commit`, `hpc_git_commit`, `git_commit`)
+  that matches exactly one session or committed analysis `code_version` in the
+  project, the batch gains one `link_note_to_*` operation per note with
+  confidence 1.0 and `basis: exact_id_match` on its source references, appended
+  after the model's proposals and never shown to the model. Ambiguous prefixes
+  and already-linked targets propose nothing. The operation still needs human
+  accept and owner commit like any other.
 - A per-project publication-readiness report
   (`GET /projects/{project_id}/publication-readiness`) that scans the retained
   graph for gaps before write-up — supported claims missing dataset/analysis

@@ -185,6 +185,15 @@ def _read_cases(records: CoreReadRecords) -> dict[str, tuple[ReadCase, ...]]:
                 project_id,
             ),
             ReadCase(
+                "capture-health",
+                f"/projects/{project_id}/capture-health",
+                f"/projects/{missing_project_id}/capture-health",
+                "Project",
+                "application/json",
+                lambda response: response.json()["data"]["project_id"],
+                project_id,
+            ),
+            ReadCase(
                 "project-graph-json",
                 f"/projects/{project_id}/graph?view=evidence",
                 f"/projects/{missing_project_id}/graph?view=evidence",
@@ -385,7 +394,7 @@ def test_core_read_variants_are_opaque_and_preserve_authorized_contracts(
 ) -> None:
     cases_by_domain = _read_cases(core_read_records)
     assert tuple(cases_by_domain) == CORE_READ_DOMAINS
-    assert sum(len(cases) for cases in cases_by_domain.values()) == 18
+    assert sum(len(cases) for cases in cases_by_domain.values()) == 19
     inventory_coverage_ids = {
         variant.coverage_id for variant in CORE_READ_OPACITY_VARIANTS
     }
@@ -445,7 +454,7 @@ def test_all_core_read_variants_still_require_authentication(
         for domain_cases in _read_cases(core_read_records).values()
         for case in domain_cases
     ]
-    assert len(cases) == 18
+    assert len(cases) == 19
 
     for case in cases:
         response = client.get(case.existing_path, headers={"Accept": case.accept})

@@ -4,6 +4,7 @@ import {
   operationIntent,
   operationNarrativeAction,
   operationProposalText,
+  rationaleLabel,
   sourceRefText,
   statusClass,
 } from "./format.js";
@@ -91,7 +92,7 @@ function ProposalCitation({
           <span className="proposal-citation-text">{proposedText}</span>
           {operation.rationale ? (
             <span className="proposal-citation-rationale">
-              <span className="subtle">Model inference</span> {operation.rationale}
+              <span className="subtle">{rationaleLabel(operation)}</span> {operation.rationale}
               {operation.confidence !== null && operation.confidence !== undefined
                 ? ` · ${Math.round(operation.confidence * 100)}% confident`
                 : ""}

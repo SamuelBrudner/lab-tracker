@@ -156,6 +156,15 @@ function spokenReviewScript(changeSet, payloadTextById = {}) {
   return sections.join(" ");
 }
 
+// Rule-based proposals (an id in the capture's own metadata matched exactly
+// one entity) are labelled as such; everything else is the model's reading.
+function rationaleLabel(operation) {
+  const refs = operation?.source_refs || [];
+  return refs.some((ref) => ref && ref.basis === "exact_id_match")
+    ? "Exact id match"
+    : "Model inference";
+}
+
 // One-line confirmation for a per-proposal decision, so the feedback names
 // what was decided instead of a generic "operation updated". `decision` is
 // undefined when only edits were saved.
@@ -403,6 +412,7 @@ export {
   payloadTargetId,
   payloadText,
   pickAudioMimeType,
+  rationaleLabel,
   semanticLinkTargetType,
   sourceRefText,
   sourceRegionStyle,
