@@ -169,8 +169,10 @@ function useReviewDictation({ changeSetId, spokenReview, canEditDraft, setFlash 
     startingRef.current = true;
     stopSpeech();
     setFlash("", "");
+    let microphoneGranted = false;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      microphoneGranted = true;
       if (!mountedRef.current) {
         stream.getTracks().forEach((track) => track.stop());
         return;
@@ -212,12 +214,19 @@ function useReviewDictation({ changeSetId, spokenReview, canEditDraft, setFlash 
       recorder.start();
       mediaRecorderRef.current = recorder;
       setIsRecording(true);
-    } catch {
+    } catch (err) {
       mediaRecorderRef.current = null;
       stopAudioStream();
       if (mountedRef.current) {
         setIsRecording(false);
-        setFlash("", "Could not access the microphone. Check browser permissions.");
+        // Only a refused getUserMedia is a permissions problem; a recorder that
+        // failed after access was granted needs its own, truthful message.
+        setFlash(
+          "",
+          microphoneGranted
+            ? `Could not start recording: ${err?.message || "the recorder failed to start."}`
+            : "Could not access the microphone. Check browser permissions."
+        );
       }
     } finally {
       startingRef.current = false;

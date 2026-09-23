@@ -1321,7 +1321,7 @@ describe("GraphDraftDetailCard audio review", () => {
     await waitFor(() =>
       expect(setFlash).toHaveBeenLastCalledWith(
         "",
-        "Could not access the microphone. Check browser permissions."
+        "Could not start recording: The stream is inactive."
       )
     );
     expect(track.stop).toHaveBeenCalledTimes(1);
@@ -1330,5 +1330,38 @@ describe("GraphDraftDetailCard audio review", () => {
 
     expect(await screen.findByRole("button", { name: "Stop recording" })).toBeInTheDocument();
     expect(getUserMedia).toHaveBeenCalledTimes(2);
+  });
+
+  it("blames microphone permissions only when the microphone was refused", async () => {
+    installSpeechSynthesis();
+    const draft = draftFixture({ draft_mode: "graph_context" });
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: {
+        getUserMedia: vi
+          .fn()
+          .mockRejectedValue(new DOMException("Permission denied", "NotAllowedError")),
+      },
+    });
+    vi.stubGlobal(
+      "MediaRecorder",
+      class {
+        static isTypeSupported() {
+          return true;
+        }
+      }
+    );
+    const setFlash = vi.fn();
+
+    renderDraft(draft, { setFlash });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Dictate feedback" }));
+    await waitFor(() =>
+      expect(setFlash).toHaveBeenLastCalledWith(
+        "",
+        "Could not access the microphone. Check browser permissions."
+      )
+    );
+    expect(screen.getByRole("button", { name: "Dictate feedback" })).toBeInTheDocument();
   });
 });
