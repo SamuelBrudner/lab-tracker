@@ -520,6 +520,40 @@ class GoalService(BaseService):
             ),
         )
 
+    def reached_project_ids(
+        self,
+        goal_id: UUID | None,
+        *,
+        project_id: UUID | None,
+        targets: Iterable[EntityRef],
+    ) -> set[UUID]:
+        """The projects a goal create/update would lock, for lock pre-planning.
+
+        Covers the existing goal's scope (``goal_id``), its ``project_id`` and
+        every link target, mirroring the set ``_locked_goal`` locks. A goal or
+        link target that does not resolve (missing, or an unsupported target
+        type) is left out: the write itself then fails with that error before
+        saving anything, so the unresolved project needs no lock.
+        """
+
+        project_ids: set[UUID] = set() if project_id is None else {project_id}
+        link_targets = list(targets)
+        if goal_id is not None:
+            try:
+                goal = self.get_goal(goal_id)
+            except NotFoundError:
+                goal = None
+            if goal is not None:
+                if goal.project_id is not None:
+                    project_ids.add(goal.project_id)
+                link_targets.extend(link.target for link in goal.links)
+        for target in link_targets:
+            try:
+                project_ids.add(self._target_project_id(target))
+            except (NotFoundError, ValidationError):
+                continue
+        return project_ids
+
     def _lock_goal_projects(self, project_ids: Iterable[UUID]) -> frozenset[UUID]:
         """Lock every project the goal reaches, in canonical UUID order.
 
@@ -540,12 +574,10 @@ class GoalService(BaseService):
         lock before its exclusive deletion scope would deadlock with them,
         and taking it after would deadlock with dataset deletes.
 
-        Known lock-order gap: a graph draft commit pre-locks its own project
-        before applying operations, so a goal operation in it whose links
-        reach other projects takes those locks after the draft project's,
-        not in global sorted order. On PostgreSQL that can deadlock with a
-        plain goal write over the same projects; the database aborts one
-        side rather than corrupting links.
+        A graph draft commit applies goal operations after pre-locking, in
+        sorted order, every project they reach (``reached_project_ids``), so
+        the reference locks taken here are already held and no goal write in
+        a draft takes one out of canonical order.
         """
 
         locked_project_ids = frozenset(project_ids)

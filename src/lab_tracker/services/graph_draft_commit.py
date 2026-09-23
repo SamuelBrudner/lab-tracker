@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import datetime
 from typing import Any, Protocol
 from uuid import UUID
@@ -14,6 +15,7 @@ from lab_tracker.member_onboarding import (
 )
 from lab_tracker.models import (
     Dataset,
+    EntityRef,
     EntityType,
     Experiment,
     GraphChangeOp,
@@ -72,6 +74,16 @@ class CommitDatasets(Protocol):
     def get_dataset(self, dataset_id: UUID) -> Dataset: ...
 
 
+class CommitGoals(Protocol):
+    def reached_project_ids(
+        self,
+        goal_id: UUID | None,
+        *,
+        project_id: UUID | None,
+        targets: Iterable[EntityRef],
+    ) -> set[UUID]: ...
+
+
 class CommitAuthorization(Protocol):
     def require_interactive(
         self,
@@ -127,6 +139,7 @@ class TransactionalDraftCommitCoordinator(BaseService):
         versions: CommitVersions,
         questions: CommitQuestions,
         datasets: CommitDatasets,
+        goals: CommitGoals,
         authorization: CommitAuthorization,
     ) -> None:
         super().__init__(context)
@@ -135,6 +148,7 @@ class TransactionalDraftCommitCoordinator(BaseService):
         self.versions = versions
         self.questions = questions
         self.datasets = datasets
+        self.goals = goals
         self.authorization = authorization
 
     @property
@@ -207,10 +221,9 @@ class TransactionalDraftCommitCoordinator(BaseService):
             self._lock_question_update_projects(
                 accepted,
                 member_onboarding=is_member_onboarding,
-                project_id=(
-                    change_set.project_id
-                    if _takes_project_reference_lock(accepted)
-                    else None
+                reference_project_ids=self._reference_lock_project_ids(
+                    accepted,
+                    project_id=change_set.project_id,
                 ),
             )
             self._lock_dataset_update_projects(
@@ -268,21 +281,57 @@ class TransactionalDraftCommitCoordinator(BaseService):
             get_question=self.questions.get_question,
         )
 
+    def _reference_lock_project_ids(
+        self,
+        operations: list[GraphChangeOperation],
+        *,
+        project_id: UUID,
+    ) -> set[UUID]:
+        """Every project whose reference lock applying ``operations`` takes.
+
+        Empty unless an operation takes the project reference lock
+        (claim/analysis/goal writes); then the draft's own project plus every
+        project a goal operation reaches. A goal write locks its goal's whole
+        scope and each link target's project, which may lie outside the
+        draft project, so pre-locking only the draft project would let the
+        goal write take the others out of canonical order and deadlock with
+        a plain goal write over the same projects on PostgreSQL.
+        """
+
+        if not _takes_project_reference_lock(operations):
+            return set()
+        project_ids = {project_id}
+        for operation in operations:
+            if operation.entity_type != EntityType.GOAL:
+                continue
+            is_create = operation.op == GraphChangeOp.CREATE
+            project_ids.update(
+                self.goals.reached_project_ids(
+                    None if is_create else operation.target_entity_id,
+                    project_id=(
+                        _payload_uuid(operation.payload.get("project_id"))
+                        if is_create
+                        else None
+                    ),
+                    targets=_payload_goal_link_targets(operation.payload),
+                )
+            )
+        return project_ids
+
     def _lock_question_update_projects(
         self,
         operations: list[GraphChangeOperation],
         *,
         member_onboarding: bool,
-        project_id: UUID | None = None,
+        reference_project_ids: Iterable[UUID] = (),
     ) -> None:
         """Pre-lock every question project in canonical UUID order.
 
-        ``project_id``, when given, names the draft's own project. Commit
-        passes it only when an operation will take the project reference
-        lock (claim/analysis writes): that lock is this question-DAG lock, and
-        it must precede the Dataset locks taken next. Other drafts keep the
-        narrower plan so pure dataset or question updates in one project do
-        not serialize on the project lock.
+        ``reference_project_ids`` names the projects whose reference lock an
+        operation will take (``_reference_lock_project_ids``): that lock is
+        this question-DAG lock, and it must precede the Dataset locks taken
+        next. Other drafts keep the narrower plan so pure dataset or question
+        updates in one project do not serialize on the project lock.
 
         ``member_onboarding`` enables the relation-only onboarding link rules
         (concrete question targets that must stay active or staged). Ordinary
@@ -291,7 +340,7 @@ class TransactionalDraftCommitCoordinator(BaseService):
         entity types, validated by the note service.
         """
 
-        project_ids: set[UUID] = set() if project_id is None else {project_id}
+        project_ids: set[UUID] = set(reference_project_ids)
         for operation in operations:
             if (
                 operation.op == GraphChangeOp.UPDATE
@@ -409,6 +458,45 @@ def _takes_project_reference_lock(operations: list[GraphChangeOperation]) -> boo
         operation.entity_type in _PROJECT_REFERENCE_LOCKING_ENTITY_TYPES
         for operation in operations
     )
+
+
+def _payload_uuid(value: Any) -> UUID | None:
+    """A concrete UUID from a raw payload value; ``$ref`` or malformed is None.
+
+    Pre-lock planning reads the payload before validation; the operation's
+    own validation reports a malformed value when it is applied.
+    """
+
+    if not isinstance(value, str):
+        return None
+    try:
+        return UUID(value)
+    except ValueError:
+        return None
+
+
+def _payload_goal_link_targets(payload: dict[str, Any]) -> list[EntityRef]:
+    """Concrete goal link targets named by a raw goal operation payload.
+
+    A ``$ref`` target is created by this draft and locked by its own write;
+    malformed links are left for the goal write's validation to report.
+    """
+
+    raw_links = payload.get("links")
+    if not isinstance(raw_links, list):
+        return []
+    targets: list[EntityRef] = []
+    for raw_link in raw_links:
+        if not isinstance(raw_link, dict):
+            continue
+        entity_id = _payload_uuid(raw_link.get("entity_id"))
+        try:
+            entity_type = EntityType(raw_link.get("entity_type"))
+        except ValueError:
+            continue
+        if entity_id is not None:
+            targets.append(EntityRef(entity_type=entity_type, entity_id=entity_id))
+    return targets
 
 
 def _ensure_accepted_operation_refs_available(

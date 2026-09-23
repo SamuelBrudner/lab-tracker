@@ -12,7 +12,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from threading import Event, Lock
 from time import monotonic
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -24,6 +24,15 @@ from lab_tracker.db_models import (
     ClaimModel,
     DatasetModel,
     GoalLinkModel,
+)
+from lab_tracker.models import (
+    AcceptanceMode,
+    EntityType,
+    GraphChangeOp,
+    GraphChangeOperation,
+    GraphChangeOperationStatus,
+    GraphChangeSet,
+    GraphChangeSetStatus,
 )
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 
@@ -639,3 +648,161 @@ def test_goal_delete_waits_for_a_goal_write_holding_the_lock(
     assert deleted.status_code == 200, deleted.text
     fetched = postgres_client.get(f"/goals/{goal_id}", headers=headers)
     assert fetched.status_code == 404, fetched.text
+
+
+def _seed_projectless_goal_draft(
+    client: TestClient,
+    headers: dict[str, str],
+    *,
+    draft_project_id: str,
+    linked_project_id: str,
+) -> UUID:
+    """A ready draft in one project that creates a goal reaching another."""
+
+    note = _post(
+        client,
+        headers,
+        "/notes",
+        {"project_id": draft_project_id, "raw_content": "Cross-project goal draft"},
+    )
+    change_set_id = uuid4()
+    change_set = GraphChangeSet(
+        change_set_id=change_set_id,
+        project_id=UUID(draft_project_id),
+        source_note_id=UUID(note["note_id"]),
+        source_note_ids=[UUID(note["note_id"])],
+        model="test-model",
+        prompt_version="test-prompt",
+        status=GraphChangeSetStatus.READY,
+        operations=[
+            GraphChangeOperation(
+                operation_id=uuid4(),
+                change_set_id=change_set_id,
+                sequence=1,
+                op=GraphChangeOp.CREATE,
+                entity_type=EntityType.GOAL,
+                payload={
+                    "goal_type": "paper",
+                    "title": "Drafted cross-project paper",
+                    "links": [
+                        {
+                            "entity_type": "project",
+                            "entity_id": linked_project_id,
+                            "relation": "contributes_to",
+                        }
+                    ],
+                },
+                status=GraphChangeOperationStatus.ACCEPTED,
+                acceptance_mode=AcceptanceMode.BULK_ACCEPTED,
+            )
+        ],
+    )
+    with client.app.state.db_session_factory() as session:
+        repository = SQLAlchemyLabTrackerRepository(session)
+        repository.graph_change_sets.save(change_set)
+        repository.commit()
+    return change_set_id
+
+
+def test_graph_commit_reaching_another_project_does_not_deadlock_with_a_goal_write(
+    postgres_client: TestClient,
+    postgres_admin_auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cross-project goal operations take reference locks in sorted order (M58).
+
+    A plain goal write over projects ``low < high`` holds ``low`` and pauses
+    before ``high``; a draft in ``high`` creates a goal reaching ``low``. The
+    commit must wait for ``low`` without holding ``high``. When it pre-locked
+    only its own project it held ``high`` while waiting for ``low``, and
+    PostgreSQL aborted one side as a deadlock (an unmapped 500).
+    """
+
+    headers = postgres_admin_auth_headers
+    low, high = sorted(
+        (
+            _post(postgres_client, headers, "/projects", {"name": f"Lock order {index}"})[
+                "project_id"
+            ]
+            for index in range(2)
+        ),
+        key=str,
+    )
+    goal = _post(
+        postgres_client,
+        headers,
+        "/goals",
+        {
+            "goal_type": "paper",
+            "title": "Plain cross-project paper",
+            "links": [
+                {"entity_type": "project", "entity_id": project_id, "relation": "contributes_to"}
+                for project_id in (low, high)
+            ],
+        },
+    )
+    change_set_id = _seed_projectless_goal_draft(
+        postgres_client, headers, draft_project_id=high, linked_project_id=low
+    )
+
+    # Requests run on the TestClient's portal thread, so the roles are told
+    # apart by order: the PATCH takes the first reference lock (``low``), and
+    # while it is paused before its deletion guards the only guard taker is
+    # the commit.
+    backend_pids: dict[str, int] = {}
+    patch_holds_low = Event()
+    release_patch = Event()
+    original_references = SQLAlchemyLabTrackerRepository.lock_project_references
+    original_guard = SQLAlchemyLabTrackerRepository.lock_project_deletion_guard
+
+    def coordinated_references(
+        repository: SQLAlchemyLabTrackerRepository, project_id: UUID
+    ) -> None:
+        original_references(repository, project_id)
+        if "patch" not in backend_pids:
+            assert str(project_id) == low
+            backend_pids["patch"] = _backend_pid(repository)
+            patch_holds_low.set()
+            if not release_patch.wait(timeout=20):
+                raise RuntimeError("Timed out holding the low project's reference lock.")
+
+    def record_commit_pid(repository: SQLAlchemyLabTrackerRepository, project_id: UUID) -> None:
+        if patch_holds_low.is_set() and not release_patch.is_set():
+            backend_pids.setdefault("commit", _backend_pid(repository))
+        original_guard(repository, project_id)
+
+    monkeypatch.setattr(
+        SQLAlchemyLabTrackerRepository, "lock_project_references", coordinated_references
+    )
+    monkeypatch.setattr(
+        SQLAlchemyLabTrackerRepository, "lock_project_deletion_guard", record_commit_pid
+    )
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        patch_future: Future[Any] = executor.submit(
+            _patch_goal, postgres_client, headers, goal["goal_id"], {"title": "Renamed"}
+        )
+        assert patch_holds_low.wait(timeout=10)
+        commit_future: Future[Any] = executor.submit(
+            postgres_client.post,
+            f"/graph-drafts/{change_set_id}/commit",
+            json={"message": "Commit the cross-project goal"},
+            headers=headers,
+        )
+        try:
+            deadline = monotonic() + 10
+            while "commit" not in backend_pids and monotonic() < deadline:
+                Event().wait(timeout=0.01)
+            assert "commit" in backend_pids
+            _wait_until_blocked(
+                postgres_client,
+                blocked_pid=backend_pids["commit"],
+                blocker_pid=backend_pids["patch"],
+            )
+        finally:
+            release_patch.set()
+        patched = patch_future.result(timeout=20)
+        committed = commit_future.result(timeout=20)
+
+    assert patched.status_code == 200, patched.text
+    assert committed.status_code == 200, committed.text
+    assert committed.json()["data"]["status"] == "committed"

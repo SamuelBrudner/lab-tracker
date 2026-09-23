@@ -323,6 +323,7 @@ class LabTrackerAPI(
             versions=self.entity_versions,
             questions=self.questions,
             datasets=self.datasets,
+            goals=self.goals,
             authorization=self.project_authorization,
         )
         graph_draft_scheduling = BatchSchedulingCoordinator(

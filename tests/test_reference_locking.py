@@ -38,6 +38,8 @@ from lab_tracker.models import (
     EntityRef,
     EntityType,
     ExplorationNodeType,
+    GoalRelation,
+    GoalType,
     GraphChangeOp,
     GraphChangeOperation,
     GraphChangeOperationStatus,
@@ -52,6 +54,7 @@ from lab_tracker.services.evidence_bundle_service import (
     CreateDatasetIntent,
     RecordEvidenceBundleCommand,
 )
+from lab_tracker.services.goal_service import GoalLinkSpec
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 
 
@@ -482,6 +485,99 @@ def test_graph_commit_prelocks_project_only_for_reference_lock_writers(
         # Pure dataset updates keep the narrower plan: no project-level lock,
         # so two such commits in one project do not serialize on it.
         assert events == [dataset_lock]
+
+
+def test_graph_commit_prelocks_every_project_its_goal_operations_reach_in_sorted_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Goal operations may reach projects beyond the draft's own (M58 follow-up).
+
+    The commit pre-locks every reached project's reference lock in canonical
+    UUID order before applying anything, so the goal writes it applies take
+    no reference lock out of order and cannot deadlock with a plain goal
+    write over the same projects on PostgreSQL.
+    """
+
+    api = repository_backed_api()
+    actor, draft_project, question = _project_with_question(api)
+    created_link_project = api.create_project("Created goal link", actor=actor)
+    updated_goal_project = api.create_project("Updated goal scope", actor=actor)
+    existing_goal = api.create_goal(
+        None,
+        goal_type=GoalType.PAPER,
+        title="Existing cross-project paper",
+        links=[
+            GoalLinkSpec(
+                target=EntityRef(
+                    entity_type=EntityType.PROJECT,
+                    entity_id=updated_goal_project.project_id,
+                ),
+                relation=GoalRelation.CONTRIBUTES_TO,
+            )
+        ],
+        actor=actor,
+    )
+    operations: list[tuple[GraphChangeOp, EntityType, UUID | None, dict[str, object]]] = [
+        (
+            GraphChangeOp.CREATE,
+            EntityType.GOAL,
+            None,
+            {
+                "goal_type": "paper",
+                "title": "Projectless graph goal.",
+                "links": [
+                    {
+                        "entity_type": "project",
+                        "entity_id": str(created_link_project.project_id),
+                        "relation": "contributes_to",
+                    }
+                ],
+            },
+        ),
+        (
+            GraphChangeOp.UPDATE,
+            EntityType.GOAL,
+            existing_goal.goal_id,
+            {
+                "links": [
+                    {
+                        "entity_type": "question",
+                        "entity_id": str(question.question_id),
+                        "relation": "addresses",
+                    }
+                ],
+            },
+        ),
+    ]
+    change_set_id = _ready_graph_draft(api, actor, draft_project, operations)
+    repository = api.graph_drafts.commit.repository
+    events: list[tuple[str, object]] = []
+    for name in ("lock_project_question_dag", "lock_project_references"):
+        original = getattr(repository, name)
+
+        def observed(*args, _name=name, _original=original, **kwargs) -> None:  # noqa: ANN002, ANN003
+            events.append((_name, args[0]))
+            _original(*args, **kwargs)
+
+        monkeypatch.setattr(repository, name, observed)
+
+    committed = api.commit_graph_change_set(change_set_id, message="Lock plan", actor=actor)
+
+    assert committed.status == GraphChangeSetStatus.COMMITTED
+    reached = sorted(
+        (
+            draft_project.project_id,
+            created_link_project.project_id,
+            updated_goal_project.project_id,
+        ),
+        key=str,
+    )
+    prelocks = [("lock_project_question_dag", project_id) for project_id in reached]
+    assert events[: len(prelocks)] == prelocks
+    # The goal writes then re-take (re-entrantly) only locks already held.
+    later_locks = events[len(prelocks) :]
+    assert ("lock_project_references", updated_goal_project.project_id) in later_locks
+    assert {project_id for _, project_id in later_locks} <= set(reached)
 
 
 def test_evidence_bundle_takes_reference_lock_after_key_lookup_before_writes(
