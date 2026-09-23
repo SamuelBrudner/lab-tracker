@@ -186,6 +186,20 @@ def test_local_note_storage_cleans_temp_file_when_atomic_replace_fails(
     assert list(tmp_path.iterdir()) == []
 
 
+def test_local_note_storage_expands_home_directory(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    storage = LocalNoteStorage("~/note_storage")
+
+    asset = storage.store(b"raw-capture", filename="capture.txt", content_type="text/plain")
+
+    assert (tmp_path / "note_storage" / asset.storage_id.hex).read_bytes() == b"raw-capture"
+    assert not (tmp_path / "~").exists()
+
+
 class _UnreadableNoteStorage(LocalNoteStorage):
     """Storage whose volume became unreadable after the asset was written."""
 

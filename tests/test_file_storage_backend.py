@@ -162,3 +162,9 @@ def test_local_file_storage_backend_validates_required_fields(tmp_path, filename
     with pytest.raises(ValidationError):
         backend.store(b"x", filename=filename, content_type=content_type)
 
+
+
+def test_local_file_storage_backend_expands_home_directory(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    backend = LocalFileStorageBackend("~/file_storage")
+    assert backend.base_path == tmp_path / "file_storage"

@@ -24,7 +24,7 @@ class LocalNoteStorage:
         *,
         max_bytes: int | None = None,
     ) -> None:
-        self._base_path = Path(base_path)
+        self._base_path = Path(base_path).expanduser()
         self._max_bytes = max_bytes
 
     def store(self, content: bytes, *, filename: str, content_type: str) -> NoteRawAsset:
