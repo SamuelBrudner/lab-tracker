@@ -850,3 +850,71 @@ def test_seed_demo_cli_refusal_exits_without_traceback(monkeypatch, capsys) -> N
         lab_tracker_main(["seed-demo"])
 
     assert upgrades == []
+
+
+def test_init_backs_up_file_before_repairing_unpaired_begin_marker(tmp_path: Path) -> None:
+    from lab_tracker.decision_context_constants import CLAUDE_BLOCK_END
+
+    claude = tmp_path / "CLAUDE.md"
+    original = (
+        f"# Mine\n\n{CLAUDE_BLOCK_BEGIN}\nstale activation\n\n"
+        "## My notes after the marker\nirreplaceable user content\n"
+    )
+    claude.write_text(original, encoding="utf-8")
+
+    result = init_consumer_repo(tmp_path)
+
+    repaired = claude.read_text(encoding="utf-8")
+    assert repaired.count(CLAUDE_BLOCK_BEGIN) == 1
+    assert repaired.count(CLAUDE_BLOCK_END) == 1
+    backup = tmp_path / "CLAUDE.md.bak-lt-update"
+    assert result.backups[claude] == backup
+    assert backup.read_text(encoding="utf-8") == original
+    assert any(
+        "unpaired" in warning and str(claude) in warning and str(backup) in warning
+        for warning in result.warnings
+    )
+
+
+def test_uninstall_backs_up_file_before_stripping_unpaired_end_marker(tmp_path: Path) -> None:
+    from lab_tracker.decision_context_constants import CLAUDE_BLOCK_END
+
+    claude = tmp_path / "CLAUDE.md"
+    original = f"# Mine\nirreplaceable user content\n{CLAUDE_BLOCK_END}\n# After\n"
+    claude.write_text(original, encoding="utf-8")
+
+    result = init_consumer_repo(tmp_path, uninstall=True)
+
+    assert CLAUDE_BLOCK_END not in claude.read_text(encoding="utf-8")
+    backup = tmp_path / "CLAUDE.md.bak-lt-update"
+    assert result.backups[claude] == backup
+    assert backup.read_text(encoding="utf-8") == original
+    assert any("unpaired" in warning for warning in result.warnings)
+
+
+def test_dry_run_reports_unpaired_marker_backup_without_writing(tmp_path: Path) -> None:
+    claude = tmp_path / "CLAUDE.md"
+    original = f"# Mine\n\n{CLAUDE_BLOCK_BEGIN}\nuser content after marker\n"
+    claude.write_text(original, encoding="utf-8")
+
+    result = init_consumer_repo(tmp_path, dry_run=True)
+
+    backup = tmp_path / "CLAUDE.md.bak-lt-update"
+    assert result.backups[claude] == backup
+    assert not backup.exists()
+    assert claude.read_text(encoding="utf-8") == original
+
+
+def test_second_unpaired_repair_keeps_the_first_backup_of_the_original(tmp_path: Path) -> None:
+    claude = tmp_path / "CLAUDE.md"
+    original = (
+        f"# Mine\n\n{CODE_CONVENTIONS_BLOCK_BEGIN}\nstale conventions\n"
+        f"{CLAUDE_BLOCK_BEGIN}\nstale activation\nuser tail\n"
+    )
+    claude.write_text(original, encoding="utf-8")
+
+    result = init_consumer_repo(tmp_path, yes=True)
+
+    backup = tmp_path / "CLAUDE.md.bak-lt-update"
+    assert result.backups[claude] == backup
+    assert backup.read_text(encoding="utf-8") == original

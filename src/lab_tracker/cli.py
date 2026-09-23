@@ -963,6 +963,14 @@ def _write_managed_block(
 ) -> None:
     if path.exists() or path in result._preview_contents:
         existing = _planned_or_disk_text(path, result)
+        _backup_before_unpaired_marker_repair(
+            path,
+            existing,
+            begin_marker=begin_marker,
+            end_marker=end_marker,
+            result=result,
+            dry_run=dry_run,
+        )
         content = _upsert_managed_block(
             existing,
             block,
@@ -1046,6 +1054,14 @@ def _strip_managed_block(
     if not removed:
         result.skipped.append(path)
         return
+    _backup_before_unpaired_marker_repair(
+        path,
+        existing,
+        begin_marker=begin_marker,
+        end_marker=end_marker,
+        result=result,
+        dry_run=dry_run,
+    )
     content = _join_surrounding_text(prefix, suffix)
     if path not in result.stripped:
         result.stripped.append(path)
@@ -1054,6 +1070,41 @@ def _strip_managed_block(
         return
     path.write_text(content, encoding="utf-8")
     result.overwritten.append(path)
+
+
+def _backup_before_unpaired_marker_repair(
+    path: Path,
+    existing: str,
+    *,
+    begin_marker: str,
+    end_marker: str,
+    result: InitResult,
+    dry_run: bool,
+) -> None:
+    """Save the file before a repair that drops text around a lone marker.
+
+    With only one marker present there is no way to tell where the stale
+    managed block ends, so the repair discards everything after a lone BEGIN
+    (or before a lone END). Keep the original next to the file so nothing the
+    user wrote there is lost, and say so.
+    """
+
+    if (begin_marker in existing) == (end_marker in existing):
+        return
+    if path in result.backups:
+        # An earlier repair in this run already saved the original text.
+        return
+    backup = path.with_name(path.name + _UPDATE_BACKUP_SUFFIX)
+    result.backups[path] = backup
+    lone_marker = begin_marker if begin_marker in existing else end_marker
+    tense = "would be" if dry_run else "was"
+    result.warnings.append(
+        f"{path} had an unpaired Lab Tracker marker ({lone_marker}); text "
+        f"around it {tense} replaced during repair, and the original {tense} "
+        f"saved at {backup}."
+    )
+    if not dry_run:
+        backup.write_text(existing, encoding="utf-8")
 
 
 def _managed_block_parts(
