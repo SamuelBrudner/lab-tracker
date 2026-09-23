@@ -12,7 +12,7 @@ from api_helpers import (
     register_test_resources,
 )
 from fastapi.testclient import TestClient
-from sqlalchemy import JSON, String, Text, create_engine, select
+from sqlalchemy import JSON, String, Text, create_engine, event, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -29,6 +29,7 @@ from lab_tracker.services.evidence_bundle_service import (
     RecordEvidenceBundleCommand,
 )
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
+from lab_tracker.sqlalchemy_repository_parts.usage import rollup_usage_events_before
 from lab_tracker_client.client import LabTracker
 
 
@@ -733,3 +734,98 @@ def test_direct_evidence_bundle_call_records_usage_without_nesting_its_transacti
     assert len(bundle_events) == 1
     assert bundle_events[0].verb == "create"
     assert bundle_events[0].project_id == project.project_id
+
+
+def test_usage_event_rollup_reads_existing_rollups_once_and_streams_bucket_columns():
+    """L118: retention must not issue one rollup SELECT per bucket or hydrate full rows."""
+
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        future=True,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(bind=engine)
+    session = sessionmaker(bind=engine, future=True)()
+    register_test_resources(engine, session)
+    old = datetime(2024, 3, 1, 12, tzinfo=timezone.utc)
+    existing_day = old.date()
+    session.add(
+        UsageEventRollupModel(
+            rollup_id=str(uuid4()),
+            day=existing_day,
+            verb="view",
+            resource_type="project",
+            project_id=None,
+            actor_role=None,
+            principal_type=None,
+            surface=None,
+            outcome="ok",
+            event_count=3,
+            total_duration_ms=30,
+            total_result_count=0,
+        )
+    )
+    for day_offset, verb in ((0, "view"), (0, "view"), (0, "search"), (1, "view"), (2, "export")):
+        session.add(
+            UsageEventModel(
+                event_id=str(uuid4()),
+                occurred_at=old + timedelta(days=day_offset),
+                verb=verb,
+                resource_type="project",
+                resource_id=None,
+                actor_user_id=None,
+                actor_role=None,
+                principal_type=None,
+                surface=None,
+                project_id=None,
+                outcome="ok",
+                duration_ms=5,
+                result_count=1,
+            )
+        )
+    session.add(
+        UsageEventModel(
+            event_id=str(uuid4()),
+            occurred_at=datetime.now(timezone.utc),
+            verb="view",
+            resource_type="project",
+            outcome="ok",
+        )
+    )
+    session.commit()
+
+    statements: list[str] = []
+
+    def record(_conn, _cursor, statement, _parameters, _context, _executemany):
+        statements.append(" ".join(statement.split()))
+
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        pruned = rollup_usage_events_before(session, old + timedelta(days=30))
+        session.commit()
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+
+    assert pruned == 5
+    rollup_reads = [
+        item
+        for item in statements
+        if item.startswith("SELECT") and "FROM usage_event_rollups" in item
+    ]
+    assert len(rollup_reads) == 1
+    event_reads = [
+        item for item in statements if item.startswith("SELECT") and "FROM usage_events" in item
+    ]
+    assert event_reads
+    assert all("usage_events.resource_id" not in item for item in event_reads)
+    rollups = {
+        (row.day, row.verb): (row.event_count, row.total_duration_ms, row.total_result_count)
+        for row in session.scalars(select(UsageEventRollupModel))
+    }
+    assert rollups == {
+        (existing_day, "view"): (5, 40, 2),
+        (existing_day, "search"): (1, 5, 1),
+        (existing_day + timedelta(days=1), "view"): (1, 5, 1),
+        (existing_day + timedelta(days=2), "export"): (1, 5, 1),
+    }

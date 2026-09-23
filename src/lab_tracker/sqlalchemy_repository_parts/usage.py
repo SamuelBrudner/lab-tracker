@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime
+from datetime import date, datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy import ColumnElement, and_, delete, func, or_, select
@@ -302,18 +302,38 @@ def summarize_usage_events(
     return [dict(row._mapping) for row in session.execute(stmt)]
 
 
+_ROLLUP_READ_BATCH_SIZE = 1000
+"""Rows fetched per round trip while streaming pre-cutoff usage events."""
+
+RollupBucketKey = tuple[
+    date, str, str, UUID | None, str | None, str | None, str | None, str
+]
+"""``(day, verb, resource_type, project_id, actor_role, principal_type, surface, outcome)``."""
+
+
 def rollup_usage_events_before(session: OrmSession, cutoff: datetime) -> int:
-    rows = list(
-        session.scalars(
-            select(UsageEventModel)
-            .where(UsageEventModel.occurred_at < cutoff)
-            .order_by(UsageEventModel.occurred_at, UsageEventModel.event_id)
+    # Stream only the bucket columns in batches instead of hydrating every
+    # pre-cutoff event as an ORM row; the bucket map stays small.
+    events = session.execute(
+        select(
+            UsageEventModel.occurred_at,
+            UsageEventModel.verb,
+            UsageEventModel.resource_type,
+            UsageEventModel.project_id,
+            UsageEventModel.actor_role,
+            UsageEventModel.principal_type,
+            UsageEventModel.surface,
+            UsageEventModel.outcome,
+            UsageEventModel.duration_ms,
+            UsageEventModel.result_count,
         )
+        .where(UsageEventModel.occurred_at < cutoff)
+        .execution_options(yield_per=_ROLLUP_READ_BATCH_SIZE)
     )
-    buckets: dict[tuple[object, ...], dict[str, int]] = defaultdict(
+    buckets: dict[RollupBucketKey, dict[str, int]] = defaultdict(
         lambda: {"event_count": 0, "duration": 0, "result_count": 0}
     )
-    for row in rows:
+    for row in events:
         key = (
             row.occurred_at.date(),
             row.verb,
@@ -327,6 +347,7 @@ def rollup_usage_events_before(session: OrmSession, cutoff: datetime) -> int:
         buckets[key]["event_count"] += 1
         buckets[key]["duration"] += int(row.duration_ms or 0)
         buckets[key]["result_count"] += int(row.result_count or 0)
+    existing_rollups = _existing_rollups_by_bucket(session, {key[0] for key in buckets})
     for key, values in buckets.items():
         (
             day,
@@ -338,18 +359,7 @@ def rollup_usage_events_before(session: OrmSession, cutoff: datetime) -> int:
             surface,
             outcome,
         ) = key
-        existing = session.scalars(
-            select(UsageEventRollupModel).where(
-                UsageEventRollupModel.day == day,
-                UsageEventRollupModel.verb == verb,
-                UsageEventRollupModel.resource_type == resource_type,
-                _nullable_bucket_match(UsageEventRollupModel.project_id, project_id),
-                _nullable_bucket_match(UsageEventRollupModel.actor_role, actor_role),
-                _nullable_bucket_match(UsageEventRollupModel.principal_type, principal_type),
-                _nullable_bucket_match(UsageEventRollupModel.surface, surface),
-                UsageEventRollupModel.outcome == outcome,
-            )
-        ).first()
+        existing = existing_rollups.get(key)
         if existing is not None:
             existing.event_count += values["event_count"]
             existing.total_duration_ms += values["duration"]
@@ -378,10 +388,37 @@ def rollup_usage_events_before(session: OrmSession, cutoff: datetime) -> int:
     return int(deleted or 0)
 
 
-def _nullable_bucket_match(column, value: object):
-    if value is None:
-        return column.is_(None)
-    return column == value
+def _existing_rollups_by_bucket(
+    session: OrmSession,
+    days: set[date],
+) -> dict[RollupBucketKey, UsageEventRollupModel]:
+    """Load, in one query, the rollups the new buckets may merge into."""
+
+    if not days:
+        return {}
+    rows = session.scalars(
+        select(UsageEventRollupModel)
+        .where(UsageEventRollupModel.day.between(min(days), max(days)))
+        .order_by(UsageEventRollupModel.day, UsageEventRollupModel.rollup_id)
+    )
+    existing: dict[RollupBucketKey, UsageEventRollupModel] = {}
+    for row in rows:
+        # NULL dimensions never collide under the unique constraint, so a
+        # bucket can have duplicates; merge into the first, as before.
+        existing.setdefault(
+            (
+                row.day,
+                row.verb,
+                row.resource_type,
+                row.project_id,
+                row.actor_role,
+                row.principal_type,
+                row.surface,
+                row.outcome,
+            ),
+            row,
+        )
+    return existing
 
 
 def _uuid_to_db_optional(value: UUID | None) -> str | None:
