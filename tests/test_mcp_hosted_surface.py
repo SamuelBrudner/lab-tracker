@@ -371,12 +371,23 @@ def _record_main_calls(
     def fake_read_only(_settings: mcp_server.MCPSettings) -> None:
         calls.append(("read_only", None))
 
-    def fake_build(settings: mcp_server.MCPServerRuntimeSettings) -> object:
+    def fake_build(
+        settings: mcp_server.MCPServerRuntimeSettings,
+        *,
+        client_update_notice: str | None = None,
+    ) -> object:
+        # A hosted endpoint ships with its server: it is redeployed, never
+        # told to uv-update itself.
+        assert client_update_notice is None
         built.append(settings)
         return object()
 
+    def unexpected_release_probe(_settings: mcp_server.MCPSettings) -> None:
+        raise AssertionError("hosted MCP must not probe for a client update")
+
     monkeypatch.setattr(mcp_server, "_ensure_mcp_target_safe", fake_target_guard)
     monkeypatch.setattr(mcp_server, "_ensure_hosted_api_credential_is_read_only", fake_read_only)
+    monkeypatch.setattr(mcp_server, "probe_client_update_notice", unexpected_release_probe)
     monkeypatch.setattr(mcp_server, "build_server", fake_build)
     monkeypatch.setattr(mcp_server, "_run_streamable_http", lambda _server, _settings: None)
     return calls, built
