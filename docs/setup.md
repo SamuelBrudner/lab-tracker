@@ -140,6 +140,44 @@ content differs is first preserved next to itself as `*.bak-lt-update`, and
 `lt_ids.json` is never touched. `--dry-run` previews the changes; run
 `lt doctor` afterwards to confirm the repo is in sync.
 
+### Know when a client install is broken or behind its server
+
+A release is the `[project].version` in `pyproject.toml`, the value the
+[dedicated-instance release](../deployments/dedicated-instance/README.md) stamps
+into images; the server reports it as `app.version` on `GET /health`, next to
+`app.source_revision`. A client counts as *behind* only when its server runs a
+newer release, so maintainers bump `version` when a change is worth every
+client updating for. Revision drift within one release is reported
+(`same_revision`) but never suggested, since most commits are not
+consumer-relevant.
+
+- `lt doctor` (and `lt doctor --all`, once per sweep) imports the MCP server
+  in-process and reports `lt_mcp.importable`, with the error, traceback, and
+  next step when it fails. A failure exits `1` like drift; `--fail-silent`
+  keeps prompt hooks quiet. There is no network I/O; `lt setup verify-mcp`
+  remains the deeper connectivity check.
+- `lt setup status` reports the same `lt_mcp` check plus a `client` release
+  comparison built from its existing `/health` probe, and suggests the update
+  when the client is behind, so the SessionStart hook's `--brief` line names it.
+- `lt-mcp` over stdio makes one unauthenticated `GET /health` at startup
+  (2-second timeout, advisory only: any failure leaves the session unchanged).
+  When the client is behind, the MCP `instructions` start with an
+  `UPDATE AVAILABLE` notice and every tool result carries the same notice in
+  `_lab_tracker_update_notice`. A hosted endpoint skips the check; it ships
+  with its server.
+- Captures record `capture_client_version` and `capture_client_revision` next
+  to the host identity. `GET /projects/{project_id}/capture-installs` lists the
+  machines that captured into a project in the last 90 days with their release
+  status, and the Daily review page names each machine that is behind by the
+  folder it watches, for example "lab-tracker on the machine watching
+  `fly_walking_data` (rig-7) is behind this server".
+
+To update a machine, install the server's release first and then refresh repo
+files: the exact tool install is on the server's Agents page
+(`uv tool install --force "lab-tracker @ git+https://github.com/SamuelBrudner/lab-tracker.git@<revision>"`),
+then run `lt update` in each consumer repo and restart the MCP host so it
+launches the new `lt-mcp`.
+
 ## Multi-client Postgres runtime
 
 For browser, Codex, Claude, scripts, and future workers writing at the same time,

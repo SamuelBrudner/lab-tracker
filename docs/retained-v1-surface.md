@@ -266,6 +266,18 @@ research record:
   cross-platform process executor and expose only static adapter-specific
   failures. See
   [external-artifact-resolution-design.md](external-artifact-resolution-design.md).
+- Advisory client-update awareness keyed to release versions: `GET /health`
+  reports the server's `[project].version` and source revision; `lt doctor` and
+  `lt setup status` check that the installed `lt-mcp` imports and compare the
+  client's release with the server's; stdio `lt-mcp` prefixes its MCP
+  instructions and adds `_lab_tracker_update_notice` to every tool result when
+  its client is behind; and captures record the capturing client's release, so
+  the project-scoped `GET /projects/{project_id}/capture-installs` read (opaque
+  like other project reads) and the Daily review page name each machine that
+  is behind by the folder it watches. Only a newer server release produces a
+  notice; revision drift within a release is reported, never suggested. None of
+  these checks blocks capture, a session, or MCP startup. See
+  [setup.md](setup.md#know-when-a-client-install-is-broken-or-behind-its-server).
 - Read-only assistant and MCP endpoints over the retained graph. Remote agents
   can orient with `graph_overview`, locate a typed anchor with `search_graph`,
   and inspect its bounded neighborhood before requesting task-specific decision
