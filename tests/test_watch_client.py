@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import os
 
@@ -68,6 +69,47 @@ def test_scan_records_capture_host_on_event_and_note_metadata(tmp_path, monkeypa
     note_metadata = _event_metadata(event)
     assert note_metadata["capture_host_label"] == "rig-7"
     assert note_metadata["capture_install_id"] == event["host"]["capture_install_id"]
+
+
+def test_scan_records_the_capturing_client_release(tmp_path, monkeypatch) -> None:
+    # The server names a stale install from this (GH #238), so it must survive
+    # the outbox round trip into note metadata.
+    from lab_tracker.client_release import ReleaseIdentity
+
+    client_module = importlib.import_module("lab_tracker_client.client")
+
+    monkeypatch.delenv("LAB_TRACKER_WATCH_CONFIG", raising=False)
+    monkeypatch.delenv("LAB_TRACKER_WATCH_OUTBOX", raising=False)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        client_module,
+        "_installed_client_release",
+        lambda: ReleaseIdentity(version="0.3.0", revision="c" * 40),
+    )
+    config = init_config(project_id="project-1")
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    (inbox / "capture.md").write_text("capture text", encoding="utf-8")
+
+    scan_watch(config, mode="files", root=inbox)
+    event = read_event(next(iter(config.outbox_path().glob("*.json"))))
+    note_metadata = _event_metadata(event)
+
+    assert note_metadata["capture_client_version"] == "0.3.0"
+    assert note_metadata["capture_client_revision"] == "c" * 40
+
+
+def test_capture_host_metadata_omits_an_unknown_client_release(monkeypatch) -> None:
+    from lab_tracker.client_release import ReleaseIdentity
+
+    client_module = importlib.import_module("lab_tracker_client.client")
+
+    monkeypatch.setattr(client_module, "_installed_client_release", ReleaseIdentity)
+
+    metadata = client_module.capture_host_metadata()
+
+    assert "capture_client_version" not in metadata
+    assert "capture_client_revision" not in metadata
 
 
 def test_sync_file_event_uploads_staged_note_and_requests_draft(tmp_path, monkeypatch) -> None:

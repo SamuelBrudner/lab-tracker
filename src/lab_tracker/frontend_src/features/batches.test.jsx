@@ -542,3 +542,97 @@ describe("BatchReviewPage drafts from captures", () => {
   });
 });
 
+describe("BatchReviewPage stale capture machines", () => {
+  const staleNotice =
+    "lab-tracker on the machine watching `fly_walking_data` (rig-7) is behind this server.";
+
+  function captureInstallsRoute(installs) {
+    return {
+      match: "/projects/project-a/capture-installs",
+      response: apiResponse({
+        installs,
+        project_id: "project-a",
+        server: { revision: null, version: "0.5.0" },
+        window_days: 90,
+      }),
+    };
+  }
+
+  function renderReview(selectedProjectId) {
+    return render(
+      <BatchReviewPage
+        token="token-1"
+        projects={[{ name: "Project A", project_id: "project-a" }]}
+        selectedProjectId={selectedProjectId}
+        onSelectedProjectChange={vi.fn()}
+        navigate={vi.fn()}
+        canManageGraph={true}
+        canManageProject={false}
+        setBusy={vi.fn()}
+        setFlash={vi.fn()}
+      />
+    );
+  }
+
+  const flushResponses = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  };
+
+  it("names each machine whose client is behind the server", async () => {
+    installFetchMock([
+      captureInstallsRoute([
+        { host_label: "rig-7", install_id: "install-a", notice: staleNotice },
+        { host_label: "laptop", install_id: "install-b", notice: null },
+      ]),
+    ]);
+    renderReview("project-a");
+
+    expect(
+      await screen.findByText("A capture machine needs a lab-tracker update")
+    ).toBeInTheDocument();
+    expect(screen.getByText(staleNotice)).toBeInTheDocument();
+    expect(screen.queryByText(/laptop/)).not.toBeInTheDocument();
+  });
+
+  it("stays silent when every machine is current", async () => {
+    const fetchMock = installFetchMock([
+      captureInstallsRoute([{ host_label: "laptop", install_id: "install-b", notice: null }]),
+    ]);
+    renderReview("project-a");
+
+    await waitFor(() =>
+      expect(fetchMock.mock.calls.map(([url]) => url)).toContain(
+        "/projects/project-a/capture-installs"
+      )
+    );
+    await flushResponses();
+    expect(screen.queryByText(/needs? a lab-tracker update/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Could not check capture machines/)).not.toBeInTheDocument();
+  });
+
+  it("does not ask about machines without a selected project", async () => {
+    const fetchMock = installFetchMock([]);
+    renderReview("");
+    await flushResponses();
+
+    expect(
+      fetchMock.mock.calls.some(([url]) => String(url).includes("/capture-installs"))
+    ).toBe(false);
+  });
+
+  it("reports a failed check without hiding the queues", async () => {
+    installFetchMock([
+      {
+        match: "/projects/project-a/capture-installs",
+        response: errorResponse("boom", 500),
+      },
+    ]);
+    renderReview("project-a");
+
+    expect(
+      await screen.findByText(/Could not check capture machines for updates/)
+    ).toBeInTheDocument();
+    expect(screen.getByText("Ready for you")).toBeInTheDocument();
+  });
+});

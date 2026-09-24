@@ -29,6 +29,7 @@ from lab_tracker.db_types import ensure_uuid
 from lab_tracker.models import (
     AcquisitionOutput,
     Analysis,
+    CaptureInstallObservation,
     Claim,
     ClaimEdge,
     Dataset,
@@ -1192,6 +1193,19 @@ class SQLAlchemyLabTrackerRepository:
             limit=limit,
             offset=offset,
             recent_first=recent_first,
+        )
+
+    def latest_capture_install_notes(
+        self,
+        *,
+        project_id: UUID,
+        since: datetime,
+        watch_only: bool = False,
+    ) -> list[CaptureInstallObservation]:
+        return self.notes.latest_capture_install_notes(
+            project_id=project_id,
+            since=since,
+            watch_only=watch_only,
         )
 
     def project_ids_with_search_matches(

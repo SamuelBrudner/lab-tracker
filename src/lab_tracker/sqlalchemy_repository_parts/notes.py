@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import UUID
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session as OrmSession
 
 from lab_tracker.db_models import GraphChangeSetModel, NoteModel, NoteTargetModel
@@ -20,7 +20,7 @@ from lab_tracker.member_onboarding import (
     FIRST_CAPTURE_AT_KEY,
     FIRST_CAPTURE_NOTE_ID_KEY,
 )
-from lab_tracker.models import EntityType, Note, NoteMetadataScalar
+from lab_tracker.models import CaptureInstallObservation, EntityType, Note, NoteMetadataScalar
 from lab_tracker.repository import EntityRepository
 from lab_tracker.sqlalchemy_mappers import (
     apply_note_to_model,
@@ -602,3 +602,53 @@ class SQLAlchemyNoteRepository(EntityRepository[Note]):
         total = count_from_statement(self._session, count_stmt)
         rows = list(self._session.scalars(apply_pagination(stmt, limit=limit, offset=offset)))
         return self.notes_from_rows(rows), total
+
+    def latest_capture_install_notes(
+        self,
+        *,
+        project_id: UUID,
+        since: datetime,
+        watch_only: bool = False,
+    ) -> list[CaptureInstallObservation]:
+        self._session.flush()
+        install_id = NoteModel.note_metadata["capture_install_id"].as_string()
+        host_label = NoteModel.note_metadata["capture_host_label"].as_string()
+        partition = (install_id, host_label)
+        conditions = [
+            NoteModel.project_id == str(project_id),
+            NoteModel.created_at >= since,
+            install_id.is_not(None),
+        ]
+        if watch_only:
+            watch_path = NoteModel.note_metadata["watch_relative_path"].as_string()
+            conditions.append(watch_path.is_not(None))
+        ranked = (
+            select(
+                NoteModel.note_id,
+                NoteModel.created_at,
+                NoteModel.note_metadata.label("note_metadata"),
+                install_id.label("install_id"),
+                host_label.label("host_label"),
+                func.row_number()
+                .over(
+                    partition_by=partition,
+                    order_by=(NoteModel.created_at.desc(), NoteModel.note_id.desc()),
+                )
+                .label("recency"),
+                func.count().over(partition_by=partition).label("capture_count"),
+            )
+            .where(*conditions)
+            .subquery()
+        )
+        rows = self._session.execute(select(ranked).where(ranked.c.recency == 1)).mappings()
+        return [
+            CaptureInstallObservation(
+                install_id=row["install_id"],
+                host_label=row["host_label"],
+                note_id=row["note_id"],
+                captured_at=row["created_at"],
+                metadata=row["note_metadata"] or {},
+                capture_count=row["capture_count"],
+            )
+            for row in rows
+        ]

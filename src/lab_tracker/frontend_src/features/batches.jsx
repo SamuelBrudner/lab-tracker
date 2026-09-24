@@ -91,6 +91,62 @@ function PendingBatchBanner({ enabled = true, token, navigate }) {
   );
 }
 
+// Capture machines whose lab-tracker client is behind this server's release,
+// named by what they capture. Loaded apart from the queues so a failure here
+// cannot hide them.
+function StaleCaptureMachines({ projectId, token }) {
+  const [staleInstalls, setStaleInstalls] = useState([]);
+  const [loadError, setLoadError] = useState("");
+
+  useEffect(() => {
+    let canceled = false;
+    setStaleInstalls([]);
+    setLoadError("");
+    if (!projectId) {
+      return () => {
+        canceled = true;
+      };
+    }
+    apiRequest(`/projects/${encodeURIComponent(projectId)}/capture-installs`, { token })
+      .then((report) => {
+        if (!canceled) {
+          setStaleInstalls((report?.installs || []).filter((install) => install?.notice));
+        }
+      })
+      .catch((err) => {
+        if (!canceled) {
+          setLoadError(
+            `Could not check capture machines for updates: ${err?.message || "request failed."}`
+          );
+        }
+      });
+    return () => {
+      canceled = true;
+    };
+  }, [projectId, token]);
+
+  if (loadError) {
+    return <p className="subtle">{loadError}</p>;
+  }
+  if (staleInstalls.length === 0) {
+    return null;
+  }
+  return (
+    <div className="flash ok" role="status">
+      <strong>
+        {staleInstalls.length === 1
+          ? "A capture machine needs a lab-tracker update"
+          : `${staleInstalls.length} capture machines need a lab-tracker update`}
+      </strong>
+      <ul>
+        {staleInstalls.map((install) => (
+          <li key={`${install.install_id}:${install.host_label || ""}`}>{install.notice}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 // Drafts started from a single capture ("Draft graph update" on a note or an
 // image) are reviewed on the same page as the batches so they are not lost
 // between the Capture page's last-ten list and nowhere.
@@ -372,6 +428,7 @@ function BatchReviewPage({
           </label>
 
           <div className="stack">
+            <StaleCaptureMachines projectId={selectedProjectId} token={token} />
             <h3>Ready for you</h3>
             <BatchCards
               batches={batches}

@@ -21,6 +21,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
+from lab_tracker.client_release import ReleaseStatus
 from lab_tracker.git_store_locator import (
     GitObjectId,
     PinnedGitPath,
@@ -1473,6 +1474,42 @@ class PublicationReadinessReport(_DomainModel):
     orphaned_entities: list[PublicationReadinessOrphanedEntity] = Field(default_factory=list)
     broken_external_refs: list[PublicationReadinessBrokenExternalRef] = Field(default_factory=list)
     seal_level: Literal["blocked", "ara_l1"] = "blocked"
+
+
+class CaptureInstallObservation(_DomainModel):
+    """The newest capture one (install id, host label) pair made in a window."""
+
+    install_id: str
+    host_label: str | None = None
+    note_id: UUID
+    captured_at: datetime
+    metadata: dict[str, NoteMetadataScalar] = Field(default_factory=dict)
+    capture_count: int
+
+
+class CaptureInstallRelease(_DomainModel):
+    version: str | None = None
+    revision: str | None = None
+
+
+class CaptureInstall(_DomainModel):
+    install_id: str
+    host_label: str | None = None
+    platform: str | None = None
+    client: CaptureInstallRelease
+    release_status: ReleaseStatus
+    last_captured_at: datetime
+    last_note_id: UUID
+    capture_count: int
+    watched_folder: str | None = None
+    notice: str | None = None
+
+
+class CaptureInstallReport(_DomainModel):
+    project_id: UUID
+    server: CaptureInstallRelease
+    window_days: int
+    installs: list[CaptureInstall] = Field(default_factory=list)
 
 
 class RecordExportEvent(_DomainModel):

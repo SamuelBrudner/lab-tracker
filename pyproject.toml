@@ -144,6 +144,7 @@ files = [
   "src/lab_tracker/graph_query.py",
   "src/lab_tracker/provider_error_redaction.py",
   "src/lab_tracker/client_release.py",
+  "src/lab_tracker/services/capture_install_service.py",
   "src/lab_tracker/deployment_probe.py",
   "src/lab_tracker/outbound_http.py",
   "src/lab_tracker/http_store_health.py",

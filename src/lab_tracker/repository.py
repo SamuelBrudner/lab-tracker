@@ -18,6 +18,7 @@ from lab_tracker.collection_models import (
 from lab_tracker.models import (
     AcquisitionOutput,
     Analysis,
+    CaptureInstallObservation,
     Claim,
     ClaimEdge,
     Dataset,
@@ -943,6 +944,21 @@ class LabTrackerRepository(Protocol):
         ``capture_bundle_id`` matches the text of the note's
         ``metadata.capture_bundle_id``; callers compare the exact metadata
         value themselves when non-string values matter.
+        """
+
+    def latest_capture_install_notes(
+        self,
+        *,
+        project_id: UUID,
+        since: datetime,
+        watch_only: bool = False,
+    ) -> list[CaptureInstallObservation]:
+        """Return the newest note per (install id, host label) created since ``since``.
+
+        Only notes whose metadata names a ``capture_install_id`` count; each
+        row carries how many captures that pair made in the window.
+        ``watch_only`` restricts both to watch-folder captures (notes with a
+        ``watch_relative_path``).
         """
 
     def project_ids_with_search_matches(

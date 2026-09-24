@@ -96,6 +96,13 @@ CORE_READ_OPACITY_VARIANTS = (
     ),
     _variant(
         CORE_SUITE,
+        "capture-installs",
+        method="GET",
+        route_template="/projects/{project_id}/capture-installs",
+        operation_id=("capture_installs_projects__project_id__capture_installs_get"),
+    ),
+    _variant(
+        CORE_SUITE,
         "project-graph-json",
         method="GET",
         route_template="/projects/{project_id}/graph",

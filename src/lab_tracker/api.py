@@ -43,6 +43,7 @@ from lab_tracker.services import (
     AcquisitionCollectionService,
     AnalysisService,
     BatchSchedulingCoordinator,
+    CaptureInstallService,
     ClaimService,
     DatasetService,
     DataStoreService,
@@ -148,6 +149,10 @@ class LabTrackerAPI(
             context
         )
         self.publication_readiness: PublicationReadinessService = PublicationReadinessService(
+            context,
+            projects=self.projects,
+        )
+        self.capture_installs: CaptureInstallService = CaptureInstallService(
             context,
             projects=self.projects,
         )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import mimetypes
@@ -22,6 +23,7 @@ from lab_tracker.assistant_next_questions import (
     OPEN_QUESTION_STATUSES,
     build_next_questions_payload,
 )
+from lab_tracker.client_release import ReleaseIdentity, installed_release
 from lab_tracker.instance_url import (
     BASE_URL_ENV,
     DEFAULT_BASE_URL,
@@ -106,6 +108,8 @@ CAPTURE_HOST_METADATA_KEYS = (
     "capture_host_label",
     "capture_install_id",
     "capture_platform",
+    "capture_client_version",
+    "capture_client_revision",
 )
 
 
@@ -160,8 +164,12 @@ def capture_host_metadata() -> dict[str, NoteMetadataScalar]:
     """Stable, fail-soft identity for the machine performing a capture or push.
 
     A configurable ``LAB_TRACKER_CAPTURE_HOST`` label (hostname fallback) plus a
-    persisted per-install id and the OS family. Used to disambiguate the
-    cross-machine content-hash join and to record which computer pushed evidence.
+    persisted per-install id, the OS family, and the installed client release.
+    Introduced to disambiguate the cross-machine content-hash join and to record
+    which computer pushed evidence. It now also has a second, deliberate use:
+    the server joins the newest capture per install against its own release to
+    name a stale machine ("update lab-tracker on the machine watching
+    fly_walking_data") in the daily review.
     """
 
     metadata: dict[str, NoteMetadataScalar] = {}
@@ -178,7 +186,19 @@ def capture_host_metadata() -> dict[str, NoteMetadataScalar]:
         system = platform.system().strip()
         if system:
             metadata["capture_platform"] = system
+    release = _installed_client_release()
+    if release.version:
+        metadata["capture_client_version"] = release.version
+    if release.revision:
+        metadata["capture_client_revision"] = release.revision
     return metadata
+
+
+@functools.lru_cache(maxsize=1)
+def _installed_client_release() -> ReleaseIdentity:
+    # A watch scan stamps every file; the running code's release cannot change
+    # mid-process, so read the distribution metadata once.
+    return installed_release()
 
 
 class LTError(RuntimeError):
