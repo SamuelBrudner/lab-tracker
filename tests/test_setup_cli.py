@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
+import textwrap
+import threading
 from types import SimpleNamespace
+from typing import Any
 
 import httpx
 import pytest
@@ -576,26 +580,95 @@ def test_setup_verify_mcp_refuses_to_launch_a_mismatched_client(
     assert "Refusing to launch MCP" in payload["error"]
 
 
+class _FakeAsyncTextStream:
+    """Stand-in for a ``Popen`` text stream fed from another thread.
+
+    Iteration blocks until ``set_content`` supplies the lines, the same way
+    reading a real pipe blocks until the child process writes to it. This
+    lets tests exercise the probe's actual poll-for-both-responses loop
+    instead of handing it output that is already fully buffered.
+    """
+
+    def __init__(self) -> None:
+        self._ready = threading.Event()
+        self._lines: list[str] = []
+
+    def set_content(self, text: str) -> None:
+        self._lines = text.splitlines(keepends=True)
+        self._ready.set()
+
+    def __iter__(self):
+        self._ready.wait(timeout=5)
+        yield from self._lines
+
+    def close(self) -> None:
+        pass
+
+
+class _FakeStdin:
+    def __init__(self, on_flush) -> None:
+        self._chunks: list[str] = []
+        self._on_flush = on_flush
+        self._flushed = False
+
+    def write(self, text: str) -> None:
+        self._chunks.append(text)
+
+    def flush(self) -> None:
+        if not self._flushed:
+            self._flushed = True
+            self._on_flush("".join(self._chunks))
+
+    def close(self) -> None:
+        pass
+
+
+class _FakePopen:
+    """Stand-in for ``subprocess.Popen`` used to unit-test the stdio probe.
+
+    ``respond`` is only invoked once the fake stdin is flushed (mirroring a
+    real process that replies after receiving its request), and it supplies
+    both stdout and stderr content for the fake process.
+    """
+
+    def __init__(self, args, *, respond, env=None, **_ignored) -> None:
+        self.args = args
+        self.env = env
+        self.returncode: int | None = None
+        self.stdout = _FakeAsyncTextStream()
+        self.stderr = _FakeAsyncTextStream()
+        self._respond = respond
+        self.record: dict[str, Any] = {"args": args, "env": env}
+        self.stdin = _FakeStdin(self._on_stdin_flushed)
+
+    def _on_stdin_flushed(self, stdin_text: str) -> None:
+        self.record["input"] = stdin_text
+        requests = [
+            json.loads(line) for line in stdin_text.splitlines() if '"id":' in line
+        ]
+        self.record["tool_name"] = requests[-1]["params"]["name"]
+        stdout_text, stderr_text = self._respond(stdin_text)
+        self.stdout.set_content(stdout_text)
+        self.stderr.set_content(stderr_text)
+
+    def wait(self, timeout=None):
+        self.returncode = 0
+        return self.returncode
+
+    def kill(self) -> None:
+        self.returncode = -9
+
+
 def test_setup_verify_mcp_launches_stdio_health_and_authenticated_project_read(
     config_home, monkeypatch
 ) -> None:
     observed = {"calls": []}
 
-    def fake_run(args, **kwargs):
+    def respond(stdin_text: str) -> tuple[str, str]:
         requests = [
-            json.loads(line)
-            for line in kwargs["input"].splitlines()
-            if '"id":' in line
+            json.loads(line) for line in stdin_text.splitlines() if '"id":' in line
         ]
         tool_name = requests[-1]["params"]["name"]
-        observed["calls"].append(
-            {
-                "args": args,
-                "env": kwargs["env"],
-                "input": kwargs["input"],
-                "tool_name": tool_name,
-            }
-        )
         structured_content = (
             {"status": "ok"}
             if tool_name == "lab_tracker_health"
@@ -631,7 +704,12 @@ def test_setup_verify_mcp_launches_stdio_health_and_authenticated_project_read(
                 ),
             ]
         )
-        return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+        return stdout, ""
+
+    def fake_popen(args, **kwargs):
+        process = _FakePopen(args, respond=respond, **kwargs)
+        observed["calls"].append(process.record)
+        return process
 
     monkeypatch.setattr(setup_helpers, "installed_source_revision", lambda: SOURCE_REVISION)
     monkeypatch.setattr(
@@ -639,7 +717,7 @@ def test_setup_verify_mcp_launches_stdio_health_and_authenticated_project_read(
         "_resolve_mcp_executable",
         lambda _command: "/tools/lt-mcp",
     )
-    monkeypatch.setattr(setup_helpers.subprocess, "run", fake_run)
+    monkeypatch.setattr(setup_helpers.subprocess, "Popen", fake_popen)
 
     payload = setup_helpers.verify_mcp_launch(expected_revision=SOURCE_REVISION)
 
@@ -669,11 +747,9 @@ def test_setup_verify_mcp_reports_auth_failure_and_redacts_tokens(
         lambda _command: "/tools/lt-mcp",
     )
 
-    def fake_run(_args, **kwargs):
+    def respond(stdin_text: str) -> tuple[str, str]:
         requests = [
-            json.loads(line)
-            for line in kwargs["input"].splitlines()
-            if '"id":' in line
+            json.loads(line) for line in stdin_text.splitlines() if '"id":' in line
         ]
         tool_name = requests[-1]["params"]["name"]
         structured_content = (
@@ -686,38 +762,37 @@ def test_setup_verify_mcp_reports_auth_failure_and_redacts_tokens(
                 }
             }
         )
-        return SimpleNamespace(
-            returncode=0,
-            stdout="\n".join(
-                [
-                    json.dumps(
-                        {
-                            "jsonrpc": "2.0",
-                            "id": 1,
-                            "result": {
-                                "serverInfo": {"name": "lab-tracker-mcp"}
-                            },
-                        }
-                    ),
-                    json.dumps(
-                        {
-                            "jsonrpc": "2.0",
-                            "id": 2,
-                            "result": {
-                                "isError": False,
-                                "structuredContent": structured_content,
-                            },
-                        }
-                    ),
-                ]
-            ),
-            stderr=(
-                "startup failed with lpat_do-not-print "
-                "linv_invite-secret ldev_device-secret lpair_pair-secret"
-            ),
+        stdout = "\n".join(
+            [
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": {"serverInfo": {"name": "lab-tracker-mcp"}},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "result": {
+                            "isError": False,
+                            "structuredContent": structured_content,
+                        },
+                    }
+                ),
+            ]
         )
+        stderr = (
+            "startup failed with lpat_do-not-print "
+            "linv_invite-secret ldev_device-secret lpair_pair-secret"
+        )
+        return stdout, stderr
 
-    monkeypatch.setattr(setup_helpers.subprocess, "run", fake_run)
+    def fake_popen(args, **kwargs):
+        return _FakePopen(args, respond=respond, **kwargs)
+
+    monkeypatch.setattr(setup_helpers.subprocess, "Popen", fake_popen)
 
     payload = setup_helpers.verify_mcp_launch(expected_revision=SOURCE_REVISION)
 
@@ -729,6 +804,92 @@ def test_setup_verify_mcp_reports_auth_failure_and_redacts_tokens(
     assert "linv_invite-secret" not in payload["diagnostic"]
     assert "ldev_device-secret" not in payload["diagnostic"]
     assert "lpair_pair-secret" not in payload["diagnostic"]
+
+
+def test_setup_verify_mcp_tool_probe_keeps_stdin_open_for_a_slow_response(
+    tmp_path,
+) -> None:
+    """Regression test for the stdin-EOF race (lab-tracker issue #234).
+
+    The fake server below answers ``initialize`` immediately but defers its
+    ``tools/call`` response by simulating outbound work in a background
+    thread, and -- like the real FastMCP stdio server -- exits the instant
+    it observes stdin EOF, even with that background reply still pending.
+    ``subprocess.run(input=...)`` used to close stdin the moment it finished
+    writing the request, so the child would see EOF and exit before its
+    slow reply was flushed, silently losing the ``tools/call`` response.
+    The fix keeps stdin open until both responses have actually been read.
+    """
+
+    server_script = tmp_path / "fake_mcp_server.py"
+    server_script.write_text(
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env python3
+            import json
+            import os
+            import sys
+            import threading
+            import time
+
+
+            def _respond_slowly(request_id):
+                time.sleep(0.3)
+                response = {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "result": {
+                        "isError": False,
+                        "structuredContent": {"status": "ok"},
+                    },
+                }
+                print(json.dumps(response), flush=True)
+
+
+            while True:
+                line = sys.stdin.readline()
+                if line == "":
+                    # A real FastMCP stdio server treats stdin EOF as a
+                    # shutdown signal, even with a tool call in flight.
+                    os._exit(0)
+                line = line.strip()
+                if not line:
+                    continue
+                message = json.loads(line)
+                method = message.get("method")
+                if method == "initialize":
+                    response = {
+                        "jsonrpc": "2.0",
+                        "id": message["id"],
+                        "result": {
+                            "protocolVersion": "2025-06-18",
+                            "serverInfo": {"name": "fake-lt-mcp", "version": "test"},
+                        },
+                    }
+                    print(json.dumps(response), flush=True)
+                elif method == "tools/call":
+                    threading.Thread(
+                        target=_respond_slowly, args=(message["id"],), daemon=True
+                    ).start()
+            """
+        ),
+        encoding="utf-8",
+    )
+    server_script.chmod(0o755)
+
+    completed, initialize_response, tool_response = setup_helpers._run_mcp_tool_probe(
+        str(server_script),
+        tool_name="lab_tracker_health",
+        arguments={},
+        timeout_seconds=5.0,
+        env=dict(os.environ),
+    )
+
+    assert initialize_response is not None
+    assert initialize_response["result"]["serverInfo"]["name"] == "fake-lt-mcp"
+    assert tool_response is not None
+    assert tool_response["result"]["structuredContent"] == {"status": "ok"}
+    assert completed.returncode == 0
 
 
 def test_setup_status_is_read_only_and_reports_repo_state(
