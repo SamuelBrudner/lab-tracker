@@ -444,11 +444,21 @@ def test_main_runs_streamable_http_transport_from_env(monkeypatch) -> None:
     class FakeServer:
         pass
 
-    def fake_build(settings: mcp_server.MCPServerRuntimeSettings | None = None):
+    def fake_build(
+        settings: mcp_server.MCPServerRuntimeSettings | None = None,
+        *,
+        client_update_notice: str | None = None,
+    ):
         assert settings is not None
+        # A hosted endpoint is redeployed with its server, never uv-updated.
+        assert client_update_notice is None
         built_settings.append(settings)
         return FakeServer()
 
+    def unexpected_release_probe(_settings):
+        raise AssertionError("hosted MCP must not probe for a client update")
+
+    monkeypatch.setattr(mcp_server, "probe_client_update_notice", unexpected_release_probe)
     monkeypatch.setenv("LAB_TRACKER_MCP_TRANSPORT", "streamable-http")
     monkeypatch.setenv("LAB_TRACKER_MCP_HOST", "127.0.0.1")
     monkeypatch.setenv("LAB_TRACKER_MCP_PORT", "9000")

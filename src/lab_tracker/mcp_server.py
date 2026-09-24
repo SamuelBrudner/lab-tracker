@@ -10,7 +10,7 @@ import re
 import secrets
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 from urllib.parse import urlparse
 
@@ -21,6 +21,12 @@ from starlette.responses import Response
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from lab_tracker.auth import LPAT_TOKEN_PREFIX
+from lab_tracker.client_release import (
+    ReleaseComparison,
+    installed_release,
+    release_from_health,
+    update_steps,
+)
 from lab_tracker.decision_context_constants import MCP_SERVER_INSTRUCTIONS
 from lab_tracker.mcp_api_client import (
     DEFAULT_BASE_URL,
@@ -102,6 +108,10 @@ _VALID_TRANSPORTS: set[str] = {"stdio", "streamable-http"}
 ALLOW_WRITES_ENV = "LAB_TRACKER_MCP_ALLOW_WRITES"
 ALLOWED_HOSTS_ENV = "LAB_TRACKER_MCP_ALLOWED_HOSTS"
 ALLOWED_ORIGINS_ENV = "LAB_TRACKER_MCP_ALLOWED_ORIGINS"
+# A field name no tool response uses, so the notice never collides with a
+# tool's own shape.
+UPDATE_NOTICE_KEY = "_lab_tracker_update_notice"
+_RELEASE_PROBE_TIMEOUT_SECONDS = 2.0
 _TRUE_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
 _FALSE_ENV_VALUES = frozenset({"", "0", "false", "no", "off"})
 _ALLOWED_HOST_PATTERN = (
@@ -229,14 +239,76 @@ def _offload_blocking_tool(fn: Callable[..., Any]) -> Callable[..., Any]:
     return run_in_worker_thread
 
 
+def _with_update_notice(fn: Callable[..., Any], notice: str | None) -> Callable[..., Any]:
+    """Add ``notice`` to every object a tool returns; the tool itself when current.
+
+    ``functools.wraps`` keeps the signature and docstring, so the registered
+    tool contract is unchanged either way.
+    """
+
+    if notice is None or inspect.iscoroutinefunction(fn):
+        return fn
+
+    @functools.wraps(fn)
+    def with_update_notice(*args: Any, **kwargs: Any) -> Any:
+        result = fn(*args, **kwargs)
+        if isinstance(result, dict):
+            return {**result, UPDATE_NOTICE_KEY: notice}
+        return result
+
+    return with_update_notice
+
+
 class LabTrackerFastMCP(FastMCP):
     """FastMCP server that keeps blocking tool calls off the event loop."""
 
+    def __init__(
+        self,
+        *args: Any,
+        client_update_notice: str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        self._client_update_notice = client_update_notice
+        super().__init__(*args, **kwargs)
+
     def add_tool(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
-        super().add_tool(_offload_blocking_tool(fn), *args, **kwargs)
+        tool = _with_update_notice(fn, self._client_update_notice)
+        super().add_tool(_offload_blocking_tool(tool), *args, **kwargs)
 
 
-def build_server(settings: MCPServerRuntimeSettings | None = None) -> FastMCP:
+def probe_client_update_notice(api_settings: MCPSettings) -> str | None:
+    """Return an agent-facing notice when this client is behind its server's release.
+
+    One bounded, unauthenticated ``GET /health``. Any failure returns ``None``
+    so the session behaves exactly as it would without the check: a staleness
+    hint must never block or fail MCP startup.
+    """
+
+    probe = LabTrackerAPIClient(
+        replace(api_settings, timeout_seconds=_RELEASE_PROBE_TIMEOUT_SECONDS)
+    )
+    try:
+        health = probe.health()
+    except Exception:  # noqa: BLE001 - see docstring: the check is advisory only.
+        return None
+    finally:
+        probe.close()
+    comparison = ReleaseComparison(client=installed_release(), server=release_from_health(health))
+    if comparison.status != "behind":
+        return None
+    return (
+        f"UPDATE AVAILABLE: this Lab Tracker MCP client runs release "
+        f"{comparison.client.version}, but its server runs release "
+        f"{comparison.server.version}. Tell the person that "
+        f"{update_steps(comparison.server)}."
+    )
+
+
+def build_server(
+    settings: MCPServerRuntimeSettings | None = None,
+    *,
+    client_update_notice: str | None = None,
+) -> FastMCP:
     settings = settings or MCPServerRuntimeSettings()
     kwargs: dict[str, object] = {}
     if settings.transport == "streamable-http":
@@ -258,9 +330,13 @@ def build_server(settings: MCPServerRuntimeSettings | None = None) -> FastMCP:
                 allowed_origins=list(settings.allowed_origins),
             ),
         }
+    instructions = MCP_SERVER_INSTRUCTIONS
+    if client_update_notice is not None:
+        instructions = f"{client_update_notice}\n\n{MCP_SERVER_INSTRUCTIONS}"
     runtime_server = LabTrackerFastMCP(
         SERVER_NAME,
-        instructions=MCP_SERVER_INSTRUCTIONS,
+        instructions=instructions,
+        client_update_notice=client_update_notice,
         **kwargs,
     )
     register_read_tools(runtime_server)
@@ -302,7 +378,13 @@ def main() -> None:
         )
     elif hosted:
         _ensure_hosted_api_credential_is_read_only(api_settings)
-    runtime_server = build_server(runtime_settings)
+    # Only a local stdio install can fall behind its server by a release; a
+    # hosted endpoint ships in the server's own deployment, and redeploying it
+    # is not something the connected agent's person can do with uv.
+    update_notice = None if hosted else probe_client_update_notice(api_settings)
+    if update_notice is not None:
+        print(f"NOTICE: {update_notice}", file=sys.stderr, flush=True)
+    runtime_server = build_server(runtime_settings, client_update_notice=update_notice)
     if runtime_settings.transport == "streamable-http":
         _run_streamable_http(runtime_server, runtime_settings)
     else:
@@ -551,6 +633,7 @@ __all__ = [
     "MCP_SERVER_INSTRUCTIONS",
     "MCPTransport",
     "SERVER_NAME",
+    "UPDATE_NOTICE_KEY",
     "build_server",
     "build_streamable_http_app",
     "client_from_env",
@@ -602,6 +685,7 @@ __all__ = [
     "lab_tracker_update_goal",
     "lab_tracker_upload_visualization_file",
     "main",
+    "probe_client_update_notice",
     "server",
 ]
 
