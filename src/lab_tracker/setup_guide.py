@@ -100,7 +100,11 @@ def setup_guide_markdown() -> str:
         "graph automatically. Server-side AI drafting uses the operator's\n"
         "configured provider credential; no local OpenAI key is needed for Lab\n"
         "Tracker. `lt doctor` and `lt setup status` surface drift after package\n"
-        "upgrades, and `lt update` is the refresh path.\n"
+        "upgrades and confirm that `lt-mcp` can start, and `lt update` is the\n"
+        "refresh path. When the server moves to a newer release, `lt setup\n"
+        "status`, `lt-mcp` notices, and the Daily review name each client that\n"
+        "is behind; the Setup page's server-pinned install updates it, then\n"
+        "`lt update` refreshes each repo.\n"
     )
 
 
