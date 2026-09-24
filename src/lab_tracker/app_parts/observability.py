@@ -217,6 +217,7 @@ def register_observability_routes(
     environment: str,
     app_name: str,
     source_revision: str,
+    source_version: str | None,
 ) -> None:
     @app.get("/health")
     def health() -> dict[str, Any]:
@@ -227,6 +228,8 @@ def register_observability_routes(
                 "name": app_name,
                 "environment": environment,
                 "source_revision": source_revision,
+                # The release clients compare against (lab_tracker.client_release).
+                "version": source_version,
             },
         }
 

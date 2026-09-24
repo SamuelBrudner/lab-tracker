@@ -11,8 +11,9 @@ swallowed health probe.
 from __future__ import annotations
 
 import difflib
-import importlib.metadata
+import importlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -21,7 +22,9 @@ import sys
 import tempfile
 import threading
 import time
-from contextlib import suppress
+import traceback
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +32,14 @@ import httpx
 
 import lab_tracker_client.hpc as hpc_capture
 import lab_tracker_client.watch as watch_capture
+from lab_tracker.client_release import (
+    ReleaseComparison,
+    ReleaseIdentity,
+    installed_release,
+    installed_source_revision,
+    release_from_health,
+    update_steps,
+)
 from lab_tracker.instance_url import (
     BASE_URL_ENV,
     LEGACY_MCP_BASE_URL_ENV,
@@ -52,6 +63,8 @@ _HEALTH_PROBE_TIMEOUT_SECONDS = 2.0
 _DEFAULT_MCP_VERIFY_TIMEOUT_SECONDS = 15.0
 _MCP_PROBE_POLL_INTERVAL_SECONDS = 0.02
 _MCP_PROBE_SHUTDOWN_GRACE_SECONDS = 2.0
+_MCP_SERVER_MODULE = "lab_tracker.mcp_server"
+_MCP_IMPORT_TRACEBACK_LIMIT = 2000
 _FULL_GIT_REVISION = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
 
 _SCAFFOLD_FILES = (
@@ -208,14 +221,17 @@ def setup_status(target: str | Path = ".", *, brief: bool = False) -> JsonObject
     root = Path(target).expanduser().resolve()
     profile = load_connection_profile()
     base_url, base_url_source = _resolve_base_url(profile)
+    server: JsonObject = {
+        "base_url": base_url,
+        "source": base_url_source,
+        **probe_health_diagnostics(base_url),
+    }
     payload: JsonObject = {
         "command": "setup-status",
         "target": str(root),
-        "server": {
-            "base_url": base_url,
-            "source": base_url_source,
-            **probe_health_diagnostics(base_url),
-        },
+        "server": server,
+        "client": _client_release_status(server),
+        "lt_mcp": mcp_startup_check(),
         "profile": {
             "present": connection_profile_path().exists(),
             "path": str(connection_profile_path()),
@@ -250,8 +266,42 @@ def setup_status(target: str | Path = ".", *, brief: bool = False) -> JsonObject
     }
 
 
-def _suggestions(status: JsonObject) -> list[str]:
+def _client_release_status(server: JsonObject) -> JsonObject:
+    """Compare this client's installed release with the one ``/health`` reported."""
+
+    reported = server.get("release")
+    reported = reported if isinstance(reported, dict) else {}
+    server_release = ReleaseIdentity.from_values(
+        reported.get("version"),
+        reported.get("revision"),
+    )
+    return ReleaseComparison(client=installed_release(), server=server_release).as_dict()
+
+
+def _install_suggestions(status: JsonObject) -> list[str]:
     suggestions: list[str] = []
+    lt_mcp = status["lt_mcp"]
+    if lt_mcp.get("importable") is False:
+        suggestions.append(
+            f"lt-mcp cannot start in this environment ({lt_mcp.get('error')}); the "
+            "install command on the server's Agents page reinstalls the client, and "
+            "`lt doctor` shows the full traceback."
+        )
+    client = status["client"]
+    if client.get("client_behind_server"):
+        server = ReleaseIdentity.from_values(
+            client["server"]["version"],
+            client["server"]["revision"],
+        )
+        suggestions.append(
+            f"This lab-tracker client (release {client['client']['version']}) is behind "
+            f"its server (release {server.version}); {update_steps(server)}."
+        )
+    return suggestions
+
+
+def _suggestions(status: JsonObject) -> list[str]:
+    suggestions = _install_suggestions(status)
     repo = status["repo"]
     hooks = status["hooks"]
     watch = status["watch"]
@@ -432,33 +482,58 @@ def probe_health_diagnostics(base_url: str) -> JsonObject:
                 detail=f"HTTP connection succeeded; server returned HTTP {response.status_code}.",
                 next_step="Check the URL, access requirements, and application or proxy logs.",
             )
+            return payload
+        with suppress(ValueError):
+            payload["release"] = release_from_health(response.json()).as_dict()
         return payload
     except Exception as exc:  # status remains fail-soft for session hooks.
         return {"reachable": False, **trace.diagnose(exc)}
 
 
-def installed_source_revision() -> str | None:
-    """Return the immutable VCS revision recorded by a direct-URL install.
+def mcp_startup_check() -> JsonObject:
+    """Offline smoke check that this Python environment can start ``lt-mcp``.
 
-    The guided setup installs Lab Tracker from an exact Git revision. Python
-    installers preserve the resolved commit in ``direct_url.json`` (PEP 610),
-    which gives both the tool environment and a consumer project's environment
-    a local, offline compatibility check.
+    Importing the server module also builds its default server object and
+    registers every tool, which catches dependency breakage (an ``mcp`` release
+    without ``mcp.server.fastmcp``, a missing package) right after an install
+    instead of when an agent first launches ``lt-mcp``. In-process keeps it
+    cheap enough for the SessionStart hook: no stdio session, no network I/O.
+    ``lt setup verify-mcp`` stays the deeper, opt-in connectivity check.
     """
 
-    with suppress(Exception):
-        direct_url_text = importlib.metadata.distribution("lab-tracker").read_text(
-            "direct_url.json"
+    payload: JsonObject = {"module": _MCP_SERVER_MODULE, "python": sys.executable}
+    try:
+        with _preserved_root_logging():
+            importlib.import_module(_MCP_SERVER_MODULE)
+    except Exception as exc:  # noqa: BLE001 - any import failure means lt-mcp cannot start.
+        traceback_text = "".join(traceback.format_exception(exc))
+        payload.update(
+            importable=False,
+            error=f"{type(exc).__name__}: {exc}",
+            traceback=traceback_text[-_MCP_IMPORT_TRACEBACK_LIMIT:],
+            next_step=(
+                "lt-mcp cannot start in this environment, so agents see the Lab "
+                "Tracker MCP server fail to connect. Reinstalling the client with "
+                "the install command on the server's Agents page replaces the "
+                "broken dependencies; `lt doctor` then confirms the fix."
+            ),
         )
-        if not direct_url_text:
-            return None
-        direct_url = json.loads(direct_url_text)
-        vcs_info = direct_url.get("vcs_info")
-        if not isinstance(vcs_info, dict):
-            return None
-        revision = str(vcs_info.get("commit_id") or "").strip().lower()
-        return revision if _FULL_GIT_REVISION.fullmatch(revision) else None
-    return None
+        return payload
+    payload["importable"] = True
+    return payload
+
+
+@contextmanager
+def _preserved_root_logging() -> Iterator[None]:
+    """Keep FastMCP's constructor-time ``logging.basicConfig`` out of ``lt``'s output."""
+
+    root = logging.getLogger()
+    handlers, level = list(root.handlers), root.level
+    try:
+        yield
+    finally:
+        root.handlers[:] = handlers
+        root.setLevel(level)
 
 
 def verify_client_revision(expected_revision: str) -> JsonObject:

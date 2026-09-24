@@ -19,6 +19,7 @@ from lab_tracker.app_parts.runtime import (
     configure_app_state,
     make_lifespan,
 )
+from lab_tracker.client_release import installed_version
 from lab_tracker.config import get_settings
 from lab_tracker.routes import register_routes
 
@@ -51,6 +52,7 @@ def create_app(*, verify_schema: bool = True) -> FastAPI:
         environment=settings.environment,
         app_name=settings.app_name,
         source_revision=settings.source_revision,
+        source_version=installed_version(),
     )
     configure_frontend_routes(app)
     register_routes(

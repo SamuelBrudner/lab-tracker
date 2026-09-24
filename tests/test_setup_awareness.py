@@ -4,6 +4,7 @@ drift semantics, status suggestions/--brief, and the SessionStart hook."""
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -412,3 +413,174 @@ def test_status_brief_healthy_is_one_line(isolated_homes, monkeypatch, capsys) -
     # configured, so brief reports a healthy line.
     assert brief["suggestions"] == []
     assert brief["brief"].startswith("lab-tracker: capture is configured")
+
+
+SERVER_REVISION = "b" * 40
+
+
+@pytest.fixture
+def broken_mcp_install(tmp_path, monkeypatch):
+    """Reproduce GH #214: the resolved ``mcp`` release lacks a server module."""
+
+    site = tmp_path / "broken-site"
+    site.mkdir()
+    (site / "broken_lt_mcp_server.py").write_text(
+        "from mcp.server.fastmcp_removed_upstream import FastMCP  # noqa: F401\n",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(site))
+    monkeypatch.setattr(setup_helpers, "_MCP_SERVER_MODULE", "broken_lt_mcp_server")
+
+
+def _healthy_status_repo(isolated_homes, monkeypatch, name: str) -> Path:
+    repo = isolated_homes / name
+    init_consumer_repo(repo, yes=True, install_skills=True)
+    (repo / "lt_ids.json").write_text(
+        json.dumps({"project_id": "p-1", "project_name": "demo"}), encoding="utf-8"
+    )
+    monkeypatch.chdir(repo)
+    lt_cli.main(["watch", "add", "results", "--config", str(repo / ".lab-tracker" / "watch.json")])
+    # An env-pinned URL keeps the "record your server URL" suggestion quiet.
+    monkeypatch.setenv("LAB_TRACKER_BASE_URL", "http://127.0.0.1:9")
+    return repo
+
+
+def _server_reports_release(monkeypatch, version: str, revision: str = SERVER_REVISION) -> None:
+    monkeypatch.setattr(
+        setup_helpers,
+        "probe_health_diagnostics",
+        lambda _url: {"reachable": True, "release": {"version": version, "revision": revision}},
+    )
+
+
+def test_doctor_reports_that_lt_mcp_can_start(tmp_path, capsys) -> None:
+    repo = tmp_path / "repo"
+    init_consumer_repo(repo, yes=True)
+
+    lt_cli.main(["doctor", "--target", str(repo)])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["lt_mcp"]["importable"] is True
+    assert payload["lt_mcp"]["module"] == "lab_tracker.mcp_server"
+    assert "error" not in payload["lt_mcp"]
+
+
+def test_doctor_fails_loudly_when_lt_mcp_cannot_import(
+    tmp_path, broken_mcp_install, capsys
+) -> None:
+    repo = tmp_path / "repo"
+    init_consumer_repo(repo, yes=True)
+
+    with pytest.raises(SystemExit) as excinfo:
+        lt_cli.main(["doctor", "--target", str(repo)])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert excinfo.value.code == 1
+    lt_mcp = payload["lt_mcp"]
+    assert lt_mcp["importable"] is False
+    assert lt_mcp["error"].startswith("ModuleNotFoundError:")
+    assert "mcp.server.fastmcp_removed_upstream" in lt_mcp["error"]
+    assert "broken_lt_mcp_server.py" in lt_mcp["traceback"]
+    assert "Agents page" in lt_mcp["next_step"]
+    # Managed-block drift is unaffected: only the install is broken.
+    assert not any(target["drifted"] for target in payload["targets"])
+
+    # Prompt hooks stay silent, exactly as they do for drift.
+    lt_cli.main(["doctor", "--target", str(repo), "--fail-silent"])
+    assert capsys.readouterr().out == ""
+
+
+def test_lt_mcp_check_keeps_server_logging_setup_out_of_lt(tmp_path, monkeypatch) -> None:
+    # FastMCP's constructor calls logging.basicConfig at import time; without
+    # containment every later INFO log (alembic, httpx) leaks onto lt's stderr.
+    site = tmp_path / "logging-site"
+    site.mkdir()
+    (site / "logging_lt_mcp_server.py").write_text(
+        "import logging\nlogging.basicConfig(level=logging.DEBUG, force=True)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(site))
+    monkeypatch.setattr(setup_helpers, "_MCP_SERVER_MODULE", "logging_lt_mcp_server")
+    root = logging.getLogger()
+    handlers, level = list(root.handlers), root.level
+
+    assert setup_helpers.mcp_startup_check()["importable"] is True
+    assert root.handlers == handlers
+    assert root.level == level
+
+
+def test_doctor_all_checks_the_install_once_per_sweep(broken_mcp_install, capsys) -> None:
+    with pytest.raises(SystemExit):
+        lt_cli.main(["doctor", "--all"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["command"] == "doctor-all"
+    assert payload["repos"] == []
+    assert payload["lt_mcp"]["importable"] is False
+
+
+def test_status_suggests_reinstalling_a_broken_lt_mcp_first(
+    isolated_homes, broken_mcp_install, monkeypatch, capsys
+) -> None:
+    repo = _healthy_status_repo(isolated_homes, monkeypatch, "consumer-broken-mcp")
+    capsys.readouterr()
+
+    lt_cli.main(["setup", "status", "--target", str(repo), "--brief"])
+    brief = json.loads(capsys.readouterr().out)
+
+    assert len(brief["suggestions"]) == 1
+    assert brief["suggestions"][0].startswith("lt-mcp cannot start in this environment")
+    assert "ModuleNotFoundError" in brief["brief"]
+
+
+def test_status_names_a_client_behind_the_server_release(
+    isolated_homes, monkeypatch, capsys
+) -> None:
+    repo = _healthy_status_repo(isolated_homes, monkeypatch, "consumer-behind")
+    capsys.readouterr()
+    _server_reports_release(monkeypatch, "99.0.0")
+
+    payload = setup_helpers.setup_status(repo)
+
+    assert payload["client"]["status"] == "behind"
+    assert payload["client"]["client_behind_server"] is True
+    assert payload["client"]["server"] == {"version": "99.0.0", "revision": SERVER_REVISION}
+    [suggestion] = payload["suggestions"]
+    assert suggestion.startswith("This lab-tracker client (release ")
+    assert "is behind its server (release 99.0.0)" in suggestion
+    assert f"lab-tracker.git@{SERVER_REVISION}" in suggestion
+    assert "`lt update`" in suggestion
+
+    lt_cli.main(["setup", "status", "--target", str(repo), "--brief"])
+    brief = json.loads(capsys.readouterr().out)
+    assert set(brief) == {"command", "brief", "suggestions"}
+    assert "is behind its server" in brief["brief"]
+
+
+@pytest.mark.parametrize("server_version", ["0.0.1", "0+unknown", None])
+def test_status_stays_quiet_without_a_newer_server_release(
+    isolated_homes, monkeypatch, server_version
+) -> None:
+    repo = _healthy_status_repo(isolated_homes, monkeypatch, "consumer-quiet")
+    _server_reports_release(monkeypatch, server_version)
+
+    payload = setup_helpers.setup_status(repo)
+
+    assert payload["client"]["client_behind_server"] is False
+    assert payload["suggestions"] == []
+
+
+def test_status_reports_revision_drift_without_nagging(isolated_homes, monkeypatch) -> None:
+    repo = _healthy_status_repo(isolated_homes, monkeypatch, "consumer-drift")
+    monkeypatch.setattr(
+        setup_helpers,
+        "installed_release",
+        lambda: setup_helpers.ReleaseIdentity(version="0.1.0", revision="a" * 40),
+    )
+    _server_reports_release(monkeypatch, "0.1.0")
+
+    payload = setup_helpers.setup_status(repo)
+
+    assert payload["client"]["status"] == "current"
+    assert payload["client"]["same_revision"] is False
+    assert payload["suggestions"] == []

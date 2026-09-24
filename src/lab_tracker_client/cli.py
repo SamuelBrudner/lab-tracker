@@ -2019,7 +2019,9 @@ def _cmd_doctor(args: argparse.Namespace) -> Any:
     from lab_tracker.cli import _doctor
 
     if not getattr(args, "all", False):
-        return _doctor(args.target)
+        payload = _doctor(args.target)
+        payload["lt_mcp"] = setup_helpers.mcp_startup_check()
+        return payload
     repos = []
     pruned = []
     for entry in repo_registry.list_repos():
@@ -2053,6 +2055,8 @@ def _cmd_doctor(args: argparse.Namespace) -> Any:
         "command": "doctor-all",
         "registry": str(repo_registry.registry_path()),
         "repos": repos,
+        # One install serves every registered repo, so check it once per sweep.
+        "lt_mcp": setup_helpers.mcp_startup_check(),
     }
     if pruned:
         result["pruned"] = pruned
@@ -2124,6 +2128,10 @@ def _payload_exit_code(payload: Any) -> int:
         and payload.get("errors")
     ):
         return 1
+    if isinstance(payload, dict) and payload.get("command") in {"doctor", "doctor-all"}:
+        lt_mcp = payload.get("lt_mcp")
+        if isinstance(lt_mcp, dict) and lt_mcp.get("importable") is False:
+            return 1
     if isinstance(payload, dict) and payload.get("command") == "doctor":
         targets = payload.get("targets")
         if not isinstance(targets, list):
