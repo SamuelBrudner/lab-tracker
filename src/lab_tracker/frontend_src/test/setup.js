@@ -14,6 +14,8 @@ import { afterEach, beforeEach, vi } from "vitest";
 // on freshly committed UI before those effects run. Assert the exact state the
 // next step needs, not just that an element exists, and keep resets that
 // interactive UI depends on out of passive effects.
+// `npm run test:frontend:chaos` forces that reordering on every run; see
+// scheduler-chaos.js.
 configure({ asyncUtilTimeout: 10000 });
 
 vi.mock("@xyflow/react", async () => {
