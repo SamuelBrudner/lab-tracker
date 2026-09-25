@@ -8,6 +8,12 @@ import { afterEach, beforeEach, vi } from "vitest";
 // such as findByText("Question staged."). Give async queries real headroom so
 // CI load spikes don't cause spurious timeouts; genuinely missing UI still
 // fails, just after a longer wait.
+//
+// Load also reorders work, which no timeout fixes: React yields between a
+// commit and its passive effects (useEffect), so a findBy*/waitFor can resolve
+// on freshly committed UI before those effects run. Assert the exact state the
+// next step needs, not just that an element exists, and keep resets that
+// interactive UI depends on out of passive effects.
 configure({ asyncUtilTimeout: 10000 });
 
 vi.mock("@xyflow/react", async () => {

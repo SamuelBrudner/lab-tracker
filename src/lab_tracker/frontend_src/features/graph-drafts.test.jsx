@@ -1439,7 +1439,9 @@ describe("GraphDraftDetailCard keyboard review", () => {
     await waitFor(() => expect(patchBodies).toHaveLength(3));
     expect(patchBodies[2]).toMatchObject({ operationId: first.operation_id, status: "proposed" });
     expect(setFlash).toHaveBeenLastCalledWith("Deferred: Does sleep change courtship behavior?");
-    expect(screen.getByText(/1 rejected · 1 undecided/)).toBeInTheDocument();
+    // setFlash runs in the same tick the saved draft is set, but the counts
+    // render in a later scheduler task, so wait for them.
+    expect(await screen.findByText(/1 rejected · 1 undecided/)).toBeInTheDocument();
   });
 
   it("leaves the shortcuts alone while a field is being typed in", async () => {

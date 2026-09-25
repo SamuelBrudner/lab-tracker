@@ -50,7 +50,14 @@ describe("VisualizationDetailCard", () => {
 
     render(<VisualizationDetailCard token="token-viz" vizId="viz-asset" navigate={vi.fn()} />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Download asset" }));
+    // The preview and the download request the same URL, so the queued
+    // responses are handed out in call order. The preview fetch starts in an
+    // effect that can still be pending when the button first renders; settle it
+    // before clicking so the download is the second request.
+    expect(
+      await screen.findByText("Preview unavailable: Preview bytes are missing.")
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Download asset" }));
 
     expect(
       await screen.findByText("Visualization asset bytes are missing.")

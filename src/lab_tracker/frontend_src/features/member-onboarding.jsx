@@ -6,7 +6,7 @@ import { formatDate } from "../shared/formatters.js";
 import { memberOnboarding as memberOnboardingGateway } from "../shared/gateways/index.js";
 import { RequestEditAccess } from "../shared/ui.jsx";
 
-const { useEffect, useMemo, useRef, useState } = React;
+const { useEffect, useLayoutEffect, useMemo, useRef, useState } = React;
 
 const EMPTY_FIELDS = {
   asOf: "",
@@ -404,7 +404,11 @@ function AiAlignmentReview({ draft: initialDraft, liveQuestions, questions, toke
   const activeDraftIdRef = useRef(changeSetId);
   const pendingCommandRef = useRef("");
 
-  useEffect(() => {
+  // A layout effect, so the reset lands in the commit that shows the draft's
+  // decision buttons. React can yield between a commit and its passive
+  // effects: a passive reset would clear the in-flight guard of a decision
+  // clicked in that gap and let a second click send a duplicate.
+  useLayoutEffect(() => {
     activeDraftIdRef.current = changeSetId;
     pendingCommandRef.current = "";
     setPendingCommand("");
