@@ -89,6 +89,7 @@
       "@type": "@id"
     },
     "dcterms": "http://purl.org/dc/terms/",
+    "effectiveStatus": "lab:effectiveStatus",
     "encodingFormat": "schema:encodingFormat",
     "endedAt": "prov:endedAtTime",
     "entityId": "lab:entityId",
