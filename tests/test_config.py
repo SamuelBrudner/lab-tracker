@@ -1725,3 +1725,45 @@ def test_public_viewer_registration_flag_overrides_environment(monkeypatch):
     monkeypatch.delenv("LAB_TRACKER_AUTH_SECRET_KEY")
     monkeypatch.setenv("LAB_TRACKER_AUTH_PUBLIC_VIEWER_REGISTRATION_ENABLED", "false")
     assert _settings_from_environment().is_public_viewer_registration_enabled() is False
+
+
+@pytest.mark.parametrize(
+    ("provider", "variable", "base_url", "expected"),
+    [
+        ("openai", "LAB_TRACKER_OPENAI_BASE_URL", "https://api.openai.com/v1", True),
+        ("claude", "LAB_TRACKER_ANTHROPIC_BASE_URL", "http://localhost:11434/v1", False),
+        ("gemini", "LAB_TRACKER_GOOGLE_BASE_URL", "http://127.0.0.1:8080", False),
+        ("anthropic", "LAB_TRACKER_ANTHROPIC_BASE_URL", "http://[::1]:9/v1", False),
+        (
+            "google",
+            "LAB_TRACKER_GOOGLE_BASE_URL",
+            "https://generativelanguage.googleapis.com",
+            True,
+        ),
+    ],
+)
+def test_graph_draft_provider_is_external_by_base_url_host(
+    monkeypatch, provider: str, variable: str, base_url: str, expected: bool
+) -> None:
+    monkeypatch.setenv("LAB_TRACKER_GRAPH_DRAFT_PROVIDER", provider)
+    monkeypatch.setenv(variable, base_url)
+    settings = _settings_from_environment()
+    assert settings.graph_draft_provider_base_url() == base_url
+    assert settings.graph_draft_provider_is_external() is expected
+
+
+def test_graph_draft_provider_aliases_are_exactly_claude_and_gemini() -> None:
+    from lab_tracker.config import GRAPH_DRAFT_PROVIDER_ALIASES
+
+    assert GRAPH_DRAFT_PROVIDER_ALIASES == {"claude": "anthropic", "gemini": "google"}
+
+
+def test_graph_draft_provider_base_url_rejects_unknown_provider(monkeypatch) -> None:
+    monkeypatch.setenv("LAB_TRACKER_GRAPH_DRAFT_PROVIDER", "agentic")
+    settings = _settings_from_environment()
+    with pytest.raises(ValueError, match="agentic"):
+        settings.graph_draft_provider_base_url()
+    # No base URL to inspect: an unknown provider fails closed as external so
+    # the acknowledgement gate stays on, while the name itself fails loudly at
+    # the first draft request.
+    assert settings.graph_draft_provider_is_external() is True

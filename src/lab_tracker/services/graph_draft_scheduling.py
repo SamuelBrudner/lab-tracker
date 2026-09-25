@@ -16,6 +16,7 @@ from lab_tracker.member_onboarding import (
     SCHEDULED_DRAFT_POLICY_KEY,
 )
 from lab_tracker.models import (
+    ExternalContextPolicy,
     GraphChangeSetStatus,
     GraphDraftBatchRun,
     GraphDraftBatchRunStatus,
@@ -53,6 +54,11 @@ from lab_tracker.services.shared import actor_user_fk, actor_user_id
 
 logger = logging.getLogger(__name__)
 SettingValueT = TypeVar("SettingValueT")
+EXTERNAL_PROVIDER_ACKNOWLEDGEMENT_REQUIRED = (
+    "Scheduled drafting with an external AI provider requires explicit "
+    "external-provider acknowledgement."
+)
+ACKNOWLEDGE_EXTERNAL_PROVIDER_ACTION = "Acknowledging the external AI provider"
 
 
 def _validated_setting_patch(
@@ -78,8 +84,8 @@ class BatchSchedulingCoordinator(BaseService):
         projects: SchedulingProjects,
         notes: SchedulingNotes,
         authorization: SchedulingAuthorization,
+        host: batch_policy.DraftingHostFacts,
         provenance_links: SchedulingProvenanceLinks | None = None,
-        review_email_available: bool = False,
     ) -> None:
         super().__init__(context)
         self.records = records
@@ -93,7 +99,8 @@ class BatchSchedulingCoordinator(BaseService):
             projects=projects,
             notes=notes,
         )
-        self.review_email_available = bool(review_email_available)
+        self.review_email_available = host.review_email_available
+        self.external_provider = host.external_provider
 
     @property
     def scheduling_repository(self) -> SchedulingRepository:
@@ -146,10 +153,24 @@ class BatchSchedulingCoordinator(BaseService):
         user_id: PatchValue[UUID | None] = NOT_PROVIDED,
         email_notifications_enabled: PatchValue[bool | None] = NOT_PROVIDED,
         notification_email: PatchValue[str | None] = NOT_PROVIDED,
+        external_context_policy: PatchValue[ExternalContextPolicy | None] = NOT_PROVIDED,
+        external_provider_acknowledged: PatchValue[bool | None] = NOT_PROVIDED,
         actor: AuthContext | None = None,
     ) -> GraphDraftBatchSettings:
         enabled = _validated_setting_patch(enabled, "enabled")
         cadence_minutes = _validated_setting_patch(cadence_minutes, "cadence_minutes")
+        external_context_policy = _validated_setting_patch(
+            external_context_policy, "external_context_policy"
+        )
+        external_provider_acknowledged = _validated_setting_patch(
+            external_provider_acknowledged,
+            "external_provider_acknowledged",
+        )
+        if (
+            is_provided(external_provider_acknowledged)
+            and external_provider_acknowledged is not True
+        ):
+            raise ValidationError("external_provider_acknowledged must be true when provided.")
         run_at_local_time = _validated_setting_patch(
             run_at_local_time,
             "run_at_local_time",
@@ -189,6 +210,17 @@ class BatchSchedulingCoordinator(BaseService):
             )
         settings.review_email_available = self.review_email_available
         before = settings.model_copy(deep=True)
+        if is_provided(external_provider_acknowledged):
+            # Consent is a person's act: a service token or automation
+            # principal cannot acknowledge on anyone's behalf.
+            self.authorization.require_interactive(
+                actor,
+                action=ACKNOWLEDGE_EXTERNAL_PROVIDER_ACTION,
+            )
+            settings.external_provider_acknowledged_at = utc_now()
+            settings.external_provider_acknowledged_by = actor_user_id(actor)
+        if is_provided(external_context_policy):
+            settings.external_context_policy = external_context_policy
         if is_provided(enabled):
             settings.enabled = enabled
         if is_provided(cadence_minutes):
@@ -225,6 +257,14 @@ class BatchSchedulingCoordinator(BaseService):
                 raise ValidationError(
                     "notification_email is required before email alerts can be enabled."
                 )
+        self._require_external_provider_acknowledgement(settings, before)
+        consent_changed = any(
+            (
+                settings.external_context_policy != before.external_context_policy,
+                settings.external_provider_acknowledged_at
+                != before.external_provider_acknowledged_at,
+            )
+        )
         scheduling_changed = any(
             (
                 settings.enabled != before.enabled,
@@ -240,7 +280,7 @@ class BatchSchedulingCoordinator(BaseService):
                 settings.notification_email_confirmed_at != before.notification_email_confirmed_at,
             )
         )
-        if not scheduling_changed and not notification_changed:
+        if not scheduling_changed and not notification_changed and not consent_changed:
             return settings
         if scheduling_changed:
             settings.next_run_at = (
@@ -257,6 +297,28 @@ class BatchSchedulingCoordinator(BaseService):
         with self.unit_of_work():
             self.scheduling_repository.graph_draft_batch_settings.save(settings)
         return settings
+
+    def _require_external_provider_acknowledgement(
+        self,
+        settings: GraphDraftBatchSettings,
+        before: GraphDraftBatchSettings,
+    ) -> None:
+        """Gate the two transitions that widen what leaves the instance.
+
+        Turning the cadence on sends the person's staged captures to the
+        provider; switching to ``project_notes`` sends colleagues' notes too.
+        A loopback provider never leaves the host, so nothing is gated.
+        """
+
+        if not self.external_provider or settings.external_provider_acknowledged_at is not None:
+            return
+        enabling = settings.enabled and not before.enabled
+        widening = (
+            settings.external_context_policy is ExternalContextPolicy.PROJECT_NOTES
+            and before.external_context_policy is not ExternalContextPolicy.PROJECT_NOTES
+        )
+        if enabling or widening:
+            raise ValidationError(EXTERNAL_PROVIDER_ACKNOWLEDGEMENT_REQUIRED)
 
     def run_graph_draft_batch_for_project(
         self,

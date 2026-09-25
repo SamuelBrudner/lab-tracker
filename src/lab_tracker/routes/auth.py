@@ -23,6 +23,7 @@ from lab_tracker.auth import (
     extract_bearer_token,
     resolve_session_user,
 )
+from lab_tracker.config import resolve_graph_draft_provider
 from lab_tracker.db_types import ensure_uuid
 from lab_tracker.errors import AuthError, PermissionDeniedError
 from lab_tracker.instance_url import build_instance_url
@@ -297,12 +298,7 @@ def build_auth_router(
 
 
 def _graph_draft_provider_readiness(settings) -> tuple[str, bool]:
-    provider = (settings.graph_draft_provider or "openai").strip().lower()
-    provider_aliases = {
-        "claude": "anthropic",
-        "gemini": "google",
-    }
-    provider = provider_aliases.get(provider, provider)
+    provider = resolve_graph_draft_provider(settings.graph_draft_provider)
     credential_fields = {
         "openai": "openai_api_key",
         "anthropic": "anthropic_api_key",

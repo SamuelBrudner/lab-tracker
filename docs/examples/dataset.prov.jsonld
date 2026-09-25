@@ -1,5 +1,11 @@
 {
   "@context": {
+    "acceptanceMode": "lab:acceptanceMode",
+    "acceptedAt": "lab:acceptedAt",
+    "acceptedBy": {
+      "@id": "lab:acceptedBy",
+      "@type": "@id"
+    },
     "actedOnBehalfOf": {
       "@id": "prov:actedOnBehalfOf",
       "@type": "@id"
@@ -172,6 +178,8 @@
       "@id": "lab:primaryQuestion",
       "@type": "@id"
     },
+    "proposalConfidence": "lab:proposalConfidence",
+    "proposalRationale": "lab:proposalRationale",
     "prov": "http://www.w3.org/ns/prov#",
     "question": {
       "@id": "lab:question",
@@ -189,6 +197,7 @@
       "@id": "lab:relatedClaim",
       "@type": "@id"
     },
+    "reviewNote": "lab:reviewNote",
     "role": "lab:role",
     "schema": "https://schema.org/",
     "scope": {

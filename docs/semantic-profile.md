@@ -157,6 +157,7 @@ also emitted under the additive compatibility policy below.
 | `lab:goalType` | `Goal`; `goalType` | `paper`, `grant`, `talk`, `other` |
 | `lab:goalStatus` | `Goal`; `status` | `planned`, `in_progress`, `submitted`, `accepted`, `abandoned` |
 | `lab:entityOrigin` | Origin-aware record or pre-revision `EntityVersion`; `origin` | `user`, `ai_suggested`, `ai_executed`, `user_revised` |
+| `lab:acceptanceMode` | Any record produced by an accepted AI proposal; `acceptanceMode` | `human_selected`, `bulk_accepted`, `auto_accepted` |
 | `lab:claimRelation` | `ClaimRelation`; `claimRelationType` | `extends`, `contradicts`, `refutes`, `depends_on`, `supersedes` |
 | `lab:questionLinkRole` | `QuestionLink`; `role` | `primary`, `secondary` |
 | `lab:outcomeStatus` | `QuestionLink`; `outcomeStatus` | `unknown`, `supports`, `refutes`, `inconclusive` |
@@ -266,7 +267,7 @@ routing hints, but those tokens do not type the referenced resource.
 | `AcquisitionOutput` | Not emitted independently; a committed output is represented by its dataset file `prov:Entity` |
 | `ProvenanceLink` proposal record | Not emitted as a class. Only a supported accepted relation (currently note-to-note `was_derived_from`) is projected as a direct PROV predicate; proposed and rejected links remain curation state outside the public graph |
 | `SupervisionEdge` | Not emitted as a class; projected as `prov:actedOnBehalfOf` |
-| Graph-change operations, draft batches, and their lifecycle states | Not public classes or schemes. Only a referenced accepted change set is projected as a standard `prov:Activity` |
+| Graph-change operations, draft batches, and their lifecycle states | Not public classes or schemes. A referenced accepted change set is projected as a standard `prov:Activity`, and an accepted operation is projected as curation properties on the record it produced (`acceptanceMode`, `acceptedBy`, `acceptedAt`, `proposalRationale`, `proposalConfidence`, `reviewNote`); the operation itself is never a node |
 | `RecordExport`, export events, usage events, readiness reports, stores, and access-control records | Operational API records, not provenance graph resources |
 | Raw note assets, visualization assets, and commit manifests | Described on their owning node or file entities; not additional semantic classes |
 | `entityType` reference token | Routing hint, not a class or controlled concept |

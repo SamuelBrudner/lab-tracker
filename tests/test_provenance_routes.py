@@ -534,3 +534,213 @@ def test_single_resource_envelopes_carry_the_canonical_iri(
 
     assert envelope["meta"]["iri"] == f"{canonical}/datasets/{dataset_id}"
     assert envelope["data"]["dataset_id"] == dataset_id
+
+
+# --- Sidecars carry the story around the record (m11) ---
+
+
+def test_dataset_provenance_route_includes_linked_question_text_and_exploration_nodes(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    headers = admin_auth_headers
+    project_id, dataset_id, primary_question_id, _, _ = (
+        _create_committed_dataset_with_provenance(client, headers)
+    )
+    decision = client.post(
+        "/exploration-nodes",
+        json={
+            "project_id": project_id,
+            "node_type": "decision",
+            "title": "Record the baseline at 200 Hz",
+            "target": {"entity_type": "dataset", "entity_id": dataset_id},
+            "choice": "200 Hz",
+            "alternatives_considered": ["100 Hz"],
+            "rationale": "Turning bouts last under 50 ms.",
+        },
+        headers=headers,
+    )
+    assert decision.status_code == 201, decision.text
+    decision_id = decision.json()["data"]["node_id"]
+    pivot = client.post(
+        "/exploration-nodes",
+        json={
+            "project_id": project_id,
+            "node_type": "pivot",
+            "title": "Back off to 100 Hz",
+            "target": {"entity_type": "question", "entity_id": primary_question_id},
+            "trigger": "The photodiode saturated within a second at 200 Hz.",
+            "rationale": "Drop the gain before raising the rate.",
+            "invalidates_node_id": decision_id,
+        },
+        headers=headers,
+    )
+    assert pivot.status_code == 201, pivot.text
+    dead_end_id = pivot.json()["data"]["node_id"]
+    unrelated = client.post(
+        "/exploration-nodes",
+        json={
+            "project_id": project_id,
+            "node_type": "decision",
+            "title": "Unrelated to this dataset",
+            "target": {"entity_type": "question", "entity_id": primary_question_id},
+            "choice": "Leave it",
+            "alternatives_considered": ["Change it"],
+            "rationale": "Not tied to this dataset.",
+        },
+        headers=headers,
+    )
+    assert unrelated.status_code == 201, unrelated.text
+
+    response = client.get(f"/datasets/{dataset_id}/provenance", headers=headers)
+    assert response.status_code == 200, response.text
+    payload = response.json()
+
+    question_node = _node_by_id(payload, f"http://testserver/questions/{primary_question_id}")
+    assert question_node["@type"] == "lab:ResearchQuestion"
+    assert question_node["text"] == "Does provenance export preserve the dataset graph?"
+    decision_node = _node_by_id(payload, f"http://testserver/exploration-nodes/{decision_id}")
+    assert decision_node["target"]["@id"] == f"http://testserver/datasets/{dataset_id}"
+    # The pivot reaches the dataset through the decision it invalidates.
+    dead_end_node = _node_by_id(payload, f"http://testserver/exploration-nodes/{dead_end_id}")
+    assert dead_end_node["invalidates"] == {
+        "@id": f"http://testserver/exploration-nodes/{decision_id}"
+    }
+    exported_ids = {node["@id"] for node in payload["@graph"]}
+    assert f"http://testserver/exploration-nodes/{unrelated.json()['data']['node_id']}" not in (
+        exported_ids
+    )
+
+
+def test_analysis_provenance_route_includes_goal_links(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    headers = admin_auth_headers
+    project_id, dataset_id, _, _, _ = _create_committed_dataset_with_provenance(client, headers)
+    analysis_id = client.post(
+        "/analyses",
+        json={
+            "project_id": project_id,
+            "dataset_ids": [dataset_id],
+            "method_hash": "method-goal",
+            "code_version": "git:goal",
+            "status": "committed",
+        },
+        headers=headers,
+    ).json()["data"]["analysis_id"]
+    goal = client.post(
+        "/goals",
+        json={
+            "project_id": project_id,
+            "goal_type": "paper",
+            "title": "Turning paper",
+            "links": [
+                {
+                    "entity_type": "analysis",
+                    "entity_id": analysis_id,
+                    "relation": "supporting_evidence",
+                    "link_status": "committed",
+                }
+            ],
+        },
+        headers=headers,
+    )
+    assert goal.status_code == 201, goal.text
+    goal_id = goal.json()["data"]["goal_id"]
+
+    response = client.get(f"/analyses/{analysis_id}/provenance", headers=headers)
+    assert response.status_code == 200, response.text
+    payload = response.json()
+
+    goal_iri = f"http://testserver/goals/{goal_id}"
+    goal_node = _node_by_id(payload, goal_iri)
+    assert goal_node["@type"] == "lab:Goal"
+    assert goal_node["text"] == "Turning paper"
+    link_nodes = [
+        node for node in payload["@graph"] if node.get("@type") == "lab:GoalLink"
+    ]
+    assert len(link_nodes) == 1
+    assert link_nodes[0]["goalLink"] == {"@id": goal_iri}
+    assert link_nodes[0]["target"]["@id"] == f"http://testserver/analyses/{analysis_id}"
+    assert link_nodes[0]["role"] == "supporting_evidence"
+
+
+def test_claim_provenance_route_embeds_curation_of_ai_accepted_claim(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    import json
+
+    from test_graph_drafts import FakeDraftClient, _image_note, _me_user_id
+
+    headers = admin_auth_headers
+    project_id = client.post(
+        "/projects", json={"name": "Curated claim"}, headers=headers
+    ).json()["data"]["project_id"]
+    note_id = _image_note(client, headers, project_id)
+    client.app.state.graph_draft_client_factory = lambda settings: FakeDraftClient(
+        {
+            "summary": "One claim was drafted from the whiteboard.",
+            "uncertain_fields": [],
+            "clarification_requests": [],
+            "operations": [
+                {
+                    "client_ref": "claim",
+                    "op": "create",
+                    "entity_type": "claim",
+                    "semantic_type": "create_entity",
+                    "target_entity_id": None,
+                    "payload_json": json.dumps(
+                        {
+                            "project_id": project_id,
+                            "statement": "The odor pulse increases turning.",
+                            "confidence": 70,
+                            "status": "proposed",
+                        }
+                    ),
+                    "rationale": "The whiteboard states the effect as a finding.",
+                    "confidence": 0.9,
+                    "source_refs": [],
+                }
+            ],
+        }
+    )
+    draft = client.post(f"/notes/{note_id}/graph-drafts", headers=headers)
+    assert draft.status_code == 201, draft.text
+    change_set_id = draft.json()["data"]["change_set_id"]
+    operation = draft.json()["data"]["operations"][0]
+    accepted = client.patch(
+        f"/graph-drafts/{change_set_id}/operations/{operation['operation_id']}",
+        json={
+            "payload": operation["payload"],
+            "status": "accepted",
+            "review_note": "Matches the rig log.",
+        },
+        headers=headers,
+    )
+    assert accepted.status_code == 200, accepted.text
+    committed = client.post(
+        f"/graph-drafts/{change_set_id}/commit",
+        json={"message": "commit the claim"},
+        headers=headers,
+    )
+    assert committed.status_code == 200, committed.text
+    claim_id = committed.json()["data"]["operations"][0]["result_entity_id"]
+    assert claim_id
+
+    response = client.get(f"/claims/{claim_id}/provenance", headers=headers)
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    claim_node = _node_by_id(payload, f"http://testserver/claims/{claim_id}")
+    acceptor = _me_user_id(client, headers)
+    assert claim_node["acceptanceMode"] == "human_selected"
+    assert {"@id": "lab:acceptanceMode/human_selected"} in claim_node["classifiedAs"]
+    assert claim_node["acceptedBy"] == {"@id": f"http://testserver/agents/{acceptor}"}
+    assert claim_node["acceptedAt"]
+    assert claim_node["proposalRationale"] == "The whiteboard states the effect as a finding."
+    assert claim_node["proposalConfidence"] == 0.9
+    assert claim_node["reviewNote"] == "Matches the rig log."
+    assert claim_node["changeSet"] == {"@id": f"http://testserver/graph-drafts/{change_set_id}"}
+    acceptor_node = _node_by_id(payload, f"http://testserver/agents/{acceptor}")
+    assert _node_type_includes(acceptor_node, "prov:Person")

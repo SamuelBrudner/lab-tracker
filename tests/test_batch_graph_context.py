@@ -13,7 +13,8 @@ from fastapi.testclient import TestClient
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.auth import AuthContext, Role
 from lab_tracker.db_models import ClaimModel, ExplorationNodeModel, NoteModel, QuestionModel
-from lab_tracker.models import Note, Session, SessionType
+from lab_tracker.models import ExternalContextPolicy, Note, Session, SessionType
+from lab_tracker.services.graph_draft_batch_policy import BatchReviewer
 from lab_tracker.services.graph_draft_context import (
     _OPEN_PREDICTION_LIMIT,
     _RECENT_CONTEXT_LIMIT,
@@ -23,6 +24,7 @@ from lab_tracker.services.graph_draft_context import (
     QUESTION_CONTEXT_LIMIT,
     _bounded_batch_source_artifacts,
     _capture_placement,
+    _compact_recent_note,
     _graph_batch_context_summary,
 )
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
@@ -1187,19 +1189,161 @@ def test_batch_context_labels_recent_notes_with_author(
     )
     admin_actor = AuthContext(user_id=UUID(admin_id), role=Role.ADMIN)
     colleague_actor = AuthContext(user_id=uuid4(), role=Role.ADMIN)
+    project_notes = ExternalContextPolicy.PROJECT_NOTES
 
     as_admin = _batch_packet(client, [note_id], actor=admin_actor)
-    as_colleague = _batch_packet(client, [note_id], actor=colleague_actor)
+    as_colleague = _batch_packet(
+        client, [note_id], actor=colleague_actor, external_context_policy=project_notes
+    )
     anonymous = _batch_packet(client, [note_id])
 
-    for packet, expected in ((as_admin, True), (as_colleague, False), (anonymous, None)):
+    for packet, expected, scope in (
+        (as_admin, True, "own"),
+        (as_colleague, False, "colleague"),
+        (anonymous, None, None),
+    ):
         recent_notes = packet["projects"][0]["recent_notes"]
         assert [item["id"] for item in recent_notes] == [older_note_id]
         assert recent_notes[0]["created_by"] == admin_id
+        assert recent_notes[0]["created_by_user_id"] == admin_id
         assert recent_notes[0]["captured_by_current_user"] is expected
+        assert recent_notes[0]["author_scope"] == scope
         assert recent_notes[0]["selection_reason"] == "recent"
     assert as_admin["batch_notes"][0]["created_by"] == admin_id
     assert "captured_by_current_user" not in as_admin["batch_notes"][0]
+    assert as_admin["external_context_policy"] == "own_notes_only"
+    assert as_colleague["external_context_policy"] == "project_notes"
+    assert as_colleague["context_owner"] == {
+        "reviewer": str(colleague_actor.user_id),
+        "reviewer_user_id": str(colleague_actor.user_id),
+    }
+    assert anonymous["context_owner"] is None
+    assert as_colleague["context_summary"]["counts"]["colleague_recent_notes"] == 1
+    assert as_admin["context_summary"]["counts"]["colleague_recent_notes"] == 0
+
+
+def test_batch_context_excludes_colleague_notes_under_own_notes_only(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    project_id = _create_project(client, admin_auth_headers, "Own Notes Only")
+    admin_id = _admin_user_id(client, admin_auth_headers)
+    _create_text_note(
+        client, admin_auth_headers, project_id=project_id, raw_content="admin's earlier note"
+    )
+    note_id = _create_text_note(
+        client, admin_auth_headers, project_id=project_id, raw_content="batch capture"
+    )
+    colleague_actor = AuthContext(user_id=uuid4(), role=Role.ADMIN)
+
+    # Explicit default policy and the resolved-from-settings default agree.
+    explicit = _batch_packet(
+        client,
+        [note_id],
+        actor=colleague_actor,
+        external_context_policy=ExternalContextPolicy.OWN_NOTES_ONLY,
+    )
+    resolved = _batch_packet(client, [note_id], actor=colleague_actor)
+    for packet in (explicit, resolved):
+        assert packet["external_context_policy"] == "own_notes_only"
+        assert packet["projects"][0]["recent_notes"] == []
+        assert packet["context_summary"]["counts"]["recent_notes"] == 0
+        assert packet["context_summary"]["counts"]["colleague_recent_notes"] == 0
+    # The batch's own captures are never filtered: the reviewer asked for them.
+    assert [item["id"] for item in resolved["batch_notes"]] == [note_id]
+    assert resolved["batch_notes"][0]["created_by"] == admin_id
+
+
+def test_batch_context_policy_resolves_from_the_owners_settings_rows(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    project_id = _create_project(client, admin_auth_headers, "Policy Rows")
+    older_note_id = _create_text_note(
+        client, admin_auth_headers, project_id=project_id, raw_content="admin's earlier note"
+    )
+    note_id = _create_text_note(
+        client, admin_auth_headers, project_id=project_id, raw_content="batch capture"
+    )
+    colleague = client.app.state.auth_service.register_user(
+        username=f"colleague-{uuid4().hex[:8]}", password="secret", role=Role.ADMIN
+    )
+    colleague_actor = AuthContext(user_id=colleague.user_id, role=Role.ADMIN)
+
+    # Project default opens the packet to every author (loopback provider: no consent needed).
+    opened = client.patch(
+        f"/projects/{project_id}/graph-draft-batch-settings/project-default",
+        json={"external_context_policy": "project_notes"},
+        headers=admin_auth_headers,
+    )
+    assert opened.status_code == 200, opened.text
+    inherited = _batch_packet(client, [note_id], actor=colleague_actor)
+    assert inherited["external_context_policy"] == "project_notes"
+    assert [item["id"] for item in inherited["projects"][0]["recent_notes"]] == [older_note_id]
+    assert inherited["projects"][0]["recent_notes"][0]["author_scope"] == "colleague"
+
+    # The colleague's personal row narrows it back for their own packets.
+    with _request_api(client) as api:
+        api.update_graph_draft_batch_settings(
+            UUID(project_id),
+            user_id=colleague.user_id,
+            external_context_policy=ExternalContextPolicy.OWN_NOTES_ONLY,
+            actor=colleague_actor,
+        )
+    personal = _batch_packet(client, [note_id], actor=colleague_actor)
+    assert personal["external_context_policy"] == "own_notes_only"
+    assert personal["projects"][0]["recent_notes"] == []
+
+
+def test_note_scoped_context_uses_actor_as_context_owner(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    project_id = _create_project(client, admin_auth_headers, "Note Scoped Owner")
+    older_note_id = _create_text_note(
+        client, admin_auth_headers, project_id=project_id, raw_content="admin's earlier note"
+    )
+    note_id = _create_text_note(
+        client, admin_auth_headers, project_id=project_id, raw_content="the note being drafted"
+    )
+    admin_id = _admin_user_id(client, admin_auth_headers)
+    admin_actor = AuthContext(user_id=UUID(admin_id), role=Role.ADMIN)
+    colleague_actor = AuthContext(user_id=uuid4(), role=Role.ADMIN)
+
+    with _request_api(client) as api:
+        as_admin = api.build_graph_context_for_note(UUID(note_id), actor=admin_actor)
+        as_colleague = api.build_graph_context_for_note(UUID(note_id), actor=colleague_actor)
+
+    assert as_admin["context_owner"]["reviewer_user_id"] == str(admin_actor.user_id)
+    assert as_admin["external_context_policy"] == "own_notes_only"
+    assert [item["id"] for item in as_admin["recent_notes"]] == [older_note_id]
+    assert as_admin["recent_notes"][0]["author_scope"] == "own"
+    assert as_admin["recent_notes"][0]["captured_by_current_user"] is True
+    assert as_colleague["context_owner"]["reviewer_user_id"] == str(colleague_actor.user_id)
+    assert as_colleague["recent_notes"] == []
+    assert as_colleague["context_summary"]["counts"]["colleague_recent_notes"] == 0
+
+
+def test_compact_recent_note_attributes_author_scope_and_created_by() -> None:
+    author_id = uuid4()
+    note = Note(
+        note_id=uuid4(),
+        project_id=uuid4(),
+        raw_content="captured by the author",
+        created_by=str(author_id),
+        created_by_user_id=author_id,
+    )
+    own = _compact_recent_note(note, BatchReviewer(str(author_id), author_id))
+    assert own["created_by"] == str(author_id)
+    assert own["created_by_user_id"] == str(author_id)
+    assert own["author_scope"] == "own"
+    assert own["captured_by_current_user"] is True
+    colleague = _compact_recent_note(note, BatchReviewer("someone-else", uuid4()))
+    assert colleague["author_scope"] == "colleague"
+    assert colleague["captured_by_current_user"] is False
+    unknown = _compact_recent_note(note, None)
+    assert unknown["author_scope"] is None
+    assert unknown["captured_by_current_user"] is None
 
 
 def _rich_project(client: TestClient, headers: dict[str, str], name: str) -> dict[str, str]:

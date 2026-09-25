@@ -66,6 +66,7 @@ from lab_tracker.models import (
     ExplorationNodeStatus,
     ExplorationNodeType,
     ExternalArtifactReference,
+    ExternalContextPolicy,
     Goal,
     GoalLink,
     GoalLinkStatus,
@@ -997,6 +998,13 @@ class GraphDraftOperationUpdate(PatchRequestModel):
 class GraphDraftCreateRequest(RequestModel):
     mode: GraphDraftMode = GraphDraftMode.GRAPH_CONTEXT
     user_hint: NonBlankStr | None = None
+    # Required (true) when the configured drafting provider is external: the
+    # note, its sources, and the project context leave the instance.
+    external_provider_acknowledged: bool = False
+
+
+class GraphDraftAnalysisCreateRequest(RequestModel):
+    external_provider_acknowledged: bool = False
 
 
 class GraphDraftCommitRequest(RequestModel):
@@ -1080,6 +1088,8 @@ class GraphDraftBatchSettingsUpdate(PatchRequestModel):
             "timezone_name",
             "user_id",
             "email_notifications_enabled",
+            "external_context_policy",
+            "external_provider_acknowledged",
         }
     )
 
@@ -1090,6 +1100,10 @@ class GraphDraftBatchSettingsUpdate(PatchRequestModel):
     user_id: UUID | SkipJsonSchema[None] = None
     email_notifications_enabled: bool | SkipJsonSchema[None] = None
     notification_email: str | None = Field(default=None, max_length=254)
+    external_context_policy: ExternalContextPolicy | SkipJsonSchema[None] = None
+    # Consent is only ever given, never revoked through a patch: the literal
+    # mirrors member onboarding's acknowledgement contract.
+    external_provider_acknowledged: Literal[True] | SkipJsonSchema[None] = None
 
 
 class GraphDraftBatchRunRequest(RequestModel):

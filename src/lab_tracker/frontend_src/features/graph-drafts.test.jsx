@@ -4,6 +4,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { GraphDraftDetailCard, spokenReviewScript } from "./graph-drafts.jsx";
+import { REJECT_REASONS } from "./graph-drafts/review-reasons.js";
 import {
   apiResponse,
   binaryResponse,
@@ -383,8 +384,12 @@ describe("GraphDraftDetailCard narrative review", () => {
       expect(screen.getByRole("button", { name: "Reject edit" })).toBeEnabled()
     );
     fireEvent.click(screen.getByRole("button", { name: "Reject edit" }));
+    // A rejection names its reason: the citation offers the same chips as a card.
+    const reasons = await screen.findByRole("group", { name: "Reason for rejecting edit 1" });
+    fireEvent.click(within(reasons).getByRole("button", { name: /Other/ }));
     await waitFor(() => expect(patchBodies).toHaveLength(3));
     expect(patchBodies[2]).toMatchObject({
+      reject_reason: "other",
       review_note: "Checked against the raw capture.",
       status: "rejected",
     });
@@ -1394,7 +1399,12 @@ describe("GraphDraftDetailCard keyboard review", () => {
           ...currentDraft,
           operations: currentDraft.operations.map((operation) =>
             operation.operation_id === operationId
-              ? { ...operation, payload: body.payload, status: body.status }
+              ? {
+                  ...operation,
+                  ...(body.payload ? { payload: body.payload } : {}),
+                  ...(body.status ? { status: body.status } : {}),
+                  ...(body.deferred ? { deferred_at: "2026-07-15T21:00:00Z" } : {}),
+                }
               : operation
           ),
         };
@@ -1403,7 +1413,7 @@ describe("GraphDraftDetailCard keyboard review", () => {
     };
   }
 
-  it("moves through proposals with j/k and decides the focused one with a/r/d", async () => {
+  it("moves through proposals with j/k, accepts with a, defers with d, and rejects with r plus a digit", async () => {
     const draft = twoProposalDraft();
     const [first, second] = draft.operations;
     const patchBodies = [];
@@ -1420,26 +1430,67 @@ describe("GraphDraftDetailCard keyboard review", () => {
     expect(row(first)).toHaveAttribute("aria-current", "true");
     expect(row(second)).not.toHaveAttribute("aria-current");
 
-    fireEvent.keyDown(document, { key: "a" });
+    // d defers immediately: one stamp, no reason, the proposal stays proposed.
+    fireEvent.keyDown(document, { key: "d" });
     await waitFor(() => expect(patchBodies).toHaveLength(1));
-    expect(patchBodies[0]).toMatchObject({ operationId: first.operation_id, status: "accepted" });
+    expect(patchBodies[0]).toEqual({ operationId: first.operation_id, deferred: true });
     await waitFor(() =>
-      expect(setFlash).toHaveBeenLastCalledWith("Accepted: Does sleep change courtship behavior?")
+      expect(setFlash).toHaveBeenLastCalledWith("Deferred: Does sleep change courtship behavior?")
     );
-    // The next undecided proposal is now the one the keys act on.
+    // A deferred proposal is no longer "next": focus moves to the undecided one.
     await waitFor(() => expect(row(second)).toHaveAttribute("aria-current", "true"));
+    expect(within(row(first)).getByText("deferred")).toBeInTheDocument();
 
-    fireEvent.keyDown(document, { key: "r" });
+    fireEvent.keyDown(document, { key: "a" });
     await waitFor(() => expect(patchBodies).toHaveLength(2));
-    expect(patchBodies[1]).toMatchObject({ operationId: second.operation_id, status: "rejected" });
+    expect(patchBodies[1]).toMatchObject({ operationId: second.operation_id, status: "accepted" });
+    await waitFor(() =>
+      expect(setFlash).toHaveBeenLastCalledWith("Accepted: Does temperature change courtship?")
+    );
 
+    // r asks for a reason; Escape backs out without a request.
     fireEvent.keyDown(document, { key: "k" });
     expect(row(first)).toHaveAttribute("aria-current", "true");
-    fireEvent.keyDown(document, { key: "d" });
+    fireEvent.keyDown(document, { key: "r" });
+    const chips = await screen.findByRole("group", { name: "Reason" });
+    expect(within(chips).getAllByRole("button")).toHaveLength(REJECT_REASONS.length + 1);
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() =>
+      expect(screen.queryByRole("group", { name: "Reason" })).not.toBeInTheDocument()
+    );
+    expect(patchBodies).toHaveLength(2);
+
+    // r then a digit writes the rejection with that structured reason.
+    fireEvent.keyDown(document, { key: "r" });
+    await screen.findByRole("group", { name: "Reason" });
+    fireEvent.keyDown(document, { key: "3" });
     await waitFor(() => expect(patchBodies).toHaveLength(3));
-    expect(patchBodies[2]).toMatchObject({ operationId: first.operation_id, status: "proposed" });
-    expect(setFlash).toHaveBeenLastCalledWith("Deferred: Does sleep change courtship behavior?");
-    expect(screen.getByText(/1 rejected · 1 undecided/)).toBeInTheDocument();
+    expect(patchBodies[2]).toMatchObject({
+      operationId: first.operation_id,
+      reject_reason: REJECT_REASONS[2].value,
+      status: "rejected",
+    });
+    expect(patchBodies[2].reject_reason).toBe("unsupported_by_source");
+    await waitFor(() =>
+      expect(setFlash).toHaveBeenLastCalledWith("Rejected: Does sleep change courtship behavior?")
+    );
+    expect(screen.getByText(/1 rejected · 0 undecided/)).toBeInTheDocument();
+  });
+
+  it("asks for a reason from the Reject button and writes the chosen chip", async () => {
+    const draft = draftFixture();
+    const patchBodies = [];
+    renderDraft(draft, { routes: [installDecisionRoute(draft, patchBodies)] });
+    await screen.findAllByText("Does sleep change courtship behavior?");
+
+    fireEvent.click(screen.getByRole("button", { name: "Reject" }));
+    const chips = await screen.findByRole("group", { name: "Reason" });
+    fireEvent.click(within(chips).getByRole("button", { name: /Not relevant/ }));
+    await waitFor(() => expect(patchBodies).toHaveLength(1));
+    expect(patchBodies[0]).toMatchObject({ reject_reason: "not_relevant", status: "rejected" });
+    await waitFor(() =>
+      expect(screen.queryByRole("group", { name: "Reason" })).not.toBeInTheDocument()
+    );
   });
 
   it("leaves the shortcuts alone while a field is being typed in", async () => {
@@ -1467,7 +1518,134 @@ describe("GraphDraftDetailCard keyboard review", () => {
     fireEvent.click(screen.getByRole("button", { name: /Proposed edit 1:/ }));
     fireEvent.click(await screen.findByRole("button", { name: "Defer edit" }));
     await waitFor(() => expect(patchBodies).toHaveLength(1));
-    expect(patchBodies[0].status).toBe("proposed");
+    expect(patchBodies[0]).toEqual({ operationId: draft.operations[0].operation_id, deferred: true });
+  });
+
+  it("shows one advisory line from the project's draft quality ledger", async () => {
+    const draft = draftFixture({ prompt_version: "daily-batch-graph-draft-v7" });
+    renderDraft(draft, {
+      routes: [
+        {
+          match: "/projects/project-1/draft-quality",
+          response: apiResponse({
+            cells: [
+              {
+                accepted_total: 31,
+                model: "gpt-5.4-mini",
+                prompt_version: "daily-batch-graph-draft-v7",
+                proposed: 40,
+                provider: "openai",
+                rejected: 6,
+              },
+              {
+                accepted_total: 1,
+                model: "other-model",
+                prompt_version: "daily-batch-graph-draft-v7",
+                proposed: 9,
+                provider: "openai",
+                rejected: 8,
+              },
+            ],
+            change_set_count: 13,
+            groups: [
+              {
+                change_set_count: 12,
+                change_sets_with_clarifications: 3,
+                model: "gpt-5.4-mini",
+                prompt_version: "daily-batch-graph-draft-v7",
+                provider: "openai",
+              },
+              {
+                change_set_count: 1,
+                change_sets_with_clarifications: 0,
+                model: "other-model",
+                prompt_version: "daily-batch-graph-draft-v7",
+                provider: "openai",
+              },
+            ],
+            project_id: "project-1",
+          }),
+        },
+      ],
+    });
+
+    expect(await screen.findByRole("status", { name: "" })).toHaveTextContent(
+      "Across 12 earlier reviews from openai/gpt-5.4-mini (daily-batch-graph-draft-v7) you kept " +
+        "31 of 40 proposals and rejected 6. 3 reviews asked you for clarification."
+    );
+  });
+
+  it("lets the reviewer set a source note aside with a reason", async () => {
+    const draft = draftFixture();
+    const noteId = draft.source_note_id;
+    const archiveBodies = [];
+    const setFlash = vi.fn();
+    renderDraft(draft, {
+      routes: [
+        {
+          match: `/notes/${noteId}/archive`,
+          method: "POST",
+          response: (request) => {
+            archiveBodies.push(JSON.parse(request.init.body));
+            return apiResponse({ note_id: noteId, status: "archived" });
+          },
+        },
+      ],
+      setFlash,
+    });
+    await screen.findAllByText("Does sleep change courtship behavior?");
+
+    fireEvent.change(screen.getByLabelText(`Set-aside reason for ${noteId}`), {
+      target: { value: "superseded" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Set aside" }));
+
+    await waitFor(() => expect(archiveBodies).toEqual([{ reason: "superseded" }]));
+    await waitFor(() =>
+      expect(setFlash).toHaveBeenLastCalledWith("Capture set aside (superseded).")
+    );
+  });
+
+  it("accepts and rejects proposed provenance links from the review page", async () => {
+    const draft = draftFixture();
+    const linkBodies = [];
+    const link = {
+      basis: "content_hash_match",
+      content_hash: "sha256:abc",
+      link_id: "link-1",
+      project_id: "project-1",
+      relation: "was_derived_from",
+      source: { entity_id: "note-b", entity_type: "note" },
+      status: "proposed",
+      target: { entity_id: "note-a", entity_type: "note" },
+    };
+    renderDraft(draft, {
+      routes: [
+        {
+          match: /^\/provenance-links\?/,
+          response: apiResponse([link]),
+        },
+        {
+          match: "/provenance-links/link-1",
+          method: "PATCH",
+          response: (request) => {
+            linkBodies.push(JSON.parse(request.init.body));
+            return apiResponse({ ...link, status: "accepted" });
+          },
+        },
+      ],
+    });
+
+    const section = await screen.findByRole("region", { name: "Proposed provenance links" });
+    expect(within(section).getByText("sha256:abc")).toBeInTheDocument();
+    fireEvent.click(within(section).getByRole("button", { name: "Accept" }));
+
+    await waitFor(() => expect(linkBodies).toEqual([{ status: "accepted" }]));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("region", { name: "Proposed provenance links" })
+      ).not.toBeInTheDocument()
+    );
   });
 
   it("gives claim statements and falsification criteria typed editors", async () => {

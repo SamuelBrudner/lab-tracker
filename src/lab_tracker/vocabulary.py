@@ -154,6 +154,11 @@ CONCEPT_SCHEMES: tuple[ConceptScheme, ...] = (
         ("user", "ai_suggested", "ai_executed", "user_revised"),
     ),
     ConceptScheme(
+        "acceptanceMode",
+        "How a person accepted the AI-proposed operation that produced a record.",
+        ("human_selected", "bulk_accepted", "auto_accepted"),
+    ),
+    ConceptScheme(
         "claimRelation",
         "Qualified logical relations between research claims.",
         ("extends", "contradicts", "refutes", "depends_on", "supersedes"),
@@ -810,6 +815,48 @@ _PROPERTY_TERMS: tuple[Term, ...] = (
         "aiPromptVersion",
         "lab:aiPromptVersion",
         "Version of the drafting prompt in use when the proposal was made.",
+    ),
+    # --- Curation: how the person accepted what the agent proposed ---
+    Term(
+        "acceptanceMode",
+        "lab:acceptanceMode",
+        "How a person accepted the AI-proposed operation that produced this record "
+        "(for example human_selected, bulk_accepted, or auto_accepted).",
+        emitters=("_apply_curation_provenance",),
+    ),
+    Term(
+        "acceptedBy",
+        "lab:acceptedBy",
+        "The person who accepted the AI-proposed operation that produced this record.",
+        is_id=True,
+        range="prov:Person",
+        emitters=("_apply_curation_provenance",),
+    ),
+    Term(
+        "acceptedAt",
+        "lab:acceptedAt",
+        "When the AI-proposed operation that produced this record was accepted, ISO 8601.",
+        emitters=("_apply_curation_provenance",),
+    ),
+    Term(
+        "proposalRationale",
+        "lab:proposalRationale",
+        "The drafting model's stated reason for proposing this record.",
+        emitters=("_apply_curation_provenance",),
+    ),
+    Term(
+        "proposalConfidence",
+        "lab:proposalConfidence",
+        "The drafting model's stated confidence, from 0 to 1, in the proposal that "
+        "produced this record.",
+        emitters=("_apply_curation_provenance",),
+    ),
+    Term(
+        "reviewNote",
+        "lab:reviewNote",
+        "The reviewer's note recorded when the proposal that produced this record "
+        "was accepted.",
+        emitters=("_apply_curation_provenance",),
     ),
     # --- Supervision ---
     Term(

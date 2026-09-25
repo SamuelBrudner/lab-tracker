@@ -6,6 +6,7 @@ import argparse
 import json
 
 import httpx
+import pytest
 
 from lab_tracker_client import LabTracker
 from lab_tracker_client import cli as lt_cli
@@ -53,6 +54,7 @@ def _args(**overrides: object) -> argparse.Namespace:
         "since": None,
         "until": None,
         "data_root": None,
+        "ara": False,
     }
     values.update(overrides)
     return argparse.Namespace(**values)
@@ -136,3 +138,92 @@ def test_export_stays_quiet_for_canonical_identifiers(tmp_path) -> None:
     assert result.identifier_root == "https://lab.example.org"
     assert result.identifier_note is None
     assert "identifier_note" not in result.to_dict()
+
+
+def _ara_doc(scope: str, entity_id: str) -> dict:
+    return {
+        "@context": {"prov": "http://www.w3.org/ns/prov#"},
+        "@id": f"http://testserver/{scope}/{entity_id}/ara-artifact",
+        "@type": "lab:AraArtifact",
+        "layers": {},
+    }
+
+
+def _ara_handler(request: httpx.Request) -> httpx.Response:
+    path = request.url.path
+    if path == "/projects/project-1/goals":
+        return _json_response(_list_payload([{"goal_id": "g1", "title": "Paper"}]))
+    if path == "/questions":
+        return _json_response(
+            _list_payload(
+                [
+                    {"question_id": "q1", "text": "Root", "parent_question_ids": []},
+                    {"question_id": "q2", "text": "Child", "parent_question_ids": ["q1"]},
+                ]
+            )
+        )
+    if path.endswith("/ara-artifact"):
+        scope, entity_id = path.split("/")[1:3]
+        return _json_response(_ara_doc(scope, entity_id))
+    return _handler(request)
+
+
+def test_export_ara_writes_goal_and_root_question_artifacts(tmp_path) -> None:
+    out_dir = tmp_path / "export"
+    with LabTracker(
+        base_url="http://testserver", transport=httpx.MockTransport(_ara_handler)
+    ) as lt:
+        summary = lt_cli._cmd_export(lt, _args(out=str(out_dir), ara=True))
+
+    assert summary["counts"] == {
+        "dataset": 1,
+        "analysis": 1,
+        "claim": 1,
+        "ara_goal": 1,
+        "ara_question": 1,
+    }
+    goal_artifact = out_dir / "goal-g1.ara.jsonld"
+    question_artifact = out_dir / "question-q1.ara.jsonld"
+    assert goal_artifact.is_file()
+    assert question_artifact.is_file()
+    assert json.loads(goal_artifact.read_text(encoding="utf-8"))["@type"] == "lab:AraArtifact"
+    assert json.loads(question_artifact.read_text(encoding="utf-8"))["@id"].endswith(
+        "/questions/q1/ara-artifact"
+    )
+    # The child question's story lives inside its root's subtree: no file of its own.
+    assert not (out_dir / "question-q2.ara.jsonld").exists()
+    assert str(goal_artifact) in summary["files"]
+    assert str(question_artifact) in summary["files"]
+
+
+def test_export_without_ara_flag_never_calls_ara_routes(tmp_path) -> None:
+    def strict_handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/ara-artifact") or path in ("/questions", "/projects/project-1/goals"):
+            return httpx.Response(500, json={"error": {"message": f"unexpected {path}"}})
+        return _handler(request)
+
+    with LabTracker(
+        base_url="http://testserver", transport=httpx.MockTransport(strict_handler)
+    ) as lt:
+        summary = lt_cli._cmd_export(lt, _args(out=str(tmp_path / "export")))
+
+    assert summary["counts"] == {"dataset": 1, "analysis": 1, "claim": 1}
+    assert not list((tmp_path / "export").glob("*.ara.jsonld"))
+
+
+def test_ara_artifact_rejects_unknown_scope() -> None:
+    from lab_tracker_client import LTValidationError
+
+    with (
+        LabTracker(base_url="http://testserver", transport=httpx.MockTransport(_handler)) as lt,
+        pytest.raises(LTValidationError, match="scope must be one of"),
+    ):
+        lt.ara_artifact("datasets", "ds-1")
+
+
+def test_export_parser_exposes_the_ara_flag() -> None:
+    parser = lt_cli._build_parser()
+    args = parser.parse_args(["export", "--project", "p1", "--ara"])
+    assert args.ara is True
+    assert parser.parse_args(["export", "--project", "p1"]).ara is False

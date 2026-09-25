@@ -60,3 +60,20 @@ capture you judged irrelevant and one you simply never got to.
 - `GET /projects/{project_id}/coverage` reports how many staged captures are
   still unreviewed, unplaced, or archived unreviewed, so the "37 captures
   unreviewed since June 1" number above is a real read, not a slogan.
+
+## Keep a capture out of scheduled drafting
+
+A staged capture can opt out of the daily review without being set aside:
+
+- `PATCH /notes/{note_id}` with
+  `{"metadata": {"scheduled_graph_draft_policy": "exclude"}}` (or the same
+  key when the note is created) marks it, and scheduled, run-due, and run-now
+  batches skip it. `exclude` is the only admitted value; any other value is
+  rejected with `422`.
+- The capture stays `staged` and visible, so it still counts as unreviewed
+  coverage until it is committed or archived: this is an opt-out from
+  drafting, not a judgement about the capture. Note-scoped drafts
+  (`POST /notes/{note_id}/graph-drafts`) still work on it.
+- Member-onboarding checkpoints carry the same key, set by the guided
+  workflow; only `member_onboarding_*` metadata keys are reserved for that
+  workflow.

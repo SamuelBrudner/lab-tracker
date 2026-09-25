@@ -203,6 +203,7 @@ function NoteDetailCard({
   const canDraft = Boolean(
     !isMemberOnboardingCheckpoint && (isImage || isAudio || isText || note?.raw_content)
   );
+  const [externalProviderConsent, setExternalProviderConsent] = useState(false);
 
   const project = useMemo(() => {
     if (!note) {
@@ -388,8 +389,11 @@ function NoteDetailCard({
       const draftPath = isText
         ? `/notes/${note.note_id}/analysis-graph-drafts`
         : `/notes/${note.note_id}/graph-drafts`;
+      // The acknowledgement travels with the request; a host whose drafting
+      // provider is external refuses the draft without it.
+      const acknowledgement = { external_provider_acknowledged: externalProviderConsent };
       const draft = await apiRequest(draftPath, {
-        ...(isText ? {} : { body: { mode } }),
+        body: isText ? acknowledgement : { mode, ...acknowledgement },
         method: "POST",
         token,
       });
@@ -526,6 +530,18 @@ function NoteDetailCard({
           >
             Save transcript
           </button>
+        ) : null}
+        {note && canDraft ? (
+          <label className="inline toggle-row">
+            <input
+              type="checkbox"
+              checked={externalProviderConsent}
+              disabled={!canWrite}
+              onChange={(event) => setExternalProviderConsent(event.target.checked)}
+            />
+            I consent to send this note and its project context to the configured external
+            AI provider for this draft.
+          </label>
         ) : null}
         {note && canDraft ? (
           <button

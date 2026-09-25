@@ -139,6 +139,9 @@ function BatchCards({ batches, emptyMessage, navigate }) {
         <span className="pill">{formatDate(batch.created_at)}</span>
         <span className="pill">{batchNoteCount(batch)} notes</span>
         <span className="pill">{batch.operation_count ?? 0} ops</span>
+        {batch.deferred_count > 0 ? (
+          <span className="pill">{batch.deferred_count} deferred</span>
+        ) : null}
         {batch.model ? <span className="pill">{batch.model}</span> : null}
       </div>
       <button
@@ -450,4 +453,4 @@ function BatchReviewPage({
   );
 }
 
-export { BatchReviewPage, PendingBatchBanner };
+export { BatchCards, BatchReviewPage, PendingBatchBanner };

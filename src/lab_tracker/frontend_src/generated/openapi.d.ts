@@ -934,6 +934,8 @@ export interface components {
       "cadence_minutes"?: number;
       "email_notifications_enabled"?: boolean;
       "enabled"?: boolean;
+      "external_context_policy"?: components["schemas"]["ExternalContextPolicy"];
+      "external_provider_acknowledged"?: true;
       "notification_email"?: (string | null);
       "run_at_local_time"?: string;
       "timezone_name"?: string;

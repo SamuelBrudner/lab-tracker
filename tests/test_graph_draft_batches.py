@@ -17,7 +17,7 @@ from sqlalchemy import select
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.app import create_app
 from lab_tracker.app_parts.middleware import system_auth_context
-from lab_tracker.auth import AuthContext, Role
+from lab_tracker.auth import AuthContext, PrincipalType, Role
 from lab_tracker.db_models import (
     GraphChangeSetModel,
     GraphDraftBatchRunModel,
@@ -2552,3 +2552,177 @@ def test_batch_draft_packet_is_reviewer_scoped_to_the_run_assignee(
     # The model saw the same reviewer-scoped memory the packet persisted.
     sent = fake_client.calls[-1]["batch_context"]["review_memory"]
     assert sent == other_memory
+
+
+# --- External-provider acknowledgement and external context policy (m11) ---
+
+_PUBLIC_OPENAI_BASE_URL = "https://api.openai.com/v1"
+_ACK_REQUIRED = "requires explicit external-provider acknowledgement"
+
+
+def test_enabling_cadence_with_external_provider_requires_acknowledgement(
+    monkeypatch,
+    migrated_sqlite_database_url: str,
+) -> None:
+    monkeypatch.setenv("LAB_TRACKER_OPENAI_BASE_URL", _PUBLIC_OPENAI_BASE_URL)
+    with TestClient(create_app()) as local_client:
+        headers, user_id = _registered_user(local_client, role=Role.ADMIN)
+        project_id = _project(local_client, headers)
+        settings_path = f"/projects/{project_id}/graph-draft-batch-settings"
+
+        refused = local_client.patch(settings_path, json={"enabled": True}, headers=headers)
+        assert refused.status_code == 422, refused.text
+        assert _ACK_REQUIRED in refused.json()["error"]["message"]
+        assert local_client.get(settings_path, headers=headers).json()["data"]["enabled"] is False
+
+        acknowledged = local_client.patch(
+            settings_path,
+            json={"enabled": True, "external_provider_acknowledged": True},
+            headers=headers,
+        )
+        assert acknowledged.status_code == 200, acknowledged.text
+        data = acknowledged.json()["data"]
+        assert data["enabled"] is True
+        assert data["external_provider_acknowledged_at"] is not None
+        assert data["external_provider_acknowledged_by"] == user_id
+        assert data["external_context_policy"] == "own_notes_only"
+
+        # The consent is recorded once on the row: later toggles need no re-send.
+        assert (
+            local_client.patch(settings_path, json={"enabled": False}, headers=headers).status_code
+            == 200
+        )
+        again = local_client.patch(settings_path, json={"enabled": True}, headers=headers)
+        assert again.status_code == 200, again.text
+        assert again.json()["data"]["external_provider_acknowledged_by"] == user_id
+
+
+def test_project_notes_policy_requires_acknowledgement_when_external(
+    monkeypatch,
+    migrated_sqlite_database_url: str,
+) -> None:
+    monkeypatch.setenv("LAB_TRACKER_OPENAI_BASE_URL", _PUBLIC_OPENAI_BASE_URL)
+    with TestClient(create_app()) as local_client:
+        headers, user_id = _registered_user(local_client, role=Role.ADMIN)
+        project_id = _project(local_client, headers)
+        settings_path = f"/projects/{project_id}/graph-draft-batch-settings"
+
+        refused = local_client.patch(
+            settings_path, json={"external_context_policy": "project_notes"}, headers=headers
+        )
+        assert refused.status_code == 422, refused.text
+        assert _ACK_REQUIRED in refused.json()["error"]["message"]
+
+        widened = local_client.patch(
+            settings_path,
+            json={
+                "external_context_policy": "project_notes",
+                "external_provider_acknowledged": True,
+            },
+            headers=headers,
+        )
+        assert widened.status_code == 200, widened.text
+        assert widened.json()["data"]["external_context_policy"] == "project_notes"
+        assert widened.json()["data"]["external_provider_acknowledged_by"] == user_id
+
+        current = local_client.get(settings_path, headers=headers)
+        assert current.json()["data"]["external_context_policy"] == "project_notes"
+        assert current.json()["data"]["external_provider_acknowledged_at"] is not None
+        # Narrowing back never needs consent, and the recorded consent stays.
+        narrowed = local_client.patch(
+            settings_path, json={"external_context_policy": "own_notes_only"}, headers=headers
+        )
+        assert narrowed.status_code == 200, narrowed.text
+        assert narrowed.json()["data"]["external_context_policy"] == "own_notes_only"
+        assert narrowed.json()["data"]["external_provider_acknowledged_by"] == user_id
+
+
+def test_local_provider_enables_cadence_and_project_notes_without_acknowledgement(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    # tests/conftest.py points the provider base URL at a loopback host.
+    project_id = _project(client, admin_auth_headers)
+    settings_path = f"/projects/{project_id}/graph-draft-batch-settings"
+    enabled = client.patch(settings_path, json={"enabled": True}, headers=admin_auth_headers)
+    assert enabled.status_code == 200, enabled.text
+    widened = client.patch(
+        settings_path, json={"external_context_policy": "project_notes"}, headers=admin_auth_headers
+    )
+    assert widened.status_code == 200, widened.text
+    data = widened.json()["data"]
+    assert data["external_context_policy"] == "project_notes"
+    assert data["external_provider_acknowledged_at"] is None
+    assert data["external_provider_acknowledged_by"] is None
+
+
+def test_acknowledgement_rejects_non_interactive_service_token(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    from lab_tracker.errors import PermissionDeniedError
+
+    project_id = _project(client, admin_auth_headers)
+    service_actor = AuthContext(
+        user_id=uuid4(), role=Role.ADMIN, principal_type=PrincipalType.SERVICE
+    )
+    with client.app.state.db_session_factory() as session:
+        api = client.app.state.lab_tracker_api.for_request(
+            SQLAlchemyLabTrackerRepository(session)
+        )
+        with pytest.raises(PermissionDeniedError, match="interactive human session"):
+            api.update_graph_draft_batch_settings(
+                UUID(project_id),
+                external_provider_acknowledged=True,
+                actor=service_actor,
+            )
+
+
+def test_batch_settings_reject_null_or_false_consent_fields(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    settings_path = f"/projects/{project_id}/graph-draft-batch-settings"
+    for body in (
+        {"external_context_policy": None},
+        {"external_provider_acknowledged": None},
+        {"external_provider_acknowledged": False},
+        {"external_context_policy": "everything"},
+    ):
+        response = client.patch(settings_path, json=body, headers=admin_auth_headers)
+        assert response.status_code == 422, (body, response.text)
+
+
+def test_capture_marked_exclude_via_patch_stays_out_of_run_now_batch(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    kept = _note(client, admin_auth_headers, project_id, "Keep me in the daily review.")
+    excluded = _note(client, admin_auth_headers, project_id, "Personal aside, not for drafting.")
+    marked = client.patch(
+        f"/notes/{excluded}",
+        json={"metadata": {"scheduled_graph_draft_policy": "exclude"}},
+        headers=admin_auth_headers,
+    )
+    assert marked.status_code == 200, marked.text
+    assert marked.json()["data"]["metadata"]["scheduled_graph_draft_policy"] == "exclude"
+    rejected = client.patch(
+        f"/notes/{kept}",
+        json={"metadata": {"scheduled_graph_draft_policy": "always"}},
+        headers=admin_auth_headers,
+    )
+    assert rejected.status_code == 422, rejected.text
+    assert "scheduled_graph_draft_policy" in rejected.json()["error"]["message"]
+
+    fake_client = FakeBatchDraftClient(_batch_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: fake_client
+    run = client.post(
+        "/batches/run-now", json={"project_id": project_id}, headers=admin_auth_headers
+    )
+    assert run.status_code == 201, run.text
+    assert run.json()["data"]["note_count"] == 1
+    change_set_id = run.json()["data"]["change_set_id"]
+    draft = client.get(f"/batches/{change_set_id}", headers=admin_auth_headers)
+    assert draft.json()["data"]["source_note_ids"] == [kept]

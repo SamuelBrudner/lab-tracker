@@ -9,6 +9,7 @@ from uuid import UUID
 
 from lab_tracker.auth import AuthContext
 from lab_tracker.models import (
+    ExternalContextPolicy,
     GraphChangeOperation,
     GraphChangeSet,
     GraphDraftMode,
@@ -96,6 +97,7 @@ class GenerationContextBuilder(Protocol):
         source_notes: list[Note],
         user_hint: str | None,
         actor: AuthContext | None,
+        external_context_policy: ExternalContextPolicy,
     ) -> dict[str, Any]: ...
 
     def image_only_context_packet(
@@ -114,6 +116,7 @@ class GenerationContextBuilder(Protocol):
         actor: AuthContext | None,
         batch_note_limit: int,
         context_owner: BatchReviewer | None,
+        external_context_policy: ExternalContextPolicy,
     ) -> dict[str, Any]: ...
 
 

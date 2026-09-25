@@ -294,6 +294,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--data-root",
         help="Resolve dataset file paths under this root and co-locate sidecars beside the data.",
     )
+    export_parser.add_argument(
+        "--ara",
+        action="store_true",
+        help="Also write each goal and root-question Ara artifact beside the sidecars.",
+    )
     export_parser.set_defaults(func=_cmd_export)
 
     questions_parser = subcommands.add_parser("list-questions")
@@ -2090,6 +2095,7 @@ def _cmd_export(client: LabTracker, args: argparse.Namespace) -> Any:
         since=args.since,
         until=args.until,
         data_root=args.data_root,
+        include_ara=args.ara,
     )
     if result.identifier_note:
         print(f"note: {result.identifier_note}", file=sys.stderr)

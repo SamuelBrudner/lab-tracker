@@ -27,6 +27,13 @@ _EXPORTED_KINDS = (
     ("analysis", "analyses"),
     ("claim", "claims"),
 )
+# Ara artifact scopes exported with --ara, as (singular tag, plural route segment).
+# Only root questions (no parent) get an artifact: a child question's story is
+# told inside its root's subtree.
+_ARA_SCOPES = (
+    ("goal", "goals"),
+    ("question", "questions"),
+)
 
 
 @dataclass
@@ -54,6 +61,14 @@ class ExportResult:
 
 def _sidecar_name(kind: str, entity_id: str) -> str:
     return f"{kind}-{entity_id}.prov.jsonld"
+
+
+def _ara_name(kind: str, entity_id: str) -> str:
+    return f"{kind}-{entity_id}.ara.jsonld"
+
+
+def _is_root_question(question: LTRecord) -> bool:
+    return not question.get("parent_question_ids")
 
 
 def _write_jsonld(path: Path, document: Any) -> None:
@@ -93,13 +108,16 @@ def export_project_provenance(
     since: str | None = None,
     until: str | None = None,
     data_root: str | None = None,
+    include_ara: bool = False,
 ) -> ExportResult:
     """Write provenance sidecars for a project's committed records.
 
     Datasets and claims are exported in full; analyses are windowed by
     ``since``/``until`` when given (the "advances since last July" surface).
     When ``data_root`` is set, each dataset's sidecar is *also* written next to
-    its resolved data file(s), so the reasoning lands beside the data.
+    its resolved data file(s), so the reasoning lands beside the data. With
+    ``include_ara`` each goal and each root question also gets its layered Ara
+    artifact (``<kind>-<id>.ara.jsonld``) beside the sidecars.
     """
 
     out = Path(out_dir).expanduser()
@@ -136,6 +154,8 @@ def export_project_provenance(
                     if data_file.parent.is_dir():
                         _write_jsonld(co_located, document)
                         result.files.append(str(co_located))
+    if include_ara:
+        _export_ara_artifacts(client, project_id=project_id, out=out, result=result)
     if result.identifier_root is not None and result.identifier_root == client.base_url:
         result.identifier_note = (
             f"Provenance @id identifiers are rooted at {result.identifier_root}, the URL "
@@ -144,3 +164,30 @@ def export_project_provenance(
             "identifiers stay stable across hosts."
         )
     return result
+
+
+def _export_ara_artifacts(
+    client: LabTracker,
+    *,
+    project_id: str,
+    out: Path,
+    result: ExportResult,
+) -> None:
+    """Write one full (all-layer) Ara artifact per goal and per root question."""
+
+    scoped: dict[str, list[LTRecord]] = {
+        "goal": client.list_goals(project_id=project_id),
+        "question": [
+            question
+            for question in client.list_questions(project_id=project_id)
+            if _is_root_question(question)
+        ],
+    }
+    for kind, route in _ARA_SCOPES:
+        items = scoped[kind]
+        result.counts[f"ara_{kind}"] = len(items)
+        for record in items:
+            entity_id = str(record.id)
+            artifact = out / _ara_name(kind, entity_id)
+            _write_jsonld(artifact, client.ara_artifact(route, entity_id))
+            result.files.append(str(artifact))

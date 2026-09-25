@@ -4570,3 +4570,95 @@ def test_commit_retire_note_archives_with_reason(
     assert archived["archived_reason"] == "superseded"
     assert archived["archived_by"] == committed["committed_by"]
     assert archived["archived_at"] is not None
+
+
+# --- Note-scoped drafts and the external-provider acknowledgement gate (m11) ---
+
+_PUBLIC_OPENAI_BASE_URL = "https://api.openai.com/v1"
+
+
+def _external_provider_admin(local_client: TestClient) -> tuple[dict[str, str], str]:
+    username = f"external-admin-{uuid4().hex[:8]}"
+    password = "secret"
+    user = local_client.app.state.auth_service.register_user(
+        username=username, password=password, role=Role.ADMIN
+    )
+    login = local_client.post("/auth/login", json={"username": username, "password": password})
+    assert login.status_code == 200, login.text
+    return {"Authorization": f"Bearer {login.json()['data']['access_token']}"}, str(user.user_id)
+
+
+def test_note_scoped_draft_with_external_provider_requires_acknowledgement(
+    monkeypatch,
+    migrated_sqlite_database_url: str,
+) -> None:
+    from lab_tracker.app import create_app
+
+    monkeypatch.setenv("LAB_TRACKER_OPENAI_BASE_URL", _PUBLIC_OPENAI_BASE_URL)
+    with TestClient(create_app()) as local_client:
+        headers, user_id = _external_provider_admin(local_client)
+        project_id = _project(local_client, headers)
+        note_id = _image_note(local_client, headers, project_id)
+        analysis_note_id = _analysis_note(local_client, headers, project_id)
+        fake_client = FakeDraftClient(_draft_patch(project_id))
+        local_client.app.state.graph_draft_client_factory = lambda settings: fake_client
+
+        refused = local_client.post(f"/notes/{note_id}/graph-drafts", headers=headers)
+        assert refused.status_code == 422, refused.text
+        assert "external-provider acknowledgement" in refused.json()["error"]["message"]
+        also_refused = local_client.post(
+            f"/notes/{note_id}/graph-drafts",
+            json={"mode": "graph_context", "external_provider_acknowledged": False},
+            headers=headers,
+        )
+        assert also_refused.status_code == 422, also_refused.text
+        # The gate runs before any provider call or draft row.
+        assert fake_client.calls == []
+        listed = local_client.get(
+            "/graph-drafts", params={"project_id": project_id}, headers=headers
+        )
+        assert listed.json()["meta"]["total"] == 0
+
+        accepted = local_client.post(
+            f"/notes/{note_id}/graph-drafts",
+            json={"mode": "graph_context", "external_provider_acknowledged": True},
+            headers=headers,
+        )
+        assert accepted.status_code == 201, accepted.text
+        packet = accepted.json()["data"]["context_packet"]
+        assert packet["external_provider_acknowledgement"]["acknowledged"] is True
+        assert packet["external_provider_acknowledgement"]["actor_user_id"] == user_id
+        assert packet["external_provider_acknowledgement"]["acknowledged_at"]
+        assert packet["external_context_policy"] == "own_notes_only"
+        assert packet["context_owner"]["reviewer_user_id"] == user_id
+
+        analysis_refused = local_client.post(
+            f"/notes/{analysis_note_id}/analysis-graph-drafts", headers=headers
+        )
+        assert analysis_refused.status_code == 422, analysis_refused.text
+        analysis_accepted = local_client.post(
+            f"/notes/{analysis_note_id}/analysis-graph-drafts",
+            json={"external_provider_acknowledged": True},
+            headers=headers,
+        )
+        assert analysis_accepted.status_code == 201, analysis_accepted.text
+        analysis_packet = analysis_accepted.json()["data"]["context_packet"]
+        assert analysis_packet["external_provider_acknowledgement"]["actor_user_id"] == user_id
+
+
+def test_local_provider_note_draft_needs_no_acknowledgement(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    # tests/conftest.py points the provider base URL at a loopback host.
+    project_id = _project(client, admin_auth_headers)
+    note_id = _image_note(client, admin_auth_headers, project_id)
+    client.app.state.graph_draft_client_factory = lambda settings: FakeDraftClient(
+        _draft_patch(project_id)
+    )
+    created = client.post(f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers)
+    assert created.status_code == 201, created.text
+    packet = created.json()["data"]["context_packet"]
+    assert "external_provider_acknowledgement" not in packet
+    assert packet["external_context_policy"] == "own_notes_only"
+    assert packet["context_owner"]["reviewer_user_id"] == _me_user_id(client, admin_auth_headers)

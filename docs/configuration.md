@@ -767,6 +767,24 @@ Tracker instance. A manual question-alignment path remains available and
 invokes no provider, and the copyable current-state brief is always rendered
 locally rather than sent for a second generation call.
 
+Whether a provider counts as **external** is decided by the host in its base
+URL: a loopback host (`localhost`, `127.0.0.1`, or `::1`) in
+`LAB_TRACKER_OPENAI_BASE_URL`, `LAB_TRACKER_ANTHROPIC_BASE_URL`, or
+`LAB_TRACKER_GOOGLE_BASE_URL` keeps every draft on this machine, so no
+external-provider acknowledgement is asked for. Any other host is external:
+turning on a scheduled daily-review cadence, switching a settings row's
+`external_context_policy` to `project_notes`, and every note-scoped draft
+request (`POST /notes/{id}/graph-drafts` and `/analysis-graph-drafts`) then
+require `external_provider_acknowledged: true` from the person making the
+request. The batch-settings acknowledgement is recorded once on that row
+(`external_provider_acknowledged_at` / `external_provider_acknowledged_by`);
+the note-scoped one is recorded on the change set's context packet. See
+[scheduled-daily-review.md](scheduled-daily-review.md) for what each policy
+sends. `LAB_TRACKER_GRAPH_DRAFT_PROVIDER` also accepts `claude` for
+`anthropic` and `gemini` for `google`; any other spelling is treated as
+external for the acknowledgement gate and still fails at the first draft
+request, as before.
+
 Automatic upload transcription is a separate, explicit operator opt-in. When
 enabled, every newly created audio upload—including tagless phone captures and
 quick captures—is sent to the configured OpenAI or Google provider after the

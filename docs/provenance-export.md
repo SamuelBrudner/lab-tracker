@@ -44,6 +44,20 @@ lt export --project <PROJECT_ID> --since 2025-07-01T00:00:00+00:00
 `--since` is inclusive and `--until` is exclusive. Datasets and claims are
 exported in full; the window applies to analyses.
 
+### Add the Ara artifacts
+
+```bash
+lt export --project <PROJECT_ID> --ara
+```
+
+`--ara` also writes `goal-<id>.ara.jsonld` for each goal and
+`question-<id>.ara.jsonld` for each root question (a question with no
+parent; a child question's story is told inside its root's subtree). Each
+file is the full layered artifact that `GET /goals/{id}/ara-artifact` and
+`GET /questions/{id}/ara-artifact` serve, with the `logic`, `src`, `trace`,
+and `evidence` layers embedded, and the printed summary counts them as
+`ara_goal` and `ara_question`.
+
 ## Identifier policy
 
 Every node in a sidecar carries an `@id` — an HTTP URI that names the dataset,
@@ -73,6 +87,25 @@ the questions each record answers.
 
 The normative class, controlled-concept, and qualified-edge choices are fixed
 by the [Lab Tracker public semantic profile](semantic-profile.md).
+
+Alongside the record's own nodes, each sidecar carries the story around it,
+so a reader with no running instance still sees the reasoning:
+
+- the linked questions as `lab:ResearchQuestion` nodes with their text,
+  status, and terminal reason (a dataset's `lab:QuestionLink` nodes point at
+  them);
+- the exploration nodes reachable from the record: the decisions, dead ends,
+  and pivots that target it or cite it as evidence, plus every node chained
+  to one of those through `wasDerivedFrom`, `alsoDependsOn`, or
+  `invalidates`;
+- the goals and `lab:GoalLink` nodes the record feeds;
+- on every record that an accepted AI proposal produced, the curation
+  properties `acceptanceMode` (classified in the `acceptanceMode` scheme),
+  `acceptedBy` (a `prov:Person` in the same graph), `acceptedAt`,
+  `proposalRationale`, `proposalConfidence`, and `reviewNote`. These describe
+  how the person accepted the proposal, not the record itself: `confidence`
+  stays the researcher's claim confidence and `rationale` the exploration
+  node's reasoning.
 
 Claim nodes in the claim, record-export, and Ara documents carry
 `lab:effectiveStatus` (classified in the `claimEffectiveStatus` scheme) next

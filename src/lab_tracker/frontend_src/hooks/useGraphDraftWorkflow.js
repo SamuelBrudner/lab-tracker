@@ -292,54 +292,156 @@ function useGraphDraftWorkflow({
     updatePayloadText(operation.operation_id, JSON.stringify(nextPayload, null, 2));
   }
 
-  // `decision` is one of accepted / rejected / proposed when a decision
-  // control was used, and undefined for a plain "save my edits".
-  async function saveOperation(operation, decision) {
-    const nextStatus = decision ?? operation.status;
+  // The buffered payload for an operation as a JSON object, or null (with a
+  // flash) when the reviewer's text is not one.
+  function bufferedPayload(operation) {
     let parsedPayload;
     try {
       parsedPayload = JSON.parse(payloads[operation.operation_id] || "{}");
     } catch {
       setFlash("", "Operation payload must be valid JSON.");
-      return;
+      return null;
     }
     if (!parsedPayload || typeof parsedPayload !== "object" || Array.isArray(parsedPayload)) {
       setFlash("", "Operation payload must be a JSON object.");
-      return;
+      return null;
     }
-    // Never mutate an operation on a draft that is no longer the active route.
+    return parsedPayload;
+  }
+
+  function adoptChangeSet(nextChangeSet) {
+    setChangeSet(nextChangeSet);
+    setPayloads(payloadText(nextChangeSet));
+    setOperationReviewNotes(operationReviewNoteText(nextChangeSet));
+  }
+
+  // One PATCH against an operation, guarded per operation so each row is
+  // independently non-duplicable and never aimed at a draft that is no
+  // longer the active route. Resolves true only when the server accepted it.
+  async function patchOperation(operation, body, flashMessage) {
     if (!isCurrent) {
-      return;
+      return false;
     }
-    // Per-operation in-flight guard so each row is independently non-duplicable.
     const commandKey = `op:${operation.operation_id}`;
     if (!beginCommand(commandKey)) {
-      return;
+      return false;
     }
     setBusy(true);
     setFlash("", "");
     try {
       const nextChangeSet = await apiRequest(
         `/graph-drafts/${changeSetId}/operations/${operation.operation_id}`,
-        {
-          body: {
-            payload: parsedPayload,
-            review_note: operationReviewNotes[operation.operation_id]?.trim() || null,
-            status: nextStatus,
-          },
-          method: "PATCH",
-          token,
-        }
+        { body, method: "PATCH", token }
       );
-      setChangeSet(nextChangeSet);
-      setPayloads(payloadText(nextChangeSet));
-      setOperationReviewNotes(operationReviewNoteText(nextChangeSet));
-      // Name the proposal as just saved, not as it read before the edit.
-      setFlash(decisionFlashMessage({ ...operation, payload: parsedPayload }, decision));
+      adoptChangeSet(nextChangeSet);
+      setFlash(flashMessage);
       return true;
     } catch (err) {
       setFlash("", err.message || "Failed to update graph draft operation.");
       return false;
+    } finally {
+      endCommand(commandKey);
+      setBusy(false);
+    }
+  }
+
+  // `decision` is one of accepted / rejected / proposed when a decision
+  // control was used, and undefined for a plain "save my edits".
+  async function saveOperation(operation, decision) {
+    const parsedPayload = bufferedPayload(operation);
+    if (!parsedPayload) {
+      return;
+    }
+    return patchOperation(
+      operation,
+      {
+        payload: parsedPayload,
+        review_note: operationReviewNotes[operation.operation_id]?.trim() || null,
+        status: decision ?? operation.status,
+      },
+      // Name the proposal as just saved, not as it read before the edit.
+      decisionFlashMessage({ ...operation, payload: parsedPayload }, decision)
+    );
+  }
+
+  // A rejection carries the reviewer's structured reason on the same PATCH.
+  async function rejectOperation(operation, reason) {
+    const parsedPayload = bufferedPayload(operation);
+    if (!parsedPayload) {
+      return;
+    }
+    return patchOperation(
+      operation,
+      {
+        payload: parsedPayload,
+        reject_reason: reason,
+        review_note: operationReviewNotes[operation.operation_id]?.trim() || null,
+        status: "rejected",
+      },
+      decisionFlashMessage({ ...operation, payload: parsedPayload }, "rejected")
+    );
+  }
+
+  // Deferral is its own stamp: the proposal stays proposed, keeps the
+  // reviewer's buffered edits untouched, and is skipped by accept-all.
+  async function deferOperation(operation) {
+    return patchOperation(
+      operation,
+      { deferred: true },
+      decisionFlashMessage(operation, "deferred")
+    );
+  }
+
+  // Set one of the draft's source captures aside with a named reason. The
+  // draft is reloaded afterwards so its source view reflects the archive.
+  async function archiveSourceNote(noteId, reason) {
+    if (!isCurrent) {
+      return false;
+    }
+    const commandKey = `archive:${noteId}`;
+    if (!beginCommand(commandKey)) {
+      return false;
+    }
+    setBusy(true);
+    setFlash("", "");
+    try {
+      await apiRequest(`/notes/${noteId}/archive`, {
+        body: { reason },
+        method: "POST",
+        token,
+      });
+      await loadDraft();
+      setFlash(`Capture set aside (${reason}).`);
+      return true;
+    } catch (err) {
+      setFlash("", err.message || "Failed to set the capture aside.");
+      return false;
+    } finally {
+      endCommand(commandKey);
+      setBusy(false);
+    }
+  }
+
+  // Accept or reject one proposed provenance link; returns the updated link
+  // or null when the server refused it.
+  async function decideProvenanceLink(linkId, status) {
+    const commandKey = `link:${linkId}`;
+    if (!beginCommand(commandKey)) {
+      return null;
+    }
+    setBusy(true);
+    setFlash("", "");
+    try {
+      const link = await apiRequest(`/provenance-links/${linkId}`, {
+        body: { status },
+        method: "PATCH",
+        token,
+      });
+      setFlash(status === "accepted" ? "Provenance link accepted." : "Provenance link rejected.");
+      return link;
+    } catch (err) {
+      setFlash("", err.message || "Failed to decide the provenance link.");
+      return null;
     } finally {
       endCommand(commandKey);
       setBusy(false);
@@ -658,10 +760,15 @@ function useGraphDraftWorkflow({
     canSubmitDraft,
     canReviewDraft,
     canCommitDraft,
+    canWriteProject: effectiveCanWrite,
     updatePayloadText,
     updateOperationReviewNote,
     patchOperationPayload,
     saveOperation,
+    rejectOperation,
+    deferOperation,
+    archiveSourceNote,
+    decideProvenanceLink,
     acceptAll,
     undoAcceptAll,
     commitDraft,

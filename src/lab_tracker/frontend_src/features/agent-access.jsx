@@ -28,6 +28,7 @@ const ACCESS_LEVELS = [
       "Reads context and syncs staged notes from captures and commit hooks. Never commits.",
     role: "editor",
     readOnly: false,
+    scope: "stage_evidence",
   },
   {
     value: "read",

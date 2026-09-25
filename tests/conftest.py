@@ -136,6 +136,13 @@ def raw_sqlite_test_engines_use_production_pragmas() -> Iterator[None]:
         event.remove(Engine, "connect", _set_sqlite_pragmas)
 
 
+# Test apps see a loopback (local, non-external) drafting provider so the
+# external-provider acknowledgement gate stays out of the way; gate tests
+# point the base URL back at the public host explicitly before create_app().
+LOOPBACK_PROVIDER_BASE_URL = "http://127.0.0.1:9/v1"
+PUBLIC_OPENAI_BASE_URL = "https://api.openai.com/v1"
+
+
 @pytest.fixture()
 def sqlite_database_url(tmp_path) -> str:
     db_path = tmp_path / "integration.db"
@@ -154,6 +161,7 @@ def migrated_sqlite_database_url(
     monkeypatch.setenv("LAB_TRACKER_NOTE_STORAGE_PATH", str(tmp_path / "note-storage"))
     monkeypatch.setenv("LAB_TRACKER_AUTH_SECRET_KEY", "test-secret")
     monkeypatch.setenv("LAB_TRACKER_AUTH_ENABLED", "true")
+    monkeypatch.setenv("LAB_TRACKER_OPENAI_BASE_URL", LOOPBACK_PROVIDER_BASE_URL)
 
     config = Config(str(_repo_root() / "alembic.ini"))
     command.upgrade(config, "head")
@@ -187,6 +195,7 @@ def migrated_postgres_database_url(monkeypatch, tmp_path) -> Iterator[str]:
     monkeypatch.setenv("LAB_TRACKER_NOTE_STORAGE_PATH", str(tmp_path / "note-storage"))
     monkeypatch.setenv("LAB_TRACKER_AUTH_SECRET_KEY", "test-secret")
     monkeypatch.setenv("LAB_TRACKER_AUTH_ENABLED", "true")
+    monkeypatch.setenv("LAB_TRACKER_OPENAI_BASE_URL", LOOPBACK_PROVIDER_BASE_URL)
 
     config = Config(str(_repo_root() / "alembic.ini"))
     command.upgrade(config, "head")

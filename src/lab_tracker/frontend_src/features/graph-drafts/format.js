@@ -160,7 +160,12 @@ function spokenReviewScript(changeSet, payloadTextById = {}) {
 // what was decided instead of a generic "operation updated". `decision` is
 // undefined when only edits were saved.
 function decisionFlashMessage(operation, decision) {
-  const verbs = { accepted: "Accepted", proposed: "Deferred", rejected: "Rejected" };
+  const verbs = {
+    accepted: "Accepted",
+    deferred: "Deferred",
+    proposed: "Deferred",
+    rejected: "Rejected",
+  };
   const verb = decision ? verbs[decision] : null;
   const subject = operationProposalText(operation);
   const clipped = subject.length > 80 ? `${subject.slice(0, 77)}...` : subject;

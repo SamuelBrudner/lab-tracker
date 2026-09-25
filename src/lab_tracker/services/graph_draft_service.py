@@ -11,6 +11,7 @@ from lab_tracker.config import Settings
 from lab_tracker.graph_drafting import GraphDraftClient, GraphDraftClientFactory
 from lab_tracker.models import (
     AcceptanceMode,
+    ExternalContextPolicy,
     GraphChangeOperationStatus,
     GraphChangeSet,
     GraphChangeSetStatus,
@@ -70,6 +71,7 @@ class GraphDraftService:
         mode: GraphDraftMode = GraphDraftMode.GRAPH_CONTEXT,
         user_hint: str | None = None,
         actor: AuthContext | None = None,
+        external_provider_acknowledged: bool = False,
     ) -> GraphChangeSet:
         return self.generation.create_graph_draft_from_note(
             note_id,
@@ -77,6 +79,7 @@ class GraphDraftService:
             mode=mode,
             user_hint=user_hint,
             actor=actor,
+            external_provider_acknowledged=external_provider_acknowledged,
         )
 
     def create_analysis_graph_draft_from_note(
@@ -85,11 +88,13 @@ class GraphDraftService:
         *,
         draft_client: GraphDraftClient,
         actor: AuthContext | None = None,
+        external_provider_acknowledged: bool = False,
     ) -> GraphChangeSet:
         return self.generation.create_analysis_graph_draft_from_note(
             note_id,
             draft_client=draft_client,
             actor=actor,
+            external_provider_acknowledged=external_provider_acknowledged,
         )
 
     def create_batch_graph_draft(
@@ -123,10 +128,7 @@ class GraphDraftService:
         return self.records.get_graph_change_set(change_set_id)
 
     def get_graph_change_set_for_read(
-        self,
-        change_set_id: UUID,
-        *,
-        actor: AuthContext | None = None,
+        self, change_set_id: UUID, *, actor: AuthContext | None = None
     ) -> GraphChangeSet:
         return self.records.get_graph_change_set_for_read(change_set_id, actor=actor)
 
@@ -284,12 +286,14 @@ class GraphDraftService:
         window: tuple[datetime, datetime] | None = None,
         actor: AuthContext | None = None,
         context_owner: BatchReviewer | None = None,
+        external_context_policy: ExternalContextPolicy | None = None,
     ) -> dict[str, Any]:
         return self.generation.build_batch_graph_context(
             notes,
             window=window,
             actor=actor,
             context_owner=context_owner,
+            external_context_policy=external_context_policy,
         )
 
     def get_graph_draft_batch_settings(
@@ -316,6 +320,8 @@ class GraphDraftService:
         user_id: PatchValue[UUID | None] = NOT_PROVIDED,
         email_notifications_enabled: PatchValue[bool | None] = NOT_PROVIDED,
         notification_email: PatchValue[str | None] = NOT_PROVIDED,
+        external_context_policy: PatchValue[ExternalContextPolicy | None] = NOT_PROVIDED,
+        external_provider_acknowledged: PatchValue[bool | None] = NOT_PROVIDED,
         actor: AuthContext | None = None,
     ) -> GraphDraftBatchSettings:
         return self.scheduling.update_graph_draft_batch_settings(
@@ -327,6 +333,8 @@ class GraphDraftService:
             user_id=user_id,
             email_notifications_enabled=email_notifications_enabled,
             notification_email=notification_email,
+            external_context_policy=external_context_policy,
+            external_provider_acknowledged=external_provider_acknowledged,
             actor=actor,
         )
 

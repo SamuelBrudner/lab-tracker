@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import os
 from collections.abc import Callable
-from typing import Any, Literal
+from typing import Any, Final, Literal
 from urllib.parse import urlsplit
 
 from pydantic import AliasChoices, Field, field_validator, model_validator
@@ -62,6 +62,27 @@ INSECURE_AUTH_SECRET_KEYS = {
     "change-me",
     "changeme",
 }
+# Spellings LAB_TRACKER_GRAPH_DRAFT_PROVIDER accepts for a canonical provider.
+GRAPH_DRAFT_PROVIDER_ALIASES: Final[dict[str, str]] = {
+    "claude": "anthropic",
+    "gemini": "google",
+}
+# The Settings field holding each canonical provider's API base URL.
+_GRAPH_DRAFT_PROVIDER_BASE_URL_FIELDS: Final[dict[str, str]] = {
+    "openai": "openai_base_url",
+    "anthropic": "anthropic_base_url",
+    "google": "google_base_url",
+}
+# A provider served from one of these hosts runs on this machine: nothing
+# leaves the instance, so no external-provider acknowledgement is required.
+LOCAL_PROVIDER_HOSTS: Final[frozenset[str]] = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def resolve_graph_draft_provider(provider: str) -> str:
+    """Return the canonical provider name for a configured spelling."""
+
+    normalized = (provider or "openai").strip().lower()
+    return GRAPH_DRAFT_PROVIDER_ALIASES.get(normalized, normalized)
 
 
 def _with_nonblank_base_url_aliases(
@@ -240,6 +261,32 @@ class Settings(BaseSettings):
         """Return the configured canonical instance origin, if any."""
 
         return self.base_url
+
+    def graph_draft_provider_base_url(self) -> str:
+        """Return the API base URL of the configured drafting provider."""
+
+        provider = resolve_graph_draft_provider(self.graph_draft_provider)
+        field_name = _GRAPH_DRAFT_PROVIDER_BASE_URL_FIELDS.get(provider)
+        if field_name is None:
+            raise ValueError(f"Unknown graph draft provider: {provider!r}.")
+        base_url: str = getattr(self, field_name)
+        return base_url
+
+    def graph_draft_provider_is_external(self) -> bool:
+        """Whether drafting sends context off this host.
+
+        Only a loopback provider host counts as local; everything else is an
+        external provider that needs the explicit acknowledgement gate. An
+        unknown provider has no base URL to inspect and fails closed as
+        external here; the provider name itself is rejected loudly by
+        :meth:`graph_draft_provider_base_url` and at the first draft request.
+        """
+
+        provider = resolve_graph_draft_provider(self.graph_draft_provider)
+        if provider not in _GRAPH_DRAFT_PROVIDER_BASE_URL_FIELDS:
+            return True
+        hostname = urlsplit(self.graph_draft_provider_base_url()).hostname
+        return hostname not in LOCAL_PROVIDER_HOSTS
 
     @field_validator("database_url")
     @classmethod

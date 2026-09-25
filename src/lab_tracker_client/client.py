@@ -69,6 +69,8 @@ DATASET_STATUS_VALUES = tuple(status.value for status in DatasetStatus)
 ANALYSIS_STATUS_VALUES = tuple(status.value for status in AnalysisStatus)
 CLAIM_STATUS_VALUES = tuple(status.value for status in ClaimStatus)
 GOAL_STATUS_VALUES = tuple(status.value for status in GoalStatus)
+# Route segments that serve a layered Ara artifact (GET /{scope}/{id}/ara-artifact).
+ARA_ARTIFACT_SCOPES = frozenset({"goals", "questions"})
 STORE_KIND_VALUES = tuple(kind.value for kind in StoreKind)
 STORE_CAPABILITY_VALUES = tuple(capability.value for capability in StoreCapability)
 
@@ -847,6 +849,30 @@ class LabTracker:
                 f"provenance entity_type must be one of {sorted(allowed)}; got {entity_type!r}."
             )
         return self._request("GET", f"/{entity_type}/{entity_id}/provenance")
+
+    def ara_artifact(
+        self,
+        scope: str,
+        entity_id: str,
+        *,
+        layer: str | None = None,
+    ) -> JsonObject:
+        """Fetch the layered Ara JSON-LD artifact for one goal or root question.
+
+        ``scope`` is the plural route segment: ``goals`` or ``questions``. The
+        full artifact embeds every layer; ``layer`` narrows it to one of
+        ``logic``, ``src``, ``trace``, or ``evidence``. The document is raw
+        JSON-LD (no envelope), readable without a running instance.
+        """
+
+        if scope not in ARA_ARTIFACT_SCOPES:
+            raise LTValidationError(
+                f"ara_artifact scope must be one of {sorted(ARA_ARTIFACT_SCOPES)}; got {scope!r}."
+            )
+        path = f"/{scope}/{_require_non_empty(entity_id, field_name='entity_id')}/ara-artifact"
+        if layer is not None:
+            path = f"{path}/{layer}"
+        return self._request("GET", path)
 
     def list_goals(
         self,
@@ -2075,6 +2101,10 @@ def list_visualizations(**kwargs: Any) -> list[LTRecord]:
 
 def list_goals(**kwargs: Any) -> list[LTRecord]:
     return client.list_goals(**kwargs)
+
+
+def ara_artifact(scope: str, entity_id: str, **kwargs: Any) -> JsonObject:
+    return client.ara_artifact(scope, entity_id, **kwargs)
 
 
 def next_questions(**kwargs: Any) -> JsonObject:

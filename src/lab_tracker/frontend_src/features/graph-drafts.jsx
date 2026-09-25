@@ -5,15 +5,25 @@ import { useReviewDictation } from "../hooks/useReviewDictation.js";
 import { useSourceArtifactPreviews } from "../hooks/useSourceArtifactPreviews.js";
 import { apiListRequest, buildApiPath } from "../shared/api.js";
 import { AudioReviewConsole } from "./graph-drafts/AudioReviewConsole.jsx";
+import { DraftQualityLine } from "./graph-drafts/DraftQualityLine.jsx";
 import { NarrativeReview } from "./graph-drafts/NarrativeReview.jsx";
 import { OperationRow } from "./graph-drafts/OperationRow.jsx";
 import { ProvenanceDetails } from "./graph-drafts/ProvenanceDetails.jsx";
+import { ProvenanceLinkProposals } from "./graph-drafts/ProvenanceLinkProposals.jsx";
 import { SourceArtifactEvidence } from "./graph-drafts/SourceArtifactEvidence.jsx";
+import { SourceNoteActions } from "./graph-drafts/SourceNoteActions.jsx";
 import { decisionCounts, spokenReviewScript } from "./graph-drafts/format.js";
+import { REJECT_REASONS, reasonForKey } from "./graph-drafts/review-reasons.js";
 import { buildSourceArtifactReview } from "./graph-drafts/source-artifacts.js";
 
-const DECISION_KEYS = { a: "accepted", d: "proposed", r: "rejected" };
+const ACCEPT_KEY = "a";
+const DEFER_KEY = "d";
+const REJECT_KEY = "r";
 const REVIEWABLE_STATUSES = new Set(["ready", "changes_requested"]);
+
+function isUndecided(operation) {
+  return operation.status === "proposed" && !operation.deferred_at;
+}
 
 function isTypingTarget(target) {
   const tag = target?.tagName;
@@ -141,9 +151,12 @@ function GraphDraftDetailCard({
   const counts = React.useMemo(() => decisionCounts(changeSet), [changeSet]);
 
   // Keyboard review loop over the proposal cards: j/k (or the arrows) move
-  // the focused card, a / r / d decide it and move on to the next undecided
-  // one. Shortcuts stay out of the way while a field is being typed in.
+  // the focused card, a accepts, d defers, and r asks for a reject reason
+  // that the digits 1-7 supply (Escape backs out); each decision moves on
+  // to the next undecided one. Shortcuts stay out of the way while a field
+  // is being typed in.
   const [focusedOperationId, setFocusedOperationId] = React.useState("");
+  const [reasonPromptOperationId, setReasonPromptOperationId] = React.useState("");
   const rowRefs = React.useRef({});
   const keyHandlerRef = React.useRef(null);
 
@@ -162,16 +175,38 @@ function GraphDraftDetailCard({
 
   function nextUndecidedIndex(from) {
     for (let index = from + 1; index < operations.length; index += 1) {
-      if (operations[index].status === "proposed") {
+      if (isUndecided(operations[index])) {
         return index;
       }
     }
     for (let index = 0; index < from; index += 1) {
-      if (operations[index].status === "proposed") {
+      if (isUndecided(operations[index])) {
         return index;
       }
     }
     return -1;
+  }
+
+  function advanceAfterDecision(current, decided) {
+    if (!decided) {
+      return;
+    }
+    const next = nextUndecidedIndex(current);
+    if (next >= 0) {
+      focusOperationAt(next);
+    }
+  }
+
+  async function rejectWithReason(operation, reason) {
+    setReasonPromptOperationId("");
+    const current = operations.findIndex(
+      (candidate) => candidate.operation_id === operation.operation_id
+    );
+    advanceAfterDecision(current, await workflow.rejectOperation(operation, reason));
+  }
+
+  async function deferFocused(operation, current) {
+    advanceAfterDecision(current, await workflow.deferOperation(operation));
   }
 
   async function handleReviewKeyDown(event) {
@@ -190,6 +225,23 @@ function GraphDraftDetailCard({
     const current = operations.findIndex(
       (operation) => operation.operation_id === focusedOperationId
     );
+    if (reasonPromptOperationId) {
+      // A reject reason is being chosen: only its digits and Escape count.
+      const prompted = operations.find(
+        (operation) => operation.operation_id === reasonPromptOperationId
+      );
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setReasonPromptOperationId("");
+        return;
+      }
+      const reason = reasonForKey(REJECT_REASONS, event.key);
+      if (reason && prompted && !pendingCommands[`op:${prompted.operation_id}`]) {
+        event.preventDefault();
+        await rejectWithReason(prompted, reason.value);
+      }
+      return;
+    }
     if (event.key === "j" || event.key === "ArrowDown") {
       event.preventDefault();
       focusOperationAt(current < 0 ? 0 : Math.min(current + 1, operations.length - 1));
@@ -200,8 +252,7 @@ function GraphDraftDetailCard({
       focusOperationAt(current < 0 ? 0 : Math.max(current - 1, 0));
       return;
     }
-    const decision = DECISION_KEYS[event.key];
-    if (!decision || !canEditDraft || current < 0) {
+    if (![ACCEPT_KEY, DEFER_KEY, REJECT_KEY].includes(event.key) || !canEditDraft || current < 0) {
       return;
     }
     event.preventDefault();
@@ -209,13 +260,15 @@ function GraphDraftDetailCard({
     if (pendingCommands[`op:${operation.operation_id}`]) {
       return;
     }
-    const saved = await workflow.saveOperation(operation, decision);
-    if (saved) {
-      const next = nextUndecidedIndex(current);
-      if (next >= 0) {
-        focusOperationAt(next);
-      }
+    if (event.key === REJECT_KEY) {
+      setReasonPromptOperationId(operation.operation_id);
+      return;
     }
+    if (event.key === DEFER_KEY) {
+      await deferFocused(operation, current);
+      return;
+    }
+    advanceAfterDecision(current, await workflow.saveOperation(operation, "accepted"));
   }
 
   React.useEffect(() => {
@@ -275,6 +328,7 @@ function GraphDraftDetailCard({
                 ))}
             </div>
           ) : null}
+          <DraftQualityLine projectId={changeSet.project_id} token={token} changeSet={changeSet} />
           <p className="review-lead subtle">
             {changeSet.source_note_count || (changeSet.source_note_ids || []).length || 1}{" "}
             {(changeSet.source_note_count || (changeSet.source_note_ids || []).length || 1) === 1
@@ -322,6 +376,16 @@ function GraphDraftDetailCard({
               {reviewAttachmentMessage}
             </p>
           ) : null}
+          <SourceNoteActions
+            noteIds={
+              (changeSet.source_note_ids || []).length > 0
+                ? changeSet.source_note_ids
+                : [changeSet.source_note_id].filter(Boolean)
+            }
+            canEditDraft={canEditDraft}
+            pendingCommands={pendingCommands}
+            onArchive={workflow.archiveSourceNote}
+          />
 
           <div className="review-view-switch">
             <span className="subtle">Review as</span>
@@ -354,13 +418,16 @@ function GraphDraftDetailCard({
               pendingCommands={pendingCommands}
               onUpdateOperationReviewNote={workflow.updateOperationReviewNote}
               onSaveOperation={workflow.saveOperation}
+              onDeferOperation={workflow.deferOperation}
+              onRejectOperation={workflow.rejectOperation}
             />
           ) : (
             <div className="review-report">
               {canEditDraft && operations.length > 0 ? (
                 <p className="review-keys subtle" aria-label="Keyboard shortcuts">
                   Keyboard: <kbd>j</kbd> / <kbd>k</kbd> next and previous proposal ·{" "}
-                  <kbd>a</kbd> accept · <kbd>r</kbd> reject · <kbd>d</kbd> defer
+                  <kbd>a</kbd> accept · <kbd>r</kbd> reject (then <kbd>1</kbd>–<kbd>7</kbd> for
+                  the reason) · <kbd>d</kbd> defer
                 </p>
               ) : null}
               {operations.map((operation) => {
@@ -385,10 +452,25 @@ function GraphDraftDetailCard({
                     sourceArtifacts={sourceMapping.artifacts}
                     sourcePreviews={sourcePreviews}
                     usesSharedSourceEvidence={sourceMapping.ambiguous}
+                    reasonPrompt={reasonPromptOperationId === operation.operation_id}
                     onPatchOperationPayload={workflow.patchOperationPayload}
                     onUpdatePayloadText={workflow.updatePayloadText}
                     onUpdateOperationReviewNote={workflow.updateOperationReviewNote}
                     onSaveOperation={workflow.saveOperation}
+                    onDeferOperation={(target) =>
+                      deferFocused(
+                        target,
+                        operations.findIndex(
+                          (candidate) => candidate.operation_id === target.operation_id
+                        )
+                      )
+                    }
+                    onRequestReason={(target) => {
+                      setFocusedOperationId(target.operation_id);
+                      setReasonPromptOperationId(target.operation_id);
+                    }}
+                    onChooseReason={(target, reason) => rejectWithReason(target, reason)}
+                    onCancelReason={() => setReasonPromptOperationId("")}
                   />
                 );
               })}
@@ -523,6 +605,12 @@ function GraphDraftDetailCard({
             ) : null}
           </div>
 
+          <ProvenanceLinkProposals
+            projectId={changeSet.project_id}
+            token={token}
+            canWrite={workflow.canWriteProject}
+            onDecide={workflow.decideProvenanceLink}
+          />
           <ProvenanceDetails changeSet={changeSet} />
         </div>
       ) : null}

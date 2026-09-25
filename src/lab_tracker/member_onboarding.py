@@ -25,6 +25,8 @@ ONBOARDING_METADATA_PREFIX: Final = "member_onboarding_"
 CHECKPOINT_CLIENT_KEY_PREFIX: Final = "member-checkpoint:"
 SCHEDULED_DRAFT_POLICY_KEY: Final = "scheduled_graph_draft_policy"
 SCHEDULED_DRAFT_EXCLUDE: Final = "exclude"
+# The only value a client may write: a capture opts out of scheduled drafting.
+SCHEDULED_DRAFT_POLICY_VALUES: Final = frozenset({SCHEDULED_DRAFT_EXCLUDE})
 
 CHECKPOINT_SCHEMA_VERSION_KEY: Final = "member_onboarding_schema_version"
 CHECKPOINT_AS_OF_KEY: Final = "member_onboarding_as_of"
@@ -66,13 +68,22 @@ def is_member_checkpoint(note: Note) -> bool:
 
 
 def has_reserved_note_metadata(metadata: dict[str, object] | None) -> bool:
-    for key in metadata or {}:
-        normalized = str(key).strip()
-        if normalized.startswith(ONBOARDING_METADATA_PREFIX):
-            return True
-        if normalized == SCHEDULED_DRAFT_POLICY_KEY:
-            return True
-    return False
+    """Only ``member_onboarding_*`` keys are the guided workflow's to write."""
+
+    return any(str(key).strip().startswith(ONBOARDING_METADATA_PREFIX) for key in metadata or {})
+
+
+def validate_scheduled_draft_policy(metadata: dict[str, object] | None) -> None:
+    """Reject a ``scheduled_graph_draft_policy`` outside its admitted values."""
+
+    if not metadata or SCHEDULED_DRAFT_POLICY_KEY not in metadata:
+        return
+    value = metadata[SCHEDULED_DRAFT_POLICY_KEY]
+    if value not in SCHEDULED_DRAFT_POLICY_VALUES:
+        allowed = ", ".join(sorted(SCHEDULED_DRAFT_POLICY_VALUES))
+        raise ValidationError(
+            f"{SCHEDULED_DRAFT_POLICY_KEY} must be one of: {allowed}; got {value!r}."
+        )
 
 
 def has_reserved_capture_key(client_capture_id: str | None) -> bool:

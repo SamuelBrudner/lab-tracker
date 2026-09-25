@@ -12,13 +12,16 @@ import {
   sourceRefText,
   statusClass,
 } from "./format.js";
+import { ReasonChips } from "./ReasonChips.jsx";
 import { SourceArtifactEvidence } from "./SourceArtifactEvidence.jsx";
 
 // Presentational per-proposal editor: proposal body, evidence, typed and raw
 // payload edits, and the accept/defer/reject decision controls. All edit and
 // decision handlers come from the workflow controller. `focused` marks the
 // row the keyboard shortcuts act on; `onFocusRow` moves that mark here when
-// anything inside the row takes focus.
+// anything inside the row takes focus. Reject is two steps: the button (or
+// `r`) asks for a reason and `reasonPrompt` shows the chips; a chip (or its
+// digit) sends the rejection with that reason. Defer is one step.
 function OperationRow({
   operation,
   changeSet,
@@ -32,10 +35,15 @@ function OperationRow({
   sourceArtifacts = [],
   sourcePreviews = {},
   usesSharedSourceEvidence = false,
+  reasonPrompt = false,
   onPatchOperationPayload,
   onUpdatePayloadText,
   onUpdateOperationReviewNote,
   onSaveOperation,
+  onDeferOperation,
+  onRequestReason,
+  onChooseReason,
+  onCancelReason,
 }) {
   const parsed = parsedPayloadFromText(payloadText) || operation.payload || {};
   const proposed =
@@ -200,6 +208,11 @@ function OperationRow({
       </div>
       <aside className="review-proposal-actions">
         <span className={statusClass(operation.status)}>{operation.status}</span>
+        {operation.deferred_at ? (
+          <span className="pill review-pending" title={`Deferred ${operation.deferred_at}`}>
+            deferred
+          </span>
+        ) : null}
         <button
           type="button"
           className="btn-primary"
@@ -211,8 +224,8 @@ function OperationRow({
         <button
           type="button"
           className="btn-secondary"
-          disabled={!canEditDraft || Boolean(pending)}
-          onClick={() => onSaveOperation(operation, "proposed")}
+          disabled={!canEditDraft || Boolean(pending) || Boolean(operation.deferred_at)}
+          onClick={() => onDeferOperation(operation)}
         >
           Defer
         </button>
@@ -220,10 +233,18 @@ function OperationRow({
           type="button"
           className="btn-danger"
           disabled={!canEditDraft || Boolean(pending)}
-          onClick={() => onSaveOperation(operation, "rejected")}
+          onClick={() => onRequestReason(operation)}
         >
           Reject
         </button>
+        {reasonPrompt ? (
+          <ReasonChips
+            disabled={!canEditDraft || Boolean(pending)}
+            label="Reason"
+            onChoose={(reason) => onChooseReason(operation, reason)}
+            onCancel={onCancelReason}
+          />
+        ) : null}
       </aside>
     </div>
   );

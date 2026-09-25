@@ -430,6 +430,7 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 
 #### Graph Drafts: `GraphDraftCreateRequest`
 - Required: none
+- `external_provider_acknowledged` (optional): boolean; default False
 - `mode` (optional): GraphDraftMode enum: graph_context, image_only, graph_batch
 - `user_hint` (optional): string; min length 1 | null
 

@@ -678,7 +678,7 @@ class RecordExportService(BaseService):
                 offset=0,
             )
             for node in project_nodes:
-                if _exploration_node_matches_records(
+                if exploration_node_matches_records(
                     node,
                     target_map=target_map,
                     known_node_ids=known_node_ids,
@@ -849,7 +849,7 @@ class RecordExportService(BaseService):
         }
 
 
-def _exploration_node_matches_records(
+def exploration_node_matches_records(
     node: ExplorationNode,
     *,
     target_map: dict[EntityType, set[UUID]],

@@ -75,6 +75,7 @@ from lab_tracker.services import (
     TransactionalDraftCommitCoordinator,
     VisualizationService,
 )
+from lab_tracker.services.graph_draft_batch_policy import DraftingHostFacts
 from lab_tracker.store_authority_registry import StoreAuthorityRegistry
 
 _logger = logging.getLogger(__name__)
@@ -341,8 +342,11 @@ class LabTrackerAPI(
             projects=self.projects,
             notes=self.notes,
             authorization=self.project_authorization,
+            host=DraftingHostFacts(
+                review_email_available=self._settings.review_email_enabled,
+                external_provider=self._settings.graph_draft_provider_is_external(),
+            ),
             provenance_links=self.provenance_links,
-            review_email_available=self._settings.review_email_enabled,
         )
         self.graph_drafts: GraphDraftService = GraphDraftService(
             records=graph_draft_records,

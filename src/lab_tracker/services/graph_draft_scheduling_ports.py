@@ -63,6 +63,8 @@ class SchedulingNotes(Protocol):
 class SchedulingAuthorization(Protocol):
     def has_global_admin(self, actor: AuthContext | None) -> bool: ...
 
+    def require_interactive(self, actor: AuthContext | None, *, action: str) -> None: ...
+
     def require_read(
         self,
         project_id: UUID,

@@ -27,6 +27,7 @@ from lab_tracker.models import (
     EntityRef,
     EntityType,
     ExplorationNode,
+    ExternalContextPolicy,
     Goal,
     GraphChangeOp,
     GraphChangeOperation,
@@ -49,7 +50,12 @@ from lab_tracker.services.claim_service import ClaimService
 from lab_tracker.services.dataset_service import DatasetService
 from lab_tracker.services.exploration_service import ExplorationService
 from lab_tracker.services.goal_service import GoalService
-from lab_tracker.services.graph_draft_batch_policy import BatchReviewer, as_utc
+from lab_tracker.services.graph_draft_batch_policy import (
+    BatchReviewer,
+    as_utc,
+    context_owner_for,
+    note_matches_reviewer,
+)
 from lab_tracker.services.note_observed_at import note_observed_at
 from lab_tracker.services.note_service import NoteService
 from lab_tracker.services.project_service import ProjectService
@@ -158,6 +164,9 @@ REVIEW_MEMORY_NOTE_MAX_CHARS = 200
 REVIEW_MEMORY_NOT_SCOPED_WARNING = "review memory not reviewer-scoped"
 _MISSING_TARGET_LABEL = "(missing)"
 _CREATE_LABEL_FIELDS = ("text", "title", "statement", "raw_content")
+# recent_notes.author_scope: whether the packet owner captured the note.
+AUTHOR_SCOPE_OWN = "own"
+AUTHOR_SCOPE_COLLEAGUE = "colleague"
 # json.dumps list rendering adds ", " per item (or the brackets for the last).
 _JSON_LIST_ITEM_OVERHEAD = 2
 
@@ -228,6 +237,7 @@ class GraphContextBuilder:
         actor: AuthContext | None = None,
         batch_note_limit: int = 100,
         context_owner: BatchReviewer | None = None,
+        external_context_policy: ExternalContextPolicy = ExternalContextPolicy.OWN_NOTES_ONLY,
     ) -> dict[str, Any]:
         """Assemble a context packet covering a batch of staged notes.
 
@@ -239,7 +249,12 @@ class GraphContextBuilder:
         Caller is responsible for filtering to staged notes and choosing
         the window. The batch is capped at batch_note_limit; overflow is
         reported as truncated_note_count. ``context_owner`` is the reviewer
-        whose pending proposals and recent rejections become review_memory.
+        whose pending proposals and recent rejections become review_memory
+        and whose authorship scopes ``recent_notes``: under
+        ``own_notes_only`` colleagues' notes never enter the packet, under
+        ``project_notes`` they do, labelled ``author_scope=colleague``. With
+        no owner there is no one to scope to, so authorship is unknown and
+        nothing is filtered.
         """
         truncated_note_count = max(0, len(notes) - batch_note_limit)
         # Chronological order gives the day a contractual timeline rather than
@@ -264,7 +279,12 @@ class GraphContextBuilder:
                 continue
             batch_ids_in_project = {n.note_id for n in project_notes}
             question_context = self._question_context(project_id)
-            recent_notes = self._recent_notes_excluding(project_id, batch_ids_in_project)
+            recent_notes = self._recent_notes_excluding(
+                project_id,
+                batch_ids_in_project,
+                owner=context_owner,
+                policy=external_context_policy,
+            )
             recent_sessions = self._recent_sessions(project_id)
             sessions_by_project[project_id] = recent_sessions
             recent_datasets = self._recent_datasets(project_id)
@@ -290,7 +310,7 @@ class GraphContextBuilder:
                     "recent_sessions": _recent_items(_compact_session, recent_sessions),
                     "recent_datasets": _recent_items(_compact_dataset, recent_datasets),
                     "recent_notes": [
-                        _compact_recent_note(item, actor) for item in recent_notes
+                        _compact_recent_note(item, context_owner) for item in recent_notes
                     ],
                     "recent_analyses": _recent_items(_compact_analysis, recent_analyses),
                     "recent_claims": _recent_claim_items(recent_claims, interpretations),
@@ -360,6 +380,8 @@ class GraphContextBuilder:
                 source_context_truncated_note_count
             ),
             "projects": project_blocks,
+            "context_owner": _compact_owner(context_owner),
+            "external_context_policy": external_context_policy.value,
             "review_memory": self.build_review_memory(
                 project_ids=set(notes_by_project),
                 context_owner=context_owner,
@@ -608,6 +630,7 @@ class GraphContextBuilder:
         source_notes: list[Note],
         user_hint: str | None,
         actor: AuthContext | None = None,
+        external_context_policy: ExternalContextPolicy = ExternalContextPolicy.OWN_NOTES_ONLY,
     ) -> dict[str, Any]:
         try:
             project = self.projects.get_project(note.project_id)
@@ -615,8 +638,16 @@ class GraphContextBuilder:
             raise ValidationError(
                 "Graph context cannot be built because the note project does not exist."
             ) from exc
+        # A note-scoped draft is owned by the person asking for it, so that
+        # is the identity recent_notes are scoped and attributed against.
+        owner = context_owner_for(None, None, actor)
         question_context = self._question_context(note.project_id)
-        recent_notes = self._recent_notes_excluding(note.project_id, {note.note_id})
+        recent_notes = self._recent_notes_excluding(
+            note.project_id,
+            {note.note_id},
+            owner=owner,
+            policy=external_context_policy,
+        )
         recent_sessions = self._recent_sessions(note.project_id)
         recent_datasets = self._recent_datasets(note.project_id)
         recent_analyses = self._recent_analyses(note.project_id)
@@ -646,7 +677,7 @@ class GraphContextBuilder:
             "active_or_staged_questions": _active_or_staged_questions(question_context),
             "recent_sessions": _recent_items(_compact_session, recent_sessions),
             "recent_datasets": _recent_items(_compact_dataset, recent_datasets),
-            "recent_notes": [_compact_recent_note(item, actor) for item in recent_notes],
+            "recent_notes": [_compact_recent_note(item, owner) for item in recent_notes],
             "recent_analyses": _recent_items(_compact_analysis, recent_analyses),
             "recent_claims": _recent_claim_items(recent_claims, interpretations),
             "open_predictions": _open_prediction_items(open_predictions, interpretations),
@@ -669,12 +700,14 @@ class GraphContextBuilder:
                 goals=recent_goals,
             ),
             "unresolved_recent_captures": [
-                _compact_recent_note(item, actor)
+                _compact_recent_note(item, owner)
                 for item in recent_notes
                 if item.raw_asset is not None
                 and item.metadata.get("capture_source") == "mobile_capture"
                 and item.status == NoteStatus.STAGED
             ],
+            "context_owner": _compact_owner(owner),
+            "external_context_policy": external_context_policy.value,
         }
         context_packet["context_summary"] = _graph_context_summary(context_packet)
         return context_packet
@@ -826,9 +859,26 @@ class GraphContextBuilder:
         self,
         project_id: UUID,
         excluded_note_ids: set[UUID],
+        *,
+        owner: BatchReviewer | None,
+        policy: ExternalContextPolicy,
     ) -> list[Note]:
+        """The newest project notes the packet may carry, minus the sources.
+
+        ``own_notes_only`` keeps the owner's notes: by author id when the
+        owner is user-backed (the query does the filtering, so older own
+        notes are never crowded out by colleagues' newer ones), else by the
+        legacy author string. ``project_notes`` keeps every author.
+        """
+
+        own_only = policy is ExternalContextPolicy.OWN_NOTES_ONLY and owner is not None
         recent_notes, _ = self.notes.repository.query_notes(
             project_id=project_id,
+            created_by=(
+                str(owner.reviewer_user_id)
+                if own_only and owner is not None and owner.reviewer_user_id is not None
+                else None
+            ),
             limit=_RECENT_CONTEXT_LIMIT + len(excluded_note_ids),
             offset=0,
             recent_first=True,
@@ -837,6 +887,7 @@ class GraphContextBuilder:
             note
             for note in recent_notes
             if note.note_id not in excluded_note_ids
+            and (not own_only or note_matches_reviewer(note, owner))
         ][:_RECENT_CONTEXT_LIMIT]
 
     def _recent_sessions(self, project_id: UUID) -> list[Session]:
@@ -933,6 +984,9 @@ def _graph_context_summary(context_packet: dict[str, Any]) -> dict[str, Any]:
             "recent_sessions": len(context_packet.get("recent_sessions") or []),
             "recent_datasets": len(context_packet.get("recent_datasets") or []),
             "recent_notes": len(context_packet.get("recent_notes") or []),
+            "colleague_recent_notes": _colleague_note_count(
+                context_packet.get("recent_notes") or []
+            ),
             "recent_analyses": len(context_packet.get("recent_analyses") or []),
             "recent_claims": len(context_packet.get("recent_claims") or []),
             "open_predictions": len(context_packet.get("open_predictions") or []),
@@ -1018,6 +1072,9 @@ def _graph_batch_context_summary(packet: dict[str, Any]) -> dict[str, Any]:
                 len(p.get("active_or_staged_questions") or []) for p in projects
             ),
             "recent_notes": sum(len(p.get("recent_notes") or []) for p in projects),
+            "colleague_recent_notes": sum(
+                _colleague_note_count(p.get("recent_notes") or []) for p in projects
+            ),
             "recent_sessions": sum(len(p.get("recent_sessions") or []) for p in projects),
             "recent_datasets": sum(len(p.get("recent_datasets") or []) for p in projects),
             "recent_analyses": sum(len(p.get("recent_analyses") or []) for p in projects),
@@ -1072,6 +1129,25 @@ def _compact_actor(actor: AuthContext | None) -> dict[str, Any] | None:
     if actor is None:
         return None
     return {"id": str(actor.user_id), "role": actor.role.value}
+
+
+def _compact_owner(owner: BatchReviewer | None) -> dict[str, Any] | None:
+    if owner is None:
+        return None
+    return {
+        "reviewer": owner.reviewer,
+        "reviewer_user_id": (
+            str(owner.reviewer_user_id) if owner.reviewer_user_id is not None else None
+        ),
+    }
+
+
+def _colleague_note_count(items: list[Any]) -> int:
+    return sum(
+        1
+        for item in items
+        if isinstance(item, dict) and item.get("author_scope") == AUTHOR_SCOPE_COLLEAGUE
+    )
 
 
 def _empty_review_memory() -> dict[str, Any]:
@@ -1327,6 +1403,9 @@ def _compact_note(note: Note, *, include_raw_asset: bool = False) -> dict[str, A
         "metadata": dict(note.metadata),
         "is_meeting": is_meeting_note(note),
         "created_by": note.created_by,
+        "created_by_user_id": (
+            str(note.created_by_user_id) if note.created_by_user_id is not None else None
+        ),
     }
     if include_raw_asset and note.raw_asset is not None:
         payload["raw_asset"] = {
@@ -1339,11 +1418,21 @@ def _compact_note(note: Note, *, include_raw_asset: bool = False) -> dict[str, A
     return payload
 
 
-def _compact_recent_note(note: Note, actor: AuthContext | None) -> dict[str, Any]:
+def _note_author_scope(note: Note, owner: BatchReviewer | None) -> str | None:
+    """``own`` or ``colleague`` relative to the packet owner; None without one."""
+
+    if owner is None:
+        return None
+    return AUTHOR_SCOPE_OWN if note_matches_reviewer(note, owner) else AUTHOR_SCOPE_COLLEAGUE
+
+
+def _compact_recent_note(note: Note, owner: BatchReviewer | None) -> dict[str, Any]:
+    # captured_by_current_user and author_scope are one fact from one owner
+    # resolution (assignee, else the acting user); they can never disagree.
     payload = _with_selection_reason(_compact_note(note), SELECTION_REASON_RECENT)
-    payload["captured_by_current_user"] = (
-        None if actor is None else note.created_by == str(actor.user_id)
-    )
+    scope = _note_author_scope(note, owner)
+    payload["captured_by_current_user"] = None if scope is None else scope == AUTHOR_SCOPE_OWN
+    payload["author_scope"] = scope
     return payload
 
 

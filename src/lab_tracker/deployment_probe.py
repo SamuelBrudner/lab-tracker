@@ -18,7 +18,7 @@ from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
 
-from lab_tracker.config import Settings, get_settings
+from lab_tracker.config import Settings, get_settings, resolve_graph_draft_provider
 
 
 class DeploymentProbeError(RuntimeError):
@@ -36,11 +36,7 @@ def _expected_migration_heads(
 
 
 def _provider_readiness(settings: Settings) -> tuple[str, bool]:
-    provider = (settings.graph_draft_provider or "openai").strip().lower()
-    provider = {
-        "claude": "anthropic",
-        "gemini": "google",
-    }.get(provider, provider)
+    provider = resolve_graph_draft_provider(settings.graph_draft_provider)
     credential = {
         "openai": settings.openai_api_key,
         "anthropic": settings.anthropic_api_key,

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import base64
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from copy import deepcopy
 from dataclasses import dataclass, field
 from threading import Lock
@@ -58,10 +58,10 @@ from lab_tracker.models import (
     DataStore,
     EntityType,
     ExplorationNode,
-    ExplorationNodeStatus,
-    ExplorationNodeType,
     ExternalArtifactReference,
     Goal,
+    GoalLink,
+    GraphChangeSet,
     Project,
     ProjectCoverageReport,
     ProjectStatus,
@@ -75,9 +75,11 @@ from lab_tracker.models import (
 from lab_tracker.portfolio_query import portfolio_summary_groups
 from lab_tracker.project_graph import build_project_graph
 from lab_tracker.provenance import (
+    CurationIndex,
     build_analysis_provenance_document,
     build_claim_provenance_document,
     build_dataset_provenance_document,
+    curation_index,
 )
 from lab_tracker.provenance_supervision import build_with_people_supervision
 from lab_tracker.rclone_store_definition import is_rclone_store_kind
@@ -92,6 +94,7 @@ from lab_tracker.schemas import (
     ProjectGraphView,
     SearchResults,
 )
+from lab_tracker.services.record_export_service import exploration_node_matches_records
 from lab_tracker.store_authority_use import (
     DetachedStoreAuthorityBinding,
     StoreAuthoritySnapshotProvider,
@@ -206,6 +209,8 @@ class ContextAccess(Protocol):
 
     def get_goal(self, goal_id: UUID) -> Goal: ...
 
+    def get_graph_change_set(self, change_set_id: UUID) -> GraphChangeSet: ...
+
     def require_goal_read(
         self,
         goal: Goal,
@@ -245,6 +250,17 @@ class ContextRepository(DecisionContextRepository, Protocol):
         limit: int | None,
         offset: int,
     ) -> tuple[list[Goal], int]: ...
+
+    def query_goal_links(
+        self,
+        *,
+        goal_id: UUID | None = None,
+        entity_type: str | None = None,
+        entity_id: UUID | None = None,
+        link_status: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[GoalLink], int]: ...
 
     def query_exploration_nodes(
         self,
@@ -420,12 +436,22 @@ class ContextQueries:
         base_url: str,
     ) -> dict[str, object]:
         dataset = self.api.get_dataset_for_read(dataset_id, actor=actor)
+        questions = self._sidecar_questions(link.question_id for link in dataset.question_links)
+        target_map = {EntityType.DATASET: {dataset.dataset_id}}
+        exploration_nodes = self._sidecar_exploration_nodes(dataset.project_id, target_map)
+        goals, goal_links = self._sidecar_goal_links(target_map)
+        curation = self._sidecar_curation([dataset, *questions, *exploration_nodes, *goals])
         return build_with_people_supervision(
             self.repository,
             lambda supervision_edges: build_dataset_provenance_document(
                 base_url,
                 dataset,
                 supervision_edges=supervision_edges,
+                questions=questions,
+                exploration_nodes=exploration_nodes,
+                goals=goals,
+                goal_links=goal_links,
+                curation=curation,
             ),
         )
 
@@ -457,6 +483,18 @@ class ContextQueries:
             limit=None,
             offset=0,
         )
+        questions = self._sidecar_questions(
+            link.question_id for dataset in datasets for link in dataset.question_links
+        )
+        target_map = {
+            EntityType.DATASET: {dataset.dataset_id for dataset in datasets},
+            EntityType.ANALYSIS: {analysis.analysis_id},
+        }
+        exploration_nodes = self._sidecar_exploration_nodes(analysis.project_id, target_map)
+        goals, goal_links = self._sidecar_goal_links(target_map)
+        curation = self._sidecar_curation(
+            [analysis, *datasets, *claims, *visualizations, *questions, *exploration_nodes, *goals]
+        )
         return build_with_people_supervision(
             self.repository,
             lambda supervision_edges: build_analysis_provenance_document(
@@ -467,6 +505,11 @@ class ContextQueries:
                 visualizations=visualizations,
                 claim_edges=claim_edges,
                 supervision_edges=supervision_edges,
+                questions=questions,
+                exploration_nodes=exploration_nodes,
+                goals=goals,
+                goal_links=goal_links,
+                curation=curation,
             ),
         )
 
@@ -527,14 +570,27 @@ class ContextQueries:
             key=str,
         )
         related_claims = [self.api.get_claim(related_id) for related_id in related_claim_ids]
-        pivots, _ = self.repository.query_exploration_nodes(
-            project_id=claim.project_id,
-            node_type=ExplorationNodeType.PIVOT.value,
-            status=ExplorationNodeStatus.COMMITTED.value,
-            limit=None,
-            offset=0,
+        # The reachability closure is a superset of the committed pivots that
+        # invalidate the claim (they target it), so one list feeds both the
+        # effective-status interpretation and the exported exploration story.
+        target_map = {
+            EntityType.DATASET: {dataset.dataset_id for dataset in datasets},
+            EntityType.ANALYSIS: {analysis.analysis_id for analysis in analyses},
+            EntityType.CLAIM: {claim.claim_id},
+        }
+        exploration_nodes = self._sidecar_exploration_nodes(claim.project_id, target_map)
+        goals, goal_links = self._sidecar_goal_links(target_map)
+        curation = self._sidecar_curation(
+            [
+                claim,
+                *analyses,
+                *datasets,
+                *questions,
+                *visualizations,
+                *exploration_nodes,
+                *goals,
+            ]
         )
-        invalidating_pivots = [node for node in pivots if node.invalidates_claim_id == claim_id]
         return build_with_people_supervision(
             self.repository,
             lambda supervision_edges: build_claim_provenance_document(
@@ -546,9 +602,79 @@ class ContextQueries:
                 visualizations=visualizations,
                 claim_edges=claim_edges,
                 related_claims=related_claims,
-                exploration_nodes=invalidating_pivots,
+                exploration_nodes=exploration_nodes,
                 supervision_edges=supervision_edges,
+                goals=goals,
+                goal_links=goal_links,
+                curation=curation,
             ),
+        )
+
+    # --- Sidecar context loaders -------------------------------------------
+    #
+    # Each loader reads the whole project's exploration nodes once per
+    # request (limit=None); lab-scale projects hold at most a few hundred.
+
+    def _sidecar_questions(self, question_ids: Iterable[UUID]) -> list[Question]:
+        return [
+            self.api.get_question(question_id)
+            for question_id in sorted(set(question_ids), key=str)
+        ]
+
+    def _sidecar_exploration_nodes(
+        self,
+        project_id: UUID,
+        target_map: dict[EntityType, set[UUID]],
+    ) -> list[ExplorationNode]:
+        """Exploration nodes reachable from the exported records, to a fixpoint."""
+
+        nodes, _ = self.repository.query_exploration_nodes(
+            project_id=project_id, limit=None, offset=0
+        )
+        known_node_ids: set[UUID] = set()
+        while True:
+            newly_reached = {
+                node.node_id
+                for node in nodes
+                if node.node_id not in known_node_ids
+                and exploration_node_matches_records(
+                    node, target_map=target_map, known_node_ids=known_node_ids
+                )
+            }
+            if not newly_reached:
+                break
+            known_node_ids |= newly_reached
+        return sorted(
+            (node for node in nodes if node.node_id in known_node_ids),
+            key=lambda node: (node.created_at, str(node.node_id)),
+        )
+
+    def _sidecar_goal_links(
+        self,
+        target_map: dict[EntityType, set[UUID]],
+    ) -> tuple[list[Goal], list[GoalLink]]:
+        links: list[GoalLink] = []
+        for entity_type, entity_ids in target_map.items():
+            for entity_id in sorted(entity_ids, key=str):
+                found, _ = self.repository.query_goal_links(
+                    entity_type=entity_type.value, entity_id=entity_id, limit=None, offset=0
+                )
+                links.extend(found)
+        links.sort(key=lambda link: (link.created_at, str(link.link_id)))
+        goal_ids = sorted({link.goal_id for link in links}, key=str)
+        return [self.api.get_goal(goal_id) for goal_id in goal_ids], links
+
+    def _sidecar_curation(self, entities: Iterable[object]) -> CurationIndex:
+        """Every accepted operation behind the records this sidecar exports."""
+
+        change_set_ids = {
+            change_set_id
+            for entity in entities
+            if isinstance(change_set_id := getattr(entity, "change_set_id", None), UUID)
+        }
+        return curation_index(
+            self.api.get_graph_change_set(change_set_id)
+            for change_set_id in sorted(change_set_ids, key=str)
         )
 
     def search(

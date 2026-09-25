@@ -124,7 +124,20 @@ research record:
   nodes, `abandon_question` closes a question with a required terminal reason,
   `merge_questions` retires one question into a replacement through the
   audited question-refactor path, and `retire_note` archives a note with a
-  named reason (`superseded` or `reviewed_not_relevant`). Note, batch, and
+  named reason (`superseded` or `reviewed_not_relevant`). Note-scoped draft
+  requests (`POST /notes/{id}/graph-drafts` and `/analysis-graph-drafts`)
+  take `external_provider_acknowledged` and are refused with `422` when the
+  provider is external and it is not true; the consent is recorded on the
+  change set's `context_packet.external_provider_acknowledgement`. Every
+  packet names its `context_owner` and `external_context_policy`, and each
+  recent note carries `created_by_user_id` and `author_scope` computed from
+  the same owner as `captured_by_current_user`. A staged note whose metadata
+  sets `scheduled_graph_draft_policy: exclude` (client-settable; the only
+  admitted value) is skipped by scheduled and run-now batches. The review
+  page asks for a structured `reject_reason` (seven chips, keys `1`-`7` after
+  `r`), defers with one keystroke, shows a deferred count on batch cards, sets
+  a source capture aside with a named reason, and accepts or rejects proposed
+  provenance links in place. Note, batch, and
   analysis packets also carry an `open_predictions` section (proposed or
   testing claims that answer a question, with their derived
   `effective_status` and `pre_registered` flags), and the drafter may propose
@@ -157,6 +170,14 @@ research record:
   (`operation_count`, `deferred_count`, `meeting_note_count`) without
   operations or the context packet; `GET /batches/{change_set_id}` returns the
   full draft, which also exposes `reject_reason_counts` per semantic type.
+  Each settings row carries an `external_context_policy`: `own_notes_only`
+  (the default) sends the provider only the reviewer's own recent notes as
+  context, `project_notes` also sends colleagues' recent notes, each labelled
+  `author_scope`; a personal row inherits the project default when created.
+  When the drafting provider is external (a non-loopback base URL), enabling
+  the cadence or switching to `project_notes` requires
+  `external_provider_acknowledged: true` from an interactive session, recorded
+  once as `external_provider_acknowledged_at` / `external_provider_acknowledged_by`.
 - Opt-in, per-user review-ready email cues backed by a transactional delivery
   outbox, retry leases, and signed short-lived links. Email contains no project
   or research content, and links still require normal authentication and
@@ -321,7 +342,13 @@ research record:
   references that preserve semantic edges to outside tools without
   reimplementing their workflows. The `lt export` consumer-side command writes
   these documents as self-contained sidecar files that survive without a running
-  instance, optionally co-located next to the data files they describe. See
+  instance, optionally co-located next to the data files they describe, and
+  with `--ara` also each goal's and root question's layered Ara artifact.
+  Every dataset, analysis, and claim sidecar embeds the linked questions'
+  text, the exploration nodes reachable from the record, its goal links, and
+  the curation properties (`acceptanceMode`, `acceptedBy`, `acceptedAt`,
+  `proposalRationale`, `proposalConfidence`, `reviewNote`) of every record an
+  accepted AI proposal produced. See
   [provenance-export.md](provenance-export.md).
 - The linked-data surface around those documents: `@id` identifiers minted
   from `LAB_TRACKER_BASE_URL` when configured, a public `GET /terms`

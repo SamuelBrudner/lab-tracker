@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from lab_tracker.models import (
+    AcceptanceMode,
     AnalysisStatus,
     ClaimEffectiveStatus,
     ClaimRelation,
@@ -169,6 +170,7 @@ _CONCEPT_ENUMS = {
     "goalType": GoalType,
     "goalStatus": GoalStatus,
     "entityOrigin": EntityOrigin,
+    "acceptanceMode": AcceptanceMode,
     "claimRelation": ClaimRelation,
     "questionLinkRole": QuestionLinkRole,
     "outcomeStatus": OutcomeStatus,
@@ -196,7 +198,35 @@ _EXAMPLE_SCHEMES: dict[str, tuple[str, ...]] = {
     "effectiveStatus": ("claimEffectiveStatus",),
     "explorationNodeType": ("explorationNodeType",),
     "goalType": ("goalType",),
+    "acceptanceMode": ("acceptanceMode",),
 }
+
+
+def test_curation_terms_are_registered_lab_properties():
+    context = build_context("http://x")
+    assert context["acceptedBy"] == {"@id": "lab:acceptedBy", "@type": "@id"}
+    literal_terms = (
+        "acceptanceMode",
+        "acceptedAt",
+        "proposalRationale",
+        "proposalConfidence",
+        "reviewNote",
+    )
+    for name in literal_terms:
+        assert context[name] == f"lab:{name}", name
+    by_name = {term.name: term for term in TERMS}
+    assert by_name["acceptedBy"].range == "prov:Person"
+    assert all(
+        by_name[name].emitters == ("_apply_curation_provenance",)
+        for name in (
+            "acceptanceMode",
+            "acceptedBy",
+            "acceptedAt",
+            "proposalRationale",
+            "proposalConfidence",
+            "reviewNote",
+        )
+    )
 
 
 def _cited_examples(definition: str) -> list[str]:

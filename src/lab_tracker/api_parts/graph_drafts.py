@@ -18,6 +18,7 @@ from lab_tracker.config import Settings
 from lab_tracker.graph_drafting import GraphDraftClient, GraphDraftClientFactory
 from lab_tracker.models import (
     AcceptanceMode,
+    ExternalContextPolicy,
     GraphChangeOperationStatus,
     GraphChangeSet,
     GraphChangeSetStatus,
@@ -71,6 +72,7 @@ class GraphDraftsApiMixin:
         mode: GraphDraftMode = GraphDraftMode.GRAPH_CONTEXT,
         user_hint: str | None = None,
         actor: AuthContext | None = None,
+        external_provider_acknowledged: bool = False,
     ) -> GraphChangeSet:
         return self._with_usage_event(
             lambda: self.graph_drafts.create_graph_draft_from_note(
@@ -79,6 +81,7 @@ class GraphDraftsApiMixin:
                 mode=mode,
                 user_hint=user_hint,
                 actor=actor,
+                external_provider_acknowledged=external_provider_acknowledged,
             ),
             verb=UsageEventVerb.CREATE,
             resource_type=UsageEventResourceType.GRAPH_CHANGE_SET,
@@ -92,12 +95,14 @@ class GraphDraftsApiMixin:
         *,
         draft_client: GraphDraftClient,
         actor: AuthContext | None = None,
+        external_provider_acknowledged: bool = False,
     ) -> GraphChangeSet:
         return self._with_usage_event(
             lambda: self.graph_drafts.create_analysis_graph_draft_from_note(
                 note_id,
                 draft_client=draft_client,
                 actor=actor,
+                external_provider_acknowledged=external_provider_acknowledged,
             ),
             verb=UsageEventVerb.CREATE,
             resource_type=UsageEventResourceType.GRAPH_CHANGE_SET,
@@ -360,12 +365,14 @@ class GraphDraftsApiMixin:
         window: tuple[datetime, datetime] | None = None,
         actor: AuthContext | None = None,
         context_owner: BatchReviewer | None = None,
+        external_context_policy: ExternalContextPolicy | None = None,
     ) -> dict[str, Any]:
         return self.graph_drafts.build_batch_graph_context(
             notes,
             window=window,
             actor=actor,
             context_owner=context_owner,
+            external_context_policy=external_context_policy,
         )
 
     def get_graph_draft_batch_settings(
@@ -392,6 +399,8 @@ class GraphDraftsApiMixin:
         user_id: PatchValue[UUID | None] = NOT_PROVIDED,
         email_notifications_enabled: PatchValue[bool | None] = NOT_PROVIDED,
         notification_email: PatchValue[str | None] = NOT_PROVIDED,
+        external_context_policy: PatchValue[ExternalContextPolicy | None] = NOT_PROVIDED,
+        external_provider_acknowledged: PatchValue[bool | None] = NOT_PROVIDED,
         actor: AuthContext | None = None,
     ) -> GraphDraftBatchSettings:
         return self._with_usage_event(
@@ -404,6 +413,8 @@ class GraphDraftsApiMixin:
                 user_id=user_id,
                 email_notifications_enabled=email_notifications_enabled,
                 notification_email=notification_email,
+                external_context_policy=external_context_policy,
+                external_provider_acknowledged=external_provider_acknowledged,
                 actor=actor,
             ),
             verb=UsageEventVerb.UPDATE,

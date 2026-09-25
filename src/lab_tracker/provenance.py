@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -28,6 +28,8 @@ from lab_tracker.models import (
     ExternalArtifactReference,
     Goal,
     GoalLink,
+    GraphChangeOperation,
+    GraphChangeSet,
     Note,
     ProvenanceLink,
     ProvenanceLinkRelation,
@@ -329,6 +331,144 @@ def _origin_provenance_nodes(base_url: str, entity: object) -> list[dict[str, ob
     return nodes
 
 
+@dataclass(frozen=True)
+class CurationIndex:
+    """Accepted AI-proposed operations keyed by the record each one produced."""
+
+    operations_by_result_entity_id: dict[UUID, GraphChangeOperation] = field(
+        default_factory=dict
+    )
+
+
+def curation_index(change_sets: Iterable[GraphChangeSet]) -> CurationIndex:
+    """Index every accepted operation that produced a record.
+
+    Only operations with both a ``result_entity_id`` and an ``acceptance_mode``
+    are curation facts; two distinct operations claiming one result entity is
+    a corrupt record and fails loud.
+    """
+
+    operations: dict[UUID, GraphChangeOperation] = {}
+    for change_set in change_sets:
+        for operation in change_set.operations:
+            if operation.result_entity_id is None or operation.acceptance_mode is None:
+                continue
+            existing = operations.get(operation.result_entity_id)
+            if existing is not None and existing.operation_id != operation.operation_id:
+                raise ValueError(
+                    f"Operations {existing.operation_id} and {operation.operation_id} both "
+                    f"claim result entity {operation.result_entity_id}."
+                )
+            operations[operation.result_entity_id] = operation
+    return CurationIndex(operations)
+
+
+def _apply_curation_provenance(
+    base_url: str,
+    graph: list[dict[str, object]],
+    curation: CurationIndex,
+    *,
+    people: dict[str, dict[str, object]],
+    supervision_edges: list[SupervisionEdge],
+) -> None:
+    """Stamp how each exported record was accepted onto its own node.
+
+    The node is matched by ``@id``; an accepted operation whose record is not
+    in this document (or whose resource segment differs) is logged and
+    skipped, since the builder cannot tell a filtered record from a wrong IRI.
+    """
+
+    nodes_by_id = {
+        node_id: node
+        for node in graph
+        if isinstance(node_id := node.get("@id"), str)
+    }
+    for result_entity_id, operation in sorted(
+        curation.operations_by_result_entity_id.items(), key=lambda item: str(item[0])
+    ):
+        if operation.acceptance_mode is None:
+            continue
+        node_iri = _resource_iri(
+            base_url, _entity_resource_name(operation.entity_type.value), result_entity_id
+        )
+        node = nodes_by_id.get(node_iri)
+        if node is None:
+            _logger.debug(
+                "Accepted operation %s has no exported node at %s",
+                operation.operation_id,
+                node_iri,
+            )
+            continue
+        node["acceptanceMode"] = operation.acceptance_mode.value
+        _classify(node, ("acceptanceMode", operation.acceptance_mode.value))
+        acceptor = _creator_user_id(operation.accepted_by_user_id, operation.accepted_by)
+        if acceptor is not None:
+            node["acceptedBy"] = {"@id": _agent_iri(base_url, acceptor)}
+            _add_person_with_supervision(
+                people,
+                base_url,
+                acceptor,
+                activity_time=operation.accepted_at,
+                supervision_edges=supervision_edges,
+            )
+        if operation.accepted_at is not None:
+            node["acceptedAt"] = _isoformat(operation.accepted_at)
+        if operation.rationale:
+            node["proposalRationale"] = operation.rationale
+        if operation.confidence is not None:
+            node["proposalConfidence"] = operation.confidence
+        if operation.review_note:
+            node["reviewNote"] = operation.review_note
+
+
+def _extend_with_context_records(
+    base_url: str,
+    graph: list[dict[str, object]],
+    *,
+    people: dict[str, dict[str, object]],
+    supervision_edges: list[SupervisionEdge],
+    questions: list[Question] | None,
+    exploration_nodes: list[ExplorationNode] | None,
+    goals: list[Goal] | None,
+    goal_links: list[GoalLink] | None,
+) -> None:
+    """Append the record's surrounding story, never duplicating an ``@id``."""
+
+    seen = {node_id for node in graph if isinstance(node_id := node.get("@id"), str)}
+
+    def add(nodes: Iterable[dict[str, object]]) -> None:
+        for node in nodes:
+            node_id = node.get("@id")
+            if isinstance(node_id, str):
+                if node_id in seen:
+                    continue
+                seen.add(node_id)
+            graph.append(node)
+
+    for question in questions or []:
+        add(
+            [_question_node(base_url, question, people=people, supervision_edges=supervision_edges)]
+        )
+        add(_origin_provenance_nodes(base_url, question))
+    for exploration_node in exploration_nodes or []:
+        add(
+            [
+                _exploration_node_node(
+                    base_url,
+                    exploration_node,
+                    people=people,
+                    supervision_edges=supervision_edges,
+                )
+            ]
+        )
+        add(_origin_provenance_nodes(base_url, exploration_node))
+    for goal in goals or []:
+        add([_goal_node(base_url, goal)])
+        add(_origin_provenance_nodes(base_url, goal))
+    for link in goal_links or []:
+        add([_goal_link_node(base_url, link)])
+
+
 def _uuid_or_none(value: str) -> UUID | None:
     try:
         return ensure_uuid(value)
@@ -554,7 +694,21 @@ def build_dataset_provenance_document(
     dataset: Dataset,
     *,
     supervision_edges: list[SupervisionEdge] | None = None,
+    questions: list[Question] | None = None,
+    exploration_nodes: list[ExplorationNode] | None = None,
+    goals: list[Goal] | None = None,
+    goal_links: list[GoalLink] | None = None,
+    curation: CurationIndex | None = None,
 ) -> dict[str, object]:
+    """Dataset sidecar.
+
+    The optional inputs embed the story around the record for a reader with
+    no running instance: the linked questions' text and terminal reasons,
+    the exploration nodes reachable from the dataset, the goals and goal
+    links it feeds, and (via ``curation``) how each AI-proposed record in the
+    document was accepted. Omitting them all yields the bare document.
+    """
+
     dataset_iri = _resource_iri(base_url, "datasets", dataset.dataset_id)
     commit_activity_iri = _synthetic_child_iri(dataset_iri, "provenance", "commit")
     files = _sorted_dataset_files(dataset.commit_manifest.files)
@@ -642,6 +796,20 @@ def build_dataset_provenance_document(
     graph.extend(_dataset_file_node(base_url, dataset, file) for file in files)
     graph.extend(_external_artifact_node(artifact) for artifact in external_artifacts)
     graph.extend(_dataset_question_link_node(base_url, dataset, link) for link in question_links)
+    _extend_with_context_records(
+        base_url,
+        graph,
+        people=people,
+        supervision_edges=supervision_edges,
+        questions=questions,
+        exploration_nodes=exploration_nodes,
+        goals=goals,
+        goal_links=goal_links,
+    )
+    if curation is not None:
+        _apply_curation_provenance(
+            base_url, graph, curation, people=people, supervision_edges=supervision_edges
+        )
     graph.extend(people[user_id] for user_id in sorted(people))
 
     return {"@context": _context(base_url), "@graph": graph}
@@ -705,6 +873,9 @@ def build_claim_provenance_document(
     related_claims: list[Claim] | None = None,
     exploration_nodes: list[ExplorationNode] | None = None,
     supervision_edges: list[SupervisionEdge] | None = None,
+    goals: list[Goal] | None = None,
+    goal_links: list[GoalLink] | None = None,
+    curation: CurationIndex | None = None,
 ) -> dict[str, object]:
     """Claim sidecar with the claim's read-time interpretation.
 
@@ -712,7 +883,12 @@ def build_claim_provenance_document(
     edge in ``claim_edges`` (their status decides whether an edge counts);
     ``interpret_claims`` fails loud otherwise. ``exploration_nodes`` are
     emitted as-is so an invalidating pivot's ``lab:invalidates`` points at the
-    claim, and only committed pivots count toward ``effectiveStatus``.
+    claim, and only committed pivots count toward ``effectiveStatus``; a
+    caller may pass the whole reachable closure. ``goals``/``goal_links``
+    embed what the claim feeds and ``curation`` stamps how each AI-proposed
+    record in the document was accepted; the nested dataset and analysis
+    builders never receive them, since this outer pass covers the merged
+    graph.
     """
 
     supervision_edges = supervision_edges or []
@@ -842,6 +1018,19 @@ def build_claim_provenance_document(
         )
         merged.setdefault(str(node["@id"]), node)
         _merge_graph_nodes(merged, _origin_provenance_nodes(base_url, exploration_node))
+    for goal in goals or []:
+        goal_node = _goal_node(base_url, goal)
+        merged.setdefault(str(goal_node["@id"]), goal_node)
+        _merge_graph_nodes(merged, _origin_provenance_nodes(base_url, goal))
+    _merge_graph_nodes(merged, [_goal_link_node(base_url, link) for link in goal_links or []])
+    if curation is not None:
+        _apply_curation_provenance(
+            base_url,
+            list(merged.values()),
+            curation,
+            people=people,
+            supervision_edges=supervision_edges,
+        )
     _merge_person_nodes(merged, people)
 
     return {"@context": _context(base_url), "@graph": list(merged.values())}
@@ -1096,13 +1285,21 @@ def build_analysis_provenance_document(
     claim_edges: list[ClaimEdge] | None = None,
     supervision_edges: list[SupervisionEdge] | None = None,
     claim_interpretations: Mapping[UUID, ClaimInterpretation] | None = None,
+    questions: list[Question] | None = None,
+    exploration_nodes: list[ExplorationNode] | None = None,
+    goals: list[Goal] | None = None,
+    goal_links: list[GoalLink] | None = None,
+    curation: CurationIndex | None = None,
 ) -> dict[str, object]:
     """Analysis sidecar.
 
     On its own this document carries no pivots, so its claim nodes emit no
     ``effectiveStatus``; a record export that already derived the
     interpretations for its whole record set passes them in so the claim nodes
-    it emits through this builder agree with the rest of the export.
+    it emits through this builder agree with the rest of the export. The
+    optional ``questions``/``exploration_nodes``/``goals``/``goal_links`` and
+    ``curation`` inputs embed the surrounding story exactly as for the
+    dataset sidecar.
     """
 
     analysis_iri = _resource_iri(base_url, "analyses", analysis.analysis_id)
@@ -1251,6 +1448,20 @@ def build_analysis_provenance_document(
             )
         )
         graph.extend(_origin_provenance_nodes(base_url, visualization))
+    _extend_with_context_records(
+        base_url,
+        graph,
+        people=people,
+        supervision_edges=supervision_edges,
+        questions=questions,
+        exploration_nodes=exploration_nodes,
+        goals=goals,
+        goal_links=goal_links,
+    )
+    if curation is not None:
+        _apply_curation_provenance(
+            base_url, graph, curation, people=people, supervision_edges=supervision_edges
+        )
     graph.extend(people[user_id] for user_id in sorted(people))
 
     return {"@context": _context(base_url), "@graph": graph}
