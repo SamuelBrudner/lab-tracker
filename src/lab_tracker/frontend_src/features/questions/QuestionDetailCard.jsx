@@ -6,7 +6,7 @@ import { formatDate } from "../../shared/formatters.js";
 import { useApiResource } from "../../hooks/useApiResource.js";
 import { useProjectAccess } from "../../hooks/useProjectAccess.js";
 
-const { useEffect, useMemo, useRef, useState } = React;
+const { useEffect, useLayoutEffect, useMemo, useRef, useState } = React;
 
 // The refactor form must offer every question and targeted note in the
 // project, so its option lists read all pages rather than the first 200.
@@ -156,7 +156,11 @@ function QuestionDetailCard({
     ? questionById.get(question.supersedes_question_id)
     : null;
 
-  useEffect(() => {
+  // A layout effect, so the reset lands in the commit that shows the loaded
+  // question. React can yield between a commit and its passive effects, and the
+  // "Refactor question" button renders in that commit: a passive reset would
+  // close a form opened by a click that lands in the gap.
+  useLayoutEffect(() => {
     if (!question) {
       return;
     }

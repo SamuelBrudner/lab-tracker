@@ -8,7 +8,7 @@ import { useApiResource } from "../hooks/useApiResource.js";
 import { useLocalDraft } from "../hooks/useLocalDraft.js";
 import { useProjectAccess } from "../hooks/useProjectAccess.js";
 
-const { useEffect, useMemo, useRef, useState } = React;
+const { useEffect, useLayoutEffect, useMemo, useRef, useState } = React;
 
 function NotePanel({
   canWrite,
@@ -255,11 +255,12 @@ function NoteDetailCard({
   // Sync the editor from the server copy without discarding unsaved edits. A
   // different note always resets it. For the same note, a new server
   // transcript replaces the editor text only when the editor still holds the
-  // previously synced text; this effect runs after the render that adopted
-  // the response, so the user may already have typed in between.
+  // previously synced text. A layout effect, so the sync lands in the commit
+  // that adopted the response: React can yield before passive effects, and a
+  // deferred reset would overwrite text typed into the editor in that gap.
   const syncedTranscriptRef = useRef({ noteId: "", text: "" });
   const serverTranscript = note?.transcribed_text || "";
-  useEffect(() => {
+  useLayoutEffect(() => {
     const synced = syncedTranscriptRef.current;
     syncedTranscriptRef.current = { noteId: loadedNoteId, text: serverTranscript };
     if (synced.noteId !== loadedNoteId) {
