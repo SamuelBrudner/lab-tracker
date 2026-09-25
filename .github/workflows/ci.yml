@@ -52,6 +52,11 @@ jobs:
         run: npm run typecheck:frontend
       - name: Test frontend
         run: npm run test:frontend
+      # Reruns the suite with React's effects deferred past Testing Library's
+      # setTimeout(0) drain (src/lab_tracker/frontend_src/test/scheduler-chaos.js),
+      # so a test that races them fails on its own PR instead of flaking later.
+      - name: Test frontend under scheduler chaos
+        run: npm run test:frontend:chaos
       - name: Build frontend
         run: npm run build:frontend
       - name: Check frontend bundle is committed

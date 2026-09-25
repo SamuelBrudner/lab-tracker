@@ -79,9 +79,12 @@ Frontend validation, only when `src/lab_tracker/frontend_src` or the committed b
 ```bash
 npm install
 npm run test:frontend
+npm run test:frontend:chaos
 npm run lint:frontend
 npm run build
 ```
+
+`test:frontend:chaos` reruns the suite with React's effects deferred past Testing Library's `setTimeout(0)` drain. A test that fails only there is racing React's scheduler; see `src/lab_tracker/frontend_src/test/scheduler-chaos.js`.
 
 Run the API with `uv run uvicorn lab_tracker.asgi:app --reload`; the app is served at `http://127.0.0.1:8000/app`.
 

@@ -587,6 +587,7 @@ Frontend, when `src/lab_tracker/frontend_src` or the committed bundle changes:
 
 ```bash
 npm run test:frontend
+npm run test:frontend:chaos
 npm run lint:frontend
 npm run build
 ```
