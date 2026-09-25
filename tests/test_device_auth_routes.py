@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import timedelta
 from uuid import uuid4
 
@@ -439,3 +440,95 @@ def test_admin_device_management_requires_an_interactive_admin(
     assert by_device.status_code == 403
     assert revoke_by_device.status_code == 403
     assert client.get("/auth/me", headers=_device_headers(secret)).status_code == 200
+
+
+def _note_metadata(client: TestClient, admin_auth_headers: dict[str, str], note_id: str) -> dict:
+    response = client.get(f"/notes/{note_id}", headers=admin_auth_headers)
+    assert response.status_code == 200, response.text
+    return response.json()["data"]["metadata"]
+
+
+def test_device_captures_are_stamped_with_device_identity(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    project_id = _create_project(client, admin_auth_headers)
+    device_token_id, secret = _pair_device(client, admin_auth_headers, label="Bench phone")
+    client_metadata = {"capture_hint": "rig 2"}
+
+    upload = client.post(
+        "/notes/upload-file",
+        data={"project_id": project_id, "metadata": json.dumps(client_metadata)},
+        files={"file": ("snap.jpg", b"image-bytes", "image/jpeg")},
+        headers=_device_headers(secret),
+    )
+    assert upload.status_code == 201, upload.text
+    quick = client.post(
+        "/notes/quick-capture",
+        data={"project_id": project_id, "metadata": json.dumps(client_metadata)},
+        files={"file": ("snap2.jpg", b"image-2", "image/jpeg")},
+        headers=_device_headers(secret),
+    )
+    assert quick.status_code == 201, quick.text
+    text = client.post(
+        "/notes",
+        json={"project_id": project_id, "raw_content": "Fly 12", "metadata": client_metadata},
+        headers=_device_headers(secret),
+    )
+    assert text.status_code == 201, text.text
+
+    for response in (upload, quick, text):
+        metadata = _note_metadata(client, admin_auth_headers, response.json()["data"]["note_id"])
+        assert metadata["capture_device_token_id"] == device_token_id
+        assert metadata["capture_device_label"] == "Bench phone"
+        # Server stamping adds to the client's bag; it never replaces it.
+        assert metadata["capture_hint"] == "rig 2"
+
+
+def test_user_captures_carry_no_device_identity(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    project_id = _create_project(client, admin_auth_headers)
+
+    upload = client.post(
+        "/notes/upload-file",
+        data={"project_id": project_id},
+        files={"file": ("snap.jpg", b"image-bytes", "image/jpeg")},
+        headers=admin_auth_headers,
+    )
+    assert upload.status_code == 201, upload.text
+
+    metadata = _note_metadata(client, admin_auth_headers, upload.json()["data"]["note_id"])
+    assert "capture_device_token_id" not in metadata
+    assert "capture_device_label" not in metadata
+
+
+def test_client_supplied_device_identity_metadata_is_rejected(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    project_id = _create_project(client, admin_auth_headers)
+    _, secret = _pair_device(client, admin_auth_headers)
+
+    spoofed_label = client.post(
+        "/notes",
+        json={
+            "project_id": project_id,
+            "raw_content": "Fly 12",
+            "metadata": {"capture_device_label": "spoof"},
+        },
+        headers=admin_auth_headers,
+    )
+    assert spoofed_label.status_code == 422, spoofed_label.text
+
+    spoofed_token = client.post(
+        "/notes/upload-file",
+        data={
+            "project_id": project_id,
+            "metadata": json.dumps({"capture_device_token_id": str(uuid4())}),
+        },
+        files={"file": ("snap.jpg", b"image-bytes", "image/jpeg")},
+        headers=_device_headers(secret),
+    )
+    assert spoofed_token.status_code == 422, spoofed_token.text

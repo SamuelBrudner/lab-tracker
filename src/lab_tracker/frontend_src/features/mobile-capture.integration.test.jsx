@@ -457,6 +457,8 @@ describe("App", () => {
             capture_mode: "photo",
             capture_review_status: "pending_review",
             capture_source: "mobile_capture",
+            // Composition clock, stamped by the composer (ISO 8601, UTC).
+            captured_at: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/),
             source_file_last_modified_at: "2026-02-01T00:00:00.000Z",
             source_file_last_modified_ms: 1769904000000,
           });

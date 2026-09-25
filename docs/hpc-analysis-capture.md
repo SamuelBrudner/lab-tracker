@@ -134,7 +134,11 @@ lt hpc sync
 Each event becomes an idempotent staged evidence note. The note contains:
 
 - run id, event type, cluster, scheduler, job id, state, and exit code
-- project id plus optional candidate question/dataset ids
+- project id plus optional candidate question/dataset ids; the declared
+  question and datasets are also attached as note targets, and the note's
+  `declared_target_source` says whether the question came from a flag or
+  manifest (`explicit`) or from the config's `default_question_id`
+  (`config_default`) -- a stale id fails the sync loudly
 - git commit and dirty state when available (a `git status` that times out after
   `LAB_TRACKER_GIT_TIMEOUT_SECONDS`, default 10 seconds, or fails is recorded as
   unknown, never as clean)

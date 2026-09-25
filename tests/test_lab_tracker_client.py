@@ -14,8 +14,14 @@ from lab_tracker_client import (
     LTRecord,
     LTValidationError,
     build_evidence_metadata,
+    declared_targets,
     file_sha256,
     first_line_marker,
+    resolve_declared_question,
+)
+from lab_tracker_client.client import (
+    declared_target_source_for,
+    validate_declared_target_source,
 )
 
 
@@ -946,3 +952,121 @@ def test_module_default_client_is_lazy(monkeypatch: pytest.MonkeyPatch) -> None:
     finally:
         client_module.__dict__.clear()
         client_module.__dict__.update(saved_namespace)
+
+
+# --- declared targets --------------------------------------------------------
+
+
+def test_declared_targets_orders_and_dedupes_entity_refs() -> None:
+    targets = declared_targets(
+        question_id="q-1",
+        session_id="s-1",
+        dataset_ids=["d-1", "d-1", " ", "d-2"],
+    )
+
+    assert [(ref.entity_type, ref.entity_id) for ref in targets] == [
+        ("question", "q-1"),
+        ("session", "s-1"),
+        ("dataset", "d-1"),
+        ("dataset", "d-2"),
+    ]
+    assert declared_targets(question_id=" ", session_id=None, dataset_ids=[]) == []
+    assert declared_targets() == []
+
+
+def test_resolve_declared_question_labels_config_default() -> None:
+    assert resolve_declared_question("q", "qd") == ("q", "explicit")
+    assert resolve_declared_question(None, "qd") == ("qd", "config_default")
+    assert resolve_declared_question("  ", "qd") == ("qd", "config_default")
+    assert resolve_declared_question(None, None) == (None, None)
+
+
+def test_declared_target_source_for_labels_question_then_datasets() -> None:
+    assert (
+        declared_target_source_for(
+            question_id="q", question_id_source="config_default", dataset_ids=["d"]
+        )
+        == "config_default"
+    )
+    # Legacy event: a question with no recorded source is left unlabelled.
+    assert (
+        declared_target_source_for(question_id="q", question_id_source=None, dataset_ids=["d"])
+        is None
+    )
+    # Datasets are always a per-capture declaration.
+    assert (
+        declared_target_source_for(question_id=None, question_id_source=None, dataset_ids=["d"])
+        == "explicit"
+    )
+    assert (
+        declared_target_source_for(question_id=None, question_id_source=None, dataset_ids=[])
+        is None
+    )
+
+
+def test_validate_declared_target_source_rejects_unknown() -> None:
+    assert validate_declared_target_source(None) is None
+    assert validate_declared_target_source("  ") is None
+    assert validate_declared_target_source("explicit") == "explicit"
+    assert validate_declared_target_source("config_default") == "config_default"
+    with pytest.raises(LTValidationError):
+        validate_declared_target_source("bogus")
+
+
+def _evidence_upload_handler(seen: list[bytes]):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/notes":
+            return _json_response(
+                200, {"data": [], "meta": {"limit": 200, "offset": 0, "total": 0}}
+            )
+        if request.method == "POST" and request.url.path == "/notes/upload-file":
+            seen.append(request.content)
+            return _json_response(
+                201, {"data": {"note_id": "note-targeted", "project_id": "project-1"}}
+            )
+        return _json_response(404, {"error": {"message": "not found"}})
+
+    return handler
+
+
+def test_import_evidence_file_posts_declared_targets_as_multipart_field(tmp_path) -> None:
+    evidence_path = tmp_path / "bench.md"
+    evidence_path.write_text("bench observation", encoding="utf-8")
+    seen: list[bytes] = []
+
+    with LabTracker(
+        base_url="http://testserver", transport=httpx.MockTransport(_evidence_upload_handler(seen))
+    ) as lt:
+        result = lt.import_evidence_file(
+            project_id="project-1",
+            file_path=evidence_path,
+            source_external_id="bench.md",
+            targets=declared_targets(question_id="q-1", dataset_ids=["d-1"]),
+        )
+
+    assert result.action == "imported"
+    assert len(seen) == 1
+    body = seen[0]
+    assert b'name="targets"' in body
+    assert b'"entity_type": "question"' in body
+    assert b'"entity_id": "q-1"' in body
+    assert b'"entity_type": "dataset"' in body
+
+
+def test_import_evidence_file_without_targets_omits_the_field(tmp_path) -> None:
+    evidence_path = tmp_path / "bench.md"
+    evidence_path.write_text("bench observation", encoding="utf-8")
+    seen: list[bytes] = []
+
+    with LabTracker(
+        base_url="http://testserver", transport=httpx.MockTransport(_evidence_upload_handler(seen))
+    ) as lt:
+        result = lt.import_evidence_file(
+            project_id="project-1",
+            file_path=evidence_path,
+            source_external_id="bench.md",
+        )
+
+    assert result.action == "imported"
+    assert len(seen) == 1
+    assert b'name="targets"' not in seen[0]

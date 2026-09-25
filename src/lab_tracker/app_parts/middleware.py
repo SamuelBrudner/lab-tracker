@@ -193,6 +193,7 @@ def configure_auth_middleware(app: FastAPI) -> None:
                     role=user.role,
                     principal_type=PrincipalType.DEVICE,
                     device_token_id=principal.device_token_id,
+                    principal_label=principal.label,
                 )
             elif token.startswith(LPAT_TOKEN_PREFIX):
                 pat_rate_client = rate_limit_client(request)

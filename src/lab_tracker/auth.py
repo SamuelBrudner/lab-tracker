@@ -73,6 +73,10 @@ class AuthContext:
     role: Role
     principal_type: PrincipalType = PrincipalType.USER
     device_token_id: UUID | None = None
+    # Human label of the presenting credential (the paired-device label
+    # today; a later change populates it for personal access tokens too).
+    # None for browser sessions and the local/system principal.
+    principal_label: str | None = None
 
     @property
     def is_device(self) -> bool:

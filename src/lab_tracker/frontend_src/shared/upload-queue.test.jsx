@@ -218,6 +218,30 @@ describe("createUploadQueue", () => {
     expect(body.get("file")).toBeInstanceOf(File);
   });
 
+  it("replays the composed captured_at instead of the drain time", async () => {
+    const composedAt = "2023-11-14T22:13:20.000Z";
+    const drainedAt = Date.parse("2023-11-15T09:00:00.000Z");
+    const storage = createMemoryStorage();
+    const fetchImpl = vi.fn(async () => ({ ok: true, status: 201 }));
+    const queue = createUploadQueue({ storage, fetch: fetchImpl, now: () => drainedAt });
+
+    await enqueueOwned(queue, {
+      fields: { project_id: "proj-a", metadata: JSON.stringify({ captured_at: composedAt }) },
+    });
+    await queue.enqueue({
+      endpoint: TEXT_NOTE_PATH,
+      json: { project_id: "proj-a", raw_content: "later", metadata: { captured_at: composedAt } },
+      ownerId: OWNER,
+    });
+    const result = await drainAsOwner(queue);
+
+    expect(result.uploaded).toHaveLength(2);
+    const [, multipartInit] = fetchImpl.mock.calls[0];
+    expect(JSON.parse(multipartInit.body.get("metadata")).captured_at).toBe(composedAt);
+    const [, jsonInit] = fetchImpl.mock.calls[1];
+    expect(JSON.parse(jsonInit.body).metadata.captured_at).toBe(composedAt);
+  });
+
   it("uses only the live drain token, never a value stored with the job", async () => {
     const storage = createMemoryStorage();
     const fetchImpl = vi.fn(async () => ({ ok: true, status: 201 }));

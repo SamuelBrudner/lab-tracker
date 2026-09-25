@@ -18,12 +18,17 @@ from lab_tracker.models import NoteMetadataScalar
 from lab_tracker_client import outbox as _outbox
 from lab_tracker_client.client import (
     CAPTURE_HOST_METADATA_KEYS,
+    DECLARED_TARGET_SOURCE_KEY,
     EvidenceNoteIndex,
     LabTracker,
     LTRecord,
     LTValidationError,
     build_evidence_metadata,
     capture_host_metadata,
+    declared_target_source_for,
+    declared_targets,
+    resolve_declared_question,
+    validate_declared_target_source,
 )
 from lab_tracker_client.evidence_index import outbox_note_index
 from lab_tracker_client.gitinfo import (
@@ -237,7 +242,9 @@ def make_event(
     resolved_run_id = _non_empty(run_id or os.getenv("LAB_TRACKER_HPC_RUN_ID") or new_run_id())
     resolved_summary = summary or _default_summary(resolved_event_type, resolved_run_id)
     resolved_project_id = _non_empty(project_id or config.project_id, "project_id")
-    resolved_question_id = _optional_str(question_id or config.default_question_id)
+    resolved_question_id, question_id_source = resolve_declared_question(
+        _optional_str(question_id), _optional_str(config.default_question_id)
+    )
     resolved_dataset_ids = [str(item) for item in dataset_ids or [] if str(item).strip()]
     resolved_tags = [str(item) for item in tags or [] if str(item).strip()]
     payload: JsonObject = {
@@ -248,6 +255,7 @@ def make_event(
         "observed_at": observed_at or utc_now(),
         "project_id": resolved_project_id,
         "question_id": resolved_question_id,
+        "question_id_source": question_id_source,
         "dataset_ids": resolved_dataset_ids,
         "tags": resolved_tags,
         "command": [str(item) for item in command or []],
@@ -321,6 +329,10 @@ def validate_event(payload: Mapping[str, Any]) -> JsonObject:
     event["observed_at"] = _non_empty(str(event.get("observed_at") or ""), "observed_at")
     event["project_id"] = _non_empty(str(event.get("project_id") or ""), "project_id")
     event["question_id"] = _optional_str(event.get("question_id"))
+    # Legacy events recorded no source: None means "not recorded", not a guess.
+    event["question_id_source"] = validate_declared_target_source(
+        event.get("question_id_source")
+    )
     event["dataset_ids"] = _string_list(event.get("dataset_ids"))
     event["tags"] = _string_list(event.get("tags"))
     event["command"] = _string_list(event.get("command"))
@@ -806,6 +818,10 @@ def _sync_event(
                 status="staged",
                 content_type="text/markdown",
                 client_capture_id=_client_capture_id(source_external_id),
+                targets=declared_targets(
+                    question_id=_optional_str(event.get("question_id")),
+                    dataset_ids=event["dataset_ids"],
+                ),
             )
             index[evidence_key] = note
             action = "imported"
@@ -930,6 +946,13 @@ def event_metadata(
             metadata[f"hpc_{key}"] = str(payload[key])
     if payload["dataset_ids"]:
         metadata["hpc_dataset_ids"] = ",".join(payload["dataset_ids"])
+    declared_target_source = declared_target_source_for(
+        question_id=payload.get("question_id"),
+        question_id_source=payload.get("question_id_source"),
+        dataset_ids=payload["dataset_ids"],
+    )
+    if declared_target_source:
+        metadata[DECLARED_TARGET_SOURCE_KEY] = declared_target_source
     if payload["tags"]:
         metadata["hpc_tags"] = ",".join(payload["tags"])
     for key in ("job_id", "array_task_id", "state", "exit_code"):

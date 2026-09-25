@@ -4,11 +4,14 @@ import hashlib
 import json
 
 import httpx
+import pytest
 
 from lab_tracker_client import LabTracker
+from lab_tracker_client.client import LTValidationError
 from lab_tracker_client.hpc import (
     begin_event,
     event_from_manifest,
+    event_metadata,
     event_source_external_id,
     finish_event,
     init_config,
@@ -18,6 +21,7 @@ from lab_tracker_client.hpc import (
     read_event,
     render_event_note,
     sync_outbox,
+    validate_event,
     watch_manifests,
 )
 
@@ -436,3 +440,96 @@ def test_log_excerpt_short_logs_are_returned_whole(tmp_path) -> None:
     log.write_text("✓ only line\n", encoding="utf-8")
 
     assert _read_log_excerpt([log], max_chars=4000) == f"==> {log} <==\n✓ only line"
+
+
+# --- declared targets --------------------------------------------------------
+
+
+def test_make_event_labels_question_source_explicit_or_config_default(
+    tmp_path, monkeypatch
+) -> None:
+    _clear_hpc_env(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1", cluster="bouchet", default_question_id="q-default")
+
+    defaulted, _path = begin_event(config, run_id="run-default")
+    explicit, _path = begin_event(config, run_id="run-explicit", question_id="q-explicit")
+
+    assert defaulted["question_id"] == "q-default"
+    assert defaulted["question_id_source"] == "config_default"
+    assert explicit["question_id"] == "q-explicit"
+    assert explicit["question_id_source"] == "explicit"
+
+    bare_config = init_config(
+        project_id="project-1",
+        cluster="bouchet",
+        config_path=tmp_path / "bare" / "hpc.json",
+    )
+    bare, _path = begin_event(bare_config, run_id="run-bare")
+    assert bare["question_id"] is None
+    assert bare["question_id_source"] is None
+
+
+def test_validate_event_rejects_unknown_question_id_source(tmp_path, monkeypatch) -> None:
+    _clear_hpc_env(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1", cluster="bouchet")
+    event, _path = begin_event(config, run_id="run-1", question_id="q-1")
+
+    with pytest.raises(LTValidationError):
+        validate_event({**event, "question_id_source": "bogus"})
+
+
+def test_event_metadata_omits_source_for_legacy_event(tmp_path, monkeypatch) -> None:
+    _clear_hpc_env(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1", cluster="bouchet")
+    event, _path = begin_event(config, run_id="run-1", question_id="q-1")
+    legacy = {key: value for key, value in event.items() if key != "question_id_source"}
+
+    metadata = event_metadata(
+        legacy,
+        source_uri="file:///outbox/run-1.json",
+        source_external_id="hpc:run-1",
+        content_hash="abc",
+    )
+
+    # The question is still recorded, but its provenance was never captured.
+    assert metadata["hpc_question_id"] == "q-1"
+    assert "declared_target_source" not in metadata
+
+
+def test_sync_outbox_passes_declared_targets_and_source(tmp_path, monkeypatch) -> None:
+    _clear_hpc_env(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1", cluster="bouchet", default_question_id="q-default")
+    finish_event(config, run_id="run-1", exit_code=0, dataset_ids=["ds-1"])
+    uploads: list[bytes] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/notes":
+            return _json_response(
+                200,
+                {"data": [], "meta": {"limit": 200, "offset": 0, "total": 0}},
+            )
+        if request.method == "POST" and request.url.path == "/notes/upload-file":
+            uploads.append(request.content)
+            return _json_response(
+                201,
+                {"data": {"note_id": "note-hpc", "project_id": "project-1", "status": "staged"}},
+            )
+        return _json_response(500, {"error": {"message": "unexpected request"}})
+
+    with LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler)) as lt:
+        summary = sync_outbox(lt, config)
+
+    assert summary["errors"] == []
+    assert len(uploads) == 1
+    body = uploads[0]
+    assert b'name="targets"' in body
+    assert b'"entity_type": "question"' in body
+    assert b'"entity_id": "q-default"' in body
+    assert b'"entity_type": "dataset"' in body
+    assert b'"entity_id": "ds-1"' in body
+    assert b"declared_target_source" in body
+    assert b"config_default" in body

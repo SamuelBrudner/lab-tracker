@@ -50,6 +50,7 @@ from lab_tracker.services.dataset_service import DatasetService
 from lab_tracker.services.exploration_service import ExplorationService
 from lab_tracker.services.goal_service import GoalService
 from lab_tracker.services.graph_draft_batch_policy import BatchReviewer, as_utc
+from lab_tracker.services.note_observed_at import note_observed_at
 from lab_tracker.services.note_service import NoteService
 from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.question_service import QuestionService
@@ -242,10 +243,12 @@ class GraphContextBuilder:
         """
         truncated_note_count = max(0, len(notes) - batch_note_limit)
         # Chronological order gives the day a contractual timeline rather than
-        # relying on incidental input ordering.
+        # relying on incidental input ordering. The model sees the day in
+        # capture-clock order (client, then adapter, then server receipt);
+        # which notes belong to the batch was decided upstream on created_at.
         batch_notes = sorted(
             notes,
-            key=lambda item: (item.created_at, str(item.note_id)),
+            key=lambda item: (note_observed_at(item)[0], str(item.note_id)),
         )[:batch_note_limit]
 
         notes_by_project: dict[UUID, list[Note]] = {}
@@ -1265,7 +1268,7 @@ def _batch_window(
         return {"since": window[0].isoformat(), "until": window[1].isoformat()}
     if not batch_notes:
         return None
-    timestamps = [note.created_at for note in batch_notes]
+    timestamps = [note_observed_at(note)[0] for note in batch_notes]
     return {"since": min(timestamps).isoformat(), "until": max(timestamps).isoformat()}
 
 
@@ -1275,14 +1278,17 @@ def _capture_placement(note: Note, sessions: list[Session]) -> dict[str, Any]:
     Pre-computes the most recent session window (if any) that contains the
     note's capture time, plus the bundle it belongs to, so terse
     identifier-only captures can be placed -- or surfaced as unplaceable --
-    rather than guessed.
+    rather than guessed. The capture time is the note's capture clock
+    (client, adapter, or server receipt), reported with its source so the
+    model can weigh a phone clock differently from a server timestamp.
     """
 
+    observed_at, observed_at_source = note_observed_at(note)
     candidates = [
         session
         for session in sessions
-        if session.started_at <= note.created_at
-        and (session.ended_at is None or note.created_at <= session.ended_at)
+        if as_utc(session.started_at) <= observed_at
+        and (session.ended_at is None or observed_at <= as_utc(session.ended_at))
     ]
     in_session: dict[str, str] | None = None
     if candidates:
@@ -1297,6 +1303,8 @@ def _capture_placement(note: Note, sessions: list[Session]) -> dict[str, Any]:
     return {
         "note_id": str(note.note_id),
         "created_at": note.created_at.isoformat(),
+        "observed_at": observed_at.isoformat(),
+        "observed_at_source": observed_at_source.value,
         "project_id": str(note.project_id),
         "capture_bundle_id": note.metadata.get("capture_bundle_id"),
         "in_session": in_session,

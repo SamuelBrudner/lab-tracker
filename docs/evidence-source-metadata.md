@@ -13,11 +13,20 @@ Use these note metadata keys for imported evidence:
 | `evidence_source_provider` | External system name, such as `local-folder`, `google-drive`, or `ci`. |
 | `evidence_source_uri` | Stable source URI or absolute file URI for the item. |
 | `evidence_source_external_id` | Provider-specific item ID, or root-relative path for local folders. |
-| `evidence_source_observed_at` | ISO-8601 timestamp when the adapter observed the item. |
+| `evidence_source_observed_at` | ISO-8601 timestamp when the adapter observed the item. Batch drafting uses it as the note's capture clock (`observed_at_source=adapter`) when no client `captured_at` exists. |
 | `evidence_capture_kind` | Evidence kind, such as `file`, `text`, or `analysis_evidence`. |
 | `evidence_content_hash` | SHA-256 hash of the imported evidence bytes or text (at most 255 characters). The server mirrors it into an indexed column; `GET /notes?evidence_content_hash=` filters on it exactly and the batch detector proposes lineage links from it. |
 | `evidence_adapter` | Adapter or script name/version that created the note. |
 | `evidence_title` | Human-readable title for reports and review screens. |
+| `declared_target_source` | How the note's declared targets were chosen: `explicit` (a flag, manifest, or watch entry) or `config_default` (the tool's configured `default_question_id`). Absent when nothing was declared or a legacy event did not record it. |
+
+Capture clocks and identity keys that Lab Tracker itself stamps or reads:
+
+| Key | Meaning |
+| --- | --- |
+| `captured_at` | Client composition clock (ISO-8601 with offset) stamped by the phone/web composer before any offline queueing; batch drafting prefers it as the capture clock (`observed_at_source=client`). Unparsable or naive values are ignored and a value later than the server receipt is clamped to `created_at`. |
+| `capture_device_token_id` | Server-stamped on captures presented with a paired-device token: the device token id. Client-supplied values are rejected. |
+| `capture_device_label` | Server-stamped on device-principal captures: the label chosen when the device was paired. Client-supplied values are rejected. |
 
 The local-folder adapter imports files as staged note assets:
 

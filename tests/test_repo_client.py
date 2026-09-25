@@ -22,6 +22,7 @@ from lab_tracker_client.repo import (
     read_event,
     render_event_note,
     sync_outbox,
+    validate_event,
 )
 
 
@@ -467,3 +468,88 @@ def test_sync_outbox_dry_run_makes_no_changes(tmp_path, monkeypatch) -> None:
 
     assert summary["results"][0]["action"] == "skipped"
     assert read_event(path)["sync"]["status"] == "pending"
+
+
+# --- declared targets --------------------------------------------------------
+
+
+def test_make_event_labels_question_source(tmp_path, monkeypatch) -> None:
+    _clear_repo_env(monkeypatch)
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1", default_question_id="q-default")
+
+    defaulted = make_event(config, event_type="commit")
+    explicit = make_event(config, event_type="commit", question_id="question-1")
+
+    assert defaulted["question_id"] == "q-default"
+    assert defaulted["question_id_source"] == "config_default"
+    assert explicit["question_id"] == "question-1"
+    assert explicit["question_id_source"] == "explicit"
+
+
+def test_validate_event_rejects_unknown_question_id_source(tmp_path, monkeypatch) -> None:
+    _clear_repo_env(monkeypatch)
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1")
+    event = make_event(config, event_type="commit", question_id="question-1")
+
+    with pytest.raises(LTValidationError):
+        validate_event({**event, "question_id_source": "bogus"})
+
+
+def test_capture_commit_hook_refire_keeps_config_default_source(tmp_path, monkeypatch) -> None:
+    """A bare re-fire must not relabel a config-default question as explicit."""
+
+    _clear_repo_env(monkeypatch)
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1", default_question_id="q-default")
+    capture_commit(config)
+
+    _event, path, action = capture_commit(config)  # bare, hook-style
+
+    assert action == "unchanged"
+    assert read_event(path)["question_id_source"] == "config_default"
+
+    # Declaring the same question explicitly is a real annotation: it upgrades
+    # the recorded provenance instead of being swallowed as "unchanged".
+    annotated, _path, annotated_action = capture_commit(config, question_id="q-default")
+    assert annotated_action == "updated"
+    assert annotated["question_id_source"] == "explicit"
+
+
+def test_sync_outbox_passes_declared_targets_and_source(tmp_path, monkeypatch) -> None:
+    _clear_repo_env(monkeypatch)
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1", default_question_id="q-default")
+    capture_commit(config, dataset_ids=["ds-1"])
+    uploads: list[bytes] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/notes":
+            return _json_response(
+                200, {"data": [], "meta": {"limit": 200, "offset": 0, "total": 0}}
+            )
+        if request.method == "POST" and request.url.path == "/notes/upload-file":
+            uploads.append(request.content)
+            return _json_response(
+                201,
+                {"data": {"note_id": "note-repo", "project_id": "project-1", "status": "staged"}},
+            )
+        return _json_response(500, {"error": {"message": "unexpected request"}})
+
+    with LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler)) as lt:
+        summary = sync_outbox(lt, config)
+
+    assert summary["errors"] == []
+    assert len(uploads) == 1
+    body = uploads[0]
+    assert b'name="targets"' in body
+    assert b'"entity_type": "question"' in body
+    assert b'"entity_id": "q-default"' in body
+    assert b'"entity_type": "dataset"' in body
+    assert b"declared_target_source" in body
+    assert b"config_default" in body

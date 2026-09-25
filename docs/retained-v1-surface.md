@@ -31,7 +31,10 @@ research record:
   substring behavior.
 - Manual note capture, including text notes, multipart raw file upload, raw file
   download, raw voice notes with editable transcripts, and attaching notes to
-  retained entities.
+  retained entities. Phone and web composer captures record a client
+  `captured_at` metadata clock at composition time, and an offline-queued
+  capture replays that value unchanged, so a late upload still says when it
+  was composed.
 - Operator-opt-in background transcription for newly created audio uploads,
   disabled by default. When enabled it applies equally to ordinary, quick, and
   tagless mobile audio captures, uses `capture_hint` only as an optional
@@ -51,13 +54,22 @@ research record:
   write durable local outbox records that later sync into staged evidence notes
   or retained acquisition-session outputs. Large outputs can remain external
   pointers, acquisition outputs still belong to sessions, and graph meaning
-  remains human-gated through normal review.
+  remains human-gated through normal review. The question, session, and
+  dataset ids declared for a watch (flags, watch entries, or manifests)
+  become the staged note's targets, labelled
+  `declared_target_source=explicit`, so a stale id fails the sync loudly
+  instead of landing as metadata only.
 - Consumer-side HPC analysis capture through the `lt hpc` CLI as an
   offline-first staged-note workflow: Slurm/HPC submit, begin, finish, and
   watch-folder manifest events write durable local outbox records that sync
   compact scheduler facts, git context, metrics, log excerpts, and external
   artifact pointers. Large outputs remain outside Lab Tracker, and any proposed
   analysis/question/claim meaning remains human-gated through graph drafts.
+  The declared question and dataset ids become the staged note's targets;
+  each event records `question_id_source` and the note carries
+  `declared_target_source` as `explicit` (a flag or manifest) or
+  `config_default` (the tool's `default_question_id`), and a stale id fails
+  the sync loudly instead of landing as metadata only.
 - Consumer-side analysis-repo capture through the `lt repo` CLI as an
   offline-first staged-note workflow: a fail-soft managed post-commit hook,
   explicit reports, and run-finish events record commit state, declared
@@ -69,7 +81,9 @@ research record:
   proposal generation is deferred to the configured daily-review cadence or an
   explicit on-demand trigger. The staged-note sink works under today's
   device-token allowlist while draft requests need a user or personal-access
-  token. See
+  token. As with `lt hpc`, the declared question and dataset ids become note
+  targets labelled `declared_target_source=explicit|config_default`, and a
+  stale id fails the sync loudly. See
   [repo-report-capture.md](repo-report-capture.md).
 - Package-pinned code-facing idiom teaching rendered from one generator into
   consent-gated managed agent surfaces, with the advisory
@@ -83,7 +97,14 @@ research record:
   transcripts, photo+voice bundles, and scheduled or user-triggered batches over
   staged notes. Drafting may be note-scoped or batch-scoped, but every proposed
   operation requires human edit/accept/reject before commit through normal API
-  validation. A reviewer may also explicitly defer a proposed operation
+  validation. Batch packets order captures and derive the day window by each
+  note's capture clock, and `capture_placement` carries `observed_at` with an
+  `observed_at_source` of `client` (metadata `captured_at`), `adapter`
+  (`evidence_source_observed_at`), or `server` (`created_at`); a metadata
+  clock that is unparsable or naive is ignored and one later than the server
+  receipt is clamped to it. Batch window membership and reviewer watermarks
+  stay on `created_at`, so no staged note is dropped by a client clock. A
+  reviewer may also explicitly defer a proposed operation
   (`deferred_at` / `deferred_by` stamps that keep it `proposed`, are cleared by
   accept, reject, or `deferred: false`, and are skipped by accept-all), a
   rejection may carry an optional structured `reject_reason`, and a submit
@@ -155,7 +176,10 @@ research record:
   reached. Coverage is derived from existing records; nothing is stored,
   ranked, or auto-reviewed.
 - Paired-device enrollment for phone capture, including one-time enrollment
-  URLs, device-token capture, and revocation.
+  URLs, device-token capture, and revocation. Captures presented with a device
+  token are stamped server-side with `capture_device_token_id` and
+  `capture_device_label` in note metadata; client-supplied values for those
+  keys are rejected.
 - Human-in-browser personal-access-token minting on the Agents page
   (`/app/agents`), including role/read-only level selection capped at the
   issuer's role, one-time secret display with copy-paste `lt setup connect`

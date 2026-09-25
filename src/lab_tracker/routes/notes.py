@@ -66,6 +66,13 @@ from .shared import (
 
 _logger = logging.getLogger(__name__)
 
+# Stamped server-side on captures presented with a paired-device token, so a
+# review can tell which phone a capture came from. Reserved: a client value is
+# rejected rather than trusted.
+CAPTURE_DEVICE_TOKEN_ID_KEY = "capture_device_token_id"
+CAPTURE_DEVICE_LABEL_KEY = "capture_device_label"
+_DEVICE_IDENTITY_KEYS = (CAPTURE_DEVICE_TOKEN_ID_KEY, CAPTURE_DEVICE_LABEL_KEY)
+
 
 def build_notes_router(api: LabTrackerAPI) -> APIRouter:
     router = APIRouter()
@@ -83,7 +90,7 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
             raw_content=payload.raw_content,
             transcribed_text=payload.transcribed_text,
             targets=payload.targets,
-            metadata=payload.metadata,
+            metadata=device_capture_metadata(actor, payload.metadata),
             client_capture_id=payload.client_capture_id,
             status=payload.status or note_default_status(),
             actor=actor,
@@ -121,7 +128,7 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         )
         content_type = validate_upload_content_type(file.content_type)
         parsed_targets = parse_entity_refs_form(targets)
-        parsed_metadata = parse_metadata_form(metadata)
+        parsed_metadata = device_capture_metadata(actor, parse_metadata_form(metadata))
         asset = request_api.store_note_raw_asset(
             file.file,
             filename=filename,
@@ -175,7 +182,7 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
             max_bytes=request.app.state.settings.max_upload_bytes,
         )
         content_type = validate_upload_content_type(file.content_type)
-        parsed_metadata = parse_metadata_form(metadata)
+        parsed_metadata = device_capture_metadata(actor, parse_metadata_form(metadata))
         asset = request_api.store_note_raw_asset(
             file.file,
             filename=filename,
@@ -413,6 +420,30 @@ def source_file_metadata(
         source_metadata["source_file_last_modified_at"] = last_modified_at
 
     metadata.update(source_metadata)
+    return metadata
+
+
+def device_capture_metadata(
+    actor: AuthContext,
+    client_metadata: dict[str, NoteMetadataScalar] | None,
+) -> dict[str, NoteMetadataScalar] | None:
+    """Stamp the presenting device's identity onto a capture's metadata.
+
+    The keys are server-owned: any client that supplies them is rejected,
+    whatever principal it presents. Non-device principals get their metadata
+    back unchanged (``None`` stays ``None``).
+    """
+
+    if client_metadata and any(key in client_metadata for key in _DEVICE_IDENTITY_KEYS):
+        raise ValidationError("capture_device_* metadata keys are stamped by the server.")
+    if not actor.is_device:
+        return client_metadata
+    if actor.device_token_id is None:
+        raise ValueError("A device principal must carry its device_token_id.")
+    metadata: dict[str, NoteMetadataScalar] = dict(client_metadata or {})
+    metadata[CAPTURE_DEVICE_TOKEN_ID_KEY] = str(actor.device_token_id)
+    if actor.principal_label:
+        metadata[CAPTURE_DEVICE_LABEL_KEY] = actor.principal_label
     return metadata
 
 

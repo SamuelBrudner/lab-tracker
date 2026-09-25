@@ -592,3 +592,109 @@ def test_draft_retry_on_synced_event_ignores_later_source_changes(tmp_path, monk
     assert synced["sync"]["status"] == "synced"
     assert synced["sync"]["note_id"] == "note-1"
     assert synced["sync"]["change_set_id"] == "draft-1"
+
+
+# --- declared targets --------------------------------------------------------
+
+
+def _upload_recorder(uploads: list[bytes], note_id: str):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/notes":
+            return _json_response(
+                200,
+                {"data": [], "meta": {"limit": 200, "offset": 0, "total": 0}},
+            )
+        if request.method == "POST" and request.url.path == "/notes/upload-file":
+            uploads.append(request.content)
+            return _json_response(201, {"data": {"note_id": note_id}})
+        return _json_response(500, {"error": {"message": "unexpected request"}})
+
+    return handler
+
+
+def test_sync_file_event_passes_declared_context_as_targets(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1")
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    (inbox / "capture.md").write_text("capture text", encoding="utf-8")
+    scan_watch(
+        config,
+        mode="files",
+        root=inbox,
+        question_id="q-1",
+        session_id="s-1",
+        dataset_ids=["d-1"],
+    )
+    uploads: list[bytes] = []
+
+    with LabTracker(
+        base_url="http://testserver",
+        transport=httpx.MockTransport(_upload_recorder(uploads, "note-watch")),
+    ) as lt:
+        summary = sync_outbox(lt, config)
+
+    assert summary["errors"] == []
+    assert len(uploads) == 1
+    body = uploads[0]
+    assert b'name="targets"' in body
+    assert b'"entity_type": "question"' in body
+    assert b'"entity_id": "q-1"' in body
+    assert b'"entity_type": "session"' in body
+    assert b'"entity_id": "s-1"' in body
+    assert b'"entity_type": "dataset"' in body
+    assert b"declared_target_source" in body
+    assert b"explicit" in body
+
+
+def test_manifest_event_passes_declared_targets(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1")
+    run_dir = tmp_path / "outputs" / "run-1"
+    run_dir.mkdir(parents=True)
+    (run_dir / "lab-tracker-evidence.json").write_text(
+        json.dumps({"capture_id": "run-1", "summary": "Decoded held-out trials."}),
+        encoding="utf-8",
+    )
+    scan_watch(config, mode="manifest", root=tmp_path / "outputs", session_id="s-1")
+    uploads: list[bytes] = []
+
+    with LabTracker(
+        base_url="http://testserver",
+        transport=httpx.MockTransport(_upload_recorder(uploads, "note-manifest")),
+    ) as lt:
+        summary = sync_outbox(lt, config)
+
+    assert summary["errors"] == []
+    assert len(uploads) == 1
+    body = uploads[0]
+    assert b'name="targets"' in body
+    assert b'"entity_type": "session"' in body
+    assert b'"entity_id": "s-1"' in body
+    assert b"declared_target_source" in body
+
+
+def test_event_metadata_omits_declared_target_source_without_context(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1")
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    (inbox / "capture.md").write_text("capture text", encoding="utf-8")
+    scan_watch(config, mode="files", root=inbox)
+    event = read_event(next(iter(config.outbox_path().glob("*.json"))))
+    uploads: list[bytes] = []
+
+    assert "declared_target_source" not in _event_metadata(event)
+
+    with LabTracker(
+        base_url="http://testserver",
+        transport=httpx.MockTransport(_upload_recorder(uploads, "note-watch")),
+    ) as lt:
+        summary = sync_outbox(lt, config)
+
+    assert summary["errors"] == []
+    assert len(uploads) == 1
+    assert b'name="targets"' not in uploads[0]
+    assert b"declared_target_source" not in uploads[0]

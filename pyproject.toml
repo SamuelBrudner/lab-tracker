@@ -187,6 +187,7 @@ files = [
   "src/lab_tracker/services/graph_draft_batch_reservation.py",
   "src/lab_tracker/services/graph_draft_scheduling.py",
   "src/lab_tracker/services/graph_draft_scheduling_ports.py",
+  "src/lab_tracker/services/note_observed_at.py",
   "src/lab_tracker/services/graph_draft_service.py",
   "src/lab_tracker/api_parts/graph_drafts.py",
   "src/lab_tracker/api_parts/projects.py",

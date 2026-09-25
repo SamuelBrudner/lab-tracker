@@ -22,8 +22,12 @@ lt repo install-hook
 ```
 
 `init` writes `.lab-tracker/repo.json` (gitignore `.lab-tracker/` — it is
-host-local scratch). `install-hook` writes a managed block into the repo's
-`post-commit` hook:
+host-local scratch). The declared question and dataset ids are attached to
+the synced note as targets; each event records `question_id_source` and the
+note carries `declared_target_source` as `explicit` (`--question`) or
+`config_default` (`--default-question`), and a stale id fails the sync
+loudly instead of landing as metadata only. `install-hook` writes a managed
+block into the repo's `post-commit` hook:
 
 - The block lives between `BEGIN/END LAB TRACKER REPO HOOK` markers; reinstalls
   update it in place. A foreign hook is never clobbered: without `--force` the

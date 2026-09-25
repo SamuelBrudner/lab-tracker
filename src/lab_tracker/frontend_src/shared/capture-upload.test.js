@@ -70,6 +70,23 @@ describe("buildCaptureMetadata", () => {
     expect(meta.voice_note_type).toBeUndefined();
     expect(meta.transcript_status).toBeUndefined();
   });
+
+  it("stamps captured_at from the composition clock", () => {
+    const meta = buildCaptureMetadata({
+      captureMode: "text",
+      kind: "text",
+      now: () => 1_700_000_000_000,
+    });
+    expect(meta.captured_at).toBe("2023-11-14T22:13:20.000Z");
+  });
+
+  it("uses the wall clock when no clock is injected", () => {
+    const before = Date.now();
+    const meta = buildCaptureMetadata({ captureMode: "text", kind: "text" });
+    const stamped = Date.parse(meta.captured_at);
+    expect(stamped).toBeGreaterThanOrEqual(before);
+    expect(stamped).toBeLessThanOrEqual(Date.now());
+  });
 });
 
 describe("uploadRawFileNote", () => {
@@ -133,6 +150,29 @@ describe("uploadOrQueueRawFile", () => {
     expect(enqueued.ownerId).toBe("owner-1");
     expect(enqueued.fields.project_id).toBe("p1");
     expect(JSON.parse(enqueued.fields.targets)).toHaveLength(1);
+  });
+
+  it("queues the composed captured_at, not the enqueue time, when offline", async () => {
+    installFetchMock([]);
+    const queue = fakeQueue();
+    // Composed long before the (network-failed) upload attempt.
+    const metadata = buildCaptureMetadata({
+      captureMode: "photo",
+      kind: "image",
+      now: () => 1_700_000_000_000,
+    });
+    const result = await uploadOrQueueRawFile({
+      token: "t",
+      projectId: "p1",
+      ownerId: "owner-1",
+      fileToUpload: new Blob(["x"]),
+      metadata,
+      queue,
+    });
+    expect(result).toBe(OFFLINE_QUEUED);
+    const queued = JSON.parse(queue.enqueue.mock.calls[0][0].fields.metadata);
+    expect(queued.captured_at).toBe("2023-11-14T22:13:20.000Z");
+    expect(Date.parse(queued.captured_at)).toBeLessThan(Date.now());
   });
 
   it("rethrows a malformed successful upload response instead of queueing it as offline", async () => {
@@ -258,6 +298,27 @@ describe("createOrQueueTextCapture", () => {
       metadata: { capture_kind: "text" },
     });
     expect(enqueued.json.client_capture_id).toEqual(expect.any(String));
+  });
+
+  it("keeps captured_at in a queued text capture", async () => {
+    installFetchMock([]);
+    const queue = fakeQueue();
+    const metadata = buildCaptureMetadata({
+      captureMode: "text",
+      kind: "text",
+      now: () => 1_700_000_000_000,
+    });
+    const result = await createOrQueueTextCapture({
+      token: "t",
+      projectId: "p1",
+      ownerId: "owner-1",
+      rawContent: "a note",
+      metadata,
+      queue,
+    });
+    expect(result).toBe(OFFLINE_QUEUED);
+    const enqueued = queue.enqueue.mock.calls[0][0];
+    expect(enqueued.json.metadata.captured_at).toBe("2023-11-14T22:13:20.000Z");
   });
 
   it("rethrows a server rejection instead of queueing", async () => {

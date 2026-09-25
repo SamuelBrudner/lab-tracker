@@ -995,6 +995,14 @@ def test_batch_instructions_are_narrative_first_with_terse_capture_guardrail() -
     assert "never fabricate content for an identifier-only capture" in lowered
     # Stays subordinate to the supported-changes guardrail.
     assert "supported by the source artifacts" in instructions
+    # Declared targets are human anchors, weaker when they came from a tool
+    # default; the capture clock is observed_at, labelled by its source; and a
+    # declared target never silences a clarification request.
+    assert "declared target" in lowered
+    assert "declared_target_source=config_default" in instructions
+    assert "capture_placement.observed_at" in instructions
+    assert "observed_at_source" in instructions
+    assert "still raise clarification_requests" in instructions
     # The summary contract changed (now a narrative), so the version bumps.
     assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v7"
 

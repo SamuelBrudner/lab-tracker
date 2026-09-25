@@ -1279,3 +1279,124 @@ def test_batch_context_summary_reports_slot_fill_counts(
     assert summary["counts"]["cue_matched"] == len(block["cue_matched"])
     assert summary["counts"]["exploration_nodes"] == 1
     assert summary["cue_term_count"] == len(block["cue_terms"]) == 2
+
+
+# --- capture clock: client captured_at > adapter observed_at > server created_at ---
+
+
+def _bench_session(project_id: UUID) -> Session:
+    return Session(
+        session_id=uuid4(),
+        project_id=project_id,
+        session_type=SessionType.SCIENTIFIC,
+        started_at=datetime(2026, 6, 25, 9, 0, tzinfo=timezone.utc),
+        ended_at=datetime(2026, 6, 25, 12, 0, tzinfo=timezone.utc),
+    )
+
+
+def _evening_note(project_id: UUID, metadata: dict[str, str]) -> Note:
+    # Received by the server in the evening, well outside the 09:00-12:00 session.
+    return Note(
+        note_id=uuid4(),
+        project_id=project_id,
+        raw_content="Rig 2 Fly 12",
+        created_at=datetime(2026, 6, 25, 18, 0, tzinfo=timezone.utc),
+        metadata=metadata,
+    )
+
+
+def test_capture_placement_prefers_client_captured_at_over_created_at() -> None:
+    project_id = uuid4()
+    session = _bench_session(project_id)
+    note = _evening_note(project_id, {"captured_at": "2026-06-25T10:30:00Z"})
+
+    placed = _capture_placement(note, [session])
+
+    # The phone composed the capture mid-session; the late upload is not the
+    # capture time, so the session match follows the client clock.
+    assert placed["in_session"] == {
+        "id": str(session.session_id),
+        "label": f"{session.session_type.value} session 2026-06-25",
+    }
+    assert placed["observed_at"] == "2026-06-25T10:30:00+00:00"
+    assert placed["observed_at_source"] == "client"
+    assert placed["created_at"] == note.created_at.isoformat()
+
+
+def test_capture_placement_uses_adapter_observed_at_and_labels_source() -> None:
+    project_id = uuid4()
+    session = _bench_session(project_id)
+    note = _evening_note(
+        project_id, {"evidence_source_observed_at": "2026-06-25T11:15:00+00:00"}
+    )
+
+    placed = _capture_placement(note, [session])
+
+    assert placed["in_session"] is not None
+    assert placed["observed_at"] == "2026-06-25T11:15:00+00:00"
+    assert placed["observed_at_source"] == "adapter"
+
+
+def test_capture_placement_ignores_unparsable_and_clamps_future_clock() -> None:
+    project_id = uuid4()
+    session = _bench_session(project_id)
+
+    unparsable = _capture_placement(
+        _evening_note(project_id, {"captured_at": "not-a-date"}), [session]
+    )
+    assert unparsable["in_session"] is None
+    assert unparsable["observed_at_source"] == "server"
+    assert unparsable["observed_at"] == unparsable["created_at"]
+
+    skewed = _capture_placement(
+        _evening_note(project_id, {"captured_at": "2026-06-25T23:59:00Z"}), [session]
+    )
+    # A clock ahead of the server receipt is clamped to created_at but still
+    # reported as the client's clock, so the skew stays visible.
+    assert skewed["observed_at"] == skewed["created_at"]
+    assert skewed["observed_at_source"] == "client"
+
+
+def test_batch_context_orders_and_windows_batch_by_observed_at(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    project_id = _create_project(client, admin_auth_headers, "Capture clock")
+    received_first = datetime(2026, 6, 25, 18, 0, tzinfo=timezone.utc)
+    received_second = received_first + timedelta(minutes=1)
+    later_capture = "2026-06-25T10:30:00+00:00"
+    earlier_capture = "2026-06-25T09:00:00+00:00"
+    note_ids: list[str] = []
+    for raw_content, captured_at, received_at in (
+        ("Rig 2 Fly 12", later_capture, received_first),
+        ("Rig 2 Fly 13", earlier_capture, received_second),
+    ):
+        response = client.post(
+            "/notes",
+            json={
+                "project_id": project_id,
+                "raw_content": raw_content,
+                "metadata": {"captured_at": captured_at},
+            },
+            headers=admin_auth_headers,
+        )
+        assert response.status_code == 201, response.text
+        note_id = response.json()["data"]["note_id"]
+        _set_note_created_at(client, note_id, received_at)
+        note_ids.append(note_id)
+    batch_notes = _load_notes(client, note_ids)
+
+    with _request_api(client) as api:
+        packet = api.build_batch_graph_context(batch_notes)
+
+    # The model sees the day in capture-clock order, not upload order, and the
+    # derived day boundaries follow the same clock.
+    assert [note["id"] for note in packet["batch_notes"]] == [note_ids[1], note_ids[0]]
+    assert packet["batch_window"] == {"since": earlier_capture, "until": later_capture}
+    assert [entry["note_id"] for entry in packet["capture_placement"]] == [
+        note["id"] for note in packet["batch_notes"]
+    ]
+    assert [entry["observed_at_source"] for entry in packet["capture_placement"]] == [
+        "client",
+        "client",
+    ]
