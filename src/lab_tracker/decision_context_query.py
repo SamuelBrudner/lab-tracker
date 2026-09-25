@@ -292,6 +292,7 @@ class RepositoryDecisionContextReader:
         limit: int = 50,
         offset: int = 0,
         recent_first: bool = False,
+        updated_first: bool = False,
     ) -> JsonObject:
         if project_id is not None and not self._project_allowed(project_id):
             return _list_payload([], 0, limit, offset)
@@ -307,6 +308,7 @@ class RepositoryDecisionContextReader:
             limit=limit,
             offset=offset,
             recent_first=recent_first,
+            updated_first=updated_first,
         )
         return _list_payload(items, total, limit, offset)
 

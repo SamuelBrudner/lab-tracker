@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import datetime
 from hashlib import blake2b
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from sqlalchemy import or_, select, text
@@ -26,6 +27,7 @@ from lab_tracker.db_models import (
     VisualizationModel,
 )
 from lab_tracker.db_types import ensure_uuid
+from lab_tracker.errors import NotFoundError
 from lab_tracker.models import (
     AcquisitionOutput,
     Analysis,
@@ -104,6 +106,9 @@ from .usage import (
     summarize_usage_events,
 )
 from .versions import SQLAlchemyEntityVersionRepository
+
+if TYPE_CHECKING:
+    from lab_tracker.schemas import GraphSearchHit
 
 _QUESTION_DAG_LOCK_DOMAIN = b"lab-tracker:question-dag:v1\0"
 _SESSION_ACQUISITION_LOCK_DOMAIN = b"lab-tracker:session-acquisition:v1\0"
@@ -1229,6 +1234,31 @@ class SQLAlchemyLabTrackerRepository:
         stmt = select(matching_projects.c.project_id).order_by(matching_projects.c.project_id)
         rows = self._session.scalars(apply_pagination(stmt, limit=limit, offset=0))
         return {ensure_uuid(project_id) for project_id in rows}
+
+    def search_graph_nodes(
+        self,
+        *,
+        project_id: UUID,
+        query: str,
+        entity_types: Sequence[str],
+        limit: int,
+    ) -> list[GraphSearchHit]:
+        # Function-local import: graph_query imports this package (via
+        # sqlalchemy_repository_parts.common), so a module-level import would
+        # form a cycle whenever graph_query is imported first.
+        from lab_tracker.graph_query import GraphQueryService
+
+        project = self.projects.get(project_id)
+        if project is None:
+            raise NotFoundError("Project does not exist.")
+        return GraphQueryService(self._session).search(
+            project,
+            query=query,
+            entity_types=entity_types,
+            statuses=None,
+            limit=limit,
+            offset=0,
+        ).items
 
     def query_sessions(
         self,

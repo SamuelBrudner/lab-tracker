@@ -208,7 +208,7 @@ def build_decision_context(
     questions_payload = reader.list_questions(
         project_id=resolved_project_id,
         limit=resolved_limit,
-        recent_first=True,
+        updated_first=True,
     )
     notes_payload = reader.list_notes(
         project_id=resolved_project_id,

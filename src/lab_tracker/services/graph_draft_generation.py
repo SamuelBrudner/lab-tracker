@@ -104,7 +104,7 @@ def configured_provider_generation_lease_seconds(settings: Settings) -> int:
     elif provider in {"google", "gemini"}:
         timeout_seconds = settings.google_timeout_seconds
     else:
-        # OpenAI and the agentic OpenAI wrapper share the OpenAI transport.
+        # OpenAI is the transport for every provider not listed above.
         timeout_seconds = settings.openai_timeout_seconds
     return max(1, math.ceil(float(timeout_seconds))) + GENERATION_LEASE_MARGIN_SECONDS
 
@@ -567,7 +567,6 @@ class GraphDraftGenerationCoordinator(BaseService):
                 review_assignee=review_assignee,
                 review_assignee_user_id=review_assignee_user_id,
             )
-        self._ensure_draft_client_allowed_here(draft_client, actor=actor)
         context_packet = self.context_builder.build_batch_graph_context(
             batch_notes,
             window=window,
@@ -663,20 +662,6 @@ class GraphDraftGenerationCoordinator(BaseService):
             }
             self._finish_failed_or_current(change_set, claim.claim_token)
             raise
-
-    @staticmethod
-    def _ensure_draft_client_allowed_here(
-        draft_client: GraphDraftClient,
-        *,
-        actor: AuthContext | None,
-    ) -> None:
-        if not getattr(draft_client, "requires_background_worker", False):
-            return
-        if actor is not None and actor.is_system:
-            return
-        raise GraphDraftingError(
-            "The configured graph draft client only runs inside the background worker."
-        )
 
     def propose_note_revision(
         self,

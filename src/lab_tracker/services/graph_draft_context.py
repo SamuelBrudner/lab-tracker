@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
-from typing import Any
+import re
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from lab_tracker.auth import AuthContext
@@ -15,6 +17,7 @@ from lab_tracker.models import (
     Dataset,
     EntityRef,
     EntityType,
+    ExplorationNode,
     Goal,
     GraphDraftMode,
     Note,
@@ -29,6 +32,7 @@ from lab_tracker.note_text import NoteTextExcerpt, is_text_content_type
 from lab_tracker.services.analysis_service import AnalysisService
 from lab_tracker.services.claim_service import ClaimService
 from lab_tracker.services.dataset_service import DatasetService
+from lab_tracker.services.exploration_service import ExplorationService
 from lab_tracker.services.goal_service import GoalService
 from lab_tracker.services.note_service import NoteService
 from lab_tracker.services.project_service import ProjectService
@@ -37,13 +41,77 @@ from lab_tracker.services.session_service import SessionService
 from lab_tracker.services.shared import is_meeting_note
 from lab_tracker.services.visualization_service import VisualizationService
 
+if TYPE_CHECKING:
+    from lab_tracker.schemas import GraphSearchHit
+
 EntityResult = (
     Project | Question | Note | Session | Dataset | Analysis | Claim | Visualization | Goal
 )
 _RECENT_CONTEXT_LIMIT = 10
-_QUESTION_CONTEXT_LIMIT = 50
+QUESTION_CONTEXT_LIMIT = 50
+# Slots reserved for active questions (most recently updated first) before
+# staged questions fill whatever remains of QUESTION_CONTEXT_LIMIT.
+ACTIVE_QUESTION_FLOOR = 50
 _CAPTURE_BUNDLE_LIMIT = 6
 BATCH_SOURCE_CONTEXT_CHAR_BUDGET = 256_000
+CONTEXT_FIELD_CHAR_LIMIT = 240
+CUE_TERM_MIN_LENGTH = 4
+CUE_TERM_LIMIT = 8
+CUE_MATCH_PER_TERM_LIMIT = 5
+CUE_MATCHED_LIMIT = 20
+CUE_MATCH_ENTITY_TYPES = ("question", "claim", "dataset", "session")
+# English function words only (articles, pronouns, prepositions, auxiliaries,
+# conjunctions); no domain vocabulary, so rare lab terms always survive.
+CUE_STOPWORDS = frozenset(
+    {
+        "about", "above", "after", "again", "against", "also", "among", "and",
+        "another", "any", "are", "around", "because", "been", "before", "being",
+        "below", "between", "both", "but", "can", "could", "did", "does", "doing",
+        "down", "during", "each", "either", "else", "even", "ever", "every", "few",
+        "for", "from", "further", "had", "has", "have", "having", "her", "here",
+        "hers", "him", "his", "how", "however", "into", "its", "itself", "just",
+        "may", "might", "more", "most", "much", "must", "neither", "nor", "not",
+        "off", "once", "only", "onto", "other", "ought", "our", "ours", "out",
+        "over", "own", "same", "shall", "she", "should", "since", "some", "such",
+        "than", "that", "the", "their", "theirs", "them", "then", "there", "these",
+        "they", "this", "those", "through", "thus", "too", "under", "until", "upon",
+        "very", "was", "were", "what", "when", "where", "whether", "which", "while",
+        "who", "whom", "whose", "why", "will", "with", "within", "without", "would",
+        "you", "your", "yours",
+    }
+)
+SELECTION_REASON_ACTIVE_FLOOR = "active_floor"
+SELECTION_REASON_STAGED_FILL = "staged_fill"
+SELECTION_REASON_RECENT = "recent"
+SELECTION_REASON_ALIAS_MATCH = "alias_match"
+SELECTION_REASON_CUE_MATCH_PREFIX = "cue_match:"
+SLOT_FILL_CUE_MATCH = "cue_match"
+# Every list of selected graph context in a packet or project block; each
+# item carries selection_reason and is counted by context_summary.slot_fill.
+_SELECTED_CONTEXT_KEYS = (
+    "active_or_staged_questions",
+    "recent_sessions",
+    "recent_datasets",
+    "recent_notes",
+    "recent_analyses",
+    "recent_claims",
+    "recent_visualizations",
+    "recent_goals",
+    "exploration_nodes",
+    "cue_matched",
+    "known_aliases",
+)
+_CUE_TOKEN_SPLIT = re.compile(r"[^0-9a-z]+")
+
+if ACTIVE_QUESTION_FLOOR > QUESTION_CONTEXT_LIMIT:
+    raise ValueError("ACTIVE_QUESTION_FLOOR must not exceed QUESTION_CONTEXT_LIMIT.")
+
+
+@dataclass(frozen=True)
+class _QuestionContext:
+    active: list[Question]
+    staged: list[Question]
+    superseded: list[Question]
 
 
 class GraphContextBuilder:
@@ -59,6 +127,7 @@ class GraphContextBuilder:
         claims: ClaimService,
         visualizations: VisualizationService,
         goals: GoalService | None = None,
+        exploration: ExplorationService | None = None,
     ) -> None:
         self.projects = projects
         self.questions = questions
@@ -69,6 +138,7 @@ class GraphContextBuilder:
         self.claims = claims
         self.visualizations = visualizations
         self.goals = goals
+        self.exploration = exploration
 
     def build_batch_graph_context(
         self,
@@ -109,7 +179,7 @@ class GraphContextBuilder:
             except NotFoundError:
                 continue
             batch_ids_in_project = {n.note_id for n in project_notes}
-            active_or_staged, superseded = self._question_context(project_id)
+            question_context = self._question_context(project_id)
             recent_notes = self._recent_notes_excluding(project_id, batch_ids_in_project)
             recent_sessions = self._recent_sessions(project_id)
             sessions_by_project[project_id] = recent_sessions
@@ -118,28 +188,37 @@ class GraphContextBuilder:
             recent_claims = self._recent_claims(project_id)
             recent_visualizations = self._recent_visualizations(project_id)
             recent_goals = self._recent_goals(project_id)
+            exploration_nodes = self._recent_exploration_nodes(project_id)
+            cue_terms = _cue_terms([_note_cue_text(item) for item in project_notes])
             project_blocks.append(
                 {
                     "id": str(project.project_id),
                     "label": project.name,
                     "status": project.status.value,
                     "note_ids_in_batch": [str(n.note_id) for n in project_notes],
-                    "active_or_staged_questions": [
-                        _compact_question(item) for item in active_or_staged
+                    "active_or_staged_questions": _active_or_staged_questions(
+                        question_context
+                    ),
+                    "recent_sessions": _recent_items(_compact_session, recent_sessions),
+                    "recent_datasets": _recent_items(_compact_dataset, recent_datasets),
+                    "recent_notes": [
+                        _compact_recent_note(item, actor) for item in recent_notes
                     ],
-                    "recent_sessions": [_compact_session(item) for item in recent_sessions],
-                    "recent_datasets": [_compact_dataset(item) for item in recent_datasets],
-                    "recent_notes": [_compact_note(item) for item in recent_notes],
-                    "recent_analyses": [_compact_analysis(item) for item in recent_analyses],
-                    "recent_claims": [_compact_claim(item) for item in recent_claims],
-                    "recent_visualizations": [
-                        _compact_visualization(item) for item in recent_visualizations
-                    ],
-                    "recent_goals": [_compact_goal(item) for item in recent_goals],
+                    "recent_analyses": _recent_items(_compact_analysis, recent_analyses),
+                    "recent_claims": _recent_items(_compact_claim, recent_claims),
+                    "recent_visualizations": _recent_items(
+                        _compact_visualization, recent_visualizations
+                    ),
+                    "recent_goals": _recent_items(_compact_goal, recent_goals),
+                    "exploration_nodes": _recent_items(
+                        _compact_exploration_node, exploration_nodes
+                    ),
+                    "cue_terms": cue_terms,
+                    "cue_matched": self._cue_matched(project_id, cue_terms),
                     "known_aliases": _known_aliases(
                         project=project,
-                        questions=active_or_staged,
-                        superseded_questions=superseded,
+                        questions=[*question_context.active, *question_context.staged],
+                        superseded_questions=question_context.superseded,
                         sessions=recent_sessions,
                         datasets=recent_datasets,
                         analyses=recent_analyses,
@@ -314,7 +393,7 @@ class GraphContextBuilder:
             raise ValidationError(
                 "Graph context cannot be built because the note project does not exist."
             ) from exc
-        questions, superseded_questions = self._question_context(note.project_id)
+        question_context = self._question_context(note.project_id)
         recent_notes = self._recent_notes_excluding(note.project_id, {note.note_id})
         recent_sessions = self._recent_sessions(note.project_id)
         recent_datasets = self._recent_datasets(note.project_id)
@@ -322,6 +401,8 @@ class GraphContextBuilder:
         recent_claims = self._recent_claims(note.project_id)
         recent_visualizations = self._recent_visualizations(note.project_id)
         recent_goals = self._recent_goals(note.project_id)
+        exploration_nodes = self._recent_exploration_nodes(note.project_id)
+        cue_terms = _cue_terms([_note_cue_text(item) for item in source_notes])
         context_packet = {
             "mode": GraphDraftMode.GRAPH_CONTEXT.value,
             "user_hint": user_hint,
@@ -336,20 +417,23 @@ class GraphContextBuilder:
                 "label": project.name,
                 "status": project.status.value,
             },
-            "active_or_staged_questions": [_compact_question(item) for item in questions],
-            "recent_sessions": [_compact_session(item) for item in recent_sessions],
-            "recent_datasets": [_compact_dataset(item) for item in recent_datasets],
-            "recent_notes": [_compact_note(item) for item in recent_notes],
-            "recent_analyses": [_compact_analysis(item) for item in recent_analyses],
-            "recent_claims": [_compact_claim(item) for item in recent_claims],
-            "recent_visualizations": [
-                _compact_visualization(item) for item in recent_visualizations
-            ],
-            "recent_goals": [_compact_goal(item) for item in recent_goals],
+            "active_or_staged_questions": _active_or_staged_questions(question_context),
+            "recent_sessions": _recent_items(_compact_session, recent_sessions),
+            "recent_datasets": _recent_items(_compact_dataset, recent_datasets),
+            "recent_notes": [_compact_recent_note(item, actor) for item in recent_notes],
+            "recent_analyses": _recent_items(_compact_analysis, recent_analyses),
+            "recent_claims": _recent_items(_compact_claim, recent_claims),
+            "recent_visualizations": _recent_items(
+                _compact_visualization, recent_visualizations
+            ),
+            "recent_goals": _recent_items(_compact_goal, recent_goals),
+            "exploration_nodes": _recent_items(_compact_exploration_node, exploration_nodes),
+            "cue_terms": cue_terms,
+            "cue_matched": self._cue_matched(note.project_id, cue_terms),
             "known_aliases": _known_aliases(
                 project=project,
-                questions=questions,
-                superseded_questions=superseded_questions,
+                questions=[*question_context.active, *question_context.staged],
+                superseded_questions=question_context.superseded,
                 sessions=recent_sessions,
                 datasets=recent_datasets,
                 analyses=recent_analyses,
@@ -358,7 +442,7 @@ class GraphContextBuilder:
                 goals=recent_goals,
             ),
             "unresolved_recent_captures": [
-                _compact_note(item)
+                _compact_recent_note(item, actor)
                 for item in recent_notes
                 if item.raw_asset is not None
                 and item.metadata.get("capture_source") == "mobile_capture"
@@ -439,36 +523,75 @@ class GraphContextBuilder:
         )
         return goals
 
-    def _question_context(self, project_id: UUID) -> tuple[list[Question], list[Question]]:
+    def _recent_exploration_nodes(self, project_id: UUID) -> list[ExplorationNode]:
+        if self.exploration is None:
+            return []
+        nodes, _ = self.exploration.repository.query_exploration_nodes(
+            project_id=project_id,
+            limit=_RECENT_CONTEXT_LIMIT,
+            offset=0,
+            recent_first=True,
+        )
+        return nodes
+
+    def _question_context(self, project_id: UUID) -> _QuestionContext:
+        """Active questions fill first (newest update first); staged fill the rest."""
+
         active_questions, _ = self.questions.repository.query_questions(
             project_id=project_id,
             status=QuestionStatus.ACTIVE.value,
-            limit=_QUESTION_CONTEXT_LIMIT,
+            limit=ACTIVE_QUESTION_FLOOR,
             offset=0,
             updated_first=True,
         )
-        staged_questions, _ = self.questions.repository.query_questions(
-            project_id=project_id,
-            status=QuestionStatus.STAGED.value,
-            limit=_QUESTION_CONTEXT_LIMIT,
-            offset=0,
-            updated_first=True,
-        )
-        questions = sorted(
-            [*active_questions, *staged_questions],
-            key=lambda question: (question.status.value, question.updated_at, question.question_id),
-            reverse=True,
-        )[:_QUESTION_CONTEXT_LIMIT]
-        active_context_ids = {question.question_id for question in questions}
+        staged_limit = QUESTION_CONTEXT_LIMIT - len(active_questions)
+        staged_questions: list[Question] = []
+        if staged_limit > 0:
+            staged_questions, _ = self.questions.repository.query_questions(
+                project_id=project_id,
+                status=QuestionStatus.STAGED.value,
+                limit=staged_limit,
+                offset=0,
+                updated_first=True,
+            )
+        context_ids = {
+            question.question_id for question in [*active_questions, *staged_questions]
+        }
         superseded_candidates, _ = self.questions.repository.query_questions(
             project_id=project_id,
             status=QuestionStatus.SUPERSEDED.value,
-            superseded_by_question_ids=active_context_ids,
-            limit=_QUESTION_CONTEXT_LIMIT * 2,
+            superseded_by_question_ids=context_ids,
+            limit=QUESTION_CONTEXT_LIMIT * 2,
             offset=0,
             updated_first=True,
         )
-        return questions, superseded_candidates
+        return _QuestionContext(
+            active=active_questions,
+            staged=staged_questions,
+            superseded=superseded_candidates,
+        )
+
+    def _cue_matched(self, project_id: UUID, terms: list[str]) -> list[dict[str, Any]]:
+        """Project-wide ranked matches for each cue term, deduplicated and bounded."""
+
+        matched: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for term in terms:
+            hits = self.questions.repository.search_graph_nodes(
+                project_id=project_id,
+                query=term,
+                entity_types=CUE_MATCH_ENTITY_TYPES,
+                limit=CUE_MATCH_PER_TERM_LIMIT,
+            )
+            for hit in hits:
+                key = (hit.node.entity_type, hit.node.entity_id)
+                if key in seen:
+                    continue
+                seen.add(key)
+                matched.append(_compact_search_hit(hit, term))
+                if len(matched) >= CUE_MATCHED_LIMIT:
+                    return matched
+        return matched
 
     def _recent_notes_excluding(
         self,
@@ -570,11 +693,15 @@ def _graph_context_summary(context_packet: dict[str, Any]) -> dict[str, Any]:
             "recent_claims": len(context_packet.get("recent_claims") or []),
             "recent_visualizations": len(context_packet.get("recent_visualizations") or []),
             "recent_goals": len(context_packet.get("recent_goals") or []),
+            "exploration_nodes": len(context_packet.get("exploration_nodes") or []),
+            "cue_matched": len(context_packet.get("cue_matched") or []),
             "known_aliases": len(context_packet.get("known_aliases") or []),
             "unresolved_recent_captures": len(
                 context_packet.get("unresolved_recent_captures") or []
             ),
         },
+        "slot_fill": _slot_fill(_selected_context_lists(context_packet)),
+        "cue_terms": list(context_packet.get("cue_terms") or []),
         "selected_targets": [
             {
                 "entity_type": item.get("entity_type"),
@@ -646,8 +773,19 @@ def _graph_batch_context_summary(packet: dict[str, Any]) -> dict[str, Any]:
                 len(p.get("recent_visualizations") or []) for p in projects
             ),
             "recent_goals": sum(len(p.get("recent_goals") or []) for p in projects),
+            "exploration_nodes": sum(len(p.get("exploration_nodes") or []) for p in projects),
+            "cue_matched": sum(len(p.get("cue_matched") or []) for p in projects),
             "known_aliases": sum(len(p.get("known_aliases") or []) for p in projects),
         },
+        "slot_fill": _slot_fill(
+            item
+            for block in projects
+            if isinstance(block, dict)
+            for item in _selected_context_lists(block)
+        ),
+        "cue_term_count": sum(
+            len(block.get("cue_terms") or []) for block in projects if isinstance(block, dict)
+        ),
         "source_artifact_counts": source_artifact_counts,
         "truncated_note_count": truncated,
         "source_context_budget_chars": int(
@@ -670,6 +808,107 @@ def _compact_actor(actor: AuthContext | None) -> dict[str, Any] | None:
     if actor is None:
         return None
     return {"id": str(actor.user_id), "role": actor.role.value}
+
+
+def _capped_text(value: str | None) -> str | None:
+    if not value:
+        return None
+    return value[:CONTEXT_FIELD_CHAR_LIMIT]
+
+
+def _with_selection_reason(payload: dict[str, Any], reason: str) -> dict[str, Any]:
+    payload["selection_reason"] = reason
+    return payload
+
+
+def _recent_items(
+    compact: Callable[[Any], dict[str, Any]],
+    items: Iterable[Any],
+) -> list[dict[str, Any]]:
+    return [_with_selection_reason(compact(item), SELECTION_REASON_RECENT) for item in items]
+
+
+def _active_or_staged_questions(context: _QuestionContext) -> list[dict[str, Any]]:
+    return [
+        _with_selection_reason(_compact_question(item), SELECTION_REASON_ACTIVE_FLOOR)
+        for item in context.active
+    ] + [
+        _with_selection_reason(_compact_question(item), SELECTION_REASON_STAGED_FILL)
+        for item in context.staged
+    ]
+
+
+def _cue_terms(texts: list[str]) -> list[str]:
+    """Rare-first lexical cues from in-memory note text.
+
+    Tokens shorter than CUE_TERM_MIN_LENGTH, all-digit tokens, and English
+    function words are dropped; the rest are ordered by document frequency
+    across the given texts (rarest first), then longest first, then
+    alphabetically, and cut to CUE_TERM_LIMIT. Deterministic for equal input.
+    """
+
+    document_frequency: dict[str, int] = {}
+    for text in texts:
+        tokens = {
+            token
+            for token in _CUE_TOKEN_SPLIT.split(text.lower())
+            if len(token) >= CUE_TERM_MIN_LENGTH
+            and not token.isdigit()
+            and token not in CUE_STOPWORDS
+        }
+        for token in tokens:
+            document_frequency[token] = document_frequency.get(token, 0) + 1
+    ordered = sorted(
+        document_frequency,
+        key=lambda token: (document_frequency[token], -len(token), token),
+    )
+    return ordered[:CUE_TERM_LIMIT]
+
+
+def _note_cue_text(note: Note) -> str:
+    return note.transcribed_text or note.raw_content or ""
+
+
+def _compact_search_hit(hit: GraphSearchHit, term: str) -> dict[str, Any]:
+    node = hit.node
+    return {
+        "entity_type": node.entity_type,
+        "id": node.entity_id,
+        "label": node.label,
+        "detail": node.detail,
+        "status": node.status,
+        "updated_at": node.updated_at.isoformat() if node.updated_at is not None else None,
+        "snippet": hit.snippet,
+        "match_reasons": list(hit.match_reasons),
+        "selection_reason": SELECTION_REASON_CUE_MATCH_PREFIX + term,
+    }
+
+
+def _selected_context_lists(block: dict[str, Any]) -> list[list[dict[str, Any]]]:
+    return [
+        [item for item in (block.get(key) or []) if isinstance(item, dict)]
+        for key in _SELECTED_CONTEXT_KEYS
+    ]
+
+
+def _slot_fill(lists: Iterable[list[dict[str, Any]]]) -> dict[str, int]:
+    """Count selection_reason values across lists; cue_match:<term> collapses to cue_match."""
+
+    counts = {
+        SELECTION_REASON_ACTIVE_FLOOR: 0,
+        SELECTION_REASON_STAGED_FILL: 0,
+        SLOT_FILL_CUE_MATCH: 0,
+        SELECTION_REASON_RECENT: 0,
+        SELECTION_REASON_ALIAS_MATCH: 0,
+    }
+    for items in lists:
+        for item in items:
+            reason = str(item.get("selection_reason") or "")
+            if reason.startswith(SELECTION_REASON_CUE_MATCH_PREFIX):
+                reason = SLOT_FILL_CUE_MATCH
+            if reason in counts:
+                counts[reason] += 1
+    return counts
 
 
 def _add_origin_context(payload: dict[str, Any], entity: Any) -> None:
@@ -757,6 +996,7 @@ def _compact_note(note: Note, *, include_raw_asset: bool = False) -> dict[str, A
         ],
         "metadata": dict(note.metadata),
         "is_meeting": is_meeting_note(note),
+        "created_by": note.created_by,
     }
     if include_raw_asset and note.raw_asset is not None:
         payload["raw_asset"] = {
@@ -766,6 +1006,14 @@ def _compact_note(note: Note, *, include_raw_asset: bool = False) -> dict[str, A
             "checksum": note.raw_asset.checksum,
         }
     _add_origin_context(payload, note)
+    return payload
+
+
+def _compact_recent_note(note: Note, actor: AuthContext | None) -> dict[str, Any]:
+    payload = _with_selection_reason(_compact_note(note), SELECTION_REASON_RECENT)
+    payload["captured_by_current_user"] = (
+        None if actor is None else note.created_by == str(actor.user_id)
+    )
     return payload
 
 
@@ -930,6 +1178,8 @@ def _compact_question(question: Question) -> dict[str, Any]:
     }
     if question.terminal_reason:
         payload["terminal_reason"] = question.terminal_reason
+    if question.hypothesis:
+        payload["hypothesis"] = _capped_text(question.hypothesis)
     _add_origin_context(payload, question)
     return payload
 
@@ -1000,10 +1250,17 @@ def _compact_claim(claim: Claim) -> dict[str, Any]:
         "confidence": claim.confidence,
         "supported_by_dataset_ids": [str(item) for item in claim.supported_by_dataset_ids],
         "supported_by_analysis_ids": [str(item) for item in claim.supported_by_analysis_ids],
+        "answers_question_ids": [str(item) for item in claim.answers_question_ids],
         "created_at": claim.created_at.isoformat(),
     }
     if claim.terminal_reason:
         payload["terminal_reason"] = claim.terminal_reason
+    if claim.falsification_criteria:
+        payload["falsification_criteria"] = _capped_text(claim.falsification_criteria)
+    if claim.verification_plan:
+        payload["verification_plan"] = _capped_text(claim.verification_plan)
+    if claim.refuting_outcome:
+        payload["refuting_outcome"] = _capped_text(claim.refuting_outcome)
     _add_origin_context(payload, claim)
     return payload
 
@@ -1019,6 +1276,37 @@ def _compact_visualization(visualization: Visualization) -> dict[str, Any]:
         "created_at": visualization.created_at.isoformat(),
     }
     _add_origin_context(payload, visualization)
+    return payload
+
+
+def _compact_exploration_node(node: ExplorationNode) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "id": str(node.node_id),
+        "label": node.title,
+        "node_type": node.node_type.value,
+        "status": node.status.value,
+        "target": {
+            "entity_type": node.target.entity_type.value,
+            "entity_id": str(node.target.entity_id),
+        },
+        "alternatives_considered": [
+            _capped_text(item) for item in node.alternatives_considered if item
+        ],
+        "invalidates_node_id": (
+            str(node.invalidates_node_id) if node.invalidates_node_id else None
+        ),
+        "invalidates_claim_id": (
+            str(node.invalidates_claim_id) if node.invalidates_claim_id else None
+        ),
+        "parent_node_ids": [str(item) for item in node.parent_node_ids],
+        "created_at": node.created_at.isoformat(),
+        "updated_at": node.updated_at.isoformat(),
+    }
+    for field_name in ("choice", "rationale", "hypothesis", "failure_mode", "lesson", "trigger"):
+        value = getattr(node, field_name)
+        if value:
+            payload[field_name] = _capped_text(value)
+    _add_origin_context(payload, node)
     return payload
 
 
@@ -1136,7 +1424,7 @@ def _known_aliases(
         }
         for item in goals
     )
-    return aliases
+    return [_with_selection_reason(alias, SELECTION_REASON_ALIAS_MATCH) for alias in aliases]
 
 
 def _entity_label(entity_type: EntityType, entity: EntityResult) -> str:

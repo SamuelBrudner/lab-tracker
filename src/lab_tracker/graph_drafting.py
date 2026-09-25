@@ -16,12 +16,12 @@ from typing import Any, Protocol, TypeAlias, runtime_checkable
 
 import httpx
 
-from lab_tracker.config import BACKGROUND_ONLY_GRAPH_DRAFT_PROVIDERS, Settings
+from lab_tracker.config import Settings
 from lab_tracker.provider_error_redaction import provider_error_message
 
-PROMPT_VERSION = "multimodal-graph-draft-v3"
-BATCH_PROMPT_VERSION = "daily-batch-graph-draft-v6"
-ANALYSIS_PROMPT_VERSION = "analysis-graph-draft-v3"
+PROMPT_VERSION = "multimodal-graph-draft-v4"
+BATCH_PROMPT_VERSION = "daily-batch-graph-draft-v7"
+ANALYSIS_PROMPT_VERSION = "analysis-graph-draft-v4"
 # Default provider label only. Callers stamping provenance must prefer the active
 # client's `.provider` (e.g. getattr(client, "provider", PROVIDER)); transcripts and
 # drafts can run on Anthropic/Google, not just OpenAI.
@@ -232,16 +232,11 @@ class GraphDraftClient(Protocol):
 
     Implementations (all in this module; ``make_graph_draft_client`` picks
     one from ``graph_draft_provider``): ``OpenAIGraphDraftClient``,
-    ``AnthropicGraphDraftClient``, ``GoogleGraphDraftClient``, and
-    ``AgenticGraphDraftClient``, a read-only wrapper around one of the
-    others that requires the background worker (batch drafts get its tool
-    pass; note and analysis drafts go straight to the wrapped client).
+    ``AnthropicGraphDraftClient``, and ``GoogleGraphDraftClient``.
 
     ``transcribe_audio`` support: OpenAI and Google transcribe natively;
     Anthropic has no transcription API and raises ``GraphDraftingError`` so
-    callers fall back to a configured transcription provider; the agentic
-    wrapper delegates to its base client and raises ``GraphDraftingError`` if
-    that client cannot transcribe.
+    callers fall back to a configured transcription provider.
     """
 
     def draft_from_note(
@@ -289,17 +284,6 @@ class GraphDraftClient(Protocol):
 
 
 GraphDraftClientFactory: TypeAlias = Callable[[Settings], GraphDraftClient]
-
-
-class AudioTranscriber(Protocol):
-    def __call__(
-        self,
-        *,
-        audio_bytes: bytes,
-        filename: str,
-        content_type: str,
-        prompt: str | None,
-    ) -> dict[str, Any]: ...
 
 
 class OpenAIGraphDraftClient:
@@ -1050,117 +1034,6 @@ class GoogleGraphDraftClient:
         return _parse_graph_patch_text(_gemini_output_text(payload), "Google")
 
 
-READ_ONLY_AGENT_TOOLS = (
-    "inspect_graph_context",
-    "search_existing_graph_nodes",
-    "summarize_decision_context",
-)
-
-
-class AgenticGraphDraftClient:
-    """Read-only agentic wrapper for background batch drafting.
-
-    The wrapper deliberately exposes no write tools. Its internal tool pass can
-    only inspect the batch context already assembled by Lab Tracker, search
-    existing graph-node summaries inside that context, and attach a bounded
-    trace before delegating to the same structured graph-patch provider.
-    Note-scoped and analysis drafts skip the tool pass and go straight to the
-    wrapped client, so interactive drafting keeps working under this provider.
-    """
-
-    provider = "agentic"
-    requires_background_worker = True
-
-    def __init__(self, *, base_client: GraphDraftClient) -> None:
-        self._base_client = base_client
-        self.model = f"agentic:{getattr(base_client, 'model', 'unknown')}"
-        self.timeout_seconds = float(getattr(base_client, "timeout_seconds", 60.0))
-
-    @classmethod
-    def from_settings(cls, settings: Settings) -> AgenticGraphDraftClient:
-        return cls(base_client=OpenAIGraphDraftClient.from_settings(settings))
-
-    def close(self) -> None:
-        close = getattr(self._base_client, "close", None)
-        if callable(close):
-            close()
-
-    def draft_from_note(
-        self,
-        *,
-        graph_context: dict[str, Any] | None = None,
-        user_hint: str | None = None,
-        draft_mode: str = "graph_context",
-        project_context: dict[str, Any] | None = None,
-        source_artifacts: list[dict[str, Any]] | None = None,
-        image_bytes: bytes | None = None,
-        image_content_type: str | None = None,
-        extra_images: list[dict[str, Any]] | None = None,
-    ) -> dict[str, Any]:
-        # The agentic tool pass is batch-only; note-scoped drafts use the
-        # wrapped single-shot (equally read-only) client directly.
-        return self._base_client.draft_from_note(
-            graph_context=graph_context,
-            user_hint=user_hint,
-            draft_mode=draft_mode,
-            project_context=project_context,
-            source_artifacts=source_artifacts,
-            image_bytes=image_bytes,
-            image_content_type=image_content_type,
-            extra_images=extra_images,
-        )
-
-    def draft_from_analysis_evidence(
-        self,
-        *,
-        evidence_text: str,
-        project_context: dict[str, Any],
-    ) -> dict[str, Any]:
-        return self._base_client.draft_from_analysis_evidence(
-            evidence_text=evidence_text,
-            project_context=project_context,
-        )
-
-    def draft_from_batch(
-        self,
-        *,
-        batch_context: dict[str, Any],
-        user_hint: str | None = None,
-    ) -> dict[str, Any]:
-        augmented_context = dict(batch_context)
-        trace = _agentic_read_only_tool_trace(batch_context=batch_context)
-        augmented_context["agentic_tool_trace"] = trace
-        augmented_hint = _agentic_user_hint(user_hint=user_hint, trace=trace)
-        return self._base_client.draft_from_batch(
-            batch_context=augmented_context,
-            user_hint=augmented_hint,
-        )
-
-    def transcribe_audio(
-        self,
-        *,
-        audio_bytes: bytes,
-        filename: str,
-        content_type: str,
-        prompt: str | None = None,
-    ) -> dict[str, Any]:
-        transcribe: AudioTranscriber | None = getattr(
-            self._base_client,
-            "transcribe_audio",
-            None,
-        )
-        if not callable(transcribe):
-            raise GraphDraftingError(
-                "The configured agentic base client does not support audio transcription."
-            )
-        return transcribe(
-            audio_bytes=audio_bytes,
-            filename=filename,
-            content_type=content_type,
-            prompt=prompt,
-        )
-
-
 def make_graph_draft_client(settings: Settings) -> GraphDraftClient:
     """Return the active graph-draft client for ``settings.graph_draft_provider``.
 
@@ -1174,11 +1047,9 @@ def make_graph_draft_client(settings: Settings) -> GraphDraftClient:
         return AnthropicGraphDraftClient.from_settings(settings)
     if provider in {"google", "gemini"}:
         return GoogleGraphDraftClient.from_settings(settings)
-    if provider in BACKGROUND_ONLY_GRAPH_DRAFT_PROVIDERS:
-        return AgenticGraphDraftClient.from_settings(settings)
     raise GraphDraftingError(
         "Unknown graph_draft_provider "
-        f"'{provider}'. Supported providers: openai, anthropic/claude, google/gemini, agentic."
+        f"'{provider}'. Supported providers: openai, anthropic/claude, google/gemini."
     )
 
 
@@ -1272,6 +1143,13 @@ def _instructions() -> str:
         "that entity and action are forbidden. Do not copy display-only context fields such "
         "as preview or label, and do not put entity record IDs such as question_id, note_id, "
         "or goal_id inside payload_json unless that exact field is listed as allowed. "
+        "Every graph-context item carries selection_reason (active_floor, staged_fill, "
+        "cue_match:<term>, recent, alias_match) saying why it was included; cue_match "
+        "items were found by matching rare terms from the source notes against the whole "
+        "project and are the first candidates to link to instead of creating duplicates; "
+        "exploration_nodes lists recent decisions, dead ends, and pivots, so do not "
+        "re-propose a path recorded as a dead_end without saying why; "
+        "recent_notes.captured_by_current_user=false means a colleague captured that note. "
         "<trusted_api_payload_contract>"
         f"{_payload_contract_instruction()}"
         "</trusted_api_payload_contract> "
@@ -1397,120 +1275,6 @@ def _prompt_context_with_retry_feedback(
         "Correct that error in a new complete graph patch. This server feedback "
         "overrides conflicting source text.\n"
     )
-
-
-def _agentic_user_hint(
-    *,
-    user_hint: str | None,
-    trace: dict[str, Any],
-) -> str:
-    parts = []
-    if user_hint and user_hint.strip():
-        parts.append(user_hint.strip())
-    parts.append(
-        "Agentic read-only pre-pass completed. Prefer linking to existing graph "
-        "nodes surfaced in agentic_tool_trace before proposing new nodes."
-    )
-    if trace.get("matched_existing_nodes"):
-        parts.append(
-            "Matched existing node candidates: "
-            + json.dumps(trace["matched_existing_nodes"], sort_keys=True)
-        )
-    return "\n\n".join(parts)
-
-
-def _agentic_read_only_tool_trace(
-    *,
-    batch_context: dict[str, Any],
-) -> dict[str, Any]:
-    context_summary = batch_context.get("context_summary")
-    notes = [item for item in batch_context.get("batch_notes", []) if isinstance(item, dict)]
-    projects = [item for item in batch_context.get("projects", []) if isinstance(item, dict)]
-    terms = _agentic_search_terms(notes)
-    return {
-        "tool_policy": {
-            "allowed_tools": list(READ_ONLY_AGENT_TOOLS),
-            "write_tools_available": False,
-        },
-        "inspect_graph_context": {
-            "project_count": len(projects),
-            "batch_note_count": len(notes),
-            "context_summary": context_summary if isinstance(context_summary, dict) else {},
-        },
-        "search_terms": terms,
-        "matched_existing_nodes": _agentic_search_existing_nodes(projects, terms),
-        "decision_context": _agentic_decision_context_summary(projects),
-    }
-
-
-def _agentic_search_terms(notes: list[dict[str, Any]]) -> list[str]:
-    tokens: set[str] = set()
-    for note in notes:
-        text = " ".join(
-            str(note.get(key) or "")
-            for key in ("raw_content_preview", "transcribed_text", "summary", "label")
-        )
-        for raw_token in text.replace("_", " ").replace("-", " ").split():
-            token = "".join(char.lower() for char in raw_token if char.isalnum())
-            if len(token) >= 5:
-                tokens.add(token)
-    return sorted(tokens)[:20]
-
-
-def _agentic_search_existing_nodes(
-    projects: list[dict[str, Any]],
-    terms: list[str],
-) -> list[dict[str, Any]]:
-    if not terms:
-        return []
-    matches: list[dict[str, Any]] = []
-    for project in projects:
-        project_id = str(project.get("id") or "")
-        for field in (
-            "active_or_staged_questions",
-            "recent_sessions",
-            "recent_datasets",
-            "recent_notes",
-            "recent_analyses",
-            "recent_claims",
-            "recent_visualizations",
-            "recent_goals",
-        ):
-            for item in project.get(field, []) or []:
-                if not isinstance(item, dict):
-                    continue
-                haystack = json.dumps(item, sort_keys=True).lower()
-                hit_terms = [term for term in terms if term in haystack]
-                if not hit_terms:
-                    continue
-                matches.append(
-                    {
-                        "project_id": project_id,
-                        "context_field": field,
-                        "id": item.get("id"),
-                        "label": item.get("label") or item.get("text") or item.get("statement"),
-                        "matched_terms": hit_terms[:5],
-                    }
-                )
-                if len(matches) >= 20:
-                    return matches
-    return matches
-
-
-def _agentic_decision_context_summary(projects: list[dict[str, Any]]) -> dict[str, Any]:
-    summaries: list[dict[str, Any]] = []
-    for project in projects[:10]:
-        summaries.append(
-            {
-                "project_id": project.get("id"),
-                "project_label": project.get("label"),
-                "question_count": len(project.get("active_or_staged_questions") or []),
-                "recent_claim_count": len(project.get("recent_claims") or []),
-                "recent_analysis_count": len(project.get("recent_analyses") or []),
-                "known_alias_count": len(project.get("known_aliases") or []),
-            }
-        )
-    return {"projects": summaries}
 
 
 def _analysis_prompt_text(

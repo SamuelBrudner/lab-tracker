@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import builtins
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from contextlib import AbstractContextManager
 from datetime import datetime
-from typing import Generic, Protocol, TypeVar
+from typing import TYPE_CHECKING, Generic, Protocol, TypeVar
 from uuid import UUID
 
 from lab_tracker.collection_models import (
@@ -52,6 +52,9 @@ from lab_tracker.models import (
     Visualization,
 )
 from lab_tracker.reference_registry import BlockingReference, DeletableEntity
+
+if TYPE_CHECKING:
+    from lab_tracker.schemas import GraphSearchHit
 
 EntityT = TypeVar("EntityT")
 
@@ -953,6 +956,16 @@ class LabTrackerRepository(Protocol):
         limit: int | None = None,
     ) -> set[UUID]:
         """Return distinct project IDs whose questions or notes match search."""
+
+    def search_graph_nodes(
+        self,
+        *,
+        project_id: UUID,
+        query: str,
+        entity_types: Sequence[str],
+        limit: int,
+    ) -> list[GraphSearchHit]:
+        """Ranked lexical graph-node matches inside one project (GraphQueryService.search order)."""
 
     def query_sessions(
         self,

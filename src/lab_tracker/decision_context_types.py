@@ -51,6 +51,7 @@ class DecisionContextReader(Protocol):
         limit: int = 50,
         offset: int = 0,
         recent_first: bool = False,
+        updated_first: bool = False,
     ) -> JsonObject:
         ...
 

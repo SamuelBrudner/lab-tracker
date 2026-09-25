@@ -276,6 +276,7 @@ class LabTrackerAPI(
             claims=self.claims,
             visualizations=self.visualizations,
             goals=self.goals,
+            exploration=self.exploration,
         )
         graph_patch_validator = GraphPatchValidator(
             get_graph_entity=graph_context_builder.get_graph_entity,

@@ -23,7 +23,6 @@ from lab_tracker.application.managed_deletions import (
 from lab_tracker.decision_context_query import DecisionContextRepository
 from lab_tracker.file_storage import FileStorageBackend, LocalFileStorageBackend
 from lab_tracker.graph_drafting import (
-    AgenticGraphDraftClient,
     AnthropicGraphDraftClient,
     GoogleGraphDraftClient,
     GraphDraftClient,
@@ -170,12 +169,10 @@ def provider_contracts(
     openai_client: OpenAIGraphDraftClient,
     anthropic_client: AnthropicGraphDraftClient,
     google_client: GoogleGraphDraftClient,
-    agentic_client: AgenticGraphDraftClient,
 ) -> None:
     _requires_graph_client(openai_client)
     _requires_graph_client(anthropic_client)
     _requires_graph_client(google_client)
-    _requires_graph_client(agentic_client)
     _requires_graph_client_factory(make_graph_draft_client)
 
 

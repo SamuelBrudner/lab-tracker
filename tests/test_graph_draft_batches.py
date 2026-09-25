@@ -24,8 +24,6 @@ from lab_tracker.db_models import (
     NoteModel,
 )
 from lab_tracker.graph_drafting import (
-    READ_ONLY_AGENT_TOOLS,
-    AgenticGraphDraftClient,
     GraphDraftingError,
     GraphDraftOutputTruncatedError,
 )
@@ -1951,88 +1949,6 @@ def test_background_run_due_partitions_by_note_author_and_assigns_reviewers(
         headers=first_headers,
     )
     assert submitted.status_code == 200
-
-
-def test_agentic_graph_draft_client_uses_read_only_context_trace() -> None:
-    class CapturingBaseClient:
-        provider = "fake"
-        model = "fake-model"
-        timeout_seconds = 5400.0
-
-        def __init__(self) -> None:
-            self.batch_context: dict[str, Any] | None = None
-            self.user_hint: str | None = None
-            self.note_calls: list[dict[str, Any]] = []
-            self.closed = False
-
-        def draft_from_batch(
-            self,
-            *,
-            batch_context: dict[str, Any],
-            user_hint: str | None = None,
-        ) -> dict[str, Any]:
-            self.batch_context = batch_context
-            self.user_hint = user_hint
-            return {
-                "summary": "agentic",
-                "uncertain_fields": [],
-                "clarification_requests": [],
-                "operations": [],
-            }
-
-        def draft_from_note(self, **kwargs: Any) -> dict[str, Any]:
-            self.note_calls.append(
-                {"user_hint": kwargs["user_hint"], "draft_mode": kwargs["draft_mode"]}
-            )
-            return {"summary": "note", "operations": []}
-
-        def close(self) -> None:
-            self.closed = True
-
-    base = CapturingBaseClient()
-    client = AgenticGraphDraftClient(base_client=base)
-    assert client.timeout_seconds == 5400.0
-
-    result = client.draft_from_batch(
-        batch_context={
-            "batch_notes": [
-                {
-                    "id": "note-1",
-                    "raw_content_preview": "PV inhibition broadened odor tuning.",
-                }
-            ],
-            "projects": [
-                {
-                    "id": "project-1",
-                    "label": "Olfaction",
-                    "active_or_staged_questions": [
-                        {
-                            "id": "question-1",
-                            "text": "Does PV inhibition broaden odor tuning?",
-                        }
-                    ],
-                    "recent_claims": [],
-                    "recent_analyses": [],
-                    "known_aliases": [],
-                }
-            ],
-            "context_summary": {"counts": {"batch_notes": 1}},
-        },
-        user_hint="prefer existing questions",
-    )
-
-    assert result["summary"] == "agentic"
-    assert base.batch_context is not None
-    trace = base.batch_context["agentic_tool_trace"]
-    assert trace["tool_policy"] == {
-        "allowed_tools": list(READ_ONLY_AGENT_TOOLS),
-        "write_tools_available": False,
-    }
-    assert trace["matched_existing_nodes"][0]["id"] == "question-1"
-    assert "prefer existing questions" in (base.user_hint or "")
-    # Note-scoped drafts skip the batch tool pass and use the wrapped client.
-    assert client.draft_from_note(user_hint="note hint")["summary"] == "note"
-    assert base.note_calls == [{"user_hint": "note hint", "draft_mode": "graph_context"}]
 
 
 def test_batch_settings_claim_requires_observed_next_run_at(

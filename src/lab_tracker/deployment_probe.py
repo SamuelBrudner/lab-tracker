@@ -40,14 +40,11 @@ def _provider_readiness(settings: Settings) -> tuple[str, bool]:
     provider = {
         "claude": "anthropic",
         "gemini": "google",
-        "agentic-openai": "agentic",
-        "agentic_openai": "agentic",
     }.get(provider, provider)
     credential = {
         "openai": settings.openai_api_key,
         "anthropic": settings.anthropic_api_key,
         "google": settings.google_api_key,
-        "agentic": settings.openai_api_key,
     }.get(provider, "")
     return provider, bool(str(credential or "").strip())
 

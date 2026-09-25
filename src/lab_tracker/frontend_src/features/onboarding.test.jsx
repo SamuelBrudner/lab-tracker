@@ -58,7 +58,7 @@ describe("OnboardingPage", () => {
     {
       readiness: {
         background_worker_enabled: false,
-        provider: "agentic",
+        provider: "custom",
         provider_credential_configured: false,
         scheduler_enabled: false,
         source_revision: SOURCE_REVISION,

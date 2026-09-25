@@ -53,9 +53,7 @@ Google provider in a fail-soft background task. It is disabled by default,
 incurs provider usage, and currently has no per-principal rate limit or daily
 budget.
 For institutional deployments, point the provider's base URL at an approved
-gateway. An `agentic` provider (a read-only tool-using drafting loop) also
-exists and requires the background worker — see
-[`server-resident-agentic-drafting-design.md`](server-resident-agentic-drafting-design.md).
+gateway.
 
 For quality-first OpenAI drafting with GPT-5.6 Sol, set:
 

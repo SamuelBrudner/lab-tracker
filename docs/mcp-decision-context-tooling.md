@@ -302,9 +302,9 @@ The decision-context tool should use a deterministic retrieval policy.
    - Include matching questions and notes with match snippets.
    - Avoid semantic/vector ranking in the first implementation.
 5. Add bounded recency fallback.
-   - Include the most recently created questions (of any status), notes,
-     sessions, datasets, analyses, claims, and visualizations within the
-     resolved project.
+   - Include the most recently updated questions (of any status), and the
+     most recently created notes, sessions, datasets, analyses, claims, and
+     visualizations within the resolved project.
 6. Order context by relevance reason.
    - Each section lists anchors first, then search matches, then recent
      records; an entity found more than once keeps its first position and

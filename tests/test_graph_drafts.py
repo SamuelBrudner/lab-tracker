@@ -25,7 +25,6 @@ from lab_tracker.db_models import (
 )
 from lab_tracker.errors import AuthError, PermissionDeniedError, ValidationError
 from lab_tracker.graph_drafting import (
-    AgenticGraphDraftClient,
     AnthropicGraphDraftClient,
     GoogleGraphDraftClient,
     GraphDraftingError,
@@ -1032,13 +1031,25 @@ def test_graph_draft_clients_wrap_transport_errors(client_factory, provider_name
         draft_client.close()
 
 
-def test_make_graph_draft_client_rejects_unknown_provider() -> None:
+@pytest.mark.parametrize(
+    "provider", ["palantir", "agentic", "agentic-openai", "agentic_openai"]
+)
+def test_make_graph_draft_client_rejects_unknown_provider(provider: str) -> None:
     settings = Settings(
         environment="local",
         auth_enabled=False,
-        graph_draft_provider="palantir",
+        graph_draft_provider=provider,
     )
-    with pytest.raises(GraphDraftingError, match="palantir"):
+    with pytest.raises(GraphDraftingError, match=provider):
+        make_graph_draft_client(settings)
+
+
+def test_agentic_provider_value_is_not_special_cased() -> None:
+    settings = Settings(environment="local", graph_draft_provider="agentic")
+
+    assert settings.graph_draft_provider == "agentic"
+    assert settings.graph_draft_background_enabled is False
+    with pytest.raises(GraphDraftingError, match="agentic"):
         make_graph_draft_client(settings)
 
 
@@ -1118,7 +1129,7 @@ def test_analysis_note_draft_stores_operations_and_context(
     payload = response.json()["data"]
     assert payload["status"] == "ready"
     assert payload["draft_mode"] == "graph_context"
-    assert payload["prompt_version"] == "analysis-graph-draft-v3"
+    assert payload["prompt_version"] == "analysis-graph-draft-v4"
     assert payload["source_note_id"] == note_id
     assert payload["source_content_type"] == "text/markdown"
     assert payload["context_packet"]["project"]["id"] == project_id
@@ -1504,6 +1515,123 @@ def test_graph_draft_rejects_untranscribed_voice_and_unsupported_raw_asset(
     assert "editable transcript" in untranscribed_voice.json()["error"]["message"]
     assert non_image.status_code == 422
     assert "raw image asset, text note, or voice transcript" in non_image.json()["error"]["message"]
+
+
+_SELECTION_REASONS = {"active_floor", "staged_fill", "recent", "alias_match"}
+_NOTE_PACKET_SELECTED_LISTS = (
+    "active_or_staged_questions",
+    "recent_sessions",
+    "recent_datasets",
+    "recent_notes",
+    "recent_analyses",
+    "recent_claims",
+    "recent_visualizations",
+    "recent_goals",
+    "exploration_nodes",
+    "cue_matched",
+    "known_aliases",
+    "unresolved_recent_captures",
+)
+
+
+def _text_note(
+    client: TestClient,
+    headers: dict[str, str],
+    project_id: str,
+    raw_content: str,
+) -> str:
+    response = client.post(
+        "/notes",
+        json={"project_id": project_id, "raw_content": raw_content},
+        headers=headers,
+    )
+    assert response.status_code == 201, response.text
+    return response.json()["data"]["note_id"]
+
+
+def test_note_context_packet_includes_cue_matches(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    older_question = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Does kynurenine depletion abolish turning?",
+            "question_type": "descriptive",
+            "status": "active",
+        },
+        headers=admin_auth_headers,
+    ).json()["data"]
+    note_id = _text_note(client, admin_auth_headers, project_id, "kynurenine assay rig 2")
+    client.app.state.graph_draft_client_factory = lambda settings: FakeDraftClient()
+
+    response = client.post(f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers)
+
+    assert response.status_code == 201, response.text
+    context = response.json()["data"]["context_packet"]
+    assert context["cue_terms"] == ["kynurenine", "assay"]
+    matched = [
+        item
+        for item in context["cue_matched"]
+        if item["entity_type"] == "question" and item["id"] == older_question["question_id"]
+    ]
+    assert len(matched) == 1
+    assert matched[0]["selection_reason"] == "cue_match:kynurenine"
+    assert matched[0]["label"] == "Does kynurenine depletion abolish turning?"
+    assert context["context_summary"]["cue_terms"] == ["kynurenine", "assay"]
+    assert context["context_summary"]["counts"]["cue_matched"] == len(context["cue_matched"])
+
+
+def test_note_context_packet_tags_selection_reasons(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Does kynurenine depletion abolish turning?",
+            "question_type": "descriptive",
+            "status": "active",
+        },
+        headers=admin_auth_headers,
+    )
+    unresolved_capture = client.post(
+        "/notes/upload-file",
+        data={
+            "project_id": project_id,
+            "metadata": json.dumps({"capture_source": "mobile_capture"}),
+        },
+        files={"file": ("rig-note.jpg", b"fake-image-bytes", "image/jpeg")},
+        headers=admin_auth_headers,
+    )
+    assert unresolved_capture.status_code == 201, unresolved_capture.text
+    note_id = _text_note(client, admin_auth_headers, project_id, "kynurenine assay rig 2")
+    client.app.state.graph_draft_client_factory = lambda settings: FakeDraftClient()
+
+    response = client.post(f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers)
+
+    assert response.status_code == 201, response.text
+    context = response.json()["data"]["context_packet"]
+    assert context["active_or_staged_questions"]
+    assert context["recent_notes"]
+    assert context["cue_matched"]
+    assert context["known_aliases"]
+    assert context["unresolved_recent_captures"]
+    for key in _NOTE_PACKET_SELECTED_LISTS:
+        for item in context[key]:
+            reason = item["selection_reason"]
+            assert reason in _SELECTION_REASONS or reason.startswith("cue_match:"), (key, item)
+    assert all(
+        item["captured_by_current_user"] is True for item in context["recent_notes"]
+    )
+    slot_fill = context["context_summary"]["slot_fill"]
+    assert slot_fill["active_floor"] == len(context["active_or_staged_questions"])
+    assert slot_fill["cue_match"] == len(context["cue_matched"])
+    assert slot_fill["alias_match"] == len(context["known_aliases"])
 
 
 def test_voice_note_transcription_stores_editable_transcript(
@@ -2200,7 +2328,7 @@ def test_edit_accept_and_commit_resolves_refs_into_canonical_records(
     assert question_payload["change_set_id"] == change_set_id
     assert question_payload["origin_provider"] == "openai"
     assert question_payload["origin_model"] == "fake-gpt"
-    assert question_payload["origin_prompt_version"] == "multimodal-graph-draft-v3"
+    assert question_payload["origin_prompt_version"] == "multimodal-graph-draft-v4"
 
     notes = client.get(
         f"/notes?project_id={project_id}&target_entity_type=question&target_entity_id={question_id}",
@@ -2487,7 +2615,7 @@ def test_revise_graph_draft_regenerates_operations_from_feedback(
     assert len(body["operations"]) == 1
     assert all(op["status"] == "proposed" for op in body["operations"])
     assert body["summary"].startswith("Revised per reviewer")
-    assert body["prompt_version"] == "multimodal-graph-draft-v3"
+    assert body["prompt_version"] == "multimodal-graph-draft-v4"
     assert body["operations"][0]["source_refs"][0]["source_note_ids"] == [note_id]
     assert (
         body["operations"][0]["source_refs"][0]["source_note_ids_resolution"]
@@ -3644,51 +3772,6 @@ def test_anthropic_client_reports_output_truncation_explicitly() -> None:
     assert "4096" in message
     assert "LAB_TRACKER_ANTHROPIC_MAX_OUTPUT_TOKENS" in message
     assert "malformed" not in message
-
-
-@pytest.mark.parametrize("provider", ["agentic", " Agentic-OpenAI ", "agentic_openai"])
-def test_settings_reject_agentic_provider_without_background_worker(provider: str) -> None:
-    with pytest.raises(
-        PydanticValidationError, match="LAB_TRACKER_GRAPH_DRAFT_BACKGROUND_ENABLED"
-    ):
-        Settings(environment="local", graph_draft_provider=provider)
-
-    assert Settings(
-        environment="local",
-        graph_draft_provider=provider,
-        graph_draft_background_enabled=True,
-    ).graph_draft_background_enabled
-    # The scheduler also runs the background worker.
-    assert Settings(
-        environment="local",
-        graph_draft_provider=provider,
-        graph_draft_scheduler_enabled=True,
-    ).graph_draft_scheduler_enabled
-
-
-def test_agentic_provider_note_drafts_use_the_wrapped_single_shot_client(
-    client: TestClient, admin_auth_headers: dict[str, str]
-) -> None:
-    """Note-scoped and analysis drafts must work when the agentic batch drafter is active."""
-    project_id = _project(client, admin_auth_headers)
-    note_id = _image_note(client, admin_auth_headers, project_id)
-    analysis_note_id = _analysis_note(client, admin_auth_headers, project_id)
-    base = FakeDraftClient(_draft_patch(project_id))
-    client.app.state.graph_draft_client_factory = lambda settings: AgenticGraphDraftClient(
-        base_client=base
-    )
-
-    note_draft = client.post(f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers)
-    analysis_draft = client.post(
-        f"/notes/{analysis_note_id}/analysis-graph-drafts", headers=admin_auth_headers
-    )
-
-    assert note_draft.status_code == 201, note_draft.text
-    assert note_draft.json()["data"]["status"] == "ready"
-    assert analysis_draft.status_code == 201, analysis_draft.text
-    assert analysis_draft.json()["data"]["status"] == "ready"
-    assert base.calls[0]["draft_mode"] == "graph_context"
-    assert "method_hash=abc123" in base.calls[1]["evidence_text"]
 
 
 def test_revise_graph_draft_records_exactly_one_usage_event(

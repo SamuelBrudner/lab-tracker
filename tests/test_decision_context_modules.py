@@ -152,6 +152,7 @@ class FakeDecisionContextReader:
         limit: int = 50,
         offset: int = 0,
         recent_first: bool = False,
+        updated_first: bool = False,
     ) -> JsonObject:
         return _envelope([self.question], limit=limit, offset=offset)
 
@@ -346,6 +347,58 @@ def test_build_decision_context_orchestrates_reader_selection_and_builders() -> 
     assert any("a person commits" in item for item in create_guidance)
     assert data["evidence_map"][0]["entity"]["entity_type"] == "dataset"
     assert data["truncation"] == {"was_truncated": False, "sections": []}
+
+
+def test_build_decision_context_lists_questions_by_last_update() -> None:
+    class OrderingSpyReader(FakeDecisionContextReader):
+        def __init__(self) -> None:
+            self.question_calls: list[dict[str, object]] = []
+            self.note_calls: list[dict[str, object]] = []
+
+        def list_questions(self, **kwargs: object) -> JsonObject:
+            self.question_calls.append(dict(kwargs))
+            return super().list_questions(**kwargs)  # type: ignore[arg-type]
+
+        def list_notes(self, **kwargs: object) -> JsonObject:
+            self.note_calls.append(dict(kwargs))
+            return super().list_notes(**kwargs)  # type: ignore[arg-type]
+
+    reader = OrderingSpyReader()
+    build_decision_context(
+        reader,
+        task_kind="summary",
+        query="baseline controls",
+        project_id="project-1",
+        limit=5,
+    )
+
+    assert len(reader.question_calls) == 1
+    assert reader.question_calls[0].get("updated_first") is True
+    assert reader.question_calls[0].get("recent_first", False) is False
+    assert len(reader.note_calls) == 1
+    assert reader.note_calls[0].get("recent_first") is True
+    assert "updated_first" not in reader.note_calls[0]
+
+
+def test_repository_reader_passes_updated_first_to_query_questions() -> None:
+    class SpyRepository:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def query_questions(self, **kwargs: object) -> tuple[list[object], int]:
+            self.calls.append(dict(kwargs))
+            return [], 0
+
+    repository = SpyRepository()
+    reader = RepositoryDecisionContextReader(repository)  # type: ignore[arg-type]
+
+    payload = reader.list_questions(project_id=None, limit=5, updated_first=True)
+
+    assert payload["meta"]["total"] == 0
+    assert len(repository.calls) == 1
+    assert repository.calls[0]["updated_first"] is True
+    assert repository.calls[0]["recent_first"] is False
+    assert repository.calls[0]["limit"] == 5
 
 
 def test_build_decision_context_reads_an_explicit_project_once() -> None:

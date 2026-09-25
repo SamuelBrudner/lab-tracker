@@ -35,8 +35,12 @@ from lab_tracker.models import (
 )
 from lab_tracker.services.graph_draft_applier import GraphPatchApplier
 from lab_tracker.services.graph_draft_context import (
+    CONTEXT_FIELD_CHAR_LIMIT,
+    CUE_TERM_LIMIT,
     GraphContextBuilder,
+    _capped_text,
     _compact_note,
+    _cue_terms,
     _graph_batch_context_summary,
     _source_artifact_packet,
 )
@@ -114,7 +118,58 @@ def test_graph_context_builder_image_only_packet_includes_summary() -> None:
     assert packet["mode"] == GraphDraftMode.IMAGE_ONLY.value
     assert packet["source_artifacts"][0]["type"] == "text"
     assert packet["context_summary"]["counts"]["source_artifacts"] == 1
+    assert packet["context_summary"]["counts"]["cue_matched"] == 0
+    assert packet["context_summary"]["counts"]["exploration_nodes"] == 0
+    assert packet["context_summary"]["slot_fill"] == {
+        "active_floor": 0,
+        "staged_fill": 0,
+        "cue_match": 0,
+        "recent": 0,
+        "alias_match": 0,
+    }
+    assert packet["context_summary"]["cue_terms"] == []
     assert "Image-only draft" in packet["warning"]
+
+
+def test_graph_context_builder_without_exploration_service_yields_empty_list() -> None:
+    builder = GraphContextBuilder(
+        projects=SimpleNamespace(),
+        questions=SimpleNamespace(),
+        notes=SimpleNamespace(),
+        sessions=SimpleNamespace(),
+        datasets=SimpleNamespace(),
+        analyses=SimpleNamespace(),
+        claims=SimpleNamespace(),
+        visualizations=SimpleNamespace(),
+        exploration=None,
+    )
+
+    assert builder._recent_exploration_nodes(uuid4()) == []
+
+
+def test_cue_terms_are_rare_first_stopword_free_and_bounded() -> None:
+    texts = [
+        "Rig 2 fly 12 kynurenine assay",
+        "the assay with plate 3",
+        "kynurenine assay repeat",
+    ]
+
+    # Document frequency ascending, then longest token, then alphabetical.
+    # 'the'/'with' are stopwords, 'rig'/'fly' are below the minimum length,
+    # and '2'/'12'/'3' are all-digit tokens.
+    assert _cue_terms(texts) == ["repeat", "plate", "kynurenine", "assay"]
+    assert _cue_terms(texts) == _cue_terms(texts)
+
+    many_tokens = " ".join(f"token{index:02d}" for index in range(30))
+    assert len(_cue_terms([many_tokens])) == CUE_TERM_LIMIT
+    assert _cue_terms(["the and with 12 rig"]) == []
+
+
+def test_capped_text_caps_at_context_field_limit() -> None:
+    assert _capped_text("x" * 300) == "x" * CONTEXT_FIELD_CHAR_LIMIT
+    assert len(_capped_text("x" * 300) or "") == 240
+    assert _capped_text(None) is None
+    assert _capped_text("") is None
 
 
 def test_graph_patch_validator_parses_operations_and_checks_payload_references() -> None:
@@ -156,13 +211,18 @@ def test_graph_patch_response_schema_requires_non_empty_source_note_ids() -> Non
 
 
 def test_graph_draft_prompt_versions_and_source_ref_contract_are_updated() -> None:
-    assert PROMPT_VERSION == "multimodal-graph-draft-v3"
-    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v6"
-    assert ANALYSIS_PROMPT_VERSION == "analysis-graph-draft-v3"
+    assert PROMPT_VERSION == "multimodal-graph-draft-v4"
+    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v7"
+    assert ANALYSIS_PROMPT_VERSION == "analysis-graph-draft-v4"
     for instructions in (_instructions(), _batch_instructions(), _analysis_instructions()):
         assert "source_note_ids" in instructions
         assert "never invent" in instructions.lower()
         assert "trusted_api_payload_contract" in instructions
+    for instructions in (_instructions(), _batch_instructions()):
+        assert "selection_reason" in instructions
+        assert "exploration_nodes" in instructions
+        assert "cue_match" in instructions
+        assert "captured_by_current_user" in instructions
     assert "non-empty raw_content" in _batch_instructions()
     assert "metadata.title" in _batch_instructions()
 
@@ -889,4 +949,4 @@ def test_batch_instructions_are_narrative_first_with_terse_capture_guardrail() -
     # Stays subordinate to the supported-changes guardrail.
     assert "supported by the source artifacts" in instructions
     # The summary contract changed (now a narrative), so the version bumps.
-    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v6"
+    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v7"

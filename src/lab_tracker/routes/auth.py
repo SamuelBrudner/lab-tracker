@@ -301,15 +301,12 @@ def _graph_draft_provider_readiness(settings) -> tuple[str, bool]:
     provider_aliases = {
         "claude": "anthropic",
         "gemini": "google",
-        "agentic-openai": "agentic",
-        "agentic_openai": "agentic",
     }
     provider = provider_aliases.get(provider, provider)
     credential_fields = {
         "openai": "openai_api_key",
         "anthropic": "anthropic_api_key",
         "google": "google_api_key",
-        "agentic": "openai_api_key",
     }
     credential_field = credential_fields.get(provider)
     if credential_field is None:
