@@ -36,6 +36,17 @@ class PermissionDeniedError(AuthError):
     """
 
 
+class ServiceScopeDeniedError(PermissionDeniedError):
+    """An lpat_ token's scope forbids this request body or parameter.
+
+    The route path itself is allowed for the token (the middleware policy let
+    the request through), but what it asks for — a committed note status, an
+    evidence bundle with ``dry_run=false`` — exceeds the scope. Maps to HTTP
+    ``403 service_forbidden`` so MCP clients steer to a capable credential
+    (``use_capable_credential``) instead of requesting project access.
+    """
+
+
 class StoreAuthorityDeniedError(LabTrackerError):
     """A data-store grant did not authorize the requested registration."""
 

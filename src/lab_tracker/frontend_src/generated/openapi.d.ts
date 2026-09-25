@@ -1116,7 +1116,7 @@ export interface components {
       "label": string;
       "read_only"?: boolean;
       "role"?: components["schemas"]["Role"];
-      "scope"?: "all" | "batch_run_due";
+      "scope"?: "all" | "batch_run_due" | "stage_evidence";
     };
     "PersonalAccessTokenIssuedRead": {
       "created_at": string;

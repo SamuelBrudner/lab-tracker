@@ -20,6 +20,7 @@ from lab_tracker.errors import (
     PayloadTooLargeError,
     PermissionDeniedError,
     RateLimitError,
+    ServiceScopeDeniedError,
     StoreAuthorityDeniedError,
     ValidationError,
 )
@@ -95,6 +96,19 @@ def register_error_handlers(app: FastAPI) -> None:
             exc=exc,
         )
         return error_response(http_status.HTTP_401_UNAUTHORIZED, "auth_error", str(exc))
+
+    @app.exception_handler(ServiceScopeDeniedError)
+    def _handle_service_scope_denied_error(request: Request, exc: ServiceScopeDeniedError):
+        # The token's scope, not the user's project or role access, blocks the
+        # request body: the same code the middleware uses for a refused path, so
+        # clients steer to a capable credential instead of requesting access.
+        _log_handled_error(
+            request,
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            code="service_forbidden",
+            exc=exc,
+        )
+        return error_response(http_status.HTTP_403_FORBIDDEN, "service_forbidden", str(exc))
 
     @app.exception_handler(PermissionDeniedError)
     def _handle_permission_denied_error(request: Request, exc: PermissionDeniedError):

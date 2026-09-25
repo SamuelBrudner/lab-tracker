@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
+from datetime import timedelta
 from uuid import uuid4
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from lab_tracker.auth import Role
+from lab_tracker.auth import Role, utc_now
 from lab_tracker.mcp_api_client import LabTrackerAPIClient, MCPSettings
 
 
@@ -786,3 +787,115 @@ def test_non_admin_bundle_member_cannot_probe_cross_project_component_ids(
         manifest_note_responses[0].json()["error"]
         == manifest_note_responses[1].json()["error"]
     )
+
+
+def _stage_evidence_token_headers(
+    client: TestClient, admin_auth_headers: dict[str, str], project_id: str
+) -> dict[str, str]:
+    # A personal token uses its own role, so its user needs project membership.
+    user_id = client.get("/auth/me", headers=admin_auth_headers).json()["data"]["user_id"]
+    membership = client.post(
+        f"/projects/{project_id}/members",
+        json={"user_id": user_id, "role": "contributor"},
+        headers=admin_auth_headers,
+    )
+    assert membership.status_code == 201, membership.text
+    response = client.post(
+        "/auth/tokens",
+        json={
+            "label": "Stage hook",
+            "role": "editor",
+            "read_only": False,
+            "scope": "stage_evidence",
+            "expires_at": (utc_now() + timedelta(days=7)).isoformat(),
+        },
+        headers=admin_auth_headers,
+    )
+    assert response.status_code == 201, response.text
+    return {"Authorization": f"Bearer {response.json()['data']['secret']}"}
+
+
+def _complete_create_bundle(project_id: str, question_id: str, **extra: object) -> dict:
+    return {
+        "project_id": project_id,
+        "primary_question_id": question_id,
+        "dataset": {"kind": "create"},
+        "analysis": {"kind": "create", "method_hash": "method-v1", "code_version": "code-v1"},
+        "claim": {"kind": "create", "statement": "Agent-authored claim.", "confidence": 60},
+        "source_note": {"kind": "create", "raw_content": "Agent-authored note"},
+        "dry_run": False,
+        "idempotency_key": "origin-bundle",
+        **extra,
+    }
+
+
+def test_stage_evidence_token_can_preview_but_not_commit_bundles(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    headers = _stage_evidence_token_headers(client, admin_auth_headers, project_id)
+
+    preview = client.post(
+        "/evidence-bundles",
+        json={
+            "project_id": project_id,
+            "source_note": {"kind": "create", "raw_content": "Preview only"},
+        },
+        headers=headers,
+    )
+    commit = client.post("/evidence-bundles", json=_note_bundle(project_id), headers=headers)
+
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["data"]["outcome"] == "preview"
+    assert commit.status_code == 403, commit.text
+    assert commit.json()["error"]["code"] == "service_forbidden"
+    notes = client.get("/notes", params={"project_id": project_id}, headers=admin_auth_headers)
+    assert notes.json()["data"] == []
+
+
+def test_evidence_bundle_origin_is_applied_to_every_created_component(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    question_id = _question(client, admin_auth_headers, project_id)
+
+    response = client.post(
+        "/evidence-bundles",
+        json=_complete_create_bundle(project_id, question_id, origin="ai_executed"),
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 201, response.text
+    ids = response.json()["data"]["component_ids"]
+    for path in (
+        f"/datasets/{ids['dataset_id']}",
+        f"/analyses/{ids['analysis_id']}",
+        f"/claims/{ids['claim_id']}",
+        f"/notes/{ids['source_note_id']}",
+    ):
+        fetched = client.get(path, headers=admin_auth_headers)
+        assert fetched.status_code == 200, fetched.text
+        assert fetched.json()["data"]["origin"] == "ai_executed", path
+        # A browser session declares the origin but is not a provider.
+        assert fetched.json()["data"]["origin_provider"] is None, path
+
+
+def test_evidence_bundle_rejects_ai_suggested_origin(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+
+    for reserved in ("ai_suggested", "user_revised"):
+        response = client.post(
+            "/evidence-bundles",
+            json={
+                "project_id": project_id,
+                "source_note": {"kind": "create", "raw_content": "Reserved origin"},
+                "origin": reserved,
+            },
+            headers=admin_auth_headers,
+        )
+        assert response.status_code == 422, response.text

@@ -91,13 +91,6 @@ def _agent_iri(base_url: str, user_id: str) -> str:
     return f"{normalized}/agents/{quote(user_id, safe='')}"
 
 
-def _attribution_value(base_url: str, user_ids: list[str]) -> dict[str, str] | list[dict[str, str]]:
-    refs = [{"@id": _agent_iri(base_url, user_id)} for user_id in user_ids]
-    if len(refs) == 1:
-        return refs[0]
-    return refs
-
-
 def _unique_user_ids(user_ids: list[str | None]) -> list[str]:
     seen: set[str] = set()
     unique: list[str] = []
@@ -123,6 +116,16 @@ def _draft_activity_iri(base_url: str, change_set_id: UUID) -> str:
 
 def _software_agent_iri(base_url: str, change_set_id: UUID) -> str:
     return _synthetic_child_iri(_draft_activity_iri(base_url, change_set_id), "software-agent")
+
+
+def _executing_agent_iri(entity_iri: str) -> str:
+    """IRI of the agent an ai_executed entity is attributed to when no draft exists."""
+    return _synthetic_child_iri(entity_iri, "software-agent")
+
+
+def _attribute_to_user(node: dict[str, object], base_url: str, user_id: str) -> None:
+    """Attribute ``node`` to a person, keeping any agent attribution already present."""
+    _append_id_ref(node, "wasAttributedTo", {"@id": _agent_iri(base_url, user_id)})
 
 
 def _append_id_ref(node: dict[str, object], key: str, ref: dict[str, str]) -> None:
@@ -222,6 +225,46 @@ def _before_revision_iri(entity_iri: str, change_set_id: object) -> str:
     return _synthetic_child_iri(entity_iri, "versions", "before", change_set_id)
 
 
+def _ai_agent_attributes(entity: object) -> dict[str, object]:
+    """The provider/model/prompt attributes recorded for an AI-authored entity."""
+    attributes: dict[str, object] = {}
+    for attribute, key in (
+        ("origin_provider", "aiProvider"),
+        ("origin_model", "aiModel"),
+        ("origin_prompt_version", "aiPromptVersion"),
+    ):
+        value = getattr(entity, attribute, None)
+        if value:
+            attributes[key] = value
+    return attributes
+
+
+def _attribute_to_executing_agent(
+    base_url: str,
+    node: dict[str, object],
+    entity: object,
+) -> None:
+    """Attribute a direct ai_executed write to its per-entity software agent."""
+    entity_iri = _entity_iri(base_url, entity)
+    if entity_iri is not None:
+        _append_id_ref(node, "wasAttributedTo", {"@id": _executing_agent_iri(entity_iri)})
+
+
+def _executing_agent_nodes(base_url: str, entity: object) -> list[dict[str, object]]:
+    """The software-agent node for an ai_executed entity that has no change set."""
+    if _entity_origin_value(entity) != EntityOrigin.AI_EXECUTED:
+        return []
+    entity_iri = _entity_iri(base_url, entity)
+    if entity_iri is None:
+        return []
+    agent_node: dict[str, object] = {
+        "@id": _executing_agent_iri(entity_iri),
+        "@type": "prov:SoftwareAgent",
+    }
+    agent_node.update(_ai_agent_attributes(entity))
+    return [agent_node]
+
+
 def _apply_origin_provenance(
     base_url: str,
     node: dict[str, object],
@@ -232,6 +275,10 @@ def _apply_origin_provenance(
     _classify(node, ("entityOrigin", origin.value))
     change_set_id = getattr(entity, "change_set_id", None)
     if change_set_id is None:
+        if origin == EntityOrigin.AI_EXECUTED:
+            # A direct agent write has no draft activity; the agent node itself
+            # is materialized by _origin_provenance_nodes.
+            _attribute_to_executing_agent(base_url, node, entity)
         return
     draft_activity = {"@id": _draft_activity_iri(base_url, change_set_id)}
     node["changeSet"] = draft_activity
@@ -249,7 +296,7 @@ def _apply_origin_provenance(
 def _origin_provenance_nodes(base_url: str, entity: object) -> list[dict[str, object]]:
     change_set_id = getattr(entity, "change_set_id", None)
     if change_set_id is None:
-        return []
+        return _executing_agent_nodes(base_url, entity)
     activity_iri = _draft_activity_iri(base_url, change_set_id)
     agent_iri = _software_agent_iri(base_url, change_set_id)
     activity_node: dict[str, object] = {
@@ -263,12 +310,7 @@ def _origin_provenance_nodes(base_url: str, entity: object) -> list[dict[str, ob
         "@id": agent_iri,
         "@type": "prov:SoftwareAgent",
     }
-    if getattr(entity, "origin_provider", None):
-        agent_node["aiProvider"] = entity.origin_provider
-    if getattr(entity, "origin_model", None):
-        agent_node["aiModel"] = entity.origin_model
-    if getattr(entity, "origin_prompt_version", None):
-        agent_node["aiPromptVersion"] = entity.origin_prompt_version
+    agent_node.update(_ai_agent_attributes(entity))
     nodes = [activity_node, agent_node]
     if _entity_origin_value(entity) == EntityOrigin.USER_REVISED:
         # Materialize the pre-revision state that the entity's prov:wasRevisionOf
@@ -536,7 +578,7 @@ def build_dataset_provenance_document(
         dataset_node["terminalReason"] = dataset.terminal_reason
     creator_user_id = _creator_user_id(dataset.created_by_user_id, dataset.created_by)
     if creator_user_id is not None:
-        dataset_node["wasAttributedTo"] = {"@id": _agent_iri(base_url, creator_user_id)}
+        _attribute_to_user(dataset_node, base_url, creator_user_id)
         _add_person_with_supervision(
             people,
             base_url,
@@ -839,8 +881,8 @@ def _claim_node(
     if claim.refuting_outcome:
         node["refutingOutcome"] = claim.refuting_outcome
     _apply_origin_provenance(base_url, node, claim)
-    if attributed_user_ids:
-        node["wasAttributedTo"] = _attribution_value(base_url, attributed_user_ids)
+    for user_id in attributed_user_ids:
+        _attribute_to_user(node, base_url, user_id)
     if claim.supported_by_dataset_ids:
         node["supportsDataset"] = [
             {"@id": _resource_iri(base_url, "datasets", dataset_id)}
@@ -990,7 +1032,7 @@ def _exploration_node_node(
     _apply_origin_provenance(base_url, payload, node)
     creator_user_id = _creator_user_id(node.created_by_user_id, node.created_by)
     if creator_user_id is not None:
-        payload["wasAttributedTo"] = {"@id": _agent_iri(base_url, creator_user_id)}
+        _attribute_to_user(payload, base_url, creator_user_id)
         _add_person_with_supervision(
             people,
             base_url,
@@ -1017,8 +1059,8 @@ def _visualization_node(
         "filePath": visualization.file_path,
     }
     _apply_origin_provenance(base_url, node, visualization)
-    if attributed_user_ids:
-        node["wasAttributedTo"] = _attribution_value(base_url, attributed_user_ids)
+    for user_id in attributed_user_ids:
+        _attribute_to_user(node, base_url, user_id)
     if visualization.caption:
         node["caption"] = visualization.caption
     if visualization.asset is not None:
@@ -1129,7 +1171,7 @@ def build_analysis_provenance_document(
             dataset_node["terminalReason"] = dataset.terminal_reason
         dataset_user_id = dataset_attribution[dataset.dataset_id]
         if dataset_user_id is not None:
-            dataset_node["wasAttributedTo"] = {"@id": _agent_iri(base_url, dataset_user_id)}
+            _attribute_to_user(dataset_node, base_url, dataset_user_id)
             _add_person_with_supervision(
                 people,
                 base_url,
@@ -1256,7 +1298,7 @@ def _question_node(
     _apply_origin_provenance(base_url, node, question)
     creator_user_id = _creator_user_id(question.created_by_user_id, question.created_by)
     if creator_user_id is not None:
-        node["wasAttributedTo"] = {"@id": _agent_iri(base_url, creator_user_id)}
+        _attribute_to_user(node, base_url, creator_user_id)
         _add_person_with_supervision(
             people,
             base_url,
@@ -1330,7 +1372,7 @@ def _note_node(
         ]
     creator_user_id = _creator_user_id(note.created_by_user_id, note.created_by)
     if creator_user_id is not None:
-        node["wasAttributedTo"] = {"@id": _agent_iri(base_url, creator_user_id)}
+        _attribute_to_user(node, base_url, creator_user_id)
         _add_person_with_supervision(
             people,
             base_url,

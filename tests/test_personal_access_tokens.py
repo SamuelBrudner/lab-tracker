@@ -14,9 +14,12 @@ from lab_tracker.auth import (
     LPAT_TOKEN_PREFIX,
     PAT_SCOPE_ALL,
     PAT_SCOPE_BATCH_RUN_DUE,
+    PAT_SCOPE_STAGE_EVIDENCE,
     PERSONAL_ACCESS_TOKEN_MAX_TTL,
+    AuthContext,
     AuthService,
     PersonalAccessTokenService,
+    PrincipalType,
     Role,
     _as_utc,
     service_principal_can_access,
@@ -542,3 +545,161 @@ def test_verify_token_rejects_a_token_whose_user_no_longer_exists(session_factor
 
     assert pat_service.verify_token(issued.secret) is None
 
+
+
+STAGE_NOTE_ID = "0f6a3c1e-2b4d-4c8e-9a1f-3d5e7b9c1a2b"
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    (
+        ("GET", "/projects"),
+        ("GET", f"/notes/{STAGE_NOTE_ID}"),
+        ("HEAD", "/health"),
+        ("POST", "/notes"),
+        ("POST", "/notes/upload-file"),
+        ("POST", "/notes/quick-capture"),
+        ("POST", "/evidence-bundles"),
+        ("POST", f"/notes/{STAGE_NOTE_ID}/graph-drafts"),
+        ("POST", f"/notes/{STAGE_NOTE_ID}/analysis-graph-drafts"),
+        ("POST", f"/notes/{STAGE_NOTE_ID}/transcript"),
+        ("PATCH", f"/notes/{STAGE_NOTE_ID}"),
+        ("POST", "/assistant/decision-context"),
+        ("POST", "/external-artifacts/resolve"),
+    ),
+)
+def test_stage_evidence_scope_allows_reads_captures_drafts_and_note_patches(
+    method: str,
+    path: str,
+) -> None:
+    assert service_principal_can_access(
+        method, path, read_only=False, role=Role.EDITOR, scope=PAT_SCOPE_STAGE_EVIDENCE
+    )
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    (
+        ("POST", "/projects"),
+        ("POST", "/questions"),
+        ("POST", "/datasets"),
+        ("POST", "/analyses"),
+        ("POST", "/claims"),
+        ("POST", "/visualizations"),
+        ("POST", "/goals"),
+        ("POST", "/batches/run-due"),
+        ("POST", "/batches/run-now"),
+        ("POST", f"/graph-drafts/{STAGE_NOTE_ID}/commit"),
+        ("POST", f"/graph-drafts/{STAGE_NOTE_ID}/accept"),
+        ("PATCH", f"/questions/{STAGE_NOTE_ID}"),
+        ("DELETE", f"/notes/{STAGE_NOTE_ID}"),
+        ("POST", f"/notes/{STAGE_NOTE_ID}/archive"),
+        ("GET", "/auth/me"),
+        ("POST", "/auth/tokens"),
+    ),
+)
+def test_stage_evidence_scope_denies_every_other_write(method: str, path: str) -> None:
+    # Even the strongest role and a write-enabled token stay inside the allow-list.
+    assert not service_principal_can_access(
+        method, path, read_only=False, role=Role.ADMIN, scope=PAT_SCOPE_STAGE_EVIDENCE
+    )
+
+
+@pytest.mark.parametrize(
+    ("read_only", "role"),
+    ((True, Role.EDITOR), (True, Role.ADMIN), (False, Role.VIEWER)),
+    ids=["read-only-editor", "read-only-admin", "write-enabled-viewer"],
+)
+def test_stage_evidence_scope_respects_read_only_and_viewer_role(
+    read_only: bool,
+    role: Role,
+) -> None:
+    for method, path in (
+        ("GET", "/projects"),
+        ("POST", "/assistant/decision-context"),
+        ("POST", "/external-artifacts/resolve"),
+    ):
+        assert service_principal_can_access(
+            method, path, read_only=read_only, role=role, scope=PAT_SCOPE_STAGE_EVIDENCE
+        ), (method, path)
+    for method, path in (
+        ("POST", "/notes"),
+        ("POST", "/notes/quick-capture"),
+        ("POST", "/evidence-bundles"),
+        ("POST", f"/notes/{STAGE_NOTE_ID}/graph-drafts"),
+        ("PATCH", f"/notes/{STAGE_NOTE_ID}"),
+    ):
+        assert not service_principal_can_access(
+            method, path, read_only=read_only, role=role, scope=PAT_SCOPE_STAGE_EVIDENCE
+        ), (method, path)
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    (
+        ("POST", f"/notes/{STAGE_NOTE_ID}/graph-drafts/extra"),
+        ("POST", f"/notes/{STAGE_NOTE_ID}/graph-drafts/"),
+        ("POST", "/notesx"),
+        ("POST", "/notes/"),
+        ("POST", "/notes//graph-drafts"),
+        ("POST", f"//notes/{STAGE_NOTE_ID}/graph-drafts"),
+        ("POST", f"/notes/{STAGE_NOTE_ID}/commit"),
+        ("PATCH", "/notes/"),
+        ("PATCH", f"/notes/{STAGE_NOTE_ID}/transcript"),
+        ("PATCH", f"/questions/{STAGE_NOTE_ID}"),
+        ("PUT", f"/notes/{STAGE_NOTE_ID}"),
+    ),
+)
+def test_stage_evidence_scope_rejects_near_miss_note_paths(method: str, path: str) -> None:
+    assert not service_principal_can_access(
+        method, path, read_only=False, role=Role.EDITOR, scope=PAT_SCOPE_STAGE_EVIDENCE
+    )
+
+
+def test_issue_token_records_stage_evidence_scope(session_factory):
+    auth_service, pat_service = _services(session_factory)
+    admin = auth_service.register_user("admin", "secret", Role.ADMIN)
+
+    issued = pat_service.issue_token(
+        admin,
+        label="Capture hook",
+        role=Role.EDITOR,
+        read_only=False,
+        scope=PAT_SCOPE_STAGE_EVIDENCE,
+        expires_at=utc_now() + timedelta(days=7),
+    )
+
+    assert issued.token.scope == PAT_SCOPE_STAGE_EVIDENCE
+    principal = pat_service.verify_token(issued.secret)
+    assert principal is not None
+    assert principal.scope == "stage_evidence"
+    assert principal.label == "Capture hook"
+
+
+def test_auth_context_reports_stage_evidence_scope() -> None:
+    user_id = uuid4()
+    stage_scoped = AuthContext(
+        user_id=user_id,
+        role=Role.EDITOR,
+        principal_type=PrincipalType.SERVICE,
+        principal_label="Capture hook",
+        service_scope=PAT_SCOPE_STAGE_EVIDENCE,
+    )
+    all_scoped = AuthContext(
+        user_id=user_id,
+        role=Role.EDITOR,
+        principal_type=PrincipalType.SERVICE,
+        principal_label="Agent",
+        service_scope=PAT_SCOPE_ALL,
+    )
+    # The flag is about the presenting credential: a browser session never
+    # carries a scope, and a stray scope value on a USER principal is inert.
+    browser = AuthContext(user_id=user_id, role=Role.EDITOR)
+    mislabelled_user = AuthContext(
+        user_id=user_id, role=Role.EDITOR, service_scope=PAT_SCOPE_STAGE_EVIDENCE
+    )
+
+    assert stage_scoped.is_stage_evidence_scoped is True
+    assert all_scoped.is_stage_evidence_scoped is False
+    assert browser.is_stage_evidence_scoped is False
+    assert mislabelled_user.is_stage_evidence_scoped is False

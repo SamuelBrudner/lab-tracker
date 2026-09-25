@@ -19,6 +19,7 @@ from lab_tracker.config import get_settings
 from lab_tracker.errors import ValidationError
 from lab_tracker.graph_drafting import make_graph_draft_client
 from lab_tracker.models import (
+    EntityOrigin,
     EntityType,
     Note,
     NoteMetadataScalar,
@@ -55,12 +56,15 @@ from .shared import (
     content_disposition_header,
     created_by_filter_value,
     ensure_project_contributor,
+    ensure_scope_allows_note_status,
     handlers_from_request,
     list_response,
     note_default_status,
+    origin_stamp,
     parse_entity_refs_form,
     parse_metadata_form,
     record_usage_view,
+    stamp_kwargs,
     validate_pagination,
 )
 
@@ -85,15 +89,20 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
     def create_note(payload: NoteCreate, request: Request, response: Response):
         actor = actor_from_request(request)
         ensure_project_contributor(request, payload.project_id)
+        status = payload.status or note_default_status()
+        ensure_scope_allows_note_status(actor, status)
+        metadata = device_capture_metadata(actor, payload.metadata)
+        stamp = origin_stamp(actor, payload.origin)
         result = api_from_request(request, api).create_note_result(
             project_id=payload.project_id,
             raw_content=payload.raw_content,
             transcribed_text=payload.transcribed_text,
             targets=payload.targets,
-            metadata=device_capture_metadata(actor, payload.metadata),
+            metadata=metadata,
             client_capture_id=payload.client_capture_id,
-            status=payload.status or note_default_status(),
+            status=status,
             actor=actor,
+            **stamp_kwargs(stamp),
         )
         if result.reused:
             response.status_code = http_status.HTTP_200_OK
@@ -119,6 +128,8 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         actor = actor_from_request(request)
         request_api = api_from_request(request, api)
         _ensure_capture_project_writable(request, request_api, project_id)
+        resolved_status = status or note_default_status()
+        ensure_scope_allows_note_status(actor, resolved_status)
         filename = (file.filename or "").strip()
         if not filename:
             raise ValidationError("filename must not be empty.")
@@ -129,6 +140,9 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         content_type = validate_upload_content_type(file.content_type)
         parsed_targets = parse_entity_refs_form(targets)
         parsed_metadata = device_capture_metadata(actor, parse_metadata_form(metadata))
+        # Multipart captures carry no origin field: a person or a hook captured
+        # the file, so the origin stays "user" while the token label is recorded.
+        stamp = origin_stamp(actor, EntityOrigin.USER)
         asset = request_api.store_note_raw_asset(
             file.file,
             filename=filename,
@@ -143,8 +157,9 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
             targets=parsed_targets,
             metadata=enriched_metadata,
             client_capture_id=client_capture_id,
-            status=status or note_default_status(),
+            status=resolved_status,
             actor=actor,
+            **stamp_kwargs(stamp),
         )
         if result.reused:
             response.status_code = http_status.HTTP_200_OK
@@ -174,6 +189,7 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         actor = actor_from_request(request)
         request_api = api_from_request(request, api)
         _ensure_capture_project_writable(request, request_api, project_id)
+        ensure_scope_allows_note_status(actor, NoteStatus.STAGED)
         filename = (file.filename or "").strip()
         if not filename:
             raise ValidationError("filename must not be empty.")
@@ -183,6 +199,7 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         )
         content_type = validate_upload_content_type(file.content_type)
         parsed_metadata = device_capture_metadata(actor, parse_metadata_form(metadata))
+        stamp = origin_stamp(actor, EntityOrigin.USER)
         asset = request_api.store_note_raw_asset(
             file.file,
             filename=filename,
@@ -197,6 +214,7 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
             client_capture_id=client_capture_id,
             status=NoteStatus.STAGED,
             actor=actor,
+            **stamp_kwargs(stamp),
         )
         if result.reused:
             response.status_code = http_status.HTTP_200_OK
@@ -330,10 +348,13 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         actor = actor_from_request(request)
         note = api_from_request(request, api).get_note(note_id)
         ensure_project_contributor(request, note.project_id)
+        fields = provided_fields(payload)
+        if "status" in fields:
+            ensure_scope_allows_note_status(actor, fields["status"])
         note = api_from_request(request, api).update_note(
             note_id,
             actor=actor,
-            **provided_fields(payload),
+            **fields,
         )
         return Envelope(data=note)
 

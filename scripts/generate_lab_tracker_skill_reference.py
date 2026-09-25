@@ -29,6 +29,22 @@ REQUEST_SCHEMAS = (
     ("Decision Context", "AssistantDecisionContextRequest"),
 )
 
+# Direct writes declare one of two origins; the shared enum also carries the
+# two values the graph-draft review path assigns, which these requests reject.
+ORIGIN_DECLARING_SCHEMA_NOTE = (
+    "`origin` accepts only `user` (default) or `ai_executed`; `ai_suggested` and "
+    "`user_revised` are reserved for the graph-draft review path and rejected."
+)
+ORIGIN_DECLARING_SCHEMAS = (
+    "QuestionCreate",
+    "NoteCreate",
+    "DatasetCreate",
+    "AnalysisCreate",
+    "ClaimCreate",
+    "GoalCreateFields",
+    "VisualizationCreate",
+)
+
 REQUEST_SCHEMA_NOTES = {
     "DataStoreCreate": (
         "Semantic requirement: provide exactly one of `project_id` or `group_id`.",
@@ -37,6 +53,7 @@ REQUEST_SCHEMA_NOTES = {
         "`object_table` and `database` appear in the shared `StoreKind` enum, but "
         "registration rejects them until their adapters and secret models exist.",
     ),
+    **{schema_name: (ORIGIN_DECLARING_SCHEMA_NOTE,) for schema_name in ORIGIN_DECLARING_SCHEMAS},
 }
 
 LIST_ENDPOINTS = (

@@ -1680,3 +1680,103 @@ def test_claim_document_requires_edge_source_claims():
             visualizations=[],
             claim_edges=[edge],
         )
+
+
+def _id_refs(value: object) -> set[str]:
+    refs = value if isinstance(value, list) else [value]
+    return {str(ref["@id"]) for ref in refs if isinstance(ref, dict)}
+
+
+def _ai_executed_claim_fixture(origin: EntityOrigin) -> tuple[Analysis, Dataset, Claim, UUID]:
+    analysis_id = UUID("55555555-bbbb-4bbb-8bbb-555555555555")
+    dataset_id = UUID("66666666-bbbb-4bbb-8bbb-666666666666")
+    claim_id = UUID("77777777-bbbb-4bbb-8bbb-777777777777")
+    creator_user_id = UUID("aaaaaaaa-bbbb-4bbb-8bbb-aaaaaaaaaaaa")
+    analysis = Analysis(
+        analysis_id=analysis_id,
+        project_id=uuid4(),
+        dataset_ids=[dataset_id],
+        method_hash="method-direct-agent",
+        code_version="v1",
+        status=AnalysisStatus.COMMITTED,
+    )
+    dataset = Dataset(
+        dataset_id=dataset_id,
+        project_id=analysis.project_id,
+        commit_hash="commit-direct-agent",
+        primary_question_id=uuid4(),
+        question_links=[],
+        commit_manifest=DatasetCommitManifest(),
+        status=DatasetStatus.COMMITTED,
+    )
+    claim = Claim(
+        claim_id=claim_id,
+        project_id=analysis.project_id,
+        statement="Directly written claim",
+        confidence=0.7,
+        status=ClaimStatus.SUPPORTED,
+        supported_by_analysis_ids=[analysis_id],
+        created_by_user_id=creator_user_id,
+        origin=origin,
+        origin_provider="Agent alpha",
+    )
+    return analysis, dataset, claim, creator_user_id
+
+
+def test_ai_executed_entity_without_change_set_attributes_a_software_agent():
+    analysis, dataset, claim, creator_user_id = _ai_executed_claim_fixture(
+        EntityOrigin.AI_EXECUTED
+    )
+
+    document = build_analysis_provenance_document(
+        "http://example.test",
+        analysis,
+        datasets=[dataset],
+        claims=[claim],
+        visualizations=[],
+    )
+
+    claim_iri = f"http://example.test/claims/{claim.claim_id}"
+    agent_iri = f"{claim_iri}/software-agent"
+    claim_node = _node_by_id(document, claim_iri)
+    agent_node = _node_by_id(document, agent_iri)
+    assert claim_node["origin"] == "ai_executed"
+    assert "changeSet" not in claim_node
+    assert "wasGeneratedBy" not in claim_node
+    # The person who asked and the agent that wrote are both recorded.
+    assert _id_refs(claim_node["wasAttributedTo"]) == {
+        agent_iri,
+        f"http://example.test/agents/{creator_user_id}",
+    }
+    assert "lab:entityOrigin/ai_executed" in _classification_ids(claim_node)
+    assert _node_type_includes(agent_node, "prov:SoftwareAgent")
+    assert agent_node["aiProvider"] == "Agent alpha"
+    assert "aiModel" not in agent_node
+    assert "aiPromptVersion" not in agent_node
+    # No draft activity exists for a direct write.
+    assert not any(
+        isinstance(node, dict) and node.get("entityType") == "graph_change_set"
+        for node in document["@graph"]
+    )
+
+
+def test_user_origin_without_change_set_emits_no_agent_node():
+    analysis, dataset, claim, creator_user_id = _ai_executed_claim_fixture(EntityOrigin.USER)
+
+    document = build_analysis_provenance_document(
+        "http://example.test",
+        analysis,
+        datasets=[dataset],
+        claims=[claim],
+        visualizations=[],
+    )
+
+    claim_node = _node_by_id(document, f"http://example.test/claims/{claim.claim_id}")
+    assert claim_node["origin"] == "user"
+    assert claim_node["wasAttributedTo"] == {
+        "@id": f"http://example.test/agents/{creator_user_id}"
+    }
+    assert not any(
+        isinstance(node, dict) and str(node.get("@id", "")).endswith("/software-agent")
+        for node in document["@graph"]
+    )

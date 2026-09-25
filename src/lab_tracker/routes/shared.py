@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Annotated, Any
 from urllib.parse import quote, urlsplit, urlunsplit
@@ -24,11 +25,12 @@ from lab_tracker.auth import (
     extract_bearer_token,
     resolve_session_user,
 )
-from lab_tracker.errors import AuthError, ValidationError
+from lab_tracker.errors import AuthError, ServiceScopeDeniedError, ValidationError
 from lab_tracker.instance_url import normalize_instance_base_url
 from lab_tracker.models import (
     AnalysisStatus,
     DatasetStatus,
+    EntityOrigin,
     EntityRef,
     NoteMetadataScalar,
     NoteStatus,
@@ -110,6 +112,59 @@ def ensure_project_owner(request: Request, project_id: Any) -> None:
 def ensure_group_owner(request: Request, group_id: Any) -> None:
     actor = actor_from_request(request)
     api_from_request(request).require_group_owner(group_id, actor=actor)
+
+
+# The only note statuses a stage_evidence-scoped token may create or patch to:
+# staging feeds the human review queue, committing bypasses it.
+STAGE_EVIDENCE_NOTE_STATUSES = frozenset({NoteStatus.STAGED})
+# Width of every entity's origin_provider column (db_models: String(80)).
+# Token labels may be up to 150 characters, so the stamp truncates to fit.
+ORIGIN_PROVIDER_MAX_LENGTH = 80
+
+
+def ensure_scope_allows_note_status(actor: AuthContext, status: NoteStatus) -> None:
+    """Body-level gate: a stage_evidence token may only stage notes."""
+    if actor.is_stage_evidence_scoped and status not in STAGE_EVIDENCE_NOTE_STATUSES:
+        raise ServiceScopeDeniedError(
+            "This token may only stage notes; committing requires a person "
+            "or an all-scope token."
+        )
+
+
+def ensure_scope_allows_evidence_bundle(actor: AuthContext, *, dry_run: bool) -> None:
+    """Body-level gate: a stage_evidence token may only preview evidence bundles."""
+    if actor.is_stage_evidence_scoped and not dry_run:
+        raise ServiceScopeDeniedError(
+            "This token may only preview evidence bundles (dry_run=true)."
+        )
+
+
+@dataclass(frozen=True)
+class OriginStamp:
+    """Origin fields a direct write records: the declared origin and the credential."""
+
+    origin: EntityOrigin
+    origin_provider: str | None
+
+
+def origin_stamp(actor: AuthContext, requested_origin: EntityOrigin) -> OriginStamp:
+    """Stamp a direct write with its declared origin and the writing token's label.
+
+    Every service-principal write records the token label as ``origin_provider``
+    (truncated to the column width) whatever origin it declared, so the record
+    shows which credential wrote it. Browser sessions and devices record none.
+    """
+    origin_provider = (
+        actor.principal_label[:ORIGIN_PROVIDER_MAX_LENGTH]
+        if actor.is_service and actor.principal_label
+        else None
+    )
+    return OriginStamp(origin=requested_origin, origin_provider=origin_provider)
+
+
+def stamp_kwargs(stamp: OriginStamp) -> dict[str, object]:
+    """Keyword arguments carrying a stamp into a service ``create_*`` call."""
+    return {"origin": stamp.origin, "origin_provider": stamp.origin_provider}
 
 
 def record_usage_view(

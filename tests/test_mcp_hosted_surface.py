@@ -83,6 +83,7 @@ def test_hosted_server_with_write_opt_in_never_registers_local_file_tools() -> N
 
     assert names == READ_TOOL_NAMES | (WRITE_TOOL_NAMES - LOCAL_FILE_TOOL_NAMES)
     assert "lab_tracker_record_evidence_bundle" in names
+    assert "lab_tracker_request_graph_draft" in names
     assert not names & LOCAL_FILE_TOOL_NAMES
 
 
@@ -195,7 +196,12 @@ def _bridged_settings(
 
 
 def _mint_token(
-    client: TestClient, headers: dict[str, str], *, role: str, read_only: bool
+    client: TestClient,
+    headers: dict[str, str],
+    *,
+    role: str,
+    read_only: bool,
+    scope: str = "all",
 ) -> str:
     response = client.post(
         "/auth/tokens",
@@ -203,7 +209,7 @@ def _mint_token(
             "label": f"hosted mcp {role} read_only={read_only}",
             "role": role,
             "read_only": read_only,
-            "scope": "all",
+            "scope": scope,
             "expires_at": (utc_now() + timedelta(days=7)).isoformat(),
         },
         headers=headers,
@@ -229,6 +235,50 @@ def test_hosted_read_only_check_accepts_a_read_only_lpat(
     assert len(client.get("/projects", headers=admin_auth_headers).json()["data"]) == (
         project_count
     )
+
+
+def _note_count(client: TestClient, headers: dict[str, str]) -> int:
+    return len(client.get("/notes", headers=headers).json()["data"])
+
+
+def test_hosted_read_only_check_refuses_a_stage_evidence_lpat(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The probe targets the real capture route, so a token whose only write
+    # grant is the stage_evidence scope is reported write-capable.
+    token = _mint_token(
+        client, admin_auth_headers, role="editor", read_only=False, scope="stage_evidence"
+    )
+    settings, requests, factory = _bridged_settings(client, token)
+    monkeypatch.setattr(mcp_server, "LabTrackerAPIClient", factory)
+    note_count = _note_count(client, admin_auth_headers)
+
+    with pytest.raises(SystemExit, match="can write"):
+        mcp_server._ensure_hosted_api_credential_is_read_only(settings)
+
+    assert [(request.method, request.url.path) for request in requests] == [("POST", "/notes")]
+    # Request validation rejects the empty body before any handler runs.
+    assert _note_count(client, admin_auth_headers) == note_count
+
+
+def test_hosted_read_only_check_accepts_a_read_only_stage_evidence_lpat(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token = _mint_token(
+        client, admin_auth_headers, role="editor", read_only=True, scope="stage_evidence"
+    )
+    settings, requests, factory = _bridged_settings(client, token)
+    monkeypatch.setattr(mcp_server, "LabTrackerAPIClient", factory)
+    note_count = _note_count(client, admin_auth_headers)
+
+    mcp_server._ensure_hosted_api_credential_is_read_only(settings)
+
+    assert [(request.method, request.url.path) for request in requests] == [("POST", "/notes")]
+    assert _note_count(client, admin_auth_headers) == note_count
 
 
 @pytest.mark.parametrize("role", ["editor", "admin"])
@@ -292,12 +342,22 @@ def test_hosted_read_only_check_requires_an_lpat_without_probing(
 @pytest.mark.parametrize(
     "response",
     [
-        httpx.Response(404, json={"detail": "Not Found"}),
-        httpx.Response(405, json={"detail": "Method Not Allowed"}),
+        # The API's answer to the probe's empty body once the token policy
+        # admitted the write: validation stops it before any handler runs.
+        httpx.Response(
+            422,
+            json={
+                "error": {
+                    "code": "request_validation_error",
+                    "message": "Request validation failed.",
+                    "issues": [],
+                }
+            },
+        ),
         httpx.Response(200, json={"data": {}}),
         httpx.Response(201, json={"data": {}}),
     ],
-    ids=["404", "405", "200", "201"],
+    ids=["422", "200", "201"],
 )
 def test_hosted_read_only_check_treats_an_unrefused_write_as_write_capable(
     monkeypatch: pytest.MonkeyPatch,
@@ -321,9 +381,12 @@ def test_hosted_read_only_check_treats_an_unrefused_write_as_write_capable(
     [
         httpx.Response(403, json={"error": {"code": "forbidden", "message": "nope"}}),
         httpx.Response(502, text="bad gateway"),
-        httpx.Response(422, json={"detail": "bad"}),
+        # The probe route exists; a missing route or method means the probe hit
+        # something other than the Lab Tracker API.
+        httpx.Response(404, json={"detail": "Not Found"}),
+        httpx.Response(405, json={"detail": "Method Not Allowed"}),
     ],
-    ids=["other-403", "502", "422"],
+    ids=["other-403", "502", "404", "405"],
 )
 def test_hosted_read_only_check_fails_closed_on_indeterminate_answers(
     monkeypatch: pytest.MonkeyPatch,

@@ -42,6 +42,7 @@ GOAL_ID = "55555555-5555-4555-8555-555555555555"
 QUESTION_ID = "66666666-6666-4666-8666-666666666666"
 VIZ_ID = "77777777-7777-4777-8777-777777777777"
 SESSION_ID = "88888888-8888-4888-8888-888888888888"
+NOTE_ID = "99999999-9999-4999-8999-999999999999"
 
 
 def _json_response(status_code: int, payload: dict) -> httpx.Response:
@@ -88,6 +89,12 @@ def test_fastmcp_registers_lab_tracker_tools() -> None:
     assert "lab_tracker_upload_visualization_file" in names
     assert "lab_tracker_record_evidence_bundle" in names
     assert "lab_tracker_list_question_refactors" in names
+    assert "lab_tracker_request_graph_draft" in names
+    assert "lab_tracker_list_my_drafts" in names
+    assert "created staged" in (tools_by_name["lab_tracker_create_note"].description or "")
+    assert "never accept or commit" in (
+        tools_by_name["lab_tracker_list_my_drafts"].description or ""
+    )
     assert mcp_server.server.instructions is not None
     assert "CALL THIS FIRST before research-facing decisions" in (mcp_server.server.instructions)
     assert "what to plot" in mcp_server.server.instructions
@@ -2960,3 +2967,202 @@ def test_mcp_entrypoint_initializes_over_stdio(tmp_path: Path) -> None:
                     assert "lab_tracker_health" in {tool.name for tool in tools.tools}
 
     asyncio.run(check_server())
+
+
+def test_client_request_graph_draft_posts_to_note_route() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "POST" and request.url.path == f"/notes/{NOTE_ID}/graph-drafts":
+            body = json.loads(request.content.decode("utf-8"))
+            assert body == {"mode": "image_only", "user_hint": "focus on the axis labels"}
+            return _json_response(201, {"data": {"change_set_id": "cs-1", "status": "ready"}})
+        return _json_response(404, {"error": {"message": "not found"}})
+
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(base_url="http://testserver"),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        payload = client.request_graph_draft(
+            note_id=NOTE_ID, mode="image_only", user_hint="focus on the axis labels"
+        )
+        # Batch drafting is not a note-scoped mode; refused before any request.
+        with pytest.raises(mcp_server.LabTrackerAPIError, match="Allowed graph draft mode"):
+            client.request_graph_draft(note_id=NOTE_ID, mode="graph_batch")
+        with pytest.raises(mcp_server.LabTrackerAPIValidationError, match="note_id"):
+            client.request_graph_draft(note_id="../graph-drafts")
+    finally:
+        client.close()
+
+    assert payload == {"data": {"change_set_id": "cs-1", "status": "ready"}}
+    assert [request.url.path for request in requests] == [f"/notes/{NOTE_ID}/graph-drafts"]
+
+
+def test_client_list_my_drafts_sends_mine_true() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return _json_response(200, {"data": [], "meta": {"total": 0}})
+
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(base_url="http://testserver"),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        client.list_my_drafts()
+        client.list_my_drafts(status="ready", project_id=PROJECT_ID, limit=10)
+        with pytest.raises(mcp_server.LabTrackerAPIError, match="Allowed draft statuses"):
+            client.list_my_drafts(status="pending")
+        with pytest.raises(mcp_server.LabTrackerAPIValidationError, match="project_id"):
+            client.list_my_drafts(project_id="not-a-uuid")
+    finally:
+        client.close()
+
+    assert [request.url.path for request in requests] == ["/batches", "/batches"]
+    assert dict(requests[0].url.params) == {"mine": "true", "limit": "200", "offset": "0"}
+    assert dict(requests[1].url.params) == {
+        "mine": "true",
+        "status": "ready",
+        "project_id": PROJECT_ID,
+        "limit": "10",
+        "offset": "0",
+    }
+
+
+def test_client_create_calls_forward_origin_only_when_given() -> None:
+    bodies: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content.decode("utf-8")))
+        return _json_response(201, {"data": {}})
+
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(base_url="http://testserver"),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        client.create_note(project_id="project-1", raw_content="capture", origin="ai_executed")
+        client.create_note(project_id="project-1", raw_content="capture")
+        client.create_question(project_id=PROJECT_ID, text="Which?", origin="user")
+        client.create_goal(
+            project_id=PROJECT_ID, goal_type="paper", title="Goal", origin="ai_executed"
+        )
+        client.record_evidence_bundle(
+            project_id=PROJECT_ID,
+            source_note={"kind": "create", "raw_content": "n"},
+            origin="ai_executed",
+        )
+        with pytest.raises(mcp_server.LabTrackerAPIError, match="Allowed origin"):
+            client.create_note(project_id="project-1", raw_content="capture", origin="ai_suggested")
+    finally:
+        client.close()
+
+    assert bodies[0]["origin"] == "ai_executed"
+    assert "origin" not in bodies[1]
+    assert bodies[2]["origin"] == "user"
+    assert bodies[3]["origin"] == "ai_executed"
+    assert bodies[4]["origin"] == "ai_executed"
+    assert len(bodies) == 5
+
+
+def test_request_graph_draft_tool_posts_and_hints_review_queue(monkeypatch) -> None:
+    from lab_tracker.mcp_tools import write as write_tools
+
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return _json_response(201, {"data": {"change_set_id": "cs-1", "status": "ready"}})
+
+    api_client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(base_url="http://testserver"),
+        transport=httpx.MockTransport(handler),
+    )
+    monkeypatch.setattr(write_tools, "client_from_env", lambda: api_client)
+
+    payload = write_tools.lab_tracker_request_graph_draft(NOTE_ID, user_hint="the y axis")
+
+    assert [(request.method, request.url.path) for request in requests] == [
+        ("POST", f"/notes/{NOTE_ID}/graph-drafts")
+    ]
+    assert json.loads(requests[0].content) == {"mode": "graph_context", "user_hint": "the y axis"}
+    assert payload["data"]["change_set_id"] == "cs-1"
+    assert payload["next_action"]["tool"] == "lab_tracker_list_my_drafts"
+    assert "never accept or commit" in payload["next_action"]["reason"]
+
+
+def test_write_tools_forward_origin(monkeypatch) -> None:
+    from lab_tracker.mcp_tools import write as write_tools
+
+    captured: dict[str, dict] = {}
+
+    class FakeClient:
+        def create_note(self, **kwargs):
+            captured["note"] = kwargs
+            return {"data": {"note_id": "note-1"}}
+
+        def create_question(self, **kwargs):
+            captured["question"] = kwargs
+            return {"data": {"question_id": "question-1"}}
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(write_tools, "client_from_env", lambda: FakeClient())
+
+    write_tools.lab_tracker_create_note(
+        project_id="project-1", raw_content="capture", origin="ai_executed"
+    )
+    write_tools.lab_tracker_create_question(project_id="project-1", text="Which?")
+
+    assert captured["note"]["origin"] == "ai_executed"
+    assert captured["question"]["origin"] is None
+
+
+def test_list_my_drafts_is_a_registered_read_tool() -> None:
+    tools = asyncio.run(mcp_server.server.list_tools())
+    tool = {item.name: item for item in tools}["lab_tracker_list_my_drafts"]
+
+    assert "lab_tracker_list_my_drafts" in {tool.__name__ for tool in READ_TOOLS}
+    assert "lab_tracker_list_my_drafts" not in {tool.__name__ for tool in WRITE_TOOLS}
+    assert tool.annotations is not None
+    assert tool.annotations.readOnlyHint is True
+    draft_request = {item.name: item for item in tools}["lab_tracker_request_graph_draft"]
+    assert draft_request.annotations is not None
+    assert draft_request.annotations.readOnlyHint is False
+    assert draft_request.annotations.destructiveHint is False
+
+
+def test_list_my_drafts_tool_calls_batches_mine(monkeypatch) -> None:
+    from lab_tracker.mcp_tools import read as read_tools
+
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return _json_response(200, {"data": [], "meta": {"total": 0}})
+
+    api_client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(base_url="http://testserver"),
+        transport=httpx.MockTransport(handler),
+    )
+    read_tools.close_cached_read_client()
+    monkeypatch.setattr(read_tools, "client_from_env", lambda: api_client)
+    try:
+        payload = read_tools.lab_tracker_list_my_drafts(status="ready")
+    finally:
+        read_tools.close_cached_read_client()
+
+    assert [(request.method, request.url.path) for request in requests] == [("GET", "/batches")]
+    assert dict(requests[0].url.params) == {
+        "mine": "true",
+        "status": "ready",
+        "limit": "50",
+        "offset": "0",
+    }
+    assert payload["data"] == []
+    assert payload["next_action"]["tool"] is None
+    assert "person's action" in payload["next_action"]["reason"]

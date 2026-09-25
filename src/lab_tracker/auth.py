@@ -73,10 +73,13 @@ class AuthContext:
     role: Role
     principal_type: PrincipalType = PrincipalType.USER
     device_token_id: UUID | None = None
-    # Human label of the presenting credential (the paired-device label
-    # today; a later change populates it for personal access tokens too).
-    # None for browser sessions and the local/system principal.
+    # Human label of the presenting credential: the paired-device label or the
+    # personal-access-token label. None for browser sessions and the
+    # local/system principal.
     principal_label: str | None = None
+    # Registered scope of the presenting personal access token (a PAT_SCOPES
+    # value). None for every other principal type.
+    service_scope: str | None = None
 
     @property
     def is_device(self) -> bool:
@@ -89,6 +92,16 @@ class AuthContext:
     @property
     def is_system(self) -> bool:
         return self.principal_type == PrincipalType.SYSTEM
+
+    @property
+    def is_stage_evidence_scoped(self) -> bool:
+        """Whether a stage_evidence-scoped service token presents this request.
+
+        The middleware policy admits such a token only to reads and the staged
+        capture routes; the body-level rules (staged note status only, bundle
+        previews only) are enforced in the routes through this flag.
+        """
+        return self.is_service and self.service_scope == PAT_SCOPE_STAGE_EVIDENCE
 
     @property
     def is_interactive(self) -> bool:
@@ -861,10 +874,29 @@ LPAT_TOKEN_PREFIX = "lpat_"
 # "batch_run_due" narrows a token to POST /batches/run-due only (nothing else,
 # not even reads), so a leaked scheduler token cannot read other data or make
 # arbitrary writes. It can still trigger the (human-gated) drafting run that
-# endpoint performs — that is the token's sole purpose.
+# endpoint performs — that is the token's sole purpose. "stage_evidence" is
+# the least-privilege writable scope for capture hooks and coding agents: every
+# read, staged-note capture and patching, draft requests, transcription, and
+# evidence-bundle previews — never a committed record, and never /auth.
 PAT_SCOPE_ALL = "all"
 PAT_SCOPE_BATCH_RUN_DUE = "batch_run_due"
-PAT_SCOPES = frozenset({PAT_SCOPE_ALL, PAT_SCOPE_BATCH_RUN_DUE})
+PAT_SCOPE_STAGE_EVIDENCE = "stage_evidence"
+PAT_SCOPES = frozenset({PAT_SCOPE_ALL, PAT_SCOPE_BATCH_RUN_DUE, PAT_SCOPE_STAGE_EVIDENCE})
+_READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+# Capture routes a stage_evidence token may POST to. The routes additionally
+# require a staged note status and, for bundles, dry_run=true.
+STAGE_EVIDENCE_CAPTURE_POSTS = frozenset(
+    {"/notes", "/notes/upload-file", "/notes/quick-capture", "/evidence-bundles"}
+)
+# POST routes that are semantically reads: they select and return bounded
+# context without persisting anything, so read-only service tokens may call them.
+SERVICE_SEMANTIC_READ_POSTS = frozenset(
+    {"/external-artifacts/resolve", "/assistant/decision-context"}
+)
+# Per-note actions (POST /notes/{id}/<action>) a stage_evidence token may take:
+# requesting drafts lands proposals in the human review queue, and transcribing
+# only enriches a capture.
+STAGE_EVIDENCE_NOTE_ACTIONS = frozenset({"graph-drafts", "analysis-graph-drafts", "transcript"})
 DEVICE_LAST_USED_UPDATE_INTERVAL = timedelta(minutes=5)
 PERSONAL_ACCESS_TOKEN_LAST_USED_UPDATE_INTERVAL = timedelta(minutes=5)
 PERSONAL_ACCESS_TOKEN_MAX_TTL = timedelta(days=90)
@@ -901,6 +933,58 @@ def device_principal_can_access(method: str, path: str) -> bool:
     return len(segments) == 3 and segments[0] == "notes" and segments[2] == "transcript"
 
 
+def _note_action_path(path: str) -> str | None:
+    """Return ``<action>`` when ``path`` is exactly ``/notes/<id>/<action>``."""
+    segments = path.split("/")
+    if len(segments) != 4 or segments[0] != "" or segments[1] != "notes":
+        return None
+    note_id, action = segments[2], segments[3]
+    if not note_id or not action:
+        return None
+    return action
+
+
+def _is_note_patch_path(path: str) -> bool:
+    """Whether ``path`` is exactly ``/notes/<id>``."""
+    segments = path.split("/")
+    return len(segments) == 3 and segments[0] == "" and segments[1] == "notes" and bool(segments[2])
+
+
+def stage_evidence_principal_can_access(
+    method: str,
+    path: str,
+    *,
+    read_only: bool,
+    role: Role,
+) -> bool:
+    """Path/method allow-list for stage_evidence-scoped lpat_ principals.
+
+    Reads and the semantic-read POSTs are always allowed. Writes require a
+    write-enabled token with a contributing role and are limited to staged
+    capture: the capture POSTs, per-note draft/transcript actions, and note
+    patches. The middleware sees only method and path, so the body-level
+    rules — a note status other than ``staged`` and an evidence bundle with
+    ``dry_run=false`` are refused — live in the routes
+    (``routes.shared.ensure_scope_allows_note_status`` and
+    ``ensure_scope_allows_evidence_bundle``). /auth stays off-limits.
+    """
+    method = method.upper()
+    if path.startswith("/auth"):
+        return False
+    if method in _READ_METHODS:
+        return True
+    if method == "POST" and path in SERVICE_SEMANTIC_READ_POSTS:
+        return True
+    if read_only or role not in {Role.ADMIN, Role.EDITOR}:
+        return False
+    if method == "POST":
+        return (
+            path in STAGE_EVIDENCE_CAPTURE_POSTS
+            or _note_action_path(path) in STAGE_EVIDENCE_NOTE_ACTIONS
+        )
+    return method == "PATCH" and _is_note_patch_path(path)
+
+
 def service_principal_can_access(
     method: str,
     path: str,
@@ -922,35 +1006,27 @@ def service_principal_can_access(
         # human-gated drafting run, which is its purpose). Still gated on the
         # admin role that running the daily review requires.
         return method == "POST" and path == "/batches/run-due" and role is Role.ADMIN
+    if scope == PAT_SCOPE_STAGE_EVIDENCE:
+        return stage_evidence_principal_can_access(
+            method, path, read_only=read_only, role=role
+        )
     if scope != PAT_SCOPE_ALL:
         # New registered scopes remain fail-closed until this policy gives them
         # an explicit branch above.
         return False
     if path.startswith("/auth"):
         return False
-    if method in {"GET", "HEAD", "OPTIONS"}:
+    if method in _READ_METHODS:
         return True
     if method == "POST" and path == "/batches/run-due":
         return role is Role.ADMIN
-    if (
-        scope == PAT_SCOPE_ALL
-        and read_only
-        and method == "POST"
-        and path == "/external-artifacts/resolve"
-    ):
-        # This POST is semantically read-only: it selects a captured artifact,
-        # verifies its bytes, and returns a bounded representation. Entity-level
-        # authorization and opaque target handling remain inside the route.
-        return True
-    if (
-        scope == PAT_SCOPE_ALL
-        and read_only
-        and method == "POST"
-        and path == "/assistant/decision-context"
-    ):
-        # Decision context is also a semantic read despite its request body.
-        # Project and anchor authorization remain inside the use case, where
-        # inaccessible records retain the same opaque contracts as missing ones.
+    if read_only and method == "POST" and path in SERVICE_SEMANTIC_READ_POSTS:
+        # Semantically read-only POSTs: artifact resolution selects a captured
+        # artifact, verifies its bytes, and returns a bounded representation;
+        # decision context builds bounded graph context from its request body.
+        # Entity-level and project/anchor authorization remain inside the route
+        # and use case, where inaccessible records keep the same opaque
+        # contracts as missing ones.
         return True
     if read_only:
         return False

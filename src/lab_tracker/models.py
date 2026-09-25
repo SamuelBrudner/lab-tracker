@@ -195,6 +195,7 @@ class UsageEventResourceType(str, Enum):
     EVIDENCE_BUNDLE = "evidence_bundle"
     USAGE_EVENT = "usage_event"
     DRAFT_QUALITY = "draft_quality"
+    DECISION_CONTEXT = "decision_context"
 
 
 class UsageEventOutcome(str, Enum):

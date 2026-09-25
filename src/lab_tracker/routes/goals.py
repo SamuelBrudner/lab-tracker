@@ -36,8 +36,10 @@ from .shared import (
     api_from_request,
     ensure_project_read,
     list_response,
+    origin_stamp,
     paginate,
     record_usage_view,
+    stamp_kwargs,
     validate_pagination,
 )
 
@@ -76,6 +78,7 @@ def build_goals_router(api: LabTrackerAPI) -> APIRouter:
             attributes=payload.attributes,
             links=goal_link_specs(payload.links),
             actor=actor,
+            **stamp_kwargs(origin_stamp(actor, payload.origin)),
         )
         return Envelope(data=goal)
 
@@ -116,6 +119,7 @@ def build_goals_router(api: LabTrackerAPI) -> APIRouter:
             external_ref=payload.external_ref,
             attributes=payload.attributes,
             actor=actor,
+            **stamp_kwargs(origin_stamp(actor, payload.origin)),
         )
         return Envelope(data=goal)
 

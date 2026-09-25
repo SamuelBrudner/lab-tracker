@@ -37,9 +37,11 @@ from .shared import (
     ensure_project_read,
     handlers_from_request,
     list_response,
+    origin_stamp,
     paginate,
     provenance_base_url,
     record_usage_view,
+    stamp_kwargs,
     validate_pagination,
     wants_jsonld,
 )
@@ -69,6 +71,7 @@ def build_claims_router(api: LabTrackerAPI) -> APIRouter:
             answers_question_ids=payload.answers_question_ids,
             external_citations=payload.external_citations,
             actor=actor,
+            **stamp_kwargs(origin_stamp(actor, payload.origin)),
         )
         return Envelope(data=_interpreted(request, api, claim))
 

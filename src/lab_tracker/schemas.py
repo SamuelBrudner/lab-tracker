@@ -58,6 +58,7 @@ from lab_tracker.models import (
     DatasetFile,
     DatasetStatus,
     DataStore,
+    EntityOrigin,
     EntityRef,
     EntityType,
     ExperimentStatus,
@@ -247,6 +248,31 @@ class RequestModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+# Origins a direct write may declare. The other two are assigned by the
+# graph-draft review path (ai_suggested on drafting, user_revised on edit).
+DIRECT_WRITE_ORIGINS = frozenset({EntityOrigin.USER, EntityOrigin.AI_EXECUTED})
+
+
+class OriginDeclaringRequest(RequestModel):
+    """Create request that self-declares who authored the record."""
+
+    origin: EntityOrigin = Field(
+        default=EntityOrigin.USER,
+        description=(
+            "Self-declared record origin for a direct write: user (a person authored "
+            "it) or ai_executed (an agent authored it on the user's request). "
+            "ai_suggested/user_revised are reserved for the graph-draft review path."
+        ),
+    )
+
+    @field_validator("origin")
+    @classmethod
+    def _origin_is_a_direct_write_origin(cls, value: EntityOrigin) -> EntityOrigin:
+        if value not in DIRECT_WRITE_ORIGINS:
+            raise ValueError("origin must be one of: user, ai_executed")
+        return value
+
+
 class PatchRequestModel(RequestModel):
     """Request model whose subclasses declare fields that reject explicit null."""
 
@@ -432,8 +458,10 @@ class PersonalAccessTokenCreate(RequestModel):
     role: Role = Role.VIEWER
     read_only: bool = True
     # "all" keeps the role-based service policy; "batch_run_due" narrows the token
-    # to POST /batches/run-due only (the daily-review scheduler credential).
-    scope: Literal["all", "batch_run_due"] = "all"
+    # to POST /batches/run-due only (the daily-review scheduler credential);
+    # "stage_evidence" allows reads plus staged-note capture/patching, draft
+    # requests, transcription, and evidence-bundle previews, never a commit.
+    scope: Literal["all", "batch_run_due", "stage_evidence"] = "all"
     expires_at: datetime
 
 
@@ -667,7 +695,7 @@ class OwnershipReassignmentCreate(RequestModel):
 OwnershipReassignmentRead = OwnershipReassignment
 
 
-class QuestionCreate(RequestModel):
+class QuestionCreate(OriginDeclaringRequest):
     project_id: UUID
     text: NonBlankStr
     question_type: QuestionType
@@ -747,7 +775,7 @@ class ExperimentUpdate(PatchRequestModel):
     status: ExperimentStatus | SkipJsonSchema[None] = None
 
 
-class DatasetCreate(RequestModel):
+class DatasetCreate(OriginDeclaringRequest):
     project_id: UUID
     commit_manifest: DatasetCommitManifestIn | None = None
     commit_hash: str | None = None
@@ -774,7 +802,7 @@ class DatasetUpdate(PatchRequestModel):
     question_links: list[QuestionLinkIn] | SkipJsonSchema[None] = None
 
 
-class NoteCreate(RequestModel):
+class NoteCreate(OriginDeclaringRequest):
     project_id: UUID
     raw_content: NonBlankStr
     transcribed_text: str | None = None
@@ -1133,7 +1161,7 @@ class AcquisitionOutputCreate(RequestModel):
     size_bytes: int | None = Field(default=None, ge=0)
 
 
-class AnalysisCreate(RequestModel):
+class AnalysisCreate(OriginDeclaringRequest):
     project_id: UUID
     dataset_ids: list[UUID] = Field(..., min_length=1)
     method_hash: AnalysisMethodHashStr
@@ -1158,7 +1186,7 @@ class AnalysisUpdate(PatchRequestModel):
     terminal_reason: NonBlankStr | None = None
 
 
-class ClaimCreate(RequestModel):
+class ClaimCreate(OriginDeclaringRequest):
     project_id: UUID
     statement: NonBlankStr
     confidence: ClaimConfidence
@@ -1318,7 +1346,7 @@ class ProvenanceLinkStatusUpdate(RequestModel):
 ProvenanceLinkRead = ProvenanceLink
 
 
-class GoalCreateFields(RequestModel):
+class GoalCreateFields(OriginDeclaringRequest):
     goal_type: GoalType
     title: GoalTitleStr
     summary: str | None = None
@@ -1414,7 +1442,7 @@ class DataStoreCreate(RequestModel):
 DataStoreRead = DataStore
 
 
-class VisualizationCreate(RequestModel):
+class VisualizationCreate(OriginDeclaringRequest):
     analysis_id: UUID
     viz_type: VisualizationTypeStr
     file_path: VisualizationFilePathStr
@@ -1603,7 +1631,7 @@ EvidenceBundleSourceNote = Annotated[
 ]
 
 
-class EvidenceBundleRequest(RequestModel):
+class EvidenceBundleRequest(OriginDeclaringRequest):
     project_id: UUID
     primary_question_id: UUID | None = None
     dataset: EvidenceBundleDataset | SkipJsonSchema[None] = None

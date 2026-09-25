@@ -36,10 +36,13 @@ from lab_tracker.models import (
     AnalysisStatus,
     ClaimStatus,
     DatasetStatus,
+    EntityOrigin,
     EntityType,
     GoalLinkStatus,
     GoalStatus,
     GoalType,
+    GraphChangeSetStatus,
+    GraphDraftMode,
     NoteMetadataScalar,
     NoteStatus,
     QuestionStatus,
@@ -65,7 +68,20 @@ LIST_PAGE_SIZE = 200
 NEXT_QUESTIONS_MAX_ROWS_PER_LIST = 2000
 UNAVAILABLE_MESSAGE = "Lab Tracker unavailable - proceeding without graph context."
 # No API route serves this path; see LabTrackerAPIClient.credential_can_write.
-CREDENTIAL_WRITE_PROBE_PATH = "/_lab-tracker-mcp/credential-write-probe"
+# The least-privileged real capture route: a token whose only write grant is
+# the stage_evidence scope is admitted here, so the probe reports it write-capable.
+CREDENTIAL_WRITE_PROBE_PATH = "/notes"
+# Origins a direct write may declare (schemas.DIRECT_WRITE_ORIGINS).
+DIRECT_WRITE_ORIGIN_VALUES = (EntityOrigin.USER.value, EntityOrigin.AI_EXECUTED.value)
+DIRECT_WRITE_ORIGIN_TEXT = ", ".join(DIRECT_WRITE_ORIGIN_VALUES)
+# Modes POST /notes/{id}/graph-drafts accepts; graph_batch is batch-only.
+NOTE_GRAPH_DRAFT_MODE_VALUES = (
+    GraphDraftMode.GRAPH_CONTEXT.value,
+    GraphDraftMode.IMAGE_ONLY.value,
+)
+NOTE_GRAPH_DRAFT_MODE_TEXT = ", ".join(NOTE_GRAPH_DRAFT_MODE_VALUES)
+GRAPH_CHANGE_SET_STATUS_VALUES = tuple(status.value for status in GraphChangeSetStatus)
+GRAPH_CHANGE_SET_STATUS_TEXT = ", ".join(GRAPH_CHANGE_SET_STATUS_VALUES)
 NOTE_STATUS_VALUES = tuple(status.value for status in NoteStatus)
 NOTE_STATUS_TEXT = ", ".join(NOTE_STATUS_VALUES)
 QUESTION_STATUS_VALUES = tuple(status.value for status in QuestionStatus)
@@ -302,20 +318,19 @@ class LabTrackerAPIClient:
         """Ask the API's service-token policy whether this credential may write.
 
         Service tokens cannot call ``/auth`` token introspection, so this sends an
-        empty POST to a path no route serves. The API auth middleware applies the
-        token's write policy before routing: a credential that may not write is
-        refused with ``403 service_forbidden``; one that may write falls through to
-        routing and gets 404/405. No handler can run either way. Any other answer
-        is indeterminate and raised to the caller.
+        empty ``POST /notes`` — the least-privileged real capture route. The API
+        auth middleware applies the token's scope and write policy before
+        routing: a credential that may not write is refused with ``403
+        service_forbidden``. One that may write reaches request validation, where
+        the empty body is rejected with ``422`` before any handler runs, so
+        nothing is created; a 2xx would mean a write was accepted. Any other
+        answer (404, 405, 5xx, another 403) is indeterminate and raised to the
+        caller.
 
-        Caveats: the API records each ``service_forbidden`` refusal as a PAT auth
-        failure, so every successful read-only check spends one attempt of the
-        PAT rate limit (default 10 per 60s); a tight restart loop can briefly
-        lock the token out, and the probe then fails closed on 429. A token
-        whose only write grant is the narrow ``batch_run_due`` scope is reported
-        as read-only, since only ``POST /batches/run-due`` accepts it and no
-        hosted tool calls that route. A dedicated introspection endpoint for
-        service tokens would remove both caveats.
+        Probing a real capture route means a token whose only write grant is the
+        ``stage_evidence`` scope is correctly reported write-capable. A
+        ``batch_run_due`` token is still reported read-only: only ``POST
+        /batches/run-due`` accepts it and no hosted tool calls that route.
         """
 
         try:
@@ -324,12 +339,10 @@ class LabTrackerAPIClient:
             if exc.code == "service_forbidden":
                 return False
             raise
-        except LabTrackerAPIUnavailableError:
-            raise
-        except LabTrackerAPIError as exc:
-            if exc.status_code in {404, 405}:
-                return True
-            raise
+        except LabTrackerAPIValidationError:
+            # The token's write policy admitted the request; only the empty body
+            # stopped it.
+            return True
         # A 2xx means something accepted a write for this credential.
         return True
 
@@ -886,6 +899,7 @@ class LabTrackerAPIClient:
         hypothesis: str | None = None,
         status: str | None = None,
         parent_question_ids: list[str] | None = None,
+        origin: str | None = None,
     ) -> JsonObject:
         return self._request(
             "POST",
@@ -897,6 +911,7 @@ class LabTrackerAPIClient:
                 "hypothesis": hypothesis,
                 "status": status,
                 "parent_question_ids": parent_question_ids,
+                "origin": _validate_origin(origin),
             },
         )
 
@@ -952,6 +967,7 @@ class LabTrackerAPIClient:
         targets: list[dict[str, str]] | None = None,
         metadata: dict[str, NoteMetadataScalar] | None = None,
         status: str | None = None,
+        origin: str | None = None,
     ) -> JsonObject:
         resolved_status = _validate_note_status(status)
         resolved_metadata = _validate_note_metadata(metadata)
@@ -965,6 +981,7 @@ class LabTrackerAPIClient:
                 "targets": targets,
                 "metadata": resolved_metadata,
                 "status": resolved_status,
+                "origin": _validate_origin(origin),
             },
         )
 
@@ -977,6 +994,7 @@ class LabTrackerAPIClient:
         commit_manifest: JsonObject | None = None,
         commit_hash: str | None = None,
         status: str | None = "staged",
+        origin: str | None = None,
     ) -> JsonObject:
         resolved_status = _validate_dataset_status(status)
         return self._request(
@@ -989,6 +1007,7 @@ class LabTrackerAPIClient:
                 "commit_manifest": commit_manifest,
                 "commit_hash": commit_hash,
                 "status": resolved_status,
+                "origin": _validate_origin(origin),
             },
         )
 
@@ -1001,6 +1020,7 @@ class LabTrackerAPIClient:
         code_version: str,
         environment_hash: str | None = None,
         status: str | None = "staged",
+        origin: str | None = None,
     ) -> JsonObject:
         resolved_status = _validate_analysis_status(status)
         return self._request(
@@ -1013,6 +1033,7 @@ class LabTrackerAPIClient:
                 "code_version": code_version,
                 "environment_hash": environment_hash,
                 "status": resolved_status,
+                "origin": _validate_origin(origin),
             },
         )
 
@@ -1030,6 +1051,7 @@ class LabTrackerAPIClient:
         supported_by_analysis_ids: list[str] | None = None,
         answers_question_ids: list[str] | None = None,
         external_citations: list[JsonObject] | None = None,
+        origin: str | None = None,
     ) -> JsonObject:
         resolved_status = _validate_claim_status(status)
         return self._request(
@@ -1047,6 +1069,7 @@ class LabTrackerAPIClient:
                 "supported_by_analysis_ids": supported_by_analysis_ids,
                 "answers_question_ids": answers_question_ids,
                 "external_citations": external_citations,
+                "origin": _validate_origin(origin),
             },
         )
 
@@ -1087,6 +1110,7 @@ class LabTrackerAPIClient:
         file_path: str,
         caption: str | None = None,
         related_claim_ids: list[str] | None = None,
+        origin: str | None = None,
     ) -> JsonObject:
         return self._request(
             "POST",
@@ -1097,6 +1121,7 @@ class LabTrackerAPIClient:
                 "file_path": file_path,
                 "caption": caption,
                 "related_claim_ids": related_claim_ids,
+                "origin": _validate_origin(origin),
             },
         )
 
@@ -1112,12 +1137,14 @@ class LabTrackerAPIClient:
         source_note: JsonObject | None = None,
         dry_run: bool = True,
         idempotency_key: str | None = None,
+        origin: str | None = None,
     ) -> JsonObject:
         payload: JsonObject = {
             "project_id": project_id,
             "primary_question_id": primary_question_id,
             "dry_run": dry_run,
             "idempotency_key": idempotency_key,
+            "origin": _validate_origin(origin),
         }
         payload.update(
             {
@@ -1149,6 +1176,7 @@ class LabTrackerAPIClient:
         target_date: str | None = None,
         external_ref: str | None = None,
         attributes: JsonObject | None = None,
+        origin: str | None = None,
     ) -> JsonObject:
         return self._request(
             "POST",
@@ -1161,6 +1189,47 @@ class LabTrackerAPIClient:
                 "target_date": target_date,
                 "external_ref": external_ref,
                 "attributes": attributes,
+                "origin": _validate_origin(origin),
+            },
+        )
+
+    def request_graph_draft(
+        self,
+        *,
+        note_id: str,
+        mode: str = GraphDraftMode.GRAPH_CONTEXT.value,
+        user_hint: str | None = None,
+    ) -> JsonObject:
+        """Ask the server-side model to propose graph changes from one note."""
+        return self._request(
+            "POST",
+            _api_path("notes", _uuid_path_id(note_id, "note_id"), "graph-drafts"),
+            json_payload={
+                "mode": _validate_note_graph_draft_mode(mode),
+                "user_hint": user_hint,
+            },
+        )
+
+    def list_my_drafts(
+        self,
+        *,
+        status: str | None = None,
+        project_id: str | None = None,
+        limit: int = LIST_PAGE_SIZE,
+        offset: int = 0,
+    ) -> JsonObject:
+        """List the Daily Review drafts assigned to the credential's user."""
+        return self._request(
+            "GET",
+            "/batches",
+            params={
+                "mine": "true",
+                "status": _validate_graph_change_set_status(status),
+                "project_id": (
+                    _uuid_path_id(project_id, "project_id") if project_id is not None else None
+                ),
+                "limit": limit,
+                "offset": offset,
             },
         )
 
@@ -1526,6 +1595,33 @@ def _validate_goal_type(goal_type: str | None) -> str | None:
         label="goal type",
         allowed_values=GOAL_TYPE_VALUES,
         allowed_text=GOAL_TYPE_TEXT,
+    )
+
+
+def _validate_origin(origin: str | None) -> str | None:
+    return _validate_status(
+        origin,
+        label="origin",
+        allowed_values=DIRECT_WRITE_ORIGIN_VALUES,
+        allowed_text=DIRECT_WRITE_ORIGIN_TEXT,
+    )
+
+
+def _validate_note_graph_draft_mode(mode: str | None) -> str | None:
+    return _validate_status(
+        mode,
+        label="graph draft mode",
+        allowed_values=NOTE_GRAPH_DRAFT_MODE_VALUES,
+        allowed_text=NOTE_GRAPH_DRAFT_MODE_TEXT,
+    )
+
+
+def _validate_graph_change_set_status(status: str | None) -> str | None:
+    return _validate_status(
+        status,
+        label="draft status",
+        allowed_values=GRAPH_CHANGE_SET_STATUS_VALUES,
+        allowed_text=GRAPH_CHANGE_SET_STATUS_TEXT,
     )
 
 

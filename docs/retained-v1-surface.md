@@ -188,7 +188,17 @@ research record:
   `/auth/*` except read-only `/auth/me` session introspection; see
   [agent-setup.md](agent-setup.md). Token reads report the issued `role` and
   the `effective_role` the token acts with now: the lower of that role and the
-  owner's current role.
+  owner's current role. A token carries one of three registered scopes:
+  `all` (the role-based service policy), `batch_run_due` (`POST
+  /batches/run-due` only, admin role, nothing else), and `stage_evidence`
+  (every read, `POST /notes`, `/notes/upload-file`, and `/notes/quick-capture`
+  with the `staged` status, `PATCH /notes/{id}` except `status=committed`,
+  `POST /notes/{id}/graph-drafts`, `/analysis-graph-drafts`, and `/transcript`,
+  and `POST /evidence-bundles` with `dry_run=true`; a committed note status or
+  a bundle commit is refused with `403 service_forbidden`, and no other write
+  exists for it). Direct create requests may declare `origin` as `user` or
+  `ai_executed`; every write made with a personal access token records the
+  token label as the entity's `origin_provider`, truncated to 80 characters.
 - Session sign-out and admin credential management: `POST /auth/sessions/revoke`
   ends every session of the caller (sign out everywhere). An admin at an
   interactive session lists and revokes another user's personal access tokens
@@ -375,7 +385,13 @@ research record:
   and inspect its bounded neighborhood before requesting task-specific decision
   context. Decision context remains mandatory before research-facing choices;
   returned record text is untrusted, and retained v1 does not delegate graph
-  commits to autonomous agents.
+  commits to autonomous agents. Agents may request a note-scoped draft
+  (`lab_tracker_request_graph_draft`, `POST /notes/{id}/graph-drafts`) and list
+  their personal review queue (`lab_tracker_list_my_drafts`,
+  `GET /batches?mine=true`), never accept or commit one. Each
+  `POST /assistant/decision-context` consultation records a content-free
+  `view decision_context` usage event: project, actor, principal type, and
+  surface only, never the query, task kind, or anchor ids.
 
 Anything not listed above is out of the retained v1 surface and should not
 shape the default runtime, supported docs, or simplified architecture.

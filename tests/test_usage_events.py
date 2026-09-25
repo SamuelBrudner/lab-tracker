@@ -829,3 +829,86 @@ def test_usage_event_rollup_reads_existing_rollups_once_and_streams_bucket_colum
         (existing_day + timedelta(days=1), "view"): (1, 5, 1),
         (existing_day + timedelta(days=2), "export"): (1, 5, 1),
     }
+
+
+def _service_token_headers(
+    client: TestClient, admin_auth_headers: dict[str, str], project_id: str
+) -> dict:
+    # A personal token uses its own role, so its user needs project membership.
+    user_id = client.get("/auth/me", headers=admin_auth_headers).json()["data"]["user_id"]
+    membership = client.post(
+        f"/projects/{project_id}/members",
+        json={"user_id": user_id, "role": "viewer"},
+        headers=admin_auth_headers,
+    )
+    assert membership.status_code == 201, membership.text
+    response = client.post(
+        "/auth/tokens",
+        json={
+            "label": "Consulting agent",
+            "role": "editor",
+            "read_only": True,
+            "scope": "all",
+            "expires_at": (datetime.now(timezone.utc) + timedelta(days=7)).isoformat(),
+        },
+        headers=admin_auth_headers,
+    )
+    assert response.status_code == 201, response.text
+    return {"Authorization": f"Bearer {response.json()['data']['secret']}"}
+
+
+def test_decision_context_consultation_records_a_content_free_view_event(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    client.app.state.settings.usage_events = True
+    project = client.post(
+        "/projects", json={"name": "Consultation telemetry"}, headers=admin_auth_headers
+    )
+    assert project.status_code == 201, project.text
+    project_id = project.json()["data"]["project_id"]
+    headers = _service_token_headers(client, admin_auth_headers, project_id)
+    query = "distinctive-consultation-query-7f3a"
+    before = _usage_rows(client)
+
+    response = client.post(
+        "/assistant/decision-context",
+        json={"task_kind": "summary", "query": query, "project_id": project_id},
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    [event] = _new_usage_rows(client, before)
+    assert event.verb == "view"
+    assert event.resource_type == "decision_context"
+    assert len(event.resource_type) <= 40
+    assert event.principal_type == "service"
+    assert str(event.project_id) == project_id
+    assert event.resource_id is None
+    assert event.outcome == "ok"
+    row_text = " ".join(
+        str(getattr(event, column.name)) for column in UsageEventModel.__table__.columns
+    )
+    assert query not in row_text
+    assert "summary" not in row_text
+
+
+def test_failed_decision_context_records_no_event(
+    client: TestClient,
+    scoped_project_member,
+) -> None:
+    client.app.state.settings.usage_events = True
+    before = _usage_rows(client)
+
+    response = client.post(
+        "/assistant/decision-context",
+        json={
+            "task_kind": "summary",
+            "query": "hidden project",
+            "project_id": scoped_project_member.hidden_project_id,
+        },
+        headers=scoped_project_member.member_headers,
+    )
+
+    assert response.status_code == 403, response.text
+    assert _new_usage_rows(client, before) == []

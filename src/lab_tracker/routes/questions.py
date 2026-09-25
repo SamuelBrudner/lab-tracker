@@ -38,9 +38,11 @@ from .shared import (
     ensure_project_read,
     handlers_from_request,
     list_response,
+    origin_stamp,
     paginate,
     question_default_status,
     record_usage_view,
+    stamp_kwargs,
     validate_pagination,
 )
 
@@ -65,6 +67,7 @@ def build_questions_router(api: LabTrackerAPI) -> APIRouter:
             terminal_reason=payload.terminal_reason,
             parent_question_ids=payload.parent_question_ids,
             actor=actor,
+            **stamp_kwargs(origin_stamp(actor, payload.origin)),
         )
         if result.reused:
             response.status_code = http_status.HTTP_200_OK

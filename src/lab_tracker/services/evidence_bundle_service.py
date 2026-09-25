@@ -21,6 +21,7 @@ from lab_tracker.models import (
     DatasetCommitManifest,
     DatasetCommitManifestInput,
     DatasetStatus,
+    EntityOrigin,
     EntityRef,
     EntityType,
     EvidenceBundleRecord,
@@ -174,6 +175,11 @@ class RecordEvidenceBundleCommand:
     source_note: SourceNoteIntent | None = None
     dry_run: bool = True
     idempotency_key: str | None = None
+    # Applied to every component the bundle creates. ``origin`` is part of the
+    # idempotency fingerprint; ``origin_provider`` is derived from the credential
+    # (the token label), not the request, so it is not.
+    origin: EntityOrigin = EntityOrigin.USER
+    origin_provider: str | None = None
 
 
 @dataclass(frozen=True)
@@ -710,6 +716,8 @@ class EvidenceBundleService(BaseService):
                 commit_manifest=command.dataset.commit_manifest,
                 commit_hash=_clean_optional(command.dataset.commit_hash),
                 actor=actor,
+                origin=command.origin,
+                origin_provider=command.origin_provider,
             )
             ids = replace(ids, dataset_id=dataset.dataset_id)
 
@@ -724,6 +732,8 @@ class EvidenceBundleService(BaseService):
                 status=command.analysis.status,
                 terminal_reason=command.analysis.terminal_reason,
                 actor=actor,
+                origin=command.origin,
+                origin_provider=command.origin_provider,
             )
             ids = replace(ids, analysis_id=analysis.analysis_id)
 
@@ -751,6 +761,8 @@ class EvidenceBundleService(BaseService):
                 ),
                 external_citations=command.claim.external_citations,
                 actor=actor,
+                origin=command.origin,
+                origin_provider=command.origin_provider,
             )
             ids = replace(ids, claim_id=claim.claim_id)
 
@@ -765,6 +777,8 @@ class EvidenceBundleService(BaseService):
                     ids.claim_id,
                 ),
                 actor=actor,
+                origin=command.origin,
+                origin_provider=command.origin_provider,
             )
             ids = replace(ids, visualization_id=visualization.viz_id)
 
@@ -781,6 +795,8 @@ class EvidenceBundleService(BaseService):
                 metadata=dict(command.source_note.metadata),
                 status=command.source_note.status,
                 actor=actor,
+                origin=command.origin,
+                origin_provider=command.origin_provider,
             )
             ids = replace(ids, source_note_id=note.note_id)
 
@@ -1239,6 +1255,9 @@ def _canonical_command(command: RecordEvidenceBundleCommand) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "project_id": str(command.project_id),
         "primary_question_id": _uuid_text(command.primary_question_id),
+        # A replay that declares a different origin is a conflicting request,
+        # not a reuse of the first result.
+        "origin": command.origin.value,
         "dataset": _canonical_dataset(command.dataset, command.primary_question_id),
         "analysis": _canonical_analysis(command.analysis, dataset_ref),
         "claim": _canonical_claim(

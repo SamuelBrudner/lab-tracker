@@ -406,6 +406,8 @@ class NoteService(BaseService):
         client_capture_id: str | None = None,
         status: NoteStatus = NoteStatus.STAGED,
         actor: AuthContext | None = None,
+        origin: EntityOrigin = EntityOrigin.USER,
+        origin_provider: str | None = None,
         allow_member_onboarding_reserved: bool = False,
     ) -> IdempotentCreateResult[Note]:
         asset = raw_asset
@@ -436,6 +438,8 @@ class NoteService(BaseService):
                 client_capture_id=resolved_client_capture_id,
                 status=status,
                 actor=actor,
+                origin=origin,
+                origin_provider=origin_provider,
                 allow_member_onboarding_reserved=allow_member_onboarding_reserved,
             )
         except Exception:

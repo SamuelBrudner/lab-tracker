@@ -40,7 +40,13 @@ from lab_tracker.services.evidence_bundle_service import (
     RecordEvidenceBundleCommand,
 )
 
-from .shared import actor_from_request, api_from_request
+from .shared import (
+    OriginStamp,
+    actor_from_request,
+    api_from_request,
+    ensure_scope_allows_evidence_bundle,
+    origin_stamp,
+)
 
 
 def build_evidence_bundles_router(api: LabTrackerAPI) -> APIRouter:
@@ -58,8 +64,10 @@ def build_evidence_bundles_router(api: LabTrackerAPI) -> APIRouter:
     )
     def record_evidence_bundle(payload: EvidenceBundleRequest, request: Request):
         actor = actor_from_request(request)
+        ensure_scope_allows_evidence_bundle(actor, dry_run=payload.dry_run)
+        stamp = origin_stamp(actor, payload.origin)
         result = api_from_request(request, api).record_evidence_bundle(
-            _command_from_request(payload),
+            _command_from_request(payload, stamp),
             actor=actor,
         )
         envelope = Envelope(data=_result_read(result))
@@ -73,7 +81,10 @@ def build_evidence_bundles_router(api: LabTrackerAPI) -> APIRouter:
     return router
 
 
-def _command_from_request(payload: EvidenceBundleRequest) -> RecordEvidenceBundleCommand:
+def _command_from_request(
+    payload: EvidenceBundleRequest,
+    stamp: OriginStamp,
+) -> RecordEvidenceBundleCommand:
     return RecordEvidenceBundleCommand(
         project_id=payload.project_id,
         primary_question_id=payload.primary_question_id,
@@ -84,6 +95,8 @@ def _command_from_request(payload: EvidenceBundleRequest) -> RecordEvidenceBundl
         source_note=_source_note_intent(payload.source_note),
         dry_run=payload.dry_run,
         idempotency_key=payload.idempotency_key,
+        origin=stamp.origin,
+        origin_provider=stamp.origin_provider,
     )
 
 

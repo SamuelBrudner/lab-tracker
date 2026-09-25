@@ -133,10 +133,32 @@ decision-context lookups work read-only, and a read-only principal cannot
 stage or draft anything.
 
 For figure capture, repository commit hooks, watch folders, or other staged
-evidence, pick **Read + stage evidence**. It is the least-privilege writable
-choice offered by the app: it can sync staged captures and request drafts, but
-non-interactive principals remain structurally unable to accept or commit a
-draft. A read-only token cannot drain a capture outbox.
+evidence, pick **Read + stage evidence**. Its API scope is `stage_evidence`
+(`POST /auth/tokens` with `"scope": "stage_evidence"`); the Agents page maps
+the level to that scope once the frontend move lands, and until then the level
+mints an `all`-scope editor token. The scope is an exact allow-list applied
+before routing, plus two body-level rules the routes enforce:
+
+- every read (`GET`, `HEAD`, `OPTIONS`) and the two semantic-read POSTs,
+  `/assistant/decision-context` and `/external-artifacts/resolve`;
+- `POST /notes`, `/notes/upload-file`, and `/notes/quick-capture` with the
+  `staged` status only — `status=committed` is refused with
+  `403 service_forbidden`;
+- `PATCH /notes/{id}` for the transcript, targets, and metadata — except
+  `status=committed`, refused the same way;
+- `POST /notes/{id}/graph-drafts`, `/notes/{id}/analysis-graph-drafts`, and
+  `/notes/{id}/transcript`;
+- `POST /evidence-bundles` with `dry_run=true` only — a commit is refused with
+  `403 service_forbidden`;
+- nothing else: no other create or patch, no archive or delete, no
+  `/batches/run-due`, and no `/auth/*`.
+
+The writes above additionally require a write-enabled token with the editor or
+admin role; a read-only or viewer token keeps only the reads. It is the
+least-privilege writable choice: it can sync staged captures and request
+drafts, it cannot create a committed record at all, and non-interactive
+principals remain structurally unable to accept or commit a draft. A read-only
+token cannot drain a capture outbox.
 
 When a commit made during an agent task reports a Lab Tracker timeout, sync
 failure, or queued event, the agent must treat the outcome as ambiguous because
@@ -266,13 +288,19 @@ Analysis repos can also send evidence automatically on every commit — see
 | Can | Cannot |
 | --- | --- |
 | Read decision context, search, list, and walk the graph | Accept, bulk-accept, or commit any draft (structurally blocked for non-interactive principals) |
-| Stage evidence notes and figures | Commit datasets/analyses without an explicit user request |
-| Trigger or request drafts when the user asks | Bypass review — every accepted operation records *how* it was accepted ([curation states](curation-states.md)) |
+| Stage evidence notes and figures | With a `stage_evidence` token: create a dataset, analysis, claim, question, goal, or visualization, commit a note, or commit an evidence bundle — the scope has no route for it |
+| Trigger or request drafts when the user asks (`lab_tracker_request_graph_draft`), and list their own review queue (`lab_tracker_list_my_drafts`) | Bypass review — every accepted operation records *how* it was accepted ([curation states](curation-states.md)) |
+| With an `all`-scope writable token: create canonical records directly, declaring `origin` as `user` or `ai_executed` | Write anonymously: every service-token write stamps the token label as `origin_provider` |
 
 The record stays honest about the division of labor: every entity carries an
 `origin` (`user` / `ai_suggested` / `ai_executed` / `user_revised`), the change set, provider,
-model, and prompt version, all exportable as PROV-O. A rubber-stamped bulk
-accept is never mistaken later for a considered per-operation review.
+model, and prompt version, all exportable as PROV-O. Every write made with a
+personal access token records the token's label as the entity's
+`origin_provider`, truncated to the column's 80 characters, whatever `origin`
+the request declared; PROV-O exports attribute an `ai_executed` record to a
+per-entity `prov:SoftwareAgent` carrying that label, next to the person it is
+attributed to. A rubber-stamped bulk accept is never mistaken later for a
+considered per-operation review.
 
 ## Diagnose an unavailable connection
 
