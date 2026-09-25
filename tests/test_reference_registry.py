@@ -62,9 +62,12 @@ def test_every_polymorphic_reference_table_is_covered_for_every_referencable_typ
     polymorphic_entities = [
         entity for entity in DeletableEntity if entity.entity_type is not None
     ]
+    # Exploration nodes are draftable (EntityType.EXPLORATION_NODE) but no
+    # polymorphic reference table may target one, so they are not referencable.
     assert {entity.entity_type for entity in polymorphic_entities} == set(EntityType) - {
         EntityType.PROJECT,
         EntityType.GOAL,
+        EntityType.EXPLORATION_NODE,
     }
     for entity in polymorphic_entities:
         probes = {referrer.probe for referrer in REFERENCE_REGISTRY[entity].referrers}

@@ -69,7 +69,13 @@ class DeletableEntity(str, Enum):
 
     @property
     def entity_type(self) -> EntityType | None:
-        """The polymorphic ``EntityType`` used by FK-less references, if any."""
+        """The polymorphic ``EntityType`` used by FK-less references, if any.
+
+        ``EntityType.EXPLORATION_NODE`` exists so graph drafts can propose
+        exploration nodes, but no polymorphic reference table (note targets,
+        goal links, exploration evidence refs, provenance links) may target
+        one, so the registry reports no polymorphic type for it.
+        """
 
         if self is DeletableEntity.EXPLORATION_NODE:
             return None
