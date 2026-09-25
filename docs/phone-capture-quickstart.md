@@ -41,6 +41,10 @@ URL for phone capture.
 - **Offline is fine.** Text, photo, and voice captures that cannot reach the
   server are queued on the phone and upload when it is back online. Unsent
   text is also kept on the device and offered back if the page reloads.
+- **Updates find the phone.** The app checks the server for a new version
+  whenever you bring it back to the foreground, and hourly while it stays open.
+  When one is ready, a banner offers **Reload to update**; queued captures and
+  unsent text survive the reload.
 - **Same context as last time.** The question and session from your previous
   capture in a project are preselected for the next one; change them when the
   work moves on.
