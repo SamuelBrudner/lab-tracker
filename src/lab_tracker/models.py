@@ -368,6 +368,7 @@ class EntityType(str, Enum):
     CLAIM = "claim"
     VISUALIZATION = "visualization"
     GOAL = "goal"
+    EXPLORATION_NODE = "exploration_node"
 
 
 class EntityOrigin(str, Enum):
@@ -467,6 +468,14 @@ class GraphDraftSemanticType(str, Enum):
     UPDATE_GOAL = "update_goal"
     SUGGEST_FOLLOWUP = "suggest_followup"
     REQUEST_CLARIFICATION = "request_clarification"
+    # Negative-knowledge labels: they preserve what did not work, what was
+    # chosen, and what was set aside, never delete or hide it.
+    RECORD_DECISION = "record_decision"
+    RECORD_DEAD_END = "record_dead_end"
+    RECORD_PIVOT = "record_pivot"
+    ABANDON_QUESTION = "abandon_question"
+    MERGE_QUESTIONS = "merge_questions"
+    RETIRE_NOTE = "retire_note"
 
 
 # Review-audit keys stamped into ``GraphChangeOperation.error_metadata`` by the

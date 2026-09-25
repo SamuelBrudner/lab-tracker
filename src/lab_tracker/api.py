@@ -271,6 +271,10 @@ class LabTrackerAPI(
             notes=self.notes,
             authorization=self.project_authorization,
         )
+        graph_draft_records = GraphDraftRecords(
+            context,
+            authorization=self.project_authorization,
+        )
         graph_context_builder = GraphContextBuilder(
             projects=self.projects,
             questions=self.questions,
@@ -282,6 +286,7 @@ class LabTrackerAPI(
             visualizations=self.visualizations,
             goals=self.goals,
             exploration=self.exploration,
+            review_memory=graph_draft_records,
         )
         graph_patch_validator = GraphPatchValidator(
             get_graph_entity=graph_context_builder.get_graph_entity,
@@ -296,10 +301,7 @@ class LabTrackerAPI(
             claims=self.claims,
             visualizations=self.visualizations,
             goals=self.goals,
-        )
-        graph_draft_records = GraphDraftRecords(
-            context,
-            authorization=self.project_authorization,
+            exploration=self.exploration,
         )
         self.review_emails: ReviewEmailService = ReviewEmailService(
             context,

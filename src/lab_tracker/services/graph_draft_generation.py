@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
@@ -65,6 +66,10 @@ from lab_tracker.services.graph_draft_generation_ports import (
 )
 from lab_tracker.services.graph_draft_generation_ports import (
     GenerationRecords as GenerationRecords,
+)
+from lab_tracker.services.graph_draft_revision_hints import (
+    compose_rejected_redraft_hint,
+    prior_rejection_summary,
 )
 from lab_tracker.services.graph_draft_validation import string_list
 from lab_tracker.services.shared import UserExistenceReader, actor_user_fk, actor_user_id
@@ -175,10 +180,12 @@ class GraphDraftGenerationCoordinator(BaseService):
         concurrent re-drafts converge) and leaves the rejected review intact.
         """
         claim = self.claim_generation(candidate, draft_client=draft_client)
+        rejected: GraphChangeSet | None = None
         while not claim.acquired and claim.change_set.status == GraphChangeSetStatus.REJECTED:
+            rejected = claim.change_set
             candidate.batch_key = successor_generation_key(claim.change_set)
             claim = self.claim_generation(candidate, draft_client=draft_client)
-        return claim
+        return replace(claim, rejected_predecessor=rejected)
 
     def renew_generation_claim(
         self,
@@ -295,6 +302,16 @@ class GraphDraftGenerationCoordinator(BaseService):
         if not claim.acquired:
             return claim.change_set
         change_set = claim.change_set
+        draft_hint = cleaned_hint
+        if claim.rejected_predecessor is not None:
+            # Seed the re-draft with what the reviewer already turned down; the
+            # claim reload is a distinct object, so the packet is re-attached.
+            draft_hint = compose_rejected_redraft_hint(
+                claim.rejected_predecessor, user_hint=cleaned_hint
+            )
+            context_packet["user_hint"] = draft_hint
+            context_packet["prior_rejection"] = prior_rejection_summary(claim.rejected_predecessor)
+            change_set.context_packet = context_packet
         try:
             generated = self._draft_validated_patch_with_retries(
                 change_set=change_set,
@@ -302,7 +319,7 @@ class GraphDraftGenerationCoordinator(BaseService):
                 draft=lambda attempt_context: self._draft_graph_patch(
                     draft_client,
                     graph_context=attempt_context,
-                    user_hint=cleaned_hint,
+                    user_hint=draft_hint,
                     draft_mode=mode,
                     source_artifacts=prepared["source_artifacts"],
                     image_bytes=prepared["image_bytes"],
@@ -572,6 +589,9 @@ class GraphDraftGenerationCoordinator(BaseService):
             window=window,
             actor=actor,
             batch_note_limit=batch_policy.BATCH_NOTE_LIMIT,
+            context_owner=batch_policy.context_owner_for(
+                review_assignee, review_assignee_user_id, actor
+            ),
         )
         if cleaned_hint:
             context_packet["user_hint"] = cleaned_hint
@@ -787,12 +807,17 @@ class GraphDraftGenerationCoordinator(BaseService):
         *,
         window: tuple[datetime, datetime] | None = None,
         actor: AuthContext | None = None,
+        context_owner: batch_policy.BatchReviewer | None = None,
     ) -> dict[str, Any]:
+        owner = context_owner
+        if owner is None:
+            owner = batch_policy.context_owner_for(None, None, actor)
         return self.context_builder.build_batch_graph_context(
             notes,
             window=window,
             actor=actor,
             batch_note_limit=batch_policy.BATCH_NOTE_LIMIT,
+            context_owner=owner,
         )
 
     @staticmethod

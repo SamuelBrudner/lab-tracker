@@ -722,7 +722,7 @@ export interface components {
       "entity_id": string;
       "entity_type": components["schemas"]["EntityType"];
     };
-    "EntityType": "project" | "question" | "dataset" | "note" | "session" | "analysis" | "claim" | "visualization" | "goal";
+    "EntityType": "project" | "question" | "dataset" | "note" | "session" | "analysis" | "claim" | "visualization" | "goal" | "exploration_node";
     "Envelope_AuthBootstrapStatus_": {
       "data": components["schemas"]["AuthBootstrapStatus"];
       "meta"?: (Record<string, unknown> | null);
@@ -921,7 +921,7 @@ export interface components {
     };
     "GraphDraftMode": "graph_context" | "image_only" | "graph_batch";
     "GraphDraftPurpose": "general" | "member_checkpoint_alignment";
-    "GraphDraftSemanticType": "create_entity" | "update_entity" | "create_note" | "link_note_to_question" | "link_note_to_session" | "link_note_to_dataset" | "link_note_to_analysis" | "suggest_new_question" | "suggest_new_dataset" | "suggest_new_goal" | "link_node_to_goal" | "update_goal" | "suggest_followup" | "request_clarification";
+    "GraphDraftSemanticType": "create_entity" | "update_entity" | "create_note" | "link_note_to_question" | "link_note_to_session" | "link_note_to_dataset" | "link_note_to_analysis" | "suggest_new_question" | "suggest_new_dataset" | "suggest_new_goal" | "link_node_to_goal" | "update_goal" | "suggest_followup" | "request_clarification" | "record_decision" | "record_dead_end" | "record_pivot" | "abandon_question" | "merge_questions" | "retire_note";
     "ListEnvelope_AuthInvitationRead_": {
       "data": Array<components["schemas"]["AuthInvitationRead"]>;
       "meta": components["schemas"]["PaginationMeta"];

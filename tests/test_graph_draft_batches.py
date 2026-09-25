@@ -10,13 +10,14 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
+from api_helpers import repository_backed_api
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.app import create_app
 from lab_tracker.app_parts.middleware import system_auth_context
-from lab_tracker.auth import Role
+from lab_tracker.auth import AuthContext, Role
 from lab_tracker.db_models import (
     GraphChangeSetModel,
     GraphDraftBatchRunModel,
@@ -27,7 +28,15 @@ from lab_tracker.graph_drafting import (
     GraphDraftingError,
     GraphDraftOutputTruncatedError,
 )
-from lab_tracker.models import GraphChangeSetStatus
+from lab_tracker.models import (
+    EntityType,
+    GraphChangeOp,
+    GraphChangeOperation,
+    GraphChangeSet,
+    GraphChangeSetStatus,
+    GraphDraftSemanticType,
+    utc_now,
+)
 from lab_tracker.services import graph_draft_batch_policy as batch_policy
 from lab_tracker.sqlalchemy_repository_parts.repository import SQLAlchemyLabTrackerRepository
 
@@ -2273,3 +2282,146 @@ def test_batch_lists_paginate_in_sql_without_operations_or_context_packets(
     assert runs.json()["meta"]["total"] == 3
     assert len(runs.json()["data"]) == 1
     assert run_query_limits == [1]
+
+
+def test_records_list_review_memory_change_sets_filters_by_status_and_limit() -> None:
+    api = repository_backed_api()
+    actor = AuthContext(user_id=uuid4(), role=Role.ADMIN)
+    project = api.create_project("Review memory", actor=actor)
+    other_project = api.create_project("Other project", actor=actor)
+    note = api.create_note(
+        project_id=project.project_id, raw_content="Source capture", actor=actor
+    )
+    records = api.graph_drafts.records
+    base = utc_now()
+
+    def save(status: GraphChangeSetStatus, *, seconds_ago: int, project_id=None) -> GraphChangeSet:
+        change_set = GraphChangeSet(
+            change_set_id=uuid4(),
+            project_id=project_id or project.project_id,
+            source_note_id=note.note_id,
+            model="fake",
+            prompt_version="test",
+            status=status,
+            created_at=base - timedelta(seconds=seconds_ago),
+        )
+        change_set.operations.append(
+            GraphChangeOperation(
+                operation_id=uuid4(),
+                change_set_id=change_set.change_set_id,
+                sequence=1,
+                op=GraphChangeOp.CREATE,
+                entity_type=EntityType.QUESTION,
+                semantic_type=GraphDraftSemanticType.SUGGEST_NEW_QUESTION,
+                payload={"text": f"Proposal in {status.value}"},
+            )
+        )
+        records.save_graph_change_set(change_set)
+        return change_set
+
+    ready = save(GraphChangeSetStatus.READY, seconds_ago=30)
+    rejected = save(GraphChangeSetStatus.REJECTED, seconds_ago=20)
+    committed = save(GraphChangeSetStatus.COMMITTED, seconds_ago=10)
+    save(GraphChangeSetStatus.DRAFTING, seconds_ago=0)
+    save(GraphChangeSetStatus.READY, seconds_ago=5, project_id=other_project.project_id)
+
+    listed = records.list_review_memory_change_sets(
+        project.project_id,
+        statuses={
+            GraphChangeSetStatus.READY,
+            GraphChangeSetStatus.REJECTED,
+            GraphChangeSetStatus.COMMITTED,
+        },
+        limit=10,
+    )
+
+    # Newest first, only the requested statuses, only this project, operations loaded.
+    assert [item.change_set_id for item in listed] == [
+        committed.change_set_id,
+        rejected.change_set_id,
+        ready.change_set_id,
+    ]
+    assert listed[0].operations[0].payload == {"text": "Proposal in committed"}
+    limited = records.list_review_memory_change_sets(
+        project.project_id,
+        statuses={GraphChangeSetStatus.READY, GraphChangeSetStatus.REJECTED},
+        limit=1,
+    )
+    assert [item.change_set_id for item in limited] == [rejected.change_set_id]
+
+
+def test_batch_draft_packet_is_reviewer_scoped_to_the_run_assignee(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    first_headers, first_user_id = _registered_user(client, role=Role.EDITOR)
+    second_headers, second_user_id = _registered_user(client, role=Role.EDITOR)
+    for user_id in (first_user_id, second_user_id):
+        added = client.post(
+            f"/projects/{project_id}/members",
+            json={"user_id": user_id, "role": "contributor"},
+            headers=admin_auth_headers,
+        )
+        assert added.status_code == 201
+    fake_client = FakeBatchDraftClient(_batch_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda _settings: fake_client
+
+    def run_now(headers: dict[str, str]) -> dict[str, Any]:
+        response = client.post(
+            "/batches/run-now", json={"project_id": project_id}, headers=headers
+        )
+        assert response.status_code == 201, response.text
+        return response.json()["data"]
+
+    def review_memory(change_set_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        stored = client.get(f"/graph-drafts/{change_set_id}", headers=admin_auth_headers)
+        assert stored.status_code == 200, stored.text
+        packet = stored.json()["data"]["context_packet"]
+        return packet["review_memory"], packet["context_summary"]
+
+    _note(client, first_headers, project_id, "First user's earlier note.")
+    _note(client, second_headers, project_id, "Second user's earlier note.")
+    first_run = run_now(first_headers)
+    second_run = run_now(second_headers)
+    assert first_run["review_assignee_user_id"] == first_user_id
+    assert second_run["review_assignee_user_id"] == second_user_id
+    first_memory, _ = review_memory(first_run["change_set_id"])
+    assert first_memory["reviewer_scoped"] is True
+    assert first_memory["pending_proposals"] == []
+
+    _note(client, first_headers, project_id, "First user's later note.")
+    _note(client, second_headers, project_id, "Second user's later note.")
+    later_first = run_now(first_headers)
+    later_second = run_now(second_headers)
+
+    memory, summary = review_memory(later_first["change_set_id"])
+    assert memory["reviewer_scoped"] is True
+    assert memory["reviewer_user_id"] == first_user_id
+    assert [item["change_set_id"] for item in memory["pending_proposals"]] == [
+        first_run["change_set_id"]
+    ]
+    assert memory["pending_proposals"][0]["semantic_type"] == "suggest_new_question"
+    assert memory["pending_proposals"][0]["entity_type"] == "question"
+    assert (
+        memory["pending_proposals"][0]["target"]
+        == "Do pooled notes support a merged observation?"
+    )
+    assert memory["recent_rejections"] == []
+    assert summary["review_memory"] == {
+        "reviewer_scoped": True,
+        "pending_proposals": 1,
+        "recent_rejections": 0,
+        "pending_proposals_truncated": False,
+    }
+    assert summary["counts"]["pending_proposals"] == 1
+    assert "review memory not reviewer-scoped" not in summary["warnings"]
+
+    other_memory, _ = review_memory(later_second["change_set_id"])
+    assert other_memory["reviewer_user_id"] == second_user_id
+    assert [item["change_set_id"] for item in other_memory["pending_proposals"]] == [
+        second_run["change_set_id"]
+    ]
+    # The model saw the same reviewer-scoped memory the packet persisted.
+    sent = fake_client.calls[-1]["batch_context"]["review_memory"]
+    assert sent == other_memory

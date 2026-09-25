@@ -41,10 +41,13 @@ self, cross-project, and cyclic edges.
 
 ## Human Gate
 
-This slice adds direct API persistence but does not auto-harvest or auto-commit
-agent output. Future agent-harvested nodes should enter the existing graph-draft
-review queue as proposed changes with `origin=ai_suggested` or
-`origin=ai_executed`, and only become committed after human acceptance.
+Direct API persistence is unchanged, and nothing auto-commits agent output.
+Agent-harvested nodes enter the existing graph-draft review queue through the
+`record_decision`, `record_dead_end`, and `record_pivot` semantic labels
+(`create exploration_node` operations validated at draft time against the same
+per-type field rules the service enforces). They commit only on human
+acceptance and are then stamped `origin=ai_suggested` — `origin=user_revised`
+when the reviewer edited the payload — with the change-set backlink.
 
 ## Export And Graph Surface
 

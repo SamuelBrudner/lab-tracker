@@ -236,6 +236,30 @@ def staged_notes_in_window(
     )
 
 
+def context_owner_for(
+    review_assignee: str | None,
+    review_assignee_user_id: UUID | None,
+    actor: AuthContext | None,
+) -> BatchReviewer | None:
+    """Whose review memory a batch packet is scoped to.
+
+    The run's assignee wins (their user id when the assignment is user-backed,
+    else the legacy reviewer string), then the acting user; ``None`` when there
+    is no reviewer at all, so the packet is flagged as not reviewer-scoped.
+    """
+
+    if review_assignee_user_id is not None:
+        return BatchReviewer(
+            reviewer=review_assignee or str(review_assignee_user_id),
+            reviewer_user_id=review_assignee_user_id,
+        )
+    if review_assignee is not None:
+        return BatchReviewer(reviewer=review_assignee, reviewer_user_id=None)
+    if actor is not None:
+        return BatchReviewer(reviewer=str(actor.user_id), reviewer_user_id=actor.user_id)
+    return None
+
+
 def reviewer_for_note(note: Note) -> BatchReviewer:
     if note.created_by_user_id is not None:
         return BatchReviewer(

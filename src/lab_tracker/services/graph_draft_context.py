@@ -6,12 +6,16 @@ import json
 import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from datetime import datetime, timedelta
+from typing import TYPE_CHECKING, Any, Protocol
 from uuid import UUID
 
 from lab_tracker.auth import AuthContext
 from lab_tracker.errors import NotFoundError, ValidationError
 from lab_tracker.models import (
+    REVIEW_NOTE_KEY,
+    REVIEWED_AT_KEY,
+    REVIEWED_BY_KEY,
     Analysis,
     Claim,
     Dataset,
@@ -19,6 +23,11 @@ from lab_tracker.models import (
     EntityType,
     ExplorationNode,
     Goal,
+    GraphChangeOp,
+    GraphChangeOperation,
+    GraphChangeOperationStatus,
+    GraphChangeSet,
+    GraphChangeSetStatus,
     GraphDraftMode,
     Note,
     NoteStatus,
@@ -27,6 +36,7 @@ from lab_tracker.models import (
     QuestionStatus,
     Session,
     Visualization,
+    utc_now,
 )
 from lab_tracker.note_text import NoteTextExcerpt, is_text_content_type
 from lab_tracker.services.analysis_service import AnalysisService
@@ -34,6 +44,7 @@ from lab_tracker.services.claim_service import ClaimService
 from lab_tracker.services.dataset_service import DatasetService
 from lab_tracker.services.exploration_service import ExplorationService
 from lab_tracker.services.goal_service import GoalService
+from lab_tracker.services.graph_draft_batch_policy import BatchReviewer, as_utc
 from lab_tracker.services.note_service import NoteService
 from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.question_service import QuestionService
@@ -45,7 +56,16 @@ if TYPE_CHECKING:
     from lab_tracker.schemas import GraphSearchHit
 
 EntityResult = (
-    Project | Question | Note | Session | Dataset | Analysis | Claim | Visualization | Goal
+    Project
+    | Question
+    | Note
+    | Session
+    | Dataset
+    | Analysis
+    | Claim
+    | Visualization
+    | Goal
+    | ExplorationNode
 )
 _RECENT_CONTEXT_LIMIT = 10
 QUESTION_CONTEXT_LIMIT = 50
@@ -102,9 +122,58 @@ _SELECTED_CONTEXT_KEYS = (
     "known_aliases",
 )
 _CUE_TOKEN_SPLIT = re.compile(r"[^0-9a-z]+")
+# Review memory: what this reviewer already has under review (so the drafter
+# cites instead of duplicating) and what they recently rejected (so a
+# re-proposal must state new evidence). Reviewer-scoped and capped.
+REVIEW_MEMORY_PENDING_STATUSES = frozenset(
+    {
+        GraphChangeSetStatus.READY,
+        GraphChangeSetStatus.SUBMITTED,
+        GraphChangeSetStatus.CHANGES_REQUESTED,
+    }
+)
+# The one status set queried per project; pending and rejected are split in Python.
+REVIEW_MEMORY_REJECTION_STATUSES = frozenset(
+    {
+        *REVIEW_MEMORY_PENDING_STATUSES,
+        GraphChangeSetStatus.REJECTED,
+        GraphChangeSetStatus.COMMITTED,
+    }
+)
+_REVIEW_MEMORY_QUERY_LIMIT = 50
+PENDING_PROPOSALS_ITEM_LIMIT = 25
+PENDING_PROPOSALS_CHAR_BUDGET = 8_000
+RECENT_REJECTIONS_ITEM_LIMIT = 15
+RECENT_REJECTIONS_WINDOW_DAYS = 14
+REVIEW_MEMORY_NOTE_MAX_CHARS = 200
+REVIEW_MEMORY_NOT_SCOPED_WARNING = "review memory not reviewer-scoped"
+_MISSING_TARGET_LABEL = "(missing)"
+_CREATE_LABEL_FIELDS = ("text", "title", "statement", "raw_content")
+# json.dumps list rendering adds ", " per item (or the brackets for the last).
+_JSON_LIST_ITEM_OVERHEAD = 2
 
 if ACTIVE_QUESTION_FLOOR > QUESTION_CONTEXT_LIMIT:
     raise ValueError("ACTIVE_QUESTION_FLOOR must not exceed QUESTION_CONTEXT_LIMIT.")
+
+
+class ReviewMemoryRecords(Protocol):
+    """Narrow change-set read that feeds reviewer-scoped review memory."""
+
+    def list_review_memory_change_sets(
+        self,
+        project_id: UUID,
+        *,
+        statuses: set[GraphChangeSetStatus],
+        limit: int,
+    ) -> list[GraphChangeSet]: ...
+
+
+@dataclass(frozen=True)
+class _Rejection:
+    change_set: GraphChangeSet
+    operation: GraphChangeOperation
+    note: str
+    rejected_at: datetime
 
 
 @dataclass(frozen=True)
@@ -128,6 +197,7 @@ class GraphContextBuilder:
         visualizations: VisualizationService,
         goals: GoalService | None = None,
         exploration: ExplorationService | None = None,
+        review_memory: ReviewMemoryRecords | None = None,
     ) -> None:
         self.projects = projects
         self.questions = questions
@@ -139,6 +209,7 @@ class GraphContextBuilder:
         self.visualizations = visualizations
         self.goals = goals
         self.exploration = exploration
+        self.review_memory = review_memory
 
     def build_batch_graph_context(
         self,
@@ -147,6 +218,7 @@ class GraphContextBuilder:
         window: tuple[Any, Any] | None = None,
         actor: AuthContext | None = None,
         batch_note_limit: int = 100,
+        context_owner: BatchReviewer | None = None,
     ) -> dict[str, Any]:
         """Assemble a context packet covering a batch of staged notes.
 
@@ -157,7 +229,8 @@ class GraphContextBuilder:
 
         Caller is responsible for filtering to staged notes and choosing
         the window. The batch is capped at batch_note_limit; overflow is
-        reported as truncated_note_count.
+        reported as truncated_note_count. ``context_owner`` is the reviewer
+        whose pending proposals and recent rejections become review_memory.
         """
         truncated_note_count = max(0, len(notes) - batch_note_limit)
         # Chronological order gives the day a contractual timeline rather than
@@ -271,10 +344,143 @@ class GraphContextBuilder:
                 source_context_truncated_note_count
             ),
             "projects": project_blocks,
+            "review_memory": self.build_review_memory(
+                project_ids=set(notes_by_project),
+                context_owner=context_owner,
+                now=utc_now(),
+            ),
             "truncated_note_count": truncated_note_count,
         }
         packet["context_summary"] = _graph_batch_context_summary(packet)
         return packet
+
+    def build_review_memory(
+        self,
+        *,
+        project_ids: set[UUID],
+        context_owner: BatchReviewer | None,
+        now: datetime,
+    ) -> dict[str, Any]:
+        """Reviewer-scoped pending proposals and recent rejections, capped.
+
+        Without a user-backed reviewer (or a records port) the block is empty
+        and flagged ``reviewer_scoped=False`` rather than matched on a legacy
+        reviewer string.
+        """
+
+        reviewer_user_id = context_owner.reviewer_user_id if context_owner is not None else None
+        if self.review_memory is None or reviewer_user_id is None:
+            return _empty_review_memory()
+        change_sets: list[GraphChangeSet] = []
+        for project_id in sorted(project_ids, key=str):
+            change_sets.extend(
+                self.review_memory.list_review_memory_change_sets(
+                    project_id,
+                    statuses=set(REVIEW_MEMORY_REJECTION_STATUSES),
+                    limit=_REVIEW_MEMORY_QUERY_LIMIT,
+                )
+            )
+        change_sets.sort(
+            key=lambda item: (-as_utc(item.created_at).timestamp(), str(item.change_set_id))
+        )
+        pending, truncated = self._pending_proposals(change_sets, reviewer_user_id)
+        cutoff = now - timedelta(days=RECENT_REJECTIONS_WINDOW_DAYS)
+        return {
+            "reviewer_scoped": True,
+            "reviewer_user_id": str(reviewer_user_id),
+            "pending_proposals": pending,
+            "pending_proposals_truncated": truncated,
+            "recent_rejections": self._recent_rejections(
+                change_sets, reviewer_user_id, cutoff=cutoff
+            ),
+        }
+
+    def _pending_proposals(
+        self,
+        change_sets: list[GraphChangeSet],
+        reviewer_user_id: UUID,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        items: list[dict[str, Any]] = []
+        serialized_chars = 0
+        for change_set in change_sets:
+            if change_set.status not in REVIEW_MEMORY_PENDING_STATUSES:
+                continue
+            if not _reviewed_by_user(change_set, reviewer_user_id):
+                continue
+            for operation in change_set.operations:
+                if operation.status == GraphChangeOperationStatus.REJECTED:
+                    continue
+                item = {
+                    "change_set_id": str(change_set.change_set_id),
+                    "change_set_status": change_set.status.value,
+                    "semantic_type": (
+                        operation.semantic_type.value if operation.semantic_type else None
+                    ),
+                    "op": operation.op.value,
+                    "entity_type": operation.entity_type.value,
+                    "target": self._operation_target_label(operation),
+                }
+                item_chars = len(json.dumps(item, sort_keys=True)) + _JSON_LIST_ITEM_OVERHEAD
+                if (
+                    len(items) >= PENDING_PROPOSALS_ITEM_LIMIT
+                    or serialized_chars + item_chars > PENDING_PROPOSALS_CHAR_BUDGET
+                ):
+                    return items, True
+                items.append(item)
+                serialized_chars += item_chars
+        return items, False
+
+    def _recent_rejections(
+        self,
+        change_sets: list[GraphChangeSet],
+        reviewer_user_id: UUID,
+        *,
+        cutoff: datetime,
+    ) -> list[dict[str, Any]]:
+        reviewer = str(reviewer_user_id)
+        rejections: list[_Rejection] = []
+        for change_set in change_sets:
+            set_rejection = _change_set_rejection(change_set, reviewer, cutoff=cutoff)
+            for operation in change_set.operations:
+                rejection = _operation_rejection(change_set, operation, reviewer, cutoff=cutoff)
+                if rejection is None and set_rejection is not None:
+                    rejection = _Rejection(change_set, operation, *set_rejection)
+                if rejection is not None:
+                    rejections.append(rejection)
+        rejections.sort(key=lambda item: str(item.operation.operation_id))
+        rejections.sort(key=lambda item: item.rejected_at, reverse=True)
+        return [
+            {
+                "change_set_id": str(item.change_set.change_set_id),
+                "operation_id": str(item.operation.operation_id),
+                "semantic_type": (
+                    item.operation.semantic_type.value
+                    if item.operation.semantic_type
+                    else None
+                ),
+                "op": item.operation.op.value,
+                "entity_type": item.operation.entity_type.value,
+                "target": self._operation_target_label(item.operation),
+                "note": item.note[:REVIEW_MEMORY_NOTE_MAX_CHARS],
+                "rejected_at": item.rejected_at.isoformat(),
+            }
+            for item in rejections[:RECENT_REJECTIONS_ITEM_LIMIT]
+        ]
+
+    def _operation_target_label(self, operation: GraphChangeOperation) -> str:
+        if operation.op == GraphChangeOp.UPDATE:
+            if operation.target_entity_id is None:
+                return _MISSING_TARGET_LABEL
+            try:
+                entity = self.get_graph_entity(operation.entity_type, operation.target_entity_id)
+            except (NotFoundError, ValidationError):
+                return _MISSING_TARGET_LABEL
+            return _entity_label(operation.entity_type, entity)[:REVIEW_MEMORY_NOTE_MAX_CHARS]
+        for field_name in _CREATE_LABEL_FIELDS:
+            value = operation.payload.get(field_name)
+            if isinstance(value, str) and value.strip():
+                return value.strip()[:REVIEW_MEMORY_NOTE_MAX_CHARS]
+        return ""
 
     def prepare_note_sources_for_graph_draft(
         self,
@@ -507,6 +713,8 @@ class GraphContextBuilder:
         }
         if self.goals is not None:
             getters[EntityType.GOAL] = self.goals.get_goal
+        if self.exploration is not None:
+            getters[EntityType.EXPLORATION_NODE] = self.exploration.get_exploration_node
         getter = getters.get(entity_type)
         if getter is None:
             raise ValidationError("Unsupported entity type.")
@@ -752,6 +960,14 @@ def _graph_batch_context_summary(packet: dict[str, Any]) -> dict[str, Any]:
     projects = packet.get("projects") or []
     batch_notes = [item for item in packet.get("batch_notes") or [] if isinstance(item, dict)]
     meeting_note_count = sum(1 for item in batch_notes if item.get("is_meeting"))
+    review_memory = packet.get("review_memory")
+    if not isinstance(review_memory, dict):
+        review_memory = _empty_review_memory()
+    pending_proposal_count = len(review_memory.get("pending_proposals") or [])
+    recent_rejection_count = len(review_memory.get("recent_rejections") or [])
+    reviewer_scoped = bool(review_memory.get("reviewer_scoped"))
+    if not reviewer_scoped:
+        warnings.append(REVIEW_MEMORY_NOT_SCOPED_WARNING)
     return {
         "approximate_size_bytes": len(
             json.dumps(packet, sort_keys=True, default=str).encode("utf-8")
@@ -776,6 +992,16 @@ def _graph_batch_context_summary(packet: dict[str, Any]) -> dict[str, Any]:
             "exploration_nodes": sum(len(p.get("exploration_nodes") or []) for p in projects),
             "cue_matched": sum(len(p.get("cue_matched") or []) for p in projects),
             "known_aliases": sum(len(p.get("known_aliases") or []) for p in projects),
+            "pending_proposals": pending_proposal_count,
+            "recent_rejections": recent_rejection_count,
+        },
+        "review_memory": {
+            "reviewer_scoped": reviewer_scoped,
+            "pending_proposals": pending_proposal_count,
+            "recent_rejections": recent_rejection_count,
+            "pending_proposals_truncated": bool(
+                review_memory.get("pending_proposals_truncated")
+            ),
         },
         "slot_fill": _slot_fill(
             item
@@ -808,6 +1034,67 @@ def _compact_actor(actor: AuthContext | None) -> dict[str, Any] | None:
     if actor is None:
         return None
     return {"id": str(actor.user_id), "role": actor.role.value}
+
+
+def _empty_review_memory() -> dict[str, Any]:
+    return {
+        "reviewer_scoped": False,
+        "reviewer_user_id": None,
+        "pending_proposals": [],
+        "pending_proposals_truncated": False,
+        "recent_rejections": [],
+    }
+
+
+def _reviewed_by_user(change_set: GraphChangeSet, reviewer_user_id: UUID) -> bool:
+    """The change set is this reviewer's: assigned to them, or theirs and unassigned."""
+
+    if change_set.review_assignee_user_id is not None:
+        return change_set.review_assignee_user_id == reviewer_user_id
+    return change_set.created_by_user_id == reviewer_user_id
+
+
+def _change_set_rejection(
+    change_set: GraphChangeSet,
+    reviewer: str,
+    *,
+    cutoff: datetime,
+) -> tuple[str, datetime] | None:
+    """(note, rejected_at) when this reviewer rejected the whole set recently."""
+
+    if change_set.status != GraphChangeSetStatus.REJECTED:
+        return None
+    if change_set.reviewed_by != reviewer or change_set.reviewed_at is None:
+        return None
+    note = (change_set.review_note or "").strip()
+    rejected_at = as_utc(change_set.reviewed_at)
+    if not note or rejected_at < cutoff:
+        return None
+    return note, rejected_at
+
+
+def _operation_rejection(
+    change_set: GraphChangeSet,
+    operation: GraphChangeOperation,
+    reviewer: str,
+    *,
+    cutoff: datetime,
+) -> _Rejection | None:
+    """This reviewer's recent, note-carrying rejection of one operation."""
+
+    if operation.status != GraphChangeOperationStatus.REJECTED:
+        return None
+    metadata = operation.error_metadata or {}
+    if metadata.get(REVIEWED_BY_KEY) != reviewer:
+        return None
+    reviewed_at = metadata.get(REVIEWED_AT_KEY)
+    if not isinstance(reviewed_at, str):
+        return None
+    note = str(operation.review_note or metadata.get(REVIEW_NOTE_KEY) or "").strip()
+    rejected_at = as_utc(datetime.fromisoformat(reviewed_at))
+    if not note or rejected_at < cutoff:
+        return None
+    return _Rejection(change_set, operation, note, rejected_at)
 
 
 def _capped_text(value: str | None) -> str | None:
@@ -1446,6 +1733,8 @@ def _entity_label(entity_type: EntityType, entity: EntityResult) -> str:
         return entity.caption or entity.file_path
     if entity_type == EntityType.GOAL:
         return entity.title
+    if entity_type == EntityType.EXPLORATION_NODE:
+        return entity.title
     return str(entity_id(entity_type, entity))
 
 
@@ -1468,4 +1757,6 @@ def entity_id(entity_type: EntityType, entity: EntityResult) -> UUID:
         return entity.viz_id
     if entity_type == EntityType.GOAL:
         return entity.goal_id
+    if entity_type == EntityType.EXPLORATION_NODE:
+        return entity.node_id
     raise ValidationError("Unsupported entity type.")

@@ -3809,3 +3809,295 @@ def test_revise_graph_draft_records_exactly_one_usage_event(
         ]
         assert str(new_events[0].resource_id) == change_set_id
         assert str(new_events[0].project_id) == project_id
+
+
+def test_redraft_after_rejection_seeds_model_with_rejected_operations_and_review_notes(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    note_id = _image_note(client, admin_auth_headers, project_id)
+    fake = FakeDraftClient(_draft_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: fake
+    first = client.post(f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers)
+    assert first.status_code == 201, first.text
+    first_data = first.json()["data"]
+    first_id = first_data["change_set_id"]
+    question_operation = first_data["operations"][0]
+    rejected = client.patch(
+        f"/graph-drafts/{first_id}/operations/{question_operation['operation_id']}",
+        json={
+            "payload": question_operation["payload"],
+            "status": "rejected",
+            "review_note": "Not a question",
+        },
+        headers=admin_auth_headers,
+    )
+    assert rejected.status_code == 200, rejected.text
+    _submit_and_reject(client, admin_auth_headers, first_id)
+
+    second = client.post(f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers)
+
+    assert second.status_code == 201, second.text
+    second_id = second.json()["data"]["change_set_id"]
+    assert second_id != first_id
+    assert fake.calls[0]["user_hint"] is None
+    hint = fake.calls[1]["user_hint"]
+    assert hint.startswith("REJECTED DRAFT.")
+    assert "Try a different framing." in hint
+    assert "(reviewer note: Not a question)" in hint
+    assert "[rejected] suggest_new_question on question" in hint
+    assert "<prior_proposed_operations>" in hint
+    # The persisted re-draft records what it was seeded with and why.
+    stored = client.get(f"/graph-drafts/{second_id}", headers=admin_auth_headers)
+    assert stored.status_code == 200
+    context_packet = stored.json()["data"]["context_packet"]
+    assert context_packet["prior_rejection"]["change_set_id"] == first_id
+    assert context_packet["prior_rejection"]["review_note"] == "Try a different framing."
+    assert context_packet["prior_rejection"]["rejected_operation_count"] == 2
+    assert context_packet["user_hint"] == hint
+    # The fenced hint also reaches the model inside the packet.
+    assert fake.calls[1]["graph_context"]["prior_rejection"]["change_set_id"] == first_id
+
+
+def test_revise_hint_carries_per_operation_review_notes(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    note_id = _image_note(client, admin_auth_headers, project_id)
+    client.app.state.graph_draft_client_factory = lambda settings: FakeDraftClient(
+        _draft_patch(project_id)
+    )
+    created = client.post(
+        f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers
+    ).json()["data"]
+    change_set_id = created["change_set_id"]
+    note_operation = created["operations"][1]
+    rejected = client.patch(
+        f"/graph-drafts/{change_set_id}/operations/{note_operation['operation_id']}",
+        json={
+            "payload": note_operation["payload"],
+            "status": "rejected",
+            "review_note": "Drop this note",
+        },
+        headers=admin_auth_headers,
+    )
+    assert rejected.status_code == 200, rejected.text
+
+    revised_client = FakeDraftClient(_revised_draft_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: revised_client
+    response = client.post(
+        f"/graph-drafts/{change_set_id}/revise",
+        data={"feedback": "Keep only the protocol question."},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    hint = revised_client.calls[0]["user_hint"]
+    assert hint.startswith("REVISION REQUEST.")
+    assert "[rejected] create_note on note" in hint
+    assert "(reviewer note: Drop this note)" in hint
+    assert "[proposed] suggest_new_question on question" in hint
+    assert "Reviewer feedback (authoritative): Keep only the protocol question." in hint
+
+
+def _question(client: TestClient, headers: dict[str, str], project_id: str, text: str) -> str:
+    response = client.post(
+        "/questions",
+        json={"project_id": project_id, "text": text, "question_type": "descriptive"},
+        headers=headers,
+    )
+    assert response.status_code == 201, response.text
+    return response.json()["data"]["question_id"]
+
+
+def _single_operation_patch(operation: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "summary": "Drafted one negative-knowledge operation",
+        "uncertain_fields": [],
+        "clarification_requests": [],
+        "operations": [operation],
+    }
+
+
+def _accept_negative_knowledge_draft(
+    client: TestClient, headers: dict[str, str], draft: dict[str, Any]
+) -> dict[str, Any]:
+    change_set_id = draft["change_set_id"]
+    for operation in draft["operations"]:
+        accepted = client.patch(
+            f"/graph-drafts/{change_set_id}/operations/{operation['operation_id']}",
+            json={"payload": operation["payload"], "status": "accepted"},
+            headers=headers,
+        )
+        assert accepted.status_code == 200, accepted.text
+    commit = client.post(
+        f"/graph-drafts/{change_set_id}/commit",
+        json={"message": "Commit negative knowledge"},
+        headers=headers,
+    )
+    assert commit.status_code == 200, commit.text
+    committed = commit.json()["data"]
+    assert committed["status"] == "committed"
+    assert [operation["status"] for operation in committed["operations"]] == ["applied"]
+    return committed
+
+
+def test_commit_record_dead_end_creates_ai_suggested_exploration_node(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    question_id = _question(
+        client, admin_auth_headers, project_id, "Does bootstrap separate groups?"
+    )
+    note_id = _image_note(client, admin_auth_headers, project_id)
+    client.app.state.graph_draft_client_factory = lambda settings: FakeDraftClient(
+        _single_operation_patch(
+            {
+                "client_ref": "dead_end",
+                "op": "create",
+                "entity_type": "exploration_node",
+                "semantic_type": "record_dead_end",
+                "target_entity_id": None,
+                "payload_json": json.dumps(
+                    {
+                        "project_id": project_id,
+                        "node_type": "dead_end",
+                        "title": "Bootstrap path underpowered",
+                        "target": {"entity_type": "question", "entity_id": question_id},
+                        "hypothesis": "Bootstrap intervals would separate the groups.",
+                        "failure_mode": "Intervals overlapped at every sample size.",
+                        "lesson": "Paired designs need a paired test.",
+                    }
+                ),
+                "rationale": "The whiteboard records the failed bootstrap attempt.",
+                "confidence": 0.7,
+                "source_refs": [{"label": "whiteboard", "quote": "underpowered", "region": None}],
+            }
+        )
+    )
+
+    draft = client.post(f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers)
+    assert draft.status_code == 201, draft.text
+    draft_data = draft.json()["data"]
+    assert draft_data["status"] == "ready"
+    assert draft_data["operations"][0]["semantic_type"] == "record_dead_end"
+    assert draft_data["operations"][0]["entity_type"] == "exploration_node"
+
+    committed = _accept_negative_knowledge_draft(client, admin_auth_headers, draft_data)
+
+    node_id = committed["operations"][0]["result_entity_id"]
+    assert UUID(node_id)
+    node = client.get(f"/exploration-nodes/{node_id}", headers=admin_auth_headers)
+    assert node.status_code == 200, node.text
+    node_payload = node.json()["data"]
+    assert node_payload["node_type"] == "dead_end"
+    assert node_payload["origin"] == "ai_suggested"
+    assert node_payload["change_set_id"] == committed["change_set_id"]
+    assert node_payload["origin_model"] == "fake-gpt"
+    assert node_payload["origin_prompt_version"] == "multimodal-graph-draft-v4"
+    assert node_payload["target"] == {"entity_type": "question", "entity_id": question_id}
+    listed = client.get(
+        f"/exploration-nodes?project_id={project_id}", headers=admin_auth_headers
+    )
+    assert [item["node_id"] for item in listed.json()["data"]] == [node_id]
+
+
+def test_commit_merge_questions_supersedes_source_and_audits_refactor(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    source_id = _question(
+        client, admin_auth_headers, project_id, "How should the question be framed?"
+    )
+    note_id = _image_note(client, admin_auth_headers, project_id)
+    client.app.state.graph_draft_client_factory = lambda settings: FakeDraftClient(
+        _single_operation_patch(
+            {
+                "client_ref": None,
+                "op": "update",
+                "entity_type": "question",
+                "semantic_type": "merge_questions",
+                "target_entity_id": source_id,
+                "payload_json": json.dumps(
+                    {
+                        "replacement": {
+                            "text": "Which contrast is testable this week?",
+                            "question_type": "hypothesis_driven",
+                            "status": "active",
+                        },
+                        "reason": "Two captures ask the same question.",
+                    }
+                ),
+                "rationale": "The whiteboard restates the existing question more precisely.",
+                "confidence": 0.8,
+                "source_refs": [{"label": "whiteboard", "quote": "same question", "region": None}],
+            }
+        )
+    )
+
+    draft = client.post(f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers)
+    assert draft.status_code == 201, draft.text
+    committed = _accept_negative_knowledge_draft(client, admin_auth_headers, draft.json()["data"])
+
+    replacement_id = committed["operations"][0]["result_entity_id"]
+    assert replacement_id != source_id
+    source = client.get(f"/questions/{source_id}", headers=admin_auth_headers).json()["data"]
+    assert source["status"] == "superseded"
+    assert source["superseded_by_question_id"] == replacement_id
+    assert source["origin"] == "user"
+    replacement = client.get(
+        f"/questions/{replacement_id}", headers=admin_auth_headers
+    ).json()["data"]
+    assert replacement["text"] == "Which contrast is testable this week?"
+    assert replacement["status"] == "active"
+    assert replacement["supersedes_question_id"] == source_id
+    assert replacement["origin"] == "ai_suggested"
+    assert replacement["change_set_id"] == committed["change_set_id"]
+    assert replacement["origin_model"] == "fake-gpt"
+    refactors = client.get(f"/questions/{source_id}/refactors", headers=admin_auth_headers)
+    assert refactors.status_code == 200, refactors.text
+    audit = refactors.json()["data"]
+    assert len(audit) == 1
+    assert audit[0]["reason"] == "Two captures ask the same question."
+    assert audit[0]["replacement_question_id"] == replacement_id
+
+
+def test_commit_retire_note_archives_with_reason(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    old_note = client.post(
+        "/notes",
+        json={"project_id": project_id, "raw_content": "Old protocol note", "status": "staged"},
+        headers=admin_auth_headers,
+    )
+    assert old_note.status_code == 201, old_note.text
+    old_note_id = old_note.json()["data"]["note_id"]
+    note_id = _image_note(client, admin_auth_headers, project_id)
+    client.app.state.graph_draft_client_factory = lambda settings: FakeDraftClient(
+        _single_operation_patch(
+            {
+                "client_ref": None,
+                "op": "update",
+                "entity_type": "note",
+                "semantic_type": "retire_note",
+                "target_entity_id": old_note_id,
+                "payload_json": json.dumps({"reason": "superseded"}),
+                "rationale": "The whiteboard replaces the old protocol note.",
+                "confidence": 0.75,
+                "source_refs": [{"label": "whiteboard", "quote": "new protocol", "region": None}],
+            }
+        )
+    )
+
+    draft = client.post(f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers)
+    assert draft.status_code == 201, draft.text
+    committed = _accept_negative_knowledge_draft(client, admin_auth_headers, draft.json()["data"])
+
+    assert committed["operations"][0]["result_entity_id"] == old_note_id
+    archived = client.get(f"/notes/{old_note_id}", headers=admin_auth_headers).json()["data"]
+    assert archived["status"] == "archived"
+    assert archived["archived_reason"] == "superseded"
+    assert archived["archived_by"] == committed["committed_by"]
+    assert archived["archived_at"] is not None

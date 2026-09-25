@@ -42,6 +42,12 @@ SEMANTIC_TYPES = [
     "update_goal",
     "suggest_followup",
     "request_clarification",
+    "record_decision",
+    "record_dead_end",
+    "record_pivot",
+    "abandon_question",
+    "merge_questions",
+    "retire_note",
 ]
 
 _GRAPH_DRAFT_ENTITY_TYPES = (
@@ -54,7 +60,25 @@ _GRAPH_DRAFT_ENTITY_TYPES = (
     "claim",
     "visualization",
     "goal",
+    "exploration_node",
 )
+# Draft-time mirror of ExplorationService._validate_node, keyed by
+# ExplorationNodeType value: the fields each node type must carry. The
+# validator imports this same table so the contract and the check cannot drift.
+EXPLORATION_NODE_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
+    "decision": ("choice", "rationale", "alternatives_considered"),
+    "dead_end": ("hypothesis", "failure_mode", "lesson"),
+    "pivot": ("trigger", "rationale"),
+}
+EXPLORATION_NODE_TARGET_ENTITY_TYPES = ("question", "dataset", "analysis", "claim")
+PIVOT_INVALIDATION_FIELDS = ("invalidates_node_id", "invalidates_claim_id")
+RETIRE_NOTE_REASON_VALUES = ("superseded", "reviewed_not_relevant")
+MERGE_QUESTIONS_REPLACEMENT_STATUSES = ("staged", "active")
+_RECORD_LABEL_NODE_TYPES = {
+    "record_decision": "decision",
+    "record_dead_end": "dead_end",
+    "record_pivot": "pivot",
+}
 
 
 class GraphDraftingError(RuntimeError):
@@ -79,6 +103,8 @@ def graph_draft_payload_contract() -> dict[str, Any]:
     envelope, so providers cannot validate its nested shape themselves. Deriving
     this instruction block from the same schema metadata used by API clients keeps
     required fields, allowed fields, and controlled values from drifting.
+    ``exploration_node`` is a draftable entity, and ``semantic_operations``
+    entries override the entity contract for their semantic_type.
     """
 
     # Import lazily so this provider module remains importable while the API schema
@@ -116,9 +142,57 @@ def graph_draft_payload_contract() -> dict[str, Any]:
             "entity record IDs belong in target_entity_id, not payload_json, "
             "unless the field is explicitly allowed",
             "use only the listed controlled_values",
+            "semantic_operations entries override the entity contract for that "
+            "semantic_type",
         ],
         "entities": contract_entities,
+        "semantic_operations": _semantic_operation_contract(),
     }
+
+
+def _semantic_operation_contract() -> dict[str, Any]:
+    """Payload rules for the negative-knowledge labels, keyed by semantic_type."""
+
+    contract: dict[str, Any] = {}
+    for label, node_type in _RECORD_LABEL_NODE_TYPES.items():
+        entry: dict[str, Any] = {
+            "op": "create",
+            "entity_type": "exploration_node",
+            "node_type": node_type,
+            "required_fields": list(EXPLORATION_NODE_REQUIRED_FIELDS[node_type]),
+            "target_entity_types": list(EXPLORATION_NODE_TARGET_ENTITY_TYPES),
+        }
+        if node_type == "pivot":
+            entry["exactly_one_of"] = list(PIVOT_INVALIDATION_FIELDS)
+        contract[label] = entry
+    contract["abandon_question"] = {
+        "op": "update",
+        "entity_type": "question",
+        "required_payload": {"status": "abandoned", "terminal_reason": "non-empty string"},
+    }
+    contract["merge_questions"] = {
+        "op": "update",
+        "entity_type": "question",
+        "target_entity_id": "the question being merged away",
+        "required_fields": ["replacement", "reason"],
+        "allowed_fields": [
+            "replacement",
+            "reason",
+            "child_question_ids_to_reparent",
+            "note_ids_to_retarget",
+        ],
+        "replacement_required_fields": ["text", "question_type", "status"],
+        "controlled_values": {
+            "replacement.status": list(MERGE_QUESTIONS_REPLACEMENT_STATUSES),
+        },
+    }
+    contract["retire_note"] = {
+        "op": "update",
+        "entity_type": "note",
+        "required_fields": ["reason"],
+        "controlled_values": {"reason": list(RETIRE_NOTE_REASON_VALUES)},
+    }
+    return contract
 
 
 def _payload_contract_instruction() -> str:
@@ -174,20 +248,7 @@ def graph_patch_response_schema() -> dict[str, Any]:
         "properties": {
             "client_ref": {"type": ["string", "null"]},
             "op": {"type": "string", "enum": ["create", "update"]},
-            "entity_type": {
-                "type": "string",
-                "enum": [
-                    "project",
-                    "question",
-                    "dataset",
-                    "note",
-                    "session",
-                    "analysis",
-                    "claim",
-                    "visualization",
-                    "goal",
-                ],
-            },
+            "entity_type": {"type": "string", "enum": list(_GRAPH_DRAFT_ENTITY_TYPES)},
             "semantic_type": {"type": "string", "enum": SEMANTIC_TYPES},
             "target_entity_id": {"type": ["string", "null"]},
             "payload_json": {
@@ -1116,6 +1177,13 @@ def _batch_instructions() -> str:
         "evidence cannot be narrowed to it. "
         "Every operation, and the narrative itself, is a draft for human review; "
         "nothing commits without explicit acceptance."
+        "\n\nThe packet may contain review_memory.pending_proposals: proposals by "
+        "this reviewer that are still under review. If a proposal you would make "
+        "duplicates one of them, say so in rationale and cite that pending "
+        "change_set_id instead of creating a parallel entity. The packet may contain "
+        "review_memory.recent_rejections: this reviewer's recent rejections with "
+        "their notes. If you re-propose something equivalent, state the new evidence "
+        "in rationale."
     )
 
 
@@ -1138,7 +1206,8 @@ def _instructions() -> str:
         "when a replacement is provided. If the context is insufficient, mark uncertainty "
         "or request clarification. "
         "Use create or update operations for project, question, note, session, dataset, "
-        "analysis, claim, visualization, or goal entities. Use payload_json as a JSON object "
+        "analysis, claim, visualization, goal, or exploration_node entities. Use "
+        "payload_json as a JSON object "
         "string matching the Lab Tracker API payload contract below. Fields not listed for "
         "that entity and action are forbidden. Do not copy display-only context fields such "
         "as preview or label, and do not put entity record IDs such as question_id, note_id, "
@@ -1172,7 +1241,24 @@ def _instructions() -> str:
         "include source_note_ids as a non-empty list of unique note UUIDs copied exactly "
         "from the supplied source artifacts; include every source note that directly "
         "supports that operation, never invent an ID, and never choose a primary source "
-        "when the evidence only supports a bundle. Return uncertainty explicitly."
+        "when the evidence only supports a bundle. Return uncertainty explicitly. "
+        "Negative knowledge has its own labels. Use record_dead_end when a capture states "
+        "an approach that failed and what was learned (create exploration_node with "
+        "node_type dead_end and hypothesis, failure_mode, lesson). Use record_decision "
+        "when a capture states a choice among alternatives with reasons (node_type "
+        "decision with choice, alternatives_considered, rationale). Use record_pivot when "
+        "a capture says a prior result, claim, or node no longer holds and the work "
+        "changed direction (node_type pivot with trigger, rationale, and exactly one of "
+        "invalidates_claim_id or invalidates_node_id). Use abandon_question when a "
+        "capture states a question will not be pursued (update the question with status "
+        "abandoned and a terminal_reason). Use merge_questions when two existing "
+        "questions are the same question (update the question being retired with a "
+        "replacement holding the surviving question's text, question_type, and status, "
+        "plus a reason; never merge a superseded question). Use retire_note when an "
+        "existing note is superseded or reviewed as not relevant (update the note with "
+        "reason superseded or reviewed_not_relevant). Never use these labels to delete "
+        "or hide information: they preserve negative knowledge for later readers. The "
+        "target of every one of them must be an existing ID from the context."
     )
 
 
@@ -1308,8 +1394,9 @@ def _analysis_instructions() -> str:
         "through the evidence and current context before proposing anything. Propose only "
         "changes supported by the evidence and context, and prefer updating or linking "
         "existing entities over creating duplicates. Use create or update operations for "
-        "project, question, note, session, dataset, analysis, claim, visualization, or goal "
-        "entities. For project, session, analysis, claim, and visualization there is no "
+        "project, question, note, session, dataset, analysis, claim, visualization, goal, "
+        "or exploration_node entities. For project, session, analysis, claim, and "
+        "visualization there is no "
         "narrower semantic_type label — use create_entity or update_entity for those. Use "
         "payload_json as a JSON object string matching the trusted Lab Tracker API "
         "payload contract below; fields not listed for that entity and action are "

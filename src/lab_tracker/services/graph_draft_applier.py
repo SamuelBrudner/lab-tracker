@@ -14,6 +14,7 @@ from lab_tracker.models import (
     EntityOrigin,
     EntityRef,
     EntityType,
+    ExplorationNodeStatus,
     GoalLinkStatus,
     GoalStatus,
     GraphChangeOp,
@@ -33,6 +34,8 @@ from lab_tracker.schemas import (
     ClaimUpdate,
     DatasetCreate,
     DatasetUpdate,
+    ExplorationNodeCreate,
+    ExplorationNodeUpdate,
     GoalCreate,
     GoalUpdate,
     NoteCreate,
@@ -40,6 +43,7 @@ from lab_tracker.schemas import (
     ProjectCreate,
     ProjectUpdate,
     QuestionCreate,
+    QuestionRefactorRequest,
     QuestionUpdate,
     SessionCreate,
     SessionUpdate,
@@ -49,9 +53,14 @@ from lab_tracker.schemas import (
 from lab_tracker.services.analysis_service import AnalysisService
 from lab_tracker.services.claim_service import ClaimService
 from lab_tracker.services.dataset_service import DatasetService
+from lab_tracker.services.exploration_service import ExplorationService
 from lab_tracker.services.goal_service import GoalLinkSpec, GoalService
 from lab_tracker.services.graph_draft_context import EntityResult
-from lab_tracker.services.graph_draft_validation import resolve_refs, validate_payload
+from lab_tracker.services.graph_draft_validation import (
+    RetireNotePayload,
+    resolve_refs,
+    validate_payload,
+)
 from lab_tracker.services.note_service import NoteService
 from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.question_service import QuestionService
@@ -72,6 +81,7 @@ class GraphPatchApplier:
         claims: ClaimService,
         visualizations: VisualizationService,
         goals: GoalService | None = None,
+        exploration: ExplorationService | None = None,
     ) -> None:
         self.projects = projects
         self.questions = questions
@@ -82,6 +92,7 @@ class GraphPatchApplier:
         self.claims = claims
         self.visualizations = visualizations
         self.goals = goals
+        self.exploration = exploration
 
     def apply_graph_operation(
         self,
@@ -105,6 +116,15 @@ class GraphPatchApplier:
             )
         if operation.target_entity_id is None:
             raise ValidationError("Update operations require target_entity_id.")
+        if operation.semantic_type == GraphDraftSemanticType.MERGE_QUESTIONS:
+            return self._merge_questions(
+                operation.target_entity_id,
+                payload,
+                actor=actor,
+                origin_kwargs=origin_kwargs,
+            )
+        if operation.semantic_type == GraphDraftSemanticType.RETIRE_NOTE:
+            return self._retire_note(operation.target_entity_id, payload, actor=actor)
         if (
             change_set.purpose == GraphDraftPurpose.MEMBER_CHECKPOINT_ALIGNMENT
             and operation.op == GraphChangeOp.UPDATE
@@ -152,6 +172,46 @@ class GraphPatchApplier:
             actor=actor,
         )
 
+    def _merge_questions(
+        self,
+        source_question_id: UUID,
+        payload: dict[str, Any],
+        *,
+        actor: AuthContext | None,
+        origin_kwargs: dict[str, Any],
+    ) -> EntityResult:
+        """Retire one question into a new replacement through the audited refactor.
+
+        The surviving replacement is the operation's result so ``result_entity_id``
+        and later ``$ref`` uses point at it; the QuestionRefactor row is the audit.
+        """
+
+        data = validate_payload(QuestionRefactorRequest, payload)
+        result = self.questions.refactor_question(
+            source_question_id,
+            replacement_text=data.replacement.text,
+            replacement_question_type=data.replacement.question_type,
+            replacement_status=data.replacement.status,
+            reason=data.reason,
+            replacement_hypothesis=data.replacement.hypothesis,
+            replacement_parent_question_ids=data.replacement.parent_question_ids,
+            child_question_ids_to_reparent=data.child_question_ids_to_reparent,
+            note_ids_to_retarget=data.note_ids_to_retarget,
+            actor=actor,
+            **origin_kwargs,
+        )
+        return result.replacement_question
+
+    def _retire_note(
+        self,
+        note_id: UUID,
+        payload: dict[str, Any],
+        *,
+        actor: AuthContext | None,
+    ) -> EntityResult:
+        data = validate_payload(RetireNotePayload, payload)
+        return self.notes.archive_note(note_id, reason=data.reason, actor=actor)
+
     def _create_graph_entity(
         self,
         entity_type: EntityType,
@@ -160,6 +220,32 @@ class GraphPatchApplier:
         actor: AuthContext | None,
         origin_kwargs: dict[str, Any],
     ) -> EntityResult:
+        if entity_type == EntityType.EXPLORATION_NODE:
+            if self.exploration is None:
+                raise ValidationError("Exploration service is not configured.")
+            data = validate_payload(ExplorationNodeCreate, payload)
+            return self.exploration.create_exploration_node(
+                data.project_id,
+                node_type=data.node_type,
+                title=data.title,
+                target=data.target,
+                status=data.status or ExplorationNodeStatus.STAGED,
+                choice=data.choice,
+                alternatives_considered=data.alternatives_considered,
+                rationale=data.rationale,
+                evidence_refs=data.evidence_refs,
+                hypothesis=data.hypothesis,
+                failure_mode=data.failure_mode,
+                lesson=data.lesson,
+                tooling_context=data.tooling_context,
+                trigger=data.trigger,
+                invalidates_node_id=data.invalidates_node_id,
+                invalidates_claim_id=data.invalidates_claim_id,
+                parent_node_ids=data.parent_node_ids,
+                also_depends_on_node_ids=data.also_depends_on_node_ids,
+                actor=actor,
+                **origin_kwargs,
+            )
         if entity_type == EntityType.PROJECT:
             data = validate_payload(ProjectCreate, payload)
             return self.projects.create_project(
@@ -301,6 +387,16 @@ class GraphPatchApplier:
     ) -> EntityResult:
         if not payload:
             raise ValidationError("Update operation payload must include at least one field.")
+        if entity_type == EntityType.EXPLORATION_NODE:
+            if self.exploration is None:
+                raise ValidationError("Exploration service is not configured.")
+            data = validate_payload(ExplorationNodeUpdate, payload)
+            return self.exploration.update_exploration_node(
+                entity_id,
+                actor=actor,
+                **origin_kwargs,
+                **provided_fields(data),
+            )
         if entity_type == EntityType.PROJECT:
             data = validate_payload(ProjectUpdate, payload)
             return self.projects.update_project(

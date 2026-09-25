@@ -306,6 +306,28 @@ class GraphDraftRecords(BaseService):
             include_operations=include_operations,
         )
 
+    def list_review_memory_change_sets(
+        self,
+        project_id: UUID,
+        *,
+        statuses: set[GraphChangeSetStatus],
+        limit: int,
+    ) -> list[GraphChangeSet]:
+        """Newest change sets (with operations) in ``statuses`` for review memory.
+
+        No authorization here: the batch generator has already required
+        contributor access on the project before it builds the packet.
+        """
+
+        change_sets, _ = self.repository.query_graph_change_sets(
+            project_id=project_id,
+            statuses={status.value for status in statuses},
+            limit=limit,
+            offset=0,
+            include_operations=True,
+        )
+        return change_sets
+
     def query_batch_graph_drafts(
         self,
         query: BatchReviewQuery,

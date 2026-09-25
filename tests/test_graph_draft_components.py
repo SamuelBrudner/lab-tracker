@@ -1,17 +1,22 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
 
-from lab_tracker.errors import ValidationError
+from lab_tracker.errors import NotFoundError, ValidationError
 from lab_tracker.graph_drafting import (
+    _GRAPH_DRAFT_ENTITY_TYPES,
     ANALYSIS_PROMPT_VERSION,
     BATCH_PROMPT_VERSION,
+    EXPLORATION_NODE_REQUIRED_FIELDS,
     PROMPT_VERSION,
+    RETIRE_NOTE_REASON_VALUES,
+    SEMANTIC_TYPES,
     GraphDraftingError,
     _analysis_instructions,
     _analysis_prompt_text,
@@ -23,29 +28,69 @@ from lab_tracker.graph_drafting import (
     graph_patch_response_schema,
 )
 from lab_tracker.models import (
+    REVIEW_NOTE_KEY,
+    REVIEWED_AT_KEY,
+    REVIEWED_BY_KEY,
+    EntityOrigin,
     EntityRef,
     EntityType,
+    ExplorationNode,
+    ExplorationNodeType,
     GraphChangeOp,
     GraphChangeOperation,
+    GraphChangeOperationStatus,
     GraphChangeSet,
+    GraphChangeSetStatus,
     GraphDraftMode,
     GraphDraftSemanticType,
     Note,
+    NoteArchiveReason,
     Project,
+    Question,
+    QuestionType,
+    utc_now,
 )
 from lab_tracker.services.graph_draft_applier import GraphPatchApplier
+from lab_tracker.services.graph_draft_batch_policy import BatchReviewer, context_owner_for
 from lab_tracker.services.graph_draft_context import (
     CONTEXT_FIELD_CHAR_LIMIT,
     CUE_TERM_LIMIT,
+    PENDING_PROPOSALS_CHAR_BUDGET,
+    PENDING_PROPOSALS_ITEM_LIMIT,
+    RECENT_REJECTIONS_ITEM_LIMIT,
+    REVIEW_MEMORY_NOT_SCOPED_WARNING,
+    REVIEW_MEMORY_NOTE_MAX_CHARS,
     GraphContextBuilder,
     _capped_text,
     _compact_note,
     _cue_terms,
+    _entity_label,
     _graph_batch_context_summary,
     _source_artifact_packet,
+    entity_id,
 )
-from lab_tracker.services.graph_draft_validation import GraphPatchValidator
+from lab_tracker.services.graph_draft_revision_hints import (
+    REJECTED_REDRAFT_HEADING,
+    REVISION_HEADING,
+    compose_rejected_redraft_hint,
+    compose_revise_hint,
+    prior_rejection_summary,
+)
+from lab_tracker.services.graph_draft_validation import (
+    _SEMANTIC_ALLOWED_TARGETS,
+    RETIRE_NOTE_REASONS,
+    GraphPatchValidator,
+)
 from lab_tracker.services.shared import MEETING_NOTE_TYPE, NOTE_TYPE_METADATA_KEY, is_meeting_note
+
+NEGATIVE_KNOWLEDGE_LABELS = (
+    "record_decision",
+    "record_dead_end",
+    "record_pivot",
+    "abandon_question",
+    "merge_questions",
+    "retire_note",
+)
 
 
 def _change_set(
@@ -950,3 +995,1102 @@ def test_batch_instructions_are_narrative_first_with_terse_capture_guardrail() -
     assert "supported by the source artifacts" in instructions
     # The summary contract changed (now a narrative), so the version bumps.
     assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v7"
+
+
+def test_semantic_types_match_domain_enum() -> None:
+    assert list(SEMANTIC_TYPES) == [member.value for member in GraphDraftSemanticType]
+    assert tuple(SEMANTIC_TYPES[-6:]) == NEGATIVE_KNOWLEDGE_LABELS
+
+
+def test_graph_draft_payload_contract_covers_exploration_nodes_and_semantic_operations() -> None:
+    contract = graph_draft_payload_contract()
+
+    create_contract = contract["entities"]["exploration_node"]["create"]
+    assert {"project_id", "node_type", "title", "target"} <= set(create_contract["required_fields"])
+    assert set(create_contract["controlled_values"]["node_type"]) == {
+        "decision",
+        "dead_end",
+        "pivot",
+    }
+    assert "invalidates_claim_id" in contract["entities"]["exploration_node"]["update"][
+        "allowed_fields"
+    ]
+
+    semantic = contract["semantic_operations"]
+    assert tuple(semantic) == NEGATIVE_KNOWLEDGE_LABELS
+    for label, node_type in (
+        ("record_decision", "decision"),
+        ("record_dead_end", "dead_end"),
+        ("record_pivot", "pivot"),
+    ):
+        assert semantic[label]["op"] == "create"
+        assert semantic[label]["entity_type"] == "exploration_node"
+        assert semantic[label]["node_type"] == node_type
+        assert semantic[label]["required_fields"] == list(
+            EXPLORATION_NODE_REQUIRED_FIELDS[node_type]
+        )
+        assert semantic[label]["target_entity_types"] == [
+            "question",
+            "dataset",
+            "analysis",
+            "claim",
+        ]
+    assert semantic["record_pivot"]["exactly_one_of"] == [
+        "invalidates_node_id",
+        "invalidates_claim_id",
+    ]
+    assert "exactly_one_of" not in semantic["record_dead_end"]
+    assert semantic["abandon_question"] == {
+        "op": "update",
+        "entity_type": "question",
+        "required_payload": {"status": "abandoned", "terminal_reason": "non-empty string"},
+    }
+    assert semantic["merge_questions"]["required_fields"] == ["replacement", "reason"]
+    assert semantic["merge_questions"]["replacement_required_fields"] == [
+        "text",
+        "question_type",
+        "status",
+    ]
+    assert semantic["merge_questions"]["controlled_values"] == {
+        "replacement.status": ["staged", "active"]
+    }
+    assert semantic["retire_note"] == {
+        "op": "update",
+        "entity_type": "note",
+        "required_fields": ["reason"],
+        "controlled_values": {"reason": ["superseded", "reviewed_not_relevant"]},
+    }
+    # The validator and the contract name the same retirement reasons.
+    assert {reason.value for reason in RETIRE_NOTE_REASONS} == set(RETIRE_NOTE_REASON_VALUES)
+    assert any("semantic_operations entries override" in rule for rule in contract["rules"])
+
+
+def test_graph_patch_response_schema_entity_types_track_draft_entity_tuple() -> None:
+    operation_schema = graph_patch_response_schema()["properties"]["operations"]["items"]
+
+    assert operation_schema["properties"]["entity_type"]["enum"] == list(
+        _GRAPH_DRAFT_ENTITY_TYPES
+    )
+    assert "exploration_node" in _GRAPH_DRAFT_ENTITY_TYPES
+    assert operation_schema["properties"]["semantic_type"]["enum"] == SEMANTIC_TYPES
+
+
+def test_instructions_explain_negative_knowledge_labels() -> None:
+    instructions = _instructions()
+    prose = instructions.split("</trusted_api_payload_contract>", 1)[1]
+
+    for label in NEGATIVE_KNOWLEDGE_LABELS:
+        assert label in prose
+    dead_end_guidance = prose.split("record_dead_end", 1)[1].split("record_decision", 1)[0]
+    assert "failure_mode" in dead_end_guidance
+    assert "lesson" in dead_end_guidance
+    assert "exploration_node entities" in instructions
+    assert "never use these labels to delete or hide information" in prose.lower()
+    assert "exploration_node" in _analysis_instructions()
+    # Prompt text changed without a version bump (binding decision for this wave).
+    assert PROMPT_VERSION == "multimodal-graph-draft-v4"
+    assert ANALYSIS_PROMPT_VERSION == "analysis-graph-draft-v4"
+
+
+def test_batch_instructions_carry_review_memory_guidance() -> None:
+    instructions = _batch_instructions()
+    pending_sentence = (
+        "say so in rationale and cite that pending change_set_id instead of creating a "
+        "parallel entity"
+    )
+    rejection_sentence = (
+        "If you re-propose something equivalent, state the new evidence in rationale"
+    )
+
+    assert "review_memory.pending_proposals" in instructions
+    assert pending_sentence in instructions
+    assert "review_memory.recent_rejections" in instructions
+    assert rejection_sentence in instructions
+    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v7"
+
+    batch_context = {
+        "batch_notes": [{"note_id": "source-1", "raw_content": "Observed result"}],
+        "review_memory": {
+            "reviewer_scoped": True,
+            "pending_proposals": [],
+            "recent_rejections": [],
+        },
+    }
+    prompt = _batch_prompt_text(batch_context=batch_context, user_hint=None)
+    trusted_prefix, untrusted_tail = prompt.split("<untrusted_batch_context>\n", 1)
+    untrusted_payload, _ = untrusted_tail.split("\n</untrusted_batch_context>", 1)
+    # The guidance is trusted system text, never part of the fenced packet.
+    assert pending_sentence not in untrusted_payload
+    assert rejection_sentence not in untrusted_payload
+    assert pending_sentence not in trusted_prefix
+    assert json.loads(untrusted_payload)["review_memory"] == batch_context["review_memory"]
+
+
+def _operation(
+    *,
+    op: GraphChangeOp,
+    entity_type: EntityType,
+    semantic_type: GraphDraftSemanticType | None,
+    payload: dict[str, Any],
+    target_entity_id: UUID | None = None,
+) -> GraphChangeOperation:
+    return GraphChangeOperation(
+        operation_id=uuid4(),
+        change_set_id=uuid4(),
+        sequence=1,
+        op=op,
+        entity_type=entity_type,
+        semantic_type=semantic_type,
+        payload=payload,
+        target_entity_id=target_entity_id,
+    )
+
+
+def _recording_validator(
+    seen: list[tuple[EntityType, UUID]],
+) -> GraphPatchValidator:
+    def get_entity(entity_type: EntityType, entity_id: UUID) -> Any:
+        seen.append((entity_type, entity_id))
+        return SimpleNamespace(entity_type=entity_type, entity_id=entity_id)
+
+    return GraphPatchValidator(get_graph_entity=get_entity)
+
+
+def _exploration_payload(
+    project_id: UUID,
+    question_id: UUID,
+    node_type: str,
+    **fields: Any,
+) -> dict[str, Any]:
+    return {
+        "project_id": str(project_id),
+        "node_type": node_type,
+        "title": "Bootstrap path underpowered",
+        "target": {"entity_type": "question", "entity_id": str(question_id)},
+        **fields,
+    }
+
+
+def _dead_end_fields() -> dict[str, Any]:
+    return {
+        "hypothesis": "Bootstrap intervals would separate the groups.",
+        "failure_mode": "Intervals overlapped at every sample size.",
+        "lesson": "Paired designs need a paired test.",
+    }
+
+
+def test_validator_accepts_record_dead_end_exploration_node() -> None:
+    project_id, question_id = uuid4(), uuid4()
+    seen: list[tuple[EntityType, UUID]] = []
+    validator = _recording_validator(seen)
+    operation = _operation(
+        op=GraphChangeOp.CREATE,
+        entity_type=EntityType.EXPLORATION_NODE,
+        semantic_type=GraphDraftSemanticType.RECORD_DEAD_END,
+        payload=_exploration_payload(project_id, question_id, "dead_end", **_dead_end_fields()),
+    )
+
+    validator.validate_operation(operation, operation.payload)
+
+    assert (EntityType.PROJECT, project_id) in seen
+    assert (EntityType.QUESTION, question_id) in seen
+
+
+def test_validator_rejects_record_labels_with_mismatched_node_type() -> None:
+    project_id, question_id = uuid4(), uuid4()
+    validator = _recording_validator([])
+    operation = _operation(
+        op=GraphChangeOp.CREATE,
+        entity_type=EntityType.EXPLORATION_NODE,
+        semantic_type=GraphDraftSemanticType.RECORD_DEAD_END,
+        payload=_exploration_payload(
+            project_id,
+            question_id,
+            "decision",
+            choice="Paired bootstrap",
+            alternatives_considered=["Mixed model"],
+            rationale="Matches the design.",
+        ),
+    )
+
+    with pytest.raises(ValidationError, match="record_dead_end requires node_type dead_end"):
+        validator.validate_operation(operation, operation.payload)
+
+
+@pytest.mark.parametrize(
+    ("node_type", "fields", "missing"),
+    [
+        (
+            "decision",
+            {"choice": "Paired bootstrap", "rationale": "Matches the design."},
+            "alternatives_considered",
+        ),
+        (
+            "dead_end",
+            {"hypothesis": "Intervals separate groups.", "failure_mode": "They overlapped."},
+            "lesson",
+        ),
+        (
+            "pivot",
+            {"rationale": "Switch designs.", "invalidates_claim_id": str(uuid4())},
+            "trigger",
+        ),
+    ],
+)
+def test_validator_rejects_exploration_node_missing_per_type_fields(
+    node_type: str,
+    fields: dict[str, Any],
+    missing: str,
+) -> None:
+    validator = _recording_validator([])
+    operation = _operation(
+        op=GraphChangeOp.CREATE,
+        entity_type=EntityType.EXPLORATION_NODE,
+        semantic_type=GraphDraftSemanticType.CREATE_ENTITY,
+        payload=_exploration_payload(uuid4(), uuid4(), node_type, **fields),
+    )
+
+    with pytest.raises(ValidationError, match=f"node_type {node_type} requires {missing}"):
+        validator.validate_operation(operation, operation.payload)
+
+
+def test_validator_rejects_pivot_without_exactly_one_invalidation() -> None:
+    validator = _recording_validator([])
+    base = {"trigger": "Bootstrap failed.", "rationale": "Mixed model fits the design."}
+
+    neither = _operation(
+        op=GraphChangeOp.CREATE,
+        entity_type=EntityType.EXPLORATION_NODE,
+        semantic_type=GraphDraftSemanticType.RECORD_PIVOT,
+        payload=_exploration_payload(uuid4(), uuid4(), "pivot", **base),
+    )
+    with pytest.raises(ValidationError, match="exactly one of invalidates_node_id"):
+        validator.validate_operation(neither, neither.payload)
+
+    both = _operation(
+        op=GraphChangeOp.CREATE,
+        entity_type=EntityType.EXPLORATION_NODE,
+        semantic_type=GraphDraftSemanticType.RECORD_PIVOT,
+        payload=_exploration_payload(
+            uuid4(),
+            uuid4(),
+            "pivot",
+            invalidates_node_id=str(uuid4()),
+            invalidates_claim_id=str(uuid4()),
+            **base,
+        ),
+    )
+    with pytest.raises(ValidationError, match="exactly one of invalidates_node_id"):
+        validator.validate_operation(both, both.payload)
+
+    dead_end_with_invalidation = _operation(
+        op=GraphChangeOp.CREATE,
+        entity_type=EntityType.EXPLORATION_NODE,
+        semantic_type=GraphDraftSemanticType.RECORD_DEAD_END,
+        payload=_exploration_payload(
+            uuid4(),
+            uuid4(),
+            "dead_end",
+            invalidates_claim_id=str(uuid4()),
+            **_dead_end_fields(),
+        ),
+    )
+    with pytest.raises(ValidationError, match="Only pivot exploration nodes"):
+        validator.validate_operation(
+            dead_end_with_invalidation, dead_end_with_invalidation.payload
+        )
+
+
+def test_validator_checks_exploration_reference_fields_exist() -> None:
+    parent_id, claim_id = uuid4(), uuid4()
+    seen: list[tuple[EntityType, UUID]] = []
+    validator = _recording_validator(seen)
+    operation = _operation(
+        op=GraphChangeOp.CREATE,
+        entity_type=EntityType.EXPLORATION_NODE,
+        semantic_type=GraphDraftSemanticType.RECORD_PIVOT,
+        payload=_exploration_payload(
+            uuid4(),
+            uuid4(),
+            "pivot",
+            trigger="Bootstrap failed.",
+            rationale="Mixed model fits the design.",
+            invalidates_claim_id=str(claim_id),
+            parent_node_ids=[str(parent_id)],
+        ),
+    )
+
+    validator.validate_operation(operation, operation.payload)
+
+    assert (EntityType.EXPLORATION_NODE, parent_id) in seen
+    assert (EntityType.CLAIM, claim_id) in seen
+
+    def missing_entity(entity_type: EntityType, entity_id: UUID) -> Any:
+        if entity_type == EntityType.EXPLORATION_NODE:
+            raise NotFoundError("Exploration node does not exist.")
+        return SimpleNamespace()
+
+    strict = GraphPatchValidator(get_graph_entity=missing_entity)
+    with pytest.raises(ValidationError, match=f"unknown exploration_node ID: {parent_id}"):
+        strict.validate_operation(operation, operation.payload)
+
+
+def test_validator_abandon_question_requires_abandoned_status_and_terminal_reason() -> None:
+    validator = _recording_validator([])
+    question_id = uuid4()
+
+    def abandon(payload: dict[str, Any]) -> GraphChangeOperation:
+        return _operation(
+            op=GraphChangeOp.UPDATE,
+            entity_type=EntityType.QUESTION,
+            semantic_type=GraphDraftSemanticType.ABANDON_QUESTION,
+            payload=payload,
+            target_entity_id=question_id,
+        )
+
+    wrong_status = abandon({"status": "active", "terminal_reason": "Out of scope."})
+    with pytest.raises(ValidationError, match="requires status abandoned"):
+        validator.validate_operation(wrong_status, wrong_status.payload)
+
+    no_reason = abandon({"status": "abandoned"})
+    with pytest.raises(ValidationError, match="requires a terminal_reason"):
+        validator.validate_operation(no_reason, no_reason.payload)
+
+    valid = abandon({"status": "abandoned", "terminal_reason": "Out of scope."})
+    validator.validate_operation(valid, valid.payload)
+
+
+def test_validator_merge_questions_uses_refactor_request_schema() -> None:
+    seen: list[tuple[EntityType, UUID]] = []
+    validator = _recording_validator(seen)
+    source_id, child_id = uuid4(), uuid4()
+
+    def merge(payload: dict[str, Any]) -> GraphChangeOperation:
+        return _operation(
+            op=GraphChangeOp.UPDATE,
+            entity_type=EntityType.QUESTION,
+            semantic_type=GraphDraftSemanticType.MERGE_QUESTIONS,
+            payload=payload,
+            target_entity_id=source_id,
+        )
+
+    question_update_shaped = merge({"text": "Merged question text", "status": "active"})
+    with pytest.raises(ValidationError, match="failed API validation"):
+        validator.validate_operation(question_update_shaped, question_update_shaped.payload)
+
+    valid = merge(
+        {
+            "replacement": {
+                "text": "Which contrast is testable this week?",
+                "question_type": "hypothesis_driven",
+                "status": "active",
+            },
+            "reason": "Two captures ask the same question.",
+            "child_question_ids_to_reparent": [str(child_id)],
+        }
+    )
+    validator.validate_operation(valid, valid.payload)
+    assert (EntityType.QUESTION, source_id) in seen
+    assert (EntityType.QUESTION, child_id) in seen
+
+
+def test_validator_retire_note_reason_is_restricted() -> None:
+    validator = _recording_validator([])
+    note_id = uuid4()
+
+    def retire(reason: str) -> GraphChangeOperation:
+        return _operation(
+            op=GraphChangeOp.UPDATE,
+            entity_type=EntityType.NOTE,
+            semantic_type=GraphDraftSemanticType.RETIRE_NOTE,
+            payload={"reason": reason},
+            target_entity_id=note_id,
+        )
+
+    unreviewed = retire("archived_unreviewed")
+    with pytest.raises(ValidationError, match="superseded or reviewed_not_relevant"):
+        validator.validate_operation(unreviewed, unreviewed.payload)
+
+    superseded = retire("superseded")
+    validator.validate_operation(superseded, superseded.payload)
+
+
+def test_semantic_allowed_targets_cover_every_new_label() -> None:
+    generic = {GraphDraftSemanticType.CREATE_ENTITY, GraphDraftSemanticType.UPDATE_ENTITY}
+    assert set(_SEMANTIC_ALLOWED_TARGETS) == set(GraphDraftSemanticType) - generic
+    for label in (
+        GraphDraftSemanticType.RECORD_DECISION,
+        GraphDraftSemanticType.RECORD_DEAD_END,
+        GraphDraftSemanticType.RECORD_PIVOT,
+    ):
+        assert _SEMANTIC_ALLOWED_TARGETS[label] == {
+            (GraphChangeOp.CREATE, EntityType.EXPLORATION_NODE)
+        }
+    assert _SEMANTIC_ALLOWED_TARGETS[GraphDraftSemanticType.ABANDON_QUESTION] == {
+        (GraphChangeOp.UPDATE, EntityType.QUESTION)
+    }
+    assert _SEMANTIC_ALLOWED_TARGETS[GraphDraftSemanticType.MERGE_QUESTIONS] == {
+        (GraphChangeOp.UPDATE, EntityType.QUESTION)
+    }
+    assert _SEMANTIC_ALLOWED_TARGETS[GraphDraftSemanticType.RETIRE_NOTE] == {
+        (GraphChangeOp.UPDATE, EntityType.NOTE)
+    }
+
+
+_ENTITY_GETTERS = {
+    "projects": "get_project",
+    "questions": "get_question",
+    "notes": "get_note",
+    "sessions": "get_session",
+    "datasets": "get_dataset",
+    "analyses": "get_analysis",
+    "claims": "get_claim",
+    "visualizations": "get_visualization",
+}
+
+
+def _missing_entity(entity_id: UUID) -> Any:
+    raise NotFoundError(f"{entity_id} does not exist.")
+
+
+def _stub_builder(**overrides: Any) -> GraphContextBuilder:
+    services: dict[str, Any] = {
+        name: SimpleNamespace(**{getter: _missing_entity})
+        for name, getter in _ENTITY_GETTERS.items()
+    }
+    services.update(overrides)
+    return GraphContextBuilder(**services)
+
+
+def _exploration_node(project_id: UUID) -> ExplorationNode:
+    return ExplorationNode(
+        node_id=uuid4(),
+        project_id=project_id,
+        node_type=ExplorationNodeType.DEAD_END,
+        title="Bootstrap path underpowered",
+        target=EntityRef(entity_type=EntityType.QUESTION, entity_id=uuid4()),
+        hypothesis="h",
+        failure_mode="f",
+        lesson="l",
+    )
+
+
+def test_graph_context_builder_resolves_exploration_nodes() -> None:
+    node = _exploration_node(uuid4())
+    builder = _stub_builder(
+        exploration=SimpleNamespace(get_exploration_node=lambda node_id: node),
+    )
+
+    resolved = builder.get_graph_entity(EntityType.EXPLORATION_NODE, node.node_id)
+
+    assert resolved is node
+    assert entity_id(EntityType.EXPLORATION_NODE, node) == node.node_id
+    assert _entity_label(EntityType.EXPLORATION_NODE, node) == node.title
+
+
+def test_graph_context_builder_without_exploration_service_rejects_exploration_refs() -> None:
+    builder = _stub_builder(exploration=None)
+
+    with pytest.raises(ValidationError, match="Unsupported entity type."):
+        builder.get_graph_entity(EntityType.EXPLORATION_NODE, uuid4())
+
+
+def _review_change_set(
+    project_id: UUID,
+    *,
+    status: GraphChangeSetStatus,
+    review_assignee_user_id: UUID | None = None,
+    created_by_user_id: UUID | None = None,
+    created_at_offset: timedelta = timedelta(),
+    reviewed_by: str | None = None,
+    reviewed_at_offset: timedelta | None = None,
+    review_note: str | None = None,
+) -> GraphChangeSet:
+    now = utc_now()
+    return GraphChangeSet(
+        change_set_id=uuid4(),
+        project_id=project_id,
+        source_note_id=uuid4(),
+        model="fake-gpt",
+        prompt_version="test",
+        status=status,
+        review_assignee_user_id=review_assignee_user_id,
+        created_by_user_id=created_by_user_id,
+        created_at=now - created_at_offset,
+        reviewed_by=reviewed_by,
+        reviewed_at=(now - reviewed_at_offset) if reviewed_at_offset is not None else None,
+        review_note=review_note,
+    )
+
+
+def _add_operation(
+    change_set: GraphChangeSet,
+    *,
+    op: GraphChangeOp = GraphChangeOp.CREATE,
+    entity_type: EntityType = EntityType.QUESTION,
+    semantic_type: GraphDraftSemanticType = GraphDraftSemanticType.SUGGEST_NEW_QUESTION,
+    payload: dict[str, Any] | None = None,
+    target_entity_id: UUID | None = None,
+    status: GraphChangeOperationStatus = GraphChangeOperationStatus.PROPOSED,
+    review_note: str | None = None,
+    rejected_by: str | None = None,
+    rejected_ago: timedelta | None = None,
+) -> GraphChangeOperation:
+    error_metadata: dict[str, Any] = {}
+    if rejected_by is not None:
+        error_metadata = {
+            REVIEWED_BY_KEY: rejected_by,
+            REVIEWED_AT_KEY: (utc_now() - (rejected_ago or timedelta())).isoformat(),
+            REVIEW_NOTE_KEY: review_note,
+        }
+    operation = GraphChangeOperation(
+        operation_id=uuid4(),
+        change_set_id=change_set.change_set_id,
+        sequence=len(change_set.operations) + 1,
+        op=op,
+        entity_type=entity_type,
+        semantic_type=semantic_type,
+        payload=payload if payload is not None else {"text": "Does pooling change the result?"},
+        target_entity_id=target_entity_id,
+        status=status,
+        review_note=review_note,
+        error_metadata=error_metadata,
+    )
+    change_set.operations.append(operation)
+    return operation
+
+
+def _review_memory_builder(change_sets: list[GraphChangeSet]) -> GraphContextBuilder:
+    def get_question(question_id: UUID) -> Question:
+        return Question(
+            question_id=question_id,
+            project_id=uuid4(),
+            text=f"Existing question {question_id}",
+            question_type=QuestionType.DESCRIPTIVE,
+        )
+
+    return _stub_builder(
+        questions=SimpleNamespace(get_question=get_question),
+        review_memory=SimpleNamespace(
+            list_review_memory_change_sets=lambda project_id, *, statuses, limit: [
+                item for item in change_sets if item.status in statuses
+            ][:limit]
+        ),
+    )
+
+
+def test_batch_packet_review_memory_lists_reviewer_pending_proposals() -> None:
+    project_id, reviewer, other = uuid4(), uuid4(), uuid4()
+    existing_question_id = uuid4()
+    assigned = _review_change_set(
+        project_id,
+        status=GraphChangeSetStatus.READY,
+        review_assignee_user_id=reviewer,
+        created_at_offset=timedelta(hours=2),
+    )
+    _add_operation(assigned, payload={"text": "Do pooled notes support a merged observation?"})
+    _add_operation(
+        assigned,
+        op=GraphChangeOp.UPDATE,
+        semantic_type=GraphDraftSemanticType.UPDATE_ENTITY,
+        payload={"status": "active"},
+        target_entity_id=existing_question_id,
+    )
+    _add_operation(assigned, status=GraphChangeOperationStatus.REJECTED)
+    authored_unassigned = _review_change_set(
+        project_id,
+        status=GraphChangeSetStatus.SUBMITTED,
+        created_by_user_id=reviewer,
+        created_at_offset=timedelta(hours=1),
+    )
+    _add_operation(authored_unassigned, payload={"text": "Is lane 2 the same gel?"})
+    someone_elses = _review_change_set(
+        project_id, status=GraphChangeSetStatus.READY, review_assignee_user_id=other
+    )
+    _add_operation(someone_elses, payload={"text": "Not this reviewer's proposal"})
+    already_committed = _review_change_set(
+        project_id, status=GraphChangeSetStatus.COMMITTED, review_assignee_user_id=reviewer
+    )
+    _add_operation(already_committed, payload={"text": "Committed already"})
+    builder = _review_memory_builder(
+        [assigned, authored_unassigned, someone_elses, already_committed]
+    )
+
+    memory = builder.build_review_memory(
+        project_ids={project_id},
+        context_owner=BatchReviewer(reviewer=str(reviewer), reviewer_user_id=reviewer),
+        now=utc_now(),
+    )
+
+    assert memory["reviewer_scoped"] is True
+    assert memory["reviewer_user_id"] == str(reviewer)
+    assert memory["pending_proposals_truncated"] is False
+    # Newest change set first; the rejected operation and other reviewers' sets are absent.
+    assert [item["change_set_id"] for item in memory["pending_proposals"]] == [
+        str(authored_unassigned.change_set_id),
+        str(assigned.change_set_id),
+        str(assigned.change_set_id),
+    ]
+    assert memory["pending_proposals"][0] == {
+        "change_set_id": str(authored_unassigned.change_set_id),
+        "change_set_status": "submitted",
+        "semantic_type": "suggest_new_question",
+        "op": "create",
+        "entity_type": "question",
+        "target": "Is lane 2 the same gel?",
+    }
+    assert memory["pending_proposals"][2]["target"] == f"Existing question {existing_question_id}"
+    assert memory["recent_rejections"] == []
+
+    summary = _graph_batch_context_summary(
+        {"batch_notes": [], "source_artifacts": [], "projects": [], "review_memory": memory}
+    )
+    assert summary["counts"]["pending_proposals"] == 3
+    assert summary["counts"]["recent_rejections"] == 0
+    assert summary["review_memory"] == {
+        "reviewer_scoped": True,
+        "pending_proposals": 3,
+        "recent_rejections": 0,
+        "pending_proposals_truncated": False,
+    }
+    assert REVIEW_MEMORY_NOT_SCOPED_WARNING not in summary["warnings"]
+
+
+def test_batch_packet_review_memory_caps_pending_items_and_chars() -> None:
+    project_id, reviewer = uuid4(), uuid4()
+    owner = BatchReviewer(reviewer=str(reviewer), reviewer_user_id=reviewer)
+
+    many = _review_change_set(
+        project_id, status=GraphChangeSetStatus.READY, review_assignee_user_id=reviewer
+    )
+    for index in range(PENDING_PROPOSALS_ITEM_LIMIT + 1):
+        _add_operation(many, payload={"text": f"Proposal {index}"})
+    capped = _review_memory_builder([many]).build_review_memory(
+        project_ids={project_id}, context_owner=owner, now=utc_now()
+    )
+    assert len(capped["pending_proposals"]) == PENDING_PROPOSALS_ITEM_LIMIT
+    assert capped["pending_proposals_truncated"] is True
+
+    oversized = _review_change_set(
+        project_id, status=GraphChangeSetStatus.READY, review_assignee_user_id=reviewer
+    )
+    for index in range(PENDING_PROPOSALS_ITEM_LIMIT):
+        _add_operation(oversized, payload={"text": f"{index}:" + ("x" * 600)})
+    budgeted = _review_memory_builder([oversized]).build_review_memory(
+        project_ids={project_id}, context_owner=owner, now=utc_now()
+    )
+    items = budgeted["pending_proposals"]
+    assert 0 < len(items) < PENDING_PROPOSALS_ITEM_LIMIT
+    assert budgeted["pending_proposals_truncated"] is True
+    assert len(json.dumps(items, sort_keys=True)) <= PENDING_PROPOSALS_CHAR_BUDGET
+    assert all(len(item["target"]) <= REVIEW_MEMORY_NOTE_MAX_CHARS for item in items)
+
+
+def test_batch_packet_review_memory_recent_rejections_are_reviewer_and_window_scoped() -> None:
+    project_id, reviewer, other = uuid4(), uuid4(), uuid4()
+    owner = BatchReviewer(reviewer=str(reviewer), reviewer_user_id=reviewer)
+
+    per_operation = _review_change_set(
+        project_id, status=GraphChangeSetStatus.COMMITTED, review_assignee_user_id=reviewer
+    )
+    recent = _add_operation(
+        per_operation,
+        payload={"text": "Rejected three days ago"},
+        status=GraphChangeOperationStatus.REJECTED,
+        review_note="Not a question",
+        rejected_by=str(reviewer),
+        rejected_ago=timedelta(days=3),
+    )
+    _add_operation(
+        per_operation,
+        payload={"text": "Rejected twenty days ago"},
+        status=GraphChangeOperationStatus.REJECTED,
+        review_note="Too old to matter",
+        rejected_by=str(reviewer),
+        rejected_ago=timedelta(days=20),
+    )
+    _add_operation(
+        per_operation,
+        payload={"text": "Rejected by someone else"},
+        status=GraphChangeOperationStatus.REJECTED,
+        review_note="Other reviewer",
+        rejected_by=str(other),
+        rejected_ago=timedelta(days=1),
+    )
+    _add_operation(
+        per_operation,
+        payload={"text": "Rejected without a note"},
+        status=GraphChangeOperationStatus.REJECTED,
+        rejected_by=str(reviewer),
+        rejected_ago=timedelta(days=1),
+    )
+    whole_set = _review_change_set(
+        project_id,
+        status=GraphChangeSetStatus.REJECTED,
+        review_assignee_user_id=reviewer,
+        reviewed_by=str(reviewer),
+        reviewed_at_offset=timedelta(days=2),
+        review_note="n" * 300,
+    )
+    first_of_set = _add_operation(whole_set, payload={"text": "Whole set, op one"})
+    second_of_set = _add_operation(whole_set, payload={"text": "Whole set, op two"})
+    builder = _review_memory_builder([per_operation, whole_set])
+
+    memory = builder.build_review_memory(
+        project_ids={project_id}, context_owner=owner, now=utc_now()
+    )
+
+    rejections = memory["recent_rejections"]
+    assert [item["operation_id"] for item in rejections] == sorted(
+        [str(first_of_set.operation_id), str(second_of_set.operation_id)]
+    ) + [str(recent.operation_id)]
+    assert rejections[0]["note"] == "n" * REVIEW_MEMORY_NOTE_MAX_CHARS
+    assert rejections[0]["change_set_id"] == str(whole_set.change_set_id)
+    assert rejections[-1] == {
+        "change_set_id": str(per_operation.change_set_id),
+        "operation_id": str(recent.operation_id),
+        "semantic_type": "suggest_new_question",
+        "op": "create",
+        "entity_type": "question",
+        "target": "Rejected three days ago",
+        "note": "Not a question",
+        "rejected_at": recent.error_metadata[REVIEWED_AT_KEY],
+    }
+
+    flood = _review_change_set(
+        project_id,
+        status=GraphChangeSetStatus.REJECTED,
+        review_assignee_user_id=reviewer,
+        reviewed_by=str(reviewer),
+        reviewed_at_offset=timedelta(hours=1),
+        review_note="Newest rejection",
+    )
+    for index in range(RECENT_REJECTIONS_ITEM_LIMIT + 5):
+        _add_operation(flood, payload={"text": f"Flood {index}"})
+    capped = _review_memory_builder([per_operation, whole_set, flood]).build_review_memory(
+        project_ids={project_id}, context_owner=owner, now=utc_now()
+    )
+    assert len(capped["recent_rejections"]) == RECENT_REJECTIONS_ITEM_LIMIT
+    assert {item["change_set_id"] for item in capped["recent_rejections"]} == {
+        str(flood.change_set_id)
+    }
+
+
+def test_batch_packet_review_memory_without_reviewer_is_empty_and_flagged() -> None:
+    project_id = uuid4()
+    change_set = _review_change_set(
+        project_id, status=GraphChangeSetStatus.READY, review_assignee_user_id=uuid4()
+    )
+    _add_operation(change_set)
+    builder = _review_memory_builder([change_set])
+    empty = {
+        "reviewer_scoped": False,
+        "reviewer_user_id": None,
+        "pending_proposals": [],
+        "pending_proposals_truncated": False,
+        "recent_rejections": [],
+    }
+
+    assert (
+        builder.build_review_memory(project_ids={project_id}, context_owner=None, now=utc_now())
+        == empty
+    )
+    legacy = BatchReviewer(reviewer="legacy-reviewer", reviewer_user_id=None)
+    assert (
+        builder.build_review_memory(project_ids={project_id}, context_owner=legacy, now=utc_now())
+        == empty
+    )
+    without_records = _stub_builder(review_memory=None)
+    assert (
+        without_records.build_review_memory(
+            project_ids={project_id},
+            context_owner=BatchReviewer(reviewer="u", reviewer_user_id=uuid4()),
+            now=utc_now(),
+        )
+        == empty
+    )
+
+    summary = _graph_batch_context_summary(
+        {"batch_notes": [], "source_artifacts": [], "projects": [], "review_memory": empty}
+    )
+    assert REVIEW_MEMORY_NOT_SCOPED_WARNING in summary["warnings"]
+    assert summary["review_memory"]["reviewer_scoped"] is False
+    # Packets from before review memory existed summarize the same way.
+    legacy_summary = _graph_batch_context_summary(
+        {"batch_notes": [], "source_artifacts": [], "projects": []}
+    )
+    assert REVIEW_MEMORY_NOT_SCOPED_WARNING in legacy_summary["warnings"]
+    assert legacy_summary["counts"]["pending_proposals"] == 0
+
+
+def test_context_owner_for_prefers_assignee_then_actor() -> None:
+    assignee_id, actor_id = uuid4(), uuid4()
+    actor = SimpleNamespace(user_id=actor_id)
+
+    assert context_owner_for("legacy", assignee_id, actor) == BatchReviewer(
+        reviewer="legacy", reviewer_user_id=assignee_id
+    )
+    assert context_owner_for(None, assignee_id, actor) == BatchReviewer(
+        reviewer=str(assignee_id), reviewer_user_id=assignee_id
+    )
+    assert context_owner_for("legacy", None, actor) == BatchReviewer(
+        reviewer="legacy", reviewer_user_id=None
+    )
+    assert context_owner_for(None, None, actor) == BatchReviewer(
+        reviewer=str(actor_id), reviewer_user_id=actor_id
+    )
+    assert context_owner_for(None, None, None) is None
+
+
+def test_compose_revise_hint_includes_operation_review_notes() -> None:
+    change_set = _change_set(uuid4())
+    noted = _add_operation(
+        change_set,
+        status=GraphChangeOperationStatus.REJECTED,
+        review_note="  Not a question  ",
+        payload={"text": "Rig 2 Fly 12"},
+    )
+    silent = _add_operation(change_set, payload={"text": "Keep this one"})
+
+    hint = compose_revise_hint(
+        [noted, silent],
+        "Drop the identifier.",
+        attachment_labels=["whiteboard.png"],
+    )
+
+    assert hint.startswith(REVISION_HEADING + " You previously proposed")
+    assert "[rejected] suggest_new_question on question" in hint
+    assert "(reviewer note: Not a question)" in hint
+    assert hint.count("(reviewer note:") == 1
+    assert "Reviewer feedback (authoritative): Drop the identifier." in hint
+    assert "whiteboard.png" in hint
+    with pytest.raises(ValueError, match="Unknown revision hint heading"):
+        compose_revise_hint([noted], "x", heading="SOMETHING ELSE.")
+
+
+def test_compose_rejected_redraft_hint_uses_change_set_review_note_and_fences_operations() -> None:
+    rejected = _review_change_set(
+        uuid4(),
+        status=GraphChangeSetStatus.REJECTED,
+        reviewed_by="reviewer",
+        reviewed_at_offset=timedelta(hours=1),
+        review_note="Try a different framing.",
+    )
+    _add_operation(
+        rejected,
+        status=GraphChangeOperationStatus.REJECTED,
+        review_note="Not a question",
+        payload={"text": "Rig 2 Fly 12"},
+    )
+
+    hint = compose_rejected_redraft_hint(rejected, user_hint="focus on controls")
+
+    assert hint.startswith("focus on controls\n\n" + REJECTED_REDRAFT_HEADING)
+    assert "A prior draft for this note was rejected by its reviewer" in hint
+    fenced = hint.split("<prior_proposed_operations>\n", 1)[1].split(
+        "\n</prior_proposed_operations>", 1
+    )[0]
+    assert "[rejected] suggest_new_question on question" in fenced
+    assert "(reviewer note: Not a question)" in fenced
+    assert "Reviewer feedback (authoritative): Try a different framing." in hint
+
+    rejected.review_note = "   "
+    bare = compose_rejected_redraft_hint(rejected, user_hint=None)
+    assert bare.startswith(REJECTED_REDRAFT_HEADING)
+    assert "(no review note recorded)" in bare
+
+    summary = prior_rejection_summary(rejected)
+    assert summary["change_set_id"] == str(rejected.change_set_id)
+    assert summary["reviewed_by"] == "reviewer"
+    assert summary["reviewed_at"] == rejected.reviewed_at.isoformat()
+    assert summary["rejected_operation_count"] == 1
+
+
+def _exploration_applier(captured: dict[str, Any], **overrides: Any) -> GraphPatchApplier:
+    def create_exploration_node(project_id: UUID, **kwargs: Any) -> ExplorationNode:
+        captured.update({"project_id": project_id, **kwargs})
+        return ExplorationNode(
+            node_id=uuid4(),
+            project_id=project_id,
+            node_type=kwargs["node_type"],
+            title=kwargs["title"],
+            target=kwargs["target"],
+            hypothesis=kwargs.get("hypothesis"),
+            failure_mode=kwargs.get("failure_mode"),
+            lesson=kwargs.get("lesson"),
+            origin=kwargs["origin"],
+            change_set_id=kwargs["change_set_id"],
+        )
+
+    services: dict[str, Any] = {
+        name: SimpleNamespace()
+        for name in (
+            "projects",
+            "questions",
+            "notes",
+            "sessions",
+            "datasets",
+            "analyses",
+            "claims",
+            "visualizations",
+        )
+    }
+    services["exploration"] = SimpleNamespace(create_exploration_node=create_exploration_node)
+    services.update(overrides)
+    return GraphPatchApplier(**services)
+
+
+def _record_dead_end_operation(
+    change_set: GraphChangeSet,
+    *,
+    error_metadata: dict[str, Any] | None = None,
+) -> GraphChangeOperation:
+    return GraphChangeOperation(
+        operation_id=uuid4(),
+        change_set_id=change_set.change_set_id,
+        sequence=1,
+        op=GraphChangeOp.CREATE,
+        entity_type=EntityType.EXPLORATION_NODE,
+        semantic_type=GraphDraftSemanticType.RECORD_DEAD_END,
+        payload={
+            "project_id": str(change_set.project_id),
+            "node_type": "dead_end",
+            "title": "Bootstrap path underpowered",
+            "target": {"entity_type": "question", "entity_id": {"$ref": "q1"}},
+            **_dead_end_fields(),
+        },
+        error_metadata=error_metadata or {},
+    )
+
+
+def test_graph_patch_applier_creates_exploration_node_with_origin_and_change_set_backlink() -> None:
+    change_set = _change_set(uuid4())
+    question_id = uuid4()
+    captured: dict[str, Any] = {}
+    applier = _exploration_applier(captured)
+
+    result = applier.apply_graph_operation(
+        _record_dead_end_operation(change_set),
+        ref_map={"q1": question_id},
+        actor=None,
+        change_set=change_set,
+    )
+
+    assert isinstance(result, ExplorationNode)
+    assert result.node_type == ExplorationNodeType.DEAD_END
+    assert captured["project_id"] == change_set.project_id
+    assert captured["target"] == EntityRef(entity_type=EntityType.QUESTION, entity_id=question_id)
+    assert captured["origin"] == EntityOrigin.AI_SUGGESTED
+    assert captured["change_set_id"] == change_set.change_set_id
+    assert captured["origin_prompt_version"] == change_set.prompt_version
+    assert captured["origin_model"] == change_set.model
+    assert captured["lesson"] == "Paired designs need a paired test."
+
+
+def test_graph_patch_applier_stamps_user_revised_on_edited_exploration_node() -> None:
+    change_set = _change_set(uuid4())
+    captured: dict[str, Any] = {}
+    applier = _exploration_applier(captured)
+
+    applier.apply_graph_operation(
+        _record_dead_end_operation(
+            change_set, error_metadata={"edited_at": utc_now().isoformat()}
+        ),
+        ref_map={"q1": uuid4()},
+        actor=None,
+        change_set=change_set,
+    )
+
+    assert captured["origin"] == EntityOrigin.USER_REVISED
+
+
+def test_graph_patch_applier_rejects_exploration_node_without_service() -> None:
+    change_set = _change_set(uuid4())
+    applier = _exploration_applier({}, exploration=None)
+
+    with pytest.raises(ValidationError, match="Exploration service is not configured."):
+        applier.apply_graph_operation(
+            _record_dead_end_operation(change_set),
+            ref_map={"q1": uuid4()},
+            actor=None,
+            change_set=change_set,
+        )
+
+
+def test_graph_patch_applier_merge_questions_calls_refactor_with_reason_and_origin() -> None:
+    change_set = _change_set(uuid4())
+    source_id = uuid4()
+    captured: dict[str, Any] = {}
+    replacement = Question(
+        question_id=uuid4(),
+        project_id=change_set.project_id,
+        text="Which contrast is testable this week?",
+        question_type=QuestionType.HYPOTHESIS_DRIVEN,
+    )
+
+    def refactor_question(question_id: UUID, **kwargs: Any) -> Any:
+        captured.update({"question_id": question_id, **kwargs})
+        return SimpleNamespace(replacement_question=replacement)
+
+    applier = _exploration_applier(
+        {}, questions=SimpleNamespace(refactor_question=refactor_question)
+    )
+    operation = _operation(
+        op=GraphChangeOp.UPDATE,
+        entity_type=EntityType.QUESTION,
+        semantic_type=GraphDraftSemanticType.MERGE_QUESTIONS,
+        payload={
+            "replacement": {
+                "text": replacement.text,
+                "question_type": "hypothesis_driven",
+                "status": "active",
+            },
+            "reason": "Two captures ask the same question.",
+        },
+        target_entity_id=source_id,
+    )
+
+    result = applier.apply_graph_operation(
+        operation, ref_map={}, actor=None, change_set=change_set
+    )
+
+    assert result is replacement
+    assert captured["question_id"] == source_id
+    assert captured["replacement_text"] == replacement.text
+    assert captured["replacement_status"].value == "active"
+    assert captured["reason"] == "Two captures ask the same question."
+    assert captured["origin"] == EntityOrigin.AI_SUGGESTED
+    assert captured["change_set_id"] == change_set.change_set_id
+    assert captured["origin_prompt_version"] == change_set.prompt_version
+
+
+def test_graph_patch_applier_retire_note_calls_archive_note_with_reason() -> None:
+    change_set = _change_set(uuid4())
+    note_id = uuid4()
+    captured: dict[str, Any] = {}
+
+    def archive_note(target_id: UUID, *, reason: NoteArchiveReason, actor: Any) -> Note:
+        captured.update({"note_id": target_id, "reason": reason, "actor": actor})
+        return Note(note_id=target_id, project_id=change_set.project_id, raw_content="old")
+
+    applier = _exploration_applier({}, notes=SimpleNamespace(archive_note=archive_note))
+
+    def retire(reason: str) -> GraphChangeOperation:
+        return _operation(
+            op=GraphChangeOp.UPDATE,
+            entity_type=EntityType.NOTE,
+            semantic_type=GraphDraftSemanticType.RETIRE_NOTE,
+            payload={"reason": reason},
+            target_entity_id=note_id,
+        )
+
+    result = applier.apply_graph_operation(
+        retire("superseded"), ref_map={}, actor=None, change_set=change_set
+    )
+    assert result.note_id == note_id
+    assert captured["reason"] == NoteArchiveReason.SUPERSEDED
+
+    with pytest.raises(ValidationError, match="superseded or reviewed_not_relevant"):
+        applier.apply_graph_operation(
+            retire("archived_unreviewed"), ref_map={}, actor=None, change_set=change_set
+        )

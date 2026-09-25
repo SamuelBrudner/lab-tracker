@@ -31,7 +31,11 @@ from lab_tracker.models import (
     UsageEventVerb,
 )
 from lab_tracker.patching import NOT_PROVIDED, PatchValue
-from lab_tracker.services.graph_draft_batch_policy import BatchReviewQuery, BatchRunQuery
+from lab_tracker.services.graph_draft_batch_policy import (
+    BatchReviewer,
+    BatchReviewQuery,
+    BatchRunQuery,
+)
 from lab_tracker.services.graph_draft_generation import DEFAULT_BATCH_RETRY_ATTEMPTS
 from lab_tracker.services.graph_draft_review import RevisionInputs
 from lab_tracker.services.graph_draft_service import GraphDraftService
@@ -348,11 +352,13 @@ class GraphDraftsApiMixin:
         *,
         window: tuple[datetime, datetime] | None = None,
         actor: AuthContext | None = None,
+        context_owner: BatchReviewer | None = None,
     ) -> dict[str, Any]:
         return self.graph_drafts.build_batch_graph_context(
             notes,
             window=window,
             actor=actor,
+            context_owner=context_owner,
         )
 
     def get_graph_draft_batch_settings(

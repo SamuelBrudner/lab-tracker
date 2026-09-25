@@ -74,6 +74,21 @@ forced review:
 - Set-aside captures name a reason, so skipped review degrades visible coverage
   rather than silent trust.
 
+### Negative-knowledge operations
+
+The labels that record what did not work, or what was set aside, commit through
+the same audited service paths a person would use, never through a shortcut:
+
+- `merge_questions` commits through `QuestionService.refactor_question`: the
+  source question becomes `superseded`, a `QuestionRefactor` audit row records
+  the reason, and the replacement question is stamped with the draft's origin,
+  change set, provider, model, and prompt version.
+- `retire_note` commits through `NoteService.archive_note` with the reason
+  limited to `superseded` or `reviewed_not_relevant`; the archive stamps record
+  who retired the note and why.
+- `abandon_question` is the normal question update with `status=abandoned` and
+  a required `terminal_reason`, so no question is closed without a stated reason.
+
 The boundary, in one line: **enforce structural invariants and record
 provenance on every path; require a second person only for AI output, and only
 optionally for humans.**

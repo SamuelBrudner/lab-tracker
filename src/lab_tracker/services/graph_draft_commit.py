@@ -354,6 +354,8 @@ class TransactionalDraftCommitCoordinator(BaseService):
 
         project_ids: set[UUID] = set(reference_project_ids)
         for operation in operations:
+            # merge_questions and abandon_question are (update, question) too:
+            # refactor_question re-takes lock_project_question_dag under this pre-lock.
             if (
                 operation.op == GraphChangeOp.UPDATE
                 and operation.entity_type == EntityType.QUESTION
@@ -453,7 +455,7 @@ def _is_note_question_link(operation: GraphChangeOperation) -> bool:
 
 
 _PROJECT_REFERENCE_LOCKING_ENTITY_TYPES = frozenset(
-    {EntityType.CLAIM, EntityType.ANALYSIS, EntityType.GOAL}
+    {EntityType.CLAIM, EntityType.ANALYSIS, EntityType.GOAL, EntityType.EXPLORATION_NODE}
 )
 
 
@@ -463,7 +465,8 @@ def _takes_project_reference_lock(operations: list[GraphChangeOperation]) -> boo
     Claim create/update and analysis create re-validate their evidence
     references under ``lock_project_references``, and goal create/update
     re-verify their link targets under it; analysis updates are included
-    conservatively.
+    conservatively. Exploration node create/update resolve their target,
+    evidence, edge, and invalidation references under the same lock.
     """
 
     return any(

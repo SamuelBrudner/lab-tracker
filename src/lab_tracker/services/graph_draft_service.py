@@ -22,7 +22,11 @@ from lab_tracker.models import (
     Note,
 )
 from lab_tracker.patching import NOT_PROVIDED, PatchValue
-from lab_tracker.services.graph_draft_batch_policy import BatchReviewQuery, BatchRunQuery
+from lab_tracker.services.graph_draft_batch_policy import (
+    BatchReviewer,
+    BatchReviewQuery,
+    BatchRunQuery,
+)
 from lab_tracker.services.graph_draft_commit import TransactionalDraftCommitCoordinator
 from lab_tracker.services.graph_draft_generation import (
     DEFAULT_BATCH_RETRY_ATTEMPTS,
@@ -278,11 +282,13 @@ class GraphDraftService:
         *,
         window: tuple[datetime, datetime] | None = None,
         actor: AuthContext | None = None,
+        context_owner: BatchReviewer | None = None,
     ) -> dict[str, Any]:
         return self.generation.build_batch_graph_context(
             notes,
             window=window,
             actor=actor,
+            context_owner=context_owner,
         )
 
     def get_graph_draft_batch_settings(

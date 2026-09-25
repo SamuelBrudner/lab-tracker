@@ -83,7 +83,17 @@ research record:
   transcripts, photo+voice bundles, and scheduled or user-triggered batches over
   staged notes. Drafting may be note-scoped or batch-scoped, but every proposed
   operation requires human edit/accept/reject before commit through normal API
-  validation.
+  validation. Drafts may also carry negative-knowledge labels:
+  `record_decision` / `record_dead_end` / `record_pivot` propose exploration
+  nodes, `abandon_question` closes a question with a required terminal reason,
+  `merge_questions` retires one question into a replacement through the
+  audited question-refactor path, and `retire_note` archives a note with a
+  named reason (`superseded` or `reviewed_not_relevant`). Batch packets carry
+  reviewer-scoped, capped review memory (that reviewer's pending proposals and
+  recent rejections) and the re-draft of a rejected note draft is seeded with
+  the rejected operations and their review notes; no validator rewrites,
+  merges, or suppresses proposals — duplicates are surfaced to the model and
+  left to the reviewer.
 - Ongoing-project member onboarding as a prospective-first retained workflow:
   one immutable project-visible checkpoint per project/member, one to three
   individually resolved live-question alignments, a deterministic labelled
@@ -160,10 +170,12 @@ research record:
   `dead_end`, and `pivot` records that each target a retained question,
   dataset, analysis, or claim and link into a DAG through `parent` and
   `also_depends_on` edges. They render in the project graph between claims and
-  visualizations and export as `lab:ExplorationNode` PROV-O records. Like other
-  graph entities they are created directly today; any future agent-harvested
-  nodes stay human-gated through graph-draft review. See
-  [ara-exploration-graph-design.md](ara-exploration-graph-design.md).
+  visualizations and export as `lab:ExplorationNode` PROV-O records. They are
+  created directly or proposed by graph drafting as `record_decision` /
+  `record_dead_end` / `record_pivot` operations that stay human-gated through
+  graph-draft review and, once committed, are stamped `origin=ai_suggested`
+  (`user_revised` when the reviewer edited them) with the change-set backlink.
+  See [ara-exploration-graph-design.md](ara-exploration-graph-design.md).
 - A per-project publication-readiness report
   (`GET /projects/{project_id}/publication-readiness`) that scans the retained
   graph for gaps before write-up — supported claims missing dataset/analysis

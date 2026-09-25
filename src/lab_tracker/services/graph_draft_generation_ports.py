@@ -15,6 +15,7 @@ from lab_tracker.models import (
     Note,
     NoteRawAsset,
 )
+from lab_tracker.services.graph_draft_batch_policy import BatchReviewer
 
 
 class GenerationRecords(Protocol):
@@ -112,6 +113,7 @@ class GenerationContextBuilder(Protocol):
         window: tuple[datetime, datetime] | None,
         actor: AuthContext | None,
         batch_note_limit: int,
+        context_owner: BatchReviewer | None,
     ) -> dict[str, Any]: ...
 
 
@@ -176,3 +178,6 @@ class GenerationClaim:
     change_set: GraphChangeSet
     claim_token: UUID
     acquired: bool
+    # The rejected draft a note re-draft was keyed off, so the new attempt can
+    # be seeded with what the reviewer already turned down.
+    rejected_predecessor: GraphChangeSet | None = None

@@ -8,18 +8,26 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from pydantic import ValidationError as PydanticValidationError
+from pydantic import field_validator
 
 from lab_tracker.errors import NotFoundError, ValidationError
 from lab_tracker.goals_attributes import validate_goal_attributes
-from lab_tracker.graph_drafting import GraphDraftingError
+from lab_tracker.graph_drafting import (
+    EXPLORATION_NODE_REQUIRED_FIELDS,
+    PIVOT_INVALIDATION_FIELDS,
+    GraphDraftingError,
+)
 from lab_tracker.models import (
     EntityType,
+    ExplorationNodeType,
     GraphChangeOp,
     GraphChangeOperation,
     GraphChangeSet,
     GraphDraftMode,
     GraphDraftPurpose,
     GraphDraftSemanticType,
+    NoteArchiveReason,
+    QuestionStatus,
 )
 from lab_tracker.schemas import (
     AnalysisCreate,
@@ -28,6 +36,8 @@ from lab_tracker.schemas import (
     ClaimUpdate,
     DatasetCreate,
     DatasetUpdate,
+    ExplorationNodeCreate,
+    ExplorationNodeUpdate,
     GoalCreate,
     GoalUpdate,
     NoteCreate,
@@ -35,7 +45,9 @@ from lab_tracker.schemas import (
     ProjectCreate,
     ProjectUpdate,
     QuestionCreate,
+    QuestionRefactorRequest,
     QuestionUpdate,
+    RequestModel,
     SessionCreate,
     SessionUpdate,
     VisualizationCreate,
@@ -44,6 +56,24 @@ from lab_tracker.schemas import (
 from lab_tracker.services.graph_draft_context import EntityResult
 
 _REF_VALIDATION_PLACEHOLDER = "00000000-0000-0000-0000-000000000001"
+RETIRE_NOTE_REASONS = frozenset(
+    {NoteArchiveReason.SUPERSEDED, NoteArchiveReason.REVIEWED_NOT_RELEVANT}
+)
+
+
+class RetireNotePayload(RequestModel):
+    """``retire_note`` payload: an archive reason a drafter may name."""
+
+    reason: NoteArchiveReason
+
+    @field_validator("reason")
+    @classmethod
+    def _reason_is_retirement(cls, value: NoteArchiveReason) -> NoteArchiveReason:
+        if value not in RETIRE_NOTE_REASONS:
+            raise ValueError("retire_note reason must be superseded or reviewed_not_relevant.")
+        return value
+
+
 _CREATE_SCHEMAS = {
     EntityType.PROJECT: ProjectCreate,
     EntityType.QUESTION: QuestionCreate,
@@ -54,6 +84,7 @@ _CREATE_SCHEMAS = {
     EntityType.CLAIM: ClaimCreate,
     EntityType.VISUALIZATION: VisualizationCreate,
     EntityType.GOAL: GoalCreate,
+    EntityType.EXPLORATION_NODE: ExplorationNodeCreate,
 }
 _UPDATE_SCHEMAS = {
     EntityType.PROJECT: ProjectUpdate,
@@ -65,6 +96,17 @@ _UPDATE_SCHEMAS = {
     EntityType.CLAIM: ClaimUpdate,
     EntityType.VISUALIZATION: VisualizationUpdate,
     EntityType.GOAL: GoalUpdate,
+    EntityType.EXPLORATION_NODE: ExplorationNodeUpdate,
+}
+# Semantic labels whose payload is not the entity's own update schema.
+_SEMANTIC_PAYLOAD_SCHEMAS = {
+    GraphDraftSemanticType.MERGE_QUESTIONS: QuestionRefactorRequest,
+    GraphDraftSemanticType.RETIRE_NOTE: RetireNotePayload,
+}
+_SEMANTIC_EXPLORATION_NODE_TYPES = {
+    GraphDraftSemanticType.RECORD_DECISION: ExplorationNodeType.DECISION,
+    GraphDraftSemanticType.RECORD_DEAD_END: ExplorationNodeType.DEAD_END,
+    GraphDraftSemanticType.RECORD_PIVOT: ExplorationNodeType.PIVOT,
 }
 _SEMANTIC_ALLOWED_TARGETS = {
     GraphDraftSemanticType.CREATE_NOTE: {(GraphChangeOp.CREATE, EntityType.NOTE)},
@@ -85,6 +127,18 @@ _SEMANTIC_ALLOWED_TARGETS = {
         (GraphChangeOp.CREATE, EntityType.NOTE),
         (GraphChangeOp.UPDATE, EntityType.NOTE),
     },
+    GraphDraftSemanticType.RECORD_DECISION: {
+        (GraphChangeOp.CREATE, EntityType.EXPLORATION_NODE),
+    },
+    GraphDraftSemanticType.RECORD_DEAD_END: {
+        (GraphChangeOp.CREATE, EntityType.EXPLORATION_NODE),
+    },
+    GraphDraftSemanticType.RECORD_PIVOT: {
+        (GraphChangeOp.CREATE, EntityType.EXPLORATION_NODE),
+    },
+    GraphDraftSemanticType.ABANDON_QUESTION: {(GraphChangeOp.UPDATE, EntityType.QUESTION)},
+    GraphDraftSemanticType.MERGE_QUESTIONS: {(GraphChangeOp.UPDATE, EntityType.QUESTION)},
+    GraphDraftSemanticType.RETIRE_NOTE: {(GraphChangeOp.UPDATE, EntityType.NOTE)},
 }
 _ENTITY_ID_FIELDS = {
     "project_id": EntityType.PROJECT,
@@ -100,6 +154,8 @@ _ENTITY_ID_FIELDS = {
     "visualization_id": EntityType.VISUALIZATION,
     "claim_id": EntityType.CLAIM,
     "goal_id": EntityType.GOAL,
+    "invalidates_node_id": EntityType.EXPLORATION_NODE,
+    "invalidates_claim_id": EntityType.CLAIM,
 }
 _ENTITY_ID_LIST_FIELDS = {
     "parent_question_ids": EntityType.QUESTION,
@@ -109,6 +165,10 @@ _ENTITY_ID_LIST_FIELDS = {
     "supported_by_analysis_ids": EntityType.ANALYSIS,
     "related_claim_ids": EntityType.CLAIM,
     "note_ids": EntityType.NOTE,
+    "parent_node_ids": EntityType.EXPLORATION_NODE,
+    "also_depends_on_node_ids": EntityType.EXPLORATION_NODE,
+    "child_question_ids_to_reparent": EntityType.QUESTION,
+    "note_ids_to_retarget": EntityType.NOTE,
 }
 _SOURCE_NOTE_ID_KEYS = ("source_note_ids", "source_note_id", "note_id")
 _SOURCE_NOTE_IDS_RESOLUTION_EXPLICIT = "explicit"
@@ -154,6 +214,7 @@ class GraphPatchValidator:
         self.ensure_operation_references_exist(operation, payload)
         self._validate_goal_update_payload(operation, payload)
         _validate_semantic_operation_target(operation)
+        _validate_semantic_payload_rules(operation, payload)
 
     def operations_from_graph_patch(
         self,
@@ -538,6 +599,10 @@ def _validate_graph_operation_payload(
         raise ValidationError("Update operations require target_entity_id.")
     if operation.op == GraphChangeOp.UPDATE and not candidate:
         raise ValidationError("Update operation payload must include at least one field.")
+    semantic_schema = _SEMANTIC_PAYLOAD_SCHEMAS.get(operation.semantic_type)
+    if semantic_schema is not None:
+        _validate_payload(semantic_schema, candidate)
+        return
     schema_map = _CREATE_SCHEMAS if operation.op == GraphChangeOp.CREATE else _UPDATE_SCHEMAS
     schema_type = schema_map.get(operation.entity_type)
     if schema_type is None:
@@ -584,6 +649,76 @@ def _validate_semantic_operation_target(operation: GraphChangeOperation) -> None
             f"Semantic operation {operation.semantic_type.value} cannot be used with "
             f"{operation.op.value} {operation.entity_type.value}."
         )
+
+
+def _validate_semantic_payload_rules(
+    operation: GraphChangeOperation,
+    payload: dict[str, Any],
+) -> None:
+    """Draft-time rules for the negative-knowledge labels.
+
+    These mirror the service-side checks (ExplorationService._validate_node,
+    terminal_reason_for_patch) so the model gets retry feedback while drafting
+    instead of a commit-time failure. The payload is never rewritten.
+    """
+
+    expected_node_type = _SEMANTIC_EXPLORATION_NODE_TYPES.get(operation.semantic_type)
+    if expected_node_type is not None and payload.get("node_type") != expected_node_type.value:
+        raise ValidationError(
+            f"Semantic operation {operation.semantic_type.value} requires node_type "
+            f"{expected_node_type.value}."
+        )
+    if (
+        operation.op == GraphChangeOp.CREATE
+        and operation.entity_type == EntityType.EXPLORATION_NODE
+    ):
+        _validate_exploration_node_fields(payload)
+    if operation.semantic_type == GraphDraftSemanticType.ABANDON_QUESTION:
+        if payload.get("status") != QuestionStatus.ABANDONED.value:
+            raise ValidationError(
+                "Semantic operation abandon_question requires status abandoned."
+            )
+        if not _payload_value_present(payload.get("terminal_reason")):
+            raise ValidationError(
+                "Semantic operation abandon_question requires a terminal_reason."
+            )
+
+
+def _validate_exploration_node_fields(payload: dict[str, Any]) -> None:
+    node_type = str(payload.get("node_type") or "")
+    required_fields = EXPLORATION_NODE_REQUIRED_FIELDS.get(node_type)
+    if required_fields is None:
+        raise ValidationError(f"Unsupported exploration node_type: {node_type}.")
+    for field_name in required_fields:
+        if not _payload_value_present(payload.get(field_name)):
+            raise ValidationError(f"Exploration node_type {node_type} requires {field_name}.")
+    invalidations = [
+        field_name
+        for field_name in PIVOT_INVALIDATION_FIELDS
+        if _payload_value_present(payload.get(field_name))
+    ]
+    if node_type == ExplorationNodeType.PIVOT.value:
+        if len(invalidations) != 1:
+            raise ValidationError(
+                "Pivot exploration nodes require exactly one of invalidates_node_id "
+                "or invalidates_claim_id."
+            )
+    elif invalidations:
+        raise ValidationError(
+            "Only pivot exploration nodes may set invalidates_node_id or invalidates_claim_id."
+        )
+
+
+def _payload_value_present(value: Any) -> bool:
+    """Non-blank text, a non-empty list, or an unresolved ``{"$ref"}`` placeholder."""
+
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, list):
+        return len(value) > 0
+    return True
 
 
 def _string_list(raw: Any) -> list[str]:
