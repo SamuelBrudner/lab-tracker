@@ -177,6 +177,7 @@ files = [
   "src/lab_tracker/_windows_job.py",
   "src/lab_tracker/application",
   "src/lab_tracker/graph_drafting.py",
+  "src/lab_tracker/draft_quality.py",
   "src/lab_tracker/services/shared.py",
   "src/lab_tracker/services/graph_draft_generation.py",
   "src/lab_tracker/services/graph_draft_review.py",

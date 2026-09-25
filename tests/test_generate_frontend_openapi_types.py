@@ -17,6 +17,10 @@ def test_member_onboarding_operations_are_all_in_the_checked_scope() -> None:
     assert expected <= set(SCOPED_OPERATIONS)
 
 
+def test_draft_quality_operation_is_in_the_checked_scope() -> None:
+    assert ("get", "/projects/{project_id}/draft-quality") in SCOPED_OPERATIONS
+
+
 def _openapi_with_response(response_schema: str) -> dict:
     return {
         "paths": {

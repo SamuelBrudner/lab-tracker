@@ -9,6 +9,7 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import and_, delete, func, or_, select, text, update
+from sqlalchemy.engine import Row
 from sqlalchemy.orm import Session as OrmSession
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -20,9 +21,11 @@ from lab_tracker.db_models import (
     UserModel,
 )
 from lab_tracker.db_types import ensure_uuid
+from lab_tracker.draft_quality import DraftQualityRow
 from lab_tracker.errors import ConflictError, ValidationError
 from lab_tracker.member_onboarding import ALIGNMENT_MODE_KEY
 from lab_tracker.models import (
+    EDITED_AT_KEY,
     AcceptanceMode,
     EntityType,
     GraphChangeOp,
@@ -93,6 +96,48 @@ def _list(value: Any) -> list[dict[str, Any]]:
 
 def _as_utc_optional(value: Any) -> Any:
     return as_utc(value) if value is not None else None
+
+
+def _draft_quality_row_from_tuple(row: Row[Any]) -> DraftQualityRow:
+    """Map one LEFT JOIN result tuple onto the ledger's typed row.
+
+    Operation columns are ``None`` for a change set without operations; the
+    edited-before-accept flag is evaluated in Python on the fetched JSON so
+    the projection needs no dialect-specific JSON SQL.
+    """
+
+    (
+        change_set_id,
+        provider,
+        model,
+        prompt_version,
+        change_set_status,
+        created_at,
+        reviewed_at,
+        clarification_requests,
+        semantic_type,
+        operation_status,
+        acceptance_mode,
+        accepted_at,
+        error_metadata,
+    ) = row
+    return DraftQualityRow(
+        change_set_id=ensure_uuid(change_set_id),
+        provider=provider,
+        model=model,
+        prompt_version=prompt_version,
+        change_set_status=GraphChangeSetStatus(change_set_status),
+        change_set_created_at=as_utc(created_at),
+        reviewed_at=_as_utc_optional(reviewed_at),
+        clarification_request_count=len(list(clarification_requests or [])),
+        semantic_type=GraphDraftSemanticType(semantic_type) if semantic_type else None,
+        operation_status=(
+            GraphChangeOperationStatus(operation_status) if operation_status else None
+        ),
+        acceptance_mode=AcceptanceMode(acceptance_mode) if acceptance_mode else None,
+        accepted_at=_as_utc_optional(accepted_at),
+        edited_before_accept=EDITED_AT_KEY in _dict(error_metadata),
+    )
 
 
 def operation_to_model(operation: GraphChangeOperation) -> GraphChangeOperationModel:
@@ -345,6 +390,47 @@ class SQLAlchemyGraphChangeSetRepository(EntityRepository[GraphChangeSet]):
             )
         )
         return {str(change_set_id): int(count) for change_set_id, count in rows}
+
+    def draft_quality_rows(
+        self,
+        *,
+        project_id: UUID,
+        since: datetime | None,
+    ) -> list[DraftQualityRow]:
+        """One narrow row per (change set, operation); payloads are never selected."""
+
+        self._session.flush()
+        stmt = (
+            select(
+                GraphChangeSetModel.change_set_id,
+                GraphChangeSetModel.provider,
+                GraphChangeSetModel.model,
+                GraphChangeSetModel.prompt_version,
+                GraphChangeSetModel.status,
+                GraphChangeSetModel.created_at,
+                GraphChangeSetModel.reviewed_at,
+                GraphChangeSetModel.clarification_requests,
+                GraphChangeOperationModel.semantic_type,
+                GraphChangeOperationModel.status,
+                GraphChangeOperationModel.acceptance_mode,
+                GraphChangeOperationModel.accepted_at,
+                GraphChangeOperationModel.error_metadata,
+            )
+            .select_from(GraphChangeSetModel)
+            .outerjoin(
+                GraphChangeOperationModel,
+                GraphChangeOperationModel.change_set_id == GraphChangeSetModel.change_set_id,
+            )
+            .where(GraphChangeSetModel.project_id == str(project_id))
+        )
+        if since is not None:
+            stmt = stmt.where(GraphChangeSetModel.created_at >= as_utc(since))
+        stmt = stmt.order_by(
+            GraphChangeSetModel.created_at,
+            GraphChangeSetModel.change_set_id,
+            GraphChangeOperationModel.sequence,
+        )
+        return [_draft_quality_row_from_tuple(row) for row in self._session.execute(stmt)]
 
     def _from_rows(
         self,

@@ -656,6 +656,13 @@ class LabTrackerAPIClient:
             ),
         )
 
+    def draft_quality(self, project_id: str, *, since: str | None = None) -> JsonObject:
+        return self._request(
+            "GET",
+            _api_path("projects", _uuid_path_id(project_id, "project_id"), "draft-quality"),
+            params={"since": since},
+        )
+
     def get_dataset_provenance(self, dataset_id: str) -> JsonObject:
         return self._request(
             "GET",

@@ -14,6 +14,8 @@ from lab_tracker.member_onboarding import (
     validate_member_alignment_operations,
 )
 from lab_tracker.models import (
+    EDITED_AT_KEY,
+    EDITED_BY_KEY,
     Dataset,
     EntityRef,
     EntityType,
@@ -36,6 +38,12 @@ from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.graph_draft_context import EntityResult
 from lab_tracker.services.graph_draft_context import entity_id as graph_entity_id
 from lab_tracker.services.shared import actor_user_id
+
+# Review-audit keys that survive a commit. Validation messages and any other
+# transient review state are cleared when an operation is APPLIED, but the
+# "a person edited this before accepting it" record must outlive the commit so
+# the draft-quality ledger stays honest about curation after the fact.
+_COMMIT_RETAINED_METADATA_KEYS = frozenset({EDITED_AT_KEY, EDITED_BY_KEY})
 
 
 class CommitRecords(Protocol):
@@ -244,7 +252,11 @@ class TransactionalDraftCommitCoordinator(BaseService):
                     ref_map[operation.client_ref] = resolved_entity_id
                 operation.status = GraphChangeOperationStatus.APPLIED
                 operation.result_entity_id = resolved_entity_id
-                operation.error_metadata = {}
+                operation.error_metadata = {
+                    key: value
+                    for key, value in operation.error_metadata.items()
+                    if key in _COMMIT_RETAINED_METADATA_KEYS
+                }
                 operation.updated_at = utc_now()
             change_set.status = GraphChangeSetStatus.COMMITTED
             change_set.commit_message = message.strip()

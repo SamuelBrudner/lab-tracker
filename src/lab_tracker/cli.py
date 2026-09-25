@@ -546,6 +546,7 @@ def seed_demo_database(
     run_migrations: bool = True,
     allow_duplicates: bool = False,
     allow_non_local: bool = False,
+    with_review: bool = False,
 ) -> DemoSeedResult:
     settings = get_settings()
     if not allow_non_local and (
@@ -569,7 +570,11 @@ def seed_demo_database(
             repository = SQLAlchemyLabTrackerRepository(session)
             root_api = LabTrackerAPI(settings=settings)
             with root_api.request_scope(repository, surface="cli") as scope:
-                result = seed_demo_data(scope.api, allow_duplicates=allow_duplicates)
+                result = seed_demo_data(
+                    scope.api,
+                    allow_duplicates=allow_duplicates,
+                    with_review=with_review,
+                )
                 scope.commit()
                 return result
     finally:
@@ -770,6 +775,14 @@ def main(argv: list[str] | None = None) -> None:
             "(LAB_TRACKER_ENVIRONMENT != local) or has authentication enabled."
         ),
     )
+    seed_parser.add_argument(
+        "--with-review",
+        action="store_true",
+        help=(
+            "Also stage a golden-day set of captures and a READY draft batch so the "
+            "review page has something to review (no model call; idempotent per demo project)."
+        ),
+    )
     doctor_parser = subcommands.add_parser(
         "doctor",
         aliases=["check-idioms"],
@@ -865,6 +878,7 @@ def main(argv: list[str] | None = None) -> None:
                 run_migrations=not args.skip_migrations,
                 allow_duplicates=args.allow_duplicates,
                 allow_non_local=args.allow_non_local,
+                with_review=args.with_review,
             )
         except Exception as exc:
             print(f"Failed to seed Lab Tracker demo data: {exc}", file=sys.stderr)

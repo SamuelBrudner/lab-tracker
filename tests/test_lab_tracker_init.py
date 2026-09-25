@@ -565,18 +565,20 @@ def test_lab_tracker_init_console_entrypoints_are_packaged() -> None:
     assert scripts["lt"] == "lab_tracker_client.cli:main"
 
 
-def test_seed_demo_cli_prints_json_summary(monkeypatch, capsys) -> None:
-    project_id = uuid4()
-    calls: list[dict[str, bool]] = []
-
+def _fake_seed_demo_database(project_id, calls: list[dict[str, bool]]):
     def fake_seed_demo_database(
-        *, run_migrations: bool, allow_duplicates: bool, allow_non_local: bool
+        *,
+        run_migrations: bool,
+        allow_duplicates: bool,
+        allow_non_local: bool,
+        with_review: bool,
     ):
         calls.append(
             {
                 "run_migrations": run_migrations,
                 "allow_duplicates": allow_duplicates,
                 "allow_non_local": allow_non_local,
+                "with_review": with_review,
             }
         )
         return DemoSeedResult(
@@ -591,19 +593,53 @@ def test_seed_demo_cli_prints_json_summary(monkeypatch, capsys) -> None:
             visualization_count=1,
         )
 
-    monkeypatch.setattr("lab_tracker.cli.seed_demo_database", fake_seed_demo_database)
+    return fake_seed_demo_database
+
+
+def test_seed_demo_cli_prints_json_summary(monkeypatch, capsys) -> None:
+    project_id = uuid4()
+    calls: list[dict[str, bool]] = []
+    monkeypatch.setattr(
+        "lab_tracker.cli.seed_demo_database", _fake_seed_demo_database(project_id, calls)
+    )
 
     lab_tracker_main(
         ["seed-demo", "--skip-migrations", "--allow-duplicates", "--allow-non-local"]
     )
 
     assert calls == [
-        {"run_migrations": False, "allow_duplicates": True, "allow_non_local": True}
+        {
+            "run_migrations": False,
+            "allow_duplicates": True,
+            "allow_non_local": True,
+            "with_review": False,
+        }
     ]
     payload = json.loads(capsys.readouterr().out)
     assert payload["created"] is True
     assert payload["project_id"] == str(project_id)
     assert payload["question_count"] == 1
+    assert payload["staged_note_count"] == 0
+    assert payload["review_change_set_id"] is None
+
+
+def test_seed_demo_cli_forwards_with_review(monkeypatch, capsys) -> None:
+    calls: list[dict[str, bool]] = []
+    monkeypatch.setattr(
+        "lab_tracker.cli.seed_demo_database", _fake_seed_demo_database(uuid4(), calls)
+    )
+
+    lab_tracker_main(["seed-demo", "--skip-migrations", "--with-review"])
+
+    assert calls == [
+        {
+            "run_migrations": False,
+            "allow_duplicates": False,
+            "allow_non_local": False,
+            "with_review": True,
+        }
+    ]
+    assert json.loads(capsys.readouterr().out)["created"] is True
 
 
 def test_lt_prime_non_research_prompt_emits_nothing(capsys) -> None:

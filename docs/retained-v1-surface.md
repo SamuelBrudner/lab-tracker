@@ -169,6 +169,18 @@ research record:
   graph for gaps before write-up — supported claims missing dataset/analysis
   evidence or falsification criteria, answered questions without committed
   dataset evidence, and broken external-artifact references.
+- A per-project draft-quality ledger
+  (`GET /projects/{project_id}/draft-quality?since=<ISO 8601 with offset>`,
+  MCP read tool `lab_tracker_draft_quality`) computed only from stored
+  graph-draft change sets and operations. Per provider x model x
+  prompt_version x semantic type it reports proposed, accepted split by
+  `human_selected` vs `bulk_accepted`, edited-before-accept, rejected, and
+  left-proposed-at-commit counts, plus per-group clarification counts and
+  median seconds to first accept and to review. It is a read of the review
+  record, never a gate, and never auto-accepts anything. Commit keeps the
+  `edited_at`/`edited_by` review-audit keys on applied operations so the
+  edited-before-accept count survives commit; operations committed before
+  that change carry no edit record and are undercounted.
 - Human-gated provenance links over `GET`/`PATCH /provenance-links`. Every
   batch execution — the synchronous `POST /batches/run-now` path, the queued
   worker path when `graph_draft_background_enabled` is set, and scheduled due
@@ -318,6 +330,10 @@ Deferred means:
 Follow these rules in sibling cleanup work:
 
 - Default runtime behavior should center the retained workflows only.
+- Demo material stays scripted: `lab-tracker seed-demo --with-review` seeds a
+  golden-day capture set and one READY batch through the ordinary batch
+  drafting service with a scripted client (no model call) so a newcomer can
+  walk capture -> batch -> review without provider credentials.
 - Frontend navigation and supported docs should describe manual,
   straightforward flows first.
 - Backend refactors should prefer direct repository-backed operations over

@@ -15,6 +15,7 @@ from lab_tracker.collection_models import (
     AcquisitionCollectionSnapshot,
     AcquisitionCollectionSummary,
 )
+from lab_tracker.draft_quality import DraftQualityRow
 from lab_tracker.models import (
     AcquisitionOutput,
     Analysis,
@@ -444,6 +445,18 @@ class GraphChangeSetRepository(EntityRepository[GraphChangeSet], Protocol):
         failed_at: datetime,
     ) -> GraphChangeSet | None:
         """Persist a FAILED result only while the caller owns the live claim."""
+
+    def draft_quality_rows(
+        self,
+        *,
+        project_id: UUID,
+        since: datetime | None,
+    ) -> builtins.list[DraftQualityRow]:
+        """Project one row per (change set, operation) for the draft-quality ledger.
+
+        Change sets without operations yield one row with the operation fields
+        ``None``; ``since`` keeps change sets created at or after that instant.
+        """
 
 
 class ReviewEmailOutboxRepository(Protocol):
@@ -1161,6 +1174,14 @@ class LabTrackerRepository(Protocol):
         ``statuses`` matches any listed status; ``assigned_to_user_id`` and
         ``unassigned_only`` select a reviewer's queue or unassigned oversight.
         """
+
+    def query_draft_quality_rows(
+        self,
+        *,
+        project_id: UUID,
+        since: datetime | None,
+    ) -> builtins.list[DraftQualityRow]:
+        """Project the draft-quality ledger rows for one project (see ``draft_quality_rows``)."""
 
     def claim_graph_change_set_for_commit(
         self,

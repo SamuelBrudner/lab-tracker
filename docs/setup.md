@@ -120,6 +120,21 @@ It refuses to write into a non-local (`LAB_TRACKER_ENVIRONMENT` other than
 `local`) or auth-enabled database unless you pass `--allow-non-local`.
 This is the same seeded data behind the read-only public demo.
 
+Add `--with-review` to also stage a golden day of fourteen captures (bench and
+imaging notes, a figure, a git commit, a meeting note, a bare identifier) and
+one READY batch draft over them, so the review page has something to review:
+
+```bash
+lab-tracker seed-demo --with-review
+```
+
+The batch is produced by a scripted client through the ordinary batch drafting
+service; it makes no provider call and needs no `LAB_TRACKER_GRAPH_DRAFT_*`
+settings. It is idempotent per demo project: re-running it (or running it after
+a plain `seed-demo`) reuses the existing golden-day batch instead of adding
+another. The printed summary reports `staged_note_count` and
+`review_change_set_id`.
+
 ### Check managed idiom blocks
 
 `lab-tracker doctor` (alias `check-idioms`) checks the package-pinned,

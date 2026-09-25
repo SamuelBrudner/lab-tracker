@@ -73,6 +73,7 @@ def test_fastmcp_registers_lab_tracker_tools() -> None:
     assert "lab_tracker_get_goal" in names
     assert "lab_tracker_list_node_goals" in names
     assert "lab_tracker_publication_readiness" in names
+    assert "lab_tracker_draft_quality" in names
     assert "lab_tracker_get_claim_provenance" in names
     assert "lab_tracker_export_goal_artifact" in names
     assert "lab_tracker_export_question_subtree" in names
@@ -2738,6 +2739,33 @@ def test_fastmcp_graph_tool_schemas_publish_hard_bounds() -> None:
     assert neighborhood.inputSchema["properties"]["max_nodes"]["maximum"] == 200
     assert neighborhood.inputSchema["properties"]["max_edges"]["maximum"] == 500
     assert "untrusted" in (neighborhood.description or "")
+
+
+def test_draft_quality_read_tool_forwards_since_and_hint(monkeypatch) -> None:
+    from lab_tracker.mcp_tools import read as read_tools
+
+    calls: list[tuple[str, str | None]] = []
+
+    class FakeClient:
+        def draft_quality(self, project_id, *, since=None):
+            calls.append((project_id, since))
+            return {"data": {"project_id": project_id, "cells": [], "groups": []}}
+
+        def close(self) -> None:
+            return None
+
+    read_tools.close_cached_read_client()
+    monkeypatch.setattr(read_tools, "client_from_env", lambda: FakeClient())
+
+    without_since = read_tools.lab_tracker_draft_quality("project-1")
+    with_since = read_tools.lab_tracker_draft_quality(
+        "project-1", since="2026-09-01T00:00:00+00:00"
+    )
+
+    assert without_since["next_action"]["tool"] == "lab_tracker_graph_overview"
+    assert with_since["data"]["project_id"] == "project-1"
+    assert calls == [("project-1", None), ("project-1", "2026-09-01T00:00:00+00:00")]
+    assert "untrusted" in (read_tools.lab_tracker_draft_quality.__doc__ or "")
 
 
 def test_graph_read_tools_forward_filters_and_next_actions(monkeypatch) -> None:

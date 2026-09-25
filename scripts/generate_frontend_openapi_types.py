@@ -39,6 +39,7 @@ SCOPED_OPERATIONS = (
     ("get", "/projects/{project_id}/members"),
     ("get", "/projects/{project_id}/graph-draft-batch-settings"),
     ("patch", "/projects/{project_id}/graph-draft-batch-settings"),
+    ("get", "/projects/{project_id}/draft-quality"),
     ("get", "/projects/{project_id}/member-onboarding"),
     ("put", "/projects/{project_id}/member-onboarding/checkpoint"),
     ("put", "/projects/{project_id}/member-onboarding/manual-alignment"),

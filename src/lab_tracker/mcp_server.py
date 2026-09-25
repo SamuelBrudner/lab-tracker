@@ -45,6 +45,7 @@ from lab_tracker.mcp_tools import (
 )
 from lab_tracker.mcp_tools.read import (
     lab_tracker_describe_schema,
+    lab_tracker_draft_quality,
     lab_tracker_export_goal_artifact,
     lab_tracker_export_question_subtree,
     lab_tracker_get_analysis_provenance,
@@ -591,6 +592,7 @@ __all__ = [
     "lab_tracker_list_visualizations",
     "lab_tracker_next_questions",
     "lab_tracker_publication_readiness",
+    "lab_tracker_draft_quality",
     "lab_tracker_quickstart",
     "lab_tracker_readiness",
     "lab_tracker_link_node_to_goal",

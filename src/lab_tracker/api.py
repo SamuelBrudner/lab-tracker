@@ -46,6 +46,7 @@ from lab_tracker.services import (
     ClaimService,
     DatasetService,
     DataStoreService,
+    DraftQualityService,
     EntityVersionService,
     EvidenceBundleService,
     ExperimentService,
@@ -148,6 +149,10 @@ class LabTrackerAPI(
             context
         )
         self.publication_readiness: PublicationReadinessService = PublicationReadinessService(
+            context,
+            projects=self.projects,
+        )
+        self.draft_quality: DraftQualityService = DraftQualityService(
             context,
             projects=self.projects,
         )

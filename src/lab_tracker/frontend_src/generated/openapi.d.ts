@@ -65,6 +65,9 @@ export interface paths {
     get: operations["get_batch_settings_projects__project_id__graph_draft_batch_settings_get"];
     patch: operations["update_batch_settings_projects__project_id__graph_draft_batch_settings_patch"];
   };
+  "/projects/{project_id}/draft-quality": {
+    get: operations["draft_quality_projects__project_id__draft_quality_get"];
+  };
   "/projects/{project_id}/member-onboarding": {
     get: operations["get_member_onboarding_projects__project_id__member_onboarding_get"];
   };
@@ -353,6 +356,15 @@ export interface operations {
       200: {
         content: {
           "application/json": components["schemas"]["Envelope_GraphDraftBatchSettings_"];
+        };
+      };
+    };
+  };
+  "draft_quality_projects__project_id__draft_quality_get": {
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["Envelope_DraftQualityLedger_"];
         };
       };
     };
@@ -675,6 +687,36 @@ export interface components {
       "last_used_at"?: (string | null);
       "revoked_at"?: (string | null);
     };
+    "DraftQualityCell": {
+      "accepted_bulk_accepted"?: number;
+      "accepted_human_selected"?: number;
+      "accepted_total"?: number;
+      "edited_before_accept"?: number;
+      "left_proposed_at_commit"?: number;
+      "model": string;
+      "prompt_version": string;
+      "proposed"?: number;
+      "provider": string;
+      "rejected"?: number;
+      "semantic_type"?: (components["schemas"]["GraphDraftSemanticType"] | null);
+    };
+    "DraftQualityGroupStats": {
+      "change_set_count"?: number;
+      "change_sets_with_clarifications"?: number;
+      "clarification_request_count"?: number;
+      "median_seconds_to_first_accept"?: (number | null);
+      "median_seconds_to_review"?: (number | null);
+      "model": string;
+      "prompt_version": string;
+      "provider": string;
+    };
+    "DraftQualityLedger": {
+      "cells"?: Array<components["schemas"]["DraftQualityCell"]>;
+      "change_set_count"?: number;
+      "groups"?: Array<components["schemas"]["DraftQualityGroupStats"]>;
+      "project_id": string;
+      "since"?: (string | null);
+    };
     "EntityOrigin": "user" | "ai_suggested" | "ai_executed" | "user_revised";
     "EntityRef": {
       "entity_id": string;
@@ -719,6 +761,10 @@ export interface components {
     };
     "Envelope_DeviceTokenRead_": {
       "data": components["schemas"]["DeviceTokenRead"];
+      "meta"?: (Record<string, unknown> | null);
+    };
+    "Envelope_DraftQualityLedger_": {
+      "data": components["schemas"]["DraftQualityLedger"];
       "meta"?: (Record<string, unknown> | null);
     };
     "Envelope_GraphChangeSet_": {

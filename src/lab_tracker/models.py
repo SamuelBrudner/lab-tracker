@@ -194,6 +194,7 @@ class UsageEventResourceType(str, Enum):
     ACQUISITION_COLLECTION = "acquisition_collection"
     EVIDENCE_BUNDLE = "evidence_bundle"
     USAGE_EVENT = "usage_event"
+    DRAFT_QUALITY = "draft_quality"
 
 
 class UsageEventOutcome(str, Enum):
@@ -466,6 +467,17 @@ class GraphDraftSemanticType(str, Enum):
     UPDATE_GOAL = "update_goal"
     SUGGEST_FOLLOWUP = "suggest_followup"
     REQUEST_CLARIFICATION = "request_clarification"
+
+
+# Review-audit keys stamped into ``GraphChangeOperation.error_metadata`` by the
+# review coordinator. They are the durable record of how a reviewer handled an
+# AI proposal (edited it, rejected it), so every reader and the commit-time
+# filter share these names rather than string literals.
+EDITED_AT_KEY: Final = "edited_at"
+EDITED_BY_KEY: Final = "edited_by"
+REVIEWED_AT_KEY: Final = "reviewed_at"
+REVIEWED_BY_KEY: Final = "reviewed_by"
+REVIEW_NOTE_KEY: Final = "review_note"
 
 
 class ExternalContextPolicy(str, Enum):
@@ -1529,6 +1541,45 @@ class PublicationReadinessReport(_DomainModel):
     orphaned_entities: list[PublicationReadinessOrphanedEntity] = Field(default_factory=list)
     broken_external_refs: list[PublicationReadinessBrokenExternalRef] = Field(default_factory=list)
     seal_level: Literal["blocked", "ara_l1"] = "blocked"
+
+
+class DraftQualityCell(_DomainModel):
+    """Review outcomes for one provider x model x prompt version x semantic type."""
+
+    provider: str
+    model: str
+    prompt_version: str
+    semantic_type: GraphDraftSemanticType | None = None
+    proposed: int = Field(default=0, ge=0)
+    accepted_total: int = Field(default=0, ge=0)
+    accepted_human_selected: int = Field(default=0, ge=0)
+    accepted_bulk_accepted: int = Field(default=0, ge=0)
+    edited_before_accept: int = Field(default=0, ge=0)
+    rejected: int = Field(default=0, ge=0)
+    left_proposed_at_commit: int = Field(default=0, ge=0)
+
+
+class DraftQualityGroupStats(_DomainModel):
+    """Change-set level review statistics for one provider x model x prompt version."""
+
+    provider: str
+    model: str
+    prompt_version: str
+    change_set_count: int = Field(default=0, ge=0)
+    clarification_request_count: int = Field(default=0, ge=0)
+    change_sets_with_clarifications: int = Field(default=0, ge=0)
+    median_seconds_to_first_accept: float | None = None
+    median_seconds_to_review: float | None = None
+
+
+class DraftQualityLedger(_DomainModel):
+    """Read-only ledger of how AI draft proposals fared in human review."""
+
+    project_id: UUID
+    since: datetime | None = None
+    change_set_count: int = Field(default=0, ge=0)
+    cells: list[DraftQualityCell] = Field(default_factory=list)
+    groups: list[DraftQualityGroupStats] = Field(default_factory=list)
 
 
 class RecordExportEvent(_DomainModel):

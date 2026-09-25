@@ -140,6 +140,7 @@ Read tools:
 - `lab_tracker_list_goals`: List goals/outputs when deciding what research objective to advance.
 - `lab_tracker_get_goal`: Get one goal with node links before advancing or updating it.
 - `lab_tracker_publication_readiness`: Check structural publication readiness for one project (seal_level ara_l1/blocked).
+- `lab_tracker_draft_quality`: Report how AI draft proposals fared in human review for one project.
 - `lab_tracker_list_node_goals`: List goals linked to one project graph node.
 - `lab_tracker_get_dataset_provenance`: Get dataset provenance JSON-LD before reusing evidence.
 - `lab_tracker_get_analysis_provenance`: Get analysis provenance JSON-LD before reusing derived evidence.

@@ -27,6 +27,7 @@ from lab_tracker.db_models import (
     VisualizationModel,
 )
 from lab_tracker.db_types import ensure_uuid
+from lab_tracker.draft_quality import DraftQualityRow
 from lab_tracker.errors import NotFoundError
 from lab_tracker.models import (
     AcquisitionOutput,
@@ -1556,6 +1557,14 @@ class SQLAlchemyLabTrackerRepository:
             offset=offset,
             include_operations=include_operations,
         )
+
+    def query_draft_quality_rows(
+        self,
+        *,
+        project_id: UUID,
+        since: datetime | None,
+    ) -> list[DraftQualityRow]:
+        return self.graph_change_sets.draft_quality_rows(project_id=project_id, since=since)
 
     def claim_graph_change_set_for_commit(
         self,

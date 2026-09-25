@@ -6,6 +6,7 @@ from lab_tracker.services.claim_service import ClaimService
 from lab_tracker.services.collection_service import AcquisitionCollectionService
 from lab_tracker.services.data_store_service import DataStoreService
 from lab_tracker.services.dataset_service import DatasetService
+from lab_tracker.services.draft_quality_service import DraftQualityService
 from lab_tracker.services.entity_version_service import EntityVersionService
 from lab_tracker.services.evidence_bundle_service import EvidenceBundleService
 from lab_tracker.services.experiment_service import ExperimentService
@@ -41,6 +42,7 @@ __all__ = [
     "ClaimService",
     "DataStoreService",
     "DatasetService",
+    "DraftQualityService",
     "EntityVersionService",
     "EvidenceBundleService",
     "ExperimentService",
