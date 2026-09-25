@@ -8,10 +8,12 @@ from typing import Protocol
 from uuid import UUID
 
 from lab_tracker.auth import AuthContext
+from lab_tracker.claim_effective_status import load_claim_interpretations
 from lab_tracker.models import (
     AcquisitionOutput,
     Analysis,
     Claim,
+    ClaimEdge,
     Dataset,
     ExplorationNode,
     Note,
@@ -21,6 +23,7 @@ from lab_tracker.models import (
     Session,
     Visualization,
 )
+from lab_tracker.schemas import ClaimRead
 
 from .types import Page
 
@@ -168,6 +171,17 @@ class CatalogRepository(Protocol):
         offset: int = 0,
         recent_first: bool = False,
     ) -> tuple[list[Claim], int]: ...
+
+    def query_claim_edges(
+        self,
+        *,
+        project_id: UUID | None = None,
+        claim_id: UUID | None = None,
+        target_claim_id: UUID | None = None,
+        relation: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[ClaimEdge], int]: ...
 
     def query_exploration_nodes(
         self,
@@ -408,7 +422,7 @@ class CatalogQueries:
         until: datetime | None,
         limit: int,
         offset: int,
-    ) -> Page[Claim]:
+    ) -> Page[ClaimRead]:
         items, total = self.repository.query_claims(
             project_id=project_id,
             project_ids=self._project_scope(project_id=project_id, actor=actor),
@@ -421,7 +435,11 @@ class CatalogQueries:
             limit=limit,
             offset=offset,
         )
-        return Page(items=items, total=total)
+        interpretations = load_claim_interpretations(self.repository, items)
+        return Page(
+            items=[ClaimRead.from_claim(item, interpretations[item.claim_id]) for item in items],
+            total=total,
+        )
 
     def list_exploration_nodes(
         self,

@@ -393,3 +393,60 @@ def test_claim_provenance_route_includes_related_visualization_of_other_analysis
     analysis_iri = f"http://testserver/analyses/{analysis_id}"
     assert viz_node["wasGeneratedBy"] == {"@id": analysis_iri}
     assert nodes[analysis_iri]["codeVersion"] == "git:follow-up"
+
+
+def test_claim_provenance_route_emits_effective_status_and_pivot(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    headers = admin_auth_headers
+    project_id = client.post(
+        "/projects", json={"name": "Effective status provenance"}, headers=headers
+    ).json()["data"]["project_id"]
+    claim_id = client.post(
+        "/claims",
+        json={"project_id": project_id, "statement": "Pulse increases turning", "confidence": 60},
+        headers=headers,
+    ).json()["data"]["claim_id"]
+    newer_id = client.post(
+        "/claims",
+        json={"project_id": project_id, "statement": "Only in the light", "confidence": 60},
+        headers=headers,
+    ).json()["data"]["claim_id"]
+    edge = client.post(
+        f"/claims/{newer_id}/edges",
+        json={"target_claim_id": claim_id, "relation": "supersedes"},
+        headers=headers,
+    )
+    assert edge.status_code == 201, edge.text
+    pivot = client.post(
+        "/exploration-nodes",
+        json={
+            "project_id": project_id,
+            "node_type": "pivot",
+            "title": "Drop the pulse claim",
+            "target": {"entity_type": "claim", "entity_id": claim_id},
+            "status": "committed",
+            "trigger": "Replication failed.",
+            "rationale": "The effect vanished.",
+            "invalidates_claim_id": claim_id,
+        },
+        headers=headers,
+    )
+    assert pivot.status_code == 201, pivot.text
+    node_id = pivot.json()["data"]["node_id"]
+
+    response = client.get(
+        f"/claims/{claim_id}", headers={**headers, "Accept": "application/ld+json"}
+    )
+
+    assert response.status_code == 200, response.text
+    nodes = _nodes(response.json())
+    claim_iri = f"http://testserver/claims/{claim_id}"
+    assert nodes[claim_iri]["status"] == "proposed"
+    assert nodes[claim_iri]["effectiveStatus"] == "invalidated"
+    assert nodes[f"http://testserver/exploration-nodes/{node_id}"]["invalidates"] == {
+        "@id": claim_iri
+    }
+    relation_iri = f"http://testserver/claim-relations/{edge.json()['data']['edge_id']}"
+    assert nodes[relation_iri]["claimRelationTarget"] == {"@id": claim_iri}

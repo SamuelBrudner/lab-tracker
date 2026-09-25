@@ -925,7 +925,7 @@ export interface components {
     };
     "GraphDraftMode": "graph_context" | "image_only" | "graph_batch";
     "GraphDraftPurpose": "general" | "member_checkpoint_alignment";
-    "GraphDraftSemanticType": "create_entity" | "update_entity" | "create_note" | "link_note_to_question" | "link_note_to_session" | "link_note_to_dataset" | "link_note_to_analysis" | "suggest_new_question" | "suggest_new_dataset" | "suggest_new_goal" | "link_node_to_goal" | "update_goal" | "suggest_followup" | "request_clarification" | "record_decision" | "record_dead_end" | "record_pivot" | "abandon_question" | "merge_questions" | "retire_note";
+    "GraphDraftSemanticType": "create_entity" | "update_entity" | "create_note" | "link_note_to_question" | "link_note_to_session" | "link_note_to_dataset" | "link_note_to_analysis" | "suggest_new_question" | "suggest_new_dataset" | "suggest_new_goal" | "link_node_to_goal" | "update_goal" | "suggest_followup" | "request_clarification" | "record_decision" | "record_dead_end" | "record_pivot" | "abandon_question" | "merge_questions" | "retire_note" | "resolve_prediction";
     "GraphOperationRejectReason": "duplicate_of_existing" | "wrong_target" | "unsupported_by_source" | "already_captured" | "not_relevant" | "not_now" | "other";
     "ListEnvelope_AuthInvitationRead_": {
       "data": Array<components["schemas"]["AuthInvitationRead"]>;

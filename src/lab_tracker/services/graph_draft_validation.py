@@ -18,6 +18,7 @@ from lab_tracker.graph_drafting import (
     GraphDraftingError,
 )
 from lab_tracker.models import (
+    ClaimStatus,
     EntityType,
     ExplorationNodeType,
     GraphChangeOp,
@@ -59,6 +60,8 @@ _REF_VALIDATION_PLACEHOLDER = "00000000-0000-0000-0000-000000000001"
 RETIRE_NOTE_REASONS = frozenset(
     {NoteArchiveReason.SUPERSEDED, NoteArchiveReason.REVIEWED_NOT_RELEVANT}
 )
+# resolve_prediction closes an open prediction: only the two terminal claim statuses.
+_RESOLUTION_STATUSES = frozenset({ClaimStatus.SUPPORTED.value, ClaimStatus.REJECTED.value})
 
 
 class RetireNotePayload(RequestModel):
@@ -139,6 +142,7 @@ _SEMANTIC_ALLOWED_TARGETS = {
     GraphDraftSemanticType.ABANDON_QUESTION: {(GraphChangeOp.UPDATE, EntityType.QUESTION)},
     GraphDraftSemanticType.MERGE_QUESTIONS: {(GraphChangeOp.UPDATE, EntityType.QUESTION)},
     GraphDraftSemanticType.RETIRE_NOTE: {(GraphChangeOp.UPDATE, EntityType.NOTE)},
+    GraphDraftSemanticType.RESOLVE_PREDICTION: {(GraphChangeOp.UPDATE, EntityType.CLAIM)},
 }
 _ENTITY_ID_FIELDS = {
     "project_id": EntityType.PROJECT,
@@ -215,6 +219,7 @@ class GraphPatchValidator:
         self._validate_goal_update_payload(operation, payload)
         _validate_semantic_operation_target(operation)
         _validate_semantic_payload_rules(operation, payload)
+        _validate_resolve_prediction_payload(operation, payload)
 
     def operations_from_graph_patch(
         self,
@@ -682,6 +687,28 @@ def _validate_semantic_payload_rules(
             raise ValidationError(
                 "Semantic operation abandon_question requires a terminal_reason."
             )
+
+
+def _validate_resolve_prediction_payload(
+    operation: GraphChangeOperation,
+    payload: dict[str, Any],
+) -> None:
+    """resolve_prediction must land on supported or rejected; rejected needs a reason.
+
+    Evidence sufficiency for ``supported`` is enforced at accept time by
+    ``ClaimService`` (supported claims require support links), so an
+    under-evidenced resolution fails loud there rather than applying silently.
+    """
+
+    if operation.semantic_type != GraphDraftSemanticType.RESOLVE_PREDICTION:
+        return
+    status = payload.get("status")
+    if status not in _RESOLUTION_STATUSES:
+        raise ValidationError("resolve_prediction must set status to supported or rejected.")
+    if status == ClaimStatus.REJECTED.value and not _payload_value_present(
+        payload.get("terminal_reason")
+    ):
+        raise ValidationError("resolve_prediction to rejected requires terminal_reason.")
 
 
 def _validate_exploration_node_fields(payload: dict[str, Any]) -> None:

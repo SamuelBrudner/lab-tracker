@@ -23,6 +23,7 @@ from pydantic.json_schema import SkipJsonSchema
 from pydantic_core import CoreSchema, core_schema
 
 from lab_tracker.auth import Role
+from lab_tracker.claim_effective_status import ClaimInterpretation
 from lab_tracker.data_store_definition import (
     DATA_STORE_CREDENTIAL_REF_MAX_LENGTH,
     DATA_STORE_ENDPOINT_MAX_LENGTH,
@@ -49,6 +50,7 @@ from lab_tracker.models import (
     AnalysisStatus,
     Claim,
     ClaimConfidence,
+    ClaimEffectiveStatus,
     ClaimInput,
     ClaimRelation,
     ClaimStatus,
@@ -1213,6 +1215,29 @@ class ClaimUpdate(PatchRequestModel):
 class ClaimEdgeCreate(RequestModel):
     target_claim_id: UUID
     relation: ClaimRelation
+
+
+class ClaimRead(Claim):
+    """A claim plus its read-time interpretation; the derived fields are never stored."""
+
+    effective_status: ClaimEffectiveStatus
+    superseded_by_claim_id: UUID | None = None
+    contested_by_claim_ids: list[UUID] = Field(default_factory=list)
+    invalidated_by_node_id: UUID | None = None
+    pre_registered: bool
+
+    @classmethod
+    def from_claim(cls, claim: Claim, interpretation: ClaimInterpretation) -> ClaimRead:
+        return cls.model_validate(
+            {
+                **claim.model_dump(),
+                "effective_status": interpretation.effective_status,
+                "superseded_by_claim_id": interpretation.superseded_by_claim_id,
+                "contested_by_claim_ids": list(interpretation.contested_by_claim_ids),
+                "invalidated_by_node_id": interpretation.invalidated_by_node_id,
+                "pre_registered": interpretation.pre_registered,
+            }
+        )
 
 
 class ExplorationNodeCreate(RequestModel):

@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi.testclient import TestClient
 
+from lab_tracker.claim_effective_status import ClaimInterpretationError
 from lab_tracker.models import (
     Analysis,
     AnalysisStatus,
@@ -54,6 +55,7 @@ from lab_tracker.provenance import (
     AraArtifactRecords,
     build_analysis_provenance_document,
     build_ara_artifact_document,
+    build_claim_provenance_document,
     build_dataset_provenance_document,
     build_record_export_provenance_document,
 )
@@ -1529,3 +1531,152 @@ def test_analysis_provenance_attributes_supported_entities_to_people():
         "supervisionStartedAt": "2026-01-01T00:00:00+00:00",
     }
     assert _node_type_includes(_node_by_id(document, supervisor_iri), "prov:Person")
+
+
+def _effective_status_fixture() -> tuple[Claim, Claim, ClaimEdge, ExplorationNode]:
+    project_id = UUID("11111111-cccc-cccc-cccc-111111111111")
+    old_claim = Claim(
+        claim_id=UUID("22222222-cccc-cccc-cccc-222222222222"),
+        project_id=project_id,
+        statement="The pulse increases turning.",
+        confidence=80.0,
+        status=ClaimStatus.SUPPORTED,
+        supported_by_dataset_ids=[UUID("55555555-cccc-cccc-cccc-555555555555")],
+    )
+    new_claim = Claim(
+        claim_id=UUID("33333333-cccc-cccc-cccc-333333333333"),
+        project_id=project_id,
+        statement="The pulse increases turning only in the light.",
+        confidence=70.0,
+        status=ClaimStatus.PROPOSED,
+    )
+    edge = ClaimEdge(
+        edge_id=UUID("44444444-cccc-cccc-cccc-444444444444"),
+        claim_id=new_claim.claim_id,
+        target_claim_id=old_claim.claim_id,
+        relation=ClaimRelation.SUPERSEDES,
+    )
+    pivot = ExplorationNode(
+        node_id=UUID("66666666-cccc-cccc-cccc-666666666666"),
+        project_id=project_id,
+        node_type=ExplorationNodeType.PIVOT,
+        title="Abandon the pulse claim",
+        target=EntityRef(entity_type=EntityType.CLAIM, entity_id=old_claim.claim_id),
+        status=ExplorationNodeStatus.COMMITTED,
+        trigger="The replication failed.",
+        rationale="The effect vanished in a larger cohort.",
+        invalidates_claim_id=old_claim.claim_id,
+    )
+    return old_claim, new_claim, edge, pivot
+
+
+def test_claim_document_emits_effective_status_and_invalidating_pivot():
+    old_claim, new_claim, edge, pivot = _effective_status_fixture()
+    claim_iri = f"http://example.test/claims/{old_claim.claim_id}"
+
+    superseded = build_claim_provenance_document(
+        "http://example.test",
+        old_claim,
+        analyses=[],
+        datasets=[],
+        questions=[],
+        visualizations=[],
+        claim_edges=[edge],
+        related_claims=[new_claim],
+    )
+    node = _node_by_id(superseded, claim_iri)
+    assert node["status"] == "supported", "the stored status is still emitted"
+    assert node["effectiveStatus"] == "superseded"
+    assert {"lab:claimStatus/supported", "lab:claimEffectiveStatus/superseded"} <= (
+        _classification_ids(node)
+    )
+    relation_iri = f"http://example.test/claim-relations/{edge.edge_id}"
+    assert _node_by_id(superseded, relation_iri)["claimRelationTarget"] == {"@id": claim_iri}
+    assert "claimRelation" not in node, "incoming edges stay on the relation node"
+
+    invalidated = build_claim_provenance_document(
+        "http://example.test",
+        old_claim,
+        analyses=[],
+        datasets=[],
+        questions=[],
+        visualizations=[],
+        claim_edges=[edge],
+        related_claims=[new_claim],
+        exploration_nodes=[pivot],
+    )
+    node = _node_by_id(invalidated, claim_iri)
+    assert node["effectiveStatus"] == "invalidated"
+    assert "lab:claimEffectiveStatus/invalidated" in _classification_ids(node)
+    pivot_node = _node_by_id(invalidated, f"http://example.test/exploration-nodes/{pivot.node_id}")
+    assert pivot_node["invalidates"] == {"@id": claim_iri}
+    assert "wasInvalidatedBy" not in node
+
+
+def test_record_export_claim_nodes_carry_effective_status():
+    old_claim, new_claim, edge, pivot = _effective_status_fixture()
+    analysis = Analysis(
+        analysis_id=UUID("77777777-cccc-cccc-cccc-777777777777"),
+        project_id=old_claim.project_id,
+        dataset_ids=[],
+        method_hash="method",
+        code_version="v1",
+        status=AnalysisStatus.COMMITTED,
+    )
+    covered = old_claim.model_copy(update={"supported_by_analysis_ids": [analysis.analysis_id]})
+
+    document = build_record_export_provenance_document(
+        "http://example.test",
+        RecordExportRecords(
+            analyses=[analysis],
+            claims=[covered, new_claim],
+            claim_edges=[edge],
+            exploration_nodes=[pivot],
+        ),
+    )
+
+    old_node = _node_by_id(document, f"http://example.test/claims/{old_claim.claim_id}")
+    new_node = _node_by_id(document, f"http://example.test/claims/{new_claim.claim_id}")
+    # The old claim is emitted through the analysis sidecar and still agrees with the export.
+    assert old_node["effectiveStatus"] == "invalidated"
+    assert "lab:claimEffectiveStatus/invalidated" in _classification_ids(old_node)
+    assert new_node["effectiveStatus"] == "proposed"
+    assert new_node["claimRelation"] == [
+        {"@id": f"http://example.test/claim-relations/{edge.edge_id}"}
+    ]
+
+    analysis_only = build_analysis_provenance_document(
+        "http://example.test",
+        analysis,
+        datasets=[],
+        claims=[covered],
+        visualizations=[],
+        claim_edges=[edge],
+    )
+    assert "effectiveStatus" not in _node_by_id(
+        analysis_only, f"http://example.test/claims/{old_claim.claim_id}"
+    )
+
+    # A scoped export interprets within its own records: an edge whose source is
+    # not exported cannot change a status, and the document stays self-consistent.
+    scoped = build_record_export_provenance_document(
+        "http://example.test",
+        RecordExportRecords(claims=[old_claim], claim_edges=[edge]),
+    )
+    assert _node_by_id(scoped, f"http://example.test/claims/{old_claim.claim_id}")[
+        "effectiveStatus"
+    ] == "supported"
+
+
+def test_claim_document_requires_edge_source_claims():
+    old_claim, _new_claim, edge, _pivot = _effective_status_fixture()
+    with pytest.raises(ClaimInterpretationError, match=str(edge.claim_id)):
+        build_claim_provenance_document(
+            "http://example.test",
+            old_claim,
+            analyses=[],
+            datasets=[],
+            questions=[],
+            visualizations=[],
+            claim_edges=[edge],
+        )

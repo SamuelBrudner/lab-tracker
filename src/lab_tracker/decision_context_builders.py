@@ -6,6 +6,13 @@ from lab_tracker.decision_context_constants import TASK_KIND_VALUES
 from lab_tracker.decision_context_selection import envelope_items, meta_total
 from lab_tracker.decision_context_types import JsonObject
 
+# Read-time effective statuses that mean a claim no longer stands as asserted.
+DERIVED_NEGATIVE_STATUSES = frozenset({"contested", "superseded", "invalidated"})
+DERIVED_STATUS_CAVEAT = (
+    "Some returned claims are contested, superseded, or invalidated by later claims "
+    "or pivots — check effective_status before citing them."
+)
+
 
 def validate_context_limit(limit: int) -> int:
     try:
@@ -143,6 +150,8 @@ def task_guidance(
         missing_evidence.append("No claims were returned in this context.")
     if any(item.get("status") == "rejected" for item in claims):
         caveats.append("Some returned claims are REJECTED — do not rely on them as evidence.")
+    if any(item.get("effective_status") in DERIVED_NEGATIVE_STATUSES for item in claims):
+        caveats.append(DERIVED_STATUS_CAVEAT)
     if any(item.get("status") in {"proposed", "testing"} for item in claims):
         caveats.append(
             "Some returned claims are still proposed or under testing, not supported."

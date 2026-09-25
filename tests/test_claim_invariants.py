@@ -197,3 +197,122 @@ def test_claim_mapper_rejects_corrupt_confidence_but_reads_legacy_missing_suppor
     row.confidence = 101.0
     with pytest.raises(PydanticValidationError):
         claim_from_model(row)
+
+
+def test_claim_read_carries_interpretation_and_keeps_domain_fields() -> None:
+    from uuid import UUID
+
+    from lab_tracker.claim_effective_status import ClaimInterpretation
+    from lab_tracker.models import ClaimEffectiveStatus
+    from lab_tracker.schemas import ClaimRead
+
+    claim = Claim(
+        **_claim_kwargs(),
+        confidence=70.0,
+        status=ClaimStatus.SUPPORTED,
+        falsification_criteria="A null replication.",
+        supported_by_dataset_ids=[uuid4()],
+        answers_question_ids=[uuid4()],
+    )
+    superseder, node_id, contester = uuid4(), uuid4(), uuid4()
+    interpretation = ClaimInterpretation(
+        effective_status=ClaimEffectiveStatus.SUPERSEDED,
+        superseded_by_claim_id=superseder,
+        contested_by_claim_ids=(contester,),
+        invalidated_by_node_id=node_id,
+        pre_registered=True,
+    )
+
+    read = ClaimRead.from_claim(claim, interpretation)
+
+    for field_name in Claim.model_fields:
+        assert getattr(read, field_name) == getattr(claim, field_name), field_name
+    assert read.effective_status == ClaimEffectiveStatus.SUPERSEDED
+    assert read.superseded_by_claim_id == superseder
+    assert read.contested_by_claim_ids == [contester]
+    assert read.invalidated_by_node_id == node_id
+    assert read.pre_registered is True
+    dumped = read.model_dump(mode="json")
+    assert dumped["status"] == "supported"
+    assert dumped["effective_status"] == "superseded"
+    assert dumped["superseded_by_claim_id"] == str(superseder)
+    assert dumped["contested_by_claim_ids"] == [str(contester)]
+    assert UUID(dumped["invalidated_by_node_id"]) == node_id
+    assert claim.status == ClaimStatus.SUPPORTED, "the domain claim is untouched"
+
+
+def test_testing_claim_attaches_evidence_only_while_resolving_to_supported() -> None:
+    from lab_tracker.models import (
+        DatasetCommitManifestInput,
+        DatasetFile,
+        DatasetStatus,
+        QuestionStatus,
+        QuestionType,
+    )
+
+    api = repository_backed_api()
+    actor = _actor()
+    project = api.create_project("Testing predictions", actor=actor)
+    question = api.create_question(
+        project_id=project.project_id,
+        text="Does the perturbation change turning?",
+        question_type=QuestionType.HYPOTHESIS_DRIVEN,
+        status=QuestionStatus.ACTIVE,
+        actor=actor,
+    )
+    dataset = api.create_dataset(
+        project_id=project.project_id,
+        primary_question_id=question.question_id,
+        commit_manifest=DatasetCommitManifestInput(
+            files=[DatasetFile(path="data.csv", checksum="abc123")]
+        ),
+        status=DatasetStatus.COMMITTED,
+        actor=actor,
+    )
+
+    def testing_claim() -> Claim:
+        claim = api.create_claim(
+            project.project_id,
+            "Turning increases after the pulse.",
+            55.0,
+            answers_question_ids=[question.question_id],
+            actor=actor,
+        )
+        return api.update_claim(claim.claim_id, status=ClaimStatus.TESTING, actor=actor)
+
+    resolved = api.update_claim(
+        testing_claim().claim_id,
+        status=ClaimStatus.SUPPORTED,
+        supported_by_dataset_ids=[dataset.dataset_id],
+        actor=actor,
+    )
+    assert resolved.status == ClaimStatus.SUPPORTED
+    assert resolved.supported_by_dataset_ids == [dataset.dataset_id]
+    [read] = api.interpret_claims([resolved])
+    assert read.effective_status.value == "supported"
+    assert read.pre_registered is False, "the claim was written after its evidence"
+
+    links_only = testing_claim()
+    with pytest.raises(ValidationError, match="Only proposed claims can be edited"):
+        api.update_claim(
+            links_only.claim_id,
+            supported_by_dataset_ids=[dataset.dataset_id],
+            actor=actor,
+        )
+    assert api.get_claim(links_only.claim_id).supported_by_dataset_ids == []
+
+    rejecting = testing_claim()
+    with pytest.raises(ValidationError, match="Only proposed claims can be edited"):
+        api.update_claim(
+            rejecting.claim_id,
+            status=ClaimStatus.REJECTED,
+            terminal_reason="No effect.",
+            supported_by_dataset_ids=[dataset.dataset_id],
+            actor=actor,
+        )
+    assert api.get_claim(rejecting.claim_id).status == ClaimStatus.TESTING
+
+    unbacked = testing_claim()
+    with pytest.raises(ValidationError, match="Supported claims require"):
+        api.update_claim(unbacked.claim_id, status=ClaimStatus.SUPPORTED, actor=actor)
+    assert api.get_claim(unbacked.claim_id).status == ClaimStatus.TESTING

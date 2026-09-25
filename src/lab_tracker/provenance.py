@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 from urllib.parse import quote
 from uuid import UUID
 
+from lab_tracker.claim_effective_status import ClaimInterpretation, interpret_claims
 from lab_tracker.db_types import ensure_uuid
 from lab_tracker.models import (
     Analysis,
@@ -658,10 +660,33 @@ def build_claim_provenance_document(
     questions: list[Question],
     visualizations: list[Visualization],
     claim_edges: list[ClaimEdge] | None = None,
+    related_claims: list[Claim] | None = None,
+    exploration_nodes: list[ExplorationNode] | None = None,
     supervision_edges: list[SupervisionEdge] | None = None,
 ) -> dict[str, object]:
+    """Claim sidecar with the claim's read-time interpretation.
+
+    ``related_claims`` must hold the other endpoint of every status-affecting
+    edge in ``claim_edges`` (their status decides whether an edge counts);
+    ``interpret_claims`` fails loud otherwise. ``exploration_nodes`` are
+    emitted as-is so an invalidating pivot's ``lab:invalidates`` points at the
+    claim, and only committed pivots count toward ``effectiveStatus``.
+    """
+
     supervision_edges = supervision_edges or []
     claim_edges = claim_edges or []
+    exploration_nodes = exploration_nodes or []
+    interpretation = interpret_claims(
+        [claim],
+        claims_by_id={
+            **{related.claim_id: related for related in related_claims or []},
+            claim.claim_id: claim,
+        },
+        edges=claim_edges,
+        exploration_nodes=exploration_nodes,
+        datasets=datasets,
+        analyses=analyses,
+    )[claim.claim_id]
     people: dict[str, dict[str, object]] = {}
     merged: dict[str, dict[str, Any]] = {}
     datasets_by_id = {dataset.dataset_id: dataset for dataset in datasets}
@@ -750,6 +775,7 @@ def build_claim_provenance_document(
         claim,
         attributed_user_ids=attributed_user_ids,
         claim_edges=claim_edges,
+        interpretation=interpretation,
     )
     merged[str(claim_node["@id"])] = claim_node
     _merge_graph_nodes(merged, _origin_provenance_nodes(base_url, claim))
@@ -765,6 +791,15 @@ def build_claim_provenance_document(
             if edge.claim_id == claim.claim_id or edge.target_claim_id == claim.claim_id
         ],
     )
+    for exploration_node in exploration_nodes:
+        node = _exploration_node_node(
+            base_url,
+            exploration_node,
+            people=people,
+            supervision_edges=supervision_edges,
+        )
+        merged.setdefault(str(node["@id"]), node)
+        _merge_graph_nodes(merged, _origin_provenance_nodes(base_url, exploration_node))
     _merge_person_nodes(merged, people)
 
     return {"@context": _context(base_url), "@graph": list(merged.values())}
@@ -780,6 +815,7 @@ def _claim_node(
     *,
     attributed_user_ids: list[str],
     claim_edges: list[ClaimEdge] | None = None,
+    interpretation: ClaimInterpretation | None = None,
 ) -> dict[str, object]:
     node: dict[str, object] = {
         "@id": _resource_iri(base_url, "claims", claim.claim_id),
@@ -789,6 +825,11 @@ def _claim_node(
         "status": claim.status.value,
     }
     _classify(node, ("claimStatus", claim.status.value))
+    if interpretation is not None:
+        # Derived, never stored: the pointers behind it are the emitted
+        # lab:ClaimRelation nodes and lab:invalidates on the pivot node.
+        node["effectiveStatus"] = interpretation.effective_status.value
+        _classify(node, ("claimEffectiveStatus", interpretation.effective_status.value))
     if claim.terminal_reason:
         node["terminalReason"] = claim.terminal_reason
     if claim.falsification_criteria:
@@ -840,6 +881,37 @@ def _claim_relation_node(base_url: str, edge: ClaimEdge) -> dict[str, object]:
     }
     _classify(node, ("claimRelation", edge.relation.value))
     return node
+
+
+def _interpretations_within_records(
+    *,
+    claims: list[Claim],
+    claim_edges: list[ClaimEdge],
+    exploration_nodes: list[ExplorationNode],
+    datasets: list[Dataset],
+    analyses: list[Analysis],
+) -> dict[UUID, ClaimInterpretation]:
+    """Interpret claims from the exported record set alone.
+
+    A scoped export may carry an edge whose other endpoint lies outside the
+    scope; only edges with both endpoints exported count, so every derived
+    status is verifiable from the ``lab:ClaimRelation`` and pivot nodes in the
+    same document.
+    """
+
+    claims_by_id = {claim.claim_id: claim for claim in claims}
+    return interpret_claims(
+        claims,
+        claims_by_id=claims_by_id,
+        edges=[
+            edge
+            for edge in claim_edges
+            if edge.claim_id in claims_by_id and edge.target_claim_id in claims_by_id
+        ],
+        exploration_nodes=exploration_nodes,
+        datasets=datasets,
+        analyses=analyses,
+    )
 
 
 def _exploration_node_iri(base_url: str, node_id: UUID) -> str:
@@ -981,10 +1053,20 @@ def build_analysis_provenance_document(
     visualizations: list[Visualization],
     claim_edges: list[ClaimEdge] | None = None,
     supervision_edges: list[SupervisionEdge] | None = None,
+    claim_interpretations: Mapping[UUID, ClaimInterpretation] | None = None,
 ) -> dict[str, object]:
+    """Analysis sidecar.
+
+    On its own this document carries no pivots, so its claim nodes emit no
+    ``effectiveStatus``; a record export that already derived the
+    interpretations for its whole record set passes them in so the claim nodes
+    it emits through this builder agree with the rest of the export.
+    """
+
     analysis_iri = _resource_iri(base_url, "analyses", analysis.analysis_id)
     supervision_edges = supervision_edges or []
     claim_edges = claim_edges or []
+    claim_interpretations = claim_interpretations or {}
     people: dict[str, dict[str, object]] = {}
     analysis_actor_user_id = _creator_user_id(
         analysis.executed_by_user_id,
@@ -1087,6 +1169,7 @@ def build_analysis_provenance_document(
                 claim,
                 attributed_user_ids=attributed_user_ids,
                 claim_edges=claim_edges,
+                interpretation=claim_interpretations.get(claim.claim_id),
             )
         )
         graph.extend(_origin_provenance_nodes(base_url, claim))
@@ -1517,6 +1600,7 @@ def _ara_logic_graph(
 ) -> list[dict[str, object]]:
     people: dict[str, dict[str, object]] = {}
     merged: dict[str, dict[str, Any]] = {}
+    interpretations = _ara_claim_interpretations(records)
     for claim in records.claims:
         creator_user_id = _creator_user_id(claim.created_by_user_id, claim.created_by)
         attributed_user_ids = _unique_user_ids([creator_user_id])
@@ -1533,6 +1617,7 @@ def _ara_logic_graph(
             claim,
             attributed_user_ids=attributed_user_ids,
             claim_edges=records.claim_edges,
+            interpretation=interpretations[claim.claim_id],
         )
         merged[str(node["@id"])] = node
         _merge_graph_nodes(merged, _origin_provenance_nodes(base_url, claim))
@@ -1562,6 +1647,16 @@ def _ara_logic_graph(
         merged[str(link_node["@id"])] = link_node
     _merge_person_nodes(merged, people)
     return list(merged.values())
+
+
+def _ara_claim_interpretations(records: AraArtifactRecords) -> dict[UUID, ClaimInterpretation]:
+    return _interpretations_within_records(
+        claims=records.claims,
+        claim_edges=records.claim_edges,
+        exploration_nodes=records.exploration_nodes,
+        datasets=records.datasets,
+        analyses=records.analyses,
+    )
 
 
 def _ara_src_graph(
@@ -1628,12 +1723,14 @@ def _ara_trace_graph(
         )
         merged[str(node["@id"])] = node
         _merge_graph_nodes(merged, _origin_provenance_nodes(base_url, analysis))
+    interpretations = _ara_claim_interpretations(records)
     for claim in records.claims:
         node = _claim_node(
             base_url,
             claim,
             attributed_user_ids=[],
             claim_edges=records.claim_edges,
+            interpretation=interpretations[claim.claim_id],
         )
         merged[str(node["@id"])] = node
         _merge_graph_nodes(merged, _origin_provenance_nodes(base_url, claim))
@@ -1935,6 +2032,13 @@ def build_record_export_provenance_document(
     people: dict[str, dict[str, object]] = {}
     merged: dict[str, dict[str, Any]] = {}
     datasets_by_id = {dataset.dataset_id: dataset for dataset in records.datasets}
+    interpretations = _interpretations_within_records(
+        claims=records.claims,
+        claim_edges=records.claim_edges,
+        exploration_nodes=records.exploration_nodes,
+        datasets=records.datasets,
+        analyses=records.analyses,
+    )
 
     for question in records.questions:
         node = _question_node(
@@ -1999,6 +2103,7 @@ def build_record_export_provenance_document(
             visualizations=[],
             claim_edges=analysis_claim_edges,
             supervision_edges=supervision_edges,
+            claim_interpretations=interpretations,
         )
         graph = document.get("@graph", [])
         if isinstance(graph, list):
@@ -2075,6 +2180,7 @@ def build_record_export_provenance_document(
             claim,
             attributed_user_ids=attributed_user_ids,
             claim_edges=records.claim_edges,
+            interpretation=interpretations[claim.claim_id],
         )
         merged.setdefault(str(node["@id"]), node)
         _merge_graph_nodes(merged, _origin_provenance_nodes(base_url, claim))

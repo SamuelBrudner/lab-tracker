@@ -11,6 +11,11 @@ from typing import TYPE_CHECKING, Any, Protocol
 from uuid import UUID
 
 from lab_tracker.auth import AuthContext
+from lab_tracker.claim_effective_status import (
+    OPEN_PREDICTION_STATUSES,
+    ClaimInterpretation,
+    load_claim_interpretations,
+)
 from lab_tracker.errors import NotFoundError, ValidationError
 from lab_tracker.models import (
     REVIEW_NOTE_KEY,
@@ -68,6 +73,9 @@ EntityResult = (
     | ExplorationNode
 )
 _RECENT_CONTEXT_LIMIT = 10
+# Open predictions (proposed/testing claims answering a question) shown to the
+# drafter so it can propose resolve_prediction when their evidence lands.
+_OPEN_PREDICTION_LIMIT = 20
 QUESTION_CONTEXT_LIMIT = 50
 # Slots reserved for active questions (most recently updated first) before
 # staged questions fill whatever remains of QUESTION_CONTEXT_LIMIT.
@@ -259,6 +267,10 @@ class GraphContextBuilder:
             recent_datasets = self._recent_datasets(project_id)
             recent_analyses = self._recent_analyses(project_id)
             recent_claims = self._recent_claims(project_id)
+            open_predictions = self._open_predictions(project_id)
+            interpretations = load_claim_interpretations(
+                self.claims.repository, [*recent_claims, *open_predictions]
+            )
             recent_visualizations = self._recent_visualizations(project_id)
             recent_goals = self._recent_goals(project_id)
             exploration_nodes = self._recent_exploration_nodes(project_id)
@@ -278,7 +290,8 @@ class GraphContextBuilder:
                         _compact_recent_note(item, actor) for item in recent_notes
                     ],
                     "recent_analyses": _recent_items(_compact_analysis, recent_analyses),
-                    "recent_claims": _recent_items(_compact_claim, recent_claims),
+                    "recent_claims": _recent_claim_items(recent_claims, interpretations),
+                    "open_predictions": _open_prediction_items(open_predictions, interpretations),
                     "recent_visualizations": _recent_items(
                         _compact_visualization, recent_visualizations
                     ),
@@ -605,6 +618,10 @@ class GraphContextBuilder:
         recent_datasets = self._recent_datasets(note.project_id)
         recent_analyses = self._recent_analyses(note.project_id)
         recent_claims = self._recent_claims(note.project_id)
+        open_predictions = self._open_predictions(note.project_id)
+        interpretations = load_claim_interpretations(
+            self.claims.repository, [*recent_claims, *open_predictions]
+        )
         recent_visualizations = self._recent_visualizations(note.project_id)
         recent_goals = self._recent_goals(note.project_id)
         exploration_nodes = self._recent_exploration_nodes(note.project_id)
@@ -628,7 +645,8 @@ class GraphContextBuilder:
             "recent_datasets": _recent_items(_compact_dataset, recent_datasets),
             "recent_notes": [_compact_recent_note(item, actor) for item in recent_notes],
             "recent_analyses": _recent_items(_compact_analysis, recent_analyses),
-            "recent_claims": _recent_items(_compact_claim, recent_claims),
+            "recent_claims": _recent_claim_items(recent_claims, interpretations),
+            "open_predictions": _open_prediction_items(open_predictions, interpretations),
             "recent_visualizations": _recent_items(
                 _compact_visualization, recent_visualizations
             ),
@@ -854,6 +872,21 @@ class GraphContextBuilder:
         )
         return recent_claims
 
+    def _open_predictions(self, project_id: UUID) -> list[Claim]:
+        """Proposed/testing claims that answer a question, oldest first, capped."""
+
+        candidates: list[Claim] = []
+        for status in sorted(OPEN_PREDICTION_STATUSES, key=lambda item: item.value):
+            claims, _ = self.claims.repository.query_claims(
+                project_id=project_id,
+                status=status.value,
+                limit=None,
+                offset=0,
+            )
+            candidates.extend(claim for claim in claims if claim.answers_question_ids)
+        candidates.sort(key=lambda claim: (claim.created_at, str(claim.claim_id)))
+        return candidates[:_OPEN_PREDICTION_LIMIT]
+
     def _recent_visualizations(self, project_id: UUID) -> list[Visualization]:
         recent_visualizations, _ = self.visualizations.repository.query_visualizations(
             project_id=project_id,
@@ -899,6 +932,7 @@ def _graph_context_summary(context_packet: dict[str, Any]) -> dict[str, Any]:
             "recent_notes": len(context_packet.get("recent_notes") or []),
             "recent_analyses": len(context_packet.get("recent_analyses") or []),
             "recent_claims": len(context_packet.get("recent_claims") or []),
+            "open_predictions": len(context_packet.get("open_predictions") or []),
             "recent_visualizations": len(context_packet.get("recent_visualizations") or []),
             "recent_goals": len(context_packet.get("recent_goals") or []),
             "exploration_nodes": len(context_packet.get("exploration_nodes") or []),
@@ -985,6 +1019,7 @@ def _graph_batch_context_summary(packet: dict[str, Any]) -> dict[str, Any]:
             "recent_datasets": sum(len(p.get("recent_datasets") or []) for p in projects),
             "recent_analyses": sum(len(p.get("recent_analyses") or []) for p in projects),
             "recent_claims": sum(len(p.get("recent_claims") or []) for p in projects),
+            "open_predictions": sum(len(p.get("open_predictions") or []) for p in projects),
             "recent_visualizations": sum(
                 len(p.get("recent_visualizations") or []) for p in projects
             ),
@@ -1529,11 +1564,52 @@ def _compact_analysis(analysis: Analysis) -> dict[str, Any]:
     return payload
 
 
-def _compact_claim(claim: Claim) -> dict[str, Any]:
+def _recent_claim_items(
+    claims: Iterable[Claim],
+    interpretations: dict[UUID, ClaimInterpretation],
+) -> list[dict[str, Any]]:
+    return [
+        _with_selection_reason(
+            _compact_claim(claim, interpretations[claim.claim_id]), SELECTION_REASON_RECENT
+        )
+        for claim in claims
+    ]
+
+
+def _open_prediction_items(
+    claims: Iterable[Claim],
+    interpretations: dict[UUID, ClaimInterpretation],
+) -> list[dict[str, Any]]:
+    return [_compact_open_prediction(claim, interpretations[claim.claim_id]) for claim in claims]
+
+
+def _compact_open_prediction(claim: Claim, interpretation: ClaimInterpretation) -> dict[str, Any]:
+    """A claim compacted for open_predictions: the Popperian fields are always present."""
+
+    payload = _compact_claim(claim, interpretation)
+    for field_name in ("falsification_criteria", "verification_plan", "refuting_outcome"):
+        payload[field_name] = _capped_text(getattr(claim, field_name))
+    return payload
+
+
+def _compact_claim(claim: Claim, interpretation: ClaimInterpretation) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "id": str(claim.claim_id),
         "label": claim.statement[:180],
         "status": claim.status.value,
+        "effective_status": interpretation.effective_status.value,
+        "superseded_by_claim_id": (
+            str(interpretation.superseded_by_claim_id)
+            if interpretation.superseded_by_claim_id is not None
+            else None
+        ),
+        "contested_by_claim_ids": [str(item) for item in interpretation.contested_by_claim_ids],
+        "invalidated_by_node_id": (
+            str(interpretation.invalidated_by_node_id)
+            if interpretation.invalidated_by_node_id is not None
+            else None
+        ),
+        "pre_registered": interpretation.pre_registered,
         "confidence": claim.confidence,
         "supported_by_dataset_ids": [str(item) for item in claim.supported_by_dataset_ids],
         "supported_by_analysis_ids": [str(item) for item in claim.supported_by_analysis_ids],

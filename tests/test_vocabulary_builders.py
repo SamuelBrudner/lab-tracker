@@ -320,6 +320,8 @@ def _builder_documents() -> dict[str, dict[str, object]]:
             questions=[question],
             visualizations=[visualization],
             claim_edges=[claim_edge],
+            related_claims=[target_claim],
+            exploration_nodes=[exploration],
         ),
         "record_export": build_record_export_provenance_document(
             _BASE,

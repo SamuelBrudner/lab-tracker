@@ -53,11 +53,12 @@ from lab_tracker.local_store_locator import (
 from lab_tracker.models import (
     Analysis,
     Claim,
-    ClaimEdge,
     Dataset,
     DataStore,
     EntityType,
     ExplorationNode,
+    ExplorationNodeStatus,
+    ExplorationNodeType,
     ExternalArtifactReference,
     Goal,
     Project,
@@ -234,14 +235,6 @@ class ContextRepository(DecisionContextRepository, Protocol):
         limit: int | None = None,
         offset: int = 0,
     ) -> tuple[list[SupervisionEdge], int]: ...
-
-    def query_claim_edges(
-        self,
-        *,
-        project_id: UUID,
-        limit: int | None,
-        offset: int,
-    ) -> tuple[list[ClaimEdge], int]: ...
 
     def query_goals(
         self,
@@ -510,6 +503,26 @@ class ContextQueries:
             for edge in claim_edges
             if edge.claim_id == claim_id or edge.target_claim_id == claim_id
         ]
+        # The interpretation needs every edge endpoint's status (a rejected source
+        # does not contest), so the other end of each edge is loaded explicitly.
+        related_claim_ids = sorted(
+            {
+                other_id
+                for edge in claim_edges
+                for other_id in (edge.claim_id, edge.target_claim_id)
+                if other_id != claim_id
+            },
+            key=str,
+        )
+        related_claims = [self.api.get_claim(related_id) for related_id in related_claim_ids]
+        pivots, _ = self.repository.query_exploration_nodes(
+            project_id=claim.project_id,
+            node_type=ExplorationNodeType.PIVOT.value,
+            status=ExplorationNodeStatus.COMMITTED.value,
+            limit=None,
+            offset=0,
+        )
+        invalidating_pivots = [node for node in pivots if node.invalidates_claim_id == claim_id]
         return build_with_people_supervision(
             self.repository,
             lambda supervision_edges: build_claim_provenance_document(
@@ -520,6 +533,8 @@ class ContextQueries:
                 questions=questions,
                 visualizations=visualizations,
                 claim_edges=claim_edges,
+                related_claims=related_claims,
+                exploration_nodes=invalidating_pivots,
                 supervision_edges=supervision_edges,
             ),
         )

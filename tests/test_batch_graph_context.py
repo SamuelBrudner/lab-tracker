@@ -15,6 +15,7 @@ from lab_tracker.auth import AuthContext, Role
 from lab_tracker.db_models import ClaimModel, ExplorationNodeModel, NoteModel, QuestionModel
 from lab_tracker.models import Note, Session, SessionType
 from lab_tracker.services.graph_draft_context import (
+    _OPEN_PREDICTION_LIMIT,
     _RECENT_CONTEXT_LIMIT,
     ACTIVE_QUESTION_FLOOR,
     CONTEXT_FIELD_CHAR_LIMIT,
@@ -1062,6 +1063,57 @@ def test_batch_context_restores_hypothesis_and_claim_verification_fields(
     assert compact_claim["verification_plan"] == "V" * CONTEXT_FIELD_CHAR_LIMIT
     assert compact_claim["refuting_outcome"] == "R" * CONTEXT_FIELD_CHAR_LIMIT
     assert compact_claim["answers_question_ids"] == [with_hypothesis["question_id"]]
+
+
+def test_batch_context_lists_open_predictions_per_project(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    project_id = _create_project(client, admin_auth_headers, "Open Predictions")
+    question = _create_question(
+        client, admin_auth_headers, project_id=project_id,
+        text="Does kynurenine change turning?", status="active",
+    )
+    predictions = [
+        _create_claim(
+            client, admin_auth_headers, project_id=project_id,
+            statement=f"Prediction {index}", answers_question_ids=[question["question_id"]],
+        )
+        for index in range(_OPEN_PREDICTION_LIMIT + 1)
+    ]
+    baseline = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for index, claim in enumerate(predictions):
+        _set_row_timestamps(
+            client, ClaimModel, str(claim["claim_id"]), baseline + timedelta(days=index)
+        )
+    _create_claim(
+        client, admin_auth_headers, project_id=project_id, statement="No question attached"
+    )
+    supported = _create_claim(
+        client, admin_auth_headers, project_id=project_id, statement="Already supported",
+        answers_question_ids=[question["question_id"]],
+    )
+    patched = client.patch(
+        f"/claims/{supported['claim_id']}",
+        json={"status": "rejected", "terminal_reason": "Refuted."},
+        headers=admin_auth_headers,
+    )
+    assert patched.status_code == 200, patched.text
+    note_id = _create_text_note(
+        client, admin_auth_headers, project_id=project_id, raw_content="batch capture"
+    )
+
+    packet = _batch_packet(client, [note_id])
+
+    block = packet["projects"][0]
+    listed = [item["id"] for item in block["open_predictions"]]
+    assert listed == [claim["claim_id"] for claim in predictions[:_OPEN_PREDICTION_LIMIT]]
+    assert all(item["status"] == "proposed" for item in block["open_predictions"])
+    assert all(item["effective_status"] == "proposed" for item in block["open_predictions"])
+    assert all("falsification_criteria" in item for item in block["open_predictions"])
+    assert all("selection_reason" not in item for item in block["open_predictions"])
+    assert packet["context_summary"]["counts"]["open_predictions"] == _OPEN_PREDICTION_LIMIT
+    assert all("effective_status" in item for item in block["recent_claims"])
 
 
 def test_batch_context_includes_recent_exploration_nodes(

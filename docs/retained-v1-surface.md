@@ -96,7 +96,13 @@ research record:
   nodes, `abandon_question` closes a question with a required terminal reason,
   `merge_questions` retires one question into a replacement through the
   audited question-refactor path, and `retire_note` archives a note with a
-  named reason (`superseded` or `reviewed_not_relevant`). Batch packets carry
+  named reason (`superseded` or `reviewed_not_relevant`). Note, batch, and
+  analysis packets also carry an `open_predictions` section (proposed or
+  testing claims that answer a question, with their derived
+  `effective_status` and `pre_registered` flags), and the drafter may propose
+  `resolve_prediction`: a human-gated claim update to `supported` (naming the
+  landed evidence) or `rejected` (with a `terminal_reason`) once evidence has
+  landed under that question. Batch packets carry
   reviewer-scoped, capped review memory (that reviewer's pending proposals and
   recent rejections) and the re-draft of a rejected note draft is seeded with
   the rejected operations and their review notes; no validator rewrites,
@@ -174,7 +180,22 @@ research record:
   path for AI proposals are deliberately asymmetric; see
   [review-and-commit-model.md](review-and-commit-model.md).
 - Analysis, claim, and visualization records as explicit user-driven flows,
-  including managed file storage for visualization assets.
+  including managed file storage for visualization assets. Claim reads carry
+  derived, never-stored fields — `effective_status`, `superseded_by_claim_id`,
+  `contested_by_claim_ids`, `invalidated_by_node_id`, and `pre_registered` —
+  computed at read time from claim edges (`supersedes` marks the target
+  superseded; `refutes` / `contradicts` mark it contested; edges from a
+  rejected source do not count) and committed `pivot` exploration nodes;
+  `pre_registered` is true only when the claim predates the earliest
+  committed dataset (its `created_at`, since datasets record no commit time)
+  or committed analysis that counts as its evidence. Stored `status` never
+  changes from an edge or pivot; `supported` and `rejected` stay terminal.
+  The one write-rule change is that a `testing` claim may attach
+  `supported_by_*` links only in the same PATCH that resolves it to
+  `supported`. A mis-asserted relation is corrected by
+  `DELETE /claims/{claim_id}/edges/{edge_id}` (contributor access; an edge
+  under another source claim reads as absent), which un-derives the target's
+  effective status; nothing is auto-derived into stored status.
 - Exploration nodes for the divergent research trajectory — `decision`,
   `dead_end`, and `pivot` records that each target a retained question,
   dataset, analysis, or claim and link into a DAG through `parent` and
@@ -188,8 +209,12 @@ research record:
 - A per-project publication-readiness report
   (`GET /projects/{project_id}/publication-readiness`) that scans the retained
   graph for gaps before write-up — supported claims missing dataset/analysis
-  evidence or falsification criteria, answered questions without committed
-  dataset evidence, and broken external-artifact references.
+  evidence or falsification criteria, supported claims that are contested,
+  superseded, or invalidated by later claims or committed pivots (blocking),
+  answered questions without committed dataset evidence, broken
+  external-artifact references, and testing predictions older than 30 days
+  whose question already has committed data (`stale_predictions`, advisory
+  only — it never changes `seal_level`).
 - A per-project draft-quality ledger
   (`GET /projects/{project_id}/draft-quality?since=<ISO 8601 with offset>`,
   MCP read tool `lab_tracker_draft_quality`) computed only from stored

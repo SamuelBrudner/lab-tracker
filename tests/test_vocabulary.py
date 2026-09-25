@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from lab_tracker.models import (
     AnalysisStatus,
+    ClaimEffectiveStatus,
     ClaimRelation,
     ClaimStatus,
     DatasetStatus,
@@ -159,6 +160,7 @@ _CONCEPT_ENUMS = {
     "datasetStatus": DatasetStatus,
     "analysisStatus": AnalysisStatus,
     "claimStatus": ClaimStatus,
+    "claimEffectiveStatus": ClaimEffectiveStatus,
     "noteStatus": NoteStatus,
     "sessionType": SessionType,
     "sessionStatus": SessionStatus,
@@ -191,6 +193,7 @@ _EXAMPLE_SCHEMES: dict[str, tuple[str, ...]] = {
     "outcomeStatus": ("outcomeStatus",),
     "sessionType": ("sessionType",),
     "claimRelationType": ("claimRelation",),
+    "effectiveStatus": ("claimEffectiveStatus",),
     "explorationNodeType": ("explorationNodeType",),
     "goalType": ("goalType",),
 }

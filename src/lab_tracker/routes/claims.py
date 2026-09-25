@@ -11,7 +11,6 @@ from starlette.requests import Request
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.models import (
-    Claim,
     ClaimEdge,
     ClaimStatus,
     EntityType,
@@ -20,7 +19,14 @@ from lab_tracker.models import (
     UsageEventResourceType,
 )
 from lab_tracker.patching import provided_fields
-from lab_tracker.schemas import ClaimCreate, ClaimEdgeCreate, ClaimUpdate, Envelope, ListEnvelope
+from lab_tracker.schemas import (
+    ClaimCreate,
+    ClaimEdgeCreate,
+    ClaimRead,
+    ClaimUpdate,
+    Envelope,
+    ListEnvelope,
+)
 
 from .provenance import claim_provenance_payload, jsonld_response
 from .shared import (
@@ -44,7 +50,7 @@ def build_claims_router(api: LabTrackerAPI) -> APIRouter:
 
     @router.post(
         "/claims",
-        response_model=Envelope[Claim],
+        response_model=Envelope[ClaimRead],
         status_code=http_status.HTTP_201_CREATED,
     )
     def create_claim(payload: ClaimCreate, request: Request):
@@ -64,9 +70,9 @@ def build_claims_router(api: LabTrackerAPI) -> APIRouter:
             external_citations=payload.external_citations,
             actor=actor,
         )
-        return Envelope(data=claim)
+        return Envelope(data=_interpreted(request, api, claim))
 
-    @router.get("/claims", response_model=ListEnvelope[Claim])
+    @router.get("/claims", response_model=ListEnvelope[ClaimRead])
     def list_claims(
         request: Request,
         project_id: UUID | None = None,
@@ -99,7 +105,7 @@ def build_claims_router(api: LabTrackerAPI) -> APIRouter:
             total=page.total,
         )
 
-    @router.get("/claims/{claim_id}", response_model=Envelope[Claim])
+    @router.get("/claims/{claim_id}", response_model=Envelope[ClaimRead])
     def get_claim(claim_id: UUID, request: Request):
         claim = api_from_request(request, api).get_claim_for_read(
             claim_id,
@@ -115,7 +121,7 @@ def build_claims_router(api: LabTrackerAPI) -> APIRouter:
             return jsonld_response(claim_provenance_payload(request, api, claim_id))
         base_url = provenance_base_url(request)
         return Envelope(
-            data=claim,
+            data=_interpreted(request, api, claim),
             meta={"iri": f"{base_url}/claims/{claim.claim_id}"},
         )
 
@@ -160,7 +166,7 @@ def build_claims_router(api: LabTrackerAPI) -> APIRouter:
         )
         return Envelope(data=diff)
 
-    @router.patch("/claims/{claim_id}", response_model=Envelope[Claim])
+    @router.patch("/claims/{claim_id}", response_model=Envelope[ClaimRead])
     def update_claim(claim_id: UUID, payload: ClaimUpdate, request: Request):
         actor = actor_from_request(request)
         existing = api_from_request(request, api).get_claim(claim_id)
@@ -170,7 +176,7 @@ def build_claims_router(api: LabTrackerAPI) -> APIRouter:
             actor=actor,
             **provided_fields(payload),
         )
-        return Envelope(data=claim)
+        return Envelope(data=_interpreted(request, api, claim))
 
     @router.post(
         "/claims/{claim_id}/edges",
@@ -205,12 +211,30 @@ def build_claims_router(api: LabTrackerAPI) -> APIRouter:
         items, total = paginate(edges, limit, offset)
         return list_response(items, limit=limit, offset=offset, total=total)
 
-    @router.delete("/claims/{claim_id}", response_model=Envelope[Claim])
+    @router.delete(
+        "/claims/{claim_id}/edges/{edge_id}",
+        response_model=Envelope[ClaimEdge],
+    )
+    def delete_claim_edge(claim_id: UUID, edge_id: UUID, request: Request):
+        actor = actor_from_request(request)
+        existing = api_from_request(request, api).get_claim(claim_id)
+        ensure_project_read(request, existing.project_id)
+        edge = api_from_request(request, api).delete_claim_edge(claim_id, edge_id, actor=actor)
+        return Envelope(data=edge)
+
+    @router.delete("/claims/{claim_id}", response_model=Envelope[ClaimRead])
     def delete_claim(claim_id: UUID, request: Request):
         actor = actor_from_request(request)
         existing = api_from_request(request, api).get_claim(claim_id)
         ensure_project_read(request, existing.project_id)
         claim = api_from_request(request, api).delete_claim(claim_id, actor=actor)
-        return Envelope(data=claim)
+        return Envelope(data=_interpreted(request, api, claim))
 
     return router
+
+
+def _interpreted(request: Request, api: LabTrackerAPI, claim) -> ClaimRead:
+    """One claim with its derived effective-status fields attached."""
+
+    [interpreted] = api_from_request(request, api).interpret_claims([claim])
+    return interpreted

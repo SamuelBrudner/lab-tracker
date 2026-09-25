@@ -133,6 +133,7 @@ warn_unused_configs = true
 show_error_codes = true
 files = [
   "src/lab_tracker/patching.py",
+  "src/lab_tracker/claim_effective_status.py",
   "src/lab_tracker/repository.py",
   "src/lab_tracker/reference_registry.py",
   "src/lab_tracker/sqlalchemy_repository_parts/references.py",

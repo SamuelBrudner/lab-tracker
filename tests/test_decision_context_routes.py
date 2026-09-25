@@ -436,3 +436,68 @@ def test_decision_context_route_returns_empty_context_for_no_matches_in_project(
     assert data["questions"] == []
     assert data["notes"] == []
     assert data["truncation"]["was_truncated"] is False
+
+
+def test_decision_context_claims_expose_effective_status_and_caveat(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = client.post(
+        "/projects",
+        json={"name": "Effective Status Context", "description": ""},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Does the baseline drift?",
+            "question_type": "descriptive",
+            "status": "active",
+        },
+        headers=admin_auth_headers,
+    )
+    old_claim_id = client.post(
+        "/claims",
+        json={"project_id": project_id, "statement": "Baseline drifts.", "confidence": 60},
+        headers=admin_auth_headers,
+    ).json()["data"]["claim_id"]
+
+    def context() -> dict:
+        response = client.post(
+            "/assistant/decision-context",
+            json={
+                "task_kind": "research_writing",
+                "query": "baseline",
+                "project_id": project_id,
+                "limit": 5,
+            },
+            headers=admin_auth_headers,
+        )
+        assert response.status_code == 200, response.text
+        return response.json()["data"]
+
+    before = context()
+    claims = {item["claim_id"]: item for item in before["claims"]}
+    assert claims[old_claim_id]["effective_status"] == "proposed"
+    assert claims[old_claim_id]["pre_registered"] is False
+    assert not any("effective_status" in caveat for caveat in before["task_guidance"]["caveats"])
+
+    new_claim_id = client.post(
+        "/claims",
+        json={"project_id": project_id, "statement": "Baseline is stable.", "confidence": 70},
+        headers=admin_auth_headers,
+    ).json()["data"]["claim_id"]
+    edge = client.post(
+        f"/claims/{new_claim_id}/edges",
+        json={"target_claim_id": old_claim_id, "relation": "supersedes"},
+        headers=admin_auth_headers,
+    )
+    assert edge.status_code == 201, edge.text
+
+    after = context()
+    claims = {item["claim_id"]: item for item in after["claims"]}
+    assert claims[old_claim_id]["effective_status"] == "superseded"
+    assert claims[old_claim_id]["superseded_by_claim_id"] == new_claim_id
+    caveats = after["task_guidance"]["caveats"]
+    assert sum("effective_status" in caveat for caveat in caveats) == 1

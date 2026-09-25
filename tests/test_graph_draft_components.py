@@ -91,6 +91,8 @@ NEGATIVE_KNOWLEDGE_LABELS = (
     "merge_questions",
     "retire_note",
 )
+# Labels added after the negative-knowledge block, in enum order.
+LATER_SEMANTIC_LABELS = ("resolve_prediction",)
 
 
 def _change_set(
@@ -999,7 +1001,7 @@ def test_batch_instructions_are_narrative_first_with_terse_capture_guardrail() -
 
 def test_semantic_types_match_domain_enum() -> None:
     assert list(SEMANTIC_TYPES) == [member.value for member in GraphDraftSemanticType]
-    assert tuple(SEMANTIC_TYPES[-6:]) == NEGATIVE_KNOWLEDGE_LABELS
+    assert tuple(SEMANTIC_TYPES[-7:]) == (*NEGATIVE_KNOWLEDGE_LABELS, *LATER_SEMANTIC_LABELS)
 
 
 def test_graph_draft_payload_contract_covers_exploration_nodes_and_semantic_operations() -> None:
@@ -1017,7 +1019,7 @@ def test_graph_draft_payload_contract_covers_exploration_nodes_and_semantic_oper
     ]
 
     semantic = contract["semantic_operations"]
-    assert tuple(semantic) == NEGATIVE_KNOWLEDGE_LABELS
+    assert tuple(semantic) == (*NEGATIVE_KNOWLEDGE_LABELS, *LATER_SEMANTIC_LABELS)
     for label, node_type in (
         ("record_decision", "decision"),
         ("record_dead_end", "dead_end"),
@@ -1413,6 +1415,127 @@ def test_validator_retire_note_reason_is_restricted() -> None:
 
     superseded = retire("superseded")
     validator.validate_operation(superseded, superseded.payload)
+
+
+def test_prompt_instructions_and_response_schema_include_resolve_prediction() -> None:
+    operation_schema = graph_patch_response_schema()["properties"]["operations"]["items"]
+    assert "resolve_prediction" in operation_schema["properties"]["semantic_type"]["enum"]
+    assert [member.value for member in GraphDraftSemanticType] == SEMANTIC_TYPES
+    for instructions in (_instructions(), _batch_instructions(), _analysis_instructions()):
+        prose = instructions.split("</trusted_api_payload_contract>", 1)[1]
+        assert "resolve_prediction" in prose
+        assert "open_predictions" in prose
+        assert "terminal_reason required" in prose
+        assert "request_clarification" in prose
+    # The analysis prompt no longer tells the model claims have no narrower label.
+    no_narrower = _analysis_instructions().split("narrower semantic_type label", 1)[0]
+    assert "analysis, and visualization there is no" in no_narrower
+    assert "claim, and visualization" not in no_narrower
+    contract = graph_draft_payload_contract()["semantic_operations"]["resolve_prediction"]
+    assert contract["op"] == "update"
+    assert contract["entity_type"] == "claim"
+    assert contract["controlled_values"] == {"status": ["supported", "rejected"]}
+    assert contract["when_rejected_required_fields"] == ["terminal_reason"]
+    # Prompt text only; versions are pinned by the binding decision for this wave.
+    assert PROMPT_VERSION == "multimodal-graph-draft-v4"
+    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v7"
+    assert ANALYSIS_PROMPT_VERSION == "analysis-graph-draft-v4"
+
+
+def _resolve_prediction(payload: dict[str, Any], **overrides: Any) -> GraphChangeOperation:
+    return _operation(
+        op=overrides.get("op", GraphChangeOp.UPDATE),
+        entity_type=overrides.get("entity_type", EntityType.CLAIM),
+        semantic_type=GraphDraftSemanticType.RESOLVE_PREDICTION,
+        payload=payload,
+        target_entity_id=overrides.get("target_entity_id", uuid4()),
+    )
+
+
+def test_graph_patch_validator_accepts_resolve_prediction_update_on_claim() -> None:
+    seen: list[tuple[EntityType, UUID]] = []
+    validator = _recording_validator(seen)
+    claim_id, dataset_id = uuid4(), uuid4()
+
+    supported = _resolve_prediction(
+        {"status": "supported", "supported_by_dataset_ids": [str(dataset_id)]},
+        target_entity_id=claim_id,
+    )
+    validator.validate_operation(supported, supported.payload)
+    assert (EntityType.CLAIM, claim_id) in seen
+    assert (EntityType.DATASET, dataset_id) in seen
+
+    rejected = _resolve_prediction(
+        {"status": "rejected", "terminal_reason": "The committed dataset showed no effect."},
+        target_entity_id=claim_id,
+    )
+    validator.validate_operation(rejected, rejected.payload)
+
+
+def test_graph_patch_validator_rejects_resolve_prediction_without_terminal_status_or_reason():
+    validator = _recording_validator([])
+
+    missing = _resolve_prediction({"confidence": 90})
+    with pytest.raises(ValidationError, match="status to supported or rejected"):
+        validator.validate_operation(missing, missing.payload)
+
+    still_testing = _resolve_prediction({"status": "testing"})
+    with pytest.raises(ValidationError, match="status to supported or rejected"):
+        validator.validate_operation(still_testing, still_testing.payload)
+
+    no_reason = _resolve_prediction({"status": "rejected"})
+    with pytest.raises(ValidationError, match="rejected requires terminal_reason"):
+        validator.validate_operation(no_reason, no_reason.payload)
+
+    blank_reason = _resolve_prediction({"status": "rejected", "terminal_reason": "   "})
+    with pytest.raises(ValidationError):
+        validator.validate_operation(blank_reason, blank_reason.payload)
+
+
+def test_graph_patch_validator_rejects_resolve_prediction_on_non_claim_target() -> None:
+    validator = _recording_validator([])
+    on_question = _resolve_prediction(
+        {"status": "abandoned", "terminal_reason": "x"},
+        entity_type=EntityType.QUESTION,
+    )
+    with pytest.raises(ValidationError, match="cannot be used with update question"):
+        validator.validate_operation(on_question, on_question.payload)
+    as_create = _resolve_prediction(
+        {"project_id": str(uuid4()), "statement": "New", "confidence": 50},
+        op=GraphChangeOp.CREATE,
+    )
+    with pytest.raises(ValidationError, match="cannot be used with create claim"):
+        validator.validate_operation(as_create, as_create.payload)
+
+
+def test_graph_patch_applier_forwards_resolve_prediction_to_claim_update() -> None:
+    change_set = _change_set(uuid4())
+    claim_id, dataset_id = uuid4(), uuid4()
+    captured: dict[str, Any] = {}
+
+    def update_claim(target_id: UUID, **kwargs: Any) -> Any:
+        captured.update({"claim_id": target_id, **kwargs})
+        return SimpleNamespace(claim_id=target_id)
+
+    applier = _exploration_applier({}, claims=SimpleNamespace(update_claim=update_claim))
+    operation = _resolve_prediction(
+        {
+            "status": "supported",
+            "supported_by_dataset_ids": [str(dataset_id)],
+            "terminal_reason": None,
+        },
+        target_entity_id=claim_id,
+    )
+
+    result = applier.apply_graph_operation(operation, ref_map={}, actor=None, change_set=change_set)
+
+    assert result.claim_id == claim_id
+    assert captured["claim_id"] == claim_id
+    assert captured["status"].value == "supported"
+    assert captured["supported_by_dataset_ids"] == [dataset_id]
+    assert captured["terminal_reason"] is None
+    assert captured["change_set_id"] == change_set.change_set_id
+    assert captured["origin"] == EntityOrigin.AI_SUGGESTED
 
 
 def test_semantic_allowed_targets_cover_every_new_label() -> None:

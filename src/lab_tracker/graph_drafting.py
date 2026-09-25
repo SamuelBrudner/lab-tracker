@@ -48,6 +48,7 @@ SEMANTIC_TYPES = [
     "abandon_question",
     "merge_questions",
     "retire_note",
+    "resolve_prediction",
 ]
 
 _GRAPH_DRAFT_ENTITY_TYPES = (
@@ -73,6 +74,7 @@ EXPLORATION_NODE_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
 EXPLORATION_NODE_TARGET_ENTITY_TYPES = ("question", "dataset", "analysis", "claim")
 PIVOT_INVALIDATION_FIELDS = ("invalidates_node_id", "invalidates_claim_id")
 RETIRE_NOTE_REASON_VALUES = ("superseded", "reviewed_not_relevant")
+RESOLVE_PREDICTION_STATUS_VALUES = ("supported", "rejected")
 MERGE_QUESTIONS_REPLACEMENT_STATUSES = ("staged", "active")
 _RECORD_LABEL_NODE_TYPES = {
     "record_decision": "decision",
@@ -191,6 +193,17 @@ def _semantic_operation_contract() -> dict[str, Any]:
         "entity_type": "note",
         "required_fields": ["reason"],
         "controlled_values": {"reason": list(RETIRE_NOTE_REASON_VALUES)},
+    }
+    contract["resolve_prediction"] = {
+        "op": "update",
+        "entity_type": "claim",
+        "target_entity_id": "a claim listed in open_predictions",
+        "required_fields": ["status"],
+        "controlled_values": {"status": list(RESOLVE_PREDICTION_STATUS_VALUES)},
+        "when_rejected_required_fields": ["terminal_reason"],
+        "when_supported_required_fields": [
+            "supported_by_dataset_ids or supported_by_analysis_ids",
+        ],
     }
     return contract
 
@@ -1184,6 +1197,13 @@ def _batch_instructions() -> str:
         "review_memory.recent_rejections: this reviewer's recent rejections with "
         "their notes. If you re-propose something equivalent, state the new evidence "
         "in rationale."
+        "\n\nEach project block carries open_predictions. When a dataset or analysis in "
+        "this batch lands under a question listed in open_predictions, propose "
+        "resolve_prediction: an update on that claim setting status to supported (name "
+        "the landed evidence in supported_by_dataset_ids or supported_by_analysis_ids) "
+        "or rejected (terminal_reason required), citing the evidence in source_refs; "
+        "never resolve a prediction the evidence does not directly test — use "
+        "request_clarification instead."
     )
 
 
@@ -1258,7 +1278,15 @@ def _instructions() -> str:
         "existing note is superseded or reviewed as not relevant (update the note with "
         "reason superseded or reviewed_not_relevant). Never use these labels to delete "
         "or hide information: they preserve negative knowledge for later readers. The "
-        "target of every one of them must be an existing ID from the context."
+        "target of every one of them must be an existing ID from the context. "
+        "open_predictions lists proposed or testing claims that answer a question, "
+        "with effective_status and pre_registered derived from later claims and pivots. "
+        "When a dataset or analysis in the source captures lands under a question listed "
+        "in open_predictions, propose resolve_prediction: an update on that claim setting "
+        "status to supported (name the landed evidence in supported_by_dataset_ids or "
+        "supported_by_analysis_ids) or rejected (terminal_reason required), citing the "
+        "evidence in source_refs; never resolve a prediction the evidence does not "
+        "directly test — use request_clarification instead."
     )
 
 
@@ -1395,7 +1423,7 @@ def _analysis_instructions() -> str:
         "changes supported by the evidence and context, and prefer updating or linking "
         "existing entities over creating duplicates. Use create or update operations for "
         "project, question, note, session, dataset, analysis, claim, visualization, goal, "
-        "or exploration_node entities. For project, session, analysis, claim, and "
+        "or exploration_node entities. For project, session, analysis, and "
         "visualization there is no "
         "narrower semantic_type label — use create_entity or update_entity for those. Use "
         "payload_json as a JSON object string matching the trusted Lab Tracker API "
@@ -1416,7 +1444,14 @@ def _analysis_instructions() -> str:
         "source_refs item must include source_note_ids as a non-empty list of unique note "
         "UUIDs copied exactly from the project context source artifacts. Include all and "
         "only the source notes that directly support the operation; never invent an ID or "
-        "guess a primary source for ambiguous evidence. Never "
+        "guess a primary source for ambiguous evidence. The project context lists "
+        "open_predictions: proposed or testing claims that answer a question. When this "
+        "evidence lands under a question listed in open_predictions, propose "
+        "resolve_prediction: an update on that claim setting status to supported (name the "
+        "landed evidence in supported_by_dataset_ids or supported_by_analysis_ids) or "
+        "rejected (terminal_reason required), citing the evidence in source_refs; never "
+        "resolve a prediction the evidence does not directly test — use "
+        "request_clarification instead. Never "
         "claim a canonical update happened; every operation is a draft for human review "
         "and nothing commits without explicit human acceptance."
     )

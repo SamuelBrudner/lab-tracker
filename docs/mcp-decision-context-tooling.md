@@ -365,6 +365,12 @@ For `summary`:
 - evidence map;
 - unresolved or ambiguous points.
 
+Every returned claim carries its read-time `effective_status` (plus
+`superseded_by_claim_id`, `contested_by_claim_ids`, `invalidated_by_node_id`,
+and `pre_registered`) beside its stored `status`; when any returned claim is
+`contested`, `superseded`, or `invalidated`, `task_guidance.caveats` says so
+and the assistant must check `effective_status` before citing it.
+
 For `research_writing`:
 
 - thesis-level motivating question;

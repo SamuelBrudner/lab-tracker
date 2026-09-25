@@ -88,6 +88,11 @@ the same audited service paths a person would use, never through a shortcut:
   who retired the note and why.
 - `abandon_question` is the normal question update with `status=abandoned` and
   a required `terminal_reason`, so no question is closed without a stated reason.
+- `resolve_prediction` is the normal claim update with `status` set to
+  `supported` or `rejected` (the validator refuses any other status, and
+  `rejected` needs a `terminal_reason`); `ClaimService` still requires
+  support links for `supported`, so an under-evidenced resolution fails at
+  accept time rather than applying silently.
 
 The boundary, in one line: **enforce structural invariants and record
 provenance on every path; require a second person only for AI output, and only

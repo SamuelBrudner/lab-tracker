@@ -100,6 +100,20 @@ CONCEPT_SCHEMES: tuple[ConceptScheme, ...] = (
         ("proposed", "testing", "supported", "rejected"),
     ),
     ConceptScheme(
+        "claimEffectiveStatus",
+        "Derived evidential state of a research claim after later claims and pivots "
+        "are applied.",
+        (
+            "proposed",
+            "testing",
+            "supported",
+            "rejected",
+            "contested",
+            "superseded",
+            "invalidated",
+        ),
+    ),
+    ConceptScheme(
         "noteStatus",
         "Lifecycle states of a research note.",
         ("staged", "committed", "archived"),
@@ -338,6 +352,13 @@ _PROPERTY_TERMS: tuple[Term, ...] = (
         "lab:status",
         "Lifecycle status of the record (for example staged, active, "
         "committed, supported, archived).",
+    ),
+    Term(
+        "effectiveStatus",
+        "lab:effectiveStatus",
+        "Derived status of a claim after supersedes, refutes, and contradicts relations "
+        "and committed pivots are applied (for example supported, contested, "
+        "superseded, invalidated).",
     ),
     Term(
         "terminalReason",

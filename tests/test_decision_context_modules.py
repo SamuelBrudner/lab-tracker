@@ -79,6 +79,12 @@ class FakeDecisionContextReader:
         "project_id": "project-1",
         "statement": "Baseline controls change behavior.",
         "status": "supported",
+        # The repository reader adds the read-time interpretation to every claim.
+        "effective_status": "supported",
+        "superseded_by_claim_id": None,
+        "contested_by_claim_ids": [],
+        "invalidated_by_node_id": None,
+        "pre_registered": False,
         "supported_by_dataset_ids": ["dataset-1"],
         "supported_by_analysis_ids": ["analysis-1"],
     }
@@ -705,3 +711,50 @@ def test_ambiguous_project_error_lists_no_more_search_matches_than_the_limit(
     assert f"{len(reader.matched_ids)} projects match the query; {listed_text}." in (
         error["message"]
     )
+
+
+def test_repository_reader_claims_carry_effective_status() -> None:
+    from lab_tracker.models import ClaimRelation
+
+    api = repository_backed_api()
+    actor = AuthContext(user_id=uuid4(), role=Role.ADMIN)
+    project = api.create_project("Effective status project", actor=actor)
+    hidden = api.create_project("Hidden project", actor=actor)
+    old = api.create_claim(project.project_id, "Old claim", 50.0, actor=actor)
+    new = api.create_claim(project.project_id, "Newer claim", 50.0, actor=actor)
+    api.create_claim_edge(
+        new.claim_id,
+        target_claim_id=old.claim_id,
+        relation=ClaimRelation.SUPERSEDES,
+        actor=actor,
+    )
+    hidden_claim = api.create_claim(hidden.project_id, "Hidden claim", 50.0, actor=actor)
+    reader = RepositoryDecisionContextReader(
+        api._repository,  # type: ignore[arg-type,attr-defined]
+        accessible_project_ids={project.project_id},
+    )
+
+    detail = reader.get_claim(str(old.claim_id))
+    assert detail is not None
+    assert detail["status"] == "proposed"
+    assert detail["effective_status"] == "superseded"
+    assert detail["superseded_by_claim_id"] == str(new.claim_id)
+    assert detail["contested_by_claim_ids"] == []
+    assert detail["invalidated_by_node_id"] is None
+    assert detail["pre_registered"] is False
+    assert reader.get_claim(str(hidden_claim.claim_id)) is None
+
+    listing = reader.list_claims(project_id=str(project.project_id))
+    assert listing["meta"]["total"] == 2
+    rows = {row["claim_id"]: row for row in listing["data"]}
+    keys = {
+        "effective_status",
+        "superseded_by_claim_id",
+        "contested_by_claim_ids",
+        "invalidated_by_node_id",
+        "pre_registered",
+    }
+    assert all(keys <= set(row) for row in rows.values())
+    assert rows[str(old.claim_id)]["effective_status"] == "superseded"
+    assert rows[str(new.claim_id)]["effective_status"] == "proposed"
+    assert reader.list_claims(project_id=str(hidden.project_id))["data"] == []

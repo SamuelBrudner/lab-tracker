@@ -74,6 +74,18 @@ the questions each record answers.
 The normative class, controlled-concept, and qualified-edge choices are fixed
 by the [Lab Tracker public semantic profile](semantic-profile.md).
 
+Claim nodes in the claim, record-export, and Ara documents carry
+`lab:effectiveStatus` (classified in the `claimEffectiveStatus` scheme) next
+to the stored `status`: the read-time derivation from `supersedes`, `refutes`,
+and `contradicts` relations and committed pivots. The pointers behind it are
+the existing `lab:ClaimRelation` nodes (an incoming edge has
+`claimRelationTarget` equal to the claim) and `lab:invalidates` on the pivot's
+`lab:ExplorationNode`; `prov:wasInvalidatedBy` is deliberately not used. A
+scoped export derives the status from the records it contains, so every
+derived value is verifiable from the relation and pivot nodes in the same
+document. The analysis document carries no pivots and therefore emits no
+`effectiveStatus` of its own.
+
 The identifiers dereference: `GET` on a dataset, analysis, or claim URI with
 `Accept: application/ld+json` returns this same document, so a JSON-LD
 consumer can follow any `@id` in a sidecar straight to the live record. The

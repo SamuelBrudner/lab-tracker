@@ -148,6 +148,7 @@ also emitted under the additive compatibility policy below.
 | `lab:datasetStatus` | `Dataset`; `status` | `staged`, `committed`, `archived` |
 | `lab:analysisStatus` | `Analysis`; `status` | `staged`, `committed`, `archived` |
 | `lab:claimStatus` | `Claim`; `status` | `proposed`, `testing`, `supported`, `rejected` |
+| `lab:claimEffectiveStatus` | `Claim`; `effectiveStatus` (derived at read time) | `proposed`, `testing`, `supported`, `rejected`, `contested`, `superseded`, `invalidated` |
 | `lab:noteStatus` | `Note`; `status` | `staged`, `committed`, `archived` |
 | `lab:sessionType` | `AcquisitionSession`; `sessionType` | `scientific`, `operational` |
 | `lab:sessionStatus` | `AcquisitionSession`; `status` | `active`, `closed` |

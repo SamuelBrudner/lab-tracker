@@ -245,6 +245,25 @@ class ClaimRelation(str, Enum):
     SUPERSEDES = "supersedes"
 
 
+class ClaimEffectiveStatus(str, Enum):
+    """Derived, never stored, evidential state of a claim after later claims and pivots.
+
+    The four stored ``ClaimStatus`` values pass through unchanged; the three
+    derived values come from claim edges (``supersedes`` marks the target
+    superseded, ``refutes`` / ``contradicts`` mark it contested) and committed
+    pivot exploration nodes (``invalidates_claim_id``). Read time only: no
+    service writes these back to ``Claim.status``.
+    """
+
+    PROPOSED = "proposed"
+    TESTING = "testing"
+    SUPPORTED = "supported"
+    REJECTED = "rejected"
+    CONTESTED = "contested"
+    SUPERSEDED = "superseded"
+    INVALIDATED = "invalidated"
+
+
 class ExplorationNodeType(str, Enum):
     DECISION = "decision"
     DEAD_END = "dead_end"
@@ -476,6 +495,9 @@ class GraphDraftSemanticType(str, Enum):
     ABANDON_QUESTION = "abandon_question"
     MERGE_QUESTIONS = "merge_questions"
     RETIRE_NOTE = "retire_note"
+    # Prediction-error label: resolve an open prediction (proposed/testing claim)
+    # to supported or rejected once evidence under its question has landed.
+    RESOLVE_PREDICTION = "resolve_prediction"
 
 
 # Review-audit keys stamped into ``GraphChangeOperation.error_metadata`` by the
@@ -1580,6 +1602,27 @@ class PublicationReadinessUnsupportedClaim(_DomainModel):
     reason: str
 
 
+class PublicationReadinessContestedClaim(_DomainModel):
+    """A supported claim whose derived status no longer reads supported."""
+
+    claim_id: UUID
+    statement: str
+    status: ClaimStatus
+    effective_status: ClaimEffectiveStatus
+    reason: str
+
+
+class PublicationReadinessStalePrediction(_DomainModel):
+    """A testing claim left unresolved although its question has committed data."""
+
+    claim_id: UUID
+    statement: str
+    status: ClaimStatus
+    question_ids: list[UUID]
+    age_days: int
+    reason: str
+
+
 class PublicationReadinessUngroundedQuestion(_DomainModel):
     question_id: UUID
     text: str
@@ -1606,6 +1649,8 @@ class PublicationReadinessBrokenExternalRef(_DomainModel):
 class PublicationReadinessReport(_DomainModel):
     project_id: UUID
     unsupported_claims: list[PublicationReadinessUnsupportedClaim] = Field(default_factory=list)
+    contested_claims: list[PublicationReadinessContestedClaim] = Field(default_factory=list)
+    stale_predictions: list[PublicationReadinessStalePrediction] = Field(default_factory=list)
     ungrounded_questions: list[PublicationReadinessUngroundedQuestion] = Field(default_factory=list)
     orphaned_entities: list[PublicationReadinessOrphanedEntity] = Field(default_factory=list)
     broken_external_refs: list[PublicationReadinessBrokenExternalRef] = Field(default_factory=list)

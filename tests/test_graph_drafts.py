@@ -1395,6 +1395,85 @@ def test_graph_context_packet_includes_selected_targets_and_recent_neighborhood(
     assert fake_client.calls[0]["user_hint"] == "same gradient protocol as last week"
 
 
+def test_graph_context_packet_includes_open_predictions_with_interpretation(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    question = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Does the pulse increase turning?",
+            "question_type": "hypothesis_driven",
+            "status": "active",
+        },
+        headers=admin_auth_headers,
+    ).json()["data"]
+    prediction = client.post(
+        "/claims",
+        json={
+            "project_id": project_id,
+            "statement": "Turning will increase after the pulse.",
+            "confidence": 55,
+            "status": "proposed",
+            "falsification_criteria": "No turning change in the committed dataset.",
+            "answers_question_ids": [question["question_id"]],
+        },
+        headers=admin_auth_headers,
+    ).json()["data"]
+    unanchored = client.post(
+        "/claims",
+        json={"project_id": project_id, "statement": "A loose remark.", "confidence": 30},
+        headers=admin_auth_headers,
+    ).json()["data"]
+    dataset = client.post(
+        "/datasets",
+        json={
+            "project_id": project_id,
+            "primary_question_id": question["question_id"],
+            "commit_manifest": {"files": [{"path": "turning.csv", "checksum": "abc"}]},
+            "status": "committed",
+        },
+        headers=admin_auth_headers,
+    ).json()["data"]
+    assert dataset["status"] == "committed"
+    note_id = _text_note(client, admin_auth_headers, project_id=project_id, raw_content="pulse run")
+    fake_client = FakeDraftClient()
+    client.app.state.graph_draft_client_factory = lambda settings: fake_client
+
+    response = client.post(f"/notes/{note_id}/graph-drafts", json={}, headers=admin_auth_headers)
+
+    assert response.status_code == 201, response.text
+    context = response.json()["data"]["context_packet"]
+    open_predictions = {item["id"]: item for item in context["open_predictions"]}
+    assert set(open_predictions) == {prediction["claim_id"]}
+    open_prediction = open_predictions[prediction["claim_id"]]
+    assert open_prediction["status"] == "proposed"
+    assert open_prediction["effective_status"] == "proposed"
+    assert open_prediction["pre_registered"] is True
+    assert open_prediction["answers_question_ids"] == [question["question_id"]]
+    assert open_prediction["falsification_criteria"] == (
+        "No turning change in the committed dataset."
+    )
+    assert open_prediction["verification_plan"] is None
+    assert open_prediction["refuting_outcome"] is None
+    assert "selection_reason" not in open_prediction
+    recent_claims = {item["id"]: item for item in context["recent_claims"]}
+    assert recent_claims[unanchored["claim_id"]]["effective_status"] == "proposed"
+    assert recent_claims[unanchored["claim_id"]]["pre_registered"] is False
+    assert recent_claims[prediction["claim_id"]]["pre_registered"] is True
+    for item in recent_claims.values():
+        assert {
+            "effective_status",
+            "superseded_by_claim_id",
+            "contested_by_claim_ids",
+            "invalidated_by_node_id",
+            "pre_registered",
+        } <= set(item)
+    assert context["context_summary"]["counts"]["open_predictions"] == 1
+
+
 def test_graph_context_packet_includes_supersession_aliases(
     client: TestClient,
     admin_auth_headers: dict[str, str],

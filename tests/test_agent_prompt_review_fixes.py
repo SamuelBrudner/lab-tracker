@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from lab_tracker.decision_context_builders import task_guidance
+import pytest
+
+from lab_tracker.decision_context_builders import (
+    DERIVED_NEGATIVE_STATUSES,
+    DERIVED_STATUS_CAVEAT,
+    task_guidance,
+)
 from lab_tracker.decision_context_constants import TASK_KIND_VALUES
 from lab_tracker.graph_drafting import (
     _analysis_instructions,
@@ -46,6 +52,40 @@ def test_rejected_claims_are_flagged_in_caveats() -> None:
         visualizations=[],
     )
     assert any("REJECTED" in caveat for caveat in guidance["caveats"])
+
+
+@pytest.mark.parametrize("effective_status", sorted(DERIVED_NEGATIVE_STATUSES))
+def test_contested_superseded_or_invalidated_claims_are_flagged_in_caveats(
+    effective_status: str,
+) -> None:
+    guidance = task_guidance(
+        "research_writing",
+        "q",
+        questions=[],
+        datasets=[],
+        analyses=[],
+        claims=[{"claim_id": "c1", "status": "supported", "effective_status": effective_status}],
+        visualizations=[],
+    )
+    assert guidance["caveats"].count(DERIVED_STATUS_CAVEAT) == 1
+
+
+@pytest.mark.parametrize(
+    "claim",
+    [
+        {"claim_id": "c1", "status": "supported"},
+        {"claim_id": "c1", "status": "supported", "effective_status": "supported"},
+        {"claim_id": "c1", "status": "testing", "effective_status": "testing"},
+    ],
+)
+def test_claims_without_a_derived_gap_do_not_trigger_the_effective_status_caveat(
+    claim: dict[str, object],
+) -> None:
+    guidance = task_guidance(
+        "research_writing", "q", questions=[], datasets=[], analyses=[], claims=[claim],
+        visualizations=[],
+    )
+    assert DERIVED_STATUS_CAVEAT not in guidance["caveats"]
 
 
 # --- L13: the live get_decision_context docstring lists every task_kind ------
