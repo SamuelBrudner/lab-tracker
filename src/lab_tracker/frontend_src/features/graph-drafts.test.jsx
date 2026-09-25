@@ -1365,3 +1365,186 @@ describe("GraphDraftDetailCard audio review", () => {
     expect(screen.getByRole("button", { name: "Dictate feedback" })).toBeInTheDocument();
   });
 });
+
+describe("GraphDraftDetailCard keyboard review", () => {
+  function twoProposalDraft() {
+    const first = draftFixture().operations[0];
+    return draftFixture({
+      operations: [
+        first,
+        {
+          ...first,
+          operation_id: "44444444-4444-4444-8444-444444444444",
+          payload: { text: "Does temperature change courtship?" },
+        },
+      ],
+    });
+  }
+
+  function installDecisionRoute(draft, patchBodies) {
+    let currentDraft = draft;
+    return {
+      match: /\/graph-drafts\/[^/]+\/operations\/([^/]+)$/,
+      method: "PATCH",
+      response: (request) => {
+        const operationId = request.url.split("/").pop();
+        const body = JSON.parse(request.init.body);
+        patchBodies.push({ operationId, ...body });
+        currentDraft = {
+          ...currentDraft,
+          operations: currentDraft.operations.map((operation) =>
+            operation.operation_id === operationId
+              ? { ...operation, payload: body.payload, status: body.status }
+              : operation
+          ),
+        };
+        return apiResponse(currentDraft);
+      },
+    };
+  }
+
+  it("moves through proposals with j/k and decides the focused one with a/r/d", async () => {
+    const draft = twoProposalDraft();
+    const [first, second] = draft.operations;
+    const patchBodies = [];
+    const setFlash = vi.fn();
+    const { container } = renderDraft(draft, {
+      routes: [installDecisionRoute(draft, patchBodies)],
+      setFlash,
+    });
+    await screen.findAllByText("Does sleep change courtship behavior?");
+    expect(screen.getByLabelText("Keyboard shortcuts")).toBeInTheDocument();
+    const row = (operation) => container.querySelector(`#review-op-${operation.operation_id}`);
+
+    fireEvent.keyDown(document, { key: "j" });
+    expect(row(first)).toHaveAttribute("aria-current", "true");
+    expect(row(second)).not.toHaveAttribute("aria-current");
+
+    fireEvent.keyDown(document, { key: "a" });
+    await waitFor(() => expect(patchBodies).toHaveLength(1));
+    expect(patchBodies[0]).toMatchObject({ operationId: first.operation_id, status: "accepted" });
+    await waitFor(() =>
+      expect(setFlash).toHaveBeenLastCalledWith("Accepted: Does sleep change courtship behavior?")
+    );
+    // The next undecided proposal is now the one the keys act on.
+    await waitFor(() => expect(row(second)).toHaveAttribute("aria-current", "true"));
+
+    fireEvent.keyDown(document, { key: "r" });
+    await waitFor(() => expect(patchBodies).toHaveLength(2));
+    expect(patchBodies[1]).toMatchObject({ operationId: second.operation_id, status: "rejected" });
+
+    fireEvent.keyDown(document, { key: "k" });
+    expect(row(first)).toHaveAttribute("aria-current", "true");
+    fireEvent.keyDown(document, { key: "d" });
+    await waitFor(() => expect(patchBodies).toHaveLength(3));
+    expect(patchBodies[2]).toMatchObject({ operationId: first.operation_id, status: "proposed" });
+    expect(setFlash).toHaveBeenLastCalledWith("Deferred: Does sleep change courtship behavior?");
+    expect(screen.getByText(/1 rejected · 1 undecided/)).toBeInTheDocument();
+  });
+
+  it("leaves the shortcuts alone while a field is being typed in", async () => {
+    const draft = twoProposalDraft();
+    const patchBodies = [];
+    renderDraft(draft, { routes: [installDecisionRoute(draft, patchBodies)] });
+    await screen.findAllByText("Does sleep change courtship behavior?");
+
+    fireEvent.keyDown(document, { key: "j" });
+    const [note] = screen.getAllByLabelText("Decision note");
+    note.focus();
+    fireEvent.keyDown(note, { key: "a" });
+    fireEvent.keyDown(note, { key: "j" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(patchBodies).toHaveLength(0);
+  });
+
+  it("offers Defer from the narrative view too", async () => {
+    const draft = draftFixture();
+    const patchBodies = [];
+    renderDraft(draft, { routes: [installDecisionRoute(draft, patchBodies)] });
+    await screen.findAllByText("Does sleep change courtship behavior?");
+
+    fireEvent.click(screen.getByRole("button", { name: "Narrative" }));
+    fireEvent.click(screen.getByRole("button", { name: /Proposed edit 1:/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Defer edit" }));
+    await waitFor(() => expect(patchBodies).toHaveLength(1));
+    expect(patchBodies[0].status).toBe("proposed");
+  });
+
+  it("gives claim statements and falsification criteria typed editors", async () => {
+    const draft = draftFixture({
+      operations: [
+        {
+          ...draftFixture().operations[0],
+          entity_type: "claim",
+          semantic_type: null,
+          payload: {
+            statement: "Sleep loss reduces courtship",
+            falsification_criteria: "No change in courtship index",
+            primary_question_id: "q-1",
+          },
+        },
+      ],
+    });
+    renderDraft(draft);
+    await screen.findAllByText("Sleep loss reduces courtship");
+
+    const statement = screen.getByLabelText("Statement");
+    expect(statement.tagName).toBe("TEXTAREA");
+    expect(screen.getByLabelText("Falsification criteria")).toHaveValue(
+      "No change in courtship index"
+    );
+    expect(screen.queryByLabelText("Primary question id")).not.toBeInTheDocument();
+
+    fireEvent.change(statement, { target: { value: "Sleep loss halves courtship" } });
+    expect(JSON.parse(screen.getByLabelText("Edit JSON payload").value)).toMatchObject({
+      statement: "Sleep loss halves courtship",
+      falsification_criteria: "No change in courtship index",
+      primary_question_id: "q-1",
+    });
+  });
+});
+
+describe("GraphDraftDetailCard commit hand-off", () => {
+  it("commits with a suggested message when none is typed and offers the next review", async () => {
+    const draft = draftFixture({
+      operations: [{ ...draftFixture().operations[0], status: "accepted" }],
+    });
+    let commitBody = null;
+    const navigate = vi.fn();
+    renderDraft(draft, {
+      navigate,
+      routes: [
+        {
+          match: `/graph-drafts/${draft.change_set_id}/commit`,
+          method: "POST",
+          response: (request) => {
+            commitBody = JSON.parse(request.init.body);
+            return apiResponse({ ...draft, status: "committed" });
+          },
+        },
+        {
+          match: "/batches?limit=5&mine=true",
+          response: apiResponse([
+            { change_set_id: draft.change_set_id, status: "committed" },
+            { change_set_id: "55555555-5555-4555-8555-555555555555", status: "ready" },
+          ]),
+        },
+      ],
+    });
+    await screen.findByText("1 of 1 kept");
+    const commitField = screen.getByLabelText(/^Commit message/);
+    expect(commitField).toHaveAttribute(
+      "placeholder",
+      "Daily review 2026-07-15: kept 1 of 1 proposals"
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Commit accepted changes" }));
+    await waitFor(() => expect(commitBody).not.toBeNull());
+    expect(commitBody.message).toBe("Daily review 2026-07-15: kept 1 of 1 proposals");
+
+    expect(await screen.findByText("Committed.")).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: "Next review" }));
+    expect(navigate).toHaveBeenCalledWith("/app/batches/55555555-5555-4555-8555-555555555555");
+  });
+});
+

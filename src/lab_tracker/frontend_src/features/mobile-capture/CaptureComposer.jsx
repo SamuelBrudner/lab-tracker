@@ -1,5 +1,6 @@
 import * as React from "react";
 
+import { DraftRecoveryNotice } from "../../shared/ui.jsx";
 import { CaptureIcon } from "./CaptureIcon.jsx";
 
 const VOICE_NOTE_TYPES = [
@@ -39,6 +40,12 @@ function CaptureComposer({
   voiceNoteType,
   setVoiceNoteType,
   onUploadCapture,
+  draftSavedAt = null,
+  onRestoreDraft = null,
+  onDiscardDraft = null,
+  recordingSupported = false,
+  isRecording = false,
+  onToggleRecording = null,
 }) {
   return (
     <section className="capture-primary" aria-labelledby="capture-primary-title">
@@ -48,6 +55,12 @@ function CaptureComposer({
           {returnPath ? "Back to orientation" : "Workspace"}
         </button>
       </div>
+      <DraftRecoveryNotice
+        label="an unsent capture"
+        savedAt={draftSavedAt}
+        onRestore={onRestoreDraft}
+        onDiscard={onDiscardDraft}
+      />
       <input
         accept="image/*"
         aria-label="Photo file"
@@ -100,15 +113,31 @@ function CaptureComposer({
           rows={1}
           value={composerTextValue}
         />
-        <label
-          aria-disabled={!canWrite}
-          className={`capture-composer-icon capture-composer-mic${canWrite ? "" : " disabled"}`}
-          htmlFor="capture-audio-record-input"
-          title="Record voice note"
-        >
-          <CaptureIcon kind="voice" />
-          <span className="sr-only">Record voice note</span>
-        </label>
+        {recordingSupported ? (
+          <button
+            aria-label={isRecording ? "Stop recording" : "Record voice note"}
+            aria-pressed={isRecording}
+            className={`capture-composer-icon capture-composer-mic${
+              isRecording ? " recording" : ""
+            }`}
+            disabled={!canWrite || uploading}
+            onClick={onToggleRecording}
+            title={isRecording ? "Stop recording" : "Record voice note"}
+            type="button"
+          >
+            <CaptureIcon kind="voice" />
+          </button>
+        ) : (
+          <label
+            aria-disabled={!canWrite}
+            className={`capture-composer-icon capture-composer-mic${canWrite ? "" : " disabled"}`}
+            htmlFor="capture-audio-record-input"
+            title="Record voice note"
+          >
+            <CaptureIcon kind="voice" />
+            <span className="sr-only">Record voice note</span>
+          </label>
+        )}
         <button
           aria-label="Save capture"
           className="capture-composer-send"
@@ -173,6 +202,12 @@ function CaptureComposer({
         </div>
       ) : null}
       <div className="capture-attachment-strip" aria-live="polite">
+        {isRecording ? (
+          <span className="capture-attachment-chip recording">
+            <CaptureIcon kind="voice" />
+            <span>Recording… tap the microphone to stop</span>
+          </span>
+        ) : null}
         {photoFile ? (
           <span className="capture-attachment-chip">
             <CaptureIcon kind="photo" />
@@ -220,16 +255,6 @@ function CaptureComposer({
           </select>
         </label>
       ) : null}
-      <div className="capture-actions">
-        <button
-          className="btn-secondary"
-          disabled={!canWrite || !readyToCapture || uploading}
-          onClick={() => onUploadCapture()}
-          type="button"
-        >
-          Save for later
-        </button>
-      </div>
     </section>
   );
 }

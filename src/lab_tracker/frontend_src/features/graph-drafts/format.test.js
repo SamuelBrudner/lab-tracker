@@ -2,6 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   contextOptions,
+  decisionCounts,
+  decisionFlashMessage,
+  defaultCommitMessage,
+  editableStringFields,
   nextPayloadWithTarget,
   operationProposalText,
   payloadTargetId,
@@ -135,5 +139,110 @@ describe("spokenReviewScript", () => {
     expect(script).toContain("Review summary. A review");
     expect(script).toContain("There is 1 proposal.");
     expect(script).toContain("Questions for you. What rig?");
+  });
+});
+
+describe("decisionFlashMessage", () => {
+  const operation = {
+    op: "create",
+    entity_type: "claim",
+    payload: { statement: "Sleep deprivation reduces courtship" },
+    status: "proposed",
+  };
+
+  it("names the decision and the proposal it applied to", () => {
+    expect(decisionFlashMessage(operation, "accepted")).toBe(
+      "Accepted: Sleep deprivation reduces courtship"
+    );
+    expect(decisionFlashMessage(operation, "rejected")).toBe(
+      "Rejected: Sleep deprivation reduces courtship"
+    );
+    expect(decisionFlashMessage(operation, "proposed")).toBe(
+      "Deferred: Sleep deprivation reduces courtship"
+    );
+  });
+
+  it("reports an edit-only save without inventing a decision", () => {
+    expect(decisionFlashMessage(operation, undefined)).toBe(
+      "Saved edits to: Sleep deprivation reduces courtship"
+    );
+  });
+
+  it("clips a long proposal so the confirmation stays one line", () => {
+    const long = { ...operation, payload: { statement: "x".repeat(120) } };
+    expect(decisionFlashMessage(long, "accepted")).toBe(`Accepted: ${"x".repeat(77)}...`);
+  });
+});
+
+describe("decisionCounts", () => {
+  it("tallies kept, rejected, and undecided proposals", () => {
+    expect(
+      decisionCounts({
+        operations: [
+          { status: "accepted" },
+          { status: "accepted" },
+          { status: "rejected" },
+          { status: "proposed" },
+          { status: "applied" },
+        ],
+      })
+    ).toEqual({ accepted: 2, proposed: 1, rejected: 1, other: 1 });
+    expect(decisionCounts(null)).toEqual({ accepted: 0, proposed: 0, rejected: 0, other: 0 });
+  });
+});
+
+describe("defaultCommitMessage", () => {
+  it("describes a daily review by date and how much was kept", () => {
+    expect(
+      defaultCommitMessage(
+        {
+          created_at: "2026-07-15T20:00:00Z",
+          draft_mode: "graph_batch",
+          operations: [{}, {}, {}],
+        },
+        2
+      )
+    ).toBe("Daily review 2026-07-15: kept 2 of 3 proposals");
+  });
+
+  it("labels a single-capture draft differently and copes with no date", () => {
+    expect(
+      defaultCommitMessage({ draft_mode: "graph_context", operations: [{}] }, 1)
+    ).toBe("Capture review: kept 1 of 1 proposals");
+    expect(defaultCommitMessage(null, 0)).toBe("");
+  });
+});
+
+describe("editableStringFields", () => {
+  it("offers typed editors for free-text fields only", () => {
+    expect(
+      editableStringFields({
+        statement: "Sleep reduces courtship",
+        falsification_criteria: "No drop in courtship index after deprivation",
+        text: "already typed",
+        raw_content: "already typed",
+        primary_question_id: "q-1",
+        dataset_ids: "d-1",
+        entity_type: "claim",
+        claim_type: "empirical",
+        confidence: 0.4,
+        label: "short",
+      })
+    ).toEqual([
+      { key: "statement", label: "Statement", multiline: true },
+      {
+        key: "falsification_criteria",
+        label: "Falsification criteria",
+        multiline: true,
+      },
+      { key: "label", label: "Label", multiline: false },
+    ]);
+  });
+
+  it("treats a long unknown string as multi-line", () => {
+    expect(editableStringFields({ caption: "c".repeat(81) })).toEqual([
+      { key: "caption", label: "Caption", multiline: true },
+    ]);
+    expect(editableStringFields(null)).toEqual([]);
   });
 });

@@ -1,11 +1,14 @@
-/* Offline-aware upload queue for capture multipart POSTs.
+/* Offline-aware upload queue for capture POSTs.
  *
  * The queue stores failed (or offline-initiated) capture payloads in IndexedDB
  * and replays them when the network returns. Logic is split from storage so
  * the queue can be unit-tested against an in-memory adapter without pulling in
  * an IndexedDB shim. The queue is endpoint-agnostic: each item carries its own
  * target path so the same queue serves /notes/upload-file (full-form capture),
- * /notes/quick-capture (share target), and any future capture variants.
+ * /notes/quick-capture (share target), the JSON /notes text capture, and any
+ * future capture variants. A job is either multipart (`file` + `fields`) or a
+ * JSON body (`json`); both carry a client_capture_id so a replay after an
+ * ambiguous failure is idempotent server-side.
  */
 
 const DB_NAME = "lab-tracker-upload-queue";
@@ -14,6 +17,7 @@ const STORE = "pending";
 
 const QUICK_CAPTURE_PATH = "/notes/quick-capture";
 const UPLOAD_FILE_PATH = "/notes/upload-file";
+const TEXT_NOTE_PATH = "/notes";
 const MAX_RETRY_ATTEMPTS = 5;
 const AUTH_RETRY_STATUSES = new Set([401, 403]);
 const PERMANENT_CLIENT_REJECTION_STATUSES = new Set([400, 404, 409, 410, 413, 415, 422]);
@@ -184,8 +188,9 @@ function createUploadQueue({
 
   async function enqueue({
     endpoint,
-    file,
+    file = null,
     fields = {},
+    json = null,
     ownerId = "",
     ownerLabel = "",
     filename = "",
@@ -194,27 +199,44 @@ function createUploadQueue({
     if (!endpoint) {
       throw new Error("enqueue requires endpoint");
     }
-    if (!file) {
+    const isJson = json !== null && json !== undefined;
+    if (isJson && (typeof json !== "object" || Array.isArray(json))) {
+      throw new Error("enqueue requires json to be an object");
+    }
+    if (isJson && file) {
+      throw new Error("enqueue takes either a file or a json body, not both");
+    }
+    if (!isJson && !file) {
       throw new Error("enqueue requires a file");
     }
-    if (!fields.project_id) {
-      throw new Error("enqueue requires fields.project_id");
+    if (!(isJson ? json.project_id : fields.project_id)) {
+      throw new Error(isJson ? "enqueue requires json.project_id" : "enqueue requires fields.project_id");
     }
-    const clientCaptureId = fields.client_capture_id || createClientCaptureId();
+    const clientCaptureId =
+      (isJson ? json.client_capture_id : fields.client_capture_id) || createClientCaptureId();
     // Persist a stable, non-secret OWNER identity and never a bearer credential:
     // a queued job is only ever drained under a live session whose identity
     // matches ownerId. ownerLabel is non-secret UI text for quarantine prompts.
-    const record = {
-      endpoint,
-      file,
-      fields: { ...fields, client_capture_id: clientCaptureId },
-      filename: filename || file.name || "capture",
-      contentType: contentType || file.type || "application/octet-stream",
-      ownerId,
-      ownerLabel,
-      clientCaptureId,
-      enqueuedAt: now(),
-    };
+    const record = isJson
+      ? {
+          endpoint,
+          json: { ...json, client_capture_id: clientCaptureId },
+          ownerId,
+          ownerLabel,
+          clientCaptureId,
+          enqueuedAt: now(),
+        }
+      : {
+          endpoint,
+          file,
+          fields: { ...fields, client_capture_id: clientCaptureId },
+          filename: filename || file.name || "capture",
+          contentType: contentType || file.type || "application/octet-stream",
+          ownerId,
+          ownerLabel,
+          clientCaptureId,
+          enqueuedAt: now(),
+        };
     const id = await adapter.add(record);
     notify();
     return id;
@@ -281,31 +303,51 @@ function createUploadQueue({
         results.skipped.push(queuedItem);
         continue;
       }
-      const payload = new FormData();
-      payload.append("file", queuedItem.file, queuedItem.filename);
-      let fields = queuedItem.fields || { project_id: queuedItem.projectId };
-      if (!fields.client_capture_id) {
-        const clientCaptureId = queuedItem.clientCaptureId || createClientCaptureId();
-        fields = { ...fields, client_capture_id: clientCaptureId };
-        const patch = { fields, clientCaptureId };
-        if (typeof adapter.update === "function") {
-          queuedItem = (await adapter.update(queuedItem.id, patch)) || {
-            ...queuedItem,
-            ...patch,
-          };
-        } else {
-          queuedItem = { ...queuedItem, ...patch };
-        }
-      }
-      for (const [key, value] of Object.entries(fields)) {
-        if (value === undefined || value === null) {
-          continue;
-        }
-        payload.append(key, value);
-      }
       // Only ever the live session token — never a value persisted with the job,
       // and never any token when the server reports auth disabled.
       const headers = authEnabled ? { Authorization: `Bearer ${token}` } : {};
+      let payload;
+      if (queuedItem.json) {
+        let json = queuedItem.json;
+        if (!json.client_capture_id) {
+          const clientCaptureId = queuedItem.clientCaptureId || createClientCaptureId();
+          json = { ...json, client_capture_id: clientCaptureId };
+          const patch = { json, clientCaptureId };
+          if (typeof adapter.update === "function") {
+            queuedItem = (await adapter.update(queuedItem.id, patch)) || {
+              ...queuedItem,
+              ...patch,
+            };
+          } else {
+            queuedItem = { ...queuedItem, ...patch };
+          }
+        }
+        headers["Content-Type"] = "application/json";
+        payload = JSON.stringify(json);
+      } else {
+        payload = new FormData();
+        payload.append("file", queuedItem.file, queuedItem.filename);
+        let fields = queuedItem.fields || { project_id: queuedItem.projectId };
+        if (!fields.client_capture_id) {
+          const clientCaptureId = queuedItem.clientCaptureId || createClientCaptureId();
+          fields = { ...fields, client_capture_id: clientCaptureId };
+          const patch = { fields, clientCaptureId };
+          if (typeof adapter.update === "function") {
+            queuedItem = (await adapter.update(queuedItem.id, patch)) || {
+              ...queuedItem,
+              ...patch,
+            };
+          } else {
+            queuedItem = { ...queuedItem, ...patch };
+          }
+        }
+        for (const [key, value] of Object.entries(fields)) {
+          if (value === undefined || value === null) {
+            continue;
+          }
+          payload.append(key, value);
+        }
+      }
       const endpoint = queuedItem.endpoint || QUICK_CAPTURE_PATH;
       let response;
       try {
@@ -380,6 +422,7 @@ export {
   AUTH_RETRY_STATUSES,
   MAX_RETRY_ATTEMPTS,
   QUICK_CAPTURE_PATH,
+  TEXT_NOTE_PATH,
   UPLOAD_FILE_PATH,
   createIndexedDbStorage,
   createMemoryStorage,

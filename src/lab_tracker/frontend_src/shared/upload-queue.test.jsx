@@ -4,6 +4,7 @@ import { indexedDB as fakeIndexedDB } from "fake-indexeddb";
 import {
   MAX_RETRY_ATTEMPTS,
   QUICK_CAPTURE_PATH,
+  TEXT_NOTE_PATH,
   UPLOAD_FILE_PATH,
   createIndexedDbStorage,
   createMemoryStorage,
@@ -96,6 +97,91 @@ describe("createUploadQueue", () => {
     await expect(
       queue.enqueue({ endpoint: UPLOAD_FILE_PATH, file: makeFile(), fields: {} })
     ).rejects.toThrow(/project_id/);
+  });
+
+  it("validates a JSON job: an object body with a project id, and never a file as well", async () => {
+    const queue = createUploadQueue({ storage: createMemoryStorage(), fetch: vi.fn() });
+    await expect(
+      queue.enqueue({ endpoint: TEXT_NOTE_PATH, json: { raw_content: "x" }, ownerId: OWNER })
+    ).rejects.toThrow(/json\.project_id/);
+    await expect(
+      queue.enqueue({ endpoint: TEXT_NOTE_PATH, json: ["nope"], ownerId: OWNER })
+    ).rejects.toThrow(/object/);
+    await expect(
+      queue.enqueue({
+        endpoint: TEXT_NOTE_PATH,
+        json: { project_id: "p" },
+        file: makeFile(),
+        ownerId: OWNER,
+      })
+    ).rejects.toThrow(/either a file or a json body/);
+  });
+
+  it("queues a JSON text capture and replays it as a JSON POST under the live token", async () => {
+    const storage = createMemoryStorage();
+    const fetchImpl = vi.fn(async () => ({ ok: true, status: 201 }));
+    const queue = createUploadQueue({
+      storage,
+      fetch: fetchImpl,
+      createClientCaptureId: () => "capture-text",
+    });
+
+    await queue.enqueue({
+      endpoint: TEXT_NOTE_PATH,
+      json: {
+        project_id: "proj-a",
+        raw_content: "Fly 12 climbed the gradient",
+        targets: [{ entity_type: "question", entity_id: "q-1" }],
+        metadata: { capture_kind: "text" },
+      },
+      ownerId: OWNER,
+    });
+    expect(await queue.pendingCount()).toBe(1);
+    const [record] = await queue.listPending();
+    expect(record.file).toBeUndefined();
+    expect(record.json.client_capture_id).toBe("capture-text");
+
+    const result = await drainAsOwner(queue, "tok-1");
+    expect(result.uploaded).toHaveLength(1);
+    expect(await queue.pendingCount()).toBe(0);
+
+    const [path, init] = fetchImpl.mock.calls[0];
+    expect(path).toBe(TEXT_NOTE_PATH);
+    expect(init.method).toBe("POST");
+    expect(init.headers).toEqual({
+      Authorization: "Bearer tok-1",
+      "Content-Type": "application/json",
+    });
+    expect(JSON.parse(init.body)).toEqual({
+      project_id: "proj-a",
+      raw_content: "Fly 12 climbed the gradient",
+      targets: [{ entity_type: "question", entity_id: "q-1" }],
+      metadata: { capture_kind: "text" },
+      client_capture_id: "capture-text",
+    });
+  });
+
+  it("keeps a JSON job queued when the network fails and drops it on a permanent rejection", async () => {
+    const storage = createMemoryStorage();
+    const fetchImpl = vi
+      .fn()
+      .mockRejectedValueOnce(new TypeError("offline"))
+      .mockResolvedValueOnce({ ok: false, status: 422 });
+    const queue = createUploadQueue({ storage, fetch: fetchImpl });
+    await queue.enqueue({
+      endpoint: TEXT_NOTE_PATH,
+      json: { project_id: "proj-a", raw_content: "later" },
+      ownerId: OWNER,
+    });
+
+    const offline = await drainAsOwner(queue);
+    expect(offline.stillQueued).toHaveLength(1);
+    expect(await queue.pendingCount()).toBe(1);
+
+    const rejected = await drainAsOwner(queue);
+    expect(rejected.dropped).toHaveLength(1);
+    expect(rejected.dropped[0].rejectedStatus).toBe(422);
+    expect(await queue.pendingCount()).toBe(0);
   });
 
   it("uploads queued items on drain and forwards all fields", async () => {

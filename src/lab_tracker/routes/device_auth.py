@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from uuid import UUID
 
-import segno
 from fastapi import APIRouter
 from starlette import status as http_status
 from starlette.requests import Request
@@ -15,9 +14,17 @@ from lab_tracker.auth import (
     DeviceToken,
     require_interactive_admin,
 )
-from lab_tracker.config import get_settings
 from lab_tracker.errors import NotFoundError, PermissionDeniedError
 from lab_tracker.instance_url import build_instance_url
+from lab_tracker.qr_svg import (
+    QR_BORDER,
+    QR_DARK,
+    QR_ERROR,
+    QR_LIGHT,
+    QR_MODULE_SIZE,
+    build_qr_svg,
+    resolve_public_base_url,
+)
 from lab_tracker.schemas import (
     DeviceConsumeRead,
     DeviceConsumeRequest,
@@ -30,59 +37,15 @@ from lab_tracker.schemas import (
 
 from .shared import actor_from_request, list_response, paginate, validate_pagination
 
-_ENROLLMENT_QR_ERROR = "l"
-_ENROLLMENT_QR_MODULE_SIZE = 8
-_ENROLLMENT_QR_BORDER = 6
-_ENROLLMENT_QR_DARK = "#000000"
-_ENROLLMENT_QR_LIGHT = "#ffffff"
-
-
-def _resolve_public_base_url(request: Request) -> str:
-    """Pick the base URL the paired phone will hit.
-
-    Setting beats inference. Falls back to the request's own host so a
-    desktop browser opened at the laptop's LAN IP automatically generates
-    a phone-reachable URL; only 127.0.0.1/localhost desktops need the
-    explicit LAB_TRACKER_BASE_URL override.
-    """
-    settings = getattr(request.app.state, "settings", None) or get_settings()
-    configured = settings.resolved_base_url()
-    if configured:
-        return configured
-    return build_instance_url(str(request.base_url), "")
-
-
-def _build_enrollment_qr_svg(url: str) -> str:
-    qr = segno.make(url, error=_ENROLLMENT_QR_ERROR)
-    module_size = _ENROLLMENT_QR_MODULE_SIZE
-    border = _ENROLLMENT_QR_BORDER
-    matrix = tuple(tuple(row) for row in qr.matrix)
-    matrix_size = len(matrix)
-    svg_size = (matrix_size + (border * 2)) * module_size
-    dark_rects: list[str] = []
-    for y, row in enumerate(matrix):
-        run_start: int | None = None
-        for x, module in enumerate((*row, 0)):
-            if module and run_start is None:
-                run_start = x
-            if not module and run_start is not None:
-                rect_x = (run_start + border) * module_size
-                rect_y = (y + border) * module_size
-                rect_width = (x - run_start) * module_size
-                dark_rects.append(
-                    f'<rect x="{rect_x}" y="{rect_y}" '
-                    f'width="{rect_width}" height="{module_size}" />'
-                )
-                run_start = None
-    dark_markup = "".join(dark_rects)
-    return (
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{svg_size}" '
-        f'height="{svg_size}" viewBox="0 0 {svg_size} {svg_size}" '
-        'shape-rendering="crispEdges">'
-        f'<rect width="{svg_size}" height="{svg_size}" fill="{_ENROLLMENT_QR_LIGHT}" />'
-        f'<g fill="{_ENROLLMENT_QR_DARK}">{dark_markup}</g>'
-        "</svg>"
-    )
+# Kept as module names: the enrollment tests and any operator scripts pin
+# the phone-scanner-friendly rendering through these.
+_ENROLLMENT_QR_ERROR = QR_ERROR
+_ENROLLMENT_QR_MODULE_SIZE = QR_MODULE_SIZE
+_ENROLLMENT_QR_BORDER = QR_BORDER
+_ENROLLMENT_QR_DARK = QR_DARK
+_ENROLLMENT_QR_LIGHT = QR_LIGHT
+_resolve_public_base_url = resolve_public_base_url
+_build_enrollment_qr_svg = build_qr_svg
 
 
 def build_device_auth_router(

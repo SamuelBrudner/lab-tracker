@@ -146,7 +146,10 @@ research record:
   and edges, return summaries by default, and never build the full graph merely
   to slice a neighborhood.
 - Sessions and acquisition outputs, including closing sessions and promoting
-  eligible sessions into datasets.
+  eligible sessions into datasets. An active session exposes a read-only
+  capture link (`GET /sessions/{session_id}/capture-link`): a phone-scannable
+  QR and URL that open `/app/capture` with the project and session
+  preselected, so bench captures land already linked to the session.
 - Dataset staging and direct commit with provenance/manifest capture, without
   an approval gate. The direct-commit path for people and the human-gated review
   path for AI proposals are deliberately asymmetric; see

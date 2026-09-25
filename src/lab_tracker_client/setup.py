@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from contextlib import suppress
 from pathlib import Path
@@ -49,6 +50,8 @@ JsonObject = dict[str, Any]
 PROFILE_KEYS = ("base_url", "default_project_id", "access_token")
 _HEALTH_PROBE_TIMEOUT_SECONDS = 2.0
 _DEFAULT_MCP_VERIFY_TIMEOUT_SECONDS = 15.0
+_MCP_PROBE_POLL_INTERVAL_SECONDS = 0.02
+_MCP_PROBE_SHUTDOWN_GRACE_SECONDS = 2.0
 _FULL_GIT_REVISION = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
 
 _SCAFFOLD_FILES = (
@@ -663,10 +666,16 @@ def _run_mcp_tool_probe(
 ) -> tuple[subprocess.CompletedProcess[str], JsonObject | None, JsonObject | None]:
     """Run one initialized tool call in a fresh bounded stdio session.
 
-    FastMCP can finish shutting down on stdin EOF before a later concurrent
-    request flushes its response. One tool call per short-lived process avoids
-    that race while still testing the exact executable and saved profile Codex
-    will use.
+    FastMCP treats stdin EOF as a shutdown signal and can exit before it
+    finishes writing the response to an in-flight ``tools/call`` request
+    (which may be doing outbound HTTP work). One tool call per short-lived
+    process avoids the race where a *later* concurrent request's response
+    gets lost in that shutdown, but ``subprocess.run(input=...)`` still
+    closes stdin the instant the request bytes are written -- racing the
+    *current* request's own response. So instead we keep stdin open,
+    drain stdout/stderr on background threads, and only close stdin once
+    responses for both the ``initialize`` (id 1) and ``tools/call`` (id 2)
+    requests have arrived, or the timeout elapses.
     """
 
     messages = (
@@ -701,16 +710,95 @@ def _run_mcp_tool_probe(
         json.dumps(message, separators=(",", ":")) + "\n"
         for message in messages
     )
-    completed = subprocess.run(  # noqa: S603 - resolved executable, no shell.
+
+    process = subprocess.Popen(  # noqa: S603 - resolved executable, no shell.
         [executable],
-        input=stdin_text,
-        capture_output=True,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=timeout_seconds,
-        check=False,
         env=env,
     )
-    responses = _mcp_responses_by_id(completed.stdout)
+    assert process.stdin is not None
+    assert process.stdout is not None
+    assert process.stderr is not None
+
+    stdout_chunks: list[str] = []
+    stderr_chunks: list[str] = []
+    stdout_lock = threading.Lock()
+
+    def _drain(stream: Any, chunks: list[str], lock: threading.Lock | None) -> None:
+        for line in stream:
+            if lock is not None:
+                with lock:
+                    chunks.append(line)
+            else:
+                chunks.append(line)
+
+    stdout_reader = threading.Thread(
+        target=_drain, args=(process.stdout, stdout_chunks, stdout_lock), daemon=True
+    )
+    stderr_reader = threading.Thread(
+        target=_drain, args=(process.stderr, stderr_chunks, None), daemon=True
+    )
+    stdout_reader.start()
+    stderr_reader.start()
+
+    def _responses_so_far() -> dict[int, JsonObject]:
+        with stdout_lock:
+            text = "".join(stdout_chunks)
+        return _mcp_responses_by_id(text)
+
+    deadline = time.monotonic() + timeout_seconds
+    timed_out = False
+    try:
+        process.stdin.write(stdin_text)
+        process.stdin.flush()
+
+        responses = _responses_so_far()
+        while {1, 2} - responses.keys():
+            if time.monotonic() >= deadline:
+                timed_out = True
+                break
+            if not stdout_reader.is_alive():
+                # Process closed stdout on its own (e.g. crashed); nothing
+                # more is coming.
+                break
+            time.sleep(_MCP_PROBE_POLL_INTERVAL_SECONDS)
+            responses = _responses_so_far()
+    finally:
+        with suppress(BrokenPipeError, OSError):
+            process.stdin.close()
+
+    grace_seconds = 0.5 if timed_out else _MCP_PROBE_SHUTDOWN_GRACE_SECONDS
+    try:
+        process.wait(timeout=grace_seconds)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+    stdout_reader.join(timeout=1.0)
+    stderr_reader.join(timeout=1.0)
+    with suppress(OSError):
+        process.stdout.close()
+    with suppress(OSError):
+        process.stderr.close()
+
+    responses = _responses_so_far()
+    completed = subprocess.CompletedProcess(
+        args=[executable],
+        returncode=process.returncode if process.returncode is not None else -1,
+        stdout="".join(stdout_chunks),
+        stderr="".join(stderr_chunks),
+    )
+
+    if timed_out:
+        raise subprocess.TimeoutExpired(
+            cmd=executable,
+            timeout=timeout_seconds,
+            output=completed.stdout,
+            stderr=completed.stderr,
+        )
+
     return completed, responses.get(1), responses.get(2)
 
 

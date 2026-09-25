@@ -255,7 +255,7 @@ test("an authenticated contributor reviews AI alignment before an owner commits 
     await ownerPage.getByRole("button", { name: "Commit accepted changes" }).click();
     expect((await commitResponse).status()).toBe(200);
 
-    await expect(ownerPage.getByText("Graph draft committed.", { exact: true })).toBeVisible();
+    await expect(ownerPage.getByText(/^Committed \d+ changes? to the graph\.$/)).toBeVisible();
     await expect(
       ownerPage.locator(".review-proposal-actions").getByText("applied", { exact: true })
     ).toBeVisible();

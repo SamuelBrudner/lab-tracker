@@ -91,6 +91,40 @@ function PendingBatchBanner({ enabled = true, token, navigate }) {
   );
 }
 
+// Drafts started from a single capture ("Draft graph update" on a note or an
+// image) are reviewed on the same page as the batches so they are not lost
+// between the Capture page's last-ten list and nowhere.
+function isCaptureDraft(draft) {
+  return draft?.draft_mode !== "graph_batch" && draft?.purpose !== "member_checkpoint_alignment";
+}
+
+function CaptureDraftCards({ drafts, emptyMessage, navigate }) {
+  if (drafts.length === 0) {
+    return <p className="subtle">{emptyMessage}</p>;
+  }
+  return drafts.map((draft) => (
+    <article className="item" key={draft.change_set_id}>
+      <div className="item-head">
+        <strong className="summary-clamp">{draft.summary || "Draft from a capture"}</strong>
+        <span className={pendingBatchStatus(draft.status)}>{draft.status}</span>
+      </div>
+      <div className="inline">
+        <span className="pill">{formatDate(draft.created_at)}</span>
+        {draft.model ? <span className="pill">{draft.model}</span> : null}
+      </div>
+      <button
+        type="button"
+        className="btn-primary"
+        onClick={() =>
+          navigate(`/app/graph-drafts/${draft.change_set_id}?return_to=${encodeURIComponent("/app/batches")}`)
+        }
+      >
+        Review draft
+      </button>
+    </article>
+  ));
+}
+
 function BatchCards({ batches, emptyMessage, navigate }) {
   if (batches.length === 0) {
     return <p className="subtle">{emptyMessage}</p>;
@@ -134,10 +168,13 @@ function BatchReviewPage({
   const [needsCommitBatches, setNeedsCommitBatches] = useState([]);
   const [unassignedOversightBatches, setUnassignedOversightBatches] = useState([]);
   const [runs, setRuns] = useState([]);
+  const [captureDrafts, setCaptureDrafts] = useState([]);
+  const [captureDraftsError, setCaptureDraftsError] = useState("");
   const [loading, setLoading] = useState(false);
   // Each load bumps the generation; results, failures and the loading reset of
   // a superseded load (e.g. for a previously selected project) are ignored.
   const loadGenerationRef = useRef(0);
+  const captureDraftGenerationRef = useRef(0);
   // The project this page currently shows (null once unmounted). An async
   // action started for another project must not touch this page's state.
   const shownProjectIdRef = useRef(selectedProjectId);
@@ -235,6 +272,41 @@ function BatchReviewPage({
     };
   }, [loadBatches]);
 
+  useEffect(() => {
+    // Loaded apart from the batch queues so a failure here cannot hide them.
+    const generation = ++captureDraftGenerationRef.current;
+    setCaptureDraftsError("");
+    Promise.all(
+      ["ready", "changes_requested"].map((status) =>
+        apiListRequest(
+          buildApiPath("/graph-drafts", { project_id: selectedProjectId, status, limit: 50 }),
+          { token }
+        )
+      )
+    )
+      .then((pages) => {
+        if (generation !== captureDraftGenerationRef.current) {
+          return;
+        }
+        const drafts = pages
+          .flatMap((page) => page.data || [])
+          .filter(isCaptureDraft)
+          .sort((a, b) => (Date.parse(b.created_at || "") || 0) - (Date.parse(a.created_at || "") || 0));
+        setCaptureDrafts(drafts);
+      })
+      .catch((err) => {
+        if (generation === captureDraftGenerationRef.current) {
+          setCaptureDrafts([]);
+          setCaptureDraftsError(
+            `Could not load drafts from captures: ${err?.message || "request failed."}`
+          );
+        }
+      });
+    return () => {
+      captureDraftGenerationRef.current += 1;
+    };
+  }, [selectedProjectId, token]);
+
   async function runNow() {
     if (!selectedProjectId || !canManageGraph) {
       return;
@@ -304,6 +376,13 @@ function BatchReviewPage({
             <BatchCards
               batches={batches}
               emptyMessage="No daily reviews need your response."
+              navigate={navigate}
+            />
+            <h3 className="review-drafts-from-captures">Drafts from your captures</h3>
+            {captureDraftsError ? <p className="subtle">{captureDraftsError}</p> : null}
+            <CaptureDraftCards
+              drafts={captureDrafts}
+              emptyMessage="No single-capture drafts are waiting for review."
               navigate={navigate}
             />
             <h3>Waiting on others</h3>

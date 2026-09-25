@@ -131,6 +131,14 @@ function ProposalCitation({
             </button>
             <button
               type="button"
+              className="btn-secondary"
+              disabled={!canEditDraft || Boolean(pending)}
+              onClick={() => onSaveOperation(operation, "proposed")}
+            >
+              Defer edit
+            </button>
+            <button
+              type="button"
               className="btn-danger"
               disabled={!canEditDraft || Boolean(pending)}
               onClick={() => onSaveOperation(operation, "rejected")}

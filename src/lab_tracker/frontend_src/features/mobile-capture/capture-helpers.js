@@ -1,5 +1,7 @@
-// Pure display/query helpers shared by the mobile-capture controller and its
-// presentational sections.
+// Display/query helpers shared by the mobile-capture controller and its
+// presentational sections, plus the small per-device capture-context store.
+
+import { DRAFT_KEY_PREFIX } from "../../hooks/useLocalDraft.js";
 
 function captureNotes(notes) {
   return notes.filter((note) => note.metadata?.capture_source === "mobile_capture");
@@ -44,9 +46,52 @@ function readCaptureLaunchContext(search = window.location.search) {
       checkpointNoteId: params.get("checkpoint_note_id") || "",
       projectId: params.get("project_id") || "",
       returnPath: returnPath.startsWith("/app/") ? returnPath : "",
+      sessionId: params.get("session_id") || "",
     };
   } catch {
-    return { checkpointNoteId: "", projectId: "", returnPath: "" };
+    return { checkpointNoteId: "", projectId: "", returnPath: "", sessionId: "" };
+  }
+}
+
+// The question and session a person last captured against, per project, kept
+// on this device so the next bench capture starts from the same context. It
+// lives under the local-draft prefix so signing out drops it with the drafts.
+function rememberedContextKey(projectId) {
+  return `${DRAFT_KEY_PREFIX}capture-context:${projectId}`;
+}
+
+function readRememberedCaptureContext(projectId) {
+  if (!projectId) {
+    return { questionId: "", sessionId: "" };
+  }
+  try {
+    const raw = globalThis.localStorage?.getItem(rememberedContextKey(projectId));
+    const parsed = raw ? JSON.parse(raw) : null;
+    return {
+      questionId: typeof parsed?.questionId === "string" ? parsed.questionId : "",
+      sessionId: typeof parsed?.sessionId === "string" ? parsed.sessionId : "",
+    };
+  } catch {
+    return { questionId: "", sessionId: "" };
+  }
+}
+
+function writeRememberedCaptureContext(projectId, { questionId = "", sessionId = "" }) {
+  if (!projectId) {
+    return;
+  }
+  try {
+    const storage = globalThis.localStorage;
+    if (!storage) {
+      return;
+    }
+    if (!questionId && !sessionId) {
+      storage.removeItem(rememberedContextKey(projectId));
+      return;
+    }
+    storage.setItem(rememberedContextKey(projectId), JSON.stringify({ questionId, sessionId }));
+  } catch {
+    // Storage may be unavailable (private mode, quota); the capture still saved.
   }
 }
 
@@ -59,4 +104,6 @@ export {
   isAudioCapture,
   missingBundleTranscript,
   readCaptureLaunchContext,
+  readRememberedCaptureContext,
+  writeRememberedCaptureContext,
 };

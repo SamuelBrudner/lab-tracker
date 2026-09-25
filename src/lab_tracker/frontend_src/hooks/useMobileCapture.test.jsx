@@ -1,6 +1,9 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
+import { indexedDB as fakeIndexedDB } from "fake-indexeddb";
 
 import { buildApiPath } from "../shared/api.js";
+import { getUploadQueue, resetUploadQueueForTests } from "../shared/register-sw.js";
+import { TEXT_NOTE_PATH } from "../shared/upload-queue.js";
 import { apiResponse, note, paged } from "../test/fixtures.js";
 import { errorResponse, installFetchMock } from "../test/utils.js";
 
@@ -141,5 +144,78 @@ describe("useMobileCapture", () => {
       ([url, init]) => url === "/notes" && init?.method === "POST"
     );
     expect(creates).toHaveLength(1);
+  });
+
+  it("queues a text capture offline when the note request never reaches the server", async () => {
+    vi.stubGlobal("indexedDB", fakeIndexedDB);
+    resetUploadQueueForTests();
+    try {
+      // No POST /notes route: fetch itself throws, which is the offline case.
+      installFetchMock([
+        {
+          match: buildApiPath("/graph-drafts", { project_id: PROJECT_ID, limit: 10 }),
+          response: paged([]),
+        },
+        { match: buildApiPath("/notes", { project_id: PROJECT_ID, limit: 10 }), response: paged([]) },
+        { match: buildApiPath("/analyses", { project_id: PROJECT_ID, limit: 50 }), response: paged([]) },
+        { match: buildApiPath("/claims", { project_id: PROJECT_ID, limit: 50 }), response: paged([]) },
+      ]);
+      const enqueue = vi.spyOn(getUploadQueue(), "enqueue").mockResolvedValue(1);
+      const { props, result } = renderCaptureHook();
+
+      act(() => {
+        result.current.handleComposerTextChange({ target: { value: "Rig 2 Fly 12" } });
+      });
+      await act(async () => {
+        await result.current.uploadCapture();
+      });
+
+      expect(enqueue).toHaveBeenCalledTimes(1);
+      const job = enqueue.mock.calls[0][0];
+      expect(job.endpoint).toBe(TEXT_NOTE_PATH);
+      expect(job.ownerId).toBe("owner-1");
+      expect(job.json).toMatchObject({
+        project_id: PROJECT_ID,
+        raw_content: "Rig 2 Fly 12",
+        metadata: { capture_source: "mobile_capture", capture_kind: "text" },
+      });
+      expect(props.setFlash).toHaveBeenLastCalledWith(
+        "Capture queued — will upload when you're back online."
+      );
+      expect(result.current.composerTextValue()).toBe("");
+      expect(props.refreshRecentNotes).not.toHaveBeenCalled();
+    } finally {
+      resetUploadQueueForTests();
+    }
+  });
+
+  it("offers to restore unsent text after the page is reopened, and clears it once saved", async () => {
+    installCaptureRoutes(() => apiResponse(note({ noteId: "note-4" }), 201));
+    const first = renderCaptureHook();
+    act(() => {
+      first.result.current.handleComposerTextChange({ target: { value: "Half a thought" } });
+    });
+    expect(first.result.current.composerDraftSavedAt).toBeNull();
+    first.unmount();
+
+    const second = renderCaptureHook();
+    await waitFor(() => expect(second.result.current.composerDraftSavedAt).not.toBeNull());
+    expect(second.result.current.composerTextValue()).toBe("");
+
+    act(() => {
+      second.result.current.restoreComposerText();
+    });
+    expect(second.result.current.composerTextValue()).toBe("Half a thought");
+    expect(second.result.current.composerDraftSavedAt).toBeNull();
+
+    await act(async () => {
+      await second.result.current.uploadCapture();
+    });
+    expect(second.props.setFlash).toHaveBeenLastCalledWith("Capture saved for review.");
+    second.unmount();
+
+    const third = renderCaptureHook();
+    await act(async () => {});
+    expect(third.result.current.composerDraftSavedAt).toBeNull();
   });
 });
