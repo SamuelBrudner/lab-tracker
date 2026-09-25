@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import datetime
 from hashlib import blake2b
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, delete, func, or_, select, text, update
+from sqlalchemy import and_, delete, or_, select, text, update
 from sqlalchemy.engine import Row
 from sqlalchemy.orm import Session as OrmSession
 from sqlalchemy.sql.elements import ColumnElement
@@ -25,6 +26,7 @@ from lab_tracker.draft_quality import DraftQualityRow
 from lab_tracker.errors import ConflictError, ValidationError
 from lab_tracker.member_onboarding import ALIGNMENT_MODE_KEY
 from lab_tracker.models import (
+    DEFERRED_AT_KEY,
     EDITED_AT_KEY,
     AcceptanceMode,
     EntityType,
@@ -36,6 +38,7 @@ from lab_tracker.models import (
     GraphDraftMode,
     GraphDraftPurpose,
     GraphDraftSemanticType,
+    deferred_operation_count,
     utc_now,
 )
 from lab_tracker.repository import EntityRepository
@@ -291,15 +294,36 @@ def apply_change_set_to_model(row: GraphChangeSetModel, change_set: GraphChangeS
     row.committed_by = change_set.committed_by
 
 
+@dataclass(frozen=True)
+class OperationTally:
+    """List-view counts for one change set, derived without hydrating operations."""
+
+    operation_count: int
+    deferred_count: int
+
+
+EMPTY_OPERATION_TALLY = OperationTally(operation_count=0, deferred_count=0)
+
+
+def operation_tally(operations: Iterable[GraphChangeOperation]) -> OperationTally:
+    loaded = list(operations)
+    return OperationTally(
+        operation_count=len(loaded),
+        deferred_count=deferred_operation_count(loaded),
+    )
+
+
 def change_set_from_model(
     row: GraphChangeSetModel,
     *,
     operations: Iterable[GraphChangeOperation] = (),
     operation_count: int | None = None,
+    deferred_count: int | None = None,
     usernames: dict[str, str] | None = None,
 ) -> GraphChangeSet:
     resolved_usernames = usernames or {}
     operation_list = list(operations)
+    loaded_tally = operation_tally(operation_list)
     return GraphChangeSet(
         change_set_id=ensure_uuid(row.change_set_id),
         project_id=ensure_uuid(row.project_id),
@@ -331,7 +355,12 @@ def change_set_from_model(
         generation_attempt_count=int(row.generation_attempt_count or 0),
         commit_message=row.commit_message,
         error_metadata=_dict(row.error_metadata),
-        operation_count=operation_count if operation_count is not None else len(operation_list),
+        operation_count=(
+            operation_count if operation_count is not None else loaded_tally.operation_count
+        ),
+        deferred_count=(
+            deferred_count if deferred_count is not None else loaded_tally.deferred_count
+        ),
         operations=operation_list,
         created_by=row.created_by,
         created_by_user_id=_uuid(row.created_by_user_id),
@@ -376,20 +405,33 @@ class SQLAlchemyGraphChangeSetRepository(EntityRepository[GraphChangeSet]):
             operation_map.setdefault(str(row.change_set_id), []).append(operation_from_model(row))
         return operation_map
 
-    def _operation_counts_for(self, change_set_ids: list[str]) -> dict[str, int]:
+    def _operation_tallies_for(self, change_set_ids: list[str]) -> dict[str, OperationTally]:
+        """Per-page operation and deferral counts; reads stamps, never hydrates operations.
+
+        The deferral stamp lives in the JSON ``error_metadata`` column, so the
+        tally is aggregated in Python to stay dialect-neutral. It is O(page):
+        one narrow row per operation of the listed change sets.
+        """
+
         if not change_set_ids:
             return {}
-        rows = list(
-            self._session.execute(
-                select(
-                    GraphChangeOperationModel.change_set_id,
-                    func.count(GraphChangeOperationModel.operation_id),
-                )
-                .where(GraphChangeOperationModel.change_set_id.in_(change_set_ids))
-                .group_by(GraphChangeOperationModel.change_set_id)
-            )
+        rows = self._session.execute(
+            select(
+                GraphChangeOperationModel.change_set_id,
+                GraphChangeOperationModel.error_metadata,
+            ).where(GraphChangeOperationModel.change_set_id.in_(change_set_ids))
         )
-        return {str(change_set_id): int(count) for change_set_id, count in rows}
+        operation_counts: dict[str, int] = {}
+        deferred_counts: dict[str, int] = {}
+        for change_set_id, error_metadata in rows:
+            key = str(change_set_id)
+            operation_counts[key] = operation_counts.get(key, 0) + 1
+            if DEFERRED_AT_KEY in _dict(error_metadata):
+                deferred_counts[key] = deferred_counts.get(key, 0) + 1
+        return {
+            key: OperationTally(operation_count=count, deferred_count=deferred_counts.get(key, 0))
+            for key, count in operation_counts.items()
+        }
 
     def draft_quality_rows(
         self,
@@ -440,10 +482,10 @@ class SQLAlchemyGraphChangeSetRepository(EntityRepository[GraphChangeSet]):
     ) -> list[GraphChangeSet]:
         change_set_ids = [row.change_set_id for row in rows]
         operation_map = self._operations_for(change_set_ids) if include_operations else {}
-        operation_counts = (
-            {change_set_id: len(operations) for change_set_id, operations in operation_map.items()}
+        tallies = (
+            {key: operation_tally(operations) for key, operations in operation_map.items()}
             if include_operations
-            else self._operation_counts_for(change_set_ids)
+            else self._operation_tallies_for(change_set_ids)
         )
         # Attribution columns are free-text strings (e.g. "operator-1"); only
         # UUID-shaped values can name a user, and binding anything else to the
@@ -479,15 +521,19 @@ class SQLAlchemyGraphChangeSetRepository(EntityRepository[GraphChangeSet]):
                 for attribution, user_id in attribution_user_ids.items()
                 if user_id in usernames_by_id
             }
-        return [
-            change_set_from_model(
-                row,
-                operations=operation_map.get(str(row.change_set_id), []),
-                operation_count=operation_counts.get(str(row.change_set_id), 0),
-                usernames=usernames,
+        change_sets: list[GraphChangeSet] = []
+        for row in rows:
+            tally = tallies.get(str(row.change_set_id), EMPTY_OPERATION_TALLY)
+            change_sets.append(
+                change_set_from_model(
+                    row,
+                    operations=operation_map.get(str(row.change_set_id), []),
+                    operation_count=tally.operation_count,
+                    deferred_count=tally.deferred_count,
+                    usernames=usernames,
+                )
             )
-            for row in rows
-        ]
+        return change_sets
 
     def get(self, entity_id: UUID) -> GraphChangeSet | None:
         self._session.flush()

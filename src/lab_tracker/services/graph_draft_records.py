@@ -19,9 +19,16 @@ from lab_tracker.models import (
     GraphDraftPurpose,
     Note,
     Question,
+    deferred_operation_count,
 )
 from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.graph_draft_batch_policy import BatchReviewQuery, BatchRunQuery
+
+
+def _refresh_operation_counts(change_set: GraphChangeSet) -> None:
+    """Derive the list-view tallies from the loaded operations before a save."""
+    change_set.operation_count = len(change_set.operations)
+    change_set.deferred_count = deferred_operation_count(change_set.operations)
 
 
 class GraphDraftReadAuthorization(Protocol):
@@ -48,7 +55,7 @@ class GraphDraftRecords(BaseService):
         self.authorization = authorization
 
     def save_graph_change_set(self, change_set: GraphChangeSet) -> None:
-        change_set.operation_count = len(change_set.operations)
+        _refresh_operation_counts(change_set)
         with self.unit_of_work() as repository:
             repository.graph_change_sets.save(change_set)
 
@@ -188,7 +195,7 @@ class GraphDraftRecords(BaseService):
         *,
         completed_at: datetime,
     ) -> GraphChangeSet | None:
-        change_set.operation_count = len(change_set.operations)
+        _refresh_operation_counts(change_set)
         with self.unit_of_work() as repository:
             return repository.graph_change_sets.complete_generation_claim(
                 change_set,
@@ -203,7 +210,7 @@ class GraphDraftRecords(BaseService):
         *,
         failed_at: datetime,
     ) -> GraphChangeSet | None:
-        change_set.operation_count = len(change_set.operations)
+        _refresh_operation_counts(change_set)
         with self.unit_of_work() as repository:
             failed = repository.graph_change_sets.fail_generation_claim(
                 change_set,

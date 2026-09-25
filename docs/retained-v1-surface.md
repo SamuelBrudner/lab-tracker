@@ -83,7 +83,15 @@ research record:
   transcripts, photo+voice bundles, and scheduled or user-triggered batches over
   staged notes. Drafting may be note-scoped or batch-scoped, but every proposed
   operation requires human edit/accept/reject before commit through normal API
-  validation. Drafts may also carry negative-knowledge labels:
+  validation. A reviewer may also explicitly defer a proposed operation
+  (`deferred_at` / `deferred_by` stamps that keep it `proposed`, are cleared by
+  accept, reject, or `deferred: false`, and are skipped by accept-all), a
+  rejection may carry an optional structured `reject_reason`, and a submit
+  with zero accepted operations closes the draft as `rejected` with
+  `reviewed_at` / `reviewed_by` stamped from the submitter and an optional
+  `review_note` — an all-negative review needs no owner verdict and never
+  archives or changes the source notes. Drafts may also carry
+  negative-knowledge labels:
   `record_decision` / `record_dead_end` / `record_pivot` propose exploration
   nodes, `abandon_question` closes a question with a required terminal reason,
   `merge_questions` retires one question into a replacement through the
@@ -112,8 +120,9 @@ research record:
   owner-commit projections remain distinct. Legacy drafts with no assignee are
   recoverable only through an explicit owner oversight projection. `GET
   /batches` pages these projections in the database and returns summaries
-  (`operation_count`, `meeting_note_count`) without operations or the context
-  packet; `GET /batches/{change_set_id}` returns the full draft.
+  (`operation_count`, `deferred_count`, `meeting_note_count`) without
+  operations or the context packet; `GET /batches/{change_set_id}` returns the
+  full draft, which also exposes `reject_reason_counts` per semantic type.
 - Opt-in, per-user review-ready email cues backed by a transactional delivery
   outbox, retry leases, and signed short-lived links. Email contains no project
   or research content, and links still require normal authentication and

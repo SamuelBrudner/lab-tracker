@@ -12,7 +12,7 @@ import binascii
 import json
 import math
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from datetime import date, datetime, timezone
 from enum import Enum
 from typing import Annotated, Any, Final, Literal
@@ -487,6 +487,24 @@ EDITED_BY_KEY: Final = "edited_by"
 REVIEWED_AT_KEY: Final = "reviewed_at"
 REVIEWED_BY_KEY: Final = "reviewed_by"
 REVIEW_NOTE_KEY: Final = "review_note"
+# Deferral is an explicit per-operation verdict ("not today") that keeps the
+# operation PROPOSED; a structured reject reason rides with a rejection only.
+DEFERRED_AT_KEY: Final = "deferred_at"
+DEFERRED_BY_KEY: Final = "deferred_by"
+REJECT_REASON_KEY: Final = "reject_reason"
+UNSPECIFIED_REJECT_REASON: Final = "unspecified"
+
+
+class GraphOperationRejectReason(str, Enum):
+    """Why a reviewer rejected one AI proposal, kept so negatives stay legible."""
+
+    DUPLICATE_OF_EXISTING = "duplicate_of_existing"
+    WRONG_TARGET = "wrong_target"
+    UNSUPPORTED_BY_SOURCE = "unsupported_by_source"
+    ALREADY_CAPTURED = "already_captured"
+    NOT_RELEVANT = "not_relevant"
+    NOT_NOW = "not_now"
+    OTHER = "other"
 
 
 class ExternalContextPolicy(str, Enum):
@@ -764,6 +782,28 @@ class GraphChangeOperation(_DomainModel):
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
+    @computed_field(return_type=datetime | None)
+    @property
+    def deferred_at(self) -> datetime | None:
+        """When a reviewer explicitly set this proposal aside; None when undeferred."""
+        value = self.error_metadata.get(DEFERRED_AT_KEY)
+        return datetime.fromisoformat(value) if isinstance(value, str) else None
+
+    @computed_field(return_type=GraphOperationRejectReason | None)
+    @property
+    def reject_reason(self) -> GraphOperationRejectReason | None:
+        value = self.error_metadata.get(REJECT_REASON_KEY)
+        return GraphOperationRejectReason(value) if isinstance(value, str) else None
+
+
+def deferred_operation_count(operations: Iterable[GraphChangeOperation]) -> int:
+    return sum(DEFERRED_AT_KEY in operation.error_metadata for operation in operations)
+
+
+def operation_review_key(operation: GraphChangeOperation) -> str:
+    """The label review tallies group by: the semantic type, else the raw op."""
+    return operation.semantic_type.value if operation.semantic_type else operation.op.value
+
 
 class GraphChangeSet(_DomainModel):
     change_set_id: UUID
@@ -793,6 +833,7 @@ class GraphChangeSet(_DomainModel):
     commit_message: str | None = None
     error_metadata: dict[str, Any] = Field(default_factory=dict)
     operation_count: int = 0
+    deferred_count: int = 0
     operations: list[GraphChangeOperation] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)
     created_by: str | None = None
@@ -833,6 +874,25 @@ class GraphChangeSet(_DomainModel):
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             return 0
         return int(value)
+
+    @computed_field(return_type=dict[str, dict[str, int]])
+    @property
+    def reject_reason_counts(self) -> dict[str, dict[str, int]]:
+        """Rejected operations tallied by review key, then by structured reason.
+
+        Rejections without a reason land in the ``unspecified`` bucket. Both
+        levels are emitted in sorted key order, and the tally is empty when the
+        operations are not loaded (list views).
+        """
+        counts: dict[str, dict[str, int]] = {}
+        for operation in self.operations:
+            if operation.status != GraphChangeOperationStatus.REJECTED:
+                continue
+            reason = operation.error_metadata.get(REJECT_REASON_KEY)
+            bucket = reason if isinstance(reason, str) else UNSPECIFIED_REJECT_REASON
+            reasons = counts.setdefault(operation_review_key(operation), {})
+            reasons[bucket] = reasons.get(bucket, 0) + 1
+        return {key: dict(sorted(counts[key].items())) for key in sorted(counts)}
 
 
 class GraphDraftBatchSettings(_DomainModel):

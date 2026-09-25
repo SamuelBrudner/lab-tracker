@@ -824,12 +824,14 @@ export interface components {
       "client_ref"?: (string | null);
       "confidence"?: (number | null);
       "created_at"?: string;
+      "deferred_at": (string | null);
       "entity_type": components["schemas"]["EntityType"];
       "error_metadata"?: Record<string, unknown>;
       "op": components["schemas"]["GraphChangeOp"];
       "operation_id": string;
       "payload"?: Record<string, unknown>;
       "rationale"?: string;
+      "reject_reason": (components["schemas"]["GraphOperationRejectReason"] | null);
       "result_entity_id"?: (string | null);
       "review_note"?: (string | null);
       "semantic_type"?: (components["schemas"]["GraphDraftSemanticType"] | null);
@@ -855,6 +857,7 @@ export interface components {
       "created_by"?: (string | null);
       "created_by_user_id"?: (string | null);
       "created_by_username"?: (string | null);
+      "deferred_count"?: number;
       "draft_mode"?: components["schemas"]["GraphDraftMode"];
       "error_metadata"?: Record<string, unknown>;
       "generation_attempt_count"?: number;
@@ -868,6 +871,7 @@ export interface components {
       "prompt_version": string;
       "provider"?: string;
       "purpose"?: components["schemas"]["GraphDraftPurpose"];
+      "reject_reason_counts": Record<string, Record<string, number>>;
       "review_assignee"?: (string | null);
       "review_assignee_user_id"?: (string | null);
       "review_assignee_username"?: (string | null);
@@ -922,6 +926,7 @@ export interface components {
     "GraphDraftMode": "graph_context" | "image_only" | "graph_batch";
     "GraphDraftPurpose": "general" | "member_checkpoint_alignment";
     "GraphDraftSemanticType": "create_entity" | "update_entity" | "create_note" | "link_note_to_question" | "link_note_to_session" | "link_note_to_dataset" | "link_note_to_analysis" | "suggest_new_question" | "suggest_new_dataset" | "suggest_new_goal" | "link_node_to_goal" | "update_goal" | "suggest_followup" | "request_clarification" | "record_decision" | "record_dead_end" | "record_pivot" | "abandon_question" | "merge_questions" | "retire_note";
+    "GraphOperationRejectReason": "duplicate_of_existing" | "wrong_target" | "unsupported_by_source" | "already_captured" | "not_relevant" | "not_now" | "other";
     "ListEnvelope_AuthInvitationRead_": {
       "data": Array<components["schemas"]["AuthInvitationRead"]>;
       "meta": components["schemas"]["PaginationMeta"];

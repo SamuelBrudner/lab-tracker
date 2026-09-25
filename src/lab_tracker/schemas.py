@@ -75,6 +75,7 @@ from lab_tracker.models import (
     GraphDraftBatchRunStatus,
     GraphDraftMode,
     GraphDraftPurpose,
+    GraphOperationRejectReason,
     GroupMembership,
     Note,
     NoteArchiveReason,
@@ -952,11 +953,14 @@ class MemberOnboardingOwnerQueueItem(BaseModel):
 
 
 class GraphDraftOperationUpdate(PatchRequestModel):
-    non_nullable_fields = frozenset({"payload", "status"})
+    non_nullable_fields = frozenset({"payload", "status", "deferred"})
 
     payload: dict[str, Any] | SkipJsonSchema[None] = None
     status: GraphChangeOperationStatus | SkipJsonSchema[None] = None
     review_note: str | None = None
+    deferred: bool | SkipJsonSchema[None] = None
+    # Nullable on purpose: ``{"status": "rejected", "reject_reason": null}`` clears it.
+    reject_reason: GraphOperationRejectReason | None = None
 
 
 class GraphDraftCreateRequest(RequestModel):
@@ -971,6 +975,12 @@ class GraphDraftCommitRequest(RequestModel):
 class GraphDraftReviewRequest(RequestModel):
     status: GraphChangeSetStatus
     note: NonBlankStr | None = None
+
+
+class GraphDraftSubmitRequest(RequestModel):
+    """Optional submit body; the note is recorded only when nothing was accepted."""
+
+    review_note: NonBlankStr | None = None
 
 
 class GraphChangeSetSummary(BaseModel):
@@ -997,6 +1007,7 @@ class GraphChangeSetSummary(BaseModel):
     commit_message: str | None = None
     error_metadata: dict[str, Any] = Field(default_factory=dict)
     operation_count: int = 0
+    deferred_count: int = 0
     created_at: datetime
     created_by: str | None = None
     created_by_user_id: UUID | None = None

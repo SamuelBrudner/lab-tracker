@@ -2266,6 +2266,7 @@ def test_batch_lists_paginate_in_sql_without_operations_or_context_packets(
         assert "operations" not in item
         assert "context_packet" not in item
         assert item["operation_count"] == 1
+        assert item["deferred_count"] == 0
         assert item["meeting_note_count"] == 0
         assert item["draft_mode"] == "graph_batch"
     assert hydrated_rows and max(hydrated_rows) <= 2
@@ -2282,6 +2283,132 @@ def test_batch_lists_paginate_in_sql_without_operations_or_context_packets(
     assert runs.json()["meta"]["total"] == 3
     assert len(runs.json()["data"]) == 1
     assert run_query_limits == [1]
+
+
+def test_batch_list_summary_reports_deferred_count_without_loading_operations(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The deferral tally is a per-page SQL read of stamps, never an operation load."""
+    from lab_tracker.sqlalchemy_repository_parts.graph_drafts import (
+        SQLAlchemyGraphChangeSetRepository,
+    )
+
+    project_id = _project(client, admin_auth_headers)
+    _note(client, admin_auth_headers, project_id, "Observation to set aside for now.")
+    client.app.state.graph_draft_client_factory = lambda _settings: FakeBatchDraftClient(
+        _batch_patch(project_id)
+    )
+    run = client.post(
+        "/batches/run-now", json={"project_id": project_id}, headers=admin_auth_headers
+    )
+    assert run.status_code == 201, run.text
+    change_set_id = run.json()["data"]["change_set_id"]
+    draft = client.get(f"/batches/{change_set_id}", headers=admin_auth_headers).json()["data"]
+    operation = draft["operations"][0]
+    deferred = client.patch(
+        f"/graph-drafts/{change_set_id}/operations/{operation['operation_id']}",
+        json={"deferred": True},
+        headers=admin_auth_headers,
+    )
+    assert deferred.status_code == 200, deferred.text
+    assert deferred.json()["data"]["deferred_count"] == 1
+
+    operation_loads: list[int] = []
+    original_operations_for = SQLAlchemyGraphChangeSetRepository._operations_for
+
+    def spy_operations_for(self, change_set_ids):  # noqa: ANN001, ANN202
+        operation_loads.append(len(change_set_ids))
+        return original_operations_for(self, change_set_ids)
+
+    monkeypatch.setattr(
+        SQLAlchemyGraphChangeSetRepository, "_operations_for", spy_operations_for
+    )
+
+    listed = client.get(f"/batches?project_id={project_id}", headers=admin_auth_headers)
+
+    assert listed.status_code == 200, listed.text
+    (item,) = listed.json()["data"]
+    assert item["change_set_id"] == change_set_id
+    assert "operations" not in item
+    assert item["operation_count"] == 1
+    assert item["deferred_count"] == 1
+    assert operation_loads == []
+
+
+def test_all_negative_daily_review_leaves_personal_queue_as_rejected(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    """A reviewer who accepts nothing can finish: the submit closes the batch without an owner."""
+    project_id = _project(client, admin_auth_headers)
+    reviewer_headers, reviewer_id = _registered_user(client, role=Role.EDITOR)
+    added = client.post(
+        f"/projects/{project_id}/members",
+        json={"user_id": reviewer_id, "role": "contributor"},
+        headers=admin_auth_headers,
+    )
+    assert added.status_code == 201
+    note_id = _note(client, reviewer_headers, project_id, "Reviewer's staged observation.")
+    client.app.state.graph_draft_client_factory = lambda _settings: FakeBatchDraftClient(
+        _batch_patch(project_id)
+    )
+    run = client.post("/batches/run-now", json={"project_id": project_id}, headers=reviewer_headers)
+    assert run.status_code == 201, run.text
+    change_set_id = run.json()["data"]["change_set_id"]
+    draft = client.get(f"/batches/{change_set_id}", headers=reviewer_headers).json()["data"]
+    operation = draft["operations"][0]
+    rejected = client.patch(
+        f"/graph-drafts/{change_set_id}/operations/{operation['operation_id']}",
+        json={"status": "rejected", "reject_reason": "not_relevant"},
+        headers=reviewer_headers,
+    )
+    assert rejected.status_code == 200, rejected.text
+
+    submitted = client.post(
+        f"/graph-drafts/{change_set_id}/submit",
+        json={"review_note": "All duplicates of existing questions."},
+        headers=reviewer_headers,
+    )
+
+    assert submitted.status_code == 200, submitted.text
+    closed = submitted.json()["data"]
+    assert closed["status"] == "rejected"
+    assert closed["reviewed_by"] == reviewer_id
+    assert closed["reviewed_at"] == closed["submitted_at"]
+    assert closed["review_note"] == "All duplicates of existing questions."
+    assert closed["deferred_count"] == 0
+    assert closed["reject_reason_counts"] == {"suggest_new_question": {"not_relevant": 1}}
+    # It has left every queue: nothing to act on, nothing waiting, nothing to commit.
+    assert client.get("/batches?mine=true", headers=reviewer_headers).json()["data"] == []
+    assert (
+        client.get("/batches?mine=true&status=submitted", headers=reviewer_headers).json()["data"]
+        == []
+    )
+    owner_commit_queue = client.get(
+        f"/batches?needs_commit=true&project_id={project_id}", headers=admin_auth_headers
+    )
+    assert owner_commit_queue.status_code == 200, owner_commit_queue.text
+    assert owner_commit_queue.json()["data"] == []
+    # ...but it stays on the record as a rejected Daily Review with its note.
+    history = client.get(
+        f"/batches?status=rejected&project_id={project_id}", headers=reviewer_headers
+    )
+    assert history.status_code == 200, history.text
+    (item,) = history.json()["data"]
+    assert item["change_set_id"] == change_set_id
+    assert item["review_note"] == "All duplicates of existing questions."
+    assert item["deferred_count"] == 0
+    detail = client.get(f"/batches/{change_set_id}", headers=reviewer_headers)
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["data"]["reject_reason_counts"] == {
+        "suggest_new_question": {"not_relevant": 1}
+    }
+    # The source note is untouched: an all-negative review never archives evidence.
+    note = client.get(f"/notes/{note_id}", headers=reviewer_headers)
+    assert note.status_code == 200, note.text
+    assert note.json()["data"]["status"] == "staged"
 
 
 def test_records_list_review_memory_change_sets_filters_by_status_and_limit() -> None:

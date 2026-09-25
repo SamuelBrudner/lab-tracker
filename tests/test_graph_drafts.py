@@ -33,11 +33,17 @@ from lab_tracker.graph_drafting import (
     make_graph_draft_client,
 )
 from lab_tracker.models import (
+    DEFERRED_AT_KEY,
+    REJECT_REASON_KEY,
     AcceptanceMode,
     EntityType,
     GraphChangeOp,
     GraphChangeOperation,
     GraphChangeOperationStatus,
+    GraphChangeSet,
+    GraphDraftSemanticType,
+    GraphOperationRejectReason,
+    deferred_operation_count,
 )
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 from lab_tracker.sqlalchemy_repository_parts.graph_drafts import operation_to_model
@@ -3392,6 +3398,391 @@ def test_repository_write_rejects_auto_accepted_operation() -> None:
         operation_to_model(operation)
 
 
+# --- Finishable review: deferral verdicts, reject reasons, zero-accept submit ---
+
+
+def _bare_operation(
+    change_set_id: UUID,
+    sequence: int,
+    *,
+    semantic_type: GraphDraftSemanticType | None = None,
+    status: GraphChangeOperationStatus = GraphChangeOperationStatus.PROPOSED,
+    error_metadata: dict[str, Any] | None = None,
+) -> GraphChangeOperation:
+    return GraphChangeOperation(
+        operation_id=uuid4(),
+        change_set_id=change_set_id,
+        sequence=sequence,
+        op=GraphChangeOp.CREATE,
+        entity_type=EntityType.QUESTION,
+        semantic_type=semantic_type,
+        status=status,
+        error_metadata=error_metadata or {},
+    )
+
+
+def test_deferred_operation_count_counts_only_stamped_operations() -> None:
+    change_set_id = uuid4()
+    deferred_at = utc_now()
+    stamped = _bare_operation(
+        change_set_id, 1, error_metadata={DEFERRED_AT_KEY: deferred_at.isoformat()}
+    )
+    untouched = _bare_operation(change_set_id, 2)
+
+    assert deferred_operation_count([stamped, untouched]) == 1
+    assert stamped.deferred_at == deferred_at
+    assert untouched.deferred_at is None
+
+
+def test_reject_reason_counts_group_by_semantic_type_with_unspecified_bucket() -> None:
+    change_set_id = uuid4()
+    change_set = GraphChangeSet(
+        change_set_id=change_set_id,
+        project_id=uuid4(),
+        source_note_id=uuid4(),
+        model="fake",
+        prompt_version="test",
+        operations=[
+            _bare_operation(
+                change_set_id,
+                1,
+                semantic_type=GraphDraftSemanticType.SUGGEST_NEW_QUESTION,
+                status=GraphChangeOperationStatus.REJECTED,
+                error_metadata={REJECT_REASON_KEY: GraphOperationRejectReason.NOT_RELEVANT.value},
+            ),
+            _bare_operation(change_set_id, 2, status=GraphChangeOperationStatus.REJECTED),
+            _bare_operation(
+                change_set_id,
+                3,
+                status=GraphChangeOperationStatus.ACCEPTED,
+                error_metadata={REJECT_REASON_KEY: GraphOperationRejectReason.OTHER.value},
+            ),
+        ],
+    )
+
+    assert change_set.reject_reason_counts == {
+        "create": {"unspecified": 1},
+        "suggest_new_question": {"not_relevant": 1},
+    }
+    assert change_set.operations[0].reject_reason is GraphOperationRejectReason.NOT_RELEVANT
+    assert change_set.operations[1].reject_reason is None
+    assert change_set.model_copy(update={"operations": []}).reject_reason_counts == {}
+
+
+def _draft_operations(
+    client: TestClient, headers: dict[str, str], change_set_id: str
+) -> list[dict[str, Any]]:
+    response = client.get(f"/graph-drafts/{change_set_id}", headers=headers)
+    assert response.status_code == 200, response.text
+    return response.json()["data"]["operations"]
+
+
+def _operation_path(change_set_id: str, operation: dict[str, Any]) -> str:
+    return f"/graph-drafts/{change_set_id}/operations/{operation['operation_id']}"
+
+
+def _operation_by_id(change_set: dict[str, Any], operation_id: str) -> dict[str, Any]:
+    return next(item for item in change_set["operations"] if item["operation_id"] == operation_id)
+
+
+def _me_user_id(client: TestClient, headers: dict[str, str]) -> str:
+    return client.get("/auth/me", headers=headers).json()["data"]["user_id"]
+
+
+def _patch_ok(
+    client: TestClient, headers: dict[str, str], path: str, body: dict[str, Any]
+) -> dict[str, Any]:
+    response = client.patch(path, json=body, headers=headers)
+    assert response.status_code == 200, response.text
+    return response.json()["data"]
+
+
+def test_defer_stamps_metadata_and_is_idempotent(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    change_set_id, operation = _note_graph_draft(client, admin_auth_headers)
+    path = _operation_path(change_set_id, operation)
+
+    deferred = client.patch(path, json={"deferred": True}, headers=admin_auth_headers)
+
+    assert deferred.status_code == 200, deferred.text
+    data = deferred.json()["data"]
+    stamped = _operation_by_id(data, operation["operation_id"])
+    assert stamped["status"] == "proposed"
+    assert stamped["deferred_at"] is not None
+    assert stamped["error_metadata"]["deferred_by"] == _me_user_id(client, admin_auth_headers)
+    assert data["deferred_count"] == 1
+
+    repeated = client.patch(path, json={"deferred": True}, headers=admin_auth_headers)
+
+    assert repeated.status_code == 200, repeated.text
+    repeated_data = repeated.json()["data"]
+    repeated_operation = _operation_by_id(repeated_data, operation["operation_id"])
+    assert repeated_data["updated_at"] == data["updated_at"]
+    assert repeated_operation["updated_at"] == stamped["updated_at"]
+    assert repeated_operation["error_metadata"] == stamped["error_metadata"]
+    assert repeated_data["deferred_count"] == 1
+
+    listed = client.get(
+        f"/graph-drafts?project_id={data['project_id']}", headers=admin_auth_headers
+    )
+    assert listed.status_code == 200, listed.text
+    summary = next(
+        item for item in listed.json()["data"] if item["change_set_id"] == change_set_id
+    )
+    assert "operations" not in summary
+    assert summary["operation_count"] == 2
+    assert summary["deferred_count"] == 1
+
+
+def test_defer_requires_proposed_status(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    change_set_id, operation = _note_graph_draft(client, admin_auth_headers)
+    path = _operation_path(change_set_id, operation)
+
+    conflicting = client.patch(
+        path, json={"deferred": True, "status": "accepted"}, headers=admin_auth_headers
+    )
+    assert conflicting.status_code == 422
+    null = client.patch(path, json={"deferred": None}, headers=admin_auth_headers)
+    assert null.status_code == 422
+    accepted = client.patch(path, json={"status": "accepted"}, headers=admin_auth_headers)
+    assert accepted.status_code == 200, accepted.text
+    late = client.patch(path, json={"deferred": True}, headers=admin_auth_headers)
+    assert late.status_code == 422
+
+    current = _draft_operations(client, admin_auth_headers, change_set_id)[0]
+    assert current["status"] == "accepted"
+    assert current["deferred_at"] is None
+    assert "deferred_at" not in current["error_metadata"]
+
+
+def test_accept_reject_or_undefer_clears_deferral(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    change_set_id, _ = _note_graph_draft(client, admin_auth_headers)
+    question, note = _draft_operations(client, admin_auth_headers, change_set_id)
+    question_path = _operation_path(change_set_id, question)
+    note_path = _operation_path(change_set_id, note)
+
+    # Accepting a deferred operation clears the deferral.
+    _patch_ok(client, admin_auth_headers, question_path, {"deferred": True})
+    accepted_data = _patch_ok(client, admin_auth_headers, question_path, {"status": "accepted"})
+    accepted_operation = _operation_by_id(accepted_data, question["operation_id"])
+    assert accepted_operation["status"] == "accepted"
+    assert accepted_operation["deferred_at"] is None
+    assert "deferred_at" not in accepted_operation["error_metadata"]
+    assert accepted_data["deferred_count"] == 0
+
+    # Rejecting a deferred operation clears it too.
+    _patch_ok(client, admin_auth_headers, note_path, {"deferred": True})
+    rejected_data = _patch_ok(client, admin_auth_headers, note_path, {"status": "rejected"})
+    rejected_operation = _operation_by_id(rejected_data, note["operation_id"])
+    assert rejected_operation["deferred_at"] is None
+    assert "deferred_by" not in rejected_operation["error_metadata"]
+    assert rejected_operation["error_metadata"]["reviewed_at"]
+
+    # An explicit un-defer leaves the operation proposed and undecided.
+    _patch_ok(client, admin_auth_headers, note_path, {"status": "proposed"})
+    deferred_again = _patch_ok(client, admin_auth_headers, note_path, {"deferred": True})
+    assert deferred_again["deferred_count"] == 1
+    undeferred_data = _patch_ok(client, admin_auth_headers, note_path, {"deferred": False})
+    undeferred_operation = _operation_by_id(undeferred_data, note["operation_id"])
+    assert undeferred_operation["status"] == "proposed"
+    assert undeferred_operation["deferred_at"] is None
+    assert undeferred_data["deferred_count"] == 0
+
+
+def test_accept_all_skips_deferred_operations(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    change_set_id, _ = _note_graph_draft(client, admin_auth_headers)
+    question, note = _draft_operations(client, admin_auth_headers, change_set_id)
+    deferred = client.patch(
+        _operation_path(change_set_id, note), json={"deferred": True}, headers=admin_auth_headers
+    )
+    assert deferred.status_code == 200, deferred.text
+
+    accepted = client.post(f"/graph-drafts/{change_set_id}/accept-all", headers=admin_auth_headers)
+
+    assert accepted.status_code == 200, accepted.text
+    data = accepted.json()["data"]
+    question_operation = _operation_by_id(data, question["operation_id"])
+    note_operation = _operation_by_id(data, note["operation_id"])
+    assert question_operation["status"] == "accepted"
+    assert question_operation["acceptance_mode"] == "bulk_accepted"
+    assert note_operation["status"] == "proposed"
+    assert note_operation["acceptance_mode"] is None
+    assert note_operation["deferred_at"] is not None
+    assert data["deferred_count"] == 1
+
+
+def test_reject_reason_is_validated_and_stored(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    change_set_id, operation = _note_graph_draft(client, admin_auth_headers)
+    path = _operation_path(change_set_id, operation)
+
+    bogus = client.patch(
+        path, json={"status": "rejected", "reject_reason": "bogus"}, headers=admin_auth_headers
+    )
+    assert bogus.status_code == 422
+    mismatched = client.patch(
+        path,
+        json={"status": "accepted", "reject_reason": "wrong_target"},
+        headers=admin_auth_headers,
+    )
+    assert mismatched.status_code == 422
+
+    rejected = client.patch(
+        path,
+        json={"status": "rejected", "reject_reason": "duplicate_of_existing"},
+        headers=admin_auth_headers,
+    )
+    assert rejected.status_code == 200, rejected.text
+    rejected_operation = _operation_by_id(rejected.json()["data"], operation["operation_id"])
+    assert rejected_operation["reject_reason"] == "duplicate_of_existing"
+    assert rejected_operation["error_metadata"]["reject_reason"] == "duplicate_of_existing"
+    assert rejected_operation["error_metadata"]["reviewed_by"] == _me_user_id(
+        client, admin_auth_headers
+    )
+
+    # A reason alone restates an existing rejection.
+    restated = client.patch(path, json={"reject_reason": "not_now"}, headers=admin_auth_headers)
+    assert restated.status_code == 200, restated.text
+    restated_operation = _operation_by_id(restated.json()["data"], operation["operation_id"])
+    assert restated_operation["status"] == "rejected"
+    assert restated_operation["reject_reason"] == "not_now"
+
+    cleared = client.patch(
+        path, json={"status": "rejected", "reject_reason": None}, headers=admin_auth_headers
+    )
+    assert cleared.status_code == 200, cleared.text
+    cleared_operation = _operation_by_id(cleared.json()["data"], operation["operation_id"])
+    assert cleared_operation["status"] == "rejected"
+    assert cleared_operation["reject_reason"] is None
+    assert "reject_reason" not in cleared_operation["error_metadata"]
+    assert cleared_operation["error_metadata"]["reviewed_at"]
+
+    # A reason never survives leaving the rejected state.
+    _patch_ok(client, admin_auth_headers, path, {"reject_reason": "other"})
+    accepted_data = _patch_ok(client, admin_auth_headers, path, {"status": "accepted"})
+    accepted_operation = _operation_by_id(accepted_data, operation["operation_id"])
+    assert accepted_operation["reject_reason"] is None
+    assert "reject_reason" not in accepted_operation["error_metadata"]
+
+
+def test_reject_reason_counts_exposed_on_change_set(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    change_set_id, _ = _note_graph_draft(client, admin_auth_headers)
+    question, note = _draft_operations(client, admin_auth_headers, change_set_id)
+    reasoned = client.patch(
+        _operation_path(change_set_id, question),
+        json={"status": "rejected", "reject_reason": "not_relevant"},
+        headers=admin_auth_headers,
+    )
+    assert reasoned.status_code == 200, reasoned.text
+    _patch_ok(
+        client, admin_auth_headers, _operation_path(change_set_id, note), {"status": "rejected"}
+    )
+
+    fetched = client.get(f"/graph-drafts/{change_set_id}", headers=admin_auth_headers)
+
+    assert fetched.status_code == 200, fetched.text
+    assert fetched.json()["data"]["reject_reason_counts"] == {
+        "create_note": {"unspecified": 1},
+        "suggest_new_question": {"not_relevant": 1},
+    }
+
+
+def test_submit_with_zero_accepted_operations_closes_as_rejected(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    change_set_id, _ = _note_graph_draft(client, admin_auth_headers)
+    operations = _draft_operations(client, admin_auth_headers, change_set_id)
+    for operation in operations:
+        rejected = client.patch(
+            _operation_path(change_set_id, operation),
+            json={"status": "rejected", "reject_reason": "not_relevant"},
+            headers=admin_auth_headers,
+        )
+        assert rejected.status_code == 200, rejected.text
+    blank = client.post(
+        f"/graph-drafts/{change_set_id}/submit",
+        json={"review_note": "  "},
+        headers=admin_auth_headers,
+    )
+    assert blank.status_code == 422
+
+    submitted = client.post(
+        f"/graph-drafts/{change_set_id}/submit",
+        json={"review_note": "Nothing worth keeping today."},
+        headers=admin_auth_headers,
+    )
+
+    assert submitted.status_code == 200, submitted.text
+    data = submitted.json()["data"]
+    assert data["status"] == "rejected"
+    assert data["submitted_at"] is not None
+    assert data["reviewed_at"] == data["submitted_at"]
+    assert data["reviewed_by"] == data["submitted_by"] == _me_user_id(client, admin_auth_headers)
+    assert data["review_note"] == "Nothing worth keeping today."
+    assert data["deferred_count"] == 0
+    assert data["reject_reason_counts"] == {
+        "create_note": {"not_relevant": 1},
+        "suggest_new_question": {"not_relevant": 1},
+    }
+    stored = client.get(f"/graph-drafts/{change_set_id}", headers=admin_auth_headers).json()["data"]
+    assert stored["status"] == "rejected"
+    assert stored["review_note"] == "Nothing worth keeping today."
+    assert stored["reviewed_at"] == stored["submitted_at"]
+    # The closed draft is final: no edits, no owner verdict, no commit.
+    reopened = client.patch(
+        _operation_path(change_set_id, operations[0]),
+        json={"status": "proposed"},
+        headers=admin_auth_headers,
+    )
+    assert reopened.status_code == 422
+    reviewed = client.post(
+        f"/graph-drafts/{change_set_id}/review",
+        json={"status": "changes_requested", "note": "Look again."},
+        headers=admin_auth_headers,
+    )
+    assert reviewed.status_code == 422
+    committed = client.post(
+        f"/graph-drafts/{change_set_id}/commit",
+        json={"message": "nothing to commit"},
+        headers=admin_auth_headers,
+    )
+    assert committed.status_code == 422
+
+
+def test_submit_review_note_rejected_when_operations_accepted(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    change_set_id, operation = _note_graph_draft(client, admin_auth_headers)
+    submit_path = f"/graph-drafts/{change_set_id}/submit"
+    operation_path = _operation_path(change_set_id, operation)
+    _patch_ok(client, admin_auth_headers, operation_path, {"status": "accepted"})
+
+    refused = client.post(submit_path, json={"review_note": "x"}, headers=admin_auth_headers)
+
+    assert refused.status_code == 422
+    still_ready = client.get(f"/graph-drafts/{change_set_id}", headers=admin_auth_headers)
+    assert still_ready.json()["data"]["status"] == "ready"
+
+    submitted = client.post(submit_path, json={}, headers=admin_auth_headers)
+
+    assert submitted.status_code == 200, submitted.text
+    data = submitted.json()["data"]
+    assert data["status"] == "submitted"
+    assert data["reviewed_at"] is None
+    assert data["reviewed_by"] is None
+    assert data["review_note"] is None
+
+
 # --- Origin honesty: user_revised only when a human actually edited the op ---
 
 
@@ -3623,15 +4014,14 @@ def test_general_draft_commits_note_link_with_mixed_targets(
 def _submit_and_reject(
     client: TestClient, headers: dict[str, str], change_set_id: str
 ) -> None:
-    submitted = client.post(f"/graph-drafts/{change_set_id}/submit", headers=headers)
-    assert submitted.status_code == 200, submitted.text
-    rejected = client.post(
-        f"/graph-drafts/{change_set_id}/review",
-        json={"status": "rejected", "note": "Try a different framing."},
+    """Close a draft that accepted nothing: the submit itself is the rejection."""
+    submitted = client.post(
+        f"/graph-drafts/{change_set_id}/submit",
+        json={"review_note": "Try a different framing."},
         headers=headers,
     )
-    assert rejected.status_code == 200, rejected.text
-    assert rejected.json()["data"]["status"] == "rejected"
+    assert submitted.status_code == 200, submitted.text
+    assert submitted.json()["data"]["status"] == "rejected"
 
 
 def test_redrafting_note_after_rejection_generates_new_draft(

@@ -26,6 +26,7 @@ from lab_tracker.models import (
     GraphDraftBatchTrigger,
     GraphDraftMode,
     GraphDraftPurpose,
+    GraphOperationRejectReason,
     Note,
     UsageEventResourceType,
     UsageEventVerb,
@@ -211,6 +212,8 @@ class GraphDraftsApiMixin:
         payload: PatchValue[dict[str, Any] | None] = NOT_PROVIDED,
         status: PatchValue[GraphChangeOperationStatus | None] = NOT_PROVIDED,
         review_note: PatchValue[str | None] = NOT_PROVIDED,
+        deferred: PatchValue[bool | None] = NOT_PROVIDED,
+        reject_reason: PatchValue[GraphOperationRejectReason | None] = NOT_PROVIDED,
         acceptance_mode: AcceptanceMode = AcceptanceMode.HUMAN_SELECTED,
         actor: AuthContext | None = None,
     ) -> GraphChangeSet:
@@ -221,6 +224,8 @@ class GraphDraftsApiMixin:
                 payload=payload,
                 status=status,
                 review_note=review_note,
+                deferred=deferred,
+                reject_reason=reject_reason,
                 acceptance_mode=acceptance_mode,
                 actor=actor,
             ),
@@ -253,11 +258,13 @@ class GraphDraftsApiMixin:
         self,
         change_set_id: UUID,
         *,
+        review_note: str | None = None,
         actor: AuthContext | None = None,
     ) -> GraphChangeSet:
         return self._with_usage_event(
             lambda: self.graph_drafts.submit_graph_change_set(
                 change_set_id,
+                review_note=review_note,
                 actor=actor,
             ),
             verb=UsageEventVerb.SUBMIT,

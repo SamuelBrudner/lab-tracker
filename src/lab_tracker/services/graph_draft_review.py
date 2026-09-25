@@ -23,6 +23,13 @@ from lab_tracker.member_onboarding import (
     validate_member_alignment_operations,
 )
 from lab_tracker.models import (
+    DEFERRED_AT_KEY,
+    DEFERRED_BY_KEY,
+    EDITED_AT_KEY,
+    EDITED_BY_KEY,
+    REVIEW_NOTE_KEY,
+    REVIEWED_AT_KEY,
+    REVIEWED_BY_KEY,
     AcceptanceMode,
     GraphChangeOperation,
     GraphChangeOperationStatus,
@@ -30,6 +37,7 @@ from lab_tracker.models import (
     GraphChangeSetStatus,
     GraphDraftMode,
     GraphDraftPurpose,
+    GraphOperationRejectReason,
     Note,
     ProjectMembershipRole,
     Question,
@@ -41,6 +49,11 @@ from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
 from lab_tracker.provider_error_redaction import provider_error_message
 from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.graph_draft_generation import GeneratedDraftProposal
+from lab_tracker.services.graph_draft_review_decisions import (
+    apply_deferral,
+    rejection_audit_metadata,
+    resolve_reject_reason,
+)
 from lab_tracker.services.graph_draft_revision_hints import compose_revise_hint
 from lab_tracker.services.graph_draft_validation import ensure_graph_change_set_revisable
 from lab_tracker.services.shared import UserExistenceReader, actor_user_fk, actor_user_id
@@ -48,6 +61,11 @@ from lab_tracker.services.shared import UserExistenceReader, actor_user_fk, acto
 _REVISION_ATTACHMENT_EVIDENCE_MESSAGE = (
     "Reviewer attachment previews are unavailable because revision attachments are not persisted."
 )
+# Review-audit stamps survive re-validation; deferral stamps survive only while proposed.
+_RETAINED_REVIEW_METADATA_KEYS = frozenset(
+    {EDITED_AT_KEY, EDITED_BY_KEY, REVIEWED_AT_KEY, REVIEWED_BY_KEY, REVIEW_NOTE_KEY}
+)
+_DEFERRAL_METADATA_KEYS = frozenset({DEFERRED_AT_KEY, DEFERRED_BY_KEY})
 
 
 class ReviewRecords(Protocol):
@@ -193,6 +211,8 @@ class GraphDraftReviewCoordinator(BaseService):
         payload: PatchValue[dict[str, Any] | None] = NOT_PROVIDED,
         status: PatchValue[GraphChangeOperationStatus | None] = NOT_PROVIDED,
         review_note: PatchValue[str | None] = NOT_PROVIDED,
+        deferred: PatchValue[bool | None] = NOT_PROVIDED,
+        reject_reason: PatchValue[GraphOperationRejectReason | None] = NOT_PROVIDED,
         acceptance_mode: AcceptanceMode = AcceptanceMode.HUMAN_SELECTED,
         actor: AuthContext | None = None,
     ) -> GraphChangeSet:
@@ -203,6 +223,8 @@ class GraphDraftReviewCoordinator(BaseService):
                 payload=payload,
                 status=status,
                 review_note=review_note,
+                deferred=deferred,
+                reject_reason=reject_reason,
                 acceptance_mode=acceptance_mode,
                 actor=actor,
             )
@@ -215,20 +237,23 @@ class GraphDraftReviewCoordinator(BaseService):
         payload: PatchValue[dict[str, Any] | None],
         status: PatchValue[GraphChangeOperationStatus | None],
         review_note: PatchValue[str | None],
+        deferred: PatchValue[bool | None],
+        reject_reason: PatchValue[GraphOperationRejectReason | None],
         acceptance_mode: AcceptanceMode,
         actor: AuthContext | None,
     ) -> GraphChangeSet:
-        change_set = self._change_set_for_serialized_onboarding_mutation(
-            change_set_id
-        )
+        change_set = self._change_set_for_serialized_onboarding_mutation(change_set_id)
         self._ensure_graph_change_set_editable(change_set, actor=actor)
         operation = self._find_graph_operation(change_set, operation_id)
-        if not any(is_provided(value) for value in (payload, status, review_note)):
+        provided = (payload, status, review_note, deferred, reject_reason)
+        if not any(is_provided(value) for value in provided):
             return change_set
         if is_provided(payload) and payload is None:
             raise ValidationError("payload must not be null.")
         if is_provided(status) and status is None:
             raise ValidationError("status must not be null.")
+        if is_provided(deferred) and deferred is None:
+            raise ValidationError("deferred must not be null.")
         before = operation.model_copy(deep=True)
         if is_provided(payload):
             if not isinstance(payload, dict):
@@ -236,8 +261,8 @@ class GraphDraftReviewCoordinator(BaseService):
             if payload != operation.payload:
                 operation.error_metadata = {
                     **operation.error_metadata,
-                    "edited_at": utc_now().isoformat(),
-                    "edited_by": actor_user_id(actor),
+                    EDITED_AT_KEY: utc_now().isoformat(),
+                    EDITED_BY_KEY: actor_user_id(actor),
                 }
             operation.payload = payload
         if is_provided(review_note):
@@ -250,36 +275,34 @@ class GraphDraftReviewCoordinator(BaseService):
             }:
                 raise ValidationError("Operation status must be proposed, accepted, or rejected.")
             operation.status = status
+        apply_deferral(operation, deferred, actor)
+        reason = resolve_reject_reason(operation, reject_reason)
         if operation.status == GraphChangeOperationStatus.REJECTED:
             rejection_changed = any(
                 (
                     operation.status != before.status,
                     operation.review_note != before.review_note,
                     operation.payload != before.payload,
+                    reason != before.reject_reason,
                 )
             )
             if rejection_changed:
-                operation.error_metadata = {
-                    **operation.error_metadata,
-                    "reviewed_at": utc_now().isoformat(),
-                    "reviewed_by": actor_user_id(actor),
-                    "review_note": operation.review_note,
-                }
+                operation.error_metadata = rejection_audit_metadata(
+                    operation, reason=reason, actor=actor
+                )
         else:
+            # Accept/un-reject clears deferral and reject reason; a proposed edit keeps them.
+            retained_keys = _RETAINED_REVIEW_METADATA_KEYS | (
+                _DEFERRAL_METADATA_KEYS
+                if operation.status == GraphChangeOperationStatus.PROPOSED
+                else frozenset()
+            )
             try:
                 self.patch_validator.validate_operation(operation, operation.payload)
                 operation.error_metadata = {
                     key: value
                     for key, value in operation.error_metadata.items()
-                    if key
-                    in {
-                        "edited_at",
-                        "edited_by",
-                        "reviewed_at",
-                        "reviewed_by",
-                        "review_note",
-                    }
-                    and value is not None
+                    if key in retained_keys and value is not None
                 }
             except ValidationError as exc:
                 operation.error_metadata = {
@@ -335,7 +358,11 @@ class GraphDraftReviewCoordinator(BaseService):
         self._ensure_graph_change_set_editable(change_set, actor=actor)
         accepted_any = False
         for operation in change_set.operations:
-            if operation.status != GraphChangeOperationStatus.PROPOSED:
+            # Bulk accept covers undecided proposals only: a deferral is a verdict.
+            if (
+                operation.status != GraphChangeOperationStatus.PROPOSED
+                or DEFERRED_AT_KEY in operation.error_metadata
+            ):
                 continue
             try:
                 self.patch_validator.validate_operation(operation, operation.payload)
@@ -354,20 +381,22 @@ class GraphDraftReviewCoordinator(BaseService):
         self,
         change_set_id: UUID,
         *,
+        review_note: str | None = None,
         actor: AuthContext | None = None,
     ) -> GraphChangeSet:
         with self.application_transaction():
-            return self._submit_graph_change_set(change_set_id, actor=actor)
+            return self._submit_graph_change_set(
+                change_set_id, review_note=review_note, actor=actor
+            )
 
     def _submit_graph_change_set(
         self,
         change_set_id: UUID,
         *,
+        review_note: str | None,
         actor: AuthContext | None,
     ) -> GraphChangeSet:
-        change_set = self._change_set_for_serialized_onboarding_mutation(
-            change_set_id
-        )
+        change_set = self._change_set_for_serialized_onboarding_mutation(change_set_id)
         self.authorization.require_contributor(change_set.project_id, actor=actor)
         is_member_onboarding = (
             change_set.purpose == GraphDraftPurpose.MEMBER_CHECKPOINT_ALIGNMENT
@@ -405,25 +434,32 @@ class GraphDraftReviewCoordinator(BaseService):
             operation.status == GraphChangeOperationStatus.ACCEPTED
             for operation in change_set.operations
         )
+        # Accepting nothing is itself the verdict: close as rejected, stamped by the submitter.
+        closes_without_acceptance = accepted_count == 0
+        if review_note is not None and not closes_without_acceptance:
+            raise ValidationError(
+                "review_note is only recorded when a submit closes a draft with no "
+                "accepted operations."
+            )
         review_already_recorded = bool(
             is_member_onboarding
             and change_set.context_packet.get("member_onboarding_review_recorded")
         )
         change_set.status = (
             GraphChangeSetStatus.REJECTED
-            if is_member_onboarding and accepted_count == 0
+            if closes_without_acceptance
             else GraphChangeSetStatus.SUBMITTED
         )
         change_set.submitted_at = utc_now()
         change_set.submitted_by = actor_user_id(actor)
-        change_set.reviewed_at = None
-        change_set.reviewed_by = None
-        change_set.review_note = None
+        change_set.reviewed_at = change_set.submitted_at if closes_without_acceptance else None
+        change_set.reviewed_by = change_set.submitted_by if closes_without_acceptance else None
+        change_set.review_note = review_note.strip() or None if review_note is not None else None
         if is_member_onboarding:
             change_set.context_packet = {
                 **change_set.context_packet,
                 "member_onboarding_resolution": (
-                    "checkpoint_only" if accepted_count == 0 else "submitted"
+                    "checkpoint_only" if closes_without_acceptance else "submitted"
                 ),
                 "member_onboarding_review_recorded": True,
             }
@@ -434,9 +470,7 @@ class GraphDraftReviewCoordinator(BaseService):
                 change_set.source_note_id,
                 change_set_id=change_set.change_set_id,
                 resolved_at=change_set.submitted_at,
-                resolution=(
-                    "checkpoint_only" if accepted_count == 0 else "submitted"
-                ),
+                resolution="checkpoint_only" if closes_without_acceptance else "submitted",
             )
             if checkpoint is None or checkpoint.metadata.get(ALIGNMENT_MODE_KEY) != "ai":
                 raise ValidationError(
@@ -481,9 +515,7 @@ class GraphDraftReviewCoordinator(BaseService):
         note: str | None,
         actor: AuthContext | None,
     ) -> GraphChangeSet:
-        change_set = self._change_set_for_serialized_onboarding_mutation(
-            change_set_id
-        )
+        change_set = self._change_set_for_serialized_onboarding_mutation(change_set_id)
         self.authorization.require_owner(change_set.project_id, actor=actor)
         if change_set.purpose == GraphDraftPurpose.MEMBER_CHECKPOINT_ALIGNMENT:
             self.authorization.require_interactive(

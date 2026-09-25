@@ -19,6 +19,7 @@ from lab_tracker.models import (
     GraphDraftBatchTrigger,
     GraphDraftMode,
     GraphDraftPurpose,
+    GraphOperationRejectReason,
     Note,
 )
 from lab_tracker.patching import NOT_PROVIDED, PatchValue
@@ -175,10 +176,7 @@ class GraphDraftService:
             include_operations=include_operations,
         )
 
-    def query_batch_graph_drafts(
-        self,
-        query: BatchReviewQuery,
-    ) -> tuple[list[GraphChangeSet], int]:
+    def query_batch_graph_drafts(self, query: BatchReviewQuery) -> tuple[list[GraphChangeSet], int]:
         return self.records.query_batch_graph_drafts(query)
 
     def update_graph_change_operation(
@@ -189,6 +187,8 @@ class GraphDraftService:
         payload: PatchValue[dict[str, Any] | None] = NOT_PROVIDED,
         status: PatchValue[GraphChangeOperationStatus | None] = NOT_PROVIDED,
         review_note: PatchValue[str | None] = NOT_PROVIDED,
+        deferred: PatchValue[bool | None] = NOT_PROVIDED,
+        reject_reason: PatchValue[GraphOperationRejectReason | None] = NOT_PROVIDED,
         acceptance_mode: AcceptanceMode = AcceptanceMode.HUMAN_SELECTED,
         actor: AuthContext | None = None,
     ) -> GraphChangeSet:
@@ -198,6 +198,8 @@ class GraphDraftService:
             payload=payload,
             status=status,
             review_note=review_note,
+            deferred=deferred,
+            reject_reason=reject_reason,
             acceptance_mode=acceptance_mode,
             actor=actor,
         )
@@ -214,9 +216,12 @@ class GraphDraftService:
         self,
         change_set_id: UUID,
         *,
+        review_note: str | None = None,
         actor: AuthContext | None = None,
     ) -> GraphChangeSet:
-        return self.review.submit_graph_change_set(change_set_id, actor=actor)
+        return self.review.submit_graph_change_set(
+            change_set_id, review_note=review_note, actor=actor
+        )
 
     def review_graph_change_set(
         self,
@@ -257,11 +262,7 @@ class GraphDraftService:
         message: str,
         actor: AuthContext | None = None,
     ) -> GraphChangeSet:
-        return self.commit.commit_graph_change_set(
-            change_set_id,
-            message=message,
-            actor=actor,
-        )
+        return self.commit.commit_graph_change_set(change_set_id, message=message, actor=actor)
 
     def build_graph_context_for_note(
         self,
@@ -390,11 +391,7 @@ class GraphDraftService:
             actor=actor,
         )
 
-    def claim_next_graph_draft_batch_run(
-        self,
-        *,
-        lease_seconds: int,
-    ) -> GraphDraftBatchRun | None:
+    def claim_next_graph_draft_batch_run(self, *, lease_seconds: int) -> GraphDraftBatchRun | None:
         return self.scheduling.claim_next_graph_draft_batch_run(lease_seconds=lease_seconds)
 
     def execute_graph_draft_batch_run(
@@ -434,10 +431,7 @@ class GraphDraftService:
         actor: AuthContext | None = None,
         now: datetime | None = None,
     ) -> list[GraphDraftBatchRun]:
-        return self.scheduling.enqueue_due_graph_draft_batches(
-            actor=actor,
-            now=now,
-        )
+        return self.scheduling.enqueue_due_graph_draft_batches(actor=actor, now=now)
 
     def query_graph_draft_batch_runs(
         self,

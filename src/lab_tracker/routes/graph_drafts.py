@@ -25,6 +25,7 @@ from lab_tracker.schemas import (
     GraphDraftCreateRequest,
     GraphDraftOperationUpdate,
     GraphDraftReviewRequest,
+    GraphDraftSubmitRequest,
     ListEnvelope,
 )
 from lab_tracker.services.graph_draft_review import RevisionInputs, RevisionUpload
@@ -186,10 +187,15 @@ def build_graph_drafts_router(api: LabTrackerAPI) -> APIRouter:
         "/graph-drafts/{change_set_id:uuid}/submit",
         response_model=Envelope[GraphChangeSet],
     )
-    def submit_graph_draft(change_set_id: UUID, request: Request):
+    def submit_graph_draft(
+        change_set_id: UUID,
+        request: Request,
+        payload: GraphDraftSubmitRequest | None = None,
+    ):
         actor = actor_from_request(request)
         change_set = api_from_request(request, api).submit_graph_change_set(
             change_set_id,
+            review_note=payload.review_note if payload is not None else None,
             actor=actor,
         )
         return Envelope(data=_attach_graph_usernames(request, change_set))
@@ -359,6 +365,7 @@ def _graph_change_set_summary(change_set: GraphChangeSet) -> GraphChangeSetSumma
         commit_message=change_set.commit_message,
         error_metadata=dict(change_set.error_metadata),
         operation_count=change_set.operation_count,
+        deferred_count=change_set.deferred_count,
         created_at=change_set.created_at,
         created_by=change_set.created_by,
         created_by_user_id=change_set.created_by_user_id,
