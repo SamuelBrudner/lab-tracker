@@ -271,7 +271,10 @@ function GraphDraftDetailCard({
     advanceAfterDecision(current, await workflow.saveOperation(operation, "accepted"));
   }
 
-  React.useEffect(() => {
+  // A layout effect, so the listener sees this render's handler as soon as it
+  // commits. React can yield between a commit and its passive effects, and a
+  // key pressed in that gap would otherwise run the previous render's handler.
+  React.useLayoutEffect(() => {
     keyHandlerRef.current = handleReviewKeyDown;
   });
   React.useEffect(() => {

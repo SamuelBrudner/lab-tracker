@@ -812,7 +812,9 @@ def _resolve_mcp_executable(command: str) -> str | None:
     """Prefer the lt-mcp entrypoint from this client's Python environment."""
 
     if command == "lt-mcp":
-        scripts_dir = Path(sys.executable).resolve().parent
+        # Do not resolve symlinks: a POSIX venv's bin/python links to the base
+        # interpreter, whose directory belongs to a different environment.
+        scripts_dir = Path(sys.executable).absolute().parent
         companion_names = (
             ("lt-mcp.exe", "lt-mcp")
             if sys.platform == "win32"

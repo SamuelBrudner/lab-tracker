@@ -305,6 +305,7 @@ the committed bundle in `src/lab_tracker/frontend`:
 
 ```bash
 npm run test:frontend
+npm run test:frontend:chaos
 npm run lint:frontend
 npm run build
 ```

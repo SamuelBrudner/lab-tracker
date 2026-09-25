@@ -12,13 +12,13 @@
  * one place.
  */
 
-const CACHE_VERSION = "v-8323498c4718";
+const CACHE_VERSION = "v-7d98d1d04f21";
 const CACHE_NAME = `lab-tracker-shell-${CACHE_VERSION}`;
 const SHELL_ASSETS = [
   "/app/",
-  "/app/static/app.js?v=8323498c4718",
-  "/app/static/styles.css?v=8323498c4718",
-  "/app/static/app.css?v=8323498c4718",
+  "/app/static/app.js?v=7d98d1d04f21",
+  "/app/static/styles.css?v=7d98d1d04f21",
+  "/app/static/app.css?v=7d98d1d04f21",
   "/app/static/manifest.json",
   "/app/static/icon-180.png",
   "/app/static/icon-192.png",

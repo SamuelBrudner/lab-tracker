@@ -121,8 +121,10 @@ describe("useAnalysisWorkflow", () => {
 
     render(<RefreshHarness />);
 
-    expect(await screen.findByTestId("recent-committed")).toHaveTextContent(
-      "analysis-recent"
+    // The element renders empty before the request resolves, so retry the
+    // content assertion itself; findByTestId alone returns the empty element.
+    await waitFor(() =>
+      expect(screen.getByTestId("recent-committed")).toHaveTextContent("analysis-recent")
     );
     expect(fetchMock).toHaveBeenCalledWith(
       committedPath,

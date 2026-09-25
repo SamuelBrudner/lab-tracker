@@ -119,7 +119,11 @@ describe("MemberOnboardingPage", () => {
       source_text: "Aim 1 context",
       strongest_recent_context: "The pilot effect reproduced twice",
     }));
-    expect(await screen.findByText("The pilot effect reproduced twice")).toBeInTheDocument();
+    // React mirrors a controlled textarea's value into its text content, so
+    // until the saved view replaces the form, the form's textarea matches too.
+    expect(
+      await screen.findByText("The pilot effect reproduced twice", { selector: "p" })
+    ).toBeInTheDocument();
   });
 
   it("lets the server validate the complete rendered checkpoint length", async () => {
@@ -246,7 +250,11 @@ describe("MemberOnboardingPage", () => {
     expect(screen.queryByRole("button", { name: /Accept all/i })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Accept" }));
     await waitFor(() => expect(patchBody).toEqual({ payload: { text: "Does the effect persist?" }, status: "accepted" }));
-    expect(screen.getByRole("button", { name: "Submit each decision" })).toBeEnabled();
+    // patchBody is captured when the request is sent; the accepted draft
+    // renders later, so wait for the enabled state itself.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Submit each decision" })).toBeEnabled()
+    );
   });
 
   it("serializes AI proposal decisions while a mutation is pending", async () => {

@@ -1474,7 +1474,9 @@ describe("GraphDraftDetailCard keyboard review", () => {
     await waitFor(() =>
       expect(setFlash).toHaveBeenLastCalledWith("Rejected: Does sleep change courtship behavior?")
     );
-    expect(screen.getByText(/1 rejected · 0 undecided/)).toBeInTheDocument();
+    // setFlash runs in the same tick the saved draft is set, but the counts
+    // render in a later scheduler task, so wait for them.
+    expect(await screen.findByText(/1 rejected · 0 undecided/)).toBeInTheDocument();
   });
 
   it("asks for a reason from the Reject button and writes the chosen chip", async () => {
