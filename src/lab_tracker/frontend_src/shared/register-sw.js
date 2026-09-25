@@ -9,6 +9,13 @@ import { TOKEN_STORAGE_KEY } from "./constants.js";
 
 let cachedQueue = null;
 
+// A home-screen app is usually resumed from memory rather than relaunched, so
+// a check made only at boot can leave a phone on an old app shell for days.
+// Recheck whenever the app returns to the foreground (at most this often)...
+const FOREGROUND_UPDATE_MIN_INTERVAL_MS = 60 * 1000;
+// ...and periodically while it stays open on screen.
+const OPEN_APP_UPDATE_INTERVAL_MS = 60 * 60 * 1000;
+
 function hasServiceWorker() {
   return (
     typeof navigator !== "undefined" &&
@@ -80,11 +87,45 @@ function surfaceDroppedUploads(result, onDropped) {
   onDropped(dropped, result);
 }
 
+function checkForUpdate(registration) {
+  try {
+    Promise.resolve(registration.update?.()).catch(() => {});
+  } catch {
+    // Registration remains usable even if an explicit update check fails.
+  }
+}
+
+// Checks now, then again on return to the foreground and while visible. An
+// update found this way reaches the page through the registration's existing
+// updatefound wiring, so it gets the same "Reload to update" prompt.
+function watchForUpdates(registration, signal) {
+  if (signal?.aborted) {
+    return;
+  }
+  let lastCheck = Date.now();
+  checkForUpdate(registration);
+  const checkIfDue = () => {
+    if (
+      document.visibilityState !== "visible" ||
+      Date.now() - lastCheck < FOREGROUND_UPDATE_MIN_INTERVAL_MS
+    ) {
+      return;
+    }
+    lastCheck = Date.now();
+    checkForUpdate(registration);
+  };
+  document.addEventListener("visibilitychange", checkIfDue, { signal });
+  const timer = setInterval(checkIfDue, OPEN_APP_UPDATE_INTERVAL_MS);
+  signal?.addEventListener("abort", () => clearInterval(timer), { once: true });
+}
+
 export function registerServiceWorker(
   scriptUrl = "/app/sw.js",
   {
     onUpdateReady = () => {},
     reloadWindow = () => window.location.reload(),
+    // Aborting stops the recurring update checks (the app shell never does).
+    signal,
   } = {}
 ) {
   if (!hasServiceWorker()) {
@@ -154,11 +195,7 @@ export function registerServiceWorker(
       registration.addEventListener?.("updatefound", () => {
         observeInstalling(registration.installing);
       });
-      try {
-        Promise.resolve(registration.update?.()).catch(() => {});
-      } catch {
-        // Registration remains usable even if an explicit update check fails.
-      }
+      watchForUpdates(registration, signal);
       return registration;
     })
     .catch(() => null);

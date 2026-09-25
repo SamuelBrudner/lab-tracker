@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   applyServiceWorkerUpdate,
@@ -22,6 +22,20 @@ afterEach(() => {
 });
 
 describe("registerServiceWorker", () => {
+  // Fake timers keep the hourly update check from outliving a test, and the
+  // signal removes each registration's foreground listener.
+  let watch;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    watch = new AbortController();
+  });
+
+  afterEach(() => {
+    watch.abort();
+    vi.useRealTimers();
+  });
+
   it("no-ops when service workers are unavailable", async () => {
     setServiceWorker(undefined);
 
@@ -49,7 +63,7 @@ describe("registerServiceWorker", () => {
     setServiceWorker(serviceWorker);
 
     await expect(
-      registerServiceWorker("/app/sw.js", { onUpdateReady, reloadWindow })
+      registerServiceWorker("/app/sw.js", { onUpdateReady, reloadWindow, signal: watch.signal })
     ).resolves.toBe(registration);
 
     expect(serviceWorker.register).toHaveBeenCalledWith("/app/sw.js", { updateViaCache: "none" });
@@ -90,7 +104,7 @@ describe("registerServiceWorker", () => {
     const onUpdateReady = vi.fn();
     setServiceWorker(serviceWorker);
 
-    await registerServiceWorker("/app/sw.js", { onUpdateReady });
+    await registerServiceWorker("/app/sw.js", { onUpdateReady, signal: watch.signal });
     registration.installing = installing;
     updateFoundListeners.updatefound();
 
@@ -127,7 +141,7 @@ describe("registerServiceWorker", () => {
     const onUpdateReady = vi.fn();
     setServiceWorker(serviceWorker);
 
-    await registerServiceWorker("/app/sw.js", { onUpdateReady });
+    await registerServiceWorker("/app/sw.js", { onUpdateReady, signal: watch.signal });
 
     expect(installing.postMessage).toHaveBeenCalledWith({
       type: "UPDATE_PROMPT_SUPPORTED",
@@ -161,7 +175,7 @@ describe("registerServiceWorker", () => {
     const onUpdateReady = vi.fn();
     setServiceWorker(serviceWorker);
 
-    await registerServiceWorker("/app/sw.js", { onUpdateReady });
+    await registerServiceWorker("/app/sw.js", { onUpdateReady, signal: watch.signal });
 
     expect(waiting.postMessage).not.toHaveBeenCalled();
     expect(onUpdateReady).not.toHaveBeenCalled();
@@ -200,8 +214,121 @@ describe("registerServiceWorker", () => {
       register: vi.fn(async () => registration),
     });
 
-    await expect(registerServiceWorker()).resolves.toBe(registration);
+    await expect(
+      registerServiceWorker(undefined, { signal: watch.signal })
+    ).resolves.toBe(registration);
     expect(applyServiceWorkerUpdate(registration)).toBe(false);
+  });
+
+  describe("rechecking after boot", () => {
+    let visibility;
+
+    beforeEach(() => {
+      visibility = "visible";
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        get: () => visibility,
+      });
+    });
+
+    afterEach(() => {
+      delete document.visibilityState;
+    });
+
+    async function registerControlledPage(options = {}) {
+      const registration = {
+        addEventListener: vi.fn(),
+        installing: null,
+        update: vi.fn(async () => {}),
+        waiting: null,
+      };
+      setServiceWorker({
+        addEventListener: vi.fn(),
+        controller: {},
+        register: vi.fn(async () => registration),
+      });
+      await registerServiceWorker("/app/sw.js", { signal: watch.signal, ...options });
+      return registration;
+    }
+
+    function setVisibility(state) {
+      visibility = state;
+      document.dispatchEvent(new Event("visibilitychange"));
+    }
+
+    it("checks again when a resumed app returns to the foreground", async () => {
+      const registration = await registerControlledPage();
+      expect(registration.update).toHaveBeenCalledTimes(1);
+
+      vi.advanceTimersByTime(5 * 60 * 1000);
+      setVisibility("hidden");
+      expect(registration.update).toHaveBeenCalledTimes(1);
+
+      setVisibility("visible");
+      expect(registration.update).toHaveBeenCalledTimes(2);
+    });
+
+    it("does not recheck on every quick app switch", async () => {
+      const registration = await registerControlledPage();
+
+      vi.advanceTimersByTime(30 * 1000);
+      setVisibility("hidden");
+      setVisibility("visible");
+
+      expect(registration.update).toHaveBeenCalledTimes(1);
+    });
+
+    it("checks hourly while open on screen, never in the background", async () => {
+      const registration = await registerControlledPage();
+
+      vi.advanceTimersByTime(60 * 60 * 1000);
+      expect(registration.update).toHaveBeenCalledTimes(2);
+
+      visibility = "hidden";
+      vi.advanceTimersByTime(3 * 60 * 60 * 1000);
+      expect(registration.update).toHaveBeenCalledTimes(2);
+    });
+
+    it("stops checking once its signal is aborted", async () => {
+      const registration = await registerControlledPage();
+
+      watch.abort();
+      vi.advanceTimersByTime(2 * 60 * 60 * 1000);
+      setVisibility("visible");
+
+      expect(registration.update).toHaveBeenCalledTimes(1);
+    });
+
+    it("offers the usual reload prompt for an update found in the foreground", async () => {
+      const onUpdateReady = vi.fn();
+      const registration = await registerControlledPage({ onUpdateReady });
+      const [, onUpdateFound] = registration.addEventListener.mock.calls.find(
+        ([event]) => event === "updatefound"
+      );
+      const stateChangeListeners = {};
+      const installing = {
+        state: "installing",
+        addEventListener: vi.fn((event, listener) => {
+          stateChangeListeners[event] = listener;
+        }),
+        postMessage: vi.fn(),
+      };
+      registration.update.mockImplementationOnce(async () => {
+        registration.installing = installing;
+        onUpdateFound();
+      });
+
+      // The server was redeployed while the app sat in the background.
+      vi.advanceTimersByTime(10 * 60 * 1000);
+      setVisibility("visible");
+      await Promise.resolve();
+      registration.waiting = installing;
+      installing.state = "installed";
+      stateChangeListeners.statechange();
+
+      expect(installing.postMessage).toHaveBeenCalledWith({ type: "UPDATE_PROMPT_SUPPORTED" });
+      expect(onUpdateReady).toHaveBeenCalledWith(registration);
+    });
   });
 });
 
