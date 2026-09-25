@@ -43,6 +43,8 @@ from lab_tracker.db_models import (
 )
 from lab_tracker.goals_attributes import validate_goal_attributes
 from lab_tracker.models import (
+    EVIDENCE_CONTENT_HASH_MAX_LENGTH,
+    EVIDENCE_CONTENT_HASH_METADATA_KEY,
     Analysis,
     AnalysisStatus,
     Claim,
@@ -226,6 +228,14 @@ def _normalize_note_metadata_for_request(
         if not cleaned_key:
             raise ValueError("metadata key must not be empty")
         cleaned[cleaned_key] = value.strip() if isinstance(value, str) else str(value)
+    content_hash = cleaned.get(EVIDENCE_CONTENT_HASH_METADATA_KEY)
+    if content_hash is not None and len(content_hash) > EVIDENCE_CONTENT_HASH_MAX_LENGTH:
+        # Mirrored into the indexed notes.evidence_content_hash String column,
+        # so an over-long value must be a 422 here, not a database error.
+        raise ValueError(
+            f"{EVIDENCE_CONTENT_HASH_METADATA_KEY} must be at most "
+            f"{EVIDENCE_CONTENT_HASH_MAX_LENGTH} characters."
+        )
     return cleaned
 
 

@@ -126,7 +126,7 @@ Read tools:
 - `lab_tracker_list_projects`: List visible projects when scoping a follow-up Lab Tracker read.
 - `lab_tracker_list_questions`: List/search questions when inspecting known project/question scope.
 - `lab_tracker_list_question_refactors`: List refactor history where a question is the source or replacement.
-- `lab_tracker_list_notes`: List notes for known scope; use decision context first for research choices.
+- `lab_tracker_list_notes`: List notes for known scope or by exact evidence_content_hash; use decision context first.
 - `lab_tracker_search`: Search questions and notes when the project or anchor IDs are not known.
 - `lab_tracker_graph_overview`: Orient within one project using bounded counts and entry-point summaries.
 - `lab_tracker_search_graph`: Search all retained graph record types inside one authorized project.
@@ -461,6 +461,7 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 - `created_by` (optional): string(uuid) | null
 - `since` (optional): string(date-time) | null
 - `until` (optional): string(date-time) | null
+- `evidence_content_hash` (optional): string | null
 - `target_entity_type` (optional): EntityType enum: project, question, dataset, note, session, analysis, claim, visualization, goal | null
 - `target_entity_id` (optional): string(uuid) | null
 - `limit` (optional): integer; default 50; maximum 200 from shared route validation

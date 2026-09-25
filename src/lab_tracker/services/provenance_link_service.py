@@ -1,9 +1,13 @@
 """Deterministic, human-gated provenance-link proposals.
 
-When two captured artifacts share a content hash, the daily/batch run proposes a
-``was_derived_from`` link for a human to accept or reject. Nothing is ever
-auto-committed: the detector only writes PROPOSED links, and there is no public
-create endpoint. Only accepted links render in PROV-O export.
+When two captured artifacts share a content hash, every batch execution
+(synchronous, queued worker, or due dispatch) proposes a ``was_derived_from``
+link for a human to accept or reject. Carriers are notes, through their
+indexed ``evidence_content_hash``, and datasets, through the checksum of an
+uploaded dataset file; the earliest capture of a hash is the antecedent.
+Nothing is ever auto-committed: the detector only writes PROPOSED links, and
+there is no public create endpoint. Only accepted links render in PROV-O
+export.
 """
 
 from __future__ import annotations
@@ -14,10 +18,10 @@ from uuid import UUID, uuid4
 from lab_tracker.auth import AuthContext
 from lab_tracker.errors import NotFoundError, OpaqueTargetNotFoundError, ValidationError
 from lab_tracker.models import (
+    MIN_CARRIERS_PER_HASH,
     AcceptanceMode,
-    EntityRef,
+    ContentHashCarrier,
     EntityType,
-    Note,
     ProvenanceLink,
     ProvenanceLinkBasis,
     ProvenanceLinkOrigin,
@@ -39,22 +43,29 @@ _PROVENANCE_LINK_TRANSITIONS: dict[ProvenanceLinkStatus, set[ProvenanceLinkStatu
 }
 
 
-def notes_sharing_content_hash(notes: list[Note]) -> dict[str, list[Note]]:
-    """Group notes by ``evidence_content_hash``; drop empty hashes and singletons.
+def group_content_hash_carriers(
+    carriers: list[ContentHashCarrier],
+) -> dict[str, list[ContentHashCarrier]]:
+    """Group carriers by hash, one entry per entity, dropping singleton groups.
 
-    Each surviving group's notes are sorted by ``created_at`` ascending so the
-    earliest capture is the antecedent.
+    The repository already orders carriers by hash and capture time, so the
+    first entry of each surviving group is the antecedent. A dataset whose
+    uploaded files repeat one checksum is a single carrier, so it can never
+    pair with itself.
     """
 
-    groups: dict[str, list[Note]] = defaultdict(list)
-    for note in notes:
-        content_hash = (note.metadata or {}).get("evidence_content_hash")
-        if content_hash:
-            groups[content_hash].append(note)
+    groups: dict[str, list[ContentHashCarrier]] = defaultdict(list)
+    seen_entities: set[tuple[str, EntityType, UUID]] = set()
+    for carrier in carriers:
+        key = (carrier.content_hash, carrier.entity.entity_type, carrier.entity.entity_id)
+        if key in seen_entities:
+            continue
+        seen_entities.add(key)
+        groups[carrier.content_hash].append(carrier)
     return {
-        content_hash: sorted(group, key=lambda note: note.created_at)
+        content_hash: group
         for content_hash, group in groups.items()
-        if len(group) >= 2
+        if len(group) >= MIN_CARRIERS_PER_HASH
     }
 
 
@@ -74,18 +85,19 @@ class ProvenanceLinkService(BaseService):
         *,
         actor: AuthContext | None = None,
     ) -> int:
-        """Propose was_derived_from links for same-content-hash note pairs.
+        """Propose was_derived_from links between same-content-hash carriers.
 
         Deterministic and idempotent: a pair already linked in any status
         (including rejected) is never re-proposed, so a declined link is not
         re-nagged. Star topology — every later capture links to the single
         earliest antecedent — so a duplicate group of N yields N-1 links, not
-        O(N^2). Always writes PROPOSED; never accepts or commits.
+        O(N^2). Endpoints may be notes or datasets. Always writes PROPOSED;
+        never accepts or commits.
         """
 
         self.authorization.require_contributor(project_id, actor=actor)
-        notes, _ = self.repository.query_notes(project_id=project_id, limit=None, offset=0)
-        groups = notes_sharing_content_hash(notes)
+        carriers = self.repository.provenance_links.list_content_hash_carriers(project_id)
+        groups = group_content_hash_carriers(carriers)
         if not groups:
             return 0
         existing = self.repository.provenance_links.list_by_project(project_id)
@@ -99,11 +111,9 @@ class ProvenanceLinkService(BaseService):
             for content_hash, group in groups.items():
                 antecedent = group[0]
                 for derived in group[1:]:
-                    if derived.note_id == antecedent.note_id:
-                        continue
                     key = (
-                        derived.note_id,
-                        antecedent.note_id,
+                        derived.entity.entity_id,
+                        antecedent.entity.entity_id,
                         ProvenanceLinkRelation.WAS_DERIVED_FROM,
                     )
                     if key in seen_pairs:
@@ -111,10 +121,8 @@ class ProvenanceLinkService(BaseService):
                     link = ProvenanceLink(
                         link_id=uuid4(),
                         project_id=project_id,
-                        source=EntityRef(entity_type=EntityType.NOTE, entity_id=derived.note_id),
-                        target=EntityRef(
-                            entity_type=EntityType.NOTE, entity_id=antecedent.note_id
-                        ),
+                        source=derived.entity,
+                        target=antecedent.entity,
                         relation=ProvenanceLinkRelation.WAS_DERIVED_FROM,
                         basis=ProvenanceLinkBasis.CONTENT_HASH_MATCH,
                         content_hash=content_hash,

@@ -20,6 +20,7 @@ from lab_tracker.models import (
     Analysis,
     Claim,
     ClaimEdge,
+    ContentHashCarrier,
     Dataset,
     DatasetFile,
     DataStore,
@@ -101,6 +102,11 @@ class ProvenanceLinkRepository(EntityRepository[ProvenanceLink], Protocol):
         status: str | None = None,
     ) -> list[ProvenanceLink]:
         """Return a project's links (optionally one status) in creation order."""
+
+    def list_content_hash_carriers(self, project_id: UUID) -> list[ContentHashCarrier]:
+        """Return every note/dataset-file carrier of a content hash that at least
+        two carriers in the project share, ordered by content_hash, captured_at,
+        entity_type, entity_id."""
 
 
 class VisualizationRepository(EntityRepository[Visualization], Protocol):
@@ -935,6 +941,7 @@ class LabTrackerRepository(Protocol):
         until: datetime | None = None,
         client_capture_id: str | None = None,
         capture_bundle_id: str | None = None,
+        evidence_content_hash: str | None = None,
         target_entity_type: str | None = None,
         target_entity_id: UUID | None = None,
         limit: int | None = None,
@@ -946,6 +953,8 @@ class LabTrackerRepository(Protocol):
         ``capture_bundle_id`` matches the text of the note's
         ``metadata.capture_bundle_id``; callers compare the exact metadata
         value themselves when non-string values matter.
+        ``evidence_content_hash`` is an exact match on the indexed
+        ``notes.evidence_content_hash`` column.
         """
 
     def project_ids_with_search_matches(

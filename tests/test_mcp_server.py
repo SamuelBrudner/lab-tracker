@@ -1034,6 +1034,7 @@ def test_client_serializes_json_bearing_association_filters() -> None:
             assert request.url.params["project_id"] == "project-1"
             assert request.url.params["target_entity_type"] == "dataset"
             assert request.url.params["target_entity_id"] == "dataset-1"
+            assert request.url.params["evidence_content_hash"] == "sha-1"
             return _json_response(200, {"data": []})
         return _json_response(404, {"error": {"message": "not found"}})
 
@@ -1051,11 +1052,42 @@ def test_client_serializes_json_bearing_association_filters() -> None:
             project_id="project-1",
             target_entity_type="dataset",
             target_entity_id="dataset-1",
+            evidence_content_hash="sha-1",
         ) == {"data": []}
     finally:
         client.close()
 
     assert [request.url.path for request in requests] == ["/analyses", "/notes"]
+
+
+def test_list_notes_tool_forwards_evidence_content_hash(monkeypatch) -> None:
+    from lab_tracker.mcp_tools import read as read_tools
+
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        assert request.url.path == "/notes"
+        assert request.url.params["project_id"] == PROJECT_ID
+        assert request.url.params["evidence_content_hash"] == "sha-1"
+        return _json_response(200, {"data": []})
+
+    api_client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(base_url="http://testserver"),
+        transport=httpx.MockTransport(handler),
+    )
+    read_tools.close_cached_read_client()
+    monkeypatch.setattr(read_tools, "client_from_env", lambda: api_client)
+    try:
+        payload = read_tools.lab_tracker_list_notes(
+            project_id=PROJECT_ID,
+            evidence_content_hash="sha-1",
+        )
+    finally:
+        read_tools.close_cached_read_client()
+
+    assert payload["data"] == []
+    assert [request.url.path for request in captured] == ["/notes"]
 
 
 def test_client_resolve_artifact_posts_to_resolve_route() -> None:

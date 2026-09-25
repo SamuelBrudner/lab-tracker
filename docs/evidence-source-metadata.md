@@ -15,7 +15,7 @@ Use these note metadata keys for imported evidence:
 | `evidence_source_external_id` | Provider-specific item ID, or root-relative path for local folders. |
 | `evidence_source_observed_at` | ISO-8601 timestamp when the adapter observed the item. |
 | `evidence_capture_kind` | Evidence kind, such as `file`, `text`, or `analysis_evidence`. |
-| `evidence_content_hash` | SHA-256 hash of the imported evidence bytes or text. |
+| `evidence_content_hash` | SHA-256 hash of the imported evidence bytes or text (at most 255 characters). The server mirrors it into an indexed column; `GET /notes?evidence_content_hash=` filters on it exactly and the batch detector proposes lineage links from it. |
 | `evidence_adapter` | Adapter or script name/version that created the note. |
 | `evidence_title` | Human-readable title for reports and review screens. |
 

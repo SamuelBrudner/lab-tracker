@@ -390,6 +390,7 @@ class LabTrackerAPIClient:
         created_by: str | None = None,
         target_entity_type: str | None = None,
         target_entity_id: str | None = None,
+        evidence_content_hash: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> JsonObject:
@@ -402,6 +403,7 @@ class LabTrackerAPIClient:
                 "created_by": created_by,
                 "target_entity_type": target_entity_type,
                 "target_entity_id": target_entity_id,
+                "evidence_content_hash": evidence_content_hash,
                 "limit": limit,
                 "offset": offset,
             },

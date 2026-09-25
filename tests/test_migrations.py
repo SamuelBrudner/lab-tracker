@@ -842,6 +842,7 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
         inspector,
         _NOT_NULL_TIGHTENING_COLUMNS_0014_0024,
     )
+    _assert_index(inspector, "notes", "ix_notes_project_evidence_content_hash")
     engine.dispose()
 
 

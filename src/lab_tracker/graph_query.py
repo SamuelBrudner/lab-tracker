@@ -33,6 +33,7 @@ from lab_tracker.db_models import (
     ClaimEdgeModel,
     ClaimModel,
     ClaimQuestionModel,
+    DatasetFileModel,
     DatasetModel,
     DatasetQuestionLinkModel,
     ExplorationNodeEdgeModel,
@@ -540,6 +541,7 @@ class GraphQueryService:
                     alternate_exact_id=alternate_id,
                 )
             )
+        exact_hash = query.casefold()
         if "note" in selected:
             branches.append(
                 _search_branch(
@@ -554,9 +556,24 @@ class GraphQueryService:
                         ("raw_content", NoteModel.raw_content, False),
                     ),
                     statuses=statuses,
+                    exact_hash_fields=(
+                        (
+                            "evidence_content_hash",
+                            func.lower(NoteModel.evidence_content_hash) == exact_hash,
+                        ),
+                    ),
                 )
             )
         if "dataset" in selected:
+            uploaded_file_with_hash = (
+                select(DatasetFileModel.file_id)
+                .where(
+                    DatasetFileModel.dataset_id == DatasetModel.dataset_id,
+                    func.lower(DatasetFileModel.checksum) == exact_hash,
+                )
+                .correlate(DatasetModel)
+                .exists()
+            )
             branches.append(
                 _search_branch(
                     "dataset",
@@ -567,6 +584,7 @@ class GraphQueryService:
                     query=query,
                     fields=(("commit_hash", DatasetModel.commit_hash, False),),
                     statuses=statuses,
+                    exact_hash_fields=(("file_checksum", uploaded_file_with_hash),),
                 )
             )
         if "analysis" in selected:
@@ -648,6 +666,12 @@ class GraphQueryService:
                         (
                             AnalysisModel,
                             AnalysisModel.analysis_id == VisualizationModel.analysis_id,
+                        ),
+                    ),
+                    exact_hash_fields=(
+                        (
+                            "asset_checksum",
+                            func.lower(VisualizationModel.asset_checksum) == exact_hash,
                         ),
                     ),
                 )
@@ -1375,7 +1399,15 @@ def _search_branch(
     alternate_exact_id: UUID | None = None,
     select_from: Any | None = None,
     joins: Sequence[tuple[Any, Any]] = (),
+    exact_hash_fields: Sequence[tuple[str, Any]] = (),
 ) -> Any:
+    """Build one entity type's ranked search rows.
+
+    ``exact_hash_fields`` are ``(field_name, condition)`` pairs whose condition
+    is true when the row carries the query as a content hash; they rank 0 with
+    the ``exact_hash`` reason and the query itself as the matched text.
+    """
+
     id_text = cast(id_column, String())
     escaped_substring = substring_pattern(query) or "%"
     escaped_prefix = escaped_substring[1:]
@@ -1402,22 +1434,39 @@ def _search_branch(
     exact_title = [exact for _, _, is_title, exact, _, _ in field_matches if is_title]
     prefix_matches = [prefix for _, _, _, _, prefix, _ in field_matches]
     substring_matches = [substring for _, _, _, _, _, substring in field_matches]
-    match_rank = case(
-        (exact_id, 0),
-        (or_(*exact_title), 0) if exact_title else (literal(False), 0),
-        (or_(id_prefix, *prefix_matches), 1),
-        else_=2,
+    hash_conditions = [condition for _, condition in exact_hash_fields]
+    rank_cases: list[tuple[Any, Any]] = []
+    reason_cases: list[tuple[Any, Any]] = []
+    if hash_conditions:
+        exact_hash = or_(*hash_conditions)
+        rank_cases.append((exact_hash, 0))
+        reason_cases.append((exact_hash, literal("exact_hash")))
+    rank_cases.extend(
+        (
+            (exact_id, 0),
+            (or_(*exact_title), 0) if exact_title else (literal(False), 0),
+            (or_(id_prefix, *prefix_matches), 1),
+        )
     )
-    match_reason = case(
-        (exact_id, literal("exact_id")),
-        (or_(*exact_title), literal("exact_title"))
-        if exact_title
-        else (literal(False), literal("exact_title")),
-        (or_(id_prefix, *prefix_matches), literal("prefix")),
-        else_=literal("substring"),
+    reason_cases.extend(
+        (
+            (exact_id, literal("exact_id")),
+            (or_(*exact_title), literal("exact_title"))
+            if exact_title
+            else (literal(False), literal("exact_title")),
+            (or_(id_prefix, *prefix_matches), literal("prefix")),
+        )
     )
-    field_cases: list[tuple[Any, Any]] = [(exact_id, literal("id"))]
-    text_cases: list[tuple[Any, Any]] = [(exact_id, id_text)]
+    match_rank = case(*rank_cases, else_=2)
+    match_reason = case(*reason_cases, else_=literal("substring"))
+    field_cases: list[tuple[Any, Any]] = [
+        (condition, literal(field_name)) for field_name, condition in exact_hash_fields
+    ]
+    text_cases: list[tuple[Any, Any]] = [
+        (condition, literal(query)) for _, condition in exact_hash_fields
+    ]
+    field_cases.append((exact_id, literal("id")))
+    text_cases.append((exact_id, id_text))
     for field_name, text_value, _, exact, _, _ in field_matches:
         field_cases.append((exact, literal(field_name)))
         text_cases.append((exact, text_value))
@@ -1446,7 +1495,7 @@ def _search_branch(
         statement = statement.join(target, on_clause)
     conditions: list[Any] = [
         project_scope,
-        or_(exact_id, id_substring, *substring_matches),
+        or_(*hash_conditions, exact_id, id_substring, *substring_matches),
     ]
     if statuses is not None:
         if status_column is None:

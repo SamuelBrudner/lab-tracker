@@ -301,19 +301,31 @@ class BatchSchedulingCoordinator(BaseService):
                     actor=actor,
                 )
             return run
-        # Independent, best-effort deterministic stage: propose content-hash
-        # provenance links for human review. A failure here must never flip the
-        # LLM batch to FAILED or block drafting.
-        if self.provenance_links is not None:
-            try:
-                self.provenance_links.propose_links_from_content_hash(project_id, actor=actor)
-            except Exception:
-                logger.exception("provenance-link detector failed for project %s", project_id)
         return self.execute_graph_draft_batch_run(
             run.run_id,
             draft_client=draft_client,
             actor=actor,
         )
+
+    def _propose_content_hash_links(
+        self,
+        project_id: UUID,
+        *,
+        actor: AuthContext | None,
+    ) -> None:
+        """Best-effort deterministic stage run once per claimed batch execution.
+
+        Proposes content-hash provenance links for human review. A failure here
+        must never flip the LLM batch to FAILED or block drafting, so it is
+        logged and swallowed.
+        """
+
+        if self.provenance_links is None:
+            return
+        try:
+            self.provenance_links.propose_links_from_content_hash(project_id, actor=actor)
+        except Exception:
+            logger.exception("provenance-link detector failed for project %s", project_id)
 
     def enqueue_graph_draft_batch_for_project(
         self,
@@ -432,6 +444,9 @@ class BatchSchedulingCoordinator(BaseService):
             return run
         if claim_token is None or run.claim_token != claim_token:
             return self.records.get_graph_draft_batch_run(run_id)
+        # Every claimed execution — synchronous run-now, the queued worker and
+        # due dispatch — runs the detector exactly once, before drafting.
+        self._propose_content_hash_links(run.project_id, actor=actor)
 
         def renew_run(_attempt: int) -> bool:
             renewed_at = utc_now()

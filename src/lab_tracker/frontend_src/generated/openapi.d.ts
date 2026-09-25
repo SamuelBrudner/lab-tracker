@@ -767,6 +767,7 @@ export interface components {
       "store_name"?: (string | null);
       "uri": string;
     };
+    "ExternalContextPolicy": "own_notes_only" | "project_notes";
     "GraphChangeOp": "create" | "update";
     "GraphChangeOperation": {
       "acceptance_mode"?: (components["schemas"]["AcceptanceMode"] | null);
@@ -848,6 +849,9 @@ export interface components {
       "created_at"?: string;
       "email_notifications_enabled"?: boolean;
       "enabled"?: boolean;
+      "external_context_policy"?: components["schemas"]["ExternalContextPolicy"];
+      "external_provider_acknowledged_at"?: (string | null);
+      "external_provider_acknowledged_by"?: (string | null);
       "next_run_at"?: (string | null);
       "notification_email"?: (string | null);
       "notification_email_confirmed_at"?: (string | null);
@@ -998,6 +1002,7 @@ export interface components {
       "created_at"?: string;
       "created_by"?: (string | null);
       "created_by_user_id"?: (string | null);
+      "evidence_content_hash": (string | null);
       "metadata"?: Record<string, string>;
       "note_id": string;
       "origin"?: components["schemas"]["EntityOrigin"];

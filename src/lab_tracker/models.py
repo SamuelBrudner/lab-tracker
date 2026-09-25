@@ -15,7 +15,7 @@ import re
 from collections.abc import Mapping
 from datetime import date, datetime, timezone
 from enum import Enum
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Final, Literal
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -468,6 +468,13 @@ class GraphDraftSemanticType(str, Enum):
     REQUEST_CLARIFICATION = "request_clarification"
 
 
+class ExternalContextPolicy(str, Enum):
+    """Which notes a batch draft may send to an external drafting provider."""
+
+    OWN_NOTES_ONLY = "own_notes_only"
+    PROJECT_NOTES = "project_notes"
+
+
 class _DomainModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -820,6 +827,9 @@ class GraphDraftBatchSettings(_DomainModel):
     review_email_available: bool = False
     notification_email: str | None = None
     notification_email_confirmed_at: datetime | None = None
+    external_context_policy: ExternalContextPolicy = ExternalContextPolicy.OWN_NOTES_ONLY
+    external_provider_acknowledged_at: datetime | None = None
+    external_provider_acknowledged_by: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
     updated_by: str | None = None
@@ -1032,6 +1042,27 @@ class Dataset(_DomainModel):
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+EVIDENCE_CONTENT_HASH_METADATA_KEY: Final = "evidence_content_hash"
+EVIDENCE_CONTENT_HASH_MAX_LENGTH: Final = 255
+
+
+def evidence_content_hash_from_metadata(metadata: Mapping[str, object] | None) -> str | None:
+    """Return the note's evidence content hash, or ``None`` when absent or empty.
+
+    This is the single derivation of ``notes.evidence_content_hash`` from the
+    note's metadata; the mappers, the repository's direct metadata writes and
+    the domain read view all go through it so the indexed column and the
+    metadata can never disagree.
+    """
+
+    if metadata is None:
+        return None
+    value = metadata.get(EVIDENCE_CONTENT_HASH_METADATA_KEY)
+    if value is None or value == "":
+        return None
+    return str(value)
+
+
 class Note(_DomainModel):
     note_id: UUID
     project_id: UUID
@@ -1055,6 +1086,11 @@ class Note(_DomainModel):
     origin_model: str | None = None
     origin_prompt_version: str | None = None
     updated_at: datetime = Field(default_factory=utc_now)
+
+    @computed_field(return_type=str | None)
+    @property
+    def evidence_content_hash(self) -> str | None:
+        return evidence_content_hash_from_metadata(self.metadata)
 
 
 class Session(_DomainModel):
@@ -1192,12 +1228,32 @@ class ProvenanceLinkOrigin(str, Enum):
     SYSTEM_DETECTED = "system_detected"
 
 
+MIN_CARRIERS_PER_HASH: Final = 2
+
+
+class ContentHashCarrier(_DomainModel):
+    """One note or dataset that carries a content hash shared within a project.
+
+    The row the content-hash detector consumes: ``entity`` is the note (via its
+    indexed ``evidence_content_hash``) or the dataset (via an uploaded file's
+    checksum), and ``captured_at`` orders carriers so the earliest capture is
+    the antecedent.
+    """
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    content_hash: str
+    entity: EntityRef
+    captured_at: datetime
+
+
 class ProvenanceLink(_DomainModel):
     """A human-gated lineage edge: ``source`` was derived from / used ``target``.
 
-    Proposed by the deterministic content-hash detector during the daily/batch
-    run; only a human accept makes it canonical (and only accepted links render
-    in PROV-O export). Carries the same curation-provenance triple as accepted
+    Proposed by the deterministic content-hash detector on every batch
+    execution (synchronous, queued worker, or due dispatch); only a human
+    accept makes it canonical (and only accepted links render in PROV-O
+    export). Carries the same curation-provenance triple as accepted
     graph-draft operations.
     """
 

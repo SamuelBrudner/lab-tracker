@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime, timezone
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
 
+from lab_tracker.api import LabTrackerAPI
+from lab_tracker.app_parts.middleware import system_auth_context
 from lab_tracker.models import (
+    ContentHashCarrier,
     EntityRef,
     EntityType,
     Note,
@@ -15,9 +19,14 @@ from lab_tracker.models import (
     ProvenanceLinkOrigin,
     ProvenanceLinkRelation,
     ProvenanceLinkStatus,
+    evidence_content_hash_from_metadata,
 )
 from lab_tracker.provenance import AraArtifactRecords, build_ara_artifact_document
-from lab_tracker.services.provenance_link_service import notes_sharing_content_hash
+from lab_tracker.services.provenance_link_service import (
+    ProvenanceLinkService,
+    group_content_hash_carriers,
+)
+from lab_tracker.sqlalchemy_repository_parts.repository import SQLAlchemyLabTrackerRepository
 
 
 def _find_node_with_id_suffix(document: object, suffix: str) -> dict[str, Any] | None:
@@ -37,39 +46,59 @@ def _find_node_with_id_suffix(document: object, suffix: str) -> dict[str, Any] |
                 return found
     return None
 
-# --- Unit: the pure grouping helper ---------------------------------------
+# --- Unit: hash derivation and the pure grouping helper ------------------
 
 
-def _note(content_hash: str | None, *, minute: int) -> Note:
-    metadata = {"evidence_content_hash": content_hash} if content_hash is not None else {}
-    return Note(
+def test_evidence_content_hash_from_metadata_treats_missing_and_empty_as_none() -> None:
+    assert evidence_content_hash_from_metadata(None) is None
+    assert evidence_content_hash_from_metadata({}) is None
+    assert evidence_content_hash_from_metadata({"evidence_content_hash": ""}) is None
+    assert evidence_content_hash_from_metadata({"evidence_content_hash": "h"}) == "h"
+
+
+def test_note_read_exposes_evidence_content_hash_computed_from_metadata() -> None:
+    with_hash = Note(
         note_id=uuid4(),
         project_id=uuid4(),
         raw_content="x",
-        metadata=metadata,
-        created_at=datetime(2026, 1, 1, 12, minute, tzinfo=timezone.utc),
+        metadata={"evidence_content_hash": "h"},
+    )
+    without_hash = Note(note_id=uuid4(), project_id=uuid4(), raw_content="x")
+
+    assert with_hash.model_dump()["evidence_content_hash"] == "h"
+    assert without_hash.model_dump()["evidence_content_hash"] is None
+
+
+def _carrier(
+    content_hash: str,
+    entity_type: EntityType,
+    entity_id: UUID,
+    *,
+    minute: int,
+) -> ContentHashCarrier:
+    return ContentHashCarrier(
+        content_hash=content_hash,
+        entity=EntityRef(entity_type=entity_type, entity_id=entity_id),
+        captured_at=datetime(2026, 1, 1, 12, minute, tzinfo=timezone.utc),
     )
 
 
-def test_groups_by_hash_drops_singletons_and_empty_hashes() -> None:
-    shared_a = _note("hash-a", minute=1)
-    shared_b = _note("hash-a", minute=2)
-    lonely = _note("hash-b", minute=3)
-    no_hash = _note(None, minute=4)
+def test_group_content_hash_carriers_dedupes_entities_and_drops_singletons() -> None:
+    note_a, note_b, dataset = uuid4(), uuid4(), uuid4()
+    carriers = [
+        _carrier("h", EntityType.NOTE, note_a, minute=1),
+        _carrier("h", EntityType.NOTE, note_b, minute=2),
+        # A dataset with two identical-checksum files is one carrier, so the
+        # repository's two rows must not pair the dataset with itself.
+        _carrier("x", EntityType.DATASET, dataset, minute=3),
+        _carrier("x", EntityType.DATASET, dataset, minute=4),
+        _carrier("y", EntityType.NOTE, note_a, minute=5),
+    ]
 
-    groups = notes_sharing_content_hash([shared_a, shared_b, lonely, no_hash])
+    groups = group_content_hash_carriers(carriers)
 
-    assert set(groups) == {"hash-a"}
-    assert [note.note_id for note in groups["hash-a"]] == [shared_a.note_id, shared_b.note_id]
-
-
-def test_groups_sort_each_group_by_created_at_ascending() -> None:
-    later = _note("h", minute=9)
-    earlier = _note("h", minute=1)
-
-    groups = notes_sharing_content_hash([later, earlier])
-
-    assert [note.note_id for note in groups["h"]] == [earlier.note_id, later.note_id]
+    assert set(groups) == {"h"}
+    assert [carrier.entity.entity_id for carrier in groups["h"]] == [note_a, note_b]
 
 
 # --- Integration: detector + human gate via the API -----------------------
@@ -121,6 +150,44 @@ def _note_with_hash(
     return response.json()["data"]["note_id"]
 
 
+def _staged_dataset(client: TestClient, headers: dict[str, str], project_id: str) -> str:
+    question = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Which acquisition output was reused?",
+            "question_type": "descriptive",
+        },
+        headers=headers,
+    )
+    assert question.status_code == 201
+    response = client.post(
+        "/datasets",
+        json={
+            "project_id": project_id,
+            "primary_question_id": question.json()["data"]["question_id"],
+        },
+        headers=headers,
+    )
+    assert response.status_code == 201
+    return response.json()["data"]["dataset_id"]
+
+
+def _upload_dataset_file(
+    client: TestClient,
+    headers: dict[str, str],
+    dataset_id: str,
+    content: bytes,
+) -> str:
+    response = client.post(
+        f"/datasets/{dataset_id}/files",
+        files={"file": ("acquired.bin", content, "application/octet-stream")},
+        headers=headers,
+    )
+    assert response.status_code == 201
+    return response.json()["data"]["checksum"]
+
+
 def _run_detection(client: TestClient, headers: dict[str, str], project_id: str) -> None:
     client.app.state.graph_draft_client_factory = lambda settings: _FakeBatchDraftClient()
     response = client.post(
@@ -131,10 +198,49 @@ def _run_detection(client: TestClient, headers: dict[str, str], project_id: str)
     assert response.status_code == 201
 
 
+def _enqueue_detection(
+    client: TestClient,
+    headers: dict[str, str],
+    project_id: str,
+) -> dict[str, Any]:
+    """Queue a run-now batch (background drafting on) instead of executing it."""
+
+    client.app.state.graph_draft_client_factory = lambda settings: _FakeBatchDraftClient()
+    client.app.state.settings.graph_draft_background_enabled = True
+    response = client.post(
+        "/batches/run-now",
+        json={"project_id": project_id, "user_hint": "detect"},
+        headers=headers,
+    )
+    assert response.status_code == 201
+    return response.json()["data"]
+
+
+def _process_next_background_run(client: TestClient):
+    with client.app.state.db_session_factory() as session:
+        api = LabTrackerAPI(
+            raw_storage=client.app.state.raw_note_storage,
+            repository=SQLAlchemyLabTrackerRepository(session),
+            settings=client.app.state.settings,
+            surface="background",
+        )
+        return api.process_next_graph_draft_batch_run(
+            draft_client_factory=client.app.state.graph_draft_client_factory,
+            app_settings=client.app.state.settings,
+            actor=system_auth_context(),
+        )
+
+
 def _links(client: TestClient, headers: dict[str, str], project_id: str) -> list[dict[str, Any]]:
     response = client.get(f"/provenance-links?project_id={project_id}", headers=headers)
     assert response.status_code == 200
     return response.json()["data"]
+
+
+def _content_hash_carriers(client: TestClient, project_id: str) -> list[ContentHashCarrier]:
+    with client.app.state.db_session_factory() as session:
+        repository = SQLAlchemyLabTrackerRepository(session)
+        return repository.provenance_links.list_content_hash_carriers(UUID(project_id))
 
 
 def test_detector_proposes_derived_from_link_with_correct_direction(
@@ -274,6 +380,131 @@ def test_cross_project_links_are_scoped_out_of_list(
     assert other_links == []
 
 
+# --- The carrier query and dataset endpoints ------------------------------
+
+
+def test_list_content_hash_carriers_returns_only_shared_hashes_across_notes_and_dataset_files(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    content = b"acquired bytes"
+    content_hash = hashlib.sha256(content).hexdigest()
+    shared_a = _note_with_hash(client, admin_auth_headers, project_id, "a", "h")
+    shared_b = _note_with_hash(client, admin_auth_headers, project_id, "b", "h")
+    _note_with_hash(client, admin_auth_headers, project_id, "lonely", "x")
+    reused = _note_with_hash(client, admin_auth_headers, project_id, "reused", content_hash)
+    dataset_id = _staged_dataset(client, admin_auth_headers, project_id)
+    assert _upload_dataset_file(client, admin_auth_headers, dataset_id, content) == content_hash
+    # Identical carriers in another project never join this project's groups.
+    other_project = _project(client, admin_auth_headers)
+    _note_with_hash(client, admin_auth_headers, other_project, "elsewhere", "h")
+    _note_with_hash(client, admin_auth_headers, other_project, "elsewhere", "x")
+
+    carriers = _content_hash_carriers(client, project_id)
+
+    assert [
+        (carrier.content_hash, carrier.entity.entity_type, str(carrier.entity.entity_id))
+        for carrier in carriers
+    ] == [
+        (content_hash, EntityType.NOTE, reused),
+        (content_hash, EntityType.DATASET, dataset_id),
+        ("h", EntityType.NOTE, shared_a),
+        ("h", EntityType.NOTE, shared_b),
+    ]
+    assert carriers[0].captured_at <= carriers[1].captured_at
+    assert carriers[2].captured_at <= carriers[3].captured_at
+    assert all(carrier.captured_at.tzinfo is not None for carrier in carriers)
+
+
+def test_detector_proposes_note_to_dataset_link_from_uploaded_file_checksum(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    content = b"acquisition output"
+    content_hash = hashlib.sha256(content).hexdigest()
+    note_id = _note_with_hash(client, admin_auth_headers, project_id, "acquired", content_hash)
+    dataset_id = _staged_dataset(client, admin_auth_headers, project_id)
+    _upload_dataset_file(client, admin_auth_headers, dataset_id, content)
+
+    _run_detection(client, admin_auth_headers, project_id)
+    links = _links(client, admin_auth_headers, project_id)
+
+    assert len(links) == 1
+    link = links[0]
+    assert link["status"] == "proposed"
+    assert link["basis"] == "content_hash_match"
+    assert link["content_hash"] == content_hash
+    assert link["source"]["entity_type"] == "dataset"
+    assert link["source"]["entity_id"] == dataset_id
+    assert link["target"]["entity_type"] == "note"
+    assert link["target"]["entity_id"] == note_id
+
+
+# --- The detector runs on every batch execution path ----------------------
+
+
+def test_detector_runs_on_the_queued_worker_path(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    _note_with_hash(client, admin_auth_headers, project_id, "a", "h")
+    _note_with_hash(client, admin_auth_headers, project_id, "b", "h")
+
+    queued = _enqueue_detection(client, admin_auth_headers, project_id)
+    assert queued["status"] == "pending"
+    # Enqueuing only reserves the run; nothing is proposed until it executes.
+    assert _links(client, admin_auth_headers, project_id) == []
+
+    processed = _process_next_background_run(client)
+
+    assert processed is not None
+    assert processed.status.value == "ready"
+    links = _links(client, admin_auth_headers, project_id)
+    assert len(links) == 1
+    assert links[0]["status"] == "proposed"
+
+
+def test_detector_failure_never_fails_the_queued_run(
+    client: TestClient, admin_auth_headers: dict[str, str], monkeypatch
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    _note_with_hash(client, admin_auth_headers, project_id, "a", "h")
+    _note_with_hash(client, admin_auth_headers, project_id, "b", "h")
+
+    def _explode(self, project_id, *, actor=None):
+        raise RuntimeError("detector exploded")
+
+    monkeypatch.setattr(ProvenanceLinkService, "propose_links_from_content_hash", _explode)
+    _enqueue_detection(client, admin_auth_headers, project_id)
+
+    processed = _process_next_background_run(client)
+
+    assert processed is not None
+    assert processed.status.value == "ready"
+    assert _links(client, admin_auth_headers, project_id) == []
+
+
+def test_detector_runs_once_per_synchronous_run(
+    client: TestClient, admin_auth_headers: dict[str, str], monkeypatch
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    _note_with_hash(client, admin_auth_headers, project_id, "a", "h")
+    _note_with_hash(client, admin_auth_headers, project_id, "b", "h")
+    calls: list[UUID] = []
+    original = ProvenanceLinkService.propose_links_from_content_hash
+
+    def _counting(self, project_id, *, actor=None):
+        calls.append(project_id)
+        return original(self, project_id, actor=actor)
+
+    monkeypatch.setattr(ProvenanceLinkService, "propose_links_from_content_hash", _counting)
+
+    _run_detection(client, admin_auth_headers, project_id)
+
+    assert calls == [UUID(project_id)]
+    assert len(_links(client, admin_auth_headers, project_id)) == 1
+
+
 # --- PROV-O rendering of accepted links -----------------------------------
 
 
@@ -354,9 +585,10 @@ def test_proposed_link_does_not_render_in_ara_export() -> None:
     assert "wasDerivedFrom" not in derived_node
 
 
-def test_provenance_link_repository_contract_declares_list_by_project() -> None:
-    # The content-hash detector calls provenance_links.list_by_project, so the
-    # repository protocol (not just the SQLAlchemy class) must declare it.
+def test_provenance_link_repository_contract_declares_detector_queries() -> None:
+    # The content-hash detector calls provenance_links.list_by_project and
+    # list_content_hash_carriers, so the repository protocol (not just the
+    # SQLAlchemy class) must declare both with the implementation's signature.
     import inspect
     from typing import get_type_hints
 
@@ -369,7 +601,8 @@ def test_provenance_link_repository_contract_declares_list_by_project() -> None:
     assert isinstance(provenance_links, property)
     assert provenance_links.fget is not None
     contract = get_type_hints(provenance_links.fget)["return"]
-    assert callable(getattr(contract, "list_by_project", None))
-    assert inspect.signature(contract.list_by_project) == inspect.signature(
-        SQLAlchemyProvenanceLinkRepository.list_by_project
-    )
+    for method_name in ("list_by_project", "list_content_hash_carriers"):
+        assert callable(getattr(contract, method_name, None)), method_name
+        assert inspect.signature(getattr(contract, method_name)) == inspect.signature(
+            getattr(SQLAlchemyProvenanceLinkRepository, method_name)
+        ), method_name
