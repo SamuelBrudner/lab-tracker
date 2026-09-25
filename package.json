@@ -15,6 +15,7 @@
     "shoot:screenshots": "node scripts/shoot-screenshots.mjs",
     "test:e2e": "playwright test",
     "test:frontend": "vitest run",
+    "test:frontend:chaos": "vitest run --mode scheduler-chaos",
     "typecheck:frontend": "tsc --project tsconfig.frontend-contracts.json"
   },
   "devDependencies": {
