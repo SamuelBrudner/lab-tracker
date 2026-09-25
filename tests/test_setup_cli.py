@@ -558,6 +558,42 @@ def test_setup_verify_mcp_prefers_the_current_client_environment(
     )
 
 
+def test_setup_verify_mcp_looks_beside_a_symlinked_interpreter_not_its_target(
+    tmp_path, monkeypatch
+) -> None:
+    # POSIX venvs (uv sync, uv tool install) make bin/python a symlink to a base
+    # interpreter that lives in a different environment.
+    base_dir = tmp_path / "base-interpreter" / "bin"
+    scripts_dir = tmp_path / "client-environment" / "bin"
+    base_dir.mkdir(parents=True)
+    scripts_dir.mkdir(parents=True)
+    base_python = base_dir / "python3"
+    base_python.touch()
+    (base_dir / "lt-mcp").touch()
+    python = scripts_dir / "python"
+    try:
+        python.symlink_to(base_python)
+    except OSError as exc:
+        if sys.platform != "win32":
+            raise
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+    companion = scripts_dir / "lt-mcp"
+    companion.touch()
+    monkeypatch.setattr(setup_helpers.sys, "executable", str(python))
+    monkeypatch.setattr(
+        setup_helpers.shutil,
+        "which",
+        lambda _command: "/other-environment/lt-mcp",
+    )
+
+    assert setup_helpers._resolve_mcp_executable("lt-mcp") == str(companion)
+
+    # Without a companion, PATH decides: the lt-mcp beside the base interpreter
+    # belongs to another install and must not be preferred.
+    companion.unlink()
+    assert setup_helpers._resolve_mcp_executable("lt-mcp") == "/other-environment/lt-mcp"
+
+
 def test_setup_verify_mcp_refuses_to_launch_a_mismatched_client(
     config_home, monkeypatch
 ) -> None:
