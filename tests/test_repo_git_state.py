@@ -315,7 +315,7 @@ def test_repo_report_cli_reports_unknown_dirty_state(
     _install_fake_git(tmp_path, monkeypatch, "hang")
     monkeypatch.setenv(GIT_TIMEOUT_ENV, "0.5")
 
-    lt_cli.main(["repo", "report", "--summary", "Pinned analysis state."])
+    lt_cli.main(["repo", "report", "--summary", "Pinned analysis state.", "--no-sync"])
     captured = capsys.readouterr()
     payload = json.loads(captured.out)
 
