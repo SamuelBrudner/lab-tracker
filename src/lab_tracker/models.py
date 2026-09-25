@@ -1657,6 +1657,50 @@ class PublicationReadinessReport(_DomainModel):
     seal_level: Literal["blocked", "ara_l1"] = "blocked"
 
 
+class ProjectCoverageCaptureSource(_DomainModel):
+    """When one capture source last delivered a note to the project.
+
+    A source is the (provider, adapter, install, host) tuple written into note
+    metadata by capture clients; manual notes carry none of the four and form
+    the all-``None`` bucket. This is a plain last-seen listing: no thresholds,
+    no staleness judgement.
+    """
+
+    evidence_source_provider: str | None = None
+    evidence_adapter: str | None = None
+    capture_install_id: str | None = None
+    capture_host_label: str | None = None
+    note_count: int = Field(..., ge=0)
+    last_capture_at: datetime
+
+
+class ProjectCoverageSummary(_DomainModel):
+    """How much of a project's captured record a person has actually reviewed.
+
+    Derived at read time, never stored: a staged note is *unreviewed* until a
+    committed or rejected draft named it, *unplaced* when a committed draft
+    absorbed it but no applied operation cites it, and *archived unreviewed*
+    when it was set aside with that reason. A skipped review therefore shows up
+    here as reduced coverage rather than as silent trust in the graph.
+    """
+
+    project_id: UUID
+    unreviewed_count: int = Field(..., ge=0)
+    oldest_unreviewed_at: datetime | None = None
+    unplaced_count: int = Field(..., ge=0)
+    archived_unreviewed_count: int = Field(..., ge=0)
+    pending_change_sets: int = Field(..., ge=0)
+    open_clarification_requests: int = Field(..., ge=0)
+    last_capture_at: datetime | None = None
+
+
+class ProjectCoverageReport(ProjectCoverageSummary):
+    """The coverage summary plus a bounded per-source last-seen listing."""
+
+    capture_sources: list[ProjectCoverageCaptureSource] = Field(default_factory=list)
+    capture_sources_truncated: bool = False
+
+
 class DraftQualityCell(_DomainModel):
     """Review outcomes for one provider x model x prompt version x semantic type."""
 

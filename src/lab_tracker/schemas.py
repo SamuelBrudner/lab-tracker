@@ -84,6 +84,7 @@ from lab_tracker.models import (
     NoteMetadataScalar,
     NoteStatus,
     OwnershipReassignment,
+    ProjectCoverageSummary,
     ProjectGroup,
     ProjectGroupKind,
     ProjectMembership,
@@ -1757,6 +1758,8 @@ class GraphOverviewRead(BaseModel):
     open_goals: list[GraphNodeSummary] = Field(default_factory=list)
     open_questions: list[GraphNodeSummary] = Field(default_factory=list)
     recent_nodes: list[GraphNodeSummary] = Field(default_factory=list)
+    # Required, not defaulted: a missing derivation must fail loud.
+    coverage: ProjectCoverageSummary
 
 
 class GraphSearchHit(BaseModel):
@@ -1827,6 +1830,7 @@ class PortfolioTriageFlag(BaseModel):
         "datasets_without_analyses",
         "analyses_without_claims",
         "unreviewed_claims",
+        "unreviewed_captures",
         "overdue_goals",
     ]
     label: str
@@ -1843,6 +1847,7 @@ class PortfolioProjectSummary(BaseModel):
     committed_dataset_count: int = Field(..., ge=0)
     staged_analysis_count: int = Field(..., ge=0)
     unreviewed_claim_count: int = Field(..., ge=0)
+    unreviewed_capture_count: int = Field(..., ge=0)
     last_activity_at: datetime | None = None
     owners: list[PortfolioProjectOwner] = Field(default_factory=list)
     triage_flags: list[PortfolioTriageFlag] = Field(default_factory=list)

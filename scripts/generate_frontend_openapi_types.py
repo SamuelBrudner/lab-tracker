@@ -45,6 +45,7 @@ SCOPED_OPERATIONS = (
     ("put", "/projects/{project_id}/member-onboarding/manual-alignment"),
     ("post", "/projects/{project_id}/member-onboarding/ai-alignment"),
     ("get", "/projects/{project_id}/member-onboarding/owner-queue"),
+    ("get", "/projects/{project_id}/coverage"),
     ("get", "/datasets"),
     ("get", "/datasets/{dataset_id}"),
     ("post", "/data-stores"),

@@ -7,6 +7,7 @@ from typing import Any
 from fastapi.testclient import TestClient
 
 from lab_tracker.db_models import ProjectModel
+from lab_tracker.portfolio_query import UNREVIEWED_CAPTURE_FLAG_THRESHOLD
 
 
 class FakeDraftClient:
@@ -121,6 +122,36 @@ def _graph_draft_patch(project_id: str) -> dict[str, Any]:
                 ),
                 "rationale": "Capture a follow-up note from the source.",
                 "confidence": 0.9,
+                "source_refs": [],
+            }
+        ],
+    }
+
+
+def _question_draft_patch(project_id: str) -> dict[str, Any]:
+    """A draft whose only operation creates a question, so committing it stages no new note."""
+
+    return {
+        "summary": "Drafted a question from the capture",
+        "uncertain_fields": [],
+        "clarification_requests": [],
+        "operations": [
+            {
+                "client_ref": "portfolio-question",
+                "op": "create",
+                "entity_type": "question",
+                "semantic_type": "suggest_new_question",
+                "target_entity_id": None,
+                "payload_json": json.dumps(
+                    {
+                        "project_id": project_id,
+                        "text": "Does the capture raise a new question?",
+                        "question_type": "descriptive",
+                        "status": "staged",
+                    }
+                ),
+                "rationale": "The capture states a question.",
+                "confidence": 0.8,
                 "source_refs": [],
             }
         ],
@@ -608,3 +639,96 @@ def test_portfolio_summary_derives_lab_health_triage_flags(
         "label": "Overdue goals",
         "severity": "critical",
     }
+    # No captures exist in either project, so nothing is unreviewed.
+    assert rows[project_id]["unreviewed_capture_count"] == 0
+    assert rows[stale_project_id]["unreviewed_capture_count"] == 0
+    assert "unreviewed_captures" not in flags
+    assert "unreviewed_captures" not in stale_flags
+
+
+def test_portfolio_summary_flags_unreviewed_captures_at_threshold(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    flagged_project_id = _create_project(client, admin_auth_headers, "Unreviewed captures")
+    below_project_id = _create_project(client, admin_auth_headers, "Below the threshold")
+    for index in range(UNREVIEWED_CAPTURE_FLAG_THRESHOLD):
+        note = client.post(
+            "/notes",
+            json={"project_id": flagged_project_id, "raw_content": f"Flagged capture {index}"},
+            headers=admin_auth_headers,
+        )
+        assert note.status_code == 201
+    for index in range(UNREVIEWED_CAPTURE_FLAG_THRESHOLD - 1):
+        note = client.post(
+            "/notes",
+            json={"project_id": below_project_id, "raw_content": f"Below capture {index}"},
+            headers=admin_auth_headers,
+        )
+        assert note.status_code == 201
+
+    response = client.get("/portfolio/summary", headers=admin_auth_headers)
+
+    assert response.status_code == 200
+    rows = {item["project_id"]: item for item in _portfolio_projects(response.json())}
+    assert rows[flagged_project_id]["unreviewed_capture_count"] == UNREVIEWED_CAPTURE_FLAG_THRESHOLD
+    assert _triage_flags_by_key(rows[flagged_project_id])["unreviewed_captures"] == {
+        "count": UNREVIEWED_CAPTURE_FLAG_THRESHOLD,
+        "key": "unreviewed_captures",
+        "label": "Unreviewed captures",
+        "severity": "warning",
+    }
+    assert rows[below_project_id]["unreviewed_capture_count"] == (
+        UNREVIEWED_CAPTURE_FLAG_THRESHOLD - 1
+    )
+    assert "unreviewed_captures" not in _triage_flags_by_key(rows[below_project_id])
+
+
+def test_portfolio_summary_unreviewed_captures_exclude_reviewed_drafts(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    project_id = _create_project(client, admin_auth_headers, "Reviewed capture portfolio")
+    note = client.post(
+        "/notes",
+        json={"project_id": project_id, "raw_content": "Capture that gets reviewed."},
+        headers=admin_auth_headers,
+    )
+    assert note.status_code == 201
+    note_id = note.json()["data"]["note_id"]
+    client.app.state.graph_draft_client_factory = lambda settings: FakeDraftClient(
+        _question_draft_patch(project_id)
+    )
+    draft = client.post(f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers)
+    assert draft.status_code == 201, draft.text
+    change_set_id = draft.json()["data"]["change_set_id"]
+
+    # A draft still waiting on a person is not a review.
+    pending = client.get("/portfolio/summary", headers=admin_auth_headers)
+    assert pending.status_code == 200
+    pending_row = next(
+        item for item in _portfolio_projects(pending.json()) if item["project_id"] == project_id
+    )
+    assert pending_row["unreviewed_capture_count"] == 1
+
+    for operation in draft.json()["data"]["operations"]:
+        accepted = client.patch(
+            f"/graph-drafts/{change_set_id}/operations/{operation['operation_id']}",
+            json={"payload": operation["payload"], "status": "accepted"},
+            headers=admin_auth_headers,
+        )
+        assert accepted.status_code == 200, accepted.text
+    commit = client.post(
+        f"/graph-drafts/{change_set_id}/commit",
+        json={"message": "Review the capture"},
+        headers=admin_auth_headers,
+    )
+    assert commit.status_code == 200, commit.text
+    assert commit.json()["data"]["status"] == "committed"
+
+    reviewed = client.get("/portfolio/summary", headers=admin_auth_headers)
+    assert reviewed.status_code == 200
+    reviewed_row = next(
+        item for item in _portfolio_projects(reviewed.json()) if item["project_id"] == project_id
+    )
+    assert reviewed_row["unreviewed_capture_count"] == 0

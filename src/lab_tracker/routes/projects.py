@@ -15,6 +15,7 @@ from lab_tracker.errors import NotFoundError
 from lab_tracker.models import (
     DraftQualityLedger,
     Project,
+    ProjectCoverageReport,
     ProjectMembership,
     ProjectStatus,
     PublicationReadinessReport,
@@ -121,6 +122,25 @@ def build_projects_router(api: LabTrackerAPI) -> APIRouter:
         report = api_from_request(request, api).check_publication_readiness(
             project_id,
             actor=actor,
+        )
+        return Envelope(data=report)
+
+    @router.get(
+        "/projects/{project_id}/coverage",
+        response_model=Envelope[ProjectCoverageReport],
+    )
+    def get_project_coverage(project_id: UUID, request: Request):
+        """Report how much of a project's captured record a person has reviewed."""
+        report = handlers_from_request(request).context.project_coverage(
+            project_id,
+            actor=actor_from_request(request),
+        )
+        # Recorded only after the opaque read succeeded: denied reads leave no trace.
+        record_usage_view(
+            request,
+            resource_type=UsageEventResourceType.PROJECT,
+            resource_id=report.project_id,
+            project_id=report.project_id,
         )
         return Envelope(data=report)
 

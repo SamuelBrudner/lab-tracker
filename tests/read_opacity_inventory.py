@@ -103,6 +103,13 @@ CORE_READ_OPACITY_VARIANTS = (
     ),
     _variant(
         CORE_SUITE,
+        "project-coverage",
+        method="GET",
+        route_template="/projects/{project_id}/coverage",
+        operation_id="get_project_coverage_projects__project_id__coverage_get",
+    ),
+    _variant(
+        CORE_SUITE,
         "project-graph-json",
         method="GET",
         route_template="/projects/{project_id}/graph",

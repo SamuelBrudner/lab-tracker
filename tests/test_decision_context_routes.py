@@ -501,3 +501,85 @@ def test_decision_context_claims_expose_effective_status_and_caveat(
     assert claims[old_claim_id]["superseded_by_claim_id"] == new_claim_id
     caveats = after["task_guidance"]["caveats"]
     assert sum("effective_status" in caveat for caveat in caveats) == 1
+
+
+def test_decision_context_route_returns_exploration_nodes_and_coverage(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = client.post(
+        "/projects",
+        json={"name": "Exploration Coverage Project", "description": ""},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    question_id = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Which baseline controls matter?",
+            "question_type": "descriptive",
+            "status": "active",
+        },
+        headers=admin_auth_headers,
+    ).json()["data"]["question_id"]
+    staged_note = client.post(
+        "/notes",
+        json={"project_id": project_id, "raw_content": "Capture nobody reviewed yet"},
+        headers=admin_auth_headers,
+    )
+    assert staged_note.status_code == 201
+    decision_id = client.post(
+        "/exploration-nodes",
+        json={
+            "project_id": project_id,
+            "node_type": "decision",
+            "title": "Use the committed analysis",
+            "target": {"entity_type": "question", "entity_id": question_id},
+            "choice": "Reuse it",
+            "alternatives_considered": ["Wait for more data"],
+            "rationale": "It is already linked.",
+        },
+        headers=admin_auth_headers,
+    ).json()["data"]["node_id"]
+    dead_end_id = client.post(
+        "/exploration-nodes",
+        json={
+            "project_id": project_id,
+            "node_type": "dead_end",
+            "title": "Side analysis went nowhere",
+            "target": {"entity_type": "question", "entity_id": question_id},
+            "hypothesis": "The side analysis would settle the question.",
+            "failure_mode": "It never reused the committed dataset.",
+            "lesson": "Keep the spine intact first.",
+        },
+        headers=admin_auth_headers,
+    ).json()["data"]["node_id"]
+
+    response = client.post(
+        "/assistant/decision-context",
+        json={
+            "task_kind": "summary",
+            "query": "baseline controls",
+            "project_id": project_id,
+            "limit": 5,
+        },
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    # Negative knowledge first: the dead end precedes the (older) decision.
+    assert [node["node_type"] for node in data["exploration_nodes"]] == ["dead_end", "decision"]
+    assert [node["node_id"] for node in data["exploration_nodes"]] == [dead_end_id, decision_id]
+    assert data["exploration_nodes"][0]["relevance_reasons"] == ["recent_activity"]
+    candidates = data["write_front_door"]["candidate_ids"]["exploration_nodes"]
+    assert [ref["entity_id"] for ref in candidates] == [dead_end_id, decision_id]
+    assert candidates[0] == {
+        "entity_type": "exploration_node",
+        "entity_id": dead_end_id,
+        "label": "Side analysis went nowhere",
+    }
+    assert data["coverage"]["project_id"] == project_id
+    assert data["coverage"]["unreviewed_count"] == 1
+    assert data["coverage"]["pending_change_sets"] == 0
+    assert data["truncation"]["was_truncated"] is False

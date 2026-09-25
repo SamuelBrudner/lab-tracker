@@ -12,6 +12,7 @@ from uuid import UUID
 from sqlalchemy import or_, select, text
 from sqlalchemy.orm import Session as OrmSession
 
+from lab_tracker.coverage_query import project_coverage_summary
 from lab_tracker.db_models import (
     AnalysisModel,
     ClaimAnalysisModel,
@@ -48,6 +49,7 @@ from lab_tracker.models import (
     Note,
     OwnershipReassignment,
     Project,
+    ProjectCoverageSummary,
     ProjectGroup,
     ProjectMembership,
     ProvenanceLink,
@@ -1415,6 +1417,9 @@ class SQLAlchemyLabTrackerRepository:
             offset=offset,
             recent_first=recent_first,
         )
+
+    def project_coverage_summary(self, project_id: UUID) -> ProjectCoverageSummary:
+        return project_coverage_summary(self._session, project_id)
 
     def query_provenance_links(
         self,

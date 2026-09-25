@@ -12,8 +12,13 @@ from lab_tracker.decision_context_builders import (
     build_evidence_map,
     task_guidance,
     truncation,
+    write_front_door,
 )
-from lab_tracker.decision_context_constants import CONTEXT_LOOKUP_LIMIT, TASK_KIND_VALUES
+from lab_tracker.decision_context_constants import (
+    CONTEXT_LOOKUP_LIMIT,
+    EXPLORATION_NODE_TYPE_ORDER,
+    TASK_KIND_VALUES,
+)
 from lab_tracker.decision_context_query import RepositoryDecisionContextReader
 from lab_tracker.decision_context_selection import merge_entities
 from lab_tracker.decision_context_types import JsonObject
@@ -22,6 +27,9 @@ from lab_tracker.decision_context_use_case import (
     build_decision_context,
 )
 from lab_tracker.models import (
+    EntityRef,
+    EntityType,
+    ExplorationNodeType,
     NoteStatus,
     QuestionStatus,
     QuestionType,
@@ -93,6 +101,44 @@ class FakeDecisionContextReader:
         "analysis_id": "analysis-1",
         "caption": "Baseline comparison",
         "related_claim_ids": ["claim-1"],
+    }
+    # Stored in the order a naive single read would return them, so the
+    # dead-end-first ordering below is the orchestrator's doing.
+    exploration_nodes = [
+        {
+            "node_id": "decision-1",
+            "project_id": "project-1",
+            "node_type": "decision",
+            "title": "Use the committed analysis",
+            "status": "committed",
+            "target": {"entity_type": "claim", "entity_id": "claim-1"},
+        },
+        {
+            "node_id": "dead-end-1",
+            "project_id": "project-1",
+            "node_type": "dead_end",
+            "title": "Side analysis went nowhere",
+            "status": "committed",
+            "target": {"entity_type": "dataset", "entity_id": "dataset-1"},
+        },
+        {
+            "node_id": "pivot-1",
+            "project_id": "project-1",
+            "node_type": "pivot",
+            "title": "Pivot back to the linked analysis",
+            "status": "committed",
+            "target": {"entity_type": "claim", "entity_id": "claim-1"},
+        },
+    ]
+    coverage = {
+        "project_id": "project-1",
+        "unreviewed_count": 3,
+        "oldest_unreviewed_at": "2026-06-01T00:00:00Z",
+        "unplaced_count": 1,
+        "archived_unreviewed_count": 0,
+        "pending_change_sets": 1,
+        "open_clarification_requests": 2,
+        "last_capture_at": "2026-06-02T00:00:00Z",
     }
 
     def list_projects(
@@ -253,6 +299,29 @@ class FakeDecisionContextReader:
         recent_first: bool = False,
     ) -> JsonObject:
         return _envelope([self.visualization], limit=limit, offset=offset)
+
+    def list_exploration_nodes(
+        self,
+        *,
+        project_id: str | None = None,
+        node_type: str | None = None,
+        status: str | None = None,
+        created_by: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+        recent_first: bool = False,
+    ) -> JsonObject:
+        nodes = [
+            node
+            for node in self.exploration_nodes
+            if node_type is None or node["node_type"] == node_type
+        ]
+        return _envelope(nodes, limit=limit, offset=offset)
+
+    def project_coverage(self, project_id: str) -> JsonObject | None:
+        if project_id != self.project["project_id"]:
+            return None
+        return dict(self.coverage)
 
 
 def test_merge_entities_preserves_first_record_and_combines_reasons() -> None:
@@ -758,3 +827,244 @@ def test_repository_reader_claims_carry_effective_status() -> None:
     assert rows[str(old.claim_id)]["effective_status"] == "superseded"
     assert rows[str(new.claim_id)]["effective_status"] == "proposed"
     assert reader.list_claims(project_id=str(hidden.project_id))["data"] == []
+
+
+def test_exploration_node_type_order_puts_dead_ends_first() -> None:
+    assert EXPLORATION_NODE_TYPE_ORDER == ("dead_end", "pivot", "decision")
+    assert sorted(EXPLORATION_NODE_TYPE_ORDER) == sorted(item.value for item in ExplorationNodeType)
+
+
+def test_write_front_door_lists_exploration_node_candidate_ids() -> None:
+    nodes = [
+        {"node_id": f"dead-end-{index}", "node_type": "dead_end", "title": f"Dead end {index}"}
+        for index in range(1, 13)
+    ]
+    nodes[0]["title"] = "Side analysis went nowhere"
+
+    payload = write_front_door(
+        task_kind="summary",
+        project=FakeDecisionContextReader.project,
+        anchors=[],
+        questions=[],
+        sessions=[],
+        datasets=[],
+        analyses=[],
+        claims=[],
+        visualizations=[],
+        exploration_nodes=nodes,
+    )
+
+    candidates = payload["candidate_ids"]["exploration_nodes"]
+    assert candidates[0] == {
+        "entity_type": "exploration_node",
+        "entity_id": "dead-end-1",
+        "label": "Side analysis went nowhere",
+    }
+    assert len(candidates) == 10
+
+
+def test_build_decision_context_orders_exploration_nodes_dead_end_first() -> None:
+    payload = build_decision_context(
+        FakeDecisionContextReader(),
+        task_kind="summary",
+        query="baseline controls",
+        project_id="project-1",
+        limit=5,
+    )
+
+    data = payload["data"]
+    assert [node["node_type"] for node in data["exploration_nodes"]] == [
+        "dead_end",
+        "pivot",
+        "decision",
+    ]
+    assert all(
+        node["relevance_reasons"] == ["recent_activity"] for node in data["exploration_nodes"]
+    )
+    assert [
+        ref["entity_id"] for ref in data["write_front_door"]["candidate_ids"]["exploration_nodes"]
+    ] == ["dead-end-1", "pivot-1", "decision-1"]
+
+
+def test_build_decision_context_reports_exploration_truncation_per_type() -> None:
+    limit = 5
+
+    class TruncatedDeadEndsReader(FakeDecisionContextReader):
+        def list_exploration_nodes(self, **kwargs: object) -> JsonObject:
+            payload = super().list_exploration_nodes(**kwargs)  # type: ignore[arg-type]
+            if kwargs.get("node_type") == "dead_end":
+                payload["meta"]["total"] = limit + 1
+            return payload
+
+    payload = build_decision_context(
+        TruncatedDeadEndsReader(),
+        task_kind="summary",
+        query="baseline controls",
+        project_id="project-1",
+        limit=limit,
+    )
+
+    truncated = payload["data"]["truncation"]
+    assert truncated["was_truncated"] is True
+    assert {
+        "section": "exploration_nodes.dead_end",
+        "returned": 1,
+        "total": limit + 1,
+    } in truncated["sections"]
+    assert not any(
+        section["section"] in {"exploration_nodes.pivot", "exploration_nodes.decision"}
+        for section in truncated["sections"]
+    )
+
+
+def test_build_decision_context_includes_coverage_block() -> None:
+    class CoverageSpyReader(FakeDecisionContextReader):
+        def __init__(self) -> None:
+            self.coverage_reads: list[str] = []
+
+        def project_coverage(self, project_id: str) -> JsonObject | None:
+            self.coverage_reads.append(project_id)
+            return super().project_coverage(project_id)
+
+    reader = CoverageSpyReader()
+    payload = build_decision_context(
+        reader,
+        task_kind="summary",
+        query="baseline controls",
+        project_id="project-1",
+        limit=5,
+    )
+
+    data = payload["data"]
+    assert data["coverage"] == FakeDecisionContextReader.coverage
+    assert reader.coverage_reads == ["project-1"]
+    # Coverage is a separate key; the pinned summary sentence does not change.
+    assert data["context_summary"] == (
+        "Found 1 questions, 1 notes, 1 datasets, 1 analyses, "
+        "1 claims, and 1 visualizations for summary."
+    )
+
+
+def test_build_decision_context_passes_created_by_to_exploration_reads() -> None:
+    class ExplorationSpyReader(FakeDecisionContextReader):
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def list_exploration_nodes(self, **kwargs: object) -> JsonObject:
+            self.calls.append(dict(kwargs))
+            return super().list_exploration_nodes(**kwargs)  # type: ignore[arg-type]
+
+    reader = ExplorationSpyReader()
+    build_decision_context(
+        reader,
+        task_kind="progress_review",
+        query="baseline controls",
+        project_id="project-1",
+        created_by="user-1",
+        limit=5,
+    )
+
+    assert [call["node_type"] for call in reader.calls] == list(EXPLORATION_NODE_TYPE_ORDER)
+    assert all(call["created_by"] == "user-1" for call in reader.calls)
+    assert all(call["recent_first"] is True and call["limit"] == 5 for call in reader.calls)
+    assert all(call["project_id"] == "project-1" for call in reader.calls)
+
+
+def test_repository_reader_returns_project_coverage_summary() -> None:
+    api = repository_backed_api()
+    actor = AuthContext(user_id=uuid4(), role=Role.ADMIN)
+    project = api.create_project("Coverage project", actor=actor)
+    hidden = api.create_project("Hidden coverage project", actor=actor)
+    api.create_note(project.project_id, "First capture", actor=actor)
+    api.create_note(project.project_id, "Second capture", actor=actor)
+    api.create_note(hidden.project_id, "Hidden capture", actor=actor)
+    reader = RepositoryDecisionContextReader(
+        api._repository,  # type: ignore[arg-type,attr-defined]
+        accessible_project_ids={project.project_id},
+    )
+
+    coverage = reader.project_coverage(str(project.project_id))
+
+    assert coverage is not None
+    assert coverage["project_id"] == str(project.project_id)
+    assert coverage["unreviewed_count"] == 2
+    assert coverage["unplaced_count"] == 0
+    assert coverage["archived_unreviewed_count"] == 0
+    assert coverage["pending_change_sets"] == 0
+    assert coverage["open_clarification_requests"] == 0
+    assert coverage["oldest_unreviewed_at"] is not None
+    assert coverage["last_capture_at"] is not None
+    assert reader.project_coverage(str(hidden.project_id)) is None
+
+
+def test_repository_reader_lists_exploration_nodes_scoped_to_accessible_projects() -> None:
+    api = repository_backed_api()
+    actor = AuthContext(user_id=uuid4(), role=Role.ADMIN)
+    project = api.create_project("Exploration project", actor=actor)
+    question = api.create_question(
+        project_id=project.project_id,
+        text="Which baseline controls matter?",
+        question_type=QuestionType.DESCRIPTIVE,
+        status=QuestionStatus.ACTIVE,
+        actor=actor,
+    )
+    target = EntityRef(entity_type=EntityType.QUESTION, entity_id=question.question_id)
+    dead_end = api.create_exploration_node(
+        project.project_id,
+        node_type=ExplorationNodeType.DEAD_END,
+        title="Side analysis went nowhere",
+        target=target,
+        hypothesis="The side analysis would settle the question.",
+        failure_mode="It never reused the committed dataset.",
+        lesson="Keep the spine intact first.",
+        actor=actor,
+    )
+    pivot = api.create_exploration_node(
+        project.project_id,
+        node_type=ExplorationNodeType.PIVOT,
+        title="Pivot back to the linked analysis",
+        target=target,
+        trigger="Dead-end side analysis",
+        rationale="The retained graph already has a support path.",
+        invalidates_node_id=dead_end.node_id,
+        actor=actor,
+    )
+    decision = api.create_exploration_node(
+        project.project_id,
+        node_type=ExplorationNodeType.DECISION,
+        title="Use the committed analysis",
+        target=target,
+        choice="Reuse it",
+        alternatives_considered=["Wait for more data"],
+        rationale="It is already linked.",
+        actor=actor,
+    )
+    reader = RepositoryDecisionContextReader(
+        api._repository,  # type: ignore[arg-type,attr-defined]
+        accessible_project_ids={project.project_id},
+    )
+
+    listing = reader.list_exploration_nodes(project_id=str(project.project_id), recent_first=True)
+    assert listing["meta"]["total"] == 3
+    assert [item["node_id"] for item in listing["data"]] == [
+        str(decision.node_id),
+        str(pivot.node_id),
+        str(dead_end.node_id),
+    ]
+    assert listing["data"][0]["node_type"] == "decision"
+
+    dead_ends = reader.list_exploration_nodes(
+        project_id=str(project.project_id),
+        node_type="dead_end",
+    )
+    assert dead_ends["meta"]["total"] == 1
+    assert [item["node_id"] for item in dead_ends["data"]] == [str(dead_end.node_id)]
+
+    outsider = RepositoryDecisionContextReader(
+        api._repository,  # type: ignore[arg-type,attr-defined]
+        accessible_project_ids=set(),
+    )
+    assert outsider.list_exploration_nodes(project_id=str(project.project_id)) == {
+        "data": [],
+        "meta": {"limit": 50, "offset": 0, "total": 0},
+    }

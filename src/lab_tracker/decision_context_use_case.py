@@ -16,6 +16,7 @@ from lab_tracker.decision_context_builders import (
 )
 from lab_tracker.decision_context_constants import (
     CONTEXT_LOOKUP_LIMIT,
+    EXPLORATION_NODE_TYPE_ORDER,
     TASK_KIND_TEXT,
     TASK_KIND_VALUES,
 )
@@ -199,6 +200,8 @@ def build_decision_context(
             f"Project {resolved_project_id!r} was not found.",
             anchor={"entity_type": "project", "entity_id": resolved_project_id},
         )
+    # Derived, never stored: how much of the captured record a person reviewed.
+    coverage = reader.project_coverage(resolved_project_id)
 
     search_payload = reader.search(
         cleaned_query,
@@ -258,6 +261,22 @@ def build_decision_context(
         limit=resolved_limit,
         recent_first=True,
     )
+    # One bounded read per node type, dead ends first, so negative knowledge
+    # is present even when decisions outnumber it (no since/until: the
+    # exploration query has no window filter).
+    exploration_payloads = [
+        (
+            node_type,
+            reader.list_exploration_nodes(
+                project_id=resolved_project_id,
+                node_type=node_type,
+                created_by=created_by,
+                limit=resolved_limit,
+                recent_first=True,
+            ),
+        )
+        for node_type in EXPLORATION_NODE_TYPE_ORDER
+    ]
 
     questions = merge_entities(
         "question_id",
@@ -294,6 +313,10 @@ def build_decision_context(
         "viz_id",
         (anchor_entities["visualizations"], "anchor"),
         (envelope_items(visualizations_payload), "recent_activity"),
+    )
+    exploration_nodes = merge_entities(
+        "node_id",
+        *[(envelope_items(payload), "recent_activity") for _, payload in exploration_payloads],
     )
 
     anchors = [
@@ -351,6 +374,7 @@ def build_decision_context(
                 analyses=analyses,
                 claims=claims,
                 visualizations=visualizations,
+                exploration_nodes=exploration_nodes,
             ),
             "questions": questions,
             "notes": notes,
@@ -359,7 +383,9 @@ def build_decision_context(
             "analyses": analyses,
             "claims": claims,
             "visualizations": visualizations,
+            "exploration_nodes": exploration_nodes,
             "evidence_map": evidence_map,
+            "coverage": coverage,
             "truncation": truncation(
                 [
                     (
@@ -389,6 +415,10 @@ def build_decision_context(
                     ("analyses", analyses_payload, None),
                     ("claims", claims_payload, None),
                     ("visualizations", visualizations_payload, None),
+                    *[
+                        (f"exploration_nodes.{node_type}", payload, None)
+                        for node_type, payload in exploration_payloads
+                    ],
                 ]
             ),
         },

@@ -12,11 +12,11 @@ capability failures and the explicit permission failures of mutations are
 
 | Slice | Behavioral variants | Distinct OpenAPI operations | Scope |
 | --- | ---: | ---: | --- |
-| Core | 19 | 19 | Projects 8; questions 6; notes 2; sessions 3 |
+| Core | 20 | 20 | Projects 9; questions 6; notes 2; sessions 3 |
 | Evidence and artifacts | 18 | 16 | Fifteen GET variants plus dataset, analysis, and claim modes of the artifact resolver |
 | Workflow and registry | 4 | 4 | Graph-draft detail, batch-detail alias, data-store detail, and data-store health |
 | Acquisition | 10 | 10 | Experiments 3; session and dataset experiment links 2; collections and snapshots 5 |
-| **Total** | **51** | **49** | **19 + 18 + 4 + 10 behavioral variants** |
+| **Total** | **52** | **50** | **20 + 18 + 4 + 10 behavioral variants** |
 
 The behavioral count is larger than the OpenAPI-operation count because the
 three entity modes all exercise the single semantic-read operation
@@ -25,11 +25,11 @@ one OpenAPI path-and-method operation.
 
 The 15 evidence GET variants comprise datasets 4, analyses 2, claims 5,
 visualizations 2, exploration nodes 1, and provenance links 1. Resolver modes
-add dataset, analysis, and claim. The eight core project variants are project
-detail, publication readiness, draft quality, and the graph JSON, overview,
-search, neighborhood, and Mermaid reads. The 19 core, four workflow/registry,
-and ten acquisition variants are enumerated directly by their behavioral
-suites, and
+add dataset, analysis, and claim. The nine core project variants are project
+detail, publication readiness, draft quality, coverage, and the graph JSON,
+overview, search, neighborhood, and Mermaid reads. The 20 core, four
+workflow/registry, and ten acquisition variants are enumerated directly by
+their behavioral suites, and
 [`tests/read_opacity_inventory.py`](../tests/read_opacity_inventory.py) is the
 canonical list.
 

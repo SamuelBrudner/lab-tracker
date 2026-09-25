@@ -57,3 +57,6 @@ capture you judged irrelevant and one you simply never got to.
   `{"reason": "reviewed_not_relevant"}`. The reason defaults to
   `archived_unreviewed`. The archived note records `archived_reason`,
   `archived_at`, and `archived_by`.
+- `GET /projects/{project_id}/coverage` reports how many staged captures are
+  still unreviewed, unplaced, or archived unreviewed, so the "37 captures
+  unreviewed since June 1" number above is a real read, not a slogan.

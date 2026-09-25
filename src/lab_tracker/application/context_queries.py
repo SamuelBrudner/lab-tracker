@@ -33,6 +33,7 @@ from lab_tracker.artifact_resolution_limits import (
     ArtifactContentBoundsError,
 )
 from lab_tracker.auth import AuthContext
+from lab_tracker.coverage_query import project_coverage_report
 from lab_tracker.decision_context import JsonObject, build_decision_context
 from lab_tracker.decision_context_query import (
     DecisionContextRepository,
@@ -62,6 +63,7 @@ from lab_tracker.models import (
     ExternalArtifactReference,
     Goal,
     Project,
+    ProjectCoverageReport,
     ProjectStatus,
     Question,
     StoreCapability,
@@ -349,6 +351,16 @@ class ContextQueries:
     ) -> GraphOverviewRead:
         project = self.api.get_project_for_read(project_id, actor=actor)
         return GraphQueryService(self.session).overview(project)
+
+    def project_coverage(
+        self,
+        project_id: UUID,
+        *,
+        actor: AuthContext,
+    ) -> ProjectCoverageReport:
+        # Same opaque missing/inaccessible boundary as the graph overview.
+        project = self.api.get_project_for_read(project_id, actor=actor)
+        return project_coverage_report(self.session, project.project_id)
 
     def search_graph(
         self,

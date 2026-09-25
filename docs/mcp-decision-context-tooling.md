@@ -217,7 +217,8 @@ Response shape:
         "datasets": [],
         "analyses": [],
         "claims": [],
-        "visualizations": []
+        "visualizations": [],
+        "exploration_nodes": []
       },
       "create_guidance": []
     },
@@ -228,7 +229,18 @@ Response shape:
     "analyses": [],
     "claims": [],
     "visualizations": [],
+    "exploration_nodes": [],
     "evidence_map": [],
+    "coverage": {
+      "project_id": "uuid",
+      "unreviewed_count": 0,
+      "oldest_unreviewed_at": null,
+      "unplaced_count": 0,
+      "archived_unreviewed_count": 0,
+      "pending_change_sets": 0,
+      "open_clarification_requests": 0,
+      "last_capture_at": null
+    },
     "truncation": {
       "was_truncated": false,
       "sections": []
@@ -250,6 +262,11 @@ Every returned entity must include:
 - timestamps when available;
 - `relevance_reasons`, a list containing `anchor`, `search_match`, and/or
   `recent_activity`.
+
+`truncation.sections` names each bounded read that returned fewer records
+than exist (`questions`, `notes`, `search.questions`, and so on); the three
+exploration reads report separately as `exploration_nodes.dead_end`,
+`exploration_nodes.pivot`, and `exploration_nodes.decision`.
 
 ### Low-Level Read Tools
 
@@ -305,6 +322,10 @@ The decision-context tool should use a deterministic retrieval policy.
    - Include the most recently updated questions (of any status), and the
      most recently created notes, sessions, datasets, analyses, claims, and
      visualizations within the resolved project.
+   - Include exploration nodes read per type in the fixed order `dead_end`,
+     `pivot`, `decision`, each bounded by `limit`, so negative knowledge is
+     never crowded out by decisions; `created_by` applies, `since`/`until` do
+     not (the exploration query has no window filter).
 6. Order context by relevance reason.
    - Each section lists anchors first, then search matches, then recent
      records; an entity found more than once keeps its first position and
@@ -370,6 +391,15 @@ Every returned claim carries its read-time `effective_status` (plus
 and `pre_registered`) beside its stored `status`; when any returned claim is
 `contested`, `superseded`, or `invalidated`, `task_guidance.caveats` says so
 and the assistant must check `effective_status` before citing it.
+
+Coverage: every packet carries a `coverage` block derived at read time from the
+project's records, never stored — staged notes no committed or rejected draft
+has named (`unreviewed_count`, with `oldest_unreviewed_at`), staged notes a
+committed draft absorbed but no applied operation cites (`unplaced_count`),
+notes set aside as `archived_unreviewed`, drafts and clarification requests
+still waiting on a person, and the last capture time. Assistants should
+surface these numbers ("N captures are unreviewed") instead of assuming the
+graph is complete; `context_summary` does not fold them in.
 
 For `research_writing`:
 

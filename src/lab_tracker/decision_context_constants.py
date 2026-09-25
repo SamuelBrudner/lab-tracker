@@ -6,6 +6,8 @@ import hashlib
 from collections.abc import Iterable
 from importlib import metadata
 
+from lab_tracker.models import ExplorationNodeType
+
 TASK_KIND_VALUES = (
     "plot",
     "analysis",
@@ -17,6 +19,14 @@ TASK_KIND_VALUES = (
 )
 TASK_KIND_TEXT = ", ".join(TASK_KIND_VALUES)
 CONTEXT_LOOKUP_LIMIT = 500
+# Decision context reads exploration nodes one type at a time, in this order:
+# negative knowledge (dead ends) first, so decisions can never crowd it out of
+# a shared limit (docs/vision.md, "Negative knowledge is first-class").
+EXPLORATION_NODE_TYPE_ORDER: tuple[str, ...] = (
+    ExplorationNodeType.DEAD_END.value,
+    ExplorationNodeType.PIVOT.value,
+    ExplorationNodeType.DECISION.value,
+)
 
 RESEARCH_FACING_DECISION_POLICY = (
     "Before research-facing decisions, consult the Lab Tracker MCP server. This "

@@ -53,6 +53,8 @@ def entity_label(entity_type: str, entity: JsonObject) -> str:
         return str(
             entity.get("caption") or entity.get("file_path") or entity.get("viz_id") or ""
         )
+    if entity_type == "exploration_node":
+        return str(entity.get("title") or entity.get("node_id") or "")
     return str(entity)
 
 
@@ -218,6 +220,7 @@ def write_front_door(
     analyses: list[JsonObject],
     claims: list[JsonObject],
     visualizations: list[JsonObject],
+    exploration_nodes: list[JsonObject],
 ) -> JsonObject:
     """Build write-oriented affordances for follow-on MCP create calls."""
     return {
@@ -250,6 +253,10 @@ def write_front_door(
             "visualizations": [
                 entity_ref("visualization", item, "viz_id")
                 for item in visualizations[:10]
+            ],
+            "exploration_nodes": [
+                entity_ref("exploration_node", item, "node_id")
+                for item in exploration_nodes[:10]
             ],
         },
         "create_guidance": _create_guidance(task_kind),

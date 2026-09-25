@@ -25,6 +25,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Session as OrmSession
 
+from lab_tracker.coverage_query import project_coverage_summary
 from lab_tracker.db_models import (
     AnalysisDatasetModel,
     AnalysisModel,
@@ -183,6 +184,7 @@ class GraphQueryService:
             project_id,
             [*open_goal_keys, *open_question_keys, *recent_keys],
         )
+        coverage = project_coverage_summary(self._session, project_id)
         return GraphOverviewRead(
             project=GraphProjectSummary(
                 project_id=project.project_id,
@@ -195,6 +197,7 @@ class GraphQueryService:
             open_goals=_summaries_in_order(open_goal_keys, hydrated),
             open_questions=_summaries_in_order(open_question_keys, hydrated),
             recent_nodes=_summaries_in_order(recent_keys, hydrated),
+            coverage=coverage,
         )
 
     def search(

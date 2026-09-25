@@ -948,6 +948,44 @@ def test_graph_overview_is_bounded_and_counts_persisted_types(
     assert len(data["recent_nodes"]) <= 10
 
 
+def test_graph_overview_includes_coverage_block(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    ids = _create_graph_fixture(client, admin_auth_headers)
+    extra = client.post(
+        "/notes",
+        json={"project_id": ids["project_id"], "raw_content": "Extra staged capture"},
+        headers=admin_auth_headers,
+    )
+    assert extra.status_code == 201
+    set_aside = client.post(
+        "/notes",
+        json={"project_id": ids["project_id"], "raw_content": "Set aside without review"},
+        headers=admin_auth_headers,
+    ).json()["data"]["note_id"]
+    archived = client.post(f"/notes/{set_aside}/archive", headers=admin_auth_headers)
+    assert archived.status_code == 200
+
+    response = client.get(
+        f"/projects/{ids['project_id']}/graph/overview",
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    coverage = response.json()["data"]["coverage"]
+    assert coverage["project_id"] == ids["project_id"]
+    # The fixture's staged note plus the extra one; the archived note is set aside.
+    assert coverage["unreviewed_count"] == 2
+    assert coverage["oldest_unreviewed_at"] is not None
+    assert coverage["unplaced_count"] == 0
+    assert coverage["archived_unreviewed_count"] == 1
+    assert coverage["pending_change_sets"] == 0
+    assert coverage["open_clarification_requests"] == 0
+    assert coverage["last_capture_at"] is not None
+    assert "capture_sources" not in coverage
+
+
 def test_graph_search_ranks_and_filters_cross_entity_hits(
     client: TestClient,
     admin_auth_headers: dict[str, str],

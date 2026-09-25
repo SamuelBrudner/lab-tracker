@@ -142,6 +142,18 @@ research record:
   captured note is a first-class action that names a reason (including
   `archived_unreviewed`), so a skipped review degrades visible coverage rather
   than silent trust. See [curation-states.md](curation-states.md).
+- Derived coverage reads that make skipped review visible:
+  `GET /projects/{project_id}/coverage` reports unreviewed staged captures
+  (never part of a committed or rejected draft) with the oldest capture time,
+  captures a committed draft absorbed but no applied operation cites
+  (`unplaced`), captures set aside as `archived_unreviewed`, drafts and
+  clarification requests still waiting on a person, and a bounded last-seen
+  listing per capture source (`evidence_source_provider`, `evidence_adapter`,
+  `capture_install_id`/`capture_host_label`) with no thresholds. The same
+  summary rides on the graph overview and the decision-context packet, and
+  the portfolio summary flags `unreviewed_captures` once a named threshold is
+  reached. Coverage is derived from existing records; nothing is stored,
+  ranked, or auto-reviewed.
 - Paired-device enrollment for phone capture, including one-time enrollment
   URLs, device-token capture, and revocation.
 - Human-in-browser personal-access-token minting on the Agents page
@@ -205,6 +217,8 @@ research record:
   `record_dead_end` / `record_pivot` operations that stay human-gated through
   graph-draft review and, once committed, are stamped `origin=ai_suggested`
   (`user_revised` when the reviewer edited them) with the change-set backlink.
+  Decision context lists them dead ends first, then pivots and decisions, with
+  `candidate_ids.exploration_nodes`.
   See [ara-exploration-graph-design.md](ara-exploration-graph-design.md).
 - A per-project publication-readiness report
   (`GET /projects/{project_id}/publication-readiness`) that scans the retained

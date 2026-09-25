@@ -39,6 +39,7 @@ from lab_tracker.models import (
     NoteMetadataScalar,
     OwnershipReassignment,
     Project,
+    ProjectCoverageSummary,
     ProjectGroup,
     ProjectMembership,
     ProvenanceLink,
@@ -1084,6 +1085,9 @@ class LabTrackerRepository(Protocol):
         recent_first: bool = False,
     ) -> tuple[list[ExplorationNode], int]:
         """Query exploration trajectory nodes with filters and pagination."""
+
+    def project_coverage_summary(self, project_id: UUID) -> ProjectCoverageSummary:
+        """Derive the capture-coverage summary for one project (never stored)."""
 
     def query_provenance_links(
         self,

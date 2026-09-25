@@ -194,6 +194,15 @@ def _read_cases(records: CoreReadRecords) -> dict[str, tuple[ReadCase, ...]]:
                 project_id,
             ),
             ReadCase(
+                "project-coverage",
+                f"/projects/{project_id}/coverage",
+                f"/projects/{missing_project_id}/coverage",
+                "Project",
+                "application/json",
+                lambda response: response.json()["data"]["project_id"],
+                project_id,
+            ),
+            ReadCase(
                 "project-graph-json",
                 f"/projects/{project_id}/graph?view=evidence",
                 f"/projects/{missing_project_id}/graph?view=evidence",
@@ -394,7 +403,7 @@ def test_core_read_variants_are_opaque_and_preserve_authorized_contracts(
 ) -> None:
     cases_by_domain = _read_cases(core_read_records)
     assert tuple(cases_by_domain) == CORE_READ_DOMAINS
-    assert sum(len(cases) for cases in cases_by_domain.values()) == 19
+    assert sum(len(cases) for cases in cases_by_domain.values()) == 20
     inventory_coverage_ids = {
         variant.coverage_id for variant in CORE_READ_OPACITY_VARIANTS
     }
@@ -454,7 +463,7 @@ def test_all_core_read_variants_still_require_authentication(
         for domain_cases in _read_cases(core_read_records).values()
         for case in domain_cases
     ]
-    assert len(cases) == 19
+    assert len(cases) == 20
 
     for case in cases:
         response = client.get(case.existing_path, headers={"Accept": case.accept})
@@ -842,6 +851,7 @@ def test_denied_detail_reads_do_not_record_usage(
     paths = (
         f"/projects/{core_read_records.project_id}",
         f"/projects/{core_read_records.project_id}/draft-quality",
+        f"/projects/{core_read_records.project_id}/coverage",
         f"/questions/{core_read_records.question_id}",
         f"/notes/{core_read_records.note_id}",
         f"/sessions/{core_read_records.session_id}",

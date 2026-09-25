@@ -160,3 +160,19 @@ class DecisionContextReader(Protocol):
         recent_first: bool = False,
     ) -> JsonObject:
         ...
+
+    def list_exploration_nodes(
+        self,
+        *,
+        project_id: str | None = None,
+        node_type: str | None = None,
+        status: str | None = None,
+        created_by: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+        recent_first: bool = False,
+    ) -> JsonObject:
+        ...
+
+    def project_coverage(self, project_id: str) -> JsonObject | None:
+        ...

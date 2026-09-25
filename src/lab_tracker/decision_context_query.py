@@ -17,6 +17,7 @@ from lab_tracker.models import (
     ExplorationNode,
     Note,
     Project,
+    ProjectCoverageSummary,
     Question,
     Session,
     Visualization,
@@ -207,6 +208,8 @@ class DecisionContextRepository(Protocol):
         offset: int = 0,
         recent_first: bool = False,
     ) -> tuple[list[ExplorationNode], int]: ...
+
+    def project_coverage_summary(self, project_id: UUID) -> ProjectCoverageSummary: ...
 
     def query_visualizations(
         self,
@@ -610,6 +613,37 @@ class RepositoryDecisionContextReader:
             recent_first=recent_first,
         )
         return _list_payload(items, total, limit, offset)
+
+    def list_exploration_nodes(
+        self,
+        *,
+        project_id: str | None = None,
+        node_type: str | None = None,
+        status: str | None = None,
+        created_by: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+        recent_first: bool = False,
+    ) -> JsonObject:
+        if project_id is not None and not self._project_allowed(project_id):
+            return _list_payload([], 0, limit, offset)
+        items, total = self._repository.query_exploration_nodes(
+            project_id=_uuid_or_none(project_id),
+            project_ids=self._project_filter(project_id),
+            node_type=node_type,
+            status=status,
+            created_by=created_by,
+            limit=limit,
+            offset=offset,
+            recent_first=recent_first,
+        )
+        return _list_payload(items, total, limit, offset)
+
+    def project_coverage(self, project_id: str) -> JsonObject | None:
+        if not self._project_allowed(project_id):
+            return None
+        summary = self._repository.project_coverage_summary(UUID(str(project_id)))
+        return _entity_to_json(summary)
 
 
 def _uuid_or_none(value: str | None) -> UUID | None:

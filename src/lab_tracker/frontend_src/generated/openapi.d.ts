@@ -83,6 +83,9 @@ export interface paths {
   "/projects/{project_id}/member-onboarding/owner-queue": {
     get: operations["owner_queue_projects__project_id__member_onboarding_owner_queue_get"];
   };
+  "/projects/{project_id}/coverage": {
+    get: operations["get_project_coverage_projects__project_id__coverage_get"];
+  };
   "/datasets": {
     get: operations["list_datasets_datasets_get"];
   };
@@ -435,6 +438,15 @@ export interface operations {
       200: {
         content: {
           "application/json": components["schemas"]["ListEnvelope_MemberOnboardingOwnerQueueItem_"];
+        };
+      };
+    };
+  };
+  "get_project_coverage_projects__project_id__coverage_get": {
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["Envelope_ProjectCoverageReport_"];
         };
       };
     };
@@ -799,6 +811,10 @@ export interface components {
       "data": components["schemas"]["ProjectAccessRead"];
       "meta"?: (Record<string, unknown> | null);
     };
+    "Envelope_ProjectCoverageReport_": {
+      "data": components["schemas"]["ProjectCoverageReport"];
+      "meta"?: (Record<string, unknown> | null);
+    };
     "Envelope_ReviewEmailDelivery_": {
       "data": components["schemas"]["ReviewEmailDelivery"];
       "meta"?: (Record<string, unknown> | null);
@@ -1142,6 +1158,26 @@ export interface components {
     "ProjectAccessRead": {
       "project_id": string;
       "role": components["schemas"]["ProjectMembershipRole"];
+    };
+    "ProjectCoverageCaptureSource": {
+      "capture_host_label"?: (string | null);
+      "capture_install_id"?: (string | null);
+      "evidence_adapter"?: (string | null);
+      "evidence_source_provider"?: (string | null);
+      "last_capture_at": string;
+      "note_count": number;
+    };
+    "ProjectCoverageReport": {
+      "archived_unreviewed_count": number;
+      "capture_sources"?: Array<components["schemas"]["ProjectCoverageCaptureSource"]>;
+      "capture_sources_truncated"?: boolean;
+      "last_capture_at"?: (string | null);
+      "oldest_unreviewed_at"?: (string | null);
+      "open_clarification_requests": number;
+      "pending_change_sets": number;
+      "project_id": string;
+      "unplaced_count": number;
+      "unreviewed_count": number;
     };
     "ProjectMembership": {
       "created_at"?: string;
