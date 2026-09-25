@@ -19,6 +19,7 @@ from lab_tracker_client.watch import (
     read_event,
     scan_watch,
     sync_outbox,
+    sync_outbox_path,
 )
 
 
@@ -698,3 +699,31 @@ def test_event_metadata_omits_declared_target_source_without_context(
     assert len(uploads) == 1
     assert b'name="targets"' not in uploads[0]
     assert b"declared_target_source" not in uploads[0]
+
+
+def test_sync_outbox_path_drains_an_outbox_without_a_config(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("LAB_TRACKER_WATCH_OUTBOX", raising=False)
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1")
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    (inbox / "capture.md").write_text("capture text", encoding="utf-8")
+    scan_watch(config, mode="files", root=inbox)
+    event_path = next(config.outbox_path().glob("*.json"))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/notes":
+            return _json_response(
+                200, {"data": [], "meta": {"limit": 200, "offset": 0, "total": 0}}
+            )
+        if request.method == "POST" and request.url.path == "/notes/upload-file":
+            return _json_response(201, {"data": {"note_id": "note-by-path"}})
+        return _json_response(500, {"error": {"message": "unexpected request"}})
+
+    with LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler)) as lt:
+        summary = sync_outbox_path(lt, config.outbox_path())
+
+    assert summary["command"] == "watch-sync"
+    assert summary["errors"] == []
+    assert summary["results"][0]["note_id"] == "note-by-path"
+    assert read_event(event_path)["sync"]["status"] == "synced"

@@ -135,29 +135,63 @@ function AppHeader({ activeKind, authEnabled, navigate, user, onLogout }) {
   );
 }
 
+// The brain of the app in the nav: capture, review, recall. Configuration
+// pages step back into a Settings group.
+const PRIMARY_LINKS = [
+  ["home", "/app", "Home"],
+  ["capture", "/app/capture", "Capture"],
+  ["batches", "/app/batches", "Review"],
+  ["graph", "/app/graph", "Graph"],
+];
+const SETTINGS_LINKS = [
+  ["devices", "/app/devices", "Devices"],
+  ["agents", "/app/agents", "Agents"],
+  ["setup", "/app/setup", "Setup"],
+];
+const ADMIN_SETTINGS_LINKS = [["users", "/app/users", "Users"]];
+// Route kinds that belong to the Review entry: the queue, one batch, one draft.
+const REVIEW_KINDS = new Set(["batches", "batch", "graph-draft"]);
+const SETTINGS_KINDS = new Set(["devices", "agents", "setup", "users"]);
+
+function NavLink({ active, label, onClick }) {
+  return (
+    <button
+      type="button"
+      className={`app-nav-link${active ? " active" : ""}`}
+      onClick={onClick}
+    >
+      {label}
+    </button>
+  );
+}
+
 function AppNavigation({ activeKind, isAdmin = false, navigate }) {
-  const links = [
-    ["home", "/app", "Home"],
-    ["capture", "/app/capture", "Capture"],
-    ["devices", "/app/devices", "Devices"],
-    ["agents", "/app/agents", "Agents"],
-    ["setup", "/app/setup", "Setup"],
-  ];
-  if (isAdmin) {
-    links.push(["users", "/app/users", "Users"]);
-  }
+  const activeKey = REVIEW_KINDS.has(activeKind) ? "batches" : activeKind;
+  const settingsActive = SETTINGS_KINDS.has(activeKind);
+  const settingsLinks = isAdmin ? [...SETTINGS_LINKS, ...ADMIN_SETTINGS_LINKS] : SETTINGS_LINKS;
   return (
     <nav className="app-nav" aria-label="Primary">
-      {links.map(([kind, path, label]) => (
-        <button
+      {PRIMARY_LINKS.map(([kind, path, label]) => (
+        <NavLink
           key={kind}
-          type="button"
-          className={`app-nav-link${activeKind === kind ? " active" : ""}`}
+          active={activeKey === kind}
+          label={label}
           onClick={() => navigate(path)}
-        >
-          {label}
-        </button>
+        />
       ))}
+      <details className="app-nav-group" open={settingsActive}>
+        <summary className={`app-nav-link${settingsActive ? " active" : ""}`}>Settings</summary>
+        <div className="app-nav-group-links">
+          {settingsLinks.map(([kind, path, label]) => (
+            <NavLink
+              key={kind}
+              active={activeKey === kind}
+              label={label}
+              onClick={() => navigate(path)}
+            />
+          ))}
+        </div>
+      </details>
     </nav>
   );
 }
@@ -360,12 +394,20 @@ function RequestEditAccess({ selectedProject }) {
 function WorkflowCoverageCard() {
   return (
     <article className="card span-6">
-      <h2>Workflow Coverage</h2>
+      <h2>Capture, review, recall</h2>
       <div className="stack">
-        <div className="item">1. Project dashboard and project creation</div>
-        <div className="item">2. Manual question capture and explicit activation</div>
-        <div className="item">3. Note capture, raw file upload, and download-ready records</div>
-        <div className="item">4. Sessions, dataset commit, and explicit analysis registration</div>
+        <div className="item">
+          1. Capture — commits, figures, watched folders, bench notes and phone captures queue
+          offline and land in the inbox as staged evidence.
+        </div>
+        <div className="item">
+          2. Review — a person accepts, edits or sets aside each proposal; Lab Tracker suggests,
+          only you commit.
+        </div>
+        <div className="item">
+          3. Recall — questions, claims and the project graph give the reasoning back when you
+          need it.
+        </div>
       </div>
     </article>
   );

@@ -1,6 +1,6 @@
 import * as React from "react";
 
-import { fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AUTH_REJECTED_EVENT } from "../../shared/api.js";
@@ -78,5 +78,34 @@ describe("VisualizationDetailCard", () => {
     } finally {
       window.removeEventListener(AUTH_REJECTED_EVENT, authRejected);
     }
+  });
+});
+
+describe("VisualizationDetailCard Back", () => {
+  function renderWithDepth(depth) {
+    window.history.replaceState(
+      depth ? { labTracker: { depth } } : null,
+      "",
+      "/app/visualizations/viz-1"
+    );
+    installFetchMock([{ match: "/visualizations/viz-1", response: apiResponse(visualization()) }]);
+    const navigate = vi.fn();
+    render(<VisualizationDetailCard token="token-viz" vizId="viz-1" navigate={navigate} />);
+    return navigate;
+  }
+
+  it("Back uses in-app history with /app fallback", async () => {
+    const back = vi.spyOn(window.history, "back").mockImplementation(() => {});
+
+    const direct = renderWithDepth(0);
+    fireEvent.click(await screen.findByRole("button", { name: "Back" }));
+    expect(direct).toHaveBeenCalledWith("/app");
+    expect(back).not.toHaveBeenCalled();
+    cleanup();
+
+    const fromApp = renderWithDepth(1);
+    fireEvent.click(await screen.findByRole("button", { name: "Back" }));
+    expect(back).toHaveBeenCalledTimes(1);
+    expect(fromApp).not.toHaveBeenCalled();
   });
 });

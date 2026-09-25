@@ -27,6 +27,13 @@ Key guarantees:
   records can never consume the budget.
 * Writes go through a unique-temp atomic replace, and the whole drain runs under
   a best-effort advisory lock so concurrent drainers do not double-process.
+
+The outbox also carries a durable skip log, ``.skipped-commits.jsonl``: one JSON
+line per commit a capture adapter deliberately did not record (a merge commit, a
+``fixup!`` subject, an opt-in ``wip`` or ignored-path filter). The log lives
+outside the ``*.json`` drain set, so it is never synced or quarantined, but every
+adapter's ``outbox_status`` counts it so a skipped commit is visible rather than
+silently dropped.
 """
 
 from __future__ import annotations
@@ -45,6 +52,8 @@ JsonObject = dict[str, Any]
 QUARANTINE_SUFFIX = ".quarantine"
 ERROR_SUFFIX = ".error"
 LOCK_FILENAME = ".lock"
+SKIPPED_LOG_FILENAME = ".skipped-commits.jsonl"
+SKIPPED_ADAPTER_KEY = "adapter"
 
 
 def write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
@@ -81,6 +90,64 @@ def count_quarantined(outbox: str | Path) -> int:
     if not path.exists():
         return 0
     return sum(1 for item in path.glob(f"*{QUARANTINE_SUFFIX}") if item.is_file())
+
+
+def skipped_log_path(outbox: str | Path) -> Path:
+    """Path of the durable skip log inside ``outbox``."""
+
+    return Path(outbox).expanduser() / SKIPPED_LOG_FILENAME
+
+
+def record_skipped_commit(outbox: str | Path, record: Mapping[str, Any]) -> Path:
+    """Append one skipped-commit record to ``<outbox>/.skipped-commits.jsonl``.
+
+    The outbox directory is created when absent so the skip is durable even for
+    a repository that has never queued an event. The log is append-only and
+    sits outside the ``*.json`` drain set, so a skip can never be synced.
+    """
+
+    path = skipped_log_path(outbox)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(dict(record), sort_keys=True) + "\n")
+    return path
+
+
+def count_skipped_commits(outbox: str | Path) -> int:
+    """Number of skipped-commit records in ``outbox`` (0 when there is no log)."""
+
+    path = skipped_log_path(outbox)
+    if not path.is_file():
+        return 0
+    with open(path, encoding="utf-8") as handle:
+        return sum(1 for line in handle if line.strip())
+
+
+def list_skipped_commits(outbox: str | Path) -> list[JsonObject]:
+    """Parsed skipped-commit records, oldest first.
+
+    A malformed line raises ``ValueError`` naming the line; this module has no
+    client dependency, so callers wrap it in their own typed error.
+    """
+
+    path = skipped_log_path(outbox)
+    if not path.is_file():
+        return []
+    records: list[JsonObject] = []
+    with open(path, encoding="utf-8") as handle:
+        for number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"{path}:{number}: skipped-commit record is not valid JSON"
+                ) from exc
+            if not isinstance(payload, dict):
+                raise ValueError(f"{path}:{number}: skipped-commit record must be a JSON object")
+            records.append(payload)
+    return records
 
 
 def quarantine_event(path: Path, error: str) -> Path:

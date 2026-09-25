@@ -338,6 +338,14 @@ def test_watch_run_composes_scan_and_sync(home, monkeypatch, capsys) -> None:
     (inbox / "note.md").write_text("captured", encoding="utf-8")
     config_path = repo / ".lab-tracker" / "watch.json"
     monkeypatch.chdir(repo)
+    for name in ("LAB_TRACKER_REPO_CONFIG", "LAB_TRACKER_REPO_OUTBOX", "LAB_TRACKER_HPC_CONFIG"):
+        monkeypatch.delenv(name, raising=False)
+    # A queued `lt repo` event in the same repo: the one scheduled `watch run`
+    # must drain it too, without ever creating the unused hpc outbox.
+    lt_cli.main(["repo", "init", "--project", "p-1"])
+    capsys.readouterr()
+    lt_cli.main(["repo", "report", "--no-sync"])
+    capsys.readouterr()
     lt_cli.main(
         [
             "watch",
@@ -370,6 +378,9 @@ def test_watch_run_composes_scan_and_sync(home, monkeypatch, capsys) -> None:
                 note=LTRecord({"note_id": "n-1"}),
             )
 
+        def _upload_note_file_payload(self, **kwargs):
+            return LTRecord({"note_id": "n-repo"})
+
         def close(self):
             pass
 
@@ -391,3 +402,14 @@ def test_watch_run_composes_scan_and_sync(home, monkeypatch, capsys) -> None:
     assert payload["errors"] == []
     assert payload["scan"]["configured"] is True
     assert payload["sync"]["results"]
+    # The all-adapter drain rides on the same run (the watch outbox was just
+    # synced, so only repo and hpc are visited).
+    drained = payload["outbox_sync"]
+    assert drained["command"] == "outbox-sync"
+    assert [item["adapter"] for item in drained["adapters"]] == ["repo", "hpc"]
+    assert drained["adapters"][0]["processed"] == 1
+    assert drained["adapters"][0]["results"][0]["action"] == "imported"
+    assert drained["adapters"][0]["results"][0]["note_id"] == "n-repo"
+    assert drained["adapters"][1]["skipped"] == "absent"
+    assert drained["errors"] == []
+    assert not (repo / ".lab-tracker" / "outbox" / "hpc").exists()

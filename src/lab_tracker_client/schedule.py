@@ -6,6 +6,14 @@ the recurrence lives in the OS scheduler (Task Scheduler on Windows, a
 managed crontab line elsewhere) — the Lab Tracker server stays free of
 background machinery. All scheduler interaction goes through an injectable
 ``runner`` so tests never touch the real scheduler.
+
+``lt watch run`` is the one drain for a repository: after scanning the
+configured watches and syncing the watch outbox it also drains the ``lt repo``
+and ``lt hpc`` outboxes of the same repository. A single scheduled job
+therefore empties every adapter queue; nothing here chains a second command
+(schtasks ``/TR`` cannot chain without ``cmd /c`` quoting and is capped at
+:data:`_SCHTASKS_COMMAND_LIMIT` characters, and a second task would double
+the install/uninstall surface).
 """
 
 from __future__ import annotations
@@ -41,6 +49,8 @@ def task_name(config_path: Path) -> str:
 
 
 def watch_run_command(lt_path: str, config_path: Path) -> str:
+    """The scheduled command: scan + watch sync + repo/hpc outbox drain, fail-silent."""
+
     lt = lt_path.replace("\\", "/") if sys.platform != "win32" else lt_path
     return f'"{lt}" watch run --config "{config_path}" --fail-silent'
 

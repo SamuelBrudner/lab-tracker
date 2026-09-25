@@ -3,6 +3,7 @@ import { Background, Controls, ReactFlow } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 
 import { apiRequest, apiTextRequest, buildApiPath } from "../shared/api.js";
+import { navigateBack } from "../shared/routing.jsx";
 
 const GRAPH_VIEWS = [
   { id: "evidence", label: "Evidence" },
@@ -623,7 +624,7 @@ function ProjectGraphExplorer({
           {selectedProject ? <p className="subtle">{selectedProject.name}</p> : null}
         </div>
         <div className="inline">
-          <button type="button" className="btn-secondary" onClick={() => navigate("/app")}>
+          <button type="button" className="btn-secondary" onClick={() => navigateBack(navigate)}>
             Back
           </button>
           <button

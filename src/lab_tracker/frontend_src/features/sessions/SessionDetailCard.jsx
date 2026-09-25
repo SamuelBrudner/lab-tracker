@@ -1,7 +1,7 @@
 import * as React from "react";
 
 import { formatDate, sessionTypeClass } from "../../shared/formatters.js";
-import { AppLink } from "../../shared/routing.jsx";
+import { AppLink, navigateBack } from "../../shared/routing.jsx";
 import { SessionCaptureLinkSection } from "./SessionCaptureLinkSection.jsx";
 import { SessionLinkedNotesSection } from "./SessionLinkedNotesSection.jsx";
 import { SessionOutputsSection } from "./SessionOutputsSection.jsx";
@@ -218,7 +218,7 @@ function SessionDetailCard({
       ) : null}
 
       <div className="inline detail-actions">
-        <button type="button" className="btn-secondary" onClick={() => navigate("/app")}>
+        <button type="button" className="btn-secondary" onClick={() => navigateBack(navigate)}>
           Back
         </button>
         {session ? (

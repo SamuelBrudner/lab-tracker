@@ -3,7 +3,7 @@ import * as React from "react";
 import { fetchAllPages } from "../../shared/api.js";
 import { datasetShape } from "../../shared/gateways/datasets.js";
 import { formatBytes, formatDate } from "../../shared/formatters.js";
-import { AppLink } from "../../shared/routing.jsx";
+import { AppLink, navigateBack } from "../../shared/routing.jsx";
 import { useApiResource } from "../../hooks/useApiResource.js";
 
 const { useEffect, useMemo, useState } = React;
@@ -145,7 +145,7 @@ function DatasetDetailCard({ token, datasetId, projects, navigate, onSetActivePr
       ) : null}
 
       <div className="inline detail-actions">
-        <button type="button" className="btn-secondary" onClick={() => navigate("/app")}>
+        <button type="button" className="btn-secondary" onClick={() => navigateBack(navigate)}>
           Back
         </button>
         {dataset ? (

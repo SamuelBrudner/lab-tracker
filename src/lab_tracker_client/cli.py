@@ -7,6 +7,8 @@ import difflib
 import json
 import os
 import sys
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +22,7 @@ import lab_tracker_client.setup as setup_helpers
 import lab_tracker_client.watch as watch_capture
 from lab_tracker import repository_conventions as repo_context
 from lab_tracker.assistant_next_questions import is_research_facing_prompt
+from lab_tracker_client import outbox as _outbox
 from lab_tracker_client.client import (
     NOTE_STATUS_VALUES,
     EntityRef,
@@ -40,6 +43,18 @@ from lab_tracker_client.hpc import (
     run_submit_command,
     sync_outbox,
     watch_manifests,
+)
+from lab_tracker_client.hpc import find_config_path as hpc_find_config_path
+from lab_tracker_client.hpc import resolve_outbox_path as hpc_resolve_outbox_path
+from lab_tracker_client.hpc import sync_outbox_path as hpc_sync_outbox_path
+
+JsonObject = dict[str, Any]
+# Every adapter outbox under <repo>/.lab-tracker/outbox, in reporting order.
+OUTBOX_ADAPTERS = ("watch", "repo", "hpc")
+SKIP_NOTICE = (
+    "lab-tracker: skipped commit {sha} ({reason}); {total} commit(s) skipped in this "
+    "repo so far. 'lt outbox status' shows the count; 'lt repo report --force-capture' "
+    "records it anyway."
 )
 
 
@@ -508,13 +523,19 @@ def _add_project_parsers(subcommands: argparse._SubParsersAction) -> None:
 def _add_git_parsers(subcommands: argparse._SubParsersAction) -> None:
     git_parser = subcommands.add_parser(
         "git",
-        help="Capture git commits as queued Lab Tracker evidence.",
+        help=(
+            "Deprecated: capture git commits as queued evidence "
+            "(use 'lt hooks install', the 'lt repo' hook)."
+        ),
     )
     git_commands = git_parser.add_subparsers(dest="git_command", required=True)
 
     snapshot_parser = git_commands.add_parser(
         "snapshot",
-        help="Queue a commit as staged evidence (outbox-backed), then best-effort sync.",
+        help=(
+            "Deprecated for one release: queue a commit as staged evidence "
+            "(outbox-backed), then best-effort sync. Migrate with 'lt hooks install --yes'."
+        ),
     )
     snapshot_parser.add_argument("--commit", default="HEAD", help="Commit-ish. Defaults to HEAD.")
     snapshot_parser.add_argument("--repo", default=".", help="Repository path. Defaults to cwd.")
@@ -552,6 +573,11 @@ def _add_git_parsers(subcommands: argparse._SubParsersAction) -> None:
         help="Queue the event only; skip the best-effort sync.",
     )
     snapshot_parser.add_argument(
+        "--force-capture",
+        action="store_true",
+        help="Record the commit even when the repo.json commit_filter would skip it.",
+    )
+    snapshot_parser.add_argument(
         "--fail-silent",
         action="store_true",
         help="Swallow all errors so a post-commit hook can never block a commit.",
@@ -562,18 +588,28 @@ def _add_git_parsers(subcommands: argparse._SubParsersAction) -> None:
 def _add_hooks_parsers(subcommands: argparse._SubParsersAction) -> None:
     hooks_parser = subcommands.add_parser(
         "hooks",
-        help="Enroll repositories with the Lab Tracker post-commit snapshot hook.",
+        help="Enroll repositories with the Lab Tracker post-commit capture hook (lt repo).",
     )
     hooks_commands = hooks_parser.add_subparsers(dest="hooks_command", required=True)
 
     install_parser = hooks_commands.add_parser(
         "install",
-        help="Write the managed post-commit block (upgrades legacy installs in place).",
+        help=(
+            "Write the managed 'lt repo' post-commit block; creates .lab-tracker/repo.json "
+            "when absent and migrates a legacy GRAPH DRAFT block in place."
+        ),
     )
     install_parser.add_argument("--repo", default=".", help="Repository path. Defaults to cwd.")
     install_parser.add_argument(
         "--project",
-        help="Project UUID baked into the hook as an overridable default.",
+        help=(
+            "Project UUID for .lab-tracker/repo.json when it does not exist yet. "
+            "Defaults to a legacy block's baked id, LAB_TRACKER_PROJECT_ID, or lt_ids.json."
+        ),
+    )
+    install_parser.add_argument(
+        "--config",
+        help="Repo config to pin into the hook. Defaults to the discovered repo.json.",
     )
     install_parser.add_argument(
         "--base-url",
@@ -855,15 +891,15 @@ def _add_outbox_parsers(subcommands: argparse._SubParsersAction) -> None:
     outbox_parser = subcommands.add_parser(
         "outbox",
         help=(
-            "Inspect and drain the local capture outbox directly, without a "
-            "watch.json (works for commit-snapshot events)."
+            "Inspect and drain every adapter outbox (watch, repo, hpc) under "
+            ".lab-tracker/outbox, without a watch.json."
         ),
     )
     outbox_commands = outbox_parser.add_subparsers(dest="outbox_command", required=True)
 
     status_parser = outbox_commands.add_parser(
         "status",
-        help="Summarize queued outbox events (count, oldest, last error).",
+        help="Summarize queued events and skipped commits across every adapter outbox.",
     )
     status_parser.add_argument(
         "--repo",
@@ -875,7 +911,7 @@ def _add_outbox_parsers(subcommands: argparse._SubParsersAction) -> None:
 
     sync_parser = outbox_commands.add_parser(
         "sync",
-        help="Drain queued outbox events into Lab Tracker (no watch.json required).",
+        help="Drain every adapter outbox into Lab Tracker (no watch.json required).",
     )
     sync_parser.add_argument(
         "--repo",
@@ -1069,6 +1105,16 @@ def _add_repo_parsers(subcommands: argparse._SubParsersAction) -> None:
     )
     report_parser.add_argument("--summary", help="Short summary for review.")
     report_parser.add_argument(
+        "--no-sync",
+        action="store_true",
+        help="Queue the event only; skip the best-effort drain of the repo outbox.",
+    )
+    report_parser.add_argument(
+        "--force-capture",
+        action="store_true",
+        help="Record the commit even when the repo.json commit_filter would skip it.",
+    )
+    report_parser.add_argument(
         "--fail-silent",
         action="store_true",
         dest="fail_silent",
@@ -1110,7 +1156,10 @@ def _add_repo_parsers(subcommands: argparse._SubParsersAction) -> None:
 
     hook_parser = repo_commands.add_parser(
         "install-hook",
-        help="Install the managed post-commit hook that runs 'lt repo report'.",
+        help=(
+            "Alias of 'lt hooks install': install the post-commit hook that runs "
+            "'lt repo report'."
+        ),
     )
     hook_parser.add_argument("--repo", default=".", help="Repository path. Defaults to cwd.")
     hook_parser.add_argument(
@@ -1149,7 +1198,30 @@ def _cmd_repo_init(args: argparse.Namespace) -> Any:
 
 
 def _cmd_repo_report(args: argparse.Namespace) -> Any:
-    return _repo_capture_payload("repo-report", args, event_type="commit")
+    payload = _repo_capture_payload("repo-report", args, event_type="commit")
+    if args.no_sync or payload["action"] == "skipped":
+        return payload
+    # Best-effort drain, exactly like `lt git snapshot`: the event above is
+    # durable, so an unreachable server means "queued for a later sync", never
+    # a lost commit; draining the repo outbox here empties the backlog on the
+    # next commit. request_draft stays False so a commit never requests LLM
+    # drafts for unrelated queued captures.
+    try:
+        client = LabTracker.from_env()
+        try:
+            payload["sync"] = repo_capture.sync_outbox_path(
+                client, Path(payload["outbox"]), request_draft=False
+            )
+        finally:
+            client.close()
+    except Exception as exc:  # noqa: BLE001 - queued events retry on later syncs.
+        payload["sync_error"] = str(exc)
+    diagnostic = _capture_sync_diagnostic(
+        payload, outbox_status=repo_capture.outbox_status, verb="repo capture"
+    )
+    if diagnostic:
+        print(diagnostic, file=sys.stderr, flush=True)
+    return payload
 
 
 def _cmd_repo_finish(args: argparse.Namespace) -> Any:
@@ -1169,7 +1241,27 @@ def _repo_capture_payload(command: str, args: argparse.Namespace, *, event_type:
         tags=args.tag,
         artifacts=artifacts,
         summary=args.summary,
+        force_capture=getattr(args, "force_capture", False),
     )
+    if action == "skipped":
+        outbox = config.outbox_path()
+        skipped_total = _outbox.count_skipped_commits(outbox)
+        print(
+            SKIP_NOTICE.format(
+                sha=str(event["git_commit"])[:12], reason=event["reason"], total=skipped_total
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
+        return {
+            "command": command,
+            "action": action,
+            "git_commit": event["git_commit"],
+            "skip_reason": event["reason"],
+            "skipped_total": skipped_total,
+            "skip_log": str(path),
+            "outbox": str(outbox),
+        }
     payload = {
         "command": command,
         "action": action,
@@ -1213,12 +1305,17 @@ def _cmd_repo_sync(client: LabTracker, args: argparse.Namespace) -> Any:
 
 
 def _cmd_repo_install_hook(args: argparse.Namespace) -> Any:
-    return repo_capture.install_post_commit_hook(
-        args.repo,
-        lt_command=args.lt_command,
+    # One installer: the same code path as `lt hooks install`, reported under
+    # this command's name so existing callers keep their payload contract.
+    payload = hook_install.install_hook(
+        repo=args.repo,
+        lt_path=args.lt_command,
         config_path=args.config,
         force=args.force,
+        dry_run=False,
     )
+    payload["command"] = "repo-install-hook"
+    return payload
 
 
 def _cmd_watch_init(args: argparse.Namespace) -> Any:
@@ -1402,6 +1499,7 @@ def _cmd_project_bind(client: LabTracker, args: argparse.Namespace) -> Any:
 
 
 def _cmd_git_snapshot(args: argparse.Namespace) -> Any:
+    print(git_capture.GIT_SNAPSHOT_DEPRECATION, file=sys.stderr, flush=True)
     payload = git_capture.snapshot_commit(
         repo=args.repo,
         commit=args.commit,
@@ -1413,7 +1511,19 @@ def _cmd_git_snapshot(args: argparse.Namespace) -> Any:
         max_diff_lines=args.max_diff_lines,
         context_lines=args.context_lines,
         request_draft=args.request_draft,
+        force_capture=args.force_capture,
     )
+    if payload.get("skipped"):
+        print(
+            SKIP_NOTICE.format(
+                sha=str(payload["commit"])[:12],
+                reason=payload["skip_reason"],
+                total=payload["skipped_total"],
+            ).replace("lt repo report --force-capture", "lt git snapshot --force-capture"),
+            file=sys.stderr,
+            flush=True,
+        )
+        return payload
     if args.no_sync:
         return payload
     # Best-effort drain: the event above is durable, so a down server means
@@ -1437,18 +1547,27 @@ def _cmd_git_snapshot(args: argparse.Namespace) -> Any:
             client.close()
     except Exception as exc:  # noqa: BLE001 - queued events retry on later syncs.
         payload["sync_error"] = str(exc)
-    diagnostic = _git_snapshot_sync_diagnostic(payload)
+    diagnostic = _capture_sync_diagnostic(
+        payload, outbox_status=watch_capture.outbox_status, verb="commit capture"
+    )
     if diagnostic:
         print(diagnostic, file=sys.stderr, flush=True)
     return payload
 
 
-def _git_snapshot_sync_diagnostic(payload: Any) -> str | None:
-    """Human-readable cause+remediation for a failed commit-snapshot sync (GH #77).
+def _capture_sync_diagnostic(
+    payload: Any,
+    *,
+    outbox_status: Callable[[str], JsonObject],
+    verb: str,
+) -> str | None:
+    """Human-readable cause+remediation for a failed post-capture sync (GH #77).
 
-    Returns ``None`` when the sync succeeded. The post-commit hook suppresses
+    Returns ``None`` when the sync succeeded. The post-commit hooks suppress
     stdout but not stderr, so this line is what the user actually sees instead of
-    the old unactionable "did not fully sync" one-liner.
+    the old unactionable "did not fully sync" one-liner. ``outbox_status`` is
+    the adapter's own status function (the backlog size it reports is what the
+    user will see from ``lt outbox status``).
     """
     if not isinstance(payload, dict):
         return None
@@ -1458,7 +1577,7 @@ def _git_snapshot_sync_diagnostic(payload: Any) -> str | None:
         return None
     outbox = payload.get("outbox") or "<outbox>"
     try:
-        queued = watch_capture.outbox_status(outbox).get("total", "?")
+        queued = outbox_status(outbox).get("total", "?")
     except Exception:  # noqa: BLE001 - a diagnostic must never raise.
         queued = "?"
     if payload.get("sync_error"):
@@ -1476,7 +1595,7 @@ def _git_snapshot_sync_diagnostic(payload: Any) -> str | None:
     else:
         cause = f"the watch config could not be used ({payload['config_error']})"
     return (
-        f"lab-tracker: commit capture did not fully sync — {cause}. "
+        f"lab-tracker: {verb} did not fully sync — {cause}. "
         f"{queued} event(s) are queued at {outbox}; the commit was kept. "
         "Treat a timeout as ambiguous: the server may already have accepted the "
         "capture. Retry now with 'lt outbox sync', then verify with 'lt outbox "
@@ -1495,6 +1614,7 @@ def _cmd_hooks_install(args: argparse.Namespace) -> Any:
         project_id=args.project,
         base_url=args.base_url,
         lt_path=args.lt_path,
+        config_path=args.config,
         force=args.force,
         dry_run=args.dry_run,
     )
@@ -1522,7 +1642,7 @@ def _cmd_agent_context_status(args: argparse.Namespace) -> Any:
     discovered = repo_context.discover_repository_convention_files(root)
     hook = hook_install.hook_status(repo=root)
     automatic_refresh = bool(
-        hook.get("managed_block_present") or hook.get("legacy_repo_block_present")
+        hook.get("managed_block_present") or hook.get("legacy_block_present")
     )
     return {
         "command": "agent-context-status",
@@ -1660,12 +1780,30 @@ def _cmd_watch_run(client: LabTracker, args: argparse.Namespace) -> Any:
         request_draft=args.request_draft,
         limit=args.limit,
     )
+    # The scheduled `lt watch run --fail-silent` is the one drain for the
+    # repository: after the watch outbox, empty the repo and hpc outboxes of the
+    # same repo (the watch outbox was just drained, so it is left out here).
+    assert config.config_path is not None  # load_config always records it
+    outbox_sync = _drain_adapter_outboxes(
+        client,
+        repo_registry.repo_root_for_config(config.config_path),
+        watch_config=args.config,
+        dry_run=False,
+        request_draft=False,
+        limit=args.limit,
+        adapters=("repo", "hpc"),
+    )
     return {
         "command": "watch-run",
         "config": str(config.config_path),
         "scan": scan,
         "sync": sync,
-        "errors": list(scan.get("errors") or []) + list(sync.get("errors") or []),
+        "outbox_sync": outbox_sync,
+        "errors": (
+            list(scan.get("errors") or [])
+            + list(sync.get("errors") or [])
+            + list(outbox_sync.get("errors") or [])
+        ),
     }
 
 
@@ -1725,46 +1863,196 @@ def _cmd_auth_doctor(args: argparse.Namespace) -> Any:
     return payload
 
 
-def _resolve_outbox_config(
-    args: argparse.Namespace,
-) -> tuple[watch_capture.WatchConfig, str | None]:
-    # Commit-snapshot capture has no watch.json, so resolve the outbox from the
+@dataclass(frozen=True)
+class _AdapterOutbox:
+    """One adapter's outbox for a repository, with its status and drain functions."""
+
+    adapter: str
+    outbox: Path
+    config: str | None
+    config_error: str | None
+    status: Callable[[Path], JsonObject]
+    sync: Callable[..., JsonObject]
+
+
+def _outbox_repo_root(repo_arg: str) -> Path:
+    # Commit capture may have no watch.json, so resolve the outboxes from the
     # repo layout directly (git toplevel, else the given path). This is what lets
     # `lt outbox` drain events that `lt watch sync` refuses without watch.json.
     try:
-        repo_root = git_capture.repo_toplevel(args.repo)
+        return git_capture.repo_toplevel(repo_arg)
     except Exception:  # noqa: BLE001 - not a git repo: treat --repo as the root.
-        repo_root = Path(args.repo).expanduser().resolve()
-    return git_capture.resolve_watch_config(repo_root, args.config)
+        return Path(repo_arg).expanduser().resolve()
+
+
+def _resolve_adapter_outboxes(
+    repo_root: Path,
+    watch_config: str | None,
+    adapters: tuple[str, ...] = OUTBOX_ADAPTERS,
+) -> list[_AdapterOutbox]:
+    """Every adapter outbox of ``repo_root`` in :data:`OUTBOX_ADAPTERS` order.
+
+    Each adapter resolves its own config (falling back to its default outbox
+    when the config is absent, and reporting a broken one) so an outbox is
+    found even for a repository enrolled with only one adapter.
+    """
+
+    resolved: list[_AdapterOutbox] = []
+    for name in adapters:
+        if name == "watch":
+            config, error = git_capture.resolve_watch_config(repo_root, watch_config)
+            resolved.append(
+                _AdapterOutbox(
+                    adapter=name,
+                    outbox=config.outbox_path(),
+                    config=str(config.config_path),
+                    config_error=error,
+                    status=watch_capture.outbox_status,
+                    sync=watch_capture.sync_outbox_path,
+                )
+            )
+        elif name == "repo":
+            outbox, error = repo_capture.resolve_outbox_path(repo_root)
+            config_path = repo_capture.find_config_path(repo_root)
+            resolved.append(
+                _AdapterOutbox(
+                    adapter=name,
+                    outbox=outbox,
+                    config=str(config_path) if config_path else None,
+                    config_error=error,
+                    status=repo_capture.outbox_status,
+                    sync=repo_capture.sync_outbox_path,
+                )
+            )
+        elif name == "hpc":
+            outbox, error = hpc_resolve_outbox_path(repo_root)
+            hpc_config = hpc_find_config_path(repo_root)
+            resolved.append(
+                _AdapterOutbox(
+                    adapter=name,
+                    outbox=outbox,
+                    config=str(hpc_config) if hpc_config else None,
+                    config_error=error,
+                    status=outbox_status,
+                    sync=hpc_sync_outbox_path,
+                )
+            )
+        else:
+            raise LTValidationError(f"Unknown outbox adapter {name!r}.")
+    return resolved
+
+
+_OUTBOX_COUNT_KEYS = (
+    "total",
+    "pending",
+    "failed",
+    "synced",
+    "quarantined",
+    "unreadable",
+    "skipped_commits",
+)
 
 
 def _cmd_outbox_status(args: argparse.Namespace) -> Any:
-    config, config_error = _resolve_outbox_config(args)
-    summary = watch_capture.outbox_status(config.outbox_path())
-    summary.update(
-        {
-            "command": "outbox-status",
-            "config": str(config.config_path),
+    repo_root = _outbox_repo_root(args.repo)
+    adapters = _resolve_adapter_outboxes(repo_root, args.config)
+    summaries: list[JsonObject] = []
+    for adapter in adapters:
+        summary: JsonObject = {
+            "adapter": adapter.adapter,
+            "config": adapter.config,
+            **adapter.status(adapter.outbox),
         }
-    )
-    if config_error:
-        summary["config_error"] = config_error
-    return summary
+        if adapter.config_error:
+            summary["config_error"] = adapter.config_error
+        summaries.append(summary)
+    payload: JsonObject = {
+        "command": "outbox-status",
+        "repo": str(repo_root),
+        "outbox": str(repo_root / ".lab-tracker" / "outbox"),
+        "config": adapters[0].config,
+        "adapters": summaries,
+        **{key: sum(int(item.get(key, 0)) for item in summaries) for key in _OUTBOX_COUNT_KEYS},
+        "events": [event for item in summaries for event in item.get("events", [])],
+        "config_errors": _config_errors(adapters),
+    }
+    if adapters[0].config_error:
+        payload["config_error"] = adapters[0].config_error
+    return payload
+
+
+def _config_errors(adapters: list[_AdapterOutbox]) -> list[JsonObject]:
+    return [
+        {"adapter": adapter.adapter, "error": adapter.config_error}
+        for adapter in adapters
+        if adapter.config_error
+    ]
+
+
+def _drain_adapter_outboxes(
+    client: LabTracker,
+    repo_root: Path,
+    *,
+    watch_config: str | None,
+    dry_run: bool,
+    request_draft: bool,
+    limit: int | None,
+    adapters: tuple[str, ...] = OUTBOX_ADAPTERS,
+) -> JsonObject:
+    """Drain every existing adapter outbox of ``repo_root``; never create one."""
+
+    resolved = _resolve_adapter_outboxes(repo_root, watch_config, adapters)
+    entries: list[JsonObject] = []
+    for adapter in resolved:
+        if not adapter.outbox.exists():
+            # Draining would mkdir the outbox (the drain lock lives inside it);
+            # an adapter this repo never used must leave no trace.
+            entries.append(
+                {"adapter": adapter.adapter, "outbox": str(adapter.outbox), "skipped": "absent"}
+            )
+            continue
+        result = adapter.sync(
+            client,
+            adapter.outbox,
+            dry_run=dry_run,
+            request_draft=request_draft,
+            limit=limit,
+        )
+        entry: JsonObject = {"adapter": adapter.adapter, "config": adapter.config, **result}
+        if adapter.config_error:
+            entry["config_error"] = adapter.config_error
+        entries.append(entry)
+    payload: JsonObject = {
+        "command": "outbox-sync",
+        "repo": str(repo_root),
+        "outbox": str(repo_root / ".lab-tracker" / "outbox"),
+        "dry_run": dry_run,
+        "request_draft": request_draft,
+        "adapters": entries,
+        "processed": sum(int(item.get("processed", 0)) for item in entries),
+        "results": [result for item in entries for result in item.get("results", [])],
+        "errors": [error for item in entries for error in item.get("errors", [])],
+        "config_errors": _config_errors(resolved),
+    }
+    quarantined = sum(int(item.get("quarantined", 0)) for item in entries)
+    if quarantined:
+        payload["quarantined"] = quarantined
+    if any(item.get("locked") for item in entries):
+        payload["locked"] = True
+    if resolved and resolved[0].adapter == "watch" and resolved[0].config_error:
+        payload["config_error"] = resolved[0].config_error
+    return payload
 
 
 def _cmd_outbox_sync(client: LabTracker, args: argparse.Namespace) -> Any:
-    config, config_error = _resolve_outbox_config(args)
-    result = watch_capture.sync_outbox(
+    return _drain_adapter_outboxes(
         client,
-        config,
+        _outbox_repo_root(args.repo),
+        watch_config=args.config,
         dry_run=args.dry_run,
         request_draft=args.request_draft,
         limit=args.limit,
     )
-    result["command"] = "outbox-sync"
-    if config_error:
-        result["config_error"] = config_error
-    return result
 
 
 def _cmd_note(client: LabTracker, args: argparse.Namespace) -> Any:
@@ -2171,7 +2459,7 @@ def _payload_exit_code(payload: Any) -> int:
             for repo in repos
         ):
             return 1
-    if isinstance(payload, dict) and payload.get("command") == "git-snapshot":
+    if isinstance(payload, dict) and payload.get("command") in {"git-snapshot", "repo-report"}:
         sync = payload.get("sync")
         if (
             payload.get("sync_error")

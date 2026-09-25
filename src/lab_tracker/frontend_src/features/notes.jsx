@@ -3,6 +3,7 @@ import * as React from "react";
 import { apiRequest } from "../shared/api.js";
 import { noteShape } from "../shared/gateways/notes.js";
 import { formatDate } from "../shared/formatters.js";
+import { navigateBack } from "../shared/routing.jsx";
 import { DraftRecoveryNotice } from "../shared/ui.jsx";
 import { useApiResource } from "../hooks/useApiResource.js";
 import { useLocalDraft } from "../hooks/useLocalDraft.js";
@@ -482,7 +483,7 @@ function NoteDetailCard({
       ) : null}
 
       <div className="inline detail-actions">
-        <button type="button" className="btn-secondary" onClick={() => navigate("/app")}>
+        <button type="button" className="btn-secondary" onClick={() => navigateBack(navigate)}>
           Back
         </button>
         {note ? (

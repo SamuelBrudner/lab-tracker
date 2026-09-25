@@ -20,7 +20,9 @@ from lab_tracker_client.hpc import (
     parse_sbatch_job,
     read_event,
     render_event_note,
+    resolve_outbox_path,
     sync_outbox,
+    sync_outbox_path,
     validate_event,
     watch_manifests,
 )
@@ -533,3 +535,51 @@ def test_sync_outbox_passes_declared_targets_and_source(tmp_path, monkeypatch) -
     assert b'"entity_id": "ds-1"' in body
     assert b"declared_target_source" in body
     assert b"config_default" in body
+
+
+# --- outbox resolution + path-taking drain -----------------------------------
+
+
+def test_resolve_outbox_path_without_config_uses_default_and_env(tmp_path, monkeypatch) -> None:
+    _clear_hpc_env(monkeypatch)
+    default = (tmp_path / ".lab-tracker" / "outbox" / "hpc").resolve()
+
+    assert resolve_outbox_path(tmp_path) == (default, None)
+    assert not default.exists()
+
+    monkeypatch.setenv("LAB_TRACKER_HPC_OUTBOX", str(tmp_path / "hpc-out"))
+    assert resolve_outbox_path(tmp_path) == ((tmp_path / "hpc-out").resolve(), None)
+    monkeypatch.delenv("LAB_TRACKER_HPC_OUTBOX")
+
+    (tmp_path / ".lab-tracker").mkdir()
+    (tmp_path / ".lab-tracker" / "hpc.json").write_text("{not json", encoding="utf-8")
+    outbox, error = resolve_outbox_path(tmp_path)
+    assert outbox == default
+    assert error is not None
+    assert "could not be loaded" in error
+
+
+def test_sync_outbox_path_drains_by_path(tmp_path, monkeypatch) -> None:
+    _clear_hpc_env(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1", cluster="bouchet")
+    _event, path = begin_event(config, run_id="run-path")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/notes":
+            return _json_response(
+                200, {"data": [], "meta": {"limit": 200, "offset": 0, "total": 0}}
+            )
+        if request.method == "POST" and request.url.path == "/notes/upload-file":
+            return _json_response(201, {"data": {"note_id": "note-path"}})
+        return _json_response(500, {"error": {"message": "unexpected request"}})
+
+    with LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler)) as lt:
+        # No config object: the drain is addressed by outbox path alone.
+        summary = sync_outbox_path(lt, config.outbox_path())
+
+    assert summary["command"] == "hpc-sync"
+    assert summary["errors"] == []
+    assert summary["results"][0]["note_id"] == "note-path"
+    assert read_event(path)["sync"]["status"] == "synced"
+    assert outbox_status(config.outbox_path())["skipped_commits"] == 0

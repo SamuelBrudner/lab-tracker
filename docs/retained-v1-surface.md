@@ -83,7 +83,14 @@ research record:
   device-token allowlist while draft requests need a user or personal-access
   token. As with `lt hpc`, the declared question and dataset ids become note
   targets labelled `declared_target_source=explicit|config_default`, and a
-  stale id fails the sync loudly. See
+  stale id fails the sync loudly. `lt hooks install` is the single hook
+  installer: it writes the `REPO HOOK` block, creates `repo.json` when absent,
+  and migrates legacy `GRAPH DRAFT` blocks in place; `lt git snapshot` is
+  deprecated for one release. Merge commits and `fixup!`/`squash!` subjects
+  are skipped by default (`wip` and path globs opt-in in `repo.json`), with
+  every skip logged in the outbox and counted by `lt outbox status`; the hook
+  drains after each commit, and `lt outbox status|sync` and the scheduled
+  `lt watch run` cover every adapter outbox (watch, repo, hpc). See
   [repo-report-capture.md](repo-report-capture.md).
 - Package-pinned code-facing idiom teaching rendered from one generator into
   consent-gated managed agent surfaces, with the advisory
@@ -221,6 +228,13 @@ research record:
   capture link (`GET /sessions/{session_id}/capture-link`): a phone-scannable
   QR and URL that open `/app/capture` with the project and session
   preselected, so bench captures land already linked to the session.
+- Web navigation: the primary nav is Home, Capture, Review (`/app/batches`),
+  and Graph (`/app/graph`), with Devices, Agents, Setup, and (for admins)
+  Users grouped under Settings; a detail page's Back follows in-app history
+  and falls back to `/app` when the page was opened directly. Manual dataset
+  and analysis staging stays supported on Home behind a "Manual staging
+  (advanced)" disclosure, while the staged-list commit, upload, and archive
+  controls remain primary.
 - Dataset staging and direct commit with provenance/manifest capture, without
   an approval gate. The direct-commit path for people and the human-gated review
   path for AI proposals are deliberately asymmetric; see

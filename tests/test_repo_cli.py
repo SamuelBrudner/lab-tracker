@@ -3,15 +3,27 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
+from lab_tracker.repository_conventions import (
+    REPOSITORY_CONVENTIONS_HASH_METADATA_KEY,
+    REPOSITORY_CONVENTIONS_METADATA_KEY,
+)
+from lab_tracker_client import LTRecord
 from lab_tracker_client import cli as lt_cli
 from lab_tracker_client.client import LTValidationError
 from lab_tracker_client.repo import (
     HOOK_BEGIN_MARKER,
     HOOK_END_MARKER,
+    capture_commit,
+    event_metadata,
+    hook_managed_block,
+    init_config,
     install_post_commit_hook,
+    merge_hook_text,
+    outbox_status,
 )
 
 
@@ -22,6 +34,33 @@ def _clear_repo_env(monkeypatch) -> None:
     monkeypatch.delenv("LAB_TRACKER_CONTAINER_REF", raising=False)
     monkeypatch.delenv("LAB_TRACKER_REPO_HOOK_ENABLED", raising=False)
     monkeypatch.delenv("LAB_TRACKER_LT", raising=False)
+    monkeypatch.delenv("LAB_TRACKER_GIT_MAX_DIFF_LINES", raising=False)
+    monkeypatch.delenv("LAB_TRACKER_GIT_CONTEXT_LINES", raising=False)
+    # `lt repo report` drains after each capture: point the client at a closed
+    # local port so tests (and the hook subprocesses they spawn) fail fast and
+    # never reach a real server or a developer's saved profile.
+    monkeypatch.setenv("LAB_TRACKER_BASE_URL", "http://127.0.0.1:9")
+    monkeypatch.delenv("LAB_TRACKER_ACCESS_TOKEN", raising=False)
+
+
+class _FakeSyncClient:
+    def __init__(self) -> None:
+        self.uploads: list[dict[str, object]] = []
+        self.draft_requests: list[str] = []
+
+    def build_evidence_note_index(self, *, project_id: str, cache_dir: object = None) -> dict:
+        return {}
+
+    def _upload_note_file_payload(self, **kwargs: object) -> LTRecord:
+        self.uploads.append(kwargs)
+        return LTRecord({"note_id": f"note-{len(self.uploads)}"})
+
+    def create_analysis_graph_draft(self, note_id: str) -> LTRecord:
+        self.draft_requests.append(note_id)
+        return LTRecord({"change_set_id": "cs-1"})
+
+    def close(self) -> None:
+        pass
 
 
 def _git(path, *args: str) -> str:
@@ -56,6 +95,22 @@ def _init_git_repo(path) -> str:
     return _git(path, "rev-parse", "HEAD")
 
 
+def _commit_file(path, name: str, text: str, subject: str) -> str:
+    (path / name).write_text(text, encoding="utf-8")
+    _git(path, "add", name)
+    _git(path, "commit", "-q", "-m", subject)
+    return _git(path, "rev-parse", "HEAD")
+
+
+def _merge_commit(path) -> str:
+    _git(path, "checkout", "-q", "-b", "feature")
+    _commit_file(path, "feature.py", "print('feature')\n", "feature work")
+    _git(path, "checkout", "-q", "-")
+    _commit_file(path, "main.py", "print('main')\n", "main work")
+    _git(path, "merge", "-q", "--no-ff", "-m", "Merge feature", "feature")
+    return _git(path, "rev-parse", "HEAD")
+
+
 def test_repo_cli_init_report_status(tmp_path, monkeypatch, capsys) -> None:
     _clear_repo_env(monkeypatch)
     commit = _init_git_repo(tmp_path)
@@ -64,7 +119,7 @@ def test_repo_cli_init_report_status(tmp_path, monkeypatch, capsys) -> None:
     lt_cli.main(["repo", "init", "--project", "project-1"])
     capsys.readouterr()
 
-    lt_cli.main(["repo", "report", "--summary", "Pinned analysis state."])
+    lt_cli.main(["repo", "report", "--summary", "Pinned analysis state.", "--no-sync"])
     report_payload = json.loads(capsys.readouterr().out)
     lt_cli.main(["repo", "status"])
     status_payload = json.loads(capsys.readouterr().out)
@@ -153,14 +208,23 @@ def test_install_hook_creates_managed_block(tmp_path, monkeypatch) -> None:
     hook = tmp_path / ".git" / "hooks" / "post-commit"
     content = hook.read_text(encoding="utf-8")
     assert result["action"] == "installed"
+    assert result["dry_run"] is False
+    assert result["hook_path"] == result["hook"] == str(hook)
     assert content.startswith("#!/usr/bin/env sh")
     assert HOOK_BEGIN_MARKER in content
     assert HOOK_END_MARKER in content
     assert "LT='/opt/venv/bin/lt'" in content  # sh-single-quoted, injection-proof
     assert "repo report >" in content
+    # stdout is suppressed but stderr passes through: the skip notice and the
+    # sync diagnostic must reach the person committing.
+    report_line = next(line for line in content.splitlines() if "repo report" in line)
+    assert "2>&1" not in report_line
+    assert "lt outbox sync" in report_line
+    assert report_line.index("lt outbox sync") < report_line.index("lt outbox status")
     # The config the hook needs is pinned at install time.
     assert "repo.json" in content
     assert "LAB_TRACKER_REPO_CONFIG" in content
+    assert "LAB_TRACKER_BASE_URL" not in content  # only baked when asked for
     assert hook.stat().st_mode & 0o111  # executable
 
 
@@ -472,3 +536,266 @@ def test_hook_warns_when_lt_is_not_found_at_commit_time(tmp_path, monkeypatch) -
     assert "lab-tracker:" in completed.stderr
     assert "not found" in completed.stderr
     assert _git(tmp_path, "log", "-1", "--pretty=%s") == "lt missing"
+
+
+# --- commit filter ------------------------------------------------------------
+
+
+def test_capture_commit_skips_merge_commit_and_logs_it(tmp_path, monkeypatch) -> None:
+    _clear_repo_env(monkeypatch)
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1")
+    merge = _merge_commit(tmp_path)
+
+    record, path, action = capture_commit(config)
+
+    assert action == "skipped"
+    assert record["reason"] == "merge_commit"
+    assert record["git_commit"] == merge
+    assert record["adapter"] == "lt-repo"
+    outbox = config.outbox_path()
+    assert path == outbox / ".skipped-commits.jsonl"
+    assert len(path.read_text(encoding="utf-8").splitlines()) == 1
+    assert list(outbox.glob("*.json")) == []  # nothing rendered, nothing queued
+    status = outbox_status(outbox)
+    assert status["skipped_commits"] == 1
+    assert status["total"] == 0
+
+
+def test_capture_commit_force_capture_records_a_fixup_commit(tmp_path, monkeypatch) -> None:
+    _clear_repo_env(monkeypatch)
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1")
+    fixup = _commit_file(tmp_path, "analysis.py", "print('fix')\n", "fixup! initial analysis")
+
+    assert capture_commit(config)[2] == "skipped"
+    event, path, action = capture_commit(config, force_capture=True)
+
+    assert action == "captured"
+    assert event["source"]["git_commit"] == fixup
+    assert path.exists()
+    assert outbox_status(config.outbox_path())["skipped_commits"] == 1
+
+
+def test_repo_commit_event_honours_diff_env_and_lifts_truncation_metadata(
+    tmp_path, monkeypatch
+) -> None:
+    _clear_repo_env(monkeypatch)
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1")
+    monkeypatch.setenv("LAB_TRACKER_GIT_MAX_DIFF_LINES", "1")
+
+    event, _path, _action = capture_commit(config)
+
+    assert "truncated" in event["payload"]["body"]
+    assert event["source"]["git_diff_truncated"] is True
+    assert event["source"]["git_max_diff_lines"] == 1
+    metadata = event_metadata(
+        event, source_uri="file:///event", source_external_id="local@x", content_hash="h"
+    )
+    assert metadata["repo_git_diff_truncated"] is True
+    assert metadata["repo_git_max_diff_lines"] == 1
+
+
+def test_repo_commit_event_carries_conventions_snapshot_hash(tmp_path, monkeypatch, capsys) -> None:
+    _clear_repo_env(monkeypatch)
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    _commit_file(
+        tmp_path, "AGENTS.md", "# Conventions\n\nCall controls `parental`.\n", "conventions"
+    )
+    lt_cli.main(["agent-context", "add", "AGENTS.md", "--repo", str(tmp_path), "--yes"])
+    capsys.readouterr()
+    config = init_config(project_id="project-1")
+
+    event, _path, _action = capture_commit(config)
+
+    snapshot_hash = event["source"][REPOSITORY_CONVENTIONS_HASH_METADATA_KEY]
+    assert snapshot_hash
+    snapshot = json.loads(event["source"][REPOSITORY_CONVENTIONS_METADATA_KEY])
+    assert snapshot["documents"][0]["paths"] == ["AGENTS.md"]
+    metadata = event_metadata(
+        event, source_uri="file:///event", source_external_id="local@x", content_hash="h"
+    )
+    assert metadata[REPOSITORY_CONVENTIONS_HASH_METADATA_KEY] == snapshot_hash
+
+
+# --- hook block + merge -------------------------------------------------------
+
+
+def test_hook_block_lets_stderr_through_and_bakes_optional_base_url() -> None:
+    block = hook_managed_block("/opt/lt", "/repo/.lab-tracker/repo.json")
+    report_line = next(line for line in block.splitlines() if "repo report" in line)
+
+    assert ">/dev/null" in report_line
+    assert "2>&1" not in report_line
+    assert "LAB_TRACKER_BASE_URL" not in block
+    assert block.index("lt outbox sync") < block.index("lt outbox status")
+
+    baked = hook_managed_block("/opt/lt", "/repo/.lab-tracker/repo.json", base_url="http://lab:8000")
+    assert 'if [ -z "$LAB_TRACKER_BASE_URL" ]; then' in baked
+    assert "LAB_TRACKER_BASE_URL='http://lab:8000'" in baked
+    assert "export LAB_TRACKER_BASE_URL" in baked
+
+
+def test_merge_hook_text_migrates_graph_draft_block_in_place(tmp_path) -> None:
+    from lab_tracker_client.hooks import HOOK_BLOCK_BEGIN, HOOK_BLOCK_END
+
+    block = hook_managed_block("/opt/lt", "/repo/.lab-tracker/repo.json")
+    existing = (
+        "#!/bin/sh\necho before\n"
+        f"{HOOK_BLOCK_BEGIN}\n: legacy snapshot\n{HOOK_BLOCK_END}\n"
+        "echo after\n"
+    )
+    hook_path = tmp_path / "post-commit"
+
+    updated, action = merge_hook_text(
+        existing, block, hook_path=hook_path, force=False, migrate_legacy=True
+    )
+
+    assert action == "migrated"
+    assert "echo before" in updated
+    assert "echo after" in updated
+    assert ": legacy snapshot" not in updated
+    assert HOOK_BLOCK_BEGIN not in updated
+    assert HOOK_BLOCK_END not in updated
+    assert updated.count(HOOK_BEGIN_MARKER) == 1
+    assert updated.index("echo before") < updated.index(HOOK_BEGIN_MARKER)
+    assert updated.index(HOOK_END_MARKER) < updated.index("echo after")
+
+    # Without migration the legacy block is still refused (or prepended under --force).
+    with pytest.raises(LTValidationError, match="lt git snapshot"):
+        merge_hook_text(existing, block, hook_path=hook_path, force=False, migrate_legacy=False)
+    forced, forced_action = merge_hook_text(
+        existing, block, hook_path=hook_path, force=True, migrate_legacy=False
+    )
+    assert forced_action == "prepended"
+    assert HOOK_BLOCK_BEGIN in forced
+
+
+def test_install_hook_dry_run_writes_nothing_and_returns_diff(tmp_path, monkeypatch) -> None:
+    _clear_repo_env(monkeypatch)
+    _init_git_repo(tmp_path)
+    _init_repo_config(tmp_path)
+
+    result = install_post_commit_hook(tmp_path, lt_command="/opt/lt", dry_run=True)
+
+    assert result["dry_run"] is True
+    assert result["action"] == "installed"
+    assert f"+{HOOK_BEGIN_MARKER}" in result["diff"]
+    assert not (tmp_path / ".git" / "hooks" / "post-commit").exists()
+
+
+# --- lt repo report drains after capture --------------------------------------
+
+
+def test_repo_report_drains_outbox_after_capture(tmp_path, monkeypatch, capsys) -> None:
+    _clear_repo_env(monkeypatch)
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    lt_cli.main(["repo", "init", "--project", "project-1"])
+    capsys.readouterr()
+    fake = _FakeSyncClient()
+    monkeypatch.setattr(
+        lt_cli.LabTracker,
+        "from_env",
+        classmethod(lambda cls: fake),  # noqa: ARG005
+    )
+
+    lt_cli.main(["repo", "report"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["action"] == "captured"
+    assert payload["sync"]["processed"] == 1
+    assert payload["sync"]["results"][0]["action"] == "imported"
+    assert payload["sync"]["errors"] == []
+    assert fake.draft_requests == []  # a commit never requests drafts for others
+    event = json.loads(Path(payload["event_path"]).read_text(encoding="utf-8"))
+    assert event["sync"]["status"] == "synced"
+
+
+def test_repo_report_sync_failure_exits_nonzero_with_actionable_stderr(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    _clear_repo_env(monkeypatch)
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    lt_cli.main(["repo", "init", "--project", "project-1"])
+    capsys.readouterr()
+
+    def _unavailable(cls):  # noqa: ARG001
+        raise RuntimeError("client unavailable")
+
+    monkeypatch.setattr(lt_cli.LabTracker, "from_env", classmethod(_unavailable))
+
+    with pytest.raises(SystemExit) as excinfo:
+        lt_cli.main(["repo", "report"])
+    out, err = capsys.readouterr()
+
+    assert excinfo.value.code == 1  # the hook's || warning stays reachable
+    payload = json.loads(out)
+    assert payload["action"] == "captured"
+    assert payload["sync_error"] == "client unavailable"
+    assert "repo capture did not fully sync" in err
+    assert "lt outbox sync" in err
+    assert err.index("lt outbox sync") < err.index("lt outbox status")
+    assert "1 event" in err
+    # The event is durable and still pending for a later drain.
+    lt_cli.main(["repo", "status"])
+    assert json.loads(capsys.readouterr().out)["pending"] == 1
+
+
+def test_repo_report_skip_notice_reaches_stderr_and_exit_zero(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    _clear_repo_env(monkeypatch)
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    lt_cli.main(["repo", "init", "--project", "project-1"])
+    capsys.readouterr()
+    merge = _merge_commit(tmp_path)
+
+    lt_cli.main(["repo", "report"])  # exit 0: nothing to warn about
+    out, err = capsys.readouterr()
+
+    payload = json.loads(out)
+    assert payload["action"] == "skipped"
+    assert payload["git_commit"] == merge
+    assert payload["skip_reason"] == "merge_commit"
+    assert payload["skipped_total"] == 1
+    assert payload["skip_log"].endswith(".skipped-commits.jsonl")
+    assert "sync" not in payload
+    assert "skipped commit" in err
+    assert "merge_commit" in err
+    assert "--force-capture" in err
+    assert list((tmp_path / ".lab-tracker" / "outbox" / "repo").glob("*.json")) == []
+    lt_cli.main(["repo", "status"])
+    assert json.loads(capsys.readouterr().out)["skipped_commits"] == 1
+
+    lt_cli.main(["repo", "report", "--force-capture", "--no-sync"])
+    forced = json.loads(capsys.readouterr().out)
+    assert forced["action"] == "captured"
+    assert forced["git_commit"] == merge
+
+
+def test_repo_install_hook_delegates_to_single_installer(tmp_path, monkeypatch, capsys) -> None:
+    _clear_repo_env(monkeypatch)
+    monkeypatch.setenv("LAB_TRACKER_CONFIG_DIR", str(tmp_path / "lt-home"))
+    _init_git_repo(tmp_path)
+    _init_repo_config(tmp_path)
+    config_path = tmp_path / ".lab-tracker" / "repo.json"
+    config_before = config_path.read_bytes()
+
+    lt_cli.main(["repo", "install-hook", "--repo", str(tmp_path), "--lt-command", "/opt/lt"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["command"] == "repo-install-hook"
+    assert payload["action"] == "created"
+    assert payload["project_id"] == "project-1"
+    content = (tmp_path / ".git" / "hooks" / "post-commit").read_text(encoding="utf-8")
+    assert HOOK_BEGIN_MARKER in content
+    assert "LT='/opt/lt'" in content
+    assert config_path.read_bytes() == config_before  # an existing config is untouched

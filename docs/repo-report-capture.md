@@ -9,45 +9,90 @@ bounded textual diff (800 lines by default) alongside metadata and hashes;
 declared run artifacts stay as pointers. Everything semantic remains behind the
 human review gate.
 
-The usual flow: a post-commit git hook self-reports every commit; researchers
-optionally annotate captures or declare run outputs; the outbox drains whenever
+The usual flow: a post-commit git hook self-reports every commit and drains
+the queue right away; researchers optionally annotate captures or declare run
+outputs; the scheduled `lt watch run` job drains every adapter outbox whenever
 Lab Tracker is reachable.
 
 ## Setup
 
 ```bash
 cd /path/to/analysis-repo
-lt repo init --project <project-uuid> [--default-question <question-uuid>]
-lt repo install-hook
+lt hooks install --project <project-uuid> --dry-run   # preview the hook diff
+lt hooks install --project <project-uuid> --yes
 ```
 
-`init` writes `.lab-tracker/repo.json` (gitignore `.lab-tracker/` — it is
-host-local scratch). The declared question and dataset ids are attached to
-the synced note as targets; each event records `question_id_source` and the
-note carries `declared_target_source` as `explicit` (`--question`) or
-`config_default` (`--default-question`), and a stale id fails the sync
-loudly instead of landing as metadata only. `install-hook` writes a managed
-block into the repo's `post-commit` hook:
+`lt hooks install` is the one installer for Lab Tracker's post-commit capture
+(decision lt-81s6.17: the `lt repo` event is the surviving commit payload; the
+older `lt git snapshot` hook is deprecated for one release). It writes
+`.lab-tracker/repo.json` when the repository has none (gitignore
+`.lab-tracker/` — it is host-local scratch), taking the project id from
+`--project`, a legacy hook's baked id, `LAB_TRACKER_PROJECT_ID`, or
+`lt_ids.json`, and it refuses a `--project` that conflicts with an existing
+config rather than overriding it. Run
+`lt repo init --project <project-uuid> [--default-question <question-uuid>]`
+first when you want a default question or a custom outbox;
+`lt repo install-hook` is an alias of the same installer. The declared
+question and dataset ids are attached to the synced note as targets; each
+event records `question_id_source` and the note carries
+`declared_target_source` as `explicit` (`--question`) or `config_default`
+(`--default-question`), and a stale id fails the sync loudly instead of
+landing as metadata only. The installer writes a managed block into the
+repo's `post-commit` hook:
 
 - The block lives between `BEGIN/END LAB TRACKER REPO HOOK` markers; reinstalls
-  update it in place. A foreign hook is never clobbered: without `--force` the
-  install refuses; with `--force` the block is inserted *before* the foreign
-  body, so a trailing `exit`/`exec` there cannot disable capture, and since the
-  block never exits, the foreign hook still runs.
+  update it in place, and a legacy `GRAPH DRAFT` block (the deprecated
+  `lt git snapshot` hook, including installs by the old PowerShell script) is
+  migrated in place — its baked project id moves into `repo.json` and its base
+  URL into the new block. A foreign hook is never clobbered: without `--force`
+  the install refuses; with `--force` the block is inserted *before* the
+  foreign body, so a trailing `exit`/`exec` there cannot disable capture, and
+  since the block never exits, the foreign hook still runs.
 - The repo config is resolved at install time and pinned into the hook, so a
   missing config fails loudly at install instead of silently on every commit.
 - The hook body is POSIX sh, which git runs on every platform (Git for Windows
   bundles one) — no separate Windows installer is needed. Disable per-repo with
   `LAB_TRACKER_REPO_HOOK_ENABLED=0`; point at a different client with
-  `LAB_TRACKER_LT`.
-- A post-commit hook can never block the commit; on capture failure it prints a
-  one-line warning and the commit proceeds.
+  `LAB_TRACKER_LT` (or re-run `lt hooks install --yes --lt-path <path>`).
+- A post-commit hook can never block the commit. It suppresses lt's stdout
+  only: a skipped commit prints one notice line on stderr, a failed capture or
+  sync prints its cause plus the drain commands, and the commit proceeds.
 - If a commit made during an agent task reports a timeout, sync failure, or
   queued event, the agent must treat the result as ambiguous: the server may
   already have accepted it. Before reporting an unresolved capture, run
   `lt outbox sync` from that repository and then `lt outbox status`. Replay is
   idempotent and deduplicates an already accepted capture; report a problem only
   if the retry fails and status still shows pending events.
+
+### Commit filter
+
+Not every commit is analysis. By default the hook skips merge commits and
+commits whose subject starts with `fixup!` or `squash!`; `wip` subjects and
+path globs are opt-in through `commit_filter` in `.lab-tracker/repo.json`:
+
+```json
+{
+  "version": 1,
+  "project_id": "<project-uuid>",
+  "outbox": ".lab-tracker/outbox/repo",
+  "commit_filter": {
+    "skip_merges": true,
+    "skip_fixups": true,
+    "skip_wip": true,
+    "skip_path_globs": ["docs/*", "*.md"]
+  }
+}
+```
+
+A commit is skipped for `skip_path_globs` only when every changed path matches
+a glob. Nothing is dropped silently: each skip is appended to
+`.lab-tracker/outbox/repo/.skipped-commits.jsonl` (commit, reason, time),
+counted as `skipped_commits` by `lt repo status` and `lt outbox status`, and
+echoed as one stderr line by the hook at commit time. `lt repo report
+--force-capture` records the current commit regardless of the filter. Set
+`skip_merges: false` when merges carry real analysis changes (conflict
+resolutions, squash-merge disabled). The deprecated `lt git snapshot` reads
+the same `commit_filter`, so both hooks skip the same commits.
 
 ### Optional repository conventions
 
@@ -123,9 +168,20 @@ pending capture. At curation the hash can populate
 ## Sync And Review
 
 ```bash
-lt repo status                 # outbox summary (pending/failed/synced)
+lt repo status                 # outbox summary (pending/failed/synced/skipped_commits)
 lt repo sync [--dry-run] [--request-draft] [--limit N]
+lt outbox status               # every adapter outbox of this repo (watch, repo, hpc)
+lt outbox sync
 ```
+
+The hook drains the repo outbox right after each commit: `lt repo report`
+performs the same best-effort post-write drain `lt git snapshot` did (pass
+`--no-sync` to queue only), exits nonzero when the queue is not fully synced
+so the hook's warning stays reachable, and prints the cause and the recovery
+commands on stderr. `lt outbox status` and `lt outbox sync` cover every
+adapter outbox under `.lab-tracker/outbox`, and the scheduled
+`lt watch run --fail-silent` job registered by `lt setup schedule` drains them
+all too, so one scheduled job empties every queue.
 
 Sync uploads each event as a staged markdown note (`provider=git`) under the
 project's normal review flow. Commit notes contain their bounded diff; the inbox
@@ -194,8 +250,12 @@ credentials. See
 
 ## Troubleshooting
 
-- `lt repo install-hook` fails with "No repo config found": run `lt repo init`
-  in the repository first.
+- `lt hooks install` fails with "No project id for the commit hook": pass
+  `--project`, bind one with `lt project bind`, or run `lt repo init` in the
+  repository first.
+- A commit was not captured: `lt outbox status` reports `skipped_commits`
+  (the hook printed the reason on stderr at commit time). Record it with
+  `lt repo report --force-capture`, or adjust `commit_filter` in `repo.json`.
 - Existing non-managed hook: re-run with `--force` (the managed block is placed
   ahead of it); a hook with a non-sh shebang (e.g. python) is refused — chain
   `lt repo report` from it manually.

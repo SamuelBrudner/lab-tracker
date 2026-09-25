@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import subprocess
 
 import httpx
@@ -8,6 +9,7 @@ import pytest
 
 from lab_tracker_client import LabTracker
 from lab_tracker_client.client import LTValidationError
+from lab_tracker_client.gitinfo import CommitFilter
 from lab_tracker_client.repo import (
     artifact_from_path,
     capture_commit,
@@ -21,6 +23,7 @@ from lab_tracker_client.repo import (
     outbox_status,
     read_event,
     render_event_note,
+    resolve_outbox_path,
     sync_outbox,
     validate_event,
 )
@@ -553,3 +556,71 @@ def test_sync_outbox_passes_declared_targets_and_source(tmp_path, monkeypatch) -
     assert b'"entity_type": "dataset"' in body
     assert b"declared_target_source" in body
     assert b"config_default" in body
+
+
+# --- commit filter config + outbox resolution ---------------------------------
+
+
+def test_repo_config_round_trips_commit_filter(tmp_path, monkeypatch) -> None:
+    _clear_repo_env(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1")
+    config_path = config.config_path
+    assert config_path is not None
+
+    written = json.loads(config_path.read_text(encoding="utf-8"))
+    assert written["commit_filter"] == {
+        "skip_merges": True,
+        "skip_fixups": True,
+        "skip_wip": False,
+        "skip_path_globs": [],
+    }
+    assert load_config().commit_filter == CommitFilter()
+
+    written["commit_filter"]["skip_wip"] = True
+    written["commit_filter"]["skip_path_globs"] = ["docs/*"]
+    config_path.write_text(json.dumps(written), encoding="utf-8")
+    assert load_config().commit_filter == CommitFilter(skip_wip=True, skip_path_globs=("docs/*",))
+
+    written["commit_filter"]["skip_marges"] = True
+    config_path.write_text(json.dumps(written), encoding="utf-8")
+    with pytest.raises(LTValidationError, match="skip_marges"):
+        load_config()
+
+    # A config written before the filter existed keeps the defaults.
+    del written["commit_filter"]
+    config_path.write_text(json.dumps(written), encoding="utf-8")
+    assert load_config().commit_filter == CommitFilter()
+
+    written["commit_filter"] = "merges"
+    config_path.write_text(json.dumps(written), encoding="utf-8")
+    with pytest.raises(LTValidationError, match="JSON object"):
+        load_config()
+
+
+def test_resolve_outbox_path_without_config_uses_default_and_env(tmp_path, monkeypatch) -> None:
+    _clear_repo_env(monkeypatch)
+    default = (tmp_path / ".lab-tracker" / "outbox" / "repo").resolve()
+
+    assert resolve_outbox_path(tmp_path) == (default, None)
+    assert not default.exists()  # resolving never creates an outbox
+
+    monkeypatch.setenv("LAB_TRACKER_REPO_OUTBOX", str(tmp_path / "custom"))
+    assert resolve_outbox_path(tmp_path) == ((tmp_path / "custom").resolve(), None)
+    monkeypatch.delenv("LAB_TRACKER_REPO_OUTBOX")
+
+    # A config that exists resolves through it...
+    config = init_config(
+        project_id="project-1",
+        outbox="queue/repo",
+        config_path=tmp_path / ".lab-tracker" / "repo.json",
+    )
+    assert resolve_outbox_path(tmp_path) == ((tmp_path / "queue" / "repo").resolve(), None)
+
+    # ...and a broken one falls back to the default while naming the error.
+    assert config.config_path is not None
+    config.config_path.write_text("{not json", encoding="utf-8")
+    outbox, error = resolve_outbox_path(tmp_path)
+    assert outbox == default
+    assert error is not None
+    assert "could not be loaded" in error

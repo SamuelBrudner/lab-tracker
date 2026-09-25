@@ -685,8 +685,13 @@ def outbox_status(outbox: str | Path) -> JsonObject:
     return {
         "outbox": str(Path(outbox).expanduser()),
         "total": len(events),
+        # Always present, so an all-adapter status can sum them uniformly.
+        "pending": counts.get("pending", 0),
+        "failed": counts.get("failed", 0),
+        "synced": counts.get("synced", 0),
         "quarantined": _outbox.count_quarantined(outbox),
         "unreadable": unreadable,
+        "skipped_commits": _outbox.count_skipped_commits(outbox),
         "events": events,
         **counts,
     }
@@ -845,7 +850,26 @@ def sync_outbox(
     request_draft: bool = False,
     limit: int | None = None,
 ) -> JsonObject:
-    outbox = config.outbox_path()
+    return sync_outbox_path(
+        client,
+        config.outbox_path(),
+        dry_run=dry_run,
+        request_draft=request_draft,
+        limit=limit,
+    )
+
+
+def sync_outbox_path(
+    client: LabTracker,
+    outbox: Path,
+    *,
+    dry_run: bool = False,
+    request_draft: bool = False,
+    limit: int | None = None,
+) -> JsonObject:
+    """Drain the watch outbox at ``outbox`` (no config needed; see ``lt outbox``)."""
+
+    outbox = Path(outbox).expanduser()
     note_indexes: dict[str, EvidenceNoteIndex] = {}
 
     def _is_actionable(event: JsonObject) -> bool:

@@ -14,6 +14,7 @@ dedup index, and host metadata come from :mod:`lab_tracker_client.client`.
 
 from __future__ import annotations
 
+import difflib
 import hashlib
 import json
 import os
@@ -50,6 +51,8 @@ from lab_tracker_client.client import (
 )
 from lab_tracker_client.evidence_index import outbox_note_index
 from lab_tracker_client.gitinfo import (
+    CommitFilter,
+    commit_skip_reason,
     dirty_label,
     dirty_metadata,
     dirty_state_fields,
@@ -81,6 +84,8 @@ class RepoConfig:
     outbox: str = DEFAULT_OUTBOX
     default_question_id: str | None = None
     version: int = CONFIG_VERSION
+    # Which commits the post-commit hook records; see gitinfo.CommitFilter.
+    commit_filter: CommitFilter = field(default_factory=CommitFilter)
     config_path: Path | None = field(default=None, repr=False, compare=False)
 
     def to_dict(self) -> JsonObject:
@@ -88,6 +93,7 @@ class RepoConfig:
             "version": self.version,
             "project_id": self.project_id,
             "outbox": self.outbox,
+            "commit_filter": self.commit_filter.to_dict(),
         }
         if self.default_question_id:
             payload["default_question_id"] = self.default_question_id
@@ -196,11 +202,15 @@ def load_config(
         raise LTValidationError(f"Repo config is not valid JSON: {path}") from exc
     if not isinstance(payload, dict):
         raise LTValidationError("Repo config must be a JSON object.")
+    raw_filter = payload.get("commit_filter")
+    if raw_filter is not None and not isinstance(raw_filter, Mapping):
+        raise LTValidationError(f"commit_filter in {path} must be a JSON object.")
     config = RepoConfig(
         version=int(payload.get("version") or CONFIG_VERSION),
         project_id=_non_empty(str(payload.get("project_id") or ""), "project_id"),
         outbox=_non_empty(str(payload.get("outbox") or DEFAULT_OUTBOX), "outbox"),
         default_question_id=_optional_str(payload.get("default_question_id")),
+        commit_filter=CommitFilter.from_mapping(raw_filter or {}),
         config_path=path,
     )
     if config.version != CONFIG_VERSION:
@@ -208,6 +218,33 @@ def load_config(
             f"Unsupported repo config version {config.version}; expected {CONFIG_VERSION}."
         )
     return config
+
+
+def resolve_outbox_path(repo_root: str | Path) -> tuple[Path, str | None]:
+    """Return ``(outbox, error-detail)`` for the repo adapter outbox of ``repo_root``.
+
+    Used by the all-adapter ``lt outbox`` commands, which must inspect and drain
+    a repo's queue even when ``repo.json`` is absent or broken: without a config
+    the default outbox (``LAB_TRACKER_REPO_OUTBOX`` or ``.lab-tracker/outbox/repo``
+    under ``repo_root``) is returned with no error; a config that exists but
+    cannot be loaded returns the same default plus the load error, so queued
+    events are still found and the broken config is reported rather than
+    hidden.
+    """
+
+    root = Path(repo_root).expanduser().resolve()
+    override = os.getenv("LAB_TRACKER_REPO_OUTBOX")
+    fallback = Path(override).expanduser() if override else root / DEFAULT_OUTBOX
+    if not fallback.is_absolute():
+        fallback = root / fallback
+    fallback = fallback.resolve()
+    config_path = find_config_path(root)
+    if config_path is None:
+        return fallback, None
+    try:
+        return load_config(config_path=config_path).outbox_path(), None
+    except Exception as exc:  # noqa: BLE001 - a broken config must not hide queued events.
+        return fallback, f"repo config could not be loaded ({exc}); using {fallback}"
 
 
 def new_run_id(prefix: str = "repo") -> str:
@@ -246,10 +283,19 @@ def make_event(
     if resolved_event_type == "commit" and commit:
         # Local import avoids a module cycle: git_capture uses normalize_remote
         # from this module for deterministic commit identities.
-        from lab_tracker_client.git_capture import commit_evidence
+        from lab_tracker_client.git_capture import (
+            commit_evidence,
+            context_lines_from_env,
+            max_diff_lines_from_env,
+        )
 
         try:
-            evidence_body, evidence_facts = commit_evidence(resolved_cwd, commit)
+            evidence_body, evidence_facts = commit_evidence(
+                resolved_cwd,
+                commit,
+                max_diff_lines=max_diff_lines_from_env(),
+                context_lines=context_lines_from_env(),
+            )
         except LTValidationError:
             # Repository reporting is offline-first and must still leave a
             # durable metadata event if git cannot render the diff.
@@ -327,6 +373,7 @@ def capture_commit(
     cwd: str | Path | None = None,
     artifacts: Sequence[Mapping[str, Any]] | None = None,
     summary: str | None = None,
+    force_capture: bool = False,
 ) -> tuple[JsonObject, Path, str]:
     """Capture the current repo state as an event and write it to the outbox.
 
@@ -341,8 +388,17 @@ def capture_commit(
       rewritten in place, preserving its sync state.
     * ``recaptured`` — the existing event was already synced, so mutating it
       would desync the staged note; the annotation was written as a new event.
+    * ``skipped`` — the config's ``commit_filter`` left a ``commit`` event out
+      (merge commit, ``fixup!`` subject, ...). Nothing was rendered or queued;
+      the returned mapping is the skip record appended to the outbox's
+      ``.skipped-commits.jsonl`` and ``path`` is that log. ``force_capture``
+      records the commit regardless of the filter.
     """
 
+    if event_type == "commit" and not force_capture:
+        skipped = _skip_record(config, cwd)
+        if skipped is not None:
+            return skipped, _outbox.record_skipped_commit(config.outbox_path(), skipped), "skipped"
     event = make_event(
         config,
         event_type=event_type,
@@ -399,6 +455,24 @@ def capture_commit(
     merged = validate_event({**merged, "sync": existing.get("sync") or merged["sync"]})
     _write_json_atomic(path, merged)
     return merged, path, "updated"
+
+
+def _skip_record(config: RepoConfig, cwd: str | Path | None) -> JsonObject | None:
+    """The skip record for HEAD under ``config.commit_filter``, or None to capture."""
+
+    root = Path(cwd or Path.cwd()).expanduser()
+    head = git_head_commit(root)
+    if not head.commit:
+        return None
+    reason = commit_skip_reason(root, head.commit, config.commit_filter)
+    if not reason:
+        return None
+    return {
+        _outbox.SKIPPED_ADAPTER_KEY: REPO_EVIDENCE_ADAPTER,
+        "git_commit": head.commit,
+        "reason": reason,
+        "skipped_at": utc_now(),
+    }
 
 
 _CAPTURE_CONTENT_KEYS = (
@@ -541,6 +615,7 @@ def outbox_status(outbox: str | Path) -> JsonObject:
         "synced": counts.get("synced", 0),
         "quarantined": _outbox.count_quarantined(outbox),
         "unreadable": unreadable,
+        "skipped_commits": _outbox.count_skipped_commits(outbox),
         "events": events,
     }
 
@@ -553,7 +628,26 @@ def sync_outbox(
     request_draft: bool = False,
     limit: int | None = None,
 ) -> JsonObject:
-    outbox = config.outbox_path()
+    return sync_outbox_path(
+        client,
+        config.outbox_path(),
+        dry_run=dry_run,
+        request_draft=request_draft,
+        limit=limit,
+    )
+
+
+def sync_outbox_path(
+    client: LabTracker,
+    outbox: Path,
+    *,
+    dry_run: bool = False,
+    request_draft: bool = False,
+    limit: int | None = None,
+) -> JsonObject:
+    """Drain the repo outbox at ``outbox`` (no config needed; see ``lt outbox``)."""
+
+    outbox = Path(outbox).expanduser()
     note_indexes: dict[str, EvidenceNoteIndex] = {}
 
     def _is_actionable(event: JsonObject) -> bool:
@@ -611,6 +705,31 @@ def sync_outbox(
 HOOK_BEGIN_MARKER = "# --- BEGIN LAB TRACKER REPO HOOK ---"
 HOOK_END_MARKER = "# --- END LAB TRACKER REPO HOOK ---"
 _HOOK_SHEBANG = "#!/usr/bin/env sh"
+HOOK_WARNING = (
+    "lab-tracker: repo hook could not record or sync the commit; queued events "
+    "are kept. Retry with 'lt outbox sync', verify with 'lt outbox status'. "
+    "Commit kept."
+)
+HOOK_ACTION_INSTALLED = "installed"
+HOOK_ACTION_UPDATED = "updated"
+HOOK_ACTION_PREPENDED = "prepended"
+HOOK_ACTION_MIGRATED = "migrated"
+
+
+@dataclass(frozen=True)
+class HookPlan:
+    """A resolved post-commit hook write: what exists, what it becomes, and why."""
+
+    repo_root: Path
+    hook_path: Path
+    existing: str
+    updated: str
+    action: str
+    lt_command: str
+    config_path: Path
+
+    def diff(self) -> str:
+        return hook_text_diff(self.hook_path, self.existing, self.updated)
 
 
 def install_post_commit_hook(
@@ -619,6 +738,9 @@ def install_post_commit_hook(
     lt_command: str | None = None,
     config_path: str | Path | None = None,
     force: bool = False,
+    base_url: str | None = None,
+    dry_run: bool = False,
+    migrate_legacy: bool = False,
 ) -> JsonObject:
     """Install (or update) the managed ``lt repo`` post-commit hook.
 
@@ -632,6 +754,10 @@ def install_post_commit_hook(
     exits, so the foreign hook still runs. The repo config the hook needs is
     resolved at install time and pinned into the block, so a missing or
     mis-located config fails here, loudly, instead of silently on every commit.
+
+    ``migrate_legacy`` replaces a legacy GRAPH DRAFT block (``lt git snapshot``)
+    in place; without it that block is refused unless ``force`` prepends ours
+    ahead of it. ``dry_run`` returns the plan (with a diff) and writes nothing.
     """
 
     root = Path(repo_root or Path.cwd()).expanduser()
@@ -645,11 +771,42 @@ def install_post_commit_hook(
             f"No repo config found from {toplevel}. Run 'lt repo init' in the "
             "repository first (or pass --config)."
         ) from exc
-    hook_path = _hook_path(Path(toplevel))
-    resolved_lt = _hook_command_path(lt_command)
-    config_for_hook = str(config.config_path).replace("\\", "/")
-    managed_block = _hook_managed_block(resolved_lt, config_for_hook)
+    assert config.config_path is not None  # load_config always records it
+    plan = plan_post_commit_hook(
+        Path(toplevel),
+        lt_command=lt_command,
+        config_path=config.config_path,
+        force=force,
+        base_url=base_url,
+        migrate_legacy=migrate_legacy,
+    )
+    if not dry_run:
+        write_hook_plan(plan)
+    return hook_plan_payload(plan, dry_run=dry_run)
 
+
+def plan_post_commit_hook(
+    repo_root: Path,
+    *,
+    lt_command: str | None,
+    config_path: Path,
+    force: bool = False,
+    base_url: str | None = None,
+    migrate_legacy: bool = False,
+) -> HookPlan:
+    """Resolve the hook path and render the merged hook text without writing.
+
+    ``config_path`` is pinned into the block as given; callers that create the
+    config afterwards (``lt hooks install`` on a repo without ``repo.json``)
+    can therefore preview the exact hook a real install would write.
+    """
+
+    hook_path = _hook_path(repo_root)
+    resolved_lt = _hook_command_path(lt_command)
+    block = hook_managed_block(
+        resolved_lt, str(config_path).replace("\\", "/"), base_url=base_url
+    )
+    existing = ""
     if hook_path.exists():
         try:
             existing = hook_path.read_text(encoding="utf-8")
@@ -658,69 +815,134 @@ def install_post_commit_hook(
                 f"Existing post-commit hook is not UTF-8 text: {hook_path}. "
                 "Fix or remove it, then re-run."
             ) from exc
-        # hooks.py imports this module at top level, so import lazily here.
-        from lab_tracker_client.hooks import HOOK_BLOCK_BEGIN as DRAFT_HOOK_BLOCK_BEGIN
+    updated, action = merge_hook_text(
+        existing, block, hook_path=hook_path, force=force, migrate_legacy=migrate_legacy
+    )
+    return HookPlan(
+        repo_root=repo_root,
+        hook_path=hook_path,
+        existing=existing,
+        updated=updated,
+        action=action,
+        lt_command=resolved_lt,
+        config_path=config_path,
+    )
 
-        if (
-            DRAFT_HOOK_BLOCK_BEGIN in existing
-            and HOOK_BEGIN_MARKER not in existing  # updating our own block is fine
-            and not force
-        ):
+
+def write_hook_plan(plan: HookPlan) -> None:
+    """Write the planned hook text (LF only) and make it executable."""
+
+    plan.hook_path.parent.mkdir(parents=True, exist_ok=True)
+    plan.hook_path.write_text(
+        plan.updated.replace("\r\n", "\n"), encoding="utf-8", newline="\n"
+    )
+    plan.hook_path.chmod(plan.hook_path.stat().st_mode | 0o755)
+
+
+def hook_plan_payload(plan: HookPlan, *, dry_run: bool) -> JsonObject:
+    return {
+        "command": "repo-install-hook",
+        "action": plan.action,
+        "repo": str(plan.repo_root),
+        "hook": str(plan.hook_path),
+        "hook_path": str(plan.hook_path),
+        "lt_command": plan.lt_command,
+        "config": str(plan.config_path),
+        "dry_run": dry_run,
+        "diff": plan.diff(),
+    }
+
+
+def merge_hook_text(
+    existing: str,
+    block: str,
+    *,
+    hook_path: Path,
+    force: bool,
+    migrate_legacy: bool,
+) -> tuple[str, str]:
+    """Merge the managed ``block`` into ``existing`` hook text; pure.
+
+    Returns ``(updated_text, action)`` with action one of ``installed`` (no
+    hook), ``updated`` (own block replaced in place), ``migrated`` (a legacy
+    GRAPH DRAFT block replaced in place, only with ``migrate_legacy``) or
+    ``prepended`` (block inserted ahead of a foreign body, only with ``force``).
+    Corrupted markers and un-forced foreign hooks raise instead of guessing.
+    """
+
+    # hooks.py imports this module at top level, so import lazily here.
+    from lab_tracker_client.hooks import HOOK_BLOCK_BEGIN, HOOK_BLOCK_END
+
+    has_begin = HOOK_BEGIN_MARKER in existing
+    has_end = HOOK_END_MARKER in existing
+    if has_begin and has_end:
+        pattern = re.compile(
+            re.escape(HOOK_BEGIN_MARKER) + r".*?" + re.escape(HOOK_END_MARKER),
+            re.DOTALL,
+        )
+        if not pattern.search(existing):
+            raise LTValidationError(
+                f"Lab Tracker markers in {hook_path} are out of order "
+                "(END before BEGIN?). Repair the hook manually, then re-run."
+            )
+        return pattern.sub(lambda _match: block, existing), HOOK_ACTION_UPDATED
+    if has_begin or has_end:
+        raise LTValidationError(
+            f"Post-commit hook has an unmatched Lab Tracker marker: {hook_path}. "
+            "Repair the hook manually, then re-run."
+        )
+    legacy_begin = HOOK_BLOCK_BEGIN in existing
+    legacy_end = HOOK_BLOCK_END in existing
+    if legacy_begin != legacy_end:
+        raise LTValidationError(
+            f"Post-commit hook has an unmatched legacy Lab Tracker marker: {hook_path}. "
+            "Repair the hook manually, then re-run."
+        )
+    if legacy_begin:
+        if migrate_legacy:
+            legacy_pattern = re.compile(
+                re.escape(HOOK_BLOCK_BEGIN) + r".*?" + re.escape(HOOK_BLOCK_END),
+                re.DOTALL,
+            )
+            if not legacy_pattern.search(existing):
+                raise LTValidationError(
+                    f"Legacy Lab Tracker markers in {hook_path} are out of order "
+                    "(END before BEGIN?). Repair the hook manually, then re-run."
+                )
+            return legacy_pattern.sub(lambda _match: block, existing), HOOK_ACTION_MIGRATED
+        if not force:
             # Both Lab Tracker capture hooks in one repo record two staged
             # notes per commit (lt-81s6.17). One adapter per repo unless forced.
             raise LTValidationError(
                 "This repo already has the 'lt git snapshot' capture hook "
                 "installed (GRAPH DRAFT block). Running both capture hooks "
-                "records every commit twice. Remove that block (lt hooks "
-                "uninstall) first, or pass --force only if you deliberately "
-                "want both."
+                "records every commit twice. Migrate it with 'lt hooks install "
+                "--yes', remove it (lt hooks uninstall), or pass --force only if "
+                "you deliberately want both."
             )
-        has_begin = HOOK_BEGIN_MARKER in existing
-        has_end = HOOK_END_MARKER in existing
-        if has_begin and has_end:
-            pattern = re.compile(
-                re.escape(HOOK_BEGIN_MARKER) + r".*?" + re.escape(HOOK_END_MARKER),
-                re.DOTALL,
-            )
-            if not pattern.search(existing):
-                raise LTValidationError(
-                    f"Lab Tracker markers in {hook_path} are out of order "
-                    "(END before BEGIN?). Repair the hook manually, then re-run."
-                )
-            updated = pattern.sub(lambda _match: managed_block, existing)
-            action = "updated"
-        elif has_begin or has_end:
-            raise LTValidationError(
-                f"Post-commit hook has an unmatched Lab Tracker marker: {hook_path}. "
-                "Repair the hook manually, then re-run."
-            )
-        elif existing.strip() and not force:
-            raise LTValidationError(
-                f"Existing post-commit hook is not Lab Tracker-managed: {hook_path}. "
-                "Re-run with --force to add the managed block ahead of it."
-            )
-        elif existing.strip():
-            _require_sh_hook(existing, hook_path)
-            updated = _insert_block_after_shebang(existing, managed_block)
-            action = "prepended"
-        else:
-            updated = f"{_HOOK_SHEBANG}\n{managed_block}\n"
-            action = "installed"
-    else:
-        updated = f"{_HOOK_SHEBANG}\n{managed_block}\n"
-        action = "installed"
+    if existing.strip() and not force:
+        raise LTValidationError(
+            f"Existing post-commit hook is not Lab Tracker-managed: {hook_path}. "
+            "Re-run with --force to add the managed block ahead of it."
+        )
+    if existing.strip():
+        _require_sh_hook(existing, hook_path)
+        return _insert_block_after_shebang(existing, block), HOOK_ACTION_PREPENDED
+    return f"{_HOOK_SHEBANG}\n{block}\n", HOOK_ACTION_INSTALLED
 
-    hook_path.parent.mkdir(parents=True, exist_ok=True)
-    hook_path.write_text(updated.replace("\r\n", "\n"), encoding="utf-8", newline="\n")
-    hook_path.chmod(hook_path.stat().st_mode | 0o755)
-    return {
-        "command": "repo-install-hook",
-        "action": action,
-        "repo": str(Path(toplevel)),
-        "hook": str(hook_path),
-        "lt_command": resolved_lt,
-        "config": str(config.config_path),
-    }
+
+def hook_text_diff(path: Path, existing: str, proposed: str) -> str:
+    """Unified diff of a hook change, for dry runs and install payloads."""
+
+    return "\n".join(
+        difflib.unified_diff(
+            existing.splitlines(),
+            proposed.splitlines(),
+            fromfile=f"{path} (current)",
+            tofile=f"{path} (proposed)",
+            lineterm="",
+        )
+    )
 
 
 def _hook_path(repo_root: Path) -> Path:
@@ -798,36 +1020,59 @@ def _insert_block_after_shebang(existing: str, block: str) -> str:
     return f"{block}\n{existing}"
 
 
-def _hook_managed_block(lt_command: str, config_path: str) -> str:
+def hook_managed_block(lt_command: str, config_path: str, *, base_url: str | None = None) -> str:
+    """Render the managed POSIX-sh block (LF only; runs under Git-for-Windows sh).
+
+    Every baked value is sh-single-quoted, so no path or URL can expand or
+    execute at commit time. ``base_url`` is an overridable default: the block
+    only sets ``LAB_TRACKER_BASE_URL`` when the environment has not.
+    """
+
     lt_quoted = _sh_single_quote(lt_command)
     config_quoted = _sh_single_quote(config_path)
-    return "\n".join(
+    lines = [
+        HOOK_BEGIN_MARKER,
+        'LAB_TRACKER_REPO_HOOK_ENABLED="${LAB_TRACKER_REPO_HOOK_ENABLED:-1}"',
+        'if [ "$LAB_TRACKER_REPO_HOOK_ENABLED" != "0" ]; then',
+        '  LT="$LAB_TRACKER_LT"',
+        f"  [ -n \"$LT\" ] || LT={lt_quoted}",
+        '  if [ -z "$LAB_TRACKER_REPO_CONFIG" ]; then',
+        f"    LAB_TRACKER_REPO_CONFIG={config_quoted}",
+        "    export LAB_TRACKER_REPO_CONFIG",
+        "  fi",
+    ]
+    if base_url:
+        lines.extend(
+            [
+                '  if [ -z "$LAB_TRACKER_BASE_URL" ]; then',
+                f"    LAB_TRACKER_BASE_URL={_sh_single_quote(base_url)}",
+                "    export LAB_TRACKER_BASE_URL",
+                "  fi",
+            ]
+        )
+    lines.extend(
         [
-            HOOK_BEGIN_MARKER,
-            'LAB_TRACKER_REPO_HOOK_ENABLED="${LAB_TRACKER_REPO_HOOK_ENABLED:-1}"',
-            'if [ "$LAB_TRACKER_REPO_HOOK_ENABLED" != "0" ]; then',
-            '  LT="$LAB_TRACKER_LT"',
-            f"  [ -n \"$LT\" ] || LT={lt_quoted}",
-            '  if [ -z "$LAB_TRACKER_REPO_CONFIG" ]; then',
-            f"    LAB_TRACKER_REPO_CONFIG={config_quoted}",
-            "    export LAB_TRACKER_REPO_CONFIG",
-            "  fi",
             '  if command -v "$LT" >/dev/null 2>&1; then',
-            # post-commit exit codes never block the commit; the redirect hides
-            # tracebacks and the || branch surfaces a one-line warning instead.
-            '    "$LT" repo report >/dev/null 2>&1 || '
-            'echo "lab-tracker: repo hook could not record the commit; commit kept." >&2',
+            # Suppress only stdout (the JSON payload), NOT stderr: lt prints the
+            # skip notice for a filtered commit and a cause-and-remediation
+            # diagnostic when the post-capture sync fails, so the user sees
+            # *why* and *how to drain* instead of an unactionable one-liner.
+            # A nonzero lt exit (capture failed, or queued but not synced)
+            # reaches the || so the warning stays reachable; post-commit hooks
+            # are advisory, so the commit is never blocked either way.
+            f'    "$LT" repo report >/dev/null || echo "{HOOK_WARNING}" >&2',
             "  else",
             # Without this branch a GUI/IDE commit whose PATH lacks lt would
             # skip capture with no trace at all.
             '    echo "lab-tracker: repo hook could not record the commit: lt command '
-            "'$LT' not found; set LAB_TRACKER_LT or re-run 'lt repo install-hook "
-            "--lt-command <path>'. Commit kept.\" >&2",
+            "'$LT' not found; set LAB_TRACKER_LT or re-run 'lt hooks install --yes "
+            "--lt-path <path>'. Commit kept.\" >&2",
             "  fi",
             "fi",
             HOOK_END_MARKER,
         ]
     )
+    return "\n".join(lines)
 
 
 # Lockfiles that pin an analysis environment, in the order they are hashed.
@@ -1125,6 +1370,10 @@ def event_metadata(
         metadata["repo_remote_url"] = remote
     if source.get("git_branch"):
         metadata["repo_git_branch"] = str(source["git_branch"])
+    if "git_diff_truncated" in source:
+        # A truncated diff is a fact about the evidence, not a detail to hide.
+        metadata["repo_git_diff_truncated"] = bool(source["git_diff_truncated"])
+        metadata["repo_git_max_diff_lines"] = int(source.get("git_max_diff_lines") or 0)
     metadata.update(dirty_metadata(source, "repo_"))
     for key, value in payload["environment"].items():
         if isinstance(value, (str, bool, int, float)) and str(key).startswith("repo_environment"):

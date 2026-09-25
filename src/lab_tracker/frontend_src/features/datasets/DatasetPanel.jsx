@@ -152,38 +152,41 @@ function DatasetPanel({
         <h2>Dataset Queue</h2>
       </div>
       <p className="subtle">
-        Stage datasets against active questions, attach files when needed, and commit them from the
-        active work queue.
+        Datasets normally arrive from sessions and the review inbox. Commit staged datasets here;
+        manual staging is for records that came from outside the capture flow.
       </p>
 
-      <form className="form" onSubmit={onCreateDataset}>
-        <label>
-          Primary question
-          <select
-            value={datasetPrimaryQuestionId}
-            onChange={onDatasetPrimaryQuestionIdChange}
-            disabled={!canWrite || !selectedProjectId || questions.length === 0}
-          >
-            <option value="">Select question</option>
-            {questions.map((question) => (
-              <option value={question.question_id} key={question.question_id}>
-                {question.text}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Secondary question IDs (comma-separated UUIDs)
-          <input
-            value={datasetSecondaryRaw}
-            onChange={onDatasetSecondaryRawChange}
-            disabled={!canWrite || !selectedProjectId}
-          />
-        </label>
-        <button className="btn-secondary" disabled={!canWrite || !selectedProjectId || busy}>
-          Stage dataset
-        </button>
-      </form>
+      <details className="advanced-disclosure">
+        <summary>Manual staging (advanced)</summary>
+        <form className="form" onSubmit={onCreateDataset}>
+          <label>
+            Primary question
+            <select
+              value={datasetPrimaryQuestionId}
+              onChange={onDatasetPrimaryQuestionIdChange}
+              disabled={!canWrite || !selectedProjectId || questions.length === 0}
+            >
+              <option value="">Select question</option>
+              {questions.map((question) => (
+                <option value={question.question_id} key={question.question_id}>
+                  {question.text}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Secondary question IDs (comma-separated UUIDs)
+            <input
+              value={datasetSecondaryRaw}
+              onChange={onDatasetSecondaryRawChange}
+              disabled={!canWrite || !selectedProjectId}
+            />
+          </label>
+          <button className="btn-secondary" disabled={!canWrite || !selectedProjectId || busy}>
+            Stage dataset
+          </button>
+        </form>
+      </details>
 
       <div className="item-head">
         <h3>Staged Work</h3>

@@ -11,11 +11,17 @@ snapshot`` and figure ``run_context``) goes through this module, so that:
   filesystems (Lustre, GPFS, NFS) rather than a laptop SSD;
 * a working tree whose state git could not report (timeout or error) is
   recorded as *unknown* (``git_dirty: None`` plus ``git_status_error``) with a
-  stderr warning — never as clean, and never by blocking the caller.
+  stderr warning — never as clean, and never by blocking the caller;
+* the commit filter (:class:`CommitFilter` / :func:`commit_skip_reason`) that
+  decides which commits a post-commit capture records is defined once, so the
+  ``lt repo`` hook and the legacy ``lt git snapshot`` hook skip the same
+  commits (merges and ``fixup!``/``squash!`` subjects by default; ``wip``
+  subjects and ignored path globs only when the repo config opts in).
 """
 
 from __future__ import annotations
 
+import fnmatch
 import math
 import os
 import re
@@ -295,3 +301,103 @@ def dirty_metadata(source: Mapping[str, Any], prefix: str) -> dict[str, NoteMeta
         error = str(source.get("git_status_error") or "").strip()
         return {f"{prefix}git_status_error": error or "unknown"}
     return {f"{prefix}git_dirty": bool(dirty)}
+
+
+# --- commit filter -----------------------------------------------------------
+
+FIXUP_SUBJECT_PATTERN = re.compile(r"^(fixup!|squash!)")
+WIP_SUBJECT_PATTERN = re.compile(r"^wip\b", re.IGNORECASE)
+SKIP_REASON_MERGE = "merge_commit"
+SKIP_REASON_FIXUP = "fixup_subject"
+SKIP_REASON_WIP = "wip_subject"
+SKIP_REASON_PATHS = "only_ignored_paths"
+# ``git show -s --format``: parent hashes, NUL, subject.
+COMMIT_FACTS_FORMAT = "%P%x00%s"
+_COMMIT_FILTER_BOOL_KEYS = ("skip_merges", "skip_fixups", "skip_wip")
+_COMMIT_FILTER_KEYS = (*_COMMIT_FILTER_BOOL_KEYS, "skip_path_globs")
+
+
+@dataclass(frozen=True)
+class CommitFilter:
+    """Which commits a post-commit capture leaves out of the outbox.
+
+    Merge commits and ``fixup!``/``squash!`` subjects are skipped by default:
+    they carry no analysis of their own (the merged or fixed-up commits do).
+    ``wip`` subjects and path globs are opt-in through ``commit_filter`` in
+    ``.lab-tracker/repo.json``. A skipped commit is always logged and counted,
+    never silently dropped.
+    """
+
+    skip_merges: bool = True
+    skip_fixups: bool = True
+    skip_wip: bool = False
+    skip_path_globs: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "skip_merges": self.skip_merges,
+            "skip_fixups": self.skip_fixups,
+            "skip_wip": self.skip_wip,
+            "skip_path_globs": list(self.skip_path_globs),
+        }
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, Any]) -> CommitFilter:
+        """Parse the ``commit_filter`` object; absent keys keep their defaults."""
+
+        if not isinstance(payload, Mapping):
+            raise LTValidationError("commit_filter must be a JSON object.")
+        unknown = sorted(str(key) for key in payload if key not in _COMMIT_FILTER_KEYS)
+        if unknown:
+            raise LTValidationError(
+                f"commit_filter has unknown keys: {', '.join(unknown)}. "
+                f"Allowed keys: {', '.join(_COMMIT_FILTER_KEYS)}."
+            )
+        values: dict[str, Any] = {}
+        for key in _COMMIT_FILTER_BOOL_KEYS:
+            if key in payload:
+                if not isinstance(payload[key], bool):
+                    raise LTValidationError(f"commit_filter.{key} must be true or false.")
+                values[key] = payload[key]
+        if "skip_path_globs" in payload:
+            globs = payload["skip_path_globs"]
+            if not isinstance(globs, list) or not all(
+                isinstance(item, str) and item.strip() for item in globs
+            ):
+                raise LTValidationError(
+                    "commit_filter.skip_path_globs must be a list of non-empty glob strings."
+                )
+            values["skip_path_globs"] = tuple(item.strip() for item in globs)
+        return cls(**values)
+
+
+def commit_skip_reason(root: Path | str, commit: str, commit_filter: CommitFilter) -> str:
+    """Why ``commit_filter`` would skip ``commit``, or ``""`` to record it.
+
+    Reasons are checked in a fixed order (merge, fixup, wip, ignored paths) and
+    the first match wins. A commit git cannot describe is never skipped: an
+    unknown commit is recorded, not filtered away.
+    """
+
+    facts = run_git(root, "show", "-s", f"--format={COMMIT_FACTS_FORMAT}", commit)
+    if not facts.ok:
+        return ""
+    parents_text, _sep, subject = facts.stdout.partition("\x00")
+    if commit_filter.skip_merges and len(parents_text.split()) > 1:
+        return SKIP_REASON_MERGE
+    if commit_filter.skip_fixups and FIXUP_SUBJECT_PATTERN.match(subject):
+        return SKIP_REASON_FIXUP
+    if commit_filter.skip_wip and WIP_SUBJECT_PATTERN.match(subject):
+        return SKIP_REASON_WIP
+    if commit_filter.skip_path_globs:
+        listing = run_git(root, "show", "--name-only", "--format=", commit)
+        if listing.ok:
+            paths = [line.strip() for line in listing.stdout.splitlines() if line.strip()]
+            globs = commit_filter.skip_path_globs
+            if paths and all(_matches_any_glob(path, globs) for path in paths):
+                return SKIP_REASON_PATHS
+    return ""
+
+
+def _matches_any_glob(path: str, globs: tuple[str, ...]) -> bool:
+    return any(fnmatch.fnmatchcase(path, glob) for glob in globs)

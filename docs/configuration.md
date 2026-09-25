@@ -996,8 +996,10 @@ FastAPI app does not read them. `LAB_TRACKER_BASE_URL` (see
 
 #### Git, repo, HPC, and watch capture
 
-- `LAB_TRACKER_GIT_CAPTURE_ENABLED`: set to `0` to turn off the managed Git
-  commit-capture hook without uninstalling it (default: on)
+- `LAB_TRACKER_GIT_CAPTURE_ENABLED`: set to `0` to turn off a legacy `GRAPH
+  DRAFT` commit-capture hook (the deprecated `lt git snapshot` block) without
+  uninstalling it; hooks written by `lt hooks install` read
+  `LAB_TRACKER_REPO_HOOK_ENABLED` instead (default: on)
 - `LAB_TRACKER_GIT_DRAFT_ENABLED`: older name for
   `LAB_TRACKER_GIT_CAPTURE_ENABLED`, used only when the new name is unset
 - `LAB_TRACKER_LT`: `lt` executable the managed Git and repo hooks run
@@ -1005,10 +1007,11 @@ FastAPI app does not read them. `LAB_TRACKER_BASE_URL` (see
 - `LAB_TRACKER_PYTHON`: Python interpreter the Windows graph-draft hook
   (`scripts/install-git-graph-draft-hook.ps1`) and `scripts/matlab-smoke.sh`
   run (default: the interpreter recorded at install, or `python3`)
-- `LAB_TRACKER_GIT_MAX_DIFF_LINES`: maximum diff lines a Git capture keeps
-  (default: `800`)
-- `LAB_TRACKER_GIT_CONTEXT_LINES`: unified-diff context lines in a Git capture
-  (default: `3`)
+- `LAB_TRACKER_GIT_MAX_DIFF_LINES`: maximum diff lines a Git capture keeps, for
+  `lt repo` commit events and the deprecated `lt git snapshot` alike; a
+  truncated diff is recorded in note metadata (default: `800`)
+- `LAB_TRACKER_GIT_CONTEXT_LINES`: unified-diff context lines in a Git capture,
+  for `lt repo` commit events and `lt git snapshot` alike (default: `3`)
 - `LAB_TRACKER_GIT_TIMEOUT_SECONDS`: timeout in seconds for each `git` probe the
   client runs (default: `10`)
 - `LAB_TRACKER_GIT_COMMIT` / `LAB_TRACKER_GIT_REPO`: default commit and
@@ -1017,7 +1020,10 @@ FastAPI app does not read them. `LAB_TRACKER_BASE_URL` (see
 - `LAB_TRACKER_TOKEN`: bearer token for `scripts/create-analysis-graph-draft.py`
   when `--token` is not given
 - `LAB_TRACKER_REPO_HOOK_ENABLED`: set to `0` to turn off the `lt repo`
-  post-commit hook without uninstalling it (default: on)
+  post-commit hook (the block `lt hooks install` writes) without uninstalling
+  it (default: on). Which commits the hook records is not an environment
+  variable: the commit filter (merge commits and `fixup!`/`squash!` subjects
+  skipped by default) lives in `commit_filter` in `.lab-tracker/repo.json`
 - `LAB_TRACKER_REPO_CONFIG` / `LAB_TRACKER_HPC_CONFIG` /
   `LAB_TRACKER_WATCH_CONFIG`: path to the `repo.json`, `hpc.json`, or
   `watch.json` config (default: the nearest `.lab-tracker/<name>.json` in the

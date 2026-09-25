@@ -212,6 +212,31 @@ def load_config(
     return config
 
 
+def resolve_outbox_path(repo_root: str | Path) -> tuple[Path, str | None]:
+    """Return ``(outbox, error-detail)`` for the HPC adapter outbox of ``repo_root``.
+
+    Mirrors ``lab_tracker_client.repo.resolve_outbox_path``: without ``hpc.json``
+    the default outbox (``LAB_TRACKER_HPC_OUTBOX`` or ``.lab-tracker/outbox/hpc``
+    under ``repo_root``) is returned with no error; a config that exists but
+    cannot be loaded returns that default plus the load error, so ``lt outbox``
+    still finds queued events and reports the broken config.
+    """
+
+    root = Path(repo_root).expanduser().resolve()
+    override = os.getenv("LAB_TRACKER_HPC_OUTBOX")
+    fallback = Path(override).expanduser() if override else root / DEFAULT_OUTBOX
+    if not fallback.is_absolute():
+        fallback = root / fallback
+    fallback = fallback.resolve()
+    config_path = find_config_path(root)
+    if config_path is None:
+        return fallback, None
+    try:
+        return load_config(config_path=config_path).outbox_path(), None
+    except Exception as exc:  # noqa: BLE001 - a broken config must not hide queued events.
+        return fallback, f"HPC config could not be loaded ({exc}); using {fallback}"
+
+
 def new_run_id(prefix: str = "hpc") -> str:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     return f"{prefix}-{stamp}-{uuid.uuid4().hex[:8]}"
@@ -404,6 +429,7 @@ def outbox_status(outbox: str | Path) -> JsonObject:
         "synced": counts.get("synced", 0),
         "quarantined": _outbox.count_quarantined(outbox),
         "unreadable": unreadable,
+        "skipped_commits": _outbox.count_skipped_commits(outbox),
         "events": events,
     }
 
@@ -611,7 +637,26 @@ def sync_outbox(
     request_draft: bool = False,
     limit: int | None = None,
 ) -> JsonObject:
-    outbox = config.outbox_path()
+    return sync_outbox_path(
+        client,
+        config.outbox_path(),
+        dry_run=dry_run,
+        request_draft=request_draft,
+        limit=limit,
+    )
+
+
+def sync_outbox_path(
+    client: LabTracker,
+    outbox: Path,
+    *,
+    dry_run: bool = False,
+    request_draft: bool = False,
+    limit: int | None = None,
+) -> JsonObject:
+    """Drain the HPC outbox at ``outbox`` (no config needed; see ``lt outbox``)."""
+
+    outbox = Path(outbox).expanduser()
     note_indexes: dict[str, EvidenceNoteIndex] = {}
 
     def _is_actionable(event: JsonObject) -> bool:

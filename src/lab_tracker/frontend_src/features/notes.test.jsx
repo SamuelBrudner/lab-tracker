@@ -1,6 +1,6 @@
 import * as React from "react";
 
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import { apiResponse, note } from "../test/fixtures.js";
 import { installFetchMock } from "../test/utils.js";
@@ -393,5 +393,39 @@ describe("NoteDetailCard transcript provenance", () => {
     await waitFor(() => expect(setFlash).toHaveBeenCalledWith("Transcript saved."));
     await waitFor(() => expect(screen.getByRole("textbox")).toBeEnabled());
     expect(screen.getByRole("textbox")).toHaveValue("Saved text");
+  });
+});
+
+describe("NoteDetailCard Back", () => {
+  function renderWithDepth(depth) {
+    window.history.replaceState(
+      depth ? { labTracker: { depth } } : null,
+      "",
+      `/app/notes/${NOTE_ID}`
+    );
+    installFetchMock(
+      baseRoutes({
+        noteResponses: apiResponse(
+          voiceNote({ metadata: CAPTURE_METADATA, transcribedText: "Fly 12 climbed" })
+        ),
+        onPatch: () => {},
+      })
+    );
+    return renderDetail();
+  }
+
+  it("Back uses in-app history with /app fallback", async () => {
+    const back = vi.spyOn(window.history, "back").mockImplementation(() => {});
+
+    const direct = renderWithDepth(0);
+    fireEvent.click(await screen.findByRole("button", { name: "Back" }));
+    expect(direct.navigate).toHaveBeenCalledWith("/app");
+    expect(back).not.toHaveBeenCalled();
+    cleanup();
+
+    const fromApp = renderWithDepth(1);
+    fireEvent.click(await screen.findByRole("button", { name: "Back" }));
+    expect(back).toHaveBeenCalledTimes(1);
+    expect(fromApp.navigate).not.toHaveBeenCalled();
   });
 });

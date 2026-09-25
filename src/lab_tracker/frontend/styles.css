@@ -186,6 +186,28 @@ body {
   color: #fff;
 }
 
+.app-nav-group {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  align-items: center;
+}
+
+.app-nav-group > summary {
+  list-style: none;
+  cursor: pointer;
+}
+
+.app-nav-group > summary::-webkit-details-marker {
+  display: none;
+}
+
+.app-nav-group-links {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
 h1 {
   margin: 0;
   font-size: clamp(1.3rem, 2.3vw, 2rem);
@@ -1325,6 +1347,16 @@ button.project-graph-legend-item:hover {
 .context-details summary {
   cursor: pointer;
   font-weight: 700;
+}
+
+.advanced-disclosure > summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--ink-soft);
+}
+
+.advanced-disclosure[open] > summary {
+  margin-bottom: 0.6rem;
 }
 
 .highlight {

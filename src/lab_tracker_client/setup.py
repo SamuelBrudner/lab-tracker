@@ -43,7 +43,8 @@ from lab_tracker_client.client import (
     load_connection_profile,
 )
 from lab_tracker_client.connection_diagnostics import ConnectionTrace
-from lab_tracker_client.hooks import HOOK_BLOCK_BEGIN, hook_path_for_repo
+from lab_tracker_client.hooks import HOOK_BLOCK_BEGIN, hook_lt_path, hook_path_for_repo
+from lab_tracker_client.repo import HOOK_BEGIN_MARKER as REPO_HOOK_BLOCK_BEGIN
 
 JsonObject = dict[str, Any]
 
@@ -287,12 +288,17 @@ def _suggestions(status: JsonObject) -> list[str]:
         )
     if not watch.get("config_present") or not watch.get("watch_count"):
         suggestions.append(_watch_setup_suggestion(status))
-    if hooks.get("git_repo") and not hooks.get("managed_block_present"):
+    if hooks.get("legacy_block_present") and not hooks.get("managed_block_present"):
+        suggestions.append(
+            "`lt hooks install --yes` migrates this repository's legacy commit "
+            "hook to the `lt repo` hook (`--dry-run` previews)."
+        )
+    elif hooks.get("git_repo") and not hooks.get("managed_block_present"):
         suggestions.append(
             "`lt hooks install` enrolls this repository's commits "
             "(`--yes` applies)."
         )
-    if hooks.get("managed_block_present") and hooks.get("lt_path_exists") is False:
+    if _commit_hook_present(hooks) and hooks.get("lt_path_exists") is False:
         suggestions.append(
             "The commit hook points at a missing lt executable; "
             "`lt hooks install --yes` re-records the current path."
@@ -976,7 +982,7 @@ def _watch_setup_suggestion(status: JsonObject) -> str:
             + ", ".join(candidate_names[:3])
             + "; prefer a narrow run-specific folder or include globs."
         )
-    if hooks.get("managed_block_present") and hooks.get("lt_path_exists") is not False:
+    if _commit_hook_present(hooks) and hooks.get("lt_path_exists") is not False:
         return (
             "Commit snapshots are active; skip watch setup unless there is a "
             "narrow results folder to capture. `lt watch add <folder> --include "
@@ -988,6 +994,12 @@ def _watch_setup_suggestion(status: JsonObject) -> str:
         "folder for capture (`--dry-run` previews)."
         + candidate_hint
     )
+
+
+def _commit_hook_present(hooks: JsonObject) -> bool:
+    """Either the `lt repo` block or a not-yet-migrated legacy block captures commits."""
+
+    return bool(hooks.get("managed_block_present") or hooks.get("legacy_block_present"))
 
 
 def _hpc_status(root: Path) -> JsonObject:
@@ -1036,27 +1048,28 @@ def _hooks_status(root: Path) -> JsonObject:
     if hook_path is None:
         return {"git_repo": False}
     managed_block_present = False
+    legacy_block_present = False
     content = ""
     with suppress(OSError, UnicodeDecodeError):
         content = hook_path.read_text(encoding="utf-8")
-        managed_block_present = HOOK_BLOCK_BEGIN in content
+        managed_block_present = REPO_HOOK_BLOCK_BEGIN in content
+        legacy_block_present = HOOK_BLOCK_BEGIN in content
     summary: JsonObject = {
         "git_repo": True,
         "post_commit_path": str(hook_path),
         "core_hooks_path": core_hooks_path,
         "post_commit_present": hook_path.exists(),
         "managed_block_present": managed_block_present,
+        "legacy_block_present": legacy_block_present,
     }
-    if managed_block_present:
+    if managed_block_present or legacy_block_present:
         # The venv-moved failure mode: the block's baked lt path no longer
         # exists, so the hook dies silently on every commit.
-        from lab_tracker_client.hooks import _LT_LINE_PATTERN
-
-        match = _LT_LINE_PATTERN.search(content)
-        if match:
-            summary["lt_path"] = match.group("path")
+        lt_path = hook_lt_path(content)
+        if lt_path is not None:
+            summary["lt_path"] = lt_path
             with suppress(OSError):
-                summary["lt_path_exists"] = Path(match.group("path")).exists()
+                summary["lt_path_exists"] = Path(lt_path).exists()
     return summary
 
 

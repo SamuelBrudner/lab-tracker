@@ -1,10 +1,16 @@
-"""Outbox-backed git commit capture.
+"""Outbox-backed git commit capture (deprecated hook path).
 
 ``snapshot_commit`` renders a commit as evidence text (byte-compatible with the
 legacy ``scripts/create-analysis-graph-draft.py`` rendering, so notes created by
 either path dedupe against each other on content hash) and queues it as a
 deterministic watch-outbox event. Commits made while the server is unreachable
 stay queued and drain on any later sync — the hook never loses a commit.
+
+``lt git snapshot`` is deprecated and will be removed after the next release;
+run ``lt hooks install --yes`` in the repository to migrate to the ``lt repo``
+hook, whose commit events carry the same bounded diff and conventions snapshot
+(decision lt-81s6.17). Until then both paths share one commit identity
+(``<normalized-remote>@<sha>``) and one commit filter (:mod:`gitinfo`).
 """
 
 from __future__ import annotations
@@ -19,14 +25,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import lab_tracker_client.repo as repo_capture
 import lab_tracker_client.watch as watch_capture
 from lab_tracker.repository_conventions import (
     REPOSITORY_CONVENTIONS_HASH_METADATA_KEY,
     capture_repository_conventions,
     repository_conventions_metadata,
 )
+from lab_tracker_client import outbox as _outbox
 from lab_tracker_client.client import LTValidationError
-from lab_tracker_client.gitinfo import sanitize_remote_url
+from lab_tracker_client.gitinfo import CommitFilter, commit_skip_reason, sanitize_remote_url
 from lab_tracker_client.repo import normalize_remote
 
 JsonObject = dict[str, Any]
@@ -35,6 +43,43 @@ GIT_EVIDENCE_ADAPTER = "lt-git-snapshot"
 GIT_CAPTURE_KIND = "git_commit"
 DEFAULT_MAX_DIFF_LINES = 800
 DEFAULT_CONTEXT_LINES = 3
+MAX_DIFF_LINES_ENV = "LAB_TRACKER_GIT_MAX_DIFF_LINES"
+CONTEXT_LINES_ENV = "LAB_TRACKER_GIT_CONTEXT_LINES"
+GIT_SNAPSHOT_DEPRECATION = (
+    "lab-tracker: 'lt git snapshot' is deprecated and will be removed after the "
+    "next release; run 'lt hooks install --yes' in this repository to migrate to "
+    "the 'lt repo' hook, whose commit events carry the same bounded diff and "
+    "conventions snapshot."
+)
+
+
+def max_diff_lines_from_env() -> int:
+    """``LAB_TRACKER_GIT_MAX_DIFF_LINES`` or :data:`DEFAULT_MAX_DIFF_LINES`."""
+
+    return _env_int(MAX_DIFF_LINES_ENV, DEFAULT_MAX_DIFF_LINES)
+
+
+def context_lines_from_env() -> int:
+    """``LAB_TRACKER_GIT_CONTEXT_LINES`` or :data:`DEFAULT_CONTEXT_LINES`."""
+
+    return _env_int(CONTEXT_LINES_ENV, DEFAULT_CONTEXT_LINES)
+
+
+def commit_filter_for_repo(repo_root: Path) -> tuple[CommitFilter, str | None]:
+    """The repo's ``commit_filter`` from ``repo.json``, or the defaults.
+
+    Returns ``(filter, error-detail)``: no config means the defaults with no
+    error; a config that cannot be loaded means the defaults plus the error,
+    because a broken ``repo.json`` must never lose a commit.
+    """
+
+    config_path = repo_capture.find_config_path(start=repo_root)
+    if config_path is None:
+        return CommitFilter(), None
+    try:
+        return repo_capture.load_config(config_path=config_path).commit_filter, None
+    except Exception as exc:  # noqa: BLE001 - a broken config must never lose a commit.
+        return CommitFilter(), f"repo config could not be loaded ({exc}); using default filter"
 
 
 def snapshot_commit(
@@ -49,25 +94,35 @@ def snapshot_commit(
     max_diff_lines: int | None = None,
     context_lines: int | None = None,
     request_draft: bool = False,
+    force_capture: bool = False,
 ) -> JsonObject:
     """Queue one commit as a staged-note outbox event; idempotent per commit.
 
+    Deprecated: ``lt git snapshot`` will be removed after the next release; run
+    ``lt hooks install --yes`` to migrate to the ``lt repo`` hook, whose commit
+    events carry the same bounded diff and conventions snapshot. Every payload
+    carries ``deprecated: True``.
+
     ``request_draft`` is recorded on the event itself (reserved
     ``payload.request_draft`` key), so a later outbox drain requests a graph
-    draft for this commit only — never for unrelated queued captures.
+    draft for this commit only — never for unrelated queued captures. The
+    repo's ``commit_filter`` (``repo.json``, defaults otherwise) is applied
+    before anything is rendered: a filtered commit is logged to the watch
+    outbox's ``.skipped-commits.jsonl`` and reported with ``skipped: True``
+    instead of queued, unless ``force_capture`` is set.
     """
 
-    resolved_max = (
-        max_diff_lines
-        if max_diff_lines is not None
-        else _env_int("LAB_TRACKER_GIT_MAX_DIFF_LINES", DEFAULT_MAX_DIFF_LINES)
-    )
+    resolved_max = max_diff_lines if max_diff_lines is not None else max_diff_lines_from_env()
     resolved_context = (
-        context_lines
-        if context_lines is not None
-        else _env_int("LAB_TRACKER_GIT_CONTEXT_LINES", DEFAULT_CONTEXT_LINES)
+        context_lines if context_lines is not None else context_lines_from_env()
     )
     repo_root = repo_toplevel(repo)
+    config, config_error = resolve_watch_config(repo_root, config_path)
+    commit_sha = _git(repo_root, "rev-parse", f"{commit}^{{commit}}").strip()
+    if not force_capture:
+        skipped = _skip_payload(repo_root, commit_sha, config=config, config_error=config_error)
+        if skipped is not None:
+            return skipped
     evidence, facts = commit_evidence(
         repo_root,
         commit,
@@ -87,13 +142,12 @@ def snapshot_commit(
         convention_snapshot = None
         agent_context_error = str(exc)
     facts.update(repository_conventions_metadata(convention_snapshot))
-    config, config_error = resolve_watch_config(repo_root, config_path)
     # The repo's own lt_ids.json binding outranks a (possibly parent-dir)
     # watch config: repo-local intent wins.
     resolved_project = (
         _optional(project_id)
         or _optional(os.getenv("LAB_TRACKER_PROJECT_ID"))
-        or _project_from_ids(repo_root)
+        or project_from_ids(repo_root)
         or _optional(config.project_id)
     )
     if not resolved_project:
@@ -102,7 +156,6 @@ def snapshot_commit(
             "LAB_TRACKER_PROJECT_ID, or bind one with 'lt project bind'."
         )
     content_hash = hashlib.sha256(evidence.encode("utf-8")).hexdigest()
-    commit_sha = str(facts["git_commit"])
     repo_name = str(facts["git_repository_name"])
     # Shared git-evidence identity (lt-81s6.8/.17): <normalized-remote>@<commit>,
     # owned by lab_tracker_client.repo, so hook-, CLI-, and CI-captured evidence
@@ -172,6 +225,7 @@ def snapshot_commit(
         "outbox": str(outbox),
         "already_queued": already_queued,
         "queued": True,
+        "deprecated": True,
     }
     if context_ignored:
         payload["context_ignored"] = True
@@ -189,6 +243,47 @@ def snapshot_commit(
         )
     if agent_context_error:
         payload["agent_context_error"] = agent_context_error
+    return payload
+
+
+def _skip_payload(
+    repo_root: Path,
+    commit_sha: str,
+    *,
+    config: watch_capture.WatchConfig,
+    config_error: str | None,
+) -> JsonObject | None:
+    """Log and report a commit the repo's filter skips, or None to capture it."""
+
+    commit_filter, filter_error = commit_filter_for_repo(repo_root)
+    reason = commit_skip_reason(repo_root, commit_sha, commit_filter)
+    if not reason:
+        return None
+    outbox = config.outbox_path()
+    _outbox.record_skipped_commit(
+        outbox,
+        {
+            _outbox.SKIPPED_ADAPTER_KEY: GIT_EVIDENCE_ADAPTER,
+            "git_commit": commit_sha,
+            "reason": reason,
+            "skipped_at": utc_iso(),
+        },
+    )
+    payload: JsonObject = {
+        "command": "git-snapshot",
+        "repo": str(repo_root),
+        "commit": commit_sha,
+        "queued": False,
+        "skipped": True,
+        "skip_reason": reason,
+        "skipped_total": _outbox.count_skipped_commits(outbox),
+        "outbox": str(outbox),
+        "deprecated": True,
+    }
+    if filter_error:
+        payload["commit_filter_error"] = filter_error
+    if config_error:
+        payload["config_error"] = config_error
     return payload
 
 
@@ -396,7 +491,7 @@ def _optional(value: str | None) -> str | None:
     return text or None
 
 
-def _project_from_ids(repo_root: Path) -> str | None:
+def project_from_ids(repo_root: Path) -> str | None:
     """Fail-soft read of the repo's lt_ids.json project binding."""
 
     with suppress(Exception):

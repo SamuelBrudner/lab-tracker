@@ -959,6 +959,56 @@ def test_setup_status_watch_guidance_is_optional_when_commit_hook_active(
     assert "artifacts" in watch_suggestions[0]
 
 
+def test_setup_status_reports_repo_hook_and_suggests_legacy_migration(
+    config_home, tmp_path, monkeypatch, capsys
+) -> None:
+    import subprocess
+
+    from lab_tracker_client.hooks import HOOK_BLOCK_BEGIN, HOOK_BLOCK_END
+
+    monkeypatch.delenv("LAB_TRACKER_REPO_CONFIG", raising=False)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for args in (
+        ("init", "-q"),
+        ("config", "user.email", "test@example.com"),
+        ("config", "user.name", "Test"),
+    ):
+        subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+    hook = repo / ".git" / "hooks" / "post-commit"
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    hook.write_text(
+        "#!/usr/bin/env sh\n"
+        f"{HOOK_BLOCK_BEGIN}\n"
+        'LAB_TRACKER_LT="${LAB_TRACKER_LT:-/old/venv/bin/lt}"\n'
+        f"{HOOK_BLOCK_END}\n",
+        encoding="utf-8",
+    )
+
+    lt_cli.main(["setup", "status", "--target", str(repo)])
+    payload = json.loads(capsys.readouterr().out)
+
+    hooks = payload["hooks"]
+    assert hooks["legacy_block_present"] is True
+    assert hooks["managed_block_present"] is False
+    assert hooks["lt_path"] == "/old/venv/bin/lt"
+    assert hooks["lt_path_exists"] is False
+    assert any("migrates" in item for item in payload["suggestions"])
+
+    lt_cli.main(["hooks", "install", "--repo", str(repo), "--project", "p-1", "--yes"])
+    capsys.readouterr()
+    lt_cli.main(["setup", "status", "--target", str(repo)])
+    payload = json.loads(capsys.readouterr().out)
+
+    hooks = payload["hooks"]
+    assert hooks["managed_block_present"] is True
+    assert hooks["legacy_block_present"] is False
+    assert hooks["lt_path"]
+    assert hooks["lt_path_exists"] is True
+    assert not any("migrates" in item for item in payload["suggestions"])
+    assert not any("enrolls this repository" in item for item in payload["suggestions"])
+
+
 def test_setup_status_fail_silent_never_raises(config_home, tmp_path, capsys) -> None:
     lt_cli.main(["setup", "status", "--target", str(tmp_path / "missing"), "--fail-silent"])
     payload = json.loads(capsys.readouterr().out)

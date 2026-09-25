@@ -3,6 +3,7 @@ import * as React from "react";
 import { QUESTION_TYPES } from "../../shared/constants.js";
 import { apiRequest, buildApiPath, fetchAllPages } from "../../shared/api.js";
 import { formatDate } from "../../shared/formatters.js";
+import { navigateBack } from "../../shared/routing.jsx";
 import { useApiResource } from "../../hooks/useApiResource.js";
 import { useProjectAccess } from "../../hooks/useProjectAccess.js";
 
@@ -460,7 +461,7 @@ function QuestionDetailCard({
       ) : null}
 
       <div className="inline detail-actions">
-        <button type="button" className="btn-secondary" onClick={() => navigate("/app")}>
+        <button type="button" className="btn-secondary" onClick={() => navigateBack(navigate)}>
           Back
         </button>
         {question ? (

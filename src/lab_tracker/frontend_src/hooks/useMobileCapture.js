@@ -59,7 +59,7 @@ function clearShareTargetStatus() {
     }
     url.searchParams.delete("from-share");
     url.searchParams.delete("share-expired");
-    window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+    window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
   } catch {
     // Query cleanup is cosmetic; the inbox migration still runs independently.
   }
