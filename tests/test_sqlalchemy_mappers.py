@@ -126,6 +126,7 @@ def test_graph_batch_mappers_normalize_sqlite_naive_datetimes():
             cadence_minutes=60,
             run_at_local_time="06:00",
             timezone_name="UTC",
+            external_context_policy="own_notes_only",
             next_run_at=timestamp,
             created_at=timestamp,
             updated_at=timestamp,
