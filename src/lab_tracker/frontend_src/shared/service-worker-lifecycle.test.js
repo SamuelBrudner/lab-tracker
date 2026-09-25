@@ -123,9 +123,11 @@ describe("service worker update lifecycle", () => {
   it("fails installation instead of activating an incomplete cache", async () => {
     vi.useFakeTimers();
     const cacheError = new Error("cache unavailable");
-    const { listeners, worker } = await loadServiceWorker({
-      cacheInstall: Promise.reject(cacheError),
-    });
+    const { cache, listeners, worker } = await loadServiceWorker();
+    // Reject only when install populates the cache: a rejection created before
+    // the worker module loads has no handler across that import, which Node
+    // reports as unhandled whenever the import takes more than a microtask.
+    cache.addAll.mockRejectedValue(cacheError);
 
     const installPromise = dispatchInstall(listeners);
     const rejection = expect(installPromise).rejects.toThrow("cache unavailable");
