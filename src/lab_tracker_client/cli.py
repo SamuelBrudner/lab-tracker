@@ -23,6 +23,7 @@ import lab_tracker_client.watch as watch_capture
 from lab_tracker import repository_conventions as repo_context
 from lab_tracker.assistant_next_questions import is_research_facing_prompt
 from lab_tracker_client import outbox as _outbox
+from lab_tracker_client._version import __version__
 from lab_tracker_client.client import (
     NOTE_STATUS_VALUES,
     EntityRef,
@@ -88,6 +89,7 @@ def main(argv: list[str] | None = None) -> None:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="lt", description="Lab Tracker consumer CLI.")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument(
         "--debug",
         action="store_true",

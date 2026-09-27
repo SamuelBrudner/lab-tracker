@@ -1,5 +1,6 @@
 """Lab tracker package."""
 
+from lab_tracker._version import __version__
 from lab_tracker.acquisition_watcher import AcquisitionOutputWatcher
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.auth import AuthContext, AuthService, Role, require_role
@@ -47,6 +48,7 @@ from lab_tracker.models import (
 )
 
 __all__ = [
+    "__version__",
     "Analysis",
     "AnalysisStatus",
     "AcquisitionOutput",
