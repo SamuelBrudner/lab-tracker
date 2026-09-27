@@ -2006,8 +2006,12 @@ def test_postgres_orm_parity_migration_refuses_nulls_then_round_trips(
 ) -> None:
     database_url = migrated_postgres_database_url
     config = _alembic_config()
-    upgraded = _schema_signature(database_url)
+    head = _schema_signature(database_url)
     previous_revision = _revision_before(_ORM_PARITY_REVISION)
+    # Later revisions build on the parity schema, so compare the parity
+    # revision's own delta rather than head, then round-trip back to head.
+    command.downgrade(config, _ORM_PARITY_REVISION)
+    upgraded = _schema_signature(database_url)
     command.downgrade(config, previous_revision)
     previous = _schema_signature(database_url)
     assert upgraded == _expected_orm_parity_signature(previous)
@@ -2033,4 +2037,4 @@ def test_postgres_orm_parity_migration_refuses_nulls_then_round_trips(
         engine.dispose()
 
     command.upgrade(config, "head")
-    assert _schema_signature(database_url) == upgraded
+    assert _schema_signature(database_url) == head
