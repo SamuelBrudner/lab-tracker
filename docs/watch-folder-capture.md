@@ -141,8 +141,9 @@ watcher attaches a session to a file in three ways, in this order:
 2. An `LT-`-prefixed session link code in the watched root's name or in the
    file's path under it. The app shows and copies each session's link code as
    `LT-<code>` (the code itself is 26 characters), so naming an acquisition
-   folder `session001_LT-<code>` claims everything saved inside it. Only the `LT-` form counts, and only a
-   code exactly as the server prints it: any 26 letters decode to some id, so
+   folder `session001_LT-<code>` claims everything saved inside it. Only the
+   `LT-` form counts, and only a code exactly as the server prints it: any 26
+   letters decode to some id, so
    an unprefixed long folder name never claims a session.
 3. The checkout's active session, set with `lt session use <uuid-or-link-code>`
    (or the `LAB_TRACKER_SESSION_ID` environment variable). `lt session use`

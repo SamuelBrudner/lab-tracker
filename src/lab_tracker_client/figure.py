@@ -96,29 +96,39 @@ _WARNED: set[str] = set()
 AUTOTRACK_UNBOUND_REASON = "project_unbound"
 AUTOTRACK_UNBOUND_NOTICE = (
     "Lab Tracker autotrack is not capturing saves in {checkout}: {why}. Nothing was "
-    "sent or queued. Bind the checkout with `lt project bind`, set "
-    "LAB_TRACKER_PROJECT_ID, or pass project_id to autotrack()."
+    "sent or queued. {remedy}"
 )
+AUTOTRACK_CHECKOUT_REMEDY = (
+    "Bind the checkout with `lt project bind`, set LAB_TRACKER_PROJECT_ID, or pass "
+    "project_id to autotrack()."
+)
+# Outside a git checkout there is no lt_ids.json for `lt project bind` to write.
+AUTOTRACK_LOOSE_FOLDER_REMEDY = "Set LAB_TRACKER_PROJECT_ID or pass project_id to autotrack()."
 # How the server refuses a declared session target, as (status, error code,
 # message): one in another project (note_service.validate_target) or one that
 # does not exist (shared.py's NotFoundError). Other causes share those status
 # codes and error codes (a gone project, bad metadata), so all three must
 # match. LAB_TRACKER_SESSION_ID is sent as a target without a project check,
 # so a live save refused this way retries once without it.
-SESSION_TARGET_REJECTIONS = frozenset(
-    {
-        (422, "validation_error", "Target must belong to the same project."),
-        (404, "not_found", "Session does not exist."),
-    }
-)
+SESSION_IN_OTHER_PROJECT = (422, "validation_error", "Target must belong to the same project.")
+SESSION_MISSING = (404, "not_found", "Session does not exist.")
+SESSION_TARGET_REJECTIONS = frozenset({SESSION_IN_OTHER_PROJECT, SESSION_MISSING})
+# What the notice says about each refusal.
+SESSION_REFUSAL_REASONS: dict[tuple[int, str, str], str] = {
+    SESSION_IN_OTHER_PROJECT: "is not in the capture's project {project_id}",
+    SESSION_MISSING: "does not exist on the server",
+}
 SESSION_TARGET_DROPPED_NOTICE = (
-    "Lab Tracker: session {session_id} is not in the capture's project {project_id}; "
-    "{kind} captures there keep it as plain metadata, not as a session target."
+    "Lab Tracker: session {session_id} {reason}; {kind} captures in project "
+    "{project_id} keep it as plain metadata, not as a session target."
 )
 # (session id, project id) pairs the server refused, so later saves in this
 # process skip the target instead of being refused again.
 _REFUSED_SESSION_TARGETS: set[tuple[str, str]] = set()
 AUTOTRACK_NO_PROJECT_WHY = "that checkout is not bound to a project (no lt_ids.json)"
+AUTOTRACK_OUTSIDE_CHECKOUT_WHY = (
+    "that folder is not inside a git checkout, so no lt_ids.json binds it to a project"
+)
 AUTOTRACK_WATCH_CONFIG_WHY = (
     "that checkout names its project only in its watch config, not in lt_ids.json"
 )
@@ -1055,14 +1065,20 @@ def _unrefused_session_target(
     return target
 
 
-def _refused_session_target(exc: Exception, targets: Iterable[EntityRef]) -> str | None:
-    """The declared session id when ``exc`` is the server refusing a session target."""
+def _refused_session_target(
+    exc: Exception, targets: Iterable[EntityRef]
+) -> tuple[str, tuple[int, str, str]] | None:
+    """The declared session id and the refusal when ``exc`` is the server refusing it."""
 
     if not isinstance(exc, LTError):
         return None
-    if (exc.status_code, exc.error_code, exc.error_message) not in SESSION_TARGET_REJECTIONS:
+    refusal = (exc.status_code, exc.error_code, exc.error_message)
+    if refusal not in SESSION_TARGET_REJECTIONS:
         return None
-    return next((ref.entity_id for ref in targets if ref.entity_type == "session"), None)
+    session_id = next((ref.entity_id for ref in targets if ref.entity_type == "session"), None)
+    if session_id is None:
+        return None
+    return session_id, (int(refusal[0] or 0), str(refusal[1]), str(refusal[2]))
 
 
 def _upload_with_session_fallback(
@@ -1083,9 +1099,10 @@ def _upload_with_session_fallback(
     try:
         note, status_code = upload(metadata, targets)
     except Exception as exc:
-        session_id = _refused_session_target(exc, targets)
-        if session_id is None:
+        refused = _refused_session_target(exc, targets)
+        if refused is None:
             raise
+        session_id, refusal = refused
         remaining = [ref for ref in targets if ref.entity_type != "session"]
         retry_metadata = dict(metadata)
         if not remaining:
@@ -1095,7 +1112,10 @@ def _upload_with_session_fallback(
         _warn_once(
             f"session-target-refused:{session_id}:{project_id}",
             SESSION_TARGET_DROPPED_NOTICE.format(
-                session_id=session_id, project_id=project_id, kind=kind
+                session_id=session_id,
+                reason=SESSION_REFUSAL_REASONS[refusal].format(project_id=project_id),
+                project_id=project_id,
+                kind=kind,
             ),
         )
         return note, status_code, retry_metadata
@@ -1105,11 +1125,25 @@ def _upload_with_session_fallback(
 def _warn_unbound_autotrack(path: Path, capture_project: CaptureProject | None) -> None:
     """Name each unbound checkout root (or bare save directory) once per process."""
 
+    root = capture_checkout_root(path)
+    if root is None and capture_project is None:
+        folder = path.expanduser().parent.resolve()
+        _warn_once(
+            f"{AUTOTRACK_UNBOUND_REASON}:{folder}",
+            AUTOTRACK_UNBOUND_NOTICE.format(
+                checkout=folder,
+                why=AUTOTRACK_OUTSIDE_CHECKOUT_WHY,
+                remedy=AUTOTRACK_LOOSE_FOLDER_REMEDY,
+            ),
+        )
+        return
     why = AUTOTRACK_WATCH_CONFIG_WHY if capture_project is not None else AUTOTRACK_NO_PROJECT_WHY
-    checkout = capture_checkout_root(path) or path.expanduser().parent.resolve()
+    checkout = root or path.expanduser().parent.resolve()
     _warn_once(
         f"{AUTOTRACK_UNBOUND_REASON}:{checkout}",
-        AUTOTRACK_UNBOUND_NOTICE.format(checkout=checkout, why=why),
+        AUTOTRACK_UNBOUND_NOTICE.format(
+            checkout=checkout, why=why, remedy=AUTOTRACK_CHECKOUT_REMEDY
+        ),
     )
 
 

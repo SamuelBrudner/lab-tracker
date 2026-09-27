@@ -1106,7 +1106,13 @@ _SESSION_TARGET_REJECTIONS = [
     (422, "validation_error", "Target must belong to the same project."),
     (404, "not_found", "Session does not exist."),
 ]
-_SESSION_DROPPED_LINE = "is not in the capture's project"
+_SESSION_DROPPED_LINE = "keep it as plain metadata, not as a session target"
+# What the notice says about each refusal: a session in another project is
+# not "missing", and a missing session is not "in another project".
+_SESSION_REFUSAL_WORDING = {
+    "validation_error": "is not in the capture's project",
+    "not_found": "does not exist on the server",
+}
 
 
 class _SessionRejectingServer:
@@ -1168,6 +1174,9 @@ def test_env_session_outside_the_project_is_retried_once_without_its_target(
     assert len(notices) == 1
     assert _ENV_SESSION_ID in notices[0]
     assert "project-1" in notices[0]
+    assert _SESSION_REFUSAL_WORDING[code] in notices[0]
+    other_wording = {wording for key, wording in _SESSION_REFUSAL_WORDING.items() if key != code}
+    assert not any(wording in notices[0] for wording in other_wording)
 
 
 def test_a_session_refusal_that_persists_without_the_session_is_not_blamed_on_it(

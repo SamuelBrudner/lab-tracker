@@ -226,8 +226,28 @@ def test_autotrack_skips_saves_whose_project_would_only_be_a_default(
     assert not isolated_capture_env.exists()
     err = capsys.readouterr().err
     assert err.count("autotrack is not capturing saves") == 1
-    assert "not bound to a project" in err
+    assert "is not inside a git checkout" in err
     assert "Nothing was sent or queued" in err
+    # Outside a checkout there is nothing for `lt project bind` to bind.
+    assert "lt project bind" not in err
+    assert "LAB_TRACKER_PROJECT_ID" in err
+
+
+def test_autotrack_tells_an_unbound_checkout_to_bind_itself(
+    fake_matplotlib, isolated_capture_env: Path, tmp_path: Path, capsys
+) -> None:
+    """Inside a git checkout without lt_ids.json, binding the checkout is the fix."""
+
+    checkout = _git_repo(tmp_path / "analysis")
+    uploads: list[str] = []
+    with _recording_client(uploads) as lt:
+        autotrack(client=lt)
+        FakeFigure().savefig(checkout / "fig.png")
+
+    assert uploads == []
+    err = capsys.readouterr().err
+    assert "not bound to a project (no lt_ids.json)" in err
+    assert "lt project bind" in err
 
 
 def test_autotrack_names_each_unbound_checkout_root_once(

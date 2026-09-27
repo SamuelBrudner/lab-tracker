@@ -64,8 +64,9 @@ short, consent-gated sequence on the `lt` CLI.
    consent (`--save-token`). Commit and figure capture need the web
    app's least-privilege **Read + stage evidence** token; read-only
    tokens cannot sync captures.
-5. **Project Python dependency** — the Setup page supplies a pinned
-   `uv add` command for each analysis repository. Verify that `uv run
+5. **Project Python dependency** — once the server reports its full
+   source revision, the Setup page supplies a pinned `uv add` command
+   for each analysis repository. Verify that `uv run
    python` can import `lab_tracker_client` before relying on figure
    capture from that project environment.
 6. **Repo scaffolding** — `lt setup init --install-skills` writes the
@@ -138,4 +139,4 @@ repo; an analysis repo updates by rerunning its pinned `uv add`
 If Lab Tracker is unreachable and the user does not operate a server, point
 them at whoever runs their lab's instance instead of standing one up ad hoc.
 
-<!-- lab-tracker-setup-guide version=0.1.0 sha256=9f3d5a1a4c56 -->
+<!-- lab-tracker-setup-guide version=0.1.0 sha256=671230086775 -->

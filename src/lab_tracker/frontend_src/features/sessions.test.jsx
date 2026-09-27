@@ -1,7 +1,7 @@
 import * as React from "react";
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { vi } from "vitest";
+import { afterEach, vi } from "vitest";
 
 import { SessionDetailCard, SessionPanel } from "./sessions.jsx";
 import { apiResponse, installFetchMock } from "../test/utils.js";
@@ -374,6 +374,16 @@ describe("SessionDetailCard Back", () => {
 });
 
 describe("session link code", () => {
+  const originalClipboard = Object.getOwnPropertyDescriptor(window.navigator, "clipboard");
+
+  afterEach(() => {
+    if (originalClipboard) {
+      Object.defineProperty(window.navigator, "clipboard", originalClipboard);
+    } else {
+      delete window.navigator.clipboard;
+    }
+  });
+
   function installClipboard() {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(window.navigator, "clipboard", {

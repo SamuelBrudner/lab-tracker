@@ -11,9 +11,10 @@ strictly opt-in: nothing installs it unless the person calls it, runs
 Because the startup hook fires in every directory, it captures a save only
 when its project comes from ``autotrack(project_id=...)``,
 ``LAB_TRACKER_PROJECT_ID``, or the saved file's checkout binding
-(``lt_ids.json``). Any other save is skipped with a one-time notice on
-stderr; nothing is sent or queued, so a figure never lands in a default
-project it was not meant for.
+(``lt_ids.json``). Any other save is skipped with a notice on stderr, named
+once per unbound checkout (or per folder outside any checkout); nothing is
+sent or queued, so a figure never lands in a default project it was not
+meant for.
 
 Explicit ``lab_tracker_client.savefig`` / ``capture_figures`` calls suppress
 the hook while they save, so a figure is never captured twice.
