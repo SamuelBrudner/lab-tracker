@@ -1,6 +1,6 @@
-"""Opt-in capture of every matplotlib figure save, with no code changes.
+"""Opt-in capture of matplotlib saves with an explicit, env, or ``lt_ids.json`` project.
 
-``autotrack()`` wraps ``matplotlib.figure.Figure.savefig`` so any figure saved
+``autotrack()`` wraps ``matplotlib.figure.Figure.savefig`` so a figure saved
 to a file path is captured through the same fail-soft path as ``savefig``:
 staged evidence with a content hash, run context, host identity, and the
 active session, never a raised exception in the user's script. It is

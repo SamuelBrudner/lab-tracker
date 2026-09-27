@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import io
 import json
 import sys
@@ -271,3 +272,37 @@ def test_autotrack_captures_into_an_explicit_or_environment_project(
         FakeFigure(b"env").savefig(tmp_path / "env.png")
 
     assert uploads == ["project-explicit", "project-env"]
+
+
+_AUTOTRACK_PROJECT_SOURCES = ("LAB_TRACKER_PROJECT_ID", "lt_ids.json")
+
+
+def _subcommand_help(parser: argparse.ArgumentParser, name: str) -> str:
+    subparsers = next(
+        action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
+    )
+    return next(str(choice.help) for choice in subparsers._choices_actions if choice.dest == name)
+
+
+def _subcommand(parser: argparse.ArgumentParser, name: str) -> argparse.ArgumentParser:
+    subparsers = next(
+        action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
+    )
+    return subparsers.choices[name]
+
+
+def _setup_autotrack_help() -> str:
+    return _subcommand_help(_subcommand(lt_cli._build_parser(), "setup"), "autotrack")
+
+
+def test_setup_autotrack_help_names_the_only_saves_it_captures() -> None:
+    """After the unbound-save fix the hook no longer captures every figure:
+    the help and module summary say which saves it takes."""
+
+    help_text = " ".join(_setup_autotrack_help().split())
+    summary = (autotrack_module.__doc__ or "").splitlines()[0]
+    for text in (help_text, summary):
+        assert "every" not in text
+    for source in _AUTOTRACK_PROJECT_SOURCES:
+        assert source in help_text
+    assert "lt_ids.json" in summary

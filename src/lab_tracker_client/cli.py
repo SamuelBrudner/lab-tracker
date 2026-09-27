@@ -461,8 +461,11 @@ def _add_setup_parsers(subcommands: argparse._SubParsersAction) -> None:
     autotrack_parser = setup_commands.add_parser(
         "autotrack",
         help=(
-            "Capture every matplotlib figure saved from IPython or Jupyter by adding "
-            "a startup file that calls lab_tracker_client.autotrack()."
+            "Capture matplotlib figures saved from IPython or Jupyter by adding a "
+            "startup file that calls lab_tracker_client.autotrack(). Only saves whose "
+            "project comes from autotrack(project_id=...), LAB_TRACKER_PROJECT_ID, or "
+            "the checkout's lt_ids.json are captured; any other save is skipped with a "
+            "notice."
         ),
     )
     autotrack_parser.add_argument(
