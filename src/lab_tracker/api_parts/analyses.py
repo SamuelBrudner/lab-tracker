@@ -8,7 +8,7 @@ its own edit locality. These are mixins: LabTrackerAPI inherits them, so
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any, TypeVar
 from uuid import UUID
 
@@ -21,6 +21,7 @@ from lab_tracker.models import (
     UsageEventVerb,
     Visualization,
 )
+from lab_tracker.schemas import ClaimRead
 
 if TYPE_CHECKING:
     from lab_tracker.services import AnalysisService, ClaimService, VisualizationService
@@ -128,6 +129,9 @@ class AnalysesApiMixin:
     def list_claims(self, *args: Any, **kwargs: Any) -> Any:
         return self.claims.list_claims(*args, **kwargs)
 
+    def interpret_claims(self, claims: Sequence[Claim]) -> list[ClaimRead]:
+        return self.claims.interpret_claims(claims)
+
     def update_claim(self, *args: Any, **kwargs: Any) -> Any:
         return self._with_usage_event(
             lambda: self.claims.update_claim(*args, **kwargs),
@@ -154,6 +158,17 @@ class AnalysesApiMixin:
             verb=UsageEventVerb.CREATE,
             resource_type=UsageEventResourceType.CLAIM_EDGE,
             actor=kwargs.get("actor"),
+            resource_id_attr="edge_id",
+            project_id_attr=None,
+        )
+
+    def delete_claim_edge(self, *args: Any, **kwargs: Any) -> Any:
+        return self._with_usage_event(
+            lambda: self.claims.delete_claim_edge(*args, **kwargs),
+            verb=UsageEventVerb.DELETE,
+            resource_type=UsageEventResourceType.CLAIM_EDGE,
+            actor=kwargs.get("actor"),
+            resource_id=_first_uuid(args[1:]) if len(args) > 1 else None,
             resource_id_attr="edge_id",
             project_id_attr=None,
         )

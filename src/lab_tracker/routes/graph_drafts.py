@@ -21,10 +21,12 @@ from lab_tracker.patching import provided_fields
 from lab_tracker.schemas import (
     Envelope,
     GraphChangeSetSummary,
+    GraphDraftAnalysisCreateRequest,
     GraphDraftCommitRequest,
     GraphDraftCreateRequest,
     GraphDraftOperationUpdate,
     GraphDraftReviewRequest,
+    GraphDraftSubmitRequest,
     ListEnvelope,
 )
 from lab_tracker.services.graph_draft_review import RevisionInputs, RevisionUpload
@@ -35,6 +37,7 @@ from lab_tracker.upload_security import (
 )
 
 from .graph_draft_clients import draft_client_from_request as _draft_client_from_request
+from .graph_draft_clients import require_external_provider_acknowledged
 from .shared import (
     accessible_project_ids_from_request,
     actor_from_request,
@@ -60,8 +63,12 @@ def build_graph_drafts_router(api: LabTrackerAPI) -> APIRouter:
         payload: GraphDraftCreateRequest | None = None,
     ):
         actor = actor_from_request(request)
-        draft_client = _draft_client_from_request(request)
         draft_payload = payload or GraphDraftCreateRequest()
+        acknowledged = require_external_provider_acknowledged(
+            request,
+            acknowledged=draft_payload.external_provider_acknowledged,
+        )
+        draft_client = _draft_client_from_request(request)
         try:
             change_set = api_from_request(request, api).create_graph_draft_from_note(
                 note_id,
@@ -69,6 +76,7 @@ def build_graph_drafts_router(api: LabTrackerAPI) -> APIRouter:
                 mode=draft_payload.mode,
                 user_hint=draft_payload.user_hint,
                 actor=actor,
+                external_provider_acknowledged=acknowledged,
             )
         finally:
             close = getattr(draft_client, "close", None)
@@ -81,14 +89,24 @@ def build_graph_drafts_router(api: LabTrackerAPI) -> APIRouter:
         response_model=Envelope[GraphChangeSet],
         status_code=http_status.HTTP_201_CREATED,
     )
-    def create_analysis_graph_draft(note_id: UUID, request: Request):
+    def create_analysis_graph_draft(
+        note_id: UUID,
+        request: Request,
+        payload: GraphDraftAnalysisCreateRequest | None = None,
+    ):
         actor = actor_from_request(request)
+        draft_payload = payload or GraphDraftAnalysisCreateRequest()
+        acknowledged = require_external_provider_acknowledged(
+            request,
+            acknowledged=draft_payload.external_provider_acknowledged,
+        )
         draft_client = _draft_client_from_request(request)
         try:
             change_set = api_from_request(request, api).create_analysis_graph_draft_from_note(
                 note_id,
                 draft_client=draft_client,
                 actor=actor,
+                external_provider_acknowledged=acknowledged,
             )
         finally:
             close = getattr(draft_client, "close", None)
@@ -186,10 +204,15 @@ def build_graph_drafts_router(api: LabTrackerAPI) -> APIRouter:
         "/graph-drafts/{change_set_id:uuid}/submit",
         response_model=Envelope[GraphChangeSet],
     )
-    def submit_graph_draft(change_set_id: UUID, request: Request):
+    def submit_graph_draft(
+        change_set_id: UUID,
+        request: Request,
+        payload: GraphDraftSubmitRequest | None = None,
+    ):
         actor = actor_from_request(request)
         change_set = api_from_request(request, api).submit_graph_change_set(
             change_set_id,
+            review_note=payload.review_note if payload is not None else None,
             actor=actor,
         )
         return Envelope(data=_attach_graph_usernames(request, change_set))
@@ -359,6 +382,7 @@ def _graph_change_set_summary(change_set: GraphChangeSet) -> GraphChangeSetSumma
         commit_message=change_set.commit_message,
         error_metadata=dict(change_set.error_metadata),
         operation_count=change_set.operation_count,
+        deferred_count=change_set.deferred_count,
         created_at=change_set.created_at,
         created_by=change_set.created_by,
         created_by_user_id=change_set.created_by_user_id,

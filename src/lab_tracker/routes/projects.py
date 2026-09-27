@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from uuid import UUID
 
 from fastapi import APIRouter
@@ -12,7 +13,9 @@ from starlette.responses import Response
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.errors import NotFoundError
 from lab_tracker.models import (
+    DraftQualityLedger,
     Project,
+    ProjectCoverageReport,
     ProjectMembership,
     ProjectStatus,
     PublicationReadinessReport,
@@ -121,6 +124,46 @@ def build_projects_router(api: LabTrackerAPI) -> APIRouter:
             actor=actor,
         )
         return Envelope(data=report)
+
+    @router.get(
+        "/projects/{project_id}/coverage",
+        response_model=Envelope[ProjectCoverageReport],
+    )
+    def get_project_coverage(project_id: UUID, request: Request):
+        """Report how much of a project's captured record a person has reviewed."""
+        report = handlers_from_request(request).context.project_coverage(
+            project_id,
+            actor=actor_from_request(request),
+        )
+        # Recorded only after the opaque read succeeded: denied reads leave no trace.
+        record_usage_view(
+            request,
+            resource_type=UsageEventResourceType.PROJECT,
+            resource_id=report.project_id,
+            project_id=report.project_id,
+        )
+        return Envelope(data=report)
+
+    @router.get(
+        "/projects/{project_id}/draft-quality",
+        response_model=Envelope[DraftQualityLedger],
+    )
+    def draft_quality(project_id: UUID, request: Request, since: datetime | None = None):
+        """Report how AI draft proposals fared in human review for one project."""
+        actor = actor_from_request(request)
+        ledger = api_from_request(request, api).draft_quality_ledger(
+            project_id,
+            since=since,
+            actor=actor,
+        )
+        # Recorded only after the opaque read succeeded: denied reads leave no trace.
+        record_usage_view(
+            request,
+            resource_type=UsageEventResourceType.DRAFT_QUALITY,
+            resource_id=project_id,
+            project_id=project_id,
+        )
+        return Envelope(data=ledger)
 
     @router.patch("/projects/{project_id}", response_model=Envelope[Project])
     def update_project(project_id: UUID, payload: ProjectUpdate, request: Request):

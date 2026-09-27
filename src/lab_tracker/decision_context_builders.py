@@ -6,6 +6,13 @@ from lab_tracker.decision_context_constants import TASK_KIND_VALUES
 from lab_tracker.decision_context_selection import envelope_items, meta_total
 from lab_tracker.decision_context_types import JsonObject
 
+# Read-time effective statuses that mean a claim no longer stands as asserted.
+DERIVED_NEGATIVE_STATUSES = frozenset({"contested", "superseded", "invalidated"})
+DERIVED_STATUS_CAVEAT = (
+    "Some returned claims are contested, superseded, or invalidated by later claims "
+    "or pivots — check effective_status before citing them."
+)
+
 
 def validate_context_limit(limit: int) -> int:
     try:
@@ -46,6 +53,8 @@ def entity_label(entity_type: str, entity: JsonObject) -> str:
         return str(
             entity.get("caption") or entity.get("file_path") or entity.get("viz_id") or ""
         )
+    if entity_type == "exploration_node":
+        return str(entity.get("title") or entity.get("node_id") or "")
     return str(entity)
 
 
@@ -143,6 +152,8 @@ def task_guidance(
         missing_evidence.append("No claims were returned in this context.")
     if any(item.get("status") == "rejected" for item in claims):
         caveats.append("Some returned claims are REJECTED — do not rely on them as evidence.")
+    if any(item.get("effective_status") in DERIVED_NEGATIVE_STATUSES for item in claims):
+        caveats.append(DERIVED_STATUS_CAVEAT)
     if any(item.get("status") in {"proposed", "testing"} for item in claims):
         caveats.append(
             "Some returned claims are still proposed or under testing, not supported."
@@ -209,6 +220,7 @@ def write_front_door(
     analyses: list[JsonObject],
     claims: list[JsonObject],
     visualizations: list[JsonObject],
+    exploration_nodes: list[JsonObject],
 ) -> JsonObject:
     """Build write-oriented affordances for follow-on MCP create calls."""
     return {
@@ -241,6 +253,10 @@ def write_front_door(
             "visualizations": [
                 entity_ref("visualization", item, "viz_id")
                 for item in visualizations[:10]
+            ],
+            "exploration_nodes": [
+                entity_ref("exploration_node", item, "node_id")
+                for item in exploration_nodes[:10]
             ],
         },
         "create_guidance": _create_guidance(task_kind),

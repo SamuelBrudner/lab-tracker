@@ -11,6 +11,7 @@ from lab_tracker.db import Base
 from lab_tracker.deployment_probe import (
     DeploymentProbeError,
     _expected_migration_heads,
+    _provider_readiness,
     probe_deployment,
 )
 
@@ -83,6 +84,17 @@ def test_deployment_probe_checks_identity_database_storage_and_automation(
         "provider_credential_configured": True,
         "scheduler_enabled": True,
     }
+
+
+def test_provider_readiness_treats_agentic_as_unknown() -> None:
+    settings = Settings(
+        _env_file=None,
+        environment="local",
+        graph_draft_provider="agentic",
+        openai_api_key="test-provider-credential",
+    )
+
+    assert _provider_readiness(settings) == ("agentic", False)
 
 
 def test_deployment_probe_rejects_wrong_revision(tmp_path: Path) -> None:

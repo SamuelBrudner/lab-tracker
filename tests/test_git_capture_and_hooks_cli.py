@@ -16,6 +16,8 @@ from lab_tracker.repository_conventions import (
 from lab_tracker_client import LTRecord
 from lab_tracker_client import cli as lt_cli
 from lab_tracker_client.hooks import HOOK_BLOCK_BEGIN, HOOK_BLOCK_END
+from lab_tracker_client.repo import HOOK_BEGIN_MARKER as REPO_HOOK_BLOCK_BEGIN
+from lab_tracker_client.repo import HOOK_END_MARKER as REPO_HOOK_BLOCK_END
 
 
 def _clear_capture_env(monkeypatch) -> None:
@@ -28,6 +30,10 @@ def _clear_capture_env(monkeypatch) -> None:
         "LAB_TRACKER_PROJECT_ID",
         "LAB_TRACKER_WATCH_CONFIG",
         "LAB_TRACKER_WATCH_OUTBOX",
+        "LAB_TRACKER_REPO_CONFIG",
+        "LAB_TRACKER_REPO_OUTBOX",
+        "LAB_TRACKER_HPC_CONFIG",
+        "LAB_TRACKER_HPC_OUTBOX",
         "LAB_TRACKER_GIT_MAX_DIFF_LINES",
         "LAB_TRACKER_GIT_CONTEXT_LINES",
     ):
@@ -59,6 +65,22 @@ def git_repo(tmp_path, monkeypatch):
     _git(repo, "add", "analysis.py")
     _git(repo, "commit", "-q", "-m", "Add analysis script")
     return repo
+
+
+def _commit_file(repo: Path, name: str, text: str, subject: str) -> str:
+    (repo / name).write_text(text, encoding="utf-8")
+    _git(repo, "add", name)
+    _git(repo, "commit", "-q", "-m", subject)
+    return _git(repo, "rev-parse", "HEAD").strip()
+
+
+def _merge_commit(repo: Path) -> str:
+    _git(repo, "checkout", "-q", "-b", "feature")
+    _commit_file(repo, "feature.py", "print('feature')\n", "feature work")
+    _git(repo, "checkout", "-q", "-")
+    _commit_file(repo, "main.py", "print('main')\n", "main work")
+    _git(repo, "merge", "-q", "--no-ff", "-m", "Merge feature", "feature")
+    return _git(repo, "rev-parse", "HEAD").strip()
 
 
 class _FakeSyncClient:
@@ -446,33 +468,43 @@ def test_hooks_install_writes_posix_hook(git_repo, capsys) -> None:
     lt_cli.main(["hooks", "install", "--repo", str(git_repo), "--project", "p-9", "--yes"])
     payload = json.loads(capsys.readouterr().out)
     assert payload["action"] == "created"
+    assert payload["project_id"] == "p-9"
+    assert payload["created_config"].endswith("repo.json")
 
     hook_path = Path(payload["hook_path"])
     raw = hook_path.read_bytes()
     assert b"\r" not in raw
     content = raw.decode("utf-8")
     assert content.startswith("#!/usr/bin/env sh\n")
-    assert HOOK_BLOCK_BEGIN in content
-    assert HOOK_BLOCK_END in content
-    assert "git snapshot >/dev/null" in content
+    # The single installer writes the `lt repo` block; GRAPH DRAFT is legacy.
+    assert REPO_HOOK_BLOCK_BEGIN in content
+    assert REPO_HOOK_BLOCK_END in content
+    assert HOOK_BLOCK_BEGIN not in content
+    assert "repo report >/dev/null" in content
+    assert "git snapshot" not in content
     assert "--request-draft" not in content
-    assert "LAB_TRACKER_GIT_CAPTURE_ENABLED" in content
-    # Suppress stdout only, not stderr, so lt's cause+remediation line survives
-    # (GH #77); and the fallback warning points at the drain commands.
-    assert ">/dev/null 2>&1" not in content
+    assert "LAB_TRACKER_REPO_HOOK_ENABLED" in content
+    assert "LAB_TRACKER_GIT_CAPTURE_ENABLED" not in content
+    # Suppress stdout only, not stderr, so lt's skip notice and its
+    # cause+remediation line survive (GH #77); the fallback warning points at
+    # the drain commands, in order.
+    report_line = next(line for line in content.splitlines() if "repo report" in line)
+    assert "2>&1" not in report_line
     assert "lt outbox sync" in content
     assert content.index("lt outbox sync") < content.index("lt outbox status")
-    assert "before reporting an unresolved capture" in content
-    assert "Replay is idempotent" in content
     assert "--fail-silent" not in content
-    assert 'LAB_TRACKER_PROJECT_ID="${LAB_TRACKER_PROJECT_ID:-p-9}"' in content
-    assert "\\" not in content.split('LAB_TRACKER_LT:-', 1)[1].split("}", 1)[0]
+    # The project id lives in repo.json, pinned into the hook by path.
+    assert "LAB_TRACKER_PROJECT_ID" not in content
+    assert "repo.json" in content
+    config = json.loads((git_repo / ".lab-tracker" / "repo.json").read_text(encoding="utf-8"))
+    assert config["project_id"] == "p-9"
     if sys.platform != "win32":
         assert hook_path.stat().st_mode & 0o111
 
     lt_cli.main(["hooks", "install", "--repo", str(git_repo), "--project", "p-9", "--yes"])
     repeat = json.loads(capsys.readouterr().out)
     assert repeat["action"] == "updated"
+    assert "created_config" not in repeat
     assert hook_path.read_bytes() == raw
 
 
@@ -485,14 +517,22 @@ def test_hooks_install_dry_run_writes_nothing(git_repo, capsys) -> None:
             "install",
             "--repo",
             str(git_repo),
+            "--project",
+            "p-1",
             "--no-request-draft",
             "--dry-run",
         ]
     )
     payload = json.loads(capsys.readouterr().out)
     assert payload["dry_run"] is True
+    assert payload["action"] == "created"
     assert payload["diff"]
+    assert REPO_HOOK_BLOCK_BEGIN in payload["diff"]
     assert "--request-draft" not in payload["diff"]
+    # No repo.json yet: the preview names the config a real install creates.
+    assert payload["would_create_config"].endswith("repo.json")
+    assert "created_config" not in payload
+    assert not (git_repo / ".lab-tracker" / "repo.json").exists()
     assert not (git_repo / ".git" / "hooks" / "post-commit").exists()
 
 
@@ -501,7 +541,7 @@ def test_hooks_install_normalizes_absolute_beads_hooks_path(git_repo, capsys) ->
     hooks_dir.mkdir(parents=True)
     _git(git_repo, "config", "core.hooksPath", str(hooks_dir))
 
-    lt_cli.main(["hooks", "install", "--repo", str(git_repo), "--yes"])
+    lt_cli.main(["hooks", "install", "--repo", str(git_repo), "--project", "p-1", "--yes"])
     payload = json.loads(capsys.readouterr().out)
 
     assert Path(payload["hook_path"]).resolve() == (hooks_dir / "post-commit").resolve()
@@ -517,16 +557,22 @@ def test_hooks_install_refuses_unmanaged_hook_without_force(git_repo, capsys) ->
     hook_path.write_text("#!/bin/sh\necho custom-hook\n", encoding="utf-8")
 
     with pytest.raises(Exception, match="--force"):
-        lt_cli.main(["hooks", "install", "--repo", str(git_repo), "--yes"])
+        lt_cli.main(["hooks", "install", "--repo", str(git_repo), "--project", "p-1", "--yes"])
     assert "custom-hook" in hook_path.read_text(encoding="utf-8")
-    assert HOOK_BLOCK_BEGIN not in hook_path.read_text(encoding="utf-8")
+    assert REPO_HOOK_BLOCK_BEGIN not in hook_path.read_text(encoding="utf-8")
+    # A refused install creates nothing, not even the config.
+    assert not (git_repo / ".lab-tracker" / "repo.json").exists()
 
-    lt_cli.main(["hooks", "install", "--repo", str(git_repo), "--yes", "--force"])
+    lt_cli.main(
+        ["hooks", "install", "--repo", str(git_repo), "--project", "p-1", "--yes", "--force"]
+    )
     payload = json.loads(capsys.readouterr().out)
-    assert payload["action"] == "appended"
+    assert payload["action"] == "prepended"
     content = hook_path.read_text(encoding="utf-8")
     assert "echo custom-hook" in content
-    assert HOOK_BLOCK_BEGIN in content
+    assert REPO_HOOK_BLOCK_BEGIN in content
+    # Ahead of the foreign body, so a trailing exit there cannot disable capture.
+    assert content.index(REPO_HOOK_BLOCK_END) < content.index("echo custom-hook")
 
 
 def test_hooks_install_upgrades_legacy_ps1_block_in_place(git_repo, capsys) -> None:
@@ -545,24 +591,33 @@ def test_hooks_install_upgrades_legacy_ps1_block_in_place(git_repo, capsys) -> N
 
     lt_cli.main(["hooks", "install", "--repo", str(git_repo), "--yes"])
     payload = json.loads(capsys.readouterr().out)
-    assert payload["action"] == "updated"
+    assert payload["action"] == "migrated"
     # The legacy block was this repo's only project/URL binding; dropping it
-    # would silently kill capture, so the baked defaults carry forward.
+    # would silently kill capture, so the baked defaults carry forward: the
+    # project into the new repo.json, the base URL into the new block.
     assert payload["carried_project_id"] == "legacy-project"
     assert payload["carried_base_url"] == "http://192.168.1.5:8000"
+    assert payload["created_config"].endswith("repo.json")
+    config = json.loads((git_repo / ".lab-tracker" / "repo.json").read_text(encoding="utf-8"))
+    assert config["project_id"] == "legacy-project"
 
     content = hook_path.read_text(encoding="utf-8")
     assert "create-analysis-graph-draft.py" not in content
-    assert "git snapshot" in content
+    assert "git snapshot" not in content
+    assert "repo report" in content
     assert "--request-draft" not in content
-    assert 'LAB_TRACKER_PROJECT_ID="${LAB_TRACKER_PROJECT_ID:-legacy-project}"' in content
-    assert 'LAB_TRACKER_BASE_URL="${LAB_TRACKER_BASE_URL:-http://192.168.1.5:8000}"' in content
-    assert content.count(HOOK_BLOCK_BEGIN) == 1
-    assert content.count(HOOK_BLOCK_END) == 1
+    assert "LAB_TRACKER_BASE_URL='http://192.168.1.5:8000'" in content
+    assert HOOK_BLOCK_BEGIN not in content
+    assert HOOK_BLOCK_END not in content
+    assert content.count(REPO_HOOK_BLOCK_BEGIN) == 1
+    assert content.count(REPO_HOOK_BLOCK_END) == 1
 
     lt_cli.main(["hooks", "status", "--repo", str(git_repo)])
     status = json.loads(capsys.readouterr().out)
+    assert status["managed_block_present"] is True
+    assert status["legacy_block_present"] is False
     assert status["baked_project_id"] == "legacy-project"
+    assert status["baked_base_url"] == "http://192.168.1.5:8000"
 
 
 def test_legacy_powershell_installer_is_capture_only() -> None:
@@ -591,15 +646,19 @@ def test_hooks_refuse_unpaired_markers(git_repo) -> None:
 
 
 def test_hooks_uninstall_and_status(git_repo, capsys) -> None:
-    lt_cli.main(["hooks", "install", "--repo", str(git_repo), "--yes"])
+    lt_cli.main(["hooks", "install", "--repo", str(git_repo), "--project", "p-1", "--yes"])
     capsys.readouterr()
 
     lt_cli.main(["hooks", "status", "--repo", str(git_repo)])
     status = json.loads(capsys.readouterr().out)
     assert status["hook_present"] is True
     assert status["managed_block_present"] is True
+    assert status["legacy_block_present"] is False
+    assert status["markers_unpaired"] is False
     assert status["lt_path"]
     assert status["lt_path_exists"] is True
+    assert status["baked_project_id"] == "p-1"
+    assert status["config"].endswith("repo.json")
 
     with pytest.raises(SystemExit, match="--yes"):
         lt_cli.main(["hooks", "uninstall", "--repo", str(git_repo)])
@@ -607,6 +666,7 @@ def test_hooks_uninstall_and_status(git_repo, capsys) -> None:
     lt_cli.main(["hooks", "uninstall", "--repo", str(git_repo), "--yes"])
     payload = json.loads(capsys.readouterr().out)
     assert payload["action"] == "removed-hook-file"
+    assert payload["removed_blocks"] == ["repo"]
     assert not Path(payload["hook_path"]).exists()
 
     lt_cli.main(["hooks", "status", "--repo", str(git_repo)])
@@ -619,7 +679,9 @@ def test_hooks_uninstall_preserves_unmanaged_content(git_repo, capsys) -> None:
     hook_path = git_repo / ".git" / "hooks" / "post-commit"
     hook_path.parent.mkdir(parents=True, exist_ok=True)
     hook_path.write_text("#!/bin/sh\necho custom-hook\n", encoding="utf-8")
-    lt_cli.main(["hooks", "install", "--repo", str(git_repo), "--yes", "--force"])
+    lt_cli.main(
+        ["hooks", "install", "--repo", str(git_repo), "--project", "p-1", "--yes", "--force"]
+    )
     capsys.readouterr()
 
     lt_cli.main(["hooks", "uninstall", "--repo", str(git_repo), "--yes"])
@@ -627,7 +689,51 @@ def test_hooks_uninstall_preserves_unmanaged_content(git_repo, capsys) -> None:
     assert payload["action"] == "stripped-block"
     content = hook_path.read_text(encoding="utf-8")
     assert "echo custom-hook" in content
-    assert HOOK_BLOCK_BEGIN not in content
+    assert REPO_HOOK_BLOCK_BEGIN not in content
+
+
+def test_hooks_uninstall_strips_repo_and_legacy_blocks(git_repo, capsys) -> None:
+    hook_path = git_repo / ".git" / "hooks" / "post-commit"
+    hook_path.parent.mkdir(parents=True, exist_ok=True)
+    hook_path.write_text(
+        "#!/usr/bin/env sh\n"
+        f"{REPO_HOOK_BLOCK_BEGIN}\n: repo capture\n{REPO_HOOK_BLOCK_END}\n"
+        f"{HOOK_BLOCK_BEGIN}\n: legacy snapshot\n{HOOK_BLOCK_END}\n",
+        encoding="utf-8",
+    )
+
+    lt_cli.main(["hooks", "uninstall", "--repo", str(git_repo), "--yes"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["removed_blocks"] == ["repo", "graph-draft"]
+    assert payload["action"] == "removed-hook-file"
+    assert not hook_path.exists()
+
+
+def test_hook_status_reports_lt_path_from_repo_block(git_repo, capsys) -> None:
+    lt_cli.main(
+        [
+            "hooks",
+            "install",
+            "--repo",
+            str(git_repo),
+            "--project",
+            "p-9",
+            "--lt-path",
+            "/opt/my tools/lt",
+            "--yes",
+        ]
+    )
+    capsys.readouterr()
+
+    lt_cli.main(["hooks", "status", "--repo", str(git_repo)])
+    status = json.loads(capsys.readouterr().out)
+
+    assert status["lt_path"] == "/opt/my tools/lt"
+    assert status["lt_path_exists"] is False
+    assert status["managed_block_present"] is True
+    assert status["baked_project_id"] == "p-9"
+    assert status["baked_base_url"] is None
 
 
 # --- cross-adapter coexistence (lt-81s6.17) ----------------------------------
@@ -663,48 +769,103 @@ def test_git_snapshot_external_id_falls_back_to_local_without_remote(
     assert event["source"]["external_id"] == f"local@{payload['commit']}"
 
 
-def test_hooks_install_refuses_repo_capture_hook_without_force(git_repo) -> None:
-    """Two Lab Tracker capture hooks would record every commit twice."""
+def test_hooks_install_updates_an_existing_repo_block_in_place(git_repo, capsys) -> None:
+    """The `lt repo` block is the installer's own block now: re-runs update it."""
 
-    from lab_tracker_client.repo import HOOK_BEGIN_MARKER, HOOK_END_MARKER
-
-    hook_path = git_repo / ".git" / "hooks" / "post-commit"
-    hook_path.parent.mkdir(parents=True, exist_ok=True)
-    hook_path.write_text(
-        f"#!/usr/bin/env sh\n{HOOK_BEGIN_MARKER}\n: repo capture\n{HOOK_END_MARKER}\n",
-        encoding="utf-8",
+    lt_cli.main(
+        [
+            "hooks",
+            "install",
+            "--repo",
+            str(git_repo),
+            "--project",
+            "p-1",
+            "--lt-path",
+            "/old/lt",
+            "--yes",
+        ]
     )
+    capsys.readouterr()
 
-    with pytest.raises(Exception, match="lt repo"):
-        lt_cli.main(["hooks", "install", "--repo", str(git_repo), "--yes"])
+    lt_cli.main(["hooks", "install", "--repo", str(git_repo), "--lt-path", "/new/lt", "--yes"])
+    payload = json.loads(capsys.readouterr().out)
 
-    # Deliberate dual setup stays possible behind --force.
-    lt_cli.main(["hooks", "install", "--repo", str(git_repo), "--yes", "--force"])
-    content = hook_path.read_text(encoding="utf-8")
-    assert HOOK_BLOCK_BEGIN in content
-    assert HOOK_BEGIN_MARKER in content
+    assert payload["action"] == "updated"
+    assert payload["lt_path"] == "/new/lt"
+    assert payload["project_id"] == "p-1"
+    content = (git_repo / ".git" / "hooks" / "post-commit").read_text(encoding="utf-8")
+    assert "LT='/new/lt'" in content
+    assert "/old/lt" not in content
+    assert content.count(REPO_HOOK_BLOCK_BEGIN) == 1
+
+
+def test_hooks_install_requires_a_project_when_no_repo_json(git_repo) -> None:
+    from lab_tracker_client.client import LTValidationError
+    from lab_tracker_client.hooks import install_hook
+
+    with pytest.raises(LTValidationError, match="lt repo init"):
+        install_hook(repo=git_repo, lt_path="/opt/lt")
+
+    assert not (git_repo / ".git" / "hooks" / "post-commit").exists()
+    assert not (git_repo / ".lab-tracker" / "repo.json").exists()
+
+
+def test_hooks_install_refuses_conflicting_project_id(git_repo, monkeypatch, capsys) -> None:
+    from lab_tracker_client.client import LTValidationError
+    from lab_tracker_client.hooks import install_hook
+
+    monkeypatch.chdir(git_repo)
+    lt_cli.main(["repo", "init", "--project", "p-1"])
+    capsys.readouterr()
+
+    with pytest.raises(LTValidationError, match="conflicts"):
+        install_hook(repo=git_repo, project_id="p-2", lt_path="/opt/lt")
+
+    assert not (git_repo / ".git" / "hooks" / "post-commit").exists()
+    # The same project (or none) is fine: repo.json is the source of truth.
+    payload = install_hook(repo=git_repo, project_id="p-1", lt_path="/opt/lt")
+    assert payload["action"] == "created"
+    assert payload["project_id"] == "p-1"
+    assert "created_config" not in payload
 
 
 @pytest.mark.parametrize(
     "unsafe",
-    ["p}rm", 'p"x', "p$(touch pwned)", "p`id`", "p\\x", "p\nx"],
+    ["p}rm", 'p"x', "p$(touch pwned)", "p`id`", "p\\x", "it's"],
 )
-@pytest.mark.parametrize("field", ["project_id", "base_url", "lt_path"])
-def test_hooks_install_refuses_values_that_would_escape_the_sh_default(
+@pytest.mark.parametrize("field", ["base_url", "lt_path"])
+def test_hooks_install_single_quotes_baked_values_so_they_cannot_escape(
     git_repo, field: str, unsafe: str
 ) -> None:
-    from lab_tracker_client.client import LTValidationError
     from lab_tracker_client.hooks import install_hook
 
-    if field == "lt_path" and unsafe == "p\\x":
-        unsafe = "p\\}x"  # lt paths fold backslashes to "/" first
     kwargs = {"project_id": "p-1", "base_url": "http://lab:8000", "lt_path": "/opt/lt"}
     kwargs[field] = unsafe
 
-    with pytest.raises(LTValidationError, match="cannot be baked into the post-commit hook"):
+    install_hook(repo=git_repo, **kwargs)
+
+    content = (git_repo / ".git" / "hooks" / "post-commit").read_text(encoding="utf-8")
+    baked = unsafe.replace("\\", "/") if field == "lt_path" else unsafe  # lt paths fold to "/"
+    quoted = "'" + baked.replace("'", "'\\''") + "'"
+    prefix = "LT=" if field == "lt_path" else "LAB_TRACKER_BASE_URL="
+    # The whole value sits inside single quotes to the end of the line, so sh
+    # can neither expand nor execute any character of it.
+    assert f"{prefix}{quoted}\n" in content
+
+
+@pytest.mark.parametrize("field", ["base_url", "lt_path"])
+def test_hooks_install_refuses_newlines_in_baked_values(git_repo, field: str) -> None:
+    from lab_tracker_client.client import LTValidationError
+    from lab_tracker_client.hooks import install_hook
+
+    kwargs = {"project_id": "p-1", "base_url": "http://lab:8000", "lt_path": "/opt/lt"}
+    kwargs[field] = "p\nx"
+
+    with pytest.raises(LTValidationError, match="newlines"):
         install_hook(repo=git_repo, **kwargs)
 
     assert not (git_repo / ".git" / "hooks" / "post-commit").exists()
+    assert not (git_repo / ".lab-tracker" / "repo.json").exists()
 
 
 @pytest.mark.parametrize(
@@ -739,4 +900,159 @@ def test_hooks_install_keeps_spaces_in_baked_values(git_repo) -> None:
     install_hook(repo=git_repo, project_id="p-1", lt_path="/opt/my tools/lt")
 
     content = (git_repo / ".git" / "hooks" / "post-commit").read_text(encoding="utf-8")
-    assert 'LAB_TRACKER_LT="${LAB_TRACKER_LT:-/opt/my tools/lt}"' in content
+    assert "LT='/opt/my tools/lt'" in content
+
+
+# --- commit filter + deprecation on the legacy snapshot path -------------------
+
+
+def test_git_snapshot_skips_merge_commits_by_default_and_counts_them(git_repo, capsys) -> None:
+    merge = _merge_commit(git_repo)
+
+    # No --no-sync: a skipped commit queues nothing, so there is nothing to drain.
+    lt_cli.main(["git", "snapshot", "--repo", str(git_repo), "--project", "p-1"])
+    out, err = capsys.readouterr()
+
+    payload = json.loads(out)
+    assert payload["skipped"] is True
+    assert payload["queued"] is False
+    assert payload["skip_reason"] == "merge_commit"
+    assert payload["commit"] == merge
+    assert payload["skipped_total"] == 1
+    assert payload["deprecated"] is True
+    assert "sync" not in payload
+    assert "skipped commit" in err
+    assert "merge_commit" in err
+    outbox = git_repo / ".lab-tracker" / "outbox" / "watch"
+    assert (outbox / ".skipped-commits.jsonl").exists()
+    assert list(outbox.glob("*.json")) == []
+
+    lt_cli.main(["outbox", "status", "--repo", str(git_repo)])
+    status = json.loads(capsys.readouterr().out)
+    assert status["skipped_commits"] == 1
+    assert status["total"] == 0
+    assert status["adapters"][0]["adapter"] == "watch"
+    assert status["adapters"][0]["skipped_commits"] == 1
+
+
+def test_git_snapshot_honours_repo_json_commit_filter(git_repo, capsys) -> None:
+    (git_repo / ".lab-tracker").mkdir()
+    (git_repo / ".lab-tracker" / "repo.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "project_id": "p-1",
+                "outbox": ".lab-tracker/outbox/repo",
+                "commit_filter": {"skip_wip": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+    _commit_file(git_repo, "analysis.py", "print('wip')\n", "wip: tinkering")
+
+    lt_cli.main(["git", "snapshot", "--repo", str(git_repo), "--project", "p-1", "--no-sync"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["skipped"] is True
+    assert payload["skip_reason"] == "wip_subject"
+    # The skip is logged in the outbox that would have queued the event.
+    assert (git_repo / ".lab-tracker" / "outbox" / "watch" / ".skipped-commits.jsonl").exists()
+
+
+def test_git_snapshot_force_capture_overrides_filter(git_repo, capsys) -> None:
+    merge = _merge_commit(git_repo)
+
+    lt_cli.main(
+        [
+            "git",
+            "snapshot",
+            "--repo",
+            str(git_repo),
+            "--project",
+            "p-1",
+            "--no-sync",
+            "--force-capture",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["queued"] is True
+    assert "skipped" not in payload
+    assert payload["commit"] == merge
+    assert Path(payload["event_path"]).exists()
+
+
+def test_git_snapshot_prints_deprecation_notice(git_repo, capsys) -> None:
+    lt_cli.main(["git", "snapshot", "--repo", str(git_repo), "--project", "p-1", "--no-sync"])
+    out, err = capsys.readouterr()
+
+    assert json.loads(out)["deprecated"] is True
+    assert "deprecated" in err
+    assert "lt hooks install --yes" in err
+
+
+# --- lt outbox covers every adapter -------------------------------------------
+
+
+def _queue_watch_and_repo_events(git_repo: Path, monkeypatch, capsys) -> None:
+    lt_cli.main(["git", "snapshot", "--repo", str(git_repo), "--project", "p-1", "--no-sync"])
+    capsys.readouterr()
+    monkeypatch.chdir(git_repo)
+    lt_cli.main(["repo", "init", "--project", "p-1"])
+    capsys.readouterr()
+    lt_cli.main(["repo", "report", "--no-sync"])
+    capsys.readouterr()
+
+
+def test_outbox_status_aggregates_every_adapter(git_repo, monkeypatch, capsys) -> None:
+    _queue_watch_and_repo_events(git_repo, monkeypatch, capsys)
+
+    lt_cli.main(["outbox", "status", "--repo", str(git_repo)])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["command"] == "outbox-status"
+    assert [item["adapter"] for item in payload["adapters"]] == ["watch", "repo", "hpc"]
+    assert payload["total"] == 2
+    assert payload["pending"] == 2
+    assert payload["skipped_commits"] == 0
+    assert payload["config_errors"] == []
+    assert len(payload["events"]) == 2
+    assert payload["events"][0]["capture_kind"] == "git_commit"
+    assert payload["events"][1]["event_type"] == "commit"
+    watch, repo, hpc = payload["adapters"]
+    assert watch["total"] == 1
+    assert repo["total"] == 1
+    assert repo["config"].endswith("repo.json")
+    assert hpc["total"] == 0
+    assert hpc["config"] is None
+    assert not (git_repo / ".lab-tracker" / "outbox" / "hpc").exists()
+
+
+def test_outbox_sync_drains_watch_and_repo_outboxes_and_leaves_absent_hpc_alone(
+    git_repo, monkeypatch, capsys
+) -> None:
+    _queue_watch_and_repo_events(git_repo, monkeypatch, capsys)
+    fake = _FakeSyncClient()
+    monkeypatch.setattr(
+        lt_cli.LabTracker,
+        "from_env",
+        classmethod(lambda cls: fake),  # noqa: ARG005
+    )
+
+    lt_cli.main(["outbox", "sync", "--repo", str(git_repo)])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["command"] == "outbox-sync"
+    assert payload["processed"] == 2
+    assert payload["errors"] == []
+    assert [item["adapter"] for item in payload["adapters"]] == ["watch", "repo", "hpc"]
+    assert payload["adapters"][2]["skipped"] == "absent"
+    assert not (git_repo / ".lab-tracker" / "outbox" / "hpc").exists()
+    assert {item["action"] for item in payload["results"]} == {"imported"}
+    assert len(fake.uploads) == 2
+    assert fake.draft_requests == []
+
+    lt_cli.main(["outbox", "status", "--repo", str(git_repo)])
+    status = json.loads(capsys.readouterr().out)
+    assert status["synced"] == 2
+    assert status["pending"] == 0

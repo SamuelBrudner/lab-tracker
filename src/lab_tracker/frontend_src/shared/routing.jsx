@@ -5,6 +5,28 @@ const { useCallback, useEffect, useState } = React;
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+// `history.state` records how many in-app navigations led to the current
+// entry, so a detail page's Back can step through real browser history when
+// there is somewhere in the app to go back to, and fall back to the dashboard
+// when the page was opened directly (a shared link, a fresh tab).
+const IN_APP_HISTORY_KEY = "labTracker";
+
+function inAppDepth(state) {
+  return Number(state?.[IN_APP_HISTORY_KEY]?.depth) || 0;
+}
+
+function historyState(depth) {
+  return { [IN_APP_HISTORY_KEY]: { depth } };
+}
+
+function navigateBack(navigate, fallback = "/app") {
+  if (inAppDepth(window.history.state) > 0) {
+    window.history.back();
+    return;
+  }
+  navigate(fallback);
+}
+
 function parseAppRoute(pathname) {
   // `navigate()` passes the complete destination (including query/hash) while
   // popstate gives us `window.location.pathname`. Parse both forms identically
@@ -140,13 +162,13 @@ function useAppRoute() {
     if (resolved === window.location.pathname) {
       return;
     }
-    window.history.pushState({}, "", resolved);
+    window.history.pushState(historyState(inAppDepth(window.history.state) + 1), "", resolved);
     setRoute(parseAppRoute(resolved));
   }, []);
 
   const replace = useCallback((to) => {
     const resolved = resolveAppPath(to);
-    window.history.replaceState({}, "", resolved);
+    window.history.replaceState(historyState(inAppDepth(window.history.state)), "", resolved);
     setRoute(parseAppRoute(resolved));
   }, []);
 
@@ -193,7 +215,9 @@ function AppLink({ to, navigate, className = "", children }) {
 export {
   AppLink,
   appBasePath,
+  inAppDepth,
   isContextualProjectReady,
+  navigateBack,
   parseAppRoute,
   resolveAppPath,
   useAppRoute,

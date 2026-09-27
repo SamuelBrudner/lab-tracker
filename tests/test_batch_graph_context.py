@@ -11,14 +11,38 @@ from uuid import UUID, uuid4
 from fastapi.testclient import TestClient
 
 from lab_tracker.api import LabTrackerAPI
-from lab_tracker.db_models import NoteModel, QuestionModel
-from lab_tracker.models import Note, Session, SessionType
+from lab_tracker.auth import AuthContext, Role
+from lab_tracker.db_models import ClaimModel, ExplorationNodeModel, NoteModel, QuestionModel
+from lab_tracker.models import ExternalContextPolicy, Note, Session, SessionType
+from lab_tracker.services.graph_draft_batch_policy import BatchReviewer
 from lab_tracker.services.graph_draft_context import (
+    _OPEN_PREDICTION_LIMIT,
+    _RECENT_CONTEXT_LIMIT,
+    ACTIVE_QUESTION_FLOOR,
+    CONTEXT_FIELD_CHAR_LIMIT,
+    CUE_MATCHED_LIMIT,
+    QUESTION_CONTEXT_LIMIT,
     _bounded_batch_source_artifacts,
     _capture_placement,
+    _compact_recent_note,
     _graph_batch_context_summary,
 )
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
+
+_SELECTION_REASONS = {"active_floor", "staged_fill", "recent", "alias_match"}
+_SELECTED_CONTEXT_LISTS = (
+    "active_or_staged_questions",
+    "recent_sessions",
+    "recent_datasets",
+    "recent_notes",
+    "recent_analyses",
+    "recent_claims",
+    "recent_visualizations",
+    "recent_goals",
+    "exploration_nodes",
+    "cue_matched",
+    "known_aliases",
+)
 
 
 @contextmanager
@@ -482,8 +506,6 @@ def test_batch_context_carries_window_and_actor_metadata(
     client: TestClient,
     admin_auth_headers: dict[str, str],
 ):
-    from lab_tracker.auth import AuthContext, Role
-
     project_id = _create_project(client, admin_auth_headers, "Windowed")
     note_id = _quick_capture(
         client,
@@ -763,3 +785,762 @@ def test_batch_context_includes_bounded_uploaded_commit_diff(
     assert packet["source_context_omitted_bytes"] == len(body) - 256_000
     assert packet["source_context_truncated"] is True
     assert packet["source_context_truncated_note_count"] == 1
+
+
+def _create_text_note(
+    client: TestClient,
+    headers: dict[str, str],
+    *,
+    project_id: str,
+    raw_content: str,
+) -> str:
+    response = client.post(
+        "/notes",
+        json={"project_id": project_id, "raw_content": raw_content},
+        headers=headers,
+    )
+    assert response.status_code == 201, response.text
+    return response.json()["data"]["note_id"]
+
+
+def _create_claim(
+    client: TestClient,
+    headers: dict[str, str],
+    *,
+    project_id: str,
+    statement: str,
+    **fields: object,
+) -> dict[str, object]:
+    response = client.post(
+        "/claims",
+        json={"project_id": project_id, "statement": statement, "confidence": 50, **fields},
+        headers=headers,
+    )
+    assert response.status_code == 201, response.text
+    return response.json()["data"]
+
+
+def _create_exploration_node(
+    client: TestClient,
+    headers: dict[str, str],
+    *,
+    project_id: str,
+    node_type: str,
+    title: str,
+    target_question_id: str,
+    rationale: str | None = None,
+) -> str:
+    # The service requires choice/rationale/alternatives for decisions and
+    # hypothesis/failure_mode/lesson for dead ends; pivots also need an
+    # invalidation target, so the tests only create the first two kinds.
+    required_fields: dict[str, dict[str, object]] = {
+        "decision": {
+            "choice": "Take this path.",
+            "rationale": rationale or "It fits the evidence.",
+            "alternatives_considered": ["Do nothing."],
+        },
+        "dead_end": {
+            "hypothesis": "This path would work.",
+            "failure_mode": "It did not.",
+            "lesson": "Record it so nobody retries it blindly.",
+        },
+    }
+    payload: dict[str, object] = {
+        "project_id": project_id,
+        "node_type": node_type,
+        "title": title,
+        "target": {"entity_type": "question", "entity_id": target_question_id},
+        **required_fields[node_type],
+    }
+    if rationale is not None:
+        payload["rationale"] = rationale
+    response = client.post("/exploration-nodes", json=payload, headers=headers)
+    assert response.status_code == 201, response.text
+    return response.json()["data"]["node_id"]
+
+
+def _admin_user_id(client: TestClient, headers: dict[str, str]) -> str:
+    response = client.get("/auth/me", headers=headers)
+    assert response.status_code == 200, response.text
+    return response.json()["data"]["user_id"]
+
+
+def _set_row_timestamps(client: TestClient, model, row_id: str, at: datetime) -> None:
+    session = client.app.state.db_session_factory()
+    try:
+        row = session.get(model, row_id)
+        assert row is not None
+        row.created_at = at
+        row.updated_at = at
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def _batch_packet(client: TestClient, note_ids: list[str], **kwargs) -> dict:
+    batch_notes = _load_notes(client, note_ids)
+    with _request_api(client) as api:
+        return api.build_batch_graph_context(batch_notes, **kwargs)
+
+
+def test_batch_context_active_questions_fill_before_staged(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    project_id = _create_project(client, admin_auth_headers, "Active Floor")
+    for index in range(60):
+        _create_question(
+            client, admin_auth_headers, project_id=project_id,
+            text=f"Active question {index}", status="active",
+        )
+    for index in range(5):
+        _create_question(
+            client, admin_auth_headers, project_id=project_id,
+            text=f"Staged question {index}", status="staged",
+        )
+    note_id = _create_text_note(
+        client, admin_auth_headers, project_id=project_id, raw_content="batch capture"
+    )
+
+    packet = _batch_packet(client, [note_id])
+
+    questions = packet["projects"][0]["active_or_staged_questions"]
+    assert len(questions) == QUESTION_CONTEXT_LIMIT == ACTIVE_QUESTION_FLOOR
+    assert all(item["status"] == "active" for item in questions)
+    assert all(item["selection_reason"] == "active_floor" for item in questions)
+
+
+def test_batch_context_staged_questions_fill_remaining_slots(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    project_id = _create_project(client, admin_auth_headers, "Staged Fill")
+    active = [
+        _create_question(
+            client, admin_auth_headers, project_id=project_id,
+            text=f"Active question {index}", status="active",
+        )
+        for index in range(10)
+    ]
+    for index in range(60):
+        _create_question(
+            client, admin_auth_headers, project_id=project_id,
+            text=f"Staged question {index}", status="staged",
+        )
+    baseline = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for index, question in enumerate(active):
+        _set_question_timestamps(
+            client,
+            question["question_id"],
+            created_at=baseline,
+            updated_at=baseline + timedelta(hours=index),
+        )
+    note_id = _create_text_note(
+        client, admin_auth_headers, project_id=project_id, raw_content="batch capture"
+    )
+
+    packet = _batch_packet(client, [note_id])
+
+    questions = packet["projects"][0]["active_or_staged_questions"]
+    assert len(questions) == QUESTION_CONTEXT_LIMIT
+    active_items = questions[:10]
+    staged_items = questions[10:]
+    assert all(item["status"] == "active" for item in active_items)
+    assert all(item["selection_reason"] == "active_floor" for item in active_items)
+    assert len(staged_items) == 40
+    assert all(item["status"] == "staged" for item in staged_items)
+    assert all(item["selection_reason"] == "staged_fill" for item in staged_items)
+    active_updates = [item["updated_at"] for item in active_items]
+    assert active_updates == sorted(active_updates, reverse=True)
+    assert active_items[0]["id"] == active[-1]["question_id"]
+
+
+def test_batch_context_cue_matches_pull_project_wide_nodes(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    project_id = _create_project(client, admin_auth_headers, "Cue Matching")
+    other_project_id = _create_project(client, admin_auth_headers, "Other Cue Project")
+    old_claim = _create_claim(
+        client, admin_auth_headers, project_id=project_id,
+        statement="kynurenine depletion abolishes turning",
+    )
+    newer_claims = [
+        _create_claim(
+            client, admin_auth_headers, project_id=project_id,
+            statement=f"Unrelated newer claim {index}",
+        )
+        for index in range(11)
+    ]
+    baseline = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    _set_row_timestamps(client, ClaimModel, str(old_claim["claim_id"]), baseline)
+    for index, claim in enumerate(newer_claims):
+        _set_row_timestamps(
+            client, ClaimModel, str(claim["claim_id"]), baseline + timedelta(days=1 + index)
+        )
+    other_question = _create_question(
+        client, admin_auth_headers, project_id=other_project_id,
+        text="Does kynurenine matter elsewhere?", status="active",
+    )
+    note_id = _create_text_note(
+        client, admin_auth_headers, project_id=project_id, raw_content="kynurenine assay rig 2"
+    )
+
+    packet = _batch_packet(client, [note_id])
+
+    block = packet["projects"][0]
+    assert block["cue_terms"] == ["kynurenine", "assay"]
+    matched = block["cue_matched"]
+    assert len(matched) <= CUE_MATCHED_LIMIT
+    keys = [(item["entity_type"], item["id"]) for item in matched]
+    assert len(keys) == len(set(keys))
+    assert ("claim", old_claim["claim_id"]) in keys
+    old_claim_match = next(item for item in matched if item["id"] == old_claim["claim_id"])
+    assert old_claim_match["selection_reason"] == "cue_match:kynurenine"
+    assert old_claim_match["label"] == "kynurenine depletion abolishes turning"
+    assert "kynurenine" in old_claim_match["snippet"].lower()
+    assert old_claim["claim_id"] not in {item["id"] for item in block["recent_claims"]}
+    assert ("question", other_question["question_id"]) not in keys
+    assert packet["context_summary"]["counts"]["cue_matched"] == len(matched)
+    assert packet["context_summary"]["cue_term_count"] == 2
+
+    terse_note_id = _create_text_note(
+        client, admin_auth_headers, project_id=project_id, raw_content="the rig 2 fly 12 and"
+    )
+    terse_packet = _batch_packet(client, [terse_note_id])
+    terse_block = terse_packet["projects"][0]
+    assert terse_block["cue_terms"] == []
+    assert terse_block["cue_matched"] == []
+
+
+def test_batch_context_restores_hypothesis_and_claim_verification_fields(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    project_id = _create_project(client, admin_auth_headers, "Restored Fields")
+    hypothesis = "H" * 300
+    response = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Question with a long hypothesis",
+            "question_type": "descriptive",
+            "status": "active",
+            "hypothesis": hypothesis,
+        },
+        headers=admin_auth_headers,
+    )
+    assert response.status_code == 201, response.text
+    with_hypothesis = response.json()["data"]
+    without_hypothesis = _create_question(
+        client, admin_auth_headers, project_id=project_id,
+        text="Question without a hypothesis", status="active",
+    )
+    claim = _create_claim(
+        client, admin_auth_headers, project_id=project_id,
+        statement="Claim with verification fields",
+        falsification_criteria="F" * 300,
+        verification_plan="V" * 300,
+        refuting_outcome="R" * 300,
+        answers_question_ids=[with_hypothesis["question_id"]],
+    )
+    note_id = _create_text_note(
+        client, admin_auth_headers, project_id=project_id, raw_content="batch capture"
+    )
+
+    packet = _batch_packet(client, [note_id])
+
+    block = packet["projects"][0]
+    questions = {item["id"]: item for item in block["active_or_staged_questions"]}
+    assert questions[with_hypothesis["question_id"]]["hypothesis"] == (
+        hypothesis[:CONTEXT_FIELD_CHAR_LIMIT]
+    )
+    assert "hypothesis" not in questions[without_hypothesis["question_id"]]
+    claims = {item["id"]: item for item in block["recent_claims"]}
+    compact_claim = claims[claim["claim_id"]]
+    assert compact_claim["falsification_criteria"] == "F" * CONTEXT_FIELD_CHAR_LIMIT
+    assert compact_claim["verification_plan"] == "V" * CONTEXT_FIELD_CHAR_LIMIT
+    assert compact_claim["refuting_outcome"] == "R" * CONTEXT_FIELD_CHAR_LIMIT
+    assert compact_claim["answers_question_ids"] == [with_hypothesis["question_id"]]
+
+
+def test_batch_context_lists_open_predictions_per_project(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    project_id = _create_project(client, admin_auth_headers, "Open Predictions")
+    question = _create_question(
+        client, admin_auth_headers, project_id=project_id,
+        text="Does kynurenine change turning?", status="active",
+    )
+    predictions = [
+        _create_claim(
+            client, admin_auth_headers, project_id=project_id,
+            statement=f"Prediction {index}", answers_question_ids=[question["question_id"]],
+        )
+        for index in range(_OPEN_PREDICTION_LIMIT + 1)
+    ]
+    baseline = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for index, claim in enumerate(predictions):
+        _set_row_timestamps(
+            client, ClaimModel, str(claim["claim_id"]), baseline + timedelta(days=index)
+        )
+    _create_claim(
+        client, admin_auth_headers, project_id=project_id, statement="No question attached"
+    )
+    supported = _create_claim(
+        client, admin_auth_headers, project_id=project_id, statement="Already supported",
+        answers_question_ids=[question["question_id"]],
+    )
+    patched = client.patch(
+        f"/claims/{supported['claim_id']}",
+        json={"status": "rejected", "terminal_reason": "Refuted."},
+        headers=admin_auth_headers,
+    )
+    assert patched.status_code == 200, patched.text
+    note_id = _create_text_note(
+        client, admin_auth_headers, project_id=project_id, raw_content="batch capture"
+    )
+
+    packet = _batch_packet(client, [note_id])
+
+    block = packet["projects"][0]
+    listed = [item["id"] for item in block["open_predictions"]]
+    assert listed == [claim["claim_id"] for claim in predictions[:_OPEN_PREDICTION_LIMIT]]
+    assert all(item["status"] == "proposed" for item in block["open_predictions"])
+    assert all(item["effective_status"] == "proposed" for item in block["open_predictions"])
+    assert all("falsification_criteria" in item for item in block["open_predictions"])
+    assert all("selection_reason" not in item for item in block["open_predictions"])
+    assert packet["context_summary"]["counts"]["open_predictions"] == _OPEN_PREDICTION_LIMIT
+    assert all("effective_status" in item for item in block["recent_claims"])
+
+
+def test_batch_context_includes_recent_exploration_nodes(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    project_id = _create_project(client, admin_auth_headers, "Exploration Nodes")
+    question = _create_question(
+        client, admin_auth_headers, project_id=project_id,
+        text="Which cue drives turning?", status="active",
+    )
+    filler_ids = [
+        _create_exploration_node(
+            client, admin_auth_headers, project_id=project_id, node_type="decision",
+            title=f"Filler decision {index}", target_question_id=question["question_id"],
+        )
+        for index in range(10)
+    ]
+    rationale = "Because the gradient assay drifted. " * 12
+    decision_id = _create_exploration_node(
+        client, admin_auth_headers, project_id=project_id, node_type="decision",
+        title="Switch to the ramp assay", target_question_id=question["question_id"],
+        rationale=rationale,
+    )
+    dead_end_id = _create_exploration_node(
+        client, admin_auth_headers, project_id=project_id, node_type="dead_end",
+        title="Static gradient assay", target_question_id=question["question_id"],
+        rationale="No turning bias was detectable.",
+    )
+    baseline = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for index, node_id in enumerate([*filler_ids, decision_id, dead_end_id]):
+        _set_row_timestamps(
+            client, ExplorationNodeModel, node_id, baseline + timedelta(hours=index)
+        )
+    note_id = _create_text_note(
+        client, admin_auth_headers, project_id=project_id, raw_content="batch capture"
+    )
+
+    packet = _batch_packet(client, [note_id])
+
+    nodes = packet["projects"][0]["exploration_nodes"]
+    assert len(nodes) == _RECENT_CONTEXT_LIMIT
+    assert [node["id"] for node in nodes[:2]] == [dead_end_id, decision_id]
+    assert nodes[0]["node_type"] == "dead_end"
+    assert nodes[0]["label"] == "Static gradient assay"
+    assert nodes[0]["rationale"] == "No turning bias was detectable."
+    assert nodes[1]["node_type"] == "decision"
+    assert nodes[1]["rationale"] == rationale[:CONTEXT_FIELD_CHAR_LIMIT]
+    assert nodes[1]["target"] == {
+        "entity_type": "question",
+        "entity_id": question["question_id"],
+    }
+    assert all(node["selection_reason"] == "recent" for node in nodes)
+    created = [node["created_at"] for node in nodes]
+    assert created == sorted(created, reverse=True)
+    assert not {filler_ids[0], filler_ids[1]} & {node["id"] for node in nodes}
+    assert packet["context_summary"]["counts"]["exploration_nodes"] == _RECENT_CONTEXT_LIMIT
+
+
+def test_batch_context_labels_recent_notes_with_author(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    project_id = _create_project(client, admin_auth_headers, "Note Authors")
+    admin_id = _admin_user_id(client, admin_auth_headers)
+    older_note_id = _create_text_note(
+        client, admin_auth_headers, project_id=project_id, raw_content="earlier observation"
+    )
+    note_id = _create_text_note(
+        client, admin_auth_headers, project_id=project_id, raw_content="batch capture"
+    )
+    admin_actor = AuthContext(user_id=UUID(admin_id), role=Role.ADMIN)
+    colleague_actor = AuthContext(user_id=uuid4(), role=Role.ADMIN)
+    project_notes = ExternalContextPolicy.PROJECT_NOTES
+
+    as_admin = _batch_packet(client, [note_id], actor=admin_actor)
+    as_colleague = _batch_packet(
+        client, [note_id], actor=colleague_actor, external_context_policy=project_notes
+    )
+    anonymous = _batch_packet(client, [note_id])
+
+    for packet, expected, scope in (
+        (as_admin, True, "own"),
+        (as_colleague, False, "colleague"),
+        (anonymous, None, None),
+    ):
+        recent_notes = packet["projects"][0]["recent_notes"]
+        assert [item["id"] for item in recent_notes] == [older_note_id]
+        assert recent_notes[0]["created_by"] == admin_id
+        assert recent_notes[0]["created_by_user_id"] == admin_id
+        assert recent_notes[0]["captured_by_current_user"] is expected
+        assert recent_notes[0]["author_scope"] == scope
+        assert recent_notes[0]["selection_reason"] == "recent"
+    assert as_admin["batch_notes"][0]["created_by"] == admin_id
+    assert "captured_by_current_user" not in as_admin["batch_notes"][0]
+    assert as_admin["external_context_policy"] == "own_notes_only"
+    assert as_colleague["external_context_policy"] == "project_notes"
+    assert as_colleague["context_owner"] == {
+        "reviewer": str(colleague_actor.user_id),
+        "reviewer_user_id": str(colleague_actor.user_id),
+    }
+    assert anonymous["context_owner"] is None
+    assert as_colleague["context_summary"]["counts"]["colleague_recent_notes"] == 1
+    assert as_admin["context_summary"]["counts"]["colleague_recent_notes"] == 0
+
+
+def test_batch_context_excludes_colleague_notes_under_own_notes_only(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    project_id = _create_project(client, admin_auth_headers, "Own Notes Only")
+    admin_id = _admin_user_id(client, admin_auth_headers)
+    _create_text_note(
+        client, admin_auth_headers, project_id=project_id, raw_content="admin's earlier note"
+    )
+    note_id = _create_text_note(
+        client, admin_auth_headers, project_id=project_id, raw_content="batch capture"
+    )
+    colleague_actor = AuthContext(user_id=uuid4(), role=Role.ADMIN)
+
+    # Explicit default policy and the resolved-from-settings default agree.
+    explicit = _batch_packet(
+        client,
+        [note_id],
+        actor=colleague_actor,
+        external_context_policy=ExternalContextPolicy.OWN_NOTES_ONLY,
+    )
+    resolved = _batch_packet(client, [note_id], actor=colleague_actor)
+    for packet in (explicit, resolved):
+        assert packet["external_context_policy"] == "own_notes_only"
+        assert packet["projects"][0]["recent_notes"] == []
+        assert packet["context_summary"]["counts"]["recent_notes"] == 0
+        assert packet["context_summary"]["counts"]["colleague_recent_notes"] == 0
+    # The batch's own captures are never filtered: the reviewer asked for them.
+    assert [item["id"] for item in resolved["batch_notes"]] == [note_id]
+    assert resolved["batch_notes"][0]["created_by"] == admin_id
+
+
+def test_batch_context_policy_resolves_from_the_owners_settings_rows(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    project_id = _create_project(client, admin_auth_headers, "Policy Rows")
+    older_note_id = _create_text_note(
+        client, admin_auth_headers, project_id=project_id, raw_content="admin's earlier note"
+    )
+    note_id = _create_text_note(
+        client, admin_auth_headers, project_id=project_id, raw_content="batch capture"
+    )
+    colleague = client.app.state.auth_service.register_user(
+        username=f"colleague-{uuid4().hex[:8]}", password="secret", role=Role.ADMIN
+    )
+    colleague_actor = AuthContext(user_id=colleague.user_id, role=Role.ADMIN)
+
+    # Project default opens the packet to every author (loopback provider: no consent needed).
+    opened = client.patch(
+        f"/projects/{project_id}/graph-draft-batch-settings/project-default",
+        json={"external_context_policy": "project_notes"},
+        headers=admin_auth_headers,
+    )
+    assert opened.status_code == 200, opened.text
+    inherited = _batch_packet(client, [note_id], actor=colleague_actor)
+    assert inherited["external_context_policy"] == "project_notes"
+    assert [item["id"] for item in inherited["projects"][0]["recent_notes"]] == [older_note_id]
+    assert inherited["projects"][0]["recent_notes"][0]["author_scope"] == "colleague"
+
+    # The colleague's personal row narrows it back for their own packets.
+    with _request_api(client) as api:
+        api.update_graph_draft_batch_settings(
+            UUID(project_id),
+            user_id=colleague.user_id,
+            external_context_policy=ExternalContextPolicy.OWN_NOTES_ONLY,
+            actor=colleague_actor,
+        )
+    personal = _batch_packet(client, [note_id], actor=colleague_actor)
+    assert personal["external_context_policy"] == "own_notes_only"
+    assert personal["projects"][0]["recent_notes"] == []
+
+
+def test_note_scoped_context_uses_actor_as_context_owner(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    project_id = _create_project(client, admin_auth_headers, "Note Scoped Owner")
+    older_note_id = _create_text_note(
+        client, admin_auth_headers, project_id=project_id, raw_content="admin's earlier note"
+    )
+    note_id = _create_text_note(
+        client, admin_auth_headers, project_id=project_id, raw_content="the note being drafted"
+    )
+    admin_id = _admin_user_id(client, admin_auth_headers)
+    admin_actor = AuthContext(user_id=UUID(admin_id), role=Role.ADMIN)
+    colleague_actor = AuthContext(user_id=uuid4(), role=Role.ADMIN)
+
+    with _request_api(client) as api:
+        as_admin = api.build_graph_context_for_note(UUID(note_id), actor=admin_actor)
+        as_colleague = api.build_graph_context_for_note(UUID(note_id), actor=colleague_actor)
+
+    assert as_admin["context_owner"]["reviewer_user_id"] == str(admin_actor.user_id)
+    assert as_admin["external_context_policy"] == "own_notes_only"
+    assert [item["id"] for item in as_admin["recent_notes"]] == [older_note_id]
+    assert as_admin["recent_notes"][0]["author_scope"] == "own"
+    assert as_admin["recent_notes"][0]["captured_by_current_user"] is True
+    assert as_colleague["context_owner"]["reviewer_user_id"] == str(colleague_actor.user_id)
+    assert as_colleague["recent_notes"] == []
+    assert as_colleague["context_summary"]["counts"]["colleague_recent_notes"] == 0
+
+
+def test_compact_recent_note_attributes_author_scope_and_created_by() -> None:
+    author_id = uuid4()
+    note = Note(
+        note_id=uuid4(),
+        project_id=uuid4(),
+        raw_content="captured by the author",
+        created_by=str(author_id),
+        created_by_user_id=author_id,
+    )
+    own = _compact_recent_note(note, BatchReviewer(str(author_id), author_id))
+    assert own["created_by"] == str(author_id)
+    assert own["created_by_user_id"] == str(author_id)
+    assert own["author_scope"] == "own"
+    assert own["captured_by_current_user"] is True
+    colleague = _compact_recent_note(note, BatchReviewer("someone-else", uuid4()))
+    assert colleague["author_scope"] == "colleague"
+    assert colleague["captured_by_current_user"] is False
+    unknown = _compact_recent_note(note, None)
+    assert unknown["author_scope"] is None
+    assert unknown["captured_by_current_user"] is None
+
+
+def _rich_project(client: TestClient, headers: dict[str, str], name: str) -> dict[str, str]:
+    project_id = _create_project(client, headers, name)
+    active = [
+        _create_question(
+            client, headers, project_id=project_id,
+            text=f"Active kynurenine question {index}", status="active",
+        )
+        for index in range(2)
+    ]
+    _create_question(client, headers, project_id=project_id, text="Staged one", status="staged")
+    claim = _create_claim(
+        client, headers, project_id=project_id,
+        statement="kynurenine depletion abolishes turning",
+    )
+    _create_exploration_node(
+        client, headers, project_id=project_id, node_type="dead_end",
+        title="Static gradient assay", target_question_id=active[0]["question_id"],
+    )
+    older_note_id = _create_text_note(
+        client, headers, project_id=project_id, raw_content="earlier observation"
+    )
+    note_id = _create_text_note(
+        client, headers, project_id=project_id, raw_content="kynurenine assay rig 2"
+    )
+    return {
+        "project_id": project_id,
+        "claim_id": str(claim["claim_id"]),
+        "older_note_id": older_note_id,
+        "note_id": note_id,
+    }
+
+
+def test_every_batch_context_item_carries_selection_reason(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    fixture = _rich_project(client, admin_auth_headers, "Selection Reasons")
+
+    packet = _batch_packet(client, [fixture["note_id"]])
+
+    block = packet["projects"][0]
+    for key in ("active_or_staged_questions", "recent_notes", "recent_claims",
+                "exploration_nodes", "cue_matched", "known_aliases"):
+        assert block[key], key
+    for key in _SELECTED_CONTEXT_LISTS:
+        for item in block[key]:
+            reason = item["selection_reason"]
+            assert reason in _SELECTION_REASONS or reason.startswith("cue_match:"), (key, item)
+    for key in ("batch_notes", "capture_placement", "source_artifacts"):
+        assert all("selection_reason" not in item for item in packet[key]), key
+
+
+def test_batch_context_summary_reports_slot_fill_counts(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    fixture = _rich_project(client, admin_auth_headers, "Slot Fill")
+
+    packet = _batch_packet(client, [fixture["note_id"]])
+
+    block = packet["projects"][0]
+    summary = packet["context_summary"]
+    recent_lists = (
+        "recent_sessions", "recent_datasets", "recent_notes", "recent_analyses",
+        "recent_claims", "recent_visualizations", "recent_goals", "exploration_nodes",
+    )
+    assert summary["slot_fill"] == {
+        "active_floor": 2,
+        "staged_fill": 1,
+        "cue_match": len(block["cue_matched"]),
+        "recent": sum(len(block[key]) for key in recent_lists),
+        "alias_match": len(block["known_aliases"]),
+    }
+    assert summary["slot_fill"]["cue_match"] >= 1
+    assert summary["counts"]["cue_matched"] == len(block["cue_matched"])
+    assert summary["counts"]["exploration_nodes"] == 1
+    assert summary["cue_term_count"] == len(block["cue_terms"]) == 2
+
+
+# --- capture clock: client captured_at > adapter observed_at > server created_at ---
+
+
+def _bench_session(project_id: UUID) -> Session:
+    return Session(
+        session_id=uuid4(),
+        project_id=project_id,
+        session_type=SessionType.SCIENTIFIC,
+        started_at=datetime(2026, 6, 25, 9, 0, tzinfo=timezone.utc),
+        ended_at=datetime(2026, 6, 25, 12, 0, tzinfo=timezone.utc),
+    )
+
+
+def _evening_note(project_id: UUID, metadata: dict[str, str]) -> Note:
+    # Received by the server in the evening, well outside the 09:00-12:00 session.
+    return Note(
+        note_id=uuid4(),
+        project_id=project_id,
+        raw_content="Rig 2 Fly 12",
+        created_at=datetime(2026, 6, 25, 18, 0, tzinfo=timezone.utc),
+        metadata=metadata,
+    )
+
+
+def test_capture_placement_prefers_client_captured_at_over_created_at() -> None:
+    project_id = uuid4()
+    session = _bench_session(project_id)
+    note = _evening_note(project_id, {"captured_at": "2026-06-25T10:30:00Z"})
+
+    placed = _capture_placement(note, [session])
+
+    # The phone composed the capture mid-session; the late upload is not the
+    # capture time, so the session match follows the client clock.
+    assert placed["in_session"] == {
+        "id": str(session.session_id),
+        "label": f"{session.session_type.value} session 2026-06-25",
+    }
+    assert placed["observed_at"] == "2026-06-25T10:30:00+00:00"
+    assert placed["observed_at_source"] == "client"
+    assert placed["created_at"] == note.created_at.isoformat()
+
+
+def test_capture_placement_uses_adapter_observed_at_and_labels_source() -> None:
+    project_id = uuid4()
+    session = _bench_session(project_id)
+    note = _evening_note(
+        project_id, {"evidence_source_observed_at": "2026-06-25T11:15:00+00:00"}
+    )
+
+    placed = _capture_placement(note, [session])
+
+    assert placed["in_session"] is not None
+    assert placed["observed_at"] == "2026-06-25T11:15:00+00:00"
+    assert placed["observed_at_source"] == "adapter"
+
+
+def test_capture_placement_ignores_unparsable_and_clamps_future_clock() -> None:
+    project_id = uuid4()
+    session = _bench_session(project_id)
+
+    unparsable = _capture_placement(
+        _evening_note(project_id, {"captured_at": "not-a-date"}), [session]
+    )
+    assert unparsable["in_session"] is None
+    assert unparsable["observed_at_source"] == "server"
+    assert unparsable["observed_at"] == unparsable["created_at"]
+
+    skewed = _capture_placement(
+        _evening_note(project_id, {"captured_at": "2026-06-25T23:59:00Z"}), [session]
+    )
+    # A clock ahead of the server receipt is clamped to created_at but still
+    # reported as the client's clock, so the skew stays visible.
+    assert skewed["observed_at"] == skewed["created_at"]
+    assert skewed["observed_at_source"] == "client"
+
+
+def test_batch_context_orders_and_windows_batch_by_observed_at(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    project_id = _create_project(client, admin_auth_headers, "Capture clock")
+    received_first = datetime(2026, 6, 25, 18, 0, tzinfo=timezone.utc)
+    received_second = received_first + timedelta(minutes=1)
+    later_capture = "2026-06-25T10:30:00+00:00"
+    earlier_capture = "2026-06-25T09:00:00+00:00"
+    note_ids: list[str] = []
+    for raw_content, captured_at, received_at in (
+        ("Rig 2 Fly 12", later_capture, received_first),
+        ("Rig 2 Fly 13", earlier_capture, received_second),
+    ):
+        response = client.post(
+            "/notes",
+            json={
+                "project_id": project_id,
+                "raw_content": raw_content,
+                "metadata": {"captured_at": captured_at},
+            },
+            headers=admin_auth_headers,
+        )
+        assert response.status_code == 201, response.text
+        note_id = response.json()["data"]["note_id"]
+        _set_note_created_at(client, note_id, received_at)
+        note_ids.append(note_id)
+    batch_notes = _load_notes(client, note_ids)
+
+    with _request_api(client) as api:
+        packet = api.build_batch_graph_context(batch_notes)
+
+    # The model sees the day in capture-clock order, not upload order, and the
+    # derived day boundaries follow the same clock.
+    assert [note["id"] for note in packet["batch_notes"]] == [note_ids[1], note_ids[0]]
+    assert packet["batch_window"] == {"since": earlier_capture, "until": later_capture}
+    assert [entry["note_id"] for entry in packet["capture_placement"]] == [
+        note["id"] for note in packet["batch_notes"]
+    ]
+    assert [entry["observed_at_source"] for entry in packet["capture_placement"]] == [
+        "client",
+        "client",
+    ]

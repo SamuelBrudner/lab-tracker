@@ -37,12 +37,16 @@ from lab_tracker.models import NoteMetadataScalar
 from lab_tracker_client import outbox as _outbox
 from lab_tracker_client.client import (
     CAPTURE_HOST_METADATA_KEYS,
+    DECLARED_TARGET_SOURCE_EXPLICIT,
+    DECLARED_TARGET_SOURCE_KEY,
+    EntityRef,
     EvidenceNoteIndex,
     LabTracker,
     LTRecord,
     LTValidationError,
     build_evidence_metadata,
     capture_host_metadata,
+    declared_targets,
 )
 from lab_tracker_client.evidence_index import outbox_note_index
 
@@ -681,8 +685,13 @@ def outbox_status(outbox: str | Path) -> JsonObject:
     return {
         "outbox": str(Path(outbox).expanduser()),
         "total": len(events),
+        # Always present, so an all-adapter status can sum them uniformly.
+        "pending": counts.get("pending", 0),
+        "failed": counts.get("failed", 0),
+        "synced": counts.get("synced", 0),
         "quarantined": _outbox.count_quarantined(outbox),
         "unreadable": unreadable,
+        "skipped_commits": _outbox.count_skipped_commits(outbox),
         "events": events,
         **counts,
     }
@@ -841,7 +850,26 @@ def sync_outbox(
     request_draft: bool = False,
     limit: int | None = None,
 ) -> JsonObject:
-    outbox = config.outbox_path()
+    return sync_outbox_path(
+        client,
+        config.outbox_path(),
+        dry_run=dry_run,
+        request_draft=request_draft,
+        limit=limit,
+    )
+
+
+def sync_outbox_path(
+    client: LabTracker,
+    outbox: Path,
+    *,
+    dry_run: bool = False,
+    request_draft: bool = False,
+    limit: int | None = None,
+) -> JsonObject:
+    """Drain the watch outbox at ``outbox`` (no config needed; see ``lt outbox``)."""
+
+    outbox = Path(outbox).expanduser()
     note_indexes: dict[str, EvidenceNoteIndex] = {}
 
     def _is_actionable(event: JsonObject) -> bool:
@@ -1038,6 +1066,7 @@ def _sync_staged_note(
     note: LTRecord | None = None
     change_set_id = _optional_str(event.get("sync", {}).get("change_set_id"))
     project_id = _non_empty(_optional_str(event["context"].get("project_id")) or "", "project_id")
+    targets = _declared_targets(event)
     if not note_id and source_path:
         result = client.import_evidence_file(
             project_id=project_id,
@@ -1057,6 +1086,7 @@ def _sync_staged_note(
                 outbox=path.parent,
                 dry_run=dry_run,
             ),
+            targets=targets,
         )
         if dry_run:
             return WatchSyncResult(
@@ -1126,6 +1156,7 @@ def _sync_staged_note(
                 client_capture_id=_client_capture_id(
                     f"{_event_source_external_id(event)}:{event['event_id']}"
                 ),
+                targets=targets,
             )
             index[evidence_key] = note
             action = "imported"
@@ -1314,6 +1345,10 @@ def _event_metadata(event: Mapping[str, Any]) -> dict[str, NoteMetadataScalar]:
             metadata[f"watch_{key}"] = str(context[key])
     if context["dataset_ids"]:
         metadata["watch_dataset_ids"] = ",".join(context["dataset_ids"])
+    if _declared_targets(payload):
+        # Watch has no configured default question: every declared context
+        # came from a flag, a watch entry, or a manifest, i.e. per capture.
+        metadata[DECLARED_TARGET_SOURCE_KEY] = DECLARED_TARGET_SOURCE_EXPLICIT
     if context["tags"]:
         metadata["watch_tags"] = ",".join(context["tags"])
     for key in ("relative_path", "content_hash", "size_bytes", "manifest_content_hash"):
@@ -1327,6 +1362,17 @@ def _event_metadata(event: Mapping[str, Any]) -> dict[str, NoteMetadataScalar]:
         if host.get(key):
             metadata[key] = str(host[key])
     return metadata
+
+
+def _declared_targets(event: Mapping[str, Any]) -> list[EntityRef]:
+    """Note targets for the question, session, and datasets the event declares."""
+
+    context = _context_payload(event.get("context") or {})
+    return declared_targets(
+        question_id=context["question_id"],
+        session_id=context["session_id"],
+        dataset_ids=context["dataset_ids"],
+    )
 
 
 def _event_requests_draft(event: Mapping[str, Any]) -> bool:

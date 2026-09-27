@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import subprocess
 
 import httpx
@@ -8,6 +9,7 @@ import pytest
 
 from lab_tracker_client import LabTracker
 from lab_tracker_client.client import LTValidationError
+from lab_tracker_client.gitinfo import CommitFilter
 from lab_tracker_client.repo import (
     artifact_from_path,
     capture_commit,
@@ -21,7 +23,9 @@ from lab_tracker_client.repo import (
     outbox_status,
     read_event,
     render_event_note,
+    resolve_outbox_path,
     sync_outbox,
+    validate_event,
 )
 
 
@@ -467,3 +471,156 @@ def test_sync_outbox_dry_run_makes_no_changes(tmp_path, monkeypatch) -> None:
 
     assert summary["results"][0]["action"] == "skipped"
     assert read_event(path)["sync"]["status"] == "pending"
+
+
+# --- declared targets --------------------------------------------------------
+
+
+def test_make_event_labels_question_source(tmp_path, monkeypatch) -> None:
+    _clear_repo_env(monkeypatch)
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1", default_question_id="q-default")
+
+    defaulted = make_event(config, event_type="commit")
+    explicit = make_event(config, event_type="commit", question_id="question-1")
+
+    assert defaulted["question_id"] == "q-default"
+    assert defaulted["question_id_source"] == "config_default"
+    assert explicit["question_id"] == "question-1"
+    assert explicit["question_id_source"] == "explicit"
+
+
+def test_validate_event_rejects_unknown_question_id_source(tmp_path, monkeypatch) -> None:
+    _clear_repo_env(monkeypatch)
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1")
+    event = make_event(config, event_type="commit", question_id="question-1")
+
+    with pytest.raises(LTValidationError):
+        validate_event({**event, "question_id_source": "bogus"})
+
+
+def test_capture_commit_hook_refire_keeps_config_default_source(tmp_path, monkeypatch) -> None:
+    """A bare re-fire must not relabel a config-default question as explicit."""
+
+    _clear_repo_env(monkeypatch)
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1", default_question_id="q-default")
+    capture_commit(config)
+
+    _event, path, action = capture_commit(config)  # bare, hook-style
+
+    assert action == "unchanged"
+    assert read_event(path)["question_id_source"] == "config_default"
+
+    # Declaring the same question explicitly is a real annotation: it upgrades
+    # the recorded provenance instead of being swallowed as "unchanged".
+    annotated, _path, annotated_action = capture_commit(config, question_id="q-default")
+    assert annotated_action == "updated"
+    assert annotated["question_id_source"] == "explicit"
+
+
+def test_sync_outbox_passes_declared_targets_and_source(tmp_path, monkeypatch) -> None:
+    _clear_repo_env(monkeypatch)
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1", default_question_id="q-default")
+    capture_commit(config, dataset_ids=["ds-1"])
+    uploads: list[bytes] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/notes":
+            return _json_response(
+                200, {"data": [], "meta": {"limit": 200, "offset": 0, "total": 0}}
+            )
+        if request.method == "POST" and request.url.path == "/notes/upload-file":
+            uploads.append(request.content)
+            return _json_response(
+                201,
+                {"data": {"note_id": "note-repo", "project_id": "project-1", "status": "staged"}},
+            )
+        return _json_response(500, {"error": {"message": "unexpected request"}})
+
+    with LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler)) as lt:
+        summary = sync_outbox(lt, config)
+
+    assert summary["errors"] == []
+    assert len(uploads) == 1
+    body = uploads[0]
+    assert b'name="targets"' in body
+    assert b'"entity_type": "question"' in body
+    assert b'"entity_id": "q-default"' in body
+    assert b'"entity_type": "dataset"' in body
+    assert b"declared_target_source" in body
+    assert b"config_default" in body
+
+
+# --- commit filter config + outbox resolution ---------------------------------
+
+
+def test_repo_config_round_trips_commit_filter(tmp_path, monkeypatch) -> None:
+    _clear_repo_env(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1")
+    config_path = config.config_path
+    assert config_path is not None
+
+    written = json.loads(config_path.read_text(encoding="utf-8"))
+    assert written["commit_filter"] == {
+        "skip_merges": True,
+        "skip_fixups": True,
+        "skip_wip": False,
+        "skip_path_globs": [],
+    }
+    assert load_config().commit_filter == CommitFilter()
+
+    written["commit_filter"]["skip_wip"] = True
+    written["commit_filter"]["skip_path_globs"] = ["docs/*"]
+    config_path.write_text(json.dumps(written), encoding="utf-8")
+    assert load_config().commit_filter == CommitFilter(skip_wip=True, skip_path_globs=("docs/*",))
+
+    written["commit_filter"]["skip_marges"] = True
+    config_path.write_text(json.dumps(written), encoding="utf-8")
+    with pytest.raises(LTValidationError, match="skip_marges"):
+        load_config()
+
+    # A config written before the filter existed keeps the defaults.
+    del written["commit_filter"]
+    config_path.write_text(json.dumps(written), encoding="utf-8")
+    assert load_config().commit_filter == CommitFilter()
+
+    written["commit_filter"] = "merges"
+    config_path.write_text(json.dumps(written), encoding="utf-8")
+    with pytest.raises(LTValidationError, match="JSON object"):
+        load_config()
+
+
+def test_resolve_outbox_path_without_config_uses_default_and_env(tmp_path, monkeypatch) -> None:
+    _clear_repo_env(monkeypatch)
+    default = (tmp_path / ".lab-tracker" / "outbox" / "repo").resolve()
+
+    assert resolve_outbox_path(tmp_path) == (default, None)
+    assert not default.exists()  # resolving never creates an outbox
+
+    monkeypatch.setenv("LAB_TRACKER_REPO_OUTBOX", str(tmp_path / "custom"))
+    assert resolve_outbox_path(tmp_path) == ((tmp_path / "custom").resolve(), None)
+    monkeypatch.delenv("LAB_TRACKER_REPO_OUTBOX")
+
+    # A config that exists resolves through it...
+    config = init_config(
+        project_id="project-1",
+        outbox="queue/repo",
+        config_path=tmp_path / ".lab-tracker" / "repo.json",
+    )
+    assert resolve_outbox_path(tmp_path) == ((tmp_path / "queue" / "repo").resolve(), None)
+
+    # ...and a broken one falls back to the default while naming the error.
+    assert config.config_path is not None
+    config.config_path.write_text("{not json", encoding="utf-8")
+    outbox, error = resolve_outbox_path(tmp_path)
+    assert outbox == default
+    assert error is not None
+    assert "could not be loaded" in error

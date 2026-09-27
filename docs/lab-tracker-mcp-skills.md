@@ -62,9 +62,11 @@ token, the client logs in with that username/password and retries once after a
 credential is valid but lacks project or role access: tools return it with
 `next_action.action = "request_access"` and never refresh the credential. A
 `403 service_forbidden` or `403 device_forbidden` means the credential's kind or
-scope (for example a read-only `lpat_` token attempting a write) cannot reach
-the route: tools return `next_action.action = "use_capable_credential"`, and the
-fix is a token minted with the needed scope. Credentials are only required when `LAB_TRACKER_AUTH_ENABLED=true`;
+scope (for example a read-only `lpat_` token attempting a write, or a
+`stage_evidence` token asking for a committed note or a `dry_run=false`
+evidence bundle) cannot make the request: tools return
+`next_action.action = "use_capable_credential"`, and the fix is a token minted
+with the needed scope. Credentials are only required when `LAB_TRACKER_AUTH_ENABLED=true`;
 local auth-disabled testing can omit them.
 
 For a private hosted read-only MCP endpoint, enable the compose `mcp` profile:
@@ -102,10 +104,14 @@ retries) unless:
   booting unguarded.
 - `LAB_TRACKER_MCP_API_KEY` is an `lpat_` token the API refuses to let write.
   The API exposes no token introspection to service tokens, so `lt-mcp` sends an
-  empty `POST` to a path no API route serves: the API's token policy answers
-  `403 service_forbidden` for a read-only token before any route runs, while a
-  write-capable token gets `404`. Only the explicit refusal counts as read-only;
-  username/password logins cannot be verified and are refused.
+  empty `POST /notes` — the least-privileged real capture route: the API's token
+  policy answers `403 service_forbidden` for a read-only token before any route
+  runs, while a write-capable token (including one whose only write grant is the
+  `stage_evidence` scope) reaches request validation, which rejects the empty
+  body with `422` before any handler runs, so nothing is created. Only the
+  explicit refusal counts as read-only; `422` and any `2xx` count as
+  write-capable; `404`, `405`, and everything else are indeterminate and stop
+  startup. Username/password logins cannot be verified and are refused.
 
 A default hosted server registers only the read tools and resources. Set
 `LAB_TRACKER_MCP_ALLOW_WRITES=true` to deliberately serve write tools as well
@@ -226,11 +232,29 @@ broader motivating questions.
 
 `lab_tracker_create_note` creates text notes. Note status is note-specific:
 allowed values are `staged`, `committed`, and `archived`; do not use question
-statuses such as `active`. Note metadata accepts an object whose values are
+statuses such as `active`. A note is created `staged` by default and feeds the
+human review queue; `committed` bypasses that queue and is refused for a
+`stage_evidence`-scoped token. Note metadata accepts an object whose values are
 strings, numbers, or booleans, and Lab Tracker normalizes those values to strings
 when storing the note. Nested metadata objects and arrays are not supported. Pass
 `targets` as a list of `{entity_type, entity_id}` objects to attach a source note
 to the most specific relevant graph record.
+
+Every create tool (`lab_tracker_create_question`, `_note`, `_dataset`,
+`_analysis`, `_claim`, `_visualization`, `_goal`) and
+`lab_tracker_record_evidence_bundle` accept an optional `origin`: `user` (a
+person authored the content) or `ai_executed` (the agent authored it on the
+user's request); `ai_suggested` and `user_revised` are reserved for the review
+path and rejected. Whatever the declared origin, every write made with an
+`lpat_` token records the token's label as the record's `origin_provider`
+(truncated to 80 characters), so the graph shows which credential wrote it.
+
+`lab_tracker_request_graph_draft` asks the server-side model to propose graph
+changes from a staged note (`POST /notes/{note_id}/graph-drafts`, mode
+`graph_context` or `image_only`, optional `user_hint`); the proposal lands in
+the Daily Review queue for a person. `lab_tracker_list_my_drafts` lists that
+personal queue (`GET /batches?mine=true`). Neither tool — and no other — can
+accept or commit a draft.
 
 ## Evidence Authoring
 

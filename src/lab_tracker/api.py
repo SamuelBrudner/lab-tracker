@@ -46,6 +46,7 @@ from lab_tracker.services import (
     ClaimService,
     DatasetService,
     DataStoreService,
+    DraftQualityService,
     EntityVersionService,
     EvidenceBundleService,
     ExperimentService,
@@ -74,6 +75,7 @@ from lab_tracker.services import (
     TransactionalDraftCommitCoordinator,
     VisualizationService,
 )
+from lab_tracker.services.graph_draft_batch_policy import DraftingHostFacts
 from lab_tracker.store_authority_registry import StoreAuthorityRegistry
 
 _logger = logging.getLogger(__name__)
@@ -148,6 +150,10 @@ class LabTrackerAPI(
             context
         )
         self.publication_readiness: PublicationReadinessService = PublicationReadinessService(
+            context,
+            projects=self.projects,
+        )
+        self.draft_quality: DraftQualityService = DraftQualityService(
             context,
             projects=self.projects,
         )
@@ -266,6 +272,10 @@ class LabTrackerAPI(
             notes=self.notes,
             authorization=self.project_authorization,
         )
+        graph_draft_records = GraphDraftRecords(
+            context,
+            authorization=self.project_authorization,
+        )
         graph_context_builder = GraphContextBuilder(
             projects=self.projects,
             questions=self.questions,
@@ -276,6 +286,8 @@ class LabTrackerAPI(
             claims=self.claims,
             visualizations=self.visualizations,
             goals=self.goals,
+            exploration=self.exploration,
+            review_memory=graph_draft_records,
         )
         graph_patch_validator = GraphPatchValidator(
             get_graph_entity=graph_context_builder.get_graph_entity,
@@ -290,10 +302,7 @@ class LabTrackerAPI(
             claims=self.claims,
             visualizations=self.visualizations,
             goals=self.goals,
-        )
-        graph_draft_records = GraphDraftRecords(
-            context,
-            authorization=self.project_authorization,
+            exploration=self.exploration,
         )
         self.review_emails: ReviewEmailService = ReviewEmailService(
             context,
@@ -333,8 +342,11 @@ class LabTrackerAPI(
             projects=self.projects,
             notes=self.notes,
             authorization=self.project_authorization,
+            host=DraftingHostFacts(
+                review_email_available=self._settings.review_email_enabled,
+                external_provider=self._settings.graph_draft_provider_is_external(),
+            ),
             provenance_links=self.provenance_links,
-            review_email_available=self._settings.review_email_enabled,
         )
         self.graph_drafts: GraphDraftService = GraphDraftService(
             records=graph_draft_records,

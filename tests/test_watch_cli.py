@@ -108,3 +108,33 @@ def test_watch_cli_sync_acquisition_output(tmp_path, monkeypatch, capsys) -> Non
     assert isinstance(fake.calls[0]["checksum"], str)
     assert len(fake.calls[0]["checksum"]) == 64
     assert fake.calls[0]["size_bytes"] == len("acquired")
+
+
+def test_watch_status_reports_skipped_commits_and_zero_counts(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    from lab_tracker_client import outbox as _outbox
+
+    _clear_watch_env(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    config_path = tmp_path / ".lab-tracker" / "watch.json"
+    lt_cli.main(["watch", "init", "--project", "project-1", "--config", str(config_path)])
+    capsys.readouterr()
+
+    lt_cli.main(["watch", "status", "--config", str(config_path)])
+    status = json.loads(capsys.readouterr().out)
+    # Every count key is present on a fresh outbox, so aggregates sum uniformly.
+    assert status["total"] == 0
+    assert status["pending"] == 0
+    assert status["failed"] == 0
+    assert status["synced"] == 0
+    assert status["skipped_commits"] == 0
+
+    _outbox.record_skipped_commit(
+        status["outbox"],
+        {"adapter": "lt-git-snapshot", "git_commit": "a" * 40, "reason": "merge_commit"},
+    )
+    lt_cli.main(["watch", "status", "--config", str(config_path)])
+    status = json.loads(capsys.readouterr().out)
+    assert status["skipped_commits"] == 1
+    assert status["total"] == 0  # the skip log is not an event

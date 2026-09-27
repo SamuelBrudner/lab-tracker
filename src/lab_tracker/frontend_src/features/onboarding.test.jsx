@@ -58,7 +58,7 @@ describe("OnboardingPage", () => {
     {
       readiness: {
         background_worker_enabled: false,
-        provider: "agentic",
+        provider: "custom",
         provider_credential_configured: false,
         scheduler_enabled: false,
         source_revision: SOURCE_REVISION,
@@ -215,6 +215,7 @@ describe("OnboardingPage", () => {
         cadence_minutes: 720,
         email_notifications_enabled: false,
         enabled: true,
+        external_context_policy: "own_notes_only",
         notification_email: null,
         run_at_local_time: "06:30",
         timezone_name: "America/New_York",

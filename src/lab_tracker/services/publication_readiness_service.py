@@ -2,25 +2,33 @@
 
 from __future__ import annotations
 
-from typing import Protocol
+from collections.abc import Mapping
+from datetime import datetime
+from typing import Final, Protocol
 from uuid import UUID
 
 from lab_tracker.auth import AuthContext
+from lab_tracker.claim_effective_status import ClaimInterpretation, interpret_claims
 from lab_tracker.models import (
     Analysis,
     Claim,
+    ClaimEffectiveStatus,
     ClaimStatus,
     Dataset,
     DatasetStatus,
     EntityRef,
     EntityType,
+    ExplorationNodeStatus,
+    ExplorationNodeType,
     ExternalArtifactReference,
     Goal,
     Note,
     Project,
     PublicationReadinessBrokenExternalRef,
+    PublicationReadinessContestedClaim,
     PublicationReadinessOrphanedEntity,
     PublicationReadinessReport,
+    PublicationReadinessStalePrediction,
     PublicationReadinessUngroundedQuestion,
     PublicationReadinessUnsupportedClaim,
     Question,
@@ -28,8 +36,20 @@ from lab_tracker.models import (
     Session,
     Visualization,
     external_artifact_uri_validation_error,
+    utc_now,
 )
 from lab_tracker.services.base import BaseService, ServiceContext
+
+# A testing prediction whose question already has committed data is reported as
+# stale after this many days. Advisory only: it never blocks the seal.
+STALE_TESTING_CLAIM_DAYS: Final = 30
+_DERIVED_GAP_STATUSES: Final = frozenset(
+    {
+        ClaimEffectiveStatus.CONTESTED,
+        ClaimEffectiveStatus.SUPERSEDED,
+        ClaimEffectiveStatus.INVALIDATED,
+    }
+)
 
 
 class ProjectReadAccess(Protocol):
@@ -73,9 +93,32 @@ class PublicationReadinessService(BaseService):
         notes, _ = repository.query_notes(project_id=project_id, limit=None, offset=0)
         goals, _ = repository.query_goals(project_id=project_id, limit=None, offset=0)
         sessions, _ = repository.query_sessions(project_id=project_id, limit=None, offset=0)
+        claim_edges, _ = repository.query_claim_edges(project_id=project_id, limit=None, offset=0)
+        pivots, _ = repository.query_exploration_nodes(
+            project_id=project_id,
+            node_type=ExplorationNodeType.PIVOT.value,
+            status=ExplorationNodeStatus.COMMITTED.value,
+            limit=None,
+            offset=0,
+        )
 
+        interpretations = interpret_claims(
+            claims,
+            claims_by_id={claim.claim_id: claim for claim in claims},
+            edges=claim_edges,
+            exploration_nodes=pivots,
+            datasets=datasets,
+            analyses=analyses,
+        )
+        committed_question_ids = _committed_dataset_question_ids(datasets)
         unsupported_claims = _unsupported_claims(claims)
-        ungrounded_questions = _ungrounded_questions(questions, datasets)
+        contested_claims = _contested_claims(claims, interpretations)
+        stale_predictions = _stale_predictions(
+            claims,
+            committed_question_ids=committed_question_ids,
+            now=utc_now(),
+        )
+        ungrounded_questions = _ungrounded_questions(questions, committed_question_ids)
         orphaned_entities = _orphaned_entities(
             project_id=project_id,
             questions=questions,
@@ -112,9 +155,12 @@ class PublicationReadinessService(BaseService):
                     claim.external_citations,
                 )
             )
+        # stale_predictions is advisory: an unresolved prediction is a workflow
+        # gap, not a logic inconsistency, so it never blocks the seal.
         seal_level = (
             "ara_l1"
             if not unsupported_claims
+            and not contested_claims
             and not ungrounded_questions
             and not orphaned_entities
             and not broken_external_refs
@@ -123,6 +169,8 @@ class PublicationReadinessService(BaseService):
         return PublicationReadinessReport(
             project_id=project_id,
             unsupported_claims=unsupported_claims,
+            contested_claims=contested_claims,
+            stale_predictions=stale_predictions,
             ungrounded_questions=ungrounded_questions,
             orphaned_entities=orphaned_entities,
             broken_external_refs=broken_external_refs,
@@ -158,21 +206,92 @@ def _unsupported_claims(
     return unsupported
 
 
+def _contested_claims(
+    claims: list[Claim],
+    interpretations: Mapping[UUID, ClaimInterpretation],
+) -> list[PublicationReadinessContestedClaim]:
+    """Supported claims whose derived status no longer reads supported (blocking)."""
+
+    contested: list[PublicationReadinessContestedClaim] = []
+    for claim in claims:
+        if claim.status != ClaimStatus.SUPPORTED:
+            continue
+        interpretation = interpretations[claim.claim_id]
+        if interpretation.effective_status not in _DERIVED_GAP_STATUSES:
+            continue
+        contested.append(
+            PublicationReadinessContestedClaim(
+                claim_id=claim.claim_id,
+                statement=claim.statement,
+                status=claim.status,
+                effective_status=interpretation.effective_status,
+                reason=_contested_reason(interpretation),
+            )
+        )
+    return contested
+
+
+def _contested_reason(interpretation: ClaimInterpretation) -> str:
+    if interpretation.effective_status == ClaimEffectiveStatus.SUPERSEDED:
+        return f"Supported claim is superseded by claim {interpretation.superseded_by_claim_id}."
+    if interpretation.effective_status == ClaimEffectiveStatus.INVALIDATED:
+        return (
+            "Supported claim is invalidated by exploration node "
+            f"{interpretation.invalidated_by_node_id}."
+        )
+    contesters = ", ".join(str(item) for item in interpretation.contested_by_claim_ids)
+    return f"Supported claim is contested by claim(s) {contesters}."
+
+
+def _stale_predictions(
+    claims: list[Claim],
+    *,
+    committed_question_ids: set[UUID],
+    now: datetime,
+) -> list[PublicationReadinessStalePrediction]:
+    """Testing claims older than the threshold whose question already has committed data."""
+
+    stale: list[PublicationReadinessStalePrediction] = []
+    for claim in claims:
+        if claim.status != ClaimStatus.TESTING:
+            continue
+        age_days = (now - claim.created_at).days
+        if age_days < STALE_TESTING_CLAIM_DAYS:
+            continue
+        grounded_question_ids = [
+            question_id
+            for question_id in claim.answers_question_ids
+            if question_id in committed_question_ids
+        ]
+        if not grounded_question_ids:
+            continue
+        stale.append(
+            PublicationReadinessStalePrediction(
+                claim_id=claim.claim_id,
+                statement=claim.statement,
+                status=claim.status,
+                question_ids=grounded_question_ids,
+                age_days=age_days,
+                reason=(
+                    f"Testing claim is {age_days} days old and its question already has "
+                    "committed data; resolve it to supported or rejected."
+                ),
+            )
+        )
+    return stale
+
+
+def _committed_dataset_question_ids(datasets: list[Dataset]) -> set[UUID]:
+    committed = [dataset for dataset in datasets if dataset.status == DatasetStatus.COMMITTED]
+    question_ids = {link.question_id for dataset in committed for link in dataset.question_links}
+    question_ids.update(dataset.primary_question_id for dataset in committed)
+    return question_ids
+
+
 def _ungrounded_questions(
     questions: list[Question],
-    datasets: list[Dataset],
+    committed_dataset_question_ids: set[UUID],
 ) -> list[PublicationReadinessUngroundedQuestion]:
-    committed_dataset_question_ids = {
-        link.question_id
-        for dataset in datasets
-        if dataset.status == DatasetStatus.COMMITTED
-        for link in dataset.question_links
-    }
-    committed_dataset_question_ids.update(
-        dataset.primary_question_id
-        for dataset in datasets
-        if dataset.status == DatasetStatus.COMMITTED
-    )
     return [
         PublicationReadinessUngroundedQuestion(
             question_id=question.question_id,

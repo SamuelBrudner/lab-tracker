@@ -121,6 +121,29 @@ cadence row's timezone starts as `America/New_York` — set yours when you enabl
 it. That per-(project, user) setting decides when each review actually runs; the
 scheduler is just a frequent, cheap poll.
 
+### What leaves the instance
+
+Each settings row carries an `external_context_policy`:
+
+- `own_notes_only` (the default) sends the provider your own staged captures
+  and, as context, only the recent notes you wrote.
+- `project_notes` also sends colleagues' recent project notes as context; the
+  packet labels every recent note with `author_scope` (`own` or `colleague`)
+  and names the `context_owner` it was scoped to.
+
+A personal row inherits the project-default policy when it is first created;
+you can narrow it back at any time. When the configured drafting provider is
+**external** (its base URL is not a loopback host; see
+[configuration.md](configuration.md)), turning the cadence on or choosing
+`project_notes` requires `external_provider_acknowledged: true` on the same
+`PATCH`, which only an interactive session can send. It is recorded once on
+that row as `external_provider_acknowledged_at` /
+`external_provider_acknowledged_by` and never asked again; a local provider
+needs no acknowledgement at all. The Batches page shows the choice as
+**Context sent to the AI provider** with a consent box that disappears once
+the row is acknowledged. To keep one capture out of scheduled drafting
+altogether, see [curation-states.md](curation-states.md).
+
 ### Try it without waiting
 
 - **Run now** on the Batches page, or

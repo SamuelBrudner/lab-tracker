@@ -152,6 +152,11 @@ deliberately out of scope here; that is the Morning Read layer
 
 ### 4. Agentic draft client (`lab-tracker-1325.4`)
 
+Status (2026-09-25): the shipped `AgenticGraphDraftClient` pre-pass was
+removed; its duplicate-avoidance goal is served by the drafter packet's
+lexical `cue_matched` slot and `selection_reason` tags in
+`graph_draft_context.py`.
+
 Replace the single-shot call with a tool-using agent behind the seam
 that already exists: `GraphDraftClient` is a protocol with three
 interchangeable provider implementations, injected via
@@ -212,8 +217,10 @@ convergence path, not off it.
 agent-facing MCP server; because it is open source, its concrete
 choices were read directly (verified in source 2026-07-06) and compared
 against the shipped `AgenticGraphDraftClient`
-(`graph_drafting.py`, landed 2026-07-03, `lab-tracker-1325.4` closed).
-Note the shipped shape: not a live tool loop but a deterministic
+(`graph_drafting.py`, landed 2026-07-03, `lab-tracker-1325.4` closed)
+[the wrapper no longer exists as of 2026-09-25, and `agentic` is not an
+accepted `LAB_TRACKER_GRAPH_DRAFT_PROVIDER` value]. Note the shipped
+shape: not a live tool loop but a deterministic
 read-only *pre-pass* — tokenize staged notes, substring-match against
 node summaries already in the batch context, attach a bounded
 `agentic_tool_trace` plus a link-before-create hint, then delegate to
@@ -283,6 +290,10 @@ adapters thin and optional, per `build-vs-buy-boundaries.md`.
 4. **Proposer:** a tool-using agent behind the `GraphDraftClient`
    protocol replaces the single-shot call as the default drafting path,
    read-only by construction, with single-shot providers as fallback.
+   [Removed 2026-09-25: the `AgenticGraphDraftClient` wrapper no longer
+   exists and `agentic` is not an accepted
+   `LAB_TRACKER_GRAPH_DRAFT_PROVIDER` value; see the status note in
+   section 4.]
 5. **Precondition:** the structural fail-closed human-commit gate must
    be in mainline first — verified already satisfied (landed 2026-07-02,
    commits `6889069`/`57277e6`); `lab-tracker-1325.1` records the

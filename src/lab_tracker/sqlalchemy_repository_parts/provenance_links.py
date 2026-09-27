@@ -4,12 +4,24 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import String, cast, func, literal, select, union_all
 from sqlalchemy.orm import Session as OrmSession
 
-from lab_tracker.db_models import ProvenanceLinkModel
-from lab_tracker.models import ProvenanceLink
+from lab_tracker.db_models import (
+    DatasetFileModel,
+    DatasetModel,
+    NoteModel,
+    ProvenanceLinkModel,
+)
+from lab_tracker.models import (
+    MIN_CARRIERS_PER_HASH,
+    ContentHashCarrier,
+    EntityRef,
+    EntityType,
+    ProvenanceLink,
+)
 from lab_tracker.repository import EntityRepository
+from lab_tracker.sqlalchemy_mapper_parts.common import as_utc
 from lab_tracker.sqlalchemy_mappers import (
     apply_provenance_link_to_model,
     provenance_link_from_model,
@@ -74,6 +86,63 @@ class SQLAlchemyProvenanceLinkRepository(EntityRepository[ProvenanceLink]):
             stmt = stmt.where(ProvenanceLinkModel.status == status)
         stmt = stmt.order_by(ProvenanceLinkModel.created_at, ProvenanceLinkModel.link_id)
         return [provenance_link_from_model(row) for row in self._session.scalars(stmt)]
+
+    def list_content_hash_carriers(self, project_id: UUID) -> list[ContentHashCarrier]:
+        """One UNION over indexed note hashes and uploaded dataset-file checksums.
+
+        Only hashes carried by at least ``MIN_CARRIERS_PER_HASH`` rows in the
+        project come back, ordered so the earliest capture of each hash leads.
+        """
+
+        self._session.flush()
+        project_value = str(project_id)
+        note_rows = select(
+            NoteModel.evidence_content_hash.label("content_hash"),
+            literal(EntityType.NOTE.value).label("entity_type"),
+            cast(NoteModel.note_id, String()).label("entity_id"),
+            NoteModel.created_at.label("captured_at"),
+        ).where(
+            NoteModel.project_id == project_value,
+            NoteModel.evidence_content_hash.is_not(None),
+        )
+        file_rows = (
+            select(
+                DatasetFileModel.checksum.label("content_hash"),
+                literal(EntityType.DATASET.value).label("entity_type"),
+                cast(DatasetModel.dataset_id, String()).label("entity_id"),
+                DatasetFileModel.created_at.label("captured_at"),
+            )
+            .select_from(DatasetFileModel)
+            .join(DatasetModel, DatasetModel.dataset_id == DatasetFileModel.dataset_id)
+            .where(DatasetModel.project_id == project_value)
+        )
+        carriers = union_all(note_rows, file_rows).subquery("content_hash_carriers")
+        shared = (
+            select(carriers.c.content_hash)
+            .group_by(carriers.c.content_hash)
+            .having(func.count() >= MIN_CARRIERS_PER_HASH)
+        )
+        stmt = (
+            select(carriers)
+            .where(carriers.c.content_hash.in_(shared))
+            .order_by(
+                carriers.c.content_hash,
+                carriers.c.captured_at,
+                carriers.c.entity_type,
+                carriers.c.entity_id,
+            )
+        )
+        return [
+            ContentHashCarrier(
+                content_hash=row.content_hash,
+                entity=EntityRef(
+                    entity_type=EntityType(row.entity_type),
+                    entity_id=UUID(row.entity_id),
+                ),
+                captured_at=as_utc(row.captured_at),
+            )
+            for row in self._session.execute(stmt)
+        ]
 
     def query(
         self,

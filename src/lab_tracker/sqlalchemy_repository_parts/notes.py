@@ -20,7 +20,12 @@ from lab_tracker.member_onboarding import (
     FIRST_CAPTURE_AT_KEY,
     FIRST_CAPTURE_NOTE_ID_KEY,
 )
-from lab_tracker.models import EntityType, Note, NoteMetadataScalar
+from lab_tracker.models import (
+    EntityType,
+    Note,
+    NoteMetadataScalar,
+    evidence_content_hash_from_metadata,
+)
 from lab_tracker.repository import EntityRepository
 from lab_tracker.sqlalchemy_mappers import (
     apply_note_to_model,
@@ -40,6 +45,13 @@ from .common import (
 
 _AUTO_TRANSCRIPTION_CLAIM_ID = "auto_transcription_claim_id"
 _AUTO_TRANSCRIPTION_CLAIMED_AT = "auto_transcription_claimed_at"
+
+
+def _assign_note_metadata(row: NoteModel, metadata: dict[str, str]) -> None:
+    """Write metadata and its derived, indexed evidence hash column together."""
+
+    row.note_metadata = metadata
+    row.evidence_content_hash = evidence_content_hash_from_metadata(metadata)
 
 
 def _metadata_datetime(value: object) -> datetime | None:
@@ -161,6 +173,7 @@ class SQLAlchemyNoteRepository(EntityRepository[Note]):
             )
             .values(
                 note_metadata=metadata,
+                evidence_content_hash=evidence_content_hash_from_metadata(metadata),
                 updated_at=claimed_at,
             )
             .execution_options(synchronize_session=False)
@@ -203,14 +216,14 @@ class SQLAlchemyNoteRepository(EntityRepository[Note]):
             row.updated_at != claimed_updated_at
             or bool((row.transcribed_text or "").strip())
         ):
-            row.note_metadata = metadata
+            _assign_note_metadata(row, metadata)
             row.updated_at = updated_at
             self._session.flush()
             return self.notes_from_rows([row])[0]
 
         metadata.update(metadata_updates)
         row.transcribed_text = text
-        row.note_metadata = metadata
+        _assign_note_metadata(row, metadata)
         row.updated_at = updated_at
         self._session.flush()
         return self.notes_from_rows([row])[0]
@@ -238,7 +251,7 @@ class SQLAlchemyNoteRepository(EntityRepository[Note]):
             return self.notes_from_rows([row])[0]
         metadata.pop(_AUTO_TRANSCRIPTION_CLAIM_ID, None)
         metadata.pop(_AUTO_TRANSCRIPTION_CLAIMED_AT, None)
-        row.note_metadata = metadata
+        _assign_note_metadata(row, metadata)
         row.updated_at = updated_at
         self._session.flush()
         return self.notes_from_rows([row])[0]
@@ -277,7 +290,7 @@ class SQLAlchemyNoteRepository(EntityRepository[Note]):
         metadata = dict(row.note_metadata or {})
         metadata.update(metadata_updates)
         row.transcribed_text = text
-        row.note_metadata = metadata
+        _assign_note_metadata(row, metadata)
         row.updated_at = updated_at
         self._session.flush()
         return self.notes_from_rows([row])[0]
@@ -316,7 +329,11 @@ class SQLAlchemyNoteRepository(EntityRepository[Note]):
                     NoteModel.note_id == str(note_id),
                     NoteModel.updated_at == prior_updated_at,
                 )
-                .values(note_metadata=metadata, updated_at=captured_at)
+                .values(
+                    note_metadata=metadata,
+                    evidence_content_hash=evidence_content_hash_from_metadata(metadata),
+                    updated_at=captured_at,
+                )
                 .execution_options(synchronize_session=False)
             )
             if result.rowcount == 1:
@@ -378,6 +395,7 @@ class SQLAlchemyNoteRepository(EntityRepository[Note]):
             )
             .values(
                 note_metadata=merged_metadata,
+                evidence_content_hash=evidence_content_hash_from_metadata(merged_metadata),
                 updated_at=checkpoint.updated_at,
             )
             .execution_options(synchronize_session=False)
@@ -429,7 +447,11 @@ class SQLAlchemyNoteRepository(EntityRepository[Note]):
                 NoteModel.note_id == str(note_id),
                 NoteModel.updated_at == prior_updated_at,
             )
-            .values(note_metadata=metadata, updated_at=completed_at)
+            .values(
+                note_metadata=metadata,
+                evidence_content_hash=evidence_content_hash_from_metadata(metadata),
+                updated_at=completed_at,
+            )
             .execution_options(synchronize_session=False)
         )
         if result.rowcount != 1:
@@ -473,7 +495,7 @@ class SQLAlchemyNoteRepository(EntityRepository[Note]):
                 ALIGNMENT_RESOLUTION_KEY: resolution,
             }
         )
-        row.note_metadata = metadata
+        _assign_note_metadata(row, metadata)
         row.updated_at = resolved_at
         self._session.flush()
         self._session.expire_all()
@@ -530,6 +552,7 @@ class SQLAlchemyNoteRepository(EntityRepository[Note]):
         until: datetime | None = None,
         client_capture_id: str | None = None,
         capture_bundle_id: str | None = None,
+        evidence_content_hash: str | None = None,
         target_entity_type: str | None = None,
         target_entity_id: UUID | None = None,
         limit: int | None = None,
@@ -575,6 +598,12 @@ class SQLAlchemyNoteRepository(EntityRepository[Note]):
             )
             stmt = stmt.where(bundle_clause)
             count_stmt = count_stmt.where(bundle_clause)
+        if evidence_content_hash is not None:
+            # Exact, case-sensitive lookup key served by
+            # ix_notes_project_evidence_content_hash (not a search).
+            hash_clause = NoteModel.evidence_content_hash == evidence_content_hash
+            stmt = stmt.where(hash_clause)
+            count_stmt = count_stmt.where(hash_clause)
         pattern = substring_pattern(search)
         if pattern is not None:
             search_clause = or_(

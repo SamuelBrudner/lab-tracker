@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext
+from lab_tracker.claim_effective_status import load_claim_interpretations
 from lab_tracker.errors import NotFoundError, OpaqueTargetNotFoundError, ValidationError
 from lab_tracker.models import (
     Claim,
@@ -21,6 +22,7 @@ from lab_tracker.models import (
 )
 from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
 from lab_tracker.reference_registry import DeletableEntity
+from lab_tracker.schemas import ClaimRead
 from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.dataset_service import DatasetService
 from lab_tracker.services.deletion_references import prepare_entity_deletion
@@ -186,6 +188,12 @@ class ClaimService(BaseService):
             ),
         )
 
+    def interpret_claims(self, claims: Sequence[Claim]) -> list[ClaimRead]:
+        """Attach the read-time interpretation to each claim, preserving input order."""
+
+        interpretations = load_claim_interpretations(self.repository, claims)
+        return [ClaimRead.from_claim(claim, interpretations[claim.claim_id]) for claim in claims]
+
     def update_claim(
         self,
         claim_id: UUID,
@@ -288,17 +296,20 @@ class ClaimService(BaseService):
             terminal_reason,
             entity_name="Claim",
         )
+        support_links_provided = is_provided(supported_by_dataset_ids) or is_provided(
+            supported_by_analysis_ids
+        )
         if claim.status != ClaimStatus.PROPOSED and (
             is_provided(statement)
             or is_provided(confidence)
-            or is_provided(supported_by_dataset_ids)
-            or is_provided(supported_by_analysis_ids)
             or is_provided(answers_question_ids)
             or is_provided(external_citations)
             or is_provided(falsification_criteria)
             or is_provided(verification_plan)
             or is_provided(refuting_outcome)
         ):
+            raise ValidationError("Only proposed claims can be edited.")
+        if support_links_provided and not _support_links_editable(claim.status, next_status):
             raise ValidationError("Only proposed claims can be edited.")
         normalized_statement: str | None = None
         if is_provided(statement):
@@ -469,6 +480,40 @@ class ClaimService(BaseService):
             repository.claim_edges.save(edge)
         return edge
 
+    def delete_claim_edge(
+        self,
+        claim_id: UUID,
+        edge_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> ClaimEdge:
+        """Remove a mis-asserted relation; the correction path for derived status.
+
+        Edges carry no status of their own, so there is no state guard: deleting
+        the edge simply stops it counting toward the target's effective status.
+        An edge that exists under another source claim is reported as absent so
+        the URL does not leak which claim it belongs to.
+        """
+
+        edge = self._get_claim_edge_for_source(claim_id, edge_id)
+        claim = self.get_claim(edge.claim_id)
+        self.authorization.require_contributor(claim.project_id, actor=actor)
+        with self.application_transaction(), self.unit_of_work() as repository:
+            repository.lock_project_references(claim.project_id)
+            edge = self._get_claim_edge_for_source(claim_id, edge_id)
+            repository.claim_edges.delete(edge.edge_id)
+        return edge
+
+    def _get_claim_edge_for_source(self, claim_id: UUID, edge_id: UUID) -> ClaimEdge:
+        edge = self.get_from_repository(
+            entity_id=edge_id,
+            label="Claim edge",
+            loader=lambda repository: repository.claim_edges.get(edge_id),
+        )
+        if edge.claim_id != claim_id:
+            raise OpaqueTargetNotFoundError("Claim edge does not exist.")
+        return edge
+
     def list_claim_edges(
         self,
         *,
@@ -519,6 +564,19 @@ class ClaimService(BaseService):
             if question.project_id != project_id:
                 raise ValidationError("Answered questions must belong to the same project.")
         return resolved_question_ids
+
+
+def _support_links_editable(current: ClaimStatus, next_status: ClaimStatus) -> bool:
+    """Support links change while proposed, or in the PATCH that resolves testing to supported.
+
+    The second case is deliberate: a testing prediction can only be resolved
+    with the evidence that tested it, and that evidence did not exist when the
+    claim entered testing. Every other locked field stays proposed-only.
+    """
+
+    if current == ClaimStatus.PROPOSED:
+        return True
+    return current == ClaimStatus.TESTING and next_status == ClaimStatus.SUPPORTED
 
 
 def _normalize_optional_text(value: str | None) -> str | None:

@@ -25,7 +25,9 @@ from .shared import (
     ensure_project_read,
     handlers_from_request,
     list_response,
+    origin_stamp,
     record_usage_view,
+    stamp_kwargs,
     validate_pagination,
 )
 
@@ -47,6 +49,7 @@ def build_visualizations_router(api: LabTrackerAPI) -> APIRouter:
             caption=payload.caption,
             related_claim_ids=payload.related_claim_ids,
             actor=actor,
+            **stamp_kwargs(origin_stamp(actor, payload.origin)),
         )
         return Envelope(data=visualization)
 

@@ -1,12 +1,15 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, renderHook, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   AppLink,
   appBasePath,
+  inAppDepth,
   isContextualProjectReady,
+  navigateBack,
   parseAppRoute,
   resolveAppPath,
+  useAppRoute,
 } from "./routing.jsx";
 
 const QUESTION_ID = "fb3454e0-6319-40bb-864c-9de91d0b04f1";
@@ -115,6 +118,50 @@ describe("AppLink", () => {
     const link = screen.getByRole("link", { name: "Docs" });
     expect(link.getAttribute("href")).toBe("https://example.com/docs");
     fireEvent.click(link, { preventDefault: () => {} });
+    expect(navigate).not.toHaveBeenCalled();
+  });
+});
+
+describe("in-app history", () => {
+  afterEach(() => {
+    window.history.replaceState({}, "", "/app");
+  });
+
+  it("navigate records in-app history depth on history.state", () => {
+    window.history.replaceState(null, "", "/app");
+    const { result } = renderHook(() => useAppRoute());
+
+    act(() => result.current.navigate("/app/graph"));
+    expect(inAppDepth(window.history.state)).toBe(1);
+
+    act(() => result.current.navigate("/app/batches"));
+    expect(inAppDepth(window.history.state)).toBe(2);
+
+    // A replace keeps the depth: it rewrites the current entry, not the trail.
+    act(() => result.current.replace("/app/batches?view=all"));
+    expect(inAppDepth(window.history.state)).toBe(2);
+    expect(result.current.route).toEqual({ kind: "batches" });
+  });
+
+  it("navigateBack falls back to /app when the page was opened directly", () => {
+    window.history.replaceState(null, "", "/app/graph");
+    const back = vi.spyOn(window.history, "back").mockImplementation(() => {});
+    const navigate = vi.fn();
+
+    navigateBack(navigate);
+
+    expect(navigate).toHaveBeenCalledWith("/app");
+    expect(back).not.toHaveBeenCalled();
+  });
+
+  it("navigateBack steps back when an in-app entry exists", () => {
+    window.history.replaceState({ labTracker: { depth: 1 } }, "", "/app/graph");
+    const back = vi.spyOn(window.history, "back").mockImplementation(() => {});
+    const navigate = vi.fn();
+
+    navigateBack(navigate);
+
+    expect(back).toHaveBeenCalledTimes(1);
     expect(navigate).not.toHaveBeenCalled();
   });
 });

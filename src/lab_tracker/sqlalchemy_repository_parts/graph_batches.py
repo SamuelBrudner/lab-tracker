@@ -18,6 +18,7 @@ from lab_tracker.db_models import (
 )
 from lab_tracker.db_types import ensure_uuid
 from lab_tracker.models import (
+    ExternalContextPolicy,
     GraphDraftBatchRun,
     GraphDraftBatchRunStatus,
     GraphDraftBatchSettings,
@@ -83,6 +84,9 @@ def settings_to_model(settings: GraphDraftBatchSettings) -> GraphDraftBatchSetti
         email_notifications_enabled=settings.email_notifications_enabled,
         notification_email=settings.notification_email,
         notification_email_confirmed_at=settings.notification_email_confirmed_at,
+        external_context_policy=settings.external_context_policy.value,
+        external_provider_acknowledged_at=settings.external_provider_acknowledged_at,
+        external_provider_acknowledged_by=settings.external_provider_acknowledged_by,
         created_at=settings.created_at,
         updated_at=settings.updated_at,
         updated_by=settings.updated_by,
@@ -103,6 +107,9 @@ def apply_settings_to_model(
     row.email_notifications_enabled = settings.email_notifications_enabled
     row.notification_email = settings.notification_email
     row.notification_email_confirmed_at = settings.notification_email_confirmed_at
+    row.external_context_policy = settings.external_context_policy.value
+    row.external_provider_acknowledged_at = settings.external_provider_acknowledged_at
+    row.external_provider_acknowledged_by = settings.external_provider_acknowledged_by
     row.created_at = settings.created_at
     row.updated_at = settings.updated_at
     row.updated_by = settings.updated_by
@@ -123,6 +130,11 @@ def settings_from_model(row: GraphDraftBatchSettingsModel) -> GraphDraftBatchSet
         email_notifications_enabled=bool(row.email_notifications_enabled),
         notification_email=row.notification_email,
         notification_email_confirmed_at=_as_utc_optional(row.notification_email_confirmed_at),
+        external_context_policy=ExternalContextPolicy(row.external_context_policy),
+        external_provider_acknowledged_at=_as_utc_optional(
+            row.external_provider_acknowledged_at
+        ),
+        external_provider_acknowledged_by=row.external_provider_acknowledged_by,
         created_at=as_utc(row.created_at),
         updated_at=as_utc(row.updated_at),
         updated_by=row.updated_by,

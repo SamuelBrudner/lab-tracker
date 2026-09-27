@@ -100,8 +100,8 @@ self-hosted runner on that machine or network.
 
 ## Git Post-Commit Hook
 
-For local analysis repositories, install a `post-commit` hook that sends each new
-commit to Lab Tracker as staged analysis evidence:
+For local analysis repositories, install the `lt repo` post-commit hook that
+queues each new commit as staged analysis evidence:
 
 ```bash
 cd /path/to/analysis-repo
@@ -109,25 +109,35 @@ lt hooks install --project "$PROJECT_ID" --dry-run
 lt hooks install --project "$PROJECT_ID" --yes
 ```
 
-The hook calls the packaged `lt git snapshot` after a commit succeeds. It only
-lands the capture in the evidence inbox; proposal generation waits for the
-configured daily-review schedule (or an explicit on-demand review trigger). It
-does not block or rewrite the commit: if Lab Tracker is down or credentials are
-missing, the evidence remains in the local outbox and the hook prints a warning
-before exiting successfully. The installer writes a single managed block
-(delimited by `# --- BEGIN/END LAB TRACKER GRAPH DRAFT HOOK ---`) and re-running
-it updates that block in place; pass `--force` to append the block to a
-pre-existing unmanaged hook. The older PowerShell installer upgrades in place
-because it uses the same markers.
+The hook calls `lt repo report` after a commit succeeds. It only lands the
+capture in the evidence inbox (the commit event carries a bounded diff and the
+repository-conventions snapshot); proposal generation waits for the configured
+daily-review schedule (or an explicit on-demand review trigger). It does not
+block or rewrite the commit: if Lab Tracker is down or credentials are missing,
+the evidence remains in the local outbox and the hook prints a warning before
+exiting successfully. Merge commits and `fixup!`/`squash!` subjects are skipped
+by default, visibly (see the commit filter in
+[repo-report-capture.md](repo-report-capture.md)). The installer writes a single
+managed block (delimited by `# --- BEGIN/END LAB TRACKER REPO HOOK ---`),
+creates `.lab-tracker/repo.json` when absent, and re-running it updates that
+block in place; pass `--force` to place the block ahead of a pre-existing
+unmanaged hook. Older installs — the `GRAPH DRAFT` block written by earlier
+versions and by the PowerShell installer, which called `lt git snapshot` — are
+migrated in place. `lt git snapshot` itself is deprecated for one release and
+prints a migration notice on every run.
 
 Set these environment variables to override the installed defaults without editing
 the hook:
 
-- `LAB_TRACKER_GIT_CAPTURE_ENABLED=0` disables the hook temporarily
-- `LAB_TRACKER_GIT_DRAFT_ENABLED=0` is the legacy alias for disabling it
-- `LAB_TRACKER_BASE_URL` points at a different Lab Tracker API
-- `LAB_TRACKER_PROJECT_ID` changes the target project
+- `LAB_TRACKER_REPO_HOOK_ENABLED=0` disables the hook temporarily
 - `LAB_TRACKER_LT` chooses the `lt` executable used by the hook
+- `LAB_TRACKER_REPO_CONFIG` points the hook at a different `repo.json`
+- `LAB_TRACKER_BASE_URL` points at a different Lab Tracker API (a `--base-url`
+  given at install time is baked in as the overridable default)
+
+A not-yet-migrated `GRAPH DRAFT` block still honours
+`LAB_TRACKER_GIT_CAPTURE_ENABLED=0` (and its older alias
+`LAB_TRACKER_GIT_DRAFT_ENABLED`) and `LAB_TRACKER_PROJECT_ID`.
 
 ## Relationship to the evidence inbox
 

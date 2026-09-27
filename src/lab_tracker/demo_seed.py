@@ -7,6 +7,12 @@ from uuid import UUID
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.auth import LOCAL_AUTH_USER_ID, AuthContext, Role
+from lab_tracker.golden_day import (
+    GOLDEN_DAY_PROVIDER,
+    ScriptedGoldenDayDraftClient,
+    golden_day_expected_patch,
+    seed_golden_day,
+)
 from lab_tracker.models import (
     AnalysisStatus,
     ClaimStatus,
@@ -16,6 +22,8 @@ from lab_tracker.models import (
     EntityRef,
     EntityType,
     ExternalArtifactReference,
+    GraphChangeSet,
+    GraphDraftMode,
     NoteStatus,
     QuestionStatus,
     QuestionType,
@@ -36,10 +44,15 @@ class DemoSeedResult:
     analysis_count: int
     claim_count: int
     visualization_count: int
+    staged_note_count: int = 0
+    review_change_set_id: UUID | None = None
 
     def as_dict(self) -> dict[str, object]:
         payload = asdict(self)
         payload["project_id"] = str(self.project_id)
+        payload["review_change_set_id"] = (
+            str(self.review_change_set_id) if self.review_change_set_id is not None else None
+        )
         return payload
 
 
@@ -48,13 +61,21 @@ def seed_demo_data(
     *,
     actor: AuthContext | None = None,
     allow_duplicates: bool = False,
+    with_review: bool = False,
 ) -> DemoSeedResult:
-    """Populate a small, inspectable demo project through the public API facade."""
+    """Populate a small, inspectable demo project through the public API facade.
+
+    ``with_review`` additionally stages the golden-day captures and one READY
+    scripted batch draft (no provider call) so the review page has work to show.
+    It is idempotent per demo project.
+    """
 
     resolved_actor = actor or AuthContext(user_id=LOCAL_AUTH_USER_ID, role=Role.ADMIN)
     if not allow_duplicates:
         existing = _find_demo_project(api)
         if existing is not None:
+            if with_review:
+                _seed_review_walkthrough(api, existing.project_id, actor=resolved_actor)
             return _summarize_project(api, existing.project_id, created=False)
 
     project = api.create_project(
@@ -153,6 +174,8 @@ def seed_demo_data(
         related_claim_ids=[claim.claim_id],
         actor=resolved_actor,
     )
+    if with_review:
+        _seed_review_walkthrough(api, project.project_id, actor=resolved_actor)
     return _summarize_project(api, project.project_id, created=True)
 
 
@@ -163,6 +186,45 @@ def _find_demo_project(api: LabTrackerAPI):
     return None
 
 
+def _find_review_change_set(api: LabTrackerAPI, project_id: UUID) -> GraphChangeSet | None:
+    change_sets, _ = api.query_graph_change_sets(
+        project_id=project_id,
+        draft_mode=GraphDraftMode.GRAPH_BATCH,
+        include_operations=False,
+    )
+    for change_set in change_sets:
+        if change_set.provider == GOLDEN_DAY_PROVIDER:
+            return change_set
+    return None
+
+
+def _seed_review_walkthrough(
+    api: LabTrackerAPI,
+    project_id: UUID,
+    *,
+    actor: AuthContext,
+) -> GraphChangeSet:
+    """Stage the golden-day captures and draft them with the scripted client.
+
+    The batch goes through the ordinary batch drafting service (context
+    builder, patch validation, READY transition) with a client that returns
+    the fixture's expected patch, so no provider is ever called. The review
+    assignee is recorded by identifier only: the local admin has no users row,
+    so a user foreign key cannot be set for it.
+    """
+
+    existing = _find_review_change_set(api, project_id)
+    if existing is not None:
+        return existing
+    graph, notes = seed_golden_day(api, project_id=project_id, actor=actor)
+    return api.create_batch_graph_draft(
+        notes,
+        draft_client=ScriptedGoldenDayDraftClient(golden_day_expected_patch(graph, notes)),
+        actor=actor,
+        review_assignee=str(actor.user_id),
+    )
+
+
 def _summarize_project(
     api: LabTrackerAPI,
     project_id: UUID,
@@ -170,14 +232,20 @@ def _summarize_project(
     created: bool,
 ) -> DemoSeedResult:
     project = api.get_project(project_id)
+    notes = api.list_notes(project_id=project_id)
+    review_change_set = _find_review_change_set(api, project_id)
     return DemoSeedResult(
         created=created,
         project_id=project.project_id,
         project_name=project.name,
         question_count=len(api.list_questions(project_id=project_id)),
         dataset_count=len(api.list_datasets(project_id=project_id)),
-        note_count=len(api.list_notes(project_id=project_id)),
+        note_count=len(notes),
         analysis_count=len(api.list_analyses(project_id=project_id)),
         claim_count=len(api.list_claims(project_id=project_id)),
         visualization_count=len(api.list_visualizations(project_id=project_id)),
+        staged_note_count=sum(1 for note in notes if note.status == NoteStatus.STAGED),
+        review_change_set_id=(
+            review_change_set.change_set_id if review_change_set is not None else None
+        ),
     )

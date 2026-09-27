@@ -11,6 +11,7 @@ from uuid import UUID
 from sqlalchemy import func, literal, or_, select
 from sqlalchemy.orm import Session as OrmSession
 
+from lab_tracker.coverage_query import unreviewed_capture_counts_by_project
 from lab_tracker.db_models import (
     AnalysisDatasetModel,
     AnalysisModel,
@@ -56,6 +57,9 @@ from lab_tracker.sqlalchemy_repository_parts.common import (
 )
 
 STALE_PROJECT_AFTER = timedelta(days=30)
+# Flag a project once at least this many staged captures have never met a
+# reviewed (committed or rejected) draft.
+UNREVIEWED_CAPTURE_FLAG_THRESHOLD = 5
 OPEN_GOAL_STATUSES = {GoalStatus.PLANNED.value, GoalStatus.IN_PROGRESS.value}
 
 
@@ -242,6 +246,10 @@ def _summary_by_project(
         project_ids,
         statuses={ClaimStatus.PROPOSED.value},
     )
+    unreviewed_capture_counts = unreviewed_capture_counts_by_project(
+        session,
+        [str(project_id) for project_id in project_ids],
+    )
     last_activity_at = _last_activity_by_project(session, project_rows)
     owners = _owners_by_project(session, project_ids)
     dataset_gap_counts = _dataset_gap_counts(session, project_ids)
@@ -253,6 +261,7 @@ def _summary_by_project(
         project_id = project.project_id
         open_question_count = open_question_counts[project_id]
         unreviewed_claim_count = unreviewed_claim_counts[project_id]
+        unreviewed_capture_count = unreviewed_capture_counts[str(project_id)]
         activity_at = last_activity_at.get(project_id)
         summaries[project_id] = PortfolioProjectSummary(
             project_id=ensure_uuid(project_id),
@@ -263,11 +272,13 @@ def _summary_by_project(
             committed_dataset_count=committed_dataset_counts[project_id],
             staged_analysis_count=staged_analysis_counts[project_id],
             unreviewed_claim_count=unreviewed_claim_count,
+            unreviewed_capture_count=unreviewed_capture_count,
             last_activity_at=activity_at,
             owners=owners.get(project_id, []),
             triage_flags=_triage_flags(
                 open_question_count=open_question_count,
                 unreviewed_claim_count=unreviewed_claim_count,
+                unreviewed_capture_count=unreviewed_capture_count,
                 last_activity_at=activity_at,
                 dataset_gap_count=dataset_gap_counts[project_id],
                 analysis_gap_count=analysis_gap_counts[project_id],
@@ -599,6 +610,7 @@ def _triage_flags(
     *,
     open_question_count: int,
     unreviewed_claim_count: int,
+    unreviewed_capture_count: int,
     last_activity_at: datetime | None,
     dataset_gap_count: int,
     analysis_gap_count: int,
@@ -644,6 +656,14 @@ def _triage_flags(
                 label="Unreviewed claims",
                 count=unreviewed_claim_count,
                 severity="info",
+            )
+        )
+    if unreviewed_capture_count >= UNREVIEWED_CAPTURE_FLAG_THRESHOLD:
+        flags.append(
+            PortfolioTriageFlag(
+                key="unreviewed_captures",
+                label="Unreviewed captures",
+                count=unreviewed_capture_count,
             )
         )
     if overdue_goal_count:

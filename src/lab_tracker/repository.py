@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import builtins
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from contextlib import AbstractContextManager
 from datetime import datetime
-from typing import Generic, Protocol, TypeVar
+from typing import TYPE_CHECKING, Generic, Protocol, TypeVar
 from uuid import UUID
 
 from lab_tracker.collection_models import (
@@ -15,11 +15,13 @@ from lab_tracker.collection_models import (
     AcquisitionCollectionSnapshot,
     AcquisitionCollectionSummary,
 )
+from lab_tracker.draft_quality import DraftQualityRow
 from lab_tracker.models import (
     AcquisitionOutput,
     Analysis,
     Claim,
     ClaimEdge,
+    ContentHashCarrier,
     Dataset,
     DatasetFile,
     DataStore,
@@ -37,6 +39,7 @@ from lab_tracker.models import (
     NoteMetadataScalar,
     OwnershipReassignment,
     Project,
+    ProjectCoverageSummary,
     ProjectGroup,
     ProjectMembership,
     ProvenanceLink,
@@ -52,6 +55,9 @@ from lab_tracker.models import (
     Visualization,
 )
 from lab_tracker.reference_registry import BlockingReference, DeletableEntity
+
+if TYPE_CHECKING:
+    from lab_tracker.schemas import GraphSearchHit
 
 EntityT = TypeVar("EntityT")
 
@@ -98,6 +104,11 @@ class ProvenanceLinkRepository(EntityRepository[ProvenanceLink], Protocol):
         status: str | None = None,
     ) -> list[ProvenanceLink]:
         """Return a project's links (optionally one status) in creation order."""
+
+    def list_content_hash_carriers(self, project_id: UUID) -> list[ContentHashCarrier]:
+        """Return every note/dataset-file carrier of a content hash that at least
+        two carriers in the project share, ordered by content_hash, captured_at,
+        entity_type, entity_id."""
 
 
 class VisualizationRepository(EntityRepository[Visualization], Protocol):
@@ -435,6 +446,18 @@ class GraphChangeSetRepository(EntityRepository[GraphChangeSet], Protocol):
         failed_at: datetime,
     ) -> GraphChangeSet | None:
         """Persist a FAILED result only while the caller owns the live claim."""
+
+    def draft_quality_rows(
+        self,
+        *,
+        project_id: UUID,
+        since: datetime | None,
+    ) -> builtins.list[DraftQualityRow]:
+        """Project one row per (change set, operation) for the draft-quality ledger.
+
+        Change sets without operations yield one row with the operation fields
+        ``None``; ``since`` keeps change sets created at or after that instant.
+        """
 
 
 class ReviewEmailOutboxRepository(Protocol):
@@ -932,6 +955,7 @@ class LabTrackerRepository(Protocol):
         until: datetime | None = None,
         client_capture_id: str | None = None,
         capture_bundle_id: str | None = None,
+        evidence_content_hash: str | None = None,
         target_entity_type: str | None = None,
         target_entity_id: UUID | None = None,
         limit: int | None = None,
@@ -943,6 +967,8 @@ class LabTrackerRepository(Protocol):
         ``capture_bundle_id`` matches the text of the note's
         ``metadata.capture_bundle_id``; callers compare the exact metadata
         value themselves when non-string values matter.
+        ``evidence_content_hash`` is an exact match on the indexed
+        ``notes.evidence_content_hash`` column.
         """
 
     def project_ids_with_search_matches(
@@ -953,6 +979,16 @@ class LabTrackerRepository(Protocol):
         limit: int | None = None,
     ) -> set[UUID]:
         """Return distinct project IDs whose questions or notes match search."""
+
+    def search_graph_nodes(
+        self,
+        *,
+        project_id: UUID,
+        query: str,
+        entity_types: Sequence[str],
+        limit: int,
+    ) -> list[GraphSearchHit]:
+        """Ranked lexical graph-node matches inside one project (GraphQueryService.search order)."""
 
     def query_sessions(
         self,
@@ -1050,6 +1086,9 @@ class LabTrackerRepository(Protocol):
     ) -> tuple[list[ExplorationNode], int]:
         """Query exploration trajectory nodes with filters and pagination."""
 
+    def project_coverage_summary(self, project_id: UUID) -> ProjectCoverageSummary:
+        """Derive the capture-coverage summary for one project (never stored)."""
+
     def query_provenance_links(
         self,
         *,
@@ -1139,6 +1178,14 @@ class LabTrackerRepository(Protocol):
         ``statuses`` matches any listed status; ``assigned_to_user_id`` and
         ``unassigned_only`` select a reviewer's queue or unassigned oversight.
         """
+
+    def query_draft_quality_rows(
+        self,
+        *,
+        project_id: UUID,
+        since: datetime | None,
+    ) -> builtins.list[DraftQualityRow]:
+        """Project the draft-quality ledger rows for one project (see ``draft_quality_rows``)."""
 
     def claim_graph_change_set_for_commit(
         self,

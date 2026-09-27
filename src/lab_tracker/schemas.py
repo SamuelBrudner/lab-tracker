@@ -23,6 +23,7 @@ from pydantic.json_schema import SkipJsonSchema
 from pydantic_core import CoreSchema, core_schema
 
 from lab_tracker.auth import Role
+from lab_tracker.claim_effective_status import ClaimInterpretation
 from lab_tracker.data_store_definition import (
     DATA_STORE_CREDENTIAL_REF_MAX_LENGTH,
     DATA_STORE_ENDPOINT_MAX_LENGTH,
@@ -43,10 +44,13 @@ from lab_tracker.db_models import (
 )
 from lab_tracker.goals_attributes import validate_goal_attributes
 from lab_tracker.models import (
+    EVIDENCE_CONTENT_HASH_MAX_LENGTH,
+    EVIDENCE_CONTENT_HASH_METADATA_KEY,
     Analysis,
     AnalysisStatus,
     Claim,
     ClaimConfidence,
+    ClaimEffectiveStatus,
     ClaimInput,
     ClaimRelation,
     ClaimStatus,
@@ -54,6 +58,7 @@ from lab_tracker.models import (
     DatasetFile,
     DatasetStatus,
     DataStore,
+    EntityOrigin,
     EntityRef,
     EntityType,
     ExperimentStatus,
@@ -61,6 +66,7 @@ from lab_tracker.models import (
     ExplorationNodeStatus,
     ExplorationNodeType,
     ExternalArtifactReference,
+    ExternalContextPolicy,
     Goal,
     GoalLink,
     GoalLinkStatus,
@@ -73,12 +79,14 @@ from lab_tracker.models import (
     GraphDraftBatchRunStatus,
     GraphDraftMode,
     GraphDraftPurpose,
+    GraphOperationRejectReason,
     GroupMembership,
     Note,
     NoteArchiveReason,
     NoteMetadataScalar,
     NoteStatus,
     OwnershipReassignment,
+    ProjectCoverageSummary,
     ProjectGroup,
     ProjectGroupKind,
     ProjectMembership,
@@ -226,11 +234,44 @@ def _normalize_note_metadata_for_request(
         if not cleaned_key:
             raise ValueError("metadata key must not be empty")
         cleaned[cleaned_key] = value.strip() if isinstance(value, str) else str(value)
+    content_hash = cleaned.get(EVIDENCE_CONTENT_HASH_METADATA_KEY)
+    if content_hash is not None and len(content_hash) > EVIDENCE_CONTENT_HASH_MAX_LENGTH:
+        # Mirrored into the indexed notes.evidence_content_hash String column,
+        # so an over-long value must be a 422 here, not a database error.
+        raise ValueError(
+            f"{EVIDENCE_CONTENT_HASH_METADATA_KEY} must be at most "
+            f"{EVIDENCE_CONTENT_HASH_MAX_LENGTH} characters."
+        )
     return cleaned
 
 
 class RequestModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+# Origins a direct write may declare. The other two are assigned by the
+# graph-draft review path (ai_suggested on drafting, user_revised on edit).
+DIRECT_WRITE_ORIGINS = frozenset({EntityOrigin.USER, EntityOrigin.AI_EXECUTED})
+
+
+class OriginDeclaringRequest(RequestModel):
+    """Create request that self-declares who authored the record."""
+
+    origin: EntityOrigin = Field(
+        default=EntityOrigin.USER,
+        description=(
+            "Self-declared record origin for a direct write: user (a person authored "
+            "it) or ai_executed (an agent authored it on the user's request). "
+            "ai_suggested/user_revised are reserved for the graph-draft review path."
+        ),
+    )
+
+    @field_validator("origin")
+    @classmethod
+    def _origin_is_a_direct_write_origin(cls, value: EntityOrigin) -> EntityOrigin:
+        if value not in DIRECT_WRITE_ORIGINS:
+            raise ValueError("origin must be one of: user, ai_executed")
+        return value
 
 
 class PatchRequestModel(RequestModel):
@@ -418,8 +459,10 @@ class PersonalAccessTokenCreate(RequestModel):
     role: Role = Role.VIEWER
     read_only: bool = True
     # "all" keeps the role-based service policy; "batch_run_due" narrows the token
-    # to POST /batches/run-due only (the daily-review scheduler credential).
-    scope: Literal["all", "batch_run_due"] = "all"
+    # to POST /batches/run-due only (the daily-review scheduler credential);
+    # "stage_evidence" allows reads plus staged-note capture/patching, draft
+    # requests, transcription, and evidence-bundle previews, never a commit.
+    scope: Literal["all", "batch_run_due", "stage_evidence"] = "all"
     expires_at: datetime
 
 
@@ -653,7 +696,7 @@ class OwnershipReassignmentCreate(RequestModel):
 OwnershipReassignmentRead = OwnershipReassignment
 
 
-class QuestionCreate(RequestModel):
+class QuestionCreate(OriginDeclaringRequest):
     project_id: UUID
     text: NonBlankStr
     question_type: QuestionType
@@ -733,7 +776,7 @@ class ExperimentUpdate(PatchRequestModel):
     status: ExperimentStatus | SkipJsonSchema[None] = None
 
 
-class DatasetCreate(RequestModel):
+class DatasetCreate(OriginDeclaringRequest):
     project_id: UUID
     commit_manifest: DatasetCommitManifestIn | None = None
     commit_hash: str | None = None
@@ -760,7 +803,7 @@ class DatasetUpdate(PatchRequestModel):
     question_links: list[QuestionLinkIn] | SkipJsonSchema[None] = None
 
 
-class NoteCreate(RequestModel):
+class NoteCreate(OriginDeclaringRequest):
     project_id: UUID
     raw_content: NonBlankStr
     transcribed_text: str | None = None
@@ -942,16 +985,26 @@ class MemberOnboardingOwnerQueueItem(BaseModel):
 
 
 class GraphDraftOperationUpdate(PatchRequestModel):
-    non_nullable_fields = frozenset({"payload", "status"})
+    non_nullable_fields = frozenset({"payload", "status", "deferred"})
 
     payload: dict[str, Any] | SkipJsonSchema[None] = None
     status: GraphChangeOperationStatus | SkipJsonSchema[None] = None
     review_note: str | None = None
+    deferred: bool | SkipJsonSchema[None] = None
+    # Nullable on purpose: ``{"status": "rejected", "reject_reason": null}`` clears it.
+    reject_reason: GraphOperationRejectReason | None = None
 
 
 class GraphDraftCreateRequest(RequestModel):
     mode: GraphDraftMode = GraphDraftMode.GRAPH_CONTEXT
     user_hint: NonBlankStr | None = None
+    # Required (true) when the configured drafting provider is external: the
+    # note, its sources, and the project context leave the instance.
+    external_provider_acknowledged: bool = False
+
+
+class GraphDraftAnalysisCreateRequest(RequestModel):
+    external_provider_acknowledged: bool = False
 
 
 class GraphDraftCommitRequest(RequestModel):
@@ -961,6 +1014,12 @@ class GraphDraftCommitRequest(RequestModel):
 class GraphDraftReviewRequest(RequestModel):
     status: GraphChangeSetStatus
     note: NonBlankStr | None = None
+
+
+class GraphDraftSubmitRequest(RequestModel):
+    """Optional submit body; the note is recorded only when nothing was accepted."""
+
+    review_note: NonBlankStr | None = None
 
 
 class GraphChangeSetSummary(BaseModel):
@@ -987,6 +1046,7 @@ class GraphChangeSetSummary(BaseModel):
     commit_message: str | None = None
     error_metadata: dict[str, Any] = Field(default_factory=dict)
     operation_count: int = 0
+    deferred_count: int = 0
     created_at: datetime
     created_by: str | None = None
     created_by_user_id: UUID | None = None
@@ -1028,6 +1088,8 @@ class GraphDraftBatchSettingsUpdate(PatchRequestModel):
             "timezone_name",
             "user_id",
             "email_notifications_enabled",
+            "external_context_policy",
+            "external_provider_acknowledged",
         }
     )
 
@@ -1038,6 +1100,10 @@ class GraphDraftBatchSettingsUpdate(PatchRequestModel):
     user_id: UUID | SkipJsonSchema[None] = None
     email_notifications_enabled: bool | SkipJsonSchema[None] = None
     notification_email: str | None = Field(default=None, max_length=254)
+    external_context_policy: ExternalContextPolicy | SkipJsonSchema[None] = None
+    # Consent is only ever given, never revoked through a patch: the literal
+    # mirrors member onboarding's acknowledgement contract.
+    external_provider_acknowledged: Literal[True] | SkipJsonSchema[None] = None
 
 
 class GraphDraftBatchRunRequest(RequestModel):
@@ -1109,7 +1175,7 @@ class AcquisitionOutputCreate(RequestModel):
     size_bytes: int | None = Field(default=None, ge=0)
 
 
-class AnalysisCreate(RequestModel):
+class AnalysisCreate(OriginDeclaringRequest):
     project_id: UUID
     dataset_ids: list[UUID] = Field(..., min_length=1)
     method_hash: AnalysisMethodHashStr
@@ -1134,7 +1200,7 @@ class AnalysisUpdate(PatchRequestModel):
     terminal_reason: NonBlankStr | None = None
 
 
-class ClaimCreate(RequestModel):
+class ClaimCreate(OriginDeclaringRequest):
     project_id: UUID
     statement: NonBlankStr
     confidence: ClaimConfidence
@@ -1192,6 +1258,29 @@ class ClaimUpdate(PatchRequestModel):
 class ClaimEdgeCreate(RequestModel):
     target_claim_id: UUID
     relation: ClaimRelation
+
+
+class ClaimRead(Claim):
+    """A claim plus its read-time interpretation; the derived fields are never stored."""
+
+    effective_status: ClaimEffectiveStatus
+    superseded_by_claim_id: UUID | None = None
+    contested_by_claim_ids: list[UUID] = Field(default_factory=list)
+    invalidated_by_node_id: UUID | None = None
+    pre_registered: bool
+
+    @classmethod
+    def from_claim(cls, claim: Claim, interpretation: ClaimInterpretation) -> ClaimRead:
+        return cls.model_validate(
+            {
+                **claim.model_dump(),
+                "effective_status": interpretation.effective_status,
+                "superseded_by_claim_id": interpretation.superseded_by_claim_id,
+                "contested_by_claim_ids": list(interpretation.contested_by_claim_ids),
+                "invalidated_by_node_id": interpretation.invalidated_by_node_id,
+                "pre_registered": interpretation.pre_registered,
+            }
+        )
 
 
 class ExplorationNodeCreate(RequestModel):
@@ -1271,7 +1360,7 @@ class ProvenanceLinkStatusUpdate(RequestModel):
 ProvenanceLinkRead = ProvenanceLink
 
 
-class GoalCreateFields(RequestModel):
+class GoalCreateFields(OriginDeclaringRequest):
     goal_type: GoalType
     title: GoalTitleStr
     summary: str | None = None
@@ -1367,7 +1456,7 @@ class DataStoreCreate(RequestModel):
 DataStoreRead = DataStore
 
 
-class VisualizationCreate(RequestModel):
+class VisualizationCreate(OriginDeclaringRequest):
     analysis_id: UUID
     viz_type: VisualizationTypeStr
     file_path: VisualizationFilePathStr
@@ -1556,7 +1645,7 @@ EvidenceBundleSourceNote = Annotated[
 ]
 
 
-class EvidenceBundleRequest(RequestModel):
+class EvidenceBundleRequest(OriginDeclaringRequest):
     project_id: UUID
     primary_question_id: UUID | None = None
     dataset: EvidenceBundleDataset | SkipJsonSchema[None] = None
@@ -1711,6 +1800,8 @@ class GraphOverviewRead(BaseModel):
     open_goals: list[GraphNodeSummary] = Field(default_factory=list)
     open_questions: list[GraphNodeSummary] = Field(default_factory=list)
     recent_nodes: list[GraphNodeSummary] = Field(default_factory=list)
+    # Required, not defaulted: a missing derivation must fail loud.
+    coverage: ProjectCoverageSummary
 
 
 class GraphSearchHit(BaseModel):
@@ -1781,6 +1872,7 @@ class PortfolioTriageFlag(BaseModel):
         "datasets_without_analyses",
         "analyses_without_claims",
         "unreviewed_claims",
+        "unreviewed_captures",
         "overdue_goals",
     ]
     label: str
@@ -1797,6 +1889,7 @@ class PortfolioProjectSummary(BaseModel):
     committed_dataset_count: int = Field(..., ge=0)
     staged_analysis_count: int = Field(..., ge=0)
     unreviewed_claim_count: int = Field(..., ge=0)
+    unreviewed_capture_count: int = Field(..., ge=0)
     last_activity_at: datetime | None = None
     owners: list[PortfolioProjectOwner] = Field(default_factory=list)
     triage_flags: list[PortfolioTriageFlag] = Field(default_factory=list)

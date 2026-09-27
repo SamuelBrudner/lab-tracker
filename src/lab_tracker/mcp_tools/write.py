@@ -91,8 +91,14 @@ def lab_tracker_create_question(
     hypothesis: str | None = None,
     status: str | None = None,
     parent_question_ids: list[str] | None = None,
+    origin: str | None = None,
 ) -> JsonObject:
-    """Create a question after project/goal scope is known."""
+    """Create a question after project/goal scope is known.
+
+    Only when the user asks. This commits a canonical record immediately; the default
+    staged status is a lifecycle state, not a review gate. Pass origin="ai_executed"
+    when you authored the text.
+    """
     return _write_tool(
         "lab_tracker_create_question",
         lambda client: client.create_question(
@@ -102,6 +108,7 @@ def lab_tracker_create_question(
             hypothesis=hypothesis,
             status=status,
             parent_question_ids=parent_question_ids,
+            origin=origin,
         ),
         hint=next_action(
             "lab_tracker_link_node_to_goal",
@@ -185,8 +192,15 @@ def lab_tracker_create_note(
     targets: list[dict[str, str]] | None = None,
     metadata: dict[str, NoteMetadataScalar] | None = None,
     status: str | None = None,
+    origin: str | None = None,
 ) -> JsonObject:
-    """Create a text note when the user asks to record source context."""
+    """Create a text note when the user asks to record source context.
+
+    The note is created staged (status defaults to staged) and feeds the human review
+    queue; status="committed" bypasses that queue and is refused for
+    stage_evidence-scoped tokens. Pass origin="ai_executed" when you authored the
+    content.
+    """
     return _write_tool(
         "lab_tracker_create_note",
         lambda client: client.create_note(
@@ -196,6 +210,7 @@ def lab_tracker_create_note(
             targets=targets,
             metadata=metadata,
             status=status,
+            origin=origin,
         ),
         hint=next_action(
             "lab_tracker_create_question",
@@ -211,11 +226,13 @@ def lab_tracker_create_dataset(
     commit_manifest: JsonObject | None = None,
     commit_hash: str | None = None,
     status: str | None = "staged",
+    origin: str | None = None,
 ) -> JsonObject:
     """Create a dataset before analyses, claims, and visualizations.
 
     Only when the user asks. This commits a canonical record immediately; the staged
     status is a lifecycle state, not a review gate that a human still has to accept.
+    Pass origin="ai_executed" when you authored the record.
     """
     return _write_tool(
         "lab_tracker_create_dataset",
@@ -226,6 +243,7 @@ def lab_tracker_create_dataset(
             commit_manifest=commit_manifest,
             commit_hash=commit_hash,
             status=status,
+            origin=origin,
         ),
         hint=next_action(
             "lab_tracker_create_analysis",
@@ -241,11 +259,13 @@ def lab_tracker_create_analysis(
     code_version: str,
     environment_hash: str | None = None,
     status: str | None = "staged",
+    origin: str | None = None,
 ) -> JsonObject:
     """Create an analysis after datasets and before claims or figures.
 
     Only when the user asks. This commits a canonical record immediately; the staged
-    status is a lifecycle state, not a review gate.
+    status is a lifecycle state, not a review gate. Pass origin="ai_executed" when
+    you authored the record.
     """
     return _write_tool(
         "lab_tracker_create_analysis",
@@ -256,6 +276,7 @@ def lab_tracker_create_analysis(
             code_version=code_version,
             environment_hash=environment_hash,
             status=status,
+            origin=origin,
         ),
         hint=next_action(
             "lab_tracker_create_claim",
@@ -276,11 +297,13 @@ def lab_tracker_create_claim(
     supported_by_analysis_ids: list[str] | None = None,
     answers_question_ids: list[str] | None = None,
     external_citations: list[JsonObject] | None = None,
+    origin: str | None = None,
 ) -> JsonObject:
     """Create a claim after linking supporting datasets or analyses.
 
     Only when the user asks. This commits a canonical record immediately; the proposed
-    status is a lifecycle state, not a review gate.
+    status is a lifecycle state, not a review gate. Pass origin="ai_executed" when
+    you authored the statement.
     """
     return _write_tool(
         "lab_tracker_create_claim",
@@ -296,6 +319,7 @@ def lab_tracker_create_claim(
             supported_by_analysis_ids=supported_by_analysis_ids,
             answers_question_ids=answers_question_ids,
             external_citations=external_citations,
+            origin=origin,
         ),
         hint=next_action(
             "lab_tracker_create_visualization",
@@ -330,10 +354,12 @@ def lab_tracker_create_visualization(
     file_path: str,
     caption: str | None = None,
     related_claim_ids: list[str] | None = None,
+    origin: str | None = None,
 ) -> JsonObject:
     """Register a visualization after its analysis and related claims exist.
 
-    Only when the user asks; this commits a canonical record immediately.
+    Only when the user asks; this commits a canonical record immediately. Pass
+    origin="ai_executed" when you authored the record.
     """
     return _write_tool(
         "lab_tracker_create_visualization",
@@ -343,6 +369,7 @@ def lab_tracker_create_visualization(
             file_path=file_path,
             caption=caption,
             related_claim_ids=related_claim_ids,
+            origin=origin,
         ),
         hint=next_action(
             "lab_tracker_upload_visualization_file",
@@ -360,10 +387,12 @@ def lab_tracker_create_goal(
     target_date: str | None = None,
     external_ref: str | None = None,
     attributes: JsonObject | None = None,
+    origin: str | None = None,
 ) -> JsonObject:
     """Create a goal/output before linking questions, datasets, or claims.
 
-    Only when the user asks; this commits a canonical record immediately.
+    Only when the user asks; this commits a canonical record immediately. Pass
+    origin="ai_executed" when you authored the record.
     """
     return _write_tool(
         "lab_tracker_create_goal",
@@ -376,6 +405,7 @@ def lab_tracker_create_goal(
             target_date=target_date,
             external_ref=external_ref,
             attributes=attributes,
+            origin=origin,
         ),
         hint=next_action(
             "lab_tracker_link_node_to_goal",
@@ -469,6 +499,32 @@ def lab_tracker_upload_visualization_file(
     )
 
 
+def lab_tracker_request_graph_draft(
+    note_id: str,
+    mode: str = "graph_context",
+    user_hint: str | None = None,
+) -> JsonObject:
+    """Ask the server-side model to propose graph changes from a staged note.
+
+    Creates a change set for a person to review in the Daily Review queue; the agent
+    can neither accept nor commit it. mode is graph_context (default) or image_only;
+    user_hint steers the draft. Only when the user asks.
+    """
+    return _write_tool(
+        "lab_tracker_request_graph_draft",
+        lambda client: client.request_graph_draft(
+            note_id=note_id,
+            mode=mode,
+            user_hint=user_hint,
+        ),
+        hint=next_action(
+            "lab_tracker_list_my_drafts",
+            "The proposal lands in the human review queue; list it, never accept or "
+            "commit it.",
+        ),
+    )
+
+
 def lab_tracker_record_evidence_bundle(
     project_id: str,
     primary_question_id: str | None = None,
@@ -479,6 +535,7 @@ def lab_tracker_record_evidence_bundle(
     source_note: JsonObject | None = None,
     dry_run: bool = True,
     idempotency_key: str | None = None,
+    origin: str | None = None,
 ) -> JsonObject:
     """Preview or atomically record an evidence bundle; defaults to dry-run.
 
@@ -494,6 +551,9 @@ def lab_tracker_record_evidence_bundle(
     through one atomic bundle endpoint. A requested local visualization upload is a
     client-side follow-up after that commit; an attachment failure is reported explicitly
     and does not roll the graph records back.
+
+    A stage_evidence-scoped token may only preview (dry_run=true); committing needs an
+    all-scope writable token. origin applies to every component the bundle creates.
     """
     return _record_evidence_bundle_tool(
         project_id=project_id,
@@ -505,6 +565,7 @@ def lab_tracker_record_evidence_bundle(
         source_note=source_note,
         dry_run=dry_run,
         idempotency_key=idempotency_key,
+        origin=origin,
         allow_local_files=True,
     )
 
@@ -519,6 +580,7 @@ def _hosted_record_evidence_bundle(
     source_note: JsonObject | None = None,
     dry_run: bool = True,
     idempotency_key: str | None = None,
+    origin: str | None = None,
 ) -> JsonObject:
     """Preview or atomically record an evidence bundle; defaults to dry-run.
 
@@ -533,6 +595,9 @@ def _hosted_record_evidence_bundle(
     that component's create fields. This hosted server never reads local files, so
     visualization upload_file/upload_file_path are refused; record the visualization's
     file_path locator instead.
+
+    A stage_evidence-scoped token may only preview (dry_run=true); committing needs an
+    all-scope writable token. origin applies to every component the bundle creates.
     """
     return _record_evidence_bundle_tool(
         project_id=project_id,
@@ -544,6 +609,7 @@ def _hosted_record_evidence_bundle(
         source_note=source_note,
         dry_run=dry_run,
         idempotency_key=idempotency_key,
+        origin=origin,
         allow_local_files=False,
     )
 
@@ -559,6 +625,7 @@ def _record_evidence_bundle_tool(
     source_note: JsonObject | None,
     dry_run: bool,
     idempotency_key: str | None,
+    origin: str | None,
     allow_local_files: bool,
 ) -> JsonObject:
     return _write_tool(
@@ -574,6 +641,7 @@ def _record_evidence_bundle_tool(
             source_note=source_note,
             dry_run=dry_run,
             idempotency_key=idempotency_key,
+            origin=origin,
             allow_local_files=allow_local_files,
         ),
         hint=next_action(
@@ -597,6 +665,7 @@ WRITE_TOOLS = (
     lab_tracker_update_goal,
     lab_tracker_link_node_to_goal,
     lab_tracker_upload_visualization_file,
+    lab_tracker_request_graph_draft,
     lab_tracker_record_evidence_bundle,
 )
 

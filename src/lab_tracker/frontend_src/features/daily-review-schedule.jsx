@@ -11,6 +11,16 @@ const BATCH_CADENCE_OPTIONS = [
   { label: "Weekly", value: "10080" },
 ];
 
+// Which notes a scheduled draft may send to the drafting provider. The
+// values are the server's ExternalContextPolicy enum.
+const DEFAULT_EXTERNAL_CONTEXT_POLICY = "own_notes_only";
+const EXTERNAL_CONTEXT_POLICY_OPTIONS = [
+  { label: "Only my notes", value: "own_notes_only" },
+  { label: "All project notes, including colleagues'", value: "project_notes" },
+];
+const PROVIDER_CONSENT_TEXT =
+  "I consent to send my staged captures and project context to the configured external AI provider.";
+
 // The API accepts any cadence of at least an hour (settable via the API, CLI
 // or MCP), so a stored cadence outside the presets is shown as its own option
 // rather than letting the select display a preset it did not load.
@@ -65,6 +75,12 @@ function DailyReviewScheduleForm({
   const [emailNotificationsEnabled, setEmailNotificationsEnabled] =
     useState(false);
   const [notificationEmail, setNotificationEmail] = useState("");
+  const [externalContextPolicy, setExternalContextPolicy] = useState(
+    DEFAULT_EXTERNAL_CONTEXT_POLICY
+  );
+  // The acknowledgement is sent only when the person ticks the box on this
+  // save; once the settings row records it, the box is no longer offered.
+  const [providerConsent, setProviderConsent] = useState(false);
   // Each load bumps the generation; a response (or failure) from an older
   // load — e.g. for a previously selected project — is ignored so it can never
   // populate the form that "Save cadence" PATCHes into the current project.
@@ -92,6 +108,8 @@ function DailyReviewScheduleForm({
     setTimezoneName(detectedTimeZone());
     setEmailNotificationsEnabled(false);
     setNotificationEmail("");
+    setExternalContextPolicy(DEFAULT_EXTERNAL_CONTEXT_POLICY);
+    setProviderConsent(false);
     if (!projectId) {
       setLoading(false);
       return;
@@ -118,6 +136,9 @@ function DailyReviewScheduleForm({
       );
       setNotificationEmail(
         reviewEmailAvailable ? nextSettings.notification_email || "" : ""
+      );
+      setExternalContextPolicy(
+        nextSettings.external_context_policy || DEFAULT_EXTERNAL_CONTEXT_POLICY
       );
     } catch (err) {
       if (!isCurrent()) {
@@ -163,12 +184,14 @@ function DailyReviewScheduleForm({
             email_notifications_enabled:
               reviewEmailAvailable && emailNotificationsEnabled,
             enabled,
+            external_context_policy: externalContextPolicy,
             notification_email:
               reviewEmailAvailable && emailNotificationsEnabled
                 ? notificationEmail.trim() || null
                 : null,
             run_at_local_time: runAtLocalTime,
             timezone_name: timezoneName,
+            ...(providerConsent ? { external_provider_acknowledged: true } : {}),
           },
           method: "PATCH",
           token,
@@ -179,6 +202,7 @@ function DailyReviewScheduleForm({
         return;
       }
       setSettings(nextSettings);
+      setProviderConsent(false);
       onSaved(nextSettings);
       setFlash("Daily review schedule updated.");
     } catch (err) {
@@ -316,6 +340,41 @@ function DailyReviewScheduleForm({
           </p>
         </>
       )}
+      <label>
+        Context sent to the AI provider
+        <select
+          value={externalContextPolicy}
+          disabled={disabled}
+          onChange={(event) => setExternalContextPolicy(event.target.value)}
+        >
+          {EXTERNAL_CONTEXT_POLICY_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </label>
+      <p className="subtle">
+        Your own staged captures always go to the provider when the review is
+        drafted. &ldquo;All project notes&rdquo; also sends colleagues&apos; recent
+        notes as context.
+      </p>
+      {settings && !settings.external_provider_acknowledged_at ? (
+        <label className="inline toggle-row">
+          <input
+            type="checkbox"
+            checked={providerConsent}
+            disabled={disabled}
+            onChange={(event) => setProviderConsent(event.target.checked)}
+          />
+          {PROVIDER_CONSENT_TEXT}
+        </label>
+      ) : null}
+      {settings?.external_provider_acknowledged_at ? (
+        <p className="subtle">
+          Acknowledged {formatDate(settings.external_provider_acknowledged_at)}
+        </p>
+      ) : null}
       {settings?.next_run_at ? (
         <p className="subtle">Next run: {formatDate(settings.next_run_at)}</p>
       ) : null}

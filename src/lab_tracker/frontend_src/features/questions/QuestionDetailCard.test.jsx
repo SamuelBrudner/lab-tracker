@@ -1,6 +1,6 @@
 import * as React from "react";
 
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { apiResponse, installFetchMock } from "../../test/utils.js";
@@ -172,5 +172,42 @@ describe("QuestionDetailCard refactor form", () => {
       expect(props.navigate).toHaveBeenCalledWith("/app/questions/question-replacement")
     );
     expect(refactorPosts()).toHaveLength(1);
+  });
+});
+
+describe("QuestionDetailCard Back", () => {
+  function renderWithDepth(depth) {
+    window.history.replaceState(
+      depth ? { labTracker: { depth } } : null,
+      "",
+      `/app/questions/${SOURCE_ID}`
+    );
+    installFetchMock(
+      baseRoutes({
+        questionPages: [
+          {
+            offset: 0,
+            response: paged([question({ questionId: SOURCE_ID, text: "Source question" })]),
+          },
+        ],
+        notePages: [{ offset: 0, response: paged([]) }],
+      })
+    );
+    return renderCard();
+  }
+
+  it("Back uses in-app history with /app fallback", async () => {
+    const back = vi.spyOn(window.history, "back").mockImplementation(() => {});
+
+    const direct = renderWithDepth(0);
+    fireEvent.click(await screen.findByRole("button", { name: "Back" }));
+    expect(direct.navigate).toHaveBeenCalledWith("/app");
+    expect(back).not.toHaveBeenCalled();
+    cleanup();
+
+    const fromApp = renderWithDepth(1);
+    fireEvent.click(await screen.findByRole("button", { name: "Back" }));
+    expect(back).toHaveBeenCalledTimes(1);
+    expect(fromApp.navigate).not.toHaveBeenCalled();
   });
 });

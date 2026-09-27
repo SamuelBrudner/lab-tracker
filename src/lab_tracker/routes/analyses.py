@@ -31,8 +31,10 @@ from .shared import (
     ensure_project_read,
     handlers_from_request,
     list_response,
+    origin_stamp,
     provenance_base_url,
     record_usage_view,
+    stamp_kwargs,
     validate_pagination,
     wants_jsonld,
 )
@@ -58,6 +60,7 @@ def build_analyses_router(api: LabTrackerAPI) -> APIRouter:
             status=payload.status or analysis_default_status(),
             terminal_reason=payload.terminal_reason,
             actor=actor,
+            **stamp_kwargs(origin_stamp(actor, payload.origin)),
         )
         return Envelope(data=analysis)
 

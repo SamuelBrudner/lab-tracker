@@ -88,6 +88,7 @@ def record_evidence_bundle(
     source_note: JsonObject | None = None,
     dry_run: bool = True,
     idempotency_key: str | None = None,
+    origin: str | None = None,
     allow_local_files: bool = True,
 ) -> JsonObject:
     """Preview or atomically record one evidence bundle through the HTTP API.
@@ -126,6 +127,7 @@ def record_evidence_bundle(
             source_note=server_components["source_note"],
             dry_run=dry_run,
             idempotency_key=idempotency_key,
+            origin=origin,
         )
         validated = _validate_bundle_response(
             response,

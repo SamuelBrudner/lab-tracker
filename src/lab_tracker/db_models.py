@@ -24,6 +24,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from lab_tracker.db import Base
 from lab_tracker.db_types import GUID, EnumType, UtcDateTime
 from lab_tracker.models import (
+    EVIDENCE_CONTENT_HASH_MAX_LENGTH,
     AcceptanceMode,
     AnalysisStatus,
     ClaimRelation,
@@ -509,6 +510,7 @@ class NoteModel(Base):
             "client_capture_id",
             name="uq_notes_project_client_capture",
         ),
+        Index("ix_notes_project_evidence_content_hash", "project_id", "evidence_content_hash"),
     )
 
     note_id: Mapped[UUID] = mapped_column(
@@ -534,6 +536,13 @@ class NoteModel(Base):
         "metadata", JSON, default=dict
     )
     client_capture_id: Mapped[str | None] = mapped_column(String(120))
+    # Derived from metadata["evidence_content_hash"] by the mappers and the
+    # repository's direct metadata writes; it exists only so the hash can be
+    # indexed (project_id, evidence_content_hash) and filtered without JSON
+    # extraction. The metadata JSON stays the source of truth.
+    evidence_content_hash: Mapped[str | None] = mapped_column(
+        String(EVIDENCE_CONTENT_HASH_MAX_LENGTH)
+    )
     status: Mapped[NoteStatus] = mapped_column(EnumType(NoteStatus, length=20), default="staged")
     archived_reason: Mapped[str | None] = mapped_column(String(32))
     archived_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
@@ -783,6 +792,15 @@ class GraphDraftBatchSettingsModel(Base):
     )
     notification_email: Mapped[str | None] = mapped_column(String(320))
     notification_email_confirmed_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    # Stored as the ExternalContextPolicy value; the mapper converts.
+    external_context_policy: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="own_notes_only",
+        server_default="own_notes_only",
+    )
+    external_provider_acknowledged_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    external_provider_acknowledged_by: Mapped[str | None] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         UtcDateTime,

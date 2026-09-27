@@ -1,6 +1,10 @@
-import { describe, expect, it } from "vitest";
+import * as React from "react";
+
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
 
 import {
+  ProjectGraphExplorer,
   buildFlowGraph,
   computeFlowLayout,
   computeQuestionLayout,
@@ -340,5 +344,38 @@ describe("type filtering", () => {
     const graph = { nodes: [q("Q", "question")], edges: [] };
     expect(filterGraphByHiddenTypes(graph, new Set())).toBe(graph);
     expect(filterGraphByHiddenTypes(null, new Set(["note"]))).toBe(null);
+  });
+});
+
+describe("ProjectGraphExplorer Back", () => {
+  function renderWithDepth(depth) {
+    window.history.replaceState(depth ? { labTracker: { depth } } : null, "", "/app/graph");
+    const navigate = vi.fn();
+    render(
+      <ProjectGraphExplorer
+        navigate={navigate}
+        onSelectedProjectChange={vi.fn()}
+        projects={[]}
+        selectedProjectId=""
+        setFlash={vi.fn()}
+        token="token-1"
+      />
+    );
+    return navigate;
+  }
+
+  it("Back uses in-app history with /app fallback", () => {
+    const back = vi.spyOn(window.history, "back").mockImplementation(() => {});
+
+    const direct = renderWithDepth(0);
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    expect(direct).toHaveBeenCalledWith("/app");
+    expect(back).not.toHaveBeenCalled();
+    cleanup();
+
+    const fromApp = renderWithDepth(1);
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    expect(back).toHaveBeenCalledTimes(1);
+    expect(fromApp).not.toHaveBeenCalled();
   });
 });

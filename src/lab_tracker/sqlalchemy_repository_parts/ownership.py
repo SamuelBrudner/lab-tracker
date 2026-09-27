@@ -63,6 +63,7 @@ USER_COLUMNS_NOT_REASSIGNED: Mapping[tuple[str, str], str] = {
     ("graph_draft_batch_runs", "review_assignee_user_id"): _REVIEW_ROUTING,
     ("graph_draft_batch_settings", "user_id"): "Per-user scheduling preference.",
     ("graph_draft_batch_settings", "updated_by"): _AUDIT_OF_ACTION,
+    ("graph_draft_batch_settings", "external_provider_acknowledged_by"): _AUDIT_OF_ACTION,
     ("group_memberships", "user_id"): _MEMBERSHIP_SUBJECT,
     ("project_memberships", "user_id"): _MEMBERSHIP_SUBJECT,
     ("invitations", "consumed_by_user_id"): _AUDIT_OF_ACTION,

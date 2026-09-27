@@ -7,13 +7,17 @@ from datetime import datetime
 from typing import Any, Literal, Protocol, TypeVar
 from uuid import UUID
 
+from lab_tracker.claim_effective_status import load_claim_interpretations
 from lab_tracker.decision_context_types import JsonObject
 from lab_tracker.models import (
     Analysis,
     Claim,
+    ClaimEdge,
     Dataset,
+    ExplorationNode,
     Note,
     Project,
+    ProjectCoverageSummary,
     Question,
     Session,
     Visualization,
@@ -179,6 +183,34 @@ class DecisionContextRepository(Protocol):
         recent_first: bool = False,
     ) -> tuple[list[Claim], int]: ...
 
+    def query_claim_edges(
+        self,
+        *,
+        project_id: UUID | None = None,
+        claim_id: UUID | None = None,
+        target_claim_id: UUID | None = None,
+        relation: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[ClaimEdge], int]: ...
+
+    def query_exploration_nodes(
+        self,
+        *,
+        project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
+        node_type: str | None = None,
+        status: str | None = None,
+        target_entity_type: str | None = None,
+        target_entity_id: UUID | None = None,
+        created_by: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+        recent_first: bool = False,
+    ) -> tuple[list[ExplorationNode], int]: ...
+
+    def project_coverage_summary(self, project_id: UUID) -> ProjectCoverageSummary: ...
+
     def query_visualizations(
         self,
         *,
@@ -257,7 +289,34 @@ class RepositoryDecisionContextReader:
 
     def get_claim(self, claim_id: str) -> JsonObject | None:
         claim = self._repository.claims.get(UUID(str(claim_id)))
-        return self._project_entity_to_json(claim)
+        if claim is None or not self._project_allowed(str(claim.project_id)):
+            return None
+        [payload] = self._claims_to_json([claim])
+        return payload
+
+    def _claims_to_json(self, claims: list[Claim]) -> list[JsonObject]:
+        """Claim JSON plus the read-time interpretation the assistant must not ignore."""
+
+        interpretations = load_claim_interpretations(self._repository, claims)
+        payloads: list[JsonObject] = []
+        for claim in claims:
+            interpretation = interpretations[claim.claim_id]
+            payload = _entity_to_json(claim)
+            payload.update(
+                {
+                    "effective_status": interpretation.effective_status.value,
+                    "superseded_by_claim_id": _optional_id(
+                        interpretation.superseded_by_claim_id
+                    ),
+                    "contested_by_claim_ids": [
+                        str(item) for item in interpretation.contested_by_claim_ids
+                    ],
+                    "invalidated_by_node_id": _optional_id(interpretation.invalidated_by_node_id),
+                    "pre_registered": interpretation.pre_registered,
+                }
+            )
+            payloads.append(payload)
+        return payloads
 
     def get_visualization(self, visualization_id: str) -> JsonObject | None:
         visualization = self._repository.visualizations.get(UUID(str(visualization_id)))
@@ -292,6 +351,7 @@ class RepositoryDecisionContextReader:
         limit: int = 50,
         offset: int = 0,
         recent_first: bool = False,
+        updated_first: bool = False,
     ) -> JsonObject:
         if project_id is not None and not self._project_allowed(project_id):
             return _list_payload([], 0, limit, offset)
@@ -307,6 +367,7 @@ class RepositoryDecisionContextReader:
             limit=limit,
             offset=offset,
             recent_first=recent_first,
+            updated_first=updated_first,
         )
         return _list_payload(items, total, limit, offset)
 
@@ -519,7 +580,10 @@ class RepositoryDecisionContextReader:
             offset=offset,
             recent_first=recent_first,
         )
-        return _list_payload(items, total, limit, offset)
+        return {
+            "data": self._claims_to_json(items),
+            "meta": {"limit": limit, "offset": offset, "total": total},
+        }
 
     def list_visualizations(
         self,
@@ -550,11 +614,46 @@ class RepositoryDecisionContextReader:
         )
         return _list_payload(items, total, limit, offset)
 
+    def list_exploration_nodes(
+        self,
+        *,
+        project_id: str | None = None,
+        node_type: str | None = None,
+        status: str | None = None,
+        created_by: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+        recent_first: bool = False,
+    ) -> JsonObject:
+        if project_id is not None and not self._project_allowed(project_id):
+            return _list_payload([], 0, limit, offset)
+        items, total = self._repository.query_exploration_nodes(
+            project_id=_uuid_or_none(project_id),
+            project_ids=self._project_filter(project_id),
+            node_type=node_type,
+            status=status,
+            created_by=created_by,
+            limit=limit,
+            offset=offset,
+            recent_first=recent_first,
+        )
+        return _list_payload(items, total, limit, offset)
+
+    def project_coverage(self, project_id: str) -> JsonObject | None:
+        if not self._project_allowed(project_id):
+            return None
+        summary = self._repository.project_coverage_summary(UUID(str(project_id)))
+        return _entity_to_json(summary)
+
 
 def _uuid_or_none(value: str | None) -> UUID | None:
     if value is None:
         return None
     return UUID(str(value))
+
+
+def _optional_id(value: UUID | None) -> str | None:
+    return str(value) if value is not None else None
 
 
 def _entity_to_json(entity: DecisionContextJsonModel) -> JsonObject:

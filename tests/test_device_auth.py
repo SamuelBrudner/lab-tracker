@@ -315,3 +315,11 @@ def test_require_interactive_admin_denies_with_permission_error(
 
 def test_require_interactive_admin_admits_an_admin_user_session() -> None:
     require_interactive_admin(AuthContext(user_id=uuid4(), role=Role.ADMIN))
+
+
+def test_auth_context_defaults_principal_label_to_none() -> None:
+    # Browser sessions and the local/system principal present no credential
+    # label; only the device (and later PAT) branch of the middleware sets one.
+    context = AuthContext(user_id=uuid4(), role=Role.EDITOR)
+
+    assert context.principal_label is None

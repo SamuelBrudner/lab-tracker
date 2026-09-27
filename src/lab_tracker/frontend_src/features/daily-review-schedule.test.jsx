@@ -99,6 +99,7 @@ describe("DailyReviewScheduleForm", () => {
         cadence_minutes: 720,
         email_notifications_enabled: true,
         enabled: true,
+        external_context_policy: "own_notes_only",
         notification_email: "reviewer@example.edu",
         run_at_local_time: "06:00",
         timezone_name: "America/New_York",
@@ -196,6 +197,7 @@ describe("DailyReviewScheduleForm", () => {
         cadence_minutes: 1440,
         email_notifications_enabled: true,
         enabled: true,
+        external_context_policy: "own_notes_only",
         notification_email: "chicago-reviewer@example.edu",
         run_at_local_time: "18:00",
         timezone_name: "America/Chicago",
@@ -265,6 +267,7 @@ describe("DailyReviewScheduleForm", () => {
         cadence_minutes: 1440,
         email_notifications_enabled: false,
         enabled: true,
+        external_context_policy: "own_notes_only",
         notification_email: null,
         run_at_local_time: "18:00",
         timezone_name: "America/New_York",
@@ -543,6 +546,118 @@ describe("DailyReviewScheduleForm", () => {
       "Failed to update daily review timing for the project you were editing: Timezone rejected."
     );
     expect(screen.getByLabelText("Cadence")).toHaveValue("720");
+  });
+
+  it("saves the external-context policy and sends the acknowledgement only when consented", async () => {
+    const bodies = [];
+    installFetchMock([
+      {
+        match: "/projects/project-1/graph-draft-batch-settings",
+        response: apiResponse({
+          cadence_minutes: 1440,
+          email_notifications_enabled: false,
+          enabled: false,
+          external_context_policy: "own_notes_only",
+          external_provider_acknowledged_at: null,
+          external_provider_acknowledged_by: null,
+          next_run_at: null,
+          notification_email: null,
+          project_id: "project-1",
+          review_email_available: false,
+          run_at_local_time: "18:00",
+          settings_id: "settings-1",
+          timezone_name: "America/New_York",
+          user_id: "user-1",
+        }),
+      },
+      {
+        match: "/projects/project-1/graph-draft-batch-settings",
+        method: "PATCH",
+        response: (request) => {
+          const body = JSON.parse(request.init.body);
+          bodies.push(body);
+          return apiResponse({
+            ...body,
+            external_provider_acknowledged_at: body.external_provider_acknowledged
+              ? "2026-07-24T10:00:00Z"
+              : null,
+            project_id: "project-1",
+            review_email_available: false,
+            settings_id: "settings-1",
+            user_id: "user-1",
+          });
+        },
+      },
+    ]);
+
+    render(
+      <DailyReviewScheduleForm
+        token="token-1"
+        projectId="project-1"
+        canManage={true}
+        setBusy={vi.fn()}
+        setFlash={vi.fn()}
+      />
+    );
+
+    const policy = await screen.findByLabelText("Context sent to the AI provider");
+    expect(policy).toHaveValue("own_notes_only");
+    fireEvent.change(policy, { target: { value: "project_notes" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save cadence" }));
+    await waitFor(() => expect(bodies).toHaveLength(1));
+    expect(bodies[0].external_context_policy).toBe("project_notes");
+    expect(bodies[0]).not.toHaveProperty("external_provider_acknowledged");
+
+    fireEvent.click(screen.getByLabelText(/I consent to send my staged captures/));
+    fireEvent.click(screen.getByRole("button", { name: "Save cadence" }));
+    await waitFor(() => expect(bodies).toHaveLength(2));
+    expect(bodies[1].external_provider_acknowledged).toBe(true);
+    expect(bodies[1].external_context_policy).toBe("project_notes");
+    // Once the row records the consent, the box is gone and the date shows.
+    await waitFor(() =>
+      expect(screen.queryByLabelText(/I consent to send my staged captures/)).not.toBeInTheDocument()
+    );
+    expect(screen.getByText(/^Acknowledged /)).toBeInTheDocument();
+  });
+
+  it("hides the consent box once the settings row is acknowledged", async () => {
+    installFetchMock([
+      {
+        match: "/projects/project-1/graph-draft-batch-settings",
+        response: apiResponse({
+          cadence_minutes: 1440,
+          email_notifications_enabled: false,
+          enabled: true,
+          external_context_policy: "project_notes",
+          external_provider_acknowledged_at: "2026-07-01T09:00:00Z",
+          external_provider_acknowledged_by: "user-1",
+          next_run_at: null,
+          notification_email: null,
+          project_id: "project-1",
+          review_email_available: false,
+          run_at_local_time: "18:00",
+          settings_id: "settings-1",
+          timezone_name: "America/New_York",
+          user_id: "user-1",
+        }),
+      },
+    ]);
+
+    render(
+      <DailyReviewScheduleForm
+        token="token-1"
+        projectId="project-1"
+        canManage={true}
+        setBusy={vi.fn()}
+        setFlash={vi.fn()}
+      />
+    );
+
+    expect(await screen.findByLabelText("Context sent to the AI provider")).toHaveValue(
+      "project_notes"
+    );
+    expect(screen.queryByLabelText(/I consent to send my staged captures/)).not.toBeInTheDocument();
+    expect(screen.getByText(/^Acknowledged /)).toBeInTheDocument();
   });
 
   it("shows and preserves a stored cadence that is not one of the presets", async () => {

@@ -2,14 +2,33 @@
 
 from __future__ import annotations
 
+from dataclasses import replace as dataclass_replace
 from datetime import timedelta
 from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
-from lab_tracker.auth import Role, utc_now
+from lab_tracker.auth import (
+    PAT_SCOPE_ALL,
+    PAT_SCOPE_STAGE_EVIDENCE,
+    AuthContext,
+    PrincipalType,
+    Role,
+    utc_now,
+)
+from lab_tracker.errors import ServiceScopeDeniedError
+from lab_tracker.models import EntityOrigin, NoteStatus
 from lab_tracker.rate_limit import InMemoryRateLimiter
+from lab_tracker.routes.shared import (
+    ORIGIN_PROVIDER_MAX_LENGTH,
+    OriginStamp,
+    ensure_scope_allows_evidence_bundle,
+    ensure_scope_allows_note_status,
+    origin_stamp,
+    stamp_kwargs,
+)
 
 
 def _bearer(secret: str) -> dict[str, str]:
@@ -834,3 +853,288 @@ def test_token_listings_do_not_widen_the_effective_role_after_promotion(
     assert listed.status_code == 200, listed.text
     item = listed.json()["data"][0]
     assert (item["role"], item["effective_role"]) == ("editor", "editor")
+
+
+def _assert_service_forbidden(response) -> None:
+    assert response.status_code == 403, response.text
+    assert response.json()["error"]["code"] == "service_forbidden"
+
+
+def _grant_token_user_contributor_access(
+    client: TestClient, admin_auth_headers: dict[str, str], project_id: str
+) -> None:
+    """A personal token uses its own role, so its user needs project membership."""
+    user_id = client.get("/auth/me", headers=admin_auth_headers).json()["data"]["user_id"]
+    response = client.post(
+        f"/projects/{project_id}/members",
+        json={"user_id": user_id, "role": "contributor"},
+        headers=admin_auth_headers,
+    )
+    assert response.status_code == 201, response.text
+
+
+def _service_actor(scope: str, label: str = "Codex hook") -> AuthContext:
+    return AuthContext(
+        user_id=uuid4(),
+        role=Role.EDITOR,
+        principal_type=PrincipalType.SERVICE,
+        principal_label=label,
+        service_scope=scope,
+    )
+
+
+def test_create_token_accepts_stage_evidence_scope_and_rejects_unknown(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    issued = _create_token(
+        client, admin_auth_headers, role="editor", read_only=False, scope="stage_evidence"
+    )
+    assert issued["scope"] == "stage_evidence"
+
+    rejected = client.post(
+        "/auth/tokens",
+        json={
+            "label": "Unknown scope",
+            "role": "editor",
+            "read_only": False,
+            "scope": "everything",
+            "expires_at": (utc_now() + timedelta(days=7)).isoformat(),
+        },
+        headers=admin_auth_headers,
+    )
+    assert rejected.status_code == 422, rejected.text
+
+
+def test_service_auth_context_carries_scope_and_label(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    def read_auth_context(request: Request) -> dict[str, object]:
+        context = request.state.auth_context
+        return {
+            "principal_type": context.principal_type.value,
+            "service_scope": context.service_scope,
+            "principal_label": context.principal_label,
+            "is_stage_evidence_scoped": context.is_stage_evidence_scoped,
+        }
+
+    client.app.add_api_route("/_test/auth-context", read_auth_context, methods=["GET"])
+    issued = _create_token(
+        client,
+        admin_auth_headers,
+        label="Hook bot",
+        role="editor",
+        read_only=False,
+        scope="stage_evidence",
+    )
+
+    via_token = client.get("/_test/auth-context", headers=_bearer(issued["secret"]))
+    via_browser = client.get("/_test/auth-context", headers=admin_auth_headers)
+
+    assert via_token.status_code == 200, via_token.text
+    assert via_token.json() == {
+        "principal_type": "service",
+        "service_scope": "stage_evidence",
+        "principal_label": "Hook bot",
+        "is_stage_evidence_scoped": True,
+    }
+    assert via_browser.status_code == 200, via_browser.text
+    assert via_browser.json() == {
+        "principal_type": "user",
+        "service_scope": None,
+        "principal_label": None,
+        "is_stage_evidence_scoped": False,
+    }
+
+
+def test_origin_stamp_records_token_label_for_service_principals() -> None:
+    service = _service_actor(PAT_SCOPE_ALL, label="Codex hook")
+    browser = AuthContext(user_id=uuid4(), role=Role.ADMIN)
+    device = AuthContext(
+        user_id=uuid4(),
+        role=Role.EDITOR,
+        principal_type=PrincipalType.DEVICE,
+        device_token_id=uuid4(),
+        principal_label="Bench phone",
+    )
+
+    assert origin_stamp(service, EntityOrigin.AI_EXECUTED) == OriginStamp(
+        origin=EntityOrigin.AI_EXECUTED, origin_provider="Codex hook"
+    )
+    assert origin_stamp(browser, EntityOrigin.USER) == OriginStamp(
+        origin=EntityOrigin.USER, origin_provider=None
+    )
+    # Only service tokens are recorded as the provider; a paired device is
+    # already stamped into the capture metadata.
+    assert origin_stamp(device, EntityOrigin.USER).origin_provider is None
+
+    long_label = "L" * 150
+    truncated = origin_stamp(
+        dataclass_replace(service, principal_label=long_label), EntityOrigin.USER
+    )
+    assert truncated.origin_provider == "L" * ORIGIN_PROVIDER_MAX_LENGTH
+    assert len(truncated.origin_provider) == 80
+    assert stamp_kwargs(truncated) == {
+        "origin": EntityOrigin.USER,
+        "origin_provider": "L" * ORIGIN_PROVIDER_MAX_LENGTH,
+    }
+
+
+def test_ensure_scope_allows_note_status_only_gates_stage_scoped_service_actors() -> None:
+    browser = AuthContext(user_id=uuid4(), role=Role.ADMIN)
+    all_scoped = _service_actor(PAT_SCOPE_ALL)
+    stage_scoped = _service_actor(PAT_SCOPE_STAGE_EVIDENCE)
+
+    ensure_scope_allows_note_status(browser, NoteStatus.COMMITTED)
+    ensure_scope_allows_note_status(all_scoped, NoteStatus.COMMITTED)
+    ensure_scope_allows_note_status(stage_scoped, NoteStatus.STAGED)
+    with pytest.raises(ServiceScopeDeniedError, match="only stage notes"):
+        ensure_scope_allows_note_status(stage_scoped, NoteStatus.COMMITTED)
+    with pytest.raises(ServiceScopeDeniedError):
+        ensure_scope_allows_note_status(stage_scoped, NoteStatus.ARCHIVED)
+
+
+def test_ensure_scope_allows_evidence_bundle_rejects_commit_for_stage_scope() -> None:
+    all_scoped = _service_actor(PAT_SCOPE_ALL)
+    stage_scoped = _service_actor(PAT_SCOPE_STAGE_EVIDENCE)
+
+    ensure_scope_allows_evidence_bundle(all_scoped, dry_run=False)
+    ensure_scope_allows_evidence_bundle(stage_scoped, dry_run=True)
+    with pytest.raises(ServiceScopeDeniedError, match="dry_run=true"):
+        ensure_scope_allows_evidence_bundle(stage_scoped, dry_run=False)
+
+
+def test_stage_evidence_token_can_stage_notes_but_not_commit_them(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project = client.post("/projects", json={"name": "Stage scope"}, headers=admin_auth_headers)
+    assert project.status_code == 201, project.text
+    project_id = project.json()["data"]["project_id"]
+    _grant_token_user_contributor_access(client, admin_auth_headers, project_id)
+    issued = _create_token(
+        client, admin_auth_headers, label="CI hook", role="editor", read_only=False,
+        scope="stage_evidence",
+    )
+    pat_headers = _bearer(issued["secret"])
+
+    staged = client.post(
+        "/notes",
+        json={"project_id": project_id, "raw_content": "Staged by the hook"},
+        headers=pat_headers,
+    )
+    assert staged.status_code == 201, staged.text
+    assert staged.json()["data"]["status"] == "staged"
+    note_id = staged.json()["data"]["note_id"]
+
+    _assert_service_forbidden(
+        client.post(
+            "/notes",
+            json={"project_id": project_id, "raw_content": "Committed", "status": "committed"},
+            headers=pat_headers,
+        )
+    )
+    _assert_service_forbidden(
+        client.post(
+            "/notes/upload-file",
+            data={"project_id": project_id, "status": "committed"},
+            files={"file": ("snap.jpg", b"image-bytes", "image/jpeg")},
+            headers=pat_headers,
+        )
+    )
+    quick = client.post(
+        "/notes/quick-capture",
+        data={"project_id": project_id},
+        files={"file": ("snap2.jpg", b"image-2", "image/jpeg")},
+        headers=pat_headers,
+    )
+    assert quick.status_code == 201, quick.text
+
+    patched = client.patch(
+        f"/notes/{note_id}", json={"transcribed_text": "typed up"}, headers=pat_headers
+    )
+    assert patched.status_code == 200, patched.text
+    _assert_service_forbidden(
+        client.patch(f"/notes/{note_id}", json={"status": "committed"}, headers=pat_headers)
+    )
+    restaged = client.patch(f"/notes/{note_id}", json={"status": "staged"}, headers=pat_headers)
+    assert restaged.status_code == 200, restaged.text
+
+    # The transcript action is admitted by the policy; a text note simply has
+    # nothing to transcribe, which the route reports as a client error.
+    transcript = client.post(f"/notes/{note_id}/transcript", headers=pat_headers)
+    assert transcript.status_code != 403, transcript.text
+    assert transcript.status_code < 500, transcript.text
+
+    listing = client.get("/notes", params={"project_id": project_id}, headers=pat_headers)
+    assert listing.status_code == 200, listing.text
+    assert len(listing.json()["data"]) == 2
+
+    denied = [
+        client.post("/projects", json={"name": "Blocked"}, headers=pat_headers),
+        client.post(
+            "/questions",
+            json={"project_id": project_id, "text": "Blocked?", "question_type": "other"},
+            headers=pat_headers,
+        ),
+        client.post(
+            "/datasets",
+            json={"project_id": project_id, "primary_question_id": str(uuid4())},
+            headers=pat_headers,
+        ),
+        client.post("/batches/run-due", headers=pat_headers),
+        client.post(f"/notes/{note_id}/archive", headers=pat_headers),
+        client.delete(f"/notes/{note_id}", headers=pat_headers),
+        client.get("/auth/me", headers=pat_headers),
+    ]
+    for response in denied:
+        _assert_service_forbidden(response)
+
+    committed = client.get(
+        "/notes",
+        params={"project_id": project_id, "status": "committed"},
+        headers=admin_auth_headers,
+    )
+    assert committed.json()["data"] == []
+
+
+def test_stage_evidence_token_writes_stamp_origin_provider_with_the_token_label(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project = client.post("/projects", json={"name": "Stamped"}, headers=admin_auth_headers)
+    project_id = project.json()["data"]["project_id"]
+    _grant_token_user_contributor_access(client, admin_auth_headers, project_id)
+    issued = _create_token(
+        client, admin_auth_headers, label="CI hook", role="editor", read_only=False,
+        scope="stage_evidence",
+    )
+    pat_headers = _bearer(issued["secret"])
+
+    by_token = client.post(
+        "/notes",
+        json={"project_id": project_id, "raw_content": "Hook capture"},
+        headers=pat_headers,
+    )
+    by_upload = client.post(
+        "/notes/quick-capture",
+        data={"project_id": project_id},
+        files={"file": ("snap.jpg", b"image-bytes", "image/jpeg")},
+        headers=pat_headers,
+    )
+    by_browser = client.post(
+        "/notes",
+        json={"project_id": project_id, "raw_content": "Typed capture"},
+        headers=admin_auth_headers,
+    )
+
+    assert by_token.status_code == 201, by_token.text
+    assert by_token.json()["data"]["origin"] == "user"
+    assert by_token.json()["data"]["origin_provider"] == "CI hook"
+    assert by_upload.status_code == 201, by_upload.text
+    assert by_upload.json()["data"]["origin"] == "user"
+    assert by_upload.json()["data"]["origin_provider"] == "CI hook"
+    assert by_browser.status_code == 201, by_browser.text
+    assert by_browser.json()["data"]["origin"] == "user"
+    assert by_browser.json()["data"]["origin_provider"] is None

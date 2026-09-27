@@ -566,6 +566,11 @@ class QuestionService(BaseService):
         child_question_ids_to_reparent: Iterable[UUID] | None = None,
         note_ids_to_retarget: Iterable[UUID] | None = None,
         actor: AuthContext | None = None,
+        origin: EntityOrigin = EntityOrigin.USER,
+        change_set_id: UUID | None = None,
+        origin_provider: str | None = None,
+        origin_model: str | None = None,
+        origin_prompt_version: str | None = None,
     ) -> QuestionRefactorResult:
         with self.application_transaction():
             located_source = self.get_question(question_id)
@@ -587,6 +592,11 @@ class QuestionService(BaseService):
                 child_question_ids_to_reparent=child_question_ids_to_reparent,
                 note_ids_to_retarget=note_ids_to_retarget,
                 actor=actor,
+                origin=origin,
+                change_set_id=change_set_id,
+                origin_provider=origin_provider,
+                origin_model=origin_model,
+                origin_prompt_version=origin_prompt_version,
             )
 
     def _refactor_question_under_dag_lock(
@@ -602,6 +612,11 @@ class QuestionService(BaseService):
         child_question_ids_to_reparent: Iterable[UUID] | None,
         note_ids_to_retarget: Iterable[UUID] | None,
         actor: AuthContext | None,
+        origin: EntityOrigin = EntityOrigin.USER,
+        change_set_id: UUID | None = None,
+        origin_provider: str | None = None,
+        origin_model: str | None = None,
+        origin_prompt_version: str | None = None,
     ) -> QuestionRefactorResult:
         if source.status not in {QuestionStatus.STAGED, QuestionStatus.ACTIVE}:
             raise ValidationError("Only staged or active questions can be refactored.")
@@ -634,6 +649,11 @@ class QuestionService(BaseService):
             supersedes_question_id=source.question_id,
             created_by=actor_user_id(actor),
             created_by_user_id=actor_user_fk(actor, self.repository),
+            origin=origin,
+            change_set_id=change_set_id,
+            origin_provider=origin_provider,
+            origin_model=origin_model,
+            origin_prompt_version=origin_prompt_version,
         )
         graph = self._question_graph(source.project_id)
         graph[replacement.question_id] = replacement

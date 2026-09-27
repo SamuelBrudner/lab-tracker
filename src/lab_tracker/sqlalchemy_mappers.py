@@ -68,6 +68,7 @@ from lab_tracker.models import (
     StoreCapability,
     Visualization,
     VisualizationAsset,
+    evidence_content_hash_from_metadata,
 )
 from lab_tracker.provenance_ingestion import external_artifacts_from_metadata
 from lab_tracker.sqlalchemy_mapper_parts.projects import (
@@ -586,6 +587,7 @@ def note_to_model(note: Note) -> NoteModel:
         raw_checksum=note.raw_asset.checksum if note.raw_asset is not None else None,
         transcribed_text=note.transcribed_text,
         note_metadata=dict(note.metadata),
+        evidence_content_hash=evidence_content_hash_from_metadata(note.metadata),
         client_capture_id=note.client_capture_id,
         status=note.status.value,
         archived_reason=note.archived_reason.value if note.archived_reason is not None else None,
@@ -674,6 +676,7 @@ def apply_note_to_model(row: NoteModel, note: Note) -> None:
     row.raw_checksum = note.raw_asset.checksum if note.raw_asset is not None else None
     row.transcribed_text = note.transcribed_text
     row.note_metadata = dict(note.metadata)
+    row.evidence_content_hash = evidence_content_hash_from_metadata(note.metadata)
     row.client_capture_id = note.client_capture_id
     row.status = note.status.value
     row.archived_reason = note.archived_reason.value if note.archived_reason is not None else None

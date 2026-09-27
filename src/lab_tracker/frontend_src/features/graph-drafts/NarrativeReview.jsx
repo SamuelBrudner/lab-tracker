@@ -7,6 +7,7 @@ import {
   sourceRefText,
   statusClass,
 } from "./format.js";
+import { ReasonChips } from "./ReasonChips.jsx";
 
 function SummaryParagraphs({ summary }) {
   if (!summary) {
@@ -39,10 +40,13 @@ function ProposalCitation({
   onTogglePinned,
   onUpdateReviewNote,
   onSaveOperation,
+  onDeferOperation,
+  onRejectOperation,
 }) {
   const panelId = `proposal-citation-${operation.operation_id}`;
   const proposedText = operationProposalText(operation, payloads);
   const editNumber = index + 1;
+  const [askingReason, setAskingReason] = React.useState(false);
 
   return (
     <span
@@ -132,8 +136,8 @@ function ProposalCitation({
             <button
               type="button"
               className="btn-secondary"
-              disabled={!canEditDraft || Boolean(pending)}
-              onClick={() => onSaveOperation(operation, "proposed")}
+              disabled={!canEditDraft || Boolean(pending) || Boolean(operation.deferred_at)}
+              onClick={() => onDeferOperation(operation)}
             >
               Defer edit
             </button>
@@ -141,7 +145,7 @@ function ProposalCitation({
               type="button"
               className="btn-danger"
               disabled={!canEditDraft || Boolean(pending)}
-              onClick={() => onSaveOperation(operation, "rejected")}
+              onClick={() => setAskingReason(true)}
             >
               Reject edit
             </button>
@@ -154,6 +158,17 @@ function ProposalCitation({
               Save note
             </button>
           </span>
+          {askingReason ? (
+            <ReasonChips
+              disabled={!canEditDraft || Boolean(pending)}
+              label={`Reason for rejecting edit ${editNumber}`}
+              onChoose={(reason) => {
+                setAskingReason(false);
+                onRejectOperation(operation, reason);
+              }}
+              onCancel={() => setAskingReason(false)}
+            />
+          ) : null}
           <button
             type="button"
             className="btn-link proposal-citation-close"
@@ -175,6 +190,8 @@ function NarrativeReview({
   pendingCommands,
   onUpdateOperationReviewNote,
   onSaveOperation,
+  onDeferOperation,
+  onRejectOperation,
 }) {
   const [openCitationId, setOpenCitationId] = React.useState("");
   const [pinnedCitationId, setPinnedCitationId] = React.useState("");
@@ -247,6 +264,8 @@ function NarrativeReview({
                   }}
                   onUpdateReviewNote={onUpdateOperationReviewNote}
                   onSaveOperation={onSaveOperation}
+                  onDeferOperation={onDeferOperation}
+                  onRejectOperation={onRejectOperation}
                 />
               </p>
             );

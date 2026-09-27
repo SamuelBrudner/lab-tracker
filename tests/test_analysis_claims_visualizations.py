@@ -513,3 +513,90 @@ def test_list_analyses_by_question_uses_the_repository_filter_without_loading_da
     by_question = api.list_analyses(question_id=question.question_id)
 
     assert [item.analysis_id for item in by_question] == [linked.analysis_id]
+
+
+def test_delete_claim_edge_removes_edge_and_requires_source_claim_match():
+    from lab_tracker.errors import NotFoundError, OpaqueTargetNotFoundError
+
+    api = repository_backed_api()
+    actor = _actor()
+    project, _ = _setup_project_with_question(api, actor)
+    a = api.create_claim(project.project_id, "A", 50.0, actor=actor)
+    b = api.create_claim(project.project_id, "B", 50.0, actor=actor)
+    edge = api.create_claim_edge(
+        a.claim_id, target_claim_id=b.claim_id, relation=ClaimRelation.EXTENDS, actor=actor
+    )
+
+    with pytest.raises(OpaqueTargetNotFoundError, match="Claim edge does not exist"):
+        api.delete_claim_edge(b.claim_id, edge.edge_id, actor=actor)
+    assert api.list_claim_edges(claim_id=a.claim_id) == [edge]
+
+    assert api.delete_claim_edge(a.claim_id, edge.edge_id, actor=actor) == edge
+    assert api.list_claim_edges(claim_id=a.claim_id) == []
+    assert api.list_claim_edges(project_id=project.project_id) == []
+    with pytest.raises(NotFoundError, match="Claim edge does not exist"):
+        api.delete_claim_edge(a.claim_id, edge.edge_id, actor=actor)
+
+
+def test_delete_claim_edge_requires_contributor():
+    from lab_tracker.errors import PermissionDeniedError
+
+    api = repository_backed_api()
+    actor = _actor()
+    project, _ = _setup_project_with_question(api, actor)
+    a = api.create_claim(project.project_id, "A", 50.0, actor=actor)
+    b = api.create_claim(project.project_id, "B", 50.0, actor=actor)
+    edge = api.create_claim_edge(
+        a.claim_id, target_claim_id=b.claim_id, relation=ClaimRelation.EXTENDS, actor=actor
+    )
+
+    with pytest.raises(PermissionDeniedError):
+        api.delete_claim_edge(a.claim_id, edge.edge_id, actor=_actor(Role.VIEWER))
+    assert api.list_claim_edges(claim_id=a.claim_id) == [edge]
+
+
+def test_interpret_claims_reads_edges_and_committed_pivots():
+    from lab_tracker.models import (
+        EntityRef,
+        EntityType,
+        ExplorationNodeStatus,
+        ExplorationNodeType,
+    )
+
+    api = repository_backed_api()
+    actor = _actor()
+    project, _ = _setup_project_with_question(api, actor)
+    a, b, c, d = (
+        api.create_claim(project.project_id, statement, 50.0, actor=actor)
+        for statement in ("A supersedes B", "B", "C refutes B", "D invalidated by pivot")
+    )
+    api.create_claim_edge(
+        a.claim_id, target_claim_id=b.claim_id, relation=ClaimRelation.SUPERSEDES, actor=actor
+    )
+    api.create_claim_edge(
+        c.claim_id, target_claim_id=b.claim_id, relation=ClaimRelation.REFUTES, actor=actor
+    )
+    node = api.create_exploration_node(
+        project.project_id,
+        node_type=ExplorationNodeType.PIVOT,
+        title="Drop D",
+        target=EntityRef(entity_type=EntityType.CLAIM, entity_id=d.claim_id),
+        status=ExplorationNodeStatus.COMMITTED,
+        trigger="The replication failed.",
+        rationale="The effect vanished.",
+        invalidates_claim_id=d.claim_id,
+        actor=actor,
+    )
+
+    reads = {read.claim_id: read for read in api.interpret_claims([a, b, c, d])}
+
+    assert [read.claim_id for read in api.interpret_claims([d, a])] == [d.claim_id, a.claim_id]
+    assert reads[b.claim_id].effective_status.value == "superseded"
+    assert reads[b.claim_id].superseded_by_claim_id == a.claim_id
+    assert reads[b.claim_id].contested_by_claim_ids == [c.claim_id]
+    assert reads[d.claim_id].effective_status.value == "invalidated"
+    assert reads[d.claim_id].invalidated_by_node_id == node.node_id
+    for claim in (a, c):
+        assert reads[claim.claim_id].effective_status.value == claim.status.value
+        assert reads[claim.claim_id].superseded_by_claim_id is None
+        assert reads[claim.claim_id].contested_by_claim_ids == []

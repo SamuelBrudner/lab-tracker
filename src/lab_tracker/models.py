@@ -12,10 +12,10 @@ import binascii
 import json
 import math
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from datetime import date, datetime, timezone
 from enum import Enum
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Final, Literal
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -194,6 +194,8 @@ class UsageEventResourceType(str, Enum):
     ACQUISITION_COLLECTION = "acquisition_collection"
     EVIDENCE_BUNDLE = "evidence_bundle"
     USAGE_EVENT = "usage_event"
+    DRAFT_QUALITY = "draft_quality"
+    DECISION_CONTEXT = "decision_context"
 
 
 class UsageEventOutcome(str, Enum):
@@ -242,6 +244,25 @@ class ClaimRelation(str, Enum):
     REFUTES = "refutes"
     DEPENDS_ON = "depends_on"
     SUPERSEDES = "supersedes"
+
+
+class ClaimEffectiveStatus(str, Enum):
+    """Derived, never stored, evidential state of a claim after later claims and pivots.
+
+    The four stored ``ClaimStatus`` values pass through unchanged; the three
+    derived values come from claim edges (``supersedes`` marks the target
+    superseded, ``refutes`` / ``contradicts`` mark it contested) and committed
+    pivot exploration nodes (``invalidates_claim_id``). Read time only: no
+    service writes these back to ``Claim.status``.
+    """
+
+    PROPOSED = "proposed"
+    TESTING = "testing"
+    SUPPORTED = "supported"
+    REJECTED = "rejected"
+    CONTESTED = "contested"
+    SUPERSEDED = "superseded"
+    INVALIDATED = "invalidated"
 
 
 class ExplorationNodeType(str, Enum):
@@ -367,6 +388,7 @@ class EntityType(str, Enum):
     CLAIM = "claim"
     VISUALIZATION = "visualization"
     GOAL = "goal"
+    EXPLORATION_NODE = "exploration_node"
 
 
 class EntityOrigin(str, Enum):
@@ -466,6 +488,53 @@ class GraphDraftSemanticType(str, Enum):
     UPDATE_GOAL = "update_goal"
     SUGGEST_FOLLOWUP = "suggest_followup"
     REQUEST_CLARIFICATION = "request_clarification"
+    # Negative-knowledge labels: they preserve what did not work, what was
+    # chosen, and what was set aside, never delete or hide it.
+    RECORD_DECISION = "record_decision"
+    RECORD_DEAD_END = "record_dead_end"
+    RECORD_PIVOT = "record_pivot"
+    ABANDON_QUESTION = "abandon_question"
+    MERGE_QUESTIONS = "merge_questions"
+    RETIRE_NOTE = "retire_note"
+    # Prediction-error label: resolve an open prediction (proposed/testing claim)
+    # to supported or rejected once evidence under its question has landed.
+    RESOLVE_PREDICTION = "resolve_prediction"
+
+
+# Review-audit keys stamped into ``GraphChangeOperation.error_metadata`` by the
+# review coordinator. They are the durable record of how a reviewer handled an
+# AI proposal (edited it, rejected it), so every reader and the commit-time
+# filter share these names rather than string literals.
+EDITED_AT_KEY: Final = "edited_at"
+EDITED_BY_KEY: Final = "edited_by"
+REVIEWED_AT_KEY: Final = "reviewed_at"
+REVIEWED_BY_KEY: Final = "reviewed_by"
+REVIEW_NOTE_KEY: Final = "review_note"
+# Deferral is an explicit per-operation verdict ("not today") that keeps the
+# operation PROPOSED; a structured reject reason rides with a rejection only.
+DEFERRED_AT_KEY: Final = "deferred_at"
+DEFERRED_BY_KEY: Final = "deferred_by"
+REJECT_REASON_KEY: Final = "reject_reason"
+UNSPECIFIED_REJECT_REASON: Final = "unspecified"
+
+
+class GraphOperationRejectReason(str, Enum):
+    """Why a reviewer rejected one AI proposal, kept so negatives stay legible."""
+
+    DUPLICATE_OF_EXISTING = "duplicate_of_existing"
+    WRONG_TARGET = "wrong_target"
+    UNSUPPORTED_BY_SOURCE = "unsupported_by_source"
+    ALREADY_CAPTURED = "already_captured"
+    NOT_RELEVANT = "not_relevant"
+    NOT_NOW = "not_now"
+    OTHER = "other"
+
+
+class ExternalContextPolicy(str, Enum):
+    """Which notes a batch draft may send to an external drafting provider."""
+
+    OWN_NOTES_ONLY = "own_notes_only"
+    PROJECT_NOTES = "project_notes"
 
 
 class _DomainModel(BaseModel):
@@ -736,6 +805,28 @@ class GraphChangeOperation(_DomainModel):
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
+    @computed_field(return_type=datetime | None)
+    @property
+    def deferred_at(self) -> datetime | None:
+        """When a reviewer explicitly set this proposal aside; None when undeferred."""
+        value = self.error_metadata.get(DEFERRED_AT_KEY)
+        return datetime.fromisoformat(value) if isinstance(value, str) else None
+
+    @computed_field(return_type=GraphOperationRejectReason | None)
+    @property
+    def reject_reason(self) -> GraphOperationRejectReason | None:
+        value = self.error_metadata.get(REJECT_REASON_KEY)
+        return GraphOperationRejectReason(value) if isinstance(value, str) else None
+
+
+def deferred_operation_count(operations: Iterable[GraphChangeOperation]) -> int:
+    return sum(DEFERRED_AT_KEY in operation.error_metadata for operation in operations)
+
+
+def operation_review_key(operation: GraphChangeOperation) -> str:
+    """The label review tallies group by: the semantic type, else the raw op."""
+    return operation.semantic_type.value if operation.semantic_type else operation.op.value
+
 
 class GraphChangeSet(_DomainModel):
     change_set_id: UUID
@@ -765,6 +856,7 @@ class GraphChangeSet(_DomainModel):
     commit_message: str | None = None
     error_metadata: dict[str, Any] = Field(default_factory=dict)
     operation_count: int = 0
+    deferred_count: int = 0
     operations: list[GraphChangeOperation] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)
     created_by: str | None = None
@@ -806,6 +898,25 @@ class GraphChangeSet(_DomainModel):
             return 0
         return int(value)
 
+    @computed_field(return_type=dict[str, dict[str, int]])
+    @property
+    def reject_reason_counts(self) -> dict[str, dict[str, int]]:
+        """Rejected operations tallied by review key, then by structured reason.
+
+        Rejections without a reason land in the ``unspecified`` bucket. Both
+        levels are emitted in sorted key order, and the tally is empty when the
+        operations are not loaded (list views).
+        """
+        counts: dict[str, dict[str, int]] = {}
+        for operation in self.operations:
+            if operation.status != GraphChangeOperationStatus.REJECTED:
+                continue
+            reason = operation.error_metadata.get(REJECT_REASON_KEY)
+            bucket = reason if isinstance(reason, str) else UNSPECIFIED_REJECT_REASON
+            reasons = counts.setdefault(operation_review_key(operation), {})
+            reasons[bucket] = reasons.get(bucket, 0) + 1
+        return {key: dict(sorted(counts[key].items())) for key in sorted(counts)}
+
 
 class GraphDraftBatchSettings(_DomainModel):
     settings_id: UUID
@@ -820,6 +931,9 @@ class GraphDraftBatchSettings(_DomainModel):
     review_email_available: bool = False
     notification_email: str | None = None
     notification_email_confirmed_at: datetime | None = None
+    external_context_policy: ExternalContextPolicy = ExternalContextPolicy.OWN_NOTES_ONLY
+    external_provider_acknowledged_at: datetime | None = None
+    external_provider_acknowledged_by: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
     updated_by: str | None = None
@@ -1032,6 +1146,27 @@ class Dataset(_DomainModel):
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+EVIDENCE_CONTENT_HASH_METADATA_KEY: Final = "evidence_content_hash"
+EVIDENCE_CONTENT_HASH_MAX_LENGTH: Final = 255
+
+
+def evidence_content_hash_from_metadata(metadata: Mapping[str, object] | None) -> str | None:
+    """Return the note's evidence content hash, or ``None`` when absent or empty.
+
+    This is the single derivation of ``notes.evidence_content_hash`` from the
+    note's metadata; the mappers, the repository's direct metadata writes and
+    the domain read view all go through it so the indexed column and the
+    metadata can never disagree.
+    """
+
+    if metadata is None:
+        return None
+    value = metadata.get(EVIDENCE_CONTENT_HASH_METADATA_KEY)
+    if value is None or value == "":
+        return None
+    return str(value)
+
+
 class Note(_DomainModel):
     note_id: UUID
     project_id: UUID
@@ -1055,6 +1190,11 @@ class Note(_DomainModel):
     origin_model: str | None = None
     origin_prompt_version: str | None = None
     updated_at: datetime = Field(default_factory=utc_now)
+
+    @computed_field(return_type=str | None)
+    @property
+    def evidence_content_hash(self) -> str | None:
+        return evidence_content_hash_from_metadata(self.metadata)
 
 
 class Session(_DomainModel):
@@ -1192,12 +1332,32 @@ class ProvenanceLinkOrigin(str, Enum):
     SYSTEM_DETECTED = "system_detected"
 
 
+MIN_CARRIERS_PER_HASH: Final = 2
+
+
+class ContentHashCarrier(_DomainModel):
+    """One note or dataset that carries a content hash shared within a project.
+
+    The row the content-hash detector consumes: ``entity`` is the note (via its
+    indexed ``evidence_content_hash``) or the dataset (via an uploaded file's
+    checksum), and ``captured_at`` orders carriers so the earliest capture is
+    the antecedent.
+    """
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    content_hash: str
+    entity: EntityRef
+    captured_at: datetime
+
+
 class ProvenanceLink(_DomainModel):
     """A human-gated lineage edge: ``source`` was derived from / used ``target``.
 
-    Proposed by the deterministic content-hash detector during the daily/batch
-    run; only a human accept makes it canonical (and only accepted links render
-    in PROV-O export). Carries the same curation-provenance triple as accepted
+    Proposed by the deterministic content-hash detector on every batch
+    execution (synchronous, queued worker, or due dispatch); only a human
+    accept makes it canonical (and only accepted links render in PROV-O
+    export). Carries the same curation-provenance triple as accepted
     graph-draft operations.
     """
 
@@ -1443,6 +1603,27 @@ class PublicationReadinessUnsupportedClaim(_DomainModel):
     reason: str
 
 
+class PublicationReadinessContestedClaim(_DomainModel):
+    """A supported claim whose derived status no longer reads supported."""
+
+    claim_id: UUID
+    statement: str
+    status: ClaimStatus
+    effective_status: ClaimEffectiveStatus
+    reason: str
+
+
+class PublicationReadinessStalePrediction(_DomainModel):
+    """A testing claim left unresolved although its question has committed data."""
+
+    claim_id: UUID
+    statement: str
+    status: ClaimStatus
+    question_ids: list[UUID]
+    age_days: int
+    reason: str
+
+
 class PublicationReadinessUngroundedQuestion(_DomainModel):
     question_id: UUID
     text: str
@@ -1469,10 +1650,95 @@ class PublicationReadinessBrokenExternalRef(_DomainModel):
 class PublicationReadinessReport(_DomainModel):
     project_id: UUID
     unsupported_claims: list[PublicationReadinessUnsupportedClaim] = Field(default_factory=list)
+    contested_claims: list[PublicationReadinessContestedClaim] = Field(default_factory=list)
+    stale_predictions: list[PublicationReadinessStalePrediction] = Field(default_factory=list)
     ungrounded_questions: list[PublicationReadinessUngroundedQuestion] = Field(default_factory=list)
     orphaned_entities: list[PublicationReadinessOrphanedEntity] = Field(default_factory=list)
     broken_external_refs: list[PublicationReadinessBrokenExternalRef] = Field(default_factory=list)
     seal_level: Literal["blocked", "ara_l1"] = "blocked"
+
+
+class ProjectCoverageCaptureSource(_DomainModel):
+    """When one capture source last delivered a note to the project.
+
+    A source is the (provider, adapter, install, host) tuple written into note
+    metadata by capture clients; manual notes carry none of the four and form
+    the all-``None`` bucket. This is a plain last-seen listing: no thresholds,
+    no staleness judgement.
+    """
+
+    evidence_source_provider: str | None = None
+    evidence_adapter: str | None = None
+    capture_install_id: str | None = None
+    capture_host_label: str | None = None
+    note_count: int = Field(..., ge=0)
+    last_capture_at: datetime
+
+
+class ProjectCoverageSummary(_DomainModel):
+    """How much of a project's captured record a person has actually reviewed.
+
+    Derived at read time, never stored: a staged note is *unreviewed* until a
+    committed or rejected draft named it, *unplaced* when a committed draft
+    absorbed it but no applied operation cites it, and *archived unreviewed*
+    when it was set aside with that reason. A skipped review therefore shows up
+    here as reduced coverage rather than as silent trust in the graph.
+    """
+
+    project_id: UUID
+    unreviewed_count: int = Field(..., ge=0)
+    oldest_unreviewed_at: datetime | None = None
+    unplaced_count: int = Field(..., ge=0)
+    archived_unreviewed_count: int = Field(..., ge=0)
+    pending_change_sets: int = Field(..., ge=0)
+    open_clarification_requests: int = Field(..., ge=0)
+    last_capture_at: datetime | None = None
+
+
+class ProjectCoverageReport(ProjectCoverageSummary):
+    """The coverage summary plus a bounded per-source last-seen listing."""
+
+    capture_sources: list[ProjectCoverageCaptureSource] = Field(default_factory=list)
+    capture_sources_truncated: bool = False
+
+
+class DraftQualityCell(_DomainModel):
+    """Review outcomes for one provider x model x prompt version x semantic type."""
+
+    provider: str
+    model: str
+    prompt_version: str
+    semantic_type: GraphDraftSemanticType | None = None
+    proposed: int = Field(default=0, ge=0)
+    accepted_total: int = Field(default=0, ge=0)
+    accepted_human_selected: int = Field(default=0, ge=0)
+    accepted_bulk_accepted: int = Field(default=0, ge=0)
+    edited_before_accept: int = Field(default=0, ge=0)
+    rejected: int = Field(default=0, ge=0)
+    left_proposed_at_commit: int = Field(default=0, ge=0)
+
+
+class DraftQualityGroupStats(_DomainModel):
+    """Change-set level review statistics for one provider x model x prompt version."""
+
+    provider: str
+    model: str
+    prompt_version: str
+    change_set_count: int = Field(default=0, ge=0)
+    clarification_request_count: int = Field(default=0, ge=0)
+    change_sets_with_clarifications: int = Field(default=0, ge=0)
+    median_seconds_to_first_accept: float | None = None
+    median_seconds_to_review: float | None = None
+
+
+class DraftQualityLedger(_DomainModel):
+    """Read-only ledger of how AI draft proposals fared in human review."""
+
+    project_id: UUID
+    since: datetime | None = None
+    change_set_count: int = Field(default=0, ge=0)
+    cells: list[DraftQualityCell] = Field(default_factory=list)
+    groups: list[DraftQualityGroupStats] = Field(default_factory=list)
 
 
 class RecordExportEvent(_DomainModel):

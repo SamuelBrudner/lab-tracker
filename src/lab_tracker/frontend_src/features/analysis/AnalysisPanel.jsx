@@ -282,24 +282,28 @@ function AnalysisPanel({
         </div>
       </div>
       <p className="subtle">
-        Stage analysis work against datasets, then promote and review only the current active queue.
+        Analyses normally arrive from captured commits and the review inbox. Commit or archive
+        queued analyses here; manual staging is for work recorded outside the capture flow.
       </p>
 
-      <AnalysisStageForm
-        analysisCodeVersion={analysisCodeVersion}
-        analysisDatasetIds={analysisDatasetIds}
-        analysisEnvironmentHash={analysisEnvironmentHash}
-        analysisMethodHash={analysisMethodHash}
-        busy={busy}
-        canWrite={canWrite}
-        datasetOptions={datasetOptions}
-        onAnalysisCodeVersionChange={onAnalysisCodeVersionChange}
-        onAnalysisDatasetIdsChange={onAnalysisDatasetIdsChange}
-        onAnalysisEnvironmentHashChange={onAnalysisEnvironmentHashChange}
-        onAnalysisMethodHashChange={onAnalysisMethodHashChange}
-        onCreateAnalysis={onCreateAnalysis}
-        selectedProjectId={selectedProjectId}
-      />
+      <details className="advanced-disclosure">
+        <summary>Manual staging (advanced)</summary>
+        <AnalysisStageForm
+          analysisCodeVersion={analysisCodeVersion}
+          analysisDatasetIds={analysisDatasetIds}
+          analysisEnvironmentHash={analysisEnvironmentHash}
+          analysisMethodHash={analysisMethodHash}
+          busy={busy}
+          canWrite={canWrite}
+          datasetOptions={datasetOptions}
+          onAnalysisCodeVersionChange={onAnalysisCodeVersionChange}
+          onAnalysisDatasetIdsChange={onAnalysisDatasetIdsChange}
+          onAnalysisEnvironmentHashChange={onAnalysisEnvironmentHashChange}
+          onAnalysisMethodHashChange={onAnalysisMethodHashChange}
+          onCreateAnalysis={onCreateAnalysis}
+          selectedProjectId={selectedProjectId}
+        />
+      </details>
 
       {!canWrite ? (
         <p className="warn">Your role is read-only. Ask an admin/editor to register analyses.</p>

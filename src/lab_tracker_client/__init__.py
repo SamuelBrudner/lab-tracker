@@ -6,6 +6,9 @@ evidence imports, and fail-soft figure capture with savefig/capture_figures.
 """
 
 from lab_tracker_client.client import (
+    DECLARED_TARGET_SOURCE_CONFIG_DEFAULT,
+    DECLARED_TARGET_SOURCE_EXPLICIT,
+    DECLARED_TARGET_SOURCE_KEY,
     ENTITY_TYPE_VALUES,
     EVIDENCE_METADATA_KEYS,
     NOTE_STATUS_VALUES,
@@ -32,6 +35,7 @@ from lab_tracker_client.client import (
     commit_note,
     create_analysis_graph_draft,
     create_data_store,
+    declared_targets,
     evidence_note_matches,
     file_sha256,
     find_evidence_note,
@@ -57,6 +61,7 @@ from lab_tracker_client.client import (
     quick_capture,
     readiness,
     register_acquisition_output,
+    resolve_declared_question,
     upload_note_file,
     upsert_note,
     upsert_project,
@@ -89,6 +94,9 @@ from lab_tracker_client.hpc import (
 )
 
 __all__ = [
+    "DECLARED_TARGET_SOURCE_CONFIG_DEFAULT",
+    "DECLARED_TARGET_SOURCE_EXPLICIT",
+    "DECLARED_TARGET_SOURCE_KEY",
     "ENTITY_TYPE_VALUES",
     "EVIDENCE_METADATA_KEYS",
     "NOTE_STATUS_VALUES",
@@ -122,6 +130,7 @@ __all__ = [
     "create_analysis_graph_draft",
     "DEFAULT_MANIFEST_PATTERN",
     "DEFAULT_OUTBOX",
+    "declared_targets",
     "evidence_note_matches",
     "file_sha256",
     "find_evidence_note",
@@ -153,6 +162,7 @@ __all__ = [
     "quick_capture",
     "readiness",
     "register_acquisition_output",
+    "resolve_declared_question",
     "run_context",
     "run_submit_command",
     "savefig",

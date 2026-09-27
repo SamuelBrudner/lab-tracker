@@ -11,6 +11,7 @@ from lab_tracker.db_models import UserModel
 from lab_tracker.errors import ConflictError, NotFoundError, ValidationError
 from lab_tracker.models import (
     ClaimStatus,
+    EntityOrigin,
     EvidenceBundleRecord,
     ProjectMembershipRole,
 )
@@ -443,3 +444,66 @@ def test_non_admin_cannot_distinguish_foreign_and_missing_component_ids() -> Non
         "Source note does not exist in the bundle project.",
         "Source note does not exist in the bundle project.",
     ]
+
+
+def test_bundle_command_origin_is_stamped_on_created_entities() -> None:
+    api = repository_backed_api()
+    actor = _actor()
+    project, question = _project_and_question(api, actor)
+    command = RecordEvidenceBundleCommand(
+        project_id=project.project_id,
+        primary_question_id=question.question_id,
+        dataset=CreateDatasetIntent(),
+        analysis=CreateAnalysisIntent(
+            dataset_ids=(),
+            method_hash="method-v1",
+            code_version="code-v1",
+        ),
+        claim=CreateClaimIntent(statement="Stamped claim", confidence=75),
+        source_note=CreateSourceNoteIntent(raw_content="Stamped note"),
+        dry_run=False,
+        idempotency_key="origin-stamp",
+        origin=EntityOrigin.AI_EXECUTED,
+        origin_provider="Agent alpha",
+    )
+
+    result = api.record_evidence_bundle(command, actor=actor)
+
+    ids = result.component_ids
+    assert ids.dataset_id and ids.analysis_id and ids.claim_id and ids.source_note_id
+    for entity in (
+        api.get_dataset(ids.dataset_id),
+        api.get_analysis(ids.analysis_id),
+        api.get_claim(ids.claim_id),
+        api.get_note(ids.source_note_id),
+    ):
+        assert entity.origin == EntityOrigin.AI_EXECUTED, type(entity).__name__
+        assert entity.origin_provider == "Agent alpha", type(entity).__name__
+
+
+def test_replay_with_different_origin_conflicts() -> None:
+    api = repository_backed_api()
+    actor = _actor()
+    project = api.create_project("Origin replay", actor=actor)
+    committed = RecordEvidenceBundleCommand(
+        project_id=project.project_id,
+        source_note=CreateSourceNoteIntent(raw_content="Replayed evidence"),
+        dry_run=False,
+        idempotency_key="origin-replay",
+        origin=EntityOrigin.USER,
+    )
+    created = api.record_evidence_bundle(committed, actor=actor)
+
+    # The credential-derived provider is not part of the fingerprint...
+    reused = api.record_evidence_bundle(
+        replace(committed, origin_provider="Agent alpha"), actor=actor
+    )
+    # ...but a different declared origin is a conflicting request.
+    with pytest.raises(ConflictError, match="conflicting fields"):
+        api.record_evidence_bundle(
+            replace(committed, origin=EntityOrigin.AI_EXECUTED), actor=actor
+        )
+
+    assert reused.outcome == "reused"
+    assert reused.component_ids == created.component_ids
+    assert len(api.list_notes(project_id=project.project_id)) == 1

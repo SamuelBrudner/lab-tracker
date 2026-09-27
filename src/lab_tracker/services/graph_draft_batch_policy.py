@@ -6,6 +6,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from typing import Any, Final, Protocol
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -16,6 +17,7 @@ from lab_tracker.member_onboarding import (
     SCHEDULED_DRAFT_POLICY_KEY,
 )
 from lab_tracker.models import (
+    ExternalContextPolicy,
     GraphChangeSetStatus,
     GraphDraftBatchRunStatus,
     GraphDraftBatchSettings,
@@ -25,11 +27,88 @@ from lab_tracker.models import (
 )
 from lab_tracker.services.shared import actor_user_id
 
+# Context-packet key carrying the person's explicit external-provider consent
+# for one note-scoped draft; the same shape member onboarding records.
+EXTERNAL_PROVIDER_ACKNOWLEDGEMENT_KEY: Final = "external_provider_acknowledgement"
+
 
 @dataclass(frozen=True)
 class BatchReviewer:
     reviewer: str | None
     reviewer_user_id: UUID | None
+
+
+@dataclass(frozen=True)
+class DraftingHostFacts:
+    """Host-level facts the scheduling coordinator gates settings changes on."""
+
+    review_email_available: bool
+    external_provider: bool
+
+
+class BatchSettingsReader(Protocol):
+    def get_graph_draft_batch_settings_by_project(
+        self,
+        project_id: UUID,
+        *,
+        user_id: UUID | None = None,
+    ) -> GraphDraftBatchSettings | None: ...
+
+
+def resolve_external_context_policy(
+    repository: BatchSettingsReader,
+    project_id: UUID,
+    user_id: UUID | None,
+) -> ExternalContextPolicy:
+    """The owner's personal row wins, then the project default, else own notes only."""
+
+    if user_id is not None:
+        personal = repository.get_graph_draft_batch_settings_by_project(project_id, user_id=user_id)
+        if personal is not None:
+            return personal.external_context_policy
+    project_default = repository.get_graph_draft_batch_settings_by_project(project_id)
+    if project_default is not None:
+        return project_default.external_context_policy
+    return ExternalContextPolicy.OWN_NOTES_ONLY
+
+
+def resolve_batch_context_policy(
+    repository: BatchSettingsReader,
+    project_ids: set[UUID],
+    owner: BatchReviewer | None,
+) -> ExternalContextPolicy:
+    """Resolve one policy for a batch packet's owner across its projects.
+
+    A packet carries a single policy, so a multi-project batch fails closed:
+    colleagues' notes are sent only when every project the batch touches
+    resolves to ``project_notes`` for this owner.
+    """
+
+    user_id = owner.reviewer_user_id if owner is not None else None
+    policies = {
+        resolve_external_context_policy(repository, project_id, user_id)
+        for project_id in project_ids
+    }
+    if policies and policies == {ExternalContextPolicy.PROJECT_NOTES}:
+        return ExternalContextPolicy.PROJECT_NOTES
+    return ExternalContextPolicy.OWN_NOTES_ONLY
+
+
+def stamp_external_provider_acknowledgement(
+    context_packet: dict[str, Any],
+    actor: AuthContext | None,
+    *,
+    acknowledged: bool,
+) -> None:
+    """Record the person's consent on the packet that leaves the instance."""
+
+    if not acknowledged:
+        return
+    context_packet[EXTERNAL_PROVIDER_ACKNOWLEDGEMENT_KEY] = {
+        "acknowledged": True,
+        "actor_user_id": actor_user_id(actor),
+        "acknowledged_at": utc_now().isoformat(),
+    }
 
 
 @dataclass(frozen=True)
@@ -156,6 +235,13 @@ def default_batch_settings(
             if inherit_from is not None and inherit_from.enabled
             else None
         ),
+        # The context policy is a project convention worth inheriting; the
+        # external-provider acknowledgement is one person's consent and is not.
+        external_context_policy=(
+            inherit_from.external_context_policy
+            if inherit_from is not None
+            else ExternalContextPolicy.OWN_NOTES_ONLY
+        ),
         updated_by=actor_user_id(actor),
     )
 
@@ -234,6 +320,30 @@ def staged_notes_in_window(
         ],
         key=lambda item: (item.created_at, str(item.note_id)),
     )
+
+
+def context_owner_for(
+    review_assignee: str | None,
+    review_assignee_user_id: UUID | None,
+    actor: AuthContext | None,
+) -> BatchReviewer | None:
+    """Whose review memory a batch packet is scoped to.
+
+    The run's assignee wins (their user id when the assignment is user-backed,
+    else the legacy reviewer string), then the acting user; ``None`` when there
+    is no reviewer at all, so the packet is flagged as not reviewer-scoped.
+    """
+
+    if review_assignee_user_id is not None:
+        return BatchReviewer(
+            reviewer=review_assignee or str(review_assignee_user_id),
+            reviewer_user_id=review_assignee_user_id,
+        )
+    if review_assignee is not None:
+        return BatchReviewer(reviewer=review_assignee, reviewer_user_id=None)
+    if actor is not None:
+        return BatchReviewer(reviewer=str(actor.user_id), reviewer_user_id=actor.user_id)
+    return None
 
 
 def reviewer_for_note(note: Note) -> BatchReviewer:

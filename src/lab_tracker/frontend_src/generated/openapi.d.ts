@@ -65,6 +65,9 @@ export interface paths {
     get: operations["get_batch_settings_projects__project_id__graph_draft_batch_settings_get"];
     patch: operations["update_batch_settings_projects__project_id__graph_draft_batch_settings_patch"];
   };
+  "/projects/{project_id}/draft-quality": {
+    get: operations["draft_quality_projects__project_id__draft_quality_get"];
+  };
   "/projects/{project_id}/member-onboarding": {
     get: operations["get_member_onboarding_projects__project_id__member_onboarding_get"];
   };
@@ -79,6 +82,9 @@ export interface paths {
   };
   "/projects/{project_id}/member-onboarding/owner-queue": {
     get: operations["owner_queue_projects__project_id__member_onboarding_owner_queue_get"];
+  };
+  "/projects/{project_id}/coverage": {
+    get: operations["get_project_coverage_projects__project_id__coverage_get"];
   };
   "/datasets": {
     get: operations["list_datasets_datasets_get"];
@@ -357,6 +363,15 @@ export interface operations {
       };
     };
   };
+  "draft_quality_projects__project_id__draft_quality_get": {
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["Envelope_DraftQualityLedger_"];
+        };
+      };
+    };
+  };
   "get_member_onboarding_projects__project_id__member_onboarding_get": {
     responses: {
       200: {
@@ -423,6 +438,15 @@ export interface operations {
       200: {
         content: {
           "application/json": components["schemas"]["ListEnvelope_MemberOnboardingOwnerQueueItem_"];
+        };
+      };
+    };
+  };
+  "get_project_coverage_projects__project_id__coverage_get": {
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["Envelope_ProjectCoverageReport_"];
         };
       };
     };
@@ -675,12 +699,42 @@ export interface components {
       "last_used_at"?: (string | null);
       "revoked_at"?: (string | null);
     };
+    "DraftQualityCell": {
+      "accepted_bulk_accepted"?: number;
+      "accepted_human_selected"?: number;
+      "accepted_total"?: number;
+      "edited_before_accept"?: number;
+      "left_proposed_at_commit"?: number;
+      "model": string;
+      "prompt_version": string;
+      "proposed"?: number;
+      "provider": string;
+      "rejected"?: number;
+      "semantic_type"?: (components["schemas"]["GraphDraftSemanticType"] | null);
+    };
+    "DraftQualityGroupStats": {
+      "change_set_count"?: number;
+      "change_sets_with_clarifications"?: number;
+      "clarification_request_count"?: number;
+      "median_seconds_to_first_accept"?: (number | null);
+      "median_seconds_to_review"?: (number | null);
+      "model": string;
+      "prompt_version": string;
+      "provider": string;
+    };
+    "DraftQualityLedger": {
+      "cells"?: Array<components["schemas"]["DraftQualityCell"]>;
+      "change_set_count"?: number;
+      "groups"?: Array<components["schemas"]["DraftQualityGroupStats"]>;
+      "project_id": string;
+      "since"?: (string | null);
+    };
     "EntityOrigin": "user" | "ai_suggested" | "ai_executed" | "user_revised";
     "EntityRef": {
       "entity_id": string;
       "entity_type": components["schemas"]["EntityType"];
     };
-    "EntityType": "project" | "question" | "dataset" | "note" | "session" | "analysis" | "claim" | "visualization" | "goal";
+    "EntityType": "project" | "question" | "dataset" | "note" | "session" | "analysis" | "claim" | "visualization" | "goal" | "exploration_node";
     "Envelope_AuthBootstrapStatus_": {
       "data": components["schemas"]["AuthBootstrapStatus"];
       "meta"?: (Record<string, unknown> | null);
@@ -721,6 +775,10 @@ export interface components {
       "data": components["schemas"]["DeviceTokenRead"];
       "meta"?: (Record<string, unknown> | null);
     };
+    "Envelope_DraftQualityLedger_": {
+      "data": components["schemas"]["DraftQualityLedger"];
+      "meta"?: (Record<string, unknown> | null);
+    };
     "Envelope_GraphChangeSet_": {
       "data": components["schemas"]["GraphChangeSet"];
       "meta"?: (Record<string, unknown> | null);
@@ -753,6 +811,10 @@ export interface components {
       "data": components["schemas"]["ProjectAccessRead"];
       "meta"?: (Record<string, unknown> | null);
     };
+    "Envelope_ProjectCoverageReport_": {
+      "data": components["schemas"]["ProjectCoverageReport"];
+      "meta"?: (Record<string, unknown> | null);
+    };
     "Envelope_ReviewEmailDelivery_": {
       "data": components["schemas"]["ReviewEmailDelivery"];
       "meta"?: (Record<string, unknown> | null);
@@ -767,6 +829,7 @@ export interface components {
       "store_name"?: (string | null);
       "uri": string;
     };
+    "ExternalContextPolicy": "own_notes_only" | "project_notes";
     "GraphChangeOp": "create" | "update";
     "GraphChangeOperation": {
       "acceptance_mode"?: (components["schemas"]["AcceptanceMode"] | null);
@@ -777,12 +840,14 @@ export interface components {
       "client_ref"?: (string | null);
       "confidence"?: (number | null);
       "created_at"?: string;
+      "deferred_at": (string | null);
       "entity_type": components["schemas"]["EntityType"];
       "error_metadata"?: Record<string, unknown>;
       "op": components["schemas"]["GraphChangeOp"];
       "operation_id": string;
       "payload"?: Record<string, unknown>;
       "rationale"?: string;
+      "reject_reason": (components["schemas"]["GraphOperationRejectReason"] | null);
       "result_entity_id"?: (string | null);
       "review_note"?: (string | null);
       "semantic_type"?: (components["schemas"]["GraphDraftSemanticType"] | null);
@@ -808,6 +873,7 @@ export interface components {
       "created_by"?: (string | null);
       "created_by_user_id"?: (string | null);
       "created_by_username"?: (string | null);
+      "deferred_count"?: number;
       "draft_mode"?: components["schemas"]["GraphDraftMode"];
       "error_metadata"?: Record<string, unknown>;
       "generation_attempt_count"?: number;
@@ -821,6 +887,7 @@ export interface components {
       "prompt_version": string;
       "provider"?: string;
       "purpose"?: components["schemas"]["GraphDraftPurpose"];
+      "reject_reason_counts": Record<string, Record<string, number>>;
       "review_assignee"?: (string | null);
       "review_assignee_user_id"?: (string | null);
       "review_assignee_username"?: (string | null);
@@ -848,6 +915,9 @@ export interface components {
       "created_at"?: string;
       "email_notifications_enabled"?: boolean;
       "enabled"?: boolean;
+      "external_context_policy"?: components["schemas"]["ExternalContextPolicy"];
+      "external_provider_acknowledged_at"?: (string | null);
+      "external_provider_acknowledged_by"?: (string | null);
       "next_run_at"?: (string | null);
       "notification_email"?: (string | null);
       "notification_email_confirmed_at"?: (string | null);
@@ -864,6 +934,8 @@ export interface components {
       "cadence_minutes"?: number;
       "email_notifications_enabled"?: boolean;
       "enabled"?: boolean;
+      "external_context_policy"?: components["schemas"]["ExternalContextPolicy"];
+      "external_provider_acknowledged"?: true;
       "notification_email"?: (string | null);
       "run_at_local_time"?: string;
       "timezone_name"?: string;
@@ -871,7 +943,8 @@ export interface components {
     };
     "GraphDraftMode": "graph_context" | "image_only" | "graph_batch";
     "GraphDraftPurpose": "general" | "member_checkpoint_alignment";
-    "GraphDraftSemanticType": "create_entity" | "update_entity" | "create_note" | "link_note_to_question" | "link_note_to_session" | "link_note_to_dataset" | "link_note_to_analysis" | "suggest_new_question" | "suggest_new_dataset" | "suggest_new_goal" | "link_node_to_goal" | "update_goal" | "suggest_followup" | "request_clarification";
+    "GraphDraftSemanticType": "create_entity" | "update_entity" | "create_note" | "link_note_to_question" | "link_note_to_session" | "link_note_to_dataset" | "link_note_to_analysis" | "suggest_new_question" | "suggest_new_dataset" | "suggest_new_goal" | "link_node_to_goal" | "update_goal" | "suggest_followup" | "request_clarification" | "record_decision" | "record_dead_end" | "record_pivot" | "abandon_question" | "merge_questions" | "retire_note" | "resolve_prediction";
+    "GraphOperationRejectReason": "duplicate_of_existing" | "wrong_target" | "unsupported_by_source" | "already_captured" | "not_relevant" | "not_now" | "other";
     "ListEnvelope_AuthInvitationRead_": {
       "data": Array<components["schemas"]["AuthInvitationRead"]>;
       "meta": components["schemas"]["PaginationMeta"];
@@ -998,6 +1071,7 @@ export interface components {
       "created_at"?: string;
       "created_by"?: (string | null);
       "created_by_user_id"?: (string | null);
+      "evidence_content_hash": (string | null);
       "metadata"?: Record<string, string>;
       "note_id": string;
       "origin"?: components["schemas"]["EntityOrigin"];
@@ -1044,7 +1118,7 @@ export interface components {
       "label": string;
       "read_only"?: boolean;
       "role"?: components["schemas"]["Role"];
-      "scope"?: "all" | "batch_run_due";
+      "scope"?: "all" | "batch_run_due" | "stage_evidence";
     };
     "PersonalAccessTokenIssuedRead": {
       "created_at": string;
@@ -1086,6 +1160,26 @@ export interface components {
     "ProjectAccessRead": {
       "project_id": string;
       "role": components["schemas"]["ProjectMembershipRole"];
+    };
+    "ProjectCoverageCaptureSource": {
+      "capture_host_label"?: (string | null);
+      "capture_install_id"?: (string | null);
+      "evidence_adapter"?: (string | null);
+      "evidence_source_provider"?: (string | null);
+      "last_capture_at": string;
+      "note_count": number;
+    };
+    "ProjectCoverageReport": {
+      "archived_unreviewed_count": number;
+      "capture_sources"?: Array<components["schemas"]["ProjectCoverageCaptureSource"]>;
+      "capture_sources_truncated"?: boolean;
+      "last_capture_at"?: (string | null);
+      "oldest_unreviewed_at"?: (string | null);
+      "open_clarification_requests": number;
+      "pending_change_sets": number;
+      "project_id": string;
+      "unplaced_count": number;
+      "unreviewed_count": number;
     };
     "ProjectMembership": {
       "created_at"?: string;

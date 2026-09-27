@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
@@ -947,6 +948,44 @@ def test_graph_overview_is_bounded_and_counts_persisted_types(
     assert len(data["recent_nodes"]) <= 10
 
 
+def test_graph_overview_includes_coverage_block(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    ids = _create_graph_fixture(client, admin_auth_headers)
+    extra = client.post(
+        "/notes",
+        json={"project_id": ids["project_id"], "raw_content": "Extra staged capture"},
+        headers=admin_auth_headers,
+    )
+    assert extra.status_code == 201
+    set_aside = client.post(
+        "/notes",
+        json={"project_id": ids["project_id"], "raw_content": "Set aside without review"},
+        headers=admin_auth_headers,
+    ).json()["data"]["note_id"]
+    archived = client.post(f"/notes/{set_aside}/archive", headers=admin_auth_headers)
+    assert archived.status_code == 200
+
+    response = client.get(
+        f"/projects/{ids['project_id']}/graph/overview",
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    coverage = response.json()["data"]["coverage"]
+    assert coverage["project_id"] == ids["project_id"]
+    # The fixture's staged note plus the extra one; the archived note is set aside.
+    assert coverage["unreviewed_count"] == 2
+    assert coverage["oldest_unreviewed_at"] is not None
+    assert coverage["unplaced_count"] == 0
+    assert coverage["archived_unreviewed_count"] == 1
+    assert coverage["pending_change_sets"] == 0
+    assert coverage["open_clarification_requests"] == 0
+    assert coverage["last_capture_at"] is not None
+    assert "capture_sources" not in coverage
+
+
 def test_graph_search_ranks_and_filters_cross_entity_hits(
     client: TestClient,
     admin_auth_headers: dict[str, str],
@@ -1301,3 +1340,114 @@ def test_graph_neighborhood_bounds_anchor_content_and_keeps_external_artifacts_a
         edge["source"].startswith("external_artifact:")
         for edge in neighborhood["edges"]
     )
+
+
+def _staged_dataset(client: TestClient, headers: dict[str, str], project_id: str) -> str:
+    question_id = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Which upload carries the shared hash?",
+            "question_type": "descriptive",
+        },
+        headers=headers,
+    ).json()["data"]["question_id"]
+    response = client.post(
+        "/datasets",
+        json={"project_id": project_id, "primary_question_id": question_id},
+        headers=headers,
+    )
+    assert response.status_code == 201
+    return response.json()["data"]["dataset_id"]
+
+
+def _carriers_of(
+    client: TestClient,
+    headers: dict[str, str],
+    project_id: str,
+    *,
+    content: bytes,
+    content_hash: str,
+    viz_id: str | None,
+) -> dict[str, str]:
+    dataset_id = _staged_dataset(client, headers, project_id)
+    upload = client.post(
+        f"/datasets/{dataset_id}/files",
+        files={"file": ("evidence.bin", content, "application/octet-stream")},
+        headers=headers,
+    )
+    assert upload.status_code == 201
+    note = client.post(
+        "/notes",
+        json={
+            "project_id": project_id,
+            "raw_content": "Imported evidence",
+            "metadata": {"evidence_content_hash": content_hash},
+        },
+        headers=headers,
+    )
+    assert note.status_code == 201
+    carriers = {"dataset": dataset_id, "note": note.json()["data"]["note_id"]}
+    if viz_id is not None:
+        asset = client.post(
+            f"/visualizations/{viz_id}/file",
+            files={"file": ("figure.png", content, "image/png")},
+            headers=headers,
+        )
+        assert asset.status_code == 201
+        carriers["visualization"] = viz_id
+    return carriers
+
+
+def test_graph_search_exact_hash_returns_every_carrier_in_project(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    ids = _create_graph_fixture(client, admin_auth_headers)
+    content = b"\x89PNG\r\n\x1a\nshared-evidence-bytes"
+    content_hash = hashlib.sha256(content).hexdigest()
+    carriers = _carriers_of(
+        client,
+        admin_auth_headers,
+        ids["project_id"],
+        content=content,
+        content_hash=content_hash,
+        viz_id=ids["viz_id"],
+    )
+    # Identical carriers in another project must stay out of this project's hits.
+    other_project_id = client.post(
+        "/projects",
+        json={"name": "Other project"},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    other_carriers = _carriers_of(
+        client,
+        admin_auth_headers,
+        other_project_id,
+        content=content,
+        content_hash=content_hash,
+        viz_id=None,
+    )
+
+    response = client.get(
+        f"/projects/{ids['project_id']}/graph/search",
+        params={"q": content_hash.upper()},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200
+    items = response.json()["data"]["items"]
+    by_type = {item["node"]["entity_type"]: item for item in items}
+    assert len(items) == 3
+    assert set(by_type) == {"note", "dataset", "visualization"}
+    expected_fields = {
+        "note": "evidence_content_hash",
+        "dataset": "file_checksum",
+        "visualization": "asset_checksum",
+    }
+    for entity_type, field_name in expected_fields.items():
+        hit = by_type[entity_type]
+        assert hit["node"]["entity_id"] == carriers[entity_type]
+        assert hit["match_reasons"] == ["exact_hash", f"field:{field_name}"]
+    found_ids = {item["node"]["entity_id"] for item in items}
+    assert not found_ids & set(other_carriers.values())

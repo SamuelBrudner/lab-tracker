@@ -75,6 +75,48 @@ function renderPage(props = {}) {
 }
 
 describe("AgentAccessPage", () => {
+  it("mints a stage_evidence-scoped token for the stage level", async () => {
+    let mintBody = null;
+    installFetchMock([
+      {
+        match: "/auth/tokens",
+        response: [
+          apiResponse([], 200, { limit: 1, offset: 0, total: 0 }),
+          apiResponse([issuedTokenPayload()], 200, { limit: 1, offset: 0, total: 1 }),
+        ],
+      },
+      {
+        match: "/auth/tokens",
+        method: "POST",
+        response: (request) => {
+          mintBody = JSON.parse(request.init.body);
+          return apiResponse(
+            issuedTokenPayload({
+              label: mintBody.label,
+              read_only: mintBody.read_only,
+              role: mintBody.role,
+              scope: mintBody.scope,
+              secret: "lpat_test-secret",
+            }),
+            201
+          );
+        },
+      },
+    ]);
+
+    renderPage({ setFlash: vi.fn() });
+
+    await waitFor(() => expect(screen.getByText("No agent tokens yet.")).toBeInTheDocument());
+    fireEvent.change(screen.getByLabelText("Label"), { target: { value: "Commit hook" } });
+    fireEvent.change(screen.getByLabelText("Access"), { target: { value: "stage" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create agent token" }));
+
+    await waitFor(() => expect(mintBody).not.toBeNull());
+    expect(mintBody.role).toBe("editor");
+    expect(mintBody.read_only).toBe(false);
+    expect(mintBody.scope).toBe("stage_evidence");
+  });
+
   it("mints a run-due-scoped token for the scheduler-trigger level", async () => {
     let mintBody = null;
     installFetchMock([
@@ -273,7 +315,8 @@ describe("AgentAccessPage", () => {
     expect(mintBody.label).toBe("Laptop agent");
     expect(mintBody.role).toBe("editor");
     expect(mintBody.read_only).toBe(false);
-    expect(mintBody.scope).toBe("all");
+    // The recommended hook level mints the narrow stage-only scope.
+    expect(mintBody.scope).toBe("stage_evidence");
     const deltaDays = (new Date(mintBody.expires_at).getTime() - Date.now()) / 86400000;
     expect(deltaDays).toBeGreaterThan(29);
     expect(deltaDays).toBeLessThanOrEqual(30);

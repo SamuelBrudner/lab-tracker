@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { formatDate } from "../../shared/formatters.js";
+import { navigateBack } from "../../shared/routing.jsx";
 import { useApiResource } from "../../hooks/useApiResource.js";
 
 function groupLinksByRelation(links = []) {
@@ -80,7 +81,7 @@ function GoalDetailCard({ token, goalId, navigate }) {
       ) : null}
 
       <div className="inline detail-actions">
-        <button type="button" className="btn-secondary" onClick={() => navigate("/app")}>
+        <button type="button" className="btn-secondary" onClick={() => navigateBack(navigate)}>
           Back
         </button>
       </div>

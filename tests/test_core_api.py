@@ -2199,3 +2199,70 @@ def test_question_refactor_records_entity_versions_for_every_changed_question():
     assert [item.version_number for item in moved_versions] == [1, 2]
     assert moved_versions[-1].snapshot["parent_question_ids"] == [str(replacement_id)]
     assert [item.version_number for item in versions(retained_child.question_id)] == [1]
+
+
+def test_question_refactor_stamps_origin_on_replacement():
+    api = repository_backed_api()
+    actor = _actor()
+    project = api.create_project("Question Refactor Origin", actor=actor)
+    source = api.create_question(
+        project_id=project.project_id,
+        text="How should the broad question be framed?",
+        question_type=QuestionType.DESCRIPTIVE,
+        actor=actor,
+    )
+    source_note = api.create_note(
+        project_id=project.project_id, raw_content="Merged capture", actor=actor
+    )
+    change_set = GraphChangeSet(
+        change_set_id=uuid4(),
+        project_id=project.project_id,
+        source_note_id=source_note.note_id,
+        model="fake-gpt",
+        prompt_version="multimodal-graph-draft-v4",
+        status=GraphChangeSetStatus.COMMITTING,
+    )
+    api.graph_drafts.records.save_graph_change_set(change_set)
+    change_set_id = change_set.change_set_id
+
+    result = api.refactor_question(
+        source.question_id,
+        replacement_text="Which experimental contrast is testable this week?",
+        replacement_question_type=QuestionType.HYPOTHESIS_DRIVEN,
+        replacement_status=QuestionStatus.ACTIVE,
+        reason="Merged by a reviewed graph draft.",
+        actor=actor,
+        origin=EntityOrigin.AI_SUGGESTED,
+        change_set_id=change_set_id,
+        origin_provider="openai",
+        origin_model="fake-gpt",
+        origin_prompt_version="multimodal-graph-draft-v4",
+    )
+
+    replacement = api.get_question(result.replacement_question.question_id)
+    assert replacement.origin == EntityOrigin.AI_SUGGESTED
+    assert replacement.change_set_id == change_set_id
+    assert replacement.origin_provider == "openai"
+    assert replacement.origin_model == "fake-gpt"
+    assert replacement.origin_prompt_version == "multimodal-graph-draft-v4"
+    assert result.refactor.replacement_snapshot["origin"] == "ai_suggested"
+    superseded = api.get_question(source.question_id)
+    assert superseded.status == QuestionStatus.SUPERSEDED
+    assert superseded.origin == EntityOrigin.USER
+    assert superseded.change_set_id is None
+    # The default path is unchanged: a direct human refactor stays user-origin.
+    human = api.create_question(
+        project_id=project.project_id,
+        text="A second question to refactor by hand.",
+        question_type=QuestionType.DESCRIPTIVE,
+        actor=actor,
+    )
+    human_result = api.refactor_question(
+        human.question_id,
+        replacement_text="A hand-refactored replacement.",
+        replacement_question_type=QuestionType.DESCRIPTIVE,
+        replacement_status=QuestionStatus.STAGED,
+        reason="Manual cleanup.",
+        actor=actor,
+    )
+    assert human_result.replacement_question.origin == EntityOrigin.USER

@@ -188,3 +188,46 @@ def test_write_json_atomic_leaves_no_temp_and_uses_unique_names(tmp_path: Path) 
     # ``event.json.tmp`` that concurrent writers would collide on).
     assert list(tmp_path.glob("*.tmp")) == []
     assert list(tmp_path.glob(".*.tmp")) == []
+
+
+# --- skipped-commit log -------------------------------------------------------
+
+
+def test_skipped_commit_log_is_appended_counted_and_never_drained(tmp_path: Path) -> None:
+    outbox = tmp_path / "outbox"
+    first = _outbox.record_skipped_commit(
+        outbox, {"adapter": "lt-repo", "git_commit": "a" * 40, "reason": "merge_commit"}
+    )
+    _outbox.record_skipped_commit(
+        outbox, {"adapter": "lt-repo", "git_commit": "b" * 40, "reason": "fixup_subject"}
+    )
+
+    assert first == outbox / _outbox.SKIPPED_LOG_FILENAME
+    assert _outbox.count_skipped_commits(outbox) == 2
+    assert [item["reason"] for item in _outbox.list_skipped_commits(outbox)] == [
+        "merge_commit",
+        "fixup_subject",
+    ]
+    # The log sits outside the *.json drain set: never an event, never drained.
+    assert _outbox.list_event_files(outbox) == []
+    processed: list[str] = []
+    summary = _make_drain(outbox, processed)
+    assert processed == []
+    assert summary["processed"] == 0
+    assert _outbox.count_skipped_commits(outbox) == 2
+
+
+def test_count_skipped_commits_is_zero_without_log(tmp_path: Path) -> None:
+    assert _outbox.count_skipped_commits(tmp_path / "missing") == 0
+    assert _outbox.list_skipped_commits(tmp_path / "missing") == []
+    assert not (tmp_path / "missing").exists()
+
+
+def test_list_skipped_commits_names_a_malformed_line(tmp_path: Path) -> None:
+    outbox = tmp_path / "outbox"
+    outbox.mkdir()
+    (outbox / _outbox.SKIPPED_LOG_FILENAME).write_text('{"reason": "x"}\nnot json\n')
+
+    assert _outbox.count_skipped_commits(outbox) == 2
+    with pytest.raises(ValueError, match=":2:"):
+        _outbox.list_skipped_commits(outbox)

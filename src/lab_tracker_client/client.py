@@ -69,6 +69,8 @@ DATASET_STATUS_VALUES = tuple(status.value for status in DatasetStatus)
 ANALYSIS_STATUS_VALUES = tuple(status.value for status in AnalysisStatus)
 CLAIM_STATUS_VALUES = tuple(status.value for status in ClaimStatus)
 GOAL_STATUS_VALUES = tuple(status.value for status in GoalStatus)
+# Route segments that serve a layered Ara artifact (GET /{scope}/{id}/ara-artifact).
+ARA_ARTIFACT_SCOPES = frozenset({"goals", "questions"})
 STORE_KIND_VALUES = tuple(kind.value for kind in StoreKind)
 STORE_CAPABILITY_VALUES = tuple(capability.value for capability in StoreCapability)
 
@@ -107,6 +109,15 @@ CAPTURE_HOST_METADATA_KEYS = (
     "capture_install_id",
     "capture_platform",
 )
+
+# How an adapter chose the question it declared as a note target: per capture
+# (a flag, manifest, or watch entry) or from the tool's configured default.
+# The drained note carries the same value so a reviewer -- or the batch
+# drafter -- can weigh a tool-wide default below a per-capture choice.
+DECLARED_TARGET_SOURCE_KEY = "declared_target_source"
+DECLARED_TARGET_SOURCE_EXPLICIT = "explicit"
+DECLARED_TARGET_SOURCE_CONFIG_DEFAULT = "config_default"
+DECLARED_TARGET_SOURCES = (DECLARED_TARGET_SOURCE_EXPLICIT, DECLARED_TARGET_SOURCE_CONFIG_DEFAULT)
 
 
 def _install_id_path() -> Path:
@@ -839,6 +850,30 @@ class LabTracker:
             )
         return self._request("GET", f"/{entity_type}/{entity_id}/provenance")
 
+    def ara_artifact(
+        self,
+        scope: str,
+        entity_id: str,
+        *,
+        layer: str | None = None,
+    ) -> JsonObject:
+        """Fetch the layered Ara JSON-LD artifact for one goal or root question.
+
+        ``scope`` is the plural route segment: ``goals`` or ``questions``. The
+        full artifact embeds every layer; ``layer`` narrows it to one of
+        ``logic``, ``src``, ``trace``, or ``evidence``. The document is raw
+        JSON-LD (no envelope), readable without a running instance.
+        """
+
+        if scope not in ARA_ARTIFACT_SCOPES:
+            raise LTValidationError(
+                f"ara_artifact scope must be one of {sorted(ARA_ARTIFACT_SCOPES)}; got {scope!r}."
+            )
+        path = f"/{scope}/{_require_non_empty(entity_id, field_name='entity_id')}/ara-artifact"
+        if layer is not None:
+            path = f"{path}/{layer}"
+        return self._request("GET", path)
+
     def list_goals(
         self,
         *,
@@ -1364,6 +1399,7 @@ class LabTracker:
         content_type: str | None = None,
         transcribed_text: str | None = None,
         client_capture_id: str | None = None,
+        targets: Sequence[EntityRef | Mapping[str, Any] | tuple[str, str] | str] = (),
         timeout: Any = None,
     ) -> LTRecord:
         note, _status_code = self._upload_note_file_payload_with_status(
@@ -1375,6 +1411,7 @@ class LabTracker:
             content_type=content_type,
             transcribed_text=transcribed_text,
             client_capture_id=client_capture_id,
+            targets=targets,
             timeout=timeout,
         )
         return note
@@ -1390,10 +1427,12 @@ class LabTracker:
         content_type: str | None = None,
         transcribed_text: str | None = None,
         client_capture_id: str | None = None,
+        targets: Sequence[EntityRef | Mapping[str, Any] | tuple[str, str] | str] = (),
         timeout: Any = None,
     ) -> tuple[LTRecord, int]:
         if not payload:
             raise LTValidationError("file_path must point to a non-empty file.")
+        resolved_targets = [_normalize_entity_ref(target) for target in targets]
         resolved_status = _validate_enum(
             status,
             field_name="note status",
@@ -1416,6 +1455,8 @@ class LabTracker:
             data["metadata"] = json.dumps(resolved_metadata, sort_keys=True)
         if transcribed_text:
             data["transcribed_text"] = transcribed_text
+        if resolved_targets:
+            data["targets"] = json.dumps(resolved_targets, sort_keys=True)
         response_payload, status_code = self._request_with_status(
             "POST",
             "/notes/upload-file",
@@ -1488,6 +1529,7 @@ class LabTracker:
         content_type: str | None = None,
         dry_run: bool = False,
         evidence_note_index: EvidenceNoteIndex | None = None,
+        targets: Sequence[EntityRef | Mapping[str, Any] | tuple[str, str] | str] = (),
     ) -> EvidenceImportResult:
         path = Path(file_path).expanduser().resolve()
         if not path.is_file():
@@ -1556,6 +1598,7 @@ class LabTracker:
             metadata=evidence_metadata,
             status=status,
             content_type=content_type,
+            targets=targets,
         )
         if evidence_note_index is not None:
             evidence_note_index[evidence_key] = note
@@ -1792,6 +1835,90 @@ def _read_non_empty_file(path: Path, *, empty_message: str) -> bytes:
     return payload
 
 
+def declared_targets(
+    *,
+    question_id: str | None = None,
+    session_id: str | None = None,
+    dataset_ids: Sequence[str] | None = None,
+) -> list[EntityRef]:
+    """Note targets for the context an adapter declared at capture time.
+
+    Deterministic order (question, session, then datasets as given, without
+    duplicates); blank ids are skipped. The server validates every target
+    against the project, so a stale id fails the sync loudly instead of
+    landing as metadata only.
+    """
+
+    refs: list[EntityRef] = []
+    if question_id and question_id.strip():
+        refs.append(EntityRef("question", question_id))
+    if session_id and session_id.strip():
+        refs.append(EntityRef("session", session_id))
+    seen_dataset_ids: set[str] = set()
+    for dataset_id in dataset_ids or ():
+        cleaned = str(dataset_id).strip()
+        if not cleaned or cleaned in seen_dataset_ids:
+            continue
+        seen_dataset_ids.add(cleaned)
+        refs.append(EntityRef("dataset", cleaned))
+    return refs
+
+
+def resolve_declared_question(
+    question_id: str | None,
+    default_question_id: str | None,
+) -> tuple[str | None, str | None]:
+    """Pick the declared question and label where it came from.
+
+    An explicit id wins and is ``explicit``; otherwise the tool's configured
+    default is used and labelled ``config_default``; with neither, both are
+    ``None``.
+    """
+
+    if question_id and question_id.strip():
+        return question_id.strip(), DECLARED_TARGET_SOURCE_EXPLICIT
+    if default_question_id and default_question_id.strip():
+        return default_question_id.strip(), DECLARED_TARGET_SOURCE_CONFIG_DEFAULT
+    return None, None
+
+
+def declared_target_source_for(
+    *,
+    question_id: str | None,
+    question_id_source: str | None,
+    dataset_ids: Sequence[str],
+) -> str | None:
+    """Label for a note's declared targets, or None when nothing was recorded.
+
+    The question's recorded source wins; datasets are always declared per
+    capture, so a dataset-only event is explicit. A legacy event with a
+    question but no recorded source gets no label: absence means "not
+    recorded", never a guess.
+    """
+
+    if question_id:
+        return validate_declared_target_source(question_id_source)
+    if dataset_ids:
+        return DECLARED_TARGET_SOURCE_EXPLICIT
+    return None
+
+
+def validate_declared_target_source(value: object) -> str | None:
+    """Normalise a recorded declared-target source; unknown labels are errors."""
+
+    if value is None:
+        return None
+    cleaned = str(value).strip()
+    if not cleaned:
+        return None
+    if cleaned not in DECLARED_TARGET_SOURCES:
+        raise LTValidationError(
+            f"Unknown declared target source {cleaned!r}; "
+            f"expected one of {', '.join(DECLARED_TARGET_SOURCES)}."
+        )
+    return cleaned
+
+
 def build_evidence_metadata(
     *,
     source_provider: str,
@@ -1974,6 +2101,10 @@ def list_visualizations(**kwargs: Any) -> list[LTRecord]:
 
 def list_goals(**kwargs: Any) -> list[LTRecord]:
     return client.list_goals(**kwargs)
+
+
+def ara_artifact(scope: str, entity_id: str, **kwargs: Any) -> JsonObject:
+    return client.ara_artifact(scope, entity_id, **kwargs)
 
 
 def next_questions(**kwargs: Any) -> JsonObject:

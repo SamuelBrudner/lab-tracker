@@ -126,6 +126,12 @@ analysis graph draft endpoint to propose human-reviewed graph changes for the
 staged note; it never commits analyses, claims, visualizations, or question
 links.
 
+The question, session, and dataset ids declared for a scan (flags, a
+configured watch entry, or a manifest) are attached to the staged note as
+targets and labelled `declared_target_source=explicit`; `lt watch` has no
+default question, so every declared id is a per-capture choice. A stale id
+fails the sync loudly instead of landing as metadata only.
+
 ## Configured Watches
 
 You can edit `.lab-tracker/watch.json` to scan repeatable roots:

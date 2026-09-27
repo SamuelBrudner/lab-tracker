@@ -10,13 +10,14 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
+from api_helpers import repository_backed_api
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.app import create_app
 from lab_tracker.app_parts.middleware import system_auth_context
-from lab_tracker.auth import Role
+from lab_tracker.auth import AuthContext, PrincipalType, Role
 from lab_tracker.db_models import (
     GraphChangeSetModel,
     GraphDraftBatchRunModel,
@@ -24,12 +25,18 @@ from lab_tracker.db_models import (
     NoteModel,
 )
 from lab_tracker.graph_drafting import (
-    READ_ONLY_AGENT_TOOLS,
-    AgenticGraphDraftClient,
     GraphDraftingError,
     GraphDraftOutputTruncatedError,
 )
-from lab_tracker.models import GraphChangeSetStatus
+from lab_tracker.models import (
+    EntityType,
+    GraphChangeOp,
+    GraphChangeOperation,
+    GraphChangeSet,
+    GraphChangeSetStatus,
+    GraphDraftSemanticType,
+    utc_now,
+)
 from lab_tracker.services import graph_draft_batch_policy as batch_policy
 from lab_tracker.sqlalchemy_repository_parts.repository import SQLAlchemyLabTrackerRepository
 
@@ -1953,88 +1960,6 @@ def test_background_run_due_partitions_by_note_author_and_assigns_reviewers(
     assert submitted.status_code == 200
 
 
-def test_agentic_graph_draft_client_uses_read_only_context_trace() -> None:
-    class CapturingBaseClient:
-        provider = "fake"
-        model = "fake-model"
-        timeout_seconds = 5400.0
-
-        def __init__(self) -> None:
-            self.batch_context: dict[str, Any] | None = None
-            self.user_hint: str | None = None
-            self.note_calls: list[dict[str, Any]] = []
-            self.closed = False
-
-        def draft_from_batch(
-            self,
-            *,
-            batch_context: dict[str, Any],
-            user_hint: str | None = None,
-        ) -> dict[str, Any]:
-            self.batch_context = batch_context
-            self.user_hint = user_hint
-            return {
-                "summary": "agentic",
-                "uncertain_fields": [],
-                "clarification_requests": [],
-                "operations": [],
-            }
-
-        def draft_from_note(self, **kwargs: Any) -> dict[str, Any]:
-            self.note_calls.append(
-                {"user_hint": kwargs["user_hint"], "draft_mode": kwargs["draft_mode"]}
-            )
-            return {"summary": "note", "operations": []}
-
-        def close(self) -> None:
-            self.closed = True
-
-    base = CapturingBaseClient()
-    client = AgenticGraphDraftClient(base_client=base)
-    assert client.timeout_seconds == 5400.0
-
-    result = client.draft_from_batch(
-        batch_context={
-            "batch_notes": [
-                {
-                    "id": "note-1",
-                    "raw_content_preview": "PV inhibition broadened odor tuning.",
-                }
-            ],
-            "projects": [
-                {
-                    "id": "project-1",
-                    "label": "Olfaction",
-                    "active_or_staged_questions": [
-                        {
-                            "id": "question-1",
-                            "text": "Does PV inhibition broaden odor tuning?",
-                        }
-                    ],
-                    "recent_claims": [],
-                    "recent_analyses": [],
-                    "known_aliases": [],
-                }
-            ],
-            "context_summary": {"counts": {"batch_notes": 1}},
-        },
-        user_hint="prefer existing questions",
-    )
-
-    assert result["summary"] == "agentic"
-    assert base.batch_context is not None
-    trace = base.batch_context["agentic_tool_trace"]
-    assert trace["tool_policy"] == {
-        "allowed_tools": list(READ_ONLY_AGENT_TOOLS),
-        "write_tools_available": False,
-    }
-    assert trace["matched_existing_nodes"][0]["id"] == "question-1"
-    assert "prefer existing questions" in (base.user_hint or "")
-    # Note-scoped drafts skip the batch tool pass and use the wrapped client.
-    assert client.draft_from_note(user_hint="note hint")["summary"] == "note"
-    assert base.note_calls == [{"user_hint": "note hint", "draft_mode": "graph_context"}]
-
-
 def test_batch_settings_claim_requires_observed_next_run_at(
     client: TestClient,
     admin_auth_headers: dict[str, str],
@@ -2341,6 +2266,7 @@ def test_batch_lists_paginate_in_sql_without_operations_or_context_packets(
         assert "operations" not in item
         assert "context_packet" not in item
         assert item["operation_count"] == 1
+        assert item["deferred_count"] == 0
         assert item["meeting_note_count"] == 0
         assert item["draft_mode"] == "graph_batch"
     assert hydrated_rows and max(hydrated_rows) <= 2
@@ -2357,3 +2283,446 @@ def test_batch_lists_paginate_in_sql_without_operations_or_context_packets(
     assert runs.json()["meta"]["total"] == 3
     assert len(runs.json()["data"]) == 1
     assert run_query_limits == [1]
+
+
+def test_batch_list_summary_reports_deferred_count_without_loading_operations(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The deferral tally is a per-page SQL read of stamps, never an operation load."""
+    from lab_tracker.sqlalchemy_repository_parts.graph_drafts import (
+        SQLAlchemyGraphChangeSetRepository,
+    )
+
+    project_id = _project(client, admin_auth_headers)
+    _note(client, admin_auth_headers, project_id, "Observation to set aside for now.")
+    client.app.state.graph_draft_client_factory = lambda _settings: FakeBatchDraftClient(
+        _batch_patch(project_id)
+    )
+    run = client.post(
+        "/batches/run-now", json={"project_id": project_id}, headers=admin_auth_headers
+    )
+    assert run.status_code == 201, run.text
+    change_set_id = run.json()["data"]["change_set_id"]
+    draft = client.get(f"/batches/{change_set_id}", headers=admin_auth_headers).json()["data"]
+    operation = draft["operations"][0]
+    deferred = client.patch(
+        f"/graph-drafts/{change_set_id}/operations/{operation['operation_id']}",
+        json={"deferred": True},
+        headers=admin_auth_headers,
+    )
+    assert deferred.status_code == 200, deferred.text
+    assert deferred.json()["data"]["deferred_count"] == 1
+
+    operation_loads: list[int] = []
+    original_operations_for = SQLAlchemyGraphChangeSetRepository._operations_for
+
+    def spy_operations_for(self, change_set_ids):  # noqa: ANN001, ANN202
+        operation_loads.append(len(change_set_ids))
+        return original_operations_for(self, change_set_ids)
+
+    monkeypatch.setattr(
+        SQLAlchemyGraphChangeSetRepository, "_operations_for", spy_operations_for
+    )
+
+    listed = client.get(f"/batches?project_id={project_id}", headers=admin_auth_headers)
+
+    assert listed.status_code == 200, listed.text
+    (item,) = listed.json()["data"]
+    assert item["change_set_id"] == change_set_id
+    assert "operations" not in item
+    assert item["operation_count"] == 1
+    assert item["deferred_count"] == 1
+    assert operation_loads == []
+
+
+def test_all_negative_daily_review_leaves_personal_queue_as_rejected(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    """A reviewer who accepts nothing can finish: the submit closes the batch without an owner."""
+    project_id = _project(client, admin_auth_headers)
+    reviewer_headers, reviewer_id = _registered_user(client, role=Role.EDITOR)
+    added = client.post(
+        f"/projects/{project_id}/members",
+        json={"user_id": reviewer_id, "role": "contributor"},
+        headers=admin_auth_headers,
+    )
+    assert added.status_code == 201
+    note_id = _note(client, reviewer_headers, project_id, "Reviewer's staged observation.")
+    client.app.state.graph_draft_client_factory = lambda _settings: FakeBatchDraftClient(
+        _batch_patch(project_id)
+    )
+    run = client.post("/batches/run-now", json={"project_id": project_id}, headers=reviewer_headers)
+    assert run.status_code == 201, run.text
+    change_set_id = run.json()["data"]["change_set_id"]
+    draft = client.get(f"/batches/{change_set_id}", headers=reviewer_headers).json()["data"]
+    operation = draft["operations"][0]
+    rejected = client.patch(
+        f"/graph-drafts/{change_set_id}/operations/{operation['operation_id']}",
+        json={"status": "rejected", "reject_reason": "not_relevant"},
+        headers=reviewer_headers,
+    )
+    assert rejected.status_code == 200, rejected.text
+
+    submitted = client.post(
+        f"/graph-drafts/{change_set_id}/submit",
+        json={"review_note": "All duplicates of existing questions."},
+        headers=reviewer_headers,
+    )
+
+    assert submitted.status_code == 200, submitted.text
+    closed = submitted.json()["data"]
+    assert closed["status"] == "rejected"
+    assert closed["reviewed_by"] == reviewer_id
+    assert closed["reviewed_at"] == closed["submitted_at"]
+    assert closed["review_note"] == "All duplicates of existing questions."
+    assert closed["deferred_count"] == 0
+    assert closed["reject_reason_counts"] == {"suggest_new_question": {"not_relevant": 1}}
+    # It has left every queue: nothing to act on, nothing waiting, nothing to commit.
+    assert client.get("/batches?mine=true", headers=reviewer_headers).json()["data"] == []
+    assert (
+        client.get("/batches?mine=true&status=submitted", headers=reviewer_headers).json()["data"]
+        == []
+    )
+    owner_commit_queue = client.get(
+        f"/batches?needs_commit=true&project_id={project_id}", headers=admin_auth_headers
+    )
+    assert owner_commit_queue.status_code == 200, owner_commit_queue.text
+    assert owner_commit_queue.json()["data"] == []
+    # ...but it stays on the record as a rejected Daily Review with its note.
+    history = client.get(
+        f"/batches?status=rejected&project_id={project_id}", headers=reviewer_headers
+    )
+    assert history.status_code == 200, history.text
+    (item,) = history.json()["data"]
+    assert item["change_set_id"] == change_set_id
+    assert item["review_note"] == "All duplicates of existing questions."
+    assert item["deferred_count"] == 0
+    detail = client.get(f"/batches/{change_set_id}", headers=reviewer_headers)
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["data"]["reject_reason_counts"] == {
+        "suggest_new_question": {"not_relevant": 1}
+    }
+    # The source note is untouched: an all-negative review never archives evidence.
+    note = client.get(f"/notes/{note_id}", headers=reviewer_headers)
+    assert note.status_code == 200, note.text
+    assert note.json()["data"]["status"] == "staged"
+
+
+def test_records_list_review_memory_change_sets_filters_by_status_and_limit() -> None:
+    api = repository_backed_api()
+    actor = AuthContext(user_id=uuid4(), role=Role.ADMIN)
+    project = api.create_project("Review memory", actor=actor)
+    other_project = api.create_project("Other project", actor=actor)
+    note = api.create_note(
+        project_id=project.project_id, raw_content="Source capture", actor=actor
+    )
+    records = api.graph_drafts.records
+    base = utc_now()
+
+    def save(status: GraphChangeSetStatus, *, seconds_ago: int, project_id=None) -> GraphChangeSet:
+        change_set = GraphChangeSet(
+            change_set_id=uuid4(),
+            project_id=project_id or project.project_id,
+            source_note_id=note.note_id,
+            model="fake",
+            prompt_version="test",
+            status=status,
+            created_at=base - timedelta(seconds=seconds_ago),
+        )
+        change_set.operations.append(
+            GraphChangeOperation(
+                operation_id=uuid4(),
+                change_set_id=change_set.change_set_id,
+                sequence=1,
+                op=GraphChangeOp.CREATE,
+                entity_type=EntityType.QUESTION,
+                semantic_type=GraphDraftSemanticType.SUGGEST_NEW_QUESTION,
+                payload={"text": f"Proposal in {status.value}"},
+            )
+        )
+        records.save_graph_change_set(change_set)
+        return change_set
+
+    ready = save(GraphChangeSetStatus.READY, seconds_ago=30)
+    rejected = save(GraphChangeSetStatus.REJECTED, seconds_ago=20)
+    committed = save(GraphChangeSetStatus.COMMITTED, seconds_ago=10)
+    save(GraphChangeSetStatus.DRAFTING, seconds_ago=0)
+    save(GraphChangeSetStatus.READY, seconds_ago=5, project_id=other_project.project_id)
+
+    listed = records.list_review_memory_change_sets(
+        project.project_id,
+        statuses={
+            GraphChangeSetStatus.READY,
+            GraphChangeSetStatus.REJECTED,
+            GraphChangeSetStatus.COMMITTED,
+        },
+        limit=10,
+    )
+
+    # Newest first, only the requested statuses, only this project, operations loaded.
+    assert [item.change_set_id for item in listed] == [
+        committed.change_set_id,
+        rejected.change_set_id,
+        ready.change_set_id,
+    ]
+    assert listed[0].operations[0].payload == {"text": "Proposal in committed"}
+    limited = records.list_review_memory_change_sets(
+        project.project_id,
+        statuses={GraphChangeSetStatus.READY, GraphChangeSetStatus.REJECTED},
+        limit=1,
+    )
+    assert [item.change_set_id for item in limited] == [rejected.change_set_id]
+
+
+def test_batch_draft_packet_is_reviewer_scoped_to_the_run_assignee(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    first_headers, first_user_id = _registered_user(client, role=Role.EDITOR)
+    second_headers, second_user_id = _registered_user(client, role=Role.EDITOR)
+    for user_id in (first_user_id, second_user_id):
+        added = client.post(
+            f"/projects/{project_id}/members",
+            json={"user_id": user_id, "role": "contributor"},
+            headers=admin_auth_headers,
+        )
+        assert added.status_code == 201
+    fake_client = FakeBatchDraftClient(_batch_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda _settings: fake_client
+
+    def run_now(headers: dict[str, str]) -> dict[str, Any]:
+        response = client.post(
+            "/batches/run-now", json={"project_id": project_id}, headers=headers
+        )
+        assert response.status_code == 201, response.text
+        return response.json()["data"]
+
+    def review_memory(change_set_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        stored = client.get(f"/graph-drafts/{change_set_id}", headers=admin_auth_headers)
+        assert stored.status_code == 200, stored.text
+        packet = stored.json()["data"]["context_packet"]
+        return packet["review_memory"], packet["context_summary"]
+
+    _note(client, first_headers, project_id, "First user's earlier note.")
+    _note(client, second_headers, project_id, "Second user's earlier note.")
+    first_run = run_now(first_headers)
+    second_run = run_now(second_headers)
+    assert first_run["review_assignee_user_id"] == first_user_id
+    assert second_run["review_assignee_user_id"] == second_user_id
+    first_memory, _ = review_memory(first_run["change_set_id"])
+    assert first_memory["reviewer_scoped"] is True
+    assert first_memory["pending_proposals"] == []
+
+    _note(client, first_headers, project_id, "First user's later note.")
+    _note(client, second_headers, project_id, "Second user's later note.")
+    later_first = run_now(first_headers)
+    later_second = run_now(second_headers)
+
+    memory, summary = review_memory(later_first["change_set_id"])
+    assert memory["reviewer_scoped"] is True
+    assert memory["reviewer_user_id"] == first_user_id
+    assert [item["change_set_id"] for item in memory["pending_proposals"]] == [
+        first_run["change_set_id"]
+    ]
+    assert memory["pending_proposals"][0]["semantic_type"] == "suggest_new_question"
+    assert memory["pending_proposals"][0]["entity_type"] == "question"
+    assert (
+        memory["pending_proposals"][0]["target"]
+        == "Do pooled notes support a merged observation?"
+    )
+    assert memory["recent_rejections"] == []
+    assert summary["review_memory"] == {
+        "reviewer_scoped": True,
+        "pending_proposals": 1,
+        "recent_rejections": 0,
+        "pending_proposals_truncated": False,
+    }
+    assert summary["counts"]["pending_proposals"] == 1
+    assert "review memory not reviewer-scoped" not in summary["warnings"]
+
+    other_memory, _ = review_memory(later_second["change_set_id"])
+    assert other_memory["reviewer_user_id"] == second_user_id
+    assert [item["change_set_id"] for item in other_memory["pending_proposals"]] == [
+        second_run["change_set_id"]
+    ]
+    # The model saw the same reviewer-scoped memory the packet persisted.
+    sent = fake_client.calls[-1]["batch_context"]["review_memory"]
+    assert sent == other_memory
+
+
+# --- External-provider acknowledgement and external context policy (m11) ---
+
+_PUBLIC_OPENAI_BASE_URL = "https://api.openai.com/v1"
+_ACK_REQUIRED = "requires explicit external-provider acknowledgement"
+
+
+def test_enabling_cadence_with_external_provider_requires_acknowledgement(
+    monkeypatch,
+    migrated_sqlite_database_url: str,
+) -> None:
+    monkeypatch.setenv("LAB_TRACKER_OPENAI_BASE_URL", _PUBLIC_OPENAI_BASE_URL)
+    with TestClient(create_app()) as local_client:
+        headers, user_id = _registered_user(local_client, role=Role.ADMIN)
+        project_id = _project(local_client, headers)
+        settings_path = f"/projects/{project_id}/graph-draft-batch-settings"
+
+        refused = local_client.patch(settings_path, json={"enabled": True}, headers=headers)
+        assert refused.status_code == 422, refused.text
+        assert _ACK_REQUIRED in refused.json()["error"]["message"]
+        assert local_client.get(settings_path, headers=headers).json()["data"]["enabled"] is False
+
+        acknowledged = local_client.patch(
+            settings_path,
+            json={"enabled": True, "external_provider_acknowledged": True},
+            headers=headers,
+        )
+        assert acknowledged.status_code == 200, acknowledged.text
+        data = acknowledged.json()["data"]
+        assert data["enabled"] is True
+        assert data["external_provider_acknowledged_at"] is not None
+        assert data["external_provider_acknowledged_by"] == user_id
+        assert data["external_context_policy"] == "own_notes_only"
+
+        # The consent is recorded once on the row: later toggles need no re-send.
+        assert (
+            local_client.patch(settings_path, json={"enabled": False}, headers=headers).status_code
+            == 200
+        )
+        again = local_client.patch(settings_path, json={"enabled": True}, headers=headers)
+        assert again.status_code == 200, again.text
+        assert again.json()["data"]["external_provider_acknowledged_by"] == user_id
+
+
+def test_project_notes_policy_requires_acknowledgement_when_external(
+    monkeypatch,
+    migrated_sqlite_database_url: str,
+) -> None:
+    monkeypatch.setenv("LAB_TRACKER_OPENAI_BASE_URL", _PUBLIC_OPENAI_BASE_URL)
+    with TestClient(create_app()) as local_client:
+        headers, user_id = _registered_user(local_client, role=Role.ADMIN)
+        project_id = _project(local_client, headers)
+        settings_path = f"/projects/{project_id}/graph-draft-batch-settings"
+
+        refused = local_client.patch(
+            settings_path, json={"external_context_policy": "project_notes"}, headers=headers
+        )
+        assert refused.status_code == 422, refused.text
+        assert _ACK_REQUIRED in refused.json()["error"]["message"]
+
+        widened = local_client.patch(
+            settings_path,
+            json={
+                "external_context_policy": "project_notes",
+                "external_provider_acknowledged": True,
+            },
+            headers=headers,
+        )
+        assert widened.status_code == 200, widened.text
+        assert widened.json()["data"]["external_context_policy"] == "project_notes"
+        assert widened.json()["data"]["external_provider_acknowledged_by"] == user_id
+
+        current = local_client.get(settings_path, headers=headers)
+        assert current.json()["data"]["external_context_policy"] == "project_notes"
+        assert current.json()["data"]["external_provider_acknowledged_at"] is not None
+        # Narrowing back never needs consent, and the recorded consent stays.
+        narrowed = local_client.patch(
+            settings_path, json={"external_context_policy": "own_notes_only"}, headers=headers
+        )
+        assert narrowed.status_code == 200, narrowed.text
+        assert narrowed.json()["data"]["external_context_policy"] == "own_notes_only"
+        assert narrowed.json()["data"]["external_provider_acknowledged_by"] == user_id
+
+
+def test_local_provider_enables_cadence_and_project_notes_without_acknowledgement(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    # tests/conftest.py points the provider base URL at a loopback host.
+    project_id = _project(client, admin_auth_headers)
+    settings_path = f"/projects/{project_id}/graph-draft-batch-settings"
+    enabled = client.patch(settings_path, json={"enabled": True}, headers=admin_auth_headers)
+    assert enabled.status_code == 200, enabled.text
+    widened = client.patch(
+        settings_path, json={"external_context_policy": "project_notes"}, headers=admin_auth_headers
+    )
+    assert widened.status_code == 200, widened.text
+    data = widened.json()["data"]
+    assert data["external_context_policy"] == "project_notes"
+    assert data["external_provider_acknowledged_at"] is None
+    assert data["external_provider_acknowledged_by"] is None
+
+
+def test_acknowledgement_rejects_non_interactive_service_token(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    from lab_tracker.errors import PermissionDeniedError
+
+    project_id = _project(client, admin_auth_headers)
+    service_actor = AuthContext(
+        user_id=uuid4(), role=Role.ADMIN, principal_type=PrincipalType.SERVICE
+    )
+    with client.app.state.db_session_factory() as session:
+        api = client.app.state.lab_tracker_api.for_request(
+            SQLAlchemyLabTrackerRepository(session)
+        )
+        with pytest.raises(PermissionDeniedError, match="interactive human session"):
+            api.update_graph_draft_batch_settings(
+                UUID(project_id),
+                external_provider_acknowledged=True,
+                actor=service_actor,
+            )
+
+
+def test_batch_settings_reject_null_or_false_consent_fields(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    settings_path = f"/projects/{project_id}/graph-draft-batch-settings"
+    for body in (
+        {"external_context_policy": None},
+        {"external_provider_acknowledged": None},
+        {"external_provider_acknowledged": False},
+        {"external_context_policy": "everything"},
+    ):
+        response = client.patch(settings_path, json=body, headers=admin_auth_headers)
+        assert response.status_code == 422, (body, response.text)
+
+
+def test_capture_marked_exclude_via_patch_stays_out_of_run_now_batch(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    kept = _note(client, admin_auth_headers, project_id, "Keep me in the daily review.")
+    excluded = _note(client, admin_auth_headers, project_id, "Personal aside, not for drafting.")
+    marked = client.patch(
+        f"/notes/{excluded}",
+        json={"metadata": {"scheduled_graph_draft_policy": "exclude"}},
+        headers=admin_auth_headers,
+    )
+    assert marked.status_code == 200, marked.text
+    assert marked.json()["data"]["metadata"]["scheduled_graph_draft_policy"] == "exclude"
+    rejected = client.patch(
+        f"/notes/{kept}",
+        json={"metadata": {"scheduled_graph_draft_policy": "always"}},
+        headers=admin_auth_headers,
+    )
+    assert rejected.status_code == 422, rejected.text
+    assert "scheduled_graph_draft_policy" in rejected.json()["error"]["message"]
+
+    fake_client = FakeBatchDraftClient(_batch_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: fake_client
+    run = client.post(
+        "/batches/run-now", json={"project_id": project_id}, headers=admin_auth_headers
+    )
+    assert run.status_code == 201, run.text
+    assert run.json()["data"]["note_count"] == 1
+    change_set_id = run.json()["data"]["change_set_id"]
+    draft = client.get(f"/batches/{change_set_id}", headers=admin_auth_headers)
+    assert draft.json()["data"]["source_note_ids"] == [kept]

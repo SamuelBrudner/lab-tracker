@@ -12,7 +12,7 @@ from lab_tracker.app import create_app
 from lab_tracker.auth import LOCAL_AUTH_USER_ID, AuthContext, Role
 from lab_tracker.db import Base, get_session_factory
 from lab_tracker.db_models import NoteModel, ProjectModel, QuestionModel, UserModel
-from lab_tracker.errors import ValidationError
+from lab_tracker.errors import NotFoundError, ValidationError
 from lab_tracker.models import (
     AnalysisStatus,
     ClaimStatus,
@@ -1208,3 +1208,66 @@ def test_repository_backed_api_rolls_back_failed_writes_from_read_state():
         raise AssertionError("Expected repository write to fail")
 
     assert api.list_projects() == []
+
+
+def test_search_graph_nodes_returns_ranked_project_hits() -> None:
+    api = repository_backed_api()
+    actor = _actor()
+    project = api.create_project("Cue project", actor=actor)
+    other_project = api.create_project("Other cue project", actor=actor)
+    question = api.create_question(
+        project_id=project.project_id,
+        text="Does kynurenine depletion abolish turning?",
+        question_type=QuestionType.DESCRIPTIVE,
+        status=QuestionStatus.ACTIVE,
+        actor=actor,
+    )
+    claim = api.create_claim(
+        project_id=project.project_id,
+        statement="Turning depends on tryptophan metabolism.",
+        confidence=0.5,
+        falsification_criteria="No change after kynurenine depletion.",
+        actor=actor,
+    )
+    note = api.create_note(
+        project_id=project.project_id,
+        raw_content="kynurenine assay rig 2",
+        actor=actor,
+    )
+    other_question = api.create_question(
+        project_id=other_project.project_id,
+        text="Is kynurenine relevant in the other project?",
+        question_type=QuestionType.DESCRIPTIVE,
+        status=QuestionStatus.ACTIVE,
+        actor=actor,
+    )
+
+    hits = api._repository.search_graph_nodes(  # type: ignore[attr-defined]
+        project_id=project.project_id,
+        query="kynurenine",
+        entity_types=("question", "claim", "dataset", "session"),
+        limit=5,
+    )
+
+    keys = [(hit.node.entity_type, hit.node.entity_id) for hit in hits]
+    assert set(keys) == {
+        ("question", str(question.question_id)),
+        ("claim", str(claim.claim_id)),
+    }
+    assert len(keys) == len(set(keys))
+    assert ("note", str(note.note_id)) not in keys
+    assert ("question", str(other_question.question_id)) not in keys
+    assert all(hit.snippet for hit in hits)
+    assert all(hit.match_reasons for hit in hits)
+
+
+def test_search_graph_nodes_unknown_project_raises_not_found() -> None:
+    api = repository_backed_api()
+
+    with pytest.raises(NotFoundError, match="Project does not exist"):
+        api._repository.search_graph_nodes(  # type: ignore[attr-defined]
+            project_id=uuid4(),
+            query="kynurenine",
+            entity_types=("question",),
+            limit=5,
+        )

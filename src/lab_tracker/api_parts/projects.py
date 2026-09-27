@@ -9,12 +9,14 @@ its own edit locality. These are mixins: LabTrackerAPI inherits them, so
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, TypeVar
 from uuid import UUID
 
 from lab_tracker.api_parts._base import _first_uuid
 from lab_tracker.auth import AuthContext
 from lab_tracker.models import (
+    DraftQualityLedger,
     Project,
     ProjectGroup,
     UsageEventResourceType,
@@ -22,7 +24,11 @@ from lab_tracker.models import (
 )
 
 if TYPE_CHECKING:
-    from lab_tracker.services import ProjectAuthorizationPolicy, ProjectService
+    from lab_tracker.services import (
+        DraftQualityService,
+        ProjectAuthorizationPolicy,
+        ProjectService,
+    )
 
 UsageResultT = TypeVar("UsageResultT")
 
@@ -31,6 +37,7 @@ class ProjectsApiMixin:
     if TYPE_CHECKING:
         projects: ProjectService
         project_authorization: ProjectAuthorizationPolicy
+        draft_quality: DraftQualityService
 
         def _with_usage_event(
             self,
@@ -78,6 +85,17 @@ class ProjectsApiMixin:
 
     def list_projects(self, *args: Any, **kwargs: Any) -> Any:
         return self.projects.list_projects(*args, **kwargs)
+
+    def draft_quality_ledger(
+        self,
+        project_id: UUID,
+        *,
+        since: datetime | None = None,
+        actor: AuthContext | None = None,
+    ) -> DraftQualityLedger:
+        """Read the draft-quality ledger; the route records the VIEW after this succeeds."""
+
+        return self.draft_quality.ledger(project_id, since=since, actor=actor)
 
     def update_project(self, *args: Any, **kwargs: Any) -> Any:
         return self._with_usage_event(

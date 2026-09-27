@@ -767,6 +767,24 @@ Tracker instance. A manual question-alignment path remains available and
 invokes no provider, and the copyable current-state brief is always rendered
 locally rather than sent for a second generation call.
 
+Whether a provider counts as **external** is decided by the host in its base
+URL: a loopback host (`localhost`, `127.0.0.1`, or `::1`) in
+`LAB_TRACKER_OPENAI_BASE_URL`, `LAB_TRACKER_ANTHROPIC_BASE_URL`, or
+`LAB_TRACKER_GOOGLE_BASE_URL` keeps every draft on this machine, so no
+external-provider acknowledgement is asked for. Any other host is external:
+turning on a scheduled daily-review cadence, switching a settings row's
+`external_context_policy` to `project_notes`, and every note-scoped draft
+request (`POST /notes/{id}/graph-drafts` and `/analysis-graph-drafts`) then
+require `external_provider_acknowledged: true` from the person making the
+request. The batch-settings acknowledgement is recorded once on that row
+(`external_provider_acknowledged_at` / `external_provider_acknowledged_by`);
+the note-scoped one is recorded on the change set's context packet. See
+[scheduled-daily-review.md](scheduled-daily-review.md) for what each policy
+sends. `LAB_TRACKER_GRAPH_DRAFT_PROVIDER` also accepts `claude` for
+`anthropic` and `gemini` for `google`; any other spelling is treated as
+external for the acknowledgement gate and still fails at the first draft
+request, as before.
+
 Automatic upload transcription is a separate, explicit operator opt-in. When
 enabled, every newly created audio upload—including tagless phone captures and
 quick captures—is sent to the configured OpenAI or Google provider after the
@@ -782,11 +800,8 @@ otherwise bounded and provider-side spending limits are acceptable. Exact
 
 - `LAB_TRACKER_GRAPH_DRAFT_PROVIDER`: active drafting provider (default:
   `openai`; accepted values are `openai`, `anthropic`/`claude`, and
-  `google`/`gemini`; `agentic`/`agentic-openai` enables the read-only agentic
-  batch drafter, which runs only in the background worker, so startup fails
-  unless `LAB_TRACKER_GRAPH_DRAFT_BACKGROUND_ENABLED` or
-  `LAB_TRACKER_GRAPH_DRAFT_SCHEDULER_ENABLED` is `true`; note-scoped and
-  analysis drafts under this provider use the wrapped OpenAI client directly)
+  `google`/`gemini`; any other value is rejected with a `GraphDraftingError`
+  when a draft is requested)
 - `LAB_TRACKER_GRAPH_DRAFT_BACKGROUND_ENABLED`: when `true`, run-now and
   run-due enqueue graph-draft batch jobs and the in-process worker executes
   them (default: `false`)
@@ -999,8 +1014,10 @@ FastAPI app does not read them. `LAB_TRACKER_BASE_URL` (see
 
 #### Git, repo, HPC, and watch capture
 
-- `LAB_TRACKER_GIT_CAPTURE_ENABLED`: set to `0` to turn off the managed Git
-  commit-capture hook without uninstalling it (default: on)
+- `LAB_TRACKER_GIT_CAPTURE_ENABLED`: set to `0` to turn off a legacy `GRAPH
+  DRAFT` commit-capture hook (the deprecated `lt git snapshot` block) without
+  uninstalling it; hooks written by `lt hooks install` read
+  `LAB_TRACKER_REPO_HOOK_ENABLED` instead (default: on)
 - `LAB_TRACKER_GIT_DRAFT_ENABLED`: older name for
   `LAB_TRACKER_GIT_CAPTURE_ENABLED`, used only when the new name is unset
 - `LAB_TRACKER_LT`: `lt` executable the managed Git and repo hooks run
@@ -1008,10 +1025,11 @@ FastAPI app does not read them. `LAB_TRACKER_BASE_URL` (see
 - `LAB_TRACKER_PYTHON`: Python interpreter the Windows graph-draft hook
   (`scripts/install-git-graph-draft-hook.ps1`) and `scripts/matlab-smoke.sh`
   run (default: the interpreter recorded at install, or `python3`)
-- `LAB_TRACKER_GIT_MAX_DIFF_LINES`: maximum diff lines a Git capture keeps
-  (default: `800`)
-- `LAB_TRACKER_GIT_CONTEXT_LINES`: unified-diff context lines in a Git capture
-  (default: `3`)
+- `LAB_TRACKER_GIT_MAX_DIFF_LINES`: maximum diff lines a Git capture keeps, for
+  `lt repo` commit events and the deprecated `lt git snapshot` alike; a
+  truncated diff is recorded in note metadata (default: `800`)
+- `LAB_TRACKER_GIT_CONTEXT_LINES`: unified-diff context lines in a Git capture,
+  for `lt repo` commit events and `lt git snapshot` alike (default: `3`)
 - `LAB_TRACKER_GIT_TIMEOUT_SECONDS`: timeout in seconds for each `git` probe the
   client runs (default: `10`)
 - `LAB_TRACKER_GIT_COMMIT` / `LAB_TRACKER_GIT_REPO`: default commit and
@@ -1020,7 +1038,10 @@ FastAPI app does not read them. `LAB_TRACKER_BASE_URL` (see
 - `LAB_TRACKER_TOKEN`: bearer token for `scripts/create-analysis-graph-draft.py`
   when `--token` is not given
 - `LAB_TRACKER_REPO_HOOK_ENABLED`: set to `0` to turn off the `lt repo`
-  post-commit hook without uninstalling it (default: on)
+  post-commit hook (the block `lt hooks install` writes) without uninstalling
+  it (default: on). Which commits the hook records is not an environment
+  variable: the commit filter (merge commits and `fixup!`/`squash!` subjects
+  skipped by default) lives in `commit_filter` in `.lab-tracker/repo.json`
 - `LAB_TRACKER_REPO_CONFIG` / `LAB_TRACKER_HPC_CONFIG` /
   `LAB_TRACKER_WATCH_CONFIG`: path to the `repo.json`, `hpc.json`, or
   `watch.json` config (default: the nearest `.lab-tracker/<name>.json` in the

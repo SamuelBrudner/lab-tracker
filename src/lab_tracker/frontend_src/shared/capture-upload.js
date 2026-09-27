@@ -34,7 +34,10 @@ function sourceFileMetadata(file) {
   return metadata;
 }
 
-// Assemble the capture metadata bag written onto a note.
+// Assemble the capture metadata bag written onto a note. captured_at is the
+// composition clock: it is stamped here, before any queueing, so an offline
+// capture replayed hours later still says when it was actually composed.
+// The clock is injectable so tests can pin it.
 function buildCaptureMetadata({
   captureMode,
   kind,
@@ -42,12 +45,14 @@ function buildCaptureMetadata({
   file = null,
   hint = "",
   voiceNoteType = "",
+  now = () => Date.now(),
 }) {
   const metadata = {
     capture_source: "mobile_capture",
     capture_mode: captureMode,
     capture_kind: kind,
     capture_review_status: "pending_review",
+    captured_at: new Date(now()).toISOString(),
     ...sourceFileMetadata(file),
   };
   if (bundleId) {

@@ -133,6 +133,7 @@ warn_unused_configs = true
 show_error_codes = true
 files = [
   "src/lab_tracker/patching.py",
+  "src/lab_tracker/claim_effective_status.py",
   "src/lab_tracker/repository.py",
   "src/lab_tracker/reference_registry.py",
   "src/lab_tracker/sqlalchemy_repository_parts/references.py",
@@ -142,6 +143,7 @@ files = [
   "src/lab_tracker/decision_context_use_case.py",
   "src/lab_tracker/project_graph.py",
   "src/lab_tracker/graph_query.py",
+  "src/lab_tracker/coverage_query.py",
   "src/lab_tracker/provider_error_redaction.py",
   "src/lab_tracker/deployment_probe.py",
   "src/lab_tracker/outbound_http.py",
@@ -177,6 +179,7 @@ files = [
   "src/lab_tracker/_windows_job.py",
   "src/lab_tracker/application",
   "src/lab_tracker/graph_drafting.py",
+  "src/lab_tracker/draft_quality.py",
   "src/lab_tracker/services/shared.py",
   "src/lab_tracker/services/graph_draft_generation.py",
   "src/lab_tracker/services/graph_draft_review.py",
@@ -184,6 +187,7 @@ files = [
   "src/lab_tracker/services/graph_draft_batch_reservation.py",
   "src/lab_tracker/services/graph_draft_scheduling.py",
   "src/lab_tracker/services/graph_draft_scheduling_ports.py",
+  "src/lab_tracker/services/note_observed_at.py",
   "src/lab_tracker/services/graph_draft_service.py",
   "src/lab_tracker/api_parts/graph_drafts.py",
   "src/lab_tracker/api_parts/projects.py",

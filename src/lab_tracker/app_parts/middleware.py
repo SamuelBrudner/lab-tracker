@@ -193,6 +193,7 @@ def configure_auth_middleware(app: FastAPI) -> None:
                     role=user.role,
                     principal_type=PrincipalType.DEVICE,
                     device_token_id=principal.device_token_id,
+                    principal_label=principal.label,
                 )
             elif token.startswith(LPAT_TOKEN_PREFIX):
                 pat_rate_client = rate_limit_client(request)
@@ -231,10 +232,14 @@ def configure_auth_middleware(app: FastAPI) -> None:
                     # quota would turn this 403 into a 429.
                     return _service_forbidden_response("Not permitted for this token.")
                 app.state.pat_rate_limiter.reset(pat_rate_key)
+                # Routes apply the scope's body-level gates and stamp the token
+                # label as origin_provider from these two fields.
                 request.state.auth_context = AuthContext(
                     user_id=principal.user_id,
                     role=principal.role,
                     principal_type=PrincipalType.SERVICE,
+                    principal_label=principal.label,
+                    service_scope=principal.scope,
                 )
             else:
                 _claims, user = await run_in_threadpool(

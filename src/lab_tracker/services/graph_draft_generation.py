@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
@@ -23,6 +24,7 @@ from lab_tracker.graph_drafting import (
 )
 from lab_tracker.member_onboarding import is_member_checkpoint
 from lab_tracker.models import (
+    ExternalContextPolicy,
     GraphChangeOperation,
     GraphChangeSet,
     GraphChangeSetStatus,
@@ -66,6 +68,10 @@ from lab_tracker.services.graph_draft_generation_ports import (
 from lab_tracker.services.graph_draft_generation_ports import (
     GenerationRecords as GenerationRecords,
 )
+from lab_tracker.services.graph_draft_revision_hints import (
+    compose_rejected_redraft_hint,
+    prior_rejection_summary,
+)
 from lab_tracker.services.graph_draft_validation import string_list
 from lab_tracker.services.shared import UserExistenceReader, actor_user_fk, actor_user_id
 
@@ -81,11 +87,7 @@ class _GenerationOwnershipLost(RuntimeError):
 def provider_generation_lease_seconds(draft_client: GraphDraftClient) -> int:
     """Return one provider attempt's timeout plus a completion margin."""
 
-    raw_timeout = getattr(
-        draft_client,
-        "timeout_seconds",
-        DEFAULT_PROVIDER_TIMEOUT_SECONDS,
-    )
+    raw_timeout = getattr(draft_client, "timeout_seconds", DEFAULT_PROVIDER_TIMEOUT_SECONDS)
     try:
         timeout_seconds = float(raw_timeout)
     except (TypeError, ValueError):
@@ -104,7 +106,7 @@ def configured_provider_generation_lease_seconds(settings: Settings) -> int:
     elif provider in {"google", "gemini"}:
         timeout_seconds = settings.google_timeout_seconds
     else:
-        # OpenAI and the agentic OpenAI wrapper share the OpenAI transport.
+        # OpenAI is the transport for every provider not listed above.
         timeout_seconds = settings.openai_timeout_seconds
     return max(1, math.ceil(float(timeout_seconds))) + GENERATION_LEASE_MARGIN_SECONDS
 
@@ -157,11 +159,7 @@ class GraphDraftGenerationCoordinator(BaseService):
             lease_until=lease_until,
             claim_token=claim_token,
         )
-        return GenerationClaim(
-            change_set=change_set,
-            claim_token=claim_token,
-            acquired=acquired,
-        )
+        return GenerationClaim(change_set=change_set, claim_token=claim_token, acquired=acquired)
 
     def claim_note_generation(
         self,
@@ -175,10 +173,12 @@ class GraphDraftGenerationCoordinator(BaseService):
         concurrent re-drafts converge) and leaves the rejected review intact.
         """
         claim = self.claim_generation(candidate, draft_client=draft_client)
+        rejected: GraphChangeSet | None = None
         while not claim.acquired and claim.change_set.status == GraphChangeSetStatus.REJECTED:
+            rejected = claim.change_set
             candidate.batch_key = successor_generation_key(claim.change_set)
             claim = self.claim_generation(candidate, draft_client=draft_client)
-        return claim
+        return replace(claim, rejected_predecessor=rejected)
 
     def renew_generation_claim(
         self,
@@ -239,6 +239,7 @@ class GraphDraftGenerationCoordinator(BaseService):
         mode: GraphDraftMode = GraphDraftMode.GRAPH_CONTEXT,
         user_hint: str | None = None,
         actor: AuthContext | None = None,
+        external_provider_acknowledged: bool = False,
         max_attempts: int = DEFAULT_BATCH_RETRY_ATTEMPTS,
         retry_backoff_seconds: float = 0.0,
     ) -> GraphChangeSet:
@@ -258,6 +259,7 @@ class GraphDraftGenerationCoordinator(BaseService):
                 source_notes=prepared["source_notes"],
                 user_hint=cleaned_hint,
                 actor=actor,
+                external_context_policy=self._context_policy(note.project_id, actor),
             )
         elif mode == GraphDraftMode.IMAGE_ONLY:
             context_packet = self.context_builder.image_only_context_packet(
@@ -267,6 +269,9 @@ class GraphDraftGenerationCoordinator(BaseService):
             )
         else:
             raise ValidationError("Unsupported graph draft mode.")
+        batch_policy.stamp_external_provider_acknowledgement(
+            context_packet, actor, acknowledged=external_provider_acknowledged
+        )
         change_set = GraphChangeSet(
             change_set_id=uuid4(),
             project_id=note.project_id,
@@ -295,6 +300,16 @@ class GraphDraftGenerationCoordinator(BaseService):
         if not claim.acquired:
             return claim.change_set
         change_set = claim.change_set
+        draft_hint = cleaned_hint
+        if claim.rejected_predecessor is not None:
+            # Seed the re-draft with what the reviewer already turned down; the
+            # claim reload is a distinct object, so the packet is re-attached.
+            draft_hint = compose_rejected_redraft_hint(
+                claim.rejected_predecessor, user_hint=cleaned_hint
+            )
+            context_packet["user_hint"] = draft_hint
+            context_packet["prior_rejection"] = prior_rejection_summary(claim.rejected_predecessor)
+            change_set.context_packet = context_packet
         try:
             generated = self._draft_validated_patch_with_retries(
                 change_set=change_set,
@@ -302,7 +317,7 @@ class GraphDraftGenerationCoordinator(BaseService):
                 draft=lambda attempt_context: self._draft_graph_patch(
                     draft_client,
                     graph_context=attempt_context,
-                    user_hint=cleaned_hint,
+                    user_hint=draft_hint,
                     draft_mode=mode,
                     source_artifacts=prepared["source_artifacts"],
                     image_bytes=prepared["image_bytes"],
@@ -350,6 +365,7 @@ class GraphDraftGenerationCoordinator(BaseService):
         *,
         draft_client: GraphDraftClient,
         actor: AuthContext | None = None,
+        external_provider_acknowledged: bool = False,
         max_attempts: int = DEFAULT_BATCH_RETRY_ATTEMPTS,
         retry_backoff_seconds: float = 0.0,
     ) -> GraphChangeSet:
@@ -365,6 +381,10 @@ class GraphDraftGenerationCoordinator(BaseService):
             source_notes=[note],
             user_hint=None,
             actor=actor,
+            external_context_policy=self._context_policy(note.project_id, actor),
+        )
+        batch_policy.stamp_external_provider_acknowledgement(
+            context_packet, actor, acknowledged=external_provider_acknowledged
         )
         change_set = GraphChangeSet(
             change_set_id=uuid4(),
@@ -517,10 +537,7 @@ class GraphDraftGenerationCoordinator(BaseService):
         change_set: GraphChangeSet,
         claim_token: UUID,
     ) -> GraphChangeSet:
-        failed = self.fail_generation_claim(
-            change_set,
-            claim_token=claim_token,
-        )
+        failed = self.fail_generation_claim(change_set, claim_token=claim_token)
         return failed or self.records.get_graph_change_set(change_set.change_set_id)
 
     def create_batch_graph_draft(
@@ -567,12 +584,14 @@ class GraphDraftGenerationCoordinator(BaseService):
                 review_assignee=review_assignee,
                 review_assignee_user_id=review_assignee_user_id,
             )
-        self._ensure_draft_client_allowed_here(draft_client, actor=actor)
+        owner = batch_policy.context_owner_for(review_assignee, review_assignee_user_id, actor)
         context_packet = self.context_builder.build_batch_graph_context(
             batch_notes,
             window=window,
             actor=actor,
             batch_note_limit=batch_policy.BATCH_NOTE_LIMIT,
+            context_owner=owner,
+            external_context_policy=self._context_policy(project_id, actor, owner),
         )
         if cleaned_hint:
             context_packet["user_hint"] = cleaned_hint
@@ -664,20 +683,6 @@ class GraphDraftGenerationCoordinator(BaseService):
             self._finish_failed_or_current(change_set, claim.claim_token)
             raise
 
-    @staticmethod
-    def _ensure_draft_client_allowed_here(
-        draft_client: GraphDraftClient,
-        *,
-        actor: AuthContext | None,
-    ) -> None:
-        if not getattr(draft_client, "requires_background_worker", False):
-            return
-        if actor is not None and actor.is_system:
-            return
-        raise GraphDraftingError(
-            "The configured graph draft client only runs inside the background worker."
-        )
-
     def propose_note_revision(
         self,
         change_set: GraphChangeSet,
@@ -714,6 +719,7 @@ class GraphDraftGenerationCoordinator(BaseService):
                 source_notes=prepared["source_notes"],
                 user_hint=user_hint,
                 actor=actor,
+                external_context_policy=self._context_policy(note.project_id, actor),
             )
         elif mode == GraphDraftMode.IMAGE_ONLY:
             context_packet = self.context_builder.image_only_context_packet(
@@ -786,14 +792,15 @@ class GraphDraftGenerationCoordinator(BaseService):
         actor: AuthContext | None = None,
     ) -> dict[str, Any]:
         prepared = self.context_builder.prepare_note_sources_for_graph_draft(
-            note_id,
-            mode=GraphDraftMode.GRAPH_CONTEXT,
+            note_id, mode=GraphDraftMode.GRAPH_CONTEXT
         )
+        note = prepared["source_note"]
         return self.context_builder.build_graph_context_packet(
-            prepared["source_note"],
+            note,
             source_notes=prepared["source_notes"],
             user_hint=user_hint.strip() if user_hint else None,
             actor=actor,
+            external_context_policy=self._context_policy(note.project_id, actor),
         )
 
     def build_batch_graph_context(
@@ -802,12 +809,38 @@ class GraphDraftGenerationCoordinator(BaseService):
         *,
         window: tuple[datetime, datetime] | None = None,
         actor: AuthContext | None = None,
+        context_owner: batch_policy.BatchReviewer | None = None,
+        external_context_policy: ExternalContextPolicy | None = None,
     ) -> dict[str, Any]:
+        """Packet for ``notes``; ``None`` policy resolves the owner's settings."""
+        owner = context_owner
+        if owner is None:
+            owner = batch_policy.context_owner_for(None, None, actor)
+        policy = external_context_policy
+        if policy is None:
+            policy = batch_policy.resolve_batch_context_policy(
+                self._context.active_repository(), {note.project_id for note in notes}, owner
+            )
         return self.context_builder.build_batch_graph_context(
             notes,
             window=window,
             actor=actor,
             batch_note_limit=batch_policy.BATCH_NOTE_LIMIT,
+            context_owner=owner,
+            external_context_policy=policy,
+        )
+
+    def _context_policy(
+        self,
+        project_id: UUID,
+        actor: AuthContext | None,
+        owner: batch_policy.BatchReviewer | None = None,
+    ) -> ExternalContextPolicy:
+        """The packet owner's external-context policy (assignee, else actor)."""
+        resolved = owner if owner is not None else batch_policy.context_owner_for(None, None, actor)
+        user_id = resolved.reviewer_user_id if resolved is not None else None
+        return batch_policy.resolve_external_context_policy(
+            self._context.active_repository(), project_id, user_id
         )
 
     @staticmethod

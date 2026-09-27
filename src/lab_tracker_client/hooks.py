@@ -1,32 +1,42 @@
-"""Cross-platform enrollment of the Lab Tracker post-commit capture hook.
+"""Single installer for the Lab Tracker post-commit capture hook.
 
-Pure-Python replacement for ``scripts/install-git-graph-draft-hook.ps1``. The
-managed block keeps the exact same BEGIN/END markers, so repos enrolled by the
-legacy PowerShell installer upgrade in place. The new hook body invokes the
-packaged ``lt git snapshot`` (outbox-backed, so unreachable-server
-commits queue instead of being lost) rather than a source-checkout script, and
-always exits 0 so a commit is never blocked. Proposal generation is deliberately
-left to the configured daily-review schedule or an explicit on-demand command.
+``lt hooks install`` writes the ``lt repo`` hook — the ``REPO HOOK`` block
+rendered by :func:`lab_tracker_client.repo.hook_managed_block`, whose commit
+events carry the bounded diff and conventions snapshot the legacy ``lt git
+snapshot`` hook used to record (decision lt-81s6.17: the ``lt repo`` event is
+the surviving payload). The legacy ``GRAPH DRAFT`` markers written by the old
+installer (and by ``scripts/install-git-graph-draft-hook.ps1``) are recognised
+only to migrate such a block in place, carrying its baked project id and base
+URL forward so an upgrade can never silently unbind capture. The hook always
+exits 0, so a commit is never blocked; proposal generation is deliberately left
+to the configured daily-review schedule or an explicit on-demand command.
 """
 
 from __future__ import annotations
 
-import difflib
+import os
 import re
 import shutil
 import subprocess
 import sys
+from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import lab_tracker_client.repo as repo_capture
 from lab_tracker_client.client import LTValidationError
+from lab_tracker_client.git_capture import project_from_ids
 from lab_tracker_client.repo import HOOK_BEGIN_MARKER as REPO_HOOK_BLOCK_BEGIN
+from lab_tracker_client.repo import HOOK_END_MARKER as REPO_HOOK_BLOCK_END
+from lab_tracker_client.repo import hook_text_diff
 
 JsonObject = dict[str, Any]
 
+# Legacy ``lt git snapshot`` block markers: recognised for migration and
+# removal only; new installs never write them.
 HOOK_BLOCK_BEGIN = "# --- BEGIN LAB TRACKER GRAPH DRAFT HOOK ---"
 HOOK_BLOCK_END = "# --- END LAB TRACKER GRAPH DRAFT HOOK ---"
-_SHEBANG = "#!/usr/bin/env sh"
 _LT_LINE_PATTERN = re.compile(r'LAB_TRACKER_LT="\$\{LAB_TRACKER_LT:-(?P<path>[^}]*)\}"')
 _PROJECT_LINE_PATTERN = re.compile(
     r'LAB_TRACKER_PROJECT_ID="\$\{LAB_TRACKER_PROJECT_ID:-(?P<value>[^}]*)\}"'
@@ -34,6 +44,16 @@ _PROJECT_LINE_PATTERN = re.compile(
 _BASE_URL_LINE_PATTERN = re.compile(
     r'LAB_TRACKER_BASE_URL="\$\{LAB_TRACKER_BASE_URL:-(?P<value>[^}]*)\}"'
 )
+# The REPO HOOK block single-quotes every baked value (``'\''`` escapes a quote).
+_SH_SINGLE_QUOTED = r"'(?P<value>(?:[^']|'\\'')*)'"
+_REPO_LT_LINE_PATTERN = re.compile(r"^\s*\[ -n \"\$LT\" \] \|\| LT=" + _SH_SINGLE_QUOTED, re.M)
+_REPO_BASE_URL_LINE_PATTERN = re.compile(r"^\s*LAB_TRACKER_BASE_URL=" + _SH_SINGLE_QUOTED, re.M)
+_ACTION_NAMES = {
+    # ``lt hooks install`` has always reported ``created`` for a fresh hook.
+    repo_capture.HOOK_ACTION_INSTALLED: "created",
+}
+REMOVED_BLOCK_REPO = "repo"
+REMOVED_BLOCK_LEGACY = "graph-draft"
 
 
 def hook_path_for_repo(repo: str | Path = ".") -> tuple[Path, Path]:
@@ -57,68 +77,14 @@ def hook_path_for_repo(repo: str | Path = ".") -> tuple[Path, Path]:
     return repo_root, path.resolve()
 
 
-def managed_hook_block(
-    *,
-    lt_path: str,
-    project_id: str | None = None,
-    base_url: str | None = None,
-) -> str:
-    """Render the POSIX-sh managed block (LF only; runs under Git-for-Windows sh)."""
+def hook_lt_path(content: str) -> str | None:
+    """The ``lt`` path baked into a hook: REPO HOOK block first, then legacy."""
 
-    lines = [
-        HOOK_BLOCK_BEGIN,
-        (
-            'LAB_TRACKER_GIT_CAPTURE_ENABLED="${LAB_TRACKER_GIT_CAPTURE_ENABLED'
-            ':-${LAB_TRACKER_GIT_DRAFT_ENABLED:-1}}"'
-        ),
-        'if [ "$LAB_TRACKER_GIT_CAPTURE_ENABLED" != "0" ]; then',
-        (
-            '  LAB_TRACKER_LT="${LAB_TRACKER_LT:-'
-            f'{_sh_default_text("lt path", _hook_path_text(lt_path))}}}"'
-        ),
-    ]
-    if base_url:
-        lines.extend(
-            [
-                (
-                    '  LAB_TRACKER_BASE_URL="${LAB_TRACKER_BASE_URL:-'
-                    f'{_sh_default_text("base URL", base_url)}}}"'
-                ),
-                "  export LAB_TRACKER_BASE_URL",
-            ]
-        )
-    if project_id:
-        lines.extend(
-            [
-                (
-                    '  LAB_TRACKER_PROJECT_ID="${LAB_TRACKER_PROJECT_ID:-'
-                    f'{_sh_default_text("project id", project_id)}}}"'
-                ),
-                "  export LAB_TRACKER_PROJECT_ID",
-            ]
-        )
-    # No --fail-silent here: a nonzero lt exit (snapshot failed, or queued but
-    # not yet synced) must reach the || so the one-line warning stays
-    # reachable. post-commit hooks are advisory — git never blocks the commit
-    # on them — and the || echo keeps the block's own status 0 regardless.
-    # Suppress only stdout (the JSON payload), NOT stderr: lt prints a
-    # cause-and-remediation diagnostic there on a sync failure (GH #77), so the
-    # user sees *why* and *how to drain* rather than an unactionable one-liner.
-    warning = (
-        "lab-tracker: commit capture did not fully sync (see the note above if "
-        "shown). Queued events are kept. Retry now with 'lt outbox sync', then "
-        "verify with 'lt outbox status' before reporting an unresolved capture. "
-        "Replay is idempotent. Commit kept."
-    )
-    lines.extend(
-        [
-            '  "$LAB_TRACKER_LT" git snapshot >/dev/null || \\',
-            f'    echo "{warning}" >&2',
-            "fi",
-            HOOK_BLOCK_END,
-        ]
-    )
-    return "\n".join(lines)
+    match = _REPO_LT_LINE_PATTERN.search(content)
+    if match:
+        return _sh_unquote(match.group("value"))
+    legacy = _LT_LINE_PATTERN.search(content)
+    return legacy.group("path") if legacy else None
 
 
 def install_hook(
@@ -127,16 +93,28 @@ def install_hook(
     project_id: str | None = None,
     base_url: str | None = None,
     lt_path: str | None = None,
+    config_path: str | Path | None = None,
     force: bool = False,
     dry_run: bool = False,
 ) -> JsonObject:
+    """Install the ``lt repo`` post-commit hook, creating ``repo.json`` if needed.
+
+    The project id comes from ``--project``, a legacy block's baked default,
+    ``LAB_TRACKER_PROJECT_ID`` or the repo's ``lt_ids.json`` binding when no
+    ``repo.json`` exists yet; when one exists, a conflicting ``--project`` is
+    refused rather than silently overridden. A legacy GRAPH DRAFT block is
+    migrated in place; a foreign hook needs ``force``; ``dry_run`` reports the
+    diff and the config it would create without writing anything.
+    """
+
     repo_root, hook_path = hook_path_for_repo(repo)
     resolved_lt = lt_path or _default_lt_path()
     existing = _read_hook(hook_path)
-    has_block = _require_paired_markers(existing, hook_path)
+    legacy_present = _require_paired_markers(existing, hook_path, HOOK_BLOCK_BEGIN, HOOK_BLOCK_END)
+    _require_paired_markers(existing, hook_path, REPO_HOOK_BLOCK_BEGIN, REPO_HOOK_BLOCK_END)
     carried_project: str | None = None
     carried_base_url: str | None = None
-    if has_block:
+    if legacy_present:
         # A legacy PS1-installed block may be the repo's ONLY project/URL
         # binding; replacing it wholesale would silently kill capture. Carry
         # the baked defaults forward unless the caller overrides them.
@@ -150,50 +128,43 @@ def install_hook(
             base_url = carried_base_url
         _require_safe_carried_value("project id", carried_project, "--project")
         _require_safe_carried_value("base URL", carried_base_url, "--base-url")
-    block = managed_hook_block(
-        lt_path=resolved_lt,
-        project_id=project_id,
-        base_url=base_url,
-    )
-    if REPO_HOOK_BLOCK_BEGIN in existing and not has_block and not force:
-        # Both Lab Tracker capture hooks in one repo record two staged notes
-        # per commit (lt-81s6.17). One adapter per repo unless forced.
-        raise LTValidationError(
-            "This repo already has the 'lt repo' capture hook installed. "
-            "Running both capture hooks records every commit twice. Remove the "
-            "REPO HOOK block (or uninstall it) first, or pass --force only if "
-            "you deliberately want both."
+    config = _resolve_repo_config(repo_root, project_id=project_id, config_path=config_path)
+    if config.create:
+        plan = repo_capture.plan_post_commit_hook(
+            repo_root,
+            lt_command=resolved_lt,
+            config_path=config.path,
+            force=force,
+            base_url=base_url,
+            migrate_legacy=True,
         )
-    if existing.strip() and not has_block and not force:
-        raise LTValidationError(
-            "Existing post-commit hook is not Lab Tracker-managed. "
-            "Pass --force to append the managed block."
-        )
-    if has_block:
-        action = "updated"
-        pattern = re.compile(
-            re.escape(HOOK_BLOCK_BEGIN) + r".*?" + re.escape(HOOK_BLOCK_END),
-            re.DOTALL,
-        )
-        updated = pattern.sub(lambda _match: block, existing, count=1)
-    elif existing.strip():
-        action = "appended"
-        updated = f"{existing.rstrip()}\n\n{block}\n"
+        if not dry_run:
+            repo_capture.init_config(project_id=config.project_id, config_path=config.path)
+            repo_capture.write_hook_plan(plan)
+        result = repo_capture.hook_plan_payload(plan, dry_run=dry_run)
     else:
-        action = "created"
-        updated = f"{_SHEBANG}\n{block}\n"
-    updated = updated.replace("\r\n", "\n")
-    if not updated.endswith("\n"):
-        updated += "\n"
+        result = repo_capture.install_post_commit_hook(
+            repo_root,
+            lt_command=resolved_lt,
+            config_path=config.path,
+            force=force,
+            base_url=base_url,
+            dry_run=dry_run,
+            migrate_legacy=True,
+        )
     payload: JsonObject = {
         "command": "hooks-install",
         "repo": str(repo_root),
-        "hook_path": str(hook_path),
-        "action": action,
-        "lt_path": resolved_lt,
+        "hook_path": result["hook_path"],
+        "action": _ACTION_NAMES.get(str(result["action"]), str(result["action"])),
+        "lt_path": result["lt_command"],
+        "config": result["config"],
+        "project_id": config.project_id,
         "dry_run": dry_run,
-        "diff": _text_diff(hook_path, existing, updated),
+        "diff": result["diff"],
     }
+    if config.create:
+        payload["would_create_config" if dry_run else "created_config"] = str(config.path)
     hooks_path_change = _normalize_core_hooks_path(
         repo_root=repo_root,
         hook_path=hook_path,
@@ -207,17 +178,59 @@ def install_hook(
         payload["carried_base_url"] = carried_base_url
     if dry_run:
         return payload
-    hook_path.parent.mkdir(parents=True, exist_ok=True)
-    hook_path.write_text(updated, encoding="utf-8", newline="\n")
-    if sys.platform != "win32":
-        hook_path.chmod(0o755)
     from lab_tracker_client.registry import record_repo
 
     record_repo(repo_root, "hooks-install")
     return payload
 
 
+@dataclass(frozen=True)
+class _RepoConfigChoice:
+    """Where the hook's ``repo.json`` is, and whether the install creates it."""
+
+    path: Path
+    project_id: str
+    create: bool
+
+
+def _resolve_repo_config(
+    repo_root: Path,
+    *,
+    project_id: str | None,
+    config_path: str | Path | None,
+) -> _RepoConfigChoice:
+    resolved = (
+        Path(config_path).expanduser().resolve()
+        if config_path
+        else repo_capture.find_config_path(start=repo_root)
+    )
+    if resolved is not None and resolved.exists():
+        config = repo_capture.load_config(config_path=resolved)
+        if project_id and project_id != config.project_id:
+            raise LTValidationError(
+                f"--project {project_id!r} conflicts with the project "
+                f"{config.project_id!r} recorded in {resolved}. Edit repo.json (or "
+                "re-run 'lt repo init --force') to change the project; the hook "
+                "never overrides it silently."
+            )
+        return _RepoConfigChoice(path=resolved, project_id=config.project_id, create=False)
+    resolved_project = (
+        _optional(project_id)
+        or _optional(os.getenv("LAB_TRACKER_PROJECT_ID"))
+        or project_from_ids(repo_root)
+    )
+    if not resolved_project:
+        raise LTValidationError(
+            "No project id for the commit hook. Pass --project, bind one with "
+            "'lt project bind', or run 'lt repo init'."
+        )
+    path = resolved or repo_root / repo_capture.DEFAULT_CONFIG_RELATIVE_PATH
+    return _RepoConfigChoice(path=path, project_id=resolved_project, create=True)
+
+
 def uninstall_hook(*, repo: str | Path = ".", dry_run: bool = False) -> JsonObject:
+    """Strip the REPO HOOK block and, if present, the legacy GRAPH DRAFT block."""
+
     repo_root, hook_path = hook_path_for_repo(repo)
     existing = _read_hook(hook_path)
     payload: JsonObject = {
@@ -226,20 +239,27 @@ def uninstall_hook(*, repo: str | Path = ".", dry_run: bool = False) -> JsonObje
         "hook_path": str(hook_path),
         "dry_run": dry_run,
     }
-    if not _require_paired_markers(existing, hook_path):
+    removed_blocks: list[str] = []
+    remainder = existing
+    for name, begin, end in (
+        (REMOVED_BLOCK_REPO, REPO_HOOK_BLOCK_BEGIN, REPO_HOOK_BLOCK_END),
+        (REMOVED_BLOCK_LEGACY, HOOK_BLOCK_BEGIN, HOOK_BLOCK_END),
+    ):
+        if not _require_paired_markers(remainder, hook_path, begin, end):
+            continue
+        pattern = re.compile(re.escape(begin) + r".*?" + re.escape(end) + r"\n?", re.DOTALL)
+        remainder = pattern.sub("", remainder, count=1)
+        removed_blocks.append(name)
+    payload["removed_blocks"] = removed_blocks
+    if not removed_blocks:
         payload["action"] = "absent"
         return payload
-    pattern = re.compile(
-        re.escape(HOOK_BLOCK_BEGIN) + r".*?" + re.escape(HOOK_BLOCK_END) + r"\n?",
-        re.DOTALL,
-    )
-    remainder = pattern.sub("", existing, count=1)
     only_shebang = not any(
         line.strip() and not line.strip().startswith("#!")
         for line in remainder.splitlines()
     )
     payload["action"] = "removed-hook-file" if only_shebang else "stripped-block"
-    payload["diff"] = _text_diff(hook_path, existing, "" if only_shebang else remainder)
+    payload["diff"] = hook_text_diff(hook_path, existing, "" if only_shebang else remainder)
     if dry_run:
         return payload
     if only_shebang:
@@ -253,27 +273,41 @@ def uninstall_hook(*, repo: str | Path = ".", dry_run: bool = False) -> JsonObje
 def hook_status(*, repo: str | Path = ".") -> JsonObject:
     repo_root, hook_path = hook_path_for_repo(repo)
     existing = _read_hook(hook_path)
-    has_begin = HOOK_BLOCK_BEGIN in existing
-    has_end = HOOK_BLOCK_END in existing
-    lt_path: str | None = None
+    repo_begin = REPO_HOOK_BLOCK_BEGIN in existing
+    repo_end = REPO_HOOK_BLOCK_END in existing
+    legacy_begin = HOOK_BLOCK_BEGIN in existing
+    legacy_end = HOOK_BLOCK_END in existing
+    lt_path = hook_lt_path(existing)
     lt_path_exists: bool | None = None
-    match = _LT_LINE_PATTERN.search(existing)
-    if match:
-        lt_path = match.group("path")
-        lt_path_exists = Path(lt_path).exists()
-    project_match = _PROJECT_LINE_PATTERN.search(existing)
-    base_url_match = _BASE_URL_LINE_PATTERN.search(existing)
+    if lt_path is not None:
+        with suppress(OSError):
+            lt_path_exists = Path(lt_path).exists()
+    config_path = repo_capture.find_config_path(start=repo_root)
+    baked_project_id: str | None = None
+    if config_path is not None:
+        with suppress(Exception):
+            baked_project_id = repo_capture.load_config(config_path=config_path).project_id
+    if baked_project_id is None:
+        project_match = _PROJECT_LINE_PATTERN.search(existing)
+        baked_project_id = project_match.group("value") if project_match else None
+    base_url_match = _REPO_BASE_URL_LINE_PATTERN.search(existing)
+    baked_base_url = _sh_unquote(base_url_match.group("value")) if base_url_match else None
+    if baked_base_url is None:
+        legacy_url = _BASE_URL_LINE_PATTERN.search(existing)
+        baked_base_url = legacy_url.group("value") if legacy_url else None
     return {
         "command": "hooks-status",
         "repo": str(repo_root),
         "hook_path": str(hook_path),
         "hook_present": hook_path.exists(),
-        "managed_block_present": has_begin and has_end,
-        "markers_unpaired": has_begin != has_end,
+        "managed_block_present": repo_begin and repo_end,
+        "legacy_block_present": legacy_begin and legacy_end,
+        "markers_unpaired": (repo_begin != repo_end) or (legacy_begin != legacy_end),
         "lt_path": lt_path,
         "lt_path_exists": lt_path_exists,
-        "baked_project_id": project_match.group("value") if project_match else None,
-        "baked_base_url": base_url_match.group("value") if base_url_match else None,
+        "config": str(config_path) if config_path is not None else None,
+        "baked_project_id": baked_project_id,
+        "baked_base_url": baked_base_url,
     }
 
 
@@ -363,18 +397,16 @@ def _read_hook(hook_path: Path) -> str:
         ) from exc
 
 
-def _require_paired_markers(existing: str, hook_path: Path) -> bool:
+def _require_paired_markers(existing: str, hook_path: Path, begin: str, end: str) -> bool:
     """True when both markers are present in order; raise on corruption.
 
     A lone or reversed marker means a hand-mangled hook; rewriting around it
     with a DOTALL regex could delete user content, so refuse instead.
     """
 
-    has_begin = HOOK_BLOCK_BEGIN in existing
-    has_end = HOOK_BLOCK_END in existing
-    if has_begin != has_end or (
-        has_begin and existing.index(HOOK_BLOCK_BEGIN) > existing.index(HOOK_BLOCK_END)
-    ):
+    has_begin = begin in existing
+    has_end = end in existing
+    if has_begin != has_end or (has_begin and existing.index(begin) > existing.index(end)):
         raise LTValidationError(
             f"post-commit hook has unpaired Lab Tracker markers: {hook_path}. "
             "Repair or remove the markers manually before re-running."
@@ -384,7 +416,8 @@ def _require_paired_markers(existing: str, hook_path: Path) -> bool:
 
 def _default_lt_path() -> str:
     # Prefer the sibling of this interpreter: it is guaranteed to be the same
-    # environment that provides git_capture; PATH may find a different install.
+    # environment that provides the capture adapters; PATH may find a
+    # different install.
     sibling = Path(sys.executable).parent / ("lt.exe" if sys.platform == "win32" else "lt")
     if sibling.exists():
         return str(sibling)
@@ -397,8 +430,9 @@ def _default_lt_path() -> str:
 
 
 # Characters that end or escape a double-quoted "${VAR:-default}" expansion, or
-# run code inside it. The baked-default line format is kept (hook_status and
-# the legacy-block carry-forward parse it), so such values are refused.
+# run code inside it. A legacy block's carried values were written in that
+# format, so a value containing them was never a plain project id or URL and
+# is refused rather than re-baked.
 _SH_DEFAULT_UNSAFE = frozenset('"$`\\}\n\r\x00')
 
 
@@ -417,30 +451,14 @@ def _require_safe_carried_value(label: str, value: str | None, flag: str) -> Non
         )
 
 
-def _sh_default_text(label: str, value: str) -> str:
-    unsafe = _sh_default_unsafe(value)
-    if unsafe:
-        raise LTValidationError(
-            f"The {label} {value!r} cannot be baked into the post-commit hook: it "
-            f"contains {', '.join(unsafe)}, which sh would expand or execute. "
-            "Use a value without these characters, or leave it out and set it "
-            "in the environment the hook runs with."
-        )
-    return value
+def _sh_unquote(value: str) -> str:
+    """Reverse ``repo._sh_single_quote`` for a value matched inside its quotes."""
+
+    return value.replace("'\\''", "'")
 
 
-def _hook_path_text(value: str) -> str:
-    # The hook body runs under sh even on Windows; forward slashes everywhere.
-    return value.replace("\\", "/")
-
-
-def _text_diff(path: Path, existing: str, proposed: str) -> str:
-    return "\n".join(
-        difflib.unified_diff(
-            existing.splitlines(),
-            proposed.splitlines(),
-            fromfile=f"{path} (current)",
-            tofile=f"{path} (proposed)",
-            lineterm="",
-        )
-    )
+def _optional(value: str | None) -> str | None:
+    if value is None:
+        return None
+    text = value.strip()
+    return text or None

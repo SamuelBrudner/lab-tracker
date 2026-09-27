@@ -24,8 +24,10 @@ from .shared import (
     ensure_project_read,
     handlers_from_request,
     list_response,
+    origin_stamp,
     provenance_base_url,
     record_usage_view,
+    stamp_kwargs,
     validate_pagination,
     wants_jsonld,
 )
@@ -50,6 +52,7 @@ def build_datasets_router(api: LabTrackerAPI) -> APIRouter:
             commit_manifest=payload.commit_manifest,
             commit_hash=payload.commit_hash,
             actor=actor,
+            **stamp_kwargs(origin_stamp(actor, payload.origin)),
         )
         return Envelope(data=dataset)
 

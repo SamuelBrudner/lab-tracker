@@ -236,12 +236,31 @@ def test_checkpoint_exact_replay_changed_conflict_and_reserved_note_guards(
     )
     assert ordinary.status_code == 201
     ordinary_id = ordinary.json()["data"]["note_id"]
-    forged_update = client.patch(
+    # scheduled_graph_draft_policy is a person's own opt-out, not onboarding
+    # state: clients may set exactly the admitted value.
+    opted_out = client.patch(
         f"/notes/{ordinary_id}",
         json={"metadata": {"scheduled_graph_draft_policy": "exclude"}},
         headers=admin_auth_headers,
     )
-    assert forged_update.status_code == 422
+    assert opted_out.status_code == 200, opted_out.text
+    assert opted_out.json()["data"]["metadata"]["scheduled_graph_draft_policy"] == "exclude"
+    bad_policy = client.patch(
+        f"/notes/{ordinary_id}",
+        json={"metadata": {"scheduled_graph_draft_policy": "always"}},
+        headers=admin_auth_headers,
+    )
+    assert bad_policy.status_code == 422, bad_policy.text
+    created_with_policy = client.post(
+        "/notes",
+        json={
+            "project_id": project_id,
+            "raw_content": "Opted out at capture time",
+            "metadata": {"scheduled_graph_draft_policy": "exclude"},
+        },
+        headers=admin_auth_headers,
+    )
+    assert created_with_policy.status_code == 201, created_with_policy.text
 
     for method, path, body in (
         ("patch", f"/notes/{checkpoint['note_id']}", {"metadata": {}}),

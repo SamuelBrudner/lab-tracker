@@ -3,7 +3,7 @@ import * as React from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { vi } from "vitest";
 
-import { BatchReviewPage, PendingBatchBanner } from "./batches.jsx";
+import { BatchCards, BatchReviewPage, PendingBatchBanner } from "./batches.jsx";
 import { apiResponse, errorResponse, installFetchMock } from "../test/utils.js";
 
 describe("PendingBatchBanner", () => {
@@ -467,6 +467,7 @@ describe("BatchReviewPage", () => {
         cadence_minutes: 1440,
         email_notifications_enabled: false,
         enabled: true,
+        external_context_policy: "own_notes_only",
         notification_email: null,
         run_at_local_time: "18:00",
         timezone_name: "America/New_York",
@@ -542,3 +543,38 @@ describe("BatchReviewPage drafts from captures", () => {
   });
 });
 
+
+describe("BatchCards", () => {
+  it("shows a deferred count on batch cards when proposals were deferred", () => {
+    render(
+      <BatchCards
+        batches={[
+          {
+            change_set_id: "cs-deferred",
+            created_at: "2026-07-16T12:00:00Z",
+            deferred_count: 2,
+            operation_count: 5,
+            source_note_count: 3,
+            status: "ready",
+            summary: "Two proposals were set aside for later.",
+          },
+          {
+            change_set_id: "cs-plain",
+            created_at: "2026-07-16T12:00:00Z",
+            deferred_count: 0,
+            operation_count: 1,
+            source_note_count: 1,
+            status: "ready",
+            summary: "Nothing deferred.",
+          },
+        ]}
+        emptyMessage="No batches"
+        navigate={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText("2 deferred")).toBeInTheDocument();
+    expect(screen.getByText("5 ops")).toBeInTheDocument();
+    expect(screen.queryByText("0 deferred")).not.toBeInTheDocument();
+  });
+});

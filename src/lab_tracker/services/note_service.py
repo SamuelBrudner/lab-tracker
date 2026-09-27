@@ -20,6 +20,7 @@ from lab_tracker.member_onboarding import (
     has_reserved_capture_key,
     has_reserved_note_metadata,
     is_member_checkpoint,
+    validate_scheduled_draft_policy,
 )
 from lab_tracker.models import (
     EntityOrigin,
@@ -249,6 +250,7 @@ class NoteService(BaseService):
                     f"client_capture_id values beginning {CHECKPOINT_CLIENT_KEY_PREFIX!r} "
                     "are reserved for the guided workflow."
                 )
+        validate_scheduled_draft_policy(metadata)
         resolved_metadata = normalize_note_metadata(metadata)
         resolved_client_capture_id = _normalize_client_capture_id(client_capture_id)
         if resolved_client_capture_id is not None:
@@ -406,6 +408,8 @@ class NoteService(BaseService):
         client_capture_id: str | None = None,
         status: NoteStatus = NoteStatus.STAGED,
         actor: AuthContext | None = None,
+        origin: EntityOrigin = EntityOrigin.USER,
+        origin_provider: str | None = None,
         allow_member_onboarding_reserved: bool = False,
     ) -> IdempotentCreateResult[Note]:
         asset = raw_asset
@@ -436,6 +440,8 @@ class NoteService(BaseService):
                 client_capture_id=resolved_client_capture_id,
                 status=status,
                 actor=actor,
+                origin=origin,
+                origin_provider=origin_provider,
                 allow_member_onboarding_reserved=allow_member_onboarding_reserved,
             )
         except Exception:
@@ -768,6 +774,8 @@ class NoteService(BaseService):
                 "Member-onboarding metadata and checkpoints are immutable outside "
                 "the guided workflow."
             )
+        if is_provided(metadata):
+            validate_scheduled_draft_policy(metadata)
         before = note.model_copy(deep=True)
         if designated_checkpoint is not None:
             if is_provided(targets):

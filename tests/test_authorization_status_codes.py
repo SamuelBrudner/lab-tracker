@@ -14,7 +14,7 @@ from uuid import uuid4
 from fastapi.testclient import TestClient
 
 from lab_tracker.auth import Role
-from lab_tracker.errors import AuthError, PermissionDeniedError
+from lab_tracker.errors import AuthError, PermissionDeniedError, ServiceScopeDeniedError
 
 
 def _register_user(client: TestClient, role: Role) -> tuple[dict[str, str], str]:
@@ -127,3 +127,26 @@ def test_missing_and_invalid_credentials_stay_401(client: TestClient) -> None:
     for response in (missing, invalid):
         assert response.status_code == 401
         assert response.json()["error"]["code"] == "auth_error"
+
+
+def test_service_scope_denied_error_maps_to_403_service_forbidden(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    # The scope of a valid token blocks the request body, so the answer carries
+    # the same code the middleware uses for a refused path: clients steer to a
+    # capable credential rather than requesting project access.
+    def deny() -> None:
+        raise ServiceScopeDeniedError("This token may only stage notes.")
+
+    client.app.add_api_route("/_test/scope-denied", deny, methods=["GET"])
+
+    response = client.get("/_test/scope-denied", headers=admin_auth_headers)
+
+    assert response.status_code == 403, response.text
+    assert response.json()["error"] == {
+        "code": "service_forbidden",
+        "message": "This token may only stage notes.",
+        "issues": None,
+    }
+    assert issubclass(ServiceScopeDeniedError, PermissionDeniedError)

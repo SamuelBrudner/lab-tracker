@@ -58,6 +58,16 @@ function renderCaptureHook() {
 }
 
 describe("useMobileCapture", () => {
+  it("keeps in-app history state when it strips share-target query params", async () => {
+    window.history.replaceState({ labTracker: { depth: 1 } }, "", "/app/capture?from-share=empty");
+    installCaptureRoutes(() => apiResponse(note({ noteId: "note-share" }), 201));
+
+    renderCaptureHook();
+
+    await waitFor(() => expect(window.location.search).toBe(""));
+    expect(window.history.state).toEqual({ labTracker: { depth: 1 } });
+  });
+
   it("ignores a second upload while the first is still in flight", async () => {
     const pendingCreate = deferred();
     const fetchMock = installCaptureRoutes(() => pendingCreate.promise);

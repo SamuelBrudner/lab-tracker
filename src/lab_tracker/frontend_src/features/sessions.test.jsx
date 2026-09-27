@@ -1,6 +1,6 @@
 import * as React from "react";
 
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { vi } from "vitest";
 
 import { SessionDetailCard } from "./sessions.jsx";
@@ -287,5 +287,88 @@ describe("SessionDetailCard", () => {
     });
     expect(await screen.findByText("scientific")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Promote to scientific" })).not.toBeInTheDocument();
+  });
+});
+
+describe("SessionDetailCard Back", () => {
+  function sessionRoutes() {
+    return [
+      {
+        match: /\/projects\/project-1\/members/,
+        response: apiResponse([{ role: "contributor", user_id: "user-1" }]),
+      },
+      {
+        match: "/sessions/session-1/capture-link",
+        response: apiResponse({
+          capture_qr_svg: "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>",
+          capture_url: "http://lab.example/app/capture?project_id=project-1&session_id=session-1",
+          project_id: "project-1",
+          session_id: "session-1",
+        }),
+      },
+      {
+        match: "/sessions/session-1",
+        response: apiResponse({
+          created_at: "2026-04-20T00:00:00Z",
+          link_code: "ABC123",
+          primary_question_id: "question-1",
+          project_id: "project-1",
+          session_id: "session-1",
+          session_type: "scientific",
+          started_at: "2026-04-20T01:00:00Z",
+          status: "active",
+          updated_at: "2026-04-20T01:00:00Z",
+        }),
+      },
+      {
+        match: "/questions?project_id=project-1&status=active&limit=200&offset=0",
+        response: apiResponse([]),
+      },
+      { match: "/sessions/session-1/outputs?limit=200&offset=0", response: apiResponse([]) },
+      {
+        match:
+          "/notes?project_id=project-1&target_entity_type=session&target_entity_id=session-1&limit=200&offset=0",
+        response: apiResponse([]),
+      },
+    ];
+  }
+
+  function renderWithDepth(depth) {
+    window.history.replaceState(
+      depth ? { labTracker: { depth } } : null,
+      "",
+      "/app/sessions/session-1"
+    );
+    installFetchMock(sessionRoutes());
+    const navigate = vi.fn();
+    render(
+      <SessionDetailCard
+        token="token-1"
+        sessionId="session-1"
+        projects={[{ name: "Project One", project_id: "project-1" }]}
+        navigate={navigate}
+        onSetActiveProject={vi.fn()}
+        user={{ role: "editor", user_id: "user-1" }}
+        canWrite={true}
+        onCloseSession={vi.fn(async () => null)}
+        onPromoteSession={vi.fn(async () => null)}
+      />
+    );
+    return navigate;
+  }
+
+  it("Back uses in-app history with /app fallback", async () => {
+    const back = vi.spyOn(window.history, "back").mockImplementation(() => {});
+
+    const direct = renderWithDepth(0);
+    fireEvent.click(await screen.findByRole("button", { name: "Back" }));
+    expect(direct).toHaveBeenCalledWith("/app");
+    expect(back).not.toHaveBeenCalled();
+    cleanup();
+
+    const fromApp = renderWithDepth(1);
+    fireEvent.click(await screen.findByRole("button", { name: "Back" }));
+    expect(back).toHaveBeenCalledTimes(1);
+    expect(fromApp).not.toHaveBeenCalled();
   });
 });

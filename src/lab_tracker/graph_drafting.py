@@ -16,12 +16,12 @@ from typing import Any, Protocol, TypeAlias, runtime_checkable
 
 import httpx
 
-from lab_tracker.config import BACKGROUND_ONLY_GRAPH_DRAFT_PROVIDERS, Settings
+from lab_tracker.config import Settings
 from lab_tracker.provider_error_redaction import provider_error_message
 
-PROMPT_VERSION = "multimodal-graph-draft-v3"
-BATCH_PROMPT_VERSION = "daily-batch-graph-draft-v6"
-ANALYSIS_PROMPT_VERSION = "analysis-graph-draft-v3"
+PROMPT_VERSION = "multimodal-graph-draft-v4"
+BATCH_PROMPT_VERSION = "daily-batch-graph-draft-v7"
+ANALYSIS_PROMPT_VERSION = "analysis-graph-draft-v4"
 # Default provider label only. Callers stamping provenance must prefer the active
 # client's `.provider` (e.g. getattr(client, "provider", PROVIDER)); transcripts and
 # drafts can run on Anthropic/Google, not just OpenAI.
@@ -42,6 +42,13 @@ SEMANTIC_TYPES = [
     "update_goal",
     "suggest_followup",
     "request_clarification",
+    "record_decision",
+    "record_dead_end",
+    "record_pivot",
+    "abandon_question",
+    "merge_questions",
+    "retire_note",
+    "resolve_prediction",
 ]
 
 _GRAPH_DRAFT_ENTITY_TYPES = (
@@ -54,7 +61,26 @@ _GRAPH_DRAFT_ENTITY_TYPES = (
     "claim",
     "visualization",
     "goal",
+    "exploration_node",
 )
+# Draft-time mirror of ExplorationService._validate_node, keyed by
+# ExplorationNodeType value: the fields each node type must carry. The
+# validator imports this same table so the contract and the check cannot drift.
+EXPLORATION_NODE_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
+    "decision": ("choice", "rationale", "alternatives_considered"),
+    "dead_end": ("hypothesis", "failure_mode", "lesson"),
+    "pivot": ("trigger", "rationale"),
+}
+EXPLORATION_NODE_TARGET_ENTITY_TYPES = ("question", "dataset", "analysis", "claim")
+PIVOT_INVALIDATION_FIELDS = ("invalidates_node_id", "invalidates_claim_id")
+RETIRE_NOTE_REASON_VALUES = ("superseded", "reviewed_not_relevant")
+RESOLVE_PREDICTION_STATUS_VALUES = ("supported", "rejected")
+MERGE_QUESTIONS_REPLACEMENT_STATUSES = ("staged", "active")
+_RECORD_LABEL_NODE_TYPES = {
+    "record_decision": "decision",
+    "record_dead_end": "dead_end",
+    "record_pivot": "pivot",
+}
 
 
 class GraphDraftingError(RuntimeError):
@@ -79,6 +105,8 @@ def graph_draft_payload_contract() -> dict[str, Any]:
     envelope, so providers cannot validate its nested shape themselves. Deriving
     this instruction block from the same schema metadata used by API clients keeps
     required fields, allowed fields, and controlled values from drifting.
+    ``exploration_node`` is a draftable entity, and ``semantic_operations``
+    entries override the entity contract for their semantic_type.
     """
 
     # Import lazily so this provider module remains importable while the API schema
@@ -116,9 +144,68 @@ def graph_draft_payload_contract() -> dict[str, Any]:
             "entity record IDs belong in target_entity_id, not payload_json, "
             "unless the field is explicitly allowed",
             "use only the listed controlled_values",
+            "semantic_operations entries override the entity contract for that "
+            "semantic_type",
         ],
         "entities": contract_entities,
+        "semantic_operations": _semantic_operation_contract(),
     }
+
+
+def _semantic_operation_contract() -> dict[str, Any]:
+    """Payload rules for the negative-knowledge labels, keyed by semantic_type."""
+
+    contract: dict[str, Any] = {}
+    for label, node_type in _RECORD_LABEL_NODE_TYPES.items():
+        entry: dict[str, Any] = {
+            "op": "create",
+            "entity_type": "exploration_node",
+            "node_type": node_type,
+            "required_fields": list(EXPLORATION_NODE_REQUIRED_FIELDS[node_type]),
+            "target_entity_types": list(EXPLORATION_NODE_TARGET_ENTITY_TYPES),
+        }
+        if node_type == "pivot":
+            entry["exactly_one_of"] = list(PIVOT_INVALIDATION_FIELDS)
+        contract[label] = entry
+    contract["abandon_question"] = {
+        "op": "update",
+        "entity_type": "question",
+        "required_payload": {"status": "abandoned", "terminal_reason": "non-empty string"},
+    }
+    contract["merge_questions"] = {
+        "op": "update",
+        "entity_type": "question",
+        "target_entity_id": "the question being merged away",
+        "required_fields": ["replacement", "reason"],
+        "allowed_fields": [
+            "replacement",
+            "reason",
+            "child_question_ids_to_reparent",
+            "note_ids_to_retarget",
+        ],
+        "replacement_required_fields": ["text", "question_type", "status"],
+        "controlled_values": {
+            "replacement.status": list(MERGE_QUESTIONS_REPLACEMENT_STATUSES),
+        },
+    }
+    contract["retire_note"] = {
+        "op": "update",
+        "entity_type": "note",
+        "required_fields": ["reason"],
+        "controlled_values": {"reason": list(RETIRE_NOTE_REASON_VALUES)},
+    }
+    contract["resolve_prediction"] = {
+        "op": "update",
+        "entity_type": "claim",
+        "target_entity_id": "a claim listed in open_predictions",
+        "required_fields": ["status"],
+        "controlled_values": {"status": list(RESOLVE_PREDICTION_STATUS_VALUES)},
+        "when_rejected_required_fields": ["terminal_reason"],
+        "when_supported_required_fields": [
+            "supported_by_dataset_ids or supported_by_analysis_ids",
+        ],
+    }
+    return contract
 
 
 def _payload_contract_instruction() -> str:
@@ -174,20 +261,7 @@ def graph_patch_response_schema() -> dict[str, Any]:
         "properties": {
             "client_ref": {"type": ["string", "null"]},
             "op": {"type": "string", "enum": ["create", "update"]},
-            "entity_type": {
-                "type": "string",
-                "enum": [
-                    "project",
-                    "question",
-                    "dataset",
-                    "note",
-                    "session",
-                    "analysis",
-                    "claim",
-                    "visualization",
-                    "goal",
-                ],
-            },
+            "entity_type": {"type": "string", "enum": list(_GRAPH_DRAFT_ENTITY_TYPES)},
             "semantic_type": {"type": "string", "enum": SEMANTIC_TYPES},
             "target_entity_id": {"type": ["string", "null"]},
             "payload_json": {
@@ -232,16 +306,11 @@ class GraphDraftClient(Protocol):
 
     Implementations (all in this module; ``make_graph_draft_client`` picks
     one from ``graph_draft_provider``): ``OpenAIGraphDraftClient``,
-    ``AnthropicGraphDraftClient``, ``GoogleGraphDraftClient``, and
-    ``AgenticGraphDraftClient``, a read-only wrapper around one of the
-    others that requires the background worker (batch drafts get its tool
-    pass; note and analysis drafts go straight to the wrapped client).
+    ``AnthropicGraphDraftClient``, and ``GoogleGraphDraftClient``.
 
     ``transcribe_audio`` support: OpenAI and Google transcribe natively;
     Anthropic has no transcription API and raises ``GraphDraftingError`` so
-    callers fall back to a configured transcription provider; the agentic
-    wrapper delegates to its base client and raises ``GraphDraftingError`` if
-    that client cannot transcribe.
+    callers fall back to a configured transcription provider.
     """
 
     def draft_from_note(
@@ -289,17 +358,6 @@ class GraphDraftClient(Protocol):
 
 
 GraphDraftClientFactory: TypeAlias = Callable[[Settings], GraphDraftClient]
-
-
-class AudioTranscriber(Protocol):
-    def __call__(
-        self,
-        *,
-        audio_bytes: bytes,
-        filename: str,
-        content_type: str,
-        prompt: str | None,
-    ) -> dict[str, Any]: ...
 
 
 class OpenAIGraphDraftClient:
@@ -1050,117 +1108,6 @@ class GoogleGraphDraftClient:
         return _parse_graph_patch_text(_gemini_output_text(payload), "Google")
 
 
-READ_ONLY_AGENT_TOOLS = (
-    "inspect_graph_context",
-    "search_existing_graph_nodes",
-    "summarize_decision_context",
-)
-
-
-class AgenticGraphDraftClient:
-    """Read-only agentic wrapper for background batch drafting.
-
-    The wrapper deliberately exposes no write tools. Its internal tool pass can
-    only inspect the batch context already assembled by Lab Tracker, search
-    existing graph-node summaries inside that context, and attach a bounded
-    trace before delegating to the same structured graph-patch provider.
-    Note-scoped and analysis drafts skip the tool pass and go straight to the
-    wrapped client, so interactive drafting keeps working under this provider.
-    """
-
-    provider = "agentic"
-    requires_background_worker = True
-
-    def __init__(self, *, base_client: GraphDraftClient) -> None:
-        self._base_client = base_client
-        self.model = f"agentic:{getattr(base_client, 'model', 'unknown')}"
-        self.timeout_seconds = float(getattr(base_client, "timeout_seconds", 60.0))
-
-    @classmethod
-    def from_settings(cls, settings: Settings) -> AgenticGraphDraftClient:
-        return cls(base_client=OpenAIGraphDraftClient.from_settings(settings))
-
-    def close(self) -> None:
-        close = getattr(self._base_client, "close", None)
-        if callable(close):
-            close()
-
-    def draft_from_note(
-        self,
-        *,
-        graph_context: dict[str, Any] | None = None,
-        user_hint: str | None = None,
-        draft_mode: str = "graph_context",
-        project_context: dict[str, Any] | None = None,
-        source_artifacts: list[dict[str, Any]] | None = None,
-        image_bytes: bytes | None = None,
-        image_content_type: str | None = None,
-        extra_images: list[dict[str, Any]] | None = None,
-    ) -> dict[str, Any]:
-        # The agentic tool pass is batch-only; note-scoped drafts use the
-        # wrapped single-shot (equally read-only) client directly.
-        return self._base_client.draft_from_note(
-            graph_context=graph_context,
-            user_hint=user_hint,
-            draft_mode=draft_mode,
-            project_context=project_context,
-            source_artifacts=source_artifacts,
-            image_bytes=image_bytes,
-            image_content_type=image_content_type,
-            extra_images=extra_images,
-        )
-
-    def draft_from_analysis_evidence(
-        self,
-        *,
-        evidence_text: str,
-        project_context: dict[str, Any],
-    ) -> dict[str, Any]:
-        return self._base_client.draft_from_analysis_evidence(
-            evidence_text=evidence_text,
-            project_context=project_context,
-        )
-
-    def draft_from_batch(
-        self,
-        *,
-        batch_context: dict[str, Any],
-        user_hint: str | None = None,
-    ) -> dict[str, Any]:
-        augmented_context = dict(batch_context)
-        trace = _agentic_read_only_tool_trace(batch_context=batch_context)
-        augmented_context["agentic_tool_trace"] = trace
-        augmented_hint = _agentic_user_hint(user_hint=user_hint, trace=trace)
-        return self._base_client.draft_from_batch(
-            batch_context=augmented_context,
-            user_hint=augmented_hint,
-        )
-
-    def transcribe_audio(
-        self,
-        *,
-        audio_bytes: bytes,
-        filename: str,
-        content_type: str,
-        prompt: str | None = None,
-    ) -> dict[str, Any]:
-        transcribe: AudioTranscriber | None = getattr(
-            self._base_client,
-            "transcribe_audio",
-            None,
-        )
-        if not callable(transcribe):
-            raise GraphDraftingError(
-                "The configured agentic base client does not support audio transcription."
-            )
-        return transcribe(
-            audio_bytes=audio_bytes,
-            filename=filename,
-            content_type=content_type,
-            prompt=prompt,
-        )
-
-
 def make_graph_draft_client(settings: Settings) -> GraphDraftClient:
     """Return the active graph-draft client for ``settings.graph_draft_provider``.
 
@@ -1174,11 +1121,9 @@ def make_graph_draft_client(settings: Settings) -> GraphDraftClient:
         return AnthropicGraphDraftClient.from_settings(settings)
     if provider in {"google", "gemini"}:
         return GoogleGraphDraftClient.from_settings(settings)
-    if provider in BACKGROUND_ONLY_GRAPH_DRAFT_PROVIDERS:
-        return AgenticGraphDraftClient.from_settings(settings)
     raise GraphDraftingError(
         "Unknown graph_draft_provider "
-        f"'{provider}'. Supported providers: openai, anthropic/claude, google/gemini, agentic."
+        f"'{provider}'. Supported providers: openai, anthropic/claude, google/gemini."
     )
 
 
@@ -1213,6 +1158,14 @@ def _batch_instructions() -> str:
         "\"Capture 'Rig 2 Fly 12' could not be placed in today's activity -- "
         "which session or question does it belong to?\"), and do not narrate it "
         "as if it happened.\n\n"
+        "Each note's targets are anchors the person declared at capture time (a "
+        "question, session, or dataset): prefer a declared target over guessing a "
+        "placement, treat a target whose note metadata carries "
+        "declared_target_source=config_default as a weaker tool-wide default rather "
+        "than a per-capture choice, use capture_placement.observed_at (labelled by "
+        "observed_at_source as the client, adapter, or server clock) rather than "
+        "created_at as the capture's time, and still raise clarification_requests "
+        "when a capture stays ambiguous even with its declared target.\n\n"
         "Repository commit captures include a '# Git Commit Evidence' text asset "
         "with commit metadata, a file summary, and a bounded diff. In the narrative, "
         "explain in plain language what the commit appears to have accomplished from "
@@ -1245,6 +1198,20 @@ def _batch_instructions() -> str:
         "evidence cannot be narrowed to it. "
         "Every operation, and the narrative itself, is a draft for human review; "
         "nothing commits without explicit acceptance."
+        "\n\nThe packet may contain review_memory.pending_proposals: proposals by "
+        "this reviewer that are still under review. If a proposal you would make "
+        "duplicates one of them, say so in rationale and cite that pending "
+        "change_set_id instead of creating a parallel entity. The packet may contain "
+        "review_memory.recent_rejections: this reviewer's recent rejections with "
+        "their notes. If you re-propose something equivalent, state the new evidence "
+        "in rationale."
+        "\n\nEach project block carries open_predictions. When a dataset or analysis in "
+        "this batch lands under a question listed in open_predictions, propose "
+        "resolve_prediction: an update on that claim setting status to supported (name "
+        "the landed evidence in supported_by_dataset_ids or supported_by_analysis_ids) "
+        "or rejected (terminal_reason required), citing the evidence in source_refs; "
+        "never resolve a prediction the evidence does not directly test — use "
+        "request_clarification instead."
     )
 
 
@@ -1267,11 +1234,19 @@ def _instructions() -> str:
         "when a replacement is provided. If the context is insufficient, mark uncertainty "
         "or request clarification. "
         "Use create or update operations for project, question, note, session, dataset, "
-        "analysis, claim, visualization, or goal entities. Use payload_json as a JSON object "
+        "analysis, claim, visualization, goal, or exploration_node entities. Use "
+        "payload_json as a JSON object "
         "string matching the Lab Tracker API payload contract below. Fields not listed for "
         "that entity and action are forbidden. Do not copy display-only context fields such "
         "as preview or label, and do not put entity record IDs such as question_id, note_id, "
         "or goal_id inside payload_json unless that exact field is listed as allowed. "
+        "Every graph-context item carries selection_reason (active_floor, staged_fill, "
+        "cue_match:<term>, recent, alias_match) saying why it was included; cue_match "
+        "items were found by matching rare terms from the source notes against the whole "
+        "project and are the first candidates to link to instead of creating duplicates; "
+        "exploration_nodes lists recent decisions, dead ends, and pivots, so do not "
+        "re-propose a path recorded as a dead_end without saying why; "
+        "recent_notes.captured_by_current_user=false means a colleague captured that note. "
         "<trusted_api_payload_contract>"
         f"{_payload_contract_instruction()}"
         "</trusted_api_payload_contract> "
@@ -1294,7 +1269,32 @@ def _instructions() -> str:
         "include source_note_ids as a non-empty list of unique note UUIDs copied exactly "
         "from the supplied source artifacts; include every source note that directly "
         "supports that operation, never invent an ID, and never choose a primary source "
-        "when the evidence only supports a bundle. Return uncertainty explicitly."
+        "when the evidence only supports a bundle. Return uncertainty explicitly. "
+        "Negative knowledge has its own labels. Use record_dead_end when a capture states "
+        "an approach that failed and what was learned (create exploration_node with "
+        "node_type dead_end and hypothesis, failure_mode, lesson). Use record_decision "
+        "when a capture states a choice among alternatives with reasons (node_type "
+        "decision with choice, alternatives_considered, rationale). Use record_pivot when "
+        "a capture says a prior result, claim, or node no longer holds and the work "
+        "changed direction (node_type pivot with trigger, rationale, and exactly one of "
+        "invalidates_claim_id or invalidates_node_id). Use abandon_question when a "
+        "capture states a question will not be pursued (update the question with status "
+        "abandoned and a terminal_reason). Use merge_questions when two existing "
+        "questions are the same question (update the question being retired with a "
+        "replacement holding the surviving question's text, question_type, and status, "
+        "plus a reason; never merge a superseded question). Use retire_note when an "
+        "existing note is superseded or reviewed as not relevant (update the note with "
+        "reason superseded or reviewed_not_relevant). Never use these labels to delete "
+        "or hide information: they preserve negative knowledge for later readers. The "
+        "target of every one of them must be an existing ID from the context. "
+        "open_predictions lists proposed or testing claims that answer a question, "
+        "with effective_status and pre_registered derived from later claims and pivots. "
+        "When a dataset or analysis in the source captures lands under a question listed "
+        "in open_predictions, propose resolve_prediction: an update on that claim setting "
+        "status to supported (name the landed evidence in supported_by_dataset_ids or "
+        "supported_by_analysis_ids) or rejected (terminal_reason required), citing the "
+        "evidence in source_refs; never resolve a prediction the evidence does not "
+        "directly test — use request_clarification instead."
     )
 
 
@@ -1399,120 +1399,6 @@ def _prompt_context_with_retry_feedback(
     )
 
 
-def _agentic_user_hint(
-    *,
-    user_hint: str | None,
-    trace: dict[str, Any],
-) -> str:
-    parts = []
-    if user_hint and user_hint.strip():
-        parts.append(user_hint.strip())
-    parts.append(
-        "Agentic read-only pre-pass completed. Prefer linking to existing graph "
-        "nodes surfaced in agentic_tool_trace before proposing new nodes."
-    )
-    if trace.get("matched_existing_nodes"):
-        parts.append(
-            "Matched existing node candidates: "
-            + json.dumps(trace["matched_existing_nodes"], sort_keys=True)
-        )
-    return "\n\n".join(parts)
-
-
-def _agentic_read_only_tool_trace(
-    *,
-    batch_context: dict[str, Any],
-) -> dict[str, Any]:
-    context_summary = batch_context.get("context_summary")
-    notes = [item for item in batch_context.get("batch_notes", []) if isinstance(item, dict)]
-    projects = [item for item in batch_context.get("projects", []) if isinstance(item, dict)]
-    terms = _agentic_search_terms(notes)
-    return {
-        "tool_policy": {
-            "allowed_tools": list(READ_ONLY_AGENT_TOOLS),
-            "write_tools_available": False,
-        },
-        "inspect_graph_context": {
-            "project_count": len(projects),
-            "batch_note_count": len(notes),
-            "context_summary": context_summary if isinstance(context_summary, dict) else {},
-        },
-        "search_terms": terms,
-        "matched_existing_nodes": _agentic_search_existing_nodes(projects, terms),
-        "decision_context": _agentic_decision_context_summary(projects),
-    }
-
-
-def _agentic_search_terms(notes: list[dict[str, Any]]) -> list[str]:
-    tokens: set[str] = set()
-    for note in notes:
-        text = " ".join(
-            str(note.get(key) or "")
-            for key in ("raw_content_preview", "transcribed_text", "summary", "label")
-        )
-        for raw_token in text.replace("_", " ").replace("-", " ").split():
-            token = "".join(char.lower() for char in raw_token if char.isalnum())
-            if len(token) >= 5:
-                tokens.add(token)
-    return sorted(tokens)[:20]
-
-
-def _agentic_search_existing_nodes(
-    projects: list[dict[str, Any]],
-    terms: list[str],
-) -> list[dict[str, Any]]:
-    if not terms:
-        return []
-    matches: list[dict[str, Any]] = []
-    for project in projects:
-        project_id = str(project.get("id") or "")
-        for field in (
-            "active_or_staged_questions",
-            "recent_sessions",
-            "recent_datasets",
-            "recent_notes",
-            "recent_analyses",
-            "recent_claims",
-            "recent_visualizations",
-            "recent_goals",
-        ):
-            for item in project.get(field, []) or []:
-                if not isinstance(item, dict):
-                    continue
-                haystack = json.dumps(item, sort_keys=True).lower()
-                hit_terms = [term for term in terms if term in haystack]
-                if not hit_terms:
-                    continue
-                matches.append(
-                    {
-                        "project_id": project_id,
-                        "context_field": field,
-                        "id": item.get("id"),
-                        "label": item.get("label") or item.get("text") or item.get("statement"),
-                        "matched_terms": hit_terms[:5],
-                    }
-                )
-                if len(matches) >= 20:
-                    return matches
-    return matches
-
-
-def _agentic_decision_context_summary(projects: list[dict[str, Any]]) -> dict[str, Any]:
-    summaries: list[dict[str, Any]] = []
-    for project in projects[:10]:
-        summaries.append(
-            {
-                "project_id": project.get("id"),
-                "project_label": project.get("label"),
-                "question_count": len(project.get("active_or_staged_questions") or []),
-                "recent_claim_count": len(project.get("recent_claims") or []),
-                "recent_analysis_count": len(project.get("recent_analyses") or []),
-                "known_alias_count": len(project.get("known_aliases") or []),
-            }
-        )
-    return {"projects": summaries}
-
-
 def _analysis_prompt_text(
     *,
     evidence_text: str,
@@ -1544,8 +1430,9 @@ def _analysis_instructions() -> str:
         "through the evidence and current context before proposing anything. Propose only "
         "changes supported by the evidence and context, and prefer updating or linking "
         "existing entities over creating duplicates. Use create or update operations for "
-        "project, question, note, session, dataset, analysis, claim, visualization, or goal "
-        "entities. For project, session, analysis, claim, and visualization there is no "
+        "project, question, note, session, dataset, analysis, claim, visualization, goal, "
+        "or exploration_node entities. For project, session, analysis, and "
+        "visualization there is no "
         "narrower semantic_type label — use create_entity or update_entity for those. Use "
         "payload_json as a JSON object string matching the trusted Lab Tracker API "
         "payload contract below; fields not listed for that entity and action are "
@@ -1565,7 +1452,14 @@ def _analysis_instructions() -> str:
         "source_refs item must include source_note_ids as a non-empty list of unique note "
         "UUIDs copied exactly from the project context source artifacts. Include all and "
         "only the source notes that directly support the operation; never invent an ID or "
-        "guess a primary source for ambiguous evidence. Never "
+        "guess a primary source for ambiguous evidence. The project context lists "
+        "open_predictions: proposed or testing claims that answer a question. When this "
+        "evidence lands under a question listed in open_predictions, propose "
+        "resolve_prediction: an update on that claim setting status to supported (name the "
+        "landed evidence in supported_by_dataset_ids or supported_by_analysis_ids) or "
+        "rejected (terminal_reason required), citing the evidence in source_refs; never "
+        "resolve a prediction the evidence does not directly test — use "
+        "request_clarification instead. Never "
         "claim a canonical update happened; every operation is a draft for human review "
         "and nothing commits without explicit human acceptance."
     )

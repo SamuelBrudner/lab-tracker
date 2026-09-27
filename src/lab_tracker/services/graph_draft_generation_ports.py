@@ -9,12 +9,14 @@ from uuid import UUID
 
 from lab_tracker.auth import AuthContext
 from lab_tracker.models import (
+    ExternalContextPolicy,
     GraphChangeOperation,
     GraphChangeSet,
     GraphDraftMode,
     Note,
     NoteRawAsset,
 )
+from lab_tracker.services.graph_draft_batch_policy import BatchReviewer
 
 
 class GenerationRecords(Protocol):
@@ -95,6 +97,7 @@ class GenerationContextBuilder(Protocol):
         source_notes: list[Note],
         user_hint: str | None,
         actor: AuthContext | None,
+        external_context_policy: ExternalContextPolicy,
     ) -> dict[str, Any]: ...
 
     def image_only_context_packet(
@@ -112,6 +115,8 @@ class GenerationContextBuilder(Protocol):
         window: tuple[datetime, datetime] | None,
         actor: AuthContext | None,
         batch_note_limit: int,
+        context_owner: BatchReviewer | None,
+        external_context_policy: ExternalContextPolicy,
     ) -> dict[str, Any]: ...
 
 
@@ -176,3 +181,6 @@ class GenerationClaim:
     change_set: GraphChangeSet
     claim_token: UUID
     acquired: bool
+    # The rejected draft a note re-draft was keyed off, so the new attempt can
+    # be seeded with what the reviewer already turned down.
+    rejected_predecessor: GraphChangeSet | None = None

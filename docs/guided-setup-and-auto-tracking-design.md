@@ -174,7 +174,8 @@ Judged alternatives, for the record:
    repo-local watch config is honored (no parent-directory walk) and a broken
    config falls back leniently (salvaging the configured outbox string) so a
    commit is never lost or stranded; credentialed remote URLs are stripped
-   before entering evidence.
+   before entering evidence. Deprecated for one release in favour of the
+   `lt repo` hook; see the decision recorded under item 7.
 7. **`lt hooks install | uninstall | status`** (M) — pure-Python,
    cross-platform port of the PS1 installer: hook path via
    `git rev-parse --git-path`, the **same BEGIN/END managed-block markers**
@@ -188,6 +189,21 @@ Judged alternatives, for the record:
    fully synced; post-commit hooks are advisory, so the commit is never
    blocked either way. `--yes`-gated like connect/bind. The PS1 script is
    deprecated-but-kept.
+   **Decision (lt-81s6.17), recorded here:** the `lt repo` event is the
+   surviving commit payload — the bounded diff and the repository-conventions
+   snapshot ride on it — so `lt hooks install` is the single installer: it
+   writes the `REPO HOOK` block (`lt repo report`), creates
+   `.lab-tracker/repo.json` when absent (project from `--project`, the legacy
+   block, `LAB_TRACKER_PROJECT_ID`, or `lt_ids.json`; a conflicting
+   `--project` is refused), and migrates a `GRAPH DRAFT` block in place,
+   carrying its baked project id into `repo.json` and its base URL into the
+   new block. `lt repo install-hook` is an alias. `lt git snapshot` is
+   deprecated for one release and prints a migration notice; both paths share
+   the `<normalized-remote>@<sha>` evidence identity and one commit filter
+   (merge commits and `fixup!`/`squash!` subjects skipped by default, `wip`
+   subjects and path globs opt-in in `repo.json`); every skip is logged in
+   the outbox, counted by `lt outbox status`, and echoed on the hook's
+   stderr — never silent.
 8. **Doctor extension + sha-only drift** (S/M) — `version_in_sync` compares
    the content sha only, so package bumps stop crying wolf; `_doctor` also
    verifies profile presence, project binding, `.mcp.json`, settings hooks,
@@ -229,9 +245,12 @@ Judged alternatives, for the record:
 ### Phase 4 — automatic sustain (deferred)
 
 13. **Scheduler enrollment** — `lt setup schedule` emitting a Task
-    Scheduler / cron / launchd entry for `lt watch scan && lt watch sync
+    Scheduler / cron entry for the single-process `lt watch run
     --fail-silent`, mirroring the daily-review installer pattern. External
-    scheduler, zero server machinery.
+    scheduler, zero server machinery. That one job is the one drain: after
+    the watch scan and sync it drains the repository's `lt repo` and `lt hpc`
+    outboxes too (`lt outbox status|sync` cover the same three), so nothing
+    chains a second command into a schtasks `/TR` string.
 14. **`~/.lab-tracker/applied-repos.json` registry + `lt doctor --all`** —
     recorded at init/hooks-install time; answers "which repos are enrolled on
     this machine" and enables a post-upgrade fleet sweep. Client-side only.
@@ -249,9 +268,12 @@ is missing, and walks the user through `lt setup init` → `lt project bind`
 → `lt watch add <results-folder>` → `lt hooks install`, showing each
 `--dry-run` diff; the human approves each command. From then on: figure saves
 capture via the fail-soft client idioms, watched folders queue offline events,
-every commit in enrolled repos queues a snapshot event, and syncs drain
-whenever the server is reachable. Drift after a package upgrade surfaces as
-one advisory line at the next agent session, with the repair verb named.
+every commit in enrolled repos queues an `lt repo` event (merge and
+`fixup!` commits filtered by default, each skip logged and echoed) and the
+hook drains it right away, and the scheduled `lt watch run` drains every
+adapter outbox whenever the server is reachable. Drift after a package
+upgrade surfaces as one advisory line at the next agent session, with the
+repair verb named.
 
 Terminal-first humans run the same verbs in sequence; a future interactive
 wizard, if ever wanted, is a thin front over the same verbs.

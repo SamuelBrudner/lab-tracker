@@ -31,7 +31,10 @@ research record:
   substring behavior.
 - Manual note capture, including text notes, multipart raw file upload, raw file
   download, raw voice notes with editable transcripts, and attaching notes to
-  retained entities.
+  retained entities. Phone and web composer captures record a client
+  `captured_at` metadata clock at composition time, and an offline-queued
+  capture replays that value unchanged, so a late upload still says when it
+  was composed.
 - Operator-opt-in background transcription for newly created audio uploads,
   disabled by default. When enabled it applies equally to ordinary, quick, and
   tagless mobile audio captures, uses `capture_hint` only as an optional
@@ -51,13 +54,22 @@ research record:
   write durable local outbox records that later sync into staged evidence notes
   or retained acquisition-session outputs. Large outputs can remain external
   pointers, acquisition outputs still belong to sessions, and graph meaning
-  remains human-gated through normal review.
+  remains human-gated through normal review. The question, session, and
+  dataset ids declared for a watch (flags, watch entries, or manifests)
+  become the staged note's targets, labelled
+  `declared_target_source=explicit`, so a stale id fails the sync loudly
+  instead of landing as metadata only.
 - Consumer-side HPC analysis capture through the `lt hpc` CLI as an
   offline-first staged-note workflow: Slurm/HPC submit, begin, finish, and
   watch-folder manifest events write durable local outbox records that sync
   compact scheduler facts, git context, metrics, log excerpts, and external
   artifact pointers. Large outputs remain outside Lab Tracker, and any proposed
   analysis/question/claim meaning remains human-gated through graph drafts.
+  The declared question and dataset ids become the staged note's targets;
+  each event records `question_id_source` and the note carries
+  `declared_target_source` as `explicit` (a flag or manifest) or
+  `config_default` (the tool's `default_question_id`), and a stale id fails
+  the sync loudly instead of landing as metadata only.
 - Consumer-side analysis-repo capture through the `lt repo` CLI as an
   offline-first staged-note workflow: a fail-soft managed post-commit hook,
   explicit reports, and run-finish events record commit state, declared
@@ -69,7 +81,16 @@ research record:
   proposal generation is deferred to the configured daily-review cadence or an
   explicit on-demand trigger. The staged-note sink works under today's
   device-token allowlist while draft requests need a user or personal-access
-  token. See
+  token. As with `lt hpc`, the declared question and dataset ids become note
+  targets labelled `declared_target_source=explicit|config_default`, and a
+  stale id fails the sync loudly. `lt hooks install` is the single hook
+  installer: it writes the `REPO HOOK` block, creates `repo.json` when absent,
+  and migrates legacy `GRAPH DRAFT` blocks in place; `lt git snapshot` is
+  deprecated for one release. Merge commits and `fixup!`/`squash!` subjects
+  are skipped by default (`wip` and path globs opt-in in `repo.json`), with
+  every skip logged in the outbox and counted by `lt outbox status`; the hook
+  drains after each commit, and `lt outbox status|sync` and the scheduled
+  `lt watch run` cover every adapter outbox (watch, repo, hpc). See
   [repo-report-capture.md](repo-report-capture.md).
 - Package-pinned code-facing idiom teaching rendered from one generator into
   consent-gated managed agent surfaces, with the advisory
@@ -83,7 +104,51 @@ research record:
   transcripts, photo+voice bundles, and scheduled or user-triggered batches over
   staged notes. Drafting may be note-scoped or batch-scoped, but every proposed
   operation requires human edit/accept/reject before commit through normal API
-  validation.
+  validation. Batch packets order captures and derive the day window by each
+  note's capture clock, and `capture_placement` carries `observed_at` with an
+  `observed_at_source` of `client` (metadata `captured_at`), `adapter`
+  (`evidence_source_observed_at`), or `server` (`created_at`); a metadata
+  clock that is unparsable or naive is ignored and one later than the server
+  receipt is clamped to it. Batch window membership and reviewer watermarks
+  stay on `created_at`, so no staged note is dropped by a client clock. A
+  reviewer may also explicitly defer a proposed operation
+  (`deferred_at` / `deferred_by` stamps that keep it `proposed`, are cleared by
+  accept, reject, or `deferred: false`, and are skipped by accept-all), a
+  rejection may carry an optional structured `reject_reason`, and a submit
+  with zero accepted operations closes the draft as `rejected` with
+  `reviewed_at` / `reviewed_by` stamped from the submitter and an optional
+  `review_note` — an all-negative review needs no owner verdict and never
+  archives or changes the source notes. Drafts may also carry
+  negative-knowledge labels:
+  `record_decision` / `record_dead_end` / `record_pivot` propose exploration
+  nodes, `abandon_question` closes a question with a required terminal reason,
+  `merge_questions` retires one question into a replacement through the
+  audited question-refactor path, and `retire_note` archives a note with a
+  named reason (`superseded` or `reviewed_not_relevant`). Note-scoped draft
+  requests (`POST /notes/{id}/graph-drafts` and `/analysis-graph-drafts`)
+  take `external_provider_acknowledged` and are refused with `422` when the
+  provider is external and it is not true; the consent is recorded on the
+  change set's `context_packet.external_provider_acknowledgement`. Every
+  packet names its `context_owner` and `external_context_policy`, and each
+  recent note carries `created_by_user_id` and `author_scope` computed from
+  the same owner as `captured_by_current_user`. A staged note whose metadata
+  sets `scheduled_graph_draft_policy: exclude` (client-settable; the only
+  admitted value) is skipped by scheduled and run-now batches. The review
+  page asks for a structured `reject_reason` (seven chips, keys `1`-`7` after
+  `r`), defers with one keystroke, shows a deferred count on batch cards, sets
+  a source capture aside with a named reason, and accepts or rejects proposed
+  provenance links in place. Note, batch, and
+  analysis packets also carry an `open_predictions` section (proposed or
+  testing claims that answer a question, with their derived
+  `effective_status` and `pre_registered` flags), and the drafter may propose
+  `resolve_prediction`: a human-gated claim update to `supported` (naming the
+  landed evidence) or `rejected` (with a `terminal_reason`) once evidence has
+  landed under that question. Batch packets carry
+  reviewer-scoped, capped review memory (that reviewer's pending proposals and
+  recent rejections) and the re-draft of a rejected note draft is seeded with
+  the rejected operations and their review notes; no validator rewrites,
+  merges, or suppresses proposals — duplicates are surfaced to the model and
+  left to the reviewer.
 - Ongoing-project member onboarding as a prospective-first retained workflow:
   one immutable project-visible checkpoint per project/member, one to three
   individually resolved live-question alignments, a deterministic labelled
@@ -102,8 +167,17 @@ research record:
   owner-commit projections remain distinct. Legacy drafts with no assignee are
   recoverable only through an explicit owner oversight projection. `GET
   /batches` pages these projections in the database and returns summaries
-  (`operation_count`, `meeting_note_count`) without operations or the context
-  packet; `GET /batches/{change_set_id}` returns the full draft.
+  (`operation_count`, `deferred_count`, `meeting_note_count`) without
+  operations or the context packet; `GET /batches/{change_set_id}` returns the
+  full draft, which also exposes `reject_reason_counts` per semantic type.
+  Each settings row carries an `external_context_policy`: `own_notes_only`
+  (the default) sends the provider only the reviewer's own recent notes as
+  context, `project_notes` also sends colleagues' recent notes, each labelled
+  `author_scope`; a personal row inherits the project default when created.
+  When the drafting provider is external (a non-loopback base URL), enabling
+  the cadence or switching to `project_notes` requires
+  `external_provider_acknowledged: true` from an interactive session, recorded
+  once as `external_provider_acknowledged_at` / `external_provider_acknowledged_by`.
 - Opt-in, per-user review-ready email cues backed by a transactional delivery
   outbox, retry leases, and signed short-lived links. Email contains no project
   or research content, and links still require normal authentication and
@@ -117,8 +191,23 @@ research record:
   captured note is a first-class action that names a reason (including
   `archived_unreviewed`), so a skipped review degrades visible coverage rather
   than silent trust. See [curation-states.md](curation-states.md).
+- Derived coverage reads that make skipped review visible:
+  `GET /projects/{project_id}/coverage` reports unreviewed staged captures
+  (never part of a committed or rejected draft) with the oldest capture time,
+  captures a committed draft absorbed but no applied operation cites
+  (`unplaced`), captures set aside as `archived_unreviewed`, drafts and
+  clarification requests still waiting on a person, and a bounded last-seen
+  listing per capture source (`evidence_source_provider`, `evidence_adapter`,
+  `capture_install_id`/`capture_host_label`) with no thresholds. The same
+  summary rides on the graph overview and the decision-context packet, and
+  the portfolio summary flags `unreviewed_captures` once a named threshold is
+  reached. Coverage is derived from existing records; nothing is stored,
+  ranked, or auto-reviewed.
 - Paired-device enrollment for phone capture, including one-time enrollment
-  URLs, device-token capture, and revocation.
+  URLs, device-token capture, and revocation. Captures presented with a device
+  token are stamped server-side with `capture_device_token_id` and
+  `capture_device_label` in note metadata; client-supplied values for those
+  keys are rejected.
 - Human-in-browser personal-access-token minting on the Agents page
   (`/app/agents`), including role/read-only level selection capped at the
   issuer's role, one-time secret display with copy-paste `lt setup connect`
@@ -127,7 +216,17 @@ research record:
   `/auth/*` except read-only `/auth/me` session introspection; see
   [agent-setup.md](agent-setup.md). Token reads report the issued `role` and
   the `effective_role` the token acts with now: the lower of that role and the
-  owner's current role.
+  owner's current role. A token carries one of three registered scopes:
+  `all` (the role-based service policy), `batch_run_due` (`POST
+  /batches/run-due` only, admin role, nothing else), and `stage_evidence`
+  (every read, `POST /notes`, `/notes/upload-file`, and `/notes/quick-capture`
+  with the `staged` status, `PATCH /notes/{id}` except `status=committed`,
+  `POST /notes/{id}/graph-drafts`, `/analysis-graph-drafts`, and `/transcript`,
+  and `POST /evidence-bundles` with `dry_run=true`; a committed note status or
+  a bundle commit is refused with `403 service_forbidden`, and no other write
+  exists for it). Direct create requests may declare `origin` as `user` or
+  `ai_executed`; every write made with a personal access token records the
+  token label as the entity's `origin_provider`, truncated to 80 characters.
 - Session sign-out and admin credential management: `POST /auth/sessions/revoke`
   ends every session of the caller (sign out everywhere). An admin at an
   interactive session lists and revokes another user's personal access tokens
@@ -150,30 +249,80 @@ research record:
   capture link (`GET /sessions/{session_id}/capture-link`): a phone-scannable
   QR and URL that open `/app/capture` with the project and session
   preselected, so bench captures land already linked to the session.
+- Web navigation: the primary nav is Home, Capture, Review (`/app/batches`),
+  and Graph (`/app/graph`), with Devices, Agents, Setup, and (for admins)
+  Users grouped under Settings; a detail page's Back follows in-app history
+  and falls back to `/app` when the page was opened directly. Manual dataset
+  and analysis staging stays supported on Home behind a "Manual staging
+  (advanced)" disclosure, while the staged-list commit, upload, and archive
+  controls remain primary.
 - Dataset staging and direct commit with provenance/manifest capture, without
   an approval gate. The direct-commit path for people and the human-gated review
   path for AI proposals are deliberately asymmetric; see
   [review-and-commit-model.md](review-and-commit-model.md).
 - Analysis, claim, and visualization records as explicit user-driven flows,
-  including managed file storage for visualization assets.
+  including managed file storage for visualization assets. Claim reads carry
+  derived, never-stored fields — `effective_status`, `superseded_by_claim_id`,
+  `contested_by_claim_ids`, `invalidated_by_node_id`, and `pre_registered` —
+  computed at read time from claim edges (`supersedes` marks the target
+  superseded; `refutes` / `contradicts` mark it contested; edges from a
+  rejected source do not count) and committed `pivot` exploration nodes;
+  `pre_registered` is true only when the claim predates the earliest
+  committed dataset (its `created_at`, since datasets record no commit time)
+  or committed analysis that counts as its evidence. Stored `status` never
+  changes from an edge or pivot; `supported` and `rejected` stay terminal.
+  The one write-rule change is that a `testing` claim may attach
+  `supported_by_*` links only in the same PATCH that resolves it to
+  `supported`. A mis-asserted relation is corrected by
+  `DELETE /claims/{claim_id}/edges/{edge_id}` (contributor access; an edge
+  under another source claim reads as absent), which un-derives the target's
+  effective status; nothing is auto-derived into stored status.
 - Exploration nodes for the divergent research trajectory — `decision`,
   `dead_end`, and `pivot` records that each target a retained question,
   dataset, analysis, or claim and link into a DAG through `parent` and
   `also_depends_on` edges. They render in the project graph between claims and
-  visualizations and export as `lab:ExplorationNode` PROV-O records. Like other
-  graph entities they are created directly today; any future agent-harvested
-  nodes stay human-gated through graph-draft review. See
-  [ara-exploration-graph-design.md](ara-exploration-graph-design.md).
+  visualizations and export as `lab:ExplorationNode` PROV-O records. They are
+  created directly or proposed by graph drafting as `record_decision` /
+  `record_dead_end` / `record_pivot` operations that stay human-gated through
+  graph-draft review and, once committed, are stamped `origin=ai_suggested`
+  (`user_revised` when the reviewer edited them) with the change-set backlink.
+  Decision context lists them dead ends first, then pivots and decisions, with
+  `candidate_ids.exploration_nodes`.
+  See [ara-exploration-graph-design.md](ara-exploration-graph-design.md).
 - A per-project publication-readiness report
   (`GET /projects/{project_id}/publication-readiness`) that scans the retained
   graph for gaps before write-up — supported claims missing dataset/analysis
-  evidence or falsification criteria, answered questions without committed
-  dataset evidence, and broken external-artifact references.
-- Human-gated provenance links over `GET`/`PATCH /provenance-links`. The daily
-  batch run deterministically proposes a `was_derived_from` link whenever two
-  captured artifacts share a content hash (e.g. an acquisition output reused as
-  an analysis input, possibly across machines); a person accepts or rejects each
-  one, and only accepted links render as `prov:wasDerivedFrom` in PROV-O export.
+  evidence or falsification criteria, supported claims that are contested,
+  superseded, or invalidated by later claims or committed pivots (blocking),
+  answered questions without committed dataset evidence, broken
+  external-artifact references, and testing predictions older than 30 days
+  whose question already has committed data (`stale_predictions`, advisory
+  only — it never changes `seal_level`).
+- A per-project draft-quality ledger
+  (`GET /projects/{project_id}/draft-quality?since=<ISO 8601 with offset>`,
+  MCP read tool `lab_tracker_draft_quality`) computed only from stored
+  graph-draft change sets and operations. Per provider x model x
+  prompt_version x semantic type it reports proposed, accepted split by
+  `human_selected` vs `bulk_accepted`, edited-before-accept, rejected, and
+  left-proposed-at-commit counts, plus per-group clarification counts and
+  median seconds to first accept and to review. It is a read of the review
+  record, never a gate, and never auto-accepts anything. Commit keeps the
+  `edited_at`/`edited_by` review-audit keys on applied operations so the
+  edited-before-accept count survives commit; operations committed before
+  that change carry no edit record and are undercounted.
+- Human-gated provenance links over `GET`/`PATCH /provenance-links`. Every
+  batch execution — the synchronous `POST /batches/run-now` path, the queued
+  worker path when `graph_draft_background_enabled` is set, and scheduled due
+  dispatch — deterministically proposes a `was_derived_from` link whenever two
+  captured artifacts share a content hash: notes via their indexed
+  `evidence_content_hash` and uploaded dataset files via their checksum (the
+  earliest capture is the antecedent; e.g. an acquisition output reused as an
+  analysis input, possibly across machines). Notes expose
+  `evidence_content_hash` on reads, `GET /notes` accepts an exact
+  `evidence_content_hash` filter, and project graph search returns every
+  carrier of a hash with an `exact_hash` match reason. A person accepts or
+  rejects each proposal over `GET`/`PATCH /provenance-links`; only accepted
+  note-to-note links render as `prov:wasDerivedFrom` in PROV-O export.
   Nothing is auto-committed and there is no machine-driven create path — the
   detector only writes proposals into the existing review gate.
 - Bounded recent analysis retrieval through `GET /analyses?recent_first=true`,
@@ -193,7 +342,13 @@ research record:
   references that preserve semantic edges to outside tools without
   reimplementing their workflows. The `lt export` consumer-side command writes
   these documents as self-contained sidecar files that survive without a running
-  instance, optionally co-located next to the data files they describe. See
+  instance, optionally co-located next to the data files they describe, and
+  with `--ara` also each goal's and root question's layered Ara artifact.
+  Every dataset, analysis, and claim sidecar embeds the linked questions'
+  text, the exploration nodes reachable from the record, its goal links, and
+  the curation properties (`acceptanceMode`, `acceptedBy`, `acceptedAt`,
+  `proposalRationale`, `proposalConfidence`, `reviewNote`) of every record an
+  accepted AI proposal produced. See
   [provenance-export.md](provenance-export.md).
 - The linked-data surface around those documents: `@id` identifiers minted
   from `LAB_TRACKER_BASE_URL` when configured, a public `GET /terms`
@@ -271,7 +426,13 @@ research record:
   and inspect its bounded neighborhood before requesting task-specific decision
   context. Decision context remains mandatory before research-facing choices;
   returned record text is untrusted, and retained v1 does not delegate graph
-  commits to autonomous agents.
+  commits to autonomous agents. Agents may request a note-scoped draft
+  (`lab_tracker_request_graph_draft`, `POST /notes/{id}/graph-drafts`) and list
+  their personal review queue (`lab_tracker_list_my_drafts`,
+  `GET /batches?mine=true`), never accept or commit one. Each
+  `POST /assistant/decision-context` consultation records a content-free
+  `view decision_context` usage event: project, actor, principal type, and
+  surface only, never the query, task kind, or anchor ids.
 
 Anything not listed above is out of the retained v1 surface and should not
 shape the default runtime, supported docs, or simplified architecture.
@@ -310,6 +471,10 @@ Deferred means:
 Follow these rules in sibling cleanup work:
 
 - Default runtime behavior should center the retained workflows only.
+- Demo material stays scripted: `lab-tracker seed-demo --with-review` seeds a
+  golden-day capture set and one READY batch through the ordinary batch
+  drafting service with a scripted client (no model call) so a newcomer can
+  walk capture -> batch -> review without provider credentials.
 - Frontend navigation and supported docs should describe manual,
   straightforward flows first.
 - Backend refactors should prefer direct repository-backed operations over

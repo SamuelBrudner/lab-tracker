@@ -3,11 +3,14 @@ from __future__ import annotations
 from api_helpers import repository_backed_api
 
 from lab_tracker.demo_seed import DEMO_PROJECT_NAME, seed_demo_data
+from lab_tracker.golden_day import GOLDEN_DAY_CLARIFICATION, GOLDEN_DAY_PROVIDER
 from lab_tracker.models import (
     AnalysisStatus,
     ClaimStatus,
     DatasetStatus,
     EntityType,
+    GraphChangeSetStatus,
+    GraphDraftMode,
     SessionType,
 )
 
@@ -53,4 +56,65 @@ def test_seed_demo_data_is_idempotent_by_default() -> None:
 
     assert second.created is False
     assert second.project_id == first.project_id
+    assert len(api.list_projects()) == 1
+
+
+def test_seed_demo_data_without_review_reports_no_batch() -> None:
+    api = repository_backed_api()
+
+    result = seed_demo_data(api)
+
+    assert result.staged_note_count == 0
+    assert result.review_change_set_id is None
+    assert result.as_dict()["review_change_set_id"] is None
+
+
+def test_seed_demo_with_review_stages_captures_and_a_ready_batch() -> None:
+    api = repository_backed_api()
+
+    result = seed_demo_data(api, with_review=True)
+
+    assert result.created is True
+    assert result.review_change_set_id is not None
+    assert result.as_dict()["review_change_set_id"] == str(result.review_change_set_id)
+    assert result.staged_note_count == 14
+    change_set = api.get_graph_change_set(result.review_change_set_id)
+    assert change_set.project_id == result.project_id
+    assert change_set.status == GraphChangeSetStatus.READY
+    assert change_set.draft_mode == GraphDraftMode.GRAPH_BATCH
+    assert change_set.provider == GOLDEN_DAY_PROVIDER
+    assert change_set.operations
+    assert change_set.clarification_requests == [GOLDEN_DAY_CLARIFICATION]
+    assert change_set.review_assignee is not None
+
+
+def test_seed_demo_with_review_is_idempotent() -> None:
+    api = repository_backed_api()
+    first = seed_demo_data(api, with_review=True)
+
+    second = seed_demo_data(api, with_review=True)
+
+    assert second.created is False
+    assert second.project_id == first.project_id
+    assert second.review_change_set_id == first.review_change_set_id
+    assert second.staged_note_count == first.staged_note_count == 14
+    batches, total = api.query_graph_change_sets(
+        project_id=first.project_id,
+        draft_mode=GraphDraftMode.GRAPH_BATCH,
+        include_operations=False,
+    )
+    assert total == len(batches) == 1
+
+
+def test_seed_demo_with_review_adds_review_to_an_existing_demo_project() -> None:
+    api = repository_backed_api()
+    plain = seed_demo_data(api)
+    assert plain.review_change_set_id is None
+
+    reviewed = seed_demo_data(api, with_review=True)
+
+    assert reviewed.created is False
+    assert reviewed.project_id == plain.project_id
+    assert reviewed.review_change_set_id is not None
+    assert reviewed.staged_note_count == 14
     assert len(api.list_projects()) == 1
