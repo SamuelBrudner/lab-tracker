@@ -29,9 +29,14 @@ SOURCE_REPOSITORY_URL = "https://github.com/SamuelBrudner/lab-tracker.git"
 # (MAJOR, MINOR): the part of a release that carries features and, on 0.y.z,
 # incompatibilities (docs/versioning.md).
 FEATURE_LINE_LENGTH = 2
-# Where a person finds the pinned project dependency when no revision is known
-# (setup guide step 5, "Project Python dependency").
-SETUP_PAGE_PROJECT_INSTALL = "the pinned `uv add` command on the server's Setup page"
+# The project-dependency step when the server's source revision is unknown. The
+# Setup page shows its pinned `uv add` command only once the server reports a
+# revision (client-setup.js matchingClientSetup), so this names the release,
+# not a command the page is not showing.
+UNKNOWN_REVISION_PROJECT_INSTALL = (
+    "a `uv add` of the server's lab-tracker release (the Setup page shows the pinned "
+    "command once the server reports its source revision)"
+)
 
 ReleaseStatus = Literal["current", "behind", "ahead", "unknown"]
 FeatureLine = tuple[int, ...]
@@ -207,7 +212,7 @@ def project_update_steps(server: ReleaseIdentity) -> str:
     """Non-imperative steps that repin an analysis repo's dependency to ``server``'s release."""
 
     command = project_install_command(server.revision)
-    install = f"`{command}`" if command else SETUP_PAGE_PROJECT_INSTALL
+    install = f"`{command}`" if command else UNKNOWN_REVISION_PROJECT_INSTALL
     return (
         f"{install} updates that repo's pinned lab-tracker dependency to the server's "
         "release; `lt update` does not change that pin"

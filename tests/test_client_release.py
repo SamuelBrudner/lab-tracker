@@ -185,8 +185,15 @@ def test_project_update_steps_repin_the_analysis_repo_dependency() -> None:
     )
     assert "uv tool install" not in pinned
     assert "`lt update` does not change" in pinned
-    assert "Setup page" in unpinned
-    assert "uv add" in unpinned
+    # The Setup page shows a pinned command only once the server reports its
+    # revision (client-setup.js matchingClientSetup), so the fallback must not
+    # promise one there.
+    assert unpinned.startswith("a `uv add` of the server's lab-tracker release")
+    assert (
+        "the Setup page shows the pinned command once the server reports its source revision"
+        in unpinned
+    )
+    assert "pinned `uv add` command on the server's Setup page" not in unpinned
     assert "git+" not in unpinned
 
 
