@@ -5,6 +5,7 @@ EntityRef note targets, project ids loaded from lt_ids.json, content-hash
 evidence imports, and fail-soft figure capture with savefig/capture_figures.
 """
 
+from lab_tracker_client._version import __version__
 from lab_tracker_client.client import (
     DECLARED_TARGET_SOURCE_CONFIG_DEFAULT,
     DECLARED_TARGET_SOURCE_EXPLICIT,
@@ -94,6 +95,7 @@ from lab_tracker_client.hpc import (
 )
 
 __all__ = [
+    "__version__",
     "DECLARED_TARGET_SOURCE_CONFIG_DEFAULT",
     "DECLARED_TARGET_SOURCE_EXPLICIT",
     "DECLARED_TARGET_SOURCE_KEY",
