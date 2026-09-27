@@ -76,6 +76,7 @@ from lab_tracker_client.figure import (
     run_context,
     savefig,
 )
+from lab_tracker_client.figure_autotrack import autotrack, is_autotracking
 from lab_tracker_client.hpc import (
     DEFAULT_MANIFEST_PATTERN,
     DEFAULT_OUTBOX,
@@ -97,6 +98,8 @@ __all__ = [
     "DECLARED_TARGET_SOURCE_CONFIG_DEFAULT",
     "DECLARED_TARGET_SOURCE_EXPLICIT",
     "DECLARED_TARGET_SOURCE_KEY",
+    "autotrack",
+    "is_autotracking",
     "ENTITY_TYPE_VALUES",
     "EVIDENCE_METADATA_KEYS",
     "NOTE_STATUS_VALUES",

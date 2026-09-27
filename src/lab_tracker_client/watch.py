@@ -7,6 +7,7 @@ import json
 import os
 import uuid
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,6 +38,7 @@ from lab_tracker.models import NoteMetadataScalar
 from lab_tracker_client import outbox as _outbox
 from lab_tracker_client.client import (
     CAPTURE_HOST_METADATA_KEYS,
+    DECLARED_TARGET_SOURCE_CONFIG_DEFAULT,
     DECLARED_TARGET_SOURCE_EXPLICIT,
     DECLARED_TARGET_SOURCE_KEY,
     EntityRef,
@@ -49,9 +51,20 @@ from lab_tracker_client.client import (
     declared_targets,
 )
 from lab_tracker_client.evidence_index import outbox_note_index
+from lab_tracker_client.session_context import (
+    find_session_link_code,
+    read_active_session,
+    session_id_from_reference,
+)
 
 CONFIG_VERSION = 1
 EVENT_VERSION = 1
+CONFIG_DIR_NAME = ".lab-tracker"
+LT_IDS_FILENAME = "lt_ids.json"
+# How a watched file's session was resolved (recorded as source.session_source).
+SESSION_SOURCE_CONFIG = "config"
+SESSION_SOURCE_PATH = "path"
+SESSION_SOURCE_ACTIVE = "active"
 DEFAULT_CONFIG_RELATIVE_PATH = Path(".lab-tracker") / "watch.json"
 DEFAULT_OUTBOX = ".lab-tracker/outbox/watch"
 DEFAULT_MANIFEST_PATTERN = "lab-tracker-evidence.json"
@@ -111,19 +124,20 @@ class WatchConfig:
             payload["project_id"] = self.project_id
         return payload
 
+    def checkout_root(self) -> Path:
+        """The checkout this config belongs to (parent of its .lab-tracker/)."""
+
+        if self.config_path is None:
+            return Path.cwd().resolve()
+        parent = self.config_path.parent
+        return (parent.parent if parent.name == CONFIG_DIR_NAME else parent).resolve()
+
     def outbox_path(self) -> Path:
         override = os.getenv("LAB_TRACKER_WATCH_OUTBOX")
         configured = Path(override or self.outbox).expanduser()
         if configured.is_absolute():
             return configured.resolve()
-        root = Path.cwd()
-        if self.config_path is not None:
-            root = (
-                self.config_path.parent.parent
-                if self.config_path.parent.name == ".lab-tracker"
-                else self.config_path.parent
-            )
-        return (root / configured).resolve()
+        return (self.checkout_root() / configured).resolve()
 
 
 @dataclass(frozen=True)
@@ -395,6 +409,34 @@ def observe_file(
     )
 
 
+def resolve_session_for_path(
+    observation: FileObservation,
+    *,
+    session_id: str | None = None,
+    checkout: Path | None = None,
+) -> tuple[str | None, str]:
+    """Pick the session a watched file belongs to, and say how it was found.
+
+    Precedence: an explicit ``--session`` (UUID or link code), then a session
+    link code in the root folder name or the root-relative path (a folder named
+    for the session claims everything inside it), then the checkout's active
+    session from ``lt session use``. Returns ``(session_id, source)`` where
+    source is ``"config"``, ``"path"``, ``"active"`` or ``""``.
+    """
+
+    explicit = session_id_from_reference(session_id)
+    if explicit:
+        return explicit, SESSION_SOURCE_CONFIG
+    haystack = f"{observation.root.name}/{observation.relative_path}"
+    found = find_session_link_code(haystack)
+    if found is not None:
+        return found[1], SESSION_SOURCE_PATH
+    active = read_active_session(checkout or observation.root)
+    if active and active.get("session_id"):
+        return str(active["session_id"]), SESSION_SOURCE_ACTIVE
+    return None, ""
+
+
 def event_from_file(
     config: WatchConfig,
     path: str | Path,
@@ -417,6 +459,9 @@ def event_from_file(
     resolved_capture_kind = capture_kind or (
         "acquisition_output" if resolved_sink == SINK_ACQUISITION_OUTPUT else "file"
     )
+    resolved_session_id, session_source = resolve_session_for_path(
+        observation, session_id=session_id, checkout=config.checkout_root()
+    )
     return make_event(
         capture_id=observation.source_external_id,
         event_id=f"file-{observation.content_hash[:16]}",
@@ -434,13 +479,14 @@ def event_from_file(
             "content_hash": observation.content_hash,
             "size_bytes": observation.size_bytes,
             "mtime": observation.mtime,
+            **({"session_source": session_source} if session_source else {}),
         },
         context={
             "project_id": _optional_str(project_id or config.project_id),
             "question_id": _optional_str(question_id),
             "dataset_ids": _string_list(dataset_ids),
             "tags": _string_list(tags),
-            "session_id": _optional_str(session_id),
+            "session_id": resolved_session_id,
         },
         payload={
             "title": title or observation.path.name,
@@ -856,6 +902,9 @@ def sync_outbox(
         dry_run=dry_run,
         request_draft=request_draft,
         limit=limit,
+        default_project_id=resolve_default_project_id(
+            config.checkout_root(), client, configured=config.project_id
+        ),
     )
 
 
@@ -866,11 +915,18 @@ def sync_outbox_path(
     dry_run: bool = False,
     request_draft: bool = False,
     limit: int | None = None,
+    default_project_id: str | None = None,
 ) -> JsonObject:
-    """Drain the watch outbox at ``outbox`` (no config needed; see ``lt outbox``)."""
+    """Drain the watch outbox at ``outbox`` (no config needed; see ``lt outbox``).
+
+    ``default_project_id`` fills events queued before a project was bound;
+    without one it is resolved from the checkout the outbox lives in.
+    """
 
     outbox = Path(outbox).expanduser()
     note_indexes: dict[str, EvidenceNoteIndex] = {}
+    if default_project_id is None:
+        default_project_id = resolve_default_project_id(checkout_root_for_outbox(outbox), client)
 
     def _is_actionable(event: JsonObject) -> bool:
         sync = event.get("sync", {})
@@ -891,6 +947,7 @@ def sync_outbox_path(
             note_indexes=note_indexes,
             dry_run=dry_run,
             request_draft=request_draft,
+            default_project_id=default_project_id,
         ).to_dict()
 
     def _skipped(path: Path, event: JsonObject) -> JsonObject:
@@ -1013,6 +1070,46 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def checkout_root_for_outbox(outbox: Path) -> Path | None:
+    """The checkout an outbox belongs to: the parent of its ``.lab-tracker`` dir.
+
+    ``None`` for an outbox placed outside any ``.lab-tracker`` directory (an
+    absolute ``LAB_TRACKER_WATCH_OUTBOX``), where no ``lt_ids.json`` applies.
+    """
+
+    for parent in outbox.resolve().parents:
+        if parent.name == CONFIG_DIR_NAME:
+            return parent.parent
+    return None
+
+
+def resolve_default_project_id(
+    checkout_root: Path | None,
+    client: LabTracker | None,
+    *,
+    configured: str | None = None,
+) -> str | None:
+    """Project for events that were queued before a project was bound.
+
+    The watch config first, then the checkout's ``lt_ids.json``, then the
+    environment, then the client's own default. An event that names its
+    project keeps it.
+    """
+
+    if configured:
+        return configured
+    if checkout_root is not None:
+        with suppress(OSError, ValueError):
+            payload = json.loads((checkout_root / LT_IDS_FILENAME).read_text(encoding="utf-8"))
+            if isinstance(payload, Mapping) and str(payload.get("project_id") or "").strip():
+                return str(payload["project_id"]).strip()
+    env_value = os.getenv("LAB_TRACKER_PROJECT_ID")
+    if env_value:
+        return env_value
+    default = getattr(client, "default_project_id", None)
+    return str(default) if default else None
+
+
 def _sync_event(
     client: LabTracker,
     *,
@@ -1021,6 +1118,7 @@ def _sync_event(
     note_indexes: dict[str, EvidenceNoteIndex],
     dry_run: bool,
     request_draft: bool,
+    default_project_id: str | None = None,
 ) -> WatchSyncResult:
     sync = event.get("sync", {})
     already_delivered = bool(sync.get("note_id") or sync.get("output_id"))
@@ -1046,6 +1144,7 @@ def _sync_event(
             note_indexes=note_indexes,
             dry_run=dry_run,
             request_draft=request_draft,
+            default_project_id=default_project_id,
         )
     if event["sink"] == SINK_ACQUISITION_OUTPUT:
         return _sync_acquisition_output(client, path=path, event=event, dry_run=dry_run)
@@ -1060,12 +1159,18 @@ def _sync_staged_note(
     note_indexes: dict[str, EvidenceNoteIndex],
     dry_run: bool,
     request_draft: bool,
+    default_project_id: str | None = None,
 ) -> WatchSyncResult:
     source_path = _optional_str(event["source"].get("path"))
     note_id = _optional_str(event.get("sync", {}).get("note_id"))
     note: LTRecord | None = None
     change_set_id = _optional_str(event.get("sync", {}).get("change_set_id"))
-    project_id = _non_empty(_optional_str(event["context"].get("project_id")) or "", "project_id")
+    project_id = _optional_str(event["context"].get("project_id")) or default_project_id
+    if not project_id:
+        raise LTValidationError(
+            "project_id must not be empty: bind the project with 'lt project bind' "
+            "or 'lt watch add --project' and sync again."
+        )
     targets = _declared_targets(event)
     if not note_id and source_path:
         result = client.import_evidence_file(
@@ -1087,6 +1192,8 @@ def _sync_staged_note(
                 dry_run=dry_run,
             ),
             targets=targets,
+            observed_at=str(event["observed_at"]),
+            client_capture_id=_optional_str(event["payload"].get("client_capture_id")),
         )
         if dry_run:
             return WatchSyncResult(
@@ -1343,12 +1450,21 @@ def _event_metadata(event: Mapping[str, Any]) -> dict[str, NoteMetadataScalar]:
     for key in ("project_id", "question_id", "session_id"):
         if context.get(key):
             metadata[f"watch_{key}"] = str(context[key])
+    if source.get("session_source"):
+        metadata["watch_session_source"] = str(source["session_source"])
+    # Adapters that queue through this outbox (figure capture offline) carry
+    # their own scalar metadata under the reserved payload.metadata key.
+    extra = payload["payload"].get("metadata")
+    if isinstance(extra, Mapping):
+        for key, value in extra.items():
+            if isinstance(value, (str, bool, int, float)) and not str(key).startswith(
+                "evidence_"
+            ):
+                metadata[str(key)] = value
     if context["dataset_ids"]:
         metadata["watch_dataset_ids"] = ",".join(context["dataset_ids"])
     if _declared_targets(payload):
-        # Watch has no configured default question: every declared context
-        # came from a flag, a watch entry, or a manifest, i.e. per capture.
-        metadata[DECLARED_TARGET_SOURCE_KEY] = DECLARED_TARGET_SOURCE_EXPLICIT
+        metadata[DECLARED_TARGET_SOURCE_KEY] = _declared_target_source(context, source)
     if context["tags"]:
         metadata["watch_tags"] = ",".join(context["tags"])
     for key in ("relative_path", "content_hash", "size_bytes", "manifest_content_hash"):
@@ -1362,6 +1478,23 @@ def _event_metadata(event: Mapping[str, Any]) -> dict[str, NoteMetadataScalar]:
         if host.get(key):
             metadata[key] = str(host[key])
     return metadata
+
+
+def _declared_target_source(context: Mapping[str, Any], source: Mapping[str, Any]) -> str:
+    """Label for the event's declared targets.
+
+    Watch has no configured default question: a question, a dataset, a
+    ``--session`` on the watch, or a session named by the folder is a
+    per-capture choice (``explicit``). Only a session taken from the
+    checkout's active ``lt session use`` context is a bounded default and
+    gets the weaker ``config_default`` label.
+    """
+
+    if context.get("question_id") or context.get("dataset_ids"):
+        return DECLARED_TARGET_SOURCE_EXPLICIT
+    if source.get("session_source") == SESSION_SOURCE_ACTIVE:
+        return DECLARED_TARGET_SOURCE_CONFIG_DEFAULT
+    return DECLARED_TARGET_SOURCE_EXPLICIT
 
 
 def _declared_targets(event: Mapping[str, Any]) -> list[EntityRef]:

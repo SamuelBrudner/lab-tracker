@@ -48,7 +48,11 @@ research record:
   (`labtracker.savefig` and `labtracker.uploadFigure`) as fail-soft
   staged-note workflows: Lab Tracker stores a bounded review image or pointer
   plus source URI and content-hash metadata, while full figure files remain in
-  the consumer repo.
+  the consumer repo. A Python save the server cannot receive is queued in the
+  checkout's watch outbox under the same capture id and delivered by the next
+  `lt outbox sync`; the opt-in `lab_tracker_client.autotrack()` hook (installed
+  into IPython by `lt setup autotrack`, disabled by `LAB_TRACKER_AUTOTRACK=0`)
+  captures every matplotlib save to a path through that same fail-soft path.
 - Consumer-side watch-folder capture through the `lt watch` CLI as an
   offline-first adapter workflow: watched files and workflow-written manifests
   write durable local outbox records that later sync into staged evidence notes
@@ -58,7 +62,12 @@ research record:
   dataset ids declared for a watch (flags, watch entries, or manifests)
   become the staged note's targets, labelled
   `declared_target_source=explicit`, so a stale id fails the sync loudly
-  instead of landing as metadata only.
+  instead of landing as metadata only. A session the client can resolve on
+  its own (`--session` as a UUID or link code, a session link code in the
+  watched folder or file name, or the checkout's `lt session use` context,
+  overridden by `LAB_TRACKER_SESSION_ID`) becomes that target the same way;
+  the checkout context is labelled `config_default` because it is a bounded
+  per-checkout default rather than a per-capture choice.
 - Consumer-side HPC analysis capture through the `lt hpc` CLI as an
   offline-first staged-note workflow: Slurm/HPC submit, begin, finish, and
   watch-folder manifest events write durable local outbox records that sync

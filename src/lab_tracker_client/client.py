@@ -1530,6 +1530,8 @@ class LabTracker:
         dry_run: bool = False,
         evidence_note_index: EvidenceNoteIndex | None = None,
         targets: Sequence[EntityRef | Mapping[str, Any] | tuple[str, str] | str] = (),
+        observed_at: str | datetime | None = None,
+        client_capture_id: str | None = None,
     ) -> EvidenceImportResult:
         path = Path(file_path).expanduser().resolve()
         if not path.is_file():
@@ -1554,6 +1556,7 @@ class LabTracker:
             capture_kind="file",
             adapter=adapter,
             title=title or path.name,
+            observed_at=observed_at,
             metadata=metadata,
         )
         evidence_key = (
@@ -1598,6 +1601,7 @@ class LabTracker:
             metadata=evidence_metadata,
             status=status,
             content_type=content_type,
+            client_capture_id=client_capture_id,
             targets=targets,
         )
         if evidence_note_index is not None:

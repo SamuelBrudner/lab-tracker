@@ -81,7 +81,19 @@ short, consent-gated sequence on the `lt` CLI.
    registers a narrow results folder; broad roots such as `artifacts/`
    are usually skipped or narrowed to a run-specific subfolder. `lt
    watch scan` and `lt watch sync` capture and upload on demand or
-   from a scheduler.
+   from a scheduler; `lt setup schedule --yes` registers `lt watch
+   run` (scan, watch sync, and the repo and HPC outbox drain) with the
+   OS scheduler, and `--request-draft` makes that run ask for AI
+   drafts too. A folder or file named with a session's link code
+   attaches its captures to that session; `lt session use <code>`
+   does the same for every capture from the checkout for the next
+   twelve hours.
+8a. **Figure autotrack (optional)** — `lt setup autotrack --yes` adds an
+   IPython startup file so every matplotlib figure saved from a notebook
+   or shell is captured without code changes (`--dry-run` previews,
+   `LAB_TRACKER_AUTOTRACK=0` disables). Saves made while the server is
+   unreachable queue in the checkout's watch outbox and drain with the
+   next sync.
 9. **Commit hooks** — `lt hooks install --project <project-id> --yes`
    enrolls the current repository: each commit queues durable staged
    evidence that syncs when the server is reachable. Repos are enrolled
@@ -116,4 +128,4 @@ upgrades, and `lt update` is the refresh path.
 If Lab Tracker is unreachable and the user does not operate a server, point
 them at whoever runs their lab's instance instead of standing one up ad hoc.
 
-<!-- lab-tracker-setup-guide version=0.1.0 sha256=fce7c9fa6c1f -->
+<!-- lab-tracker-setup-guide version=0.1.0 sha256=a0b6107e6b38 -->

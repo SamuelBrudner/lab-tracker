@@ -413,3 +413,82 @@ def test_watch_run_composes_scan_and_sync(home, monkeypatch, capsys) -> None:
     assert drained["adapters"][1]["skipped"] == "absent"
     assert drained["errors"] == []
     assert not (repo / ".lab-tracker" / "outbox" / "hpc").exists()
+
+
+def test_schedule_macos_installs_a_launchd_agent_and_retires_any_cron_line(
+    home, monkeypatch
+) -> None:
+    config = _watch_config(home)
+    monkeypatch.setenv("HOME", str(home / "mac-home"))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home / "mac-home"))
+    name = task_name(config.resolve())
+    runner = _FakeRunner(crontab_text=f"*/15 * * * * old-lt watch run # LAB-TRACKER-WATCH {name}\n")
+
+    payload = install_schedule(
+        config_path=config,
+        interval_minutes=30,
+        lt_path="/venv/bin/lt",
+        request_draft=True,
+        platform="darwin",
+        runner=runner,
+    )
+
+    assert payload["scheduler"] == "launchd"
+    assert payload["request_draft"] is True
+    assert payload["scheduled_command"].endswith("--fail-silent --request-draft")
+    plist_path = Path(payload["plist_path"])
+    assert plist_path.parent == home / "mac-home" / "Library" / "LaunchAgents"
+    assert plist_path.is_file()
+    plist = plist_path.read_text(encoding="utf-8")
+    assert payload["launchd_label"] in plist
+    assert "<integer>1800</integer>" in plist
+    assert "--request-draft" in plist
+    assert ["launchctl", "load", str(plist_path)] in runner.calls
+    # The stale crontab line from an earlier install is gone.
+    assert "# LAB-TRACKER-WATCH" not in runner.crontab_text
+
+    removed = uninstall_schedule(config_path=config, platform="darwin", runner=runner)
+    assert removed["action"] == "removed"
+    assert not plist_path.exists()
+    assert ["launchctl", "unload", str(plist_path)] in runner.calls
+    assert uninstall_schedule(config_path=config, platform="darwin", runner=runner)["action"] == (
+        "absent"
+    )
+
+
+def test_schedule_macos_refuses_intervals_beyond_a_day_and_tolerates_no_crontab(
+    home, monkeypatch
+) -> None:
+    config = _watch_config(home)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home / "mac-home"))
+
+    class _NoCron(_FakeRunner):
+        def __call__(self, argv, **kwargs):
+            self.calls.append(list(argv))
+            if argv[:2] == ["crontab", "-l"]:
+                return subprocess.CompletedProcess(argv, 1, stdout="", stderr="permission denied")
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    with pytest.raises(Exception, match="1439"):
+        install_schedule(
+            config_path=config, interval_minutes=2000, lt_path="/venv/bin/lt", platform="darwin"
+        )
+    payload = install_schedule(
+        config_path=config, lt_path="/venv/bin/lt", platform="darwin", runner=_NoCron()
+    )
+    assert payload["action"] == "installed"
+
+
+def test_schedule_request_draft_rides_the_cron_line(home) -> None:
+    config = _watch_config(home)
+    runner = _FakeRunner()
+    payload = install_schedule(
+        config_path=config,
+        interval_minutes=5,
+        lt_path="/venv/bin/lt",
+        request_draft=True,
+        platform="linux",
+        runner=runner,
+    )
+    assert payload["cron_line"].split(" # ")[0].endswith("--fail-silent --request-draft")
+    assert "--request-draft" in runner.crontab_text
