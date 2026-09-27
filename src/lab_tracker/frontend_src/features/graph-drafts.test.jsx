@@ -1640,6 +1640,7 @@ describe("GraphDraftDetailCard keyboard review", () => {
 
     const section = await screen.findByRole("region", { name: "Proposed provenance links" });
     expect(within(section).getByText("sha256:abc")).toBeInTheDocument();
+    expect(within(section).getByText(/shared content hash/)).toBeInTheDocument();
     fireEvent.click(within(section).getByRole("button", { name: "Accept" }));
 
     await waitFor(() => expect(linkBodies).toEqual([{ status: "accepted" }]));

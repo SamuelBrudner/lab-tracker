@@ -1168,6 +1168,9 @@ export interface components {
       "evidence_source_provider"?: (string | null);
       "last_capture_at": string;
       "note_count": number;
+      "quiet"?: boolean;
+      "recent_note_count"?: number;
+      "staged_unreviewed_count"?: number;
     };
     "ProjectCoverageReport": {
       "archived_unreviewed_count": number;
@@ -1178,6 +1181,9 @@ export interface components {
       "open_clarification_requests": number;
       "pending_change_sets": number;
       "project_id": string;
+      "quiet_source_count"?: number;
+      "quiet_window_days"?: number;
+      "recent_days"?: number;
       "unplaced_count": number;
       "unreviewed_count": number;
     };

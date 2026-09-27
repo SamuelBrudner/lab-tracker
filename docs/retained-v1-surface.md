@@ -207,11 +207,18 @@ research record:
   (`unplaced`), captures set aside as `archived_unreviewed`, drafts and
   clarification requests still waiting on a person, and a bounded last-seen
   listing per capture source (`evidence_source_provider`, `evidence_adapter`,
-  `capture_install_id`/`capture_host_label`) with no thresholds. The same
-  summary rides on the graph overview and the decision-context packet, and
-  the portfolio summary flags `unreviewed_captures` once a named threshold is
-  reached. Coverage is derived from existing records; nothing is stored,
-  ranked, or auto-reviewed.
+  `capture_install_id`/`capture_host_label`). Each listed source also carries
+  its capture health: how many notes it delivered in the last `recent_days`
+  (7), how many of its staged notes are still unreviewed, and a `quiet` flag
+  for an automated source that captured inside `quiet_window_days` (30) but
+  not inside the recent window, so a stalled scheduler, expired token, or
+  moved folder is visible on the home page's Capture health card instead of
+  showing up as an emptier review queue. Typed notes are never flagged and a
+  source silent for longer than the quiet window is retired, not stalled.
+  The same summary rides on the graph overview and the decision-context
+  packet, and the portfolio summary flags `unreviewed_captures` once a named
+  threshold is reached. Coverage is derived from existing records; nothing is
+  stored, ranked, or auto-reviewed.
 - Paired-device enrollment for phone capture, including one-time enrollment
   URLs, device-token capture, and revocation. Captures presented with a device
   token are stamped server-side with `capture_device_token_id` and
@@ -329,9 +336,20 @@ research record:
   analysis input, possibly across machines). Notes expose
   `evidence_content_hash` on reads, `GET /notes` accepts an exact
   `evidence_content_hash` filter, and project graph search returns every
-  carrier of a hash with an `exact_hash` match reason. A person accepts or
-  rejects each proposal over `GET`/`PATCH /provenance-links`; only accepted
-  note-to-note links render as `prov:wasDerivedFrom` in PROV-O export.
+  carrier of a hash with an `exact_hash` match reason. The same batch
+  execution runs a second, rule-based detector: when a staged note's own
+  capture metadata names a session (`watch_session_id`, `capture_session_id`)
+  or a git commit (`run_git_commit`, `repo_git_commit`, `hpc_git_commit`,
+  `git_commit`) that resolves to exactly one session or committed analysis
+  `code_version` in the project, it proposes a `was_derived_from` link from
+  the note to that entity with `basis: exact_id_match` and no content hash.
+  Ambiguous commit prefixes, prefixes shorter than seven characters, staged
+  analyses, and targets the note already carries propose nothing, and a pair
+  declined once is never re-proposed. Both detectors feed the same `PROPOSED`
+  rows and the same review surface; the model never sees them. A person
+  accepts or rejects each proposal over `GET`/`PATCH /provenance-links`;
+  only accepted note-to-note links render as `prov:wasDerivedFrom` in PROV-O
+  export.
   Nothing is auto-committed and there is no machine-driven create path — the
   detector only writes proposals into the existing review gate.
 - Bounded recent analysis retrieval through `GET /analyses?recent_first=true`,

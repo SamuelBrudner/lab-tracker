@@ -1,18 +1,31 @@
 """Deterministic, human-gated provenance-link proposals.
 
-When two captured artifacts share a content hash, every batch execution
-(synchronous, queued worker, or due dispatch) proposes a ``was_derived_from``
-link for a human to accept or reject. Carriers are notes, through their
-indexed ``evidence_content_hash``, and datasets, through the checksum of an
-uploaded dataset file; the earliest capture of a hash is the antecedent.
-Nothing is ever auto-committed: the detector only writes PROPOSED links, and
-there is no public create endpoint. Only accepted links render in PROV-O
-export.
+Two detectors run on every batch execution (synchronous, queued worker, or
+due dispatch) and propose ``was_derived_from`` links for a human to accept or
+reject:
+
+* Content hash: when two captured artifacts share a content hash. Carriers
+  are notes, through their indexed ``evidence_content_hash``, and datasets,
+  through the checksum of an uploaded dataset file; the earliest capture of
+  a hash is the antecedent.
+* Exact id: when a note's own capture metadata names a session
+  (``watch_session_id``, ``capture_session_id``) or a git commit
+  (``run_git_commit``, ``repo_git_commit``, ``hpc_git_commit``,
+  ``git_commit``) that resolves to exactly one session or committed analysis
+  ``code_version`` in the project. The note is the source, the named entity
+  the target; ambiguous prefixes and targets the note already carries propose
+  nothing.
+
+Nothing is ever auto-committed: the detectors only write PROPOSED links, a
+pair already linked in any status (including rejected) is never re-proposed,
+and there is no public create endpoint. Only accepted note-to-note links
+render in PROV-O export.
 """
 
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import dataclass
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext
@@ -20,7 +33,9 @@ from lab_tracker.errors import NotFoundError, OpaqueTargetNotFoundError, Validat
 from lab_tracker.models import (
     MIN_CARRIERS_PER_HASH,
     AcceptanceMode,
+    AnalysisStatus,
     ContentHashCarrier,
+    EntityRef,
     EntityType,
     ProvenanceLink,
     ProvenanceLinkBasis,
@@ -31,7 +46,64 @@ from lab_tracker.models import (
 )
 from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
+from lab_tracker.services.provenance_id_matches import (
+    ID_MATCH_COMMIT_METADATA_KEYS,
+    ID_MATCH_SESSION_METADATA_KEYS,
+    IdMatch,
+    id_matches_for_notes,
+)
 from lab_tracker.services.shared import actor_user_fk, actor_user_id
+
+ID_MATCH_METADATA_KEYS: tuple[str, ...] = (
+    *ID_MATCH_SESSION_METADATA_KEYS,
+    *ID_MATCH_COMMIT_METADATA_KEYS,
+)
+
+
+@dataclass(frozen=True)
+class _Proposal:
+    """A detector's candidate link before the existing-pair check and save."""
+
+    source: EntityRef
+    target: EntityRef
+    basis: ProvenanceLinkBasis
+    content_hash: str | None = None
+
+    @property
+    def pair(self) -> tuple[UUID, UUID, ProvenanceLinkRelation]:
+        return (
+            self.source.entity_id,
+            self.target.entity_id,
+            ProvenanceLinkRelation.WAS_DERIVED_FROM,
+        )
+
+
+def content_hash_proposals(
+    groups: dict[str, list[ContentHashCarrier]],
+) -> list[_Proposal]:
+    """Star topology per hash: every later capture derives from the earliest one."""
+
+    return [
+        _Proposal(
+            source=derived.entity,
+            target=antecedent.entity,
+            basis=ProvenanceLinkBasis.CONTENT_HASH_MATCH,
+            content_hash=content_hash,
+        )
+        for content_hash, (antecedent, *rest) in groups.items()
+        for derived in rest
+    ]
+
+
+def id_match_proposals(matches: list[IdMatch]) -> list[_Proposal]:
+    return [
+        _Proposal(
+            source=EntityRef(entity_type=EntityType.NOTE, entity_id=match.note_id),
+            target=match.target,
+            basis=ProvenanceLinkBasis.EXACT_ID_MATCH,
+        )
+        for match in matches
+    ]
 
 _PROVENANCE_LINK_TRANSITIONS: dict[ProvenanceLinkStatus, set[ProvenanceLinkStatus]] = {
     ProvenanceLinkStatus.PROPOSED: {
@@ -100,6 +172,52 @@ class ProvenanceLinkService(BaseService):
         groups = group_content_hash_carriers(carriers)
         if not groups:
             return 0
+        return self._save_new_proposals(project_id, content_hash_proposals(groups), actor=actor)
+
+    def propose_links_from_id_matches(
+        self,
+        project_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> int:
+        """Propose was_derived_from links from ids a note's own metadata names.
+
+        A note whose capture metadata names a project session, or a git commit
+        matching exactly one committed analysis ``code_version``, derives from
+        that entity as a matter of record; the link still needs a person to
+        accept it. Same idempotency rule as the content-hash detector, plus:
+        a target the note already carries proposes nothing.
+        """
+
+        self.authorization.require_contributor(project_id, actor=actor)
+        notes = self.repository.provenance_links.list_identifier_carriers(
+            project_id, ID_MATCH_METADATA_KEYS
+        )
+        if not notes:
+            return 0
+        sessions, _total = self.repository.query_sessions(
+            project_id=project_id, limit=None, offset=0
+        )
+        analyses, _total = self.repository.query_analyses(
+            project_id=project_id,
+            status=AnalysisStatus.COMMITTED.value,
+            limit=None,
+            offset=0,
+        )
+        matches = id_matches_for_notes(notes, sessions=sessions, analyses=analyses)
+        return self._save_new_proposals(project_id, id_match_proposals(matches), actor=actor)
+
+    def _save_new_proposals(
+        self,
+        project_id: UUID,
+        proposals: list[_Proposal],
+        *,
+        actor: AuthContext | None,
+    ) -> int:
+        """Write each proposal whose (source, target, relation) pair is new; return the count."""
+
+        if not proposals:
+            return 0
         existing = self.repository.provenance_links.list_by_project(project_id)
         seen_pairs = {
             (link.source.entity_id, link.target.entity_id, link.relation) for link in existing
@@ -108,33 +226,27 @@ class ProvenanceLinkService(BaseService):
         with self.unit_of_work() as repository:
             created_by = actor_user_id(actor)
             created_by_user_id = actor_user_fk(actor, repository)
-            for content_hash, group in groups.items():
-                antecedent = group[0]
-                for derived in group[1:]:
-                    key = (
-                        derived.entity.entity_id,
-                        antecedent.entity.entity_id,
-                        ProvenanceLinkRelation.WAS_DERIVED_FROM,
-                    )
-                    if key in seen_pairs:
-                        continue
-                    link = ProvenanceLink(
+            for proposal in proposals:
+                if proposal.pair in seen_pairs:
+                    continue
+                repository.provenance_links.save(
+                    ProvenanceLink(
                         link_id=uuid4(),
                         project_id=project_id,
-                        source=derived.entity,
-                        target=antecedent.entity,
+                        source=proposal.source,
+                        target=proposal.target,
                         relation=ProvenanceLinkRelation.WAS_DERIVED_FROM,
-                        basis=ProvenanceLinkBasis.CONTENT_HASH_MATCH,
-                        content_hash=content_hash,
+                        basis=proposal.basis,
+                        content_hash=proposal.content_hash,
                         status=ProvenanceLinkStatus.PROPOSED,
                         origin=ProvenanceLinkOrigin.SYSTEM_DETECTED,
                         created_by=created_by,
                         created_by_user_id=created_by_user_id,
                         created_at=utc_now(),
                     )
-                    repository.provenance_links.save(link)
-                    seen_pairs.add(key)
-                    created += 1
+                )
+                seen_pairs.add(proposal.pair)
+                created += 1
         return created
 
     def get_provenance_link(self, link_id: UUID) -> ProvenanceLink:

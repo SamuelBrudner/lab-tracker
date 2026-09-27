@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -14,10 +14,16 @@ from sqlalchemy import event
 
 from lab_tracker.coverage_query import (
     CAPTURE_SOURCE_LISTING_LIMIT,
+    capture_source_is_quiet,
     unreviewed_capture_counts_by_project,
 )
-from lab_tracker.db_models import GraphChangeOperationModel, GraphChangeSetModel
-from lab_tracker.models import ProjectCoverageReport, ProjectCoverageSummary
+from lab_tracker.db_models import GraphChangeOperationModel, GraphChangeSetModel, NoteModel
+from lab_tracker.models import (
+    QUIET_CAPTURE_WINDOW_DAYS,
+    RECENT_CAPTURE_DAYS,
+    ProjectCoverageReport,
+    ProjectCoverageSummary,
+)
 
 
 def _project(client: TestClient, headers: dict[str, str], name: str = "Coverage project") -> str:
@@ -109,6 +115,21 @@ def test_project_coverage_models_reject_negative_counts() -> None:
     assert report.capture_sources_truncated is False
     assert report.oldest_unreviewed_at is None
     assert report.last_capture_at is None
+    assert report.recent_days == RECENT_CAPTURE_DAYS
+    assert report.quiet_window_days == QUIET_CAPTURE_WINDOW_DAYS
+    assert report.quiet_source_count == 0
+
+
+def test_capture_source_is_quiet_only_for_automated_sources_inside_the_quiet_window() -> None:
+    now = datetime(2026, 9, 23, 12, tzinfo=timezone.utc)
+    stalled = now - timedelta(days=RECENT_CAPTURE_DAYS + 1)
+    retired = now - timedelta(days=QUIET_CAPTURE_WINDOW_DAYS + 1)
+    alive = now - timedelta(days=RECENT_CAPTURE_DAYS - 1)
+
+    assert capture_source_is_quiet(automated=True, last_capture_at=stalled, now=now)
+    assert not capture_source_is_quiet(automated=True, last_capture_at=alive, now=now)
+    assert not capture_source_is_quiet(automated=True, last_capture_at=retired, now=now)
+    assert not capture_source_is_quiet(automated=False, last_capture_at=stalled, now=now)
 
 
 def test_project_coverage_derives_unreviewed_unplaced_and_archived_counts(
@@ -232,6 +253,88 @@ def test_project_coverage_lists_capture_sources_last_seen(
     assert _timestamp(sources[1]["last_capture_at"]) == _timestamp(provider_only["created_at"])
     assert _timestamp(sources[2]["last_capture_at"]) == _timestamp(manual["created_at"])
     assert _timestamp(data["last_capture_at"]) == _timestamp(rig_latest["created_at"])
+
+
+def _backdate_note(client: TestClient, note_id: str, created_at: datetime) -> None:
+    with client.app.state.db_session_factory() as session:
+        row = session.get(NoteModel, note_id)
+        assert row is not None
+        row.created_at = created_at
+        session.commit()
+
+
+def test_project_coverage_flags_quiet_automated_sources_and_counts_recent_unreviewed(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    """Capture health rides on coverage: a scheduler that stopped shows up as a
+    quiet source instead of an emptier review queue."""
+
+    project_id = _project(client, admin_auth_headers)
+    now = datetime.now(timezone.utc)
+    rig = {"evidence_adapter": "lt-watch-files", "capture_host_label": "rig-2"}
+    figures = {"evidence_adapter": "lab-tracker-client-figure", "capture_host_label": "rig-2"}
+    stalled_capture = _note(client, admin_auth_headers, project_id, "Old watch", metadata=rig)
+    _backdate_note(
+        client, str(stalled_capture["note_id"]), now - timedelta(days=RECENT_CAPTURE_DAYS + 3)
+    )
+    reviewed_figure = _note(
+        client, admin_auth_headers, project_id, "Reviewed figure", metadata=figures
+    )
+    _note(client, admin_auth_headers, project_id, "Fresh figure", metadata=figures)
+    old_typed = _note(client, admin_auth_headers, project_id, "Typed long ago")
+    _backdate_note(
+        client, str(old_typed["note_id"]), now - timedelta(days=RECENT_CAPTURE_DAYS + 3)
+    )
+    retired_id = str(
+        _note(
+            client,
+            admin_auth_headers,
+            project_id,
+            "Retired rig",
+            metadata={"evidence_adapter": "lt-hpc", "capture_host_label": "cluster"},
+        )["note_id"]
+    )
+    _backdate_note(client, retired_id, now - timedelta(days=QUIET_CAPTURE_WINDOW_DAYS + 5))
+    with client.app.state.db_session_factory() as session:
+        reviewed_id = str(reviewed_figure["note_id"])
+        session.add(
+            _change_set(
+                project_id, status="committed", source_note_id=reviewed_id,
+                source_note_ids=[reviewed_id],
+            )
+        )
+        session.commit()
+
+    response = client.get(f"/projects/{project_id}/coverage", headers=admin_auth_headers)
+
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["recent_days"] == RECENT_CAPTURE_DAYS
+    assert data["quiet_window_days"] == QUIET_CAPTURE_WINDOW_DAYS
+    assert data["quiet_source_count"] == 1
+    by_adapter = {source["evidence_adapter"]: source for source in data["capture_sources"]}
+    assert set(by_adapter) == {"lab-tracker-client-figure", "lt-watch-files", "lt-hpc", None}
+    assert by_adapter["lab-tracker-client-figure"] == {
+        **by_adapter["lab-tracker-client-figure"],
+        "note_count": 2,
+        "recent_note_count": 2,
+        "staged_unreviewed_count": 1,
+        "quiet": False,
+    }
+    assert by_adapter["lt-watch-files"] == {
+        **by_adapter["lt-watch-files"],
+        "note_count": 1,
+        "recent_note_count": 0,
+        "staged_unreviewed_count": 1,
+        "quiet": True,
+    }
+    # Silent for longer than the quiet window: retired, not stalled.
+    assert by_adapter["lt-hpc"]["quiet"] is False
+    assert by_adapter["lt-hpc"]["recent_note_count"] == 0
+    # Typed notes are never flagged, however old.
+    assert by_adapter[None]["quiet"] is False
+    assert by_adapter[None]["staged_unreviewed_count"] == 1
 
 
 def test_project_coverage_capture_sources_are_bounded(

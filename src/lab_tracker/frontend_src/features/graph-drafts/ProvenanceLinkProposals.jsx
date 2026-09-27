@@ -4,14 +4,25 @@ import { apiListRequest, buildApiPath } from "../../shared/api.js";
 
 const PROPOSAL_PAGE_SIZE = 50;
 
+// How a detector justified a proposal, in the reviewer's words.
+const BASIS_LABELS = {
+  content_hash_match: "shared content hash",
+  exact_id_match: "exact id match",
+};
+
 function entityLabel(ref) {
   return `${ref?.entity_type || "?"} ${ref?.entity_id || ""}`.trim();
 }
 
+function basisLabel(basis) {
+  return BASIS_LABELS[basis] || basis;
+}
+
 // The project's proposed provenance links (the content-hash detector's
-// "these two captures share bytes" proposals), each with an Accept / Reject
-// decision. Only a person turns a proposal into lineage, so the section
-// disappears once the list is empty.
+// "these two captures share bytes" proposals and the exact-id detector's
+// "this capture names that session or commit" proposals), each with an
+// Accept / Reject decision. Only a person turns a proposal into lineage, so
+// the section disappears once the list is empty.
 function ProvenanceLinkProposals({ projectId, token, canWrite, onDecide }) {
   const [links, setLinks] = React.useState([]);
   const [pendingId, setPendingId] = React.useState("");
@@ -75,7 +86,7 @@ function ProvenanceLinkProposals({ projectId, token, canWrite, onDecide }) {
               <span className="mono">{entityLabel(link.target)}</span>
               <span className="subtle">
                 {" "}
-                · {link.relation} · {link.basis}
+                · {link.relation} · {basisLabel(link.basis)}
                 {link.content_hash ? (
                   <>
                     {" "}
@@ -109,4 +120,4 @@ function ProvenanceLinkProposals({ projectId, token, canWrite, onDecide }) {
   );
 }
 
-export { ProvenanceLinkProposals };
+export { ProvenanceLinkProposals, basisLabel };

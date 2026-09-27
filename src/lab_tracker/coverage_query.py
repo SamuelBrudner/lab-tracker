@@ -14,16 +14,18 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session as OrmSession
 
 from lab_tracker.db_models import GraphChangeOperationModel, GraphChangeSetModel, NoteModel
 from lab_tracker.db_types import ensure_uuid
 from lab_tracker.models import (
+    QUIET_CAPTURE_WINDOW_DAYS,
+    RECENT_CAPTURE_DAYS,
     GraphChangeOperationStatus,
     GraphChangeSetStatus,
     NoteArchiveReason,
@@ -62,6 +64,8 @@ CAPTURE_SOURCE_METADATA_KEYS = (
     CAPTURE_INSTALL_ID_KEY,
     CAPTURE_HOST_LABEL_KEY,
 )
+# The (provider, adapter, install, host) tuple that identifies one capture source.
+CaptureSourceKey = tuple[str | None, str | None, str | None, str | None]
 # Historical spellings of the note id(s) inside a persisted operation source ref
 # (the same tuple graph_draft_validation normalises on write).
 _SOURCE_REF_NOTE_ID_KEYS = ("source_note_ids", "source_note_id", "note_id")
@@ -104,16 +108,54 @@ def project_coverage_summary(session: OrmSession, project_id: UUID) -> ProjectCo
     )
 
 
-def project_coverage_report(session: OrmSession, project_id: UUID) -> ProjectCoverageReport:
-    """The coverage summary plus the bounded per-source last-seen listing."""
+def project_coverage_report(
+    session: OrmSession,
+    project_id: UUID,
+    *,
+    now: datetime | None = None,
+) -> ProjectCoverageReport:
+    """The coverage summary plus the bounded per-source last-seen listing.
+
+    ``now`` anchors the recent and quiet windows of the capture-source
+    listing; it defaults to the wall clock and exists for deterministic reads.
+    """
 
     summary = project_coverage_summary(session, project_id)
-    capture_sources, truncated = _capture_sources(session, str(project_id))
+    generated_at = _as_utc(now) if now is not None else datetime.now(timezone.utc)
+    capture_sources, truncated = _capture_sources(session, str(project_id), now=generated_at)
     return ProjectCoverageReport(
         **summary.model_dump(),
         capture_sources=capture_sources,
         capture_sources_truncated=truncated,
+        recent_days=RECENT_CAPTURE_DAYS,
+        quiet_window_days=QUIET_CAPTURE_WINDOW_DAYS,
+        quiet_source_count=sum(1 for source in capture_sources if source.quiet),
     )
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def capture_source_is_quiet(
+    *,
+    automated: bool,
+    last_capture_at: datetime,
+    now: datetime,
+) -> bool:
+    """An automated source that delivered inside the quiet window but not recently.
+
+    Manual notes are never quiet, and a source silent for longer than the
+    quiet window is retired rather than stalled, so it is not flagged either.
+    """
+
+    if not automated:
+        return False
+    recent_cutoff = now - timedelta(days=RECENT_CAPTURE_DAYS)
+    quiet_cutoff = now - timedelta(days=QUIET_CAPTURE_WINDOW_DAYS)
+    return quiet_cutoff <= _as_utc(last_capture_at) < recent_cutoff
 
 
 def unreviewed_capture_counts_by_project(
@@ -252,21 +294,31 @@ def _last_capture_at(session: OrmSession, project_id: str) -> datetime | None:
 def _capture_sources(
     session: OrmSession,
     project_id: str,
+    *,
+    now: datetime,
 ) -> tuple[list[ProjectCoverageCaptureSource], bool]:
-    """Group the project's notes by capture source, most recently delivering first."""
+    """Group the project's notes by capture source, most recently delivering first.
+
+    Each source also carries how many notes it delivered inside the recent
+    window, how many of its staged notes nobody has reviewed, and whether it
+    has gone quiet (see :func:`capture_source_is_quiet`).
+    """
 
     source_columns = [
         NoteModel.note_metadata[key].as_string() for key in CAPTURE_SOURCE_METADATA_KEYS
     ]
     last_capture_at = func.max(NoteModel.created_at)
+    recent_cutoff = now - timedelta(days=RECENT_CAPTURE_DAYS)
+    recent_note_count = func.sum(case((NoteModel.created_at >= recent_cutoff, 1), else_=0))
     rows = session.execute(
-        select(*source_columns, func.count(NoteModel.note_id), last_capture_at)
+        select(*source_columns, func.count(NoteModel.note_id), last_capture_at, recent_note_count)
         .where(NoteModel.project_id == project_id)
         .group_by(*source_columns)
         .order_by(last_capture_at.desc(), *source_columns)
         .limit(CAPTURE_SOURCE_LISTING_LIMIT + 1)
     ).all()
     truncated = len(rows) > CAPTURE_SOURCE_LISTING_LIMIT
+    unreviewed_by_source = _staged_unreviewed_by_source(session, project_id)
     sources = [
         ProjectCoverageCaptureSource(
             evidence_source_provider=provider,
@@ -275,9 +327,44 @@ def _capture_sources(
             capture_host_label=host_label,
             note_count=int(note_count),
             last_capture_at=as_utc(captured_at),
+            recent_note_count=int(recent or 0),
+            staged_unreviewed_count=unreviewed_by_source.get(
+                (provider, adapter, install_id, host_label), 0
+            ),
+            quiet=capture_source_is_quiet(
+                automated=bool(provider or adapter),
+                last_capture_at=as_utc(captured_at),
+                now=now,
+            ),
         )
-        for provider, adapter, install_id, host_label, note_count, captured_at in rows[
+        for provider, adapter, install_id, host_label, note_count, captured_at, recent in rows[
             :CAPTURE_SOURCE_LISTING_LIMIT
         ]
     ]
     return sources, truncated
+
+
+def _staged_unreviewed_by_source(
+    session: OrmSession,
+    project_id: str,
+) -> dict[CaptureSourceKey, int]:
+    """Staged notes no closed draft has named, counted per capture source."""
+
+    reviewed = _reviewed_notes_by_project(session, [project_id]).get(
+        project_id, _ReviewedNotes()
+    )
+    source_columns = [
+        NoteModel.note_metadata[key].as_string() for key in CAPTURE_SOURCE_METADATA_KEYS
+    ]
+    rows = session.execute(
+        select(NoteModel.note_id, *source_columns).where(
+            NoteModel.project_id == project_id,
+            NoteModel.status == NoteStatus.STAGED.value,
+        )
+    )
+    counts: defaultdict[CaptureSourceKey, int] = defaultdict(int)
+    for note_id, provider, adapter, install_id, host_label in rows:
+        if ensure_uuid(note_id) in reviewed.reviewed:
+            continue
+        counts[(provider, adapter, install_id, host_label)] += 1
+    return dict(counts)
