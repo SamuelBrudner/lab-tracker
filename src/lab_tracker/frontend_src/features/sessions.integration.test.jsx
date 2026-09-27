@@ -109,7 +109,7 @@ describe("App", () => {
     await waitFor(() => expect(startButton).toBeEnabled());
     fireEvent.click(startButton);
 
-    expect(await screen.findByText("ABC123")).toBeInTheDocument();
+    expect(await screen.findByText("LT-ABC123")).toBeInTheDocument();
     expect(await screen.findByText("Session started.")).toBeInTheDocument();
 
     const closeButton = screen.getByRole("button", { name: "Close session" });
@@ -118,7 +118,7 @@ describe("App", () => {
 
     expect(await screen.findByText("Session closed.")).toBeInTheDocument();
     await waitFor(() => {
-      expect(screen.queryByText("ABC123")).not.toBeInTheDocument();
+      expect(screen.queryByText("LT-ABC123")).not.toBeInTheDocument();
     });
   });
 });

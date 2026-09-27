@@ -1000,7 +1000,7 @@ describe("App", () => {
 
     expect((await screen.findAllByText("Project One Question 204")).length).toBeGreaterThan(0);
     expect(await screen.findByText("Project One note")).toBeInTheDocument();
-    expect(await screen.findByText("P1CODE")).toBeInTheDocument();
+    expect(await screen.findByText("LT-P1CODE")).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("Active project"), {
       target: { value: "project-2" },
@@ -1008,7 +1008,7 @@ describe("App", () => {
 
     expect((await screen.findAllByText("Project Two Question 2")).length).toBeGreaterThan(0);
     expect(await screen.findByText("Project Two note")).toBeInTheDocument();
-    expect(await screen.findByText("P2CODE")).toBeInTheDocument();
+    expect(await screen.findByText("LT-P2CODE")).toBeInTheDocument();
 
     const urls = requestedUrls(fetchMock);
     expect(urls).toContain(recentNotesPath("project-1"));
