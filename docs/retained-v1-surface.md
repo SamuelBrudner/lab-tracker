@@ -75,7 +75,10 @@ research record:
   same way; the checkout context is labelled `config_default` because it is a
   bounded per-checkout default rather than a per-capture choice. A path
   claims a session only through the explicit `LT-` prefix and a code in the
-  canonical form the server prints. `lt session use` looks the session up on
+  canonical form the server prints. The app shows and copies each session's
+  link code as `LT-<code>`, the form a folder or file name needs; the API
+  (`/sessions/by-link/{link_code}` and every session payload) keeps the bare
+  code. `lt session use` looks the session up on
   the server, records its project, and fails loudly when the session does not
   exist or the server cannot be reached; the checkout context then targets
   only captures filed into that project, other captures keep the id as plain
