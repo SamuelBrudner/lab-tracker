@@ -18,7 +18,8 @@ server's release, an analysis repo by repinning its dependency.
 A notice is written only when an update is recommended (the client's
 (MAJOR, MINOR) is older than the server's, see ``lab_tracker.client_release``
 and ``docs/versioning.md``), the source carries an install id, and it captured
-within ``UPDATE_NOTICE_WINDOW_DAYS``.
+within ``UPDATE_NOTICE_WINDOW_DAYS`` (the coverage read's quiet window,
+``QUIET_CAPTURE_WINDOW_DAYS``).
 """
 
 from __future__ import annotations
@@ -42,7 +43,7 @@ from lab_tracker.client_release import (
     update_steps,
 )
 from lab_tracker.config import Settings
-from lab_tracker.models import NoteMetadataScalar
+from lab_tracker.models import QUIET_CAPTURE_WINDOW_DAYS, NoteMetadataScalar
 
 # Note-metadata keys written by capture clients; the server names them only here.
 CAPTURE_CLIENT_VERSION_KEY = "capture_client_version"
@@ -62,8 +63,9 @@ IN_SCRIPT_ADAPTER_PREFIX = "lab-tracker-client-"
 # `lab_tracker_client.run_context` metadata, written only in-script.
 RUN_METADATA_PREFIX = "run_"
 # A source that has not captured for this long is not addressed: the notice
-# is for clients people are still using.
-UPDATE_NOTICE_WINDOW_DAYS = 90
+# is for clients people are still using. It is the coverage read's quiet
+# window, so a source the read calls retired is never nagged to update.
+UPDATE_NOTICE_WINDOW_DAYS = QUIET_CAPTURE_WINDOW_DAYS
 FILE_URI_SCHEME = "file"
 INSTALL_ID_PREFIX_LENGTH = 8
 

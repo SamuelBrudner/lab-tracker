@@ -32,6 +32,10 @@ ID_MATCH_COMMIT_METADATA_KEYS: tuple[str, ...] = (
 # Note-metadata keys the capture clients stamp with a session id
 # (a watched folder's session, a figure saved under an active session).
 ID_MATCH_SESSION_METADATA_KEYS: tuple[str, ...] = ("watch_session_id", "capture_session_id")
+# Stamped by a client that sends its session as a declared note target. Such a
+# note's session was already decided at capture: if it no longer carries the
+# target, a person detached it, and the rule must not propose it back.
+DECLARED_TARGET_SOURCE_KEY = "declared_target_source"
 # Shorter git prefixes are too ambiguous to count as an exact match.
 MIN_COMMIT_PREFIX_LENGTH = 7
 
@@ -68,8 +72,15 @@ def _already_linked(note: Note, target: EntityRef) -> bool:
 
 
 def session_id_matches(note: Note, sessions: Sequence[Session]) -> list[IdMatch]:
-    """Sessions the note's metadata names by id, one match per session."""
+    """Sessions the note's metadata names by id, one match per session.
 
+    Notes from a declared-target client (``declared_target_source`` set) are
+    skipped: that client already linked the session as a target, so the rule
+    only covers notes that carry a session id without having declared one.
+    """
+
+    if _metadata_value(note, DECLARED_TARGET_SOURCE_KEY):
+        return []
     known = {session.session_id for session in sessions}
     matches: list[IdMatch] = []
     seen: set[UUID] = set()

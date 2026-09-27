@@ -151,7 +151,7 @@ def project_coverage_report(
         capture_sources_truncated=truncated,
         recent_days=RECENT_CAPTURE_DAYS,
         quiet_window_days=QUIET_CAPTURE_WINDOW_DAYS,
-        quiet_source_count=sum(1 for source in capture_sources if source.quiet),
+        quiet_source_count=_quiet_source_count(session, ranked, windows),
     )
 
 
@@ -185,7 +185,7 @@ def is_scheduled_capture_adapter(adapter: str | None) -> bool:
 
 def capture_source_is_quiet(
     *,
-    automated: bool,
+    scheduled: bool,
     last_capture_at: datetime,
     now: datetime,
 ) -> bool:
@@ -196,7 +196,7 @@ def capture_source_is_quiet(
     either.
     """
 
-    if not automated:
+    if not scheduled:
         return False
     windows = _CaptureWindows.ending_at(as_utc(now))
     return windows.quiet_cutoff <= as_utc(last_capture_at) < windows.recent_cutoff
@@ -459,7 +459,7 @@ def _capture_source(
         recent_note_count=int(row[RECENT_NOTE_COUNT_COLUMN] or 0),
         staged_unreviewed_count=unreviewed_by_source.get(key, 0),
         quiet=capture_source_is_quiet(
-            automated=bool(key[0] or key[1]),
+            scheduled=is_scheduled_capture_adapter(key[1]),
             last_capture_at=last_capture_at,
             now=now,
         ),

@@ -191,12 +191,16 @@ commits are not consumer-relevant.
   own: it reports the release the source's newest capture was made with, its
   `release_status` against the server's, and `update_recommended`, and writes
   an `update_notice` on every source for which an update is recommended and
-  that captured in the last 90 days. A source with an install id but no
-  recorded release predates release reporting; while the server's release is
-  known it is reported as behind, with a notice saying so. The Daily review
-  page lists each notice, for example "lab-tracker on the machine watching
-  `fly_walking_data` (rig-7) is behind this server". Only a watch source is
-  named by the folder it watches.
+  that captured within the report's `quiet_window_days` (30 days, the same
+  window after which a silent source counts as retired). A source with an
+  install id but no recorded release predates release reporting; while the
+  server's release is known it is reported as behind, with a notice saying
+  so. The Daily review page lists each notice, for example "lab-tracker on
+  the machine watching `fly_walking_data` (rig-7) is behind this server", and
+  the home page's Capture health card marks the same source "client behind".
+  Only a watch source is named by the folder it watches. A capture queued
+  offline carries the release that queued it, so draining an old queue after
+  an update can show a notice until that source's next live capture.
 
 One install id covers every Python environment on a machine, and the notice's
 fix depends on which environment made the capture:

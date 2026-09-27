@@ -16,6 +16,7 @@ from lab_tracker import capture_client_release
 from lab_tracker.coverage_query import (
     CAPTURE_SOURCE_LISTING_LIMIT,
     capture_source_is_quiet,
+    is_scheduled_capture_adapter,
     unreviewed_capture_counts_by_project,
 )
 from lab_tracker.db_models import GraphChangeOperationModel, GraphChangeSetModel, NoteModel
@@ -122,16 +123,36 @@ def test_project_coverage_models_reject_negative_counts() -> None:
     assert report.quiet_source_count == 0
 
 
-def test_capture_source_is_quiet_only_for_automated_sources_inside_the_quiet_window() -> None:
+def test_capture_source_is_quiet_only_for_scheduled_sources_inside_the_quiet_window() -> None:
     now = datetime(2026, 9, 23, 12, tzinfo=timezone.utc)
     stalled = now - timedelta(days=RECENT_CAPTURE_DAYS + 1)
     retired = now - timedelta(days=QUIET_CAPTURE_WINDOW_DAYS + 1)
     alive = now - timedelta(days=RECENT_CAPTURE_DAYS - 1)
 
-    assert capture_source_is_quiet(automated=True, last_capture_at=stalled, now=now)
-    assert not capture_source_is_quiet(automated=True, last_capture_at=alive, now=now)
-    assert not capture_source_is_quiet(automated=True, last_capture_at=retired, now=now)
-    assert not capture_source_is_quiet(automated=False, last_capture_at=stalled, now=now)
+    assert capture_source_is_quiet(scheduled=True, last_capture_at=stalled, now=now)
+    assert not capture_source_is_quiet(scheduled=True, last_capture_at=alive, now=now)
+    assert not capture_source_is_quiet(scheduled=True, last_capture_at=retired, now=now)
+    assert not capture_source_is_quiet(scheduled=False, last_capture_at=stalled, now=now)
+
+
+@pytest.mark.parametrize(
+    ("adapter", "scheduled"),
+    [
+        ("lt-watch", True),
+        ("lt-watch-files", True),
+        ("lt-watch-acquisition", True),
+        ("lt-watch-manifest", True),
+        ("lt-hpc", True),
+        ("lab-tracker-client-figure", False),
+        ("lt-import-folder", False),
+        ("lt-git-snapshot", False),
+        ("lt-repo", False),
+        ("mobile_capture", False),
+        (None, False),
+    ],
+)
+def test_only_the_watch_family_and_hpc_are_scheduled(adapter: str | None, scheduled: bool) -> None:
+    assert is_scheduled_capture_adapter(adapter) is scheduled
 
 
 def test_project_coverage_derives_unreviewed_unplaced_and_archived_counts(
@@ -262,86 +283,222 @@ def test_project_coverage_lists_capture_sources_last_seen(
     assert _timestamp(data["last_capture_at"]) == _timestamp(rig_latest["created_at"])
 
 
-def _backdate_note(client: TestClient, note_id: str, created_at: datetime) -> None:
-    with client.app.state.db_session_factory() as session:
-        row = session.get(NoteModel, note_id)
-        assert row is not None
-        row.created_at = created_at
-        session.commit()
-
-
-def test_project_coverage_flags_quiet_automated_sources_and_counts_recent_unreviewed(
-    client: TestClient,
-    admin_auth_headers: dict[str, str],
-) -> None:
+def _assert_capture_health(client: TestClient, headers: dict[str, str]) -> None:
     """Capture health rides on coverage: a scheduler that stopped shows up as a
-    quiet source instead of an emptier review queue."""
+    quiet source instead of an emptier review queue, while human-paced
+    sources are never flagged however long they are silent."""
 
-    project_id = _project(client, admin_auth_headers)
-    now = datetime.now(timezone.utc)
+    project_id = _project(client, headers)
     rig = {"evidence_adapter": "lt-watch-files", "capture_host_label": "rig-2"}
-    figures = {"evidence_adapter": "lab-tracker-client-figure", "capture_host_label": "rig-2"}
-    stalled_capture = _note(client, admin_auth_headers, project_id, "Old watch", metadata=rig)
-    _backdate_note(
-        client, str(stalled_capture["note_id"]), now - timedelta(days=RECENT_CAPTURE_DAYS + 3)
-    )
-    reviewed_figure = _note(
-        client, admin_auth_headers, project_id, "Reviewed figure", metadata=figures
-    )
-    _note(client, admin_auth_headers, project_id, "Fresh figure", metadata=figures)
-    old_typed = _note(client, admin_auth_headers, project_id, "Typed long ago")
-    _backdate_note(
-        client, str(old_typed["note_id"]), now - timedelta(days=RECENT_CAPTURE_DAYS + 3)
-    )
-    retired_id = str(
-        _note(
+    figures = {"evidence_adapter": FIGURE_ADAPTER, "capture_host_label": "rig-2"}
+    stalled_capture = _note(client, headers, project_id, "Old watch", metadata=rig)
+    _backdate(client, str(stalled_capture["note_id"]), days=RECENT_CAPTURE_DAYS + 3)
+    reviewed_figure = _note(client, headers, project_id, "Reviewed figure", metadata=figures)
+    _note(client, headers, project_id, "Fresh figure", metadata=figures)
+    old_typed = _note(client, headers, project_id, "Typed long ago")
+    _backdate(client, str(old_typed["note_id"]), days=RECENT_CAPTURE_DAYS + 3)
+    for adapter in HUMAN_PACED_ADAPTERS:
+        idle = _note(
             client,
-            admin_auth_headers,
+            headers,
             project_id,
-            "Retired rig",
-            metadata={"evidence_adapter": "lt-hpc", "capture_host_label": "cluster"},
-        )["note_id"]
+            f"Idle {adapter}",
+            metadata={"evidence_adapter": adapter, "capture_host_label": "laptop"},
+        )
+        _backdate(client, str(idle["note_id"]), days=RECENT_CAPTURE_DAYS + 3)
+    stalled_hpc = _note(
+        client,
+        headers,
+        project_id,
+        "Stalled cluster",
+        metadata={"evidence_adapter": "lt-hpc", "capture_host_label": "cluster-a"},
     )
-    _backdate_note(client, retired_id, now - timedelta(days=QUIET_CAPTURE_WINDOW_DAYS + 5))
+    _backdate(client, str(stalled_hpc["note_id"]), days=RECENT_CAPTURE_DAYS + 2)
+    retired = _note(
+        client,
+        headers,
+        project_id,
+        "Retired rig",
+        metadata={"evidence_adapter": "lt-hpc", "capture_host_label": "cluster"},
+    )
+    _backdate(client, str(retired["note_id"]), days=QUIET_CAPTURE_WINDOW_DAYS + 5)
     with client.app.state.db_session_factory() as session:
         reviewed_id = str(reviewed_figure["note_id"])
         session.add(
             _change_set(
-                project_id, status="committed", source_note_id=reviewed_id,
+                project_id,
+                status="committed",
+                source_note_id=reviewed_id,
                 source_note_ids=[reviewed_id],
             )
         )
         session.commit()
 
-    response = client.get(f"/projects/{project_id}/coverage", headers=admin_auth_headers)
+    response = client.get(f"/projects/{project_id}/coverage", headers=headers)
 
     assert response.status_code == 200, response.text
     data = response.json()["data"]
     assert data["recent_days"] == RECENT_CAPTURE_DAYS
     assert data["quiet_window_days"] == QUIET_CAPTURE_WINDOW_DAYS
-    assert data["quiet_source_count"] == 1
-    by_adapter = {source["evidence_adapter"]: source for source in data["capture_sources"]}
-    assert set(by_adapter) == {"lab-tracker-client-figure", "lt-watch-files", "lt-hpc", None}
-    assert by_adapter["lab-tracker-client-figure"] == {
-        **by_adapter["lab-tracker-client-figure"],
+    assert data["capture_sources_truncated"] is False
+    by_key = {
+        (source["evidence_adapter"], source["capture_host_label"]): source
+        for source in data["capture_sources"]
+    }
+    assert by_key[(FIGURE_ADAPTER, "rig-2")] == {
+        **by_key[(FIGURE_ADAPTER, "rig-2")],
         "note_count": 2,
         "recent_note_count": 2,
         "staged_unreviewed_count": 1,
         "quiet": False,
     }
-    assert by_adapter["lt-watch-files"] == {
-        **by_adapter["lt-watch-files"],
+    assert by_key[("lt-watch-files", "rig-2")] == {
+        **by_key[("lt-watch-files", "rig-2")],
         "note_count": 1,
         "recent_note_count": 0,
         "staged_unreviewed_count": 1,
         "quiet": True,
     }
+    assert by_key[("lt-hpc", "cluster-a")]["quiet"] is True
     # Silent for longer than the quiet window: retired, not stalled.
-    assert by_adapter["lt-hpc"]["quiet"] is False
-    assert by_adapter["lt-hpc"]["recent_note_count"] == 0
-    # Typed notes are never flagged, however old.
-    assert by_adapter[None]["quiet"] is False
-    assert by_adapter[None]["staged_unreviewed_count"] == 1
+    assert by_key[("lt-hpc", "cluster")]["quiet"] is False
+    assert by_key[("lt-hpc", "cluster")]["recent_note_count"] == 0
+    # Typed notes and human-paced adapters are never flagged, however old.
+    assert by_key[(None, None)]["quiet"] is False
+    assert by_key[(None, None)]["staged_unreviewed_count"] == 1
+    for adapter in HUMAN_PACED_ADAPTERS:
+        assert by_key[(adapter, "laptop")]["quiet"] is False, adapter
+    assert data["quiet_source_count"] == 2
+    # Every staged note nobody reviewed is attributed to exactly one source.
+    assert (
+        sum(source["staged_unreviewed_count"] for source in data["capture_sources"])
+        == data["unreviewed_count"]
+    )
+
+
+def test_project_coverage_flags_quiet_scheduled_sources_and_counts_recent_unreviewed(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    _assert_capture_health(client, admin_auth_headers)
+
+
+@pytest.mark.postgres
+def test_project_coverage_flags_quiet_scheduled_sources_on_postgres(
+    postgres_client: TestClient,
+    postgres_admin_auth_headers: dict[str, str],
+) -> None:
+    _assert_capture_health(postgres_client, postgres_admin_auth_headers)
+
+
+def _assert_quiet_count_covers_sources_past_the_listing_bound(
+    client: TestClient, headers: dict[str, str]
+) -> None:
+    project_id = _project(client, headers)
+    stalled = _note(
+        client,
+        headers,
+        project_id,
+        "Stalled watch",
+        metadata={"evidence_adapter": "lt-watch-files", "capture_install_id": "stalled"},
+    )
+    _backdate(client, str(stalled["note_id"]), days=RECENT_CAPTURE_DAYS + 3)
+    for index in range(CAPTURE_SOURCE_LISTING_LIMIT):
+        _note(
+            client,
+            headers,
+            project_id,
+            f"Live watch {index}",
+            metadata={"evidence_adapter": "lt-watch-files", "capture_install_id": f"i{index:03d}"},
+        )
+
+    response = client.get(f"/projects/{project_id}/coverage", headers=headers)
+
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["capture_sources_truncated"] is True
+    listed = {source["capture_install_id"] for source in data["capture_sources"]}
+    assert "stalled" not in listed
+    # The stall the count exists to show is the first source cut from the
+    # listing, so the count is taken over every source.
+    assert data["quiet_source_count"] == 1
+
+
+def test_project_coverage_quiet_count_covers_sources_past_the_listing_bound(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    _assert_quiet_count_covers_sources_past_the_listing_bound(client, admin_auth_headers)
+
+
+@pytest.mark.postgres
+def test_project_coverage_quiet_count_covers_sources_past_the_bound_on_postgres(
+    postgres_client: TestClient,
+    postgres_admin_auth_headers: dict[str, str],
+) -> None:
+    _assert_quiet_count_covers_sources_past_the_listing_bound(
+        postgres_client, postgres_admin_auth_headers
+    )
+
+
+def test_quiet_and_behind_are_separate_judgements_on_one_install(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Quiet and behind are separate judgements, each made per source.
+
+    A stalled watcher on an old release is quiet and behind, and because it
+    captured inside the quiet window it is told to update; the newer figure
+    environment on the same install is current and is not. A machine silent
+    past the quiet window is retired: neither quiet nor addressed.
+    """
+
+    monkeypatch.setattr(capture_client_release, "installed_version", lambda: "0.5.0")
+    project_id = _project(client, admin_auth_headers, "Quiet and behind")
+    watch = _note(
+        client,
+        admin_auth_headers,
+        project_id,
+        "old watch",
+        metadata=_watch_metadata(INSTALL_A, "rig-7", "0.3.0"),
+    )
+    _backdate(client, str(watch["note_id"]), days=RECENT_CAPTURE_DAYS + 3)
+    _note(
+        client,
+        admin_auth_headers,
+        project_id,
+        "new figure",
+        metadata=_host(INSTALL_A, "rig-7", "0.5.0", adapter=FIGURE_ADAPTER),
+    )
+    retired = _note(
+        client,
+        admin_auth_headers,
+        project_id,
+        "retired watch",
+        metadata=_watch_metadata(INSTALL_B, "rig-8", "0.3.0"),
+    )
+    _backdate(client, str(retired["note_id"]), days=QUIET_CAPTURE_WINDOW_DAYS + 1)
+
+    response = client.get(f"/projects/{project_id}/coverage", headers=admin_auth_headers)
+
+    assert response.status_code == 200, response.text
+    sources = {
+        (source["evidence_adapter"], source["capture_host_label"]): source
+        for source in response.json()["data"]["capture_sources"]
+    }
+    stalled_watch = sources[("lt-watch", "rig-7")]
+    figure = sources[(FIGURE_ADAPTER, "rig-7")]
+    old_machine = sources[("lt-watch", "rig-8")]
+    assert (stalled_watch["quiet"], stalled_watch["release_status"]) == (True, "behind")
+    assert stalled_watch["update_notice"].startswith(
+        "lab-tracker on the machine watching `fly_walking_data` (rig-7) is behind"
+    )
+    assert (figure["quiet"], figure["release_status"]) == (False, "current")
+    assert figure["update_notice"] is None
+    # Past the quiet window: retired, so neither quiet nor addressed.
+    assert (old_machine["quiet"], old_machine["release_status"]) == (False, "behind")
+    assert old_machine["update_notice"] is None
 
 
 def test_project_coverage_capture_sources_are_bounded(
@@ -449,6 +606,8 @@ INSTALL_C = "c" * 32
 INSTALL_D = "d" * 32
 INSTALL_E = "e" * 32
 FIGURE_ADAPTER = "lab-tracker-client-figure"
+# Sources that deliver when a person acts, so their silence is never a stall.
+HUMAN_PACED_ADAPTERS = (FIGURE_ADAPTER, "lt-import-folder", "lt-git-snapshot", "lt-repo")
 FLY_URI = "file:///Users/sam/data/fly_walking_data/run1/trace.csv"
 
 

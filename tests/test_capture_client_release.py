@@ -299,3 +299,15 @@ def test_a_source_idle_for_longer_than_the_window_is_not_addressed() -> None:
     assert idle.release_status == "behind"
     assert idle.update_notice is None
     assert active.update_notice is not None
+
+
+def test_the_update_notice_window_is_the_quiet_capture_window() -> None:
+    """One idea of an active source: a machine the coverage read calls
+    retired (silent past the quiet window) is never nagged to update."""
+
+    from lab_tracker.models import QUIET_CAPTURE_WINDOW_DAYS
+
+    assert UPDATE_NOTICE_WINDOW_DAYS == QUIET_CAPTURE_WINDOW_DAYS
+    retired = _judge(_watch("0.1.0"), hours_ago=24 * (QUIET_CAPTURE_WINDOW_DAYS + 1))
+    assert retired.release_status == "behind"
+    assert retired.update_notice is None

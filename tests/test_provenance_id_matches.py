@@ -18,6 +18,7 @@ from lab_tracker.models import (
     SessionType,
 )
 from lab_tracker.services.provenance_id_matches import (
+    DECLARED_TARGET_SOURCE_KEY,
     ID_MATCH_COMMIT_METADATA_KEYS,
     ID_MATCH_SESSION_METADATA_KEYS,
     MIN_COMMIT_PREFIX_LENGTH,
@@ -109,6 +110,34 @@ def test_id_matches_stay_silent_for_unknown_ambiguous_short_or_already_linked_id
 
     for label, note in cases.items():
         assert id_matches_for_note(note, sessions=[session], analyses=twins) == [], label
+
+
+def test_a_declared_target_client_already_decided_the_session() -> None:
+    """A note whose client declared its targets (declared_target_source) had
+    its session linked at capture: if a person detached it since, the rule
+    must not propose it back. Its commit is still matched."""
+
+    project_id = uuid4()
+    session = _session(project_id)
+    analysis = _analysis(project_id, COMMIT)
+    for source in ("explicit", "config_default"):
+        detached = _note(
+            project_id,
+            {
+                "watch_session_id": str(session.session_id),
+                "run_git_commit": COMMIT[:12],
+                DECLARED_TARGET_SOURCE_KEY: source,
+            },
+        )
+
+        matches = id_matches_for_note(detached, sessions=[session], analyses=[analysis])
+
+        assert [match.target.entity_type for match in matches] == [EntityType.ANALYSIS], source
+    legacy = _note(project_id, {"capture_session_id": str(session.session_id)})
+    assert [
+        match.target.entity_id
+        for match in id_matches_for_note(legacy, sessions=[session], analyses=[])
+    ] == [session.session_id]
 
 
 # --- Integration: the detector feeds the provenance-link review surface ------
@@ -386,3 +415,55 @@ def test_exact_id_detector_failure_never_fails_the_batch_or_the_hash_detector(
     assert run["status"] == "ready"
     links = _links(client, admin_auth_headers, project_id)
     assert [link["basis"] for link in links] == [ProvenanceLinkBasis.CONTENT_HASH_MATCH.value]
+
+
+def test_detaching_a_declared_session_target_is_never_proposed_back(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    session_id = _session_id(client, admin_auth_headers, project_id)
+    note_id = _staged_note(
+        client,
+        admin_auth_headers,
+        project_id,
+        "Watched file declared into its session",
+        metadata={"watch_session_id": session_id, "declared_target_source": "explicit"},
+        targets=[{"entity_type": "session", "entity_id": session_id}],
+    )
+    detached = client.patch(
+        f"/notes/{note_id}", json={"targets": []}, headers=admin_auth_headers
+    )
+    assert detached.status_code == 200, detached.text
+
+    _run_batch(client, admin_auth_headers, project_id)
+
+    assert _links(client, admin_auth_headers, project_id) == []
+
+
+def test_hash_detector_failure_still_runs_the_exact_id_detector(
+    client: TestClient, admin_auth_headers: dict[str, str], monkeypatch
+) -> None:
+    """The hash detector runs first; its failure must not stop the second."""
+
+    project_id = _project(client, admin_auth_headers)
+    session_id = _session_id(client, admin_auth_headers, project_id)
+    _staged_note(
+        client,
+        admin_auth_headers,
+        project_id,
+        "Watched file",
+        metadata={"watch_session_id": session_id, "evidence_content_hash": "h"},
+    )
+
+    def _explode(self, project_id, *, actor=None):
+        raise RuntimeError("hash detector exploded")
+
+    monkeypatch.setattr(ProvenanceLinkService, "propose_links_from_content_hash", _explode)
+
+    run = _run_batch(client, admin_auth_headers, project_id)
+
+    assert run["status"] == "ready"
+    links = _links(client, admin_auth_headers, project_id)
+    assert [(link["basis"], link["target"]["entity_id"]) for link in links] == [
+        (ProvenanceLinkBasis.EXACT_ID_MATCH.value, session_id)
+    ]
