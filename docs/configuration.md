@@ -1065,11 +1065,13 @@ FastAPI app does not read them. `LAB_TRACKER_BASE_URL` (see
   checkout's active session recorded by `lt session use` and, as a per-shell
   choice, is not checked against the capture's project before sending. When
   the server refuses it as a live figure upload's session target (HTTP 422
-  `validation_error` for a session in another project, 404 `not_found` for
-  one that does not exist), the upload retries exactly once without that
-  target, keeps the id as `capture_session_id` metadata, prints one stderr
-  line saying the session is not in the capture's project, and later saves in
-  that process skip the target
+  `validation_error` "Target must belong to the same project." for a session
+  in another project, 404 `not_found` "Session does not exist." for one that
+  does not exist; other rejections with those codes are not retried), the
+  upload retries exactly once without that target, keeping the id as
+  `capture_session_id` metadata; when that retry is accepted it prints one
+  stderr line saying the session is not in the capture's project, and later
+  saves in that process skip the target
 - `LAB_TRACKER_SESSION_CONTEXT`: path of the active-session file that `lt
   session use` writes and captures read (default: `.lab-tracker/session.json`
   at the checkout root)

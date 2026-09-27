@@ -219,12 +219,15 @@ def _installed_client_release() -> ReleaseIdentity:
 class LTError(RuntimeError):
     """Base exception for Lab Tracker client failures.
 
-    ``status_code`` and ``error_code`` are set when the server answered with
-    an error envelope, and stay ``None`` for failures raised on the client.
+    ``status_code``, ``error_code`` and ``error_message`` are set when the
+    server answered with an error envelope, and stay ``None`` for failures
+    raised on the client (``error_message`` also stays ``None`` when the
+    envelope carried no message).
     """
 
     status_code: int | None = None
     error_code: str | None = None
+    error_message: str | None = None
 
 
 class LTAPIError(LTError):
@@ -1787,7 +1790,7 @@ class LabTracker:
             raise _response_exception(LTConflictError, response)
         if (
             response.status_code == 403
-            and _response_error_code(response) == _STORE_AUTHORITY_DENIED_ERROR_CODE
+            and _response_error_field(response, "code") == _STORE_AUTHORITY_DENIED_ERROR_CODE
         ):
             raise _response_exception(LTStoreAuthorityDeniedError, response)
         if response.status_code == 403:
@@ -2424,11 +2427,14 @@ def _response_exception(
 
     error = error_type(_response_error(response))
     error.status_code = response.status_code
-    error.error_code = _response_error_code(response)
+    error.error_code = _response_error_field(response, "code")
+    error.error_message = _response_error_field(response, "message")
     return error
 
 
-def _response_error_code(response: httpx.Response) -> str | None:
+def _response_error_field(response: httpx.Response, field: str) -> str | None:
+    """A string field of the response's ``error`` envelope, when it has one."""
+
     try:
         payload = response.json()
     except ValueError:
@@ -2438,5 +2444,5 @@ def _response_error_code(response: httpx.Response) -> str | None:
     error = payload.get("error")
     if not isinstance(error, dict):
         return None
-    code = error.get("code")
-    return code if isinstance(code, str) else None
+    value = error.get(field)
+    return value if isinstance(value, str) else None

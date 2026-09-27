@@ -11,6 +11,7 @@ import pytest
 import lab_tracker_client.figure as figure_module
 from lab_tracker_client import (
     LabTracker,
+    LTError,
     LTValidationError,
     capture,
     capture_figures,
@@ -1169,15 +1170,18 @@ def test_env_session_outside_the_project_is_retried_once_without_its_target(
     assert "project-1" in notices[0]
 
 
-def test_a_rejection_that_persists_without_the_session_is_not_blamed_on_it(
+def test_a_session_refusal_that_persists_without_the_session_is_not_blamed_on_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """The one retry happens, but the session is blamed only if it succeeds."""
+
     monkeypatch.setenv("LAB_TRACKER_SESSION_ID", _ENV_SESSION_ID)
     requests: list[bool] = []
+    status_code, code, message = _SESSION_TARGET_REJECTIONS[0]
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(b'name="targets"' in request.content)
-        return _json_response(422, {"error": {"code": "validation_error", "message": "Bad."}})
+        return _json_response(status_code, {"error": {"code": code, "message": message}})
 
     with LabTracker(
         base_url="http://testserver",
@@ -1192,6 +1196,79 @@ def test_a_rejection_that_persists_without_the_session_is_not_blamed_on_it(
 
 
 @pytest.mark.parametrize(
+    ("status_code", "code", "message"),
+    [
+        (404, "not_found", "Project does not exist."),
+        (422, "validation_error", "Metadata values must be scalars."),
+        (422, "validation_error", "Target must belong to the same project"),
+        (404, "not_found", "Session does not exist"),
+    ],
+)
+def test_a_rejection_sharing_a_session_refusal_code_is_not_retried(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    status_code: int,
+    code: str,
+    message: str,
+) -> None:
+    """A 404 or 422 for another reason (a gone project, bad metadata) is not a
+    session refusal, so the upload that declared a session is sent once."""
+
+    monkeypatch.setenv("LAB_TRACKER_SESSION_ID", _ENV_SESSION_ID)
+    requests: list[bool] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(b'name="targets"' in request.content)
+        return _json_response(status_code, {"error": {"code": code, "message": message}})
+
+    with LabTracker(
+        base_url="http://testserver",
+        default_project_id="project-1",
+        transport=httpx.MockTransport(handler),
+    ) as lt:
+        result = savefig(FakeFigure(), tmp_path / "plot.png", client=lt)
+
+    assert result.action == "failed"
+    assert requests == [True]
+    assert _SESSION_DROPPED_LINE not in capsys.readouterr().err
+
+
+def test_an_error_envelope_keeps_its_status_code_and_message_on_the_exception() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _json_response(
+            404, {"error": {"code": "not_found", "message": "Project does not exist."}}
+        )
+
+    with (
+        LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler)) as lt,
+        pytest.raises(LTError) as excinfo,
+    ):
+        lt.commit_note("note-1")
+
+    error = excinfo.value
+    assert (error.status_code, error.error_code, error.error_message) == (
+        404,
+        "not_found",
+        "Project does not exist.",
+    )
+
+
+def test_an_error_without_an_envelope_message_carries_none() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(502, text="Bad gateway")
+
+    with (
+        LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler)) as lt,
+        pytest.raises(LTError) as excinfo,
+    ):
+        lt.commit_note("note-1")
+
+    assert excinfo.value.status_code == 502
+    assert excinfo.value.error_message is None
+
+
+@pytest.mark.parametrize(
     ("status_code", "code"),
     [(403, "forbidden"), (409, "conflict"), (422, "validation_error")],
 )
@@ -1199,7 +1276,7 @@ def test_other_rejections_are_never_retried(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status_code: int, code: str
 ) -> None:
     """Only a session-target rejection of an upload that declared a session
-    is retried; without LAB_TRACKER_SESSION_ID a 422 is not."""
+    is retried; without LAB_TRACKER_SESSION_ID even a session refusal is not."""
 
     if code != "validation_error":
         monkeypatch.setenv("LAB_TRACKER_SESSION_ID", _ENV_SESSION_ID)
@@ -1207,7 +1284,8 @@ def test_other_rejections_are_never_retried(
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(1)
-        return _json_response(status_code, {"error": {"code": code, "message": "No."}})
+        message = _SESSION_TARGET_REJECTIONS[0][2] if code == "validation_error" else "No."
+        return _json_response(status_code, {"error": {"code": code, "message": message}})
 
     with LabTracker(
         base_url="http://testserver",
@@ -1251,6 +1329,8 @@ def test_the_server_refuses_a_foreign_or_missing_session_target_as_the_client_ex
             files={"file": ("plot.png", b"png-bytes", "image/png")},
             headers=admin_auth_headers,
         )
-        refusals.add((response.status_code, response.json()["error"]["code"]))
+        error = response.json()["error"]
+        refusals.add((response.status_code, error["code"], error["message"]))
 
     assert refusals == figure_module.SESSION_TARGET_REJECTIONS
+    assert refusals == set(_SESSION_TARGET_REJECTIONS)

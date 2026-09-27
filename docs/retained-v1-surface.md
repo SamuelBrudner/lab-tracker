@@ -88,11 +88,13 @@ research record:
   to rerun `lt session use`. `LAB_TRACKER_SESSION_ID` stays an explicit
   per-shell choice that is sent without a project check; when the server
   refuses it as a live figure upload's session target (HTTP 422
-  `validation_error` for a session in another project, 404 `not_found` for
-  one that does not exist), the upload is retried exactly once without that
-  target, keeps the id as `capture_session_id` metadata, prints one stderr
-  line saying the session is not in the capture's project, and later saves
-  in that process skip the target.
+  `validation_error` "Target must belong to the same project." for a session
+  in another project, 404 `not_found` "Session does not exist." for one that
+  does not exist; other rejections with those codes are not retried), the
+  upload is retried exactly once without that target, keeping the id as
+  `capture_session_id` metadata; when that retry is accepted it prints one
+  stderr line saying the session is not in the capture's project, and later
+  saves in that process skip the target.
 - Consumer-side HPC analysis capture through the `lt hpc` CLI as an
   offline-first staged-note workflow: Slurm/HPC submit, begin, finish, and
   watch-folder manifest events write durable local outbox records that sync

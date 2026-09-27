@@ -99,10 +99,18 @@ AUTOTRACK_UNBOUND_NOTICE = (
     "sent or queued. Bind the checkout with `lt project bind`, set "
     "LAB_TRACKER_PROJECT_ID, or pass project_id to autotrack()."
 )
-# How the server refuses a declared session target: one in another project
-# (422) or one that does not exist (404). LAB_TRACKER_SESSION_ID is sent as a
-# target without a project check, so a live save retries once without it.
-SESSION_TARGET_REJECTIONS = frozenset({(422, "validation_error"), (404, "not_found")})
+# How the server refuses a declared session target, as (status, error code,
+# message): one in another project (note_service.validate_target) or one that
+# does not exist (shared.py's NotFoundError). Other causes share those status
+# codes and error codes (a gone project, bad metadata), so all three must
+# match. LAB_TRACKER_SESSION_ID is sent as a target without a project check,
+# so a live save refused this way retries once without it.
+SESSION_TARGET_REJECTIONS = frozenset(
+    {
+        (422, "validation_error", "Target must belong to the same project."),
+        (404, "not_found", "Session does not exist."),
+    }
+)
 SESSION_TARGET_DROPPED_NOTICE = (
     "Lab Tracker: session {session_id} is not in the capture's project {project_id}; "
     "{kind} captures there keep it as plain metadata, not as a session target."
@@ -1052,7 +1060,7 @@ def _refused_session_target(exc: Exception, targets: Iterable[EntityRef]) -> str
 
     if not isinstance(exc, LTError):
         return None
-    if (exc.status_code, exc.error_code) not in SESSION_TARGET_REJECTIONS:
+    if (exc.status_code, exc.error_code, exc.error_message) not in SESSION_TARGET_REJECTIONS:
         return None
     return next((ref.entity_id for ref in targets if ref.entity_type == "session"), None)
 
