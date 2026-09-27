@@ -1162,12 +1162,18 @@ export interface components {
       "role": components["schemas"]["ProjectMembershipRole"];
     };
     "ProjectCoverageCaptureSource": {
+      "capture_client_revision"?: (string | null);
+      "capture_client_version"?: (string | null);
       "capture_host_label"?: (string | null);
       "capture_install_id"?: (string | null);
       "evidence_adapter"?: (string | null);
       "evidence_source_provider"?: (string | null);
       "last_capture_at": string;
       "note_count": number;
+      "release_status"?: "current" | "behind" | "ahead" | "unknown";
+      "update_notice"?: (string | null);
+      "update_recommended"?: boolean;
+      "watched_folder"?: (string | null);
     };
     "ProjectCoverageReport": {
       "archived_unreviewed_count": number;
@@ -1178,6 +1184,7 @@ export interface components {
       "open_clarification_requests": number;
       "pending_change_sets": number;
       "project_id": string;
+      "server_release"?: components["schemas"]["SoftwareRelease"];
       "unplaced_count": number;
       "unreviewed_count": number;
     };
@@ -1225,6 +1232,10 @@ export interface components {
       "recipient_user_id"?: (string | null);
     };
     "Role": "admin" | "editor" | "viewer";
+    "SoftwareRelease": {
+      "revision"?: (string | null);
+      "version"?: (string | null);
+    };
     "StoreCapability": "bytes_by_path" | "byte_range" | "list" | "versioned_snapshot" | "query";
     "StoreKind": "local_fs" | "ssh" | "s3" | "gcs" | "azure_blob" | "dropbox" | "gdrive" | "box" | "onedrive" | "object_table" | "database" | "http" | "rclone" | "git";
   };

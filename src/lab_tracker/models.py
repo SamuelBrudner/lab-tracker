@@ -21,6 +21,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
+from lab_tracker.client_release import ReleaseStatus
 from lab_tracker.git_store_locator import (
     GitObjectId,
     PinnedGitPath,
@@ -1658,13 +1659,25 @@ class PublicationReadinessReport(_DomainModel):
     seal_level: Literal["blocked", "ara_l1"] = "blocked"
 
 
+class SoftwareRelease(_DomainModel):
+    """A lab-tracker release: the ``[project].version`` plus, when known, its revision."""
+
+    version: str | None = None
+    revision: str | None = None
+
+
 class ProjectCoverageCaptureSource(_DomainModel):
     """When one capture source last delivered a note to the project.
 
     A source is the (provider, adapter, install, host) tuple written into note
     metadata by capture clients; manual notes carry none of the four and form
-    the all-``None`` bucket. This is a plain last-seen listing: no thresholds,
-    no staleness judgement.
+    the all-``None`` bucket. This is a plain last-seen listing with no recency
+    thresholds. The one judgement it carries is whether the client that made
+    the source's newest capture runs a release behind this server's
+    (``release_status``), and whether that gap is worth updating for
+    (``update_recommended``: an older MAJOR.MINOR, see ``docs/versioning.md``),
+    spelled out as an ``update_notice`` on each such source that captured
+    recently (see ``lab_tracker.capture_client_release``).
     """
 
     evidence_source_provider: str | None = None
@@ -1673,6 +1686,14 @@ class ProjectCoverageCaptureSource(_DomainModel):
     capture_host_label: str | None = None
     note_count: int = Field(..., ge=0)
     last_capture_at: datetime
+    # The release the newest capture was made with, when its client recorded it.
+    capture_client_version: str | None = None
+    capture_client_revision: str | None = None
+    release_status: ReleaseStatus = "unknown"
+    update_recommended: bool = False
+    # The watch root the newest capture came from, for a watch-folder source.
+    watched_folder: str | None = None
+    update_notice: str | None = None
 
 
 class ProjectCoverageSummary(_DomainModel):
@@ -1698,6 +1719,8 @@ class ProjectCoverageSummary(_DomainModel):
 class ProjectCoverageReport(ProjectCoverageSummary):
     """The coverage summary plus a bounded per-source last-seen listing."""
 
+    # The release capture sources are compared against.
+    server_release: SoftwareRelease = Field(default_factory=SoftwareRelease)
     capture_sources: list[ProjectCoverageCaptureSource] = Field(default_factory=list)
     capture_sources_truncated: bool = False
 

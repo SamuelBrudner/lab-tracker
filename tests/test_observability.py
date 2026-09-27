@@ -1,3 +1,4 @@
+import importlib.metadata
 import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -105,6 +106,7 @@ def test_health_identifies_the_exact_deployment_without_secrets(monkeypatch, tmp
         "name": "deployment-test-lab-tracker",
         "environment": "local",
         "source_revision": "0123456789abcdef0123456789abcdef01234567",
+        "version": importlib.metadata.version("lab-tracker"),
     }
     assert "database_url" not in response.text
     assert "api_key" not in response.text

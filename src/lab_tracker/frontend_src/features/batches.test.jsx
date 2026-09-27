@@ -1,6 +1,6 @@
 import * as React from "react";
 
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { vi } from "vitest";
 
 import { BatchCards, BatchReviewPage, PendingBatchBanner } from "./batches.jsx";
@@ -576,5 +576,209 @@ describe("BatchCards", () => {
     expect(screen.getByText("2 deferred")).toBeInTheDocument();
     expect(screen.getByText("5 ops")).toBeInTheDocument();
     expect(screen.queryByText("0 deferred")).not.toBeInTheDocument();
+  });
+});
+
+describe("BatchReviewPage stale capture machines", () => {
+  const staleNotice =
+    "lab-tracker on the machine watching `fly_walking_data` (rig-7) is behind this server.";
+  const figureNotice =
+    "lab-tracker in an analysis-repo environment on `rig-7` is behind this server.";
+  const laptopNotice = "lab-tracker on `laptop` is behind this server.";
+
+  function coverage(projectId, captureSources) {
+    return apiResponse({
+      archived_unreviewed_count: 0,
+      capture_sources: captureSources,
+      capture_sources_truncated: false,
+      open_clarification_requests: 0,
+      pending_change_sets: 0,
+      project_id: projectId,
+      server_release: { revision: null, version: "0.5.0" },
+      unplaced_count: 0,
+      unreviewed_count: 0,
+    });
+  }
+
+  function coverageRoute(captureSources) {
+    return { match: "/projects/project-a/coverage", response: coverage("project-a", captureSources) };
+  }
+
+  function source(installId, hostLabel, updateNotice, adapter = "lt-watch") {
+    return {
+      capture_host_label: hostLabel,
+      capture_install_id: installId,
+      evidence_adapter: adapter,
+      evidence_source_provider: "local-folder",
+      last_capture_at: "2026-09-27T10:00:00Z",
+      note_count: 1,
+      release_status: updateNotice ? "behind" : "current",
+      update_recommended: Boolean(updateNotice),
+      update_notice: updateNotice,
+    };
+  }
+
+  function reviewPage(selectedProjectId) {
+    return (
+      <BatchReviewPage
+        token="token-1"
+        projects={[
+          { name: "Project A", project_id: "project-a" },
+          { name: "Project B", project_id: "project-b" },
+        ]}
+        selectedProjectId={selectedProjectId}
+        onSelectedProjectChange={vi.fn()}
+        navigate={vi.fn()}
+        canManageGraph={true}
+        canManageProject={false}
+        setBusy={vi.fn()}
+        setFlash={vi.fn()}
+      />
+    );
+  }
+
+  function renderReview(selectedProjectId) {
+    return render(reviewPage(selectedProjectId));
+  }
+
+  function deferred() {
+    let resolve;
+    const promise = new Promise((settle) => {
+      resolve = settle;
+    });
+    return { promise, resolve };
+  }
+
+  // One macrotask: every promise continuation queued before it has run.
+  const nextMacrotask = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  // A coverage response that reports when the component has read its body,
+  // so a test can wait for a positive signal instead of a fixed timer count.
+  function observedCoverage(projectId, captureSources) {
+    const read = deferred();
+    const response = coverage(projectId, captureSources);
+    return {
+      read: read.promise,
+      response: {
+        ...response,
+        json: async () => {
+          const payload = await response.json();
+          read.resolve();
+          return payload;
+        },
+      },
+    };
+  }
+
+  it("names each machine whose client is behind the server", async () => {
+    installFetchMock([
+      coverageRoute([
+        source("install-a", "rig-7", staleNotice),
+        source("install-b", "laptop", null),
+      ]),
+    ]);
+    renderReview("project-a");
+
+    expect(
+      await screen.findByText("A capture client needs a lab-tracker update")
+    ).toBeInTheDocument();
+    expect(screen.getByText(staleNotice)).toBeInTheDocument();
+    expect(screen.queryByText(/laptop/)).not.toBeInTheDocument();
+  });
+
+  it("lists every stale environment on one machine with its own notice", async () => {
+    installFetchMock([
+      coverageRoute([
+        source("install-a", "rig-7", figureNotice, "lab-tracker-client-figure"),
+        source("install-a", "rig-7", staleNotice, "lt-watch"),
+      ]),
+    ]);
+    renderReview("project-a");
+
+    expect(
+      await screen.findByText("2 capture clients need a lab-tracker update")
+    ).toBeInTheDocument();
+    expect(screen.getByText(figureNotice)).toBeInTheDocument();
+    expect(screen.getByText(staleNotice)).toBeInTheDocument();
+  });
+
+  it("stays silent when every machine is current", async () => {
+    const observed = observedCoverage("project-a", [source("install-b", "laptop", null)]);
+    installFetchMock([{ match: "/projects/project-a/coverage", response: observed.response }]);
+    renderReview("project-a");
+
+    // Inside act, the state update that follows the read is flushed before
+    // act returns, whatever the scheduler's timing.
+    await act(async () => {
+      await observed.read;
+      await nextMacrotask();
+    });
+    expect(screen.queryByText(/needs? a lab-tracker update/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Could not check capture machines/)).not.toBeInTheDocument();
+  });
+
+  it("does not ask about machines without a selected project", async () => {
+    const fetchMock = installFetchMock([]);
+    renderReview("");
+    await act(async () => {
+      await nextMacrotask();
+    });
+
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/coverage"))).toBe(
+      false
+    );
+  });
+
+  it("drops a project's stale machines when the selected project changes", async () => {
+    const lateProjectA = deferred();
+    const projectAResponses = [
+      lateProjectA.promise,
+      coverage("project-a", [source("install-a", "rig-7", staleNotice)]),
+    ];
+    const projectBResponses = [
+      coverage("project-b", [source("install-b", "laptop", laptopNotice)]),
+      new Promise(() => {}),
+    ];
+    const fetchMock = installFetchMock([
+      { match: "/projects/project-a/coverage", response: () => projectAResponses.shift() },
+      { match: "/projects/project-b/coverage", response: () => projectBResponses.shift() },
+    ]);
+    const view = renderReview("project-a");
+
+    // Project A's check is still in flight when project B is selected.
+    view.rerender(reviewPage("project-b"));
+    expect(await screen.findByText(laptopNotice)).toBeInTheDocument();
+    await act(async () => {
+      lateProjectA.resolve(coverage("project-a", [source("install-a", "rig-7", staleNotice)]));
+      await nextMacrotask();
+    });
+    expect(screen.queryByText(staleNotice)).not.toBeInTheDocument();
+    expect(screen.getByText(laptopNotice)).toBeInTheDocument();
+
+    // A banner already shown for project A is cleared as soon as project B is
+    // selected, before B's own check answers.
+    view.rerender(reviewPage("project-a"));
+    expect(await screen.findByText(staleNotice)).toBeInTheDocument();
+    view.rerender(reviewPage("project-b"));
+    expect(screen.queryByText(staleNotice)).not.toBeInTheDocument();
+    expect(screen.queryByText(laptopNotice)).not.toBeInTheDocument();
+    expect(
+      fetchMock.mock.calls.filter(([url]) => url === "/projects/project-b/coverage")
+    ).toHaveLength(2);
+  });
+
+  it("reports a failed check without hiding the queues", async () => {
+    installFetchMock([
+      {
+        match: "/projects/project-a/coverage",
+        response: errorResponse("boom", 500),
+      },
+    ]);
+    renderReview("project-a");
+
+    expect(
+      await screen.findByText(/Could not check capture machines for updates/)
+    ).toBeInTheDocument();
+    expect(screen.getByText("Ready for you")).toBeInTheDocument();
   });
 });

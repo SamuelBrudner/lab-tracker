@@ -14,13 +14,15 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import RowMapping, func, select
 from sqlalchemy.orm import Session as OrmSession
 
+from lab_tracker.capture_client_release import capture_release
+from lab_tracker.client_release import ReleaseIdentity
 from lab_tracker.db_models import GraphChangeOperationModel, GraphChangeSetModel, NoteModel
 from lab_tracker.db_types import ensure_uuid
 from lab_tracker.models import (
@@ -31,6 +33,7 @@ from lab_tracker.models import (
     ProjectCoverageCaptureSource,
     ProjectCoverageReport,
     ProjectCoverageSummary,
+    SoftwareRelease,
 )
 from lab_tracker.sqlalchemy_mapper_parts.common import as_utc
 
@@ -104,13 +107,25 @@ def project_coverage_summary(session: OrmSession, project_id: UUID) -> ProjectCo
     )
 
 
-def project_coverage_report(session: OrmSession, project_id: UUID) -> ProjectCoverageReport:
-    """The coverage summary plus the bounded per-source last-seen listing."""
+def project_coverage_report(
+    session: OrmSession,
+    project_id: UUID,
+    *,
+    server: ReleaseIdentity,
+    now: datetime | None = None,
+) -> ProjectCoverageReport:
+    """The coverage summary plus the bounded per-source last-seen listing.
+
+    ``server`` is the release each source's newest capture is compared with.
+    """
 
     summary = project_coverage_summary(session, project_id)
-    capture_sources, truncated = _capture_sources(session, str(project_id))
+    capture_sources, truncated = _capture_sources(
+        session, str(project_id), server=server, now=now or datetime.now(timezone.utc)
+    )
     return ProjectCoverageReport(
         **summary.model_dump(),
+        server_release=SoftwareRelease(**server.as_dict()),
         capture_sources=capture_sources,
         capture_sources_truncated=truncated,
     )
@@ -252,32 +267,76 @@ def _last_capture_at(session: OrmSession, project_id: str) -> datetime | None:
 def _capture_sources(
     session: OrmSession,
     project_id: str,
+    *,
+    server: ReleaseIdentity,
+    now: datetime,
 ) -> tuple[list[ProjectCoverageCaptureSource], bool]:
-    """Group the project's notes by capture source, most recently delivering first."""
+    """Group the project's notes by capture source, most recently delivering first.
 
-    source_columns = [
-        NoteModel.note_metadata[key].as_string() for key in CAPTURE_SOURCE_METADATA_KEYS
-    ]
-    last_capture_at = func.max(NoteModel.created_at)
-    rows = session.execute(
-        select(*source_columns, func.count(NoteModel.note_id), last_capture_at)
+    One window function ranks each source's notes newest-first, so the row that
+    represents a source is its newest capture: that note's metadata names the
+    client release that source's environment runs now and, for a watch source,
+    its folder.
+    """
+
+    source_expressions = {
+        key: NoteModel.note_metadata[key].as_string() for key in CAPTURE_SOURCE_METADATA_KEYS
+    }
+    partition = list(source_expressions.values())
+    ranked = (
+        select(
+            *(expression.label(key) for key, expression in source_expressions.items()),
+            NoteModel.created_at.label("last_capture_at"),
+            NoteModel.note_metadata.label("note_metadata"),
+            func.row_number()
+            .over(
+                partition_by=partition,
+                order_by=(NoteModel.created_at.desc(), NoteModel.note_id.desc()),
+            )
+            .label("recency"),
+            func.count().over(partition_by=partition).label("note_count"),
+        )
         .where(NoteModel.project_id == project_id)
-        .group_by(*source_columns)
-        .order_by(last_capture_at.desc(), *source_columns)
-        .limit(CAPTURE_SOURCE_LISTING_LIMIT + 1)
-    ).all()
+        .subquery()
+    )
+    rows = (
+        session.execute(
+            select(ranked)
+            .where(ranked.c.recency == 1)
+            .order_by(
+                ranked.c.last_capture_at.desc(),
+                *(ranked.c[key] for key in CAPTURE_SOURCE_METADATA_KEYS),
+            )
+            .limit(CAPTURE_SOURCE_LISTING_LIMIT + 1)
+        )
+        .mappings()
+        .all()
+    )
     truncated = len(rows) > CAPTURE_SOURCE_LISTING_LIMIT
     sources = [
-        ProjectCoverageCaptureSource(
-            evidence_source_provider=provider,
-            evidence_adapter=adapter,
-            capture_install_id=install_id,
-            capture_host_label=host_label,
-            note_count=int(note_count),
-            last_capture_at=as_utc(captured_at),
-        )
-        for provider, adapter, install_id, host_label, note_count, captured_at in rows[
-            :CAPTURE_SOURCE_LISTING_LIMIT
-        ]
+        _capture_source(row, server=server, now=now)
+        for row in rows[:CAPTURE_SOURCE_LISTING_LIMIT]
     ]
     return sources, truncated
+
+
+def _capture_source(
+    row: RowMapping, *, server: ReleaseIdentity, now: datetime
+) -> ProjectCoverageCaptureSource:
+    metadata = row["note_metadata"] or {}
+    last_capture_at = as_utc(row["last_capture_at"])
+    release = capture_release(metadata, last_capture_at=last_capture_at, server=server, now=now)
+    return ProjectCoverageCaptureSource(
+        evidence_source_provider=row[EVIDENCE_SOURCE_PROVIDER_KEY],
+        evidence_adapter=row[EVIDENCE_ADAPTER_KEY],
+        capture_install_id=row[CAPTURE_INSTALL_ID_KEY],
+        capture_host_label=row[CAPTURE_HOST_LABEL_KEY],
+        note_count=int(row["note_count"]),
+        last_capture_at=last_capture_at,
+        capture_client_version=release.capture_client_version,
+        capture_client_revision=release.capture_client_revision,
+        release_status=release.release_status,
+        update_recommended=release.update_recommended,
+        watched_folder=release.watched_folder,
+        update_notice=release.update_notice,
+    )
