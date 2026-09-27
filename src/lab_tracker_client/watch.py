@@ -55,6 +55,7 @@ from lab_tracker_client.session_context import (
     find_session_link_code,
     read_active_session,
     session_id_from_reference,
+    session_target,
 )
 
 CONFIG_VERSION = 1
@@ -65,6 +66,10 @@ LT_IDS_FILENAME = "lt_ids.json"
 SESSION_SOURCE_CONFIG = "config"
 SESSION_SOURCE_PATH = "path"
 SESSION_SOURCE_ACTIVE = "active"
+# Event source keys that let the sync verify an active-session target against
+# the project the event is filed into (see session_context.session_target).
+SESSION_CONTEXT_KEY = "session_context"
+SESSION_PROJECT_ID_KEY = "session_project_id"
 DEFAULT_CONFIG_RELATIVE_PATH = Path(".lab-tracker") / "watch.json"
 DEFAULT_OUTBOX = ".lab-tracker/outbox/watch"
 DEFAULT_MANIFEST_PATTERN = "lab-tracker-evidence.json"
@@ -409,32 +414,60 @@ def observe_file(
     )
 
 
+@dataclass(frozen=True)
+class SessionResolution:
+    """The session a watched file belongs to, and the event source keys saying how."""
+
+    session_id: str | None
+    source_fields: dict[str, str]
+
+
 def resolve_session_for_path(
     observation: FileObservation,
     *,
     session_id: str | None = None,
     checkout: Path | None = None,
-) -> tuple[str | None, str]:
+) -> SessionResolution:
     """Pick the session a watched file belongs to, and say how it was found.
 
-    Precedence: an explicit ``--session`` (UUID or link code), then a session
-    link code in the root folder name or the root-relative path (a folder named
-    for the session claims everything inside it), then the checkout's active
-    session from ``lt session use``. Returns ``(session_id, source)`` where
-    source is ``"config"``, ``"path"``, ``"active"`` or ``""``.
+    Precedence: an explicit ``--session`` (UUID or link code), then an
+    ``LT-``-prefixed session link code in the root folder name or the
+    root-relative path (a folder named for the session claims everything
+    inside it), then the checkout's active session from ``lt session use``.
+    ``source_fields`` records ``session_source`` (``"config"``, ``"path"`` or
+    ``"active"``) and, for an active session, what the sync needs to verify it.
     """
 
     explicit = session_id_from_reference(session_id)
     if explicit:
-        return explicit, SESSION_SOURCE_CONFIG
+        return SessionResolution(explicit, {"session_source": SESSION_SOURCE_CONFIG})
     haystack = f"{observation.root.name}/{observation.relative_path}"
     found = find_session_link_code(haystack)
     if found is not None:
-        return found[1], SESSION_SOURCE_PATH
+        return SessionResolution(found[1], {"session_source": SESSION_SOURCE_PATH})
     active = read_active_session(checkout or observation.root)
     if active and active.get("session_id"):
-        return str(active["session_id"]), SESSION_SOURCE_ACTIVE
-    return None, ""
+        return SessionResolution(str(active["session_id"]), active_session_source(active))
+    return SessionResolution(None, {})
+
+
+def active_session_source(active: Mapping[str, Any] | None) -> dict[str, str]:
+    """Event source keys for a session taken from the active context.
+
+    The sync re-checks the session against the project the event is filed
+    into (:func:`session_target`), so the context's origin and recorded
+    project travel with the queued event.
+    """
+
+    if not active or not active.get("session_id"):
+        return {}
+    fields = {
+        "session_source": SESSION_SOURCE_ACTIVE,
+        SESSION_CONTEXT_KEY: str(active.get("source") or ""),
+    }
+    if active.get("project_id"):
+        fields[SESSION_PROJECT_ID_KEY] = str(active["project_id"])
+    return fields
 
 
 def event_from_file(
@@ -459,7 +492,7 @@ def event_from_file(
     resolved_capture_kind = capture_kind or (
         "acquisition_output" if resolved_sink == SINK_ACQUISITION_OUTPUT else "file"
     )
-    resolved_session_id, session_source = resolve_session_for_path(
+    session = resolve_session_for_path(
         observation, session_id=session_id, checkout=config.checkout_root()
     )
     return make_event(
@@ -479,14 +512,14 @@ def event_from_file(
             "content_hash": observation.content_hash,
             "size_bytes": observation.size_bytes,
             "mtime": observation.mtime,
-            **({"session_source": session_source} if session_source else {}),
+            **session.source_fields,
         },
         context={
             "project_id": _optional_str(project_id or config.project_id),
             "question_id": _optional_str(question_id),
             "dataset_ids": _string_list(dataset_ids),
             "tags": _string_list(tags),
-            "session_id": resolved_session_id,
+            "session_id": session.session_id,
         },
         payload={
             "title": title or observation.path.name,
@@ -1171,7 +1204,7 @@ def _sync_staged_note(
             "project_id must not be empty: bind the project with 'lt project bind' "
             "or 'lt watch add --project' and sync again."
         )
-    targets = _declared_targets(event)
+    targets = _declared_targets(event, project_id=project_id)
     if not note_id and source_path:
         result = client.import_evidence_file(
             project_id=project_id,
@@ -1181,7 +1214,7 @@ def _sync_staged_note(
             source_uri=str(event["source"].get("uri") or Path(source_path).as_uri()),
             adapter=str(event["adapter"]),
             title=str(event["payload"].get("title") or Path(source_path).name),
-            metadata=_event_metadata(event),
+            metadata=_event_metadata(event, project_id=project_id),
             status=str(event["payload"].get("status") or "staged"),
             dry_run=dry_run,
             evidence_note_index=outbox_note_index(
@@ -1224,7 +1257,7 @@ def _sync_staged_note(
             adapter=str(event["adapter"]),
             title=str(event["payload"].get("title") or f"Watch capture {event['capture_id']}"),
             observed_at=str(event["observed_at"]),
-            metadata=_event_metadata(event),
+            metadata=_event_metadata(event, project_id=project_id),
         )
         evidence_key = (
             str(metadata["evidence_source_provider"]),
@@ -1435,7 +1468,9 @@ def _stale_reason(event: Mapping[str, Any]) -> str:
     return ""
 
 
-def _event_metadata(event: Mapping[str, Any]) -> dict[str, NoteMetadataScalar]:
+def _event_metadata(
+    event: Mapping[str, Any], *, project_id: str | None
+) -> dict[str, NoteMetadataScalar]:
     payload = validate_event(event)
     context = payload["context"]
     source = payload["source"]
@@ -1463,7 +1498,7 @@ def _event_metadata(event: Mapping[str, Any]) -> dict[str, NoteMetadataScalar]:
                 metadata[str(key)] = value
     if context["dataset_ids"]:
         metadata["watch_dataset_ids"] = ",".join(context["dataset_ids"])
-    if _declared_targets(payload):
+    if _declared_targets(payload, project_id=project_id):
         metadata[DECLARED_TARGET_SOURCE_KEY] = _declared_target_source(context, source)
     if context["tags"]:
         metadata["watch_tags"] = ",".join(context["tags"])
@@ -1497,15 +1532,34 @@ def _declared_target_source(context: Mapping[str, Any], source: Mapping[str, Any
     return DECLARED_TARGET_SOURCE_EXPLICIT
 
 
-def _declared_targets(event: Mapping[str, Any]) -> list[EntityRef]:
-    """Note targets for the question, session, and datasets the event declares."""
+def _declared_targets(event: Mapping[str, Any], *, project_id: str | None) -> list[EntityRef]:
+    """Note targets for the question, session, and datasets the event declares.
+
+    A session taken from the active context targets only an event filed into
+    the project it was verified for; otherwise it stays plain metadata
+    (``watch_session_id``).
+    """
 
     context = _context_payload(event.get("context") or {})
     return declared_targets(
         question_id=context["question_id"],
-        session_id=context["session_id"],
+        session_id=_session_target_id(event, context["session_id"], project_id=project_id),
         dataset_ids=context["dataset_ids"],
     )
+
+
+def _session_target_id(
+    event: Mapping[str, Any], session_id: str | None, *, project_id: str | None
+) -> str | None:
+    source = event.get("source") if isinstance(event.get("source"), Mapping) else {}
+    if not session_id or source.get("session_source") != SESSION_SOURCE_ACTIVE:
+        return session_id
+    active = {
+        "session_id": session_id,
+        "source": source.get(SESSION_CONTEXT_KEY),
+        "project_id": source.get(SESSION_PROJECT_ID_KEY),
+    }
+    return session_target(active, project_id)
 
 
 def _event_requests_draft(event: Mapping[str, Any]) -> bool:

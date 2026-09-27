@@ -957,3 +957,141 @@ def test_offline_capture_queues_an_event_that_later_syncs_with_its_session(
     assert metadata["declared_target_source"] == "config_default"
     assert metadata["capture_session_source"] == "env"
 
+
+
+def test_transport_failure_with_capture_outbox_disabled_fails_loudly_without_queueing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """With the queue switched off, an unreachable server is a visible
+    failure: nothing is written and the scientist is told on stderr."""
+
+    monkeypatch.setenv("LAB_TRACKER_CAPTURE_OUTBOX", "0")
+
+    def connect_handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("offline", request=request)
+
+    with LabTracker(
+        base_url="http://testserver",
+        default_project_id="project-1",
+        transport=httpx.MockTransport(connect_handler),
+    ) as lt:
+        result = savefig(FakeFigure(b"one"), tmp_path / "one.png", client=lt)
+
+    assert result.action == "failed"
+    assert result.reason == "capture_failed"
+    assert result.queued_event == ""
+    assert "Lab Tracker figure capture failed" in capsys.readouterr().err
+    assert not (tmp_path / "outbox").exists()
+
+
+def test_queued_capture_without_an_explicit_project_drains_from_the_checkout_outbox(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """No project argument and no outbox override: the save queues into the
+    checkout's own outbox under its bound project, and `lt outbox sync`
+    delivers it there."""
+
+    import subprocess
+
+    from lab_tracker_client import cli as lt_cli
+    from lab_tracker_client.watch import read_event
+
+    monkeypatch.delenv("LAB_TRACKER_WATCH_OUTBOX", raising=False)
+    repo = tmp_path / "analysis"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)  # noqa: S603, S607
+    (repo / "lt_ids.json").write_text(json.dumps({"project_id": "project-bound"}))
+    monkeypatch.chdir(repo)
+
+    def connect_handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("offline", request=request)
+
+    with LabTracker(
+        base_url="http://testserver", transport=httpx.MockTransport(connect_handler)
+    ) as lt:
+        queued = savefig(FakeFigure(b"trace"), repo / "trace.png", client=lt)
+
+    assert queued.action == "queued"
+    event_path = Path(queued.queued_event)
+    assert event_path.parent == repo.resolve() / ".lab-tracker" / "outbox" / "watch"
+    assert read_event(event_path)["context"]["project_id"] == "project-bound"
+
+    uploaded_to: list[str] = []
+
+    def sync_handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/notes":
+            return _json_response(
+                200, {"data": [], "meta": {"limit": 200, "offset": 0, "total": 0}}
+            )
+        if request.method == "POST" and request.url.path == "/notes/upload-file":
+            uploaded_to.append(_multipart_field(request.content, "project_id"))
+            return _json_response(201, {"data": {"note_id": "note-drained"}})
+        return _json_response(500, {"error": {"message": "unexpected"}})
+
+    class _FromEnv:
+        @staticmethod
+        def from_env(**_kwargs: object) -> LabTracker:
+            return LabTracker(
+                base_url="http://testserver", transport=httpx.MockTransport(sync_handler)
+            )
+
+    monkeypatch.setattr(lt_cli, "LabTracker", _FromEnv)
+    capsys.readouterr()
+    lt_cli.main(["outbox", "sync", "--repo", str(repo)])
+
+    assert uploaded_to == ["project-bound"]
+    assert read_event(event_path)["sync"]["status"] == "synced"
+
+
+class _SessionServer:
+    def __init__(self, project_id: str) -> None:
+        self.project_id = project_id
+
+    def get_session(self, session_id: str) -> dict[str, str]:
+        return {"session_id": session_id, "project_id": self.project_id}
+
+
+@pytest.mark.parametrize(
+    ("session_project", "expect_target"),
+    [("project-1", True), ("project-other", False)],
+)
+def test_active_session_targets_a_figure_only_in_its_own_project(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    session_project: str,
+    expect_target: bool,
+) -> None:
+    from lab_tracker_client.session_context import set_active_session
+
+    session_id = "3d4f6a1e-9c2b-4a8e-8f01-2b3c4d5e6f70"
+    monkeypatch.setenv("LAB_TRACKER_SESSION_CONTEXT", str(tmp_path / "session.json"))
+    set_active_session(session_id, client=_SessionServer(session_project))
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = request.content
+        seen["has_targets"] = b'name="targets"' in body
+        seen["metadata"] = json.loads(_multipart_field(body, "metadata"))
+        return _json_response(201, {"data": {"note_id": "note-1", "metadata": {}}})
+
+    with LabTracker(
+        base_url="http://testserver",
+        default_project_id="project-1",
+        transport=httpx.MockTransport(handler),
+    ) as lt:
+        result = savefig(FakeFigure(), tmp_path / "plot.png", client=lt)
+
+    assert result.action == "imported"
+    metadata = seen["metadata"]
+    assert isinstance(metadata, dict)
+    # The session id always stays on the capture as plain metadata.
+    assert metadata["capture_session_id"] == session_id
+    assert seen["has_targets"] is expect_target
+    if expect_target:
+        assert metadata["declared_target_source"] == "config_default"
+    else:
+        assert "declared_target_source" not in metadata

@@ -134,6 +134,7 @@ show_error_codes = true
 files = [
   "src/lab_tracker/_version.py",
   "src/lab_tracker_client/_version.py",
+  "src/lab_tracker_client/capture_project.py",
   "src/lab_tracker/patching.py",
   "src/lab_tracker/claim_effective_status.py",
   "src/lab_tracker/repository.py",
@@ -146,6 +147,8 @@ files = [
   "src/lab_tracker/project_graph.py",
   "src/lab_tracker/graph_query.py",
   "src/lab_tracker/coverage_query.py",
+  "src/lab_tracker/services/provenance_id_matches.py",
+  "src/lab_tracker/services/provenance_detection_stage.py",
   "src/lab_tracker/provider_error_redaction.py",
   "src/lab_tracker/client_release.py",
   "src/lab_tracker/capture_client_release.py",

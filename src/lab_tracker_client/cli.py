@@ -32,6 +32,7 @@ from lab_tracker_client.client import (
     EvidenceImportResult,
     LabTracker,
     LTAPIError,
+    LTError,
     LTValidationError,
     ids,
 )
@@ -995,14 +996,20 @@ def _add_session_parsers(subcommands: argparse._SubParsersAction) -> None:
             f"{session_context.DEFAULT_ACTIVE_SESSION_HOURS:g}."
         ),
     )
-    use_parser.add_argument("--project", help="Project UUID recorded with the context.")
+    use_parser.add_argument(
+        "--project",
+        help=(
+            "Project UUID the session must belong to. The session's own project is "
+            "always looked up on the server and recorded with the context."
+        ),
+    )
     use_parser.add_argument(
         "--repo",
         default=".",
         help="Checkout whose .lab-tracker/session.json to write. Defaults to cwd.",
     )
     use_parser.add_argument("--dry-run", action="store_true", help="Preview without writing.")
-    use_parser.set_defaults(func=_cmd_session_use, needs_client=False)
+    use_parser.set_defaults(func=_cmd_session_use)
 
     clear_parser = session_commands.add_parser(
         "clear", help="Stop attaching captures to a session."
@@ -1481,14 +1488,21 @@ def _cmd_watch_add(args: argparse.Namespace) -> Any:
     return payload
 
 
-def _cmd_session_use(args: argparse.Namespace) -> Any:
-    return session_context.set_active_session(
-        args.session,
-        project_id=args.project,
-        hours=args.hours,
-        start=args.repo,
-        dry_run=args.dry_run,
-    )
+def _cmd_session_use(client: LabTracker, args: argparse.Namespace) -> Any:
+    try:
+        return session_context.set_active_session(
+            args.session,
+            client=client,
+            project_id=args.project,
+            hours=args.hours,
+            start=args.repo,
+            dry_run=args.dry_run,
+        )
+    except LTError as exc:
+        # A session that cannot be verified is never recorded: say why and
+        # exit non-zero rather than leave captures pointed at it.
+        print(f"error: {exc}", file=sys.stderr)
+        raise SystemExit(1) from None
 
 
 def _cmd_session_clear(args: argparse.Namespace) -> Any:

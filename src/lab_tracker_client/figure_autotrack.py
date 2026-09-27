@@ -8,6 +8,13 @@ strictly opt-in: nothing installs it unless the person calls it, runs
 ``lt setup autotrack`` to add it to their IPython startup, and the
 ``LAB_TRACKER_AUTOTRACK=0`` kill switch disables it everywhere.
 
+Because the startup hook fires in every directory, it captures a save only
+when its project comes from ``autotrack(project_id=...)``,
+``LAB_TRACKER_PROJECT_ID``, or the saved file's checkout binding
+(``lt_ids.json``). Any other save is skipped with a one-time notice on
+stderr; nothing is sent or queued, so a figure never lands in a default
+project it was not meant for.
+
 Explicit ``lab_tracker_client.savefig`` / ``capture_figures`` calls suppress
 the hook while they save, so a figure is never captured twice.
 """
@@ -91,6 +98,7 @@ def autotrack(
                 metadata={**(options.get("metadata") or {}), "figure_autotracked": True},
                 preview_max_bytes=_figure.FIGURE_PREVIEW_MAX_BYTES,
                 version_every_change=False,
+                require_bound_project=True,
             )
         return result
 
@@ -159,9 +167,11 @@ def ipython_startup_path() -> Path:
 def ipython_startup_source() -> str:
     return (
         f"{IPYTHON_STARTUP_BEGIN}\n"
-        "# Captures every matplotlib figure saved to a path into Lab Tracker as staged\n"
-        "# evidence. Set LAB_TRACKER_AUTOTRACK=0 to disable, or remove this file with\n"
-        "# `lt setup autotrack --uninstall`. Fail-soft: never raises into a notebook.\n"
+        "# Captures matplotlib figures saved to a path into Lab Tracker as staged\n"
+        "# evidence, only inside a checkout bound to a project (lt_ids.json) or with\n"
+        "# LAB_TRACKER_PROJECT_ID set. Set LAB_TRACKER_AUTOTRACK=0 to disable, or\n"
+        "# remove this file with `lt setup autotrack --uninstall`. Fail-soft: never\n"
+        "# raises into a notebook.\n"
         "try:\n"
         "    import lab_tracker_client\n"
         "\n"

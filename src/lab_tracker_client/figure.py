@@ -22,6 +22,7 @@ import httpx
 
 from lab_tracker.instance_url import normalize_instance_base_url
 from lab_tracker.models import NoteMetadataScalar
+from lab_tracker_client.capture_project import CaptureProject, resolve_capture_project
 from lab_tracker_client.client import (
     DECLARED_TARGET_SOURCE_CONFIG_DEFAULT,
     DECLARED_TARGET_SOURCE_KEY,
@@ -46,7 +47,11 @@ from lab_tracker_client.gitinfo import (
     sanitize_remote_url,
 )
 from lab_tracker_client.repo import normalize_remote
-from lab_tracker_client.session_context import read_active_session
+from lab_tracker_client.session_context import (
+    _reset_session_hints_for_tests,
+    read_active_session,
+    session_target,
+)
 
 FIGURE_CAPTURE_TIMEOUT_SECONDS = 2.5
 FIGURE_CIRCUIT_COOLDOWN_SECONDS = 30.0
@@ -80,6 +85,18 @@ class _BreakerState:
 # it with a fresh cooldown (failure).
 _BREAKERS: dict[str, _BreakerState] = {}
 _WARNED: set[str] = set()
+# autotrack fires on every save in every directory, so it captures only into
+# a project a person bound for this script, shell, or checkout.
+AUTOTRACK_UNBOUND_REASON = "project_unbound"
+AUTOTRACK_UNBOUND_NOTICE = (
+    "Lab Tracker autotrack is not capturing saves in {checkout}: {why}. Nothing was "
+    "sent or queued. Bind the checkout with `lt project bind`, set "
+    "LAB_TRACKER_PROJECT_ID, or pass project_id to autotrack()."
+)
+AUTOTRACK_NO_PROJECT_WHY = "that checkout is not bound to a project (no lt_ids.json)"
+AUTOTRACK_WATCH_CONFIG_WHY = (
+    "that checkout names its project only in its watch config, not in lt_ids.json"
+)
 def _first_capture_review_keys(kind: str) -> frozenset[str]:
     return frozenset({f"{kind}_no_preview", f"{kind}_preview_size_bytes"})
 
@@ -483,7 +500,15 @@ def _capture_saved_figure(
     preview_max_bytes: int,
     version_every_change: bool,
     kind: str = "figure",
+    require_bound_project: bool = False,
 ) -> FigureCaptureResult:
+    """Capture one saved file, fail-soft.
+
+    ``require_bound_project`` (set by ``autotrack``) skips the save, sending
+    and queueing nothing, unless its project comes from an explicit argument,
+    ``LAB_TRACKER_PROJECT_ID``, or the saved file's checkout binding.
+    """
+
     resolved_path = Path(path).expanduser()
     result_defaults: dict[str, Any] = {
         "action": "failed",
@@ -496,6 +521,13 @@ def _capture_saved_figure(
     }
     endpoint_key = _capture_endpoint_key(client)
     try:
+        capture_project = resolve_capture_project(resolved_path, project_id=project_id)
+        if require_bound_project and (capture_project is None or not capture_project.bound):
+            _warn_unbound_autotrack(resolved_path, capture_project)
+            return FigureCaptureResult(
+                **{**result_defaults, "action": "skipped", "reason": AUTOTRACK_UNBOUND_REASON}
+            )
+        bound_project_id = capture_project.project_id if capture_project else None
         file_size = resolved_path.stat().st_size
         if file_size <= 0:
             raise LTValidationError(f"Captured {kind} file must not be empty.")
@@ -537,9 +569,6 @@ def _capture_saved_figure(
             }
         )
         session = read_active_session()
-        # The active session is a declared target, exactly as `lt watch` passes
-        # its declared ids: the server validates it against the project.
-        targets = declared_targets(session_id=_session_id(session))
         if _breaker_blocks(endpoint_key):
             remaining = _figure_circuit_state().get(endpoint_key or "", 0.0)
             _warn_once(
@@ -550,8 +579,8 @@ def _capture_saved_figure(
             queued = _queue_capture_offline(
                 path=resolved_path,
                 kind=kind,
-                project_id=_queue_project_id(client, project_id),
-                session_id=_session_id(session),
+                project_id=_queue_project_id(client, bound_project_id),
+                session=session,
                 client_capture_id=client_capture_id,
                 content_hash=content_hash,
                 size_bytes=file_size,
@@ -572,7 +601,7 @@ def _capture_saved_figure(
             )
         resolved_client, resolved_project_id, close_client = _resolve_capture_client(
             client=client,
-            project_id=project_id,
+            project_id=bound_project_id,
         )
         if resolved_client is None or resolved_project_id is None:
             _warn_once(
@@ -583,6 +612,9 @@ def _capture_saved_figure(
             return FigureCaptureResult(
                 **{**result_defaults, "action": "skipped", "reason": "unconfigured"}
             )
+        # The active session is a declared target, exactly as `lt watch` passes
+        # its declared ids, but only in the project it was verified for.
+        targets = declared_targets(session_id=session_target(session, resolved_project_id))
         try:
             # Clamp the capture request without mutating the shared client's
             # timeout: pass a per-request timeout so concurrent captures cannot
@@ -607,6 +639,10 @@ def _capture_saved_figure(
                     f"{kind}_review_bytes_stale": False,
                 }
             )
+            if targets:
+                # A checkout-wide (or shell-wide) session is a bounded default,
+                # not a per-capture choice, so it carries the weaker label.
+                upload_metadata[DECLARED_TARGET_SOURCE_KEY] = DECLARED_TARGET_SOURCE_CONFIG_DEFAULT
             try:
                 note, status_code = resolved_client._upload_note_file_payload_with_status(
                     project_id=resolved_project_id,
@@ -630,7 +666,7 @@ def _capture_saved_figure(
                     path=resolved_path,
                     kind=kind,
                     project_id=resolved_project_id,
-                    session_id=_session_id(session),
+                    session=session,
                     client_capture_id=client_capture_id,
                     content_hash=content_hash,
                     size_bytes=file_size,
@@ -786,9 +822,6 @@ def _base_figure_metadata(
         merged["capture_session_id"] = str(session["session_id"])
         merged["capture_session_link_code"] = str(session.get("link_code") or "")
         merged["capture_session_source"] = str(session.get("source") or "")
-        # A checkout-wide (or shell-wide) session is a bounded default, not a
-        # per-capture choice, so it carries the weaker declared-target label.
-        merged[DECLARED_TARGET_SOURCE_KEY] = DECLARED_TARGET_SOURCE_CONFIG_DEFAULT
     evidence = build_evidence_metadata(
         source_provider=f"local-{kind}",
         source_uri=source_uri,
@@ -962,13 +995,23 @@ def _capture_outbox_enabled() -> bool:
     return os.getenv(CAPTURE_OUTBOX_ENV, "1").strip().lower() not in {"0", "false", "no", "off"}
 
 
-def _queue_project_id(client: LabTracker | None, project_id: str | None) -> str | None:
-    if project_id:
-        return str(project_id)
+def _queue_project_id(client: LabTracker | None, bound_project_id: str | None) -> str | None:
+    """The project a queued capture names: the resolved one, else the default."""
+
+    if bound_project_id:
+        return str(bound_project_id)
     if client is not None and getattr(client, "default_project_id", None):
         return str(client.default_project_id)
-    profile = load_connection_profile()
-    return os.getenv("LAB_TRACKER_PROJECT_ID") or profile.get("default_project_id") or None
+    return load_connection_profile().get("default_project_id") or None
+
+
+def _warn_unbound_autotrack(path: Path, capture_project: CaptureProject | None) -> None:
+    why = AUTOTRACK_WATCH_CONFIG_WHY if capture_project is not None else AUTOTRACK_NO_PROJECT_WHY
+    checkout = path.parent
+    _warn_once(
+        f"{AUTOTRACK_UNBOUND_REASON}:{why}",
+        AUTOTRACK_UNBOUND_NOTICE.format(checkout=checkout, why=why),
+    )
 
 
 def _queue_capture_offline(
@@ -976,7 +1019,7 @@ def _queue_capture_offline(
     path: Path,
     kind: str,
     project_id: str | None,
-    session_id: str | None,
+    session: Mapping[str, Any] | None,
     client_capture_id: str,
     content_hash: str,
     size_bytes: int,
@@ -1028,11 +1071,12 @@ def _queue_capture_offline(
                 "content_hash": content_hash,
                 "size_bytes": int(size_bytes),
                 "mtime": path.stat().st_mtime,
-                # The session (if any) is the checkout's active context, so the
-                # synced note carries the weaker config_default target label.
-                **({"session_source": watch_capture.SESSION_SOURCE_ACTIVE} if session_id else {}),
+                # The session (if any) is the active context: the sync
+                # verifies it against the project and labels the target
+                # config_default, as it does for a watch scan.
+                **watch_capture.active_session_source(session),
             },
-            context={"project_id": project_id, "session_id": session_id},
+            context={"project_id": project_id, "session_id": _session_id(session)},
             payload={
                 "title": path.name,
                 "summary": f"Queued {kind} capture while Lab Tracker was unreachable.",
@@ -1258,4 +1302,5 @@ def _warn_once(key: str, message: str) -> None:
 def _reset_figure_capture_state_for_tests() -> None:
     _BREAKERS.clear()
     _WARNED.clear()
+    _reset_session_hints_for_tests()
     _RUN_CONTEXT.set(None)

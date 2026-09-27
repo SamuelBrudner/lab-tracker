@@ -50,9 +50,15 @@ research record:
   plus source URI and content-hash metadata, while full figure files remain in
   the consumer repo. A Python save the server cannot receive is queued in the
   checkout's watch outbox under the same capture id and delivered by the next
-  `lt outbox sync`; the opt-in `lab_tracker_client.autotrack()` hook (installed
-  into IPython by `lt setup autotrack`, disabled by `LAB_TRACKER_AUTOTRACK=0`)
-  captures every matplotlib save to a path through that same fail-soft path.
+  `lt outbox sync`. A figure is filed into the project named by the
+  `project_id` argument, then `LAB_TRACKER_PROJECT_ID`, then the saved file's
+  checkout binding (`lt_ids.json`), then the checkout's watch config, and only
+  then the client's or login profile's default. The opt-in
+  `lab_tracker_client.autotrack()` hook (installed into IPython by `lt setup
+  autotrack`, disabled by `LAB_TRACKER_AUTOTRACK=0`) captures matplotlib saves
+  to a path through that same fail-soft path, but only when the project comes
+  from the argument, the environment, or the checkout binding; any other save
+  is skipped with a one-time stderr notice and nothing is sent or queued.
 - Consumer-side watch-folder capture through the `lt watch` CLI as an
   offline-first adapter workflow: watched files and workflow-written manifests
   write durable local outbox records that later sync into staged evidence notes
@@ -63,11 +69,18 @@ research record:
   become the staged note's targets, labelled
   `declared_target_source=explicit`, so a stale id fails the sync loudly
   instead of landing as metadata only. A session the client can resolve on
-  its own (`--session` as a UUID or link code, a session link code in the
-  watched folder or file name, or the checkout's `lt session use` context,
-  overridden by `LAB_TRACKER_SESSION_ID`) becomes that target the same way;
-  the checkout context is labelled `config_default` because it is a bounded
-  per-checkout default rather than a per-capture choice.
+  its own (`--session` as a UUID or link code, an `LT-<code>` link code in
+  the watched folder or file name, or the checkout's `lt session use`
+  context, overridden by `LAB_TRACKER_SESSION_ID`) becomes that target the
+  same way; the checkout context is labelled `config_default` because it is a
+  bounded per-checkout default rather than a per-capture choice. A path
+  claims a session only through the explicit `LT-` prefix and a code in the
+  canonical form the server prints. `lt session use` looks the session up on
+  the server, records its project, and fails loudly when the session does not
+  exist or the server cannot be reached; the checkout context then targets
+  only captures filed into that project, other captures keep the id as plain
+  metadata, and a context recorded without a project is ignored with a hint
+  to rerun `lt session use`.
 - Consumer-side HPC analysis capture through the `lt hpc` CLI as an
   offline-first staged-note workflow: Slurm/HPC submit, begin, finish, and
   watch-folder manifest events write durable local outbox records that sync

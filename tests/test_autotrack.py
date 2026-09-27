@@ -165,3 +165,109 @@ def test_setup_autotrack_manages_the_ipython_startup_file(
     assert not startup.exists()
     lt_cli.main(["setup", "autotrack", "--yes", "--uninstall"])
     assert json.loads(capsys.readouterr().out)["action"] == "absent"
+
+
+def _recording_client(uploads: list[str]):
+    import httpx
+
+    from lab_tracker_client import LabTracker
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = request.content
+        chunk = body.split(b'name="project_id"', 1)[1].split(b"\r\n\r\n", 1)[1]
+        uploads.append(chunk.split(b"\r\n--", 1)[0].decode("utf-8"))
+        return httpx.Response(201, json={"data": {"note_id": "note-1", "metadata": {}}})
+
+    return LabTracker(
+        base_url="http://testserver",
+        default_project_id="project-default",
+        transport=httpx.MockTransport(handler),
+    )
+
+
+def _git_repo(path: Path) -> Path:
+    import subprocess
+
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q", str(path)], check=True)  # noqa: S603, S607
+    return path
+
+
+@pytest.fixture
+def isolated_capture_env(monkeypatch, tmp_path: Path) -> Path:
+    for key in (
+        "LAB_TRACKER_PROJECT_ID",
+        "LAB_TRACKER_WATCH_CONFIG",
+        "LAB_TRACKER_CAPTURE_OUTBOX",
+        "LAB_TRACKER_SESSION_CONTEXT",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("LAB_TRACKER_CONFIG_DIR", str(tmp_path / "lt-config"))
+    outbox = tmp_path / "outbox"
+    monkeypatch.setenv("LAB_TRACKER_WATCH_OUTBOX", str(outbox))
+    return outbox
+
+
+def test_autotrack_skips_saves_whose_project_would_only_be_a_default(
+    fake_matplotlib, isolated_capture_env: Path, tmp_path: Path, capsys
+) -> None:
+    """A user-wide hook must never file a notebook's figures into the
+    profile's default project: outside a bound checkout nothing is sent or
+    queued, and the scientist is told why once."""
+
+    uploads: list[str] = []
+    with _recording_client(uploads) as lt:
+        autotrack(client=lt)
+        FakeFigure(b"one").savefig(tmp_path / "one.png")
+        FakeFigure(b"two").savefig(tmp_path / "two.png")
+
+    assert uploads == []
+    assert not isolated_capture_env.exists()
+    err = capsys.readouterr().err
+    assert err.count("autotrack is not capturing saves") == 1
+    assert "not bound to a project" in err
+    assert "Nothing was sent or queued" in err
+
+
+def test_autotrack_skips_a_checkout_bound_only_by_its_watch_config(
+    fake_matplotlib, isolated_capture_env: Path, tmp_path: Path, capsys
+) -> None:
+    repo = _git_repo(tmp_path / "repo")
+    (repo / ".lab-tracker").mkdir()
+    (repo / ".lab-tracker" / "watch.json").write_text(
+        json.dumps({"version": 1, "project_id": "project-watch", "watches": []})
+    )
+    uploads: list[str] = []
+    with _recording_client(uploads) as lt:
+        autotrack(client=lt)
+        FakeFigure().savefig(repo / "plot.png")
+
+    assert uploads == []
+    assert "only in its watch config" in capsys.readouterr().err
+
+
+def test_autotrack_captures_into_the_checkout_binding_not_the_default(
+    fake_matplotlib, isolated_capture_env: Path, tmp_path: Path
+) -> None:
+    repo = _git_repo(tmp_path / "repo")
+    (repo / "lt_ids.json").write_text(json.dumps({"project_id": "project-checkout"}))
+    uploads: list[str] = []
+    with _recording_client(uploads) as lt:
+        autotrack(client=lt)
+        FakeFigure().savefig(repo / "plot.png")
+
+    assert uploads == ["project-checkout"]
+
+
+def test_autotrack_captures_into_an_explicit_or_environment_project(
+    fake_matplotlib, isolated_capture_env: Path, tmp_path: Path, monkeypatch
+) -> None:
+    uploads: list[str] = []
+    with _recording_client(uploads) as lt:
+        autotrack(client=lt, project_id="project-explicit")
+        FakeFigure(b"explicit").savefig(tmp_path / "explicit.png")
+        monkeypatch.setenv("LAB_TRACKER_PROJECT_ID", "project-env")
+        autotrack(client=lt)
+        FakeFigure(b"env").savefig(tmp_path / "env.png")
+
+    assert uploads == ["project-explicit", "project-env"]

@@ -5,15 +5,21 @@ A session's link code is the base32 form of its UUID (26 characters from
 phone scans. Consumers can name it in three places so captures arrive already
 linked to the session:
 
-* ``lt session use <code-or-uuid>`` records an *active session* for the
+* ``lt session use <code-or-uuid>`` looks the session up on the server and
+  records it, with the project it belongs to, as the *active session* for the
   current checkout (``.lab-tracker/session.json``) for a bounded time; figure
-  saves and watch scans made while it is active carry a session target.
+  saves and watch scans made while it is active carry a session target when
+  they are filed into that same project. A context recorded without its
+  project (by an older client) is unverified and targets nothing.
 * ``LAB_TRACKER_SESSION_ID`` overrides it for one shell or job.
-* A watched folder or file whose name contains the code (for example
-  ``session001_LT-<code>/``) attaches to that session without any setup.
+* A watched folder or file whose name contains the ``LT-``-prefixed code
+  (for example ``session001_LT-<code>/``) attaches to that session without
+  any setup.
 
-Everything here is fail-soft: an unreadable or expired context simply yields
-no session, never an exception in a consumer script.
+Reading is fail-soft: an unreadable or expired context simply yields no
+session, never an exception in a consumer script. Recording is not: ``lt
+session use`` fails loudly when the session does not exist or the server
+cannot be reached.
 """
 
 from __future__ import annotations
@@ -21,15 +27,18 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import uuid
 from collections.abc import Mapping
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
+
+import httpx
 
 from lab_tracker import models as _models
-from lab_tracker_client.client import LTValidationError
+from lab_tracker_client.client import LTAPIError, LTValidationError
 from lab_tracker_client.outbox import write_json_atomic
 
 JsonObject = dict[str, Any]
@@ -38,12 +47,28 @@ ACTIVE_SESSION_RELATIVE_PATH = Path(".lab-tracker") / "session.json"
 ACTIVE_SESSION_ENV = "LAB_TRACKER_SESSION_ID"
 ACTIVE_SESSION_CONTEXT_ENV = "LAB_TRACKER_SESSION_CONTEXT"
 DEFAULT_ACTIVE_SESSION_HOURS = 12.0
+# How read_active_session labels where the session came from.
+ACTIVE_SESSION_SOURCE_ENV = "env"
+ACTIVE_SESSION_SOURCE_CHECKOUT = "checkout"
+UNVERIFIED_SESSION_HINT = (
+    "lab-tracker: the active session {session_id} was recorded without its project, "
+    "so captures no longer attach to it; run `lt session use {link_code}` again to "
+    "verify it."
+)
+_HINTS_SHOWN: set[str] = set()
 _LINK_CODE_LENGTH = 26
+LINK_CODE_PREFIX = "LT-"
 # A bare 26-character base32 token, optionally prefixed ``LT-``, that is not
-# part of a longer alphanumeric run. Base32 uses no 0/1/8/9, so ordinary hex
-# ids and timestamps never match.
+# part of a longer alphanumeric run: the form a person types as a reference.
+# Base32 uses no 0/1/8/9, so ordinary hex ids and timestamps never match.
 _LINK_CODE_TOKEN = re.compile(
     r"(?<![A-Za-z0-9])(?:LT-)?([A-Za-z2-7]{26})(?![A-Za-z0-9])"
+)
+# Inside a path only the explicit prefix counts: any 26 base32 letters decode
+# to 16 bytes, so an unprefixed run (``supplementaryinformationaq/``) would
+# otherwise claim a session that does not exist.
+_PATH_LINK_CODE_TOKEN = re.compile(
+    rf"(?<![A-Za-z0-9]){re.escape(LINK_CODE_PREFIX)}([A-Za-z2-7]{{26}})(?![A-Za-z0-9])"
 )
 
 
@@ -66,9 +91,16 @@ def decode_session_link_code(link_code: str) -> str:
     if len(normalized) != _LINK_CODE_LENGTH:
         raise LTValidationError("Session link codes are 26 base32 characters.")
     try:
-        return str(_models.decode_session_link_code(normalized))
+        session_id = _models.decode_session_link_code(normalized)
     except ValueError as exc:
         raise LTValidationError(f"Session link code is invalid: {exc}") from exc
+    # Base32 ignores the last character's two pad bits, so a code that does
+    # not re-encode to itself was never printed by the server.
+    if _models.encode_session_link_code(session_id) != normalized:
+        raise LTValidationError(
+            f"Session link code {normalized} is not one the server prints; check it for a typo."
+        )
+    return str(session_id)
 
 
 def looks_like_link_code(value: str) -> bool:
@@ -107,13 +139,15 @@ def strict_session_id(value: str | None) -> str:
 
 
 def find_session_link_code(text: str) -> tuple[str, str] | None:
-    """Find the first session link code in free text (a path, a title).
+    """Find the first ``LT-``-prefixed session link code in a path or title.
 
-    Returns ``(link_code, session_id)`` or ``None``. Only tokens that decode to
-    a UUID count, so a random 26-letter word cannot claim a session.
+    Returns ``(link_code, session_id)`` or ``None``. Only an explicit
+    ``LT-<code>`` token counts, and only when the code is in the canonical
+    form the server prints (it re-encodes to itself, so its pad bits are
+    zero): a 26-letter folder name never claims a session.
     """
 
-    for match in _LINK_CODE_TOKEN.finditer(str(text or "")):
+    for match in _PATH_LINK_CODE_TOKEN.finditer(str(text or "")):
         code = match.group(1).upper()
         with suppress(LTValidationError):
             return code, decode_session_link_code(code)
@@ -136,29 +170,46 @@ def active_session_path(start: str | Path | None = None) -> Path:
     return _checkout_root(start) / ACTIVE_SESSION_RELATIVE_PATH
 
 
+class SessionLookup(Protocol):
+    """The one server call recording an active session needs."""
+
+    def get_session(self, session_id: str) -> Mapping[str, Any]: ...
+
+
 def set_active_session(
     session_ref: str,
     *,
+    client: SessionLookup,
     project_id: str | None = None,
     hours: float = DEFAULT_ACTIVE_SESSION_HOURS,
     start: str | Path | None = None,
     dry_run: bool = False,
 ) -> JsonObject:
-    """Record the session captures from this checkout should attach to."""
+    """Verify a session on the server and record it, with its project, for this checkout.
+
+    Raises ``LTAPIError`` when the session does not exist or the server cannot
+    be reached, and ``LTValidationError`` when ``project_id`` names a
+    different project than the session's own: nothing is written then.
+    """
 
     session_id = strict_session_id(session_ref)
     if hours <= 0:
         raise LTValidationError("--hours must be greater than zero.")
+    session_project_id = _server_session_project(client, session_id)
+    if project_id and str(project_id) != session_project_id:
+        raise LTValidationError(
+            f"Session {session_id} belongs to project {session_project_id}, "
+            f"not {project_id}."
+        )
     now = datetime.now(timezone.utc)
     payload: JsonObject = {
         "version": 1,
         "session_id": session_id,
         "link_code": encode_session_link_code(session_id),
+        "project_id": session_project_id,
         "set_at": now.isoformat(),
         "expires_at": (now + timedelta(hours=hours)).isoformat(),
     }
-    if project_id:
-        payload["project_id"] = str(project_id)
     path = active_session_path(start)
     result: JsonObject = {
         "command": "session-use",
@@ -171,6 +222,63 @@ def set_active_session(
         path.parent.mkdir(parents=True, exist_ok=True)
         write_json_atomic(path, payload)
     return result
+
+
+def _server_session_project(client: SessionLookup, session_id: str) -> str:
+    try:
+        record = client.get_session(session_id)
+    except httpx.TransportError as exc:
+        raise LTAPIError(
+            f"Could not reach Lab Tracker to verify session {session_id} ({exc}); "
+            "the active session was not changed."
+        ) from exc
+    except LTAPIError as exc:
+        raise LTAPIError(
+            f"Session {session_id} could not be verified: {exc} "
+            "The active session was not changed."
+        ) from exc
+    project_id = str(record.get("project_id") or "").strip()
+    if not project_id:
+        raise LTAPIError(f"Lab Tracker returned session {session_id} without a project.")
+    return project_id
+
+
+def session_target(active: Mapping[str, Any] | None, project_id: str | None) -> str | None:
+    """The active session's id when it may be a declared target in ``project_id``.
+
+    ``LAB_TRACKER_SESSION_ID`` is a per-shell choice and always targets. A
+    checkout context targets only captures filed into the project recorded
+    with it; one recorded without a project (by an older client) is
+    unverified, targets nothing, and prints a one-line hint once. A session
+    that does not target stays on the capture as plain metadata.
+    """
+
+    if not active or not active.get("session_id"):
+        return None
+    session_id = str(active["session_id"])
+    if active.get("source") == ACTIVE_SESSION_SOURCE_ENV:
+        return session_id
+    recorded_project = str(active.get("project_id") or "").strip()
+    if not recorded_project:
+        _hint_once(
+            UNVERIFIED_SESSION_HINT.format(
+                session_id=session_id,
+                link_code=active.get("link_code") or session_id,
+            )
+        )
+        return None
+    return session_id if recorded_project == str(project_id or "") else None
+
+
+def _reset_session_hints_for_tests() -> None:
+    _HINTS_SHOWN.clear()
+
+
+def _hint_once(message: str) -> None:
+    if message in _HINTS_SHOWN:
+        return
+    _HINTS_SHOWN.add(message)
+    print(message, file=sys.stderr)
 
 
 def clear_active_session(*, start: str | Path | None = None, dry_run: bool = False) -> JsonObject:
@@ -200,7 +308,7 @@ def read_active_session(start: str | Path | None = None) -> JsonObject | None:
             return {
                 "session_id": session_id,
                 "link_code": encode_session_link_code(session_id),
-                "source": "env",
+                "source": ACTIVE_SESSION_SOURCE_ENV,
             }
         return None
     with suppress(Exception):
@@ -216,7 +324,7 @@ def read_active_session(start: str | Path | None = None) -> JsonObject | None:
             "link_code": encode_session_link_code(session_id),
             "project_id": str(payload.get("project_id") or "") or None,
             "expires_at": expires_at or None,
-            "source": "checkout",
+            "source": ACTIVE_SESSION_SOURCE_CHECKOUT,
         }
     return None
 
@@ -242,6 +350,9 @@ def _parse_iso(value: str) -> datetime:
 
 __all__ = [
     "ACTIVE_SESSION_ENV",
+    "ACTIVE_SESSION_SOURCE_CHECKOUT",
+    "ACTIVE_SESSION_SOURCE_ENV",
+    "SessionLookup",
     "DEFAULT_ACTIVE_SESSION_HOURS",
     "active_session_path",
     "active_session_status",
@@ -252,6 +363,7 @@ __all__ = [
     "looks_like_link_code",
     "read_active_session",
     "session_id_from_reference",
+    "session_target",
     "set_active_session",
     "strict_session_id",
 ]

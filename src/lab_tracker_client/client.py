@@ -618,6 +618,13 @@ class LabTracker:
             offset=offset,
         )
 
+    def get_session(self, session_id: str) -> LTRecord:
+        return self._data_record(
+            self._request(
+                "GET", f"/sessions/{_require_non_empty(str(session_id), 'session_id')}"
+            )
+        )
+
     def list_sessions(
         self,
         *,
