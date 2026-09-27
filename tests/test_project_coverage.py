@@ -4,19 +4,20 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
-from sqlalchemy import event
+from sqlalchemy import event, update
 
+from lab_tracker import capture_client_release
 from lab_tracker.coverage_query import (
     CAPTURE_SOURCE_LISTING_LIMIT,
     unreviewed_capture_counts_by_project,
 )
-from lab_tracker.db_models import GraphChangeOperationModel, GraphChangeSetModel
+from lab_tracker.db_models import GraphChangeOperationModel, GraphChangeSetModel, NoteModel
 from lab_tracker.models import ProjectCoverageReport, ProjectCoverageSummary
 
 
@@ -107,6 +108,7 @@ def test_project_coverage_models_reject_negative_counts() -> None:
     )
     assert report.capture_sources == []
     assert report.capture_sources_truncated is False
+    assert report.server_release.version is None
     assert report.oldest_unreviewed_at is None
     assert report.last_capture_at is None
 
@@ -228,6 +230,9 @@ def test_project_coverage_lists_capture_sources_last_seen(
         ("git", None, None, None, 1),
         (None, None, None, None, 1),
     ]
+    # No capture recorded a client release, so nothing is judged.
+    assert {source["release_status"] for source in sources} == {"unknown"}
+    assert {source["update_notice"] for source in sources} == {None}
     assert _timestamp(sources[0]["last_capture_at"]) == _timestamp(rig_latest["created_at"])
     assert _timestamp(sources[1]["last_capture_at"]) == _timestamp(provider_only["created_at"])
     assert _timestamp(sources[2]["last_capture_at"]) == _timestamp(manual["created_at"])
@@ -331,3 +336,110 @@ def test_project_coverage_rejects_unauthenticated(
 
     assert response.status_code == 401
     assert response.json()["error"]["code"] == "auth_error"
+
+
+INSTALL_A = "a" * 32
+INSTALL_B = "b" * 32
+INSTALL_C = "c" * 32
+FLY_URI = "file:///Users/sam/data/fly_walking_data/run1/trace.csv"
+
+
+def _backdate(client: TestClient, note_id: str, *, days: float) -> None:
+    with client.app.state.db_session_factory() as session:
+        session.execute(
+            update(NoteModel)
+            .where(NoteModel.note_id == note_id)
+            .values(created_at=datetime.now(timezone.utc) - timedelta(days=days))
+        )
+        session.commit()
+
+
+def _host(install_id: str, label: str, version: str, *, adapter: str) -> dict[str, str]:
+    return {
+        "evidence_adapter": adapter,
+        "capture_install_id": install_id,
+        "capture_host_label": label,
+        "capture_platform": "Linux",
+        "capture_client_version": version,
+        "capture_client_revision": "a" * 40,
+    }
+
+
+def _assert_coverage_names_the_stale_machine(
+    client: TestClient,
+    headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(capture_client_release, "installed_version", lambda: "0.5.0")
+    project_id = _project(client, headers, "Capture installs")
+    watch_metadata = {
+        **_host(INSTALL_A, "rig-7", "0.3.0", adapter="lt-watch"),
+        "evidence_source_uri": FLY_URI,
+        "watch_relative_path": "run1/trace.csv",
+    }
+    watch_note = _note(client, headers, project_id, "trace.csv", metadata=watch_metadata)
+    _backdate(client, str(watch_note["note_id"]), days=1)
+    # The machine's newest capture decides its release, whichever source made it.
+    rig_figure_metadata = _host(INSTALL_A, "rig-7", "0.4.0", adapter="lt-figure")
+    _note(client, headers, project_id, "figure", metadata=rig_figure_metadata)
+    laptop_metadata = _host(INSTALL_B, "laptop", "0.5.0", adapter="lt-figure")
+    _note(client, headers, project_id, "laptop plot", metadata=laptop_metadata)
+    _note(client, headers, project_id, "typed note", metadata={"source": "manual"})
+    old_rig_metadata = _host(INSTALL_C, "old-rig", "0.1", adapter="lt-figure")
+    old_note = _note(client, headers, project_id, "old", metadata=old_rig_metadata)
+    idle_days = capture_client_release.UPDATE_NOTICE_WINDOW_DAYS + 1
+    _backdate(client, str(old_note["note_id"]), days=idle_days)
+
+    response = client.get(f"/projects/{project_id}/coverage", headers=headers)
+
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["server_release"]["version"] == "0.5.0"
+    sources = data["capture_sources"]
+    assert [
+        (source["evidence_adapter"], source["capture_host_label"], source["note_count"])
+        for source in sources
+    ] == [
+        (None, None, 1),
+        ("lt-figure", "laptop", 1),
+        ("lt-figure", "rig-7", 1),
+        ("lt-watch", "rig-7", 1),
+        ("lt-figure", "old-rig", 1),
+    ]
+    manual, laptop, rig_figure, rig_watch, old_rig = sources
+    assert manual["release_status"] == "unknown"
+    assert laptop["release_status"] == "current"
+    assert rig_figure["capture_client_version"] == "0.4.0"
+    assert rig_figure["capture_client_revision"] == "a" * 40
+    assert rig_figure["release_status"] == "behind"
+    assert rig_figure["watched_folder"] is None
+    assert rig_watch["release_status"] == "behind"
+    assert rig_watch["watched_folder"] == "fly_walking_data"
+    # One notice per machine, on its most recent source, naming the folder it watches.
+    assert rig_figure["update_notice"].startswith(
+        "lab-tracker on the machine watching `fly_walking_data` (rig-7) is behind this server: "
+        "it captured with release 0.4.0, and the server runs release 0.5.0."
+    )
+    assert rig_watch["update_notice"] is None
+    # A machine idle for longer than the window is behind but not addressed.
+    assert old_rig["release_status"] == "behind"
+    assert [source["update_notice"] for source in (manual, laptop, old_rig)] == [None, None, None]
+
+
+def test_project_coverage_names_the_machine_whose_client_is_behind(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _assert_coverage_names_the_stale_machine(client, admin_auth_headers, monkeypatch)
+
+
+@pytest.mark.postgres
+def test_project_coverage_names_the_stale_machine_on_postgres(
+    postgres_client: TestClient,
+    postgres_admin_auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _assert_coverage_names_the_stale_machine(
+        postgres_client, postgres_admin_auth_headers, monkeypatch
+    )

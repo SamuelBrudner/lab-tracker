@@ -1659,13 +1659,23 @@ class PublicationReadinessReport(_DomainModel):
     seal_level: Literal["blocked", "ara_l1"] = "blocked"
 
 
+class SoftwareRelease(_DomainModel):
+    """A lab-tracker release: the ``[project].version`` plus, when known, its revision."""
+
+    version: str | None = None
+    revision: str | None = None
+
+
 class ProjectCoverageCaptureSource(_DomainModel):
     """When one capture source last delivered a note to the project.
 
     A source is the (provider, adapter, install, host) tuple written into note
     metadata by capture clients; manual notes carry none of the four and form
-    the all-``None`` bucket. This is a plain last-seen listing: no thresholds,
-    no staleness judgement.
+    the all-``None`` bucket. This is a plain last-seen listing with no recency
+    thresholds. The one judgement it carries is whether the client that made
+    the source's newest capture runs a release behind this server's
+    (``release_status``), spelled out as an ``update_notice`` on a machine's
+    most recent source (see ``lab_tracker.capture_client_release``).
     """
 
     evidence_source_provider: str | None = None
@@ -1674,6 +1684,13 @@ class ProjectCoverageCaptureSource(_DomainModel):
     capture_host_label: str | None = None
     note_count: int = Field(..., ge=0)
     last_capture_at: datetime
+    # The release the newest capture was made with, when its client recorded it.
+    capture_client_version: str | None = None
+    capture_client_revision: str | None = None
+    release_status: ReleaseStatus = "unknown"
+    # The watch root the newest capture came from, for a watch-folder source.
+    watched_folder: str | None = None
+    update_notice: str | None = None
 
 
 class ProjectCoverageSummary(_DomainModel):
@@ -1699,6 +1716,8 @@ class ProjectCoverageSummary(_DomainModel):
 class ProjectCoverageReport(ProjectCoverageSummary):
     """The coverage summary plus a bounded per-source last-seen listing."""
 
+    # The release capture sources are compared against.
+    server_release: SoftwareRelease = Field(default_factory=SoftwareRelease)
     capture_sources: list[ProjectCoverageCaptureSource] = Field(default_factory=list)
     capture_sources_truncated: bool = False
 
@@ -1740,42 +1759,6 @@ class DraftQualityLedger(_DomainModel):
     change_set_count: int = Field(default=0, ge=0)
     cells: list[DraftQualityCell] = Field(default_factory=list)
     groups: list[DraftQualityGroupStats] = Field(default_factory=list)
-class CaptureInstallObservation(_DomainModel):
-    """The newest capture one (install id, host label) pair made in a window."""
-
-    install_id: str
-    host_label: str | None = None
-    note_id: UUID
-    captured_at: datetime
-    metadata: dict[str, NoteMetadataScalar] = Field(default_factory=dict)
-    capture_count: int
-
-
-class CaptureInstallRelease(_DomainModel):
-    version: str | None = None
-    revision: str | None = None
-
-
-class CaptureInstall(_DomainModel):
-    install_id: str
-    host_label: str | None = None
-    platform: str | None = None
-    client: CaptureInstallRelease
-    release_status: ReleaseStatus
-    last_captured_at: datetime
-    last_note_id: UUID
-    capture_count: int
-    watched_folder: str | None = None
-    notice: str | None = None
-
-
-class CaptureInstallReport(_DomainModel):
-    project_id: UUID
-    server: CaptureInstallRelease
-    window_days: int
-    installs: list[CaptureInstall] = Field(default_factory=list)
-
-
 class RecordExportEvent(_DomainModel):
     export_id: UUID
     user_id: UUID

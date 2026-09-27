@@ -89,6 +89,7 @@ class RequestHandlers:
                 release_read_scope=release_read_scope,
                 resolver_registry=resolver_registry,
                 store_authority_snapshot_provider=store_authority_snapshot_provider,
+                settings=settings,
             ),
             store_health=StoreHealthQueries(
                 api=api,

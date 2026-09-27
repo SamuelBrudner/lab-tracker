@@ -92,8 +92,14 @@ function PendingBatchBanner({ enabled = true, token, navigate }) {
 }
 
 // Capture machines whose lab-tracker client is behind this server's release,
-// named by what they capture. Loaded apart from the queues so a failure here
-// cannot hide them.
+// named by what they capture. The coverage read writes update_notice on one
+// capture source per machine (its most recent), so filtering on it lists each
+// stale machine once. Loaded apart from the queues so a failure here cannot
+// hide them.
+function staleCaptureSources(coverage) {
+  return (coverage?.capture_sources || []).filter((source) => source?.update_notice);
+}
+
 function StaleCaptureMachines({ projectId, token }) {
   const [staleInstalls, setStaleInstalls] = useState([]);
   const [loadError, setLoadError] = useState("");
@@ -107,10 +113,10 @@ function StaleCaptureMachines({ projectId, token }) {
         canceled = true;
       };
     }
-    apiRequest(`/projects/${encodeURIComponent(projectId)}/capture-installs`, { token })
-      .then((report) => {
+    apiRequest(`/projects/${encodeURIComponent(projectId)}/coverage`, { token })
+      .then((coverage) => {
         if (!canceled) {
-          setStaleInstalls((report?.installs || []).filter((install) => install?.notice));
+          setStaleInstalls(staleCaptureSources(coverage));
         }
       })
       .catch((err) => {
@@ -139,8 +145,10 @@ function StaleCaptureMachines({ projectId, token }) {
           : `${staleInstalls.length} capture machines need a lab-tracker update`}
       </strong>
       <ul>
-        {staleInstalls.map((install) => (
-          <li key={`${install.install_id}:${install.host_label || ""}`}>{install.notice}</li>
+        {staleInstalls.map((source) => (
+          <li key={`${source.capture_install_id}:${source.capture_host_label || ""}`}>
+            {source.update_notice}
+          </li>
         ))}
       </ul>
     </div>

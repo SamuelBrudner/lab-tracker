@@ -181,11 +181,13 @@ consumer-relevant.
   `_lab_tracker_update_notice`. A hosted endpoint skips the check; it ships
   with its server.
 - Captures record `capture_client_version` and `capture_client_revision` next
-  to the host identity. `GET /projects/{project_id}/capture-installs` lists the
-  machines that captured into a project in the last 90 days with their release
-  status, and the Daily review page names each machine that is behind by the
-  folder it watches, for example "lab-tracker on the machine watching
-  `fly_walking_data` (rig-7) is behind this server".
+  to the host identity. The coverage read (`GET /projects/{project_id}/coverage`)
+  reports, for each capture source, the release its newest capture was made
+  with and its `release_status` against the server's, and writes an
+  `update_notice` on a machine's most recent source when that machine is behind
+  and captured in the last 90 days. The Daily review page names each such
+  machine by the folder it watches, for example "lab-tracker on the machine
+  watching `fly_walking_data` (rig-7) is behind this server".
 
 To update a machine, install the server's release first and then refresh repo
 files: the exact tool install is on the server's Agents page

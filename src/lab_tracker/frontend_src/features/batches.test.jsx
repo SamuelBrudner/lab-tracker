@@ -583,15 +583,31 @@ describe("BatchReviewPage stale capture machines", () => {
   const staleNotice =
     "lab-tracker on the machine watching `fly_walking_data` (rig-7) is behind this server.";
 
-  function captureInstallsRoute(installs) {
+  function coverageRoute(captureSources) {
     return {
-      match: "/projects/project-a/capture-installs",
+      match: "/projects/project-a/coverage",
       response: apiResponse({
-        installs,
+        archived_unreviewed_count: 0,
+        capture_sources: captureSources,
+        capture_sources_truncated: false,
+        open_clarification_requests: 0,
+        pending_change_sets: 0,
         project_id: "project-a",
-        server: { revision: null, version: "0.5.0" },
-        window_days: 90,
+        server_release: { revision: null, version: "0.5.0" },
+        unplaced_count: 0,
+        unreviewed_count: 0,
       }),
+    };
+  }
+
+  function source(installId, hostLabel, updateNotice) {
+    return {
+      capture_host_label: hostLabel,
+      capture_install_id: installId,
+      last_capture_at: "2026-09-27T10:00:00Z",
+      note_count: 1,
+      release_status: updateNotice ? "behind" : "current",
+      update_notice: updateNotice,
     };
   }
 
@@ -618,9 +634,9 @@ describe("BatchReviewPage stale capture machines", () => {
 
   it("names each machine whose client is behind the server", async () => {
     installFetchMock([
-      captureInstallsRoute([
-        { host_label: "rig-7", install_id: "install-a", notice: staleNotice },
-        { host_label: "laptop", install_id: "install-b", notice: null },
+      coverageRoute([
+        source("install-a", "rig-7", staleNotice),
+        source("install-b", "laptop", null),
       ]),
     ]);
     renderReview("project-a");
@@ -633,15 +649,11 @@ describe("BatchReviewPage stale capture machines", () => {
   });
 
   it("stays silent when every machine is current", async () => {
-    const fetchMock = installFetchMock([
-      captureInstallsRoute([{ host_label: "laptop", install_id: "install-b", notice: null }]),
-    ]);
+    const fetchMock = installFetchMock([coverageRoute([source("install-b", "laptop", null)])]);
     renderReview("project-a");
 
     await waitFor(() =>
-      expect(fetchMock.mock.calls.map(([url]) => url)).toContain(
-        "/projects/project-a/capture-installs"
-      )
+      expect(fetchMock.mock.calls.map(([url]) => url)).toContain("/projects/project-a/coverage")
     );
     await flushResponses();
     expect(screen.queryByText(/needs? a lab-tracker update/)).not.toBeInTheDocument();
@@ -653,15 +665,15 @@ describe("BatchReviewPage stale capture machines", () => {
     renderReview("");
     await flushResponses();
 
-    expect(
-      fetchMock.mock.calls.some(([url]) => String(url).includes("/capture-installs"))
-    ).toBe(false);
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/coverage"))).toBe(
+      false
+    );
   });
 
   it("reports a failed check without hiding the queues", async () => {
     installFetchMock([
       {
-        match: "/projects/project-a/capture-installs",
+        match: "/projects/project-a/coverage",
         response: errorResponse("boom", 500),
       },
     ]);

@@ -13,7 +13,6 @@ from starlette.responses import Response
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.errors import NotFoundError
 from lab_tracker.models import (
-    CaptureInstallReport,
     DraftQualityLedger,
     Project,
     ProjectCoverageReport,
@@ -165,18 +164,6 @@ def build_projects_router(api: LabTrackerAPI) -> APIRouter:
             project_id=project_id,
         )
         return Envelope(data=ledger)
-
-    @router.get(
-        "/projects/{project_id}/capture-installs",
-        response_model=Envelope[CaptureInstallReport],
-    )
-    def capture_installs(project_id: UUID, request: Request):
-        """Machines that captured into this project recently, and whose client is stale."""
-        report = api_from_request(request, api).report_capture_installs(
-            project_id,
-            actor=actor_from_request(request),
-        )
-        return Envelope(data=report)
 
     @router.patch("/projects/{project_id}", response_model=Envelope[Project])
     def update_project(project_id: UUID, payload: ProjectUpdate, request: Request):

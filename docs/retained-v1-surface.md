@@ -198,7 +198,12 @@ research record:
   (`unplaced`), captures set aside as `archived_unreviewed`, drafts and
   clarification requests still waiting on a person, and a bounded last-seen
   listing per capture source (`evidence_source_provider`, `evidence_adapter`,
-  `capture_install_id`/`capture_host_label`) with no thresholds. The same
+  `capture_install_id`/`capture_host_label`) with no recency thresholds. Each
+  source also carries the release its newest capture was made with
+  (`capture_client_version`/`capture_client_revision`), its `release_status`
+  against the report's `server_release`, the folder a watch source captures
+  from, and an `update_notice` on a machine's most recent source when that
+  client is behind and captured within the last 90 days. The same
   summary rides on the graph overview and the decision-context packet, and
   the portfolio summary flags `unreviewed_captures` once a named threshold is
   reached. Coverage is derived from existing records; nothing is stored,
@@ -427,8 +432,8 @@ research record:
   client's release with the server's; stdio `lt-mcp` prefixes its MCP
   instructions and adds `_lab_tracker_update_notice` to every tool result when
   its client is behind; and captures record the capturing client's release, so
-  the project-scoped `GET /projects/{project_id}/capture-installs` read (opaque
-  like other project reads) and the Daily review page name each machine that
+  the coverage read's `capture_sources` carry each source's `release_status`
+  and an `update_notice`, and the Daily review page names each machine that
   is behind by the folder it watches. Only a newer server release produces a
   notice; revision drift within a release is reported, never suggested. None of
   these checks blocks capture, a session, or MCP startup. See

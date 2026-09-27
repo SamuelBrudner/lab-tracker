@@ -19,7 +19,6 @@ from lab_tracker.draft_quality import DraftQualityRow
 from lab_tracker.models import (
     AcquisitionOutput,
     Analysis,
-    CaptureInstallObservation,
     Claim,
     ClaimEdge,
     ContentHashCarrier,
@@ -970,21 +969,6 @@ class LabTrackerRepository(Protocol):
         value themselves when non-string values matter.
         ``evidence_content_hash`` is an exact match on the indexed
         ``notes.evidence_content_hash`` column.
-        """
-
-    def latest_capture_install_notes(
-        self,
-        *,
-        project_id: UUID,
-        since: datetime,
-        watch_only: bool = False,
-    ) -> list[CaptureInstallObservation]:
-        """Return the newest note per (install id, host label) created since ``since``.
-
-        Only notes whose metadata names a ``capture_install_id`` count; each
-        row carries how many captures that pair made in the window.
-        ``watch_only`` restricts both to watch-folder captures (notes with a
-        ``watch_relative_path``).
         """
 
     def project_ids_with_search_matches(
