@@ -180,8 +180,9 @@ argument, `LAB_TRACKER_PROJECT_ID`, the saved file's checkout binding
 (`lt_ids.json`), the checkout's watch config, and only then the client's or
 login profile's default project. The autotrack hook fires in every directory,
 so it captures only when the project comes from one of the first three; any
-other save is skipped with a one-time notice on stderr, and nothing is sent
-or queued.
+other save is skipped, and nothing is sent or queued. A stderr notice names
+each unbound checkout root (or, outside a repository, the save's directory)
+once per process.
 `lt setup schedule --request-draft` adds `--request-draft` to the scheduled
 run so newly synced captures also ask for a graph draft; on macOS the
 schedule is a launchd agent under `~/Library/LaunchAgents`, Windows uses Task

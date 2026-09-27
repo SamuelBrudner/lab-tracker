@@ -230,6 +230,36 @@ def test_autotrack_skips_saves_whose_project_would_only_be_a_default(
     assert "Nothing was sent or queued" in err
 
 
+def test_autotrack_names_each_unbound_checkout_root_once(
+    fake_matplotlib, isolated_capture_env: Path, tmp_path: Path, capsys
+) -> None:
+    """The notice is keyed on the checkout, not the reason: every unbound
+    checkout (its root, not the save's subfolder) is named exactly once, and
+    a save outside any repository names its own directory."""
+
+    first = _git_repo(tmp_path / "first")
+    second = _git_repo(tmp_path / "second")
+    loose = tmp_path / "loose"
+    for folder in (first / "figs" / "a", first / "figs" / "b", second / "out", loose):
+        folder.mkdir(parents=True)
+    uploads: list[str] = []
+    with _recording_client(uploads) as lt:
+        autotrack(client=lt)
+        FakeFigure().savefig(first / "figs" / "a" / "one.png")
+        FakeFigure().savefig(first / "figs" / "b" / "two.png")
+        FakeFigure().savefig(second / "out" / "three.png")
+        FakeFigure().savefig(loose / "four.png")
+        FakeFigure().savefig(loose / "five.png")
+
+    assert uploads == []
+    err_lines = capsys.readouterr().err.splitlines()
+    notices = [line for line in err_lines if "autotrack is not capturing" in line]
+    assert len(notices) == 3
+    assert f"saves in {first.resolve()}:" in notices[0]
+    assert f"saves in {second.resolve()}:" in notices[1]
+    assert f"saves in {loose.resolve()}:" in notices[2]
+
+
 def test_autotrack_skips_a_checkout_bound_only_by_its_watch_config(
     fake_matplotlib, isolated_capture_env: Path, tmp_path: Path, capsys
 ) -> None:

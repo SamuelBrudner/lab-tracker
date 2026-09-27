@@ -58,7 +58,9 @@ research record:
   autotrack`, disabled by `LAB_TRACKER_AUTOTRACK=0`) captures matplotlib saves
   to a path through that same fail-soft path, but only when the project comes
   from the argument, the environment, or the checkout binding; any other save
-  is skipped with a one-time stderr notice and nothing is sent or queued.
+  is skipped and nothing is sent or queued, with a stderr notice that names
+  each unbound checkout root (or the save's directory outside a repository)
+  once per process.
 - Consumer-side watch-folder capture through the `lt watch` CLI as an
   offline-first adapter workflow: watched files and workflow-written manifests
   write durable local outbox records that later sync into staged evidence notes

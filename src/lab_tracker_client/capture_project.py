@@ -72,7 +72,7 @@ def resolve_capture_project(path: Path, *, project_id: str | None) -> CapturePro
     from_env = _optional(os.getenv(PROJECT_ENV))
     if from_env:
         return CaptureProject(project_id=from_env, source=CaptureProjectSource.ENVIRONMENT)
-    checkout = _checkout_root(path)
+    checkout = capture_checkout_root(path)
     if checkout is None:
         return None
     return _checkout_project(checkout)
@@ -91,7 +91,9 @@ def _checkout_project(checkout: Path) -> CaptureProject | None:
     return None
 
 
-def _checkout_root(path: Path) -> Path | None:
+def capture_checkout_root(path: Path) -> Path | None:
+    """The git checkout root a file saved at ``path`` belongs to, or ``None``."""
+
     from lab_tracker_client import git_capture
 
     try:
@@ -109,5 +111,6 @@ __all__ = [
     "BOUND_PROJECT_SOURCES",
     "CaptureProject",
     "CaptureProjectSource",
+    "capture_checkout_root",
     "resolve_capture_project",
 ]

@@ -22,7 +22,11 @@ import httpx
 
 from lab_tracker.instance_url import normalize_instance_base_url
 from lab_tracker.models import NoteMetadataScalar
-from lab_tracker_client.capture_project import CaptureProject, resolve_capture_project
+from lab_tracker_client.capture_project import (
+    CaptureProject,
+    capture_checkout_root,
+    resolve_capture_project,
+)
 from lab_tracker_client.client import (
     DECLARED_TARGET_SOURCE_CONFIG_DEFAULT,
     DECLARED_TARGET_SOURCE_KEY,
@@ -1008,10 +1012,12 @@ def _queue_project_id(client: LabTracker | None, bound_project_id: str | None) -
 
 
 def _warn_unbound_autotrack(path: Path, capture_project: CaptureProject | None) -> None:
+    """Name each unbound checkout root (or bare save directory) once per process."""
+
     why = AUTOTRACK_WATCH_CONFIG_WHY if capture_project is not None else AUTOTRACK_NO_PROJECT_WHY
-    checkout = path.parent
+    checkout = capture_checkout_root(path) or path.expanduser().parent.resolve()
     _warn_once(
-        f"{AUTOTRACK_UNBOUND_REASON}:{why}",
+        f"{AUTOTRACK_UNBOUND_REASON}:{checkout}",
         AUTOTRACK_UNBOUND_NOTICE.format(checkout=checkout, why=why),
     )
 
