@@ -1651,6 +1651,34 @@ describe("GraphDraftDetailCard keyboard review", () => {
     );
   });
 
+  it("labels an exact-id provenance proposal without a content hash", async () => {
+    const draft = draftFixture();
+    renderDraft(draft, {
+      routes: [
+        {
+          match: /^\/provenance-links\?/,
+          response: apiResponse([
+            {
+              basis: "exact_id_match",
+              content_hash: null,
+              link_id: "link-2",
+              project_id: "project-1",
+              relation: "was_derived_from",
+              source: { entity_id: "note-c", entity_type: "note" },
+              status: "proposed",
+              target: { entity_id: "session-1", entity_type: "session" },
+            },
+          ]),
+        },
+      ],
+    });
+
+    const section = await screen.findByRole("region", { name: "Proposed provenance links" });
+    expect(within(section).getByText(/exact id match/)).toBeInTheDocument();
+    expect(within(section).queryByText(/shared content hash/)).not.toBeInTheDocument();
+    expect(within(section).getByText("session session-1")).toBeInTheDocument();
+  });
+
   it("gives claim statements and falsification criteria typed editors", async () => {
     const draft = draftFixture({
       operations: [

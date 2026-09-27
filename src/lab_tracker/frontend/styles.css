@@ -1834,6 +1834,15 @@ button.project-graph-legend-item:hover {
   margin-left: auto;
 }
 
+.capture-health-flag + .capture-health-flag {
+  margin-left: 0;
+}
+
+.pill.capture-health-behind {
+  background: #fff8e5;
+  border-color: #ecdcb0;
+}
+
 .review-proposal-intent {
   margin: 0;
   text-transform: uppercase;

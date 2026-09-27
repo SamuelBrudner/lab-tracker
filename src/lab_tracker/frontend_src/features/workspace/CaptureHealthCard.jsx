@@ -14,14 +14,18 @@ const ADAPTER_LABELS = {
   "lt-repo": "Repository report",
   "lt-hpc": "HPC run",
   "lt-import-folder": "Folder import",
-  mobile_capture: "Phone capture",
-  share_target: "Phone share sheet",
 };
 
-const MANUAL_LABEL = "Typed in the app";
+// Typed notes and phone or share-sheet captures carry no adapter, so the
+// coverage read groups them together; nothing monitors their pace.
+const MANUAL_LABEL = "Typed or phone captures (not monitored)";
+const UNAVAILABLE_MESSAGE = "Capture health is unavailable.";
+const BEHIND_LABEL = "client behind";
+const TRUNCATED_MESSAGE =
+  "Only the most recent sources are listed; the quiet count covers every source.";
 
 // A coverage capture source names an adapter, or only a provider, or nothing
-// (typed in the app). The adapter is the most specific name it has.
+// (typed or phone captures). The adapter is the most specific name it has.
 function sourceLabel(source) {
   const adapter = source.evidence_adapter || source.evidence_source_provider;
   if (!adapter) {
@@ -35,6 +39,16 @@ function describeSource(source) {
   return `${sourceLabel(source)}${host}`;
 }
 
+// The server's own notice when it wrote one; otherwise say which releases differ.
+function behindDescription(source, serverRelease) {
+  if (source.update_notice) {
+    return source.update_notice;
+  }
+  const client = source.capture_client_version || "an unreported release";
+  const server = serverRelease?.version || "an unknown release";
+  return `Captured with release ${client}; this server runs release ${server}.`;
+}
+
 function sourceKey(source) {
   return [
     source.evidence_source_provider,
@@ -44,15 +58,18 @@ function sourceKey(source) {
   ].join("|");
 }
 
-// Automated capture fails quietly; this card makes the silence visible. It
+// Scheduled capture fails quietly; this card makes the silence visible. It
 // reads the project's coverage report and lists every capture path that
-// delivered, flagging the ones that stopped, so a scientist sees a stalled
-// scheduler or expired token before the review queue simply goes empty.
+// delivered, flagging the scheduled ones (watch folders, HPC runs) that
+// stopped, so a scientist sees a stalled scheduler or expired token before
+// the review queue simply goes empty. A source whose client runs a release
+// behind the server carries a "client behind" pill, so a quiet watcher and
+// its outdated install read as one machine.
 function CaptureHealthCard({ token, projectId }) {
   const { data, error, loading } = useApiResource(
-    token && projectId ? `/projects/${projectId}/coverage` : "",
+    projectId ? `/projects/${projectId}/coverage` : "",
     token,
-    "Capture health is unavailable."
+    UNAVAILABLE_MESSAGE
   );
   if (!projectId) {
     return null;
@@ -73,11 +90,17 @@ function CaptureHealthCard({ token, projectId }) {
           </span>
         ) : null}
       </div>
-      {error ? <p className="subtle">{error}</p> : null}
+      {error ? (
+        <p className="subtle">
+          {UNAVAILABLE_MESSAGE}
+          {error !== UNAVAILABLE_MESSAGE ? ` ${error}` : ""}
+        </p>
+      ) : null}
       {data && sources.length === 0 ? (
         <p className="subtle">
-          Nothing has been captured yet. A watch folder, figure capture, or the phone
-          capture page turns bench work into staged notes without extra steps.
+          Nothing has been captured yet. A watch folder, an HPC run, or figure capture
+          turns bench work into staged notes without extra steps, and this card shows
+          when a scheduled one stops delivering.
         </p>
       ) : null}
       {sources.length > 0 ? (
@@ -98,10 +121,19 @@ function CaptureHealthCard({ token, projectId }) {
                   quiet for over {recentDays} days
                 </span>
               ) : null}
+              {source.release_status === "behind" ? (
+                <span
+                  className="pill capture-health-flag capture-health-behind"
+                  title={behindDescription(source, data?.server_release)}
+                  aria-label={`${BEHIND_LABEL}: ${behindDescription(source, data?.server_release)}`}
+                >
+                  {BEHIND_LABEL}
+                </span>
+              ) : null}
             </li>
           ))}
           {data?.capture_sources_truncated ? (
-            <li className="subtle">Only the most recent sources are listed.</li>
+            <li className="subtle">{TRUNCATED_MESSAGE}</li>
           ) : null}
         </ul>
       ) : null}

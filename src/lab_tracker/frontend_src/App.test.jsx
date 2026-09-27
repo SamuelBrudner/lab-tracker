@@ -239,6 +239,72 @@ describe("App", () => {
     expect(requestedUrls(fetchMock)).toContain(projectsPath);
   });
 
+  it("mounts the capture health card on the home page for the active project", async () => {
+    installFetchMock([
+      {
+        match: "/auth/me",
+        response: apiResponse(
+          { role: "admin", username: "local-tester" },
+          200,
+          { auth_enabled: false }
+        ),
+      },
+      {
+        match: projectsPath,
+        response: apiResponse([project("project-1", "Temporal odor project")]),
+      },
+      { match: questionListPath("project-1"), response: paged([]) },
+      { match: datasetListPath("project-1"), response: paged([]) },
+      {
+        match: noteCountPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 0 }),
+      },
+      { match: recentNotesPath("project-1"), response: paged([]) },
+      { match: activeSessionsPath("project-1"), response: paged([]) },
+      { match: stagedAnalysesPath("project-1"), response: paged([]) },
+      {
+        match: committedAnalysesPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 0 }),
+      },
+      {
+        match: "/projects/project-1/coverage",
+        response: apiResponse({
+          project_id: "project-1",
+          unreviewed_count: 1,
+          unplaced_count: 0,
+          archived_unreviewed_count: 0,
+          pending_change_sets: 0,
+          open_clarification_requests: 0,
+          server_release: { version: "0.5.0", revision: null },
+          capture_sources: [
+            {
+              evidence_source_provider: "local-folder",
+              evidence_adapter: "lt-watch-files",
+              capture_install_id: "install-a",
+              capture_host_label: "rig-2",
+              note_count: 1,
+              last_capture_at: "2026-09-20T09:00:00Z",
+              recent_note_count: 0,
+              staged_unreviewed_count: 1,
+              quiet: true,
+              release_status: "current",
+            },
+          ],
+          capture_sources_truncated: false,
+          recent_days: 7,
+          quiet_window_days: 30,
+          quiet_source_count: 1,
+        }),
+      },
+    ]);
+
+    render(<App />);
+
+    const card = await screen.findByRole("article", { name: "Capture health" });
+    await waitFor(() => expect(card).toHaveTextContent("Watch folder on rig-2"));
+    expect(card).toHaveTextContent("1 gone quiet");
+  });
+
   it("drains offline captures under the local owner when auth is disabled", async () => {
     vi.stubGlobal("indexedDB", fakeIndexedDB);
     resetUploadQueueForTests();
