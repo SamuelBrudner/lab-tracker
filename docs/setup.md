@@ -197,10 +197,11 @@ commits are not consumer-relevant.
   server's release is known it is reported as behind, with a notice saying
   so. The Daily review page lists each notice, for example "lab-tracker on
   the machine watching `fly_walking_data` (rig-7) is behind this server", and
-  the home page's Capture health card marks the same source "client behind".
-  Only a watch source is named by the folder it watches. A capture queued
-  offline carries the release that queued it, so draining an old queue after
-  an update can show a notice until that source's next live capture.
+  the home page's Capture health card marks every behind source "client
+  behind". Only a watch source is named by the folder it watches. A capture
+  queued offline carries the release that queued it, so draining an old
+  queue after an update can show a notice until that source's next live
+  capture.
 
 One install id covers every Python environment on a machine, and the notice's
 fix depends on which environment made the capture:

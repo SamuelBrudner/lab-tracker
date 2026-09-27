@@ -97,6 +97,8 @@ AUTOTRACK_NO_PROJECT_WHY = "that checkout is not bound to a project (no lt_ids.j
 AUTOTRACK_WATCH_CONFIG_WHY = (
     "that checkout names its project only in its watch config, not in lt_ids.json"
 )
+
+
 def _first_capture_review_keys(kind: str) -> frozenset[str]:
     return frozenset({f"{kind}_no_preview", f"{kind}_preview_size_bytes"})
 

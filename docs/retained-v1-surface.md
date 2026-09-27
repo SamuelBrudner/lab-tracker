@@ -486,8 +486,9 @@ research record:
   environment needs an update (a watch source by the folder it watches),
   with the fix for that environment: the tool install plus `lt update`, or
   an analysis repo's pinned `uv add` dependency; the home page's Capture
-  health card marks the same rows with a "client behind" pill. A capture
-  queued offline and drained later carries the release that queued it. Only a newer
+  health card marks every source whose client is behind with a "client
+  behind" pill that carries the notice when there is one. A capture queued
+  offline and drained later carries the release that queued it. Only a newer
   server `MAJOR.MINOR` produces a notice ([versioning.md](versioning.md)); a
   PATCH-only gap and revision drift within a release are reported, never
   suggested. None of these checks blocks capture, a session, or MCP startup.
