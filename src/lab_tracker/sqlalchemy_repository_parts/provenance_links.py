@@ -1,10 +1,11 @@
-"""SQLAlchemy repository for provenance links (content-hash lineage proposals)."""
+"""SQLAlchemy repository for provenance links (content-hash and exact-id proposals)."""
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from uuid import UUID
 
-from sqlalchemy import String, cast, func, literal, select, union_all
+from sqlalchemy import String, cast, func, literal, or_, select, union_all
 from sqlalchemy.orm import Session as OrmSession
 
 from lab_tracker.db_models import (
@@ -18,6 +19,7 @@ from lab_tracker.models import (
     ContentHashCarrier,
     EntityRef,
     EntityType,
+    Note,
     ProvenanceLink,
 )
 from lab_tracker.repository import EntityRepository
@@ -29,6 +31,7 @@ from lab_tracker.sqlalchemy_mappers import (
 )
 
 from .common import apply_pagination, count_from_statement, uuid_values
+from .notes import SQLAlchemyNoteRepository
 
 
 class SQLAlchemyProvenanceLinkRepository(EntityRepository[ProvenanceLink]):
@@ -143,6 +146,27 @@ class SQLAlchemyProvenanceLinkRepository(EntityRepository[ProvenanceLink]):
             )
             for row in self._session.execute(stmt)
         ]
+
+    def list_identifier_carriers(self, project_id: UUID, keys: Sequence[str]) -> list[Note]:
+        """Notes whose metadata sets any of ``keys``; the JSON filter runs in SQL.
+
+        Bounded by the captures that actually name an identifier, so a project
+        full of typed notes costs the detector nothing.
+        """
+
+        if not keys:
+            return []
+        self._session.flush()
+        stmt = (
+            select(NoteModel)
+            .where(
+                NoteModel.project_id == str(project_id),
+                or_(*(NoteModel.note_metadata[key].as_string().is_not(None) for key in keys)),
+            )
+            .order_by(NoteModel.created_at, NoteModel.note_id)
+        )
+        rows = list(self._session.scalars(stmt))
+        return SQLAlchemyNoteRepository(self._session).notes_from_rows(rows)
 
     def query(
         self,

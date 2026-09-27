@@ -110,6 +110,10 @@ class ProvenanceLinkRepository(EntityRepository[ProvenanceLink], Protocol):
         two carriers in the project share, ordered by content_hash, captured_at,
         entity_type, entity_id."""
 
+    def list_identifier_carriers(self, project_id: UUID, keys: Sequence[str]) -> list[Note]:
+        """Return the project's notes whose metadata sets any of ``keys`` (with
+        their targets), in creation order: the exact-id detector's input."""
+
 
 class VisualizationRepository(EntityRepository[Visualization], Protocol):
     """Visualization persistence with the row lock asset mutations hold."""

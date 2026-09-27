@@ -492,3 +492,46 @@ def test_postgres_note_capture_bundle_filter_matches_the_metadata_text(
 
     assert total == 2
     assert {str(note.note_id) for note in notes} == {note_ids["image"], note_ids["voice"]}
+
+
+def test_postgres_identifier_carriers_filter_metadata_keys_in_sql(
+    postgres_client: TestClient,
+    postgres_admin_auth_headers: dict[str, str],
+) -> None:
+    """The exact-id detector reads only notes whose metadata names an id key."""
+
+    from lab_tracker.services.provenance_id_matches import (
+        ID_MATCH_COMMIT_METADATA_KEYS,
+        ID_MATCH_SESSION_METADATA_KEYS,
+    )
+    from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
+
+    project_id = _create_project(
+        postgres_client,
+        postgres_admin_auth_headers,
+        label="Identifier carriers",
+    )
+    created: list[str] = []
+    for label, metadata in (
+        ("session", {"watch_session_id": str(uuid4())}),
+        ("commit", {"run_git_commit": "9f2c1d4e5a6b"}),
+        ("plain", {"capture_host_label": "rig-2"}),
+    ):
+        response = postgres_client.post(
+            "/notes",
+            json={
+                "project_id": str(project_id),
+                "raw_content": f"{label} note",
+                "metadata": metadata,
+            },
+            headers=postgres_admin_auth_headers,
+        )
+        assert response.status_code == 201, response.text
+        created.append(response.json()["data"]["note_id"])
+
+    keys = (*ID_MATCH_SESSION_METADATA_KEYS, *ID_MATCH_COMMIT_METADATA_KEYS)
+    with postgres_client.app.state.db_session_factory() as session:
+        repository = SQLAlchemyLabTrackerRepository(session)
+        carriers = repository.provenance_links.list_identifier_carriers(project_id, keys)
+
+    assert [str(note.note_id) for note in carriers] == created[:2]

@@ -1170,7 +1170,10 @@ export interface components {
       "evidence_source_provider"?: (string | null);
       "last_capture_at": string;
       "note_count": number;
+      "quiet"?: boolean;
+      "recent_note_count"?: number;
       "release_status"?: "current" | "behind" | "ahead" | "unknown";
+      "staged_unreviewed_count"?: number;
       "update_notice"?: (string | null);
       "update_recommended"?: boolean;
       "watched_folder"?: (string | null);
@@ -1184,6 +1187,9 @@ export interface components {
       "open_clarification_requests": number;
       "pending_change_sets": number;
       "project_id": string;
+      "quiet_source_count"?: number;
+      "quiet_window_days"?: number;
+      "recent_days"?: number;
       "server_release"?: components["schemas"]["SoftwareRelease"];
       "unplaced_count": number;
       "unreviewed_count": number;

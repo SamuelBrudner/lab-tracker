@@ -1009,6 +1009,14 @@ FastAPI app does not read them. `LAB_TRACKER_BASE_URL` (see
   profile, install id, and enrolled-repo registry (default: `~/.lab-tracker`)
 - `LAB_TRACKER_CAPTURE_HOST`: machine label recorded on captures (default: the
   hostname)
+- `LAB_TRACKER_AUTOTRACK`: `0`, `false`, `no`, or `off` disables the matplotlib
+  figure autotrack hook everywhere, including the IPython startup file that
+  `lt setup autotrack` installs (default: on). The hook captures only saves
+  whose project comes from `autotrack(project_id=...)`,
+  `LAB_TRACKER_PROJECT_ID`, or the checkout's `lt_ids.json`
+- `LAB_TRACKER_CAPTURE_OUTBOX`: `0`, `false`, `no`, or `off` stops figure
+  captures from queueing into the checkout's watch outbox when the server is
+  unreachable; the save then reports the failure instead (default: on)
 - `LAB_TRACKER_SKILLS_HOME`: install the generated setup skill into this one
   directory instead of both `~/.claude/skills` and `~/.agents/skills`
 
@@ -1052,6 +1060,21 @@ FastAPI app does not read them. `LAB_TRACKER_BASE_URL` (see
 - `LAB_TRACKER_REPO_RUN_ID` / `LAB_TRACKER_HPC_RUN_ID`: run id for `lt repo` and
   `lt hpc` events when `--run` is not given. `lt hpc` sets the HPC run id,
   outbox, and config for the job it submits.
+- `LAB_TRACKER_SESSION_ID`: session UUID or link code that every figure capture
+  and watch scan from this shell or job attaches to; it overrides the
+  checkout's active session recorded by `lt session use` and, as a per-shell
+  choice, is not checked against the capture's project before sending. When
+  the server refuses it as a live figure upload's session target (HTTP 422
+  `validation_error` "Target must belong to the same project." for a session
+  in another project, 404 `not_found` "Session does not exist." for one that
+  does not exist; other rejections with those codes are not retried), the
+  upload retries exactly once without that target, keeping the id as
+  `capture_session_id` metadata; when that retry is accepted it prints one
+  stderr line saying the session is not in the capture's project, and later
+  saves in that process skip the target
+- `LAB_TRACKER_SESSION_CONTEXT`: path of the active-session file that `lt
+  session use` writes and captures read (default: `.lab-tracker/session.json`
+  at the checkout root)
 - `LAB_TRACKER_CONTAINER_REF`: container image reference folded into the
   repository environment fingerprint
 

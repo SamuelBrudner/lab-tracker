@@ -601,7 +601,11 @@ def test_provenance_link_repository_contract_declares_detector_queries() -> None
     assert isinstance(provenance_links, property)
     assert provenance_links.fget is not None
     contract = get_type_hints(provenance_links.fget)["return"]
-    for method_name in ("list_by_project", "list_content_hash_carriers"):
+    for method_name in (
+        "list_by_project",
+        "list_content_hash_carriers",
+        "list_identifier_carriers",
+    ):
         assert callable(getattr(contract, method_name, None)), method_name
         assert inspect.signature(getattr(contract, method_name)) == inspect.signature(
             getattr(SQLAlchemyProvenanceLinkRepository, method_name)

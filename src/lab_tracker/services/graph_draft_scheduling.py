@@ -49,6 +49,7 @@ from lab_tracker.services.graph_draft_scheduling_ports import (
     SchedulingRecords,
     SchedulingRepository,
 )
+from lab_tracker.services.provenance_detection_stage import propose_deterministic_links
 from lab_tracker.services.review_email_service import normalize_review_email
 from lab_tracker.services.shared import actor_user_fk, actor_user_id
 
@@ -369,7 +370,7 @@ class BatchSchedulingCoordinator(BaseService):
             actor=actor,
         )
 
-    def _propose_content_hash_links(
+    def _propose_deterministic_links(
         self,
         project_id: UUID,
         *,
@@ -377,17 +378,13 @@ class BatchSchedulingCoordinator(BaseService):
     ) -> None:
         """Best-effort deterministic stage run once per claimed batch execution.
 
-        Proposes content-hash provenance links for human review. A failure here
-        must never flip the LLM batch to FAILED or block drafting, so it is
-        logged and swallowed.
+        Proposes content-hash and exact-id provenance links for human review;
+        each detector's failure is logged and swallowed, never failing the batch.
         """
 
         if self.provenance_links is None:
             return
-        try:
-            self.provenance_links.propose_links_from_content_hash(project_id, actor=actor)
-        except Exception:
-            logger.exception("provenance-link detector failed for project %s", project_id)
+        propose_deterministic_links(self.provenance_links, project_id, actor=actor)
 
     def enqueue_graph_draft_batch_for_project(
         self,
@@ -507,8 +504,8 @@ class BatchSchedulingCoordinator(BaseService):
         if claim_token is None or run.claim_token != claim_token:
             return self.records.get_graph_draft_batch_run(run_id)
         # Every claimed execution — synchronous run-now, the queued worker and
-        # due dispatch — runs the detector exactly once, before drafting.
-        self._propose_content_hash_links(run.project_id, actor=actor)
+        # due dispatch — runs the detectors exactly once, before drafting.
+        self._propose_deterministic_links(run.project_id, actor=actor)
 
         def renew_run(_attempt: int) -> bool:
             renewed_at = utc_now()

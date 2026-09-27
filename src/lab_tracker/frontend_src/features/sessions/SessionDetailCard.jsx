@@ -3,6 +3,7 @@ import * as React from "react";
 import { formatDate, sessionTypeClass } from "../../shared/formatters.js";
 import { AppLink, navigateBack } from "../../shared/routing.jsx";
 import { SessionCaptureLinkSection } from "./SessionCaptureLinkSection.jsx";
+import { SessionLinkCode } from "./SessionLinkCode.jsx";
 import { SessionLinkedNotesSection } from "./SessionLinkedNotesSection.jsx";
 import { SessionOutputsSection } from "./SessionOutputsSection.jsx";
 import { useSessionDetailData } from "./useSessionDetailData.js";
@@ -139,8 +140,7 @@ function SessionDetailCard({
             <div className="mono">{session.session_id}</div>
             <div className="subtle">Project ID</div>
             <div className="mono">{session.project_id}</div>
-            <div className="subtle">Link code</div>
-            <div className="mono">{session.link_code}</div>
+            <SessionLinkCode linkCode={session.link_code} />
             <div className="subtle">Started</div>
             <div className="mono">{formatDate(session.started_at)}</div>
             <div className="subtle">Ended</div>

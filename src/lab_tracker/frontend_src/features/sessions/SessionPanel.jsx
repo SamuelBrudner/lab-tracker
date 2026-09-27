@@ -3,6 +3,7 @@ import * as React from "react";
 import { formatDate, sessionTypeClass } from "../../shared/formatters.js";
 import { AppLink } from "../../shared/routing.jsx";
 import { captureRoute } from "./SessionCaptureLinkSection.jsx";
+import { SessionLinkCode } from "./SessionLinkCode.jsx";
 
 const { useMemo } = React;
 
@@ -175,8 +176,7 @@ function SessionPanel({
                 ) : null}
 
                 <div className="stack">
-                  <div className="subtle">Link code</div>
-                  <div className="mono">{session.link_code}</div>
+                  <SessionLinkCode linkCode={session.link_code} />
                   <div className="subtle">Link endpoint</div>
                   <div className="mono">/sessions/by-link/{session.link_code}</div>
                 </div>

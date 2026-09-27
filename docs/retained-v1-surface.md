@@ -48,7 +48,19 @@ research record:
   (`labtracker.savefig` and `labtracker.uploadFigure`) as fail-soft
   staged-note workflows: Lab Tracker stores a bounded review image or pointer
   plus source URI and content-hash metadata, while full figure files remain in
-  the consumer repo.
+  the consumer repo. A Python save the server cannot receive is queued in the
+  checkout's watch outbox under the same capture id and delivered by the next
+  `lt outbox sync`. A figure is filed into the project named by the
+  `project_id` argument, then `LAB_TRACKER_PROJECT_ID`, then the saved file's
+  checkout binding (`lt_ids.json`), then the checkout's watch config, and only
+  then the client's or login profile's default. The opt-in
+  `lab_tracker_client.autotrack()` hook (installed into IPython by `lt setup
+  autotrack`, disabled by `LAB_TRACKER_AUTOTRACK=0`) captures matplotlib saves
+  to a path through that same fail-soft path, but only when the project comes
+  from the argument, the environment, or the checkout binding; any other save
+  is skipped and nothing is sent or queued, with a stderr notice that names
+  each unbound checkout root (or the save's directory outside a repository)
+  once per process.
 - Consumer-side watch-folder capture through the `lt watch` CLI as an
   offline-first adapter workflow: watched files and workflow-written manifests
   write durable local outbox records that later sync into staged evidence notes
@@ -58,7 +70,31 @@ research record:
   dataset ids declared for a watch (flags, watch entries, or manifests)
   become the staged note's targets, labelled
   `declared_target_source=explicit`, so a stale id fails the sync loudly
-  instead of landing as metadata only.
+  instead of landing as metadata only. A session the client can resolve on
+  its own (`--session` as a UUID or link code, an `LT-<code>` link code in
+  the watched folder or file name, or the checkout's `lt session use`
+  context, overridden by `LAB_TRACKER_SESSION_ID`) becomes that target the
+  same way; the checkout context is labelled `config_default` because it is a
+  bounded per-checkout default rather than a per-capture choice. A path
+  claims a session only through the explicit `LT-` prefix and a code in the
+  canonical form the server prints. The app shows and copies each session's
+  link code as `LT-<code>`, the form a folder or file name needs; the API
+  (`/sessions/by-link/{link_code}` and every session payload) keeps the bare
+  code. `lt session use` looks the session up on
+  the server, records its project, and fails loudly when the session does not
+  exist or the server cannot be reached; the checkout context then targets
+  only captures filed into that project, other captures keep the id as plain
+  metadata, and a context recorded without a project is ignored with a hint
+  to rerun `lt session use`. `LAB_TRACKER_SESSION_ID` stays an explicit
+  per-shell choice that is sent without a project check; when the server
+  refuses it as a live figure upload's session target (HTTP 422
+  `validation_error` "Target must belong to the same project." for a session
+  in another project, 404 `not_found` "Session does not exist." for one that
+  does not exist; other rejections with those codes are not retried), the
+  upload is retried exactly once without that target, keeping the id as
+  `capture_session_id` metadata; when that retry is accepted it prints one
+  stderr line saying the session is not in the capture's project, and later
+  saves in that process skip the target.
 - Consumer-side HPC analysis capture through the `lt hpc` CLI as an
   offline-first staged-note workflow: Slurm/HPC submit, begin, finish, and
   watch-folder manifest events write durable local outbox records that sync
@@ -198,17 +234,24 @@ research record:
   (`unplaced`), captures set aside as `archived_unreviewed`, drafts and
   clarification requests still waiting on a person, and a bounded last-seen
   listing per capture source (`evidence_source_provider`, `evidence_adapter`,
-  `capture_install_id`/`capture_host_label`) with no recency thresholds. Each
-  source also carries the release its newest capture was made with
-  (`capture_client_version`/`capture_client_revision`), its `release_status`
-  against the report's `server_release`, whether an update is recommended
-  (`update_recommended`: an older `MAJOR.MINOR`), the folder a watch source
-  captures from, and an `update_notice` on each source for which an update is
-  recommended and that captured within the last 90 days. The same
-  summary rides on the graph overview and the decision-context packet, and
-  the portfolio summary flags `unreviewed_captures` once a named threshold is
-  reached. Coverage is derived from existing records; nothing is stored,
-  ranked, or auto-reviewed.
+  `capture_install_id`/`capture_host_label`). Each listed source also carries
+  its capture health: how many notes it delivered in the last `recent_days`
+  (7), how many of its staged notes are still unreviewed, and a `quiet` flag
+  for a scheduled source (the `lt watch` family or `lt-hpc`) that captured
+  inside `quiet_window_days` (30) but not inside the recent window, so a
+  stalled scheduler, expired token, or moved folder is visible on the home
+  page's Capture health card instead of showing up as an emptier review
+  queue; `quiet_source_count` counts every quiet source, including any past
+  the listing bound. Human-paced sources (typed notes, figure saves, imports,
+  git snapshots) are never flagged, and a source silent for longer than the
+  quiet window is retired, not stalled. Phone and share-sheet captures carry
+  no adapter, so they are listed with typed notes and are not monitored.
+  Each source also carries its newest capture's client release (see the
+  client-update awareness below). The same summary rides on the graph
+  overview and the decision-context packet, and the portfolio summary flags
+  `unreviewed_captures` once a named threshold is reached. Coverage is
+  derived from existing records; nothing is stored, ranked, or
+  auto-reviewed.
 - Paired-device enrollment for phone capture, including one-time enrollment
   URLs, device-token capture, and revocation. Captures presented with a device
   token are stamped server-side with `capture_device_token_id` and
@@ -326,9 +369,28 @@ research record:
   analysis input, possibly across machines). Notes expose
   `evidence_content_hash` on reads, `GET /notes` accepts an exact
   `evidence_content_hash` filter, and project graph search returns every
-  carrier of a hash with an `exact_hash` match reason. A person accepts or
-  rejects each proposal over `GET`/`PATCH /provenance-links`; only accepted
-  note-to-note links render as `prov:wasDerivedFrom` in PROV-O export.
+  carrier of a hash with an `exact_hash` match reason. The same batch
+  execution runs a second, rule-based detector: when a staged note's own
+  capture metadata names a session (`watch_session_id`, `capture_session_id`)
+  or a git commit (`run_git_commit`, `repo_git_commit`, `hpc_git_commit`,
+  `git_commit`) that resolves to exactly one session or committed analysis
+  `code_version` in the project, it proposes a `was_derived_from` link from
+  the note to that entity with `basis: exact_id_match` and no content hash.
+  Ambiguous commit prefixes, prefixes shorter than seven characters, staged
+  analyses, and targets the note already carries propose nothing, and a pair
+  declined once is never re-proposed. The session rule skips a note whose
+  client declared its targets (`declared_target_source` set) only while the
+  note carries a session target, because that session was decided at
+  capture. A declared note with no session target (a watch note that
+  declared only a question or dataset after its unverified active session
+  was dropped, or one whose declared session a person detached) still gets
+  the session its metadata names proposed for review, and declining that
+  proposal keeps it from coming back. Every git-commit match is proposed
+  either way. Both detectors feed the same `PROPOSED`
+  rows and the same review surface; the model never sees them. A person
+  accepts or rejects each proposal over `GET`/`PATCH /provenance-links`;
+  only accepted note-to-note links render as `prov:wasDerivedFrom` in PROV-O
+  export.
   Nothing is auto-committed and there is no machine-driven create path — the
   detector only writes proposals into the existing review gate.
 - Bounded recent analysis retrieval through `GET /analyses?recent_first=true`,
@@ -433,11 +495,18 @@ research record:
   client's release with the server's; stdio `lt-mcp` prefixes its MCP
   instructions and adds `_lab_tracker_update_notice` to every tool result when
   an update is recommended; and captures record the capturing client's
-  release, so the coverage read's `capture_sources` carry each source's
-  `release_status` and an `update_notice`, and the Daily review page lists
-  each source whose client environment needs an update (a watch source by the
-  folder it watches), with the fix for that environment: the tool install plus
-  `lt update`, or an analysis repo's pinned `uv add` dependency. Only a newer
+  release. Each coverage `capture_sources` row carries its newest capture's
+  `capture_client_version`/`capture_client_revision`, its `release_status`
+  against the report's `server_release`, `update_recommended`, the
+  `watched_folder` of a watch source, and a per-source `update_notice` when
+  an update is recommended and the source captured within
+  `quiet_window_days`. The Daily review page lists each source whose client
+  environment needs an update (a watch source by the folder it watches),
+  with the fix for that environment: the tool install plus `lt update`, or
+  an analysis repo's pinned `uv add` dependency; the home page's Capture
+  health card marks every source whose client is behind with a "client
+  behind" pill that carries the notice when there is one. A capture queued
+  offline and drained later carries the release that queued it. Only a newer
   server `MAJOR.MINOR` produces a notice ([versioning.md](versioning.md)); a
   PATCH-only gap and revision drift within a release are reported, never
   suggested. None of these checks blocks capture, a session, or MCP startup.

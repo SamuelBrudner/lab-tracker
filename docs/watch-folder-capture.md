@@ -132,6 +132,63 @@ targets and labelled `declared_target_source=explicit`; `lt watch` has no
 default question, so every declared id is a per-capture choice. A stale id
 fails the sync loudly instead of landing as metadata only.
 
+## Sessions From Folder Names
+
+A capture that already names its session needs no linking in review. The
+watcher attaches a session to a file in three ways, in this order:
+
+1. `lt watch add --session <uuid-or-link-code>` on the watch entry.
+2. An `LT-`-prefixed session link code in the watched root's name or in the
+   file's path under it. The app shows and copies each session's link code as
+   `LT-<code>` (the code itself is 26 characters), so naming an acquisition
+   folder `session001_LT-<code>` claims everything saved inside it. Only the
+   `LT-` form counts, and only a code exactly as the server prints it: any 26
+   letters decode to some id, so
+   an unprefixed long folder name never claims a session.
+3. The checkout's active session, set with `lt session use <uuid-or-link-code>`
+   (or the `LAB_TRACKER_SESSION_ID` environment variable). `lt session use`
+   looks the session up on the server and records its project; it fails
+   (exit status 1) when the session does not exist or the server cannot be
+   reached, so a typo is never recorded. The checkout session targets only
+   captures filed into that project; any other capture keeps the id as plain
+   metadata (`watch_session_id` or `capture_session_id`). A context written
+   by an older client without its project targets nothing and prints a hint
+   to rerun `lt session use`. It expires after twelve hours by default
+   (`--hours`), so a stale session never keeps claiming next week's
+   captures. `lt session status` shows it and `lt session clear` ends it
+   early.
+
+The resolved session becomes a note target on the staged note, and the
+`watch_session_source` metadata (`config`, `path`, or `active`) says which
+rule matched. The first two rules are per-capture choices and keep
+`declared_target_source=explicit`; a session taken from the checkout context
+is labelled `config_default`, the same weaker label a tool-wide default
+question gets, so a reviewer can tell a named folder from a lingering
+context. Figure saves made from the same checkout carry the active session
+the same way.
+
+## Offline Figure Queue
+
+Figure saves that cannot reach the server (`lab_tracker_client.savefig`,
+`capture_figures`, or the autotrack hook) are queued into this same watch
+outbox instead of being dropped, under the same capture id and project a live
+save would use, and drain with the next `lt watch run`, `lt watch sync`, or `lt outbox
+sync` (see [repo-report-capture.md](repo-report-capture.md) for the
+all-adapter drain). Set `LAB_TRACKER_CAPTURE_OUTBOX=0` to disable the queue.
+
+A figure save goes to the project named by, in order: the `project_id`
+argument, `LAB_TRACKER_PROJECT_ID`, the saved file's checkout binding
+(`lt_ids.json`), the checkout's watch config, and only then the client's or
+login profile's default project. The autotrack hook fires in every directory,
+so it captures only when the project comes from one of the first three; any
+other save is skipped, and nothing is sent or queued. A stderr notice names
+each unbound checkout root (or, outside a repository, the save's directory)
+once per process.
+`lt setup schedule --request-draft` adds `--request-draft` to the scheduled
+run so newly synced captures also ask for a graph draft; on macOS the
+schedule is a launchd agent under `~/Library/LaunchAgents`, Windows uses Task
+Scheduler, and other systems a managed crontab line.
+
 ## Configured Watches
 
 You can edit `.lab-tracker/watch.json` to scan repeatable roots:

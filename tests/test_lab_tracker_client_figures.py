@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from hashlib import sha256
 from pathlib import Path
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -10,6 +11,7 @@ import pytest
 import lab_tracker_client.figure as figure_module
 from lab_tracker_client import (
     LabTracker,
+    LTError,
     LTValidationError,
     capture,
     capture_figures,
@@ -51,6 +53,10 @@ def reset_figure_capture_state(
 ) -> None:
     _reset_figure_capture_state_for_tests()
     monkeypatch.setenv("LAB_TRACKER_CONFIG_DIR", str(tmp_path / "lt-config"))
+    # Offline captures queue into the checkout's watch outbox; keep that out of
+    # the repository the tests run from.
+    monkeypatch.setenv("LAB_TRACKER_WATCH_OUTBOX", str(tmp_path / "outbox"))
+    monkeypatch.delenv("LAB_TRACKER_SESSION_ID", raising=False)
     for key in (
         "LAB_TRACKER_PROJECT_ID",
         "LAB_TRACKER_BASE_URL",
@@ -247,9 +253,15 @@ def test_savefig_is_fail_soft_and_circuit_breaker_short_circuits(tmp_path: Path)
         first = savefig(FakeFigure(b"one"), tmp_path / "one.png", client=lt)
         second = savefig(FakeFigure(b"two"), tmp_path / "two.png", client=lt)
 
-    assert first.action == "failed"
-    assert second.action == "skipped"
-    assert second.reason == "circuit_open"
+    # A server that never answers is an outage, not a lost figure: both saves
+    # are queued for a later sync, and the open breaker spares the second one
+    # a connection attempt.
+    assert first.action == "queued"
+    assert first.reason == "offline_queued"
+    assert first.errors
+    assert Path(first.queued_event).is_file()
+    assert second.action == "queued"
+    assert second.reason == "offline_queued"
     assert attempts == 1
 
 
@@ -267,7 +279,7 @@ def test_circuit_open_skips_env_client_construction(
     ) as lt:
         failed = savefig(FakeFigure(b"one"), tmp_path / "one.png", client=lt)
 
-    assert failed.action == "failed"
+    assert failed.action == "queued"
     monkeypatch.setenv("LAB_TRACKER_PROJECT_ID", "project-1")
     monkeypatch.setenv("LAB_TRACKER_BASE_URL", "http://testserver")
     monkeypatch.setenv("LAB_TRACKER_ACCESS_TOKEN", "token")
@@ -278,8 +290,14 @@ def test_circuit_open_skips_env_client_construction(
 
     monkeypatch.setattr(figure_module, "LabTracker", ForbiddenAutoClient)
 
-    skipped = savefig(FakeFigure(b"two"), tmp_path / "two.png")
+    queued = savefig(FakeFigure(b"two"), tmp_path / "two.png")
 
+    # Still no client construction; the env project is enough to queue.
+    assert queued.action == "queued"
+    assert queued.reason == "offline_queued"
+
+    monkeypatch.setenv("LAB_TRACKER_CAPTURE_OUTBOX", "0")
+    skipped = savefig(FakeFigure(b"three"), tmp_path / "three.png")
     assert skipped.action == "skipped"
     assert skipped.reason == "circuit_open"
 
@@ -315,7 +333,7 @@ def test_breaker_is_per_endpoint_and_does_not_skip_a_healthy_endpoint(
         transport=httpx.MockTransport(connect_handler),
     ) as lt_a:
         failed = savefig(FakeFigure(b"a"), tmp_path / "a.png", client=lt_a)
-    assert failed.action == "failed"
+    assert failed.action == "queued"
 
     healthy_hits = 0
 
@@ -349,8 +367,8 @@ def test_breaker_recovers_after_cooldown_with_half_open_probe(tmp_path: Path) ->
     ) as lt:
         first = savefig(FakeFigure(b"one"), tmp_path / "one.png", client=lt)
         second = savefig(FakeFigure(b"two"), tmp_path / "two.png", client=lt)
-    assert first.action == "failed"
-    assert second.action == "skipped" and second.reason == "circuit_open"
+    assert first.action == "queued"
+    assert second.action == "queued" and second.reason == "offline_queued"
 
     # Simulate the cooldown elapsing without touching the global clock.
     for state in figure_module._BREAKERS.values():
@@ -481,8 +499,10 @@ def test_coalesced_metadata_patch_transport_failure_opens_circuit(tmp_path: Path
     assert first.action == "coalesced"
     assert first.reason == "metadata_patch_failed"
     assert first.stale_review_bytes is True
-    assert second.action == "skipped"
-    assert second.reason == "circuit_open"
+    # The failed metadata patch opened the breaker; the next save is queued
+    # rather than attempted (or lost).
+    assert second.action == "queued"
+    assert second.reason == "offline_queued"
     assert posts == 1
 
 
@@ -848,3 +868,478 @@ def test_distinct_capture_failures_each_reach_stderr_once(
     # A later failure with a different cause is not hidden behind the first
     # warning; an identical repeat is not re-printed.
     assert stderr.count("second failure cause") == 1
+
+
+def test_offline_capture_queues_an_event_that_later_syncs_with_its_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A save while the server is down lands in the watch outbox and drains
+    later through the ordinary sync, with the same capture id, the figure
+    metadata, and the active session as a note target."""
+
+    from lab_tracker_client.session_context import encode_session_link_code
+    from lab_tracker_client.watch import WatchConfig, read_event, sync_outbox
+
+    session_id = "3d4f6a1e-9c2b-4a8e-8f01-2b3c4d5e6f70"
+    monkeypatch.setenv("LAB_TRACKER_SESSION_ID", encode_session_link_code(session_id))
+    monkeypatch.chdir(tmp_path)
+    figure_path = tmp_path / "figs" / "trace.png"
+    figure_path.parent.mkdir()
+
+    def connect_handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("offline", request=request)
+
+    with LabTracker(
+        base_url="http://testserver",
+        default_project_id="project-1",
+        transport=httpx.MockTransport(connect_handler),
+    ) as lt:
+        queued = savefig(FakeFigure(b"trace"), figure_path, client=lt)
+
+    assert queued.action == "queued"
+    event_path = Path(queued.queued_event)
+    assert event_path.parent == (tmp_path / "outbox").resolve()
+    event = read_event(event_path)
+    assert event["capture_kind"] == "figure"
+    assert event["adapter"] == "lab-tracker-client-figure"
+    assert event["source"]["provider"] == "local-figure"
+    assert event["source"]["external_id"] == queued.client_capture_id
+    assert event["context"] == {
+        "project_id": "project-1",
+        "question_id": None,
+        "dataset_ids": [],
+        "tags": [],
+        "session_id": session_id,
+    }
+    assert event["payload"]["client_capture_id"] == queued.client_capture_id
+    assert event["payload"]["metadata"]["figure_full_size_bytes"] == len(b"trace")
+    assert event["payload"]["metadata"]["capture_session_id"] == session_id
+    assert not any(key.startswith("evidence_") for key in event["payload"]["metadata"])
+
+    uploads: list[dict[str, str]] = []
+
+    def sync_handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/notes":
+            return _json_response(
+                200, {"data": [], "meta": {"limit": 200, "offset": 0, "total": 0}}
+            )
+        if request.method == "POST" and request.url.path == "/notes/upload-file":
+            body = request.content
+            uploads.append(
+                {
+                    "client_capture_id": _multipart_field(body, "client_capture_id"),
+                    "targets": _multipart_field(body, "targets"),
+                    "metadata": _multipart_field(body, "metadata"),
+                }
+            )
+            assert b"trace" in body
+            return _json_response(201, {"data": {"note_id": "note-figure"}})
+        return _json_response(500, {"error": {"message": "unexpected"}})
+
+    config = WatchConfig(project_id="project-1", config_path=tmp_path / ".lab-tracker" / "w.json")
+    transport = httpx.MockTransport(sync_handler)
+    with LabTracker(base_url="http://testserver", transport=transport) as lt:
+        summary = sync_outbox(lt, config)
+
+    assert summary["errors"] == []
+    assert summary["results"][0]["note_id"] == "note-figure"
+    assert uploads[0]["client_capture_id"] == queued.client_capture_id
+    assert json.loads(uploads[0]["targets"]) == [
+        {"entity_type": "session", "entity_id": session_id}
+    ]
+    metadata = json.loads(uploads[0]["metadata"])
+    assert metadata["evidence_source_provider"] == "local-figure"
+    assert metadata["evidence_source_external_id"] == queued.client_capture_id
+    assert metadata["evidence_source_observed_at"] == event["observed_at"]
+    assert metadata["figure_full_size_bytes"] == len(b"trace")
+    assert metadata["watch_session_id"] == session_id
+    assert metadata["watch_session_source"] == "active"
+    # An active-session target is a bounded default, labelled like one.
+    assert metadata["declared_target_source"] == "config_default"
+    assert metadata["capture_session_source"] == "env"
+
+
+
+def test_transport_failure_with_capture_outbox_disabled_fails_loudly_without_queueing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """With the queue switched off, an unreachable server is a visible
+    failure: nothing is written and the scientist is told on stderr."""
+
+    monkeypatch.setenv("LAB_TRACKER_CAPTURE_OUTBOX", "0")
+
+    def connect_handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("offline", request=request)
+
+    with LabTracker(
+        base_url="http://testserver",
+        default_project_id="project-1",
+        transport=httpx.MockTransport(connect_handler),
+    ) as lt:
+        result = savefig(FakeFigure(b"one"), tmp_path / "one.png", client=lt)
+
+    assert result.action == "failed"
+    assert result.reason == "capture_failed"
+    assert result.queued_event == ""
+    assert "Lab Tracker figure capture failed" in capsys.readouterr().err
+    assert not (tmp_path / "outbox").exists()
+
+
+def test_queued_capture_without_an_explicit_project_drains_from_the_checkout_outbox(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """No project argument and no outbox override: the save queues into the
+    checkout's own outbox under its bound project, and `lt outbox sync`
+    delivers it there."""
+
+    import subprocess
+
+    from lab_tracker_client import cli as lt_cli
+    from lab_tracker_client.watch import read_event
+
+    monkeypatch.delenv("LAB_TRACKER_WATCH_OUTBOX", raising=False)
+    repo = tmp_path / "analysis"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)  # noqa: S603, S607
+    (repo / "lt_ids.json").write_text(json.dumps({"project_id": "project-bound"}))
+    monkeypatch.chdir(repo)
+
+    def connect_handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("offline", request=request)
+
+    with LabTracker(
+        base_url="http://testserver", transport=httpx.MockTransport(connect_handler)
+    ) as lt:
+        queued = savefig(FakeFigure(b"trace"), repo / "trace.png", client=lt)
+
+    assert queued.action == "queued"
+    event_path = Path(queued.queued_event)
+    assert event_path.parent == repo.resolve() / ".lab-tracker" / "outbox" / "watch"
+    assert read_event(event_path)["context"]["project_id"] == "project-bound"
+
+    uploaded_to: list[str] = []
+
+    def sync_handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/notes":
+            return _json_response(
+                200, {"data": [], "meta": {"limit": 200, "offset": 0, "total": 0}}
+            )
+        if request.method == "POST" and request.url.path == "/notes/upload-file":
+            uploaded_to.append(_multipart_field(request.content, "project_id"))
+            return _json_response(201, {"data": {"note_id": "note-drained"}})
+        return _json_response(500, {"error": {"message": "unexpected"}})
+
+    class _FromEnv:
+        @staticmethod
+        def from_env(**_kwargs: object) -> LabTracker:
+            return LabTracker(
+                base_url="http://testserver", transport=httpx.MockTransport(sync_handler)
+            )
+
+    monkeypatch.setattr(lt_cli, "LabTracker", _FromEnv)
+    capsys.readouterr()
+    lt_cli.main(["outbox", "sync", "--repo", str(repo)])
+
+    assert uploaded_to == ["project-bound"]
+    assert read_event(event_path)["sync"]["status"] == "synced"
+
+
+class _SessionServer:
+    def __init__(self, project_id: str) -> None:
+        self.project_id = project_id
+
+    def get_session(self, session_id: str) -> dict[str, str]:
+        return {"session_id": session_id, "project_id": self.project_id}
+
+
+@pytest.mark.parametrize(
+    ("session_project", "expect_target"),
+    [("project-1", True), ("project-other", False)],
+)
+def test_active_session_targets_a_figure_only_in_its_own_project(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    session_project: str,
+    expect_target: bool,
+) -> None:
+    from lab_tracker_client.session_context import set_active_session
+
+    session_id = "3d4f6a1e-9c2b-4a8e-8f01-2b3c4d5e6f70"
+    monkeypatch.setenv("LAB_TRACKER_SESSION_CONTEXT", str(tmp_path / "session.json"))
+    set_active_session(session_id, client=_SessionServer(session_project))
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = request.content
+        seen["has_targets"] = b'name="targets"' in body
+        seen["metadata"] = json.loads(_multipart_field(body, "metadata"))
+        return _json_response(201, {"data": {"note_id": "note-1", "metadata": {}}})
+
+    with LabTracker(
+        base_url="http://testserver",
+        default_project_id="project-1",
+        transport=httpx.MockTransport(handler),
+    ) as lt:
+        result = savefig(FakeFigure(), tmp_path / "plot.png", client=lt)
+
+    assert result.action == "imported"
+    metadata = seen["metadata"]
+    assert isinstance(metadata, dict)
+    # The session id always stays on the capture as plain metadata.
+    assert metadata["capture_session_id"] == session_id
+    assert seen["has_targets"] is expect_target
+    if expect_target:
+        assert metadata["declared_target_source"] == "config_default"
+    else:
+        assert "declared_target_source" not in metadata
+
+
+_ENV_SESSION_ID = "3d4f6a1e-9c2b-4a8e-8f01-2b3c4d5e6f70"
+# How the server refuses a declared session target (see note_service.validate_target):
+# a session in another project, and a session that does not exist.
+_SESSION_TARGET_REJECTIONS = [
+    (422, "validation_error", "Target must belong to the same project."),
+    (404, "not_found", "Session does not exist."),
+]
+_SESSION_DROPPED_LINE = "keep it as plain metadata, not as a session target"
+# What the notice says about each refusal: a session in another project is
+# not "missing", and a missing session is not "in another project".
+_SESSION_REFUSAL_WORDING = {
+    "validation_error": "is not in the capture's project",
+    "not_found": "does not exist on the server",
+}
+
+
+class _SessionRejectingServer:
+    """Refuses any upload that declares a session target; accepts the rest."""
+
+    def __init__(self, status_code: int, code: str, message: str) -> None:
+        self.rejection = _json_response(status_code, {"error": {"code": code, "message": message}})
+        self.uploads: list[dict[str, object]] = []
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        body = request.content
+        targets_field = b'name="targets"' in body
+        self.uploads.append(
+            {
+                "targets": json.loads(_multipart_field(body, "targets")) if targets_field else [],
+                "metadata": json.loads(_multipart_field(body, "metadata")),
+            }
+        )
+        if targets_field:
+            return self.rejection
+        return _json_response(201, {"data": {"note_id": f"note-{len(self.uploads)}"}})
+
+
+@pytest.mark.parametrize(("status_code", "code", "message"), _SESSION_TARGET_REJECTIONS)
+def test_env_session_outside_the_project_is_retried_once_without_its_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    status_code: int,
+    code: str,
+    message: str,
+) -> None:
+    """LAB_TRACKER_SESSION_ID stays an explicit per-shell choice, but a live
+    save must not fail because the server refused that session: retry once
+    without it, keep the id as metadata, and say why once."""
+
+    monkeypatch.setenv("LAB_TRACKER_SESSION_ID", _ENV_SESSION_ID)
+    server = _SessionRejectingServer(status_code, code, message)
+    with LabTracker(
+        base_url="http://testserver",
+        default_project_id="project-1",
+        transport=httpx.MockTransport(server.handler),
+    ) as lt:
+        first = savefig(FakeFigure(b"one"), tmp_path / "one.png", client=lt)
+        second = savefig(FakeFigure(b"two"), tmp_path / "two.png", client=lt)
+
+    assert (first.action, second.action) == ("imported", "imported")
+    rejected, retried, later = server.uploads
+    assert rejected["targets"] == [{"entity_type": "session", "entity_id": _ENV_SESSION_ID}]
+    for upload in (retried, later):
+        assert upload["targets"] == []
+        metadata = upload["metadata"]
+        assert isinstance(metadata, dict)
+        assert metadata["capture_session_id"] == _ENV_SESSION_ID
+        assert "declared_target_source" not in metadata
+    assert "declared_target_source" not in first.metadata
+    err_lines = capsys.readouterr().err.splitlines()
+    notices = [line for line in err_lines if _SESSION_DROPPED_LINE in line]
+    assert len(notices) == 1
+    assert _ENV_SESSION_ID in notices[0]
+    assert "project-1" in notices[0]
+    assert _SESSION_REFUSAL_WORDING[code] in notices[0]
+    other_wording = {wording for key, wording in _SESSION_REFUSAL_WORDING.items() if key != code}
+    assert not any(wording in notices[0] for wording in other_wording)
+
+
+def test_a_session_refusal_that_persists_without_the_session_is_not_blamed_on_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The one retry happens, but the session is blamed only if it succeeds."""
+
+    monkeypatch.setenv("LAB_TRACKER_SESSION_ID", _ENV_SESSION_ID)
+    requests: list[bool] = []
+    status_code, code, message = _SESSION_TARGET_REJECTIONS[0]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(b'name="targets"' in request.content)
+        return _json_response(status_code, {"error": {"code": code, "message": message}})
+
+    with LabTracker(
+        base_url="http://testserver",
+        default_project_id="project-1",
+        transport=httpx.MockTransport(handler),
+    ) as lt:
+        result = savefig(FakeFigure(), tmp_path / "plot.png", client=lt)
+
+    assert result.action == "failed"
+    assert requests == [True, False]
+    assert _SESSION_DROPPED_LINE not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("status_code", "code", "message"),
+    [
+        (404, "not_found", "Project does not exist."),
+        (422, "validation_error", "Metadata values must be scalars."),
+        (422, "validation_error", "Target must belong to the same project"),
+        (404, "not_found", "Session does not exist"),
+    ],
+)
+def test_a_rejection_sharing_a_session_refusal_code_is_not_retried(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    status_code: int,
+    code: str,
+    message: str,
+) -> None:
+    """A 404 or 422 for another reason (a gone project, bad metadata) is not a
+    session refusal, so the upload that declared a session is sent once."""
+
+    monkeypatch.setenv("LAB_TRACKER_SESSION_ID", _ENV_SESSION_ID)
+    requests: list[bool] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(b'name="targets"' in request.content)
+        return _json_response(status_code, {"error": {"code": code, "message": message}})
+
+    with LabTracker(
+        base_url="http://testserver",
+        default_project_id="project-1",
+        transport=httpx.MockTransport(handler),
+    ) as lt:
+        result = savefig(FakeFigure(), tmp_path / "plot.png", client=lt)
+
+    assert result.action == "failed"
+    assert requests == [True]
+    assert _SESSION_DROPPED_LINE not in capsys.readouterr().err
+
+
+def test_an_error_envelope_keeps_its_status_code_and_message_on_the_exception() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _json_response(
+            404, {"error": {"code": "not_found", "message": "Project does not exist."}}
+        )
+
+    with (
+        LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler)) as lt,
+        pytest.raises(LTError) as excinfo,
+    ):
+        lt.commit_note("note-1")
+
+    error = excinfo.value
+    assert (error.status_code, error.error_code, error.error_message) == (
+        404,
+        "not_found",
+        "Project does not exist.",
+    )
+
+
+def test_an_error_without_an_envelope_message_carries_none() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(502, text="Bad gateway")
+
+    with (
+        LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler)) as lt,
+        pytest.raises(LTError) as excinfo,
+    ):
+        lt.commit_note("note-1")
+
+    assert excinfo.value.status_code == 502
+    assert excinfo.value.error_message is None
+
+
+@pytest.mark.parametrize(
+    ("status_code", "code"),
+    [(403, "forbidden"), (409, "conflict"), (422, "validation_error")],
+)
+def test_other_rejections_are_never_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status_code: int, code: str
+) -> None:
+    """Only a session-target rejection of an upload that declared a session
+    is retried; without LAB_TRACKER_SESSION_ID even a session refusal is not."""
+
+    if code != "validation_error":
+        monkeypatch.setenv("LAB_TRACKER_SESSION_ID", _ENV_SESSION_ID)
+    requests: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(1)
+        message = _SESSION_TARGET_REJECTIONS[0][2] if code == "validation_error" else "No."
+        return _json_response(status_code, {"error": {"code": code, "message": message}})
+
+    with LabTracker(
+        base_url="http://testserver",
+        default_project_id="project-1",
+        transport=httpx.MockTransport(handler),
+    ) as lt:
+        result = savefig(FakeFigure(), tmp_path / "plot.png", client=lt)
+
+    assert result.action == "failed"
+    assert requests == [1]
+
+
+def test_the_server_refuses_a_foreign_or_missing_session_target_as_the_client_expects(
+    client, admin_auth_headers: dict[str, str]
+) -> None:
+    """Pins the rejections the figure fallback keys on to the real API."""
+
+    def project() -> str:
+        response = client.post(
+            "/projects", json={"name": f"Figures {uuid4().hex[:6]}"}, headers=admin_auth_headers
+        )
+        assert response.status_code == 201, response.text
+        return response.json()["data"]["project_id"]
+
+    capture_project, other_project = project(), project()
+    session = client.post(
+        "/sessions",
+        json={"project_id": other_project, "session_type": "operational"},
+        headers=admin_auth_headers,
+    )
+    assert session.status_code == 201, session.text
+    refusals = set()
+    for session_id in (session.json()["data"]["session_id"], str(uuid4())):
+        response = client.post(
+            "/notes/upload-file",
+            data={
+                "project_id": capture_project,
+                "status": "staged",
+                "targets": json.dumps([{"entity_type": "session", "entity_id": session_id}]),
+            },
+            files={"file": ("plot.png", b"png-bytes", "image/png")},
+            headers=admin_auth_headers,
+        )
+        error = response.json()["error"]
+        refusals.add((response.status_code, error["code"], error["message"]))
+
+    assert refusals == figure_module.SESSION_TARGET_REJECTIONS
+    assert refusals == set(_SESSION_TARGET_REJECTIONS)

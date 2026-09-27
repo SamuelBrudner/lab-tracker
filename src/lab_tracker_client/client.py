@@ -14,7 +14,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, TypeVar
 
 import httpx
 
@@ -217,7 +217,17 @@ def _installed_client_release() -> ReleaseIdentity:
 
 
 class LTError(RuntimeError):
-    """Base exception for Lab Tracker client failures."""
+    """Base exception for Lab Tracker client failures.
+
+    ``status_code``, ``error_code`` and ``error_message`` are set when the
+    server answered with an error envelope, and stay ``None`` for failures
+    raised on the client (``error_message`` also stays ``None`` when the
+    envelope carried no message).
+    """
+
+    status_code: int | None = None
+    error_code: str | None = None
+    error_message: str | None = None
 
 
 class LTAPIError(LTError):
@@ -616,6 +626,13 @@ class LabTracker:
             },
             limit=limit,
             offset=offset,
+        )
+
+    def get_session(self, session_id: str) -> LTRecord:
+        return self._data_record(
+            self._request(
+                "GET", f"/sessions/{_require_non_empty(str(session_id), 'session_id')}"
+            )
         )
 
     def list_sessions(
@@ -1403,13 +1420,13 @@ class LabTracker:
             data=data,
         )
         if response.status_code == 422:
-            raise LTValidationError(_response_error(response))
+            raise _response_exception(LTValidationError, response)
         if response.status_code == 409:
-            raise LTConflictError(_response_error(response))
+            raise _response_exception(LTConflictError, response)
         if response.status_code == 403:
-            raise LTPermissionDeniedError(_response_error(response))
+            raise _response_exception(LTPermissionDeniedError, response)
         if response.status_code >= 400:
-            raise LTAPIError(_response_error(response))
+            raise _response_exception(LTAPIError, response)
         return self._data_record(_response_json(response))
 
     def _upload_note_file_payload(
@@ -1554,6 +1571,8 @@ class LabTracker:
         dry_run: bool = False,
         evidence_note_index: EvidenceNoteIndex | None = None,
         targets: Sequence[EntityRef | Mapping[str, Any] | tuple[str, str] | str] = (),
+        observed_at: str | datetime | None = None,
+        client_capture_id: str | None = None,
     ) -> EvidenceImportResult:
         path = Path(file_path).expanduser().resolve()
         if not path.is_file():
@@ -1578,6 +1597,7 @@ class LabTracker:
             capture_kind="file",
             adapter=adapter,
             title=title or path.name,
+            observed_at=observed_at,
             metadata=metadata,
         )
         evidence_key = (
@@ -1622,6 +1642,7 @@ class LabTracker:
             metadata=evidence_metadata,
             status=status,
             content_type=content_type,
+            client_capture_id=client_capture_id,
             targets=targets,
         )
         if evidence_note_index is not None:
@@ -1764,18 +1785,18 @@ class LabTracker:
             timeout=timeout,
         )
         if response.status_code == 422:
-            raise LTValidationError(_response_error(response))
+            raise _response_exception(LTValidationError, response)
         if response.status_code == 409:
-            raise LTConflictError(_response_error(response))
+            raise _response_exception(LTConflictError, response)
         if (
             response.status_code == 403
-            and _response_error_code(response) == _STORE_AUTHORITY_DENIED_ERROR_CODE
+            and _response_error_field(response, "code") == _STORE_AUTHORITY_DENIED_ERROR_CODE
         ):
-            raise LTStoreAuthorityDeniedError(_response_error(response))
+            raise _response_exception(LTStoreAuthorityDeniedError, response)
         if response.status_code == 403:
-            raise LTPermissionDeniedError(_response_error(response))
+            raise _response_exception(LTPermissionDeniedError, response)
         if response.status_code >= 400:
-            raise LTAPIError(_response_error(response))
+            raise _response_exception(LTAPIError, response)
         return _response_json(response), response.status_code
 
     def _has_login_credentials(self) -> bool:
@@ -1799,11 +1820,11 @@ class LabTracker:
             json={"username": username, "password": password},
         )
         if response.status_code == 422:
-            raise LTValidationError(_response_error(response))
+            raise _response_exception(LTValidationError, response)
         if response.status_code == 409:
-            raise LTConflictError(_response_error(response))
+            raise _response_exception(LTConflictError, response)
         if response.status_code >= 400:
-            raise LTAPIError(_response_error(response))
+            raise _response_exception(LTAPIError, response)
         payload = _response_json(response)
         try:
             token = str(payload["data"]["access_token"])
@@ -2396,7 +2417,24 @@ def _response_error(response: httpx.Response) -> str:
     return f"Lab Tracker API returned HTTP {response.status_code}: {payload}"
 
 
-def _response_error_code(response: httpx.Response) -> str | None:
+_ResponseErrorT = TypeVar("_ResponseErrorT", bound=LTError)
+
+
+def _response_exception(
+    error_type: type[_ResponseErrorT], response: httpx.Response
+) -> _ResponseErrorT:
+    """The client exception for an error response, carrying its status and code."""
+
+    error = error_type(_response_error(response))
+    error.status_code = response.status_code
+    error.error_code = _response_error_field(response, "code")
+    error.error_message = _response_error_field(response, "message")
+    return error
+
+
+def _response_error_field(response: httpx.Response, field: str) -> str | None:
+    """A string field of the response's ``error`` envelope, when it has one."""
+
     try:
         payload = response.json()
     except ValueError:
@@ -2406,5 +2444,5 @@ def _response_error_code(response: httpx.Response) -> str | None:
     error = payload.get("error")
     if not isinstance(error, dict):
         return None
-    code = error.get("code")
-    return code if isinstance(code, str) else None
+    value = error.get(field)
+    return value if isinstance(value, str) else None

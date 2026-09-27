@@ -1640,6 +1640,7 @@ describe("GraphDraftDetailCard keyboard review", () => {
 
     const section = await screen.findByRole("region", { name: "Proposed provenance links" });
     expect(within(section).getByText("sha256:abc")).toBeInTheDocument();
+    expect(within(section).getByText(/shared content hash/)).toBeInTheDocument();
     fireEvent.click(within(section).getByRole("button", { name: "Accept" }));
 
     await waitFor(() => expect(linkBodies).toEqual([{ status: "accepted" }]));
@@ -1648,6 +1649,34 @@ describe("GraphDraftDetailCard keyboard review", () => {
         screen.queryByRole("region", { name: "Proposed provenance links" })
       ).not.toBeInTheDocument()
     );
+  });
+
+  it("labels an exact-id provenance proposal without a content hash", async () => {
+    const draft = draftFixture();
+    renderDraft(draft, {
+      routes: [
+        {
+          match: /^\/provenance-links\?/,
+          response: apiResponse([
+            {
+              basis: "exact_id_match",
+              content_hash: null,
+              link_id: "link-2",
+              project_id: "project-1",
+              relation: "was_derived_from",
+              source: { entity_id: "note-c", entity_type: "note" },
+              status: "proposed",
+              target: { entity_id: "session-1", entity_type: "session" },
+            },
+          ]),
+        },
+      ],
+    });
+
+    const section = await screen.findByRole("region", { name: "Proposed provenance links" });
+    expect(within(section).getByText(/exact id match/)).toBeInTheDocument();
+    expect(within(section).queryByText(/shared content hash/)).not.toBeInTheDocument();
+    expect(within(section).getByText("session session-1")).toBeInTheDocument();
   });
 
   it("gives claim statements and falsification criteria typed editors", async () => {

@@ -14,6 +14,7 @@ from lab_tracker_client.watch import (
     SINK_STAGED_NOTE,
     _event_metadata,
     _event_source_external_id,
+    checkout_root_for_outbox,
     event_from_manifest,
     init_config,
     outbox_status,
@@ -22,6 +23,12 @@ from lab_tracker_client.watch import (
     sync_outbox,
     sync_outbox_path,
 )
+
+
+def _scan_metadata(event: dict) -> dict:
+    """Note metadata for an event synced into the project it names."""
+
+    return _event_metadata(event, project_id=event["context"]["project_id"])
 
 
 def _json_response(status_code: int, payload: dict) -> httpx.Response:
@@ -67,7 +74,7 @@ def test_scan_records_capture_host_on_event_and_note_metadata(tmp_path, monkeypa
 
     assert event["host"]["capture_host_label"] == "rig-7"
     assert len(event["host"]["capture_install_id"]) == 32
-    note_metadata = _event_metadata(event)
+    note_metadata = _scan_metadata(event)
     assert note_metadata["capture_host_label"] == "rig-7"
     assert note_metadata["capture_install_id"] == event["host"]["capture_install_id"]
 
@@ -94,7 +101,7 @@ def test_scan_records_the_capturing_client_release(tmp_path, monkeypatch) -> Non
 
     scan_watch(config, mode="files", root=inbox)
     event = read_event(next(iter(config.outbox_path().glob("*.json"))))
-    note_metadata = _event_metadata(event)
+    note_metadata = _scan_metadata(event)
 
     assert note_metadata["capture_client_version"] == "0.3.0"
     assert note_metadata["capture_client_revision"] == "c" * 40
@@ -735,7 +742,7 @@ def test_event_metadata_omits_declared_target_source_without_context(
     event = read_event(next(iter(config.outbox_path().glob("*.json"))))
     uploads: list[bytes] = []
 
-    assert "declared_target_source" not in _event_metadata(event)
+    assert "declared_target_source" not in _scan_metadata(event)
 
     with LabTracker(
         base_url="http://testserver",
@@ -775,3 +782,298 @@ def test_sync_outbox_path_drains_an_outbox_without_a_config(tmp_path, monkeypatc
     assert summary["errors"] == []
     assert summary["results"][0]["note_id"] == "note-by-path"
     assert read_event(event_path)["sync"]["status"] == "synced"
+
+
+def test_sync_outbox_path_fills_the_project_from_the_checkout_lt_ids(
+    tmp_path, monkeypatch
+) -> None:
+    """`lt outbox sync` has no watch config in hand: the checkout is found from
+    the outbox location (the parent of its .lab-tracker) and lt_ids.json fills
+    an event queued before the project was bound."""
+
+    monkeypatch.delenv("LAB_TRACKER_WATCH_OUTBOX", raising=False)
+    monkeypatch.delenv("LAB_TRACKER_PROJECT_ID", raising=False)
+    monkeypatch.delenv("LAB_TRACKER_SESSION_ID", raising=False)
+    monkeypatch.chdir(tmp_path)
+    config = init_config()
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    (inbox / "early.md").write_text("queued before binding", encoding="utf-8")
+    scan_watch(config, mode="files", root=inbox)
+    outbox = config.outbox_path()
+    assert checkout_root_for_outbox(outbox) == tmp_path.resolve()
+    assert checkout_root_for_outbox(tmp_path / "elsewhere" / "outbox") is None
+    (tmp_path / "lt_ids.json").write_text(json.dumps({"project_id": "project-7"}), encoding="utf-8")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/notes":
+            assert request.url.params.get("project_id") == "project-7"
+            return _json_response(
+                200, {"data": [], "meta": {"limit": 200, "offset": 0, "total": 0}}
+            )
+        if request.method == "POST" and request.url.path == "/notes/upload-file":
+            assert b"project-7" in request.content
+            return _json_response(201, {"data": {"note_id": "note-bound-late"}})
+        return _json_response(500, {"error": {"message": "unexpected request"}})
+
+    with LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler)) as lt:
+        summary = sync_outbox_path(lt, outbox)
+
+    assert summary["errors"] == []
+    assert summary["results"][0]["note_id"] == "note-bound-late"
+
+
+def test_scan_attaches_session_from_link_code_in_path_and_sync_sends_target(
+    tmp_path, monkeypatch
+) -> None:
+    from lab_tracker_client.session_context import encode_session_link_code
+
+    monkeypatch.delenv("LAB_TRACKER_SESSION_ID", raising=False)
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1")
+    session_id = "3d4f6a1e-9c2b-4a8e-8f01-2b3c4d5e6f70"
+    code = encode_session_link_code(session_id)
+    inbox = tmp_path / "rig2"
+    session_dir = inbox / f"session001_LT-{code}"
+    session_dir.mkdir(parents=True)
+    (session_dir / "trace.md").write_text("bench note", encoding="utf-8")
+    (inbox / "loose.md").write_text("no session here", encoding="utf-8")
+
+    scan_watch(config, mode="files", root=inbox)
+    events = {read_event(path)["source"]["relative_path"]: read_event(path)
+              for path in config.outbox_path().glob("*.json")}
+    linked = events[f"session001_LT-{code}/trace.md"]
+    loose = events["loose.md"]
+    assert linked["context"]["session_id"] == session_id
+    assert linked["source"]["session_source"] == "path"
+    assert loose["context"]["session_id"] is None
+    assert "session_source" not in loose["source"]
+    assert _scan_metadata(linked)["watch_session_id"] == session_id
+    assert _scan_metadata(linked)["watch_session_source"] == "path"
+    # A folder named for the session is a per-capture choice.
+    assert _scan_metadata(linked)["declared_target_source"] == "explicit"
+    assert "declared_target_source" not in _scan_metadata(loose)
+
+    uploads: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/notes":
+            return _json_response(
+                200, {"data": [], "meta": {"limit": 200, "offset": 0, "total": 0}}
+            )
+        if request.method == "POST" and request.url.path == "/notes/upload-file":
+            body = request.content.decode("utf-8", errors="replace")
+            uploads.append({"has_targets": 'name="targets"' in body, "body": body})
+            return _json_response(201, {"data": {"note_id": f"note-{len(uploads)}"}})
+        return _json_response(500, {"error": {"message": "unexpected request"}})
+
+    with LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler)) as lt:
+        summary = sync_outbox(lt, config)
+
+    assert summary["errors"] == []
+    linked_upload = next(item for item in uploads if "bench note" in item["body"])
+    loose_upload = next(item for item in uploads if "no session here" in item["body"])
+    assert linked_upload["has_targets"] is True
+    assert f'"entity_id": "{session_id}"' in linked_upload["body"]
+    assert '"entity_type": "session"' in linked_upload["body"]
+    assert loose_upload["has_targets"] is False
+
+
+def test_scan_uses_the_checkout_active_session_when_the_path_names_none(
+    tmp_path, monkeypatch
+) -> None:
+    from lab_tracker_client.session_context import set_active_session
+
+    monkeypatch.delenv("LAB_TRACKER_SESSION_ID", raising=False)
+    monkeypatch.delenv("LAB_TRACKER_SESSION_CONTEXT", raising=False)
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1")
+    session_id = "3d4f6a1e-9c2b-4a8e-8f01-2b3c4d5e6f70"
+    set_active_session(session_id, client=_SessionServer("project-1"), start=tmp_path)
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    (inbox / "capture.md").write_text("bench note", encoding="utf-8")
+
+    scan_watch(config, mode="files", root=inbox)
+    event = read_event(next(config.outbox_path().glob("*.json")))
+    assert event["context"]["session_id"] == session_id
+    assert event["source"]["session_source"] == "active"
+    # The checkout context is a bounded default, not a per-capture choice.
+    assert _scan_metadata(event)["declared_target_source"] == "config_default"
+    assert _scan_metadata(event)["watch_session_source"] == "active"
+
+    # An explicit --session (here a link code) still wins over the checkout.
+    explicit = "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d"
+    from lab_tracker_client.session_context import encode_session_link_code
+
+    (inbox / "second.md").write_text("another", encoding="utf-8")
+    scan_watch(config, mode="files", root=inbox, session_id=encode_session_link_code(explicit))
+    events = [read_event(path) for path in config.outbox_path().glob("*.json")]
+    second = next(item for item in events if item["source"]["relative_path"] == "second.md")
+    assert second["context"]["session_id"] == explicit
+    assert second["source"]["session_source"] == "config"
+    assert _scan_metadata(second)["declared_target_source"] == "explicit"
+
+
+class _SessionServer:
+    """Answers the session lookup `lt session use` makes, for one project."""
+
+    def __init__(self, project_id: str) -> None:
+        self.project_id = project_id
+
+    def get_session(self, session_id: str) -> dict[str, str]:
+        return {"session_id": session_id, "project_id": self.project_id}
+
+
+def _session_uploads(config) -> list[str]:
+    """Sync the outbox and return each upload's targets field ('' when none)."""
+
+    targets: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/notes":
+            return _json_response(
+                200, {"data": [], "meta": {"limit": 200, "offset": 0, "total": 0}}
+            )
+        if request.method == "POST" and request.url.path == "/notes/upload-file":
+            body = request.content.decode("utf-8", errors="replace")
+            targets.append(body.split('name="targets"', 1)[1] if 'name="targets"' in body else "")
+            return _json_response(201, {"data": {"note_id": f"note-{len(targets)}"}})
+        return _json_response(500, {"error": {"message": "unexpected request"}})
+
+    with LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler)) as lt:
+        summary = sync_outbox(lt, config)
+    assert summary["errors"] == []
+    return targets
+
+
+def test_an_all_letter_26_character_folder_names_no_session(tmp_path, monkeypatch) -> None:
+    """Any 26 base32 letters decode to a UUID; without the LT- prefix such a
+    folder must neither override the active session nor claim a session."""
+
+    from lab_tracker_client.session_context import set_active_session
+
+    monkeypatch.delenv("LAB_TRACKER_SESSION_ID", raising=False)
+    monkeypatch.delenv("LAB_TRACKER_SESSION_CONTEXT", raising=False)
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1")
+    inbox = tmp_path / "rig2"
+    look_alike = inbox / "supplementaryinformationaq"
+    look_alike.mkdir(parents=True)
+    (look_alike / "x.md").write_text("look-alike folder", encoding="utf-8")
+
+    scan_watch(config, mode="files", root=inbox)
+    event = read_event(next(config.outbox_path().glob("*.json")))
+    assert event["context"]["session_id"] is None
+    assert "session_source" not in event["source"]
+    assert _session_uploads(config) == [""]
+
+    active_session = "3d4f6a1e-9c2b-4a8e-8f01-2b3c4d5e6f70"
+    set_active_session(active_session, client=_SessionServer("project-1"), start=tmp_path)
+    (look_alike / "y.md").write_text("with an active session", encoding="utf-8")
+    scan_watch(config, mode="files", root=inbox)
+    events = [read_event(path) for path in config.outbox_path().glob("*.json")]
+    second = next(item for item in events if item["source"]["relative_path"].endswith("y.md"))
+    assert second["context"]["session_id"] == active_session
+    assert second["source"]["session_source"] == "active"
+
+
+def test_active_session_from_another_project_stays_metadata_only(
+    tmp_path, monkeypatch
+) -> None:
+    from lab_tracker_client.session_context import set_active_session
+
+    monkeypatch.delenv("LAB_TRACKER_SESSION_ID", raising=False)
+    monkeypatch.delenv("LAB_TRACKER_SESSION_CONTEXT", raising=False)
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-b")
+    session_id = "3d4f6a1e-9c2b-4a8e-8f01-2b3c4d5e6f70"
+    set_active_session(session_id, client=_SessionServer("project-a"), start=tmp_path)
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    (inbox / "capture.md").write_text("bench note", encoding="utf-8")
+
+    scan_watch(config, mode="files", root=inbox)
+    event = read_event(next(config.outbox_path().glob("*.json")))
+    assert event["source"]["session_project_id"] == "project-a"
+    metadata = _event_metadata(event, project_id="project-b")
+    assert metadata["watch_session_id"] == session_id
+    assert "declared_target_source" not in metadata
+    assert _session_uploads(config) == [""]
+
+
+def test_active_session_without_a_recorded_project_is_unverified(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    from lab_tracker_client.session_context import (
+        _reset_session_hints_for_tests,
+        active_session_path,
+    )
+
+    _reset_session_hints_for_tests()
+    monkeypatch.delenv("LAB_TRACKER_SESSION_ID", raising=False)
+    monkeypatch.delenv("LAB_TRACKER_SESSION_CONTEXT", raising=False)
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1")
+    session_id = "3d4f6a1e-9c2b-4a8e-8f01-2b3c4d5e6f70"
+    legacy = active_session_path(tmp_path)
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text(json.dumps({"version": 1, "session_id": session_id}), encoding="utf-8")
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    (inbox / "capture.md").write_text("bench note", encoding="utf-8")
+
+    scan_watch(config, mode="files", root=inbox)
+
+    assert _session_uploads(config) == [""]
+    err = capsys.readouterr().err
+    assert err.count("recorded without its project") == 1
+    assert "lt session use" in err
+
+
+def test_sync_inherits_the_project_bound_after_the_scan(tmp_path, monkeypatch) -> None:
+    """An event queued before `lt project bind` must not stay stuck: the sync
+    fills the project from lt_ids.json (then the environment) instead of
+    failing forever on an empty project_id."""
+
+    monkeypatch.delenv("LAB_TRACKER_PROJECT_ID", raising=False)
+    monkeypatch.delenv("LAB_TRACKER_SESSION_ID", raising=False)
+    monkeypatch.chdir(tmp_path)
+    config = init_config()
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    (inbox / "early.md").write_text("queued before binding", encoding="utf-8")
+    scan_watch(config, mode="files", root=inbox)
+    event_path = next(config.outbox_path().glob("*.json"))
+    assert read_event(event_path)["context"]["project_id"] is None
+
+    def failing_handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"no request expected without a project: {request.url}")
+
+    transport = httpx.MockTransport(failing_handler)
+    with LabTracker(base_url="http://testserver", transport=transport) as lt:
+        unresolved = sync_outbox(lt, config)
+    assert unresolved["results"][0]["action"] == "failed"
+    assert "lt project bind" in unresolved["results"][0]["error"]
+
+    (tmp_path / "lt_ids.json").write_text(json.dumps({"project_id": "project-9"}), encoding="utf-8")
+    seen_projects: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/notes":
+            seen_projects.append(request.url.params.get("project_id", ""))
+            return _json_response(
+                200, {"data": [], "meta": {"limit": 200, "offset": 0, "total": 0}}
+            )
+        if request.method == "POST" and request.url.path == "/notes/upload-file":
+            assert b"project-9" in request.content
+            return _json_response(201, {"data": {"note_id": "note-late"}})
+        return _json_response(500, {"error": {"message": "unexpected request"}})
+
+    with LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler)) as lt:
+        summary = sync_outbox(lt, config)
+    assert summary["errors"] == []
+    assert summary["results"][0]["note_id"] == "note-late"
+    assert seen_projects == ["project-9"]
+
+

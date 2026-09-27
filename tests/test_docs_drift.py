@@ -247,3 +247,22 @@ def test_graph_draft_client_docstring_names_every_implementation() -> None:
     missing = [name for name in implementations if f"``{name}``" not in docstring]
     assert not missing, missing
     assert "tracked as separate beads" not in docstring
+
+
+_SESSION_LINK_CODE_COMPONENT = (
+    _REPO_ROOT / "src/lab_tracker/frontend_src/features/sessions/SessionLinkCode.jsx"
+)
+_APP_LINK_CODE_SENTENCE = "The app shows and copies each session's link code as `LT-<code>`"
+
+
+def _collapsed_whitespace(text: str) -> str:
+    return " ".join(text.split())
+
+
+def test_app_session_link_code_matches_the_prefix_the_watcher_claims() -> None:
+    from lab_tracker_client.session_context import LINK_CODE_PREFIX
+
+    component = _read(_SESSION_LINK_CODE_COMPONENT)
+    assert f'SESSION_LINK_CODE_PREFIX = "{LINK_CODE_PREFIX}"' in component
+    for doc in (_DOCS / "watch-folder-capture.md", _DOCS / "retained-v1-surface.md"):
+        assert _APP_LINK_CODE_SENTENCE in _collapsed_whitespace(_read(doc)), doc.name

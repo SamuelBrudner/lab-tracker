@@ -64,8 +64,9 @@ short, consent-gated sequence on the `lt` CLI.
    consent (`--save-token`). Commit and figure capture need the web
    app's least-privilege **Read + stage evidence** token; read-only
    tokens cannot sync captures.
-5. **Project Python dependency** — the Setup page supplies a pinned
-   `uv add` command for each analysis repository. Verify that `uv run
+5. **Project Python dependency** — once the server reports its full
+   source revision, the Setup page supplies a pinned `uv add` command
+   for each analysis repository. Verify that `uv run
    python` can import `lab_tracker_client` before relying on figure
    capture from that project environment.
 6. **Repo scaffolding** — `lt setup init --install-skills` writes the
@@ -81,12 +82,27 @@ short, consent-gated sequence on the `lt` CLI.
    registers a narrow results folder; broad roots such as `artifacts/`
    are usually skipped or narrowed to a run-specific subfolder. `lt
    watch scan` and `lt watch sync` capture and upload on demand or
-   from a scheduler.
-9. **Commit hooks** — `lt hooks install --project <project-id> --yes`
-   enrolls the current repository: each commit queues durable staged
-   evidence that syncs when the server is reachable. Repos are enrolled
-   one consented command at a time.
-10. **MCP launch verification** — after client registration, `lt setup
+   from a scheduler; `lt setup schedule --yes` registers `lt watch
+   run` (scan, watch sync, and the repo and HPC outbox drain) with the
+   OS scheduler, and `--request-draft` makes that run ask for AI
+   drafts too. A folder or file named with a session's `LT-<code>`
+   link code attaches its captures to that session; `lt session use
+   <code>` checks the session on the server and does the same for
+   every capture from the checkout into that session's project for
+   the next twelve hours.
+9. **Figure autotrack (optional)** — `lt setup autotrack --yes` adds an
+   IPython startup file so matplotlib figures saved from a notebook or
+   shell are captured without code changes (`--dry-run` previews,
+   `LAB_TRACKER_AUTOTRACK=0` disables). It captures only saves inside
+   a checkout bound with `lt project bind` (or with
+   `LAB_TRACKER_PROJECT_ID` set) and skips the rest with a notice.
+   Saves made while the server is unreachable queue in the checkout's
+   watch outbox and drain with the next sync.
+10. **Commit hooks** — `lt hooks install --project <project-id> --yes`
+    enrolls the current repository: each commit queues durable staged
+    evidence that syncs when the server is reachable. Repos are enrolled
+    one consented command at a time.
+11. **MCP launch verification** — after client registration, `lt setup
     verify-mcp --expected-revision <revision>` launches `lt-mcp` over
     stdio, initializes the protocol, calls health, and performs an
     authenticated project read through the saved profile.
@@ -123,4 +139,4 @@ repo; an analysis repo updates by rerunning its pinned `uv add`
 If Lab Tracker is unreachable and the user does not operate a server, point
 them at whoever runs their lab's instance instead of standing one up ad hoc.
 
-<!-- lab-tracker-setup-guide version=0.1.0 sha256=5b857bbcc3b0 -->
+<!-- lab-tracker-setup-guide version=0.1.0 sha256=671230086775 -->

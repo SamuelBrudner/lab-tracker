@@ -10,7 +10,7 @@ import stat
 import sys
 import time
 import uuid
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -22,15 +22,25 @@ import httpx
 
 from lab_tracker.instance_url import normalize_instance_base_url
 from lab_tracker.models import NoteMetadataScalar
+from lab_tracker_client.capture_project import (
+    CaptureProject,
+    capture_checkout_root,
+    resolve_capture_project,
+)
 from lab_tracker_client.client import (
+    DECLARED_TARGET_SOURCE_CONFIG_DEFAULT,
+    DECLARED_TARGET_SOURCE_KEY,
+    EntityRef,
     LabTracker,
     LTAPIError,
+    LTError,
     LTRecord,
     LTValidationError,
     _bytes_sha256,
     _validate_metadata,
     build_evidence_metadata,
     capture_host_metadata,
+    declared_targets,
     file_sha256,
     load_connection_profile,
 )
@@ -43,13 +53,27 @@ from lab_tracker_client.gitinfo import (
     sanitize_remote_url,
 )
 from lab_tracker_client.repo import normalize_remote
+from lab_tracker_client.session_context import (
+    _reset_session_hints_for_tests,
+    read_active_session,
+    session_target,
+)
 
 FIGURE_CAPTURE_TIMEOUT_SECONDS = 2.5
 FIGURE_CIRCUIT_COOLDOWN_SECONDS = 30.0
 FIGURE_PREVIEW_MAX_BYTES = 2_000_000
 FIGURE_UPLOAD_MAX_BYTES = 100 * 1024 * 1024
-_DEFAULT_IMAGE_PATTERNS = ("*.png", "*.jpg", "*.jpeg", "*.svg", "*.pdf", "*.tif", "*.tiff")
+# SVG is deliberately absent: the server rejects image/svg+xml uploads
+# (scriptable), so a default pattern for it would only produce failures.
+_DEFAULT_IMAGE_PATTERNS = ("*.png", "*.jpg", "*.jpeg", "*.pdf", "*.tif", "*.tiff")
+CAPTURE_OUTBOX_ENV = "LAB_TRACKER_CAPTURE_OUTBOX"
 _RUN_CONTEXT: ContextVar[RunContext | None] = ContextVar("lab_tracker_run_context", default=None)
+# True while an explicit capture helper (savefig, capture_figures) is doing the
+# save itself, so an installed autotrack hook does not capture the same file
+# a second time.
+_AUTOTRACK_SUPPRESSED: ContextVar[bool] = ContextVar(
+    "lab_tracker_autotrack_suppressed", default=False
+)
 
 
 @dataclass
@@ -67,6 +91,49 @@ class _BreakerState:
 # it with a fresh cooldown (failure).
 _BREAKERS: dict[str, _BreakerState] = {}
 _WARNED: set[str] = set()
+# autotrack fires on every save in every directory, so it captures only into
+# a project a person bound for this script, shell, or checkout.
+AUTOTRACK_UNBOUND_REASON = "project_unbound"
+AUTOTRACK_UNBOUND_NOTICE = (
+    "Lab Tracker autotrack is not capturing saves in {checkout}: {why}. Nothing was "
+    "sent or queued. {remedy}"
+)
+AUTOTRACK_CHECKOUT_REMEDY = (
+    "Bind the checkout with `lt project bind`, set LAB_TRACKER_PROJECT_ID, or pass "
+    "project_id to autotrack()."
+)
+# Outside a git checkout there is no lt_ids.json for `lt project bind` to write.
+AUTOTRACK_LOOSE_FOLDER_REMEDY = "Set LAB_TRACKER_PROJECT_ID or pass project_id to autotrack()."
+# How the server refuses a declared session target, as (status, error code,
+# message): one in another project (note_service.validate_target) or one that
+# does not exist (shared.py's NotFoundError). Other causes share those status
+# codes and error codes (a gone project, bad metadata), so all three must
+# match. LAB_TRACKER_SESSION_ID is sent as a target without a project check,
+# so a live save refused this way retries once without it.
+SESSION_IN_OTHER_PROJECT = (422, "validation_error", "Target must belong to the same project.")
+SESSION_MISSING = (404, "not_found", "Session does not exist.")
+SESSION_TARGET_REJECTIONS = frozenset({SESSION_IN_OTHER_PROJECT, SESSION_MISSING})
+# What the notice says about each refusal.
+SESSION_REFUSAL_REASONS: dict[tuple[int, str, str], str] = {
+    SESSION_IN_OTHER_PROJECT: "is not in the capture's project {project_id}",
+    SESSION_MISSING: "does not exist on the server",
+}
+SESSION_TARGET_DROPPED_NOTICE = (
+    "Lab Tracker: session {session_id} {reason}; {kind} captures in project "
+    "{project_id} keep it as plain metadata, not as a session target."
+)
+# (session id, project id) pairs the server refused, so later saves in this
+# process skip the target instead of being refused again.
+_REFUSED_SESSION_TARGETS: set[tuple[str, str]] = set()
+AUTOTRACK_NO_PROJECT_WHY = "that checkout is not bound to a project (no lt_ids.json)"
+AUTOTRACK_OUTSIDE_CHECKOUT_WHY = (
+    "that folder is not inside a git checkout, so no lt_ids.json binds it to a project"
+)
+AUTOTRACK_WATCH_CONFIG_WHY = (
+    "that checkout names its project only in its watch config, not in lt_ids.json"
+)
+
+
 def _first_capture_review_keys(kind: str) -> frozenset[str]:
     return frozenset({f"{kind}_no_preview", f"{kind}_preview_size_bytes"})
 
@@ -87,6 +154,7 @@ class FigureCaptureResult:
     stale_review_bytes: bool = False
     reason: str = ""
     errors: list[str] = field(default_factory=list)
+    queued_event: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -100,6 +168,8 @@ class FigureCaptureResult:
             "no_preview": self.no_preview,
             "stale_review_bytes": self.stale_review_bytes,
         }
+        if self.queued_event:
+            payload["queued_event"] = self.queued_event
         if self.note is not None:
             payload["note"] = self.note.to_dict()
             with suppress(AttributeError):
@@ -222,12 +292,15 @@ class CaptureContext:
         self.results: list[FigureCaptureResult] = []
         self.errors: list[str] = []
         self._snapshot: dict[Path, int] = {}
+        self._suppress_token: Any = None
 
     def __enter__(self) -> CaptureContext:
         self._snapshot = _snapshot_file_mtimes(self.root, self.patterns, recursive=self.recursive)
+        self._suppress_token = _AUTOTRACK_SUPPRESSED.set(True)
         return self
 
     def __exit__(self, *_: object) -> bool:
+        _AUTOTRACK_SUPPRESSED.reset(self._suppress_token)
         try:
             after = _snapshot_file_mtimes(self.root, self.patterns, recursive=self.recursive)
             for path, mtime in sorted(after.items(), key=lambda item: item[0].as_posix()):
@@ -368,7 +441,11 @@ def savefig(
 
     resolved_path = Path(path).expanduser()
     if fig is not None:
-        fig.savefig(resolved_path, **savefig_kwargs)
+        token = _AUTOTRACK_SUPPRESSED.set(True)
+        try:
+            fig.savefig(resolved_path, **savefig_kwargs)
+        finally:
+            _AUTOTRACK_SUPPRESSED.reset(token)
     return _capture_saved_figure(
         fig=fig,
         path=resolved_path,
@@ -460,7 +537,15 @@ def _capture_saved_figure(
     preview_max_bytes: int,
     version_every_change: bool,
     kind: str = "figure",
+    require_bound_project: bool = False,
 ) -> FigureCaptureResult:
+    """Capture one saved file, fail-soft.
+
+    ``require_bound_project`` (set by ``autotrack``) skips the save, sending
+    and queueing nothing, unless its project comes from an explicit argument,
+    ``LAB_TRACKER_PROJECT_ID``, or the saved file's checkout binding.
+    """
+
     resolved_path = Path(path).expanduser()
     result_defaults: dict[str, Any] = {
         "action": "failed",
@@ -473,6 +558,13 @@ def _capture_saved_figure(
     }
     endpoint_key = _capture_endpoint_key(client)
     try:
+        capture_project = resolve_capture_project(resolved_path, project_id=project_id)
+        if require_bound_project and (capture_project is None or not capture_project.bound):
+            _warn_unbound_autotrack(resolved_path, capture_project)
+            return FigureCaptureResult(
+                **{**result_defaults, "action": "skipped", "reason": AUTOTRACK_UNBOUND_REASON}
+            )
+        bound_project_id = capture_project.project_id if capture_project else None
         file_size = resolved_path.stat().st_size
         if file_size <= 0:
             raise LTValidationError(f"Captured {kind} file must not be empty.")
@@ -513,6 +605,7 @@ def _capture_saved_figure(
                 "client_capture_id": client_capture_id,
             }
         )
+        session = read_active_session()
         if _breaker_blocks(endpoint_key):
             remaining = _figure_circuit_state().get(endpoint_key or "", 0.0)
             _warn_once(
@@ -520,12 +613,32 @@ def _capture_saved_figure(
                 f"Lab Tracker figure capture is paused for {endpoint_key} after a "
                 f"connection or timeout failure (retrying in ~{remaining:.0f}s).",
             )
+            queued = _queue_capture_offline(
+                path=resolved_path,
+                kind=kind,
+                project_id=_queue_project_id(client, bound_project_id),
+                session=session,
+                client_capture_id=client_capture_id,
+                content_hash=content_hash,
+                size_bytes=file_size,
+                metadata=base_metadata,
+                reason="circuit_open",
+            )
+            if queued is not None:
+                return FigureCaptureResult(
+                    **{
+                        **result_defaults,
+                        "action": "queued",
+                        "reason": "offline_queued",
+                        "queued_event": str(queued),
+                    }
+                )
             return FigureCaptureResult(
                 **{**result_defaults, "action": "skipped", "reason": "circuit_open"}
             )
         resolved_client, resolved_project_id, close_client = _resolve_capture_client(
             client=client,
-            project_id=project_id,
+            project_id=bound_project_id,
         )
         if resolved_client is None or resolved_project_id is None:
             _warn_once(
@@ -536,6 +649,11 @@ def _capture_saved_figure(
             return FigureCaptureResult(
                 **{**result_defaults, "action": "skipped", "reason": "unconfigured"}
             )
+        # The active session is a declared target, exactly as `lt watch` passes
+        # its declared ids, but only in the project it was verified for.
+        targets = declared_targets(
+            session_id=_unrefused_session_target(session, resolved_project_id)
+        )
         try:
             # Clamp the capture request without mutating the shared client's
             # timeout: pass a per-request timeout so concurrent captures cannot
@@ -560,16 +678,68 @@ def _capture_saved_figure(
                     f"{kind}_review_bytes_stale": False,
                 }
             )
-            note, status_code = resolved_client._upload_note_file_payload_with_status(
-                project_id=resolved_project_id,
-                path=preview.path,
-                payload=preview.payload,
-                metadata=upload_metadata,
-                status="staged",
-                content_type=preview.content_type,
-                client_capture_id=client_capture_id,
-                timeout=capture_timeout,
-            )
+            if targets:
+                # A checkout-wide (or shell-wide) session is a bounded default,
+                # not a per-capture choice, so it carries the weaker label.
+                upload_metadata[DECLARED_TARGET_SOURCE_KEY] = DECLARED_TARGET_SOURCE_CONFIG_DEFAULT
+
+            def upload(
+                metadata: dict[str, NoteMetadataScalar], upload_targets: list[EntityRef]
+            ) -> tuple[LTRecord, int]:
+                return resolved_client._upload_note_file_payload_with_status(
+                    project_id=resolved_project_id,
+                    path=preview.path,
+                    payload=preview.payload,
+                    metadata=metadata,
+                    status="staged",
+                    content_type=preview.content_type,
+                    client_capture_id=client_capture_id,
+                    targets=upload_targets,
+                    timeout=capture_timeout,
+                )
+
+            try:
+                note, status_code, upload_metadata = _upload_with_session_fallback(
+                    upload,
+                    metadata=upload_metadata,
+                    targets=targets,
+                    project_id=resolved_project_id,
+                    kind=kind,
+                )
+            except Exception as exc:
+                if not _is_transport_failure(exc):
+                    raise
+                # The server never answered the upload: keep the capture in the
+                # checkout's outbox so `lt outbox sync` (or the scheduled watch
+                # run) delivers it later instead of losing the save.
+                _trip_circuit(endpoint_key, str(exc))
+                queued = _queue_capture_offline(
+                    path=resolved_path,
+                    kind=kind,
+                    project_id=resolved_project_id,
+                    session=session,
+                    client_capture_id=client_capture_id,
+                    content_hash=content_hash,
+                    size_bytes=file_size,
+                    metadata=base_metadata,
+                    reason=str(exc),
+                )
+                if queued is None:
+                    raise
+                _warn_once(
+                    f"queued:{endpoint_key}",
+                    f"Lab Tracker is unreachable ({exc}); the {kind} capture was queued "
+                    f"in {queued.parent} for a later `lt outbox sync`.",
+                )
+                return FigureCaptureResult(
+                    **{
+                        **result_defaults,
+                        "action": "queued",
+                        "reason": "offline_queued",
+                        "errors": [str(exc)],
+                        "queued_event": str(queued),
+                    }
+                )
             # The endpoint answered: close any open breaker for it.
             _close_circuit(endpoint_key)
             if status_code == 200:
@@ -698,6 +868,11 @@ def _base_figure_metadata(
     context = _active_run_context()
     if context is not None:
         merged.update(context.to_metadata())
+    session = read_active_session()
+    if session and session.get("session_id"):
+        merged["capture_session_id"] = str(session["session_id"])
+        merged["capture_session_link_code"] = str(session.get("link_code") or "")
+        merged["capture_session_source"] = str(session.get("source") or "")
     evidence = build_evidence_metadata(
         source_provider=f"local-{kind}",
         source_uri=source_uri,
@@ -857,6 +1032,200 @@ def _clamped_timeout_value(value: Any) -> float:
     with suppress(TypeError, ValueError):
         return min(float(value), FIGURE_CAPTURE_TIMEOUT_SECONDS)
     return FIGURE_CAPTURE_TIMEOUT_SECONDS
+
+
+def _session_id(session: Mapping[str, Any] | None) -> str | None:
+    """The active session id, or ``None`` when no session context is set."""
+
+    if not session or not session.get("session_id"):
+        return None
+    return str(session["session_id"])
+
+
+def _capture_outbox_enabled() -> bool:
+    return os.getenv(CAPTURE_OUTBOX_ENV, "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _queue_project_id(client: LabTracker | None, bound_project_id: str | None) -> str | None:
+    """The project a queued capture names: the resolved one, else the default."""
+
+    if bound_project_id:
+        return str(bound_project_id)
+    if client is not None and getattr(client, "default_project_id", None):
+        return str(client.default_project_id)
+    return load_connection_profile().get("default_project_id") or None
+
+
+def _unrefused_session_target(
+    session: Mapping[str, Any] | None, project_id: str
+) -> str | None:
+    target = session_target(session, project_id)
+    if target is None or (target, project_id) in _REFUSED_SESSION_TARGETS:
+        return None
+    return target
+
+
+def _refused_session_target(
+    exc: Exception, targets: Iterable[EntityRef]
+) -> tuple[str, tuple[int, str, str]] | None:
+    """The declared session id and the refusal when ``exc`` is the server refusing it."""
+
+    if not isinstance(exc, LTError):
+        return None
+    refusal = (exc.status_code, exc.error_code, exc.error_message)
+    if refusal not in SESSION_TARGET_REJECTIONS:
+        return None
+    session_id = next((ref.entity_id for ref in targets if ref.entity_type == "session"), None)
+    if session_id is None:
+        return None
+    return session_id, (int(refusal[0] or 0), str(refusal[1]), str(refusal[2]))
+
+
+def _upload_with_session_fallback(
+    upload: Callable[[dict[str, NoteMetadataScalar], list[EntityRef]], tuple[LTRecord, int]],
+    *,
+    metadata: dict[str, NoteMetadataScalar],
+    targets: list[EntityRef],
+    project_id: str,
+    kind: str,
+) -> tuple[LTRecord, int, dict[str, NoteMetadataScalar]]:
+    """Upload once; if the server refuses the session target, retry once without it.
+
+    The retry keeps every other target and the session id as plain metadata
+    (``capture_session_id``). The session is blamed, and remembered for the
+    process, only when the retry without it is accepted.
+    """
+
+    try:
+        note, status_code = upload(metadata, targets)
+    except Exception as exc:
+        refused = _refused_session_target(exc, targets)
+        if refused is None:
+            raise
+        session_id, refusal = refused
+        remaining = [ref for ref in targets if ref.entity_type != "session"]
+        retry_metadata = dict(metadata)
+        if not remaining:
+            retry_metadata.pop(DECLARED_TARGET_SOURCE_KEY, None)
+        note, status_code = upload(retry_metadata, remaining)
+        _REFUSED_SESSION_TARGETS.add((session_id, project_id))
+        _warn_once(
+            f"session-target-refused:{session_id}:{project_id}",
+            SESSION_TARGET_DROPPED_NOTICE.format(
+                session_id=session_id,
+                reason=SESSION_REFUSAL_REASONS[refusal].format(project_id=project_id),
+                project_id=project_id,
+                kind=kind,
+            ),
+        )
+        return note, status_code, retry_metadata
+    return note, status_code, metadata
+
+
+def _warn_unbound_autotrack(path: Path, capture_project: CaptureProject | None) -> None:
+    """Name each unbound checkout root (or bare save directory) once per process."""
+
+    root = capture_checkout_root(path)
+    if root is None and capture_project is None:
+        folder = path.expanduser().parent.resolve()
+        _warn_once(
+            f"{AUTOTRACK_UNBOUND_REASON}:{folder}",
+            AUTOTRACK_UNBOUND_NOTICE.format(
+                checkout=folder,
+                why=AUTOTRACK_OUTSIDE_CHECKOUT_WHY,
+                remedy=AUTOTRACK_LOOSE_FOLDER_REMEDY,
+            ),
+        )
+        return
+    why = AUTOTRACK_WATCH_CONFIG_WHY if capture_project is not None else AUTOTRACK_NO_PROJECT_WHY
+    checkout = root or path.expanduser().parent.resolve()
+    _warn_once(
+        f"{AUTOTRACK_UNBOUND_REASON}:{checkout}",
+        AUTOTRACK_UNBOUND_NOTICE.format(
+            checkout=checkout, why=why, remedy=AUTOTRACK_CHECKOUT_REMEDY
+        ),
+    )
+
+
+def _queue_capture_offline(
+    *,
+    path: Path,
+    kind: str,
+    project_id: str | None,
+    session: Mapping[str, Any] | None,
+    client_capture_id: str,
+    content_hash: str,
+    size_bytes: int,
+    metadata: Mapping[str, NoteMetadataScalar],
+    reason: str,
+) -> Path | None:
+    """Write the capture as a watch-outbox event so a later sync delivers it.
+
+    Returns the event path, or ``None`` when queueing is disabled, no project
+    is known, or the outbox cannot be written (never raises: the figure was
+    already saved to disk and the caller reports a plain failure instead).
+    """
+
+    if not _capture_outbox_enabled() or not project_id:
+        return None
+    try:
+        from lab_tracker_client import git_capture
+        from lab_tracker_client import watch as watch_capture
+
+        try:
+            root = git_capture.repo_toplevel(path.parent)
+        except Exception:  # noqa: BLE001 - not a repo: the checkout is the cwd.
+            root = Path.cwd().resolve()
+        config, _config_error = git_capture.resolve_watch_config(root)
+        try:
+            relative_path = path.resolve().relative_to(root).as_posix()
+        except ValueError:
+            relative_path = path.name
+        extra = {
+            str(key): value
+            for key, value in metadata.items()
+            if not str(key).startswith("evidence_")
+            and isinstance(value, (str, bool, int, float))
+        }
+        event = watch_capture.make_event(
+            capture_id=client_capture_id,
+            event_id=f"{kind}-{content_hash[:16]}",
+            capture_kind=kind,
+            adapter=f"lab-tracker-client-{kind}",
+            sink=watch_capture.SINK_STAGED_NOTE,
+            source={
+                "provider": f"local-{kind}",
+                "uri": path.resolve().as_uri(),
+                "external_id": client_capture_id,
+                "path": str(path.resolve()),
+                "root": str(root),
+                "root_uri": root.as_uri(),
+                "relative_path": relative_path,
+                "content_hash": content_hash,
+                "size_bytes": int(size_bytes),
+                "mtime": path.stat().st_mtime,
+                # The session (if any) is the active context: the sync
+                # verifies it against the project and labels the target
+                # config_default, as it does for a watch scan.
+                **watch_capture.active_session_source(session),
+            },
+            context={"project_id": project_id, "session_id": _session_id(session)},
+            payload={
+                "title": path.name,
+                "summary": f"Queued {kind} capture while Lab Tracker was unreachable.",
+                "status": "staged",
+                "metadata": extra,
+                "client_capture_id": client_capture_id,
+                "queue_reason": reason[:500],
+            },
+        )
+        return watch_capture.write_event(event, config.outbox_path())
+    except Exception as exc:  # noqa: BLE001 - queueing is best effort.
+        _warn_once(
+            f"queue-failed:{type(exc).__name__}",
+            f"Lab Tracker could not queue the {kind} capture offline: {exc}",
+        )
+        return None
 
 
 def _resolve_capture_client(
@@ -1066,4 +1435,6 @@ def _warn_once(key: str, message: str) -> None:
 def _reset_figure_capture_state_for_tests() -> None:
     _BREAKERS.clear()
     _WARNED.clear()
+    _REFUSED_SESSION_TARGETS.clear()
+    _reset_session_hints_for_tests()
     _RUN_CONTEXT.set(None)
