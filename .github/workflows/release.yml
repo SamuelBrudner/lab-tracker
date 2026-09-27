@@ -1,0 +1,58 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+# Every setup-uv step pins the same exact uv release as ci.yml and the
+# Dockerfile, so lock handling and `uv sync --frozen` behave identically here.
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.12.18"
+      # --frozen installs exactly what uv.lock records without validating it
+      # against pyproject.toml; fail here when they have drifted.
+      - name: Check uv.lock matches pyproject.toml
+        run: uv lock --check
+      - name: Install Python dependencies
+        run: uv sync --frozen --extra test --extra lint
+      - name: Verify release tag
+        run: uv run --frozen python scripts/verify_release.py --tag "$GITHUB_REF_NAME"
+      - name: Lint
+        run: uv run --frozen ruff check .
+      - name: Test
+        run: uv run --frozen pytest -q
+      - name: Build wheel and source distribution
+        run: uv build --no-sources
+      - name: Smoke-test built version
+        shell: bash
+        run: |
+          set -euo pipefail
+          wheel="$(find dist -maxdepth 1 -name 'lab_tracker-*.whl' -print -quit)"
+          test -n "$wheel"
+          uv run --no-project --with "$wheel" -- python - <<'PY'
+          from importlib.metadata import version
+          from lab_tracker import __version__ as server_version
+          from lab_tracker_client import __version__ as client_version
+
+          expected = version("lab-tracker")
+          assert server_version == expected, (server_version, expected)
+          assert client_version == expected, (client_version, expected)
+          PY
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes

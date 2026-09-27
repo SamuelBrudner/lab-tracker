@@ -259,6 +259,7 @@ MCP, and verification.
   [supported v1 surface](docs/retained-v1-surface.md)
 - **Operate AI drafting:** [agent setup](docs/agent-setup.md) ·
   [scheduled review](docs/scheduled-daily-review.md)
+- **Maintain and release:** [versioning and releases](docs/versioning.md)
 
 ## Caveats
 
