@@ -85,7 +85,14 @@ research record:
   exist or the server cannot be reached; the checkout context then targets
   only captures filed into that project, other captures keep the id as plain
   metadata, and a context recorded without a project is ignored with a hint
-  to rerun `lt session use`.
+  to rerun `lt session use`. `LAB_TRACKER_SESSION_ID` stays an explicit
+  per-shell choice that is sent without a project check; when the server
+  refuses it as a live figure upload's session target (HTTP 422
+  `validation_error` for a session in another project, 404 `not_found` for
+  one that does not exist), the upload is retried exactly once without that
+  target, keeps the id as `capture_session_id` metadata, prints one stderr
+  line saying the session is not in the capture's project, and later saves
+  in that process skip the target.
 - Consumer-side HPC analysis capture through the `lt hpc` CLI as an
   offline-first staged-note workflow: Slurm/HPC submit, begin, finish, and
   watch-folder manifest events write durable local outbox records that sync

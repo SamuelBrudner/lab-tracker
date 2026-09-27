@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from hashlib import sha256
 from pathlib import Path
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -1095,3 +1096,161 @@ def test_active_session_targets_a_figure_only_in_its_own_project(
         assert metadata["declared_target_source"] == "config_default"
     else:
         assert "declared_target_source" not in metadata
+
+
+_ENV_SESSION_ID = "3d4f6a1e-9c2b-4a8e-8f01-2b3c4d5e6f70"
+# How the server refuses a declared session target (see note_service.validate_target):
+# a session in another project, and a session that does not exist.
+_SESSION_TARGET_REJECTIONS = [
+    (422, "validation_error", "Target must belong to the same project."),
+    (404, "not_found", "Session does not exist."),
+]
+_SESSION_DROPPED_LINE = "is not in the capture's project"
+
+
+class _SessionRejectingServer:
+    """Refuses any upload that declares a session target; accepts the rest."""
+
+    def __init__(self, status_code: int, code: str, message: str) -> None:
+        self.rejection = _json_response(status_code, {"error": {"code": code, "message": message}})
+        self.uploads: list[dict[str, object]] = []
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        body = request.content
+        targets_field = b'name="targets"' in body
+        self.uploads.append(
+            {
+                "targets": json.loads(_multipart_field(body, "targets")) if targets_field else [],
+                "metadata": json.loads(_multipart_field(body, "metadata")),
+            }
+        )
+        if targets_field:
+            return self.rejection
+        return _json_response(201, {"data": {"note_id": f"note-{len(self.uploads)}"}})
+
+
+@pytest.mark.parametrize(("status_code", "code", "message"), _SESSION_TARGET_REJECTIONS)
+def test_env_session_outside_the_project_is_retried_once_without_its_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    status_code: int,
+    code: str,
+    message: str,
+) -> None:
+    """LAB_TRACKER_SESSION_ID stays an explicit per-shell choice, but a live
+    save must not fail because the server refused that session: retry once
+    without it, keep the id as metadata, and say why once."""
+
+    monkeypatch.setenv("LAB_TRACKER_SESSION_ID", _ENV_SESSION_ID)
+    server = _SessionRejectingServer(status_code, code, message)
+    with LabTracker(
+        base_url="http://testserver",
+        default_project_id="project-1",
+        transport=httpx.MockTransport(server.handler),
+    ) as lt:
+        first = savefig(FakeFigure(b"one"), tmp_path / "one.png", client=lt)
+        second = savefig(FakeFigure(b"two"), tmp_path / "two.png", client=lt)
+
+    assert (first.action, second.action) == ("imported", "imported")
+    rejected, retried, later = server.uploads
+    assert rejected["targets"] == [{"entity_type": "session", "entity_id": _ENV_SESSION_ID}]
+    for upload in (retried, later):
+        assert upload["targets"] == []
+        metadata = upload["metadata"]
+        assert isinstance(metadata, dict)
+        assert metadata["capture_session_id"] == _ENV_SESSION_ID
+        assert "declared_target_source" not in metadata
+    assert "declared_target_source" not in first.metadata
+    err_lines = capsys.readouterr().err.splitlines()
+    notices = [line for line in err_lines if _SESSION_DROPPED_LINE in line]
+    assert len(notices) == 1
+    assert _ENV_SESSION_ID in notices[0]
+    assert "project-1" in notices[0]
+
+
+def test_a_rejection_that_persists_without_the_session_is_not_blamed_on_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("LAB_TRACKER_SESSION_ID", _ENV_SESSION_ID)
+    requests: list[bool] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(b'name="targets"' in request.content)
+        return _json_response(422, {"error": {"code": "validation_error", "message": "Bad."}})
+
+    with LabTracker(
+        base_url="http://testserver",
+        default_project_id="project-1",
+        transport=httpx.MockTransport(handler),
+    ) as lt:
+        result = savefig(FakeFigure(), tmp_path / "plot.png", client=lt)
+
+    assert result.action == "failed"
+    assert requests == [True, False]
+    assert _SESSION_DROPPED_LINE not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("status_code", "code"),
+    [(403, "forbidden"), (409, "conflict"), (422, "validation_error")],
+)
+def test_other_rejections_are_never_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status_code: int, code: str
+) -> None:
+    """Only a session-target rejection of an upload that declared a session
+    is retried; without LAB_TRACKER_SESSION_ID a 422 is not."""
+
+    if code != "validation_error":
+        monkeypatch.setenv("LAB_TRACKER_SESSION_ID", _ENV_SESSION_ID)
+    requests: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(1)
+        return _json_response(status_code, {"error": {"code": code, "message": "No."}})
+
+    with LabTracker(
+        base_url="http://testserver",
+        default_project_id="project-1",
+        transport=httpx.MockTransport(handler),
+    ) as lt:
+        result = savefig(FakeFigure(), tmp_path / "plot.png", client=lt)
+
+    assert result.action == "failed"
+    assert requests == [1]
+
+
+def test_the_server_refuses_a_foreign_or_missing_session_target_as_the_client_expects(
+    client, admin_auth_headers: dict[str, str]
+) -> None:
+    """Pins the rejections the figure fallback keys on to the real API."""
+
+    def project() -> str:
+        response = client.post(
+            "/projects", json={"name": f"Figures {uuid4().hex[:6]}"}, headers=admin_auth_headers
+        )
+        assert response.status_code == 201, response.text
+        return response.json()["data"]["project_id"]
+
+    capture_project, other_project = project(), project()
+    session = client.post(
+        "/sessions",
+        json={"project_id": other_project, "session_type": "operational"},
+        headers=admin_auth_headers,
+    )
+    assert session.status_code == 201, session.text
+    refusals = set()
+    for session_id in (session.json()["data"]["session_id"], str(uuid4())):
+        response = client.post(
+            "/notes/upload-file",
+            data={
+                "project_id": capture_project,
+                "status": "staged",
+                "targets": json.dumps([{"entity_type": "session", "entity_id": session_id}]),
+            },
+            files={"file": ("plot.png", b"png-bytes", "image/png")},
+            headers=admin_auth_headers,
+        )
+        refusals.add((response.status_code, response.json()["error"]["code"]))
+
+    assert refusals == figure_module.SESSION_TARGET_REJECTIONS

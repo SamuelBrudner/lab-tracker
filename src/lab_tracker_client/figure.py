@@ -10,7 +10,7 @@ import stat
 import sys
 import time
 import uuid
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -30,8 +30,10 @@ from lab_tracker_client.capture_project import (
 from lab_tracker_client.client import (
     DECLARED_TARGET_SOURCE_CONFIG_DEFAULT,
     DECLARED_TARGET_SOURCE_KEY,
+    EntityRef,
     LabTracker,
     LTAPIError,
+    LTError,
     LTRecord,
     LTValidationError,
     _bytes_sha256,
@@ -97,6 +99,17 @@ AUTOTRACK_UNBOUND_NOTICE = (
     "sent or queued. Bind the checkout with `lt project bind`, set "
     "LAB_TRACKER_PROJECT_ID, or pass project_id to autotrack()."
 )
+# How the server refuses a declared session target: one in another project
+# (422) or one that does not exist (404). LAB_TRACKER_SESSION_ID is sent as a
+# target without a project check, so a live save retries once without it.
+SESSION_TARGET_REJECTIONS = frozenset({(422, "validation_error"), (404, "not_found")})
+SESSION_TARGET_DROPPED_NOTICE = (
+    "Lab Tracker: session {session_id} is not in the capture's project {project_id}; "
+    "{kind} captures there keep it as plain metadata, not as a session target."
+)
+# (session id, project id) pairs the server refused, so later saves in this
+# process skip the target instead of being refused again.
+_REFUSED_SESSION_TARGETS: set[tuple[str, str]] = set()
 AUTOTRACK_NO_PROJECT_WHY = "that checkout is not bound to a project (no lt_ids.json)"
 AUTOTRACK_WATCH_CONFIG_WHY = (
     "that checkout names its project only in its watch config, not in lt_ids.json"
@@ -620,7 +633,9 @@ def _capture_saved_figure(
             )
         # The active session is a declared target, exactly as `lt watch` passes
         # its declared ids, but only in the project it was verified for.
-        targets = declared_targets(session_id=session_target(session, resolved_project_id))
+        targets = declared_targets(
+            session_id=_unrefused_session_target(session, resolved_project_id)
+        )
         try:
             # Clamp the capture request without mutating the shared client's
             # timeout: pass a per-request timeout so concurrent captures cannot
@@ -649,17 +664,28 @@ def _capture_saved_figure(
                 # A checkout-wide (or shell-wide) session is a bounded default,
                 # not a per-capture choice, so it carries the weaker label.
                 upload_metadata[DECLARED_TARGET_SOURCE_KEY] = DECLARED_TARGET_SOURCE_CONFIG_DEFAULT
-            try:
-                note, status_code = resolved_client._upload_note_file_payload_with_status(
+            def upload(
+                metadata: dict[str, NoteMetadataScalar], targets: list[EntityRef]
+            ) -> tuple[LTRecord, int]:
+                return resolved_client._upload_note_file_payload_with_status(
                     project_id=resolved_project_id,
                     path=preview.path,
                     payload=preview.payload,
-                    metadata=upload_metadata,
+                    metadata=metadata,
                     status="staged",
                     content_type=preview.content_type,
                     client_capture_id=client_capture_id,
                     targets=targets,
                     timeout=capture_timeout,
+                )
+
+            try:
+                note, status_code, upload_metadata = _upload_with_session_fallback(
+                    upload,
+                    metadata=upload_metadata,
+                    targets=targets,
+                    project_id=resolved_project_id,
+                    kind=kind,
                 )
             except Exception as exc:
                 if not _is_transport_failure(exc):
@@ -1011,6 +1037,62 @@ def _queue_project_id(client: LabTracker | None, bound_project_id: str | None) -
     return load_connection_profile().get("default_project_id") or None
 
 
+def _unrefused_session_target(
+    session: Mapping[str, Any] | None, project_id: str
+) -> str | None:
+    target = session_target(session, project_id)
+    if target is None or (target, project_id) in _REFUSED_SESSION_TARGETS:
+        return None
+    return target
+
+
+def _refused_session_target(exc: Exception, targets: Iterable[EntityRef]) -> str | None:
+    """The declared session id when ``exc`` is the server refusing a session target."""
+
+    if not isinstance(exc, LTError):
+        return None
+    if (exc.status_code, exc.error_code) not in SESSION_TARGET_REJECTIONS:
+        return None
+    return next((ref.entity_id for ref in targets if ref.entity_type == "session"), None)
+
+
+def _upload_with_session_fallback(
+    upload: Callable[[dict[str, NoteMetadataScalar], list[EntityRef]], tuple[LTRecord, int]],
+    *,
+    metadata: dict[str, NoteMetadataScalar],
+    targets: list[EntityRef],
+    project_id: str,
+    kind: str,
+) -> tuple[LTRecord, int, dict[str, NoteMetadataScalar]]:
+    """Upload once; if the server refuses the session target, retry once without it.
+
+    The retry keeps every other target and the session id as plain metadata
+    (``capture_session_id``). The session is blamed, and remembered for the
+    process, only when the retry without it is accepted.
+    """
+
+    try:
+        note, status_code = upload(metadata, targets)
+    except Exception as exc:
+        session_id = _refused_session_target(exc, targets)
+        if session_id is None:
+            raise
+        remaining = [ref for ref in targets if ref.entity_type != "session"]
+        retry_metadata = dict(metadata)
+        if not remaining:
+            retry_metadata.pop(DECLARED_TARGET_SOURCE_KEY, None)
+        note, status_code = upload(retry_metadata, remaining)
+        _REFUSED_SESSION_TARGETS.add((session_id, project_id))
+        _warn_once(
+            f"session-target-refused:{session_id}:{project_id}",
+            SESSION_TARGET_DROPPED_NOTICE.format(
+                session_id=session_id, project_id=project_id, kind=kind
+            ),
+        )
+        return note, status_code, retry_metadata
+    return note, status_code, metadata
+
+
 def _warn_unbound_autotrack(path: Path, capture_project: CaptureProject | None) -> None:
     """Name each unbound checkout root (or bare save directory) once per process."""
 
@@ -1310,5 +1392,6 @@ def _warn_once(key: str, message: str) -> None:
 def _reset_figure_capture_state_for_tests() -> None:
     _BREAKERS.clear()
     _WARNED.clear()
+    _REFUSED_SESSION_TARGETS.clear()
     _reset_session_hints_for_tests()
     _RUN_CONTEXT.set(None)
