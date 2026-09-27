@@ -1674,8 +1674,10 @@ class ProjectCoverageCaptureSource(_DomainModel):
     the all-``None`` bucket. This is a plain last-seen listing with no recency
     thresholds. The one judgement it carries is whether the client that made
     the source's newest capture runs a release behind this server's
-    (``release_status``), spelled out as an ``update_notice`` on a machine's
-    most recent source (see ``lab_tracker.capture_client_release``).
+    (``release_status``), and whether that gap is worth updating for
+    (``update_recommended``: an older MAJOR.MINOR, see ``docs/versioning.md``),
+    spelled out as an ``update_notice`` on each such source that captured
+    recently (see ``lab_tracker.capture_client_release``).
     """
 
     evidence_source_provider: str | None = None
@@ -1688,6 +1690,7 @@ class ProjectCoverageCaptureSource(_DomainModel):
     capture_client_version: str | None = None
     capture_client_revision: str | None = None
     release_status: ReleaseStatus = "unknown"
+    update_recommended: bool = False
     # The watch root the newest capture came from, for a watch-folder source.
     watched_folder: str | None = None
     update_notice: str | None = None
@@ -1759,6 +1762,8 @@ class DraftQualityLedger(_DomainModel):
     change_set_count: int = Field(default=0, ge=0)
     cells: list[DraftQualityCell] = Field(default_factory=list)
     groups: list[DraftQualityGroupStats] = Field(default_factory=list)
+
+
 class RecordExportEvent(_DomainModel):
     export_id: UUID
     user_id: UUID

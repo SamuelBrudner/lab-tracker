@@ -91,11 +91,23 @@ function PendingBatchBanner({ enabled = true, token, navigate }) {
   );
 }
 
-// Capture machines whose lab-tracker client is behind this server's release,
-// named by what they capture. The coverage read writes update_notice on one
-// capture source per machine (its most recent), so filtering on it lists each
-// stale machine once. Loaded apart from the queues so a failure here cannot
-// hide them.
+// Capture clients that should update to this server's release, named by what
+// they capture. The coverage read judges each capture source on its own and
+// writes update_notice only when an update is recommended, so one machine can
+// list its uv tool install and an analysis repo's environment separately, each
+// with its own fix. Loaded apart from the queues so a failure here cannot hide
+// them.
+function captureSourceKey(source) {
+  return [
+    source.evidence_source_provider,
+    source.evidence_adapter,
+    source.capture_install_id,
+    source.capture_host_label,
+  ]
+    .map((part) => part || "")
+    .join(":");
+}
+
 function staleCaptureSources(coverage) {
   return (coverage?.capture_sources || []).filter((source) => source?.update_notice);
 }
@@ -141,12 +153,12 @@ function StaleCaptureMachines({ projectId, token }) {
     <div className="flash ok" role="status">
       <strong>
         {staleInstalls.length === 1
-          ? "A capture machine needs a lab-tracker update"
-          : `${staleInstalls.length} capture machines need a lab-tracker update`}
+          ? "A capture client needs a lab-tracker update"
+          : `${staleInstalls.length} capture clients need a lab-tracker update`}
       </strong>
       <ul>
         {staleInstalls.map((source) => (
-          <li key={`${source.capture_install_id}:${source.capture_host_label || ""}`}>
+          <li key={captureSourceKey(source)}>
             {source.update_notice}
           </li>
         ))}

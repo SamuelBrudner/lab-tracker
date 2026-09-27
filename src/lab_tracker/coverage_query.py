@@ -21,12 +21,7 @@ from uuid import UUID
 from sqlalchemy import RowMapping, func, select
 from sqlalchemy.orm import Session as OrmSession
 
-from lab_tracker.capture_client_release import (
-    client_release,
-    release_status,
-    watched_folder,
-    with_update_notices,
-)
+from lab_tracker.capture_client_release import capture_release
 from lab_tracker.client_release import ReleaseIdentity
 from lab_tracker.db_models import GraphChangeOperationModel, GraphChangeSetModel, NoteModel
 from lab_tracker.db_types import ensure_uuid
@@ -125,13 +120,13 @@ def project_coverage_report(
     """
 
     summary = project_coverage_summary(session, project_id)
-    capture_sources, truncated = _capture_sources(session, str(project_id), server=server)
+    capture_sources, truncated = _capture_sources(
+        session, str(project_id), server=server, now=now or datetime.now(timezone.utc)
+    )
     return ProjectCoverageReport(
         **summary.model_dump(),
         server_release=SoftwareRelease(**server.as_dict()),
-        capture_sources=with_update_notices(
-            capture_sources, server=server, now=now or datetime.now(timezone.utc)
-        ),
+        capture_sources=capture_sources,
         capture_sources_truncated=truncated,
     )
 
@@ -274,12 +269,14 @@ def _capture_sources(
     project_id: str,
     *,
     server: ReleaseIdentity,
+    now: datetime,
 ) -> tuple[list[ProjectCoverageCaptureSource], bool]:
     """Group the project's notes by capture source, most recently delivering first.
 
     One window function ranks each source's notes newest-first, so the row that
     represents a source is its newest capture: that note's metadata names the
-    client release the machine runs now and, for a watch source, its folder.
+    client release that source's environment runs now and, for a watch source,
+    its folder.
     """
 
     source_expressions = {
@@ -317,23 +314,29 @@ def _capture_sources(
     )
     truncated = len(rows) > CAPTURE_SOURCE_LISTING_LIMIT
     sources = [
-        _capture_source(row, server=server) for row in rows[:CAPTURE_SOURCE_LISTING_LIMIT]
+        _capture_source(row, server=server, now=now)
+        for row in rows[:CAPTURE_SOURCE_LISTING_LIMIT]
     ]
     return sources, truncated
 
 
-def _capture_source(row: RowMapping, *, server: ReleaseIdentity) -> ProjectCoverageCaptureSource:
+def _capture_source(
+    row: RowMapping, *, server: ReleaseIdentity, now: datetime
+) -> ProjectCoverageCaptureSource:
     metadata = row["note_metadata"] or {}
-    client = client_release(metadata)
+    last_capture_at = as_utc(row["last_capture_at"])
+    release = capture_release(metadata, last_capture_at=last_capture_at, server=server, now=now)
     return ProjectCoverageCaptureSource(
         evidence_source_provider=row[EVIDENCE_SOURCE_PROVIDER_KEY],
         evidence_adapter=row[EVIDENCE_ADAPTER_KEY],
         capture_install_id=row[CAPTURE_INSTALL_ID_KEY],
         capture_host_label=row[CAPTURE_HOST_LABEL_KEY],
         note_count=int(row["note_count"]),
-        last_capture_at=as_utc(row["last_capture_at"]),
-        capture_client_version=client.version,
-        capture_client_revision=client.revision,
-        release_status=release_status(client, server),
-        watched_folder=watched_folder(metadata),
+        last_capture_at=last_capture_at,
+        capture_client_version=release.capture_client_version,
+        capture_client_revision=release.capture_client_revision,
+        release_status=release.release_status,
+        update_recommended=release.update_recommended,
+        watched_folder=release.watched_folder,
+        update_notice=release.update_notice,
     )

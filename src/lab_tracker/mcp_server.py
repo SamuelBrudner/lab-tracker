@@ -280,7 +280,10 @@ class LabTrackerFastMCP(FastMCP):
 
 
 def probe_client_update_notice(api_settings: MCPSettings) -> str | None:
-    """Return an agent-facing notice when this client is behind its server's release.
+    """Return an agent-facing notice when an update is recommended for this client.
+
+    Only a newer server (MAJOR, MINOR) recommends one (``client_release``); a
+    PATCH-only gap stays quiet.
 
     One bounded, unauthenticated ``GET /health``. Any failure returns ``None``
     so the session behaves exactly as it would without the check: a staleness
@@ -297,7 +300,7 @@ def probe_client_update_notice(api_settings: MCPSettings) -> str | None:
     finally:
         probe.close()
     comparison = ReleaseComparison(client=installed_release(), server=release_from_health(health))
-    if comparison.status != "behind":
+    if not comparison.update_recommended:
         return None
     return (
         f"UPDATE AVAILABLE: this Lab Tracker MCP client runs release "

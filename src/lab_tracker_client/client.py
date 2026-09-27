@@ -18,6 +18,7 @@ from typing import Any, Literal, Protocol
 
 import httpx
 
+from lab_tracker._version import UNKNOWN_VERSION
 from lab_tracker.assistant_next_questions import (
     OPEN_GOAL_STATUSES,
     OPEN_QUESTION_STATUSES,
@@ -175,11 +176,12 @@ def capture_host_metadata() -> dict[str, NoteMetadataScalar]:
     """Stable, fail-soft identity for the machine performing a capture or push.
 
     A configurable ``LAB_TRACKER_CAPTURE_HOST`` label (hostname fallback) plus a
-    persisted per-install id, the OS family, and the installed client release.
+    persisted per-install id, the OS family, and the installed client release
+    (always present; ``lab_tracker._version.UNKNOWN_VERSION`` when unreadable).
     Introduced to disambiguate the cross-machine content-hash join and to record
     which computer pushed evidence. It now also has a second, deliberate use:
-    the server joins the newest capture per install against its own release to
-    name a stale machine ("update lab-tracker on the machine watching
+    the server compares each capture source's newest capture with its own
+    release to name a stale client ("update lab-tracker on the machine watching
     fly_walking_data") in the daily review.
     """
 
@@ -198,8 +200,10 @@ def capture_host_metadata() -> dict[str, NoteMetadataScalar]:
         if system:
             metadata["capture_platform"] = system
     release = _installed_client_release()
-    if release.version:
-        metadata["capture_client_version"] = release.version
+    # Always stamped, so a capture with an install id and no client version
+    # reliably predates release reporting; an unreadable release stamps the
+    # shared unknown sentinel, which the server compares as unknown.
+    metadata["capture_client_version"] = release.version or UNKNOWN_VERSION
     if release.revision:
         metadata["capture_client_revision"] = release.revision
     return metadata

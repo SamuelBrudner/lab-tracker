@@ -289,7 +289,9 @@ def _install_suggestions(status: JsonObject) -> list[str]:
             "`lt doctor` shows the full traceback."
         )
     client = status["client"]
-    if client.get("client_behind_server"):
+    # Only a newer server (MAJOR, MINOR) is worth a suggestion; a PATCH-only
+    # gap stays in the ``client`` report as information.
+    if client.get("update_recommended"):
         server = ReleaseIdentity.from_values(
             client["server"]["version"],
             client["server"]["revision"],

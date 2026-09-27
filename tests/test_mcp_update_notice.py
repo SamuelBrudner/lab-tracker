@@ -142,6 +142,8 @@ def test_probe_names_both_releases_and_the_pinned_update(monkeypatch) -> None:
         # Same release, different commit: revision drift alone never nags.
         {"app": {"version": "0.1.0", "source_revision": SERVER_REVISION}},
         {"app": {"version": "0.0.9", "source_revision": SERVER_REVISION}},
+        # A PATCH release is a backward-compatible fix (docs/versioning.md).
+        {"app": {"version": "0.1.7", "source_revision": SERVER_REVISION}},
         # A server from before /health reported its release.
         {"app": {"source_revision": SERVER_REVISION}},
         LabTrackerAPIUnavailableError("connection refused"),

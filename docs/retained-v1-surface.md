@@ -201,9 +201,10 @@ research record:
   `capture_install_id`/`capture_host_label`) with no recency thresholds. Each
   source also carries the release its newest capture was made with
   (`capture_client_version`/`capture_client_revision`), its `release_status`
-  against the report's `server_release`, the folder a watch source captures
-  from, and an `update_notice` on a machine's most recent source when that
-  client is behind and captured within the last 90 days. The same
+  against the report's `server_release`, whether an update is recommended
+  (`update_recommended`: an older `MAJOR.MINOR`), the folder a watch source
+  captures from, and an `update_notice` on each source for which an update is
+  recommended and that captured within the last 90 days. The same
   summary rides on the graph overview and the decision-context packet, and
   the portfolio summary flags `unreviewed_captures` once a named threshold is
   reached. Coverage is derived from existing records; nothing is stored,
@@ -431,13 +432,16 @@ research record:
   `lt setup status` check that the installed `lt-mcp` imports and compare the
   client's release with the server's; stdio `lt-mcp` prefixes its MCP
   instructions and adds `_lab_tracker_update_notice` to every tool result when
-  its client is behind; and captures record the capturing client's release, so
-  the coverage read's `capture_sources` carry each source's `release_status`
-  and an `update_notice`, and the Daily review page names each machine that
-  is behind by the folder it watches. Only a newer server release produces a
-  notice; revision drift within a release is reported, never suggested. None of
-  these checks blocks capture, a session, or MCP startup. See
-  [setup.md](setup.md#know-when-a-client-install-is-broken-or-behind-its-server).
+  an update is recommended; and captures record the capturing client's
+  release, so the coverage read's `capture_sources` carry each source's
+  `release_status` and an `update_notice`, and the Daily review page lists
+  each source whose client environment needs an update (a watch source by the
+  folder it watches), with the fix for that environment: the tool install plus
+  `lt update`, or an analysis repo's pinned `uv add` dependency. Only a newer
+  server `MAJOR.MINOR` produces a notice ([versioning.md](versioning.md)); a
+  PATCH-only gap and revision drift within a release are reported, never
+  suggested. None of these checks blocks capture, a session, or MCP startup.
+  See [setup.md](setup.md#know-when-a-client-install-is-broken-or-behind-its-server).
 - Read-only assistant and MCP endpoints over the retained graph. Remote agents
   can orient with `graph_overview`, locate a typed anchor with `search_graph`,
   and inspect its bounded neighborhood before requesting task-specific decision

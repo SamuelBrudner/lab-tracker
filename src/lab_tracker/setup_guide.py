@@ -101,10 +101,13 @@ def setup_guide_markdown() -> str:
         "configured provider credential; no local OpenAI key is needed for Lab\n"
         "Tracker. `lt doctor` and `lt setup status` surface drift after package\n"
         "upgrades and confirm that `lt-mcp` can start, and `lt update` is the\n"
-        "refresh path. When the server moves to a newer release, `lt setup\n"
-        "status`, `lt-mcp` notices, and the Daily review name each client that\n"
-        "is behind; the Setup page's server-pinned install updates it, then\n"
-        "`lt update` refreshes each repo.\n"
+        "refresh path. When the server moves to a newer MAJOR.MINOR release\n"
+        "(docs/versioning.md), `lt setup status`, `lt-mcp` notices, and the\n"
+        "Daily review name each client that should update; a PATCH-only gap is\n"
+        "reported, never suggested. The `uv tool` install updates with the\n"
+        "Setup page's server-pinned install, then `lt update` refreshes each\n"
+        "repo; an analysis repo updates by rerunning its pinned `uv add`\n"
+        "(step 5), which `lt update` does not change.\n"
     )
 
 

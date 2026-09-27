@@ -7,6 +7,7 @@ import json
 import logging
 from pathlib import Path
 
+import httpx
 import pytest
 
 from lab_tracker.cli import _doctor, init_consumer_repo, update_consumer_repo
@@ -568,6 +569,50 @@ def test_status_stays_quiet_without_a_newer_server_release(
 
     assert payload["client"]["client_behind_server"] is False
     assert payload["suggestions"] == []
+
+
+def test_status_reports_a_patch_release_gap_without_nagging(isolated_homes, monkeypatch) -> None:
+    # docs/versioning.md: a PATCH release is a backward-compatible fix.
+    repo = _healthy_status_repo(isolated_homes, monkeypatch, "consumer-patch")
+    monkeypatch.setattr(
+        setup_helpers,
+        "installed_release",
+        lambda: setup_helpers.ReleaseIdentity(version="0.4.0", revision="a" * 40),
+    )
+    _server_reports_release(monkeypatch, "0.4.3")
+
+    payload = setup_helpers.setup_status(repo)
+
+    assert payload["client"]["status"] == "behind"
+    assert payload["client"]["client_behind_server"] is True
+    assert payload["client"]["update_recommended"] is False
+    assert payload["suggestions"] == []
+
+
+def test_status_compares_the_release_the_health_probe_reads(
+    isolated_homes, monkeypatch
+) -> None:
+    repo = _healthy_status_repo(isolated_homes, monkeypatch, "consumer-probe")
+    monkeypatch.setattr(
+        setup_helpers,
+        "installed_release",
+        lambda: setup_helpers.ReleaseIdentity(version="0.4.0", revision="a" * 40),
+    )
+
+    def get(_self, _url, **_kwargs):
+        return httpx.Response(
+            200, json={"app": {"version": "0.5.0", "source_revision": SERVER_REVISION}}
+        )
+
+    monkeypatch.setattr(httpx.Client, "get", get)
+
+    payload = setup_helpers.setup_status(repo)
+
+    assert payload["client"]["status"] == "behind"
+    assert payload["client"]["update_recommended"] is True
+    assert payload["client"]["server"] == {"version": "0.5.0", "revision": SERVER_REVISION}
+    [suggestion] = payload["suggestions"]
+    assert f"lab-tracker.git@{SERVER_REVISION}" in suggestion
 
 
 def test_status_reports_revision_drift_without_nagging(isolated_homes, monkeypatch) -> None:

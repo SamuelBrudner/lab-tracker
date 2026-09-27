@@ -1172,6 +1172,7 @@ export interface components {
       "note_count": number;
       "release_status"?: "current" | "behind" | "ahead" | "unknown";
       "update_notice"?: (string | null);
+      "update_recommended"?: boolean;
       "watched_folder"?: (string | null);
     };
     "ProjectCoverageReport": {

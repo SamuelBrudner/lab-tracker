@@ -100,7 +100,12 @@ def test_scan_records_the_capturing_client_release(tmp_path, monkeypatch) -> Non
     assert note_metadata["capture_client_revision"] == "c" * 40
 
 
-def test_capture_host_metadata_omits_an_unknown_client_release(monkeypatch) -> None:
+def test_capture_host_metadata_stamps_an_unreadable_client_release_as_unknown(
+    monkeypatch,
+) -> None:
+    # An install id without a client version must mean the client predates
+    # release reporting, so a current client always stamps a version.
+    from lab_tracker._version import UNKNOWN_VERSION
     from lab_tracker.client_release import ReleaseIdentity
 
     client_module = importlib.import_module("lab_tracker_client.client")
@@ -109,7 +114,8 @@ def test_capture_host_metadata_omits_an_unknown_client_release(monkeypatch) -> N
 
     metadata = client_module.capture_host_metadata()
 
-    assert "capture_client_version" not in metadata
+    assert metadata["capture_install_id"]
+    assert metadata["capture_client_version"] == UNKNOWN_VERSION
     assert "capture_client_revision" not in metadata
 
 
