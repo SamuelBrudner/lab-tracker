@@ -131,6 +131,31 @@ def test_health_http_status_preserves_reachability_contract(monkeypatch, status,
         assert "diagnosis" not in result
 
 
+def test_health_probe_reports_the_server_release(monkeypatch):
+    def get(_self, _url, **_kwargs):
+        return httpx.Response(
+            200, json={"status": "ok", "app": {"version": "0.9.0", "source_revision": "B" * 40}}
+        )
+
+    monkeypatch.setattr(httpx.Client, "get", get)
+
+    result = setup.probe_health_diagnostics("https://origin.ts.net")
+
+    assert result == {"reachable": True, "release": {"version": "0.9.0", "revision": "b" * 40}}
+
+
+def test_health_probe_without_a_json_body_stays_reachable_without_a_release(monkeypatch):
+    def get(_self, _url, **_kwargs):
+        return httpx.Response(200, text="<html>ok</html>")
+
+    monkeypatch.setattr(httpx.Client, "get", get)
+
+    result = setup.probe_health_diagnostics("https://origin.ts.net")
+
+    assert result["reachable"] is True
+    assert "release" not in result
+
+
 def test_mcp_health_keeps_fail_soft_and_exposes_diagnostic(monkeypatch):
     def handler(request):
         trace = request.extensions["trace"]

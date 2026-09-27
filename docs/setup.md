@@ -155,6 +155,65 @@ content differs is first preserved next to itself as `*.bak-lt-update`, and
 `lt_ids.json` is never touched. `--dry-run` previews the changes; run
 `lt doctor` afterwards to confirm the repo is in sync.
 
+### Know when a client install is broken or behind its server
+
+A release is the `[project].version` in `pyproject.toml`, versioned by
+[versioning.md](versioning.md) (Semantic Versioning; while on `0.y.z`, MINOR
+for features and any incompatibility, PATCH only for backward-compatible
+fixes). The server reports it as `app.version` on `GET /health`, next to
+`app.source_revision`. The release status is truthful: a client on any older
+release is *behind*. One rule decides whether that is worth a nag: an update is
+*recommended* (`update_recommended`) only when the client's `MAJOR.MINOR` is
+older than the server's. Every notice below keys on that rule, so a PATCH-only
+gap is reported as information and never suggested. Revision drift within one
+release is reported (`same_revision`) but never suggested either, since most
+commits are not consumer-relevant.
+
+- `lt doctor` (and `lt doctor --all`, once per sweep) imports the MCP server
+  in-process and reports `lt_mcp.importable`, with the error, traceback, and
+  next step when it fails. A failure exits `1` like drift; `--fail-silent`
+  keeps prompt hooks quiet. There is no network I/O; `lt setup verify-mcp`
+  remains the deeper connectivity check.
+- `lt setup status` reports the same `lt_mcp` check plus a `client` release
+  comparison built from its existing `/health` probe (`status`,
+  `client_behind_server`, `update_recommended`), and suggests the update only
+  when one is recommended, so the SessionStart hook's `--brief` line names it.
+- `lt-mcp` over stdio makes one unauthenticated `GET /health` at startup
+  (2-second timeout, advisory only: any failure leaves the session unchanged).
+  When an update is recommended, the MCP `instructions` start with an
+  `UPDATE AVAILABLE` notice and every tool result carries the same notice in
+  `_lab_tracker_update_notice`. A hosted endpoint skips the check; it ships
+  with its server.
+- Captures always record `capture_client_version` (`0.0.0+unknown` when the
+  client cannot read its own release) and, when known, `capture_client_revision`
+  next to the host identity. The coverage read
+  (`GET /projects/{project_id}/coverage`) judges each capture source on its
+  own: it reports the release the source's newest capture was made with, its
+  `release_status` against the server's, and `update_recommended`, and writes
+  an `update_notice` on every source for which an update is recommended and
+  that captured in the last 90 days. A source with an install id but no
+  recorded release predates release reporting; while the server's release is
+  known it is reported as behind, with a notice saying so. The Daily review
+  page lists each notice, for example "lab-tracker on the machine watching
+  `fly_walking_data` (rig-7) is behind this server". Only a watch source is
+  named by the folder it watches.
+
+One install id covers every Python environment on a machine, and the notice's
+fix depends on which environment made the capture:
+
+- **Tool environment** (`lt watch`, `lt-hpc`, the repo and git hooks,
+  `lt import-folder`, and anything else launched from the `uv tool` install):
+  install the server's release with the Agents page's install command
+  (`uv tool install --force "lab-tracker @ git+https://github.com/SamuelBrudner/lab-tracker.git@<revision>"`),
+  then run `lt update` in each consumer repo and restart the MCP host so it
+  launches the new `lt-mcp`.
+- **Analysis repo** (in-script captures such as `savefig` from
+  `lab_tracker_client`, adapter `lab-tracker-client-figure`, or captures that
+  carry `run_*` metadata): in that repo, rerun the Setup page's pinned project
+  dependency (`uv add "lab-tracker @ git+https://github.com/SamuelBrudner/lab-tracker.git@<revision>"`,
+  guided setup step 5). `lt update` refreshes integration files only and does
+  not change that pin.
+
 ## Multi-client Postgres runtime
 
 For browser, Codex, Claude, scripts, and future workers writing at the same time,

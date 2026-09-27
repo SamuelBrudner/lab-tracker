@@ -21,6 +21,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
+from lab_tracker.client_release import ReleaseStatus
 from lab_tracker.git_store_locator import (
     GitObjectId,
     PinnedGitPath,
@@ -1665,10 +1666,19 @@ class PublicationReadinessReport(_DomainModel):
     seal_level: Literal["blocked", "ara_l1"] = "blocked"
 
 
-# Capture-health windows for the per-source coverage listing: a source that
-# delivered within the quiet window but not within the recent window has gone
-# quiet (a stalled scheduler, an expired token, a moved folder); one silent for
-# longer than the quiet window is simply retired and is not flagged.
+class SoftwareRelease(_DomainModel):
+    """A lab-tracker release: the ``[project].version`` plus, when known, its revision."""
+
+    version: str | None = None
+    revision: str | None = None
+
+
+# Capture-health windows for the per-source coverage listing: a scheduled
+# source that delivered within the quiet window but not within the recent
+# window has gone quiet (a stalled scheduler, an expired token, a moved
+# folder); one silent for longer than the quiet window is simply retired and
+# is not flagged. The quiet window is also how recently a source must have
+# captured to be sent a client update notice.
 RECENT_CAPTURE_DAYS: Final = 7
 QUIET_CAPTURE_WINDOW_DAYS: Final = 30
 
@@ -1678,11 +1688,21 @@ class ProjectCoverageCaptureSource(_DomainModel):
 
     A source is the (provider, adapter, install, host) tuple written into note
     metadata by capture clients; manual notes carry none of the four and form
-    the all-``None`` bucket. The last-seen listing carries two named windows
-    (``RECENT_CAPTURE_DAYS`` and ``QUIET_CAPTURE_WINDOW_DAYS``): ``quiet`` is
-    true for an automated source (one naming a provider or adapter) that
-    captured inside the quiet window but not inside the recent window. Manual
-    notes are never flagged.
+    the all-``None`` bucket. Two advisory judgements ride on each source, and
+    neither is stored or acted on:
+
+    - Capture health, from two named windows (``RECENT_CAPTURE_DAYS`` and
+      ``QUIET_CAPTURE_WINDOW_DAYS``): ``quiet`` is true for a scheduled source
+      (the ``lt watch`` family or ``lt-hpc``) that captured inside the quiet
+      window but not inside the recent window. Human-paced sources (typed
+      notes, figure saves, imports, git snapshots, phone captures) are never
+      flagged.
+    - Client release: whether the client that made the source's newest capture
+      runs a release behind this server's (``release_status``), and whether that
+      gap is worth updating for (``update_recommended``: an older MAJOR.MINOR,
+      see ``docs/versioning.md``), spelled out as an ``update_notice`` on each
+      such source that captured inside the quiet window (see
+      ``lab_tracker.capture_client_release``).
     """
 
     evidence_source_provider: str | None = None
@@ -1694,6 +1714,14 @@ class ProjectCoverageCaptureSource(_DomainModel):
     recent_note_count: int = Field(default=0, ge=0)
     staged_unreviewed_count: int = Field(default=0, ge=0)
     quiet: bool = False
+    # The release the newest capture was made with, when its client recorded it.
+    capture_client_version: str | None = None
+    capture_client_revision: str | None = None
+    release_status: ReleaseStatus = "unknown"
+    update_recommended: bool = False
+    # The watch root the newest capture came from, for a watch-folder source.
+    watched_folder: str | None = None
+    update_notice: str | None = None
 
 
 class ProjectCoverageSummary(_DomainModel):
@@ -1721,9 +1749,14 @@ class ProjectCoverageReport(ProjectCoverageSummary):
 
     ``recent_days`` and ``quiet_window_days`` name the windows the listing's
     ``recent_note_count`` and ``quiet`` were derived with, so a reader never
-    has to guess the thresholds.
+    has to guess the thresholds. ``quiet_source_count`` counts every quiet
+    source in the project, including any past the listing bound.
+    ``server_release`` is the release each source's ``release_status`` was
+    judged against.
     """
 
+    # The release capture sources are compared against.
+    server_release: SoftwareRelease = Field(default_factory=SoftwareRelease)
     capture_sources: list[ProjectCoverageCaptureSource] = Field(default_factory=list)
     capture_sources_truncated: bool = False
     recent_days: int = Field(default=RECENT_CAPTURE_DAYS, ge=1)

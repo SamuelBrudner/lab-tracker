@@ -117,6 +117,14 @@ The release:
 7. Retries and verifies the same identity through both the loopback and
    configured public health endpoints.
 
+The `version` in `pyproject.toml` is the release that clients compare against:
+`GET /health` reports it as `app.version`. Bump it as
+[versioning.md](../../docs/versioning.md) requires for every release. `lt setup
+status`, `lt-mcp`, and the Daily review recommend an update only when a
+client's `MAJOR.MINOR` is older than the server's; a PATCH release is reported
+to clients as information and never nags
+([client update awareness](../../docs/setup.md#know-when-a-client-install-is-broken-or-behind-its-server)).
+
 If a post-cutover gate fails, the script restarts the previous immutable image
 ID against the current env files and database and waits for it to become
 healthy. That automatic recovery works only while the database is still at a

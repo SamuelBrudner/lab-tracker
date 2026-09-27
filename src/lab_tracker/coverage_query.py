@@ -18,9 +18,11 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import case, func, select
+from sqlalchemy import ColumnElement, RowMapping, Subquery, and_, case, func, or_, select
 from sqlalchemy.orm import Session as OrmSession
 
+from lab_tracker.capture_client_release import WATCH_ADAPTER_PREFIX, capture_release
+from lab_tracker.client_release import ReleaseIdentity
 from lab_tracker.db_models import GraphChangeOperationModel, GraphChangeSetModel, NoteModel
 from lab_tracker.db_types import ensure_uuid
 from lab_tracker.models import (
@@ -33,6 +35,7 @@ from lab_tracker.models import (
     ProjectCoverageCaptureSource,
     ProjectCoverageReport,
     ProjectCoverageSummary,
+    SoftwareRelease,
 )
 from lab_tracker.sqlalchemy_mapper_parts.common import as_utc
 
@@ -66,6 +69,18 @@ CAPTURE_SOURCE_METADATA_KEYS = (
 )
 # The (provider, adapter, install, host) tuple that identifies one capture source.
 CaptureSourceKey = tuple[str | None, str | None, str | None, str | None]
+# Adapters that deliver on their own clock, so their silence can mean a stall:
+# the `lt watch` family (lt-watch, lt-watch-files, lt-watch-acquisition,
+# lt-watch-manifest) and `lt-hpc` run records.
+HPC_ADAPTER_PREFIX = "lt-hpc"
+SCHEDULED_CAPTURE_ADAPTER_PREFIXES = (WATCH_ADAPTER_PREFIX, HPC_ADAPTER_PREFIX)
+# Labels of the ranked capture-source subquery's computed columns.
+LAST_CAPTURE_AT_COLUMN = "last_capture_at"
+NOTE_METADATA_COLUMN = "note_metadata"
+RECENCY_COLUMN = "recency"
+NOTE_COUNT_COLUMN = "note_count"
+RECENT_NOTE_COUNT_COLUMN = "recent_note_count"
+NEWEST_RANK = 1
 # Historical spellings of the note id(s) inside a persisted operation source ref
 # (the same tuple graph_draft_validation normalises on write).
 _SOURCE_REF_NOTE_ID_KEYS = ("source_note_ids", "source_note_id", "note_id")
@@ -112,19 +127,26 @@ def project_coverage_report(
     session: OrmSession,
     project_id: UUID,
     *,
+    server: ReleaseIdentity,
     now: datetime | None = None,
 ) -> ProjectCoverageReport:
     """The coverage summary plus the bounded per-source last-seen listing.
 
-    ``now`` anchors the recent and quiet windows of the capture-source
-    listing; it defaults to the wall clock and exists for deterministic reads.
+    ``server`` is the release each source's newest capture is compared with.
+    ``now`` anchors the recent, quiet and update-notice windows; it defaults to
+    the wall clock and exists for deterministic reads.
     """
 
     summary = project_coverage_summary(session, project_id)
-    generated_at = _as_utc(now) if now is not None else datetime.now(timezone.utc)
-    capture_sources, truncated = _capture_sources(session, str(project_id), now=generated_at)
+    generated_at = as_utc(now) if now is not None else datetime.now(timezone.utc)
+    windows = _CaptureWindows.ending_at(generated_at)
+    ranked = _ranked_capture_sources(str(project_id), windows)
+    capture_sources, truncated = _capture_sources(
+        session, str(project_id), ranked, server=server, now=generated_at
+    )
     return ProjectCoverageReport(
         **summary.model_dump(),
+        server_release=SoftwareRelease(**server.as_dict()),
         capture_sources=capture_sources,
         capture_sources_truncated=truncated,
         recent_days=RECENT_CAPTURE_DAYS,
@@ -133,10 +155,32 @@ def project_coverage_report(
     )
 
 
-def _as_utc(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
+@dataclass(frozen=True)
+class _CaptureWindows:
+    """The recent and quiet cutoffs of one coverage read, anchored at one instant."""
+
+    recent_cutoff: datetime
+    quiet_cutoff: datetime
+
+    @classmethod
+    def ending_at(cls, now: datetime) -> _CaptureWindows:
+        return cls(
+            recent_cutoff=now - timedelta(days=RECENT_CAPTURE_DAYS),
+            quiet_cutoff=now - timedelta(days=QUIET_CAPTURE_WINDOW_DAYS),
+        )
+
+
+def is_scheduled_capture_adapter(adapter: str | None) -> bool:
+    """Whether ``adapter`` names a capture path that runs on a schedule.
+
+    Only these can go quiet: the ``lt watch`` family and ``lt-hpc`` deliver on
+    their own clock, so their silence means something stalled. Every other
+    source (typed notes, figure saves, imports, git snapshots, phone and
+    share-sheet captures) delivers when a person acts, so silence is not a
+    signal.
+    """
+
+    return adapter is not None and adapter.startswith(SCHEDULED_CAPTURE_ADAPTER_PREFIXES)
 
 
 def capture_source_is_quiet(
@@ -145,17 +189,17 @@ def capture_source_is_quiet(
     last_capture_at: datetime,
     now: datetime,
 ) -> bool:
-    """An automated source that delivered inside the quiet window but not recently.
+    """A scheduled source that delivered inside the quiet window but not recently.
 
-    Manual notes are never quiet, and a source silent for longer than the
-    quiet window is retired rather than stalled, so it is not flagged either.
+    Human-paced sources are never quiet, and a source silent for longer than
+    the quiet window is retired rather than stalled, so it is not flagged
+    either.
     """
 
     if not automated:
         return False
-    recent_cutoff = now - timedelta(days=RECENT_CAPTURE_DAYS)
-    quiet_cutoff = now - timedelta(days=QUIET_CAPTURE_WINDOW_DAYS)
-    return quiet_cutoff <= _as_utc(last_capture_at) < recent_cutoff
+    windows = _CaptureWindows.ending_at(as_utc(now))
+    return windows.quiet_cutoff <= as_utc(last_capture_at) < windows.recent_cutoff
 
 
 def unreviewed_capture_counts_by_project(
@@ -291,57 +335,141 @@ def _last_capture_at(session: OrmSession, project_id: str) -> datetime | None:
     return as_utc(value) if value is not None else None
 
 
+def _ranked_capture_sources(project_id: str, windows: _CaptureWindows) -> Subquery:
+    """The project's notes ranked newest-first within their capture source.
+
+    One window function ranks each source's notes, so the rank-1 row that
+    represents a source is its newest capture: that note's metadata names the
+    client release that source's environment runs now and, for a watch source,
+    its folder. Windowed aggregates give the same row the source's note count
+    and how many of its notes arrived inside the recent window.
+    """
+
+    source_expressions = {
+        key: NoteModel.note_metadata[key].as_string() for key in CAPTURE_SOURCE_METADATA_KEYS
+    }
+    partition = list(source_expressions.values())
+    is_recent = case((NoteModel.created_at >= windows.recent_cutoff, 1), else_=0)
+    return (
+        select(
+            *(expression.label(key) for key, expression in source_expressions.items()),
+            NoteModel.created_at.label(LAST_CAPTURE_AT_COLUMN),
+            NoteModel.note_metadata.label(NOTE_METADATA_COLUMN),
+            func.row_number()
+            .over(
+                partition_by=partition,
+                order_by=(NoteModel.created_at.desc(), NoteModel.note_id.desc()),
+            )
+            .label(RECENCY_COLUMN),
+            func.count().over(partition_by=partition).label(NOTE_COUNT_COLUMN),
+            func.sum(is_recent).over(partition_by=partition).label(RECENT_NOTE_COUNT_COLUMN),
+        )
+        .where(NoteModel.project_id == project_id)
+        .subquery()
+    )
+
+
 def _capture_sources(
     session: OrmSession,
     project_id: str,
+    ranked: Subquery,
     *,
+    server: ReleaseIdentity,
     now: datetime,
 ) -> tuple[list[ProjectCoverageCaptureSource], bool]:
-    """Group the project's notes by capture source, most recently delivering first.
+    """List the project's capture sources, most recently delivering first."""
 
-    Each source also carries how many notes it delivered inside the recent
-    window, how many of its staged notes nobody has reviewed, and whether it
-    has gone quiet (see :func:`capture_source_is_quiet`).
-    """
-
-    source_columns = [
-        NoteModel.note_metadata[key].as_string() for key in CAPTURE_SOURCE_METADATA_KEYS
-    ]
-    last_capture_at = func.max(NoteModel.created_at)
-    recent_cutoff = now - timedelta(days=RECENT_CAPTURE_DAYS)
-    recent_note_count = func.sum(case((NoteModel.created_at >= recent_cutoff, 1), else_=0))
-    rows = session.execute(
-        select(*source_columns, func.count(NoteModel.note_id), last_capture_at, recent_note_count)
-        .where(NoteModel.project_id == project_id)
-        .group_by(*source_columns)
-        .order_by(last_capture_at.desc(), *source_columns)
-        .limit(CAPTURE_SOURCE_LISTING_LIMIT + 1)
-    ).all()
+    rows = (
+        session.execute(
+            select(ranked)
+            .where(ranked.c[RECENCY_COLUMN] == NEWEST_RANK)
+            .order_by(
+                ranked.c[LAST_CAPTURE_AT_COLUMN].desc(),
+                *(ranked.c[key] for key in CAPTURE_SOURCE_METADATA_KEYS),
+            )
+            .limit(CAPTURE_SOURCE_LISTING_LIMIT + 1)
+        )
+        .mappings()
+        .all()
+    )
     truncated = len(rows) > CAPTURE_SOURCE_LISTING_LIMIT
     unreviewed_by_source = _staged_unreviewed_by_source(session, project_id)
     sources = [
-        ProjectCoverageCaptureSource(
-            evidence_source_provider=provider,
-            evidence_adapter=adapter,
-            capture_install_id=install_id,
-            capture_host_label=host_label,
-            note_count=int(note_count),
-            last_capture_at=as_utc(captured_at),
-            recent_note_count=int(recent or 0),
-            staged_unreviewed_count=unreviewed_by_source.get(
-                (provider, adapter, install_id, host_label), 0
-            ),
-            quiet=capture_source_is_quiet(
-                automated=bool(provider or adapter),
-                last_capture_at=as_utc(captured_at),
-                now=now,
-            ),
-        )
-        for provider, adapter, install_id, host_label, note_count, captured_at, recent in rows[
-            :CAPTURE_SOURCE_LISTING_LIMIT
-        ]
+        _capture_source(row, server=server, now=now, unreviewed_by_source=unreviewed_by_source)
+        for row in rows[:CAPTURE_SOURCE_LISTING_LIMIT]
     ]
     return sources, truncated
+
+
+def _quiet_source_count(session: OrmSession, ranked: Subquery, windows: _CaptureWindows) -> int:
+    """Count every quiet source in SQL, including those past the listing bound.
+
+    Quiet sources sort after every recently delivering one, so they are the
+    first to fall past ``CAPTURE_SOURCE_LISTING_LIMIT``; counting the listed
+    rows would hide exactly the stalls this count exists to show.
+    """
+
+    last_capture_at = ranked.c[LAST_CAPTURE_AT_COLUMN]
+    count = session.execute(
+        select(func.count())
+        .select_from(ranked)
+        .where(
+            ranked.c[RECENCY_COLUMN] == NEWEST_RANK,
+            _is_scheduled_adapter_column(ranked.c[EVIDENCE_ADAPTER_KEY]),
+            and_(last_capture_at >= windows.quiet_cutoff, last_capture_at < windows.recent_cutoff),
+        )
+    ).scalar_one()
+    return int(count)
+
+
+def _is_scheduled_adapter_column(adapter: ColumnElement[str]) -> ColumnElement[bool]:
+    """SQL form of :func:`is_scheduled_capture_adapter`."""
+
+    return or_(
+        *(
+            adapter.startswith(prefix, autoescape=True)
+            for prefix in SCHEDULED_CAPTURE_ADAPTER_PREFIXES
+        )
+    )
+
+
+def _capture_source(
+    row: RowMapping,
+    *,
+    server: ReleaseIdentity,
+    now: datetime,
+    unreviewed_by_source: dict[CaptureSourceKey, int],
+) -> ProjectCoverageCaptureSource:
+    key: CaptureSourceKey = (
+        row[EVIDENCE_SOURCE_PROVIDER_KEY],
+        row[EVIDENCE_ADAPTER_KEY],
+        row[CAPTURE_INSTALL_ID_KEY],
+        row[CAPTURE_HOST_LABEL_KEY],
+    )
+    metadata = row[NOTE_METADATA_COLUMN] or {}
+    last_capture_at = as_utc(row[LAST_CAPTURE_AT_COLUMN])
+    release = capture_release(metadata, last_capture_at=last_capture_at, server=server, now=now)
+    return ProjectCoverageCaptureSource(
+        evidence_source_provider=key[0],
+        evidence_adapter=key[1],
+        capture_install_id=key[2],
+        capture_host_label=key[3],
+        note_count=int(row[NOTE_COUNT_COLUMN]),
+        last_capture_at=last_capture_at,
+        recent_note_count=int(row[RECENT_NOTE_COUNT_COLUMN] or 0),
+        staged_unreviewed_count=unreviewed_by_source.get(key, 0),
+        quiet=capture_source_is_quiet(
+            automated=bool(key[0] or key[1]),
+            last_capture_at=last_capture_at,
+            now=now,
+        ),
+        capture_client_version=release.capture_client_version,
+        capture_client_revision=release.capture_client_revision,
+        release_status=release.release_status,
+        update_recommended=release.update_recommended,
+        watched_folder=release.watched_folder,
+        update_notice=release.update_notice,
+    )
 
 
 def _staged_unreviewed_by_source(

@@ -91,6 +91,82 @@ function PendingBatchBanner({ enabled = true, token, navigate }) {
   );
 }
 
+// Capture clients that should update to this server's release, named by what
+// they capture. The coverage read judges each capture source on its own and
+// writes update_notice only when an update is recommended, so one machine can
+// list its uv tool install and an analysis repo's environment separately, each
+// with its own fix. Loaded apart from the queues so a failure here cannot hide
+// them.
+function captureSourceKey(source) {
+  return [
+    source.evidence_source_provider,
+    source.evidence_adapter,
+    source.capture_install_id,
+    source.capture_host_label,
+  ]
+    .map((part) => part || "")
+    .join(":");
+}
+
+function staleCaptureSources(coverage) {
+  return (coverage?.capture_sources || []).filter((source) => source?.update_notice);
+}
+
+function StaleCaptureMachines({ projectId, token }) {
+  const [staleInstalls, setStaleInstalls] = useState([]);
+  const [loadError, setLoadError] = useState("");
+
+  useEffect(() => {
+    let canceled = false;
+    setStaleInstalls([]);
+    setLoadError("");
+    if (!projectId) {
+      return () => {
+        canceled = true;
+      };
+    }
+    apiRequest(`/projects/${encodeURIComponent(projectId)}/coverage`, { token })
+      .then((coverage) => {
+        if (!canceled) {
+          setStaleInstalls(staleCaptureSources(coverage));
+        }
+      })
+      .catch((err) => {
+        if (!canceled) {
+          setLoadError(
+            `Could not check capture machines for updates: ${err?.message || "request failed."}`
+          );
+        }
+      });
+    return () => {
+      canceled = true;
+    };
+  }, [projectId, token]);
+
+  if (loadError) {
+    return <p className="subtle">{loadError}</p>;
+  }
+  if (staleInstalls.length === 0) {
+    return null;
+  }
+  return (
+    <div className="flash ok" role="status">
+      <strong>
+        {staleInstalls.length === 1
+          ? "A capture client needs a lab-tracker update"
+          : `${staleInstalls.length} capture clients need a lab-tracker update`}
+      </strong>
+      <ul>
+        {staleInstalls.map((source) => (
+          <li key={captureSourceKey(source)}>
+            {source.update_notice}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 // Drafts started from a single capture ("Draft graph update" on a note or an
 // image) are reviewed on the same page as the batches so they are not lost
 // between the Capture page's last-ten list and nowhere.
@@ -375,6 +451,7 @@ function BatchReviewPage({
           </label>
 
           <div className="stack">
+            <StaleCaptureMachines projectId={selectedProjectId} token={token} />
             <h3>Ready for you</h3>
             <BatchCards
               batches={batches}

@@ -33,6 +33,8 @@ from lab_tracker.artifact_resolution_limits import (
     ArtifactContentBoundsError,
 )
 from lab_tracker.auth import AuthContext
+from lab_tracker.capture_client_release import server_release
+from lab_tracker.config import Settings
 from lab_tracker.coverage_query import project_coverage_report
 from lab_tracker.decision_context import JsonObject, build_decision_context
 from lab_tracker.decision_context_query import (
@@ -288,6 +290,8 @@ class ContextQueries:
     release_read_scope: Callable[[], None]
     resolver_registry: ResolverRegistry | None = None
     store_authority_snapshot_provider: StoreAuthoritySnapshotProvider | None = None
+    # Needed only by reads that describe the running server (coverage's release).
+    settings: Settings | None = None
     _prepared_external_artifact_resolutions: dict[
         object, _PreparedExternalArtifactResolutionRecord
     ] = field(default_factory=dict, init=False, repr=False, compare=False)
@@ -376,7 +380,13 @@ class ContextQueries:
     ) -> ProjectCoverageReport:
         # Same opaque missing/inaccessible boundary as the graph overview.
         project = self.api.get_project_for_read(project_id, actor=actor)
-        return project_coverage_report(self.session, project.project_id)
+        if self.settings is None:
+            raise RuntimeError("ContextQueries.settings is required to report coverage")
+        return project_coverage_report(
+            self.session,
+            project.project_id,
+            server=server_release(self.settings),
+        )
 
     def search_graph(
         self,

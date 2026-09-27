@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Iterable
-from importlib import metadata
 
+from lab_tracker._version import distribution_version
 from lab_tracker.models import ExplorationNodeType
 
 TASK_KIND_VALUES = (
@@ -250,7 +250,6 @@ def code_conventions_version_line(body: str | None = None) -> str:
 
 
 def package_version() -> str:
-    try:
-        return metadata.version("lab-tracker")
-    except metadata.PackageNotFoundError:
-        return "0+unknown"
+    """Return the installed ``lab-tracker`` version; ``lab_tracker._version`` owns the lookup."""
+
+    return distribution_version()

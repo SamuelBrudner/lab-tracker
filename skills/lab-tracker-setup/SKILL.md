@@ -109,7 +109,14 @@ Captures stage for human review — nothing commits to the research
 graph automatically. Server-side AI drafting uses the operator's
 configured provider credential; no local OpenAI key is needed for Lab
 Tracker. `lt doctor` and `lt setup status` surface drift after package
-upgrades, and `lt update` is the refresh path.
+upgrades and confirm that `lt-mcp` can start, and `lt update` is the
+refresh path. When the server moves to a newer MAJOR.MINOR release
+(docs/versioning.md), `lt setup status`, `lt-mcp` notices, and the
+Daily review name each client that should update; a PATCH-only gap is
+reported, never suggested. The `uv tool` install updates with the
+Setup page's server-pinned install, then `lt update` refreshes each
+repo; an analysis repo updates by rerunning its pinned `uv add`
+(step 5), which `lt update` does not change.
 <!-- END GENERATED SETUP GUIDE -->
 
 ## Conversation shape
@@ -128,4 +135,4 @@ upgrades, and `lt update` is the refresh path.
 If Lab Tracker is unreachable and the user does not operate a server, point
 them at whoever runs their lab's instance instead of standing one up ad hoc.
 
-<!-- lab-tracker-setup-guide version=0.1.0 sha256=a0b6107e6b38 -->
+<!-- lab-tracker-setup-guide version=0.1.0 sha256=8126889c0eeb -->

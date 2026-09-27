@@ -210,15 +210,21 @@ research record:
   `capture_install_id`/`capture_host_label`). Each listed source also carries
   its capture health: how many notes it delivered in the last `recent_days`
   (7), how many of its staged notes are still unreviewed, and a `quiet` flag
-  for an automated source that captured inside `quiet_window_days` (30) but
-  not inside the recent window, so a stalled scheduler, expired token, or
-  moved folder is visible on the home page's Capture health card instead of
-  showing up as an emptier review queue. Typed notes are never flagged and a
-  source silent for longer than the quiet window is retired, not stalled.
-  The same summary rides on the graph overview and the decision-context
-  packet, and the portfolio summary flags `unreviewed_captures` once a named
-  threshold is reached. Coverage is derived from existing records; nothing is
-  stored, ranked, or auto-reviewed.
+  for a scheduled source (the `lt watch` family or `lt-hpc`) that captured
+  inside `quiet_window_days` (30) but not inside the recent window, so a
+  stalled scheduler, expired token, or moved folder is visible on the home
+  page's Capture health card instead of showing up as an emptier review
+  queue; `quiet_source_count` counts every quiet source, including any past
+  the listing bound. Human-paced sources (typed notes, figure saves, imports,
+  git snapshots) are never flagged, and a source silent for longer than the
+  quiet window is retired, not stalled. Phone and share-sheet captures carry
+  no adapter, so they are listed with typed notes and are not monitored.
+  Each source also carries its newest capture's client release (see the
+  client-update awareness below). The same summary rides on the graph
+  overview and the decision-context packet, and the portfolio summary flags
+  `unreviewed_captures` once a named threshold is reached. Coverage is
+  derived from existing records; nothing is stored, ranked, or
+  auto-reviewed.
 - Paired-device enrollment for phone capture, including one-time enrollment
   URLs, device-token capture, and revocation. Captures presented with a device
   token are stamped server-side with `capture_device_token_id` and
@@ -448,6 +454,27 @@ research record:
   cross-platform process executor and expose only static adapter-specific
   failures. See
   [external-artifact-resolution-design.md](external-artifact-resolution-design.md).
+- Advisory client-update awareness keyed to release versions: `GET /health`
+  reports the server's `[project].version` and source revision; `lt doctor` and
+  `lt setup status` check that the installed `lt-mcp` imports and compare the
+  client's release with the server's; stdio `lt-mcp` prefixes its MCP
+  instructions and adds `_lab_tracker_update_notice` to every tool result when
+  an update is recommended; and captures record the capturing client's
+  release. Each coverage `capture_sources` row carries its newest capture's
+  `capture_client_version`/`capture_client_revision`, its `release_status`
+  against the report's `server_release`, `update_recommended`, the
+  `watched_folder` of a watch source, and a per-source `update_notice` when
+  an update is recommended and the source captured within
+  `quiet_window_days`. The Daily review page lists each source whose client
+  environment needs an update (a watch source by the folder it watches),
+  with the fix for that environment: the tool install plus `lt update`, or
+  an analysis repo's pinned `uv add` dependency; the home page's Capture
+  health card marks the same rows with a "client behind" pill. A capture
+  queued offline and drained later carries the release that queued it. Only a newer
+  server `MAJOR.MINOR` produces a notice ([versioning.md](versioning.md)); a
+  PATCH-only gap and revision drift within a release are reported, never
+  suggested. None of these checks blocks capture, a session, or MCP startup.
+  See [setup.md](setup.md#know-when-a-client-install-is-broken-or-behind-its-server).
 - Read-only assistant and MCP endpoints over the retained graph. Remote agents
   can orient with `graph_overview`, locate a typed anchor with `search_graph`,
   and inspect its bounded neighborhood before requesting task-specific decision

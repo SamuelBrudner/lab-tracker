@@ -36,6 +36,8 @@ jobs:
         run: uv lock --check
       - name: Install Python dependencies
         run: uv sync --frozen --extra test --extra lint
+      - name: Verify package version
+        run: uv run --frozen python scripts/verify_release.py
       - name: Install frontend dependencies
         run: npm ci
       - name: Audit frontend dependencies
