@@ -664,8 +664,9 @@ def _capture_saved_figure(
                 # A checkout-wide (or shell-wide) session is a bounded default,
                 # not a per-capture choice, so it carries the weaker label.
                 upload_metadata[DECLARED_TARGET_SOURCE_KEY] = DECLARED_TARGET_SOURCE_CONFIG_DEFAULT
+
             def upload(
-                metadata: dict[str, NoteMetadataScalar], targets: list[EntityRef]
+                metadata: dict[str, NoteMetadataScalar], upload_targets: list[EntityRef]
             ) -> tuple[LTRecord, int]:
                 return resolved_client._upload_note_file_payload_with_status(
                     project_id=resolved_project_id,
@@ -675,7 +676,7 @@ def _capture_saved_figure(
                     status="staged",
                     content_type=preview.content_type,
                     client_capture_id=client_capture_id,
-                    targets=targets,
+                    targets=upload_targets,
                     timeout=capture_timeout,
                 )
 
