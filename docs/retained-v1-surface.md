@@ -369,11 +369,15 @@ research record:
   the note to that entity with `basis: exact_id_match` and no content hash.
   Ambiguous commit prefixes, prefixes shorter than seven characters, staged
   analyses, and targets the note already carries propose nothing, and a pair
-  declined once is never re-proposed. The session rule skips notes whose
-  client declared its targets (`declared_target_source` set), because that
-  client already linked the session: detaching a declared session target
-  does not bring it back as a proposal. It still covers notes that carry a
-  session id without declaring one, and every git-commit match. Both detectors feed the same `PROPOSED`
+  declined once is never re-proposed. The session rule skips a note whose
+  client declared its targets (`declared_target_source` set) only while the
+  note carries a session target, because that session was decided at
+  capture. A declared note with no session target (a watch note that
+  declared only a question or dataset after its unverified active session
+  was dropped, or one whose declared session a person detached) still gets
+  the session its metadata names proposed for review, and declining that
+  proposal keeps it from coming back. Every git-commit match is proposed
+  either way. Both detectors feed the same `PROPOSED`
   rows and the same review surface; the model never sees them. A person
   accepts or rejects each proposal over `GET`/`PATCH /provenance-links`;
   only accepted note-to-note links render as `prov:wasDerivedFrom` in PROV-O

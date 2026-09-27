@@ -112,27 +112,52 @@ def test_id_matches_stay_silent_for_unknown_ambiguous_short_or_already_linked_id
         assert id_matches_for_note(note, sessions=[session], analyses=twins) == [], label
 
 
-def test_a_declared_target_client_already_decided_the_session() -> None:
-    """A note whose client declared its targets (declared_target_source) had
-    its session linked at capture: if a person detached it since, the rule
-    must not propose it back. Its commit is still matched."""
+def test_a_note_carrying_a_declared_session_target_is_not_given_another() -> None:
+    """A declared-target note that still carries a session target had its
+    session decided at capture: the rule proposes no other session. Its
+    commit is still matched."""
 
     project_id = uuid4()
-    session = _session(project_id)
+    declared = _session(project_id)
+    other = _session(project_id)
     analysis = _analysis(project_id, COMMIT)
     for source in ("explicit", "config_default"):
-        detached = _note(
+        note = _note(
             project_id,
             {
-                "watch_session_id": str(session.session_id),
+                "watch_session_id": str(other.session_id),
                 "run_git_commit": COMMIT[:12],
                 DECLARED_TARGET_SOURCE_KEY: source,
             },
+            [EntityRef(entity_type=EntityType.SESSION, entity_id=declared.session_id)],
         )
 
-        matches = id_matches_for_note(detached, sessions=[session], analyses=[analysis])
+        matches = id_matches_for_note(note, sessions=[declared, other], analyses=[analysis])
 
         assert [match.target.entity_type for match in matches] == [EntityType.ANALYSIS], source
+
+
+def test_a_declared_note_without_a_session_target_still_gets_its_session_proposed() -> None:
+    """A watch note that declared only a question (its unverified active
+    session dropped) or whose declared session a person detached carries no
+    session target: the rule still proposes the session its metadata names,
+    for review."""
+
+    project_id = uuid4()
+    session = _session(project_id)
+    question_target = EntityRef(entity_type=EntityType.QUESTION, entity_id=uuid4())
+    for source in ("explicit", "config_default"):
+        for targets in ([question_target], []):
+            note = _note(
+                project_id,
+                {"watch_session_id": str(session.session_id), DECLARED_TARGET_SOURCE_KEY: source},
+                targets,
+            )
+
+            assert [
+                match.target.entity_id
+                for match in id_matches_for_note(note, sessions=[session], analyses=[])
+            ] == [session.session_id], (source, targets)
     legacy = _note(project_id, {"capture_session_id": str(session.session_id)})
     assert [
         match.target.entity_id
@@ -417,7 +442,7 @@ def test_exact_id_detector_failure_never_fails_the_batch_or_the_hash_detector(
     assert [link["basis"] for link in links] == [ProvenanceLinkBasis.CONTENT_HASH_MATCH.value]
 
 
-def test_detaching_a_declared_session_target_is_never_proposed_back(
+def test_a_detached_declared_session_is_proposed_for_review_and_a_decline_sticks(
     client: TestClient, admin_auth_headers: dict[str, str]
 ) -> None:
     project_id = _project(client, admin_auth_headers)
@@ -430,14 +455,50 @@ def test_detaching_a_declared_session_target_is_never_proposed_back(
         metadata={"watch_session_id": session_id, "declared_target_source": "explicit"},
         targets=[{"entity_type": "session", "entity_id": session_id}],
     )
+    _run_batch(client, admin_auth_headers, project_id)
+    assert _links(client, admin_auth_headers, project_id) == []
+
     detached = client.patch(
         f"/notes/{note_id}", json={"targets": []}, headers=admin_auth_headers
     )
     assert detached.status_code == 200, detached.text
+    _run_batch(client, admin_auth_headers, project_id)
+    (link,) = _links(client, admin_auth_headers, project_id)
+    assert link["target"] == {"entity_type": "session", "entity_id": session_id}
+
+    rejected = client.patch(
+        f"/provenance-links/{link['link_id']}",
+        json={"status": "rejected"},
+        headers=admin_auth_headers,
+    )
+    assert rejected.status_code == 200, rejected.text
+    _run_batch(client, admin_auth_headers, project_id)
+    assert _links(client, admin_auth_headers, project_id) == []
+
+
+def test_a_watch_note_declaring_only_a_question_gets_its_session_proposed(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    """The watcher dropped an unverified active session and declared only the
+    question: the session its metadata names is still proposed for review."""
+
+    project_id = _project(client, admin_auth_headers)
+    question_id = _question(client, admin_auth_headers, project_id)
+    session_id = _session_id(client, admin_auth_headers, project_id)
+    note_id = _staged_note(
+        client,
+        admin_auth_headers,
+        project_id,
+        "Watched file declared into its question",
+        metadata={"watch_session_id": session_id, "declared_target_source": "explicit"},
+        targets=[{"entity_type": "question", "entity_id": question_id}],
+    )
 
     _run_batch(client, admin_auth_headers, project_id)
 
-    assert _links(client, admin_auth_headers, project_id) == []
+    (link,) = _links(client, admin_auth_headers, project_id)
+    assert link["source"] == {"entity_type": "note", "entity_id": note_id}
+    assert link["target"] == {"entity_type": "session", "entity_id": session_id}
 
 
 def test_hash_detector_failure_still_runs_the_exact_id_detector(
