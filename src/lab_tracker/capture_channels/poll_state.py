@@ -87,13 +87,6 @@ class PollState:
         except PollStateUnavailable:
             _logger.warning("Could not record the %s poller's outcome.", poller)
 
-    def last_runs(self) -> dict[str, dict[str, str]]:
-        """A snapshot of every poller's last start, finish, and status."""
-
-        with self._locked() as state:
-            pollers = state.get("pollers", {})
-            return {name: dict(entry) for name, entry in pollers.items() if isinstance(entry, dict)}
-
     def store_scan_baseline(self, scan_key: str) -> frozenset[str] | None:
         with self._locked() as state:
             entry = state.get("store_scan_baselines", {}).get(scan_key)

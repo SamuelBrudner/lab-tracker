@@ -64,6 +64,7 @@ def poll_once(*, only: Sequence[str] | None = None, force: bool = False) -> Poll
     from lab_tracker.app_parts.runtime import build_app_runtime
     from lab_tracker.capture_channels.dispatch import CaptureRuntime, run_due_pollers
     from lab_tracker.capture_channels.poll_state import PollState
+    from lab_tracker.capture_channels.store_scan import LocalStoreScanAccess
     from lab_tracker.config import get_settings
     from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 
@@ -86,7 +87,7 @@ def poll_once(*, only: Sequence[str] | None = None, force: bool = False) -> Poll
             outbound_http_client=runtime.outbound_http_client,
             rclone_remote_policy=runtime.rclone_remote_policy,
             process_executor=runtime.process_executor,
-            local_filesystem_operations=runtime.local_filesystem_operations,
+            local_store_access=LocalStoreScanAccess(runtime.local_filesystem_operations),
             state=PollState.from_settings(settings),
         )
         return run_due_pollers(capture, trigger="cli", only=only, force=force)

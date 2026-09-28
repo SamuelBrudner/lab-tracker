@@ -59,6 +59,7 @@ from lab_tracker.capture_channels.common import (
 )
 from lab_tracker.capture_channels.settings import StoreScan
 from lab_tracker.local_filesystem_authority import LocalFilesystemAuthority
+from lab_tracker.local_filesystem_operations import BoundedLocalFilesystemOperations
 from lab_tracker.local_filesystem_ports import (
     LocalRegularFileReader,
     LocalRegularFileReadOutcome,
@@ -143,6 +144,26 @@ class StoreAdapter(Protocol):
 
 
 # --------------------------------------------------------------------------- local_fs
+
+
+@dataclass(frozen=True, eq=False, repr=False)
+class LocalStoreScanAccess:
+    """The narrow local capability a scan holds: list and hash beneath a store root.
+
+    It wraps the runtime's bounded local-filesystem broker so the broker itself
+    is never published on the app state; a holder can only build a
+    :class:`LocalStoreAdapter`, which re-checks the operator's local roots.
+    """
+
+    _operations: BoundedLocalFilesystemOperations
+
+    def adapter(self, root: str, *, deadline_seconds: float) -> LocalStoreAdapter:
+        return LocalStoreAdapter(
+            root=root,
+            authority=self._operations.authority,
+            reader=self._operations,
+            deadline_seconds=deadline_seconds,
+        )
 
 
 @dataclass(frozen=True)

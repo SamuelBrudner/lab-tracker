@@ -48,13 +48,12 @@ from lab_tracker.capture_channels.settings import (
     parse_store_scans,
 )
 from lab_tracker.capture_channels.store_scan import (
-    LocalStoreAdapter,
+    LocalStoreScanAccess,
     RcloneStoreAdapter,
     StoreAdapter,
     StoreScanError,
     run_store_scan,
 )
-from lab_tracker.local_filesystem_operations import BoundedLocalFilesystemOperations
 from lab_tracker.models import DataStore, StoreKind, utc_now
 from lab_tracker.outbound_http import OutboundHttpClient, OutboundHttpPolicy
 from lab_tracker.rclone_remote_policy import RcloneRemotePolicy
@@ -102,12 +101,11 @@ class CaptureRuntime:
     outbound_http_client: OutboundHttpClient
     rclone_remote_policy: RcloneRemotePolicy
     process_executor: ProcessExecutor
-    local_filesystem_operations: BoundedLocalFilesystemOperations
+    local_store_access: LocalStoreScanAccess
     state: PollState
     imap_factory: ImapFactory = default_imap_factory
     calendar_fetcher: CalendarFetcher | None = None
     clock: Callable[[], datetime] = utc_now
-    store_adapter_factory: Callable[[DataStore], StoreAdapter | None] | None = field(default=None)
 
 
 def email_configured(settings: Any) -> bool:
@@ -355,19 +353,9 @@ def _run_store_scans(runtime: CaptureRuntime) -> _Outcome:
 
 
 def _store_adapter(runtime: CaptureRuntime, store: DataStore) -> StoreAdapter:
-    if runtime.store_adapter_factory is not None:
-        adapter = runtime.store_adapter_factory(store)
-        if adapter is not None:
-            return adapter
     deadline = float(runtime.settings.resolver_subprocess_deadline_seconds)
     if store.kind is StoreKind.LOCAL_FS:
-        operations = runtime.local_filesystem_operations
-        return LocalStoreAdapter(
-            root=store.root,
-            authority=operations.authority,
-            reader=operations,
-            deadline_seconds=deadline,
-        )
+        return runtime.local_store_access.adapter(store.root, deadline_seconds=deadline)
     if is_rclone_store_kind(store.kind):
         return RcloneStoreAdapter(
             store=store,

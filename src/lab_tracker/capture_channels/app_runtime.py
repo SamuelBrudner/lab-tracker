@@ -38,7 +38,7 @@ def capture_runtime_from_app(app: FastAPI) -> CaptureRuntime:
         outbound_http_client=state.outbound_http_client,
         rclone_remote_policy=state.rclone_remote_policy,
         process_executor=state.process_executor,
-        local_filesystem_operations=state.local_filesystem_operations,
+        local_store_access=state.local_store_scan_access,
         state=PollState.from_settings(state.settings),
     )
     app.state.capture_runtime = runtime

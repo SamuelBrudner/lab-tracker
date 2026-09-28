@@ -29,6 +29,7 @@ from lab_tracker.capture_channels.app_runtime import (
 from lab_tracker.capture_channels.dispatch import CaptureRuntime, run_due_pollers
 from lab_tracker.capture_channels.email_capture import capture_token
 from lab_tracker.capture_channels.slack import slack_signature
+from lab_tracker.capture_channels.store_scan import LocalStoreScanAccess
 from lab_tracker.local_filesystem_authority import LocalFilesystemAuthority
 from lab_tracker.local_filesystem_operations import BoundedLocalFilesystemOperations
 from lab_tracker.models import DataStore, StoreKind, utc_now
@@ -700,7 +701,9 @@ def local_store(
         project_id=project_id,
         root=root,
         allowed=allowed,
-        runtime=lambda: _runtime(client, local_filesystem_operations=operations, clock=lambda: NOW),
+        runtime=lambda: _runtime(
+            client, local_store_access=LocalStoreScanAccess(operations), clock=lambda: NOW
+        ),
     )
 
 
@@ -793,7 +796,9 @@ def test_local_store_outside_the_operator_roots_is_refused(
         executor=BoundedSubprocessExecutor(),
     )
 
-    report = _scan(_runtime(client, local_filesystem_operations=operations, clock=lambda: NOW))
+    report = _scan(
+        _runtime(client, local_store_access=LocalStoreScanAccess(operations), clock=lambda: NOW)
+    )
 
     assert report.counts["scans_failed"] == 1
     assert "LAB_TRACKER_RESOLVER_ALLOWED_ROOTS" in report.errors[0]
