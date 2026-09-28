@@ -34,6 +34,7 @@ import stat
 import sys
 import weakref
 from collections.abc import Iterable
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -99,27 +100,9 @@ def autotrack(
 
     def _tracked_savefig(self: Any, fname: Any, *args: Any, **kwargs: Any) -> Any:
         result = original(self, fname, *args, **kwargs)
-        path = _path_target(fname) or _file_object_target(fname)
-        options = _STATE["options"] or {}
-        matched = path is not None and _suffix_matches(path, options.get("patterns", ()))
-        if matched:
-            _note_figure_saved(self)
-        if _figure._AUTOTRACK_SUPPRESSED.get():
-            return result
-        if path is not None and matched:
-            # Same fail-soft capture as savefig(); a failure here is reported
-            # once on stderr and never reaches the user's plotting code.
-            _figure._capture_saved_figure(
-                fig=self,
-                path=path,
-                client=options.get("client"),
-                project_id=options.get("project_id"),
-                logical_id=None,
-                metadata={**(options.get("metadata") or {}), "figure_autotracked": True},
-                preview_max_bytes=_figure.FIGURE_PREVIEW_MAX_BYTES,
-                version_every_change=False,
-                require_bound_project=True,
-            )
+        # The save succeeded; nothing the hook does afterwards may fail it.
+        with suppress(Exception):
+            _after_save(self, fname)
         return result
 
     _tracked_savefig.__wrapped__ = original  # type: ignore[attr-defined]
@@ -128,6 +111,31 @@ def autotrack(
     figure_module.Figure.savefig = _tracked_savefig
     _install_display_capture(displays)
     return True
+
+
+def _after_save(fig: Any, fname: Any) -> None:
+    """Note and capture a finished save whose target matches the patterns."""
+
+    path = _path_target(fname) or _file_object_target(fname)
+    options = _STATE["options"] or {}
+    if path is None or not _suffix_matches(path, options.get("patterns", ())):
+        return
+    _note_figure_saved(fig)
+    if _figure._AUTOTRACK_SUPPRESSED.get():
+        return
+    # Same fail-soft capture as savefig(); a failure here is reported once on
+    # stderr and never reaches the user's plotting code.
+    _figure._capture_saved_figure(
+        fig=fig,
+        path=path,
+        client=options.get("client"),
+        project_id=options.get("project_id"),
+        logical_id=None,
+        metadata={**(options.get("metadata") or {}), "figure_autotracked": True},
+        preview_max_bytes=_figure.FIGURE_PREVIEW_MAX_BYTES,
+        version_every_change=False,
+        require_bound_project=True,
+    )
 
 
 def _install_display_capture(displays: bool) -> None:

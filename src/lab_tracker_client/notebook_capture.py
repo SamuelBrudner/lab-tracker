@@ -161,9 +161,35 @@ def record_notebook_save(
         return {**result, "action": "skipped", "reason": NOTEBOOK_UNBOUND_REASON}
     root = capture_checkout_root(notebook) or notebook.parent
     label = _relative_label(notebook, root)
-    raw, content_hash, size_bytes = _read_notebook(notebook)
-    summary, summary_error = _summarize(raw)
+    capture_id = _capture_id(notebook)
+    event_id = f"notebook-day-{day}"
+    event_file = _watch.event_path(
+        _watch.make_event(
+            capture_id=capture_id,
+            event_id=event_id,
+            capture_kind=NOTEBOOK_CAPTURE_KIND,
+            adapter=NOTEBOOK_ADAPTER,
+            sink=_watch.SINK_STAGED_NOTE,
+        ),
+        _outbox_for(root),
+    )
     deliver_after = _next_local_midnight(local_now)
+    result.update(
+        {
+            "project_id": capture_project.project_id,
+            "event_path": str(event_file),
+            "deliver_after": deliver_after,
+        }
+    )
+    existing = _read_existing(event_file)
+    existing_sync = existing.get("sync", {}) if existing is not None else {}
+    if str(existing_sync.get("status") or "") == "synced" or existing_sync.get("note_id"):
+        return {**result, "action": "already_synced"}
+    raw, content_hash, size_bytes = _read_notebook(notebook)
+    result["content_hash"] = content_hash
+    if existing is not None and existing["source"].get("content_hash") == content_hash:
+        return {**result, "action": "unchanged"}
+    summary, summary_error = _summarize(raw)
     session = read_active_session(root)
     session_id = str(session["session_id"]) if session and session.get("session_id") else None
     metadata = _page_metadata(
@@ -175,8 +201,8 @@ def record_notebook_save(
         summary=summary,
     )
     event = _watch.make_event(
-        capture_id=_capture_id(notebook),
-        event_id=f"notebook-day-{day}",
+        capture_id=capture_id,
+        event_id=event_id,
         capture_kind=NOTEBOOK_CAPTURE_KIND,
         adapter=NOTEBOOK_ADAPTER,
         sink=_watch.SINK_STAGED_NOTE,
@@ -224,26 +250,10 @@ def record_notebook_save(
             "local_day": day,
         },
     )
-    outbox = _outbox_for(root)
-    event_file = _watch.event_path(event, outbox)
-    result.update(
-        {
-            "project_id": capture_project.project_id,
-            "event_path": str(event_file),
-            "deliver_after": deliver_after,
-            "content_hash": content_hash,
-        }
-    )
-    existing = _read_existing(event_file)
     if existing is not None:
-        sync = existing.get("sync", {})
-        if str(sync.get("status") or "") == "synced" or sync.get("note_id"):
-            return {**result, "action": "already_synced"}
-        if existing["source"].get("content_hash") == content_hash:
-            return {**result, "action": "unchanged"}
         event["sync"] = {
             "status": "pending",
-            "attempts": int(sync.get("attempts") or 0),
+            "attempts": int(existing_sync.get("attempts") or 0),
             "replaced_at": _watch.utc_now(),
         }
     event_file.parent.mkdir(parents=True, exist_ok=True)

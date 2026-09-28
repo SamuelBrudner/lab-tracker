@@ -395,3 +395,19 @@ def test_saves_to_real_open_files_are_flushed_then_captured(
     with os.fdopen(descriptor, "wb") as by_descriptor:
         FakeFigure().savefig(by_descriptor)  # name is an int, not a path
     assert len(seen) == 2
+
+
+def test_a_hook_failure_after_the_save_never_fails_the_save(
+    fake_matplotlib, captured, tmp_path: Path
+) -> None:
+    class Hostile(io.BytesIO):
+        name = str(tmp_path / "hostile.png")
+
+        def fileno(self) -> int:
+            raise RuntimeError("not a real file")
+
+    autotrack()
+    target = Hostile()
+    assert FakeFigure(b"kept").savefig(target) == "saved"
+    assert target.getvalue() == b"kept"
+    assert captured == []
