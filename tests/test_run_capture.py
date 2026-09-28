@@ -52,8 +52,12 @@ def _multipart_field(body: bytes, name: str) -> str:
 class _Server:
     def __init__(self) -> None:
         self.uploads: list[dict[str, object]] = []
+        self.paths: list[str] = []
 
     def handler(self, request: httpx.Request) -> httpx.Response:
+        self.paths.append(request.url.path)
+        if request.method == "GET" and request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok"})
         if request.method == "GET" and request.url.path == "/notes":
             return httpx.Response(
                 200, json={"data": [], "meta": {"limit": 200, "offset": 0, "total": 0}}
@@ -509,6 +513,10 @@ def test_the_active_session_rides_along_for_the_sync_to_verify(
     assert event["context"]["session_id"] == SESSION_ID
     assert event["source"]["session_source"] == "active"
     assert event["source"]["session_project_id"] == PROJECT_ID
+    # A gitignored .lab-tracker/ that exists (the usual configured checkout)
+    # never costs the run its code identity.
+    head_tree = _git(bound_repo, "rev-parse", "HEAD^{tree}")
+    assert event["payload"]["metadata"]["run_git_worktree_tree"] == head_tree
 
 
 # --- drain ----------------------------------------------------------------------
@@ -544,6 +552,148 @@ def test_an_unreachable_server_leaves_the_run_queued_with_one_notice(
     assert "lt outbox sync" in line
     _path, event = _only_event(bound_repo)
     assert event["sync"]["status"] != "synced"
+
+
+def test_a_black_holed_server_costs_one_short_health_probe(
+    bound_repo: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    seen: list[tuple[str, object]] = []
+
+    def black_holed() -> LabTracker:
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append((request.url.path, request.extensions.get("timeout")))
+            raise httpx.ReadTimeout("no answer", request=request)
+
+        return LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler))
+
+    code = run_command(_python("raise SystemExit(4)"), RunOptions(), client_factory=black_holed)
+
+    assert code == 4
+    # One probe with the short timeout, then nothing: no per-event timeouts.
+    assert [path for path, _timeout in seen] == ["/health"]
+    timeout = seen[0][1]
+    assert isinstance(timeout, dict)
+    assert timeout["read"] == run_capture.HEALTH_PROBE_TIMEOUT_SECONDS
+    (line,) = capfd.readouterr().err.strip().splitlines()
+    assert "/health" in line and "lt outbox sync" in line
+    _path, event = _only_event(bound_repo)
+    assert event["sync"]["status"] == "pending"
+
+
+def test_the_post_run_drain_syncs_a_bounded_number_of_events(
+    bound_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lab_tracker_client import watch as watch_capture
+
+    outbox = bound_repo / ".lab-tracker" / "outbox" / "watch"
+    backlog = watch_capture.make_event(
+        capture_id="aaa-earlier-capture",
+        capture_kind="note",
+        adapter="test",
+        sink=watch_capture.SINK_STAGED_NOTE,
+        context={"project_id": PROJECT_ID},
+        payload={"title": "backlog", "body": "# queued earlier\n", "status": "staged"},
+    )
+    watch_capture.write_event(backlog, outbox)
+    monkeypatch.setattr(run_capture, "DRAIN_LIMIT", 1)
+    server = _Server()
+
+    assert run_command(_python("pass"), RunOptions(), client_factory=server.client) == 0
+
+    assert server.paths[0] == "/health"
+    assert len(server.uploads) == 1
+    statuses = sorted(read_event(path)["sync"]["status"] for path in outbox.glob("*.json"))
+    assert statuses == ["pending", "synced"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
+def test_an_interrupt_sent_to_lt_run_reaches_the_command(tmp_path: Path) -> None:
+    """``kill -INT <lt pid>`` (or a notebook kernel interrupt) must reach the
+    command: no terminal delivered it to the command's process group."""
+
+    import signal
+    import time
+
+    ready = tmp_path / "ready"
+    child = f"import pathlib, time; pathlib.Path({str(ready)!r}).touch(); time.sleep(60)"
+    env = {key: value for key, value in os.environ.items() if not key.startswith("LAB_TRACKER_")}
+    process = subprocess.Popen(
+        [sys.executable, "-m", "lab_tracker_client", "run", "--no-drain", "--"]
+        + [sys.executable, "-c", child],
+        cwd=tmp_path,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 60
+        while not ready.exists():
+            assert process.poll() is None, process.communicate()
+            assert time.monotonic() < deadline, "the command never started"
+            time.sleep(0.05)
+        process.send_signal(signal.SIGINT)
+        _out, err = process.communicate(timeout=60)
+    finally:
+        if process.poll() is None:
+            process.kill()
+
+    assert process.returncode == 130, err
+    assert "KeyboardInterrupt" in err.decode("utf-8", "replace")
+
+
+def test_interrupts_are_left_to_the_terminal_only_in_its_foreground_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(run_capture.os, "isatty", lambda _fd: False)
+    assert run_capture._terminal_delivers_interrupts() is False
+
+    monkeypatch.setattr(run_capture.os, "isatty", lambda _fd: True)
+    monkeypatch.setattr(run_capture.os, "getpgrp", lambda: 4242, raising=False)
+    monkeypatch.setattr(run_capture.os, "tcgetpgrp", lambda _fd: 4242, raising=False)
+    assert run_capture._terminal_delivers_interrupts() is True
+
+    monkeypatch.setattr(run_capture.os, "tcgetpgrp", lambda _fd: 7, raising=False)
+    assert run_capture._terminal_delivers_interrupts() is False
+
+
+# --- pre-exec git cost ----------------------------------------------------------
+
+
+def test_one_read_only_status_serves_the_dirty_flag_and_the_tree(
+    bound_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (bound_repo / "analysis.py").write_text("print('v2 uncommitted')\n", encoding="utf-8")
+
+    def second_status(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("the dirty flag must reuse the worktree's git status")
+
+    monkeypatch.setattr(run_capture, "git_dirty_state", second_status)
+
+    assert run_command(_python("pass"), RunOptions(drain=False)) == 0
+
+    _path, event = _only_event(bound_repo)
+    metadata = event["payload"]["metadata"]
+    assert metadata["run_git_dirty"] is True
+    assert metadata["run_git_worktree_tree"] != _git(bound_repo, "rev-parse", "HEAD^{tree}")
+
+
+def test_lt_run_never_refreshes_the_real_index(bound_repo: Path) -> None:
+    # A tracked file with a new mtime but the same bytes: a plain `git status`
+    # re-hashes it and rewrites the index with fresh stat data.
+    tracked = bound_repo / "analysis.py"
+    stat = tracked.stat()
+    os.utime(tracked, ns=(stat.st_atime_ns, stat.st_mtime_ns + 5_000_000_000))
+    index = bound_repo / ".git" / "index"
+    before = (index.read_bytes(), index.stat().st_mtime_ns)
+
+    assert run_command(_python("pass"), RunOptions(drain=False)) == 0
+
+    assert (index.read_bytes(), index.stat().st_mtime_ns) == before
+    _git(bound_repo, "status", "--porcelain")
+    # The scenario was real: an ordinary status does rewrite it.
+    assert (index.read_bytes(), index.stat().st_mtime_ns) != before
 
 
 def test_no_server_configured_means_no_network_call(

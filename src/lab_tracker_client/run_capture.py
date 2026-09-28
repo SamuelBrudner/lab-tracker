@@ -56,11 +56,11 @@ from lab_tracker.instance_url import BASE_URL_ENV, LEGACY_MCP_BASE_URL_ENV
 from lab_tracker.models import NoteMetadataScalar
 from lab_tracker_client.capture_project import (
     CaptureProject,
-    capture_checkout_root,
-    resolve_capture_project,
+    resolve_capture_project_in_checkout,
 )
 from lab_tracker_client.client import LabTracker, LTValidationError, load_connection_profile
 from lab_tracker_client.gitinfo import (
+    DirtyState,
     WorktreeTree,
     dirty_label,
     dirty_metadata,
@@ -69,9 +69,11 @@ from lab_tracker_client.gitinfo import (
     git_head_commit,
     git_output,
     head_commit_fields,
+    run_git,
     sanitize_remote_url,
-    worktree_tree_id,
+    worktree_state,
 )
+from lab_tracker_client.redaction import REDACTED, looks_secret_name, redact_capture_text
 from lab_tracker_client.repo import environment_fingerprint, normalize_remote
 from lab_tracker_client.session_context import read_active_session, strict_session_id
 
@@ -84,7 +86,6 @@ RUN_EVIDENCE_PROVIDER = "lt-run"
 # ``--session`` flag is a per-run choice; the checkout's active session keeps
 # the watch sync's ``active`` label so it is verified against the project.
 RUN_SESSION_SOURCE_EXPLICIT = "explicit"
-REDACTED = "[REDACTED]"
 # Bounds on what one run records. Outputs beyond MAX_OUTPUT_ARTIFACTS are
 # counted (run_output_count) but not listed; files above MAX_HASH_FILE_BYTES,
 # or past MAX_HASH_TOTAL_BYTES hashed in one run, keep size + mtime only; a
@@ -100,6 +101,11 @@ MAX_BODY_CHARS = 64_000
 # so the fixed remedy at the end of the line is always printed.
 MAX_NOTICE_CAUSE_CHARS = 160
 DRAIN_TIMEOUT_SECONDS = 10.0
+# The post-run drain probes /health once with this timeout and then syncs at
+# most DRAIN_LIMIT queued events, so a slow or unreachable server never holds
+# the shell for long after the command exits.
+HEALTH_PROBE_TIMEOUT_SECONDS = 2.0
+DRAIN_LIMIT = 10
 EXIT_COMMAND_NOT_FOUND = 127
 EXIT_CANNOT_EXECUTE = 126
 EXIT_INTERRUPTED = 128 + 2  # SIGINT, as the shell reports an interrupted command
@@ -311,9 +317,14 @@ def _relay_signals(process: subprocess.Popen[Any]) -> Iterator[None]:
         with contextlib.suppress(Exception):
             process.send_signal(signum)
 
+    # Ctrl-C / Ctrl-\ at a terminal reach every process in the foreground group,
+    # the command included, so they are only ignored here. Anywhere else (a
+    # pipeline, `kill -INT <lt pid>`, a notebook kernel interrupting `!lt run`)
+    # only this process got the signal and it must reach the command.
+    interrupt = signal.SIG_IGN if _terminal_delivers_interrupts() else forward
     wanted: list[tuple[str, Any]] = [
-        ("SIGINT", signal.SIG_IGN),
-        ("SIGQUIT", signal.SIG_IGN),
+        ("SIGINT", interrupt),
+        ("SIGQUIT", interrupt),
         ("SIGTERM", forward),
         ("SIGHUP", forward),
     ]
@@ -332,16 +343,28 @@ def _relay_signals(process: subprocess.Popen[Any]) -> Iterator[None]:
                 signal.signal(signum, handler)
 
 
+def _terminal_delivers_interrupts() -> bool:
+    """True when stdin is a terminal whose foreground process group is ours.
+
+    Only then does the terminal send Ctrl-C/Ctrl-\\ to the command as well.
+    """
+
+    try:
+        return os.isatty(0) and os.tcgetpgrp(0) == os.getpgrp()
+    except (AttributeError, OSError):
+        return False
+
+
 # --- before the command -----------------------------------------------------------
 
 
 def _prepare(options: RunOptions, notices: list[str]) -> _Plan | None:
     cwd = Path.cwd().resolve()
-    # A stand-in file in the working directory: capture-project resolution
-    # looks for the checkout that contains a saved file's folder.
-    anchor = cwd / ".lt-run"
-    capture_project = resolve_capture_project(anchor, project_id=options.project_id)
-    checkout = capture_checkout_root(anchor)
+    # Every git probe before the command delays its start, so the checkout
+    # root is resolved once (bounded) and one read-only `git status` serves
+    # both the dirty flag and the worktree tree.
+    checkout = _checkout_root(cwd)
+    capture_project = resolve_capture_project_in_checkout(checkout, project_id=options.project_id)
     if capture_project is None or not capture_project.bound:
         notices.append(_unbound_notice(cwd, checkout, capture_project))
         return None
@@ -352,8 +375,9 @@ def _prepare(options: RunOptions, notices: list[str]) -> _Plan | None:
     git: JsonObject = {}
     worktree = WorktreeTree()
     if checkout is not None:
-        git = _git_facts(checkout)
-        worktree = worktree_tree_id(checkout, exclude=outputs)
+        state = worktree_state(checkout, exclude=outputs, toplevel=checkout)
+        git = _git_facts(checkout, dirty=state.dirty)
+        worktree = state.tree
     config, _config_error = git_capture.resolve_watch_config(root)
     return _Plan(
         run_id=new_run_id(),
@@ -413,11 +437,25 @@ def _resolve_outputs(cwd: Path, outputs: Sequence[str]) -> list[Path]:
     return resolved
 
 
-def _git_facts(checkout: Path) -> JsonObject:
+def _checkout_root(cwd: Path) -> Path | None:
+    """The git checkout containing ``cwd`` (one bounded probe), or ``None``."""
+
+    probe = run_git(cwd, "rev-parse", "--show-toplevel")
+    if not probe.ok or not probe.stdout:
+        return None
+    try:
+        return Path(probe.stdout).resolve()
+    except OSError:
+        return None
+
+
+def _git_facts(checkout: Path, *, dirty: DirtyState | None = None) -> JsonObject:
+    """HEAD, dirty flag (reusing ``dirty`` when a status already answered), branch, remote."""
+
     head = git_head_commit(checkout)
     facts: JsonObject = {
         **head_commit_fields(head),
-        **dirty_state_fields(git_dirty_state(checkout, head=head)),
+        **dirty_state_fields(dirty or git_dirty_state(checkout, head=head)),
     }
     branch = git_output(checkout, "rev-parse", "--abbrev-ref", "HEAD")
     if branch:
@@ -782,7 +820,13 @@ def _output_lines(
 
 
 def _drain(outbox: Path, client_factory: Callable[[], LabTracker] | None) -> str | None:
-    """Best-effort sync of the checkout's watch outbox; a notice when it fails."""
+    """Best-effort, bounded sync of the checkout's watch outbox; a notice when it fails.
+
+    One ``/health`` probe with a short timeout first, so an unreachable or
+    black-holed server costs :data:`HEALTH_PROBE_TIMEOUT_SECONDS`, not a
+    timeout per queued event; then at most :data:`DRAIN_LIMIT` events. The
+    rest (and anything that failed) waits for ``lt outbox sync``/``lt watch run``.
+    """
 
     if client_factory is None and not server_configured():
         return None
@@ -790,7 +834,16 @@ def _drain(outbox: Path, client_factory: Callable[[], LabTracker] | None) -> str
     try:
         client = factory()
         try:
-            summary = watch_capture.sync_outbox_path(client, outbox, request_draft=False)
+            try:
+                client._request(
+                    "GET", "/health", authenticated=False, timeout=HEALTH_PROBE_TIMEOUT_SECONDS
+                )
+            except Exception as exc:  # noqa: BLE001 - reported as one notice below.
+                cause = f"no answer from /health: {exc}"
+                return RUN_SYNC_FAILED_NOTICE.format(outbox=outbox, cause=_one_line(cause))
+            summary = watch_capture.sync_outbox_path(
+                client, outbox, request_draft=False, limit=DRAIN_LIMIT
+            )
         finally:
             client.close()
     except Exception as exc:  # noqa: BLE001 - the event is durable; a later sync retries.
@@ -817,107 +870,30 @@ def server_configured() -> bool:
 
 # --- redaction --------------------------------------------------------------------
 
-# Name parts that mark a flag, env-style key, or URL query key as secret.
-_SECRET_WORDS = frozenset(
-    {
-        "token",
-        "tokens",
-        "password",
-        "passwords",
-        "passwd",
-        "passphrase",
-        "pass",
-        "pwd",
-        "secret",
-        "secrets",
-        "apikey",
-        "accesskey",
-        "secretkey",
-        "privatekey",
-        "credential",
-        "credentials",
-        "creds",
-        "auth",
-        "authorization",
-        "cookie",
-        "sessionkey",
-        "pat",
-    }
-)
-# Substrings strong enough to flag an unseparated name (``PGPASSWORD``).
-# ``token`` is deliberately absent: ``--tokenizer`` is not a secret.
-_SECRET_SUBSTRINGS = ("password", "passwd", "passphrase", "secret", "apikey", "privatekey")
-# ``<qualifier>-key`` names a key that is a secret (``--api-key``, ``AWS_ACCESS_KEY``).
-_KEY_QUALIFIERS = frozenset(
-    {
-        "api",
-        "access",
-        "secret",
-        "private",
-        "signing",
-        "encryption",
-        "client",
-        "master",
-        "account",
-        "app",
-        "consumer",
-        "license",
-        "service",
-        "ssh",
-        "session",
-    }
-)
-# A secret-sounding name ending in one of these holds a pointer, not the secret.
-_NOT_SECRET_SUFFIXES = frozenset(
-    {"file", "path", "dir", "env", "var", "cmd", "command", "stdin", "prompt", "length"}
-    | {"len", "type", "kind", "mode", "name", "url"}
-)
-_SECRET_QUERY_KEYS = frozenset({"key", "sig", "signature", "code"})
-_ENV_ASSIGNMENT = re.compile(
-    r"\A(?P<prefix>[+~]{0,2})(?P<key>[A-Za-z_][A-Za-z0-9_.\-]*)=(?P<value>.*)\Z", re.DOTALL
-)
-_URL = re.compile(
-    r"(?P<scheme>[A-Za-z][A-Za-z0-9+.\-]*)://(?P<authority>[^/?#\s]*)(?P<rest>[^\s]*)"
-)
-_SSH_SCHEMES = frozenset({"ssh", "git+ssh", "ssh+git"})
-_HEADER_SECRET = re.compile(
-    r"(?i)\b(?P<name>authorization|proxy-authorization|x-api-key|api-key|x-auth-token|cookie)"
-    r"(?P<sep>\s*:\s*)\S.*"
-)
-_BEARER = re.compile(r"(?i)\b(?P<scheme>bearer)\s+[A-Za-z0-9._~+/=\-]{8,}")
 # Characters the displayed command leaves unquoted (shlex's safe set plus the
 # brackets of the redaction marker); anything else is shell-quoted.
 _UNQUOTED_ARG = re.compile(r"\A[\w@%+=:,./\[\]-]+\Z", re.ASCII)
-_TOKEN_PATTERNS = (
-    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"),
-    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}"),
-    re.compile(r"\bglpat-[A-Za-z0-9_\-]{20,}"),
-    re.compile(r"\bxox[abprs]-[A-Za-z0-9\-]{10,}"),
-    re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
-    re.compile(r"\bsk-[A-Za-z0-9_\-]{20,}"),
-    re.compile(r"\b[rs]k_(?:live|test)_[A-Za-z0-9]{16,}"),
-    re.compile(r"\bAIza[0-9A-Za-z_\-]{35}"),
-    re.compile(r"\bhf_[A-Za-z0-9]{30,}"),
-    re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}"),
-    re.compile(
-        r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)", re.S
-    ),
-)
+# Programs whose ``-p`` carries a password, and how: mysql-family clients take
+# it attached (``-pSECRET``; a bare ``-p`` prompts), sshpass and ``docker
+# login`` take it attached or as the next argument.
+_ATTACHED_PASSWORD_PROGRAMS = frozenset({"mysql", "mysqladmin", "mysqldump", "mariadb"})
+_SEPARATE_PASSWORD_PROGRAMS = frozenset({"sshpass"})
+_USER_FLAGS = frozenset({"-u", "--user"})
 
 
 def redact_argv(argv: Sequence[str]) -> list[str]:
     """``argv`` with obvious secret values replaced by :data:`REDACTED`.
 
-    * ``--token VALUE`` / ``--api-key=VALUE`` / ``-password VALUE`` style
-      flags whose name looks secret (the value after a bare flag is redacted
-      unless it is itself a ``--`` option);
-    * ``KEY=VALUE`` arguments (``env API_TOKEN=...``, Hydra ``db.password=...``)
-      whose key looks secret;
-    * URL credentials (``https://user:pw@host``) and secret-looking query
-      values (``?token=...``); an ssh login name is kept, its password is not;
-    * ``Authorization:``-style header values, ``Bearer`` tokens, and
-      well-known token formats (GitHub, GitLab, Slack, AWS, OpenAI-style
-      ``sk-``, Google, Hugging Face, JWTs, PEM private keys) anywhere.
+    Every element goes through the shared redactor
+    (:func:`lab_tracker_client.redaction.redact_capture_text`: headers, URL
+    credentials and query secrets, ``name=value`` pairs, token shapes, ...).
+    On top of that, what only the argv boundaries reveal:
+
+    * a secret-named flag given alone (``--token VALUE``, ``-password VALUE``)
+      redacts the next argument unless it is itself a ``--`` option;
+    * ``-u``/``--user USER:PW`` keeps the user and drops the password;
+    * ``-p<pw>`` for mysql/mysqladmin/mysqldump/mariadb, and ``-p <pw>`` or
+      ``-p<pw>`` for sshpass and ``docker login``; any other ``-p`` is left.
 
     Names that only point at a secret (``--password-file``, ``--token-name``)
     and negations (``--no-password``) are kept. This is a best-effort filter
@@ -925,47 +901,36 @@ def redact_argv(argv: Sequence[str]) -> list[str]:
     """
 
     redacted: list[str] = []
-    redact_next = False
-    for raw in argv:
+    program = Path(str(argv[0])).name.lower() if argv else ""
+    program = program[:-4] if program.endswith(".exe") else program
+    docker_login = program == "docker" and "login" in [str(item) for item in argv[1:3]]
+    short_password = program in _SEPARATE_PASSWORD_PROGRAMS or docker_login
+    password_program = short_password or program in _ATTACHED_PASSWORD_PROGRAMS
+    pending: str | None = None
+    for index, raw in enumerate(argv):
         text = str(raw)
-        if redact_next:
-            redact_next = False
-            if not text.startswith("--"):
+        if pending is not None:
+            kind, pending = pending, None
+            if kind == "user" and ":" in text:
+                user = text.split(":", 1)[0]
+                redacted.append(f"{user}:{REDACTED}")
+                continue
+            if kind == "value" and not text.startswith("--"):
                 redacted.append(REDACTED)
                 continue
-        option = _option_name(text)
-        if option is not None:
-            name, has_value = option
-            if looks_secret_name(name):
-                if has_value:
-                    text = f"{text.split('=', 1)[0]}={REDACTED}"
-                else:
-                    redact_next = True
+        if index > 0 and text in _USER_FLAGS:
+            pending = "user"
+        elif password_program and index > 0 and text.startswith("-p") and text[2:3] != "-":
+            if len(text) > 2:
+                text = f"-p{REDACTED}"
+            elif short_password:
+                pending = "value"
         else:
-            assignment = _ENV_ASSIGNMENT.match(text)
-            if assignment and looks_secret_name(assignment["key"]):
-                text = f"{assignment['prefix']}{assignment['key']}={REDACTED}"
-        redacted.append(_redact_inline_secrets(text))
+            option = _option_name(text)
+            if option is not None and not option[1] and looks_secret_name(option[0]):
+                pending = "value"
+        redacted.append(redact_capture_text(text))
     return redacted
-
-
-def looks_secret_name(name: str) -> bool:
-    """True when a flag or key name (``api-key``, ``DB_PASSWORD``) names a secret."""
-
-    normalized = re.sub(r"[^a-z0-9]+", "-", str(name).lower()).strip("-")
-    if not normalized:
-        return False
-    parts = normalized.split("-")
-    if parts[0] == "no" or parts[-1] in _NOT_SECRET_SUFFIXES:
-        return False
-    if any(part in _SECRET_WORDS for part in parts):
-        return True
-    if any(marker in normalized.replace("-", "") for marker in _SECRET_SUBSTRINGS):
-        return True
-    return any(
-        part == "key" and index > 0 and parts[index - 1] in _KEY_QUALIFIERS
-        for index, part in enumerate(parts)
-    )
 
 
 def _option_name(text: str) -> tuple[str, bool] | None:
@@ -979,41 +944,6 @@ def _option_name(text: str) -> tuple[str, bool] | None:
         return None
     name, equals, _value = body.partition("=")
     return name, bool(equals)
-
-
-def _redact_inline_secrets(text: str) -> str:
-    text = _HEADER_SECRET.sub(lambda match: f"{match['name']}{match['sep']}{REDACTED}", text)
-    text = _URL.sub(_redact_url, text)
-    text = _BEARER.sub(lambda match: f"{match['scheme']} {REDACTED}", text)
-    for pattern in _TOKEN_PATTERNS:
-        text = pattern.sub(REDACTED, text)
-    return text
-
-
-def _redact_url(match: re.Match[str]) -> str:
-    scheme, authority, rest = match["scheme"], match["authority"], match["rest"]
-    userinfo, at, host = authority.rpartition("@")
-    if at and userinfo != REDACTED:
-        login, colon, _password = userinfo.partition(":")
-        if scheme.lower() in _SSH_SCHEMES and login:
-            userinfo = f"{login}:{REDACTED}" if colon else login
-        else:
-            userinfo = REDACTED
-        authority = f"{userinfo}@{host}"
-    return f"{scheme}://{authority}{_redact_query(rest)}"
-
-
-def _redact_query(rest: str) -> str:
-    path, question, tail = rest.partition("?")
-    if not question:
-        return rest
-    query, hash_sign, fragment = tail.partition("#")
-    pairs = re.split(r"([&;])", query)
-    for index, pair in enumerate(pairs):
-        key, equals, _value = pair.partition("=")
-        if equals and (looks_secret_name(key) or key.lower() in _SECRET_QUERY_KEYS):
-            pairs[index] = f"{key}={REDACTED}"
-    return f"{path}?{''.join(pairs)}{hash_sign}{fragment}"
 
 
 # --- helpers ----------------------------------------------------------------------
