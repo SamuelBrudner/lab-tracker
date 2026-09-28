@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import json
+import subprocess
 import threading
 from collections.abc import Sequence
 from datetime import date
@@ -22,6 +23,7 @@ from lab_tracker import photo_codes
 from lab_tracker.gs1 import GS
 from lab_tracker.models import encode_session_link_code
 from lab_tracker.photo_codes import (
+    DECODABLE_CONTENT_TYPES,
     DECODED_CODE_METADATA_KEYS,
     MAX_BARCODE_TEXT_CHARS,
     DecodedCode,
@@ -236,23 +238,25 @@ def test_every_stamped_key_is_reserved_and_photo_session_id_feeds_the_detector()
 
 
 def test_decoder_returns_the_readers_codes() -> None:
-    decoder = PhotoCodeDecoder(reader=lambda data: [DecodedCode(data.decode(), "QRCode")])
+    decoder = PhotoCodeDecoder(reader=lambda data, _type: [DecodedCode(data.decode(), "QRCode")])
     try:
-        assert decoder.decode(b"hello", timeout_seconds=5) == [DecodedCode("hello", "QRCode")]
+        assert decoder.decode(b"hello", content_type="image/png", timeout_seconds=5) == [
+            DecodedCode("hello", "QRCode")
+        ]
     finally:
         decoder.close()
 
 
 @pytest.mark.parametrize("error", [RuntimeError("zxing crashed"), PhotoCodeLimitError("big")])
 def test_decoder_swallows_reader_failures(error: Exception) -> None:
-    def reader(_data: bytes) -> Sequence[DecodedCode]:
+    def reader(_data: bytes, _content_type: str) -> Sequence[DecodedCode]:
         raise error
 
     decoder = PhotoCodeDecoder(reader=reader)
     try:
-        assert decoder.decode(b"x", timeout_seconds=5) is None
+        assert decoder.decode(b"x", content_type="image/png", timeout_seconds=5) is None
         # The failed decode released its slot.
-        assert decoder.decode(b"x", timeout_seconds=5) is None
+        assert decoder.decode(b"x", content_type="image/png", timeout_seconds=5) is None
     finally:
         decoder.close()
 
@@ -261,7 +265,7 @@ def test_decoder_abandons_a_slow_decode_and_skips_while_every_slot_is_busy() -> 
     release = threading.Event()
     calls: list[bytes] = []
 
-    def reader(data: bytes) -> Sequence[DecodedCode]:
+    def reader(data: bytes, _content_type: str) -> Sequence[DecodedCode]:
         calls.append(data)
         if data == b"slow":
             release.wait(timeout=30)
@@ -269,14 +273,16 @@ def test_decoder_abandons_a_slow_decode_and_skips_while_every_slot_is_busy() -> 
 
     decoder = PhotoCodeDecoder(reader=reader, max_concurrent=1)
     try:
-        assert decoder.decode(b"slow", timeout_seconds=0.05) is None
+        assert decoder.decode(b"slow", content_type="image/png", timeout_seconds=0.05) is None
         # The abandoned decode still holds the only slot: skipped, not queued.
-        assert decoder.decode(b"next", timeout_seconds=5) is None
+        assert decoder.decode(b"next", content_type="image/png", timeout_seconds=5) is None
         assert calls == [b"slow"]
         release.set()
         # Wait for the abandoned worker to finish and free its slot.
         decoder._pool().submit(lambda: None).result(timeout=30)
-        assert decoder.decode(b"next", timeout_seconds=5) == [DecodedCode("next", "QRCode")]
+        assert decoder.decode(b"next", content_type="image/png", timeout_seconds=5) == [
+            DecodedCode("next", "QRCode")
+        ]
     finally:
         release.set()
         decoder.close()
@@ -291,7 +297,7 @@ class _Settings:
 def _counting_decoder(codes: list[DecodedCode]) -> tuple[PhotoCodeDecoder, list[bytes]]:
     seen: list[bytes] = []
 
-    def reader(data: bytes) -> Sequence[DecodedCode]:
+    def reader(data: bytes, _content_type: str) -> Sequence[DecodedCode]:
         seen.append(data)
         return codes
 
@@ -381,9 +387,9 @@ def _symbol_png(content: str, symbology: str = "QRCode", *, gs1: bool = False) -
 
 
 def test_zxing_reads_an_lt_code_and_a_gs1_datamatrix() -> None:
-    qr = photo_codes.read_image_codes(_symbol_png(_lt(SESSION_A)))
+    qr = photo_codes.read_image_codes(_symbol_png(_lt(SESSION_A)), "image/png")
     datamatrix = photo_codes.read_image_codes(
-        _symbol_png(f"(01){GTIN}(17)261231(10)ABC123", "DataMatrix", gs1=True)
+        _symbol_png(f"(01){GTIN}(17)261231(10)ABC123", "DataMatrix", gs1=True), "image/png"
     )
 
     assert qr == [DecodedCode(_lt(SESSION_A), "QRCode", is_gs1=False)]
@@ -400,21 +406,26 @@ def test_zxing_reader_enforces_the_pixel_limit_and_rejects_garbage() -> None:
     png = _symbol_png("hello")
 
     with pytest.raises(PhotoCodeLimitError):
-        photo_codes.read_image_codes(png, max_pixels=100)
+        photo_codes.read_image_codes(png, "image/png", max_pixels=100)
     # A PNG must be decoded at full size, so its lower cap applies...
     with pytest.raises(PhotoCodeLimitError):
-        photo_codes.read_image_codes(png, max_full_decode_pixels=100)
+        photo_codes.read_image_codes(png, "image/png", max_full_decode_pixels=100)
     # ...while a JPEG of the same size is decoded at a reduced scale.
     image_module = pytest.importorskip("PIL.Image")
     jpeg = io.BytesIO()
     image_module.open(io.BytesIO(png)).convert("RGB").save(jpeg, format="JPEG", quality=95)
     assert [
         code.text
-        for code in photo_codes.read_image_codes(jpeg.getvalue(), max_full_decode_pixels=100)
+        for code in photo_codes.read_image_codes(
+            jpeg.getvalue(), "image/jpeg", max_full_decode_pixels=100
+        )
     ] == ["hello"]
     decoder = PhotoCodeDecoder()
     try:
-        assert decoder.decode(b"not an image at all", timeout_seconds=5) is None
+        assert (
+            decoder.decode(b"not an image at all", content_type="image/png", timeout_seconds=5)
+            is None
+        )
     finally:
         decoder.close()
 
@@ -427,9 +438,65 @@ def test_zxing_reader_downscales_a_large_jpeg_before_decoding() -> None:
     buffer = io.BytesIO()
     photo.save(buffer, format="JPEG", quality=90)
 
-    codes = photo_codes.read_image_codes(buffer.getvalue(), max_side=2048)
+    codes = photo_codes.read_image_codes(buffer.getvalue(), "image/jpeg", max_side=2048)
 
     assert [code.text for code in codes] == [_lt(SESSION_B)]
+
+
+# An EPS whose PostScript never terminates: Pillow's EPS loader would hand it
+# to Ghostscript in a subprocess with no timeout.
+_EPS = (
+    b"%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 10 10\n%%EndComments\n{} loop\nshowpage\n%%EOF\n"
+)
+
+
+def _forbid_subprocesses(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    calls: list[Any] = []
+
+    def refuse(*args: Any, **_kwargs: Any) -> Any:
+        calls.append(args)
+        raise AssertionError("photo decoding must never start a subprocess")
+
+    for name in ("Popen", "run", "call", "check_call", "check_output"):
+        monkeypatch.setattr(subprocess, name, refuse)
+    # Pretend Ghostscript is installed, so reaching Pillow's EPS loader would
+    # try to start it (and trip ``refuse``) even on a machine without it.
+    eps_plugin = pytest.importorskip("PIL.EpsImagePlugin")
+    monkeypatch.setattr(eps_plugin, "gs_binary", "gs")
+    return calls
+
+
+def test_an_eps_labelled_as_a_photo_never_reaches_pillows_eps_loader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image_module = pytest.importorskip("PIL.Image")
+    pytest.importorskip("zxingcpp")
+    # Unrestricted, Pillow sniffs the payload as EPS, whatever its label says.
+    with image_module.open(io.BytesIO(_EPS)) as sniffed:
+        assert sniffed.format == "EPS"
+    calls = _forbid_subprocesses(monkeypatch)
+
+    for content_type in sorted(DECODABLE_CONTENT_TYPES):
+        with pytest.raises(image_module.UnidentifiedImageError):
+            photo_codes.read_image_codes(_EPS, content_type)
+    decoder = PhotoCodeDecoder()
+    try:
+        assert decoder.decode(_EPS, content_type="image/png", timeout_seconds=5) is None
+    finally:
+        decoder.close()
+
+    assert calls == []
+
+
+def test_a_photo_must_be_the_format_its_content_type_declares() -> None:
+    image_module = pytest.importorskip("PIL.Image")
+    png = _symbol_png("hello")
+
+    with pytest.raises(image_module.UnidentifiedImageError):
+        photo_codes.read_image_codes(png, "image/jpeg")
+    with pytest.raises(PhotoCodeLimitError):
+        photo_codes.read_image_codes(png, "image/tiff")
+    assert [code.text for code in photo_codes.read_image_codes(png, "IMAGE/PNG")] == ["hello"]
 
 
 # --- the upload routes ------------------------------------------------------------------
@@ -518,7 +585,7 @@ def test_a_session_label_from_another_project_is_not_resolved(
     project_id = _project(client, admin_auth_headers)
     other_session = _session(client, admin_auth_headers, _project(client, admin_auth_headers))
     label = f"LT-{encode_session_link_code(UUID(other_session))}"
-    decoder = _fake_decoder(client, lambda _data: [DecodedCode(label, "QRCode")])
+    decoder = _fake_decoder(client, lambda _data, _type: [DecodedCode(label, "QRCode")])
     try:
         response = _upload(client, admin_auth_headers, project_id, b"photo-bytes")
     finally:
@@ -536,7 +603,7 @@ def test_quick_capture_photos_are_decoded_too(
     project_id = _project(client, admin_auth_headers)
     decoder = _fake_decoder(
         client,
-        lambda _data: [DecodedCode(f"01{GTIN}10LOT9", "Code128", is_gs1=True)],
+        lambda _data, _type: [DecodedCode(f"01{GTIN}10LOT9", "Code128", is_gs1=True)],
     )
     try:
         response = _upload(
@@ -556,7 +623,7 @@ def test_a_decode_failure_never_fails_the_upload(
 ) -> None:
     project_id = _project(client, admin_auth_headers)
 
-    def reader(_data: bytes) -> Sequence[DecodedCode]:
+    def reader(_data: bytes, _content_type: str) -> Sequence[DecodedCode]:
         raise RuntimeError("decoder exploded")
 
     decoder = _fake_decoder(client, reader)
@@ -582,13 +649,27 @@ def test_garbage_image_bytes_upload_without_decoded_metadata(
     assert not set(response.json()["data"]["metadata"]) & DECODED_CODE_METADATA_KEYS
 
 
+def test_an_eps_uploaded_as_a_png_is_stored_but_never_decoded(
+    client: TestClient, admin_auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("zxingcpp")
+    project_id = _project(client, admin_auth_headers)
+    calls = _forbid_subprocesses(monkeypatch)
+
+    response = _upload(client, admin_auth_headers, project_id, _EPS)
+
+    assert response.status_code == 201, response.text
+    assert not set(response.json()["data"]["metadata"]) & DECODED_CODE_METADATA_KEYS
+    assert calls == []
+
+
 def test_the_kill_switch_skips_decoding(
     client: TestClient, admin_auth_headers: dict[str, str]
 ) -> None:
     project_id = _project(client, admin_auth_headers)
     calls: list[bytes] = []
 
-    def reader(data: bytes) -> Sequence[DecodedCode]:
+    def reader(data: bytes, _content_type: str) -> Sequence[DecodedCode]:
         calls.append(data)
         return [DecodedCode("plain", "QRCode")]
 
@@ -621,9 +702,84 @@ def test_client_supplied_decoded_keys_are_rejected(
         )
         assert response.status_code == 422, response.text
         assert "stamped by the server" in response.text
+    json_note = client.post(
+        "/notes",
+        json={
+            "project_id": project_id,
+            "raw_content": "typed",
+            "metadata": {"barcode_gs1_lot": "L1", "decoded_session_link_code": "LT-X"},
+        },
+        headers=admin_auth_headers,
+    )
+    assert json_note.status_code == 422, json_note.text
+    assert "barcode_gs1_lot, decoded_session_link_code" in json_note.text
+    bundle = client.post(
+        "/evidence-bundles",
+        json={
+            "project_id": project_id,
+            "source_note": {
+                "kind": "create",
+                "raw_content": "bundled",
+                "metadata": {"photo_session_id": str(uuid4())},
+            },
+            "dry_run": False,
+            "idempotency_key": "decoded-keys-bundle",
+        },
+        headers=admin_auth_headers,
+    )
+    assert bundle.status_code == 422, bundle.text
+    assert "stamped by the server" in bundle.text
 
     notes = client.get(f"/notes?project_id={project_id}", headers=admin_auth_headers)
     assert notes.json()["data"] == []
+
+
+def test_a_patch_may_keep_or_drop_decoded_keys_but_never_forge_them(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    session_id = _session(client, admin_auth_headers, project_id)
+    label = f"LT-{encode_session_link_code(UUID(session_id))}"
+    decoder = _fake_decoder(client, lambda _data, _type: [DecodedCode(label, "QRCode")])
+    try:
+        uploaded = _upload(client, admin_auth_headers, project_id, b"photo")
+    finally:
+        decoder.close()
+    assert uploaded.status_code == 201, uploaded.text
+    note = uploaded.json()["data"]
+    stored = note["metadata"]
+    typed = client.post(
+        "/notes",
+        json={"project_id": project_id, "raw_content": "typed"},
+        headers=admin_auth_headers,
+    ).json()["data"]
+
+    def patch(note_id: str, metadata: dict[str, Any]) -> Any:
+        return client.patch(
+            f"/notes/{note_id}", json={"metadata": metadata}, headers=admin_auth_headers
+        )
+
+    # The web app sends the whole bag back with its own edits: allowed.
+    kept = patch(note["note_id"], {**stored, "transcript_status": "ready"})
+    assert kept.status_code == 200, kept.text
+    assert kept.json()["data"]["metadata"]["photo_session_id"] == session_id
+    # Changing a decoded value, or adding one to any note, is forging it.
+    other_session = _session(client, admin_auth_headers, project_id)
+    for note_id, metadata in (
+        (note["note_id"], {**stored, "photo_session_id": other_session}),
+        (note["note_id"], {**stored, "barcode_text": "made up"}),
+        (typed["note_id"], {"photo_session_id": other_session}),
+    ):
+        forged = patch(note_id, metadata)
+        assert forged.status_code == 422, forged.text
+        assert "stamped by the server" in forged.text
+    # Dropping a misread key is a person's correction: allowed.
+    dropped = patch(
+        note["note_id"],
+        {key: value for key, value in stored.items() if key != "photo_session_id"},
+    )
+    assert dropped.status_code == 200, dropped.text
+    assert "photo_session_id" not in dropped.json()["data"]["metadata"]
 
 
 def test_a_capture_replay_is_reused_even_when_decoding_differs(
@@ -631,7 +787,7 @@ def test_a_capture_replay_is_reused_even_when_decoding_differs(
 ) -> None:
     project_id = _project(client, admin_auth_headers)
     results = iter([[DecodedCode("first", "QRCode")], []])
-    decoder = _fake_decoder(client, lambda _data: next(results))
+    decoder = _fake_decoder(client, lambda _data, _type: next(results))
     try:
         first = _upload(
             client, admin_auth_headers, project_id, b"photo", client_capture_id="phone-1"

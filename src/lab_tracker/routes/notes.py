@@ -36,6 +36,7 @@ from lab_tracker.patching import provided_fields
 from lab_tracker.photo_codes import (
     PhotoCodeDecoder,
     decoded_upload_metadata,
+    ensure_no_client_decoded_code_changes,
     ensure_no_client_decoded_code_keys,
 )
 from lab_tracker.schemas import (
@@ -96,6 +97,7 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         ensure_project_contributor(request, payload.project_id)
         status = payload.status or note_default_status()
         ensure_scope_allows_note_status(actor, status)
+        ensure_no_client_decoded_code_keys(payload.metadata)
         metadata = device_capture_metadata(actor, payload.metadata)
         stamp = origin_stamp(actor, payload.origin)
         result = api_from_request(request, api).create_note_result(
@@ -364,6 +366,8 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         fields = provided_fields(payload)
         if "status" in fields:
             ensure_scope_allows_note_status(actor, fields["status"])
+        if fields.get("metadata") is not None:
+            ensure_no_client_decoded_code_changes(fields["metadata"], stored=note.metadata)
         note = api_from_request(request, api).update_note(
             note_id,
             actor=actor,

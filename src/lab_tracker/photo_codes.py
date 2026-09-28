@@ -69,11 +69,31 @@ DECODED_CODE_METADATA_KEYS: frozenset[str] = frozenset(
     }
 )
 
-# Phone-camera and screenshot formats. TIFF (microscopy stacks), HEIC (needs
-# a plugin), and SVG (not a raster) are not decoded.
-DECODABLE_CONTENT_TYPES: frozenset[str] = frozenset(
-    {"image/jpeg", "image/jpg", "image/pjpeg", "image/png", "image/webp", "image/gif", "image/bmp"}
-)
+# Phone-camera and screenshot formats, and the one Pillow plugin allowed to
+# open each. TIFF (microscopy stacks), HEIC (needs a plugin), and SVG (not a
+# raster) are not decoded. Pillow sniffs the real format, so opening is
+# restricted to the declared type's plugin: a payload in any other format
+# (EPS, whose loader runs Ghostscript in a subprocess; PDF; ...) labelled as
+# a photo never reaches another plugin. None of these five shells out.
+_PILLOW_FORMAT_BY_CONTENT_TYPE: dict[str, str] = {
+    "image/jpeg": "JPEG",
+    "image/jpg": "JPEG",
+    "image/pjpeg": "JPEG",
+    "image/png": "PNG",
+    "image/webp": "WEBP",
+    "image/gif": "GIF",
+    "image/bmp": "BMP",
+}
+# What ``image.format`` may report for each opener (the JPEG opener returns
+# multi-picture JPEGs from phone cameras as MPO).
+_OPENED_FORMATS: dict[str, frozenset[str]] = {
+    "JPEG": frozenset({"JPEG", "MPO"}),
+    "PNG": frozenset({"PNG"}),
+    "WEBP": frozenset({"WEBP"}),
+    "GIF": frozenset({"GIF"}),
+    "BMP": frozenset({"BMP"}),
+}
+DECODABLE_CONTENT_TYPES: frozenset[str] = frozenset(_PILLOW_FORMAT_BY_CONTENT_TYPE)
 # Uploads larger than this are not read for decoding at all.
 MAX_DECODE_BYTES = 32 * 1024 * 1024
 # Images whose header declares more pixels than this are skipped before any
@@ -126,7 +146,8 @@ class SessionReference:
     session_id: UUID
 
 
-CodeReader = Callable[[bytes], Sequence[DecodedCode]]
+# A reader gets the upload's bytes and its declared content type.
+CodeReader = Callable[[bytes, str], Sequence[DecodedCode]]
 SessionInProject = Callable[[UUID], bool]
 
 
@@ -262,6 +283,7 @@ def _safe_in_project(session_in_project: SessionInProject, reference: SessionRef
 
 def read_image_codes(
     data: bytes,
+    content_type: str,
     *,
     max_pixels: int = MAX_DECODE_PIXELS,
     max_full_decode_pixels: int = MAX_FULL_DECODE_PIXELS,
@@ -269,7 +291,10 @@ def read_image_codes(
 ) -> list[DecodedCode]:
     """Decode every QR code and barcode zxing-cpp finds in an encoded image.
 
-    Raises :class:`PhotoCodeLimitError` for an image over ``max_pixels``
+    Only the Pillow plugin for the declared ``content_type`` may open the
+    bytes, and the opened format must match it; anything else raises before
+    any pixel data is decoded. Raises :class:`PhotoCodeLimitError` for an
+    undecodable content type or an image over ``max_pixels``
     (``max_full_decode_pixels`` for a non-JPEG, which cannot be decoded at a
     reduced scale), checked from the header before pixel data is decoded,
     and whatever Pillow or zxing-cpp raise for undecodable input; the caller
@@ -278,7 +303,14 @@ def read_image_codes(
 
     image_module: Any = importlib.import_module("PIL.Image")
     zxingcpp: Any = importlib.import_module("zxingcpp")
-    with image_module.open(io.BytesIO(data)) as image:
+    pillow_format = _PILLOW_FORMAT_BY_CONTENT_TYPE.get(content_type.strip().lower())
+    if pillow_format is None:
+        raise PhotoCodeLimitError(f"{content_type!r} is not a decodable photo type")
+    with image_module.open(io.BytesIO(data), formats=(pillow_format,)) as image:
+        if image.format not in _OPENED_FORMATS[pillow_format]:
+            raise PhotoCodeLimitError(
+                f"{content_type} upload opened as {image.format}; not decoding it"
+            )
         width, height = image.size
         limit = max_pixels if image.format == "JPEG" else min(max_pixels, max_full_decode_pixels)
         if width * height > limit:
@@ -332,13 +364,15 @@ class PhotoCodeDecoder:
                 )
             return self._executor
 
-    def _run(self, data: bytes) -> list[DecodedCode]:
+    def _run(self, data: bytes, content_type: str) -> list[DecodedCode]:
         try:
-            return list(self._reader(data))
+            return list(self._reader(data, content_type))
         finally:
             self._slots.release()
 
-    def decode(self, data: bytes, *, timeout_seconds: float) -> list[DecodedCode] | None:
+    def decode(
+        self, data: bytes, *, content_type: str, timeout_seconds: float
+    ) -> list[DecodedCode] | None:
         """The codes in ``data``, or ``None`` when decoding was skipped or failed."""
 
         if not self._slots.acquire(blocking=False):
@@ -347,7 +381,7 @@ class PhotoCodeDecoder:
             )
             return None
         try:
-            future = self._pool().submit(self._run, data)
+            future = self._pool().submit(self._run, data, content_type)
         except Exception:
             self._slots.release()
             _logger.exception("Photo code decoding could not start.")
@@ -388,14 +422,41 @@ def default_photo_code_decoder() -> PhotoCodeDecoder:
         return _DEFAULT_DECODER
 
 
-def ensure_no_client_decoded_code_keys(metadata: Mapping[str, Any] | None) -> None:
-    """Reject an upload whose client metadata claims a decoded-code key."""
-
-    claimed = sorted(key for key in metadata or {} if key in DECODED_CODE_METADATA_KEYS)
+def _refuse_decoded_code_keys(keys: Iterable[str]) -> None:
+    claimed = sorted(keys)
     if claimed:
         raise ValidationError(
             "Decoded-code metadata keys are stamped by the server: " + ", ".join(claimed) + "."
         )
+
+
+def ensure_no_client_decoded_code_keys(metadata: Mapping[str, Any] | None) -> None:
+    """Reject a new capture whose client metadata claims a decoded-code key."""
+
+    _refuse_decoded_code_keys(key for key in metadata or {} if key in DECODED_CODE_METADATA_KEYS)
+
+
+def _stored_form(value: Any) -> str:
+    # Mirrors normalize_note_metadata: metadata values are stored as strings.
+    return value.strip() if isinstance(value, str) else str(value)
+
+
+def ensure_no_client_decoded_code_changes(
+    metadata: Mapping[str, Any] | None, *, stored: Mapping[str, Any]
+) -> None:
+    """Reject a metadata replacement that adds or changes a decoded-code key.
+
+    ``PATCH /notes/{id}`` replaces the whole metadata bag and clients send
+    back what they read, so a decoded key kept with its stored value, or
+    dropped, is allowed; a new or different value is not.
+    """
+
+    _refuse_decoded_code_keys(
+        key
+        for key, value in (metadata or {}).items()
+        if key in DECODED_CODE_METADATA_KEYS
+        and (key not in stored or _stored_form(value) != _stored_form(stored[key]))
+    )
 
 
 def _read_bounded(stream: BinaryIO, max_bytes: int) -> bytes | None:
@@ -437,7 +498,11 @@ def decoded_upload_metadata(
         data = _read_bounded(stream, MAX_DECODE_BYTES)
         if not data:
             return {}
-        codes = decoder.decode(data, timeout_seconds=settings.decode_photo_codes_timeout_seconds)
+        codes = decoder.decode(
+            data,
+            content_type=content_type,
+            timeout_seconds=settings.decode_photo_codes_timeout_seconds,
+        )
         if not codes:
             return {}
         return photo_code_metadata(codes, session_in_project=session_in_project, today=today)
@@ -467,6 +532,7 @@ __all__ = [
     "decoded_upload_metadata",
     "decoder_available",
     "default_photo_code_decoder",
+    "ensure_no_client_decoded_code_changes",
     "ensure_no_client_decoded_code_keys",
     "photo_code_metadata",
     "read_image_codes",
