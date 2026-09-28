@@ -262,7 +262,10 @@ def _declared(
         if name in _PARAMETER_NAMES or name.startswith("params:"):
             skipped += 1
             continue
-        location = dataset_location(_dataset(catalog, name), role=role)
+        try:
+            location = dataset_location(_dataset(catalog, name), role=role)
+        except Exception:  # noqa: BLE001 - one odd dataset must not lose the run.
+            location = None
         if location is None:
             skipped += 1
             continue

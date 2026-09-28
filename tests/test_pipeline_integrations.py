@@ -409,7 +409,8 @@ def test_kedro_error_hook_records_the_error_and_survives_a_broken_catalog(tmp_pa
         def inputs(self):
             raise RuntimeError("no inputs")
 
-        outputs = inputs
+        def outputs(self):
+            return {"model"}
 
     hooks = kedro_hooks.LabTrackerHooks(drain=False)
     hooks.on_pipeline_error(
@@ -421,6 +422,7 @@ def test_kedro_error_hook_records_the_error_and_survives_a_broken_catalog(tmp_pa
 
     [event] = _events(project)
     assert event["payload"]["metadata"]["pipeline_status"] == "error"
+    assert event["payload"]["metadata"]["pipeline_kedro_datasets_without_files"] == 1
     assert "ValueError: bad column" in event["log_excerpt"]
     assert kedro_hooks.LabTrackerHooks.after_pipeline_run.kedro_impl["hookwrapper"] is False
 

@@ -78,7 +78,6 @@ DRAIN_EVENT_LIMIT = 25
 DRAIN_TIMEOUT_SECONDS = 10.0
 _OFF_VALUES = frozenset({"0", "false", "no", "off"})
 _URI_SCHEME = re.compile(r"^(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*)://")
-_UTF8_MAX_BYTES_PER_CHAR = 4
 _NOTICES_SHOWN: set[str] = set()
 
 

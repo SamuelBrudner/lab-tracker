@@ -119,6 +119,7 @@ if [ "$2" = "report" ]; then
       echo "lab-tracker: repo capture did not fully sync - 1 event(s) failed to sync" \\
         "(Note client_capture_id 'x' was already used with different field(s))." >&2 ;;
     silent) ;;
+    crash) echo "Traceback: boom" >&2; exit 1 ;;
   esac
 fi
 exit 0
@@ -158,7 +159,7 @@ def _run_report_step(tmp_path: Path, repo: Path, **overrides: str):
         **overrides,
     }
     completed = subprocess.run(
-        ["bash", str(script)],
+        ["bash", "--noprofile", "--norc", "-eo", "pipefail", str(script)],
         cwd=repo,
         env=env,
         capture_output=True,
@@ -248,6 +249,45 @@ def test_report_step_explains_a_commit_the_hook_already_captured(tmp_path) -> No
 
     completed, _calls = _run_report_step(tmp_path, repo, FAKE_MODE="silent")
     assert "recorded nothing" in completed.stdout
+
+    # GitHub runs the step under bash -e: a crashing client must not fail the job.
+    completed, _calls = _run_report_step(tmp_path, repo, FAKE_MODE="crash")
+    assert completed.returncode == 0
+    assert "::warning title=Lab Tracker::Traceback: boom" in completed.stdout
+
+
+@pytest.mark.parametrize(
+    ("ref", "python", "expected"),
+    [
+        ("", sys.executable, "lab-tracker-ref is empty"),
+        ("v9.9.9", "false", "could not install lab-tracker@v9.9.9"),
+    ],
+)
+def test_install_step_failures_skip_the_capture_without_failing(
+    tmp_path, ref, python, expected
+) -> None:
+    script = tmp_path / "install-step.sh"
+    script.write_text(_step("Install the Lab Tracker client")["run"], encoding="utf-8")
+    output = tmp_path / "github-output"
+    completed = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-eo", "pipefail", str(script)],
+        env={
+            "PATH": os.environ["PATH"],
+            "RUNNER_TEMP": str(tmp_path),
+            "GITHUB_OUTPUT": str(output),
+            "LT_REPOSITORY": "SamuelBrudner/lab-tracker",
+            "LT_REF": ref,
+            "LT_BOOTSTRAP_PYTHON": python,
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+
+    assert completed.returncode == 0
+    assert expected in completed.stdout
+    assert output.read_text().strip().splitlines()[-1] == "ready=false"
 
 
 def test_ci_checkout_and_local_clone_share_the_commit_identity(tmp_path, monkeypatch) -> None:

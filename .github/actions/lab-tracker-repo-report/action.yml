@@ -78,7 +78,8 @@ runs:
         LT_REF: ${{ inputs.lab-tracker-ref }}
         LT_BOOTSTRAP_PYTHON: ${{ inputs.python }}
       run: |
-        set -u
+        # GitHub runs bash with -e; a capture step must never fail the job.
+        set +e -u
         if [ -z "$LT_REF" ]; then
           echo "::warning title=Lab Tracker::lab-tracker-ref is empty; pin a tag or commit SHA. The commit was not captured."
           echo "ready=false" >> "$GITHUB_OUTPUT"
@@ -114,7 +115,8 @@ runs:
         LT_PR_TITLE: ${{ github.event.pull_request.title }}
         LT_PR_BODY: ${{ github.event.pull_request.body }}
       run: |
-        set -u
+        # GitHub runs bash with -e; a capture step must never fail the job.
+        set +e -u
         annotate() {
           # Workflow-command escaping: %, CR and LF would otherwise break the line.
           printf '::%s title=Lab Tracker::%s\n' "$1" "$(printf '%s' "$2" | sed 's/%/%25/g')"
