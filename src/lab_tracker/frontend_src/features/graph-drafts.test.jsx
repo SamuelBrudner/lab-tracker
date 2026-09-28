@@ -1710,6 +1710,34 @@ describe("GraphDraftDetailCard keyboard review", () => {
     expect(within(section).getByText("session session-1")).toBeInTheDocument();
   });
 
+  it("labels a worktree-tree proposal from a capture to its commit note", async () => {
+    const draft = draftFixture();
+    renderDraft(draft, {
+      routes: [
+        {
+          match: /^\/provenance-links\?/,
+          response: apiResponse([
+            {
+              basis: "worktree_tree_match",
+              content_hash: null,
+              link_id: "link-3",
+              project_id: "project-1",
+              relation: "was_derived_from",
+              source: { entity_id: "note-figure", entity_type: "note" },
+              status: "proposed",
+              target: { entity_id: "note-commit", entity_type: "note" },
+            },
+          ]),
+        },
+      ],
+    });
+
+    const section = await screen.findByRole("region", { name: "Proposed provenance links" });
+    expect(within(section).getByText(/same code tree as a commit/)).toBeInTheDocument();
+    expect(within(section).queryByText(/worktree_tree_match/)).not.toBeInTheDocument();
+    expect(within(section).getByText("note note-commit")).toBeInTheDocument();
+  });
+
   it("gives claim statements and falsification criteria typed editors", async () => {
     const draft = draftFixture({
       operations: [
