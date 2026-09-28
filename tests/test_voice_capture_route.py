@@ -332,19 +332,30 @@ def test_client_capture_id_replays_return_the_same_note(
     assert note["metadata"]["captured_at"] == "2026-09-28T10:00:00+00:00"
 
 
+@pytest.mark.parametrize(
+    "captured_at",
+    [
+        "Sep 28, 2026 at 10:00",
+        # Parses, but converting to UTC leaves the calendar (was a 500).
+        "0001-01-01T00:00:00+14:00",
+        "9999-12-31T23:59:59-14:00",
+    ],
+)
 def test_malformed_captured_at_is_rejected(
     client: TestClient,
     admin_auth_headers: dict[str, str],
+    captured_at: str,
 ):
     project_id = _create_project(client, admin_auth_headers)
 
     response = _post_voice(
         client,
         _bearer(admin_auth_headers),
-        params={"project_id": project_id, "captured_at": "Sep 28, 2026 at 10:00"},
+        params={"project_id": project_id, "captured_at": captured_at},
     )
 
     assert response.status_code == 422, response.text
+    assert "captured_at must be an ISO 8601" in response.text
 
 
 def test_auth_matches_phone_capture(client: TestClient, admin_auth_headers: dict[str, str]):
