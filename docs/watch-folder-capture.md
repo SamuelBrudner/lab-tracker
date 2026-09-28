@@ -226,6 +226,19 @@ lt watch status
 lt watch sync
 ```
 
+## Files a Coding Agent Writes
+
+`lt watch touch <path>` (or an agent's `PostToolUse` hook payload on stdin)
+queues just that file when a configured watch would capture it, with the same
+event identity a scan gives it, then syncs best-effort; any other path returns
+at once without scanning or network. The opt-in `lt setup agent-hooks` wires it
+to Claude Code's `Write`/`Edit`/`MultiEdit`/`NotebookEdit` tools, so watched
+folders fill as the agent writes instead of at the next scheduled run. Only the
+checkout's own `.lab-tracker/watch.json` is consulted, relative roots are
+anchored at the checkout, and a staged-note watch needs a declared project
+(watch config, `lt_ids.json`, or `LAB_TRACKER_PROJECT_ID`). See
+[agent session capture](agent-session-capture.md).
+
 ## HPC Adapter
 
 `lt hpc` is still the recommended interface for Slurm workflows because it

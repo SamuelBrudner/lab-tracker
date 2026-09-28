@@ -153,7 +153,9 @@ integration files — the `.claude/settings.json` prompt hook, `.mcp.json`,
 `AGENTS.lt.md` — are rewritten to the current canonical text. A file whose
 content differs is first preserved next to itself as `*.bak-lt-update`, and
 `lt_ids.json` is never touched. `--dry-run` previews the changes; run
-`lt doctor` afterwards to confirm the repo is in sync.
+`lt doctor` afterwards to confirm the repo is in sync. Hook entries added by
+the separate `lt setup agent-hooks` opt-in are carried forward into the
+refreshed `.claude/settings.json` rather than dropped.
 
 ### Know when a client install is broken or behind its server
 
