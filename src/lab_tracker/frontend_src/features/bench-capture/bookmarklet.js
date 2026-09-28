@@ -11,10 +11,27 @@ const CLIP_FRAGMENT_KEY = "lt-clip";
 const CLIP_TITLE_MAX_CHARS = 300;
 const CLIP_URL_MAX_CHARS = 2000;
 const CLIP_TEXT_MAX_CHARS = 2000;
-// Query parameters whose values are treated as secrets and redacted.
-const SECRET_QUERY_KEY =
-  /(^|[_-])(token|access[_-]?token|id[_-]?token|refresh[_-]?token|api[_-]?key|apikey|key|secret|password|passwd|pwd|sig|signature|auth|authorization|credential|session[_-]?id|sessionid|code)s?$/i;
+// Query parameters whose values are treated as secrets and redacted. Keys are
+// compared after splitting camelCase (authToken -> auth_token). Unambiguous
+// words match as a suffix even with no separator (mytoken, clientsecret);
+// short or common words (key, sig, code, auth, pwd) only as a whole word, so
+// barcode= or monkey= keep their values.
+const SECRET_KEY_SUFFIX =
+  /(token|secret|password|passwd|passphrase|signature|credential|apikey|sessionid|sessid)s?$/;
+const SECRET_KEY_WORD = /(^|[_.-])(key|sig|code|auth|authorization|pwd|session_id)s?$/;
 const REDACTED = "REDACTED";
+
+function normalizedQueryKey(key) {
+  return String(key)
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2")
+    .toLowerCase();
+}
+
+function isSecretQueryKey(key) {
+  const normalized = normalizedQueryKey(key);
+  return SECRET_KEY_SUFFIX.test(normalized) || SECRET_KEY_WORD.test(normalized);
+}
 
 function bounded(value, max) {
   const text = String(value || "").trim();
@@ -38,7 +55,7 @@ function sanitizeClipUrl(href) {
   parsed.username = "";
   parsed.password = "";
   for (const key of Array.from(parsed.searchParams.keys())) {
-    if (SECRET_QUERY_KEY.test(key)) {
+    if (isSecretQueryKey(key)) {
       parsed.searchParams.set(key, REDACTED);
     }
   }
@@ -150,6 +167,7 @@ export {
   clearBookmarkletFragment,
   clipComposerText,
   clipMetadata,
+  isSecretQueryKey,
   readBookmarkletClip,
   sanitizeClipUrl,
 };

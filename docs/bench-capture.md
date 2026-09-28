@@ -36,10 +36,19 @@ then Enter).
   immediately (`Bench scan: <code>`) with `capture_channel=kiosk`,
   `bench_scan_value=<code>`, the scan clock as `captured_at`, and the chosen
   session as its target. The input clears and keeps focus for the next scan.
+- **Never deaf:** the input stays enabled and focused while the station is
+  still confirming the signed-in person's project access (or re-confirming it
+  after a token refresh). Scans made meanwhile are listed as *Waiting for
+  access* and sent once write access is confirmed; without write access they
+  stay on screen, unsent.
 - **Offline:** scans go through the same offline queue as phone captures. The
   running list of the last 20 scans shows each one's time and state (Sending,
-  Saved, Queued offline, Synced, Failed with Retry). A retry reuses the scan's
-  `client_capture_id`, so it never duplicates a note.
+  Saved, Queued offline, Synced, Failed with Retry). Queued scans are sent when
+  the browser reports it is back online and also as soon as any later scan
+  reaches the server (a server restart fires no `online` event). A queued scan
+  is shown as Synced only when a drain reports it uploaded, and as Failed when a
+  drain drops it. A retry reuses the scan's `client_capture_id`, so it never
+  duplicates a note.
 - **What it is not:** a log of who scanned what, when, and where, not an
   inventory. Codes are not looked up or resolved.
 - **Limits:** a scan value is capped at 256 characters
@@ -80,6 +89,14 @@ target). When a session is selected on the capture page, the review also offers
   and bound to the person who opened it. It expires on its own, never applies in
   another project or to a session that is no longer active, and is removed at
   sign-out or when another person signs in on the browser.
+- The stored window is re-read right before each automatic import, and again
+  when another tab changes it (a `storage` event) or the page becomes visible,
+  so a **Stop** in another tab or an expiry between timer ticks sends later
+  shares to manual review.
+- Every open capture page may see the same share. Imports take turns through
+  Web Locks where the browser has them (a page that waited finds the share
+  already gone), and each share carries a deterministic `client_capture_id`
+  (`share-inbox-<receivedAt>-<id>`), so a share imported twice is one capture.
 - A trusted import that fails is left in the inbox for manual review rather
   than retried in a loop.
 - Trade-off: during the window a share posted by another web page would also be
@@ -108,7 +125,9 @@ targeting the session with `capture_purpose=session_debrief`,
 `capture_channel=debrief`, and a capture hint used as the transcription prompt.
 **Skip** is one tap, even mid-recording (the recording is discarded), and
 nothing here can block or undo the close. Browsers without in-page recording
-fall back to the phone's recorder app.
+fall back to the phone's recorder app. A recording's capture id and metadata
+(including `captured_at`) are fixed when it is recorded, so **Retry upload**
+is an exact replay the server accepts even if the first attempt was stored.
 
 The capture flow does not request drafts at upload time (drafting needs a
 transcript and the external-provider acknowledgement, and paired devices may not
@@ -185,7 +204,10 @@ person checks it and presses send, and nothing is saved before that.
   and leave the address bar once read.
 - It stores a pointer: title (300 characters), URL (2,000 characters; credentials
   removed, secret-looking query values such as `token`, `key`, `password`, or
-  `sig` replaced with `REDACTED`, fragments with `key=value` pairs dropped), and
+  `sig` replaced with `REDACTED`, including camelCase and run-together names
+  like `authToken`, `clientSecret`, `privateKey`, or `mytoken`, while ordinary
+  names such as `barcode` keep their values; fragments with `key=value` pairs
+  dropped), and
   at most 2,000 characters of selected text. The note carries
   `capture_channel=bookmarklet`, `share_title`, and `share_url`.
 - Some sites' content security policy blocks bookmarklets; copy the address and

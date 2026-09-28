@@ -54,48 +54,65 @@ function SessionDebrief({
   // idle | uploading | saved | queued | failed
   const [status, setStatus] = useState("idle");
   const [error, setError] = useState("");
-  const [lastFile, setLastFile] = useState(null);
-  const clientCaptureIdRef = useRef("");
+  const [canRetry, setCanRetry] = useState(false);
+  // One recording is one capture: its file, client_capture_id, and metadata
+  // (including the captured_at clock) are fixed when it is recorded, so a
+  // retry after an ambiguous failure is an exact replay the server accepts.
+  const captureRef = useRef(null);
   // Skip while recording throws the recording away instead of saving it.
   const discardRef = useRef(false);
 
-  async function uploadDebrief(file) {
-    if (!file || !session) {
+  async function sendDebrief() {
+    const capture = captureRef.current;
+    if (!capture || !session) {
       return;
-    }
-    setLastFile(file);
-    if (!clientCaptureIdRef.current) {
-      clientCaptureIdRef.current = newCaptureId();
     }
     setStatus("uploading");
     setError("");
+    setCanRetry(false);
     try {
       const result = await uploadOrQueueRawFile({
         token,
-        projectId,
+        projectId: capture.projectId,
         ownerId,
-        fileToUpload: file,
-        metadata: {
-          ...buildCaptureMetadata({
-            captureMode: "voice",
-            kind: "voice",
-            file,
-            hint: DEBRIEF_HINT,
-            voiceNoteType: DEBRIEF_VOICE_NOTE_TYPE,
-            captureChannel: CAPTURE_CHANNEL.DEBRIEF,
-            now,
-          }),
-          capture_purpose: SESSION_DEBRIEF_PURPOSE,
-        },
-        targets: sessionTargets(session.session_id),
+        fileToUpload: capture.file,
+        metadata: capture.metadata,
+        targets: capture.targets,
         queue,
-        clientCaptureId: clientCaptureIdRef.current,
+        clientCaptureId: capture.clientCaptureId,
       });
       setStatus(result === OFFLINE_QUEUED ? "queued" : "saved");
     } catch (uploadError) {
       setStatus("failed");
+      setCanRetry(true);
       setError(errorMessage(uploadError, "The debrief could not be uploaded."));
     }
+  }
+
+  function captureDebrief(file) {
+    if (!file || !session) {
+      return;
+    }
+    // A new recording is a new capture, not a replay of the last one.
+    captureRef.current = {
+      clientCaptureId: newCaptureId(),
+      file,
+      metadata: {
+        ...buildCaptureMetadata({
+          captureMode: "voice",
+          kind: "voice",
+          file,
+          hint: DEBRIEF_HINT,
+          voiceNoteType: DEBRIEF_VOICE_NOTE_TYPE,
+          captureChannel: CAPTURE_CHANNEL.DEBRIEF,
+          now,
+        }),
+        capture_purpose: SESSION_DEBRIEF_PURPOSE,
+      },
+      projectId,
+      targets: sessionTargets(session.session_id),
+    };
+    sendDebrief();
   }
 
   const recorder = useAudioRecorder({
@@ -105,9 +122,7 @@ function SessionDebrief({
       if (discardRef.current) {
         return;
       }
-      // A new recording is a new capture, not a replay of the last one.
-      clientCaptureIdRef.current = "";
-      uploadDebrief(file);
+      captureDebrief(file);
     },
     setFlash: (_message, recorderError = "") => setError(recorderError),
   });
@@ -157,20 +172,15 @@ function SessionDebrief({
                 onChange={(event) => {
                   const file = event.target.files?.[0] || null;
                   event.target.value = "";
-                  clientCaptureIdRef.current = "";
-                  uploadDebrief(file);
+                  captureDebrief(file);
                 }}
                 type="file"
               />
             </label>
           )
         ) : null}
-        {status === "failed" && lastFile ? (
-          <button
-            type="button"
-            className="btn-secondary"
-            onClick={() => uploadDebrief(lastFile)}
-          >
+        {status === "failed" && canRetry ? (
+          <button type="button" className="btn-secondary" onClick={sendDebrief}>
             Retry upload
           </button>
         ) : null}
