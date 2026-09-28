@@ -46,6 +46,9 @@ from lab_tracker.models import NoteMetadataScalar
 from lab_tracker_client.client import LTValidationError
 
 GIT_TIMEOUT_ENV = "LAB_TRACKER_GIT_TIMEOUT_SECONDS"
+# Environment for reads that must never write: GIT_OPTIONAL_LOCKS=0 stops
+# ``status`` from refreshing (and so rewriting) the user's index.
+READ_ONLY_GIT_ENV: Mapping[str, str] = {"GIT_OPTIONAL_LOCKS": "0"}
 DEFAULT_GIT_TIMEOUT_SECONDS = 10.0
 
 # ``scheme://authority rest`` — authority is everything up to the first
@@ -135,6 +138,7 @@ def run_git(
     timeout: float | None = None,
     env_overrides: Mapping[str, str] | None = None,
     strip: bool = True,
+    input_text: str | None = None,
 ) -> GitProbe:
     """Run ``git [-C root] args`` bounded by :func:`git_timeout_seconds`.
 
@@ -144,7 +148,8 @@ def run_git(
     caller can recognise specific git messages in ``stderr``. ``timeout``
     overrides the probe timeout, ``env_overrides`` adds environment variables
     for this one invocation, and ``strip=False`` keeps stdout byte-exact
-    (``git status --porcelain`` output starts with a significant space).
+    (``git status --porcelain`` output starts with a significant space);
+    ``input_text`` is written to git's stdin.
     """
 
     if timeout is None:
@@ -166,6 +171,7 @@ def run_git(
             errors="replace",
             timeout=timeout,
             env=env,
+            input=input_text,
         )
     except subprocess.TimeoutExpired:
         return GitProbe("", f"{label} timed out after {timeout:g}s", timed_out=True)
@@ -274,7 +280,8 @@ def git_dirty_state(root: str | Path | None, *, head: HeadCommit) -> DirtyState:
     warning is printed; the state is still recorded as unknown.
     """
 
-    probe = run_git(root, "status", "--porcelain")
+    # Read-only: a plain status may refresh (rewrite) the real index.
+    probe = run_git(root, "status", "--porcelain", env_overrides=READ_ONLY_GIT_ENV)
     if probe.ok:
         return DirtyState(bool(probe.stdout))
     if not head.commit and not head.error and not (probe.timed_out or probe.unavailable):
@@ -486,6 +493,20 @@ class WorktreeTree:
 _WORKTREE_CACHE: OrderedDict[tuple[str, str], WorktreeTree] = OrderedDict()
 
 
+@dataclass(frozen=True)
+class WorktreeState:
+    """One read-only ``git status`` shared by a dirty flag and the worktree tree.
+
+    ``dirty`` is ``None`` when that status did not run (outside a checkout,
+    the kill switch, git missing or slow): a caller then asks
+    :func:`git_dirty_state` itself, which reports why.
+    """
+
+    tree: WorktreeTree
+    dirty: DirtyState | None = None
+    toplevel: Path | None = None
+
+
 def worktree_tree_id(
     root: str | Path | None = None,
     *,
@@ -511,10 +532,33 @@ def worktree_tree_id(
     back as a :class:`WorktreeTree` error marker.
     """
 
+    return worktree_state(root, exclude=exclude, timeout=timeout).tree
+
+
+def worktree_state(
+    root: str | Path | None = None,
+    *,
+    exclude: Sequence[str | Path] = (),
+    timeout: float | None = None,
+    toplevel: str | Path | None = None,
+) -> WorktreeState:
+    """:func:`worktree_tree_id` plus the dirty flag its ``git status`` already answers.
+
+    ``toplevel`` (a checkout root the caller already resolved) skips one
+    ``git rev-parse``. The dirty flag is what ``git status --porcelain`` says
+    for the whole working copy, exclusions notwithstanding, exactly as
+    :func:`git_dirty_state` reports it. Never raises.
+    """
+
     try:
-        return _worktree_tree_id(root, exclude=exclude, timeout=timeout)
+        tree, dirty, resolved = _worktree_state(
+            root, exclude=exclude, timeout=timeout, toplevel=toplevel
+        )
     except Exception as exc:  # noqa: BLE001 - identity is optional; never break a capture.
-        return WorktreeTree(error=WORKTREE_TREE_ERROR_FAILED, detail=str(exc))
+        return WorktreeState(WorktreeTree(error=WORKTREE_TREE_ERROR_FAILED, detail=str(exc)))
+    return WorktreeState(
+        tree=tree, dirty=None if dirty is None else DirtyState(dirty), toplevel=resolved
+    )
 
 
 def commit_tree_id(root: str | Path | None, commit: str) -> str:
@@ -538,94 +582,111 @@ def _reset_worktree_tree_cache_for_tests() -> None:
     _WORKTREE_CACHE.clear()
 
 
-def _worktree_tree_id(
+def _worktree_state(
     root: str | Path | None,
     *,
     exclude: Sequence[str | Path],
     timeout: float | None,
-) -> WorktreeTree:
+    toplevel: str | Path | None,
+) -> tuple[WorktreeTree, bool | None, Path | None]:
+    """``(tree, dirty-or-None, checkout root-or-None)`` from one status read."""
+
     if worktree_tree_disabled():
-        return WorktreeTree(
+        disabled = WorktreeTree(
             error=WORKTREE_TREE_ERROR_DISABLED, detail=f"{WORKTREE_TREE_ENV} is off"
         )
-    location = Path(root).expanduser() if root is not None else None
-    if location is not None and not location.is_dir():
-        return WorktreeTree()
+        return disabled, None, None
     deadline = time.monotonic() + _worktree_budget(timeout)
-    top = _bounded_git(location, deadline, "rev-parse", "--show-toplevel", c_locale=True)
-    if not top.ok:
-        if "not a git repository" in top.stderr:
-            return WorktreeTree()
-        return _probe_failure(top)
-    toplevel = Path(top.stdout).resolve()
-    head = _bounded_git(toplevel, deadline, "rev-parse", "-q", "--verify", "HEAD^{tree}")
+    if toplevel is not None:
+        top_path = Path(toplevel).resolve()
+    else:
+        location = Path(root).expanduser() if root is not None else None
+        if location is not None and not location.is_dir():
+            return WorktreeTree(), None, None
+        top = _bounded_git(location, deadline, "rev-parse", "--show-toplevel", c_locale=True)
+        if not top.ok:
+            if "not a git repository" in top.stderr:
+                return WorktreeTree(), None, None
+            return _probe_failure(top), None, None
+        top_path = Path(top.stdout).resolve()
+    head = _bounded_git(top_path, deadline, "rev-parse", "-q", "--verify", "HEAD^{tree}")
     if head.timed_out or head.unavailable:
-        return _probe_failure(head)
+        return _probe_failure(head), None, top_path
     head_tree = head.stdout.lower() if head.ok else ""
-    # Read-only status: GIT_OPTIONAL_LOCKS=0 stops git from refreshing (and so
-    # rewriting) the real index as a side effect.
     status = _bounded_git(
-        toplevel,
+        top_path,
         deadline,
         "status",
         "--porcelain",
         "-z",
         "--untracked-files=all",
-        env={"GIT_OPTIONAL_LOCKS": "0"},
+        env=READ_ONLY_GIT_ENV,
         strip=False,
     )
     if not status.ok:
-        return _probe_failure(status)
-    excluded = _relative_exclusions(toplevel, exclude)
-    entries = [
-        entry for entry in _porcelain_entries(status.stdout) if not _is_excluded(entry[1], excluded)
-    ]
+        return _probe_failure(status), None, top_path
+    all_entries = list(_porcelain_entries(status.stdout))
+    dirty = bool(all_entries)
+    excluded = _relative_exclusions(top_path, exclude)
+    entries = [entry for entry in all_entries if not _is_excluded(entry[1], excluded)]
     if len(entries) > WORKTREE_TREE_MAX_FILES:
-        return WorktreeTree(
+        too_many = WorktreeTree(
             error=WORKTREE_TREE_ERROR_TOO_LARGE,
-            detail=(f"{len(entries)} changed or untracked paths (limit {WORKTREE_TREE_MAX_FILES})"),
+            detail=f"{len(entries)} changed or untracked paths (limit {WORKTREE_TREE_MAX_FILES})",
         )
+        return too_many, dirty, top_path
     signature = hashlib.sha256()
     signature.update("\0".join([head_tree, *excluded, ""]).encode("utf-8", "surrogateescape"))
     total_bytes = 0
     for code, path in entries:
-        stamp, size = _path_stamp(toplevel / path)
+        stamp, size = _path_stamp(top_path / path)
         total_bytes += size
         signature.update(f"{code}\0{path}\0{stamp}\0".encode("utf-8", "surrogateescape"))
     if total_bytes > WORKTREE_TREE_MAX_BYTES:
-        return WorktreeTree(
+        too_big = WorktreeTree(
             error=WORKTREE_TREE_ERROR_TOO_LARGE,
             detail=(
                 f"{total_bytes} bytes of changed or untracked content "
                 f"(limit {WORKTREE_TREE_MAX_BYTES})"
             ),
         )
-    cache_key = (str(toplevel), signature.hexdigest())
+        return too_big, dirty, top_path
+    cache_key = (str(top_path), signature.hexdigest())
     cached = _WORKTREE_CACHE.get(cache_key)
     if cached is not None:
         _WORKTREE_CACHE.move_to_end(cache_key)
-        return cached
+        return cached, dirty, top_path
     if not entries and head_tree:
         result = WorktreeTree(tree=head_tree, clean=True)
     else:
         result = _tree_from_temporary_index(
-            toplevel, deadline=deadline, excluded=excluded, head_tree=head_tree
+            top_path,
+            deadline=deadline,
+            excluded_entries=[entry for entry in all_entries if _is_excluded(entry[1], excluded)],
+            head_tree=head_tree,
         )
     if result.tree:
         _WORKTREE_CACHE[cache_key] = result
         while len(_WORKTREE_CACHE) > _WORKTREE_CACHE_LIMIT:
             _WORKTREE_CACHE.popitem(last=False)
-    return result
+    return result, dirty, top_path
 
 
 def _tree_from_temporary_index(
     toplevel: Path,
     *,
     deadline: float,
-    excluded: Sequence[str],
+    excluded_entries: Sequence[tuple[str, str]],
     head_tree: str,
 ) -> WorktreeTree:
-    """``git add -A`` + ``git write-tree`` into a scratch index and object store."""
+    """``git add -A`` + ``git write-tree`` into a scratch index and object store.
+
+    Excluded paths are not passed to ``add`` as exclude pathspecs (git refuses
+    any pathspec that names an ignored path, e.g. a gitignored
+    ``.lab-tracker/``). Instead, the changed or untracked entries under an
+    exclusion (``excluded_entries``, from status) are put back afterwards: a
+    tracked one to its entry in the real index, an untracked one removed.
+    """
 
     paths = _bounded_git(
         toplevel, deadline, "rev-parse", "--git-path", "index", "--git-path", "objects"
@@ -639,6 +700,14 @@ def _tree_from_temporary_index(
         )
     real_index = (toplevel / lines[0]).resolve()
     real_objects = (toplevel / lines[1]).resolve()
+    restore = ""
+    if excluded_entries:
+        restore_or_failure = _excluded_index_info(
+            toplevel, deadline, excluded_entries, head_tree=head_tree
+        )
+        if isinstance(restore_or_failure, WorktreeTree):
+            return restore_or_failure
+        restore = restore_or_failure
     with tempfile.TemporaryDirectory(prefix="lt-worktree-", ignore_cleanup_errors=True) as scratch:
         scratch_index = Path(scratch) / "index"
         scratch_objects = Path(scratch) / "objects"
@@ -655,9 +724,8 @@ def _tree_from_temporary_index(
             "GIT_INDEX_FILE": str(scratch_index),
             "GIT_OBJECT_DIRECTORY": str(scratch_objects),
             "GIT_ALTERNATE_OBJECT_DIRECTORIES": os.pathsep.join(alternates),
-            "GIT_OPTIONAL_LOCKS": "0",
+            **READ_ONLY_GIT_ENV,
         }
-        pathspecs = ["--", ".", *(f":(exclude,literal){path}" for path in excluded)]
         added = _bounded_git(
             toplevel,
             deadline,
@@ -667,11 +735,26 @@ def _tree_from_temporary_index(
             "advice.addEmbeddedRepo=false",
             "add",
             "-A",
-            *pathspecs,
+            "--",
+            ".",
             env=env,
         )
         if not added.ok:
             return _probe_failure(added)
+        if restore:
+            restored = _bounded_git(
+                toplevel,
+                deadline,
+                "-c",
+                "core.splitIndex=false",
+                "update-index",
+                "-z",
+                "--index-info",
+                env=env,
+                input_text=restore,
+            )
+            if not restored.ok:
+                return _probe_failure(restored)
         written = _bounded_git(toplevel, deadline, "write-tree", env=env)
     if not written.ok:
         return _probe_failure(written)
@@ -681,6 +764,37 @@ def _tree_from_temporary_index(
             error=WORKTREE_TREE_ERROR_FAILED, detail=f"unexpected write-tree output {tree!r}"
         )
     return WorktreeTree(tree=tree, clean=tree == head_tree)
+
+
+def _excluded_index_info(
+    toplevel: Path,
+    deadline: float,
+    excluded_entries: Sequence[tuple[str, str]],
+    *,
+    head_tree: str,
+) -> str | WorktreeTree:
+    """``update-index -z --index-info`` input putting excluded entries back.
+
+    Each excluded path is first removed (mode 0), then a path the real index
+    tracks gets its real-index entry back; the result is NUL-terminated.
+    """
+
+    excluded_paths = sorted({path for _code, path in excluded_entries})
+    tracked = {path for code, path in excluded_entries if code != "??"}
+    originals: list[str] = []
+    if tracked:
+        listing = _bounded_git(
+            toplevel, deadline, "ls-files", "-s", "-z", env=READ_ONLY_GIT_ENV, strip=False
+        )
+        if not listing.ok:
+            return _probe_failure(listing)
+        for record in listing.stdout.split("\0"):
+            _info, tab, path = record.partition("\t")
+            if tab and path in tracked:
+                originals.append(record)
+    zero_oid = "0" * (len(head_tree) if head_tree else 40)
+    removals = [f"0 {zero_oid}\t{path}" for path in excluded_paths]
+    return "".join(f"{line}\0" for line in (*removals, *originals))
 
 
 def _worktree_budget(timeout: float | None) -> float:
@@ -700,6 +814,7 @@ def _bounded_git(
     c_locale: bool = False,
     env: Mapping[str, str] | None = None,
     strip: bool = True,
+    input_text: str | None = None,
 ) -> GitProbe:
     remaining = deadline - time.monotonic()
     if remaining <= 0:
@@ -711,6 +826,7 @@ def _bounded_git(
         timeout=remaining,
         env_overrides=env,
         strip=strip,
+        input_text=input_text,
     )
 
 

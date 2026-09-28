@@ -290,3 +290,95 @@ def test_commit_tree_id_names_the_commits_own_tree(repo: Path, tmp_path: Path) -
     assert commit_tree_id(repo, commit) == _head_tree(repo)
     assert commit_tree_id(repo, "0" * 40) == ""
     assert commit_tree_id(tmp_path, commit) == ""
+
+
+# --- exclusions next to gitignored paths ------------------------------------------
+
+
+def _ignore(repo: Path, *patterns: str) -> None:
+    gitignore = repo / ".gitignore"
+    gitignore.write_text(gitignore.read_text() + "".join(f"{p}\n" for p in patterns))
+    _git(repo, "add", ".gitignore")
+    _git(repo, "commit", "-q", "-m", "ignore scratch")
+
+
+def test_a_gitignored_lab_tracker_folder_does_not_break_the_tree(repo: Path) -> None:
+    """The common configured checkout: `.lab-tracker/` exists and is gitignored."""
+
+    _ignore(repo, ".lab-tracker/")
+    (repo / ".lab-tracker" / "outbox").mkdir(parents=True)
+    (repo / ".lab-tracker" / "outbox" / "event.json").write_text("{}", encoding="utf-8")
+    (repo / "analysis.py").write_text("print('v2')\n", encoding="utf-8")
+
+    dirty = worktree_tree_id(repo)
+
+    assert dirty.error == "" and dirty.tree
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "commit everything")
+    assert dirty.tree == _head_tree(repo)
+
+
+def test_excluded_changes_inside_an_ignored_folder_keep_their_indexed_content(
+    repo: Path,
+) -> None:
+    _ignore(repo, "results/")
+    (repo / "results").mkdir()
+    (repo / "results" / "summary.csv").write_text("a\n", encoding="utf-8")
+    _git(repo, "add", "-f", "results/summary.csv")
+    _git(repo, "commit", "-q", "-m", "tracked result in an ignored folder")
+    (repo / "results" / "summary.csv").write_text("b\n", encoding="utf-8")
+
+    excluded = worktree_tree_id(repo, exclude=[repo / "results"])
+    included = worktree_tree_id(repo)
+
+    assert excluded == WorktreeTree(tree=_head_tree(repo), clean=True)
+    assert included.tree and included.tree != _head_tree(repo)
+
+
+def test_excluded_untracked_outputs_and_a_changed_tracked_output_are_left_out(
+    repo: Path,
+) -> None:
+    (repo / "out").mkdir()
+    (repo / "out" / "kept.csv").write_text("committed\n", encoding="utf-8")
+    _git(repo, "add", "out/kept.csv")
+    _git(repo, "commit", "-q", "-m", "an output")
+    (repo / "out" / "kept.csv").write_text("regenerated\n", encoding="utf-8")
+    for index in range(3):
+        (repo / "out" / f"new_{index}.csv").write_text(str(index), encoding="utf-8")
+    (repo / "analysis.py").write_text("print('code change')\n", encoding="utf-8")
+
+    result = worktree_tree_id(repo, exclude=[repo / "out"])
+
+    # Equals the tree of a commit of the code change alone.
+    _git(repo, "add", "analysis.py")
+    _git(repo, "commit", "-q", "-m", "code only")
+    assert result.tree == _head_tree(repo)
+
+
+# --- one read-only status ---------------------------------------------------------
+
+
+def test_worktree_state_reports_the_dirty_flag_from_its_own_status(repo: Path) -> None:
+    clean = gitinfo.worktree_state(repo)
+    (repo / "scratch.txt").write_text("x", encoding="utf-8")
+    dirty = gitinfo.worktree_state(repo, exclude=[repo / "scratch.txt"])
+
+    assert clean.dirty == gitinfo.DirtyState(False)
+    # The flag describes the whole working copy, exclusions notwithstanding.
+    assert dirty.dirty == gitinfo.DirtyState(True)
+    assert dirty.tree.tree == _head_tree(repo)
+    assert dirty.toplevel == repo.resolve()
+    assert gitinfo.worktree_state(repo.parent).dirty is None
+
+
+def test_the_dirty_state_probe_never_refreshes_the_real_index(repo: Path) -> None:
+    tracked = repo / "analysis.py"
+    info = tracked.stat()
+    os.utime(tracked, ns=(info.st_atime_ns, info.st_mtime_ns + 5_000_000_000))
+    index = repo / ".git" / "index"
+    before = (index.read_bytes(), index.stat().st_mtime_ns)
+    head = gitinfo.git_head_commit(repo)
+
+    assert gitinfo.git_dirty_state(repo, head=head) == gitinfo.DirtyState(False)
+    assert gitinfo.worktree_state(repo).dirty == gitinfo.DirtyState(False)
+    assert (index.read_bytes(), index.stat().st_mtime_ns) == before
