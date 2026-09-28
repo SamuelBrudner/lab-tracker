@@ -1624,6 +1624,11 @@ def _metric_value(value: str) -> str | int | float | bool:
         return cleaned
 
 
+# Extra characters read before a log tail is redacted, so a secret split by the
+# read offset is dropped whole instead of surviving without its prefix.
+LOG_REDACTION_MARGIN_CHARS = 512
+
+
 def _read_log_excerpt(paths: Sequence[str | Path], *, max_chars: int = 4000) -> str:
     chunks: list[str] = []
     remaining = max_chars
@@ -1632,14 +1637,35 @@ def _read_log_excerpt(paths: Sequence[str | Path], *, max_chars: int = 4000) -> 
             break
         path = Path(item).expanduser()
         try:
-            text = _read_text_tail(path, max_chars=remaining)
+            excerpt = redacted_log_tail(path, max_chars=remaining)
         except OSError:
             continue
-        excerpt = text[-remaining:]
         chunks.append(f"==> {path} <==\n{excerpt.strip()}")
         remaining -= len(excerpt)
-    # Job logs routinely echo tokens and connection strings; never store them.
-    return redact_capture_text("\n\n".join(chunks))
+    return "\n\n".join(chunks)
+
+
+def redacted_log_tail(path: Path, *, max_chars: int) -> str:
+    """The last ``max_chars`` characters of a log, with secrets redacted before the cut.
+
+    Job and pipeline logs routinely echo tokens and connection strings. A
+    window ``LOG_REDACTION_MARGIN_CHARS`` larger than needed is read; when the
+    file is longer than that window, its first (partial) line is dropped -- or,
+    for a log without line breaks, the whole margin -- so a secret split by the
+    read offset cannot survive without the prefix that identifies it. Only
+    then is the text redacted and cut to ``max_chars``: that cut runs on
+    already-redacted text, so it cannot expose a secret.
+    """
+
+    window = _read_text_tail(path, max_chars=max_chars + LOG_REDACTION_MARGIN_CHARS)
+    try:
+        truncated = path.stat().st_size > len(window.encode("utf-8"))
+    except OSError:
+        truncated = True
+    if truncated:
+        newline = window.find("\n")
+        window = window[LOG_REDACTION_MARGIN_CHARS:] if newline < 0 else window[newline + 1 :]
+    return redact_capture_text(window)[-max_chars:]
 
 
 def _read_text_tail(path: Path, *, max_chars: int) -> str:

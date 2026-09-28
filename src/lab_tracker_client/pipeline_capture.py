@@ -739,34 +739,11 @@ def _log_excerpt(logs: Sequence[str | Path], error_text: str | None, *, base: Pa
 
 
 def _redacted_tail(path: Path, *, max_chars: int) -> str:
-    """The last ``max_chars`` characters of ``path``, redacted before the cut.
+    """The last ``max_chars`` characters of ``path``, redacted before the cut."""
 
-    A window ``REDACTION_MARGIN_CHARS`` larger than needed is read. When the
-    file is longer than the window, the window's first (partial) line is
-    dropped -- or, for a log without line breaks, the whole margin -- so a
-    secret split by the read offset cannot survive without its prefix. The
-    window is then redacted, cut to ``max_chars``, and a line split by that
-    cut is dropped too.
-    """
+    from lab_tracker_client.hpc import redacted_log_tail
 
-    window = _read_text_tail(path, max_chars=max_chars + REDACTION_MARGIN_CHARS)
-    try:
-        truncated = path.stat().st_size > len(window.encode("utf-8"))
-    except OSError:
-        truncated = True
-    if truncated:
-        window = _drop_partial_head(window, REDACTION_MARGIN_CHARS)
-    cleaned = redact_capture_text(window)
-    if len(cleaned) > max_chars:
-        cleaned = _drop_partial_head(cleaned[-max_chars:], max_chars)
-    return cleaned.strip()
-
-
-def _drop_partial_head(text: str, limit: int) -> str:
-    """``text`` without its first line; without a line break, minus ``limit`` characters."""
-
-    newline = text.find("\n")
-    return text[limit:] if newline < 0 else text[newline + 1 :]
+    return redacted_log_tail(path, max_chars=max_chars).strip()
 
 
 def _cut_head(text: str, max_chars: int) -> str:
