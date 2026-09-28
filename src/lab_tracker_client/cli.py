@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import lab_tracker_client.auth as auth_helpers
+import lab_tracker_client.cli_agent as agent_cli
 import lab_tracker_client.figure_autotrack as autotrack_helpers
 import lab_tracker_client.git_capture as git_capture
 import lab_tracker_client.hooks as hook_install
@@ -174,6 +175,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_git_parsers(subcommands)
     _add_hooks_parsers(subcommands)
     _add_agent_context_parsers(subcommands)
+    agent_cli.add_agent_parsers(subcommands)
 
     prime_parser = subcommands.add_parser(
         "prime",
@@ -518,6 +520,7 @@ def _add_setup_parsers(subcommands: argparse._SubParsersAction) -> None:
         help="Consent to modifying the OS scheduler.",
     )
     schedule_parser.set_defaults(func=_cmd_setup_schedule, needs_client=False)
+    agent_cli.add_setup_agent_hooks_parser(setup_commands)
 
 
 def _add_project_parsers(subcommands: argparse._SubParsersAction) -> None:
@@ -928,6 +931,7 @@ def _add_watch_parsers(subcommands: argparse._SubParsersAction) -> None:
         help="Suppress errors and error exit codes for scheduler runs.",
     )
     run_parser.set_defaults(func=_cmd_watch_run)
+    agent_cli.add_watch_touch_parser(watch_commands)
 
 
 def _add_outbox_parsers(subcommands: argparse._SubParsersAction) -> None:

@@ -1014,6 +1014,10 @@ FastAPI app does not read them. `LAB_TRACKER_BASE_URL` (see
   `lt setup autotrack` installs (default: on). The hook captures only saves
   whose project comes from `autotrack(project_id=...)`,
   `LAB_TRACKER_PROJECT_ID`, or the checkout's `lt_ids.json`
+- `LAB_TRACKER_AGENT_HOOKS`: `0`, `false`, `no`, or `off` turns off the
+  coding-agent hooks `lt setup agent-hooks` installs: `lt agent session-end`
+  and `lt watch touch` return at once without reading a transcript or queuing
+  anything (default: on). See [agent session capture](agent-session-capture.md)
 - `LAB_TRACKER_CAPTURE_OUTBOX`: `0`, `false`, `no`, or `off` stops figure
   captures from queueing into the checkout's watch outbox when the server is
   unreachable; the save then reports the failure instead (default: on)
