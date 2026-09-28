@@ -216,6 +216,11 @@ Each event becomes an idempotent staged evidence note. The note contains:
 - git commit and dirty state when available (a `git status` that times out after
   `LAB_TRACKER_GIT_TIMEOUT_SECONDS`, default 10 seconds, or fails is recorded as
   unknown, never as clean)
+- on `begin` and `finish` events, the git tree id of the job's working copy
+  (`hpc_git_worktree_tree`), the identity of the exact code the job ran even
+  when it was never committed; a later `lt repo` commit with the same tree is
+  proposed as the code the job derived from (see
+  [run-capture.md](run-capture.md#code-identity-for-uncommitted-code))
 - artifact pointers with titles and summaries
 - compact log excerpts and metrics
 

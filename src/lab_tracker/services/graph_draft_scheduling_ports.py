@@ -102,6 +102,13 @@ class SchedulingProvenanceLinks(Protocol):
         actor: AuthContext | None = None,
     ) -> int: ...
 
+    def propose_links_from_tree_matches(
+        self,
+        project_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> int: ...
+
 
 class BatchSettingsStore(Protocol):
     def save(self, settings: GraphDraftBatchSettings) -> None: ...

@@ -107,6 +107,25 @@ so a reader with no running instance still sees the reasoning:
   stays the researcher's claim confidence and `rationale` the exploration
   node's reasoning.
 
+Captured notes can also carry derivation edges between themselves. Every
+batch execution runs deterministic detectors that *propose* `was_derived_from`
+provenance links, each labelled with the rule that found it:
+
+- `content_hash_match`: two captures share bytes (the earliest capture is the
+  antecedent);
+- `exact_id_match`: a capture's own metadata names one session, or a git
+  commit that is the `code_version` of exactly one committed analysis;
+- `worktree_tree_match`: a capture recorded the git tree of the working copy
+  it ran in (`run_git_worktree_tree`, `capture_git_worktree_tree`,
+  `hpc_git_worktree_tree`) and the earliest other note of the project records
+  that same tree as its commit's own (`repo_git_tree`), so the capture was made
+  from exactly that commit's code, even when it ran before the commit existed
+  (see [run-capture.md](run-capture.md#code-identity-for-uncommitted-code)).
+
+Proposed and rejected links never appear in an export. Only after a person
+accepts a note-to-note link does the derived note's node carry
+`wasDerivedFrom` pointing at the antecedent note's `@id`, whatever the basis.
+
 Claim nodes in the claim, record-export, and Ara documents carry
 `lab:effectiveStatus` (classified in the `claimEffectiveStatus` scheme) next
 to the stored `status`: the read-time derivation from `supersedes`, `refutes`,

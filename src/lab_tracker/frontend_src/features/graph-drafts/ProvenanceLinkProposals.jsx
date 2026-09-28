@@ -8,6 +8,7 @@ const PROPOSAL_PAGE_SIZE = 50;
 const BASIS_LABELS = {
   content_hash_match: "shared content hash",
   exact_id_match: "exact id match",
+  worktree_tree_match: "same code tree as a commit",
 };
 
 function entityLabel(ref) {
@@ -19,9 +20,10 @@ function basisLabel(basis) {
 }
 
 // The project's proposed provenance links (the content-hash detector's
-// "these two captures share bytes" proposals and the exact-id detector's
-// "this capture names that session or commit" proposals), each with an
-// Accept / Reject decision. Only a person turns a proposal into lineage, so
+// "these two captures share bytes" proposals, the exact-id detector's
+// "this capture names that session or commit" proposals, and the
+// worktree-tree detector's "this capture ran that commit's exact code"
+// proposals), each with an Accept / Reject decision. Only a person turns a proposal into lineage, so
 // the section disappears once the list is empty.
 function ProvenanceLinkProposals({ projectId, token, canWrite, onDecide }) {
   const [links, setLinks] = React.useState([]);

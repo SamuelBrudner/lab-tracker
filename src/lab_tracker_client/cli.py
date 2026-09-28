@@ -31,6 +31,7 @@ from lab_tracker_client import outbox as _outbox
 from lab_tracker_client._version import __version__
 from lab_tracker_client.cli_hpc_epilog import add_hpc_epilog_parser
 from lab_tracker_client.cli_pipeline import add_pipeline_parsers
+from lab_tracker_client.cli_run import add_run_parsers
 from lab_tracker_client.client import (
     NOTE_STATUS_VALUES,
     EntityRef,
@@ -284,6 +285,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_hpc_parsers(subcommands)
     _add_repo_parsers(subcommands)
     add_pipeline_parsers(subcommands)
+    add_run_parsers(subcommands)
 
     export_parser = subcommands.add_parser(
         "export",

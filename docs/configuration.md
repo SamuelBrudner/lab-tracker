@@ -1050,6 +1050,11 @@ FastAPI app does not read them. `LAB_TRACKER_BASE_URL` (see
   for `lt repo` commit events and `lt git snapshot` alike (default: `3`)
 - `LAB_TRACKER_GIT_TIMEOUT_SECONDS`: timeout in seconds for each `git` probe the
   client runs (default: `10`)
+- `LAB_TRACKER_WORKTREE_TREE`: set to `0`, `false`, `no`, or `off` to stop the
+  client computing the git tree id of the working copy (the identity of
+  uncommitted code) for `run_context`, figure/file captures, `lt run`, and `lt
+  hpc begin`/`finish`; captures then record `*_git_worktree_tree_error:
+  disabled` instead (default: on; see [run-capture.md](run-capture.md))
 - `LAB_TRACKER_GIT_COMMIT` / `LAB_TRACKER_GIT_REPO`: default commit and
   repository for `scripts/create-analysis-graph-draft.py` (repository default:
   the current directory)
