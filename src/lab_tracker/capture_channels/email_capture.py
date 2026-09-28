@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from datetime import timezone
 from email.message import EmailMessage
 from email.utils import getaddresses, parsedate_to_datetime
+from functools import cached_property
 from html.parser import HTMLParser
 from typing import Any, Final, Protocol
 from uuid import UUID
@@ -85,6 +86,8 @@ MAX_STORED_ATTACHMENTS: Final = 10
 MAX_POINTER_ATTACHMENTS: Final = 20
 MAX_PROJECTS_PER_MESSAGE: Final = 3
 MAX_CANDIDATE_PROJECTS: Final = 10_000
+# Text scanned for quoted replies (the stored body is bounded to 8,000 chars).
+MAX_BODY_SCAN_CHARS: Final = 64 * 1024
 IMAP_TIMEOUT_SECONDS: Final = 30.0
 STORED_ATTACHMENT_TYPES: Final = frozenset(
     {
@@ -182,45 +185,103 @@ class Attachment:
         return self.content_type in STORED_ATTACHMENT_TYPES and 0 < len(self.payload) <= max_bytes
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(eq=False)
 class ParsedEmail:
-    """The parts of one message a capture needs."""
+    """The envelope of one message; its body and attachments are read lazily.
+
+    Only the headers are interpreted up front. ``body`` and ``attachments`` are
+    extracted on first use, which :func:`stage_email` reaches only after the
+    sender and the capture token have been verified, so an unverified message
+    never costs more than a header parse.
+    """
 
     message_key: str
     message_id: str | None
     sender: str | None
     recipients: tuple[str, ...]
     subject: str
-    body: str
     sent_at: str | None
-    attachments: tuple[Attachment, ...]
+    _message: EmailMessage | None = field(default=None, repr=False)
+
+    @cached_property
+    def body(self) -> str:
+        if self._message is None:
+            return ""
+        try:
+            return _message_text(self._message)
+        except Exception:  # a malformed body must not wedge the mailbox
+            _logger.warning("Email capture could not read a message body.")
+            return ""
+
+    @cached_property
+    def attachments(self) -> tuple[Attachment, ...]:
+        if self._message is None:
+            return ()
+        try:
+            return tuple(_attachments(self._message))
+        except Exception:
+            _logger.warning("Email capture could not read a message's attachments.")
+            return ()
 
 
 def parse_email(raw: bytes) -> ParsedEmail:
-    """Parse one RFC 5322 message without trusting any of its claims yet."""
+    """Parse one RFC 5322 message's headers without trusting any of its claims yet."""
 
     message = email.message_from_bytes(raw, policy=email.policy.default)
     assert isinstance(message, EmailMessage)
     message_id = _header(message, "Message-ID")
-    senders = [addr for _name, addr in getaddresses(_all_headers(message, "From")) if addr]
-    sender = normalize_email_address(senders[0]) if len(senders) == 1 else None
-    recipients = tuple(
-        normalized
-        for _name, addr in getaddresses(
-            [value for header in _RECIPIENT_HEADERS for value in _all_headers(message, header)]
-        )
-        if (normalized := normalize_email_address(addr)) is not None
-    )
     return ParsedEmail(
         message_key=bound_value(message_id, limit=300) if message_id else sha256_hex(raw),
         message_id=bound_value(message_id, limit=300) if message_id else None,
-        sender=sender,
-        recipients=recipients,
+        sender=_single_sender(message),
+        recipients=_recipients(message),
         subject=bound_value(_header(message, "Subject") or "", limit=MAX_TITLE_CHARS),
-        body=_message_text(message),
         sent_at=_sent_at(message),
-        attachments=tuple(_attachments(message)),
+        _message=message,
     )
+
+
+def _single_sender(message: EmailMessage) -> str | None:
+    """The one ``From`` address, or ``None`` when absent, repeated, or malformed.
+
+    A ``From`` header with parse defects is refused outright: an input such as
+    ``alice@lab.org <mallory@evil.com>`` is repaired by lenient parsers into
+    ``alice@lab.org`` while DMARC aligns on ``evil.com``.
+    """
+
+    try:
+        headers = message.get_all("From") or []
+    except (IndexError, ValueError, TypeError):
+        return None
+    if len(headers) != 1:
+        return None
+    header = headers[0]
+    addresses = getattr(header, "addresses", None)
+    if getattr(header, "defects", ()) or not addresses or len(addresses) != 1:
+        return None
+    return normalize_email_address(str(addresses[0].addr_spec))
+
+
+def _recipients(message: EmailMessage) -> tuple[str, ...]:
+    found: list[str] = []
+    for name in _RECIPIENT_HEADERS:
+        try:
+            values = message.get_all(name) or []
+        except (IndexError, ValueError, TypeError):
+            continue
+        for value in values:
+            addresses = getattr(value, "addresses", None)
+            candidates = (
+                [str(address.addr_spec) for address in addresses]
+                if addresses is not None
+                else [addr for _name, addr in getaddresses([str(value)])]
+            )
+            found.extend(
+                normalized
+                for candidate in candidates
+                if (normalized := normalize_email_address(candidate)) is not None
+            )
+    return tuple(found)
 
 
 def capture_tokens(recipients: Iterable[str], address: CaptureAddress) -> tuple[str, ...]:
@@ -258,22 +319,41 @@ def strip_quoted_reply(text: str) -> str:
     """
 
     lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
-    cut = len(lines)
+    count = len(lines)
+    # One backward pass (linear): the next non-blank line at or after each index,
+    # and whether every non-blank line from there on is ">"-quoted.
+    next_nonblank = [count] * (count + 1)
+    quoted_from = [False] * (count + 1)
+    for index in range(count - 1, -1, -1):
+        if lines[index].strip():
+            next_nonblank[index] = index
+            later = next_nonblank[index + 1]
+            quoted_from[index] = lines[index].lstrip().startswith(">") and (
+                later == count or quoted_from[later]
+            )
+        else:
+            next_nonblank[index] = next_nonblank[index + 1]
+            quoted_from[index] = quoted_from[index + 1]
+    cut = count
     for index, line in enumerate(lines):
-        following = lines[index + 1 :]
         if _ORIGINAL_MESSAGE_RE.match(line):
             cut = index
             break
-        if _OUTLOOK_SEPARATOR_RE.match(line) and _next_nonblank(following).lower().startswith(
-            "from:"
+        following = next_nonblank[index + 1] if index + 1 <= count else count
+        if (
+            _OUTLOOK_SEPARATOR_RE.match(line)
+            and following < count
+            and lines[following].strip().lower().startswith("from:")
         ):
             cut = index
             break
         if _REPLY_HEADER_START_RE.match(line):
             header_end = _reply_header_end(lines, index)
-            if header_end is not None and _all_quoted(lines[header_end + 1 :]):
-                cut = index
-                break
+            if header_end is not None:
+                rest = next_nonblank[header_end + 1]
+                if rest < count and quoted_from[rest]:
+                    cut = index
+                    break
     kept = lines[:cut]
     while kept and (not kept[-1].strip() or kept[-1].lstrip().startswith(">")):
         kept.pop()
@@ -288,15 +368,6 @@ def _reply_header_end(lines: list[str], start: int) -> int | None:
         if index < len(lines) and _REPLY_HEADER_END_RE.search(lines[index]):
             return index
     return None
-
-
-def _all_quoted(lines: list[str]) -> bool:
-    nonblank = [line for line in lines if line.strip()]
-    return bool(nonblank) and all(line.lstrip().startswith(">") for line in nonblank)
-
-
-def _next_nonblank(lines: list[str]) -> str:
-    return next((line.strip() for line in lines if line.strip()), "")
 
 
 class _HtmlText(HTMLParser):
@@ -344,6 +415,8 @@ def _message_text(message: EmailMessage) -> str:
         content = payload.decode("utf-8", errors="replace") if isinstance(payload, bytes) else ""
     if not isinstance(content, str):
         return ""
+    # Bound the work before any scanning: the stored body is capped far lower.
+    content = content[:MAX_BODY_SCAN_CHARS]
     if part.get_content_subtype() == "html":
         content = html_to_text(content)
     return strip_quoted_reply(content)
@@ -372,13 +445,6 @@ def _header(message: EmailMessage, name: str) -> str | None:
     except (IndexError, ValueError, TypeError):
         return None
     return str(value).strip() if value is not None else None
-
-
-def _all_headers(message: EmailMessage, name: str) -> list[str]:
-    try:
-        return [str(value) for value in message.get_all(name, [])]
-    except (IndexError, ValueError, TypeError):
-        return []
 
 
 def _sent_at(message: EmailMessage) -> str | None:
@@ -628,6 +694,7 @@ class EmailPollResult:
     rejected: int = 0
     failed: int = 0
     notes_created: int = 0
+    left_for_next_poll: int = 0
     rejection_reasons: dict[str, int] = field(default_factory=dict)
 
 
@@ -637,8 +704,13 @@ def poll_mailbox(
     imap_factory: ImapFactory,
     stage: Callable[[ParsedEmail], MessageOutcome],
     max_messages: int = MAX_MESSAGES_PER_POLL,
+    expired: Callable[[], bool] = lambda: False,
 ) -> EmailPollResult:
-    """Read unseen messages (bounded), stage each, and mark it processed only after."""
+    """Read unseen messages (bounded), stage each, and mark it processed only after.
+
+    ``expired`` is the poller's wall-clock budget: once it reports true, the
+    remaining unseen messages are left for the next poll.
+    """
 
     result = EmailPollResult()
     try:
@@ -657,7 +729,10 @@ def poll_mailbox(
         if status != "OK":
             raise EmailCaptureError("Could not search the capture mailbox.")
         uids = [uid.decode("ascii") for uid in (data[0] or b"").split() if uid.isdigit()]
-        for uid in uids[:max_messages]:
+        for position, uid in enumerate(uids[:max_messages]):
+            if expired():
+                result.left_for_next_poll = len(uids[:max_messages]) - position
+                break
             result.examined += 1
             outcome = _process_uid(connection, uid, config=config, stage=stage)
             _tally(result, outcome)

@@ -31,6 +31,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -46,6 +47,7 @@ from lab_tracker.bounded_subprocess import (
 )
 from lab_tracker.capture_channels.common import (
     CAPTURE_CHANNEL_KEY,
+    CAPTURED_AT_KEY,
     EVIDENCE_ADAPTER_KEY,
     EVIDENCE_CAPTURE_KIND_KEY,
     EVIDENCE_CONTENT_HASH_KEY,
@@ -135,10 +137,17 @@ class StoreListing:
     truncated: bool
 
 
-class StoreAdapter(Protocol):
-    """List a store beneath a prefix and, when possible, hash one listed file."""
+Include = Callable[[PortableStorePath], bool]
 
-    def list(self, prefix: PortableStorePath | None) -> StoreListing: ...
+
+class StoreAdapter(Protocol):
+    """List a store beneath a prefix and, when possible, hash one listed file.
+
+    ``include`` is applied while listing, so only matching files count toward
+    ``MAX_LISTED_FILES`` and non-matching clutter cannot hide a match.
+    """
+
+    def list(self, prefix: PortableStorePath | None, *, include: Include) -> StoreListing: ...
 
     def sha256(self, listed: ListedFile, *, max_bytes: int) -> str | None: ...
 
@@ -175,7 +184,7 @@ class LocalStoreAdapter:
     reader: LocalRegularFileReader
     deadline_seconds: float
 
-    def list(self, prefix: PortableStorePath | None) -> StoreListing:
+    def list(self, prefix: PortableStorePath | None, *, include: Include) -> StoreListing:
         if self.authority.select_directory(self.root) is None:
             raise StoreScanError("The store root is outside LAB_TRACKER_RESOLVER_ALLOWED_ROOTS.")
         real_root = os.path.realpath(self.root)
@@ -189,7 +198,9 @@ class LocalStoreAdapter:
             raise StoreScanError("The scan prefix resolves outside the store root.")
         if not os.path.isdir(start):
             return StoreListing((), False)
-        return _walk_local(start, components)
+        if _FD_WALK_SUPPORTED:
+            return _walk_local_fds(real_root, components, include)
+        return _walk_local_paths(real_root, components, include)
 
     def sha256(self, listed: ListedFile, *, max_bytes: int) -> str | None:
         if listed.size > max_bytes or listed.size > MAX_LOCAL_RESOLUTION_MAX_READ_BYTES:
@@ -215,54 +226,177 @@ class LocalStoreAdapter:
         return digest.hexdigest()
 
 
-def _walk_local(start: str, prefix_components: tuple[str, ...]) -> StoreListing:
-    files: list[ListedFile] = []
-    stack: list[tuple[str, tuple[str, ...], int]] = [(start, prefix_components, 0)]
-    directories = 0
-    truncated = False
-    while stack:
-        directory, components, depth = stack.pop()
-        directories += 1
-        if directories > MAX_LISTED_DIRECTORIES:
-            truncated = True
-            break
+_DIRECTORY_FLAGS: Final = (
+    os.O_RDONLY
+    | getattr(os, "O_DIRECTORY", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_CLOEXEC", 0)
+)
+# Descend with directory descriptors and O_NOFOLLOW where the platform allows:
+# a directory swapped for a symlink mid-walk then fails to open instead of
+# leading the listing outside the store.
+_FD_WALK_SUPPORTED: Final = (
+    hasattr(os, "O_NOFOLLOW")
+    and hasattr(os, "O_DIRECTORY")
+    and os.open in os.supports_dir_fd
+    and os.scandir in os.supports_fd
+)
+
+
+class _Walk:
+    """Shared bookkeeping for both local walk strategies."""
+
+    def __init__(self, include: Include) -> None:
+        self.include = include
+        self.files: list[ListedFile] = []
+        self.directories = 0
+        self.truncated = False
+
+    def visit(self) -> bool:
+        self.directories += 1
+        if self.directories > MAX_LISTED_DIRECTORIES:
+            self.truncated = True
+            return False
+        return True
+
+    def add(self, components: tuple[str, ...], stat_result: os.stat_result) -> bool:
+        """Record one regular file; return False once the listing is full."""
+
+        locator = _locator(components)
+        if locator is None or not self.include(locator):
+            return True
+        self.files.append(
+            ListedFile(
+                locator=locator,
+                size=int(stat_result.st_size),
+                modified_at=datetime.fromtimestamp(stat_result.st_mtime, timezone.utc).replace(
+                    microsecond=0
+                ),
+            )
+        )
+        if len(self.files) >= MAX_LISTED_FILES:
+            self.truncated = True
+            return False
+        return True
+
+    def listing(self) -> StoreListing:
+        return StoreListing(tuple(self.files), self.truncated)
+
+
+def _scan_entries(
+    entries: list[os.DirEntry[str]],
+    *,
+    components: tuple[str, ...],
+    depth: int,
+    walk: _Walk,
+    stack: list[tuple[tuple[str, ...], int]],
+) -> bool:
+    for entry in entries:
+        if _ignored_name(entry.name):
+            continue
         try:
-            with os.scandir(directory) as entries:
-                ordered = sorted(entries, key=lambda entry: entry.name)
+            if entry.is_symlink():
+                continue  # never follow an alias out of (or around) the store
+            if entry.is_dir(follow_symlinks=False):
+                if depth + 1 < MAX_LIST_DEPTH:
+                    stack.append(((*components, entry.name), depth + 1))
+                else:
+                    walk.truncated = True
+                continue
+            if not entry.is_file(follow_symlinks=False):
+                continue
+            stat_result = entry.stat(follow_symlinks=False)
         except OSError:
             continue
-        for entry in ordered:
-            if _ignored_name(entry.name):
-                continue
+        if not walk.add((*components, entry.name), stat_result):
+            return False
+    return True
+
+
+def _walk_local_fds(
+    real_root: str, prefix_components: tuple[str, ...], include: Include
+) -> StoreListing:
+    walk = _Walk(include)
+    root_fd = os.open(real_root, _DIRECTORY_FLAGS)
+    try:
+        stack: list[tuple[tuple[str, ...], int]] = [(prefix_components, 0)]
+        while stack:
+            components, depth = stack.pop()
+            if not walk.visit():
+                break
             try:
-                if entry.is_symlink():
-                    continue  # never follow an alias out of (or around) the store
-                if entry.is_dir(follow_symlinks=False):
-                    if depth + 1 < MAX_LIST_DEPTH:
-                        stack.append((entry.path, (*components, entry.name), depth + 1))
-                    else:
-                        truncated = True
-                    continue
-                if not entry.is_file(follow_symlinks=False):
-                    continue
-                stat = entry.stat(follow_symlinks=False)
+                directory_fd = _open_below(root_fd, components)
             except OSError:
-                continue
-            locator = _locator((*components, entry.name))
-            if locator is None:
-                continue
-            files.append(
-                ListedFile(
-                    locator=locator,
-                    size=int(stat.st_size),
-                    modified_at=datetime.fromtimestamp(stat.st_mtime, timezone.utc).replace(
-                        microsecond=0
-                    ),
-                )
-            )
-            if len(files) >= MAX_LISTED_FILES:
-                return StoreListing(tuple(files), True)
-    return StoreListing(tuple(files), truncated)
+                continue  # vanished, not a directory, or now a symlink
+            keep_going = True
+            try:
+                with os.scandir(directory_fd) as iterator:
+                    entries = sorted(iterator, key=lambda entry: entry.name)
+                    keep_going = _scan_entries(
+                        entries, components=components, depth=depth, walk=walk, stack=stack
+                    )
+            except OSError:
+                keep_going = True
+            finally:
+                os.close(directory_fd)
+            if not keep_going:
+                break
+    finally:
+        os.close(root_fd)
+    return walk.listing()
+
+
+def _open_below(root_fd: int, components: tuple[str, ...]) -> int:
+    """Open ``root/components`` one no-follow step at a time from the root descriptor."""
+
+    descriptor = os.dup(root_fd)
+    try:
+        for name in components:
+            child = os.open(name, _DIRECTORY_FLAGS, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def _walk_local_paths(
+    real_root: str, prefix_components: tuple[str, ...], include: Include
+) -> StoreListing:
+    """Fallback without descriptor walking: re-check each directory just before listing it."""
+
+    walk = _Walk(include)
+    stack: list[tuple[tuple[str, ...], int]] = [(prefix_components, 0)]
+    while stack:
+        components, depth = stack.pop()
+        if not walk.visit():
+            break
+        directory = os.path.join(real_root, *components)
+        if not _is_contained_directory(directory, real_root):
+            continue
+        try:
+            with os.scandir(directory) as iterator:
+                entries = sorted(iterator, key=lambda entry: entry.name)
+        except OSError:
+            continue
+        if not _scan_entries(entries, components=components, depth=depth, walk=walk, stack=stack):
+            break
+    return walk.listing()
+
+
+def _is_contained_directory(path: str, real_root: str) -> bool:
+    try:
+        stat_result = os.lstat(path)
+    except OSError:
+        return False
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    if not stat.S_ISDIR(stat_result.st_mode) or (
+        getattr(stat_result, "st_file_attributes", 0) & reparse
+    ):
+        return False
+    resolved = os.path.realpath(path)
+    return resolved == real_root or resolved.startswith(real_root.rstrip(os.sep) + os.sep)
 
 
 # --------------------------------------------------------------------------- rclone
@@ -293,7 +427,7 @@ class RcloneStoreAdapter:
             raise StoreScanError("The store's remote is not in LAB_TRACKER_RCLONE_ALLOWED_REMOTES.")
         return address, remote
 
-    def list(self, prefix: PortableStorePath | None) -> StoreListing:
+    def list(self, prefix: PortableStorePath | None, *, include: Include) -> StoreListing:
         address, remote = self._address()
         target = (
             address.root.compose(remote, prefix)
@@ -327,7 +461,7 @@ class RcloneStoreAdapter:
             ) from exc
         if result.returncode != 0:
             raise StoreScanError("rclone listing failed.")
-        return parse_rclone_listing(result.stdout, prefix=prefix)
+        return parse_rclone_listing(result.stdout, prefix=prefix, include=include)
 
     def sha256(self, listed: ListedFile, *, max_bytes: int) -> str | None:
         if listed.size > max_bytes:
@@ -355,7 +489,12 @@ class RcloneStoreAdapter:
         return digest.hexdigest()
 
 
-def parse_rclone_listing(stdout: bytes, *, prefix: PortableStorePath | None) -> StoreListing:
+def parse_rclone_listing(
+    stdout: bytes,
+    *,
+    prefix: PortableStorePath | None,
+    include: Include = lambda _locator: True,
+) -> StoreListing:
     """Parse ``rclone lsjson`` output into locators relative to the store root."""
 
     try:
@@ -376,7 +515,7 @@ def parse_rclone_listing(stdout: bytes, *, prefix: PortableStorePath | None) -> 
         if _ignored_name(parts[-1]):
             continue
         locator = _locator((*base, *parts))
-        if locator is None:
+        if locator is None or not include(locator):
             continue
         files.append(
             ListedFile(
@@ -472,12 +611,13 @@ def run_store_scan(
     now: datetime,
     hash_max_bytes: int,
     monotonic: Callable[[], float] = time.monotonic,
+    expired: Callable[[], bool] = lambda: False,
 ) -> StoreScanResult:
     """List, match, baseline, and stage new files for one scan."""
 
-    listing = adapter.list(scan.prefix)
+    listing = adapter.list(scan.prefix, include=lambda locator: _matches(locator, scan))
     result = StoreScanResult(listed=len(listing.files), truncated_listing=listing.truncated)
-    matched = [listed for listed in listing.files if _matches(listed, scan)]
+    matched = list(listing.files)
     result.matched = len(matched)
     keys = {listed: listed.capture_key(store.name) for listed in matched}
     identity = scan_key(scan)
@@ -505,7 +645,7 @@ def run_store_scan(
         if api.find_note_by_client_capture_id(scan.project_id, key, actor=actor) is not None:
             result.already_captured += 1
             continue
-        if result.created >= MAX_NEW_FILES_PER_SCAN:
+        if result.created >= MAX_NEW_FILES_PER_SCAN or expired():
             result.deferred += 1
             continue
         digest = (
@@ -570,6 +710,8 @@ def _pointer_metadata(
     }
     if listed.modified_at is not None:
         metadata["store_file_modified_at"] = listed.modified_at.isoformat()
+        # The file's own clock places it in time (sessions, day windows), not the poll.
+        metadata[CAPTURED_AT_KEY] = listed.modified_at.isoformat()
     for name, value in listed.provider_hashes:
         metadata[f"store_file_provider_hash_{name}"] = value
     if digest is not None:
@@ -603,10 +745,10 @@ def _pointer_text(
     return "\n".join(lines)
 
 
-def _matches(listed: ListedFile, scan: StoreScan) -> bool:
+def _matches(locator: PortableStorePath, scan: StoreScan) -> bool:
     prefix_length = len(scan.prefix.components) if scan.prefix is not None else 0
-    relative = "/".join(listed.locator.components[prefix_length:]).lower()
-    name = listed.locator.components[-1].lower()
+    relative = "/".join(locator.components[prefix_length:]).lower()
+    name = locator.components[-1].lower()
     return any(
         fnmatch.fnmatchcase(name, pattern.lower()) or fnmatch.fnmatchcase(relative, pattern.lower())
         for pattern in scan.patterns

@@ -13,6 +13,7 @@ which runs on its own path.
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -66,6 +67,10 @@ EMAIL_POLLER: Final = "email"
 BOOKINGS_POLLER: Final = "bookings"
 STORE_SCANS_POLLER: Final = "store_scans"
 POLLER_NAMES: Final = (EMAIL_POLLER, BOOKINGS_POLLER, STORE_SCANS_POLLER)
+# Wall-clock budget per poller run: once spent, the poller stops between items
+# (messages, feeds, scans, files) and leaves the rest for its next run, so one
+# slow poller cannot starve the others in the same trigger.
+POLLER_BUDGET_SECONDS: Final = 240.0
 PollerStatus = Literal["ran", "failed", "skipped_interval", "not_configured", "busy"]
 
 
@@ -106,6 +111,8 @@ class CaptureRuntime:
     imap_factory: ImapFactory = default_imap_factory
     calendar_fetcher: CalendarFetcher | None = None
     clock: Callable[[], datetime] = utc_now
+    monotonic: Callable[[], float] = time.monotonic
+    poller_budget_seconds: float = POLLER_BUDGET_SECONDS
 
 
 def email_configured(settings: Any) -> bool:
@@ -137,7 +144,7 @@ def run_due_pollers(
 ) -> PollRunReport:
     """Run every configured, due poller once; never raises for a poller's failure."""
 
-    pollers: list[tuple[str, Callable[[Any], bool], Callable[[CaptureRuntime], _Outcome]]] = [
+    pollers: list[tuple[str, Callable[[Any], bool], _PollerRun]] = [
         (EMAIL_POLLER, email_configured, _run_email),
         (BOOKINGS_POLLER, bookings_configured, _run_bookings),
         (STORE_SCANS_POLLER, store_scans_configured, _run_store_scans),
@@ -170,6 +177,9 @@ def run_due_pollers(
     return PollRunReport(trigger=trigger, pollers=reports)
 
 
+Expired = Callable[[], bool]
+
+
 @dataclass
 class _Outcome:
     counts: dict[str, int] = field(default_factory=dict)
@@ -180,16 +190,24 @@ class _Outcome:
             self.counts[key] = self.counts.get(key, 0) + int(value)
 
 
+_PollerRun = Callable[[CaptureRuntime, Expired], _Outcome]
+
+
 def _run_one(
     name: str,
-    run: Callable[[CaptureRuntime], _Outcome],
+    run: _PollerRun,
     runtime: CaptureRuntime,
     *,
     started_at: datetime,
 ) -> PollerReport:
     status: PollerStatus = "ran"
+    deadline = runtime.monotonic() + runtime.poller_budget_seconds
+
+    def expired() -> bool:
+        return runtime.monotonic() >= deadline
+
     try:
-        outcome = run(runtime)
+        outcome = run(runtime, expired)
     except Exception as exc:  # isolation: one poller never stops the others
         _logger.warning("Capture poller %s failed with %s.", name, type(exc).__name__)
         outcome = _Outcome(errors=[_static_detail(exc)])
@@ -215,7 +233,7 @@ def _static_detail(exc: Exception) -> str:
 # --------------------------------------------------------------------------- email
 
 
-def _run_email(runtime: CaptureRuntime) -> _Outcome:
+def _run_email(runtime: CaptureRuntime, expired: Expired) -> _Outcome:
     config = EmailCaptureConfig.from_settings(runtime.settings)
     if config is None:
         return _Outcome()
@@ -238,7 +256,9 @@ def _run_email(runtime: CaptureRuntime) -> _Outcome:
                 session.rollback()
                 return MessageOutcome("failed", "storage_error")
 
-        result = poll_mailbox(config=config, imap_factory=runtime.imap_factory, stage=stage)
+        result = poll_mailbox(
+            config=config, imap_factory=runtime.imap_factory, stage=stage, expired=expired
+        )
     outcome.add(
         examined=result.examined,
         stored=result.stored,
@@ -246,6 +266,7 @@ def _run_email(runtime: CaptureRuntime) -> _Outcome:
         rejected=result.rejected,
         failed=result.failed,
         notes_created=result.notes_created,
+        left_for_next_poll=result.left_for_next_poll,
     )
     outcome.add(
         **{f"rejected_{reason}": count for reason, count in result.rejection_reasons.items()}
@@ -256,7 +277,7 @@ def _run_email(runtime: CaptureRuntime) -> _Outcome:
 # --------------------------------------------------------------------------- bookings
 
 
-def _run_bookings(runtime: CaptureRuntime) -> _Outcome:
+def _run_bookings(runtime: CaptureRuntime, expired: Expired) -> _Outcome:
     calendars = parse_booking_calendars(
         runtime.settings.booking_calendars or "", variable="LAB_TRACKER_BOOKING_CALENDARS"
     )
@@ -265,7 +286,10 @@ def _run_bookings(runtime: CaptureRuntime) -> _Outcome:
     )
     outcome = _Outcome()
     now = runtime.clock()
-    for calendar in calendars:
+    for position, calendar in enumerate(calendars):
+        if expired():
+            outcome.add(feeds_left_for_next_poll=len(calendars) - position)
+            break
         try:
             with runtime.session_factory() as session:
                 result = sync_calendar(
@@ -300,13 +324,16 @@ def _run_bookings(runtime: CaptureRuntime) -> _Outcome:
 # --------------------------------------------------------------------------- store scans
 
 
-def _run_store_scans(runtime: CaptureRuntime) -> _Outcome:
+def _run_store_scans(runtime: CaptureRuntime, expired: Expired) -> _Outcome:
     scans = parse_store_scans(
         runtime.settings.store_scans or "", variable="LAB_TRACKER_STORE_SCANS"
     )
     outcome = _Outcome()
     now = runtime.clock()
-    for scan in scans:
+    for position, scan in enumerate(scans):
+        if expired():
+            outcome.add(scans_left_for_next_poll=len(scans) - position)
+            break
         label = f"{scan.store}/{scan.prefix.path if scan.prefix else ''}"
         try:
             with runtime.session_factory() as session:
@@ -328,6 +355,7 @@ def _run_store_scans(runtime: CaptureRuntime) -> _Outcome:
                     baselines=runtime.state,
                     now=now,
                     hash_max_bytes=int(runtime.settings.store_scan_hash_max_bytes),
+                    expired=expired,
                 )
         except Exception as exc:  # one failing scan never stops the next
             _logger.warning(

@@ -524,6 +524,66 @@ def test_email_storage_failure_leaves_the_message_unseen(
     assert imap.flags["5"] == set()
 
 
+def test_unverified_mail_is_rejected_before_its_body_is_read(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    email_setup: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import lab_tracker.capture_channels.email_capture as email_module
+
+    read_bodies: list[object] = []
+    real_message_text = email_module._message_text
+
+    def recording_message_text(message: Any) -> str:
+        read_bodies.append(message)
+        return real_message_text(message)
+
+    monkeypatch.setattr(email_module, "_message_text", recording_message_text)
+    pathological = "\n" * 2_000_000 + "On Mon, Bob wrote:\n" + "> q\n" * 1000
+    imap = FakeImap(
+        {
+            "8": _email(
+                sender="mallory@evil.example.org", to=email_setup.address, body=pathological
+            ),
+            "9": _email(
+                sender="alice@lab.example.org <mallory@evil.example.org>",
+                to=email_setup.address,
+            ),
+            "10": _email(sender="alice@lab.example.org", to=email_setup.address, body=pathological),
+        }
+    )
+
+    started = time.perf_counter()
+    report = _poll_email(client, imap)
+
+    assert time.perf_counter() - started < 60
+    assert report["counts"]["rejected_unknown_sender"] == 1
+    assert report["counts"]["rejected_sender_missing_or_ambiguous"] == 1
+    assert report["counts"]["stored"] == 1
+    assert len(read_bodies) == 1  # only the verified message's body was read
+    assert all("\\Seen" in imap.flags[uid] for uid in ("8", "9", "10"))
+    [note] = _notes(client, admin_auth_headers, email_setup.project_id)
+    assert note["created_by"] == email_setup.alice.user_id
+    assert len(note["raw_content"]) <= 8000
+
+
+def test_oversized_slack_timestamp_is_a_401_not_a_500(
+    client: TestClient, slack_setup: SimpleNamespace
+) -> None:
+    body = _command()
+    response = client.post(
+        "/integrations/slack/commands",
+        content=body,
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "X-Slack-Request-Timestamp": "9" * 5000,
+            "X-Slack-Signature": "v0=" + "0" * 64,
+        },
+    )
+    assert response.status_code == 401
+
+
 # --------------------------------------------------------------------------- bookings
 
 
@@ -745,6 +805,8 @@ def test_local_store_scan_baselines_then_stages_new_files_with_sha256(
     assert metadata["evidence_content_hash"] == hashlib.sha256(payload).hexdigest()
     assert metadata["store_file_size_bytes"] == str(len(payload))
     assert metadata["store_file_modified_at"] == (NOW - timedelta(hours=1)).isoformat()
+    # The file's own clock, not the poll time, is the capture clock.
+    assert metadata["captured_at"] == metadata["store_file_modified_at"]
     assert "content_hash_pending" not in metadata
     assert note["created_by"] == str(LOCAL_AUTH_USER_ID)
     assert note["created_by_user_id"] is None
@@ -803,6 +865,112 @@ def test_local_store_outside_the_operator_roots_is_refused(
     assert report.counts["scans_failed"] == 1
     assert "LAB_TRACKER_RESOLVER_ALLOWED_ROOTS" in report.errors[0]
     assert _notes(client, admin_auth_headers, project_id) == []
+
+
+class _Listed:
+    """A scandir-like context manager over entries captured before a swap."""
+
+    def __init__(self, entries: list[os.DirEntry[str]]) -> None:
+        self._entries = entries
+
+    def __enter__(self) -> _Listed:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        return None
+
+    def __iter__(self) -> Any:
+        return iter(self._entries)
+
+
+@pytest.mark.parametrize("descriptor_walk", [True, False])
+def test_directory_swapped_for_a_symlink_mid_walk_is_not_followed(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    local_store: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    descriptor_walk: bool,
+) -> None:
+    import lab_tracker.capture_channels.store_scan as store_scan_module
+
+    if descriptor_walk and not store_scan_module._FD_WALK_SUPPORTED:
+        pytest.skip("descriptor walking is unavailable on this platform")
+    monkeypatch.setattr(store_scan_module, "_FD_WALK_SUPPORTED", descriptor_walk)
+    _configure(
+        client,
+        store_scans=json.dumps(
+            [
+                {
+                    "project_id": local_store.project_id,
+                    "store": "lab-disk",
+                    "prefix": "flow",
+                    "include_existing": True,
+                }
+            ]
+        ),
+    )
+    flow = local_store.root / "flow"
+    _touch(flow / "ok.fcs", b"inside")
+    _touch(flow / "sub" / "inside.fcs", b"inside too")
+    secrets_dir = local_store.allowed.parent / "secrets"
+    _touch(secrets_dir / "private-key.pem", b"-----BEGIN PRIVATE KEY-----")
+    flow_identity = os.stat(flow)
+    real_scandir = os.scandir
+    swapped: list[bool] = []
+
+    def swapping_scandir(target: Any) -> Any:
+        iterator = real_scandir(target)
+        listing_flow = os.path.samestat(
+            os.fstat(target) if isinstance(target, int) else os.stat(target), flow_identity
+        )
+        if swapped or not listing_flow:
+            return iterator
+        with iterator:
+            entries = list(iterator)
+        # The race: after "flow" is listed, "sub" becomes a symlink leading outside.
+        (flow / "sub").rename(flow / "sub-moved")
+        (flow / "sub").symlink_to(secrets_dir, target_is_directory=True)
+        swapped.append(True)
+        return _Listed(entries)
+
+    monkeypatch.setattr(os, "scandir", swapping_scandir)
+
+    report = _scan(local_store.runtime())
+
+    assert swapped == [True]
+    assert report.status == "ran", report.errors
+    paths = sorted(
+        note["metadata"]["store_file_path"]
+        for note in _notes(client, admin_auth_headers, local_store.project_id)
+    )
+    assert paths == ["flow/ok.fcs"]
+
+
+def test_a_poller_out_of_budget_leaves_work_for_its_next_run(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    project_id = _project(client, admin_auth_headers, "Budget project")
+    _configure(
+        client,
+        booking_calendars=json.dumps(
+            [
+                {"project_id": project_id, "url": "https://a.example.org/a.ics", "instrument": "A"},
+                {"project_id": project_id, "url": "https://b.example.org/b.ics", "instrument": "B"},
+            ]
+        ),
+    )
+    fetched: list[str] = []
+
+    def fetch(url: str) -> bytes:
+        fetched.append(url)
+        return _feed()
+
+    runtime = _runtime(client, calendar_fetcher=fetch, clock=lambda: NOW, poller_budget_seconds=0.0)
+    [report] = run_due_pollers(runtime, trigger="test", only=["bookings"]).pollers
+
+    assert report.status == "ran"
+    assert report.counts == {"feeds_left_for_next_poll": 2}
+    assert fetched == []
 
 
 class FakeRclone:

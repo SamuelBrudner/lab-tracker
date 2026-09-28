@@ -149,7 +149,9 @@ def parse_events(
             elif current is not None and upper_value == "VEVENT":
                 try:
                     event = _event(current, default_zone)
-                except IcsParseError:
+                except (IcsParseError, OverflowError, ValueError):
+                    # e.g. DURATION:P999999999W or a year-1 date east of UTC
+                    # overflows datetime; skip that event, never the feed.
                     skipped += 1
                 else:
                     key = (event.uid, event.instance_start)
