@@ -30,6 +30,7 @@ import binascii
 import hashlib
 import os
 import sys
+import threading
 from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass
@@ -114,36 +115,53 @@ class DisplayCapture:
     def __init__(self, shell: Any) -> None:
         self.shell = shell
         self._formatter: Any = None
-        self._original_format: Any = None
+        self._wrapper: Any = None
+        self._restore_to: Any = None
         self._owned_instance_attribute = False
+        self._active = False
+        self._local = threading.local()
         self._pending: dict[int, _Displayed] = {}
         self._cell = _Cell()
         self._execution_count: int | None = None
 
     def install(self) -> None:
-        """Wrap the display formatter and register the cell hooks (idempotent)."""
+        """Wrap the display formatter and register the cell hooks (idempotent).
+
+        Another tool may wrap the formatter on top of this one; a wrapper of
+        ours anywhere in its ``__wrapped__`` chain counts as installed. Each
+        wrapper calls the function it wrapped, so no chain can loop back.
+        """
 
         formatter = self.shell.display_formatter
         current = formatter.format
-        if getattr(current, _WRAPPER_MARKER, None) is not self:
+        if not _chain_has_wrapper(current, self):
             if self._formatter is not None and self._formatter is not formatter:
                 self._restore_formatter()
-            self._formatter = formatter
-            self._original_format = current
-            self._owned_instance_attribute = "format" not in vars(formatter)
+            original = current
 
             def _format(obj: Any, *args: Any, **kwargs: Any) -> Any:
-                return self._format(obj, *args, **kwargs)
+                return self._format(original, obj, *args, **kwargs)
 
             setattr(_format, _WRAPPER_MARKER, self)
+            _format.__wrapped__ = original  # type: ignore[attr-defined]
+            self._owned_instance_attribute = "format" not in vars(formatter)
+            self._formatter = formatter
+            self._wrapper = _format
+            self._restore_to = original
             formatter.format = _format
+        self._active = True
         events = self.shell.events
         events.register("pre_run_cell", self._pre_run_cell)
         events.register("post_run_cell", self._post_run_cell)
 
     def uninstall(self) -> None:
-        """Restore the formatter and drop the cell hooks; pending displays are discarded."""
+        """Restore the formatter and drop the cell hooks; pending displays are discarded.
 
+        A wrapper another tool has wrapped cannot be unhooked; it stays in that
+        chain as a pass-through.
+        """
+
+        self._active = False
         self._restore_formatter()
         for event, callback in (
             ("pre_run_cell", self._pre_run_cell),
@@ -158,16 +176,24 @@ class DisplayCapture:
         if formatter is None:
             return
         with suppress(Exception):
-            if getattr(formatter.format, _WRAPPER_MARKER, None) is self:
+            if formatter.format is self._wrapper:
                 if self._owned_instance_attribute:
                     del formatter.format
                 else:
-                    formatter.format = self._original_format
+                    formatter.format = self._restore_to
         self._formatter = None
-        self._original_format = None
+        self._wrapper = None
+        self._restore_to = None
 
-    def _format(self, obj: Any, *args: Any, **kwargs: Any) -> Any:
-        result = self._original_format(obj, *args, **kwargs)
+    def _format(self, original: Any, obj: Any, *args: Any, **kwargs: Any) -> Any:
+        depth = getattr(self._local, "depth", 0)
+        if not self._active or depth:
+            return original(obj, *args, **kwargs)
+        self._local.depth = depth + 1
+        try:
+            result = original(obj, *args, **kwargs)
+        finally:
+            self._local.depth = depth
         # Recording is best effort: a display must never fail because of it.
         with suppress(Exception):
             self._record(obj, result)
@@ -269,6 +295,18 @@ class DisplayCapture:
             metadata=metadata,
             require_bound_project=True,
         )
+
+
+def _chain_has_wrapper(func: Any, capture: DisplayCapture) -> bool:
+    """Whether ``func`` is, or wraps (via ``__wrapped__``), one of ``capture``'s wrappers."""
+
+    for _depth in range(32):
+        if func is None:
+            return False
+        if getattr(func, _WRAPPER_MARKER, None) is capture:
+            return True
+        func = getattr(func, "__wrapped__", None)
+    return False
 
 
 def _notebook_label(location: NotebookLocation) -> str:

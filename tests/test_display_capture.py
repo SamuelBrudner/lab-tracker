@@ -408,3 +408,43 @@ def test_real_matplotlib_figures_display_and_capture(
     assert len(captured) == 1
     assert captured[0]["payload"].startswith(display_module.PNG_MAGIC)
     assert captured[0]["fig"] is fig
+
+
+def _third_party_wrap(shell: FakeShell, *, keep_wrapped: bool) -> list[Any]:
+    """Another tool wrapping the formatter on top of ours, as tools do."""
+
+    import functools
+
+    seen: list[Any] = []
+    inner = shell.display_formatter.format
+
+    def theirs(obj: Any, *args: Any, **kwargs: Any) -> Any:
+        seen.append(obj)
+        return inner(obj, *args, **kwargs)
+
+    wrapper = functools.wraps(inner)(theirs) if keep_wrapped else theirs
+    shell.display_formatter.format = wrapper  # type: ignore[method-assign]
+    return seen
+
+
+@pytest.mark.parametrize("keep_wrapped", [False, True])
+def test_a_third_party_wrapper_over_ours_never_loops_or_breaks_displays(
+    ipython: FakeShell, captured: list[dict[str, Any]], keep_wrapped: bool
+) -> None:
+    autotrack()
+    seen = _third_party_wrap(ipython, keep_wrapped=keep_wrapped)
+    assert autotrack() is True  # a second install on top of their wrapper
+    ipython.run_cell("fig", lambda shell: shell.display(FakeFigure(PNG_A)))
+    assert len(seen) == 1
+    assert [call["payload"] for call in captured] == [PNG_A]
+
+    # Uninstalling cannot unhook a wrapper someone wrapped: it passes through.
+    autotrack(False)
+    ipython.run_cell("fig", lambda shell: shell.display(FakeFigure(PNG_B)))
+    assert len(ipython.shown) == 2
+    assert len(captured) == 1
+    # And installing again records once, without recursion.
+    autotrack()
+    ipython.run_cell("fig", lambda shell: shell.display(FakeFigure(PNG_B)))
+    assert [call["payload"] for call in captured] == [PNG_A, PNG_B]
+    assert len(ipython.shown) == 3
