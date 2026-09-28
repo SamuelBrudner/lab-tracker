@@ -32,6 +32,19 @@ All three read the same two facts
   or `[started_at, now]` while it is open, inclusive at both ends. A capture
   that falls inside two overlapping windows is **ambiguous**, and every rule
   here then does nothing.
+- **Whose session it was.** Time only ties a capture to a session its own
+  author ran: when both the note's author and the session's author are known
+  (their user ids), they must match, so a colleague's open session never
+  claims your bench photo, and two people's overlapping sessions are not
+  ambiguous for either of them. When either author is unknown (legacy rows,
+  auth-disabled installs), any session of the project qualifies. A declared
+  session target or a session id in the metadata is never second-guessed by
+  this rule.
+
+All window lookups go through one timeline per read or batch run: each
+session's window is computed once, sessions that ended before the earliest
+capture are skipped, and every capture is placed in a single sweep, so the
+work grows with captures plus sessions, not their product.
 
 A note "already has a session" when it carries a session target or any of
 `watch_session_id`, `capture_session_id`, `photo_session_id`, or
@@ -55,8 +68,8 @@ effort, before the model drafts. For each note created in the last
   and is not an instrument-booking note (`booking_*` metadata: it describes a
   reserved window, not a capture made when it was synced),
 - carries no session target and no session id or link code in its metadata,
-- and whose capture time falls inside exactly one session window of its
-  project,
+- and whose capture time falls inside exactly one window among its project's
+  sessions run by the note's author (either author unknown: any session),
 
 it proposes `note -was_derived_from-> session` with
 `basis: time_window_match`, `origin: system_detected`, status `proposed`.
@@ -66,7 +79,8 @@ left alone, so a declined guess is not replaced by another. The review page
 lists it under **Proposed provenance links** as "made during this session".
 Accepting records `acceptance_mode=human_selected`; like other note-to-session
 links it does not render as `prov:wasDerivedFrom` in PROV-O export, which
-carries accepted note-to-note links only.
+carries accepted note-to-note links only. The detector reads only the existing
+links whose source is one of its candidate notes.
 
 ## Session suggestions
 
@@ -98,14 +112,26 @@ anything, a report:
 | Kind | When | Suggests | Stable id |
 | --- | --- | --- | --- |
 | `close_quiet_session` | An **active** session whose most recent capture (a note targeting it, or the source of a proposed/accepted link to it) is older than **4 hours** | End it at that capture's time (never before its start) | session + last capture, so new captures raise a fresh suggestion |
-| `start_session_from_captures` | A local day with **3 or more** staged captures that name no session and fall in no session window (bookings and onboarding checkpoints excluded) | A session spanning the first to the last of them, listing their note ids | project + local day, so a dismissed day stays dismissed |
+| `start_session_from_captures` | A local day with **3 or more** of one person's staged captures that name no session and fall in no window of a session that person ran (bookings and onboarding checkpoints excluded) | A session spanning the first to the last of them, listing their note ids | project + local day + author, so a dismissed day stays dismissed |
 | `start_session_from_booking` | A note with `booking_start`/`booking_end` metadata (an instrument-calendar booking) that has begun within the last 14 days and whose window **no session overlaps** | A session for the booking window, listing the booking note and the sessionless captures made in it | project + hash of `booking_uid` (else the note id); a re-synced booking suggests once |
 
 A session with no captures at all is never suggested for closing: there is no
 honest time to end it at. Captures inside a suggested booking belong to that
-booking's suggestion, not to a day suggestion. Bounds: at most 50 suggestions
-per read, 200 listed capture ids per suggestion, and the 500 most recent notes
-per active session.
+booking's suggestion, not to a day suggestion.
+
+Capture days are per person and offered to their own author: the reader sees
+days made of their own captures (plus captures with no recorded author), and
+the captures listed with a booking are the reader's too. Applying records the
+session as the reader, and time only ties a capture to its own author's
+session, so offering a colleague's day would suggest a session that could
+never cover it. Quiet sessions and bookings are project facts and every reader
+sees them; any session, whoever ran it, covers a booking.
+
+Bounds: candidate captures from the last 14 days (filtered in SQL), booking
+notes synced in the last 90 days (`BOOKING_NOTE_LOOKBACK_DAYS`), only the
+provenance links that target an active session, the 500 most recent notes per
+active session, at most 50 suggestions per read, and 200 listed capture ids
+per suggestion.
 
 ### In the app
 
@@ -139,7 +165,9 @@ at the bench, not an adapter's import (no `evidence_source_provider`, not a
 booking, not an earlier day log), and one of: text of at most 1000 characters,
 an `audio/*` upload with a transcript of at most 1000 characters, or an
 `image/*` upload. Its session is its single declared session target, else the
-session id its metadata names, else the one session open at its capture time.
+session id its metadata names, else the one session its own author had open at
+its capture time (either author unknown: any session). Only day logs recorded
+since the earliest capture in the batch are read for the idempotency check.
 
 The proposed note targets the session, is created `committed` when accepted
 (it is a reviewed record, not a new capture to redraft), and reads:

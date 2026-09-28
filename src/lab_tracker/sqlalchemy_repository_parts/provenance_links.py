@@ -39,6 +39,8 @@ from .notes import SQLAlchemyNoteRepository
 # Values per IN (...) clause in list_metadata_value_carriers; each key repeats
 # the chunk, so this stays far below SQLite's and Postgres' parameter limits.
 _METADATA_VALUE_CHUNK = 200
+# Entity ids per IN (...) clause when list_by_project is scoped to endpoints.
+_ENTITY_ID_CHUNK = 500
 
 
 class SQLAlchemyProvenanceLinkRepository(EntityRepository[ProvenanceLink]):
@@ -87,15 +89,53 @@ class SQLAlchemyProvenanceLinkRepository(EntityRepository[ProvenanceLink]):
         project_id: UUID,
         *,
         status: str | None = None,
+        source_ids: Sequence[UUID] | None = None,
+        target_ids: Sequence[UUID] | None = None,
     ) -> list[ProvenanceLink]:
+        """A project's links, optionally scoped to one status and to endpoints.
+
+        ``source_ids``/``target_ids`` keep only links whose source (target) is
+        one of those entity ids, so a detector that only needs the links of its
+        own candidates never loads the project's whole link history. An empty
+        sequence matches nothing; the ids are chunked below parameter limits.
+        """
+
         self._session.flush()
-        stmt = select(ProvenanceLinkModel).where(
+        base = select(ProvenanceLinkModel).where(
             ProvenanceLinkModel.project_id == str(project_id)
         )
         if status is not None:
-            stmt = stmt.where(ProvenanceLinkModel.status == status)
-        stmt = stmt.order_by(ProvenanceLinkModel.created_at, ProvenanceLinkModel.link_id)
-        return [provenance_link_from_model(row) for row in self._session.scalars(stmt)]
+            base = base.where(ProvenanceLinkModel.status == status)
+        scopes = [
+            (column, uuid_values(set(ids)))
+            for column, ids in (
+                (ProvenanceLinkModel.source_entity_id, source_ids),
+                (ProvenanceLinkModel.target_entity_id, target_ids),
+            )
+            if ids is not None
+        ]
+        if any(not values for _column, values in scopes):
+            return []
+        if not scopes:
+            rows = list(
+                self._session.scalars(
+                    base.order_by(ProvenanceLinkModel.created_at, ProvenanceLinkModel.link_id)
+                )
+            )
+            return [provenance_link_from_model(row) for row in rows]
+        column, values = scopes[0]
+        ordered = sorted(values)
+        rows_by_id: dict[str, ProvenanceLinkModel] = {}
+        for start in range(0, len(ordered), _ENTITY_ID_CHUNK):
+            stmt = base.where(column.in_(ordered[start : start + _ENTITY_ID_CHUNK]))
+            for other_column, other_values in scopes[1:]:
+                stmt = stmt.where(other_column.in_(sorted(other_values)))
+            for row in self._session.scalars(stmt):
+                rows_by_id.setdefault(str(row.link_id), row)
+        rows = sorted(
+            rows_by_id.values(), key=lambda row: (as_utc(row.created_at), str(row.link_id))
+        )
+        return [provenance_link_from_model(row) for row in rows]
 
     def list_content_hash_carriers(self, project_id: UUID) -> list[ContentHashCarrier]:
         """One UNION over indexed note hashes and uploaded dataset-file checksums.
@@ -154,24 +194,30 @@ class SQLAlchemyProvenanceLinkRepository(EntityRepository[ProvenanceLink]):
             for row in self._session.execute(stmt)
         ]
 
-    def list_identifier_carriers(self, project_id: UUID, keys: Sequence[str]) -> list[Note]:
+    def list_identifier_carriers(
+        self,
+        project_id: UUID,
+        keys: Sequence[str],
+        *,
+        created_since: datetime | None = None,
+    ) -> list[Note]:
         """Notes whose metadata sets any of ``keys``; the JSON filter runs in SQL.
 
         Bounded by the captures that actually name an identifier, so a project
-        full of typed notes costs the detector nothing.
+        full of typed notes costs the detector nothing; ``created_since`` bounds
+        it further to recent notes.
         """
 
         if not keys:
             return []
         self._session.flush()
-        stmt = (
-            select(NoteModel)
-            .where(
-                NoteModel.project_id == str(project_id),
-                or_(*(NoteModel.note_metadata[key].as_string().is_not(None) for key in keys)),
-            )
-            .order_by(NoteModel.created_at, NoteModel.note_id)
+        stmt = select(NoteModel).where(
+            NoteModel.project_id == str(project_id),
+            or_(*(NoteModel.note_metadata[key].as_string().is_not(None) for key in keys)),
         )
+        if created_since is not None:
+            stmt = stmt.where(NoteModel.created_at >= created_since)
+        stmt = stmt.order_by(NoteModel.created_at, NoteModel.note_id)
         rows = list(self._session.scalars(stmt))
         return SQLAlchemyNoteRepository(self._session).notes_from_rows(rows)
 

@@ -19,12 +19,23 @@ observed time (client ``captured_at``, then the adapter's
 clamped to ``created_at``: nothing is acquired after the server stored it.
 
 A session's window is ``[started_at, ended_at]``, or ``[started_at, now]`` while
-it is open, inclusive at both ends. Everything here is pure except
-:func:`resolve_capture_timezone`, which reads one settings row.
+it is open, inclusive at both ends. Time only links a capture to a session its
+own author ran: when both the note's and the session's author are known they
+must match (a colleague's open session is not where your bench photo was
+taken); when either is unknown (legacy rows, auth-disabled installs) any
+session of the project qualifies.
+
+Lookups go through :class:`SessionTimeline`, built once per batch of captures:
+every window is computed once and all capture times are answered in one sweep,
+so the cost grows with captures plus sessions, not their product. Everything
+here is pure except :func:`resolve_capture_timezone`, which reads one settings
+row.
 """
 
 from __future__ import annotations
 
+import heapq
+from bisect import bisect_right
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone, tzinfo
@@ -135,6 +146,111 @@ def session_window(session: Session, *, now: datetime) -> tuple[datetime, dateti
     return start, end
 
 
+class SessionTimeline:
+    """A project's session windows ordered by start, for bounded time lookups.
+
+    Each window is computed once. :meth:`containing_many` answers a batch of
+    capture times with one sweep (a heap of open windows keyed by end), so it
+    costs O((captures + sessions) log sessions) plus the size of each answer
+    -- the sessions actually open at that moment -- instead of captures times
+    sessions. :meth:`overlaps` is one bisect over a running maximum of ends.
+    Windows ending before ``since`` are dropped up front, so a caller that
+    knows its earliest capture pays nothing for older history.
+
+    ``windows_examined`` counts the windows each sweep opens and closes (at
+    most twice the number of sessions per sweep); it exists so tests and
+    diagnostics can check the work stays bounded.
+    """
+
+    def __init__(
+        self,
+        sessions: Iterable[Session],
+        *,
+        now: datetime,
+        since: datetime | None = None,
+    ) -> None:
+        floor = _as_utc(since) if since is not None else None
+        windows: list[tuple[datetime, datetime, Session]] = []
+        for session in sessions:
+            start, end = session_window(session, now=now)
+            if start > end or (floor is not None and end < floor):
+                continue
+            windows.append((start, end, session))
+        windows.sort(key=lambda item: (item[0], str(item[2].session_id)))
+        self._windows = windows
+        self._starts = [start for start, _end, _session in windows]
+        self._max_ends: list[datetime] = []
+        for _start, end, _session in windows:
+            latest = self._max_ends[-1] if self._max_ends else end
+            self._max_ends.append(max(latest, end))
+        self.windows_examined = 0
+
+    def __len__(self) -> int:
+        return len(self._windows)
+
+    def containing_many(self, times: Sequence[datetime]) -> list[tuple[Session, ...]]:
+        """For each time (in any order), the sessions whose window contains it."""
+
+        moments = [_as_utc(moment) for moment in times]
+        order = sorted(range(len(moments)), key=lambda index: moments[index])
+        answers: list[tuple[Session, ...]] = [() for _ in moments]
+        open_ends: list[tuple[datetime, int]] = []
+        open_sessions: dict[int, Session] = {}
+        next_window = 0
+        for index in order:
+            moment = moments[index]
+            while next_window < len(self._windows) and self._windows[next_window][0] <= moment:
+                _start, end, session = self._windows[next_window]
+                heapq.heappush(open_ends, (end, next_window))
+                open_sessions[next_window] = session
+                next_window += 1
+                self.windows_examined += 1
+            while open_ends and open_ends[0][0] < moment:
+                _end, closed = heapq.heappop(open_ends)
+                del open_sessions[closed]
+                self.windows_examined += 1
+            answers[index] = tuple(open_sessions[key] for key in sorted(open_sessions))
+        return answers
+
+    def containing(self, at: datetime) -> tuple[Session, ...]:
+        """The sessions whose window contains ``at`` (inclusive at both ends)."""
+
+        return self.containing_many([at])[0]
+
+    def overlaps(self, start: datetime, end: datetime) -> bool:
+        """True when any window overlaps ``[start, end]``."""
+
+        count = bisect_right(self._starts, _as_utc(end))
+        return count > 0 and self._max_ends[count - 1] >= _as_utc(start)
+
+
+def author_key(entity: Note | Session) -> str | None:
+    """Who made a note or started a session: the user id, else the stored actor id."""
+
+    if entity.created_by_user_id is not None:
+        return str(entity.created_by_user_id)
+    created_by = (entity.created_by or "").strip()
+    return created_by or None
+
+
+def same_author_or_unknown(note: Note, session: Session) -> bool:
+    """Whether time may tie ``note`` to ``session``: same author, or one unknown."""
+
+    note_author = author_key(note)
+    session_author = author_key(session)
+    return note_author is None or session_author is None or note_author == session_author
+
+
+def eligible_sessions(note: Note, containing: Iterable[Session]) -> list[Session]:
+    """The sessions of the note's project, run by its author, among ``containing``."""
+
+    return [
+        session
+        for session in containing
+        if session.project_id == note.project_id and same_author_or_unknown(note, session)
+    ]
+
+
 def sessions_containing(
     at: datetime,
     sessions: Iterable[Session],
@@ -143,13 +259,7 @@ def sessions_containing(
 ) -> list[Session]:
     """Every session whose window contains ``at`` (inclusive at both ends)."""
 
-    moment = _as_utc(at)
-    matches: list[Session] = []
-    for session in sessions:
-        start, end = session_window(session, now=now)
-        if start <= moment <= end:
-            matches.append(session)
-    return matches
+    return list(SessionTimeline(sessions, now=now).containing(at))
 
 
 def unique_session_at(
@@ -173,13 +283,7 @@ def windows_overlap(
 ) -> bool:
     """True when any session window overlaps ``[start, end]``."""
 
-    lower = _as_utc(start)
-    upper = _as_utc(end)
-    for session in sessions:
-        session_start, session_end = session_window(session, now=now)
-        if session_start <= upper and lower <= session_end:
-            return True
-    return False
+    return SessionTimeline(sessions, now=now).overlaps(start, end)
 
 
 def is_booking_note(note: Note) -> bool:
@@ -224,35 +328,71 @@ def metadata_session_id(note: Note, known: set[UUID]) -> UUID | None:
     return None
 
 
+def _named_session(note: Note, known: set[UUID]) -> tuple[bool, UUID | None]:
+    """``(decided, session)`` from what the capture itself says.
+
+    ``decided`` is True when a target or metadata settles the question (even
+    as "ambiguous" or "unknown to this project"), so time must not overrule it.
+    """
+
+    targeted = session_targets(note)
+    declared = [session_id for session_id in targeted if session_id in known]
+    if declared:
+        return True, declared[0] if len(set(declared)) == 1 else None
+    if targeted:
+        return True, None
+    named = metadata_session_id(note, known)
+    if named is not None:
+        return True, named
+    if any(str(note.metadata.get(key) or "").strip() for key in SESSION_HINT_METADATA_KEYS):
+        # It names a session this project does not know (or only by code).
+        return True, None
+    return False, None
+
+
+def sessions_for_captures(
+    notes: Sequence[Note],
+    sessions: Sequence[Session],
+    *,
+    now: datetime,
+) -> dict[UUID, UUID | None]:
+    """The session each capture belongs to, by declaration, then id, then time.
+
+    A single declared session target wins; several are ambiguous. Otherwise a
+    session id in the metadata that names a project session; otherwise the one
+    session of the note's author (see :func:`same_author_or_unknown`) whose
+    window contains the capture time. Anything ambiguous or unmatched is
+    ``None``. All time lookups share one :class:`SessionTimeline` sweep.
+    """
+
+    known = {session.session_id for session in sessions}
+    resolved: dict[UUID, UUID | None] = {}
+    timed: list[tuple[Note, datetime]] = []
+    for note in notes:
+        decided, session_id = _named_session(note, known)
+        if decided:
+            resolved[note.note_id] = session_id
+        else:
+            timed.append((note, capture_clock(note).at))
+    if timed:
+        earliest = min(at for _note, at in timed)
+        timeline = SessionTimeline(sessions, now=now, since=earliest)
+        containing = timeline.containing_many([at for _note, at in timed])
+        for (note, _at), open_sessions in zip(timed, containing, strict=True):
+            eligible = eligible_sessions(note, open_sessions)
+            resolved[note.note_id] = eligible[0].session_id if len(eligible) == 1 else None
+    return resolved
+
+
 def session_for_capture(
     note: Note,
     sessions: Sequence[Session],
     *,
     now: datetime,
 ) -> UUID | None:
-    """The session a capture belongs to, by declaration, then id, then time.
+    """The session one capture belongs to (see :func:`sessions_for_captures`)."""
 
-    A single declared session target wins; several are ambiguous. Otherwise a
-    session id in the metadata that names a project session; otherwise the one
-    session whose window contains the capture time. Anything ambiguous or
-    unmatched is ``None``.
-    """
-
-    known = {session.session_id for session in sessions}
-    declared = [session_id for session_id in session_targets(note) if session_id in known]
-    if declared:
-        return declared[0] if len(set(declared)) == 1 else None
-    if session_targets(note):
-        return None
-    named = metadata_session_id(note, known)
-    if named is not None:
-        return named
-    if any(str(note.metadata.get(key) or "").strip() for key in SESSION_HINT_METADATA_KEYS):
-        # It names a session this project does not know (or only by code):
-        # time must not overrule what the capture itself said.
-        return None
-    match = unique_session_at(capture_clock(note).at, sessions, now=now)
-    return match.session_id if match is not None else None
+    return sessions_for_captures([note], sessions, now=now)[note.note_id]
 
 
 class BatchSettingsReader(Protocol):
@@ -308,13 +448,18 @@ __all__ = [
     "SESSION_LINK_CODE_PREFIX",
     "UTC_ZONE_NAME",
     "CaptureClock",
+    "SessionTimeline",
+    "author_key",
     "capture_clock",
     "carries_session",
+    "eligible_sessions",
     "is_booking_note",
     "metadata_session_id",
     "parse_format_acquired_at",
     "resolve_capture_timezone",
+    "same_author_or_unknown",
     "session_for_capture",
+    "sessions_for_captures",
     "session_label",
     "session_targets",
     "session_window",

@@ -16,11 +16,16 @@ The rule is deliberately narrow:
   describes a reserved window, not a capture made when it was synced);
 * the capture time is ``format_acquired_at`` when present and parseable, else
   the note's observed time (see :mod:`lab_tracker.services.session_clock`);
-* the time must fall inside exactly one session window of the project;
-  overlapping windows are ambiguous and propose nothing;
+* the time must fall inside exactly one window among the project's sessions
+  run by the capture's own author (when both authors are known; see
+  :func:`~lab_tracker.services.session_clock.same_author_or_unknown`), so a
+  colleague's open session never claims your capture; overlapping windows are
+  ambiguous and propose nothing;
 * only notes created in the last :data:`TIME_WINDOW_LOOKBACK_DAYS` days are
-  scanned (the repository filters in SQL), so an old project costs a bounded
-  scan per batch run.
+  scanned (the repository filters in SQL), and every capture is matched in one
+  :class:`~lab_tracker.services.session_clock.SessionTimeline` sweep that skips
+  sessions ending before the earliest capture, so an old project costs a
+  bounded scan per batch run.
 
 Everything here is pure: the caller supplies candidate notes and sessions.
 """
@@ -38,10 +43,11 @@ from lab_tracker.models import EntityOrigin, Note, NoteStatus, Session
 from lab_tracker.services.session_clock import (
     BOOKING_METADATA_KEYS,
     SESSION_HINT_METADATA_KEYS,
+    SessionTimeline,
     capture_clock,
     carries_session,
+    eligible_sessions,
     is_booking_note,
-    unique_session_at,
 )
 
 # How far back (by note creation) the detector looks on each batch run.
@@ -84,6 +90,42 @@ def is_time_window_candidate(note: Note) -> bool:
     )
 
 
+def time_window_matches(
+    notes: Iterable[Note],
+    sessions: Sequence[Session],
+    *,
+    now: datetime,
+    timeline: SessionTimeline | None = None,
+) -> list[TimeWindowMatch]:
+    """Time-window matches for ``notes``, in input order.
+
+    All captures share one timeline sweep; pass ``timeline`` to reuse one
+    already built over ``sessions``.
+    """
+
+    candidates = [(note, capture_clock(note)) for note in notes if is_time_window_candidate(note)]
+    if not candidates:
+        return []
+    if timeline is None:
+        earliest = min(clock.at for _note, clock in candidates)
+        timeline = SessionTimeline(sessions, now=now, since=earliest)
+    containing = timeline.containing_many([clock.at for _note, clock in candidates])
+    matches: list[TimeWindowMatch] = []
+    for (note, clock), open_sessions in zip(candidates, containing, strict=True):
+        eligible = eligible_sessions(note, open_sessions)
+        if len(eligible) != 1:
+            continue
+        matches.append(
+            TimeWindowMatch(
+                note_id=note.note_id,
+                session_id=eligible[0].session_id,
+                captured_at=clock.at,
+                clock_source=clock.source,
+            )
+        )
+    return matches
+
+
 def time_window_match(
     note: Note,
     sessions: Sequence[Session],
@@ -92,38 +134,8 @@ def time_window_match(
 ) -> TimeWindowMatch | None:
     """The session open at the note's capture time, when there is exactly one."""
 
-    if not is_time_window_candidate(note):
-        return None
-    clock = capture_clock(note)
-    session = unique_session_at(
-        clock.at,
-        [item for item in sessions if item.project_id == note.project_id],
-        now=now,
-    )
-    if session is None:
-        return None
-    return TimeWindowMatch(
-        note_id=note.note_id,
-        session_id=session.session_id,
-        captured_at=clock.at,
-        clock_source=clock.source,
-    )
-
-
-def time_window_matches(
-    notes: Iterable[Note],
-    sessions: Sequence[Session],
-    *,
-    now: datetime,
-) -> list[TimeWindowMatch]:
-    """Time-window matches for ``notes``, in input order."""
-
-    matches: list[TimeWindowMatch] = []
-    for note in notes:
-        match = time_window_match(note, sessions, now=now)
-        if match is not None:
-            matches.append(match)
-    return matches
+    matches = time_window_matches([note], sessions, now=now)
+    return matches[0] if matches else None
 
 
 __all__ = [

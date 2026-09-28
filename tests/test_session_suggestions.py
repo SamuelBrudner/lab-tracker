@@ -37,6 +37,7 @@ def _session(
     *,
     start: datetime,
     end: datetime | None = None,
+    author: UUID | None = None,
 ) -> Session:
     return Session(
         session_id=uuid4(),
@@ -45,6 +46,8 @@ def _session(
         status=SessionStatus.CLOSED if end is not None else SessionStatus.ACTIVE,
         started_at=start,
         ended_at=end,
+        created_by=str(author) if author is not None else None,
+        created_by_user_id=author,
     )
 
 
@@ -56,6 +59,7 @@ def _note(
     targets: list[EntityRef] | None = None,
     status: NoteStatus = NoteStatus.STAGED,
     origin: EntityOrigin = EntityOrigin.USER,
+    author: UUID | None = None,
 ) -> Note:
     return Note(
         note_id=uuid4(),
@@ -66,6 +70,8 @@ def _note(
         status=status,
         origin=origin,
         created_at=at,
+        created_by=str(author) if author is not None else None,
+        created_by_user_id=author,
     )
 
 
@@ -78,6 +84,7 @@ def _suggest(
     bookings: list[Note] | None = None,
     now: datetime = T0,
     zone=UTC,
+    viewer: str | None = None,
 ):
     return suggest_sessions(
         project_id=project_id,
@@ -87,6 +94,7 @@ def _suggest(
         booking_notes=bookings or [],
         now=now,
         zone=zone,
+        viewer=viewer,
     )
 
 
@@ -171,6 +179,57 @@ def test_capture_days_ignore_sessioned_windowed_reviewed_and_few_captures() -> N
     ]
 
     assert _suggest(project_id, sessions=[session], candidates=notes) == []
+
+
+def test_capture_days_never_pool_different_peoples_captures() -> None:
+    project_id = uuid4()
+    alice, bob = uuid4(), uuid4()
+    hours = (4, 3, 2)
+    alices = [_note(project_id, T0 - timedelta(hours=h), author=alice) for h in hours]
+    bobs = [_note(project_id, T0 - timedelta(hours=h, minutes=5), author=bob) for h in hours[:2]]
+
+    (suggestion,) = _suggest(project_id, candidates=[*alices, *bobs])
+
+    assert suggestion.capture_note_ids == [note.note_id for note in alices]
+    assert suggestion.suggestion_id == (
+        f"start_session_from_captures:{project_id}:2026-09-28:{alice}"
+    )
+    # Two of Bob's and two of Alice's are not a day for either of them.
+    assert _suggest(project_id, candidates=[*alices[:2], *bobs]) == []
+
+
+def test_capture_days_offer_the_reader_only_their_own_captures() -> None:
+    project_id = uuid4()
+    alice, bob = uuid4(), uuid4()
+    alices = [_note(project_id, T0 - timedelta(hours=h), author=alice) for h in (4, 3, 2)]
+    legacy = _note(project_id, T0 - timedelta(hours=1))
+
+    assert _suggest(project_id, candidates=alices, viewer=str(bob)) == []
+    (mine,) = _suggest(project_id, candidates=[*alices, legacy], viewer=str(alice))
+    assert mine.capture_note_ids == [*(note.note_id for note in alices), legacy.note_id]
+
+
+def test_a_colleagues_open_session_does_not_cover_your_captures() -> None:
+    project_id = uuid4()
+    alice, bob = uuid4(), uuid4()
+    alices_session = _session(project_id, start=T0 - timedelta(hours=6), author=alice)
+    bobs = [_note(project_id, T0 - timedelta(hours=h), author=bob) for h in (4, 3, 2)]
+
+    (suggestion,) = _suggest(
+        project_id, sessions=[alices_session], candidates=bobs, viewer=str(bob)
+    )
+    assert suggestion.kind == SessionSuggestionKind.START_SESSION_FROM_CAPTURES
+    assert suggestion.capture_note_ids == [note.note_id for note in bobs]
+    bobs_session = _session(project_id, start=T0 - timedelta(hours=5), author=bob)
+    assert (
+        _suggest(
+            project_id,
+            sessions=[alices_session, bobs_session],
+            candidates=bobs,
+            viewer=str(bob),
+        )
+        == []
+    )
 
 
 def test_capture_days_are_local_days_in_the_projects_zone() -> None:
@@ -451,19 +510,37 @@ def test_a_viewer_can_read_suggestions_but_not_apply_them(
     client: TestClient, admin_auth_headers: dict[str, str], scoped_project_member
 ) -> None:
     project_id = scoped_project_member.visible_project_id
-    for minute in (0, 20, 45):
-        _note_id(client, admin_auth_headers, project_id, captured_at=_yesterday_at(10, minute))
-    (suggestion,) = _suggestions(client, scoped_project_member.member_headers, project_id)[
-        "suggestions"
-    ]
-
-    applied = client.post(
+    started = client.post(
         "/sessions",
         json={
             "project_id": project_id,
             "session_type": "operational",
-            "started_at": suggestion["start_at"],
+            "started_at": _iso(_now() - timedelta(hours=9)),
         },
+        headers=admin_auth_headers,
+    )
+    assert started.status_code == 201, started.text
+    session_id = started.json()["data"]["session_id"]
+    _note_id(
+        client,
+        admin_auth_headers,
+        project_id,
+        captured_at=_now() - timedelta(hours=8),
+        targets=[{"entity_type": "session", "entity_id": session_id}],
+    )
+    # The admin's sessionless day is the admin's to record, not the viewer's.
+    for minute in (0, 20, 45):
+        _note_id(client, admin_auth_headers, project_id, captured_at=_yesterday_at(10, minute))
+    viewer_view = _suggestions(client, scoped_project_member.member_headers, project_id)
+    (suggestion,) = viewer_view["suggestions"]
+    assert suggestion["kind"] == "close_quiet_session"
+    assert {
+        item["kind"] for item in _suggestions(client, admin_auth_headers, project_id)["suggestions"]
+    } == {"close_quiet_session", "start_session_from_captures"}
+
+    applied = client.patch(
+        f"/sessions/{session_id}",
+        json={"status": "closed", "ended_at": suggestion["end_at"]},
         headers=scoped_project_member.member_headers,
     )
     assert applied.status_code == 403

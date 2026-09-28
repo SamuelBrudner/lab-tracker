@@ -43,7 +43,13 @@ UTC = timezone.utc
 # --- Unit: what counts, how it groups, what the log says ----------------------
 
 
-def _session(project_id: UUID, *, start: datetime, end: datetime | None = None) -> Session:
+def _session(
+    project_id: UUID,
+    *,
+    start: datetime,
+    end: datetime | None = None,
+    author: UUID | None = None,
+) -> Session:
     return Session(
         session_id=uuid4(),
         project_id=project_id,
@@ -51,6 +57,8 @@ def _session(project_id: UUID, *, start: datetime, end: datetime | None = None) 
         status=SessionStatus.CLOSED if end is not None else SessionStatus.ACTIVE,
         started_at=start,
         ended_at=end,
+        created_by=str(author) if author is not None else None,
+        created_by_user_id=author,
     )
 
 
@@ -74,6 +82,7 @@ def _note(
     metadata: dict[str, str] | None = None,
     targets: list[EntityRef] | None = None,
     status: NoteStatus = NoteStatus.STAGED,
+    author: UUID | None = None,
 ) -> Note:
     return Note(
         note_id=uuid4(),
@@ -85,6 +94,8 @@ def _note(
         targets=list(targets or []),
         status=status,
         created_at=at,
+        created_by=str(author) if author is not None else None,
+        created_by_user_id=author,
     )
 
 
@@ -140,6 +151,32 @@ def test_captures_group_by_declared_named_or_timed_session() -> None:
         timed.note_id,
     }
     assert plan.entries[0].note_id == timed.note_id
+
+
+def test_time_places_only_the_session_authors_captures_in_its_day_log() -> None:
+    """Bob's captures during Alice's session are not Alice's day, unless declared."""
+
+    project_id = uuid4()
+    alice, bob = uuid4(), uuid4()
+    session = _session(project_id, start=T0 - timedelta(hours=6), author=alice)
+    times = [T0 - timedelta(hours=hours) for hours in (3, 2, 1)]
+    bobs = [_note(project_id, at, author=bob) for at in times]
+
+    assert plan_day_logs(bobs, [session], now=T0) == []
+    declared = [
+        _note(
+            project_id,
+            at,
+            author=bob,
+            targets=[EntityRef(entity_type=EntityType.SESSION, entity_id=session.session_id)],
+        )
+        for at in times
+    ]
+    (plan,) = plan_day_logs(declared, [session], now=T0)
+    assert plan.session is session
+    alices = [_note(project_id, at, author=alice) for at in times]
+    (own,) = plan_day_logs([*alices, *bobs], [session], now=T0)
+    assert {entry.note_id for entry in own.entries} == {note.note_id for note in alices}
 
 
 def test_fewer_captures_ambiguous_windows_and_recorded_logs_plan_nothing() -> None:
