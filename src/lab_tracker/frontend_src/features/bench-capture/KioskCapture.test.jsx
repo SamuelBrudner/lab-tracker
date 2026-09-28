@@ -238,11 +238,118 @@ describe("KioskCaptureCard", () => {
     expect(props.navigate).toHaveBeenCalledWith("/app/capture?project_id=project-1");
   });
 
-  it("disables scanning without write access", () => {
-    installNotesRoute({ created: [] });
-    renderKiosk({ canWrite: false });
+  it("holds scans without write access instead of going deaf", async () => {
+    const created = [];
+    installNotesRoute({ created });
+    renderKiosk({ canWrite: false, accessStatus: "ready" });
 
-    expect(scanInput()).toBeDisabled();
+    expect(scanInput()).toBeEnabled();
+    expect(scanInput()).toHaveFocus();
     expect(screen.getByText(/need write access/)).toBeInTheDocument();
+
+    scan("TUBE-3");
+
+    expect(within(recentScans()[0]).getByText("Waiting for access")).toBeInTheDocument();
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+    expect(created).toEqual([]);
+  });
+
+  it("keeps listening while a non-admin's access loads, then sends the held scans", async () => {
+    const created = [];
+    installNotesRoute({ created });
+    const view = renderKiosk({ canWrite: false, accessStatus: "loading" });
+
+    expect(scanInput()).toBeEnabled();
+    expect(scanInput()).toHaveFocus();
+    expect(screen.getByText(/Checking your access/)).toBeInTheDocument();
+    scan("HELD-1");
+    scan("HELD-2");
+    expect(recentScans()).toHaveLength(2);
+    expect(created).toEqual([]);
+
+    view.rerender(<KioskCaptureCard {...view.props} canWrite accessStatus="ready" />);
+
+    await waitFor(() => expect(created).toHaveLength(2));
+    expect(created.map((note) => note.metadata.bench_scan_value).sort()).toEqual([
+      "HELD-1",
+      "HELD-2",
+    ]);
+    await waitFor(() =>
+      expect(recentScans().every((item) => within(item).queryByText("Saved"))).toBe(true)
+    );
+    expect(scanInput()).toHaveFocus();
+
+    // A token refresh flips access off and on again: nothing is resent.
+    view.rerender(<KioskCaptureCard {...view.props} canWrite={false} accessStatus="loading" />);
+    view.rerender(<KioskCaptureCard {...view.props} canWrite accessStatus="ready" />);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+    expect(created).toHaveLength(2);
+    expect(scanInput()).toHaveFocus();
+  });
+
+  it("takes the focus once a project is chosen", () => {
+    installNotesRoute({ created: [] });
+    const view = renderKiosk({ selectedProjectId: "" });
+    expect(scanInput()).toBeDisabled();
+
+    view.rerender(<KioskCaptureCard {...view.props} selectedProjectId={PROJECT.project_id} />);
+
+    expect(scanInput()).toBeEnabled();
+    expect(scanInput()).toHaveFocus();
+  });
+
+  it("sends queued scans as soon as the server answers again, without an online event", async () => {
+    // A server restart with the network up: no `online` event ever fires.
+    const created = [];
+    const offline = { value: true };
+    installNotesRoute({ created, offline });
+    const queue = memoryQueue();
+    renderKiosk({ queue });
+
+    scan("DURING-RESTART");
+    await waitFor(() =>
+      expect(within(recentScans()[0]).getByText("Queued offline")).toBeInTheDocument()
+    );
+
+    offline.value = false;
+    scan("AFTER-RESTART");
+
+    await waitFor(() => expect(created).toHaveLength(2));
+    await waitFor(() =>
+      expect(within(recentScans()[1]).getByText("Synced")).toBeInTheDocument()
+    );
+    expect(within(recentScans()[0]).getByText("Saved")).toBeInTheDocument();
+    expect(await queue.pendingCount()).toBe(0);
+  });
+
+  it("marks a queued scan failed, not synced, when a drain elsewhere drops it", async () => {
+    const created = [];
+    const offline = { value: true };
+    const reject = { value: false };
+    installNotesRoute({ created, offline, reject });
+    const queue = memoryQueue();
+    renderKiosk({ queue });
+
+    scan("REFUSED-1");
+    await waitFor(() =>
+      expect(within(recentScans()[0]).getByText("Queued offline")).toBeInTheDocument()
+    );
+
+    // The app shell's boot/online retry drains the same queue.
+    offline.value = false;
+    reject.value = true;
+    await act(async () => {
+      await queue.drain({ token: "token-1", ownerId: "owner-1", authEnabled: true });
+    });
+
+    await waitFor(() =>
+      expect(within(recentScans()[0]).getByText("Failed")).toBeInTheDocument()
+    );
+    expect(within(recentScans()[0]).queryByText("Synced")).toBeNull();
+    expect(screen.getByText(/The server refused this scan/)).toBeInTheDocument();
   });
 });

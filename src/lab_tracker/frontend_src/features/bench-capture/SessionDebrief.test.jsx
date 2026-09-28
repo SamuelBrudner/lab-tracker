@@ -171,11 +171,19 @@ describe("SessionDebrief", () => {
     ]);
   });
 
-  it("retries a failed upload under the same capture id", async () => {
+  it("retries a failed upload as an exact replay: same capture id, same metadata", async () => {
+    // The first attempt may have stored the note before failing in transit;
+    // the server accepts a replay only if every field matches.
     const fail = { value: true };
     const uploads = [];
     const fetchMock = installUploadRoute({ uploads, fail });
-    renderDebrief();
+    let clock = Date.parse("2026-09-28T17:00:00Z");
+    renderDebrief({
+      now: () => {
+        clock += 60 * 1000;
+        return clock;
+      },
+    });
 
     fireEvent.change(screen.getByLabelText("Record debrief"), {
       target: { files: [new File(["m4a"], "Recording.m4a", { type: "audio/mp4" })] },
@@ -186,9 +194,31 @@ describe("SessionDebrief", () => {
     fireEvent.click(screen.getByRole("button", { name: "Retry upload" }));
 
     expect(await screen.findByText("Debrief saved for review.")).toBeInTheDocument();
+    const attempts = fetchMock.mock.calls.map(([, init]) => init.body);
+    expect(attempts).toHaveLength(2);
+    expect(attempts[1].get("client_capture_id")).toBe(attempts[0].get("client_capture_id"));
+    expect(attempts[1].get("metadata")).toBe(attempts[0].get("metadata"));
+    expect(attempts[1].get("targets")).toBe(attempts[0].get("targets"));
+  });
+
+  it("treats a new recording after a failure as a new capture", async () => {
+    const fail = { value: true };
+    const fetchMock = installUploadRoute({ uploads: [], fail });
+    renderDebrief();
+    const pick = (name) =>
+      fireEvent.change(screen.getByLabelText("Record debrief"), {
+        target: { files: [new File([name], name, { type: "audio/mp4" })] },
+      });
+
+    pick("first.m4a");
+    expect(await screen.findByText("Upload rejected.")).toBeInTheDocument();
+    fail.value = false;
+    pick("second.m4a");
+
+    expect(await screen.findByText("Debrief saved for review.")).toBeInTheDocument();
     const ids = fetchMock.mock.calls.map(([, init]) => init.body.get("client_capture_id"));
     expect(ids).toHaveLength(2);
-    expect(ids[0]).toBe(ids[1]);
+    expect(ids[0]).not.toBe(ids[1]);
   });
 
   it("cannot record without write access but can still be dismissed", () => {

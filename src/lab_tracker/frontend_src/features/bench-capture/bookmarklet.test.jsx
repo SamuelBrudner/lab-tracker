@@ -9,6 +9,7 @@ import {
   bookmarkletSource,
   clipComposerText,
   clipMetadata,
+  isSecretQueryKey,
   readBookmarkletClip,
   sanitizeClipUrl,
 } from "./bookmarklet.js";
@@ -39,6 +40,41 @@ describe("sanitizeClipUrl", () => {
       sanitizeClipUrl("https://user:pw@vendor.example/sheet?id=42&api_key=abc&token=xyz#methods")
     ).toBe("https://vendor.example/sheet?id=42&api_key=REDACTED&token=REDACTED#methods");
   });
+
+  it.each([
+    "authToken",
+    "sessionToken",
+    "clientSecret",
+    "secretKey",
+    "privateKey",
+    "SigninToken",
+    "accessToken",
+    "apiKey",
+    "X-Amz-Signature",
+    "X-Amz-Credential",
+    "mytoken",
+    "clientsecret",
+    "sessionId",
+    "PHPSESSID",
+    "code",
+    "sig",
+  ])("redacts the %s query value", (key) => {
+    const sanitized = sanitizeClipUrl(`https://vendor.example/sheet?id=42&${key}=hunter2`);
+
+    expect(sanitized).not.toContain("hunter2");
+    expect(new URL(sanitized).searchParams.get(key)).toBe("REDACTED");
+    expect(isSecretQueryKey(key)).toBe(true);
+  });
+
+  it.each(["barcode", "zipcode", "monkey", "keyword", "q", "id", "page", "author"])(
+    "keeps the ordinary %s query value",
+    (key) => {
+      expect(isSecretQueryKey(key)).toBe(false);
+      expect(sanitizeClipUrl(`https://vendor.example/sheet?${key}=4006381333931`)).toBe(
+        `https://vendor.example/sheet?${key}=4006381333931`
+      );
+    }
+  );
 
   it("drops a fragment that carries key=value pairs", () => {
     expect(sanitizeClipUrl("https://app.example/cb#access_token=abc&state=1")).toBe(
