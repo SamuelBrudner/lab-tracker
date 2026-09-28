@@ -117,7 +117,8 @@ that destination through your normal off-machine backup process.
   `barcode_text` note metadata (default: `true`). It takes effect only when
   the optional `decode` extra (`zxing-cpp`, Pillow) is installed; decoding is
   local and deterministic (not OCR), sends nothing outside the instance, and
-  never fails or blocks an upload. Set `false` to turn it off.
+  never fails or blocks an upload. Set `false` to turn it off. See
+  [decoded-labels-and-file-headers.md](decoded-labels-and-file-headers.md).
 - `LAB_TRACKER_DECODE_PHOTO_CODES_TIMEOUT_SECONDS`: longest an upload waits for
   its photo's decode before it proceeds without decoded metadata (default:
   `1.5`; greater than `0` and at most `10`)
@@ -1085,6 +1086,10 @@ FastAPI app does not read them. `LAB_TRACKER_BASE_URL` (see
 - `LAB_TRACKER_SESSION_CONTEXT`: path of the active-session file that `lt
   session use` writes and captures read (default: `.lab-tracker/session.json`
   at the checkout root)
+- `LAB_TRACKER_WATCH_FORMAT_SNIFF`: set to `0` (or `false`/`no`/`off`) to stop
+  `lt watch` from reading FCS, OME-TIFF, and NWB headers into `format_*`
+  note metadata (default: on; reads are bounded and never fail a scan). See
+  [decoded-labels-and-file-headers.md](decoded-labels-and-file-headers.md).
 - `LAB_TRACKER_CONTAINER_REF`: container image reference folded into the
   repository environment fingerprint
 
