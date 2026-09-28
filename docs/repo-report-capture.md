@@ -191,6 +191,10 @@ evidence index. The
 shared evidence identity is `<normalized-remote>@<commit>` — the same identity
 `scripts/create-analysis-graph-draft.py` emits, so hook-based and CI-based
 capture of one commit dedup to one identity rather than parallel note streams.
+The reusable GitHub Action `.github/actions/lab-tracker-repo-report` runs
+`lt repo report --fail-silent` in CI with that identity; see
+[pipeline-capture.md](pipeline-capture.md#ci-capture-github-action) for its
+inputs and for exactly how the two captures of one commit resolve to one note.
 
 Under today's device-token allowlist the staged-note sink works with a device
 token; graph-draft requests (`--request-draft`) and any future first-class

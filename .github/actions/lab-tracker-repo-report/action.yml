@@ -1,0 +1,209 @@
+name: Lab Tracker repo report
+description: >-
+  Capture the pushed commit as a staged Lab Tracker note with `lt repo report
+  --fail-silent`. The capture shares the local post-commit hook's evidence
+  identity (<normalized-remote>@<sha>), so a commit already captured by the
+  hook is not recorded twice. Never fails the workflow.
+author: Lab Tracker
+
+inputs:
+  lab-tracker-ref:
+    description: >-
+      Tag or full commit SHA of the lab-tracker repository to install the
+      client from (the client is not on PyPI). Pin it; an empty ref skips the
+      capture with a warning.
+    required: true
+  lab-tracker-repository:
+    description: GitHub repository (owner/name) that hosts the lab-tracker client.
+    required: false
+    default: SamuelBrudner/lab-tracker
+  base-url:
+    description: Lab Tracker API base URL. Defaults to the LAB_TRACKER_BASE_URL environment variable.
+    required: false
+    default: ""
+  access-token:
+    description: >-
+      Lab Tracker access token; pass a secret (secrets.LAB_TRACKER_ACCESS_TOKEN).
+      Defaults to the LAB_TRACKER_ACCESS_TOKEN environment variable. Never echoed.
+    required: false
+    default: ""
+  project-id:
+    description: >-
+      Lab Tracker project UUID. Defaults to LAB_TRACKER_PROJECT_ID, then the
+      repository's lt_ids.json.
+    required: false
+    default: ""
+  question-id:
+    description: Optional question UUID declared as the note's target.
+    required: false
+    default: ""
+  commit:
+    description: >-
+      Commit to capture; the checked-out HEAD must be this commit. For
+      pull_request runs check out the head commit, not GitHub's merge commit.
+    required: false
+    default: ${{ github.event.pull_request.head.sha || github.sha }}
+  remote-url:
+    description: >-
+      Remote URL to derive the commit identity from, when the committing
+      machines' origin differs from the CI checkout's (an SSH host alias, a
+      mirror). Defaults to the checkout's origin.
+    required: false
+    default: ""
+  include-pr-text:
+    description: When 'true' on a pull_request run, use the PR title and body (bounded) as the summary.
+    required: false
+    default: "false"
+  pr-text-max-chars:
+    description: Maximum characters of PR title and body kept as the summary.
+    required: false
+    default: "2000"
+  python:
+    description: Python interpreter used to create the client's virtual environment.
+    required: false
+    default: python3
+  working-directory:
+    description: Path of the checked-out analysis repository.
+    required: false
+    default: .
+
+runs:
+  using: composite
+  steps:
+    - name: Install the Lab Tracker client
+      id: install
+      shell: bash
+      env:
+        LT_REPOSITORY: ${{ inputs.lab-tracker-repository }}
+        LT_REF: ${{ inputs.lab-tracker-ref }}
+        LT_BOOTSTRAP_PYTHON: ${{ inputs.python }}
+      run: |
+        # GitHub runs bash with -e; a capture step must never fail the job.
+        set +e -u
+        if [ -z "$LT_REF" ]; then
+          echo "::warning title=Lab Tracker::lab-tracker-ref is empty; pin a tag or commit SHA. The commit was not captured."
+          echo "ready=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        venv="$RUNNER_TEMP/lab-tracker-client"
+        if "$LT_BOOTSTRAP_PYTHON" -m venv "$venv" \
+          && "$venv/bin/python" -m pip install --quiet --disable-pip-version-check \
+            "lab-tracker @ git+https://github.com/${LT_REPOSITORY}@${LT_REF}"; then
+          echo "lt=$venv/bin/lt" >> "$GITHUB_OUTPUT"
+          echo "python=$venv/bin/python" >> "$GITHUB_OUTPUT"
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "::warning title=Lab Tracker::could not install lab-tracker@${LT_REF}; the commit was not captured."
+          echo "ready=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Report the commit to Lab Tracker
+      if: steps.install.outputs.ready == 'true'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        LT: ${{ steps.install.outputs.lt }}
+        LT_PYTHON: ${{ steps.install.outputs.python }}
+        LT_INPUT_BASE_URL: ${{ inputs.base-url }}
+        LT_INPUT_ACCESS_TOKEN: ${{ inputs.access-token }}
+        LT_INPUT_PROJECT_ID: ${{ inputs.project-id }}
+        LT_QUESTION_ID: ${{ inputs.question-id }}
+        LT_EXPECTED_COMMIT: ${{ inputs.commit }}
+        LT_REMOTE_URL: ${{ inputs.remote-url }}
+        LT_INCLUDE_PR_TEXT: ${{ inputs.include-pr-text }}
+        LT_PR_TEXT_MAX_CHARS: ${{ inputs.pr-text-max-chars }}
+        LT_PR_TITLE: ${{ github.event.pull_request.title }}
+        LT_PR_BODY: ${{ github.event.pull_request.body }}
+      run: |
+        # GitHub runs bash with -e; a capture step must never fail the job.
+        set +e -u
+        annotate() {
+          # Workflow-command escaping: %, CR and LF would otherwise break the line.
+          printf '::%s title=Lab Tracker::%s\n' "$1" "$(printf '%s' "$2" | sed 's/%/%25/g')"
+        }
+
+        # Credentials come from the inputs or the caller's environment and are
+        # only ever exported for lt; they are never printed.
+        export LAB_TRACKER_BASE_URL="${LT_INPUT_BASE_URL:-${LAB_TRACKER_BASE_URL:-}}"
+        export LAB_TRACKER_ACCESS_TOKEN="${LT_INPUT_ACCESS_TOKEN:-${LAB_TRACKER_ACCESS_TOKEN:-}}"
+        unset LT_INPUT_ACCESS_TOKEN
+        if [ -z "$LAB_TRACKER_BASE_URL" ]; then
+          annotate warning "no base-url input or LAB_TRACKER_BASE_URL; the commit was not captured."
+          exit 0
+        fi
+
+        project="${LT_INPUT_PROJECT_ID:-${LAB_TRACKER_PROJECT_ID:-}}"
+        if [ -z "$project" ] && [ -f lt_ids.json ]; then
+          project="$("$LT_PYTHON" -c 'import json; print(json.load(open("lt_ids.json")).get("project_id") or "")' 2>/dev/null || true)"
+        fi
+        if [ -z "$project" ]; then
+          annotate warning "no project-id input, LAB_TRACKER_PROJECT_ID or lt_ids.json; the commit was not captured."
+          exit 0
+        fi
+
+        head="$(git rev-parse HEAD 2>/dev/null || true)"
+        if [ -n "$LT_EXPECTED_COMMIT" ] && [ "$head" != "$LT_EXPECTED_COMMIT" ]; then
+          annotate warning "HEAD is ${head:-unknown}, not $LT_EXPECTED_COMMIT; check out that commit (for pull_request: actions/checkout ref github.event.pull_request.head.sha) so the capture shares the post-commit hook's identity. Not captured."
+          exit 0
+        fi
+
+        if [ -n "$LT_REMOTE_URL" ]; then
+          # Override remote.origin.url for lt's own git calls only; the checkout
+          # is untouched. lt normalizes it exactly as the post-commit hook does.
+          n="${GIT_CONFIG_COUNT:-0}"
+          export "GIT_CONFIG_KEY_$n=remote.origin.url" "GIT_CONFIG_VALUE_$n=$LT_REMOTE_URL"
+          export GIT_CONFIG_COUNT=$((n + 1))
+        fi
+
+        work="$RUNNER_TEMP/lab-tracker-repo-report"
+        rm -rf "$work"
+        mkdir -p "$work"
+        if ! "$LT" repo init --project "$project" --config "$work/repo.json" \
+          --outbox "$work/outbox" >/dev/null 2>"$work/init.err"; then
+          annotate warning "could not write a repo config; the commit was not captured."
+          exit 0
+        fi
+
+        set -- repo report --config "$work/repo.json" --tag github-actions --fail-silent
+        if [ -n "$LT_QUESTION_ID" ]; then
+          set -- "$@" --question "$LT_QUESTION_ID"
+        fi
+        if [ "$LT_INCLUDE_PR_TEXT" = "true" ] && [ -n "$LT_PR_TITLE" ]; then
+          summary="$("$LT_PYTHON" - <<'PY'
+        import os
+
+        limit = max(1, int(os.environ.get("LT_PR_TEXT_MAX_CHARS") or 2000))
+        title = os.environ.get("LT_PR_TITLE", "").strip()
+        body = os.environ.get("LT_PR_BODY", "").strip()
+        text = title + ("\n\n" + body if body else "")
+        try:
+            from lab_tracker_client.redaction import redact_capture_text
+
+            text = redact_capture_text(text)
+        except Exception:
+            pass
+        print(text if len(text) <= limit else text[: limit - 1] + "…")
+        PY
+          )"
+          if [ -n "$summary" ]; then
+            set -- "$@" --summary "$summary"
+          fi
+        fi
+
+        # --fail-silent: lt prints its JSON only when the capture synced; a
+        # queued-but-unsynced capture explains itself on stderr.
+        "$LT" "$@" >"$work/report.json" 2>"$work/report.err"
+        if grep -q "was already used with different field" "$work/report.err"; then
+          annotate notice "commit ${head} is already captured under its <remote>@<sha> identity (usually by the post-commit hook); nothing new was recorded."
+        elif grep -q "^lab-tracker: skipped commit" "$work/report.err"; then
+          annotate notice "$(grep -m 1 "^lab-tracker: skipped commit" "$work/report.err")"
+        elif [ -s "$work/report.json" ]; then
+          annotate notice "commit ${head} captured as a staged note."
+        elif [ -s "$work/report.err" ]; then
+          while IFS= read -r line; do
+            [ -n "$line" ] && annotate warning "$line"
+          done < "$work/report.err"
+        else
+          annotate warning "lt repo report recorded nothing for ${head}; rerun it without --fail-silent to see why."
+        fi
+        exit 0
