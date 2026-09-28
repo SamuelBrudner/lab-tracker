@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import lab_tracker_client.auth as auth_helpers
+import lab_tracker_client.cli_capture as cli_capture
 import lab_tracker_client.figure_autotrack as autotrack_helpers
 import lab_tracker_client.git_capture as git_capture
 import lab_tracker_client.hooks as hook_install
@@ -274,6 +275,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     _add_watch_parsers(subcommands)
     _add_outbox_parsers(subcommands)
+    cli_capture.add_capture_parsers(subcommands)
     _add_session_parsers(subcommands)
     _add_hpc_parsers(subcommands)
     _add_repo_parsers(subcommands)
