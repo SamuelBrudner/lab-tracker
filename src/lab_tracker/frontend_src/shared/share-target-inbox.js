@@ -191,6 +191,8 @@ async function listReviewedShares(storage, shareIds) {
 
 // Imports exactly the shares the user reviewed (`shareIds`), so a share that
 // lands in the inbox after the review was shown is never imported unseen.
+// `targets` and `extraMetadata` carry a person's declared context (a trusted
+// share window's session and capture_channel) onto every imported share.
 async function migrateIncomingShares({
   createTextNote = null,
   projectId,
@@ -198,6 +200,8 @@ async function migrateIncomingShares({
   uploadQueue,
   shareIds,
   storage = createIndexedDbShareStorage(),
+  targets = [],
+  extraMetadata = {},
 }) {
   requireReviewedShareIds(shareIds);
   if (!projectId || !uploadQueue) {
@@ -230,10 +234,11 @@ async function migrateIncomingShares({
         continue;
       }
       await createTextNote({
-        metadata: buildShareMetadata(share),
+        metadata: { ...buildShareMetadata(share), ...extraMetadata },
         projectId,
         rawContent,
         share,
+        targets,
       });
       await storage.remove(share.id);
       migrated += 1;
@@ -241,8 +246,11 @@ async function migrateIncomingShares({
     }
     const fields = {
       project_id: projectId,
-      metadata: JSON.stringify(buildShareMetadata(share)),
+      metadata: JSON.stringify({ ...buildShareMetadata(share), ...extraMetadata }),
     };
+    if (targets.length > 0) {
+      fields.targets = JSON.stringify(targets);
+    }
     await uploadQueue.enqueue({
       endpoint: UPLOAD_FILE_PATH,
       file: share.file,
