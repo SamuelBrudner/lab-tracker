@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID, uuid4
 
+import pytest
 from api_helpers import repository_backed_api
 from fastapi.testclient import TestClient
 
@@ -452,6 +453,7 @@ def test_the_repository_contract_declares_the_value_carrier_query() -> None:
     )
 
 
+@pytest.mark.postgres
 def test_postgres_metadata_value_carriers_filter_in_sql(
     postgres_client: TestClient, postgres_admin_auth_headers: dict[str, str]
 ) -> None:
