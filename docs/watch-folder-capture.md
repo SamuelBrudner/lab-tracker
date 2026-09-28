@@ -63,6 +63,15 @@ Each file event records the absolute file URI, root-relative external ID,
 content hash, size, and observed mtime. Sync refuses to upload a file if it
 changed after the scan; rescan the folder to capture the new version.
 
+Instrument files also carry facts from their headers. FCS, OME-TIFF, and NWB
+(with `h5py`) files get `format_kind`, `format_acquired_at` (ISO-8601 UTC),
+and other `format_*` keys in the staged note's metadata. The sniffer reads
+at most 2 MiB of each file. A malformed header only adds
+`format_sniff_error` and never fails the scan. Set
+`LAB_TRACKER_WATCH_FORMAT_SNIFF=0` to turn this off. See
+[decoded-labels-and-file-headers.md](decoded-labels-and-file-headers.md) for
+the fields and the timezone rule for header clocks that have no UTC offset.
+
 `lt import-folder` remains supported for one-shot folder import. It now shares
 the same file discovery rules as `lt watch`: symlinked files are skipped, hidden
 paths are ignored, and include/exclude globs are matched against both the

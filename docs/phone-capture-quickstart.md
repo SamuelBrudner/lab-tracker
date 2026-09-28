@@ -51,6 +51,12 @@ URL for phone capture.
 - **Scan into a session.** On the serving computer, open an active session
   and scan its **Capture into this session** QR code (or tap **Capture** on the
   session). Every capture from that page arrives linked to the session.
+- **Photograph the label.** If the server has the optional `decode` extra, a
+  photo showing a session's `LT-<code>` or its capture QR proposes a link to
+  that session for review. A GS1 barcode on a reagent adds its GTIN, lot,
+  expiry, serial, and catalog number to the note. This is local barcode
+  decoding, not OCR, and it never blocks the upload. See
+  [decoded-labels-and-file-headers.md](decoded-labels-and-file-headers.md).
 
 ## Firewall Checks
 
