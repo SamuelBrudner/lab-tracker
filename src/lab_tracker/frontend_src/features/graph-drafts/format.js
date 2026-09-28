@@ -312,6 +312,17 @@ function sourceRefText(ref) {
   return `${label}${quote}` || "Source reference";
 }
 
+// A day log the server appended to a batch by rule (no model): the change set
+// records its operation id under context_packet.day_logs, a field only the
+// server writes, so the review page can say who proposed it.
+function isDeterministicDayLog(changeSet, operation) {
+  const entries = changeSet?.context_packet?.day_logs;
+  return (
+    Array.isArray(entries) &&
+    entries.some((entry) => entry?.operation_id === operation?.operation_id)
+  );
+}
+
 function contextCountLabel(key) {
   return key.replaceAll("_", " ");
 }
@@ -397,6 +408,7 @@ export {
   defaultCommitMessage,
   editableStringFields,
   imageDataUrl,
+  isDeterministicDayLog,
   nextPayloadWithTarget,
   normalizeSpeechText,
   operationIntent,

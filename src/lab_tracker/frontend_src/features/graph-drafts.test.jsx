@@ -1738,6 +1738,34 @@ describe("GraphDraftDetailCard keyboard review", () => {
     expect(within(section).getByText("session session-2")).toBeInTheDocument();
   });
 
+  it("says a server-appended day log is a deterministic grouping, not model inference", async () => {
+    const dayLog = {
+      ...draftFixture().operations[0],
+      confidence: null,
+      entity_type: "note",
+      operation_id: "44444444-4444-4444-8444-444444444444",
+      payload: { project_id: "project-1", raw_content: "Day log — operational session LT-ABC" },
+      rationale: "grouped 3 captures from operational session LT-ABC.",
+      semantic_type: "create_note",
+    };
+    const draft = draftFixture({
+      context_packet: {
+        day_logs: [{ operation_id: dayLog.operation_id, origin: "deterministic" }],
+      },
+      operations: [draftFixture().operations[0], dayLog],
+    });
+    renderDraft(draft, {
+      routes: [{ match: /^\/provenance-links\?/, response: apiResponse([]) }],
+    });
+
+    const grouped = await screen.findByText(/grouped 3 captures from operational session/);
+    expect(grouped).toHaveTextContent("Deterministic grouping (no model)");
+    expect(grouped).not.toHaveTextContent("confident");
+    expect(
+      screen.getByText(/The capture states this as the next comparison/)
+    ).toHaveTextContent("Model inference");
+  });
+
   it("gives claim statements and falsification criteria typed editors", async () => {
     const draft = draftFixture({
       operations: [

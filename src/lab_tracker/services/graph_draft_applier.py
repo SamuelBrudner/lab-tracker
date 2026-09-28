@@ -56,6 +56,12 @@ from lab_tracker.services.dataset_service import DatasetService
 from lab_tracker.services.exploration_service import ExplorationService
 from lab_tracker.services.goal_service import GoalLinkSpec, GoalService
 from lab_tracker.services.graph_draft_context import EntityResult
+from lab_tracker.services.graph_draft_day_log import (
+    DAY_LOG_ORIGIN_MODEL,
+    DAY_LOG_ORIGIN_PROMPT_VERSION,
+    DAY_LOG_ORIGIN_PROVIDER,
+    is_day_log_operation,
+)
 from lab_tracker.services.graph_draft_validation import (
     RetireNotePayload,
     resolve_refs,
@@ -496,6 +502,10 @@ def _graph_draft_origin_kwargs(
     change_set: GraphChangeSet,
     operation: GraphChangeOperation,
 ) -> dict[str, Any]:
+    # A deterministic day log (recorded by the server in the change set's
+    # packet) was produced by Lab Tracker's grouping rule, not the batch's
+    # model: say so on the committed record instead of naming the model.
+    deterministic = is_day_log_operation(change_set, operation)
     return {
         "origin": (
             EntityOrigin.USER_REVISED
@@ -503,9 +513,11 @@ def _graph_draft_origin_kwargs(
             else EntityOrigin.AI_SUGGESTED
         ),
         "change_set_id": change_set.change_set_id,
-        "origin_provider": change_set.provider,
-        "origin_model": change_set.model,
-        "origin_prompt_version": change_set.prompt_version,
+        "origin_provider": DAY_LOG_ORIGIN_PROVIDER if deterministic else change_set.provider,
+        "origin_model": DAY_LOG_ORIGIN_MODEL if deterministic else change_set.model,
+        "origin_prompt_version": (
+            DAY_LOG_ORIGIN_PROMPT_VERSION if deterministic else change_set.prompt_version
+        ),
     }
 
 

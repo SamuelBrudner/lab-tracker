@@ -152,6 +152,7 @@ files = [
   "src/lab_tracker/services/session_clock.py",
   "src/lab_tracker/services/provenance_time_windows.py",
   "src/lab_tracker/services/session_suggestions.py",
+  "src/lab_tracker/services/graph_draft_day_log.py",
   "src/lab_tracker/provider_error_redaction.py",
   "src/lab_tracker/client_release.py",
   "src/lab_tracker/capture_client_release.py",
