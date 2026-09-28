@@ -522,6 +522,9 @@ stages:
       params.yaml:
         prepare.seed: 20170428
         prepare.split: 0.2
+        db.password: hunter2
+        api_token: abc123
+        max_tokens: 100
     outs:
     - path: data/prepared
       md5: 153aad06d376b6595932470e459ef42a.dir
@@ -553,7 +556,8 @@ def test_dvc_lock_parsing_and_legacy_layout() -> None:
     assert prepare.cmd == ("python src/prepare.py data/data.xml --token abc123",)
     assert prepare.deps[1].hash_name == "etag"
     assert prepare.outs[0].is_directory
-    assert prepare.params == {"params.yaml": {"prepare.seed": 20170428, "prepare.split": 0.2}}
+    assert prepare.params["params.yaml"]["prepare.seed"] == 20170428
+    assert prepare.params["params.yaml"]["max_tokens"] == 100
 
     legacy = parse_dvc_lock(
         "train:\n  cmd: python train.py\n  outs:\n  - path: m.pkl\n    md5: abc\n"
@@ -583,6 +587,10 @@ def test_dvc_cli_records_stage_pointers_with_md5(tmp_path, capsys) -> None:
     body = event["payload"]["body"]
     assert "Stage `prepare`" in body
     assert "abc123" not in body
+    assert "hunter2" not in body
+    assert "db.password=[REDACTED]" in body
+    assert "api_token=[REDACTED]" in body
+    assert "max_tokens=100" in body
     assert "prepare.seed=20170428" in body
     metadata = event["payload"]["metadata"]
     assert metadata["pipeline_dvc_stage_count"] == 2

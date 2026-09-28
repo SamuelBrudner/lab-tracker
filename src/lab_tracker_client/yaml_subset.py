@@ -194,8 +194,7 @@ class _Parser:
             except _Unterminated:
                 if self.pos >= len(self.lines):
                     raise self.error("unterminated quoted scalar or flow collection") from None
-                continuation = self.lines[self.pos].strip()
-                buffer += " " + continuation if continuation else "\n"
+                buffer = _fold_continuation(buffer, self.lines[self.pos])
                 self.pos += 1
                 continue
             leftover = remainder.strip()
@@ -255,6 +254,25 @@ class _Parser:
         if chomp == "keep":
             return body + "\n" * (trailing + 1)
         return body + "\n"
+
+
+def _fold_continuation(buffer: str, line: str) -> str:
+    """Append the next line of a multi-line quoted scalar or flow collection.
+
+    YAML folds the line break into one space (trailing and leading white space
+    dropped), keeps an empty line as a line feed, and in a double-quoted scalar
+    joins the lines with nothing when the break is escaped with a backslash.
+    """
+
+    continuation = line.strip()
+    if not continuation:
+        return buffer + "\n"
+    if buffer.endswith("\n"):
+        return buffer + continuation
+    backslashes = len(buffer) - len(buffer.rstrip("\\"))
+    if buffer.startswith('"') and backslashes % 2 == 1:
+        return buffer[:-1] + continuation
+    return buffer.rstrip(" \t") + " " + continuation
 
 
 def _rstrip_blank(lines: list[str]) -> list[str]:

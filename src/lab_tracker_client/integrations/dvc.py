@@ -21,6 +21,7 @@ relative to that ``wdir``, which the lock does not say.
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -33,7 +34,14 @@ from lab_tracker_client.yaml_subset import load_yaml
 MAX_STAGES_LISTED = 50
 MAX_CMD_CHARS = 300
 MAX_PARAMS_PER_STAGE = 20
+MAX_PARAM_CHARS = 120
+REDACTED = "[REDACTED]"
 _HASH_KEYS = ("md5", "etag", "checksum", "version_id")
+# A param key whose last dotted segment ends in a credential word.
+_SECRET_PARAM_KEY = re.compile(
+    r"(?:password|passwd|passphrase|token|secret|api[_-]?key|access[_-]?key|credentials?)$",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -138,8 +146,7 @@ def stage_details(stages: Sequence[DvcStage]) -> list[str]:
         for file, values in stage.params.items():
             items = list(values.items())
             shown = ", ".join(
-                f"{key}={redact_capture_text(str(value))[:80]}"
-                for key, value in items[:MAX_PARAMS_PER_STAGE]
+                _param_text(key, value) for key, value in items[:MAX_PARAMS_PER_STAGE]
             )
             more = (
                 f", … {len(items) - MAX_PARAMS_PER_STAGE} more"
@@ -210,6 +217,22 @@ def pipeline_run_from_lock(
         },
         tags=tags,
     )
+
+
+def _param_text(key: Any, value: Any) -> str:
+    """``key=value`` for one stage param, never showing a secret-named key's value.
+
+    The key and value are redacted together, so ``db.password: hunter2`` is
+    recognized as an assignment; a key whose last segment names a credential
+    (``api_token``, ``db.password``) has its value withheld outright even when
+    the value itself looks harmless.
+    """
+
+    name = str(key)
+    if _SECRET_PARAM_KEY.search(name.rsplit(".", 1)[-1]):
+        return f"{name}={REDACTED}"
+    text = redact_capture_text(f"{name}={value}")
+    return text if len(text) <= MAX_PARAM_CHARS else text[: MAX_PARAM_CHARS - 1] + "…"
 
 
 def _entries(value: Any) -> list[DvcEntry]:
