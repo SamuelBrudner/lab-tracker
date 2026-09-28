@@ -71,6 +71,14 @@ def _capture_order(note: Note) -> tuple[datetime, str]:
     return (note.created_at, str(note.note_id))
 
 
+def commit_trees(notes: Iterable[Note]) -> set[str]:
+    """Every full tree id the notes record as their commit's own (``repo_git_tree``)."""
+
+    trees = {normalize_tree_id(note.metadata.get(COMMIT_TREE_METADATA_KEY)) for note in notes}
+    trees.discard("")
+    return trees
+
+
 def commit_notes_by_tree(notes: Iterable[Note]) -> dict[str, list[UUID]]:
     """Every note carrying ``repo_git_tree``, per tree, earliest capture first."""
 
@@ -124,6 +132,7 @@ __all__ = [
     "WORKTREE_TREE_METADATA_KEYS",
     "TreeMatch",
     "commit_notes_by_tree",
+    "commit_trees",
     "normalize_tree_id",
     "tree_matches_for_note",
     "tree_matches_for_notes",

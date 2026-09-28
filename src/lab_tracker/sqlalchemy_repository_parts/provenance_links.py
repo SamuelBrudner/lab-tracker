@@ -33,6 +33,10 @@ from lab_tracker.sqlalchemy_mappers import (
 from .common import apply_pagination, count_from_statement, uuid_values
 from .notes import SQLAlchemyNoteRepository
 
+# Values per IN (...) clause in list_metadata_value_carriers; each key repeats
+# the chunk, so this stays far below SQLite's and Postgres' parameter limits.
+_METADATA_VALUE_CHUNK = 200
+
 
 class SQLAlchemyProvenanceLinkRepository(EntityRepository[ProvenanceLink]):
     def __init__(self, session: OrmSession) -> None:
@@ -166,6 +170,32 @@ class SQLAlchemyProvenanceLinkRepository(EntityRepository[ProvenanceLink]):
             .order_by(NoteModel.created_at, NoteModel.note_id)
         )
         rows = list(self._session.scalars(stmt))
+        return SQLAlchemyNoteRepository(self._session).notes_from_rows(rows)
+
+    def list_metadata_value_carriers(
+        self, project_id: UUID, keys: Sequence[str], values: Sequence[str]
+    ) -> list[Note]:
+        """Notes whose metadata sets any of ``keys`` to one of ``values``, filtered in SQL.
+
+        The value list is chunked so a project with many commits never exceeds
+        a backend's bound-parameter limit; a note matched by several chunks is
+        returned once.
+        """
+
+        wanted = sorted({value for value in values if value})
+        if not keys or not wanted:
+            return []
+        self._session.flush()
+        rows_by_id: dict[str, NoteModel] = {}
+        for start in range(0, len(wanted), _METADATA_VALUE_CHUNK):
+            chunk = wanted[start : start + _METADATA_VALUE_CHUNK]
+            stmt = select(NoteModel).where(
+                NoteModel.project_id == str(project_id),
+                or_(*(NoteModel.note_metadata[key].as_string().in_(chunk) for key in keys)),
+            )
+            for row in self._session.scalars(stmt):
+                rows_by_id.setdefault(row.note_id, row)
+        rows = sorted(rows_by_id.values(), key=lambda row: (as_utc(row.created_at), row.note_id))
         return SQLAlchemyNoteRepository(self._session).notes_from_rows(rows)
 
     def query(

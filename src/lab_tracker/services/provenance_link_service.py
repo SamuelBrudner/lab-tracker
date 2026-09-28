@@ -58,8 +58,10 @@ from lab_tracker.services.provenance_id_matches import (
     id_matches_for_notes,
 )
 from lab_tracker.services.provenance_tree_matches import (
-    TREE_MATCH_METADATA_KEYS,
+    COMMIT_TREE_METADATA_KEY,
+    WORKTREE_TREE_METADATA_KEYS,
     TreeMatch,
+    commit_trees,
     tree_matches_for_notes,
 )
 from lab_tracker.services.shared import actor_user_fk, actor_user_id
@@ -248,10 +250,21 @@ class ProvenanceLinkService(BaseService):
         """
 
         self.authorization.require_contributor(project_id, actor=actor)
-        notes = self.repository.provenance_links.list_identifier_carriers(
-            project_id, TREE_MATCH_METADATA_KEYS
+        links = self.repository.provenance_links
+        # Commit notes first (few); then only the captures whose recorded tree
+        # is one of those commits' trees, so a project full of figure captures
+        # never loads them all.
+        commit_notes = links.list_identifier_carriers(project_id, (COMMIT_TREE_METADATA_KEY,))
+        trees = sorted(commit_trees(commit_notes))
+        if not trees:
+            return 0
+        captures = links.list_metadata_value_carriers(
+            project_id,
+            WORKTREE_TREE_METADATA_KEYS,
+            [*trees, *(tree.upper() for tree in trees)],
         )
-        matches = tree_matches_for_notes(notes)
+        notes = {note.note_id: note for note in (*commit_notes, *captures)}
+        matches = tree_matches_for_notes(notes.values())
         if not matches:
             return 0
         return self._save_new_proposals(project_id, tree_match_proposals(matches), actor=actor)

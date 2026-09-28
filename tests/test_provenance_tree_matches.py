@@ -395,3 +395,74 @@ def test_worktree_tree_detector_failure_never_fails_the_batch_or_other_detectors
     assert run["status"] == "ready"
     links = _links(client, admin_auth_headers, project_id)
     assert [link["basis"] for link in links] == [ProvenanceLinkBasis.CONTENT_HASH_MATCH.value]
+
+
+# --- Repository: only captures of a committed tree are loaded -----------------
+
+
+def _carrier_notes(client: TestClient, headers: dict[str, str]) -> tuple[str, list[str]]:
+    project_id = _project(client, headers)
+    other_project = _project(client, headers)
+    created = [
+        _staged_note(client, headers, project_id, "run", {"run_git_worktree_tree": TREE}),
+        _staged_note(client, headers, project_id, "hpc", {"hpc_git_worktree_tree": OTHER_TREE}),
+        _staged_note(client, headers, project_id, "other", {"capture_git_worktree_tree": "a" * 40}),
+        _staged_note(client, headers, project_id, "commit", {"repo_git_tree": TREE}),
+        _staged_note(client, headers, other_project, "foreign", {"run_git_worktree_tree": TREE}),
+    ]
+    return project_id, created
+
+
+def test_metadata_value_carriers_filter_keys_and_values_in_sql(
+    client: TestClient, admin_auth_headers: dict[str, str], monkeypatch
+) -> None:
+    from lab_tracker.sqlalchemy_repository_parts import provenance_links as repository_part
+    from lab_tracker.sqlalchemy_repository_parts.repository import (
+        SQLAlchemyLabTrackerRepository,
+    )
+
+    project_id, created = _carrier_notes(client, admin_auth_headers)
+    # One value per IN clause: a note matched by two chunks still comes back once.
+    monkeypatch.setattr(repository_part, "_METADATA_VALUE_CHUNK", 1)
+    with client.app.state.db_session_factory() as session:
+        links = SQLAlchemyLabTrackerRepository(session).provenance_links
+        carriers = links.list_metadata_value_carriers(
+            UUID(project_id), WORKTREE_TREE_METADATA_KEYS, [OTHER_TREE, TREE, TREE]
+        )
+        nothing = links.list_metadata_value_carriers(UUID(project_id), (), [TREE])
+
+    assert [str(note.note_id) for note in carriers] == created[:2]
+    assert nothing == []
+
+
+def test_the_repository_contract_declares_the_value_carrier_query() -> None:
+    import inspect
+    from typing import get_type_hints
+
+    from lab_tracker.repository import LabTrackerRepository
+    from lab_tracker.sqlalchemy_repository_parts.provenance_links import (
+        SQLAlchemyProvenanceLinkRepository,
+    )
+
+    getter = LabTrackerRepository.provenance_links.fget
+    assert getter is not None
+    contract = get_type_hints(getter)["return"]
+    assert inspect.signature(contract.list_metadata_value_carriers) == inspect.signature(
+        SQLAlchemyProvenanceLinkRepository.list_metadata_value_carriers
+    )
+
+
+def test_postgres_metadata_value_carriers_filter_in_sql(
+    postgres_client: TestClient, postgres_admin_auth_headers: dict[str, str]
+) -> None:
+    from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
+
+    project_id, created = _carrier_notes(postgres_client, postgres_admin_auth_headers)
+    with postgres_client.app.state.db_session_factory() as session:
+        carriers = SQLAlchemyLabTrackerRepository(
+            session
+        ).provenance_links.list_metadata_value_carriers(
+            UUID(project_id), WORKTREE_TREE_METADATA_KEYS, [TREE, OTHER_TREE]
+        )
+
+    assert [str(note.note_id) for note in carriers] == created[:2]

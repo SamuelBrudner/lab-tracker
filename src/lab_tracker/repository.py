@@ -114,6 +114,13 @@ class ProvenanceLinkRepository(EntityRepository[ProvenanceLink], Protocol):
         """Return the project's notes whose metadata sets any of ``keys`` (with
         their targets), in creation order: the exact-id detector's input."""
 
+    def list_metadata_value_carriers(
+        self, project_id: UUID, keys: Sequence[str], values: Sequence[str]
+    ) -> list[Note]:
+        """Return the project's notes whose metadata sets any of ``keys`` to one
+        of ``values`` exactly, in creation order: the worktree-tree detector's
+        capture input, bounded to the trees some commit note carries."""
+
 
 class VisualizationRepository(EntityRepository[Visualization], Protocol):
     """Visualization persistence with the row lock asset mutations hold."""
