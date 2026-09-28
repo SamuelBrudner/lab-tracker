@@ -205,6 +205,85 @@ def test_setup_status_reports_the_r_block(
     assert status["rprofile"] == str(rprofile)
 
 
+def _symlink(link: Path, target: Path) -> None:
+    link.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError) as exc:  # pragma: no cover - Windows without rights
+        pytest.skip(f"cannot create symlinks here: {exc}")
+
+
+def test_a_symlinked_profile_keeps_its_link_and_edits_the_dotfiles_copy(
+    rprofile: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A dotfiles-managed ~/.Rprofile is a symlink: install, update and
+    uninstall edit the file it points at, never replace or delete the link."""
+
+    original = "options(digits = 4)\n"
+    target = tmp_path / "dotfiles" / "Rprofile"
+    target.parent.mkdir()
+    target.write_text(original, encoding="utf-8")
+    _symlink(rprofile, Path("..") / "dotfiles" / "Rprofile")
+    link_text = os.readlink(rprofile)
+
+    preview = _setup(capsys, "--dry-run")
+    assert preview["action"] == "would-install"
+    assert Path(preview["rprofile"]) == rprofile
+    assert Path(preview["rprofile_target"]) == target.resolve()
+    assert target.read_text(encoding="utf-8") == original
+
+    installed = _setup(capsys, "--yes")
+    assert installed["action"] == "installed"
+    assert Path(installed["rprofile_target"]) == target.resolve()
+    assert rprofile.is_symlink() and os.readlink(rprofile) == link_text
+    block = r_autotrack.rprofile_block()
+    assert target.read_text(encoding="utf-8") == f"{original}\n{block}"
+    assert [path.name for path in target.parent.iterdir()] == ["Rprofile"]
+    status = r_autotrack.rprofile_status()
+    assert status["up_to_date"] is True
+    assert Path(status["rprofile_target"]) == target.resolve()
+
+    target.write_text(f"{original}\n{block.replace('lt_path <- ', 'lt_path <- 1 # ')}")
+    assert _setup(capsys, "--yes")["action"] == "updated"
+    assert rprofile.is_symlink() and os.readlink(rprofile) == link_text
+    assert target.read_text(encoding="utf-8") == f"{original}\n{block}"
+
+    assert _setup(capsys, "--uninstall", "--yes")["action"] == "removed"
+    assert rprofile.is_symlink() and os.readlink(rprofile) == link_text
+    assert target.read_text(encoding="utf-8") == original
+
+
+def test_uninstall_empties_a_symlinked_block_only_profile_but_keeps_the_link(
+    rprofile: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    target = tmp_path / "dotfiles" / "Rprofile"
+    target.parent.mkdir()
+    target.write_text("", encoding="utf-8")
+    _symlink(rprofile, target)
+    _setup(capsys, "--yes")
+
+    removed = _setup(capsys, "--uninstall", "--yes")
+
+    assert removed["action"] == "removed"
+    assert "file_removed" not in removed
+    assert rprofile.is_symlink()
+    assert target.exists() and target.read_text(encoding="utf-8") == ""
+
+
+def test_a_dangling_profile_symlink_is_refused_clearly(
+    rprofile: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    missing = tmp_path / "dotfiles" / "Rprofile"
+    _symlink(rprofile, missing)
+
+    for flags in (["--dry-run"], ["--yes"], ["--uninstall", "--yes"]):
+        with pytest.raises(LTValidationError, match="symlink to .* which does not exist"):
+            lt_cli.main(["setup", "autotrack", "--r", *flags])
+    assert rprofile.is_symlink()
+    assert not missing.exists()
+    assert "does not exist" in r_autotrack.rprofile_status()["error"]
+
+
 def test_r_string_literals_escape_quotes_and_backslashes() -> None:
     assert r_autotrack._r_string('C:\\Users\\a "b"') == '"C:\\\\Users\\\\a \\"b\\""'
 
