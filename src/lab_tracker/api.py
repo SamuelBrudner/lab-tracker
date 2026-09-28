@@ -74,6 +74,7 @@ from lab_tracker.services import (
     ReviewEmailService,
     ServiceContext,
     SessionService,
+    SessionSuggestionService,
     SupervisionService,
     TransactionalDraftCommitCoordinator,
     VisualizationService,
@@ -181,6 +182,10 @@ class LabTrackerAPI(
             questions=self.questions,
             datasets_provider=lambda: self.datasets,
             authorization=self.project_authorization,
+        )
+        self.session_suggestions: SessionSuggestionService = SessionSuggestionService(
+            context,
+            projects=self.projects,
         )
         self.experiments: ExperimentService = ExperimentService(
             context,

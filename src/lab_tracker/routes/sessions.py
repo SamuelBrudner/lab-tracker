@@ -31,6 +31,7 @@ from lab_tracker.schemas import (
     SessionPromotionRequest,
     SessionUpdate,
 )
+from lab_tracker.services.session_suggestions import SessionSuggestionReport
 
 from .shared import (
     actor_from_request,
@@ -86,6 +87,23 @@ def build_sessions_router(api: LabTrackerAPI) -> APIRouter:
             offset=offset,
             total=page.total,
         )
+
+    @router.get(
+        "/projects/{project_id}/session-suggestions",
+        response_model=Envelope[SessionSuggestionReport],
+    )
+    def get_session_suggestions(project_id: UUID, request: Request):
+        """Suggest session bookkeeping for a project; computed on read, never applied.
+
+        Needs project read access (an unreadable project is a 404). A person
+        applies a suggestion through the ordinary session create/update and
+        note-target APIs, which need contributor access.
+        """
+        report = api_from_request(request, api).suggest_sessions(
+            project_id,
+            actor=actor_from_request(request),
+        )
+        return Envelope(data=report)
 
     @router.get("/sessions/by-link/{link_code}", response_model=Envelope[Session])
     def get_session_by_link_code(link_code: str, request: Request):

@@ -4,6 +4,7 @@ import { apiListRequest, apiRequest, buildApiPath } from "../shared/api.js";
 import { formatDate } from "../shared/formatters.js";
 import { DailyReviewScheduleForm } from "./daily-review-schedule.jsx";
 import { DelegatedCurationForm } from "./delegated-curation.jsx";
+import { SessionSuggestionsCard } from "./sessions/SessionSuggestionsCard.jsx";
 
 const { useCallback, useEffect, useMemo, useRef, useState } = React;
 
@@ -453,6 +454,11 @@ function BatchReviewPage({
 
           <div className="stack">
             <StaleCaptureMachines projectId={selectedProjectId} token={token} />
+            <SessionSuggestionsCard
+              projectId={selectedProjectId}
+              token={token}
+              canWrite={canManageGraph}
+            />
             <h3>Ready for you</h3>
             <BatchCards
               batches={batches}
