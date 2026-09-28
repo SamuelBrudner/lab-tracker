@@ -119,6 +119,30 @@ derived value is verifiable from the relation and pivot nodes in the same
 document. The analysis document carries no pivots and therefore emits no
 `effectiveStatus` of its own.
 
+### Where proposed lineage comes from
+
+Lineage links between captures are never guessed into the record: each daily
+review run proposes them by rule as `PROPOSED` rows on `GET /provenance-links`,
+and a person accepts or rejects each one. The `basis` says which rule:
+
+| `basis` | Proposed when | Link |
+| --- | --- | --- |
+| `content_hash_match` | Two captured artifacts share a content hash | later capture `was_derived_from` the earliest |
+| `exact_id_match` | A capture's metadata names one session or one committed analysis commit | note `was_derived_from` that session or analysis |
+| `time_window_match` | A capture that names no session was made (by `format_acquired_at`, else its observed time) inside exactly one session window of its project, within the last 14 days | note `was_derived_from` that session |
+
+Overlapping session windows are ambiguous and propose nothing; a pair declined
+once is never re-proposed. Only accepted note-to-note links render as
+`prov:wasDerivedFrom` in the sidecars. See
+[session-suggestions.md](session-suggestions.md) for the time-window rule and
+the capture clock it uses.
+
+A daily-review **day log** (one timestamped note grouping a session's short
+bench captures) is produced by a deterministic rule, not the drafting model.
+When a reviewer accepts it, the committed note carries
+`origin_provider=lab_tracker` and `origin_model=deterministic_day_log`, which
+the export reports as its `aiProvider`/`aiModel` in place of the batch's model.
+
 The identifiers dereference: `GET` on a dataset, analysis, or claim URI with
 `Accept: application/ld+json` returns this same document, so a JSON-LD
 consumer can follow any `@id` in a sidecar straight to the live record. The
