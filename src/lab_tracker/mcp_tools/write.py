@@ -13,6 +13,7 @@ from lab_tracker.mcp_api_client import (
     JsonObject,
     LabTrackerAPIError,
     LabTrackerAPIUnavailableError,
+    LabTrackerAPIValidationError,
     NoteMetadataScalar,
     client_from_env,
     lab_tracker_api_error,
@@ -534,16 +535,20 @@ def lab_tracker_run_graph_draft_batch(
 
     POST /batches/run-now: the server-side model proposes graph changes for the
     staged notes not yet drafted, assigned to the token's user for review. Needs an
-    all-scope or graph_curate token with contributor access. Where the project owner
-    has delegated curation, the server applies the admitted proposals itself before
-    returning. Only when the user asks.
+    all-scope or graph_curate token with contributor access. The returned run is
+    `ready` with a change_set_id when the host drafted synchronously, or `pending`
+    when the host queues drafting for its background worker; then poll
+    lab_tracker_list_my_drafts until the draft appears. Where the project owner has
+    delegated curation, the server applies the admitted proposals when the run
+    executes, so the draft may already be committed. Only when the user asks.
     """
     return _write_tool(
         "lab_tracker_run_graph_draft_batch",
         lambda client: client.run_graph_draft_batch(project_id=project_id, user_hint=user_hint),
         hint=next_action(
             "lab_tracker_list_my_drafts",
-            "The run's draft lands in the review queue; list it, then read it with "
+            "A ready run names its change_set_id; a pending run drafts in the "
+            "background, so list the queue until the draft appears, then read it with "
             "lab_tracker_get_graph_draft before acting.",
         ),
     )
@@ -556,23 +561,27 @@ def lab_tracker_accept_graph_draft_operations(
     """Accept a draft's proposals under the project owner's delegated-curation grant.
 
     Without operation_ids, POST /graph-drafts/{id}/accept-all accepts every valid
-    proposal the grant admits and leaves the rest proposed for a person; with
-    operation_ids, each is accepted individually (PATCH status=accepted) and one
-    outside the grant fails the call. The server refuses (403) unless the token was
-    minted at the Curate graph (delegated) level and the project has delegated
-    curation on; every accept is recorded as auto_accepted. Editing, rejecting, and
-    deferring are a person's verdicts. Only when the user asks.
+    proposal the grant admits and leaves the rest proposed for a person. With
+    operation_ids, each is accepted in turn (PATCH status=accepted) and the result
+    reports `accepted` (persisted, even if a later id is refused) and `refused` (the
+    id with the server's reason) side by side, plus the draft after the last accept;
+    an empty list is an error. The server refuses (403) unless the token was minted
+    at the Curate graph (delegated) level and the project has delegated curation on,
+    and never a proposal outside the grant or one a person already decided; every
+    accept is recorded as auto_accepted. Editing, rejecting, and deferring are a
+    person's verdicts. Only when the user asks.
     """
 
     def call(client: Any) -> JsonObject:
-        if not operation_ids:
+        if operation_ids is None:
             return client.accept_all_graph_draft_operations(change_set_id)
-        payload: JsonObject = {}
-        for operation_id in operation_ids:
-            payload = client.accept_graph_draft_operation(
-                change_set_id=change_set_id, operation_id=operation_id
+        if not operation_ids:
+            raise LabTrackerAPIValidationError(
+                "operation_ids must name at least one operation; omit it to accept "
+                "every proposal the grant admits.",
+                code="validation_error",
             )
-        return payload
+        return _accept_each(client, change_set_id, operation_ids)
 
     return _write_tool(
         "lab_tracker_accept_graph_draft_operations",
@@ -584,6 +593,32 @@ def lab_tracker_accept_graph_draft_operations(
             arguments={"change_set_id": change_set_id},
         ),
     )
+
+
+def _accept_each(client: Any, change_set_id: str, operation_ids: list[str]) -> JsonObject:
+    """Accept ids one by one; what persisted and what was refused both come back."""
+
+    accepted: list[str] = []
+    refused: list[JsonObject] = []
+    change_set: JsonObject | None = None
+    for operation_id in operation_ids:
+        try:
+            payload = client.accept_graph_draft_operation(
+                change_set_id=change_set_id, operation_id=operation_id
+            )
+        except LabTrackerAPIError as exc:
+            refused.append(
+                {
+                    "operation_id": operation_id,
+                    "code": exc.code or "lab_tracker_api_error",
+                    "message": str(exc),
+                    "status_code": exc.status_code,
+                }
+            )
+            continue
+        accepted.append(operation_id)
+        change_set = payload.get("data") if isinstance(payload, dict) else None
+    return {"data": {"accepted": accepted, "refused": refused, "change_set": change_set}}
 
 
 def lab_tracker_commit_graph_draft(change_set_id: str, message: str) -> JsonObject:

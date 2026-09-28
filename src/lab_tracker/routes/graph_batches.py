@@ -30,6 +30,7 @@ from lab_tracker.schemas import (
     ListEnvelope,
 )
 from lab_tracker.services.graph_draft_batch_policy import BatchReviewQuery, BatchRunQuery
+from lab_tracker.services.graph_draft_delegation import DELEGATED_CURATION_PROJECT_LEVEL_ONLY
 
 from .graph_draft_clients import (
     draft_client_factory_from_request as _draft_client_factory_from_request,
@@ -211,6 +212,11 @@ def build_graph_batches_router(api: LabTrackerAPI) -> APIRouter:
                 "Personal Daily Review settings resolve the authenticated user; "
                 "user_id is not accepted."
             )
+        # The grant lives on the project-default row alone, in every auth mode:
+        # an auth-disabled host routes this endpoint to that row, so refuse
+        # the field here rather than rely on the row's user_id.
+        if fields.keys() & {"delegated_curation", "delegated_curation_acknowledged"}:
+            raise ValidationError(DELEGATED_CURATION_PROJECT_LEVEL_ONLY)
         if personal_user_id is not None:
             fields["user_id"] = personal_user_id
         settings = api_from_request(request, api).update_graph_draft_batch_settings(

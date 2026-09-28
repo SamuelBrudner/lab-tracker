@@ -27,6 +27,7 @@ from test_graph_draft_batches import FakeBatchDraftClient, _note, _registered_us
 from test_graph_drafts import FakeDraftClient, _image_note, _project
 
 from lab_tracker.api import LabTrackerAPI
+from lab_tracker.app import create_app
 from lab_tracker.app_parts.middleware import system_auth_context
 from lab_tracker.auth import (
     PAT_SCOPE_ALL,
@@ -479,6 +480,33 @@ def test_personal_settings_rows_never_carry_a_grant(
         f"/projects/{project_id}/graph-draft-batch-settings", headers=admin_auth_headers
     ).json()["data"]
     assert personal_row["delegated_curation"] == "off"
+
+
+def test_personal_route_refuses_the_grant_even_with_auth_disabled(
+    monkeypatch, migrated_sqlite_database_url: str
+) -> None:
+    # An auth-disabled host routes the personal endpoint to the project-default
+    # row, so the refusal is the route's, not the row's.
+    monkeypatch.setenv("LAB_TRACKER_AUTH_ENABLED", "false")
+    with TestClient(create_app()) as local_client:
+        project_id = local_client.post("/projects", json={"name": "Local"}).json()["data"][
+            "project_id"
+        ]
+        refused = local_client.patch(
+            f"/projects/{project_id}/graph-draft-batch-settings",
+            json={"delegated_curation": "full", "delegated_curation_acknowledged": True},
+        )
+        assert refused.status_code == 422, refused.text
+        assert DELEGATED_CURATION_PROJECT_LEVEL_ONLY in refused.json()["error"]["message"]
+        current = local_client.get(_settings_path(project_id)).json()["data"]
+        assert current["delegated_curation"] == "off"
+        # The project-default endpoint still grants, as the owner's act.
+        granted = local_client.patch(
+            _settings_path(project_id),
+            json={"delegated_curation": "organize", "delegated_curation_acknowledged": True},
+        )
+        assert granted.status_code == 200, granted.text
+        assert granted.json()["data"]["delegated_curation"] == "organize"
 
 
 def test_grant_patch_rejects_malformed_consent_bodies(

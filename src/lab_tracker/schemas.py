@@ -1109,8 +1109,9 @@ class GraphDraftBatchSettingsUpdate(PatchRequestModel):
     # Consent is only ever given, never revoked through a patch: the literal
     # mirrors member onboarding's acknowledgement contract.
     external_provider_acknowledged: Literal[True] | SkipJsonSchema[None] = None
-    # Project-default rows only. Widening the grant (off -> organize -> full)
-    # needs the acknowledgement in the same request; narrowing never does.
+    # Project-default rows only. Any change to a value other than off (off ->
+    # organize, off -> full, organize <-> full) needs the acknowledgement in the
+    # same request; only turning the grant off never does.
     delegated_curation: DelegatedCurationPolicy | SkipJsonSchema[None] = None
     delegated_curation_acknowledged: Literal[True] | SkipJsonSchema[None] = None
 
