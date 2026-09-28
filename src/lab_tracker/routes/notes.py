@@ -16,7 +16,7 @@ from starlette.responses import Response, StreamingResponse
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.auth import AuthContext
 from lab_tracker.config import get_settings
-from lab_tracker.errors import ValidationError
+from lab_tracker.errors import NotFoundError, ValidationError
 from lab_tracker.graph_drafting import make_graph_draft_client
 from lab_tracker.models import (
     EntityOrigin,
@@ -33,6 +33,11 @@ from lab_tracker.note_text import (
     MAX_NOTE_TEXT_PREVIEW_CHARS,
 )
 from lab_tracker.patching import provided_fields
+from lab_tracker.photo_codes import (
+    PhotoCodeDecoder,
+    decoded_upload_metadata,
+    ensure_no_client_decoded_code_keys,
+)
 from lab_tracker.schemas import (
     Envelope,
     ListEnvelope,
@@ -140,6 +145,7 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         content_type = validate_upload_content_type(file.content_type)
         parsed_targets = parse_entity_refs_form(targets)
         parsed_metadata = device_capture_metadata(actor, parse_metadata_form(metadata))
+        ensure_no_client_decoded_code_keys(parsed_metadata)
         # Multipart captures carry no origin field: a person or a hook captured
         # the file, so the origin stays "user" while the token label is recorded.
         stamp = origin_stamp(actor, EntityOrigin.USER)
@@ -149,6 +155,9 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
             content_type=content_type,
         )
         enriched_metadata = source_file_metadata(asset, parsed_metadata)
+        enriched_metadata.update(
+            _decoded_photo_metadata(request, request_api, file, asset, project_id)
+        )
         result = request_api.upload_note_raw_result(
             project_id=project_id,
             raw_asset=asset,
@@ -199,6 +208,7 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         )
         content_type = validate_upload_content_type(file.content_type)
         parsed_metadata = device_capture_metadata(actor, parse_metadata_form(metadata))
+        ensure_no_client_decoded_code_keys(parsed_metadata)
         stamp = origin_stamp(actor, EntityOrigin.USER)
         asset = request_api.store_note_raw_asset(
             file.file,
@@ -206,6 +216,9 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
             content_type=content_type,
         )
         enriched_metadata = source_file_metadata(asset, parsed_metadata)
+        enriched_metadata.update(
+            _decoded_photo_metadata(request, request_api, file, asset, project_id)
+        )
         result = request_api.upload_note_raw_result(
             project_id=project_id,
             raw_asset=asset,
@@ -497,6 +510,41 @@ def _optional_epoch_ms(value: object) -> str | None:
     if milliseconds < 0:
         raise ValidationError("source_file_last_modified_ms must be non-negative.")
     return str(milliseconds)
+
+
+def _decoded_photo_metadata(
+    request: Request,
+    request_api: LabTrackerAPI,
+    upload: UploadFile,
+    asset: NoteRawAsset,
+    project_id: UUID,
+) -> dict[str, NoteMetadataScalar]:
+    """Best-effort QR/barcode metadata for an uploaded photo (never raises).
+
+    Deterministic, local decoding of machine-readable symbols, bounded by the
+    photo_codes byte/pixel limits and the configured time budget; see
+    docs/decoded-labels-and-file-headers.md. A decoded session resolves only
+    within the note's own project.
+    """
+
+    settings = getattr(request.app.state, "settings", None) or get_settings()
+    decoder = getattr(request.app.state, "photo_code_decoder", None)
+
+    def session_in_project(session_id: UUID) -> bool:
+        try:
+            session = request_api.get_session(session_id)
+        except NotFoundError:
+            return False
+        return session.project_id == project_id
+
+    return decoded_upload_metadata(
+        upload.file,
+        content_type=asset.content_type,
+        size_bytes=asset.size_bytes,
+        settings=settings,
+        session_in_project=session_in_project,
+        decoder=decoder if isinstance(decoder, PhotoCodeDecoder) else None,
+    )
 
 
 def _ensure_capture_project_writable(

@@ -9,7 +9,7 @@ reject:
   through the checksum of an uploaded dataset file; the earliest capture of
   a hash is the antecedent.
 * Exact id: when a note's own capture metadata names a session
-  (``watch_session_id``, ``capture_session_id``) or a git commit
+  (``watch_session_id``, ``capture_session_id``, ``photo_session_id``) or a git commit
   (``run_git_commit``, ``repo_git_commit``, ``hpc_git_commit``,
   ``git_commit``) that resolves to exactly one session or committed analysis
   ``code_version`` in the project. The note is the source, the named entity

@@ -111,6 +111,16 @@ that destination through your normal off-machine backup process.
   dataset files, and visualization assets (default: `104857600`, 100 MiB).
   Uploads that exceed the limit are rejected and partial local files are
   cleaned up.
+- `LAB_TRACKER_DECODE_PHOTO_CODES`: decode QR codes and barcodes in photo
+  uploads (`/notes/upload-file`, `/notes/quick-capture`) into
+  `decoded_session_link_code`, `photo_session_id`, `barcode_gs1_*`, and
+  `barcode_text` note metadata (default: `true`). It takes effect only when
+  the optional `decode` extra (`zxing-cpp`, Pillow) is installed; decoding is
+  local and deterministic (not OCR), sends nothing outside the instance, and
+  never fails or blocks an upload. Set `false` to turn it off.
+- `LAB_TRACKER_DECODE_PHOTO_CODES_TIMEOUT_SECONDS`: longest an upload waits for
+  its photo's decode before it proceeds without decoded metadata (default:
+  `1.5`; greater than `0` and at most `10`)
 
 ### Scoped store-authority grants
 
