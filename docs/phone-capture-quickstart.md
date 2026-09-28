@@ -61,6 +61,12 @@ URL for phone capture.
   uploads many photos at once as one group, with per-file progress and retry.
 - **Debrief.** Closing a session offers a one-button voice debrief (three
   prompts); **Skip** is one tap and never holds the close back.
+- **Photograph the label.** If the server has the optional `decode` extra, a
+  photo showing a session's `LT-<code>` or its capture QR proposes a link to
+  that session for review. A GS1 barcode on a reagent adds its GTIN, lot,
+  expiry, serial, and catalog number to the note. This is local barcode
+  decoding, not OCR, and it never blocks the upload. See
+  [decoded-labels-and-file-headers.md](decoded-labels-and-file-headers.md).
 
 ## Bench Shortcuts
 

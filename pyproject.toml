@@ -55,6 +55,10 @@ test = [
   "pytest-cov",
   "pytest-xdist",
   "pyld",
+  # Exercise the optional `decode` extra in CI (wheels exist for CPython
+  # 3.10-3.12+ on Linux, macOS, and Windows).
+  "zxing-cpp>=2.3",
+  "pillow",
 ]
 lint = [
   "mypy>=1.15,<3",
@@ -62,6 +66,12 @@ lint = [
 ]
 figure = [
   "matplotlib",
+  "pillow",
+]
+# Deterministic, local decoding of QR codes and barcodes in uploaded photos
+# (not OCR). Without it, uploads simply carry no decoded-code metadata.
+decode = [
+  "zxing-cpp>=2.3",
   "pillow",
 ]
 

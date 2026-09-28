@@ -55,6 +55,8 @@ BootstrapAdminTokenDisclosure = Literal["local", "first_run", "never"]
 DEFAULT_AUTH_SESSION_MAX_AGE_HOURS = 7 * 24
 MAX_AUTH_SESSION_MAX_AGE_HOURS = 365 * 24
 MAX_COMBINED_HOST_IO_IN_FLIGHT_LIMIT = 32
+# Upper bound on the per-photo QR/barcode decode budget an upload may wait for.
+MAX_DECODE_PHOTO_CODES_TIMEOUT_SECONDS = 10.0
 INSECURE_AUTH_SECRET_KEYS = {
     DEFAULT_AUTH_SECRET_KEY,
     "replace-with-a-strong-secret",
@@ -186,6 +188,10 @@ class Settings(BaseSettings):
         ),
     )
     auto_transcribe_voice_captures: bool = False
+    # Local, deterministic QR/barcode decoding on photo uploads (not OCR);
+    # a no-op unless the optional `decode` extra is installed.
+    decode_photo_codes: bool = True
+    decode_photo_codes_timeout_seconds: float = 1.5
     review_email_enabled: bool = False
     review_email_transport: Literal["external", "smtp"] = "external"
     review_email_worker_poll_seconds: float = 10.0
@@ -509,6 +515,12 @@ class Settings(BaseSettings):
             )
         if self.max_upload_bytes < 1:
             raise ValueError("LAB_TRACKER_MAX_UPLOAD_BYTES must be at least 1.")
+        decode_budget = self.decode_photo_codes_timeout_seconds
+        if not 0 < decode_budget <= MAX_DECODE_PHOTO_CODES_TIMEOUT_SECONDS:
+            raise ValueError(
+                "LAB_TRACKER_DECODE_PHOTO_CODES_TIMEOUT_SECONDS must be greater than 0 and at "
+                f"most {MAX_DECODE_PHOTO_CODES_TIMEOUT_SECONDS}."
+            )
         if self.backup_keep < 1:
             raise ValueError("LAB_TRACKER_BACKUP_KEEP must be at least 1.")
         if not 1 <= self.auth_session_max_age_hours <= MAX_AUTH_SESSION_MAX_AGE_HOURS:

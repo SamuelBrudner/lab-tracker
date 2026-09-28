@@ -51,6 +51,7 @@ from lab_tracker_client.client import (
     declared_targets,
 )
 from lab_tracker_client.evidence_index import outbox_note_index
+from lab_tracker_client.format_sniffers import watch_format_fields
 from lab_tracker_client.session_context import (
     find_session_link_code,
     read_active_session,
@@ -518,6 +519,8 @@ def event_from_file(
             "size_bytes": observation.size_bytes,
             "mtime": observation.mtime,
             **session.source_fields,
+            # Bounded, fail-soft instrument-header facts (format_kind, format_*).
+            **watch_format_fields(observation.path),
         },
         context={
             "project_id": _optional_str(project_id or config.project_id),
@@ -1534,7 +1537,9 @@ def _event_metadata(
         if source.get(key) is not None:
             metadata[f"watch_{key}"] = source[key]
     for key, value in source.items():
-        if str(key).startswith("git_") and isinstance(value, (str, bool, int, float)):
+        if str(key).startswith(("git_", "format_")) and isinstance(
+            value, (str, bool, int, float)
+        ):
             metadata[str(key)] = value
     host = payload.get("host") if isinstance(payload.get("host"), Mapping) else {}
     for key in CAPTURE_HOST_METADATA_KEYS:
