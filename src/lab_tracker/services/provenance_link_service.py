@@ -15,6 +15,11 @@ reject:
   ``code_version`` in the project. The note is the source, the named entity
   the target; ambiguous prefixes and targets the note already carries propose
   nothing.
+* Worktree tree: when a capture recorded the git tree of the working copy it
+  ran in (``capture_git_worktree_tree``, ``run_git_worktree_tree``,
+  ``hpc_git_worktree_tree``) and another note records that same tree as its
+  commit's own (``repo_git_tree``), the capture derives from the earliest such
+  commit note (see :mod:`lab_tracker.services.provenance_tree_matches`).
 
 Nothing is ever auto-committed: the detectors only write PROPOSED links, a
 pair already linked in any status (including rejected) is never re-proposed,
@@ -51,6 +56,11 @@ from lab_tracker.services.provenance_id_matches import (
     ID_MATCH_SESSION_METADATA_KEYS,
     IdMatch,
     id_matches_for_notes,
+)
+from lab_tracker.services.provenance_tree_matches import (
+    TREE_MATCH_METADATA_KEYS,
+    TreeMatch,
+    tree_matches_for_notes,
 )
 from lab_tracker.services.shared import actor_user_fk, actor_user_id
 
@@ -101,6 +111,19 @@ def id_match_proposals(matches: list[IdMatch]) -> list[_Proposal]:
             source=EntityRef(entity_type=EntityType.NOTE, entity_id=match.note_id),
             target=match.target,
             basis=ProvenanceLinkBasis.EXACT_ID_MATCH,
+        )
+        for match in matches
+    ]
+
+
+def tree_match_proposals(matches: list[TreeMatch]) -> list[_Proposal]:
+    """Capture note -> the commit note whose own tree the capture ran in."""
+
+    return [
+        _Proposal(
+            source=EntityRef(entity_type=EntityType.NOTE, entity_id=match.note_id),
+            target=EntityRef(entity_type=EntityType.NOTE, entity_id=match.commit_note_id),
+            basis=ProvenanceLinkBasis.WORKTREE_TREE_MATCH,
         )
         for match in matches
     ]
@@ -206,6 +229,32 @@ class ProvenanceLinkService(BaseService):
         )
         matches = id_matches_for_notes(notes, sessions=sessions, analyses=analyses)
         return self._save_new_proposals(project_id, id_match_proposals(matches), actor=actor)
+
+    def propose_links_from_tree_matches(
+        self,
+        project_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> int:
+        """Propose was_derived_from links from a capture to the commit it ran.
+
+        A note whose metadata records the git tree of its working copy
+        derives from the earliest *other* note in the project whose
+        ``repo_git_tree`` is the same tree id: the capture was made from
+        exactly that commit's code. Only full tree ids match, the first
+        worktree key that resolves wins, and the same idempotency rule as the
+        other detectors applies (a pair linked in any status is never
+        re-proposed). Always writes PROPOSED.
+        """
+
+        self.authorization.require_contributor(project_id, actor=actor)
+        notes = self.repository.provenance_links.list_identifier_carriers(
+            project_id, TREE_MATCH_METADATA_KEYS
+        )
+        matches = tree_matches_for_notes(notes)
+        if not matches:
+            return 0
+        return self._save_new_proposals(project_id, tree_match_proposals(matches), actor=actor)
 
     def _save_new_proposals(
         self,

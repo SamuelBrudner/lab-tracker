@@ -1343,10 +1343,14 @@ class ProvenanceLinkBasis(str, Enum):
     ``exact_id_match``: a capture's own metadata names exactly one session or
     committed analysis in the project (a session id, or a git commit that
     matches one committed ``code_version``).
+    ``worktree_tree_match``: a capture recorded the git tree of the working
+    copy it ran in, and a commit note records that same tree as its own: the
+    capture was made from exactly that commit's code.
     """
 
     CONTENT_HASH_MATCH = "content_hash_match"
     EXACT_ID_MATCH = "exact_id_match"
+    WORKTREE_TREE_MATCH = "worktree_tree_match"
 
 
 class ProvenanceLinkStatus(str, Enum):
