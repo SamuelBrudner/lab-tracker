@@ -85,9 +85,7 @@ def _configure(client: TestClient, **updates: Any) -> None:
 
 
 def _notes(client: TestClient, admin: dict[str, str], project_id: str) -> list[dict[str, Any]]:
-    response = client.get(
-        "/notes", params={"project_id": project_id, "limit": 200}, headers=admin
-    )
+    response = client.get("/notes", params={"project_id": project_id, "limit": 200}, headers=admin)
     assert response.status_code == 200, response.text
     return list(response.json()["data"])
 
@@ -351,7 +349,8 @@ def email_setup(client: TestClient, admin_auth_headers: dict[str, str]) -> Simpl
         ),
     )
     alice_address = (
-        "capture+" + capture_token(AUTH_SECRET, UUID(alice.user_id), UUID(project_id))
+        "capture+"
+        + capture_token(AUTH_SECRET, UUID(alice.user_id), UUID(project_id))
         + "@lab.example.org"
     )
     return SimpleNamespace(alice=alice, bob=bob, project_id=project_id, address=alice_address)
@@ -559,7 +558,9 @@ def test_booking_feed_upserts_system_authored_staged_notes(
         "body": _feed(
             _vevent("b1", "20260928T140000Z", "20260928T160000Z", "Alice - live imaging"),
             _vevent("far", "20261101T140000Z", "20261101T150000Z", "Too far out"),
-            _vevent("gone", "20260929T140000Z", "20260929T150000Z", "Cancelled", "STATUS:CANCELLED\r\n"),
+            _vevent(
+                "gone", "20260929T140000Z", "20260929T150000Z", "Cancelled", "STATUS:CANCELLED\r\n"
+            ),
         )
     }
     fetched: list[str] = []
@@ -623,8 +624,16 @@ def test_one_failing_feed_does_not_stop_the_next(
         client,
         booking_calendars=json.dumps(
             [
-                {"project_id": project_id, "url": "https://down.example.org/a.ics", "instrument": "A"},
-                {"project_id": project_id, "url": "https://up.example.org/b.ics", "instrument": "B"},
+                {
+                    "project_id": project_id,
+                    "url": "https://down.example.org/a.ics",
+                    "instrument": "A",
+                },
+                {
+                    "project_id": project_id,
+                    "url": "https://up.example.org/b.ics",
+                    "instrument": "B",
+                },
             ]
         ),
     )
@@ -673,7 +682,14 @@ def local_store(
     _configure(
         client,
         store_scans=json.dumps(
-            [{"project_id": project_id, "store": "lab-disk", "prefix": "flow", "patterns": ["*.fcs"]}]
+            [
+                {
+                    "project_id": project_id,
+                    "store": "lab-disk",
+                    "prefix": "flow",
+                    "patterns": ["*.fcs"],
+                }
+            ]
         ),
     )
     operations = BoundedLocalFilesystemOperations(
@@ -684,9 +700,7 @@ def local_store(
         project_id=project_id,
         root=root,
         allowed=allowed,
-        runtime=lambda: _runtime(
-            client, local_filesystem_operations=operations, clock=lambda: NOW
-        ),
+        runtime=lambda: _runtime(client, local_filesystem_operations=operations, clock=lambda: NOW),
     )
 
 
@@ -826,7 +840,14 @@ def test_rclone_store_scan_uses_the_bounded_executor_and_remote_policy(
     _configure(
         client,
         store_scans=json.dumps(
-            [{"project_id": project_id, "store": "lab-s3", "prefix": "flow", "include_existing": True}]
+            [
+                {
+                    "project_id": project_id,
+                    "store": "lab-s3",
+                    "prefix": "flow",
+                    "include_existing": True,
+                }
+            ]
         ),
     )
     payload = b"s3 object bytes"
@@ -954,9 +975,7 @@ def test_run_due_route_is_admin_only_and_accepts_the_scheduler_token(
     )
 
     assert as_admin.status_code == 200, as_admin.text
-    assert {poller["status"] for poller in as_admin.json()["data"]["pollers"]} == {
-        "not_configured"
-    }
+    assert {poller["status"] for poller in as_admin.json()["data"]["pollers"]} == {"not_configured"}
     assert as_editor.status_code == 403
     assert as_scheduler.status_code == 200, as_scheduler.text
 

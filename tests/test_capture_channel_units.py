@@ -140,7 +140,11 @@ def test_capture_channels_are_off_by_default() -> None:
             "https:// URL",
         ),
         (
-            {"store_scans": json.dumps([{"project_id": str(uuid4()), "store": "s", "prefix": "../x"}])},
+            {
+                "store_scans": json.dumps(
+                    [{"project_id": str(uuid4()), "store": "s", "prefix": "../x"}]
+                )
+            },
             "portable relative path",
         ),
         ({"integrations_poll_min_interval_seconds": 5}, "POLL_MIN_INTERVAL_SECONDS"),
@@ -182,7 +186,14 @@ def test_complete_capture_configuration_is_accepted(tmp_path) -> None:
             ]
         ),
         store_scans=json.dumps(
-            [{"project_id": project_id, "store": "lab-onedrive", "prefix": "flow/", "patterns": ["*.fcs"]}]
+            [
+                {
+                    "project_id": project_id,
+                    "store": "lab-onedrive",
+                    "prefix": "flow/",
+                    "patterns": ["*.fcs"],
+                }
+            ]
         ),
     )
     assert "s3cret" not in repr(settings)
@@ -346,7 +357,9 @@ def _calendar(*events: str) -> str:
 
 
 def test_ics_unfolds_continuation_lines() -> None:
-    assert unfold_lines("SUMMARY:Confocal booking for a very long\r\n  sample prep run\r\nUID:x") == [
+    assert unfold_lines(
+        "SUMMARY:Confocal booking for a very long\r\n  sample prep run\r\nUID:x"
+    ) == [
         "SUMMARY:Confocal booking for a very long sample prep run",
         "UID:x",
     ]
@@ -356,11 +369,11 @@ def test_ics_parses_utc_tzid_all_day_duration_and_escapes() -> None:
     text = _calendar(
         "BEGIN:VEVENT\r\nUID:utc-1\r\nDTSTART:20260928T140000Z\r\nDTEND:20260928T150000Z\r\n"
         "SUMMARY:Confocal\\, rig 2\\; imaging\\nsecond line\r\n"
-        "ORGANIZER;CN=\"Doe, Jane\":mailto:Jane.Doe@Lab.Example.org\r\nEND:VEVENT\r\n",
+        'ORGANIZER;CN="Doe, Jane":mailto:Jane.Doe@Lab.Example.org\r\nEND:VEVENT\r\n',
         "BEGIN:VEVENT\r\nUID:tz-1\r\nDTSTART;TZID=America/New_York:20260928T100000\r\n"
         "DURATION:PT1H30M\r\nSUMMARY:Local\r\nEND:VEVENT\r\n",
-        "BEGIN:VEVENT\r\nUID:win-1\r\nDTSTART;TZID=\"Eastern Standard Time\":20260929T090000\r\n"
-        "DTEND;TZID=\"Eastern Standard Time\":20260929T100000\r\nEND:VEVENT\r\n",
+        'BEGIN:VEVENT\r\nUID:win-1\r\nDTSTART;TZID="Eastern Standard Time":20260929T090000\r\n'
+        'DTEND;TZID="Eastern Standard Time":20260929T100000\r\nEND:VEVENT\r\n',
         "BEGIN:VEVENT\r\nUID:allday-1\r\nDTSTART;VALUE=DATE:20260930\r\nSUMMARY:Service\r\n"
         "END:VEVENT\r\n",
     )
@@ -513,10 +526,7 @@ def test_parse_email_extracts_sender_recipients_body_and_attachments() -> None:
 
 
 def test_parse_email_refuses_multiple_from_addresses() -> None:
-    raw = (
-        b"From: a@lab.example.org, b@lab.example.org\r\nTo: x@y.org\r\n"
-        b"Subject: s\r\n\r\nbody\r\n"
-    )
+    raw = b"From: a@lab.example.org, b@lab.example.org\r\nTo: x@y.org\r\nSubject: s\r\n\r\nbody\r\n"
     assert parse_email(raw).sender is None
 
 
