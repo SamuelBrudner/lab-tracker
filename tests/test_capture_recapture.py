@@ -14,6 +14,7 @@ import types
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -152,3 +153,124 @@ def test_bytes_captures_with_distinct_logical_ids_stay_distinct(
             )
             assert result.action in {"imported", "coalesced"}
     assert len(_notes(client, admin_auth_headers, project_id)) == 2
+
+
+class _Recording(httpx.BaseTransport):
+    """Delegates to the app while recording every request's method and path."""
+
+    def __init__(self, inner: httpx.BaseTransport) -> None:
+        self.inner = inner
+        self.requests: list[tuple[str, str]] = []
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append((request.method, request.url.path))
+        return self.inner.handle_request(request)
+
+
+def _curate(client: TestClient, headers: dict[str, str], note_id: str, curation: str) -> None:
+    if curation == "committed":
+        response = client.patch(f"/notes/{note_id}", json={"status": "committed"}, headers=headers)
+    else:
+        response = client.post(f"/notes/{note_id}/archive", json={}, headers=headers)
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["status"] == curation
+
+
+@pytest.mark.parametrize("curation", ["committed", "archived"])
+def test_a_curated_note_is_never_rewritten_by_a_capture(
+    client: TestClient, admin_auth_headers: dict[str, str], tmp_path: Path, curation: str
+) -> None:
+    """A person's commit or archive is final for automatic capture: unchanged
+    bytes coalesce with no write, and new bytes become a new staged note that
+    names the curated one, which stays exactly as the person left it."""
+
+    project_id = _project(client, admin_auth_headers, f"curated-{curation}")
+    target = tmp_path / "plot.png"
+    recorder = _Recording(client._transport)
+    lt = LabTracker(
+        base_url="http://testserver",
+        access_token=admin_auth_headers["Authorization"].split()[1],
+        transport=recorder,
+        default_project_id=project_id,
+    )
+    with lt:
+        first = savefig(FakeFigure(PNG), target, client=lt, project_id=project_id)
+        assert first.note is not None
+        curated_id = str(first.note["note_id"])
+        _curate(client, admin_auth_headers, curated_id, curation)
+        before = client.get(f"/notes/{curated_id}", headers=admin_auth_headers).json()["data"]
+        recorder.requests.clear()
+
+        unchanged = savefig(FakeFigure(PNG), target, client=lt, project_id=project_id)
+        figure_module._CAPTURE_NOTE_IDS.clear()  # a new process looks the note up
+        changed = savefig(FakeFigure(PNG + b"new"), target, client=lt, project_id=project_id)
+        again = savefig(FakeFigure(PNG + b"new"), target, client=lt, project_id=project_id)
+
+    assert (unchanged.action, unchanged.errors) == ("coalesced", [])
+    assert unchanged.note is not None and str(unchanged.note["note_id"]) == curated_id
+    assert (changed.action, changed.reason, changed.errors) == (
+        "imported",
+        figure_module.CAPTURE_REVISION_REASON,
+        [],
+    )
+    assert changed.client_capture_id == f"figure:plot.png:{changed.content_hash[:12]}"
+    assert (again.action, again.errors) == ("coalesced", [])
+    assert changed.note is not None and again.note is not None
+    assert again.note["note_id"] == changed.note["note_id"] != curated_id
+    # The capture never wrote the curated note.
+    assert not [request for request in recorder.requests if request[0] == "PATCH"]
+    after = client.get(f"/notes/{curated_id}", headers=admin_auth_headers).json()["data"]
+    assert after == before
+    notes = {note["note_id"]: note for note in _notes(client, admin_auth_headers, project_id)}
+    assert set(notes) == {curated_id, changed.note["note_id"]}
+    revision = notes[changed.note["note_id"]]
+    assert revision["status"] == "staged"
+    assert revision["client_capture_id"] == changed.client_capture_id
+    assert revision["metadata"]["supersedes_capture_note_id"] == curated_id
+    assert revision["metadata"]["supersedes_capture_note_status"] == curation
+    assert revision["metadata"]["evidence_content_hash"] == changed.content_hash
+
+
+def test_a_replayed_curated_note_is_left_alone_on_the_200_path(tmp_path: Path) -> None:
+    """The exact-replay answer (200) for a committed note takes the same rule."""
+
+    import hashlib
+
+    requests: list[tuple[str, str, str]] = []
+    old_hash = hashlib.sha256(PNG).hexdigest()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = request.content
+        capture_id = ""
+        if b'name="client_capture_id"' in body:
+            chunk = body.split(b'name="client_capture_id"', 1)[1].split(b"\r\n\r\n", 1)[1]
+            capture_id = chunk.split(b"\r\n--", 1)[0].decode()
+        requests.append((request.method, request.url.path, capture_id))
+        if request.method == "POST" and capture_id == "figure:plot.png":
+            curated = {
+                "note_id": "note-curated",
+                "status": "committed",
+                "client_capture_id": capture_id,
+                "metadata": {"evidence_content_hash": old_hash},
+            }
+            return httpx.Response(200, json={"data": curated})
+        if request.method == "POST":
+            return httpx.Response(
+                201, json={"data": {"note_id": "note-revision", "status": "staged"}}
+            )
+        return httpx.Response(500, json={"error": {"message": "unexpected"}})
+
+    with LabTracker(
+        base_url="http://testserver",
+        default_project_id="project-1",
+        transport=httpx.MockTransport(handler),
+    ) as lt:
+        unchanged = savefig(FakeFigure(PNG), tmp_path / "plot.png", client=lt)
+        changed = savefig(FakeFigure(PNG + b"new"), tmp_path / "plot.png", client=lt)
+
+    assert unchanged.action == "coalesced"
+    assert changed.action == "imported"
+    assert changed.reason == figure_module.CAPTURE_REVISION_REASON
+    assert [request[0] for request in requests] == ["POST", "POST", "POST"]
+    assert requests[2][2] == f"figure:plot.png:{changed.content_hash[:12]}"
+    assert changed.metadata["supersedes_capture_note_id"] == "note-curated"
