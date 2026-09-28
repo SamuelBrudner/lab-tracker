@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import lab_tracker_client.auth as auth_helpers
+import lab_tracker_client.autotrack_setup as autotrack_setup
 import lab_tracker_client.figure_autotrack as autotrack_helpers
 import lab_tracker_client.git_capture as git_capture
 import lab_tracker_client.hooks as hook_install
@@ -479,6 +480,22 @@ def _add_setup_parsers(subcommands: argparse._SubParsersAction) -> None:
     )
     autotrack_parser.add_argument(
         "--yes", action="store_true", help="Consent to writing the IPython startup file."
+    )
+    autotrack_parser.add_argument(
+        "--jupyter",
+        action="store_true",
+        help=(
+            "Instead, enable the Jupyter Server save hook: each bound notebook's saves "
+            "become one staged lab-notebook page per day."
+        ),
+    )
+    autotrack_parser.add_argument(
+        "--scripts",
+        action="store_true",
+        help=(
+            "Instead, add a .pth file to this Python environment so plain scripts "
+            "capture figures they save or plt.show()."
+        ),
     )
     autotrack_parser.set_defaults(func=_cmd_setup_autotrack, needs_client=False)
 
@@ -1935,6 +1952,14 @@ def _cmd_watch_run(client: LabTracker, args: argparse.Namespace) -> Any:
 
 
 def _cmd_setup_autotrack(args: argparse.Namespace) -> Any:
+    if args.jupyter or args.scripts:
+        return autotrack_setup.setup_autotrack_targets(
+            jupyter=args.jupyter,
+            scripts=args.scripts,
+            yes=args.yes,
+            dry_run=args.dry_run,
+            uninstall=args.uninstall,
+        )
     if not (args.yes or args.dry_run):
         raise SystemExit(
             "lt setup autotrack writes an IPython startup file; "
