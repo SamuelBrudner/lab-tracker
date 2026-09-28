@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 import httpx
@@ -273,14 +274,100 @@ def test_hpc_begin_and_finish_carry_the_worktree_tree_to_the_note(
     assert f"- Git worktree tree: `{tree}`" in hpc_capture.render_event_note(begin)
 
 
-def test_hpc_submit_events_are_unchanged(repo: Path, tmp_path: Path) -> None:
+_SLURM_ENV = ("SLURM_JOB_ID", "SLURM_ARRAY_JOB_ID", "SLURM_ARRAY_TASK_ID", "SLURM_SUBMIT_DIR")
+
+
+def _submit_job(repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    for name in _SLURM_ENV:
+        monkeypatch.delenv(name, raising=False)
+    config = hpc_capture.init_config(
+        project_id="project-1",
+        cluster="test-cluster",
+        outbox=str(tmp_path / "hpc-outbox"),
+        config_path=repo / ".lab-tracker" / "hpc.json",
+    )
+    # An older job's log in the submit folder is not code either.
+    (repo / "slurm-1.out").write_text("old job\n", encoding="utf-8")
+    result = hpc_capture.run_submit_command(
+        config, [sys.executable, "-c", "print('Submitted batch job 4242')"], cwd=repo
+    )
+    return config, result
+
+
+def test_hpc_submit_records_the_code_tree_before_sbatch(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (repo / "analysis.py").write_text("print('submitted edit')\n", encoding="utf-8")
+    expected = gitinfo.worktree_tree_id(repo, exclude=[repo / "slurm-1.out"]).tree
+
+    config, result = _submit_job(repo, tmp_path, monkeypatch)
+
+    submit = json.loads(Path(result["event_path"]).read_text(encoding="utf-8"))
+    manifest = json.loads(Path(result["run_manifest"]).read_text(encoding="utf-8"))
+    assert expected and expected != _head_tree(repo)
+    assert submit["source"]["git_worktree_tree"] == expected
+    assert manifest["git_worktree_tree"] == expected
+    metadata = hpc_capture.event_metadata(
+        submit, source_uri="file:///e.json", source_external_id="x", content_hash="0" * 64
+    )
+    assert metadata["hpc_git_worktree_tree"] == expected
+
+
+def test_begin_finish_and_epilog_reuse_the_submitted_tree(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (repo / "analysis.py").write_text("print('submitted edit')\n", encoding="utf-8")
+    config, result = _submit_job(repo, tmp_path, monkeypatch)
+    submitted = json.loads(Path(result["event_path"]).read_text())["source"]["git_worktree_tree"]
+    # The job runs later: the code moved on, and Slurm's output file grows.
+    (repo / "analysis.py").write_text("print('edited after submit')\n", encoding="utf-8")
+    (repo / "slurm-4242.out").write_text("step 1 of 3\n", encoding="utf-8")
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("SLURM_JOB_ID", "4242")
+    monkeypatch.setenv("SLURM_SUBMIT_DIR", str(repo))
+
+    begin, _ = hpc_capture.begin_event(config)
+    (repo / "slurm-4242.out").write_text("step 1 of 3\ndone\n", encoding="utf-8")
+    finish, _ = hpc_capture.finish_event(config, exit_code=0, logs=[repo / "slurm-4242.out"])
+    epilog = hpc_capture.epilog_finish(exit_code=0)
+
+    assert begin["run_id"] == result["run_id"] == finish["run_id"]
+    assert begin["source"]["git_worktree_tree"] == submitted
+    assert finish["source"]["git_worktree_tree"] == submitted
+    # The job already finished itself, so the epilog leaves that record alone.
+    assert epilog["action"] == "already_finished"
+
+
+def test_the_epilog_reuses_the_submitted_tree_from_the_outbox(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, result = _submit_job(repo, tmp_path, monkeypatch)
+    submitted = json.loads(Path(result["event_path"]).read_text())["source"]["git_worktree_tree"]
+    Path(result["run_manifest"]).unlink()
+    (repo / "analysis.py").write_text("print('edited after submit')\n", encoding="utf-8")
+
+    finish, _ = hpc_capture.finish_event(
+        config, run_id=result["run_id"], exit_code=0, cwd=repo, outbox=Path(result["outbox"])
+    )
+
+    assert finish["source"]["git_worktree_tree"] == submitted
+
+
+def test_a_job_without_a_submitted_tree_leaves_its_own_output_out(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in _SLURM_ENV:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.chdir(repo)
+    (repo / "slurm-77.out").write_text("growing log\n", encoding="utf-8")
     config = hpc_capture.HpcConfig(
         project_id="project-1", cluster="test-cluster", outbox=str(tmp_path / "hpc-outbox")
     )
 
-    event = hpc_capture.make_event(config, event_type="submit", run_id="run-1", cwd=repo)
+    begin, _ = hpc_capture.begin_event(config, run_id="run-direct")
 
-    assert "git_worktree_tree" not in event["source"]
+    assert begin["source"]["git_worktree_tree"] == _head_tree(repo)
+    assert gitinfo.worktree_tree_id(repo).tree != _head_tree(repo)
 
 
 # --- repo -----------------------------------------------------------------------
