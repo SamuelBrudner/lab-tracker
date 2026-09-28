@@ -21,6 +21,9 @@ profile:
 Like every setup verb that writes outside the repository, this is consent
 gated at the CLI layer (``--dry-run`` shows a diff, ``--yes`` applies,
 ``--uninstall`` removes the block and leaves the rest of the file untouched).
+A profile that is a symlink (a dotfiles repository) is edited at its final
+target, atomically in the target's own directory; the link itself is never
+replaced or deleted, and a dangling link is refused.
 """
 
 from __future__ import annotations
@@ -163,22 +166,23 @@ def rprofile_status() -> JsonObject:
     """Read-only state of the managed block (for ``lt setup status``)."""
 
     path = rprofile_path()
+    target = path
     installed = False
     current: bool | None = None
     with_error: str | None = None
-    if path.exists():
-        try:
-            content = path.read_text(encoding="utf-8")
+    try:
+        target = profile_target(path)
+        if target.exists():
+            content = target.read_text(encoding="utf-8")
             span = _block_span(content, path)
-        except (OSError, UnicodeDecodeError, LTValidationError) as exc:
-            with_error = str(exc)
-            span = None
-        else:
             installed = span is not None
             if span is not None:
                 current = content[span[0] : span[1]] == rprofile_block()
+    except (OSError, UnicodeDecodeError, LTValidationError) as exc:
+        with_error = str(exc)
     status: JsonObject = {
         "rprofile": str(path),
+        "rprofile_target": str(target),
         "installed": installed,
         "up_to_date": current,
         "r_source": str(shipped_r_source()),
@@ -199,12 +203,16 @@ def install_rprofile(*, dry_run: bool = False, uninstall: bool = False) -> JsonO
     """
 
     path = rprofile_path()
-    existing = path.read_text(encoding="utf-8") if path.exists() else ""
+    # A dotfiles-managed profile is a symlink: every read and write goes to
+    # the file it points at, so the link itself is never replaced or removed.
+    target = profile_target(path)
+    existing = target.read_text(encoding="utf-8") if target.exists() else ""
     span = _block_span(existing, path)
     payload: JsonObject = {
         "command": "setup-autotrack",
         "language": "r",
         "rprofile": str(path),
+        "rprofile_target": str(target),
         "r_source": str(shipped_r_source()),
         "dry_run": dry_run,
     }
@@ -230,19 +238,48 @@ def install_rprofile(*, dry_run: bool = False, uninstall: bool = False) -> JsonO
         difflib.unified_diff(
             existing.splitlines(keepends=True),
             updated.splitlines(keepends=True),
-            fromfile=str(path),
-            tofile=str(path),
+            fromfile=str(target),
+            tofile=str(target),
         )
     )
     if dry_run:
         return payload
-    if uninstall and not updated.strip():
-        # Only the block was ever in the file (this command created it).
-        path.unlink()
+    if uninstall and not updated.strip() and target == path:
+        # Only the block was ever in the file (this command created it). A
+        # symlinked profile is emptied instead: deleting its target would
+        # leave the link dangling, and the link is never deleted.
+        target.unlink()
         payload["file_removed"] = True
         return payload
-    _write_text_atomic(path, updated)
+    _write_text_atomic(target, updated)
     return payload
+
+
+def profile_target(path: Path) -> Path:
+    """The file to edit for the profile at ``path``: the final target of a symlink.
+
+    A plain path (existing or not) is returned unchanged. A symlink that
+    points nowhere, or at a loop, is refused: writing through it would
+    create a file somewhere the person never chose.
+    """
+
+    if not path.is_symlink():
+        return path
+    try:
+        target = path.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        destination = os.readlink(path)
+        raise LTValidationError(
+            f"{path} is a symlink to {destination}, which does not exist or cannot be "
+            f"resolved ({exc}). Point the link at an existing file (or remove it), then "
+            "re-run `lt setup autotrack --r`."
+        ) from exc
+    if not target.is_file():
+        raise LTValidationError(
+            f"{path} is a symlink to {target}, which is not a regular file; "
+            "`lt setup autotrack --r` edits only a file."
+        )
+    return target
 
 
 def _with_block_appended(existing: str, block: str) -> str:
@@ -280,6 +317,7 @@ __all__ = [
     "RPROFILE_BEGIN",
     "RPROFILE_END",
     "install_rprofile",
+    "profile_target",
     "recorded_lt_path",
     "rprofile_block",
     "rprofile_path",

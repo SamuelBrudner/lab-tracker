@@ -36,7 +36,10 @@ The block goes into the file R reads as the user profile:
 `HOME`, else the Documents folder). It is delimited by
 `# --- BEGIN LAB TRACKER AUTOTRACK ...` / `# --- END LAB TRACKER AUTOTRACK ---`
 lines; everything outside them is left as it was, and a damaged pair of
-markers is refused rather than guessed around. A `.Rprofile` in the folder R
+markers is refused rather than guessed around. A profile that is a symlink
+(for example into a dotfiles repository) is edited at the file it points to,
+which the command reports as `rprofile_target`; the link itself is never
+replaced or deleted, and a link that points nowhere is refused. A `.Rprofile` in the folder R
 starts in replaces the user profile for that session (an RStudio project's
 own `.Rprofile`, for example); add `source("~/.Rprofile")` to it if you want
 both. `lt setup status` reports the block (`autotrack_r`) and whether it is
