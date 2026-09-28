@@ -159,13 +159,14 @@ test_that("a device call that fails records nothing and the error is the user's 
 test_that("background captures do not block the session", {
   fx <- local_autotrack()
   withr::local_options(list(labtracker.autotrack.wait = FALSE))
-  withr::local_envvar(FAKE_LT_SLEEP = "2", FAKE_LT_NOTICE = "background notice")
+  # The stand-in takes 5 s; a save that waited for it could not return in 4.
+  withr::local_envvar(FAKE_LT_SLEEP = "5", FAKE_LT_NOTICE = "background notice")
   started <- Sys.time()
   save_plot(grDevices::png, file.path(fx$dir, "bg.png"))
-  expect_lt(as.numeric(difftime(Sys.time(), started, units = "secs")), 1.5)
+  expect_lt(as.numeric(difftime(Sys.time(), started, units = "secs")), 4)
   expect_length(lt$.lt_state$pending, 1L)
 
-  deadline <- Sys.time() + 20
+  deadline <- Sys.time() + 60
   shown <- FALSE
   while (!shown && Sys.time() < deadline) {
     shown <- length(testthat::capture_messages(lt$.lt_poll())) > 0L
