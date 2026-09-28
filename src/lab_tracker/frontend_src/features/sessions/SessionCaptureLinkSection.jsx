@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { useApiResource } from "../../hooks/useApiResource.js";
+import { kioskRoute } from "../bench-capture/KioskLaunchPanel.jsx";
 import { NfcTagWriter } from "../bench-capture/NfcTagWriter.jsx";
 
 function captureRoute(session) {
@@ -53,6 +54,15 @@ function SessionCaptureLinkSection({ token, session, navigate }) {
           onClick={() => navigate(captureRoute(session))}
         >
           Capture on this device
+        </button>
+        <button
+          type="button"
+          className="btn-secondary"
+          onClick={() =>
+            navigate(kioskRoute({ projectId: session.project_id, sessionId: session.session_id }))
+          }
+        >
+          Open bench kiosk
         </button>
       </div>
     </section>

@@ -3,7 +3,9 @@ import * as React from "react";
 import { auth as authGateway } from "../shared/gateways/index.js";
 import { formatDate } from "../shared/formatters.js";
 import { BookmarkletPanel } from "./bench-capture/BookmarkletPanel.jsx";
+import { EmailCapturePanel } from "./bench-capture/EmailCapturePanel.jsx";
 import { HandsFreeShortcutPanel } from "./bench-capture/HandsFreeShortcutPanel.jsx";
+import { KioskLaunchPanel } from "./bench-capture/KioskLaunchPanel.jsx";
 
 const { useCallback, useEffect, useState } = React;
 
@@ -185,7 +187,11 @@ function DevicesPage({
         onCredentialCreated={refresh}
       />
 
+      <KioskLaunchPanel navigate={navigate} selectedProjectId={selectedProjectId} />
+
       <BookmarkletPanel />
+
+      <EmailCapturePanel token={token} selectedProjectId={selectedProjectId} />
     </article>
   );
 }

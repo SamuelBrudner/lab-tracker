@@ -54,13 +54,16 @@ function sessionRoutes(session = ACTIVE_SESSION) {
   ];
 }
 
-function renderDetail({ onCloseSession = vi.fn(async () => CLOSED_SESSION) } = {}) {
+function renderDetail({
+  onCloseSession = vi.fn(async () => CLOSED_SESSION),
+  navigate = vi.fn(),
+} = {}) {
   render(
     <SessionDetailCard
       token="token-1"
       sessionId="session-1"
       projects={[{ name: "Project One", project_id: "project-1" }]}
-      navigate={vi.fn()}
+      navigate={navigate}
       onSetActiveProject={vi.fn()}
       user={{ role: "editor", user_id: "user-1" }}
       canWrite={true}
@@ -68,7 +71,7 @@ function renderDetail({ onCloseSession = vi.fn(async () => CLOSED_SESSION) } = {
       onPromoteSession={vi.fn(async () => null)}
     />
   );
-  return { onCloseSession };
+  return { onCloseSession, navigate };
 }
 
 afterEach(() => {
@@ -134,6 +137,17 @@ describe("SessionDetailCard bench capture", () => {
 
     expect(await screen.findByRole("button", { name: "Write NFC tag" })).toBeInTheDocument();
     expect(screen.getByText(`${CAPTURE_URL}&capture_channel=nfc`)).toBeInTheDocument();
+  });
+
+  it("opens the bench kiosk preselected for this session", async () => {
+    installFetchMock(sessionRoutes());
+    const { navigate } = renderDetail();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open bench kiosk" }));
+
+    expect(navigate).toHaveBeenCalledWith(
+      "/app/capture?kiosk=1&project_id=project-1&session_id=session-1"
+    );
   });
 });
 

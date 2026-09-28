@@ -748,6 +748,20 @@ function AgentAccessPage({
                     files. <code>lt setup status</code> reports the final local
                     state.
                   </p>
+                  <p className="subtle">
+                    Optional capture, each previewed with <code>--dry-run</code>{" "}
+                    and applied with <code>--yes</code>:{" "}
+                    <code>lt setup autotrack</code> captures figures notebooks
+                    save or display (<code>--jupyter</code>,{" "}
+                    <code>--scripts</code>, and <code>--r</code> extend it to
+                    notebook pages, plain scripts, and R),{" "}
+                    <code>lt setup schedule</code> syncs watch folders on a
+                    timer, and <code>lt setup agent-hooks</code> keeps
+                    coding-agent session retrospectives. With no setup,{" "}
+                    <code>lt run -- &lt;command&gt;</code> records an analysis
+                    run and <code>lt pipeline report</code> records a pipeline
+                    run. The installed setup skill walks through each one.
+                  </p>
                 </>
               ) : (
                 <p className="warn">
