@@ -10,6 +10,7 @@ import { GoalDetailCard } from "./features/goals/GoalDetailCard.jsx";
 import { ProjectGraphExplorer } from "./features/project-graph.jsx";
 import { VisualizationDetailCard } from "./features/analysis/VisualizationDetailCard.jsx";
 import { DatasetDetailCard } from "./features/datasets/index.js";
+import { KioskCaptureCard, isKioskSearch } from "./features/bench-capture/KioskCapture.jsx";
 import { MobileCaptureCard } from "./features/mobile-capture.jsx";
 import { MemberOnboardingPage } from "./features/member-onboarding.jsx";
 import { NoteDetailCard } from "./features/notes.jsx";
@@ -57,6 +58,8 @@ function App({ onReloadForUpdate = null }) {
       return "";
     }
   })();
+  // `/app/capture?kiosk=1`: the bench scan station, with no app chrome.
+  const isKioskCapture = route.kind === "capture" && isKioskSearch();
   const needsProjectData =
     isHomeRoute || route.kind === "capture" || route.kind === "batches" || isMemberOnboardingRoute;
   const [busy, setBusy] = React.useState(false);
@@ -322,15 +325,17 @@ function App({ onReloadForUpdate = null }) {
     <div
       className={`app-shell${isCaptureRoute ? " capture-app-shell" : ""}${
         isFocusedReviewRoute ? " review-app-shell" : ""
-      }`}
+      }${isKioskCapture ? " kiosk-app-shell" : ""}`}
     >
-      <AppHeader
-        activeKind={route.kind}
-        authEnabled={auth.authEnabled}
-        navigate={navigate}
-        user={auth.user}
-        onLogout={auth.handleLogout}
-      />
+      {isKioskCapture ? null : (
+        <AppHeader
+          activeKind={route.kind}
+          authEnabled={auth.authEnabled}
+          navigate={navigate}
+          user={auth.user}
+          onLogout={auth.handleLogout}
+        />
+      )}
 
       <UpdateAvailableBanner onReload={onReloadForUpdate} />
       <FlashMessages message={message} error={error} />
@@ -341,7 +346,9 @@ function App({ onReloadForUpdate = null }) {
         </p>
       ) : null}
       <PendingUploadsBadge />
-      <PendingBatchBanner enabled={apiEnabled} token={auth.token} navigate={navigate} />
+      {isKioskCapture ? null : (
+        <PendingBatchBanner enabled={apiEnabled} token={auth.token} navigate={navigate} />
+      )}
 
       {!auth.authChecked ? (
         <section className="grid">
@@ -386,7 +393,19 @@ function App({ onReloadForUpdate = null }) {
         </section>
       ) : (
         <section className="grid">
-          {isCaptureRoute && contextualProjectReady ? (
+          {isKioskCapture && contextualProjectReady ? (
+            <KioskCaptureCard
+              token={auth.token}
+              ownerId={ownerId}
+              authEnabled={auth.authEnabled}
+              canWrite={canContributeToProject}
+              projects={workspaceData.projects}
+              selectedProjectId={captureProjectId || workspaceData.selectedProjectId}
+              onSelectedProjectChange={workspaceData.setSelectedProjectId}
+              sessions={sessionData.sessions}
+              navigate={navigate}
+            />
+          ) : isCaptureRoute && contextualProjectReady ? (
             <MobileCaptureCard
               token={auth.token}
               ownerId={ownerId}
@@ -440,7 +459,8 @@ function App({ onReloadForUpdate = null }) {
                 role: selectedProjectRole,
               }}
             />
-          ) : route.kind === "graph" ||
+          ) : isKioskCapture ||
+            route.kind === "graph" ||
             isFocusedReviewRoute ||
             route.kind === "setup" ||
             isMemberOnboardingRoute ? null : (
@@ -496,6 +516,8 @@ function App({ onReloadForUpdate = null }) {
               canWrite={Boolean(auth.user)}
               navigate={navigate}
               setFlash={setFlash}
+              projects={workspaceData.projects}
+              selectedProjectId={workspaceData.selectedProjectId}
             />
           ) : null}
 

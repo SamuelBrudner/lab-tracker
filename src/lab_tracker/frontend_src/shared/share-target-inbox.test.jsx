@@ -115,6 +115,44 @@ describe("migrateIncomingShares", () => {
     ]);
   });
 
+  it("carries declared targets and extra metadata onto text and file shares", async () => {
+    const storage = createMemoryShareStorage([
+      { text: "shared text", receivedAt: 1 },
+      { file: makeFile(), filename: "shared.jpg", contentType: "image/jpeg", receivedAt: 2 },
+    ]);
+    const createTextNote = vi.fn(async () => ({ note_id: "note-share" }));
+    const uploadQueue = makeQueue();
+    const targets = [{ entity_id: "session-1", entity_type: "session" }];
+
+    const result = await migrateIncomingShares({
+      createTextNote,
+      projectId: "proj-a",
+      ownerId: "owner-1",
+      uploadQueue,
+      storage,
+      shareIds: await reviewedIds(storage),
+      targets,
+      extraMetadata: { capture_channel: "share" },
+    });
+
+    expect(result).toEqual({ migrated: 2, skipped: 0 });
+    expect(createTextNote).toHaveBeenCalledWith(
+      expect.objectContaining({
+        metadata: expect.objectContaining({
+          capture_channel: "share",
+          capture_source: "share_target",
+        }),
+        targets,
+      })
+    );
+    const [queued] = await uploadQueue.listPending();
+    expect(JSON.parse(queued.fields.targets)).toEqual(targets);
+    expect(JSON.parse(queued.fields.metadata)).toMatchObject({
+      capture_channel: "share",
+      capture_source: "share_target",
+    });
+  });
+
   it("refuses to import without an explicit list of reviewed shares", async () => {
     const storage = createMemoryShareStorage([{ text: "unreviewed", receivedAt: 1 }]);
     const createTextNote = vi.fn();
@@ -284,6 +322,8 @@ describe("migrateIncomingShares", () => {
         title: "Paper link",
         url: "https://example.test/protocol",
       }),
+      // A reviewed share declares no targets unless a trusted window names one.
+      targets: [],
     });
   });
 

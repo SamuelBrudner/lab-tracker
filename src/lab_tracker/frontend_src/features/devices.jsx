@@ -2,10 +2,19 @@ import * as React from "react";
 
 import { auth as authGateway } from "../shared/gateways/index.js";
 import { formatDate } from "../shared/formatters.js";
+import { BookmarkletPanel } from "./bench-capture/BookmarkletPanel.jsx";
+import { HandsFreeShortcutPanel } from "./bench-capture/HandsFreeShortcutPanel.jsx";
 
 const { useCallback, useEffect, useState } = React;
 
-function DevicesPage({ token, canWrite, navigate, setFlash }) {
+function DevicesPage({
+  token,
+  canWrite,
+  navigate,
+  setFlash,
+  projects = [],
+  selectedProjectId = "",
+}) {
   const [devices, setDevices] = useState([]);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
@@ -166,6 +175,17 @@ function DevicesPage({ token, canWrite, navigate, setFlash }) {
           ))}
         </ul>
       )}
+
+      <HandsFreeShortcutPanel
+        token={token}
+        canWrite={canWrite}
+        projects={projects}
+        selectedProjectId={selectedProjectId}
+        setFlash={setFlash}
+        onCredentialCreated={refresh}
+      />
+
+      <BookmarkletPanel />
     </article>
   );
 }

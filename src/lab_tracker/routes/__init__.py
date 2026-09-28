@@ -49,6 +49,7 @@ from .sessions import build_sessions_router
 from .supervision import build_supervision_router
 from .usage_events import build_usage_events_router
 from .visualizations import build_visualizations_router
+from .voice_capture import build_voice_capture_router
 
 
 def register_routes(
@@ -96,6 +97,7 @@ def register_routes(
     app.include_router(build_evidence_bundles_router(api))
     app.include_router(build_dataset_files_router(api))
     app.include_router(build_notes_router(api))
+    app.include_router(build_voice_capture_router(api))
     app.include_router(build_member_onboarding_router(api))
     app.include_router(build_graph_drafts_router(api))
     app.include_router(build_graph_batches_router(api))
