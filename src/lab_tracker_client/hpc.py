@@ -6,7 +6,9 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
+import sys
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -40,6 +42,7 @@ from lab_tracker_client.gitinfo import (
     git_timeout_seconds,
     head_commit_fields,
 )
+from lab_tracker_client.redaction import redact_capture_text
 
 CONFIG_VERSION = 1
 EVENT_VERSION = 1
@@ -51,6 +54,15 @@ HPC_EVIDENCE_ADAPTER = "lt-hpc"
 ALLOWED_EVENT_TYPES = {"submit", "begin", "finish"}
 TERMINAL_SYNC_STATES = {"synced"}
 _UTF8_MAX_BYTES_PER_CHAR = 4
+# ``lt hpc submit`` records each accepted job's run in the submit directory
+# (``<submit dir>/.lab-tracker/hpc-runs/job-<id>.json``) so a job started with
+# ``--export=NONE`` -- and the TaskEpilog -- can find its run from Slurm's own
+# ``SLURM_SUBMIT_DIR`` and ``SLURM_JOB_ID`` alone.
+SUBMIT_MANIFEST_DIR = Path(".lab-tracker") / "hpc-runs"
+SUBMIT_MANIFEST_VERSION = 1
+SUBMIT_MANIFEST_KIND = "lab-tracker-hpc-submit"
+EPILOG_ENABLED_ENV = "LAB_TRACKER_HPC_EPILOG_ENABLED"
+_OFF_VALUES = frozenset({"0", "false", "no", "off"})
 
 
 JsonObject = dict[str, Any]
@@ -150,6 +162,14 @@ def find_config_path(start: str | Path | None = None) -> Path | None:
         candidate = parent / DEFAULT_CONFIG_RELATIVE_PATH
         if candidate.exists():
             return candidate
+    if start is None:
+        # Inside a job started with --export=NONE (no LAB_TRACKER_HPC_CONFIG)
+        # whose working directory is outside the checkout: the submit
+        # manifest names the config the job was submitted with.
+        manifest = find_submit_manifest()
+        configured = _optional_str(manifest.get("config")) if manifest else None
+        if configured and Path(configured).expanduser().exists():
+            return Path(configured).expanduser().resolve()
     return None
 
 
@@ -480,10 +500,9 @@ def run_submit_command(
         cwd=str(Path(cwd).expanduser().resolve()) if cwd else None,
         env=env,
     )
-    parsed_job = parse_sbatch_job(
-        "\n".join([result.stdout, result.stderr]),
-        fallback_cluster=config.cluster,
-    )
+    sbatch_output = "\n".join([result.stdout, result.stderr])
+    parsed_job = parse_sbatch_job(sbatch_output, fallback_cluster=config.cluster)
+    printed_job = parse_sbatch_job(sbatch_output, fallback_cluster=None)
     scheduler: JsonObject = {
         "state": "submitted" if result.returncode == 0 else "submit_failed",
         "exit_code": result.returncode,
@@ -509,7 +528,7 @@ def run_submit_command(
         log_excerpt=_join_log_excerpt(result.stdout, result.stderr),
     )
     path = write_event(event, outbox)
-    return {
+    payload: JsonObject = {
         "command": "hpc-submit",
         "run_id": run_id,
         "job_id": parsed_job.job_id if parsed_job else None,
@@ -521,6 +540,148 @@ def run_submit_command(
         "event_path": str(path),
         "outbox": str(outbox),
     }
+    if result.returncode == 0 and parsed_job is not None:
+        # The submit event above is already durable; a manifest that cannot be
+        # written only costs --export=NONE jobs their run link, never the job.
+        try:
+            payload["run_manifest"] = str(
+                write_submit_manifest(
+                    config,
+                    submit_dir=Path(cwd).expanduser().resolve() if cwd else Path.cwd(),
+                    run_id=run_id,
+                    job_id=parsed_job.job_id,
+                    sbatch_cluster=printed_job.cluster if printed_job else None,
+                    outbox=outbox,
+                    project_id=project_id,
+                    question_id=question_id,
+                    dataset_ids=dataset_ids,
+                    tags=tags,
+                    submit_event_id=str(event["event_id"]),
+                )
+            )
+        except OSError as exc:
+            payload["run_manifest_error"] = str(exc)
+            print(
+                f"lab-tracker: warning: could not record run {run_id} in the submit "
+                f"directory ({exc}); jobs started with --export=NONE and the Slurm "
+                "epilog will not find it.",
+                file=sys.stderr,
+            )
+    return payload
+
+
+def submit_manifest_path(submit_dir: str | Path, job_id: str, cluster: str | None = None) -> Path:
+    """Where ``lt hpc submit`` records job ``job_id``'s run under ``submit_dir``."""
+
+    suffix = f".{_safe_path_part(cluster)}" if cluster else ""
+    name = f"job-{_safe_path_part(job_id)}{suffix}.json"
+    return Path(submit_dir).expanduser() / SUBMIT_MANIFEST_DIR / name
+
+
+def write_submit_manifest(
+    config: HpcConfig,
+    *,
+    submit_dir: Path,
+    run_id: str,
+    job_id: str,
+    sbatch_cluster: str | None,
+    outbox: Path,
+    project_id: str | None,
+    question_id: str | None,
+    dataset_ids: Sequence[str] | None,
+    tags: Sequence[str] | None,
+    submit_event_id: str,
+) -> Path:
+    """Record a submitted job's run in its submit directory; return the file.
+
+    Only explicit ``--project``/``--question``/``--dataset``/``--tag`` values are
+    recorded: config defaults are re-resolved from the config when the run
+    finishes, so their provenance label stays ``config_default``.
+    """
+
+    path = submit_manifest_path(submit_dir, job_id, sbatch_cluster)
+    manifest: JsonObject = {
+        "version": SUBMIT_MANIFEST_VERSION,
+        "kind": SUBMIT_MANIFEST_KIND,
+        "run_id": run_id,
+        "job_id": job_id,
+        "cluster": config.cluster,
+        "scheduler": config.scheduler,
+        "outbox": str(outbox),
+        "submit_dir": str(Path(submit_dir).resolve()),
+        "submitted_at": utc_now(),
+        "submit_event_id": submit_event_id,
+        "dataset_ids": [str(item) for item in dataset_ids or [] if str(item).strip()],
+        "tags": [str(item) for item in tags or [] if str(item).strip()],
+    }
+    optional = {
+        "config": str(config.config_path) if config.config_path else None,
+        "sbatch_cluster": sbatch_cluster,
+        "project_id": _optional_str(project_id),
+        "question_id": _optional_str(question_id),
+        "lt_command": _lt_command_path(),
+    }
+    manifest.update({key: value for key, value in optional.items() if value})
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _write_json_atomic(path, manifest)
+    return path
+
+
+def find_submit_manifest(environ: Mapping[str, str] | None = None) -> JsonObject | None:
+    """The submit manifest of the Slurm job described by ``environ``, or ``None``.
+
+    Uses only variables Slurm sets in every job and task epilog, even under
+    ``--export=NONE``: ``SLURM_ARRAY_JOB_ID`` (array tasks) or ``SLURM_JOB_ID``,
+    ``SLURM_SUBMIT_DIR`` (or ``SLURM_JOB_WORK_DIR``) and ``SLURM_CLUSTER_NAME``.
+    Never raises: an unreadable manifest is treated as absent.
+    """
+
+    env = os.environ if environ is None else environ
+    job_id = (env.get("SLURM_ARRAY_JOB_ID") or env.get("SLURM_JOB_ID") or "").strip()
+    if not job_id:
+        return None
+    cluster = (env.get("SLURM_CLUSTER_NAME") or "").strip() or None
+    directories: list[str] = []
+    for key in ("SLURM_SUBMIT_DIR", "SLURM_JOB_WORK_DIR"):
+        value = (env.get(key) or "").strip()
+        if value and value not in directories:
+            directories.append(value)
+    for directory in directories:
+        candidates = [submit_manifest_path(directory, job_id, cluster)] if cluster else []
+        candidates.append(submit_manifest_path(directory, job_id))
+        for path in candidates:
+            manifest = _read_submit_manifest(path)
+            if manifest is not None and str(manifest.get("job_id")) == job_id:
+                manifest["manifest_path"] = str(path)
+                return manifest
+    return None
+
+
+def _read_submit_manifest(path: Path) -> JsonObject | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict) or payload.get("kind") != SUBMIT_MANIFEST_KIND:
+        return None
+    if not _optional_str(payload.get("run_id")):
+        return None
+    return payload
+
+
+def _lt_command_path() -> str | None:
+    """The ``lt`` executable of this client, so a TaskEpilog can call the same one."""
+
+    argv0 = Path(sys.argv[0]) if sys.argv and sys.argv[0] else None
+    if argv0 is not None and argv0.name in {"lt", "lt.exe"}:
+        try:
+            return str(argv0.resolve())
+        except OSError:
+            pass
+    sibling = Path(sys.executable).parent / ("lt.exe" if os.name == "nt" else "lt")
+    if sibling.exists():
+        return str(sibling)
+    return shutil.which("lt")
 
 
 def event_from_manifest(
@@ -721,6 +882,7 @@ def begin_event(
     tags: Sequence[str] | None = None,
     summary: str | None = None,
 ) -> tuple[JsonObject, Path]:
+    run_id, job_manifest = _job_run(run_id)
     event = make_event(
         config,
         event_type="begin",
@@ -736,7 +898,7 @@ def begin_event(
             "state": "running",
         },
     )
-    path = write_event(event, config.outbox_path())
+    path = write_event(event, _event_outbox(config, job_manifest))
     return event, path
 
 
@@ -755,11 +917,24 @@ def finish_event(
     dataset_ids: Sequence[str] | None = None,
     tags: Sequence[str] | None = None,
     summary: str | None = None,
+    event_id: str | None = None,
+    cwd: str | Path | None = None,
+    outbox: Path | None = None,
+    scheduler_extra: Mapping[str, Any] | None = None,
 ) -> tuple[JsonObject, Path]:
+    """Write a ``finish`` event; ``lt hpc finish`` and ``lt hpc epilog`` both land here.
+
+    The run id is ``run_id``, else ``LAB_TRACKER_HPC_RUN_ID``, else the
+    ``manifest``'s, else the run the job's submit manifest names (see
+    :func:`find_submit_manifest`), so a job started with ``--export=NONE``
+    still finishes the run it was submitted as.
+    """
+
     manifest_payload: JsonObject = {}
     if manifest is not None:
         manifest_path = Path(manifest).expanduser().resolve()
         manifest_payload = event_from_manifest(config, manifest_path)
+    run_id, job_manifest = _job_run(run_id or _optional_str(manifest_payload.get("run_id")))
     scheduler = _json_mapping(manifest_payload.get("scheduler") or {})
     scheduler.update(
         {
@@ -769,20 +944,21 @@ def finish_event(
             "exit_code": exit_code if exit_code is not None else scheduler.get("exit_code"),
         }
     )
+    scheduler.update({str(key): value for key, value in (scheduler_extra or {}).items() if value})
     merged_artifacts = list(manifest_payload.get("artifacts") or [])
     merged_artifacts.extend(_artifact_from_uri(uri) for uri in artifacts or [])
     event = make_event(
         config,
         event_type="finish",
-        run_id=run_id or _optional_str(manifest_payload.get("run_id")),
-        event_id=_optional_str(manifest_payload.get("event_id")),
+        run_id=run_id,
+        event_id=event_id or _optional_str(manifest_payload.get("event_id")),
         observed_at=_optional_str(manifest_payload.get("observed_at")),
         project_id=project_id or _optional_str(manifest_payload.get("project_id")),
         question_id=question_id or _optional_str(manifest_payload.get("question_id")),
         dataset_ids=dataset_ids or _string_list(manifest_payload.get("dataset_ids")),
         tags=tags or _string_list(manifest_payload.get("tags")),
         command=_string_list(manifest_payload.get("command")),
-        cwd=_optional_str(manifest_payload.get("cwd")) or Path.cwd(),
+        cwd=cwd or _optional_str(manifest_payload.get("cwd")) or Path.cwd(),
         scheduler=scheduler,
         source=_json_mapping(manifest_payload.get("source") or {}),
         artifacts=merged_artifacts,
@@ -793,8 +969,180 @@ def finish_event(
         ),
         summary=summary or _optional_str(manifest_payload.get("summary")),
     )
-    path = write_event(event, config.outbox_path())
+    path = write_event(event, outbox or _event_outbox(config, job_manifest))
     return event, path
+
+
+def epilog_finish(
+    *,
+    exit_code: int | None = None,
+    logs: Sequence[str | Path] | None = None,
+    config_path: str | Path | None = None,
+) -> JsonObject:
+    """Finish the current Slurm job's ``lt hpc submit`` run from an epilog.
+
+    Reads only Slurm's own environment (``SLURM_JOB_ID``, ``SLURM_SUBMIT_DIR``,
+    array ids, and ``SLURM_JOB_EXIT_CODE``/``SLURM_JOB_EXIT_CODE2`` where the
+    epilog type provides them) plus the job's submit manifest, then writes the
+    same ``finish`` event ``lt hpc finish`` would, with the submit's declared
+    question, datasets and tags. Idempotent: a run (or array task) that already
+    has a finish event -- because the job called ``lt hpc finish`` itself, or
+    an earlier task epilog ran -- is left alone. Without a job, a manifest, or
+    with ``LAB_TRACKER_HPC_EPILOG_ENABLED=0`` it writes nothing.
+    """
+
+    base: JsonObject = {"command": "hpc-epilog"}
+    if os.getenv(EPILOG_ENABLED_ENV, "").strip().lower() in _OFF_VALUES:
+        return {**base, "action": "disabled"}
+    job_id = _optional_str(os.getenv("SLURM_JOB_ID"))
+    if job_id is None:
+        return {**base, "action": "not_in_job"}
+    job_manifest = find_submit_manifest()
+    if job_manifest is None:
+        return {**base, "action": "no_run", "job_id": job_id}
+    config = load_config(config_path=config_path or _optional_str(job_manifest.get("config")))
+    run_id = str(job_manifest["run_id"])
+    array_task_id = _optional_str(os.getenv("SLURM_ARRAY_TASK_ID"))
+    outbox = _event_outbox(config, job_manifest)
+    result: JsonObject = {**base, "run_id": run_id, "job_id": job_id, "outbox": str(outbox)}
+    if array_task_id:
+        result["array_task_id"] = array_task_id
+    existing = find_finish_event(outbox, run_id=run_id, array_task_id=array_task_id)
+    if existing is not None:
+        return {**result, "action": "already_finished", "event_path": str(existing)}
+    resolved_exit = exit_code if exit_code is not None else slurm_exit_code(os.environ)
+    submit_dir = Path(str(job_manifest.get("submit_dir") or os.getenv("SLURM_SUBMIT_DIR")))
+    event, path = finish_event(
+        config,
+        run_id=run_id,
+        exit_code=resolved_exit,
+        state=None if resolved_exit is not None else "ended",
+        logs=list(logs or []) or _default_job_logs(submit_dir, job_id, array_task_id),
+        project_id=_optional_str(job_manifest.get("project_id")),
+        question_id=_optional_str(job_manifest.get("question_id")),
+        dataset_ids=_string_list(job_manifest.get("dataset_ids")),
+        tags=_string_list(job_manifest.get("tags")),
+        summary=_epilog_summary(job_id, array_task_id, resolved_exit),
+        event_id="epilog-" + _epilog_digest(run_id, job_id, array_task_id),
+        cwd=submit_dir,
+        outbox=outbox,
+        scheduler_extra={
+            "finish_source": "epilog",
+            "epilog_context": _optional_str(os.getenv("SLURM_SCRIPT_CONTEXT")),
+        },
+    )
+    return {
+        **result,
+        "action": "finished",
+        "exit_code": resolved_exit,
+        "state": event["scheduler"].get("state"),
+        "event_path": str(path),
+    }
+
+
+def find_finish_event(outbox: str | Path, *, run_id: str, array_task_id: str | None) -> Path | None:
+    """An existing ``finish`` event for ``run_id`` (and array task), or ``None``."""
+
+    prefix = f"{_safe_path_part(run_id)}.finish."
+    for path in sorted(Path(outbox).expanduser().glob(f"{prefix}*.json")):
+        try:
+            event = read_event(path)
+        except Exception:  # noqa: BLE001 - an unreadable event is not a finish record.
+            continue
+        if event["run_id"] != run_id:
+            continue
+        if array_task_id is None or str(event["scheduler"].get("array_task_id")) == array_task_id:
+            return path
+    return None
+
+
+def slurm_exit_code(environ: Mapping[str, str]) -> int | None:
+    """The job's exit code from ``SLURM_JOB_EXIT_CODE2``/``SLURM_JOB_EXIT_CODE``.
+
+    ``SLURM_JOB_EXIT_CODE2`` is ``<exit>:<signal>``; ``SLURM_JOB_EXIT_CODE`` is
+    a ``wait(2)`` status. A signal maps to ``128 + signal`` like a shell does.
+    Slurm sets these only for its privileged epilogs (EpilogSlurmctld and, on
+    recent releases, the node Epilog), never for a TaskEpilog: ``None`` then.
+    """
+
+    code2 = (environ.get("SLURM_JOB_EXIT_CODE2") or "").strip()
+    if code2:
+        exit_text, _separator, signal_text = code2.partition(":")
+        try:
+            code = int(exit_text or 0)
+            signal = int(signal_text or 0)
+        except ValueError:
+            pass
+        else:
+            return 128 + signal if signal else code
+    raw = (environ.get("SLURM_JOB_EXIT_CODE") or "").strip()
+    if raw:
+        try:
+            status = int(raw)
+        except ValueError:
+            return None
+        signal = status & 0x7F
+        return 128 + signal if signal else (status >> 8) & 0xFF
+    return None
+
+
+def _job_run(run_id: str | None) -> tuple[str | None, JsonObject | None]:
+    """``run_id`` as given or from the environment, else the job's submit manifest."""
+
+    if run_id or os.getenv("LAB_TRACKER_HPC_RUN_ID"):
+        return run_id, None
+    job_manifest = find_submit_manifest()
+    if job_manifest is None:
+        return None, None
+    return str(job_manifest["run_id"]), job_manifest
+
+
+def _event_outbox(config: HpcConfig, job_manifest: Mapping[str, Any] | None) -> Path:
+    """The submit's outbox for a run found through its manifest, else the config's.
+
+    ``lt hpc submit`` resolved the outbox with the submitting shell's
+    ``LAB_TRACKER_HPC_OUTBOX``, which a ``--export=NONE`` job does not see.
+    """
+
+    recorded = _optional_str(job_manifest.get("outbox")) if job_manifest else None
+    if recorded is None or os.getenv("LAB_TRACKER_HPC_OUTBOX"):
+        return config.outbox_path()
+    manifest_config = _optional_str(job_manifest.get("config")) if job_manifest else None
+    if (
+        manifest_config
+        and config.config_path is not None
+        and Path(manifest_config).expanduser().resolve() != config.config_path.resolve()
+    ):
+        return config.outbox_path()
+    return Path(recorded).expanduser()
+
+
+def _default_job_logs(submit_dir: Path, job_id: str, array_task_id: str | None) -> list[Path]:
+    """Slurm's default output file for the job, when it exists in the submit directory."""
+
+    array_job_id = _optional_str(os.getenv("SLURM_ARRAY_JOB_ID"))
+    name = (
+        f"slurm-{array_job_id}_{array_task_id}.out"
+        if array_job_id and array_task_id
+        else f"slurm-{job_id}.out"
+    )
+    candidate = submit_dir / name
+    return [candidate] if candidate.is_file() else []
+
+
+def _epilog_summary(job_id: str, array_task_id: str | None, exit_code: int | None) -> str:
+    task = f" array task {array_task_id}" if array_task_id else ""
+    outcome = (
+        f"exited with code {exit_code}"
+        if exit_code is not None
+        else "ended (a TaskEpilog does not receive the job's exit code)"
+    )
+    return f"Slurm job {job_id}{task} {outcome}; finish recorded by lt hpc epilog."
+
+
+def _epilog_digest(run_id: str, job_id: str, array_task_id: str | None) -> str:
+    seed = "\0".join((run_id, job_id, array_task_id or ""))
+    return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
 
 
 def git_context(cwd: str | Path | None = None) -> JsonObject:
@@ -1165,7 +1513,8 @@ def _read_log_excerpt(paths: Sequence[str | Path], *, max_chars: int = 4000) -> 
         excerpt = text[-remaining:]
         chunks.append(f"==> {path} <==\n{excerpt.strip()}")
         remaining -= len(excerpt)
-    return "\n\n".join(chunks)
+    # Job logs routinely echo tokens and connection strings; never store them.
+    return redact_capture_text("\n\n".join(chunks))
 
 
 def _read_text_tail(path: Path, *, max_chars: int) -> str:

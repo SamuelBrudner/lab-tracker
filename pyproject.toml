@@ -137,6 +137,7 @@ files = [
   "src/lab_tracker_client/capture_project.py",
   "src/lab_tracker_client/pipeline_capture.py",
   "src/lab_tracker_client/cli_pipeline.py",
+  "src/lab_tracker_client/cli_hpc_epilog.py",
   "src/lab_tracker_client/integrations",
   "src/lab_tracker_client/yaml_subset.py",
   "src/lab_tracker_client/redaction.py",
