@@ -150,9 +150,10 @@ def record_notebook_save(
     """
 
     notebook = Path(path).expanduser().resolve()
-    # The local day is the one in ``now``'s own zone (the machine's by default).
-    local_now = now if now is not None and now.tzinfo is not None else (now or datetime.now())
-    local_now = local_now if local_now.tzinfo is not None else local_now.astimezone()
+    # The local day is the one in ``now``'s own zone; a naive (or default)
+    # ``now`` is the machine's local time, with its daylight-saving rules.
+    system_local = now is None or now.tzinfo is None
+    local_now = (now or datetime.now()).astimezone() if now is None or system_local else now
     day = local_now.date().isoformat()
     result: dict[str, Any] = {"notebook": str(notebook), "local_day": day}
     capture_project = resolve_capture_project(notebook, project_id=project_id)
@@ -173,7 +174,7 @@ def record_notebook_save(
         ),
         _outbox_for(root),
     )
-    deliver_after = _next_local_midnight(local_now)
+    deliver_after = _next_local_midnight(local_now, system_local=system_local)
     result.update(
         {
             "project_id": capture_project.project_id,
@@ -504,8 +505,19 @@ def _page_metadata(
     return metadata
 
 
-def _next_local_midnight(local_now: datetime) -> str:
-    midnight = datetime.combine(local_now.date() + timedelta(days=1), time.min, local_now.tzinfo)
+def _next_local_midnight(local_now: datetime, *, system_local: bool) -> str:
+    """The UTC instant the local day of ``local_now`` ends.
+
+    For the machine's own time the offset comes from the system zone's rules
+    for that midnight, not from the save's offset, so a day that changes
+    daylight saving still ends at local midnight.
+    """
+
+    next_day = local_now.date() + timedelta(days=1)
+    if system_local:
+        midnight = datetime.combine(next_day, time.min).astimezone()
+    else:
+        midnight = datetime.combine(next_day, time.min, local_now.tzinfo)
     return midnight.astimezone(timezone.utc).isoformat()
 
 

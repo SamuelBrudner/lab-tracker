@@ -11,10 +11,12 @@ installs:
 
 - the autotrack ``savefig`` hook (saves to a path, or to an open real file),
   exactly as in IPython, and
-- a ``pyplot.show()`` hook for scripts that never save: before showing, each
-  open figure is rendered as PNG and captured, once per figure per run (the
-  logical id carries a per-process run id; showing identical bytes again
-  sends nothing, and a figure the run saved to a file is left to that save).
+- a ``pyplot.show()`` hook for scripts that never save: before a blocking
+  show, each open figure is rendered as PNG and captured, at most once per
+  figure number per run (the logical id carries a per-process run id, and a
+  figure the run saved to a file is left to that save). Animation frames
+  (``plt.pause()`` calls ``show(block=False)``) and shows in interactive mode
+  are not captured.
 
 Both follow the bound-project rule: a figure is captured only when its
 project comes from ``LAB_TRACKER_PROJECT_ID`` or the checkout binding
@@ -23,7 +25,6 @@ project comes from ``LAB_TRACKER_PROJECT_ID`` or the checkout binding
 
 from __future__ import annotations
 
-import hashlib
 import io
 import sys
 import sysconfig
@@ -44,8 +45,8 @@ SCRIPTS_PTH_FILENAME = "lab_tracker_autotrack.pth"
 SCRIPTS_PTH_MARKER = "# Lab Tracker scripts autotrack (managed by `lt setup autotrack --scripts`)"
 _SHOW_HOOK_MARKER = "_lab_tracker_show_hook"
 _STATE: dict[str, Any] = {"show_original": None, "run_id": None}
-# Figure number -> hash of the bytes last captured for it in this run.
-_SHOWN: dict[int, str] = {}
+# Figure numbers already captured from a show in this run.
+_SHOWN: set[int] = set()
 
 
 def activate_script_autotrack() -> bool:
@@ -58,6 +59,9 @@ def activate_script_autotrack() -> bool:
     try:
         if not _autotrack.autotrack_env_enabled() or _in_ipython():
             return False
+        # A script is a new process each run: name an unbound checkout at
+        # most once a week across runs, not on every run.
+        _figure._PERSISTENT_UNBOUND_NOTICES[0] = True
         # An autotrack() the script already made keeps its own options.
         installed = _autotrack.is_autotracking() or _autotrack.autotrack(displays=False)
         if installed:
@@ -80,7 +84,8 @@ def install_show_hook() -> bool:
 
     def show(*args: Any, **kwargs: Any) -> Any:
         with suppress(Exception):
-            capture_shown_figures()
+            if _blocking_show(args, kwargs):
+                capture_shown_figures()
         return original(*args, **kwargs)
 
     setattr(show, _SHOW_HOOK_MARKER, True)
@@ -102,8 +107,25 @@ def uninstall_show_hook() -> None:
     _STATE["show_original"] = None
 
 
+def _blocking_show(args: tuple[Any, ...], kwargs: dict[str, Any]) -> bool:
+    """Whether a ``show()`` call is a real show, not an animation frame.
+
+    ``plt.pause()`` calls ``show(block=False)`` on every frame, and in
+    interactive mode a bare ``show()`` returns at once; neither is captured.
+    """
+
+    block = kwargs.get("block", args[0] if args else None)
+    if block is not None:
+        return bool(block)
+    is_interactive = getattr(sys.modules.get("matplotlib"), "is_interactive", None)
+    try:
+        return not (is_interactive is not None and is_interactive())
+    except Exception:  # noqa: BLE001 - assume an ordinary blocking show.
+        return True
+
+
 def capture_shown_figures() -> list[_figure.FigureCaptureResult]:
-    """Capture every open pyplot figure as PNG, once per figure per run."""
+    """Capture every open pyplot figure as PNG, at most once per figure per run."""
 
     results: list[_figure.FigureCaptureResult] = []
     # autotrack(False) turns the show capture off too.
@@ -120,13 +142,12 @@ def capture_shown_figures() -> list[_figure.FigureCaptureResult]:
             if _autotrack.figure_saved_since(fig, 0):
                 continue
             number = int(getattr(manager, "num", 0) or getattr(fig, "number", 0) or 0)
+            if number in _SHOWN:
+                continue
             payload = _render_png(fig)
             if not payload:
                 continue
-            digest = hashlib.sha256(payload).hexdigest()
-            if _SHOWN.get(number) == digest:
-                continue
-            _SHOWN[number] = digest
+            _SHOWN.add(number)
             results.append(_capture_shown(fig, number, payload, options))
     return results
 
@@ -242,12 +263,17 @@ def scripts_pth_source(bootstrap: str | Path | None = None) -> str:
     switch and, when the bootstrap file exists, runs its cached bytecode
     (compiling the source only when the bytecode loader is unavailable)
     without importing ``lab_tracker_client``; any error is swallowed.
+
+    The file is pure ASCII (``ascii()`` escapes a non-ASCII path): Python
+    3.10-3.12 decode ``.pth`` files in the locale encoding outside the
+    per-line error handling, so a non-ASCII byte on a Windows ANSI code page
+    would stop every interpreter in the environment from starting.
     """
 
     boot = str(bootstrap or bootstrap_path())
     code = (
         "try:\n"
-        f" p = {boot!r}\n"
+        f" p = {ascii(boot)}\n"
         " if os.environ.get('LAB_TRACKER_AUTOTRACK', '1').strip().lower() not in "
         "('0', 'false', 'no', 'off') and os.path.isfile(p):\n"
         f"  m = type(sys)({PTH_MODULE_NAME!r})\n"
@@ -269,7 +295,7 @@ def scripts_pth_source(bootstrap: str | Path | None = None) -> str:
         "# Captures matplotlib figures that plain Python scripts save or show, only in a\n"
         "# checkout bound to a project. LAB_TRACKER_AUTOTRACK=0 disables it; remove it\n"
         "# with `lt setup autotrack --scripts --uninstall`.\n"
-        f"import os, sys; exec({code!r})\n"
+        f"import os, sys; exec({ascii(code)})\n"
     )
 
 
@@ -282,7 +308,7 @@ def scripts_pth_status(site_dir: str | Path | None = None) -> dict[str, Any]:
     if path.exists():
         content = ""
         with suppress(OSError, UnicodeDecodeError):
-            content = path.read_text(encoding="utf-8")
+            content = path.read_text(encoding="ascii", errors="replace")
         installed = SCRIPTS_PTH_MARKER in content
         up_to_date = content == scripts_pth_source() if installed else None
     return {
@@ -347,7 +373,7 @@ def install_scripts_pth(
     if not dry_run:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(scripts_pth_source(), encoding="utf-8")
+            path.write_text(scripts_pth_source(), encoding="ascii")
         except OSError as exc:
             raise LTValidationError(
                 f"Could not write {path} ({exc}); run this with a Python environment "
