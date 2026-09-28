@@ -1098,11 +1098,16 @@ def _hpc_status(root: Path) -> JsonObject:
 
 
 def _autotrack_status() -> JsonObject:
+    from lab_tracker_client.autotrack_setup import autotrack_hook_status
     from lab_tracker_client.figure_autotrack import ipython_startup_status
 
+    status: JsonObject = {"startup_file": None, "installed": False, "up_to_date": None}
     with suppress(Exception):
-        return ipython_startup_status()
-    return {"startup_file": None, "installed": False, "up_to_date": None}
+        status = ipython_startup_status()
+    # The Jupyter save hook and the scripts .pth, next to the IPython startup file.
+    with suppress(Exception):
+        status.update(autotrack_hook_status())
+    return status
 
 
 def _session_status(root: Path) -> JsonObject:

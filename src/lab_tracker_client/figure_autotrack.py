@@ -238,7 +238,8 @@ def _file_object_target(fname: Any) -> Path | None:
         fname.flush()
     except (AttributeError, OSError, ValueError, io.UnsupportedOperation):
         return None
-    return Path(os.fspath(name)).expanduser()
+    # Absolute now: the name was just checked against the open file from this cwd.
+    return Path(os.path.abspath(os.fspath(name)))
 
 
 def _suffix_matches(path: Path, patterns: Iterable[str]) -> bool:
