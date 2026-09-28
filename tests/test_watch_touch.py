@@ -251,6 +251,65 @@ def test_touch_syncs_best_effort_and_keeps_events_when_offline(touch_env: Path) 
     assert sorted(pending) == ["pending", "synced"]
 
 
+def test_touch_without_a_configured_server_queues_without_network(
+    touch_env: Path, monkeypatch, capsys
+) -> None:
+    """No env or profile URL: the client's localhost default is never contacted."""
+
+    monkeypatch.delenv("LAB_TRACKER_MCP_BASE_URL", raising=False)
+    monkeypatch.setenv("LAB_TRACKER_CONFIG_DIR", str(touch_env / "no-profile"))
+
+    def forbidden(*_args: object, **_kwargs: object) -> LabTracker:
+        raise AssertionError("no client may be built when no server is configured")
+
+    monkeypatch.setattr(LabTracker, "from_env", forbidden)
+    repo = _watched_repo(touch_env)
+    target = repo / "results" / "a.csv"
+    target.write_text("1", encoding="utf-8")
+
+    payload = watch_touch.touch_from_hook(_post_tool_use(repo, target))
+
+    assert payload["action"] == "queued"
+    assert payload["sync_skipped"] == agent_session.SYNC_SKIPPED_NOT_CONFIGURED
+    assert "sync" not in payload and "sync_error" not in payload
+    assert capsys.readouterr().err == ""
+    assert watch_capture.read_event(_events(repo)[0])["sync"]["status"] == "pending"
+
+
+def test_touch_drains_through_the_env_configured_server(touch_env: Path, monkeypatch) -> None:
+    monkeypatch.setenv("LAB_TRACKER_BASE_URL", "http://lab.example:8000")
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok"})
+        if request.url.path == "/notes":
+            return httpx.Response(
+                200, json={"data": [], "meta": {"limit": 200, "offset": 0, "total": 0}}
+            )
+        return httpx.Response(201, json={"data": {"note_id": "note-a", "metadata": {}}})
+
+    monkeypatch.setattr(
+        LabTracker,
+        "from_env",
+        classmethod(
+            lambda _cls, **_kwargs: LabTracker(
+                base_url="http://lab.example:8000", transport=httpx.MockTransport(handler)
+            )
+        ),
+    )
+    repo = _watched_repo(touch_env)
+    target = repo / "results" / "a.csv"
+    target.write_text("1", encoding="utf-8")
+
+    payload = watch_touch.touch_from_hook(_post_tool_use(repo, target))
+
+    assert "sync_skipped" not in payload
+    assert payload["sync"]["errors"] == []
+    assert requests == ["/health", "/notes", "/notes/upload-file"]
+
+
 def test_kill_switch_turns_touch_off(touch_env: Path, monkeypatch) -> None:
     repo = _watched_repo(touch_env)
     target = repo / "results" / "a.csv"

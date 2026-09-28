@@ -89,8 +89,9 @@ transcript once. It skips, silently and without queuing:
   outside a git checkout.
 
 Otherwise it writes **one** staged-note event to the checkout's watch outbox
-(`.lab-tracker/outbox/watch`) with `payload.request_draft` set, then drains
-that outbox best-effort. The note body is markdown under the heading
+(`.lab-tracker/outbox/watch`) with `payload.request_draft` set, then, when a
+server is configured, drains that outbox best-effort. The note body is
+markdown under the heading
 **Agent session retrospective**:
 
 - **What the person asked** — the person's prompts (not slash commands without
@@ -134,7 +135,8 @@ parent directory above the checkout is never used) has a watch whose scan
 would capture that file — same root, include/exclude globs, hidden-file and
 manifest rules; relative roots are anchored at the checkout — it queues
 exactly the event `lt watch scan` would queue for it (same identity, so the
-scheduled scan dedupes against it) and drains the outbox best-effort.
+scheduled scan dedupes against it) and, when a server is configured, drains
+the outbox best-effort.
 
 Anything else returns at once: no network call, no folder scan, no hashing.
 Only write tools trigger it; a `Read` is never captured. Each agent write of a
@@ -175,6 +177,11 @@ Over-redaction is the accepted failure mode.
 
 ## Failure modes and kill switches
 
+- **No server configured:** with no `LAB_TRACKER_BASE_URL` (or MCP base URL)
+  in the environment and no `base_url` in the saved connection profile, both
+  hooks only queue: no network call and no notice. They never fall back to the
+  client's `http://127.0.0.1:8000` default, so whatever else listens there
+  never receives a capture. This is the same rule `lt run` uses.
 - **Server unreachable:** the event stays queued in the outbox; `lt outbox
   sync`, the scheduled `lt watch run`, or the next hook drains it. One failed
   `/health` probe costs a single short timeout, not one per queued event.

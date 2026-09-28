@@ -593,6 +593,73 @@ def test_session_end_keeps_the_event_queued_when_the_server_is_unreachable(
     assert capsys.readouterr().err.count("`lt outbox sync` retries") == 1
 
 
+def _forbid_default_client(monkeypatch) -> None:
+    def forbidden(*_args: object, **_kwargs: object) -> LabTracker:
+        raise AssertionError("no client may be built when no server is configured")
+
+    monkeypatch.setattr(LabTracker, "from_env", forbidden)
+
+
+def test_session_end_without_a_configured_server_only_queues(
+    agent_env: Path, monkeypatch, capsys
+) -> None:
+    """No env or profile URL: the localhost default is never probed, and no notice."""
+
+    monkeypatch.delenv("LAB_TRACKER_MCP_BASE_URL", raising=False)
+    monkeypatch.setenv("LAB_TRACKER_CONFIG_DIR", str(agent_env / "no-profile"))
+    _forbid_default_client(monkeypatch)
+    repo = _git_repo(agent_env / "unconfigured")
+    _bind(repo)
+    transcript = _fixture_transcript(agent_env, repo)
+
+    payload = agent_session.capture_session_end(
+        _hook(repo, transcript), agent_session.SessionEndOptions()
+    )
+
+    assert payload["action"] == "queued"
+    assert payload["sync_skipped"] == agent_session.SYNC_SKIPPED_NOT_CONFIGURED
+    assert "sync" not in payload and "sync_error" not in payload
+    assert capsys.readouterr().err == ""
+    event = watch_capture.read_event(_outbox_events(repo)[0])
+    assert event["sync"]["status"] == "pending"
+
+
+@pytest.mark.parametrize("configured_by", ["env", "mcp_env", "profile"])
+def test_session_end_drains_when_a_server_is_configured(
+    agent_env: Path, monkeypatch, configured_by: str
+) -> None:
+    monkeypatch.delenv("LAB_TRACKER_MCP_BASE_URL", raising=False)
+    config_dir = agent_env / "lt-config"
+    monkeypatch.setenv("LAB_TRACKER_CONFIG_DIR", str(config_dir))
+    if configured_by == "env":
+        monkeypatch.setenv("LAB_TRACKER_BASE_URL", "http://lab.example:8000")
+    elif configured_by == "mcp_env":
+        monkeypatch.setenv("LAB_TRACKER_MCP_BASE_URL", "http://lab.example:8000")
+    else:
+        config_dir.mkdir()
+        (config_dir / "config.json").write_text(
+            json.dumps({"base_url": "http://lab.example:8000"}), encoding="utf-8"
+        )
+    requests: list[httpx.Request] = []
+    recording = _recording_client(requests)
+    monkeypatch.setattr(LabTracker, "from_env", classmethod(lambda _cls, **_kwargs: recording()))
+    repo = _git_repo(agent_env / "configured")
+    _bind(repo)
+    transcript = _fixture_transcript(agent_env, repo)
+
+    payload = agent_session.capture_session_end(
+        _hook(repo, transcript), agent_session.SessionEndOptions()
+    )
+
+    assert "sync_skipped" not in payload
+    assert payload["sync"]["errors"] == []
+    assert [request.url.path for request in requests][:3] == [
+        "/health",
+        "/notes",
+        "/notes/upload-file",
+    ]
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
