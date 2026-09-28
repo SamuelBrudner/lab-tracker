@@ -91,6 +91,11 @@ STALE_SYNC_STATE = "stale"
 # that was only touched, or finished settling), re-arms that same event back to
 # ``pending`` with the fresh fingerprint.
 TERMINAL_SYNC_STATES = {"synced", STALE_SYNC_STATE}
+# Reserved payload key: an ISO-8601 time before which a sync leaves a pending
+# event queued (a notebook's day page waits for its local day to end, so the
+# day's saves keep replacing it). Reported as skipped with NOT_DUE_REASON.
+DELIVER_AFTER_KEY = "deliver_after"
+NOT_DUE_REASON = "not_due"
 
 JsonObject = dict[str, Any]
 
@@ -963,6 +968,8 @@ def sync_outbox_path(
 
     def _is_actionable(event: JsonObject) -> bool:
         sync = event.get("sync", {})
+        if event_not_due(event) and not sync.get("note_id"):
+            return False
         already_synced = str(sync.get("status") or "") in TERMINAL_SYNC_STATES
         needs_draft = (
             (request_draft or _event_requests_draft(event))
@@ -997,6 +1004,8 @@ def sync_outbox_path(
             reason=(
                 STALE_SYNC_STATE
                 if str(sync.get("status") or "") == STALE_SYNC_STATE
+                else NOT_DUE_REASON
+                if event_not_due(event) and not sync.get("note_id")
                 else "already_synced"
             ),
         ).to_dict()
@@ -1024,6 +1033,22 @@ def sync_outbox_path(
         on_skipped=_skipped,
         on_failure=_failed,
     )
+
+
+def event_not_due(event: Mapping[str, Any], *, now: datetime | None = None) -> bool:
+    """Whether the event's reserved ``payload.deliver_after`` time is still ahead."""
+
+    payload = event.get("payload") if isinstance(event.get("payload"), Mapping) else {}
+    value = str(payload.get(DELIVER_AFTER_KEY) or "").strip()
+    if not value:
+        return False
+    try:
+        due = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if due.tzinfo is None:
+        due = due.replace(tzinfo=timezone.utc)
+    return (now or datetime.now(timezone.utc)) < due
 
 
 def render_event_note(event: Mapping[str, Any]) -> str:
