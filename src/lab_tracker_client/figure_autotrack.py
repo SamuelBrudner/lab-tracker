@@ -18,12 +18,21 @@ meant for.
 
 Explicit ``lab_tracker_client.savefig`` / ``capture_figures`` calls suppress
 the hook while they save, so a figure is never captured twice.
+
+Inside IPython or Jupyter, ``autotrack()`` also captures the figures a cell
+displays inline (see :mod:`lab_tracker_client.display_capture`), under the
+same bound-project rule and kill switch. A save to an open file object is
+captured when the object is a real file with a filesystem ``name``; in-memory
+buffers such as ``BytesIO`` are ignored.
 """
 
 from __future__ import annotations
 
+import io
 import os
+import stat
 import sys
+import weakref
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -37,6 +46,10 @@ IPYTHON_STARTUP_FILENAME = "50-lab-tracker-autotrack.py"
 IPYTHON_STARTUP_BEGIN = "# --- BEGIN LAB TRACKER AUTOTRACK (managed by `lt setup autotrack`) ---"
 IPYTHON_STARTUP_END = "# --- END LAB TRACKER AUTOTRACK ---"
 _STATE: dict[str, Any] = {"original": None, "options": None}
+# Figures this process saved to a file, with the save counter at that moment,
+# so a display or show hook can leave a figure the file capture already took.
+_SAVED_FIGURES: weakref.WeakKeyDictionary[Any, int] = weakref.WeakKeyDictionary()
+_SAVE_COUNTER = [0]
 
 
 def autotrack_env_enabled() -> bool:
@@ -56,14 +69,16 @@ def autotrack(
     client: LabTracker | None = None,
     project_id: str | None = None,
     metadata: dict[str, NoteMetadataScalar] | None = None,
+    displays: bool = True,
 ) -> bool:
     """Install (``True``) or remove (``False``) the matplotlib save hook.
 
     Returns whether the hook is installed afterwards. Installing is a no-op
     that returns ``False`` when matplotlib is not importable or the
     ``LAB_TRACKER_AUTOTRACK`` kill switch is set; calling it twice keeps one
-    hook. The hook captures only saves to a filesystem path whose suffix
-    matches ``patterns``; saves to file objects are ignored.
+    hook. The hook captures only saves whose target is a filesystem path (or
+    an open real file with that path as its ``name``) matching ``patterns``.
+    Inside IPython, ``displays`` also captures figures a cell displays inline.
     """
 
     if not enabled:
@@ -73,6 +88,7 @@ def autotrack(
         return False
     if is_autotracking():
         _STATE["options"] = _options(patterns, client, project_id, metadata)
+        _install_display_capture(displays)
         return True
     figure_module = _matplotlib_figure_module()
     if figure_module is None:
@@ -83,11 +99,14 @@ def autotrack(
 
     def _tracked_savefig(self: Any, fname: Any, *args: Any, **kwargs: Any) -> Any:
         result = original(self, fname, *args, **kwargs)
+        path = _path_target(fname) or _file_object_target(fname)
+        options = _STATE["options"] or {}
+        matched = path is not None and _suffix_matches(path, options.get("patterns", ()))
+        if matched:
+            _note_figure_saved(self)
         if _figure._AUTOTRACK_SUPPRESSED.get():
             return result
-        path = _path_target(fname)
-        options = _STATE["options"] or {}
-        if path is not None and _suffix_matches(path, options.get("patterns", ())):
+        if path is not None and matched:
             # Same fail-soft capture as savefig(); a failure here is reported
             # once on stderr and never reaches the user's plotting code.
             _figure._capture_saved_figure(
@@ -107,10 +126,55 @@ def autotrack(
     _tracked_savefig.__name__ = getattr(original, "__name__", "savefig")
     _tracked_savefig.__doc__ = getattr(original, "__doc__", None)
     figure_module.Figure.savefig = _tracked_savefig
+    _install_display_capture(displays)
     return True
 
 
+def _install_display_capture(displays: bool) -> None:
+    """Capture inline figure displays when running inside IPython; fail-soft."""
+
+    try:
+        from lab_tracker_client import display_capture
+
+        if displays:
+            display_capture.install_display_capture()
+        else:
+            display_capture.uninstall_display_capture()
+    except Exception:  # noqa: BLE001 - display capture must never break autotrack.
+        return
+
+
+def figure_saved_since(fig: Any, counter: int) -> bool:
+    """Whether ``fig`` was saved to a matching file after save counter ``counter``."""
+
+    try:
+        return _SAVED_FIGURES.get(fig, -1) > counter
+    except TypeError:
+        return False
+
+
+def save_counter() -> int:
+    """The number of matching file saves this process has made so far."""
+
+    return _SAVE_COUNTER[0]
+
+
+def _note_figure_saved(fig: Any) -> None:
+    _SAVE_COUNTER[0] += 1
+    try:
+        _SAVED_FIGURES[fig] = _SAVE_COUNTER[0]
+    except TypeError:
+        return
+
+
+def autotrack_options() -> dict[str, Any]:
+    """The installed hook's options (patterns, client, project, metadata)."""
+
+    return dict(_STATE["options"] or {})
+
+
 def _uninstall() -> None:
+    _install_display_capture(False)
     original = _STATE["original"]
     if original is None:
         return
@@ -149,6 +213,32 @@ def _path_target(fname: Any) -> Path | None:
         if isinstance(text, str) and text.strip():
             return Path(text).expanduser()
     return None
+
+
+def _file_object_target(fname: Any) -> Path | None:
+    """The file an open real file object writes to, flushed; else ``None``.
+
+    Only an object whose ``name`` is a filesystem path naming the very file
+    its descriptor has open counts (``open(path, "wb")``, a named temporary
+    file); ``BytesIO`` and other in-memory buffers have no such file.
+    """
+
+    name = getattr(fname, "name", None)
+    if isinstance(name, bytes):
+        name = os.fsdecode(name)
+    if not isinstance(name, (str, os.PathLike)) or not os.fspath(name):
+        return None
+    try:
+        descriptor_stat = os.fstat(fname.fileno())
+        path_stat = os.stat(name)
+        if not stat.S_ISREG(path_stat.st_mode) or not os.path.samestat(
+            descriptor_stat, path_stat
+        ):
+            return None
+        fname.flush()
+    except (AttributeError, OSError, ValueError, io.UnsupportedOperation):
+        return None
+    return Path(os.fspath(name)).expanduser()
 
 
 def _suffix_matches(path: Path, patterns: Iterable[str]) -> bool:
@@ -240,8 +330,11 @@ __all__ = [
     "AUTOTRACK_ENV",
     "autotrack",
     "autotrack_env_enabled",
+    "autotrack_options",
+    "figure_saved_since",
     "install_ipython_startup",
     "ipython_startup_path",
     "ipython_startup_status",
     "is_autotracking",
+    "save_counter",
 ]

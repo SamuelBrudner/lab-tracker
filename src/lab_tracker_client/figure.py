@@ -67,6 +67,8 @@ FIGURE_UPLOAD_MAX_BYTES = 100 * 1024 * 1024
 # (scriptable), so a default pattern for it would only produce failures.
 _DEFAULT_IMAGE_PATTERNS = ("*.png", "*.jpg", "*.jpeg", "*.pdf", "*.tif", "*.tiff")
 CAPTURE_OUTBOX_ENV = "LAB_TRACKER_CAPTURE_OUTBOX"
+# Folder inside the watch outbox holding queued in-memory capture bytes.
+QUEUED_PAYLOAD_DIRNAME = "blobs"
 _RUN_CONTEXT: ContextVar[RunContext | None] = ContextVar("lab_tracker_run_context", default=None)
 # True while an explicit capture helper (savefig, capture_figures) is doing the
 # save itself, so an installed autotrack hook does not capture the same file
@@ -526,6 +528,47 @@ def capture(
     )
 
 
+def capture_figure_bytes(
+    payload: bytes,
+    *,
+    filename: str,
+    anchor: str | Path,
+    source_uri: str,
+    logical_id: str,
+    fig: Any = None,
+    client: LabTracker | None = None,
+    project_id: str | None = None,
+    metadata: Mapping[str, NoteMetadataScalar] | None = None,
+    preview_max_bytes: int = FIGURE_PREVIEW_MAX_BYTES,
+    version_every_change: bool = False,
+    require_bound_project: bool = False,
+) -> FigureCaptureResult:
+    """Fail-soft capture of figure bytes that were never saved to a file.
+
+    For a figure a notebook displayed inline or a script only showed:
+    ``filename`` names the capture (its suffix sets the content type),
+    ``anchor`` is the folder whose checkout binds the project (the notebook's
+    or script's), and ``source_uri`` points at where the figure was seen.
+    Nothing is written to disk on a live capture; only when the server is
+    unreachable are the bytes kept in the watch outbox's ``blobs/`` folder so
+    the queued event can deliver them on the next sync.
+    """
+
+    return _capture_saved_figure(
+        fig=fig,
+        path=Path(anchor).expanduser() / Path(filename).name,
+        client=client,
+        project_id=project_id,
+        logical_id=logical_id,
+        metadata=metadata,
+        preview_max_bytes=preview_max_bytes,
+        version_every_change=version_every_change,
+        require_bound_project=require_bound_project,
+        payload=bytes(payload),
+        source_uri=source_uri,
+    )
+
+
 def _capture_saved_figure(
     *,
     fig: Any,
@@ -538,12 +581,16 @@ def _capture_saved_figure(
     version_every_change: bool,
     kind: str = "figure",
     require_bound_project: bool = False,
+    payload: bytes | None = None,
+    source_uri: str | None = None,
 ) -> FigureCaptureResult:
     """Capture one saved file, fail-soft.
 
     ``require_bound_project`` (set by ``autotrack``) skips the save, sending
     and queueing nothing, unless its project comes from an explicit argument,
     ``LAB_TRACKER_PROJECT_ID``, or the saved file's checkout binding.
+    ``payload`` and ``source_uri`` (see :func:`capture_figure_bytes`) capture
+    in-memory bytes named by ``path`` instead of reading a file there.
     """
 
     resolved_path = Path(path).expanduser()
@@ -565,10 +612,13 @@ def _capture_saved_figure(
                 **{**result_defaults, "action": "skipped", "reason": AUTOTRACK_UNBOUND_REASON}
             )
         bound_project_id = capture_project.project_id if capture_project else None
-        file_size = resolved_path.stat().st_size
+        file_size = len(payload) if payload is not None else resolved_path.stat().st_size
         if file_size <= 0:
             raise LTValidationError(f"Captured {kind} file must not be empty.")
-        if file_size > FIGURE_UPLOAD_MAX_BYTES:
+        if payload is not None:
+            full_payload = payload if file_size <= FIGURE_UPLOAD_MAX_BYTES else None
+            content_hash = _bytes_sha256(payload)
+        elif file_size > FIGURE_UPLOAD_MAX_BYTES:
             # Never read an oversized artifact into memory: stream-hash it and
             # let _preview_payload emit a pointer (or a fig-rendered preview).
             full_payload: bytes | None = None
@@ -579,7 +629,7 @@ def _capture_saved_figure(
                 raise LTValidationError(f"Captured {kind} file must not be empty.")
             content_hash = _bytes_sha256(full_payload)
         resolved_path = resolved_path.resolve()
-        source_uri = resolved_path.as_uri()
+        source_uri = source_uri or resolved_path.as_uri()
         client_capture_id = _client_capture_id(
             resolved_path,
             logical_id=logical_id,
@@ -623,6 +673,8 @@ def _capture_saved_figure(
                 size_bytes=file_size,
                 metadata=base_metadata,
                 reason="circuit_open",
+                payload=payload,
+                source_uri=source_uri,
             )
             if queued is not None:
                 return FigureCaptureResult(
@@ -723,6 +775,8 @@ def _capture_saved_figure(
                     size_bytes=file_size,
                     metadata=base_metadata,
                     reason=str(exc),
+                    payload=payload,
+                    source_uri=source_uri,
                 )
                 if queued is None:
                     raise
@@ -1158,12 +1212,16 @@ def _queue_capture_offline(
     size_bytes: int,
     metadata: Mapping[str, NoteMetadataScalar],
     reason: str,
+    payload: bytes | None = None,
+    source_uri: str | None = None,
 ) -> Path | None:
     """Write the capture as a watch-outbox event so a later sync delivers it.
 
     Returns the event path, or ``None`` when queueing is disabled, no project
     is known, or the outbox cannot be written (never raises: the figure was
     already saved to disk and the caller reports a plain failure instead).
+    In-memory ``payload`` bytes (an inline display) are first written to the
+    outbox's ``blobs/`` folder, the only file such a capture ever creates.
     """
 
     if not _capture_outbox_enabled() or not project_id:
@@ -1181,6 +1239,9 @@ def _queue_capture_offline(
             relative_path = path.resolve().relative_to(root).as_posix()
         except ValueError:
             relative_path = path.name
+        title = path.name
+        if payload is not None:
+            path = _queued_payload_file(config.outbox_path(), payload, content_hash, path.suffix)
         extra = {
             str(key): value
             for key, value in metadata.items()
@@ -1195,7 +1256,7 @@ def _queue_capture_offline(
             sink=watch_capture.SINK_STAGED_NOTE,
             source={
                 "provider": f"local-{kind}",
-                "uri": path.resolve().as_uri(),
+                "uri": source_uri or path.resolve().as_uri(),
                 "external_id": client_capture_id,
                 "path": str(path.resolve()),
                 "root": str(root),
@@ -1211,7 +1272,7 @@ def _queue_capture_offline(
             },
             context={"project_id": project_id, "session_id": _session_id(session)},
             payload={
-                "title": path.name,
+                "title": title,
                 "summary": f"Queued {kind} capture while Lab Tracker was unreachable.",
                 "status": "staged",
                 "metadata": extra,
@@ -1226,6 +1287,24 @@ def _queue_capture_offline(
             f"Lab Tracker could not queue the {kind} capture offline: {exc}",
         )
         return None
+
+
+def _queued_payload_file(outbox: Path, payload: bytes, content_hash: str, suffix: str) -> Path:
+    """Keep queued in-memory capture bytes as ``<outbox>/blobs/<hash><suffix>``.
+
+    One file per distinct content, written atomically once and never
+    rewritten, so the queued event's size, hash, and mtime stay valid.
+    """
+
+    safe_suffix = suffix if suffix.startswith(".") and suffix[1:].isalnum() else ".bin"
+    folder = Path(outbox) / QUEUED_PAYLOAD_DIRNAME
+    folder.mkdir(parents=True, exist_ok=True)
+    target = folder / f"{content_hash}{safe_suffix.lower()}"
+    if not target.is_file():
+        partial = folder / f".{target.name}.{uuid.uuid4().hex}.partial"
+        partial.write_bytes(payload)
+        os.replace(partial, target)
+    return target
 
 
 def _resolve_capture_client(
