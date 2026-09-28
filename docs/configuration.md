@@ -1029,7 +1029,10 @@ FastAPI app does not read them. `LAB_TRACKER_BASE_URL` (see
 - `LAB_TRACKER_GIT_DRAFT_ENABLED`: older name for
   `LAB_TRACKER_GIT_CAPTURE_ENABLED`, used only when the new name is unset
 - `LAB_TRACKER_LT`: `lt` executable the managed Git and repo hooks run
-  (default: the path recorded when the hook was installed)
+  (default: the path recorded when the hook was installed); the Slurm
+  `scripts/slurm-task-epilog.sh` template also honours it (default there: the
+  `lt` that submitted the job, recorded in its run manifest, then `lt` on
+  `PATH`)
 - `LAB_TRACKER_PYTHON`: Python interpreter the Windows graph-draft hook
   (`scripts/install-git-graph-draft-hook.ps1`) and `scripts/matlab-smoke.sh`
   run (default: the interpreter recorded at install, or `python3`)
@@ -1059,7 +1062,15 @@ FastAPI app does not read them. `LAB_TRACKER_BASE_URL` (see
   `outbox` (defaults: `.lab-tracker/outbox/repo`, `hpc`, and `watch`)
 - `LAB_TRACKER_REPO_RUN_ID` / `LAB_TRACKER_HPC_RUN_ID`: run id for `lt repo` and
   `lt hpc` events when `--run` is not given. `lt hpc` sets the HPC run id,
-  outbox, and config for the job it submits.
+  outbox, and config for the job it submits; a job started with
+  `--export=NONE` finds them in the run manifest `lt hpc submit` writes to
+  the submit directory instead.
+- `LAB_TRACKER_HPC_EPILOG_ENABLED`: `0`, `false`, `no`, or `off` makes
+  `lt hpc epilog` and the `scripts/slurm-task-epilog.sh` TaskEpilog template
+  record nothing for a job or site (default: on)
+- `LAB_TRACKER_PIPELINE_CAPTURE`: `0`, `false`, `no`, or `off` turns off
+  `lt pipeline report`/`nextflow`/`dvc` and the Snakemake and Kedro pipeline
+  adapters without editing the pipeline (default: on)
 - `LAB_TRACKER_SESSION_ID`: session UUID or link code that every figure capture
   and watch scan from this shell or job attaches to; it overrides the
   checkout's active session recorded by `lt session use` and, as a per-shell
