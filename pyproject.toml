@@ -79,6 +79,9 @@ where = ["src"]
 include = ["lab_tracker", "lab_tracker.*", "lab_tracker_client", "lab_tracker_client.*"]
 
 [tool.setuptools.package-data]
+# The R autotrack implementation (a byte-identical copy of r/labtracker/R/labtracker.R)
+# that `lt setup autotrack --r` points ~/.Rprofile at.
+lab_tracker_client = ["r_labtracker/*.R"]
 lab_tracker = [
   "alembic/env.py",
   "alembic/versions/*.py",
@@ -135,6 +138,8 @@ files = [
   "src/lab_tracker/_version.py",
   "src/lab_tracker_client/_version.py",
   "src/lab_tracker_client/capture_project.py",
+  "src/lab_tracker_client/cli_capture.py",
+  "src/lab_tracker_client/r_autotrack.py",
   "src/lab_tracker/patching.py",
   "src/lab_tracker/claim_effective_status.py",
   "src/lab_tracker/repository.py",

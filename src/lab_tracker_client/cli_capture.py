@@ -44,7 +44,9 @@ _KIND_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
 _BOOL_VALUES = {"true": True, "false": False}
 
 
-def add_capture_parsers(subcommands: argparse._SubParsersAction) -> None:
+def add_capture_parsers(
+    subcommands: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
     """Register ``lt capture file``."""
 
     capture_parser = subcommands.add_parser(

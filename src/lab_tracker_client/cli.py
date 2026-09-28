@@ -17,6 +17,7 @@ import lab_tracker_client.cli_capture as cli_capture
 import lab_tracker_client.figure_autotrack as autotrack_helpers
 import lab_tracker_client.git_capture as git_capture
 import lab_tracker_client.hooks as hook_install
+import lab_tracker_client.r_autotrack as r_autotrack
 import lab_tracker_client.registry as repo_registry
 import lab_tracker_client.repo as repo_capture
 import lab_tracker_client.schedule as schedule_helpers
@@ -467,11 +468,18 @@ def _add_setup_parsers(subcommands: argparse._SubParsersAction) -> None:
             "startup file that calls lab_tracker_client.autotrack(). Only saves whose "
             "project comes from autotrack(project_id=...), LAB_TRACKER_PROJECT_ID, or "
             "the checkout's lt_ids.json are captured; any other save is skipped with a "
-            "notice."
+            "notice. With --r, manage the R profile block instead (ggsave() and the "
+            "png/jpeg/tiff/bmp/pdf devices, same rule)."
         ),
     )
     autotrack_parser.add_argument(
         "--uninstall", action="store_true", help="Remove the managed IPython startup file."
+    )
+    autotrack_parser.add_argument(
+        "--r",
+        dest="r_profile",
+        action="store_true",
+        help="Manage the R autotrack block in ~/.Rprofile (or R_PROFILE_USER) instead.",
     )
     autotrack_parser.add_argument(
         "--dry-run", action="store_true", help="Show the change without writing it."
@@ -1933,6 +1941,13 @@ def _cmd_watch_run(client: LabTracker, args: argparse.Namespace) -> Any:
 
 
 def _cmd_setup_autotrack(args: argparse.Namespace) -> Any:
+    if args.r_profile:
+        if not (args.yes or args.dry_run):
+            raise SystemExit(
+                "lt setup autotrack --r edits your R profile (~/.Rprofile); "
+                "pass --yes to consent or --dry-run to preview."
+            )
+        return r_autotrack.install_rprofile(dry_run=args.dry_run, uninstall=args.uninstall)
     if not (args.yes or args.dry_run):
         raise SystemExit(
             "lt setup autotrack writes an IPython startup file; "
