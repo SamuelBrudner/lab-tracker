@@ -35,7 +35,6 @@ import importlib
 import os
 import re
 import struct
-import xml.etree.ElementTree as ElementTree
 from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
@@ -507,6 +506,8 @@ def _xml_parser(target: _OmeTarget) -> Any:
     try:
         defused = importlib.import_module("defusedxml.ElementTree")
     except ImportError:
+        from xml.etree import ElementTree
+
         return ElementTree.XMLParser(target=target)
     return defused.DefusedXMLParser(
         target=target, forbid_dtd=True, forbid_entities=True, forbid_external=True
@@ -515,6 +516,9 @@ def _xml_parser(target: _OmeTarget) -> Any:
 
 def parse_ome_xml(data: bytes, *, truncated: bool, zone: tzinfo | None) -> FormatFields:
     """``format_*`` fields from OME-XML bytes; raises ``_NotThisFormat`` for other XML."""
+
+    # Imported here so `lt` startup (hooks run on every commit) never pays for it.
+    from xml.etree import ElementTree
 
     text = data.decode("utf-8", errors="replace")
     if "<OME" not in text[:65536] and ":OME" not in text[:65536]:
