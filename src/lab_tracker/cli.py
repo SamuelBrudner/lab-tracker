@@ -29,6 +29,7 @@ from alembic.config import Config
 from lab_tracker._version import DISTRIBUTION_NAME, __version__
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.backup import BackupError, create_sqlite_backup, restore_sqlite_backup
+from lab_tracker.capture_channels.cli import add_integrations_parsers, run_integrations_command
 from lab_tracker.config import get_settings
 from lab_tracker.db import get_engine, get_session_factory
 from lab_tracker.decision_context_constants import (
@@ -832,6 +833,7 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="Overwrite the target database after you have stopped Lab Tracker.",
     )
+    add_integrations_parsers(subcommands)
 
     args = parser.parse_args(argv)
     if args.command == "init":
@@ -917,6 +919,10 @@ def main(argv: list[str] | None = None) -> None:
             print(f"Restore failed: {exc}", file=sys.stderr)
             raise SystemExit(1) from exc
         print(json.dumps(result.as_dict(), indent=2))
+    elif args.command == "integrations":
+        exit_code = run_integrations_command(args)
+        if exit_code:
+            raise SystemExit(exit_code)
 
 
 def _alembic_config() -> Config:

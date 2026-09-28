@@ -31,6 +31,7 @@ from .goals import build_goals_router
 from .graph_batches import build_graph_batches_router
 from .graph_drafts import build_graph_drafts_router
 from .groups import build_groups_router
+from .integrations import build_integrations_router
 from .member_onboarding import build_member_onboarding_router
 from .notes import build_notes_router
 from .ownership import build_ownership_router
@@ -117,6 +118,7 @@ def register_routes(
     app.include_router(build_data_stores_router(api))
     app.include_router(build_goals_router(api))
     app.include_router(build_visualizations_router(api))
+    app.include_router(build_integrations_router(api))
 
 
 __all__ = [

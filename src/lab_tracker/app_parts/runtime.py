@@ -499,6 +499,7 @@ def make_lifespan(
             background_tasks = [
                 *_start_graph_draft_background_tasks(app),
                 *_start_review_email_background_tasks(app),
+                *_start_capture_poller_tasks(app),
             ]
             yield
         finally:
@@ -545,6 +546,20 @@ async def _stop_background_tasks(tasks: list[asyncio.Task[None]]) -> None:
         task.cancel()
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def _start_capture_poller_tasks(app: FastAPI) -> list[asyncio.Task[None]]:
+    # Imported lazily: the capture channels compose from this module's app state.
+    from lab_tracker.capture_channels.app_runtime import start_capture_poller_tasks
+
+    return start_capture_poller_tasks(app)
+
+
+def _local_store_scan_access(runtime: AppRuntime) -> object:
+    # Only the narrow scan capability is published; the broker stays private.
+    from lab_tracker.capture_channels.store_scan import LocalStoreScanAccess
+
+    return LocalStoreScanAccess(runtime.local_filesystem_operations)
 
 
 def _graph_draft_background_enabled(settings: Settings) -> bool:
@@ -773,6 +788,8 @@ def configure_app_state(app: FastAPI, runtime: AppRuntime) -> None:
     app.state.register_rate_limiter = runtime.register_rate_limiter
     app.state.pat_rate_limiter = runtime.pat_rate_limiter
     app.state.outbound_http_policy = runtime.outbound_http_policy
+    app.state.outbound_http_client = runtime.outbound_http_client
+    app.state.local_store_scan_access = _local_store_scan_access(runtime)
     app.state.rclone_remote_policy = runtime.rclone_remote_policy
     app.state.git_remote_policy = runtime.git_remote_policy
     app.state.process_executor = runtime.process_executor

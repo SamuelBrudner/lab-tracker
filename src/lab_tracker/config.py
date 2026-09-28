@@ -21,6 +21,7 @@ from lab_tracker.artifact_resolution_admission import (
     MAX_ARTIFACT_RESOLUTION_GLOBAL_IN_FLIGHT_LIMIT,
 )
 from lab_tracker.bounded_subprocess import MAX_PROCESS_DEADLINE_SECONDS
+from lab_tracker.capture_channels.settings import validate_capture_channel_settings
 from lab_tracker.instance_url import (
     BASE_URL_ENV,
     LEGACY_CANONICAL_BASE_URL_ENV,
@@ -205,6 +206,26 @@ class Settings(BaseSettings):
     review_email_smtp_from_address: str = ""
     review_email_smtp_tls_mode: Literal["none", "starttls", "implicit"] = "starttls"
     review_email_smtp_timeout_seconds: float = 10.0
+    # Server capture channels (docs/server-capture-channels.md); all off until set.
+    integrations_poller_enabled: bool = False
+    integrations_poll_min_interval_seconds: float = 300.0
+    integrations_state_path: str = ""
+    capture_user_emails: str = Field(default="", repr=False)
+    slack_signing_secret: str = Field(default="", repr=False)
+    slack_workspace_url: str = ""
+    slack_channel_projects: str = ""
+    slack_users: str = Field(default="", repr=False)
+    email_capture_address: str = ""
+    email_capture_imap_host: str = ""
+    email_capture_imap_port: int = 993
+    email_capture_imap_username: str = Field(default="", repr=False)
+    email_capture_imap_password: str = Field(default="", repr=False)
+    email_capture_imap_password_file: str = ""
+    email_capture_imap_folder: str = "INBOX"
+    email_capture_processed_folder: str = ""
+    booking_calendars: str = Field(default="", repr=False)
+    store_scans: str = ""
+    store_scan_hash_max_bytes: int = 64 * 1024 * 1024
     openai_api_key: str = Field(default="", repr=False)
     openai_model: str = "gpt-4o-mini"
     openai_reasoning_effort: Literal["none", "low", "medium", "high", "xhigh", "max"] | None = None
@@ -655,6 +676,10 @@ class Settings(BaseSettings):
                         "LAB_TRACKER_REVIEW_EMAIL_SMTP_USERNAME and "
                         "LAB_TRACKER_REVIEW_EMAIL_SMTP_PASSWORD must be configured together."
                     )
+        validate_capture_channel_settings(
+            self,
+            auth_secret_is_placeholder=auth_secret_key in INSECURE_AUTH_SECRET_KEYS,
+        )
         return self
 
     model_config = SettingsConfigDict(

@@ -935,6 +935,87 @@ does not target the deployed Postgres database. The optional
 one-shot external bridge; it lets the profile read the app's existing runtime
 secret from a read-only volume rather than duplicating that secret in Compose.
 
+### Server capture channels
+
+Every channel is off until configured, and every capture lands as a **staged**
+note carrying pointers and bounded text — never a committed record. A person
+who acted (a Slack save, a verified email) authors their capture; a record the
+server fetched itself (a calendar booking, a new file in a registered store) is
+authored by the `SYSTEM` principal and labelled with `capture_channel`. Every
+setting below is validated at startup and a malformed or half-configured
+channel refuses to start, naming the variable (never its value). Setup, the
+email threat model, the Slack app manifest, and limits are in
+[`server-capture-channels.md`](server-capture-channels.md).
+
+The three pollers (email, bookings, store scans) run from the optional
+in-process ticker, from `POST /integrations/run-due` (an admin session, an
+admin `all`-scope token, or the admin `batch_run_due` scheduler token), or from
+`lab-tracker integrations poll` under cron. Each poller runs at most once per
+minimum interval whoever triggers it, is bounded, and fails on its own without
+stopping the others or the daily-review batch dispatch.
+
+- `LAB_TRACKER_INTEGRATIONS_POLLER_ENABLED`: start the in-process ticker that
+  runs due capture pollers (default: `false`; it also stays idle while no
+  poller is configured)
+- `LAB_TRACKER_INTEGRATIONS_POLL_MIN_INTERVAL_SECONDS`: minimum seconds between
+  two runs of the same poller across the ticker, the HTTP trigger, and the CLI
+  (default: `300`; `60`–`86400`)
+- `LAB_TRACKER_INTEGRATIONS_STATE_PATH`: JSON file holding each poller's last
+  run and each store scan's baseline (default:
+  `<LAB_TRACKER_NOTE_STORAGE_PATH>/.integrations-poll-state.json`; an explicit
+  value must be absolute); written atomically with mode `0600`
+- `LAB_TRACKER_CAPTURE_USER_EMAILS`: JSON object mapping a sender email address
+  to a Lab Tracker user id or username, e.g.
+  `{"alice@lab.example.org": "alice"}`. Email capture accepts mail only from a
+  mapped address, and a Slack user may be mapped by one of these addresses
+- `LAB_TRACKER_SLACK_SIGNING_SECRET`: the Slack app's signing secret; enables
+  `POST /integrations/slack/commands` and `/integrations/slack/interactivity`,
+  which are authenticated by Slack's `v0` HMAC over the raw body with a
+  five-minute replay window instead of a bearer token (unset: both answer
+  `404`)
+- `LAB_TRACKER_SLACK_WORKSPACE_URL`: `https://<workspace>.slack.com`, used to
+  build message permalinks (optional)
+- `LAB_TRACKER_SLACK_CHANNEL_PROJECTS`: JSON object mapping a Slack channel id
+  to a Lab Tracker project UUID, e.g. `{"C0123ABCD": "<project uuid>"}`; a
+  capture from an unmapped channel is refused with an ephemeral reply
+- `LAB_TRACKER_SLACK_USERS`: JSON object mapping a Slack user id to a Lab
+  Tracker user id, username, or an address in
+  `LAB_TRACKER_CAPTURE_USER_EMAILS`; an unmapped user is refused with an
+  ephemeral reply and nothing is stored
+- `LAB_TRACKER_EMAIL_CAPTURE_ADDRESS`: the base capture address, e.g.
+  `capture@lab.example.org` (no `+` extension); each person's per-project
+  address is `capture+<token>@lab.example.org` where the token is a truncated
+  HMAC of the user and project under `LAB_TRACKER_AUTH_SECRET_KEY` (so rotating
+  that secret changes every capture address). Requires a non-placeholder auth
+  secret and the IMAP settings below
+- `LAB_TRACKER_EMAIL_CAPTURE_IMAP_HOST`: IMAP server hostname (implicit TLS
+  with certificate verification)
+- `LAB_TRACKER_EMAIL_CAPTURE_IMAP_PORT`: IMAP port (default: `993`)
+- `LAB_TRACKER_EMAIL_CAPTURE_IMAP_USERNAME`: mailbox login
+- `LAB_TRACKER_EMAIL_CAPTURE_IMAP_PASSWORD` / `LAB_TRACKER_EMAIL_CAPTURE_IMAP_PASSWORD_FILE`:
+  the mailbox password, or a file holding it (read at each poll, so a rotated
+  file needs no restart); set exactly one
+- `LAB_TRACKER_EMAIL_CAPTURE_IMAP_FOLDER`: folder to poll for unseen mail
+  (default: `INBOX`)
+- `LAB_TRACKER_EMAIL_CAPTURE_PROCESSED_FOLDER`: optional folder a processed
+  message is moved to (`MOVE`, else `COPY` plus `\Deleted` without expunge);
+  unset, processed mail is only flagged `\Seen`
+- `LAB_TRACKER_BOOKING_CALENDARS`: JSON list of instrument calendar feeds,
+  `[{"project_id": "<uuid>", "url": "https://…/feed.ics", "instrument":
+  "Confocal 1", "timezone": "America/New_York"}]` (`timezone`, default `UTC`,
+  applies to floating times and all-day dates). Feeds are HTTPS-only and
+  fetched through the outbound HTTP policy above, capped at 2 MiB and 20
+  seconds; the URL (which often embeds a secret token) is never logged or
+  stored
+- `LAB_TRACKER_STORE_SCANS`: JSON list of registered-store scans,
+  `[{"project_id": "<uuid>", "store": "lab-onedrive", "prefix": "flow",
+  "patterns": ["*.fcs"], "include_existing": false}]`. `local_fs` stores must
+  lie inside `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS`; rclone-backed stores must be
+  in `LAB_TRACKER_RCLONE_ALLOWED_REMOTES`; other kinds cannot be listed
+- `LAB_TRACKER_STORE_SCAN_HASH_MAX_BYTES`: largest file a scan streams to
+  compute its SHA-256 (default: `67108864`, 64 MiB; `0`–`536870912`); larger
+  or unreadable files are staged with `content_hash_pending=true`
+
 ### MCP service client (`lt-mcp`)
 
 These variables are read by the MCP server process, not the FastAPI app. The
