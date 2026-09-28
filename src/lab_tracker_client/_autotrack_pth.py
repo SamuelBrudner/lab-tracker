@@ -17,6 +17,13 @@ from __future__ import annotations
 import os
 import sys
 
+# Not ``typing.TYPE_CHECKING``: importing typing would cost every interpreter start.
+TYPE_CHECKING = False
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+    from importlib.machinery import ModuleSpec
+    from types import ModuleType
+
 MODULE_NAME = "_lab_tracker_autotrack_pth"
 AUTOTRACK_ENV = "LAB_TRACKER_AUTOTRACK"
 FIGURE_MODULE = "matplotlib.figure"
@@ -59,7 +66,12 @@ class MatplotlibWatcher:
         self.pending = {FIGURE_MODULE, PYPLOT_MODULE}
         self._busy = False
 
-    def find_spec(self, fullname: str, path: object = None, target: object = None) -> object:
+    def find_spec(
+        self,
+        fullname: str,
+        path: Sequence[str] | None = None,
+        target: ModuleType | None = None,
+    ) -> ModuleSpec | None:
         if fullname not in self.pending or self._busy:
             return None
         self._busy = True
@@ -68,12 +80,12 @@ class MatplotlibWatcher:
                 find_spec = getattr(finder, "find_spec", None)
                 if finder is self or find_spec is None:
                     continue
-                spec = find_spec(fullname, path, target)
+                spec: ModuleSpec | None = find_spec(fullname, path, target)
                 if spec is not None:
                     loader = getattr(spec, "loader", None)
                     if loader is None or not hasattr(loader, "exec_module"):
                         return None
-                    spec.loader = _PostImportLoader(loader, fullname, self)
+                    spec.loader = _PostImportLoader(loader, fullname, self)  # type: ignore[assignment]
                     return spec
             return None
         except Exception:  # noqa: BLE001 - fall back to the ordinary import.
@@ -81,7 +93,7 @@ class MatplotlibWatcher:
         finally:
             self._busy = False
 
-    def loaded(self, name: str, module: object) -> None:
+    def loaded(self, name: str, module: ModuleType) -> None:
         """React to a finished import: lazy hooks, or step aside inside IPython."""
 
         self.pending.discard(name)
@@ -113,17 +125,17 @@ class _PostImportLoader:
         self._name = name
         self._watcher = watcher
 
-    def create_module(self, spec: object) -> object:
+    def create_module(self, spec: ModuleSpec) -> ModuleType | None:
         create = getattr(self._loader, "create_module", None)
         return create(spec) if create is not None else None
 
-    def exec_module(self, module: object) -> None:
+    def exec_module(self, module: ModuleType) -> None:
         try:
             self._loader.exec_module(module)  # type: ignore[attr-defined]
         finally:
             try:
                 # Hand the module back to its real loader for introspection.
-                module.__loader__ = self._loader  # type: ignore[attr-defined]
+                module.__loader__ = self._loader  # type: ignore[assignment]
                 spec = getattr(module, "__spec__", None)
                 if spec is not None:
                     spec.loader = self._loader
@@ -143,9 +155,12 @@ def _lazy_patch(owner: object, attribute: str) -> None:
     def lazy(*args: object, **kwargs: object) -> object:
         _activate()
         current = getattr(owner, attribute, original)
-        if current is lazy:
+        # Dispatch to the hook now installed, unless this stand-in is itself
+        # what that hook wraps (a hook installed on top of it): then run the
+        # original, or the call would loop back here.
+        if current is lazy or _wraps(current, lazy):
             current = original
-        return current(*args, **kwargs)  # type: ignore[operator]
+        return current(*args, **kwargs)
 
     lazy._lab_tracker_lazy = True  # type: ignore[attr-defined]
     lazy.__wrapped__ = original  # type: ignore[attr-defined]
@@ -156,9 +171,25 @@ def _lazy_patch(owner: object, attribute: str) -> None:
     _LAZY.append((owner, attribute, original, lazy))
 
 
-def _activate() -> None:
-    """First save or show: restore the originals, then install the real hooks."""
+def _wraps(func: object, target: object) -> bool:
+    for _depth in range(8):
+        func = getattr(func, "__wrapped__", None)
+        if func is None:
+            return False
+        if func is target:
+            return True
+    return False
 
+
+def _activate() -> None:
+    """First save or show: restore the originals, then install the real hooks.
+
+    Runs once per batch of stand-ins, so a hook the user later removes (for
+    example with ``autotrack(False)``) is never reinstalled behind their back.
+    """
+
+    if not _LAZY:
+        return
     while _LAZY:
         owner, attribute, original, lazy = _LAZY.pop()
         try:

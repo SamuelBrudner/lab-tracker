@@ -374,12 +374,20 @@ def test_displays_upload_into_the_notebooks_bound_checkout_only(
 
 
 def test_real_matplotlib_figures_display_and_capture(
-    ipython: FakeShell, captured: list[dict[str, Any]], monkeypatch
+    captured: list[dict[str, Any]], monkeypatch, tmp_path: Path
 ) -> None:
+    """The real matplotlib Figure (not the `ipython` fixture's fake module)."""
+
     pytest.importorskip("matplotlib")
-    monkeypatch.delitem(sys.modules, "matplotlib", raising=False)
-    monkeypatch.delitem(sys.modules, "matplotlib.figure", raising=False)
     from matplotlib.figure import Figure
+
+    ipython = FakeShell()
+    ipython_module = types.ModuleType("IPython")
+    ipython_module.get_ipython = lambda: ipython  # type: ignore[attr-defined]
+    ipython_module.version_info = (9, 0, 0)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "IPython", ipython_module)
+    monkeypatch.delenv("LAB_TRACKER_AUTOTRACK", raising=False)
+    monkeypatch.setenv("LAB_TRACKER_CONFIG_DIR", str(tmp_path / "lt-config"))
 
     def ipython_like_format(self: Any, obj: Any, include: Any = None, exclude: Any = None):  # noqa: ARG001
         data: dict[str, Any] = {"text/plain": repr(obj)}

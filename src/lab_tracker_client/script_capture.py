@@ -58,7 +58,8 @@ def activate_script_autotrack() -> bool:
     try:
         if not _autotrack.autotrack_env_enabled() or _in_ipython():
             return False
-        installed = _autotrack.autotrack(displays=False)
+        # An autotrack() the script already made keeps its own options.
+        installed = _autotrack.is_autotracking() or _autotrack.autotrack(displays=False)
         if installed:
             install_show_hook()
         return installed
@@ -86,7 +87,7 @@ def install_show_hook() -> bool:
     show.__wrapped__ = original  # type: ignore[attr-defined]
     show.__name__ = getattr(original, "__name__", "show")
     show.__doc__ = getattr(original, "__doc__", None)
-    pyplot.show = show
+    setattr(pyplot, "show", show)  # noqa: B010 - a module attribute mypy cannot see.
     _STATE["show_original"] = original
     return True
 
@@ -97,7 +98,7 @@ def uninstall_show_hook() -> None:
     if pyplot is not None and original is not None:
         current = getattr(pyplot, "show", None)
         if getattr(current, _SHOW_HOOK_MARKER, False):
-            pyplot.show = original
+            setattr(pyplot, "show", original)  # noqa: B010 - see install_show_hook.
     _STATE["show_original"] = None
 
 
@@ -105,7 +106,8 @@ def capture_shown_figures() -> list[_figure.FigureCaptureResult]:
     """Capture every open pyplot figure as PNG, once per figure per run."""
 
     results: list[_figure.FigureCaptureResult] = []
-    if not _autotrack.autotrack_env_enabled():
+    # autotrack(False) turns the show capture off too.
+    if not _autotrack.autotrack_env_enabled() or not _autotrack.is_autotracking():
         return results
     helpers = sys.modules.get("matplotlib._pylab_helpers")
     gcf = getattr(helpers, "Gcf", None)

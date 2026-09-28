@@ -576,7 +576,7 @@ def _jupyter_server_extension_points() -> list[dict[str, str]]:
 def _load_jupyter_server_extension(serverapp: Any) -> None:
     """Register :func:`post_save_hook` on the server's contents manager."""
 
-    log = getattr(serverapp, "log", None)
+    log: Any = getattr(serverapp, "log", None)
     try:
         outcome = register_post_save_hook(serverapp.contents_manager)
     except Exception as exc:  # noqa: BLE001 - never stop the server from starting.

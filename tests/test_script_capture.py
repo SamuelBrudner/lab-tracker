@@ -479,15 +479,20 @@ def test_show_captures_each_figure_once_per_run_into_the_scripts_checkout(
 def test_show_hook_is_fail_soft_and_removable(
     fake_pyplot: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def broken(*_args: Any, **_kwargs: Any) -> Any:
+    attempts: list[str] = []
+
+    def broken(*_args: Any, **kwargs: Any) -> Any:
+        attempts.append(kwargs["logical_id"])
         raise RuntimeError("capture exploded")
 
     monkeypatch.setattr(figure_module, "capture_figure_bytes", broken)
     original = fake_pyplot.module.show
+    autotrack(displays=False)
     script_module.install_show_hook()
     fake_pyplot.figure(1)
     fake_pyplot.module.show()
     assert fake_pyplot.shown == [1]
+    assert len(attempts) == 1
     script_module.uninstall_show_hook()
     assert fake_pyplot.module.show is original
 
@@ -552,3 +557,47 @@ def test_setup_autotrack_scripts_manages_the_pth_file(
     with pytest.raises(SystemExit, match="not written by Lab Tracker"):
         lt_cli.main(["setup", "autotrack", "--scripts", "--yes"])
     assert pth.read_text(encoding="utf-8") == "import something_else\n"
+
+
+def test_lazy_stand_ins_install_the_real_hooks_once_and_never_loop(
+    fake_pyplot: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lab_tracker_client import _autotrack_pth as boot
+
+    monkeypatch.setattr(boot, "_LAZY", [])
+    monkeypatch.setattr(FakeFigure, "savefig", FakeFigure.savefig)  # restored afterwards
+    original_savefig = FakeFigure.savefig
+    saves: list[dict[str, Any]] = []
+    shows: list[str] = []
+    monkeypatch.setattr(figure_module, "_capture_saved_figure", lambda **kw: saves.append(kw))
+    monkeypatch.setattr(
+        figure_module,
+        "capture_figure_bytes",
+        lambda payload, **kw: shows.append(kw["logical_id"]),
+    )
+
+    boot._lazy_patch(FakeFigure, "savefig")
+    boot._lazy_patch(fake_pyplot.module, "show")
+    imported_show = fake_pyplot.module.show  # like `from matplotlib.pyplot import show`
+    FakeFigure().savefig(tmp_path / "first.png")
+    assert [kw["path"] for kw in saves] == [tmp_path / "first.png"]
+    assert FakeFigure.savefig.__wrapped__ is original_savefig
+    fake_pyplot.figure(1)
+    imported_show()  # the early reference still reaches the installed show hook
+    assert fake_pyplot.shown == [1]
+    assert len(shows) == 1
+
+    # Removing autotrack sticks: a stand-in never reinstalls it.
+    autotrack(False)
+    fake_pyplot.figure(2, PNG + b"-new")
+    imported_show()
+    FakeFigure().savefig(tmp_path / "after.png")
+    assert (len(saves), len(shows)) == (1, 1)
+
+    # autotrack() installed on top of a stand-in keeps its options and never loops.
+    boot._lazy_patch(FakeFigure, "savefig")
+    autotrack(project_id="project-explicit", displays=False)
+    FakeFigure().savefig(tmp_path / "explicit.png")
+    FakeFigure().savefig(tmp_path / "again.png")
+    assert [kw["path"].name for kw in saves[1:]] == ["explicit.png", "again.png"]
+    assert {kw["project_id"] for kw in saves[1:]} == {"project-explicit"}
