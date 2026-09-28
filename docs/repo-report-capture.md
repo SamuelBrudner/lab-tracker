@@ -140,7 +140,8 @@ lt repo report --summary "Sweep over latency window" --question <uuid> --tag pil
 Annotating a *pending* capture updates it in place (`action: updated`); a bare
 hook re-fire never reverts an annotation (`unchanged`); annotating an already
 *synced* capture writes a new event so the staged note is never desynced
-(`recaptured`).
+(`recaptured`). A recaptured annotation syncs as a note of its own next to the
+commit's note (see [One commit, one note](#one-commit-one-note)).
 
 ### Run Outputs
 
@@ -152,8 +153,8 @@ lt repo finish --artifact results/decoding.csv --artifact figures/summary.png \
   --summary "Decoded stimulus identity from held-out trials."
 ```
 
-`finish` events are per-run: two runs at the same commit stay distinct. The
-same `--artifact` flag works on `report`.
+`finish` events are per-run: two runs at the same commit stay distinct, and
+each syncs as its own note. The same `--artifact` flag works on `report`.
 
 ### Environment Fingerprint
 
@@ -187,14 +188,49 @@ Sync uploads each event as a staged markdown note (`provider=git`) under the
 project's normal review flow. Commit notes contain their bounded diff; the inbox
 exposes it through the safe text-asset preview, and scheduled review includes it
 within the aggregate source-context budget. Events are deduplicated through the
-evidence index. The
-shared evidence identity is `<normalized-remote>@<commit>` — the same identity
-`scripts/create-analysis-graph-draft.py` emits, so hook-based and CI-based
-capture of one commit dedup to one identity rather than parallel note streams.
+evidence index.
 
 Under today's device-token allowlist the staged-note sink works with a device
 token; graph-draft requests (`--request-draft`) and any future first-class
 registration need a user or personal-access token.
+
+### One commit, one note
+
+Every event at a commit carries the commit's evidence identity,
+`<normalized-remote>@<commit>`, as `evidence_source_external_id` — the same
+identity `scripts/create-analysis-graph-draft.py` emits, so hook-based and
+CI-based capture of one commit share one identity rather than parallel note
+streams. The server keeps one note per project and `client_capture_id`, and
+that key decides which events are meant as notes of their own:
+
+| Event | `client_capture_id` |
+| --- | --- |
+| The commit capture (the hook's `commit` event) | `<normalized-remote>@<commit>` |
+| `finish`, `report`, and a `recaptured` annotation | `<normalized-remote>@<commit>:<event_type>:<event_id>` |
+
+A key longer than the server's 120 characters keeps its first 104 and a hash of
+the whole key. A replay of the same event (a retry after a lost response)
+sends the same key and content, so the server returns the note it already
+made instead of a second one.
+
+When two clones, or a clone and CI, capture the same commit, whichever sync
+arrives first makes the commit note. The other is refused with HTTP 409
+("already used with different field(s)") because its content differs (host,
+branch, environment or annotation). The refused event settles by what it
+carries:
+
+- A bare commit capture — no `--summary`, `--question`, `--dataset`, `--tag` or
+  `--artifact` (a `default_question_id` from `repo.json` does not count) — is
+  marked `synced` with reason `already_captured` and no note id: the commit is
+  already captured, so there is nothing to retry. `lt outbox status` shows the
+  reason as `sync_reason`.
+- A commit capture that carries any of those stays `failed`, with an error
+  naming what it records: marking it synced would silently drop an annotation
+  the other note may lack. A capture recorded before annotations were tracked
+  (no `summary_is_explicit` or `question_id_source`) counts a non-default
+  summary or any question as one. See [Troubleshooting](#troubleshooting).
+- Every other refusal stays `failed` as before: a `finish`, `report` or
+  recaptured event whose own key was refused, or a 409 for another reason.
 
 ## Curation: From Note To Provenance
 
@@ -261,3 +297,10 @@ credentials. See
   `lt repo report` from it manually.
 - Commits recorded but never syncing: run `lt repo status`, then
   `lt repo sync` on a machine that can reach Lab Tracker.
+- A commit event stays `failed` with "is already captured by another note;
+  this event also records ...": another capture of that commit made its note
+  first (another clone, CI, or this event's own upload before you annotated
+  it), and this event's annotation is not on it. The annotation is only in
+  the event file that `lt outbox status` lists. Copy it over by hand (for
+  example while reviewing the commit's note), then delete the file; until
+  then every sync reports it again.
