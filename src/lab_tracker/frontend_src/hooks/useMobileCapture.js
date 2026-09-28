@@ -22,6 +22,7 @@ import {
   migrateIncomingShares,
   shareInboxAvailable,
   shareTooLargeMessage,
+  withShareImportLock,
 } from "../shared/share-target-inbox.js";
 import {
   captureHint,
@@ -42,6 +43,7 @@ import {
   readBookmarkletClip,
 } from "../features/bench-capture/bookmarklet.js";
 import {
+  SHARE_TRUST_KEY,
   grantShareTrust,
   readShareTrust,
   revokeShareTrust,
@@ -340,6 +342,27 @@ function useMobileCapture({
     return () => clearInterval(timer);
   }, [refreshShareTrust, shareTrust]);
 
+  useEffect(() => {
+    // Another tab can open or stop the window (a `storage` event), and a phone
+    // resumed from the background may be past its expiry.
+    const handleStorage = (event) => {
+      if (!event.key || event.key === SHARE_TRUST_KEY) {
+        refreshShareTrust();
+      }
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        refreshShareTrust();
+      }
+    };
+    window.addEventListener("storage", handleStorage);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      window.removeEventListener("storage", handleStorage);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [refreshShareTrust]);
+
   // The window only applies while its session is one of this project's active
   // sessions: a closed session, or another project, gets nothing implicitly.
   const trustedSession = useMemo(
@@ -481,36 +504,55 @@ function useMobileCapture({
 
   // Imports the listed shares into the selected project, with a trusted share
   // window's session target and capture_channel when `options` carry them.
-  async function importShares(shareIds, { targets = [], extraMetadata = {}, destination = "" } = {}) {
+  // Imports from every open capture page take turns (Web Locks), each share
+  // carries its own idempotency key, and `stillAllowed` is asked again once
+  // this page's turn comes, so a trust window stopped meanwhile imports nothing.
+  async function importShares(
+    shareIds,
+    { targets = [], extraMetadata = {}, destination = "", stillAllowed = null } = {}
+  ) {
     const queue = getUploadQueue();
     if (!queue || !shareStorage) {
       setFlash("", "Shared items cannot be imported: this browser has no offline upload storage.");
-      return;
+      return false;
     }
     const projectId = selectedProjectId;
     setFlash("", "");
+    let imported = true;
     await runShareAction(async () => {
       let result;
       try {
-        result = await migrateIncomingShares({
-          createTextNote: ({ metadata, rawContent, targets: noteTargets = [] }) =>
-            apiRequest("/notes", {
-              body: {
-                metadata,
-                project_id: projectId,
-                raw_content: rawContent,
-                targets: noteTargets,
-              },
-              method: "POST",
-              token,
-            }),
-          extraMetadata,
-          projectId,
-          ownerId,
-          shareIds,
-          storage: shareStorage,
-          targets,
-          uploadQueue: queue,
+        result = await withShareImportLock(async () => {
+          if (stillAllowed && !stillAllowed()) {
+            imported = false;
+            return { migrated: 0, skipped: 0 };
+          }
+          return migrateIncomingShares({
+            createTextNote: ({
+              clientCaptureId,
+              metadata,
+              rawContent,
+              targets: noteTargets = [],
+            }) =>
+              apiRequest("/notes", {
+                body: {
+                  client_capture_id: clientCaptureId,
+                  metadata,
+                  project_id: projectId,
+                  raw_content: rawContent,
+                  targets: noteTargets,
+                },
+                method: "POST",
+                token,
+              }),
+            extraMetadata,
+            projectId,
+            ownerId,
+            shareIds,
+            storage: shareStorage,
+            targets,
+            uploadQueue: queue,
+          });
         });
       } catch (error) {
         // eslint-disable-next-line no-console
@@ -532,16 +574,24 @@ function useMobileCapture({
         return;
       }
       if (mountedRef.current) {
-        const imported =
+        const count =
           result.migrated === 1 ? "1 shared capture" : `${result.migrated} shared captures`;
-        setFlash(destination ? `${imported} saved into ${destination}.` : `${imported} imported.`);
+        setFlash(destination ? `${count} saved into ${destination}.` : `${count} imported.`);
       }
       await drainImportedShares(queue);
       await refreshImportedProject(projectId);
     });
+    return imported;
   }
 
-  function autoImportTrustedShares() {
+  // The stored window, read now: another tab may have stopped it or it may
+  // have expired since this page last looked.
+  function currentTrustFor(sessionIdToMatch) {
+    const current = readShareTrust({ ownerId, projectId: selectedProjectId, now: now() });
+    return current && current.sessionId === sessionIdToMatch ? current : null;
+  }
+
+  async function autoImportTrustedShares() {
     if (
       !shareTrust ||
       !trustedSession ||
@@ -557,15 +607,28 @@ function useMobileCapture({
     if (fresh.length === 0) {
       return;
     }
-    fresh.forEach((share) => autoImportedShareIdsRef.current.add(share.id));
-    importShares(
-      fresh.map((share) => share.id),
-      {
-        destination: shareTrust.sessionLabel || sessionLabel(trustedSession),
-        extraMetadata: { capture_channel: CAPTURE_CHANNEL.SHARE },
-        targets: sessionTargets(trustedSession.session_id),
+    const sessionIdToMatch = trustedSession.session_id;
+    if (!currentTrustFor(sessionIdToMatch)) {
+      // Stopped elsewhere or expired: these shares wait for review.
+      refreshShareTrust();
+      return;
+    }
+    const freshIds = fresh.map((share) => share.id);
+    freshIds.forEach((id) => autoImportedShareIdsRef.current.add(id));
+    const imported = await importShares(freshIds, {
+      destination: shareTrust.sessionLabel || sessionLabel(trustedSession),
+      extraMetadata: { capture_channel: CAPTURE_CHANNEL.SHARE },
+      stillAllowed: () => Boolean(currentTrustFor(sessionIdToMatch)),
+      targets: sessionTargets(sessionIdToMatch),
+    });
+    if (!imported) {
+      // The window closed while waiting for another page's import: leave
+      // these for review, and for a later window if one is opened.
+      freshIds.forEach((id) => autoImportedShareIdsRef.current.delete(id));
+      if (mountedRef.current) {
+        refreshShareTrust();
       }
-    );
+    }
   }
 
   useEffect(() => {
@@ -575,7 +638,10 @@ function useMobileCapture({
   useEffect(() => {
     // While a trusted share window is open, shares go straight into its
     // session: no confirm step. Anything else waits for review as before.
-    autoImportSharesRef.current?.();
+    Promise.resolve(autoImportSharesRef.current?.()).catch((error) => {
+      // eslint-disable-next-line no-console
+      console.error("Trusted share import failed:", error);
+    });
   }, [canWrite, incomingShares, trustedSession]);
 
   function trustShares(hours) {

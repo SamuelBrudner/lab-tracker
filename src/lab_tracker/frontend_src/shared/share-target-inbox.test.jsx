@@ -11,6 +11,7 @@ import {
   expiredSharesMessage,
   listReviewableShares,
   migrateIncomingShares,
+  shareCaptureId,
   shareTooLargeMessage,
 } from "./share-target-inbox.js";
 import {
@@ -324,7 +325,41 @@ describe("migrateIncomingShares", () => {
       }),
       // A reviewed share declares no targets unless a trusted window names one.
       targets: [],
+      clientCaptureId: expect.stringMatching(/^share-inbox-1-\d+$/),
     });
+  });
+
+  it("gives each share one deterministic capture id, for text and file shares alike", async () => {
+    const shares = [
+      { text: "shared text", receivedAt: 1700 },
+      { file: makeFile(), filename: "shared.jpg", contentType: "image/jpeg", receivedAt: 1800 },
+    ];
+    const createTextNote = vi.fn(async () => ({ note_id: "n" }));
+    const importOnce = async () => {
+      const storage = createMemoryShareStorage(shares);
+      const uploadQueue = makeQueue();
+      await migrateIncomingShares({
+        createTextNote,
+        projectId: "proj-a",
+        ownerId: "owner-1",
+        uploadQueue,
+        storage,
+        shareIds: await reviewedIds(storage),
+      });
+      return (await uploadQueue.listPending())[0].fields.client_capture_id;
+    };
+
+    const firstFileId = await importOnce();
+    const secondFileId = await importOnce();
+
+    expect(firstFileId).toBe(shareCaptureId({ id: 2, receivedAt: 1800 }));
+    expect(secondFileId).toBe(firstFileId);
+    const textIds = createTextNote.mock.calls.map(([args]) => args.clientCaptureId);
+    expect(textIds).toEqual([
+      shareCaptureId({ id: 1, receivedAt: 1700 }),
+      shareCaptureId({ id: 1, receivedAt: 1700 }),
+    ]);
+    expect(textIds[0]).not.toBe(firstFileId);
   });
 
   it("leaves fileless text shares in the inbox if no note creator is available", async () => {

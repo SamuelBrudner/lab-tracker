@@ -6,7 +6,11 @@ import {
   SHARE_INBOX_UPDATED_MESSAGE,
   createMemoryShareStorage,
 } from "../shared/share-target-inbox.js";
-import { grantShareTrust, readShareTrust } from "../features/bench-capture/trusted-share.js";
+import {
+  SHARE_TRUST_KEY,
+  grantShareTrust,
+  readShareTrust,
+} from "../features/bench-capture/trusted-share.js";
 import { apiResponse, paged } from "../test/fixtures.js";
 import { errorResponse, installFetchMock } from "../test/utils.js";
 
@@ -41,7 +45,7 @@ const SESSION = {
 const SESSIONS = [SESSION];
 const originalServiceWorker = navigator.serviceWorker;
 
-function installRoutes({ createdNotes, failNotes = false }) {
+function installRoutes({ createdNotes, failNotes = false, gate = null }) {
   return installFetchMock([
     {
       match: buildApiPath("/graph-drafts", { project_id: PROJECT_ID, limit: 10 }),
@@ -61,10 +65,40 @@ function installRoutes({ createdNotes, failNotes = false }) {
           return errorResponse("Server is busy.", 500);
         }
         createdNotes.push(JSON.parse(request.init.body));
-        return apiResponse({ note_id: `note-${createdNotes.length}` }, 201);
+        const response = apiResponse({ note_id: `note-${createdNotes.length}` }, 201);
+        return gate ? gate.then(() => response) : response;
       },
     },
   ]);
+}
+
+function installServiceWorker() {
+  const serviceWorker = new EventTarget();
+  Object.defineProperty(navigator, "serviceWorker", { configurable: true, value: serviceWorker });
+  return serviceWorker;
+}
+
+function parkShareAndNotify(serviceWorker, share) {
+  const arrived = createMemoryShareStorage([share]);
+  shareMocks.storage.list = arrived.list;
+  shareMocks.storage.remove = arrived.remove;
+  act(() => {
+    serviceWorker.dispatchEvent(
+      new MessageEvent("message", { data: { type: SHARE_INBOX_UPDATED_MESSAGE } })
+    );
+  });
+}
+
+// Web Locks as the browser grants them: one holder at a time, in order.
+function installWebLocks() {
+  let tail = Promise.resolve();
+  const request = vi.fn((_name, callback) => {
+    const run = tail.then(() => callback());
+    tail = run.catch(() => {});
+    return run;
+  });
+  Object.defineProperty(navigator, "locks", { configurable: true, value: { request } });
+  return request;
 }
 
 function trustSession({ projectId = PROJECT_ID, hours = 2, now = T0 } = {}) {
@@ -126,6 +160,7 @@ describe("useMobileCapture trusted share window", () => {
       configurable: true,
       value: originalServiceWorker,
     });
+    delete navigator.locks;
     consoleError.mockRestore();
     shareMocks.getUploadQueue.mockReset();
     shareMocks.storage = null;
@@ -297,6 +332,116 @@ describe("useMobileCapture trusted share window", () => {
     const posts = fetchMock.mock.calls.filter(([, init]) => init?.method === "POST");
     expect(posts).toHaveLength(1);
     expect(result.current.incomingShares).toHaveLength(1);
+  });
+
+  it("gives one share the same capture id when two open pages import it at once", async () => {
+    // Two capture tabs, no Web Locks: both reach the POST before either has
+    // removed the share, so only the idempotency key keeps it one capture.
+    let release;
+    const gate = new Promise((resolve) => {
+      release = resolve;
+    });
+    installRoutes({ createdNotes, gate });
+    trustSession();
+
+    renderCaptureHook();
+    renderCaptureHook();
+
+    await waitFor(() => expect(createdNotes).toHaveLength(2));
+    release();
+    const ids = createdNotes.map((body) => body.client_capture_id);
+    expect(ids[0]).toEqual(expect.stringMatching(/^share-inbox-/));
+    expect(new Set(ids).size).toBe(1);
+  });
+
+  it("imports a share once across open pages where Web Locks exist", async () => {
+    const request = installWebLocks();
+    installRoutes({ createdNotes });
+    trustSession();
+
+    renderCaptureHook();
+    renderCaptureHook();
+
+    await waitFor(() => expect(request).toHaveBeenCalledTimes(2));
+    await settle();
+    expect(createdNotes).toHaveLength(1);
+    expect(await shareMocks.storage.list()).toEqual([]);
+  });
+
+  it("stops at once when another tab stops the window", async () => {
+    installRoutes({ createdNotes });
+    const serviceWorker = installServiceWorker();
+    shareMocks.storage = createMemoryShareStorage([]);
+    trustSession();
+    const { result } = renderCaptureHook();
+    await waitFor(() => expect(result.current.shareTrust).not.toBeNull());
+
+    // The other tab's Stop reaches this one as a storage event.
+    localStorage.removeItem(SHARE_TRUST_KEY);
+    act(() => {
+      window.dispatchEvent(new StorageEvent("storage", { key: SHARE_TRUST_KEY }));
+    });
+    expect(result.current.shareTrust).toBeNull();
+
+    parkShareAndNotify(serviceWorker, { text: "after stop", receivedAt: T0 });
+
+    await waitFor(() => expect(result.current.incomingShares).toHaveLength(1));
+    await settle();
+    expect(createdNotes).toEqual([]);
+  });
+
+  it("re-checks the stored window before importing, even without an event", async () => {
+    installRoutes({ createdNotes });
+    const serviceWorker = installServiceWorker();
+    shareMocks.storage = createMemoryShareStorage([]);
+    trustSession();
+    const { result } = renderCaptureHook();
+    await waitFor(() => expect(result.current.shareTrust).not.toBeNull());
+
+    // Stopped elsewhere, and this page missed the event.
+    localStorage.removeItem(SHARE_TRUST_KEY);
+    parkShareAndNotify(serviceWorker, { text: "missed stop", receivedAt: T0 });
+
+    await waitFor(() => expect(result.current.incomingShares).toHaveLength(1));
+    await settle();
+    expect(createdNotes).toEqual([]);
+    expect(result.current.shareTrust).toBeNull();
+  });
+
+  it("does not import after the window expires between timer ticks", async () => {
+    installRoutes({ createdNotes });
+    const serviceWorker = installServiceWorker();
+    shareMocks.storage = createMemoryShareStorage([]);
+    trustSession({ hours: 1 });
+    let clock = T0 + 10 * 60 * 1000;
+    const { result } = renderCaptureHook({ now: () => clock });
+    await waitFor(() => expect(result.current.shareTrust).not.toBeNull());
+
+    clock = T0 + HOUR + 1000;
+    parkShareAndNotify(serviceWorker, { text: "too late", receivedAt: clock });
+
+    await waitFor(() => expect(result.current.incomingShares).toHaveLength(1));
+    await settle();
+    expect(createdNotes).toEqual([]);
+    expect(result.current.shareTrust).toBeNull();
+  });
+
+  it("refreshes the window when the page becomes visible again", async () => {
+    installRoutes({ createdNotes });
+    shareMocks.storage = createMemoryShareStorage([]);
+    trustSession({ hours: 1 });
+    let clock = T0 + 10 * 60 * 1000;
+    const { result } = renderCaptureHook({ now: () => clock });
+    await waitFor(() => expect(result.current.shareTrust).not.toBeNull());
+
+    clock = T0 + 2 * HOUR;
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+    act(() => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    delete document.visibilityState;
+
+    await waitFor(() => expect(result.current.shareTrust).toBeNull());
   });
 
   it("says so, and trusts nothing, when this browser will not store the window", async () => {
