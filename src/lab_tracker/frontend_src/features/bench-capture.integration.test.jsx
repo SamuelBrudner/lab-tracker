@@ -127,6 +127,46 @@ describe("bench capture in the app", () => {
     expect(await screen.findByRole("heading", { name: "Capture" })).toBeInTheDocument();
   });
 
+  it("keeps a non-admin's kiosk listening while project access loads", async () => {
+    localStorage.setItem(TOKEN_STORAGE_KEY, "token-kiosk-editor");
+    window.history.replaceState({}, "", `/app/capture?kiosk=1&project_id=${PROJECT_ID}`);
+    const createdNotes = [];
+    let releaseMembers;
+    const membersResponse = new Promise((resolve) => {
+      releaseMembers = () =>
+        resolve(apiResponse([{ role: "contributor", user_id: "user-1" }]));
+    });
+    const routes = captureRoutes(createdNotes).map((route) => {
+      if (route.match === "/auth/me") {
+        return { ...route, response: apiResponse({ role: "editor", username: "tech" }) };
+      }
+      if (String(route.match).includes("members")) {
+        return { ...route, response: () => membersResponse };
+      }
+      return route;
+    });
+    installFetchMock(routes);
+
+    render(<App />);
+
+    const input = await screen.findByLabelText(/scan a barcode/i);
+    await waitFor(() => expect(input).toHaveFocus());
+    expect(input).toBeEnabled();
+    fireEvent.change(input, { target: { value: "EARLY-1" } });
+    fireEvent.submit(input.closest("form"));
+    expect(await screen.findByText("Waiting for access")).toBeInTheDocument();
+    expect(createdNotes).toEqual([]);
+
+    releaseMembers();
+
+    await waitFor(() => expect(createdNotes).toHaveLength(1));
+    expect(createdNotes[0].metadata).toMatchObject({
+      bench_scan_value: "EARLY-1",
+      capture_channel: "kiosk",
+    });
+    expect(input).toHaveFocus();
+  });
+
   it("stamps captures from a page an NFC tag opened", async () => {
     localStorage.setItem(TOKEN_STORAGE_KEY, "token-nfc");
     window.history.replaceState(

@@ -399,6 +399,7 @@ function App({ onReloadForUpdate = null }) {
               ownerId={ownerId}
               authEnabled={auth.authEnabled}
               canWrite={canContributeToProject}
+              accessStatus={projectAccess.status}
               projects={workspaceData.projects}
               selectedProjectId={captureProjectId || workspaceData.selectedProjectId}
               onSelectedProjectChange={workspaceData.setSelectedProjectId}

@@ -31,7 +31,9 @@ const SCAN_STATE_LABELS = {
   saved: "Saved",
   sending: "Sending…",
   synced: "Synced",
+  waiting: "Waiting for access",
 };
+const PENDING_ACCESS_STATUSES = new Set(["idle", "loading"]);
 const NO_SESSIONS = Object.freeze([]);
 
 // Kiosk type is sized for a bench PC read at arm's length.
@@ -71,12 +73,18 @@ function onlineNow() {
  * paired device), when (the scan clock), and where (the chosen session). It is
  * a log of what was scanned, not an inventory: nothing is looked up or linked
  * beyond the session the person picked.
+ *
+ * The station must never go deaf: the input stays enabled (and focused) while
+ * project access is still being confirmed, or flickers during a token
+ * refresh, and scans made meanwhile are held on screen and sent as soon as
+ * write access is confirmed.
  */
 function KioskCaptureCard({
   token,
   ownerId = "",
   authEnabled = true,
   canWrite,
+  accessStatus = "ready",
   projects,
   selectedProjectId,
   onSelectedProjectChange,
@@ -138,6 +146,15 @@ function KioskCaptureCard({
     return () => window.removeEventListener("focus", focusInput);
   }, [focusInput]);
 
+  // The input is only disabled without a project; the moment it is usable
+  // again (a project chosen or restored) it takes the focus back.
+  const inputEnabled = Boolean(selectedProjectId);
+  useEffect(() => {
+    if (inputEnabled) {
+      focusInput();
+    }
+  }, [focusInput, inputEnabled]);
+
   const updateScan = useCallback((id, patch) => {
     if (!mountedRef.current) {
       return;
@@ -145,58 +162,54 @@ function KioskCaptureCard({
     setScans((current) => current.map((scan) => (scan.id === id ? { ...scan, ...patch } : scan)));
   }, []);
 
-  const markQueuedScansFrom = useCallback((pendingItems) => {
-    if (!mountedRef.current) {
+  // Sync state follows the drain's own results: an uploaded job is Synced, a
+  // dropped one Failed. Leaving the queue alone proves neither.
+  const applyDrainResult = useCallback((result) => {
+    if (!result || !mountedRef.current) {
       return;
     }
-    const pending = new Set(pendingItems.map((item) => item.clientCaptureId));
+    const uploaded = new Set((result.uploaded || []).map((item) => item.clientCaptureId));
+    const dropped = new Set((result.dropped || []).map((item) => item.clientCaptureId));
+    if (uploaded.size === 0 && dropped.size === 0) {
+      return;
+    }
     setScans((current) =>
-      current.map((scan) =>
-        scan.state === "queued" && !pending.has(scan.clientCaptureId)
-          ? { ...scan, state: "synced" }
-          : scan
-      )
+      current.map((scan) => {
+        if (scan.state !== "queued") {
+          return scan;
+        }
+        if (dropped.has(scan.clientCaptureId)) {
+          return { ...scan, error: "The server refused this scan.", state: "failed" };
+        }
+        return uploaded.has(scan.clientCaptureId) ? { ...scan, state: "synced" } : scan;
+      })
     );
   }, []);
 
   useEffect(() => {
-    // Queued scans leave the queue when a drain (boot, back online) sends
-    // them; reflect that in the list without polling.
+    // Any drain of this page's queue (boot, back online, after a scan, the
+    // app shell's retry) reports its results to subscribers.
     if (!queue || typeof queue.subscribe !== "function") {
       return undefined;
     }
-    return queue.subscribe(() => {
-      Promise.resolve(queue.listPending())
-        .then((items) => markQueuedScansFrom(items || []))
-        .catch(() => {
-          // The list only mirrors sync state; the queue keeps the scans.
-        });
-    });
-  }, [markQueuedScansFrom, queue]);
+    return queue.subscribe((result) => applyDrainResult(result));
+  }, [applyDrainResult, queue]);
+
+  const drainQueued = useCallback(() => {
+    if (!queue) {
+      return;
+    }
+    Promise.resolve(queue.drain({ token, ownerId, authEnabled }))
+      .then(applyDrainResult)
+      .catch(() => {
+        // Still queued; the next scan, online event, or boot retries.
+      });
+  }, [applyDrainResult, authEnabled, ownerId, queue, token]);
 
   useEffect(() => {
     const handleOnline = () => {
       setOnline(true);
-      if (!queue) {
-        return;
-      }
-      Promise.resolve(queue.drain({ token, ownerId, authEnabled }))
-        .then((result) => {
-          const dropped = new Set((result?.dropped || []).map((item) => item.clientCaptureId));
-          if (dropped.size === 0 || !mountedRef.current) {
-            return;
-          }
-          setScans((current) =>
-            current.map((scan) =>
-              dropped.has(scan.clientCaptureId)
-                ? { ...scan, state: "failed", error: "The server refused this scan." }
-                : scan
-            )
-          );
-        })
-        .catch(() => {
-          // Still queued; the next online event or boot retries.
-        });
+      drainQueued();
     };
     const handleOffline = () => setOnline(false);
     window.addEventListener("online", handleOnline);
@@ -205,12 +218,13 @@ function KioskCaptureCard({
       window.removeEventListener("online", handleOnline);
       window.removeEventListener("offline", handleOffline);
     };
-  }, [authEnabled, ownerId, queue, token]);
+  }, [drainQueued]);
 
   async function sendScan(scan) {
     updateScan(scan.id, { error: "", state: "sending" });
+    let result;
     try {
-      const result = await createOrQueueTextCapture({
+      result = await createOrQueueTextCapture({
         token,
         projectId: scan.projectId,
         ownerId,
@@ -220,25 +234,55 @@ function KioskCaptureCard({
         queue,
         clientCaptureId: scan.clientCaptureId,
       });
-      if (result === OFFLINE_QUEUED) {
-        updateScan(scan.id, { state: "queued" });
-      } else {
-        updateScan(scan.id, { noteId: result?.note_id || "", state: "saved" });
-      }
     } catch (error) {
       updateScan(scan.id, {
         error: errorMessage(error, "The scan could not be saved."),
         state: "failed",
       });
+      return;
+    }
+    if (result === OFFLINE_QUEUED) {
+      updateScan(scan.id, { state: "queued" });
+      return;
+    }
+    updateScan(scan.id, { noteId: result?.note_id || "", state: "saved" });
+    // The server answered, so anything queued earlier (a restart or a Wi-Fi
+    // blip with no `online` event) can go now.
+    if (queue) {
+      Promise.resolve(queue.pendingCount())
+        .then((count) => {
+          if (count > 0) {
+            drainQueued();
+          }
+        })
+        .catch(() => {});
     }
   }
+
+  // Scans held while write access was being confirmed go out once it is.
+  const sendScanRef = useRef(sendScan);
+  const scansRef = useRef(scans);
+  useEffect(() => {
+    sendScanRef.current = sendScan;
+    scansRef.current = scans;
+  });
+  useEffect(() => {
+    if (!canWrite) {
+      return;
+    }
+    for (const scan of scansRef.current) {
+      if (scan.state === "waiting") {
+        sendScanRef.current(scan);
+      }
+    }
+  }, [canWrite]);
 
   function handleSubmit(event) {
     event.preventDefault();
     const value = scanValue.trim();
     setScanValue("");
     focusInput();
-    if (!value || !canWrite || !selectedProjectId) {
+    if (!value || !selectedProjectId) {
       return;
     }
     const at = now();
@@ -264,11 +308,13 @@ function KioskCaptureCard({
       noteId: "",
       projectId: selectedProjectId,
       sessionId,
-      state: "sending",
+      state: canWrite ? "sending" : "waiting",
       value: scanned,
     };
     setScans((current) => [scan, ...current].slice(0, KIOSK_SCAN_HISTORY));
-    sendScan(scan);
+    if (canWrite) {
+      sendScan(scan);
+    }
   }
 
   function handleSessionChange(event) {
@@ -293,7 +339,6 @@ function KioskCaptureCard({
   }
 
   const latest = scans[0] || null;
-  const ready = Boolean(canWrite && selectedProjectId);
 
   return (
     <article className="card span-12 kiosk-capture" aria-labelledby="kiosk-title">
@@ -317,7 +362,17 @@ function KioskCaptureCard({
         </p>
       ) : null}
       {!canWrite && selectedProjectId ? (
-        <p className="warn">You need write access to this project to record scans.</p>
+        PENDING_ACCESS_STATUSES.has(accessStatus) ? (
+          <p className="subtle" role="status">
+            Checking your access to this project… keep scanning; scans are held here and sent
+            once it is confirmed.
+          </p>
+        ) : (
+          <p className="warn">
+            You need write access to this project to record scans. Scans made now are held on
+            this screen and sent if access is granted.
+          </p>
+        )
       ) : null}
 
       <div className="inline">
@@ -361,7 +416,7 @@ function KioskCaptureCard({
           autoCorrect="off"
           spellCheck={false}
           enterKeyHint="send"
-          disabled={!ready}
+          disabled={!inputEnabled}
           maxLength={BENCH_SCAN_MAX_CHARS * 4}
           style={KIOSK_INPUT_STYLE}
           value={scanValue}
