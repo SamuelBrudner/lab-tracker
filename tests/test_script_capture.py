@@ -243,6 +243,15 @@ def test_scripts_pth_capture_follows_the_bound_project_rule(tmp_path: Path, site
     assert result.stdout.strip() == "done"
     assert result.stderr.count("autotrack is not capturing saves") == 1
     assert sorted(item.name for item in loose.iterdir()) == ["analysis.py", "one.png", "two.png"]
+    # Every run is a new process; the folder is named once a week, not per run.
+    again = _run_child(
+        script,
+        cwd=loose,
+        env=_child_env(tmp_path),
+        args=[str(fake_root), str(site_dir), str(tmp_path / "unused.json")],
+    )
+    assert (again.returncode, again.stderr) == (0, "")
+    assert (tmp_path / "lt-config" / figure_module.UNBOUND_NOTICE_FILENAME).is_file()
 
     bound = _git_checkout(tmp_path / "bound", "project-script")
     result = _run_child(
@@ -601,3 +610,141 @@ def test_lazy_stand_ins_install_the_real_hooks_once_and_never_loop(
     FakeFigure().savefig(tmp_path / "again.png")
     assert [kw["path"].name for kw in saves[1:]] == ["explicit.png", "again.png"]
     assert {kw["project_id"] for kw in saves[1:]} == {"project-explicit"}
+
+
+# --- review fixes ---------------------------------------------------------------
+
+
+def test_the_pth_file_is_pure_ascii_even_under_a_non_ascii_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Python 3.10-3.12 decode .pth files in the locale encoding, outside the
+    per-line error handling: a non-ASCII byte on a Windows ANSI code page would
+    stop every interpreter in the environment from starting."""
+
+    site = tmp_path / "Jérôme" / "site-packages"
+    package = site / "lab_tracker_client"
+    package.mkdir(parents=True)
+    bootstrap = package / "_autotrack_pth.py"
+    bootstrap.write_text(script_module.bootstrap_path().read_text(encoding="utf-8"))
+    source = script_module.scripts_pth_source(bootstrap)
+    source.encode("ascii")  # raises on any non-ASCII character
+
+    monkeypatch.setattr(script_module, "scripts_site_dir", lambda: site)
+    monkeypatch.setattr(script_module, "bootstrap_path", lambda: bootstrap)
+    assert script_module.install_scripts_pth()["action"] == "installed"
+    written = (site / script_module.SCRIPTS_PTH_FILENAME).read_bytes()
+    assert written.isascii()
+    assert script_module.scripts_pth_status()["up_to_date"] is True
+
+    # The escaped path still reaches the bootstrap at interpreter start.
+    probe = (
+        "import json, site, sys; site.addsitedir(sys.argv[1]); "
+        "m = sys.modules.get('_lab_tracker_autotrack_pth'); "
+        "print(json.dumps(getattr(m, '__file__', None)))"
+    )
+    result = subprocess.run(  # noqa: S603 - the test's own interpreter.
+        [sys.executable, "-c", probe, str(site)],
+        env=_child_env(tmp_path),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=120,
+        check=False,
+    )
+    assert (result.returncode, result.stderr) == (0, "")
+    assert json.loads(result.stdout) == str(bootstrap)
+
+
+def test_animation_frames_and_interactive_shows_are_not_captured(
+    fake_pyplot: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """plt.pause() calls show(block=False) every frame; capturing there would
+    upload every frame. Each figure is captured at most once per run."""
+
+    shows: list[bytes] = []
+    monkeypatch.setattr(
+        figure_module, "capture_figure_bytes", lambda payload, **kw: shows.append(payload)
+    )
+    autotrack(displays=False)
+    script_module.install_show_hook()
+    fig = fake_pyplot.figure(1)
+    for frame in range(200):
+        fig.payload = PNG + str(frame).encode()
+        fake_pyplot.module.show(block=False)  # what plt.pause() does per frame
+        fake_pyplot.module.show(False)
+    assert shows == []
+
+    matplotlib = sys.modules["matplotlib"]
+    monkeypatch.setattr(matplotlib, "is_interactive", lambda: True, raising=False)
+    fake_pyplot.module.show()  # returns at once in interactive mode
+    assert shows == []
+    monkeypatch.setattr(matplotlib, "is_interactive", lambda: False)
+    fake_pyplot.module.show()
+    fig.payload = PNG + b"-final"
+    fake_pyplot.module.show()
+    fake_pyplot.module.show(block=True)
+    assert shows == [PNG + b"199"]  # once per figure per run
+    assert len(fake_pyplot.shown) == 404  # every call still reaches the real show
+
+
+def test_a_real_plt_pause_loop_captures_the_figure_once(tmp_path: Path, site_dir: Path) -> None:
+    pytest.importorskip("matplotlib")
+    checkout = _git_checkout(tmp_path / "analysis", "project-script")
+    script = (
+        CHILD_PRELUDE
+        + """
+    import matplotlib.pyplot as plt
+    import lab_tracker_client.figure as figure_module
+
+    calls = []
+    figure_module.capture_figure_bytes = lambda payload, **kw: calls.append(kw["logical_id"])
+    fig, ax = plt.subplots()
+    (line,) = ax.plot([0, 1])
+    for frame in range(25):
+        line.set_ydata([0, frame])
+        plt.pause(0.001)
+    plt.show()
+    state["calls"] = calls
+    with open(out, "w") as handle:
+        json.dump(state, handle)
+    """
+    )
+    out = tmp_path / "state.json"
+    result = _run_child(
+        script,
+        cwd=checkout,
+        env=_child_env(tmp_path),
+        args=[str(tmp_path / "no-fakes"), str(site_dir), str(out)],
+    )
+    assert result.returncode == 0, result.stderr
+    calls = json.loads(out.read_text())["calls"]
+    assert len(calls) == 1 and calls[0].endswith("/figure-1")
+
+
+def test_script_runs_name_an_unbound_folder_once_a_week(
+    fake_pyplot: Any, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    loose = tmp_path / "loose"
+    loose.mkdir()
+    notices = tmp_path / "lt-config" / figure_module.UNBOUND_NOTICE_FILENAME
+    figure_module._PERSISTENT_UNBOUND_NOTICES[0] = True
+
+    def run_once() -> str:
+        figure_module._WARNED.clear()  # a new process
+        figure_module._warn_unbound_autotrack(loose / "fig.png", None)
+        return capsys.readouterr().err
+
+    assert "autotrack is not capturing saves" in run_once()
+    assert run_once() == ""
+    key = f"{figure_module.AUTOTRACK_UNBOUND_REASON}:{loose.resolve()}"
+    assert set(json.loads(notices.read_text())) == {key}
+    # A week later the folder is named again.
+    week = figure_module.UNBOUND_NOTICE_REPEAT_SECONDS
+    stored = json.loads(notices.read_text())
+    notices.write_text(json.dumps({name: when - week - 1 for name, when in stored.items()}))
+    assert "autotrack is not capturing saves" in run_once()
+    # The file stays bounded.
+    for index in range(figure_module.UNBOUND_NOTICE_MAX_ENTRIES + 20):
+        figure_module._claim_unbound_notice(f"key-{index}", now=1_000_000_000.0 + index)
+    assert len(json.loads(notices.read_text())) <= figure_module.UNBOUND_NOTICE_MAX_ENTRIES
