@@ -1,7 +1,8 @@
 # Phone Capture Quickstart
 
 Use this when one computer is running Lab Tracker and a bench phone should
-capture notes into the same graph.
+capture notes into the same graph. For every other capture path, from the
+bench kiosk to notebooks and pipelines, see the [capture guide](capture-guide.md).
 
 ## Pair the Phone
 

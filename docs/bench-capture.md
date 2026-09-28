@@ -4,7 +4,9 @@ At the bench, hands are gloved and eyes are on the work. These paths cut the
 taps per capture on top of the phone capture page
 ([phone-capture-quickstart.md](phone-capture-quickstart.md)): a barcode kiosk,
 NFC station tags, a trusted share window, end-of-session photo import, a voice
-debrief, a hands-free phone shortcut, and a desktop bookmarklet.
+debrief, a hands-free phone shortcut, a desktop bookmarklet, and a private
+email capture address. The [capture guide](capture-guide.md) maps these and
+every other capture path.
 
 Every one of them lands a **staged note** through the ordinary capture routes
 (`POST /notes`, `/notes/upload-file`, or the raw-body `/notes/voice-capture`).
@@ -15,7 +17,7 @@ with a paired-device credential are stamped server-side with
 
 | Path | Setup (once) | Effort per capture | `capture_channel` |
 | --- | --- | --- | --- |
-| Kiosk scan station | Open `/app/capture?kiosk=1` on the bench PC | Scan (0 taps) | `kiosk` |
+| Kiosk scan station | **Devices → Bench kiosk** or **Open bench kiosk** on a session | Scan (0 taps) | `kiosk` |
 | NFC station tag | Write a tag from the session page | Tap the tag, capture as usual | `nfc` |
 | Trusted share window | One tap: 1 h / 2 h / 4 h | Share from any app (no confirm) | `share` |
 | Photo import | None | Pick all photos once | `import` |
@@ -28,7 +30,9 @@ with a paired-device credential are stamped server-side with
 For a shared bench PC with a USB barcode scanner (scanners type the code and
 then Enter).
 
-- **Open** `/app/capture?kiosk=1`. Add `&project_id=<id>&session_id=<id>` to
+- **Open** it from **Devices → Bench kiosk**, or from **Open bench kiosk** on
+  a session's page to start on that session. The address is
+  `/app/capture?kiosk=1`; add `&project_id=<id>&session_id=<id>` to
   preselect; otherwise the last-used project and the session this browser last
   captured into (if still active) are used. Someone signs in once; every scan is
   recorded as that person (or the paired device).
@@ -212,6 +216,17 @@ person checks it and presses send, and nothing is saved before that.
   `capture_channel=bookmarklet`, `share_title`, and `share_url`.
 - Some sites' content security policy blocks bookmarklets; copy the address and
   capture it on the capture page instead.
+
+## Email Capture Address
+
+When the server has email capture configured, **Devices → Email capture**
+shows your private capture address for the project selected there, with a
+copy button and the sender addresses it accepts. Forward instrument reports,
+results, or notes to it and they arrive as staged notes in that project. The
+address works like a password, so it is shown only to you, and only mail from
+your registered address is accepted. When email capture is off, or no sender
+address is registered for you, the panel says so. Operators set it up as
+described in [server capture channels](server-capture-channels.md).
 
 ## Metadata Keys
 

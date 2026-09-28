@@ -157,10 +157,12 @@ characters (100 bits) of an HMAC-SHA256 of `user_id|project_id` under a key
 derived from `LAB_TRACKER_AUTH_SECRET_KEY`. Nothing is stored: the server
 recomputes the token for the sender's projects and compares in constant time.
 Rotating the auth secret therefore changes every capture address. A signed-in
-contributor reads their address with `GET /projects/{project_id}/capture-address`
+contributor sees their address under **Devices → Email capture** in the app
+(for the project selected there), which reads it from
+`GET /projects/{project_id}/capture-address`
 (interactive sessions only — personal access tokens are refused, because the
-address is a capability), which also returns the sender addresses accepted for
-them.
+address is a capability). The endpoint also returns the sender addresses
+accepted for them.
 
 ### Threat model
 

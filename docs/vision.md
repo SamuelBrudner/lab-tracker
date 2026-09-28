@@ -113,8 +113,8 @@ edge:
   barcodes and session QR codes in photos, a bench kiosk, NFC station tags,
   phone shortcuts, and opt-in server channels (Slack, email, instrument
   calendars, registered-store scans). Each lands staged notes or proposed
-  links only; see the low-effort capture entry in
-  [retained-v1-surface.md](retained-v1-surface.md).
+  links only; see the [capture guide](capture-guide.md) and the low-effort
+  capture entry in [retained-v1-surface.md](retained-v1-surface.md).
 - **AI agents via MCP** (shipped) and **git post-commit / CI hooks** (shipped):
   agents and analysis repositories stage evidence and can request a draft, but
   never commit — except under a project owner's delegated-curation grant, with

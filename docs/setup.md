@@ -10,6 +10,10 @@ The supported runtime surface is defined in
 [`retained-v1-surface.md`](retained-v1-surface.md); if it and this guide
 disagree, the retained-surface document wins.
 
+Once the server runs, the [capture guide](capture-guide.md) shows how to wire
+each way your lab works (phone and bench, notebooks and scripts, runs and
+pipelines, watch folders, coding agents, and server channels) into it.
+
 ## Contents
 
 - [Prerequisites and install](#prerequisites-and-install)
@@ -385,6 +389,7 @@ npm run build
 - [One-click cloud deploy (Render)](one-click-cloud-deploy.md)
 - [Self-hosted operations (backup/restore/upgrade, first admin)](self-hosted-operations.md)
 - [Serve the shared graph on a LAN/VPN](lan-shared-graph.md)
+- [Capture guide (every capture path and its setup)](capture-guide.md)
 - [Phone capture quickstart](phone-capture-quickstart.md)
 - [Windows fresh-clone setup](windows-fresh-clone.md)
 

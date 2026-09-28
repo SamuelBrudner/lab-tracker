@@ -128,7 +128,8 @@ research record:
   drains after each commit, and `lt outbox status|sync` and the scheduled
   `lt watch run` cover every adapter outbox (watch, repo, hpc). See
   [repo-report-capture.md](repo-report-capture.md).
-- Low-effort capture surfaces added 2026-09-28. Every one lands staged notes
+- Low-effort capture surfaces added 2026-09-28 (mapped for people in
+  [capture-guide.md](capture-guide.md)). Every one lands staged notes
   or proposed links only, follows the bound-project rule wherever it fires in
   every directory or process, and is opt-in through a consent-gated setup verb
   or operator configuration:
@@ -194,7 +195,8 @@ research record:
     `LAB_TRACKER_DECODE_PHOTO_CODES` is its kill switch. See
     [decoded-labels-and-file-headers.md](decoded-labels-and-file-headers.md).
   - **Bench capture in the app.** A chrome-free kiosk scan station
-    (`/app/capture?kiosk=1`), NFC station tags that carry a session's capture
+    (`/app/capture?kiosk=1`, opened from the Devices page or a session's
+    page), NFC station tags that carry a session's capture
     link, a per-device trusted share window (1, 2, or 4 hours, one project and
     session), multi-photo session import, a skippable voice debrief when a
     session closes, `POST /notes/voice-capture` for phone shortcuts (raw audio
@@ -205,7 +207,8 @@ research record:
   - **Server capture channels.** Operator-opt-in signed Slack capture (a slash
     command and a message shortcut, authored by the mapped person),
     email-to-capture through a per-(user, project) HMAC plus-address accepted
-    only from the mapped sender, instrument-calendar (ICS) bookings, and
+    only from the mapped sender and shown only to that person (Devices →
+    Email capture), instrument-calendar (ICS) bookings, and
     registered-store scans. Bookings and store files become SYSTEM-authored
     staged notes; channel principals are non-interactive and can never accept
     or commit. Pollers run from the optional ticker, `POST
