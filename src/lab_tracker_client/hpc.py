@@ -39,6 +39,7 @@ from lab_tracker_client.gitinfo import (
     git_head_commit,
     git_timeout_seconds,
     head_commit_fields,
+    worktree_tree_id,
 )
 
 CONFIG_VERSION = 1
@@ -735,6 +736,7 @@ def begin_event(
             "array_task_id": os.getenv("SLURM_ARRAY_TASK_ID"),
             "state": "running",
         },
+        source=worktree_source(Path.cwd()),
     )
     path = write_event(event, config.outbox_path())
     return event, path
@@ -771,6 +773,7 @@ def finish_event(
     )
     merged_artifacts = list(manifest_payload.get("artifacts") or [])
     merged_artifacts.extend(_artifact_from_uri(uri) for uri in artifacts or [])
+    cwd = _optional_str(manifest_payload.get("cwd")) or Path.cwd()
     event = make_event(
         config,
         event_type="finish",
@@ -782,9 +785,13 @@ def finish_event(
         dataset_ids=dataset_ids or _string_list(manifest_payload.get("dataset_ids")),
         tags=tags or _string_list(manifest_payload.get("tags")),
         command=_string_list(manifest_payload.get("command")),
-        cwd=_optional_str(manifest_payload.get("cwd")) or Path.cwd(),
+        cwd=cwd,
         scheduler=scheduler,
-        source=_json_mapping(manifest_payload.get("source") or {}),
+        # A manifest that recorded its own worktree tree keeps it.
+        source={
+            **worktree_source(cwd),
+            **_json_mapping(manifest_payload.get("source") or {}),
+        },
         artifacts=merged_artifacts,
         metrics={**_json_mapping(manifest_payload.get("metrics") or {}), **_metrics(metrics)},
         log_excerpt=_join_log_excerpt(
@@ -804,6 +811,17 @@ def git_context(cwd: str | Path | None = None) -> JsonObject:
         **head_commit_fields(head),
         **dirty_state_fields(git_dirty_state(root, head=head)),
     }
+
+
+def worktree_source(cwd: str | Path) -> JsonObject:
+    """Event ``source`` keys naming the job's working-copy tree (begin/finish).
+
+    ``git_worktree_tree`` identifies the exact code a job ran even when it was
+    never committed; ``git_worktree_tree_error`` says why it is unknown.
+    Outside a checkout there is nothing to record.
+    """
+
+    return dict(worktree_tree_id(Path(cwd).expanduser()).as_fields("git_worktree_tree"))
 
 
 def utc_now() -> str:
@@ -934,6 +952,8 @@ def render_event_note(event: Mapping[str, Any]) -> str:
     if source.get("git_commit"):
         lines.append(f"- Git commit: `{source['git_commit']}`")
         lines.append(f"- Git dirty: {dirty_label(source)}")
+    if source.get("git_worktree_tree"):
+        lines.append(f"- Git worktree tree: `{source['git_worktree_tree']}`")
     lines.extend(["", "## Research Context", f"- Project: `{payload['project_id']}`"])
     if payload.get("question_id"):
         lines.append(f"- Candidate question: `{payload['question_id']}`")
@@ -1008,6 +1028,10 @@ def event_metadata(
         metadata.update(dirty_metadata(source, "hpc_"))
     elif source.get("git_commit_error"):
         metadata["hpc_git_commit_error"] = str(source["git_commit_error"])
+    if source.get("git_worktree_tree"):
+        metadata["hpc_git_worktree_tree"] = str(source["git_worktree_tree"])
+    elif source.get("git_worktree_tree_error"):
+        metadata["hpc_git_worktree_tree_error"] = str(source["git_worktree_tree_error"])
     host = payload.get("host") if isinstance(payload.get("host"), Mapping) else {}
     for key in CAPTURE_HOST_METADATA_KEYS:
         if host.get(key):

@@ -47,10 +47,13 @@ from lab_tracker_client.client import (
 from lab_tracker_client.gitinfo import (
     DirtyState,
     HeadCommit,
+    WorktreeTree,
+    _reset_worktree_tree_cache_for_tests,
     git_dirty_state,
     git_head_commit,
     git_output,
     sanitize_remote_url,
+    worktree_tree_id,
 )
 from lab_tracker_client.repo import normalize_remote
 from lab_tracker_client.session_context import (
@@ -63,6 +66,10 @@ FIGURE_CAPTURE_TIMEOUT_SECONDS = 2.5
 FIGURE_CIRCUIT_COOLDOWN_SECONDS = 30.0
 FIGURE_PREVIEW_MAX_BYTES = 2_000_000
 FIGURE_UPLOAD_MAX_BYTES = 100 * 1024 * 1024
+# Upper bound on the working-copy tree computation a plain capture runs before
+# its upload; a slow git records ``capture_git_worktree_tree_error: timeout``
+# instead of holding the user's save. Repeat saves hit a per-process cache.
+CAPTURE_WORKTREE_TREE_TIMEOUT_SECONDS = 2.0
 # SVG is deliberately absent: the server rejects image/svg+xml uploads
 # (scriptable), so a default pattern for it would only produce failures.
 _DEFAULT_IMAGE_PATTERNS = ("*.png", "*.jpg", "*.jpeg", "*.pdf", "*.tif", "*.tiff")
@@ -198,6 +205,10 @@ class RunContext:
     code_line: int = 0
     code_region_hash: str = ""
     extra: dict[str, NoteMetadataScalar] = field(default_factory=dict)
+    # The working copy's git tree id when the context opened (identity for
+    # uncommitted code), or the marker saying why it is unknown.
+    git_worktree_tree: str = ""
+    git_worktree_tree_error: str = ""
 
     def expired(self) -> bool:
         return time.monotonic() >= self.expires_at
@@ -215,6 +226,11 @@ class RunContext:
             metadata["run_git_commit"] = self.git_commit
         elif self.git_commit_error:
             metadata["run_git_commit_error"] = self.git_commit_error
+        metadata.update(
+            WorktreeTree(
+                tree=self.git_worktree_tree, error=self.git_worktree_tree_error
+            ).as_fields("run_git_worktree_tree")
+        )
         if self.repo_remote_url:
             metadata["run_repo_remote_url"] = self.repo_remote_url
         if self.code_file:
@@ -349,6 +365,7 @@ def run_context(
     head = git_head_commit(None)
     git_commit = head.commit
     dirty_state = _git_dirty_state(head)
+    worktree = worktree_tree_id(None)
     context = RunContext(
         captured_at=datetime.now(timezone.utc).isoformat(),
         expires_at=time.monotonic() + max(0.0, float(ttl_seconds)),
@@ -365,6 +382,8 @@ def run_context(
         code_line=int(pointer.get("code_line", 0) or 0),
         code_region_hash=str(pointer.get("code_region_hash", "")),
         extra=resolved_extra,
+        git_worktree_tree=worktree.tree,
+        git_worktree_tree_error=worktree.error,
     )
     return _RunContextManager(context)
 
@@ -868,6 +887,7 @@ def _base_figure_metadata(
     context = _active_run_context()
     if context is not None:
         merged.update(context.to_metadata())
+    merged.update(_capture_worktree_metadata(path))
     session = read_active_session()
     if session and session.get("session_id"):
         merged["capture_session_id"] = str(session["session_id"])
@@ -894,6 +914,24 @@ def _base_figure_metadata(
         }
     )
     return evidence
+
+
+def _capture_worktree_metadata(path: Path) -> dict[str, NoteMetadataScalar]:
+    """``capture_git_worktree_tree`` for a file saved inside a git checkout.
+
+    The tree is the saving checkout's working copy *without the saved file
+    itself* (an output is not the code that produced it), so re-saving the
+    same figure reuses the cached tree. Outside a checkout it is ``{}``; any
+    failure is at most an error marker, never a failed capture.
+    """
+
+    try:
+        worktree = worktree_tree_id(
+            path.parent, exclude=(path,), timeout=CAPTURE_WORKTREE_TREE_TIMEOUT_SECONDS
+        )
+        return worktree.as_fields("capture_git_worktree_tree")
+    except Exception:  # noqa: BLE001 - code identity is optional; the capture is not.
+        return {}
 
 
 def _merge_current_metadata(
@@ -1437,4 +1475,5 @@ def _reset_figure_capture_state_for_tests() -> None:
     _WARNED.clear()
     _REFUSED_SESSION_TARGETS.clear()
     _reset_session_hints_for_tests()
+    _reset_worktree_tree_cache_for_tests()
     _RUN_CONTEXT.set(None)
