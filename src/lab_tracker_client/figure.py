@@ -146,6 +146,12 @@ CAPTURE_NOTE_LOOKUP_MAX_NOTES = 5000
 # How the server words the 409 for a capture id replayed with other fields
 # (note_service._ensure_matching_capture_note); any other conflict is a failure.
 CAPTURE_ID_REUSE_MESSAGE = "was already used with different field(s)"
+# A capture never changes a note a person curated (committed or archived).
+# New bytes for such a note become a new staged capture whose metadata names
+# the curated note under this key.
+SUPERSEDES_CAPTURE_NOTE_KEY = "supersedes_capture_note_id"
+SUPERSEDED_NOTE_STATUS_KEY = "supersedes_capture_note_status"
+CAPTURE_REVISION_REASON = "curated_note_kept"
 AUTOTRACK_NO_PROJECT_WHY = "that checkout is not bound to a project (no lt_ids.json)"
 # A plain script is a new process on every run, so under the scripts .pth the
 # unbound notice is remembered in the client config dir: each checkout (or
@@ -773,20 +779,25 @@ def _capture_saved_figure(
                 # not a per-capture choice, so it carries the weaker label.
                 upload_metadata[DECLARED_TARGET_SOURCE_KEY] = DECLARED_TARGET_SOURCE_CONFIG_DEFAULT
 
-            def upload(
-                metadata: dict[str, NoteMetadataScalar], upload_targets: list[EntityRef]
-            ) -> tuple[LTRecord, int]:
-                return resolved_client._upload_note_file_payload_with_status(
-                    project_id=resolved_project_id,
-                    path=preview.path,
-                    payload=preview.payload,
-                    metadata=metadata,
-                    status="staged",
-                    content_type=preview.content_type,
-                    client_capture_id=client_capture_id,
-                    targets=upload_targets,
-                    timeout=capture_timeout,
-                )
+            def upload_as(capture_id: str) -> _Upload:
+                def upload(
+                    metadata: dict[str, NoteMetadataScalar], upload_targets: list[EntityRef]
+                ) -> tuple[LTRecord, int]:
+                    return resolved_client._upload_note_file_payload_with_status(
+                        project_id=resolved_project_id,
+                        path=preview.path,
+                        payload=preview.payload,
+                        metadata=metadata,
+                        status="staged",
+                        content_type=preview.content_type,
+                        client_capture_id=capture_id,
+                        targets=upload_targets,
+                        timeout=capture_timeout,
+                    )
+
+                return upload
+
+            upload = upload_as(client_capture_id)
 
             try:
                 note, status_code, upload_metadata = _upload_with_session_fallback(
@@ -854,6 +865,30 @@ def _capture_saved_figure(
             # The endpoint answered: close any open breaker for it.
             _close_circuit(endpoint_key)
             _remember_capture_note(endpoint_key, resolved_project_id, client_capture_id, note)
+            if status_code == 200 and not _note_is_staged(note):
+                revision_id = _client_capture_id(
+                    resolved_path, logical_id=logical_id, content_hash=content_hash, kind=kind
+                )
+                if _stored_content_hash(note) not in {"", content_hash} and (
+                    revision_id != client_capture_id
+                ):
+                    # The note a person committed or archived stays as it is;
+                    # the new bytes enter review as their own staged capture.
+                    return _capture_curated_revision(
+                        client=resolved_client,
+                        upload=upload_as(revision_id),
+                        curated=note,
+                        revision_id=revision_id,
+                        upload_metadata=upload_metadata,
+                        targets=targets,
+                        endpoint_key=endpoint_key,
+                        project_id=resolved_project_id,
+                        result_defaults=result_defaults,
+                        content_hash=content_hash,
+                        no_preview=preview.no_preview,
+                        kind=kind,
+                        timeout=capture_timeout,
+                    )
             if status_code == 200:
                 return _coalesced_result(
                     client=resolved_client,
@@ -896,6 +931,90 @@ def _capture_saved_figure(
                 "errors": [str(exc)],
             }
         )
+
+
+_Upload = Callable[[dict[str, NoteMetadataScalar], list[EntityRef]], tuple[LTRecord, int]]
+
+
+def _note_is_staged(note: Mapping[str, Any]) -> bool:
+    """Whether a capture may still update ``note`` (a person has not curated it)."""
+
+    return str(note.get("status") or "") == "staged"
+
+
+def _stored_content_hash(note: Mapping[str, Any]) -> str:
+    metadata = note.get("metadata")
+    return str(metadata.get("evidence_content_hash") or "") if isinstance(metadata, Mapping) else ""
+
+
+def _capture_curated_revision(
+    *,
+    client: LabTracker,
+    upload: _Upload,
+    curated: LTRecord,
+    revision_id: str,
+    upload_metadata: dict[str, NoteMetadataScalar],
+    targets: list[EntityRef],
+    endpoint_key: str | None,
+    project_id: str,
+    result_defaults: dict[str, Any],
+    content_hash: str,
+    no_preview: bool,
+    kind: str,
+    timeout: Any,
+) -> FigureCaptureResult:
+    """File new bytes for a curated note as a new staged note (the versioned id).
+
+    The curated note is never written. The new note's capture id is the base
+    id plus a content-hash suffix (the ``version_every_change`` scheme), so a
+    later identical re-save coalesces onto it; this path never recurses.
+    """
+
+    metadata = dict(upload_metadata)
+    metadata.update(
+        {
+            "evidence_source_external_id": revision_id,
+            f"{kind}_source_external_id_current": revision_id,
+            f"{kind}_client_capture_id": revision_id,
+            SUPERSEDES_CAPTURE_NOTE_KEY: str(curated.get("note_id") or ""),
+            SUPERSEDED_NOTE_STATUS_KEY: str(curated.get("status") or ""),
+        }
+    )
+    defaults = {
+        **result_defaults,
+        "source_external_id": revision_id,
+        "client_capture_id": revision_id,
+        "reason": CAPTURE_REVISION_REASON,
+    }
+    try:
+        note, status_code, metadata = _upload_with_session_fallback(
+            upload, metadata=metadata, targets=targets, project_id=project_id, kind=kind
+        )
+    except LTConflictError as conflict:
+        if CAPTURE_ID_REUSE_MESSAGE not in str(conflict.error_message or conflict):
+            raise
+        existing = _existing_capture_note(
+            client,
+            endpoint_key=endpoint_key,
+            project_id=project_id,
+            client_capture_id=revision_id,
+            content_hash=content_hash,
+            timeout=timeout,
+        )
+        if existing is None:
+            raise
+        note, status_code = existing, 200
+    _remember_capture_note(endpoint_key, project_id, revision_id, note)
+    action = "coalesced" if status_code == 200 else "imported"
+    return FigureCaptureResult(
+        **{
+            **defaults,
+            "action": action,
+            "metadata": metadata,
+            "note": note,
+            "no_preview": no_preview,
+        }
+    )
 
 
 def _remember_capture_note(
@@ -974,7 +1093,9 @@ def _coalesced_result(
     existing_metadata = dict(note_metadata) if isinstance(note_metadata, Mapping) else {}
     existing_hash = str(existing_metadata.get("evidence_content_hash") or "")
     stale_review_bytes = bool(existing_hash and existing_hash != content_hash)
-    if not stale_review_bytes:
+    # Only a staged note is ever patched: a capture never rewrites a note a
+    # person committed or archived (the caller files new bytes separately).
+    if not stale_review_bytes or not _note_is_staged(note):
         return FigureCaptureResult(
             **{
                 **result_defaults,

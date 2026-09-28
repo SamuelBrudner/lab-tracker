@@ -76,6 +76,16 @@ JPEG) bytes the kernel sent to the notebook; nothing is rendered twice.
   capture has a new observed-at time, so the client looks up the note that
   capture id made, first in a per-process cache, then among the project's
   notes, at most 5,000, and coalesces into it.)
+- **A curated note is never rewritten.** Coalescing only ever updates a note
+  that is still staged. Once a person has committed or archived it, a capture
+  never writes to it again: unchanged bytes coalesce with no write, and new
+  bytes are uploaded as a new staged note under a versioned capture id (the
+  base id plus the first 12 hex characters of the content hash, the
+  `version_every_change` scheme) whose metadata carries
+  `supersedes_capture_note_id` and `supersedes_capture_note_status`, so the
+  new version enters review next to the curated record. A later identical
+  save coalesces onto that new note. This applies to every automatic capture
+  path (file saves, inline displays, `plt.show()`, `lt capture file`).
 - **Notebook path.** From `JPY_SESSION_NAME` (set by Jupyter Server), else VS
   Code's `__vsc_ipynb_file__`, else `unknown` (the kernel's folder anchors the
   project binding).
