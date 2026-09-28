@@ -602,6 +602,22 @@ def _scalar(group: Any, name: str) -> str | None:
         return None
 
 
+def _open_hdf5_unlocked(h5py: Any, path: Path) -> Any:
+    """Open read-only without HDF5 file locking.
+
+    A scan runs while acquisition software may be writing the file; a read
+    lock would make its open-for-write fail with "unable to lock file".
+    ``locking=`` needs h5py 3.5+; older h5py opens with the library default.
+    """
+
+    try:
+        return h5py.File(str(path), "r", locking=False)
+    except TypeError as exc:
+        if "locking" not in str(exc):
+            raise
+        return h5py.File(str(path), "r")
+
+
 def _sniff_nwb(_reader: _BoundedReader, path: Path, zone: tzinfo | None) -> FormatFields:
     named_nwb = path.name.lower().endswith(".nwb")
     try:
@@ -610,7 +626,7 @@ def _sniff_nwb(_reader: _BoundedReader, path: Path, zone: tzinfo | None) -> Form
         if named_nwb:
             return {FORMAT_SNIFF_ERROR_KEY: "h5py not installed"}
         raise _NotThisFormat() from None
-    with h5py.File(str(path), "r") as handle:
+    with _open_hdf5_unlocked(h5py, path) as handle:
         attrs = handle.attrs
         neurodata_type = _text(attrs.get("neurodata_type"))
         nwb_version = _text(attrs.get("nwb_version"))
