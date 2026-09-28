@@ -26,6 +26,7 @@ from lab_tracker import repository_conventions as repo_context
 from lab_tracker.assistant_next_questions import is_research_facing_prompt
 from lab_tracker_client import outbox as _outbox
 from lab_tracker_client._version import __version__
+from lab_tracker_client.cli_pipeline import add_pipeline_parsers
 from lab_tracker_client.client import (
     NOTE_STATUS_VALUES,
     EntityRef,
@@ -277,6 +278,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_session_parsers(subcommands)
     _add_hpc_parsers(subcommands)
     _add_repo_parsers(subcommands)
+    add_pipeline_parsers(subcommands)
 
     export_parser = subcommands.add_parser(
         "export",
