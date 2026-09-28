@@ -1433,9 +1433,19 @@ def _agents_fragment() -> str:
         Guided setup lives on the `lt` CLI: `lt setup status` is a read-only
         inventory of server reachability and what is configured in this repo.
         Setup write commands take `--dry-run` previews (`lt setup init`,
-        `lt watch add`), and `lt setup connect`, `lt project bind`, and
-        `lt hooks install` also require `--yes`; suggest them to the user
+        `lt watch add`), and `lt setup connect`, `lt project bind`,
+        `lt hooks install`, `lt setup autotrack`, `lt setup schedule`, and
+        `lt setup agent-hooks` also require `--yes`; suggest them to the user
         rather than applying them unprompted.
+
+        Capture that needs no code changes, once this checkout is bound to a
+        project: `lt setup autotrack` captures figures notebooks save or
+        display (`--jupyter`, `--scripts`, and `--r` extend it), `lt run
+        --output <dir> -- <command>` records one analysis run, `lt pipeline
+        report` records a pipeline run, and `lt capture file <path>` stages one
+        saved file from any language. The `lab-tracker://setup-guide` MCP
+        resource lists every capture path; offer them rather than enabling
+        them unasked.
 
         The proposal workflow is human-gated: evidence staged from this repo
         (notes, figures, watch folders, commit hooks) can be swept into

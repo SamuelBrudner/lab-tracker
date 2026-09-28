@@ -98,7 +98,15 @@ def main(argv: list[str] | None = None) -> None:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="lt", description="Lab Tracker consumer CLI.")
+    parser = argparse.ArgumentParser(
+        prog="lt",
+        description="Lab Tracker consumer CLI.",
+        epilog=(
+            "Start with 'lt setup status' (read-only) to see what capture is set up "
+            "here. Capture paths and their setup: docs/capture-guide.md in the Lab "
+            "Tracker repository, or the lab-tracker://setup-guide MCP resource."
+        ),
+    )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument(
         "--debug",

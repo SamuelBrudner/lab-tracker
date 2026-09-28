@@ -1,6 +1,6 @@
 ---
 name: lab-tracker-setup
-description: Guide a user through setting up Lab Tracker capture in a consumer repo or on a new machine. Use when the user asks to set up Lab Tracker, connect a repo, configure watch folders, enroll commit hooks, bind a project, or when `lt setup status` / a session hook reports unconfigured or drifted capture. Covers the consent-gated `lt` setup verbs and their choreography.
+description: Guide a user through setting up Lab Tracker capture in a consumer repo or on a new machine. Use when the user asks to set up Lab Tracker, connect a repo, configure watch folders, enroll commit hooks, bind a project, capture figures from notebooks, scripts, or R, record command or pipeline runs, capture coding-agent sessions, or asks which capture paths exist, or when `lt setup status` / a session hook reports unconfigured or drifted capture. Covers the consent-gated `lt` setup verbs and their choreography.
 allowed-tools: "Read,Bash(lt setup status:*),Bash(lt setup verify-client:*),Bash(lt setup verify-mcp:*),Bash(lt doctor:*)"
 version: "0.1.0"
 compatible-with: claude-code,codex
@@ -125,6 +125,27 @@ short, consent-gated sequence on the `lt` CLI.
     writes the committed `.claude/settings.json` instead, which would
     capture the sessions of everyone who clones the repository, so it
     is a team decision rather than a setup default.
+13. **Runs and pipelines (optional, nothing to install)** — once the
+    project is bound, `lt run --output <dir> -- <command>` records an
+    analysis command (redacted command line, git and working-copy state,
+    hashed pointers to the files it wrote under `--output`) without
+    changing its exit status. `lt pipeline report`, `lt pipeline
+    nextflow --trace`, `lt pipeline dvc`, and the Snakemake and Kedro
+    adapters in `lab_tracker_client.integrations` record a pipeline
+    run's declared inputs and outputs; `lt hpc submit -- sbatch ...`
+    records Slurm jobs, which a cluster admin's TaskEpilog
+    (`scripts/slurm-task-epilog.sh`) can finish without job-script
+    edits; the `lab-tracker-repo-report` GitHub Action records commits
+    from CI; and `lt capture file <path>` stages one saved file from any
+    language. Offer the ones that match how the person already works.
+14. **Beyond this machine** — bench capture lives in the web app: a
+    session's page offers its capture QR, an NFC tag writer, photo
+    import, a voice debrief, and the bench kiosk, and the Devices page
+    offers the kiosk, a hands-free phone shortcut, a desktop bookmarklet,
+    and the person's email capture address. Slack, email, instrument
+    calendars, registered-store scans, and photo barcode decoding are
+    server settings an operator turns on. `docs/capture-guide.md` in the
+    Lab Tracker repository maps every capture path to its setup.
 
 ## After setup
 
@@ -158,4 +179,4 @@ repo; an analysis repo updates by rerunning its pinned `uv add`
 If Lab Tracker is unreachable and the user does not operate a server, point
 them at whoever runs their lab's instance instead of standing one up ad hoc.
 
-<!-- lab-tracker-setup-guide version=0.1.0 sha256=def6032af137 -->
+<!-- lab-tracker-setup-guide version=0.1.0 sha256=ae2dc90a0296 -->

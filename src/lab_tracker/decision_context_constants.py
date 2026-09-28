@@ -90,8 +90,10 @@ MCP_SERVER_INSTRUCTIONS = " ".join(
         "Code-facing conventions are available at lab-tracker://code-conventions; "
         "package text remains canonical.",
         "When capture looks unconfigured or drifted, lab-tracker://setup-guide "
-        "describes the consent-gated guided-setup flow; read-only `lt setup "
-        "status` is safe to consult.",
+        "describes the consent-gated guided-setup flow and every optional "
+        "capture path (figure autotrack for notebooks, scripts, and R; command, "
+        "pipeline, and cluster runs; coding-agent sessions; bench and server "
+        "channels); read-only `lt setup status` is safe to consult.",
     )
 )
 
@@ -150,8 +152,11 @@ def managed_agent_activation_block() -> str:
             "read-only inventory that is safe to consult. Setup writes happen "
             "through `lt` commands that all take a `--dry-run` preview "
             "(`lt setup init`, `lt watch add`; `lt setup connect`, "
-            "`lt project bind`, and `lt hooks install` also require `--yes`); "
-            "suggest them to the user rather than applying them unprompted.",
+            "`lt project bind`, `lt hooks install`, `lt setup autotrack`, "
+            "`lt setup schedule`, and `lt setup agent-hooks` also require "
+            "`--yes`); suggest them to the user rather than applying them "
+            "unprompted. The `lab-tracker://setup-guide` MCP resource lists every "
+            "optional capture path.",
             CLAUDE_BLOCK_END,
             "",
         ]
@@ -204,9 +209,19 @@ def code_facing_idioms(*, symbols: Iterable[str] | None = None) -> str:
         "Guided setup lives on the `lt` CLI: `lt setup status` is a read-only "
         "inventory of what is configured in a consumer repo. Setup write "
         "commands take `--dry-run` previews (`lt setup init`, `lt watch add`), "
-        "and `lt setup connect`, `lt project bind`, and `lt hooks install` "
+        "and `lt setup connect`, `lt project bind`, `lt hooks install`, "
+        "`lt setup autotrack`, `lt setup schedule`, and `lt setup agent-hooks` "
         "also require `--yes`. Status and previews are safe to consult; a "
         "person approves each applying command.",
+        "",
+        "Command-line capture needs no code changes once the checkout is bound "
+        "to a project: `lt run --output <dir> -- <command>` records one analysis "
+        "run and the files it wrote without changing its exit status, `lt "
+        "pipeline report` records a pipeline run's declared inputs and outputs "
+        "(the Snakemake and Kedro adapters live in "
+        "`lab_tracker_client.integrations`), and `lt capture file <path>` stages "
+        "one saved file from any language. Each stages evidence for review; "
+        "offer them rather than wrapping commands unasked.",
     ]
     if {"savefig", "capture_figures"}.issubset(symbol_set):
         sections.extend(
@@ -217,6 +232,19 @@ def code_facing_idioms(*, symbols: Iterable[str] | None = None) -> str:
                 "`evidence_content_hash`, while Lab Tracker receives only a "
                 "bounded review image or pointer note. `run_context()` contributes "
                 "scalar git/run metadata without creating Analysis records.",
+            ]
+        )
+    if "autotrack" in symbol_set:
+        sections.extend(
+            [
+                "",
+                "`autotrack()`, which `lt setup autotrack` installs for IPython, "
+                "captures matplotlib figures a notebook saves or only displays, "
+                "with no `savefig()` call needed; the same setup verb's "
+                "`--jupyter`, `--scripts`, and `--r` options add daily notebook "
+                "pages, plain Python scripts, and R. It captures only inside a "
+                "checkout bound to a project, and `LAB_TRACKER_AUTOTRACK=0` turns "
+                "it off.",
             ]
         )
     return "\n".join(sections) + "\n"

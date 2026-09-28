@@ -390,3 +390,8 @@ symlinks so repo updates are picked up by new agent sessions:
 
 Restart Codex or Claude after changing MCP or skill config so the new server and
 skill are loaded.
+
+The skill's Capture Surfaces section lists every capture path with its setup
+command and doc; the generated `lab-tracker-setup` skill (installed by
+`lt setup init --install-skills`) walks a person through enabling them, and
+[capture-guide.md](capture-guide.md) is the same map for people.

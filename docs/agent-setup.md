@@ -311,6 +311,11 @@ Cursor and Codex have comparable hook points but are not supported; details,
 limits, and the `LAB_TRACKER_AGENT_HOOKS=0` kill switch are in
 [agent session capture](agent-session-capture.md).
 
+Agents can also offer the other capture paths that need no code changes:
+figure autotrack, `lt run`, pipeline capture, and `lt capture file`. The
+`lab-tracker://setup-guide` MCP resource and the managed conventions block
+describe them, and the [capture guide](capture-guide.md) maps all of them.
+
 ## 5. Verify the loop
 
 1. `uv run lt setup verify-client --expected-revision <full-revision>` in the
