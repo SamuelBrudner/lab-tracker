@@ -185,6 +185,7 @@ files = [
   "src/lab_tracker/bounded_subprocess.py",
   "src/lab_tracker/_windows_job.py",
   "src/lab_tracker/application",
+  "src/lab_tracker/capture_channels",
   "src/lab_tracker/graph_drafting.py",
   "src/lab_tracker/draft_quality.py",
   "src/lab_tracker/services/shared.py",
