@@ -39,6 +39,8 @@ from typing import Any
 from urllib.parse import unquote, urlparse
 from urllib.request import url2pathname
 
+import httpx
+
 from lab_tracker.file_watch import stable_file_fingerprint
 from lab_tracker_client.redaction import redact_capture_text
 
@@ -69,6 +71,9 @@ DIRECTORY_WALK_LIMIT = 10_000
 # Characters of log text (tail) and error text kept per run.
 LOG_EXCERPT_MAX_CHARS = 4000
 ERROR_TEXT_MAX_CHARS = 1000
+# Extra characters read and redacted around every cut, so a cut never leaves a
+# secret without the prefix that identifies it.
+REDACTION_MARGIN_CHARS = 512
 # Hard cap on the rendered note body.
 BODY_MAX_CHARS = 60_000
 # Kill switch: 0/false/no/off disables every pipeline capture path.
@@ -76,6 +81,7 @@ CAPTURE_ENV = "LAB_TRACKER_PIPELINE_CAPTURE"
 # The post-write drain is best-effort and bounded.
 DRAIN_EVENT_LIMIT = 25
 DRAIN_TIMEOUT_SECONDS = 10.0
+HEALTH_PROBE_TIMEOUT_SECONDS = 3.0
 _OFF_VALUES = frozenset({"0", "false", "no", "off"})
 _URI_SCHEME = re.compile(r"^(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*)://")
 _NOTICES_SHOWN: set[str] = set()
@@ -702,10 +708,18 @@ def _directory_summary(path: Path) -> JsonObject:
 
 
 def _log_excerpt(logs: Sequence[str | Path], error_text: str | None, *, base: Path) -> str:
+    """Bounded, credential-scrubbed excerpt: error text first, then log tails.
+
+    Every piece is redacted *before* it is cut to size, so a cut can never
+    separate a secret from the prefix (``ghp_``, ``Bearer``, ``password=``) that
+    identifies it.
+    """
+
     chunks: list[str] = []
     remaining = LOG_EXCERPT_MAX_CHARS
     if error_text and error_text.strip():
-        text = error_text.strip()[:ERROR_TEXT_MAX_CHARS]
+        head = error_text.strip()[: ERROR_TEXT_MAX_CHARS + REDACTION_MARGIN_CHARS]
+        text = _cut_head(redact_capture_text(head), ERROR_TEXT_MAX_CHARS)
         chunks.append(f"==> error <==\n{text}")
         remaining -= len(text)
     for item in logs:
@@ -715,13 +729,48 @@ def _log_excerpt(logs: Sequence[str | Path], error_text: str | None, *, base: Pa
         if not path.is_absolute():
             path = base / path
         try:
-            text = _read_text_tail(path, max_chars=remaining).strip()
+            text = _redacted_tail(path, max_chars=remaining)
         except OSError:
             continue
         if text:
             chunks.append(f"==> {path.name} (last {len(text)} characters) <==\n{text}")
             remaining -= len(text)
-    return redact_capture_text("\n\n".join(chunks))
+    return "\n\n".join(chunks)
+
+
+def _redacted_tail(path: Path, *, max_chars: int) -> str:
+    """The last ``max_chars`` characters of ``path``, redacted before the cut.
+
+    A window ``REDACTION_MARGIN_CHARS`` larger than needed is read. When the
+    file is longer than the window, the window's first (partial) line is
+    dropped -- or, for a log without line breaks, the whole margin -- so a
+    secret split by the read offset cannot survive without its prefix. The
+    window is then redacted, cut to ``max_chars``, and a line split by that
+    cut is dropped too.
+    """
+
+    window = _read_text_tail(path, max_chars=max_chars + REDACTION_MARGIN_CHARS)
+    try:
+        truncated = path.stat().st_size > len(window.encode("utf-8"))
+    except OSError:
+        truncated = True
+    if truncated:
+        window = _drop_partial_head(window, REDACTION_MARGIN_CHARS)
+    cleaned = redact_capture_text(window)
+    if len(cleaned) > max_chars:
+        cleaned = _drop_partial_head(cleaned[-max_chars:], max_chars)
+    return cleaned.strip()
+
+
+def _drop_partial_head(text: str, limit: int) -> str:
+    """``text`` without its first line; without a line break, minus ``limit`` characters."""
+
+    newline = text.find("\n")
+    return text[limit:] if newline < 0 else text[newline + 1 :]
+
+
+def _cut_head(text: str, max_chars: int) -> str:
+    return text if len(text) <= max_chars else text[: max_chars - 1] + "…"
 
 
 def _read_text_tail(path: Path, *, max_chars: int) -> str:
@@ -806,6 +855,12 @@ def _drain(outbox: Path, client_factory: Callable[[], Any] | None) -> tuple[Any,
     try:
         client = client_factory() if client_factory else _default_client()
         try:
+            # One short unauthenticated probe: a down or black-holed server costs
+            # HEALTH_PROBE_TIMEOUT_SECONDS, not one request timeout per event.
+            client._request(
+                "GET", "/health", authenticated=False, timeout=HEALTH_PROBE_TIMEOUT_SECONDS
+            )
+            _DrainCircuit().install(client._client)
             return (
                 watch.sync_outbox_path(
                     client, outbox, request_draft=False, limit=DRAIN_EVENT_LIMIT
@@ -816,6 +871,41 @@ def _drain(outbox: Path, client_factory: Callable[[], Any] | None) -> tuple[Any,
             client.close()
     except Exception as exc:  # noqa: BLE001 - the event is durable; sync retries later.
         return None, redact_capture_text(str(exc)) or exc.__class__.__name__
+
+
+class _DrainCircuit:
+    """Stop a drain's network use at its first connection failure.
+
+    httpx runs request hooks before sending and response hooks only when a
+    response arrives, so a request that starts while the previous one is still
+    "in flight" means that one ended in a transport error (refused, reset,
+    timed out). From then on every request fails at once without touching the
+    network; the drain records those events as failed and a later
+    ``lt outbox sync`` retries them.
+    """
+
+    def __init__(self) -> None:
+        self.in_flight = False
+        self.tripped = False
+
+    def install(self, http_client: httpx.Client) -> None:
+        hooks = http_client.event_hooks
+        hooks.setdefault("request", []).append(self.before_request)
+        hooks.setdefault("response", []).append(self.after_response)
+        http_client.event_hooks = hooks
+
+    def before_request(self, request: httpx.Request) -> None:
+        if self.in_flight:
+            self.tripped = True
+        if self.tripped:
+            raise httpx.ConnectError(
+                "an earlier request in this drain could not reach Lab Tracker; the drain stopped",
+                request=request,
+            )
+        self.in_flight = True
+
+    def after_response(self, response: httpx.Response) -> None:
+        self.in_flight = False
 
 
 def _server_configured() -> bool:

@@ -92,6 +92,22 @@ single: 'it''s'
     assert parsed["single"] == "it's"
 
 
+def test_multi_line_double_quoted_scalars_fold_like_yaml() -> None:
+    parsed = parse_yaml_subset(
+        'escaped: "abc \\\n    def"\n'
+        'joined: "abc\\\n    def"\n'
+        'folded: "abc   \n    def"\n'
+        'paragraph: "abc\n\n    def"\n'
+    )
+
+    assert parsed == {
+        "escaped": "abc def",
+        "joined": "abcdef",
+        "folded": "abc def",
+        "paragraph": "abc\ndef",
+    }
+
+
 def test_rejects_constructs_outside_the_subset() -> None:
     with pytest.raises(YamlSubsetError):
         parse_yaml_subset("a: &anchor 1\nb: *anchor\n")

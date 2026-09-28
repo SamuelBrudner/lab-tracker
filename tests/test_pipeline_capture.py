@@ -301,6 +301,8 @@ def test_drain_uploads_the_staged_note_with_pipeline_metadata(tmp_path, monkeypa
     uploads: list[bytes] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok"})
         if request.method == "GET" and request.url.path == "/notes":
             return httpx.Response(200, json={"data": [], "meta": {"total": 0}})
         if request.method == "POST" and request.url.path == "/notes/upload-file":
@@ -439,3 +441,96 @@ def test_cli_report_prints_json_and_fail_silent_swallows_errors(tmp_path, capsys
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == ""
+
+
+def _tail_excerpt(tmp_path: Path, prefix: str, secret: str) -> str:
+    """A log whose last LOG_EXCERPT_MAX_CHARS characters start inside ``prefix``."""
+
+    limit = pipeline_capture.LOG_EXCERPT_MAX_CHARS
+    secret_line = f"{prefix}{secret}\n"
+    end = "\nrun finished\n"
+    # Size the tail so the cut lands after the prefix's first two characters,
+    # e.g. "Be|arer <secret>" or "gh|p_<secret>".
+    fill = limit - (len(secret_line) - 2) - len(end)
+    tail = secret_line + "z" * fill + end
+    log = tmp_path / f"cut-{len(prefix)}.log"
+    log.write_text("start\n" + "filler line\n" * 600 + tail, encoding="utf-8")
+    old_style_cut = log.read_text(encoding="utf-8")[-limit:]
+    assert old_style_cut.startswith(prefix[2:])  # the fixture really splits the prefix
+    return pipeline_capture._log_excerpt([log], None, base=tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("prefix", "secret"),
+    [("Bearer ", "eyJhbGciOiJIUzI1NiJ9.cGF5bG9hZA.c2lnbmF0dXJl"), ("ghp_", "A1b2" * 9)],
+)
+def test_log_tail_is_redacted_before_it_is_cut(tmp_path, prefix, secret) -> None:
+    excerpt = _tail_excerpt(tmp_path, prefix, secret)
+
+    assert secret not in excerpt
+    assert secret[:12] not in excerpt
+    assert "run finished" in excerpt
+    assert len(excerpt) <= pipeline_capture.LOG_EXCERPT_MAX_CHARS + 100
+
+
+def test_error_text_is_redacted_before_it_is_cut(tmp_path) -> None:
+    head = "x" * (pipeline_capture.ERROR_TEXT_MAX_CHARS - 10)
+    excerpt = pipeline_capture._log_excerpt(
+        [], head + " password=hunter2hunter2 trailing", base=tmp_path
+    )
+
+    assert "hunter2" not in excerpt
+
+
+def _black_hole_client(requests: list[str], *, health_ok: bool) -> LabTracker:
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(f"{request.method} {request.url.path}")
+        if request.url.path == "/health" and health_ok:
+            return httpx.Response(200, json={"status": "ok"})
+        if request.method == "GET" and request.url.path == "/notes" and health_ok:
+            return httpx.Response(200, json={"data": [], "meta": {"total": 0}})
+        raise httpx.ConnectTimeout("timed out", request=request)
+
+    return LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler))
+
+
+def _queue_runs(checkout: Path, count: int) -> None:
+    for index in range(count):
+        report_pipeline_run(
+            PipelineRun(run_id=f"queued-{index}"), cwd=checkout, project_id="p", drain=False
+        )
+
+
+def test_drain_probes_health_once_and_skips_a_dead_server(tmp_path, monkeypatch) -> None:
+    _repo(tmp_path)
+    monkeypatch.setenv("LAB_TRACKER_BASE_URL", "http://testserver")
+    _queue_runs(tmp_path, 5)
+    requests: list[str] = []
+    monkeypatch.setattr(
+        pipeline_capture, "_default_client", lambda: _black_hole_client(requests, health_ok=False)
+    )
+
+    payload = report_pipeline_run(PipelineRun(run_id="r"), cwd=tmp_path, project_id="p")
+
+    assert requests == ["GET /health"]
+    assert payload["action"] == "captured"
+    assert payload["sync_error"]
+    assert all(event["sync"]["status"] == "pending" for event in _events(tmp_path))
+
+
+def test_drain_stops_at_the_first_connection_failure(tmp_path, monkeypatch) -> None:
+    _repo(tmp_path)
+    monkeypatch.setenv("LAB_TRACKER_BASE_URL", "http://testserver")
+    _queue_runs(tmp_path, 5)
+    requests: list[str] = []
+    monkeypatch.setattr(
+        pipeline_capture, "_default_client", lambda: _black_hole_client(requests, health_ok=True)
+    )
+
+    payload = report_pipeline_run(PipelineRun(run_id="r"), cwd=tmp_path, project_id="p")
+
+    assert requests.count("POST /notes/upload-file") == 1
+    assert payload["sync_error"]
+    events = _events(tmp_path)
+    assert len(events) == 6
+    assert not any(event["sync"]["status"] == "synced" for event in events)
