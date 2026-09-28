@@ -111,6 +111,51 @@ If an untrusted principal can mutate that topology, disable local resolution
 or isolate the service in a namespace the principal cannot change. Directory handles make one operation resistant to pathname
 replacement; they are not a durable mount-topology lease.
 
+## Server Capture Channels
+
+The optional Slack, email, instrument-calendar, and store-scan channels
+([`server-capture-channels.md`](server-capture-channels.md)) are configured
+with the `LAB_TRACKER_SLACK_*`, `LAB_TRACKER_EMAIL_CAPTURE_*`,
+`LAB_TRACKER_BOOKING_CALENDARS`, and `LAB_TRACKER_STORE_SCANS` variables in
+`.env`; see [`configuration.md`](configuration.md#server-capture-channels).
+Operational notes for this deployment:
+
+- **Poll state** lives at
+  `/app/data/note_storage/.integrations-poll-state.json` in the `app_data`
+  volume unless `LAB_TRACKER_INTEGRATIONS_STATE_PATH` moves it. It holds each
+  poller's last run and each store scan's baseline; back it up with the volume.
+  Losing it only resets rate limits and makes each scan record a fresh
+  baseline.
+- **Scheduling**: the simplest option is
+  `LAB_TRACKER_INTEGRATIONS_POLLER_ENABLED=true`, which lets the app poll. An
+  external scheduler can instead call `POST /integrations/run-due` with the
+  admin `batch_run_due` token it already uses for `/batches/run-due`. To run
+  the CLI from the host's cron inside the container, supply the auth secret
+  the entrypoint generated (an `exec` does not run the entrypoint; skip the
+  prefix when `.env` sets `LAB_TRACKER_AUTH_SECRET_KEY` itself):
+
+  ```bash
+  */5 * * * * cd /srv/lab-tracker && docker compose exec -T app sh -c 'LAB_TRACKER_AUTH_SECRET_KEY="$(cat /app/data/runtime-env/auth-secret-key)" lab-tracker integrations poll'
+  ```
+
+  All three share the poll state, so combining them never double-polls.
+- **Secrets**: prefer `LAB_TRACKER_EMAIL_CAPTURE_IMAP_PASSWORD_FILE` pointing
+  at a file mounted read-only into the container (it is re-read at every
+  poll). The Slack signing secret and the feed URLs (which often embed tokens)
+  are never logged. Capture addresses are derived from
+  `LAB_TRACKER_AUTH_SECRET_KEY`, so rotating it changes every address.
+- **Network**: Slack must reach `/integrations/slack/*` over public HTTPS
+  through the reverse proxy; those two paths authenticate by Slack's request
+  signature, not a bearer token. The IMAP poller needs outbound TLS to the
+  mail server, and calendar feeds follow the outbound HTTP policy (a feed on a
+  private network needs `LAB_TRACKER_RESOLVER_HTTP_ALLOWED_AUTHORITIES` and
+  `LAB_TRACKER_RESOLVER_HTTP_ALLOWED_NETWORKS`).
+- **Store scans** read only what resolution may read: a `local_fs` store must
+  sit inside `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS` (mount it into the container,
+  read-only where possible, as described above), and an rclone store's remote
+  must be in `LAB_TRACKER_RCLONE_ALLOWED_REMOTES` with its `rclone.conf`
+  available to the app container.
+
 ## Backup
 
 From the repo root:
