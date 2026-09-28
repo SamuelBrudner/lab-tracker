@@ -72,6 +72,10 @@ JPEG) bytes the kernel sent to the notebook; nothing is rendered twice.
   the SHA-256 of its source), and the figure's order in the cell. A re-run
   lands on the same staged note; changed bytes mark it
   `figure_review_bytes_stale`, exactly like re-saving a file to the same path.
+  (The server refuses a capture-id replay whose fields differ, and every
+  capture has a new observed-at time, so the client looks up the note that
+  capture id made, first in a per-process cache, then among the project's
+  notes, at most 5,000, and coalesces into it.)
 - **Notebook path.** From `JPY_SESSION_NAME` (set by Jupyter Server), else VS
   Code's `__vsc_ipynb_file__`, else `unknown` (the kernel's folder anchors the
   project binding).
@@ -163,17 +167,25 @@ removes itself. The first save or show imports Lab Tracker and installs:
   whose `name` is its filesystem path (the file is flushed first); in-memory
   buffers such as `BytesIO` are ignored, as are suffixes outside the figure
   patterns;
-- a **`plt.show()` hook** for scripts that never save: before showing, each
-  open figure is rendered as PNG and captured with logical id
-  `show/<script>/run-<run id>/figure-<number>`, so each figure is one note per
-  run; showing the same bytes again sends nothing, and a figure the run saved
-  to a matching file is left to that save. The project binding follows the
-  script's checkout (or the working folder for `python -c`). Metadata:
-  `figure_show_captured=True`, `figure_number`, `script_path`,
-  `script_run_id`.
+- a **`plt.show()` hook** for scripts that never save: before a blocking
+  show, each open figure is rendered as PNG and captured with logical id
+  `show/<script>/run-<run id>/figure-<number>`, at most once per figure
+  number per run, so each figure is one note per run; a figure the run saved
+  to a matching file is left to that save. Animation frames are not
+  captured: `plt.pause()` calls `show(block=False)` on every frame, and a
+  bare `show()` in interactive mode (`plt.ion()`) returns at once, so both
+  are skipped. The project binding follows the script's checkout (or the
+  working folder for `python -c`). Metadata: `figure_show_captured=True`,
+  `figure_number`, `script_path`, `script_run_id`.
 
 A script that imports matplotlib but never saves or shows a figure never
 imports Lab Tracker. `python -S` or `-I` skip `.pth` processing entirely.
+Because every script run is a new process, the unbound-checkout notice is
+remembered in `autotrack-notices.json` in the client config folder
+(`LAB_TRACKER_CONFIG_DIR`, default `~/.lab-tracker`): each checkout or loose
+folder is named at most once a week, and the file keeps at most 256 entries.
+The `.pth` file is pure ASCII (a non-ASCII path is escaped), since Python
+3.10-3.12 read `.pth` files in the locale encoding.
 
 ## Limits and kill switches
 
