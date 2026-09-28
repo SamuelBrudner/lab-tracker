@@ -49,6 +49,8 @@ SLACK_SIGNATURE_VERSION: Final = "v0"
 # Slack's own guidance: refuse requests whose timestamp is over five minutes off.
 MAX_SLACK_REQUEST_SKEW_SECONDS: Final = 300
 MAX_SLACK_BODY_BYTES: Final = 64 * 1024
+# Unix seconds; checked before int() so an oversized header cannot raise.
+MAX_SLACK_TIMESTAMP_DIGITS: Final = 12
 _SLACK_TS_RE = re.compile(r"[0-9]{1,12}\.[0-9]{1,9}\Z")
 _SLACK_ID_RE = re.compile(r"[A-Z0-9][A-Z0-9_-]{1,63}\Z")
 
@@ -122,8 +124,13 @@ def verify_slack_request(
 
     if len(body) > MAX_SLACK_BODY_BYTES:
         raise SlackRequestRejected("Slack request body is too large.")
-    if not timestamp or not timestamp.isascii() or not timestamp.isdigit():
-        raise SlackRequestRejected("Slack request timestamp is missing.")
+    if (
+        not timestamp
+        or len(timestamp) > MAX_SLACK_TIMESTAMP_DIGITS
+        or not timestamp.isascii()
+        or not timestamp.isdigit()
+    ):
+        raise SlackRequestRejected("Slack request timestamp is missing or malformed.")
     if abs(now - int(timestamp)) > MAX_SLACK_REQUEST_SKEW_SECONDS:
         raise SlackRequestRejected("Slack request timestamp is outside the replay window.")
     if not signature or not signature.isascii():

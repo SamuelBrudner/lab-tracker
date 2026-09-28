@@ -182,10 +182,15 @@ The damage is bounded — a staged note in that person's inbox that they can set
 aside, never a committed record — and it is further reduced by having the
 mailbox provider reject mail that fails DMARC/SPF alignment for your domain,
 and by treating the address like a password (it can be rotated only by rotating
-the auth secret). Messages with no `From`, several `From` addresses, an unknown
-sender, no capture address, a token mismatch, or a sender who cannot write the
-project are rejected: they are marked processed and counted in the poll report
-(`rejected_<reason>`), and nothing is stored.
+the auth secret). Messages with no `From`, more than one `From` header or
+address, a `From` header with parse defects (e.g. `alice@lab.org
+<mallory@evil.com>`, which lenient parsers read as `alice@lab.org` while DMARC
+aligns on `evil.com`), an unknown sender, no capture address, a token mismatch,
+or a sender who cannot write the project are rejected: they are marked
+processed and counted in the poll report (`rejected_<reason>`), and nothing is
+stored. Only the headers of a message are interpreted until the sender and the
+token have both been verified; the body and attachments of a rejected message
+are never read.
 
 ### What is captured
 
@@ -194,7 +199,9 @@ project are rejected: they are marked processed and counted in the poll report
   trailing quoted reply stripped conservatively — only at an explicit
   `-----Original Message-----`, an Outlook underscore rule followed by
   `From:`, or an `On … wrote:` line after which every line is `>`-quoted.
-  Interleaved replies are kept whole. Bounded to 8,000 characters.
+  Interleaved replies are kept whole. At most the first 64 KiB of the text
+  part is scanned (in linear time), and the stored body is bounded to 8,000
+  characters.
 - Attachments that are PNG, JPEG, GIF, WebP, TIFF, HEIC/HEIF, PDF, or CSV and at
   most 10 MiB (and at most `LAB_TRACKER_MAX_UPLOAD_BYTES`), up to ten per
   message, each become a separate staged file note sharing the text note's
@@ -280,7 +287,8 @@ LAB_TRACKER_STORE_SCANS='[{"project_id": "<uuid>", "store": "lab-onedrive",
 ```
 
 `patterns` are case-insensitive globs matched against the file name or its
-path below the prefix (default `["*"]`). Dot files, Office lock files (`~$…`),
+path below the prefix (default `["*"]`); they are applied while listing, so
+only matching files count toward the listing cap. Dot files, Office lock files (`~$…`),
 and `*.tmp`/`*.part`/`*.partial`/`*.crdownload` are always ignored. The store
 name resolves like `store://` resolution: the project's own store first, then
 its group's.
@@ -288,7 +296,11 @@ its group's.
 - **`local_fs`** — the registered root must lie inside
   `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS`, both as written and after resolving
   aliases, and the prefix must resolve inside the root. The listing never
-  follows a symlink, is bounded (5,000 files, 2,000 directories, depth 16), and
+  follows a symlink: on POSIX it descends with directory descriptors opened
+  `O_NOFOLLOW` one component at a time, so a directory swapped for a symlink
+  mid-walk fails to open; elsewhere each directory is re-checked (no link or
+  reparse point, still under the root) just before it is listed. It is bounded
+  (5,000 matching files, 2,000 directories, depth 16), and
   hashes each new file through the same retained-handle local helper that
   artifact resolution uses, so the operator's local-root authority applies to
   the read too. This softens G7: the core facility PC writes to the synced
@@ -307,7 +319,9 @@ its group's.
 Each new file becomes a staged note authored by `SYSTEM` with
 `origin_provider=store_scan` and metadata `capture_channel=store_scan`,
 `evidence_source_uri` (`store://<name>/<path>`), `store_file_path`,
-`store_file_size_bytes`, `store_file_modified_at`,
+`store_file_size_bytes`, `store_file_modified_at`, `captured_at` (the file's
+modification time, so sessions and day windows place the file by when it was
+written rather than when the poll noticed it),
 `store_file_provider_hash_<algorithm>` (when the listing reports one), and
 either `evidence_content_hash` (the SHA-256, which feeds the content-hash
 provenance detector) or `content_hash_pending=true` when the file is larger
@@ -368,4 +382,8 @@ mailbox content, or host path.
 
 Pollers are independent: an exception in one poller — or in one feed, message,
 or scan inside it — is recorded and the rest carry on, and none of them shares
-a code path with the daily-review batch dispatch.
+a code path with the daily-review batch dispatch. Each poller run also has a
+four-minute wall-clock budget: once spent, it stops between items (messages,
+feeds, scans, files) and reports what it left for its next run
+(`left_for_next_poll`, `feeds_left_for_next_poll`, `scans_left_for_next_poll`,
+or `deferred`), so one slow poller cannot starve the others.

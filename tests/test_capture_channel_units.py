@@ -555,3 +555,103 @@ def test_rclone_listing_parse_keeps_files_hashes_and_times() -> None:
     assert listed.size == 1234
     assert listed.modified_at == datetime(2026, 9, 27, 15, 15, 57, tzinfo=timezone.utc)
     assert listed.provider_hashes == (("md5", "0cc175b9c0f1b6a831c399e269772661"),)
+
+
+# --------------------------------------------------------------------------- review fixes
+
+
+def test_strip_quoted_reply_is_linear_on_pathological_bodies() -> None:
+    blank_heavy = "\n" * 200_000 + "On Mon, Bob wrote:\n" + "> quoted\n" * 50_000
+    started = time.perf_counter()
+    assert strip_quoted_reply("Top line\n" + blank_heavy) == "Top line"
+    assert strip_quoted_reply("x\n" * 200_000).startswith("x\nx")
+    assert time.perf_counter() - started < 5.0
+
+
+def test_parse_email_reads_the_body_only_on_demand() -> None:
+    body = "line\n" * 500_000  # ~2.5 MB of text
+    raw = (
+        b"From: alice@lab.example.org\r\nTo: capture@lab.example.org\r\nSubject: big\r\n\r\n"
+        + body.encode()
+    )
+    started = time.perf_counter()
+    parsed = parse_email(raw)
+    assert "body" not in parsed.__dict__  # nothing scanned until verification passes
+    assert len(parsed.body) <= 64 * 1024
+    assert time.perf_counter() - started < 10.0
+
+
+@pytest.mark.parametrize(
+    "from_header",
+    [
+        b"alice@lab.example.org <mallory@evil.example.org>",
+        b"Alice <alice@lab.example.org>, Bob <bob@lab.example.org>",
+    ],
+)
+def test_parse_email_refuses_defective_or_multiple_from(from_header: bytes) -> None:
+    raw = b"From: " + from_header + b"\r\nTo: x@y.org\r\nSubject: s\r\n\r\nbody\r\n"
+    assert parse_email(raw).sender is None
+
+
+def test_parse_email_refuses_repeated_from_headers() -> None:
+    raw = (
+        b"From: alice@lab.example.org\r\nFrom: mallory@evil.example.org\r\n"
+        b"To: x@y.org\r\n\r\nbody\r\n"
+    )
+    assert parse_email(raw).sender is None
+
+
+def test_ics_overflowing_events_are_skipped_not_fatal() -> None:
+    text = _calendar(
+        "BEGIN:VEVENT\r\nUID:huge\r\nDTSTART:20261005T130000Z\r\nDURATION:P999999999W\r\n"
+        "END:VEVENT\r\n",
+        "BEGIN:VEVENT\r\nUID:year-one\r\nDTSTART;VALUE=DATE:00010101\r\nEND:VEVENT\r\n",
+        "BEGIN:VEVENT\r\nUID:fine\r\nDTSTART:20261005T130000Z\r\nEND:VEVENT\r\n",
+    )
+    result = parse_events(text, default_zone=ZoneInfo("Asia/Tokyo"))
+    assert [event.uid for event in result.events] == ["fine"]
+    assert result.skipped == 2
+
+
+def test_slack_rejects_an_oversized_timestamp_before_parsing_it() -> None:
+    body = b"team_id=T1&channel_id=C1&user_id=U1&text=x"
+    with pytest.raises(SlackRequestRejected, match="malformed"):
+        verify_slack_request(
+            secret=SECRET,
+            timestamp="9" * 5000,
+            signature="v0=" + "0" * 64,
+            body=body,
+            now=time.time(),
+        )
+
+
+def test_listing_caps_count_only_matching_files(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import lab_tracker.capture_channels.store_scan as store_scan_module
+    from lab_tracker.capture_channels.store_scan import LocalStoreAdapter
+    from lab_tracker.local_filesystem_authority import LocalFilesystemAuthority
+
+    monkeypatch.setattr(store_scan_module, "MAX_LISTED_FILES", 3)
+    root = tmp_path / "store"
+    root.mkdir()
+    for index in range(10):
+        (root / f"clutter-{index:02d}.txt").write_bytes(b"x")
+    (root / "zz-wanted.fcs").write_bytes(b"x")
+    adapter = LocalStoreAdapter(
+        root=str(root),
+        authority=LocalFilesystemAuthority.from_roots([tmp_path]),
+        reader=None,  # type: ignore[arg-type]  # listing never reads
+        deadline_seconds=5.0,
+    )
+
+    def wanted(locator: PortableStorePath) -> bool:
+        return locator.path.endswith(".fcs")
+
+    local = adapter.list(None, include=wanted)
+    assert [listed.locator.path for listed in local.files] == ["zz-wanted.fcs"]
+    assert local.truncated is False
+
+    rclone_entries = [
+        {"Path": f"clutter-{index}.txt", "Size": 1, "IsDir": False} for index in range(10)
+    ] + [{"Path": "zz-wanted.fcs", "Size": 1, "IsDir": False}]
+    remote = parse_rclone_listing(json.dumps(rclone_entries).encode(), prefix=None, include=wanted)
+    assert [listed.locator.path for listed in remote.files] == ["zz-wanted.fcs"]
