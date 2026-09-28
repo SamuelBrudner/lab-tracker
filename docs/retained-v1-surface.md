@@ -128,6 +128,94 @@ research record:
   drains after each commit, and `lt outbox status|sync` and the scheduled
   `lt watch run` cover every adapter outbox (watch, repo, hpc). See
   [repo-report-capture.md](repo-report-capture.md).
+- Low-effort capture surfaces added 2026-09-28. Every one lands staged notes
+  or proposed links only, follows the bound-project rule wherever it fires in
+  every directory or process, and is opt-in through a consent-gated setup verb
+  or operator configuration:
+  - **Notebooks and scripts.** Inside IPython, `autotrack()` also captures the
+    exact bytes of matplotlib figures a cell displays inline, coalesced per
+    cell. `lt setup autotrack --jupyter` enables the
+    `lab_tracker_client.notebook_capture` Jupyter Server extension, which files
+    each bound notebook's saves as one staged "notebook page" per local day
+    (pointer, SHA-256, bounded markdown text, one summary line per code cell),
+    held by the reserved `payload.deliver_after` key until that day ends.
+    `lt setup autotrack --scripts` installs a `.pth` hook so plain scripts
+    capture figures they save or `plt.show()`. `lt setup autotrack --r` adds a
+    managed `~/.Rprofile` block for `ggsave()` and the file graphics devices.
+    `LAB_TRACKER_AUTOTRACK=0` disables all of them. See
+    [notebook-and-script-capture.md](notebook-and-script-capture.md) and
+    [lab-tracker-r.md](lab-tracker-r.md).
+  - **Any runtime.** `lt capture file PATH` is the language-neutral fail-soft
+    single-file capture: it prints the result JSON and exits 0 for every
+    capture outcome. MATLAB `labtracker.savefig`/`uploadFigure` now queue
+    unreachable saves into the checkout's watch outbox, resolve the project
+    from `lt_ids.json`, and record the active session and `run_*` git facts.
+  - **Commands and pipelines.** `lt run [options] -- <command>` exits with the
+    command's exact code and queues one staged note per run (redacted argv, git
+    state, lockfile fingerprint, SHA-256 pointers for files under declared
+    `--output` folders). `lt pipeline report|nextflow|dvc` and the Snakemake
+    and Kedro adapters in `lab_tracker_client.integrations` record one staged
+    note per pipeline run from its declared inputs and outputs, never a
+    catalog. `.github/actions/lab-tracker-repo-report` runs `lt repo report`
+    in CI under the post-commit hook's `<normalized-remote>@<sha>` identity.
+    `lt hpc submit` writes a run manifest into the submit directory, and
+    `lt hpc epilog` with `scripts/slurm-task-epilog.sh` finishes submitted runs
+    from an admin-installed TaskEpilog. See [run-capture.md](run-capture.md),
+    [pipeline-capture.md](pipeline-capture.md), and
+    [hpc-analysis-capture.md](hpc-analysis-capture.md).
+  - **Identity for uncommitted code.** Captures stamp the git tree id of the
+    working copy (`run_git_worktree_tree`, `capture_git_worktree_tree`,
+    `hpc_git_worktree_tree`), computed read-only against a scratch index and
+    bounded; `lt repo` commit notes stamp `repo_git_tree`.
+    `LAB_TRACKER_WORKTREE_TREE=0` turns the computation off.
+  - **Coding-agent sessions.** `lt setup agent-hooks` is an explicit opt-in
+    that `lt setup init` never makes. It writes the personal, git-ignored
+    `.claude/settings.local.json` by default; only `--shared`, with a warning,
+    writes the committed `.claude/settings.json`. Its SessionEnd hook runs
+    `lt agent session-end`, which stages one bounded, redacted retrospective
+    note per session with `request_draft`, so any decision, dead-end, or pivot
+    proposals wait for review; the transcript is never uploaded. Its
+    PostToolUse hook runs `lt watch touch`, which queues exactly what a
+    configured watch scan would capture for one written file.
+    `LAB_TRACKER_AGENT_HOOKS=0` turns both off. See
+    [agent-session-capture.md](agent-session-capture.md).
+  - **Instrument files.** `lt watch` reads bounded FCS, OME-TIFF (DTDs
+    refused), and NWB (`h5py` optional) headers into `format_kind`,
+    `format_acquired_at`, and other `format_*` metadata; a malformed header
+    records `format_sniff_error` and never fails a scan.
+    `LAB_TRACKER_WATCH_FORMAT_SNIFF=0` turns it off.
+  - **Machine-readable labels in photos.** With the optional `decode` extra,
+    image uploads are decoded locally and within fixed bounds for QR codes and
+    barcodes. This is deterministic decoding of machine-readable symbols, not
+    OCR, which stays deferred. It stamps only server-owned metadata:
+    `decoded_session_link_code`, `photo_session_id` (only when exactly one
+    decoded session is in the note's own project), `barcode_gs1_*`, and
+    `barcode_text`. It never blocks an upload, and
+    `LAB_TRACKER_DECODE_PHOTO_CODES` is its kill switch. See
+    [decoded-labels-and-file-headers.md](decoded-labels-and-file-headers.md).
+  - **Bench capture in the app.** A chrome-free kiosk scan station
+    (`/app/capture?kiosk=1`), NFC station tags that carry a session's capture
+    link, a per-device trusted share window (1, 2, or 4 hours, one project and
+    session), multi-photo session import, a skippable voice debrief when a
+    session closes, `POST /notes/voice-capture` for phone shortcuts (raw audio
+    body, quick-capture auth, bounded by `max_upload_bytes`), and a desktop
+    bookmarklet that prefills the capture page and saves nothing until the
+    person confirms. Every path is tagged `capture_channel`. See
+    [bench-capture.md](bench-capture.md).
+  - **Server capture channels.** Operator-opt-in signed Slack capture (a slash
+    command and a message shortcut, authored by the mapped person),
+    email-to-capture through a per-(user, project) HMAC plus-address accepted
+    only from the mapped sender, instrument-calendar (ICS) bookings, and
+    registered-store scans. Bookings and store files become SYSTEM-authored
+    staged notes; channel principals are non-interactive and can never accept
+    or commit. Pollers run from the optional ticker, `POST
+    /integrations/run-due`, or `lab-tracker integrations poll`, each at most
+    once per minimum interval. See
+    [server-capture-channels.md](server-capture-channels.md).
+  - **New deterministic proposals.** Each batch execution also runs a
+    worktree-tree detector (`basis: worktree_tree_match`, a capture to the
+    earliest note whose `repo_git_tree` is the same tree), and `photo_session_id`
+    joins the exact-id detector's session keys. Both write PROPOSED links only.
 - Package-pinned code-facing idiom teaching rendered from one generator into
   consent-gated managed agent surfaces, with the advisory
   `lab-tracker://code-conventions` MCP resource treating the package text as

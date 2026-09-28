@@ -34,6 +34,21 @@ rather than replacing them, and roughly if they arrive expecting an ELN.
 > [`lab-tracker-y5j8`](#the-real-remaining-onedrive-gap-is-setup-not-data-model),
 > not the rows below. G1 and G7 are annotated inline.
 
+> **Update (2026-09-28) — bench capture moved several rows.** Reagent photos
+> now yield structured lot, expiry, GTIN, serial, and catalog numbers when the
+> bottle carries a GS1 barcode (G6, steps 5 and 12), and a photo of a
+> session's `LT-<code>` label proposes the session link (steps 8 and 21–22);
+> see [decoded-labels-and-file-headers.md](decoded-labels-and-file-headers.md).
+> `lt watch` reads `.fcs` headers (acquisition time, cytometer, event and
+> parameter counts) into staged-note metadata (step 14). Registered-store
+> scans stage `store://` pointers for files the core-facility PC uploads,
+> with no client on that PC (step 15, G7); see
+> [server-capture-channels.md](server-capture-channels.md). At the bench, a
+> kiosk scan station, NFC station tags, a trusted share window, multi-photo
+> session import, and a one-button voice debrief cut the taps per capture
+> (steps 11, 18, 21–22); see [bench-capture.md](bench-capture.md). Protocol,
+> sample, and inventory entities remain out of scope, so G3, G4, and G5 stand.
+
 ## Coverage legend
 
 - **Full** — a first-class entity holds this with its structure intact.
