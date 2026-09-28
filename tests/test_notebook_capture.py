@@ -537,3 +537,37 @@ def test_setup_status_reports_the_jupyter_hook_and_scripts_pth(
     assert status["jupyter"]["up_to_date"] is True
     assert status["scripts"]["installed"] is True
     assert status["scripts"]["pth_file"] == str(site / script_module.SCRIPTS_PTH_FILENAME)
+
+
+def test_a_daylight_saving_day_ends_at_local_midnight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The page is due at the next local midnight by the zone's rules, not by
+    the offset of the save (New York springs forward at 02:00 on 2026-03-08)."""
+
+    import time
+
+    if not hasattr(time, "tzset") or not Path("/usr/share/zoneinfo/America/New_York").exists():
+        pytest.skip("needs POSIX time zone support")
+    monkeypatch.setenv("TZ", "America/New_York")
+    time.tzset()
+    try:
+        checkout = _git_checkout(tmp_path / "analysis")
+        notebook = _notebook(checkout / "dose.ipynb")
+        # 01:00 EST (UTC-5), before the change; the day ends at 00:00 EDT (UTC-4).
+        early = notebook_module.record_notebook_save(notebook, now=datetime(2026, 3, 8, 1, 0))
+        assert early["local_day"] == "2026-03-08"
+        assert early["deliver_after"] == "2026-03-09T04:00:00+00:00"
+        # 23:30 EDT, after the change: still the same day's pending page.
+        _notebook(notebook, extra_markdown="\nEvening edit.")
+        evening = notebook_module.record_notebook_save(notebook, now=datetime(2026, 3, 8, 23, 30))
+        assert (evening["action"], evening["deliver_after"]) == (
+            "replaced",
+            "2026-03-09T04:00:00+00:00",
+        )
+        # The autumn change (01:00 repeats on 2026-11-01): the day ends at 00:00 EST.
+        autumn = notebook_module.record_notebook_save(notebook, now=datetime(2026, 11, 1, 0, 30))
+        assert autumn["deliver_after"] == "2026-11-02T05:00:00+00:00"
+    finally:
+        monkeypatch.undo()
+        time.tzset()
