@@ -1011,9 +1011,12 @@ FastAPI app does not read them. `LAB_TRACKER_BASE_URL` (see
   hostname)
 - `LAB_TRACKER_AUTOTRACK`: `0`, `false`, `no`, or `off` disables the matplotlib
   figure autotrack hook everywhere, including the IPython startup file that
-  `lt setup autotrack` installs (default: on). The hook captures only saves
-  whose project comes from `autotrack(project_id=...)`,
-  `LAB_TRACKER_PROJECT_ID`, or the checkout's `lt_ids.json`
+  `lt setup autotrack` installs, its capture of figures a notebook displays
+  inline, the Jupyter notebook save hook (`--jupyter`), and the scripts `.pth`
+  hook (`--scripts`, checked at every interpreter start) (default: on). The
+  hooks capture only when the project comes from `autotrack(project_id=...)`,
+  `LAB_TRACKER_PROJECT_ID`, or the checkout's `lt_ids.json`; see
+  [notebook-and-script-capture.md](notebook-and-script-capture.md)
 - `LAB_TRACKER_CAPTURE_OUTBOX`: `0`, `false`, `no`, or `off` stops figure
   captures from queueing into the checkout's watch outbox when the server is
   unreachable; the save then reports the failure instead (default: on)

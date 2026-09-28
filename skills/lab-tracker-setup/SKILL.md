@@ -91,13 +91,17 @@ short, consent-gated sequence on the `lt` CLI.
    every capture from the checkout into that session's project for
    the next twelve hours.
 9. **Figure autotrack (optional)** — `lt setup autotrack --yes` adds an
-   IPython startup file so matplotlib figures saved from a notebook or
-   shell are captured without code changes (`--dry-run` previews,
-   `LAB_TRACKER_AUTOTRACK=0` disables). It captures only saves inside
-   a checkout bound with `lt project bind` (or with
-   `LAB_TRACKER_PROJECT_ID` set) and skips the rest with a notice.
-   Saves made while the server is unreachable queue in the checkout's
-   watch outbox and drain with the next sync.
+   IPython startup file so matplotlib figures a notebook or shell saves,
+   or a notebook displays inline, are captured without code changes
+   (`--dry-run` previews, `LAB_TRACKER_AUTOTRACK=0` disables).
+   `--jupyter` instead enables a Jupyter save hook that files each
+   notebook's day of saves as one staged page (restart Jupyter), and
+   `--scripts` adds a `.pth` file to the Python environment that runs
+   it so plain scripts capture the figures they save or `plt.show()`.
+   All of it captures only inside a checkout bound with `lt project
+   bind` (or with `LAB_TRACKER_PROJECT_ID` set) and skips the rest
+   with a notice. Captures made while the server is unreachable queue
+   in the checkout's watch outbox and drain with the next sync.
 10. **Commit hooks** — `lt hooks install --project <project-id> --yes`
     enrolls the current repository: each commit queues durable staged
     evidence that syncs when the server is reachable. Repos are enrolled
@@ -139,4 +143,4 @@ repo; an analysis repo updates by rerunning its pinned `uv add`
 If Lab Tracker is unreachable and the user does not operate a server, point
 them at whoever runs their lab's instance instead of standing one up ad hoc.
 
-<!-- lab-tracker-setup-guide version=0.1.0 sha256=671230086775 -->
+<!-- lab-tracker-setup-guide version=0.1.0 sha256=26c64272bc41 -->

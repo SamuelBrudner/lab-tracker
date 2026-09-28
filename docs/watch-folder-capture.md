@@ -175,6 +175,16 @@ outbox instead of being dropped, under the same capture id and project a live
 save would use, and drain with the next `lt watch run`, `lt watch sync`, or `lt outbox
 sync` (see [repo-report-capture.md](repo-report-capture.md) for the
 all-adapter drain). Set `LAB_TRACKER_CAPTURE_OUTBOX=0` to disable the queue.
+A figure that was only displayed inline or shown (never saved) has no file to
+point at, so its queued bytes are kept under the outbox's `blobs/` folder, one
+file per distinct content; they can be deleted once `lt outbox status` shows
+the events synced.
+
+The same outbox holds the daily notebook pages the Jupyter save hook writes
+([notebook-and-script-capture.md](notebook-and-script-capture.md)). Each page
+carries the reserved `payload.deliver_after` time (its local day's end); a
+sync leaves such an event pending, reported as skipped with reason `not_due`,
+until that time has passed.
 
 A figure save goes to the project named by, in order: the `project_id`
 argument, `LAB_TRACKER_PROJECT_ID`, the saved file's checkout binding
