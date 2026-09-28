@@ -78,6 +78,27 @@ def resolve_capture_project(path: Path, *, project_id: str | None) -> CapturePro
     return _checkout_project(checkout)
 
 
+def resolve_capture_project_in_checkout(
+    checkout: Path | None, *, project_id: str | None
+) -> CaptureProject | None:
+    """:func:`resolve_capture_project` for a caller that already knows the checkout root.
+
+    Same order (explicit, environment, the checkout's ``lt_ids.json``, its
+    watch config) without a second git probe; ``checkout=None`` means the
+    capture is outside any git checkout.
+    """
+
+    explicit = _optional(project_id)
+    if explicit:
+        return CaptureProject(project_id=explicit, source=CaptureProjectSource.EXPLICIT)
+    from_env = _optional(os.getenv(PROJECT_ENV))
+    if from_env:
+        return CaptureProject(project_id=from_env, source=CaptureProjectSource.ENVIRONMENT)
+    if checkout is None:
+        return None
+    return _checkout_project(checkout)
+
+
 def _checkout_project(checkout: Path) -> CaptureProject | None:
     from lab_tracker_client import git_capture
 
@@ -113,4 +134,5 @@ __all__ = [
     "CaptureProjectSource",
     "capture_checkout_root",
     "resolve_capture_project",
+    "resolve_capture_project_in_checkout",
 ]

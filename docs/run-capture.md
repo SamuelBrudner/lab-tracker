@@ -117,21 +117,32 @@ changed file becomes an artifact pointer -- `file://` URI, size, mtime, and a
 ### Secrets
 
 The command line is redacted before it is written anywhere (event file, note
-body, or metadata):
+body, or metadata) by the client's one redactor
+(`lab_tracker_client.redaction`, which pipeline, HPC and agent-session
+captures use too):
 
-- the value of a flag whose name looks secret: `--token X`, `--api-key=X`,
-  `--password X`, `-password X`, `--secret`, `--auth`, `--cookie`,
-  `--client-secret`, ... (the next argument is redacted unless it is itself a
-  `--` option);
-- `KEY=VALUE` arguments whose key looks secret (`env API_TOKEN=...`,
-  `PGPASSWORD=...`, Hydra `db.password=...`);
+- the value of a flag whose name ends in a secret word: `--token X`,
+  `--api-key=X`, `--password X`, `-password X`, `--secret`, `--auth`,
+  `--cookie`, `--client-secret`, ... (a bare flag redacts the next argument
+  unless it is itself a `--` option);
+- `name=value`, `name: value` and JSON `"name": "value"` pairs whose name ends
+  in a secret word (`env API_TOKEN=...`, `PGPASSWORD=...`, Hydra
+  `db.password=...`); `max_tokens`, `--tokenizer`, `token_count` or
+  `--num-pass` are not secrets;
+- `-u`/`--user user:password` (the user is kept);
+- `mysql`/`mysqladmin`/`mysqldump` `-p<password>` (a bare `-p` prompts and is
+  left), and `sshpass -p <pw>` / `docker login -p <pw>`;
 - URL credentials (`https://user:pw@host` becomes `https://[REDACTED]@host`; an
-  ssh login name is kept, its password is not) and secret-looking query values
-  (`?token=`, `?sig=`, `?key=`, `X-Amz-Credential`, ...);
-- `Authorization:`/`Cookie:`-style header values, `Bearer` tokens, and
-  well-known token formats anywhere (GitHub `ghp_`/`github_pat_`, GitLab
-  `glpat-`, Slack `xox*-`, AWS `AKIA`/`ASIA`, `sk-`, Google `AIza`, Hugging
-  Face `hf_`, JWTs, PEM private keys).
+  ssh login name is kept, its password is not) and secret query values
+  (`?token=`, `?api_key=`, `?sig=`, `X-Amz-Signature`, `X-Amz-Credential`,
+  `X-Amz-Security-Token`, `X-Goog-Signature`, ...);
+- the whole value of `Authorization` (Bearer, Basic, `token x`),
+  `Proxy-Authorization`, `Cookie`, `X-Api-Key`, `PRIVATE-TOKEN`,
+  `X-Vault-Token` and `X-Auth-Token` headers, `Bearer` tokens, PEM private
+  keys, and well-known token formats anywhere (GitHub `ghp_`/`github_pat_`,
+  GitLab `glpat-`, Slack `xox*-`, AWS `AKIA`/`ASIA`, `sk-`, Stripe
+  `sk_`/`rk_` live/test, Google `AIza`, Hugging Face `hf_`, JWTs, Lab Tracker
+  tokens), plus the values of the client's own credential variables.
 
 Names that only point at a secret (`--password-file`, `--token-name`) and
 negations (`--no-password`) are kept. The environment is never recorded, and
@@ -146,10 +157,13 @@ or files rather than on the command line.
   A command that does not exist exits 127 and one that cannot be executed
   exits 126, each with one `lt run: <cmd>: ...` line on stderr; nothing is
   recorded for a command that never started.
-- While the command runs, Ctrl-C and Ctrl-\ go to the command (the terminal
-  delivers them to it) and `lt run` waits for it to finish; a SIGTERM or
-  SIGHUP sent to `lt run` is forwarded to the command. Either way the run is
-  still recorded with how it ended.
+- While the command runs at a terminal (stdin is a TTY and `lt run` is in its
+  foreground process group), Ctrl-C and Ctrl-\ reach the command from the
+  terminal itself, so `lt run` only ignores them and waits. Anywhere else --
+  a pipeline or script, `kill -INT <lt pid>`, a notebook kernel interrupting
+  `!lt run -- ...` -- SIGINT and SIGQUIT are forwarded to the command, as are
+  SIGTERM and SIGHUP always. Either way the run is still recorded with how it
+  ended (130 for an interrupted command).
 - `lt run` never writes to stdout, so pipelines are unaffected, and it prints
   at most one line to stderr per run: why a run was not captured (unbound
   project), a dropped `--session`, a capture failure, or a failed sync. A
@@ -162,10 +176,18 @@ The event is written to the checkout's watch outbox
 outside any git checkout with `--project` or `LAB_TRACKER_PROJECT_ID` uses
 `.lab-tracker/outbox/watch` under the working directory. When a server is
 configured (`LAB_TRACKER_BASE_URL`, or a profile saved by `lt setup connect`),
-`lt run` then drains that outbox best effort, like the `lt repo` hook, with a
-10-second client timeout; unconfigured, it makes no network call and the run
-waits for `lt outbox sync`, `lt watch run`, or the scheduled drain
-(`lt setup schedule`). `lt outbox status` lists queued runs.
+`lt run` then drains that outbox best effort, like the `lt repo` hook: one
+`/health` probe with a 2-second timeout first (an unreachable or unresponsive
+server costs that, and one notice line), then at most 10 queued events with a
+10-second client timeout. Unconfigured, it makes no network call. Anything
+left waits for `lt outbox sync`, `lt watch run`, or the scheduled drain
+(`lt setup schedule`); `lt outbox status` lists queued runs.
+
+Before the command starts, `lt run` resolves the checkout once and runs a
+single read-only `git status` (`GIT_OPTIONAL_LOCKS=0`, so the real index is
+never refreshed) that serves both the dirty flag and the worktree tree, plus
+the HEAD, branch and remote probes: six short git calls on a clean checkout,
+three more to build the tree of a dirty one.
 
 ## Code Identity for Uncommitted Code
 
@@ -181,7 +203,7 @@ exactly `HEAD^{tree}`.
 | --- | --- | --- |
 | `run_git_worktree_tree` | `run_context()` figure captures; `lt run` | when the run context opens / the command starts |
 | `capture_git_worktree_tree` | plain figure and file captures (`savefig`, `capture_figures`, `capture`, autotrack) inside a git checkout | at save time, *without the saved file itself* |
-| `hpc_git_worktree_tree` | `lt hpc begin` and `lt hpc finish` | when the event is written (a manifest's own value wins) |
+| `hpc_git_worktree_tree` | `lt hpc submit`, `begin`, `finish` and `epilog` | at submit, before `sbatch`; the job's begin/finish/epilog events reuse that tree (from the submit manifest or the run's submit event), and only recompute it -- without `slurm-*.out` and the job's `--log` files -- when no submitted tree exists (a manifest's own value wins) |
 | `repo_git_tree` | `lt repo` commit events | the commit's own tree (`git rev-parse <sha>^{tree}`), never the working copy |
 
 How it is computed and bounded:
@@ -191,9 +213,12 @@ How it is computed and bounded:
   alternate: `git add -A` then `git write-tree`. The user's index and
   `.git/objects` are never written, and `git status` runs with
   `GIT_OPTIONAL_LOCKS=0`.
-- `.lab-tracker/` is always left out, as are `lt run --output` folders and the
-  saved file of a figure capture (an output is not the code that produced it).
-  A left-out tracked path keeps its indexed content.
+- `.lab-tracker/` is always left out, as are `lt run --output` folders, a
+  job's Slurm output files, and the saved file of a figure capture (an output
+  is not the code that produced it). A left-out tracked path keeps its indexed
+  content; a left-out untracked file is simply absent. (Left-out paths are
+  restored in the scratch index after `git add -A`, never passed to git as
+  exclude pathspecs, which git rejects for gitignored paths.)
 - More than 5,000 changed or untracked paths, or more than 64 MiB in them,
   records `*_git_worktree_tree_error: too_large` instead of hashing a data
   dump. Gitignore data and output folders so they never count.

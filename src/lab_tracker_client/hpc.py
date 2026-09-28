@@ -11,6 +11,7 @@ import subprocess
 import sys
 import uuid
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -64,6 +65,9 @@ SUBMIT_MANIFEST_VERSION = 1
 SUBMIT_MANIFEST_KIND = "lab-tracker-hpc-submit"
 EPILOG_ENABLED_ENV = "LAB_TRACKER_HPC_EPILOG_ENABLED"
 _OFF_VALUES = frozenset({"0", "false", "no", "off"})
+# At most this many ``slurm-*.out`` files per folder are left out of a
+# recomputed worktree tree.
+_MAX_JOB_LOGS = 1_000
 
 
 JsonObject = dict[str, Any]
@@ -486,6 +490,10 @@ def run_submit_command(
     git_timeout_seconds()
     run_id = new_run_id()
     outbox = config.outbox_path()
+    submit_dir = Path(cwd).expanduser().resolve() if cwd else Path.cwd()
+    # The code the job will run is the code submitted now: take its tree before
+    # sbatch (and before any slurm-<job>.out exists); begin/finish reuse it.
+    submitted_tree = worktree_source(submit_dir, exclude=job_output_files(submit_dir))
     env = {
         **os.environ,
         "LAB_TRACKER_HPC_RUN_ID": run_id,
@@ -525,6 +533,7 @@ def run_submit_command(
         command=resolved_command,
         cwd=cwd,
         scheduler=scheduler,
+        source=submitted_tree,
         summary=summary or f"Submitted HPC run {run_id}.",
         log_excerpt=_join_log_excerpt(result.stdout, result.stderr),
     )
@@ -548,7 +557,7 @@ def run_submit_command(
             payload["run_manifest"] = str(
                 write_submit_manifest(
                     config,
-                    submit_dir=Path(cwd).expanduser().resolve() if cwd else Path.cwd(),
+                    submit_dir=submit_dir,
                     run_id=run_id,
                     job_id=parsed_job.job_id,
                     sbatch_cluster=printed_job.cluster if printed_job else None,
@@ -558,6 +567,7 @@ def run_submit_command(
                     dataset_ids=dataset_ids,
                     tags=tags,
                     submit_event_id=str(event["event_id"]),
+                    worktree=submitted_tree,
                 )
             )
         except OSError as exc:
@@ -592,12 +602,15 @@ def write_submit_manifest(
     dataset_ids: Sequence[str] | None,
     tags: Sequence[str] | None,
     submit_event_id: str,
+    worktree: Mapping[str, Any] | None = None,
 ) -> Path:
     """Record a submitted job's run in its submit directory; return the file.
 
     Only explicit ``--project``/``--question``/``--dataset``/``--tag`` values are
     recorded: config defaults are re-resolved from the config when the run
-    finishes, so their provenance label stays ``config_default``.
+    finishes, so their provenance label stays ``config_default``. ``worktree``
+    (``git_worktree_tree`` or its ``_error``) is the tree taken before sbatch,
+    which the job's begin/finish events reuse.
     """
 
     path = submit_manifest_path(submit_dir, job_id, sbatch_cluster)
@@ -621,6 +634,10 @@ def write_submit_manifest(
         "project_id": _optional_str(project_id),
         "question_id": _optional_str(question_id),
         "lt_command": _lt_command_path(),
+        **{
+            key: _optional_str((worktree or {}).get(key))
+            for key in ("git_worktree_tree", "git_worktree_tree_error")
+        },
     }
     manifest.update({key: value for key, value in optional.items() if value})
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -884,6 +901,13 @@ def begin_event(
     summary: str | None = None,
 ) -> tuple[JsonObject, Path]:
     run_id, job_manifest = _job_run(run_id)
+    outbox = _event_outbox(config, job_manifest)
+    worktree = _job_worktree_source(
+        run_id or os.getenv("LAB_TRACKER_HPC_RUN_ID"),
+        cwd=Path.cwd(),
+        outbox=outbox,
+        job_manifest=job_manifest,
+    )
     event = make_event(
         config,
         event_type="begin",
@@ -898,9 +922,9 @@ def begin_event(
             "array_task_id": os.getenv("SLURM_ARRAY_TASK_ID"),
             "state": "running",
         },
-        source=worktree_source(Path.cwd()),
+        source=worktree,
     )
-    path = write_event(event, _event_outbox(config, job_manifest))
+    path = write_event(event, outbox)
     return event, path
 
 
@@ -950,6 +974,17 @@ def finish_event(
     merged_artifacts = list(manifest_payload.get("artifacts") or [])
     merged_artifacts.extend(_artifact_from_uri(uri) for uri in artifacts or [])
     cwd = cwd or _optional_str(manifest_payload.get("cwd")) or Path.cwd()
+    target_outbox = outbox or _event_outbox(config, job_manifest)
+    manifest_source = _json_mapping(manifest_payload.get("source") or {})
+    worktree: JsonObject = {}
+    if not manifest_source.get("git_worktree_tree"):
+        worktree = _job_worktree_source(
+            run_id or os.getenv("LAB_TRACKER_HPC_RUN_ID"),
+            cwd=cwd,
+            outbox=target_outbox,
+            job_manifest=job_manifest,
+            logs=list(logs or []),
+        )
     event = make_event(
         config,
         event_type="finish",
@@ -963,11 +998,9 @@ def finish_event(
         command=_string_list(manifest_payload.get("command")),
         cwd=cwd,
         scheduler=scheduler,
-        # A manifest that recorded its own worktree tree keeps it.
-        source={
-            **worktree_source(cwd),
-            **_json_mapping(manifest_payload.get("source") or {}),
-        },
+        # A manifest that recorded its own worktree tree keeps it; otherwise
+        # the tree submitted with the job, else one without the job's output.
+        source={**worktree, **manifest_source},
         artifacts=merged_artifacts,
         metrics={**_json_mapping(manifest_payload.get("metrics") or {}), **_metrics(metrics)},
         log_excerpt=_join_log_excerpt(
@@ -976,7 +1009,7 @@ def finish_event(
         ),
         summary=summary or _optional_str(manifest_payload.get("summary")),
     )
-    path = write_event(event, outbox or _event_outbox(config, job_manifest))
+    path = write_event(event, target_outbox)
     return event, path
 
 
@@ -1161,15 +1194,83 @@ def git_context(cwd: str | Path | None = None) -> JsonObject:
     }
 
 
-def worktree_source(cwd: str | Path) -> JsonObject:
-    """Event ``source`` keys naming the job's working-copy tree (begin/finish).
+def worktree_source(cwd: str | Path, *, exclude: Sequence[str | Path] = ()) -> JsonObject:
+    """Event ``source`` keys naming a working-copy tree (``exclude`` left out).
 
     ``git_worktree_tree`` identifies the exact code a job ran even when it was
     never committed; ``git_worktree_tree_error`` says why it is unknown.
     Outside a checkout there is nothing to record.
     """
 
-    return dict(worktree_tree_id(Path(cwd).expanduser()).as_fields("git_worktree_tree"))
+    tree = worktree_tree_id(Path(cwd).expanduser(), exclude=exclude)
+    return dict(tree.as_fields("git_worktree_tree"))
+
+
+def job_output_files(*directories: str | Path, logs: Sequence[str | Path] = ()) -> list[Path]:
+    """A job's own output: ``logs`` plus Slurm's ``slurm-*.out`` in ``directories``.
+
+    These grow while the job runs, so they are never part of the code a
+    worktree tree identifies.
+    """
+
+    found: list[Path] = [Path(item).expanduser() for item in logs]
+    for directory in directories:
+        with suppress(OSError):
+            found.extend(sorted(Path(directory).expanduser().glob("slurm-*.out"))[:_MAX_JOB_LOGS])
+    return found
+
+
+def submitted_worktree_source(
+    run_id: str | None,
+    *,
+    outbox: Path,
+    job_manifest: Mapping[str, Any] | None = None,
+) -> JsonObject:
+    """The worktree tree ``lt hpc submit`` recorded for ``run_id`` before sbatch, or ``{}``.
+
+    The job's code is the code that was submitted: the tree is taken from the
+    job's submit manifest (``job_manifest`` or the one Slurm's environment
+    names), else from the run's ``submit`` event in ``outbox``. Only a tree is
+    reused; a submit that could not compute one leaves the job to try.
+    """
+
+    if not run_id:
+        return {}
+    manifest = job_manifest if job_manifest is not None else find_submit_manifest()
+    if manifest and str(manifest.get("run_id") or "") == run_id:
+        tree = _optional_str(manifest.get("git_worktree_tree"))
+        if tree:
+            return {"git_worktree_tree": tree}
+    with suppress(OSError):
+        for path in sorted(Path(outbox).glob(f"{_safe_path_part(run_id)}.submit.*.json")):
+            try:
+                event = read_event(path)
+            except Exception:  # noqa: BLE001 - an unreadable event names no tree.
+                continue
+            tree = _optional_str(event["source"].get("git_worktree_tree"))
+            if event["run_id"] == run_id and tree:
+                return {"git_worktree_tree": tree}
+    return {}
+
+
+def _job_worktree_source(
+    run_id: str | None,
+    *,
+    cwd: str | Path,
+    outbox: Path,
+    job_manifest: Mapping[str, Any] | None,
+    logs: Sequence[str | Path] = (),
+) -> JsonObject:
+    """The submitted tree for a begin/finish event, else one computed without job output."""
+
+    submitted = submitted_worktree_source(run_id, outbox=outbox, job_manifest=job_manifest)
+    if submitted:
+        return submitted
+    directories = [cwd]
+    submit_dir = _optional_str(os.getenv("SLURM_SUBMIT_DIR"))
+    if submit_dir:
+        directories.append(submit_dir)
+    return worktree_source(cwd, exclude=job_output_files(*directories, logs=logs))
 
 
 def utc_now() -> str:

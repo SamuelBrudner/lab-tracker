@@ -40,12 +40,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Any
 
-from lab_tracker.provider_error_redaction import REDACTED, provider_error_message
 from lab_tracker_client import gitinfo
 from lab_tracker_client import watch as watch_capture
 from lab_tracker_client.capture_project import resolve_capture_project
 from lab_tracker_client.client import LabTracker
 from lab_tracker_client.git_capture import resolve_watch_config
+from lab_tracker_client.redaction import redact_capture_text
 
 JsonObject = dict[str, Any]
 
@@ -105,95 +105,18 @@ def agent_hooks_enabled() -> bool:
 # Redaction
 # --------------------------------------------------------------------------
 
-_PRIVATE_KEY_RE = re.compile(
-    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\Z)",
-    re.DOTALL,
-)
-_URL_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"<>`]+")
-_SSH_URL_SCHEMES = frozenset({"ssh", "git+ssh", "ssh+git"})
-_AUTHORITY_RE = re.compile(r"(?P<authority>[^/?#]*)(?P<tail>.*)", re.DOTALL)
-_BEARER_RE = re.compile(r"\b(Bearer)\s+[A-Za-z0-9._~+/=-]{8,}", re.IGNORECASE)
-_TOKEN_SHAPES_RE = re.compile(
-    r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{20,}"
-    r"|xox[abprs]-[A-Za-z0-9-]{10,}|(?:AKIA|ASIA)[0-9A-Z]{16}|hf_[A-Za-z0-9]{20,}"
-    r"|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})"
-)
-_SECRET_WORDS = (
-    r"(?:password|passwd|passphrase|secret|token|api[_-]?key|apikey|access[_-]?key"
-    r"|private[_-]?key|credentials?)"
-)
-# ``--password X``, ``--api-key=X``, ``-token X``: the value goes, the flag stays.
-_SECRET_FLAG_RE = re.compile(
-    rf"(?P<flag>(?<![\w-])--?[A-Za-z0-9_-]*{_SECRET_WORDS}[A-Za-z0-9_-]*)"
-    r"(?P<sep>=|\s+)(?P<value>\"[^\"]*\"|'[^']*'|[^\s\"']+)",
-    re.IGNORECASE,
-)
-# ``GITHUB_TOKEN=X``, ``password: X``, ``"access_token": "X"``: the name must END
-# with the secret word, so ``max_tokens=100`` or ``token_count: 5`` survive.
-_SECRET_ASSIGNMENT_RE = re.compile(
-    rf"(?P<name>(?<![\w-])[A-Za-z0-9_.-]*{_SECRET_WORDS}[\"']?)"
-    r"(?P<sep>\s*[:=]\s*)(?P<value>\"[^\"\n]*\"|'[^'\n]*'|[^\s,;\"'}\])]+)",
-    re.IGNORECASE,
-)
-# ``curl -u user:password``: keep the user, drop the password.
-_USER_PASSWORD_FLAG_RE = re.compile(
-    r"(?P<flag>(?<![\w-])(?:-u|--user))(?P<sep>\s+|=)"
-    r"(?P<user>[^\s:'\"]+):(?P<value>[^\s'\"]+)"
-)
-
-
 def redact_secrets(text: str) -> str:
     """Remove credential-shaped material from free text before it is stored.
 
-    Builds on :func:`lab_tracker.provider_error_redaction.provider_error_message`
-    (query-string secrets, authorization headers, Lab Tracker bearer tokens,
-    Google/OpenAI/Anthropic keys) and adds private-key blocks, credentialed
-    URLs (via :func:`gitinfo.sanitize_remote_url`), well-known token shapes,
-    ``Bearer`` values, password/token/secret/api-key command-line flags and
-    ``NAME=value`` / ``name: value`` assignments, and ``-u user:password``.
-    Over-redaction is the accepted failure mode.
+    A thin call into the client's one redactor,
+    :func:`lab_tracker_client.redaction.redact_capture_text` (private keys,
+    credentialed URLs and query secrets, credential headers and ``Bearer``
+    values, secret flags and ``NAME=value`` / ``name: value`` assignments,
+    ``-u user:password``, well-known token shapes, and the client's own
+    credential variables). Over-redaction is the accepted failure mode.
     """
 
-    if not text:
-        return text
-    redacted = _PRIVATE_KEY_RE.sub(f"{REDACTED} private key", text)
-    redacted = _URL_RE.sub(_redact_url, redacted)
-    redacted = provider_error_message(redacted)
-    redacted = _BEARER_RE.sub(lambda match: f"{match.group(1)} {REDACTED}", redacted)
-    redacted = _TOKEN_SHAPES_RE.sub(REDACTED, redacted)
-    redacted = _USER_PASSWORD_FLAG_RE.sub(
-        lambda match: f"{match['flag']}{match['sep']}{match['user']}:{REDACTED}", redacted
-    )
-    redacted = _SECRET_FLAG_RE.sub(
-        lambda match: f"{match['flag']}{match['sep']}{REDACTED}", redacted
-    )
-    return _SECRET_ASSIGNMENT_RE.sub(
-        lambda match: f"{match['name']}{match['sep']}{REDACTED}", redacted
-    )
-
-
-def _redact_url(match: re.Match[str]) -> str:
-    """Credentialed URL -> marker, mirroring :func:`gitinfo.sanitize_remote_url`'s policy.
-
-    Any userinfo on a non-ssh scheme goes (a bare ``https://<token>@host``
-    user is indistinguishable from a token); an ssh login is addressing and
-    stays, only its password goes. Query secrets are left to
-    :func:`provider_error_message`.
-    """
-
-    url = match.group(0)
-    scheme, _separator, rest = url.partition("://")
-    parts = _AUTHORITY_RE.match(rest)
-    authority, tail = (parts["authority"], parts["tail"]) if parts else (rest, "")
-    userinfo, at, host = authority.rpartition("@")
-    if not at:
-        return url
-    login, colon, _password = userinfo.partition(":")
-    if scheme.lower() in _SSH_URL_SCHEMES:
-        if not colon:
-            return url
-        return f"{scheme}://{login}:{REDACTED}@{host}{tail}"
-    return f"{scheme}://{REDACTED}@{host}{tail}"
+    return redact_capture_text(text)
 
 
 def _clean(text: str, limit: int) -> str:
