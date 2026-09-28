@@ -118,4 +118,6 @@ Read tools are annotated as read-only so Copilot IDEs can run them without a
 confirmation dialog. Write tools are not read-only, and destructive graph edits
 are marked destructive so the IDE prompts before use.
 
-The product rule is unchanged: AI can suggest; only a person commits.
+The product rule is unchanged: AI can suggest; only a person commits — unless a
+project owner has granted delegated curation, in which case the delegated
+tools apply what that grant admits ([delegated-curation.md](delegated-curation.md)).

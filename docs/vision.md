@@ -108,7 +108,8 @@ edge:
   notes. Large outputs stay put; only paths, hashes, and summaries are stored.
 - **AI agents via MCP** (shipped) and **git post-commit / CI hooks** (shipped):
   agents and analysis repositories stage evidence and can request a draft, but
-  never commit.
+  never commit — except under a project owner's delegated-curation grant, with
+  a token minted for it ([delegated-curation.md](delegated-curation.md)).
 
 The organizing metaphor is "save your own memory," not "submit metadata." No
 capture path asks the scientist to speak ontology or pick a question up front.
@@ -138,8 +139,10 @@ request_ rather than a fabricated finding.
 The scientist works **one review queue**: accept, edit, reject, or defer each
 proposal, or "revise with AI" by feeding back typed, dictated, or image
 feedback. Accepted operations commit through the same validation as manual
-entry. Hard guarantees: nothing commits automatically, proposals referencing
-unknown entities are rejected, and human approval is always required. The
+entry. Hard guarantees: proposals referencing unknown entities are rejected,
+and nothing commits without a person's approval — either at review, or in
+advance through a project owner's delegated-curation grant, which is recorded
+on every change it produces ([delegated-curation.md](delegated-curation.md)). The
 review/commit lifecycle mirrors code review (submit → request changes / reject →
 commit), but the entity under review is the _AI's interpretation of your lab
 notes_, not a colleague's data.

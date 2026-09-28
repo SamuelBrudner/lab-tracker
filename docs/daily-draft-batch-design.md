@@ -6,8 +6,11 @@ user-tap - before the feature shipped.
 
 ## What is and isn't at stake
 
-**Not at stake: autonomy.** Drafting never commits. Every proposed graph
-operation is queued for human accept / reject / edit through the existing
+**Not at stake: autonomy.** Drafting never commits on its own. Every proposed
+graph operation is queued for human accept / reject / edit through the existing
+graph-draft review surface, unless the project owner has since granted
+delegated curation ([delegated-curation.md](delegated-curation.md)) — a later
+addition to the
 graph-draft review surface (`lab-tracker-2dt`). Whether the model runs at
 06:00 or when the user taps a button, the next thing that happens is a
 human reviewing each proposed op.

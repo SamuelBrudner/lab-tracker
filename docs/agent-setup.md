@@ -161,9 +161,9 @@ plus two body-level rules the routes enforce:
 The writes above additionally require a write-enabled token with the editor or
 admin role; a read-only or viewer token keeps only the reads. It is the
 least-privilege writable choice: it can sync staged captures and request
-drafts, it cannot create a committed record at all, and non-interactive
-principals remain structurally unable to accept or commit a draft. A read-only
-token cannot drain a capture outbox.
+drafts, it cannot create a committed record at all, and outside a
+delegated-curation grant non-interactive principals remain structurally unable
+to accept or commit a draft. A read-only token cannot drain a capture outbox.
 
 For an agent that should also *organize* the graph on its own, pick
 **Curate graph (delegated)**. Its API scope is `graph_curate`: everything
@@ -174,7 +174,10 @@ routes are open to the token; whether an accept or commit goes through is
 decided per proposal against the project's delegated-curation grant (see
 [`delegated-curation.md`](delegated-curation.md)): with the grant off every
 accept and commit is refused with `403`, `organize` admits the link
-proposals, `full` admits every valid proposal except a clarification request.
+proposals whose payload carries nothing but the link, `full` admits every
+valid proposal except a clarification request. The ordinary review rules
+still apply first: the token's user must be the draft's author or assigned
+reviewer (or a global admin) to touch it at all.
 The token's user must be a project owner to commit, may only *accept* (never
 edit, reject, or defer), and every accept it makes is recorded as
 `auto_accepted` against that user. Turning the grant on is the owner's act in
@@ -280,7 +283,10 @@ OpenAI key locally for Lab Tracker.
 
 Every scaffolded instruction file carries the same policy, whatever the vendor: consult
 `lab_tracker_get_decision_context` before research-facing decisions; stage
-evidence and request drafts only when asked; never accept or commit a draft.
+evidence and request drafts only when asked; never accept or commit a draft
+yourself, except through the delegated-curation tools when the user asks and
+the server admits it (a Curate graph token in a project whose owner granted
+delegation).
 Analysis repos can also send evidence automatically on every commit — see
 [analysis graph drafts from CI and git hooks](analysis-graph-drafts-ci.md).
 

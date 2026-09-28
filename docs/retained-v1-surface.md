@@ -230,16 +230,17 @@ research record:
 - Delegated curation: the one owner-granted exception to human-gated review.
   A project owner, at an interactive session, may set `delegated_curation` on
   the project-default batch settings row to `organize` (AI may apply link
-  proposals: `link_note_to_question`, `link_note_to_session`,
-  `link_note_to_dataset`, `link_note_to_analysis`, `link_node_to_goal`) or
-  `full` (every valid proposal except `request_clarification`); the default
-  is `off`. Widening the grant needs `delegated_curation_acknowledged: true`
+  proposals — `link_note_to_question`, `link_note_to_session`,
+  `link_note_to_dataset`, `link_note_to_analysis`, `link_node_to_goal` —
+  whose payload carries nothing but the linking field) or `full` (every valid
+  proposal except `request_clarification`); the default is `off`. Widening the grant needs `delegated_curation_acknowledged: true`
   in the same `PATCH .../graph-draft-batch-settings/project-default` and
   stamps `delegated_curation_granted_at` / `_by`; narrowing to `off` needs no
   acknowledgement and clears the stamps; personal settings rows never carry a
   grant. Under a grant, the drafting pass runs once on every draft the server
   generates for the project (scheduled, run-due, run-now, and note-scoped,
-  whoever triggered it): it accepts every valid proposal the grant admits as
+  whoever triggered it), once per draft and only on a draft nobody has
+  started deciding: it accepts every valid proposal the grant admits as
   `auto_accepted` and commits only when no proposal is left for a person,
   otherwise the draft stays in the review queue with its admitted proposals
   pre-accepted. The same grant admits a `graph_curate`-scoped token to the

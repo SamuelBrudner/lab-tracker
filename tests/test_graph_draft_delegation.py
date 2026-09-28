@@ -39,7 +39,7 @@ from lab_tracker.auth import (
     utc_now,
 )
 from lab_tracker.draft_quality import aggregate_draft_quality
-from lab_tracker.errors import PermissionDeniedError, ValidationError
+from lab_tracker.errors import PermissionDeniedError, ServiceScopeDeniedError, ValidationError
 from lab_tracker.models import (
     AcceptanceMode,
     DelegatedCurationPolicy,
@@ -732,6 +732,125 @@ def test_curate_token_commit_still_requires_project_owner(
     )
     assert commit.status_code == 403, commit.text
     assert "owner" in commit.json()["error"]["message"].lower()
+
+
+def test_delegated_commit_is_refused_when_an_accepted_proposal_left_the_grant(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    project_id, note_id, question_id = _linked_setup(client, admin_auth_headers)
+    draft = _note_draft(
+        client,
+        admin_auth_headers,
+        note_id,
+        _patch(_question_op(project_id), _link_op(note_id, question_id)),
+    )
+    change_set_id = draft["change_set_id"]
+    _grant(client, admin_auth_headers, project_id, "full")
+    token = _token_headers(client, admin_auth_headers, scope=PAT_SCOPE_GRAPH_CURATE)
+    accepted = client.post(f"/graph-drafts/{change_set_id}/accept-all", headers=token)
+    assert accepted.status_code == 200, accepted.text
+    assert {op["status"] for op in accepted.json()["data"]["operations"]} == {"accepted"}
+
+    # The owner narrows the grant before the commit: the question no longer fits.
+    narrowed = client.patch(
+        _settings_path(project_id),
+        json={"delegated_curation": "organize", "delegated_curation_acknowledged": True},
+        headers=admin_auth_headers,
+    )
+    assert narrowed.status_code == 200, narrowed.text
+    commit = client.post(
+        f"/graph-drafts/{change_set_id}/commit", json={"message": "agent"}, headers=token
+    )
+    assert commit.status_code == 403, commit.text
+    assert "does not admit suggest_new_question" in commit.json()["error"]["message"]
+    assert _read_draft(client, admin_auth_headers, change_set_id)["status"] == "ready"
+
+
+def test_narrowing_between_grants_still_needs_the_acknowledgement(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    _grant(client, admin_auth_headers, project_id, "full")
+    refused = client.patch(
+        _settings_path(project_id),
+        json={"delegated_curation": "organize"},
+        headers=admin_auth_headers,
+    )
+    assert refused.status_code == 422, refused.text
+    assert DELEGATED_CURATION_ACKNOWLEDGEMENT_REQUIRED in refused.json()["error"]["message"]
+    granted = _grant(client, admin_auth_headers, project_id, "organize")
+    assert granted["delegated_curation"] == "organize"
+    assert granted["delegated_curation_granted_at"] is not None
+
+
+def test_graph_curate_token_only_previews_evidence_bundles() -> None:
+    from lab_tracker.routes.shared import ensure_scope_allows_evidence_bundle
+
+    curate = _service_actor(PAT_SCOPE_GRAPH_CURATE)
+    ensure_scope_allows_evidence_bundle(curate, dry_run=True)
+    with pytest.raises(ServiceScopeDeniedError, match="dry_run=true"):
+        ensure_scope_allows_evidence_bundle(curate, dry_run=False)
+
+
+def test_drafting_pass_runs_once_even_if_a_person_reopens_its_accept(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    project_id, note_id, question_id = _linked_setup(client, admin_auth_headers)
+    _grant(client, admin_auth_headers, project_id, "organize")
+    patch = _patch(_question_op(project_id), _link_op(note_id, question_id))
+    draft = _note_draft(client, admin_auth_headers, note_id, patch)
+    change_set_id = draft["change_set_id"]
+    link = _by_semantic(draft)["link_note_to_question"]
+    assert link["acceptance_mode"] == "auto_accepted"
+    reopened = client.patch(
+        f"/graph-drafts/{change_set_id}/operations/{link['operation_id']}",
+        json={"status": "proposed"},
+        headers=admin_auth_headers,
+    )
+    assert reopened.status_code == 200, reopened.text
+
+    again = _note_draft(client, admin_auth_headers, note_id, patch)
+
+    assert again["change_set_id"] == change_set_id
+    link = _by_semantic(again)["link_note_to_question"]
+    assert link["status"] == "proposed"
+    assert link["acceptance_mode"] is None
+
+
+def test_drafting_pass_runs_in_the_background_worker(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    question_id = _question(client, admin_auth_headers, project_id)
+    note_id = _note(client, admin_auth_headers, project_id, "Gel photo A looked clean.")
+    _grant(client, admin_auth_headers, project_id, "organize")
+    client.app.state.settings.graph_draft_background_enabled = True
+    fake_client = FakeBatchDraftClient(_patch(_link_op(note_id, question_id)))
+    client.app.state.graph_draft_client_factory = lambda settings: fake_client
+    queued = client.post(
+        "/batches/run-now", json={"project_id": project_id}, headers=admin_auth_headers
+    )
+    assert queued.status_code == 201, queued.text
+    assert queued.json()["data"]["status"] == "pending"
+
+    with client.app.state.db_session_factory() as session:
+        api = LabTrackerAPI(
+            raw_storage=client.app.state.raw_note_storage,
+            repository=SQLAlchemyLabTrackerRepository(session),
+            settings=client.app.state.settings,
+            surface="background",
+        )
+        run = api.process_next_graph_draft_batch_run(
+            draft_client_factory=client.app.state.graph_draft_client_factory,
+            app_settings=client.app.state.settings,
+            actor=system_auth_context(),
+        )
+    assert run is not None and run.change_set_id is not None
+    assert run.status.value == "ready"
+    draft = _read_draft(client, admin_auth_headers, str(run.change_set_id))
+    assert draft["status"] == "committed"
+    assert draft["operations"][0]["acceptance_mode"] == "auto_accepted"
+    assert draft["context_packet"][DELEGATED_CURATION_PACKET_KEY]["committed"] is True
 
 
 def test_delegated_principals_may_only_accept(

@@ -58,7 +58,8 @@ Rules that hold for every grant:
 - **It runs once, on fresh drafts only.** The pass never touches a draft it
   already ran on, or one a person has started deciding (any proposal
   accepted, rejected, or deferred), so re-requesting a draft never re-runs the
-  pass over someone's review.
+  pass over someone's review. A draft a person revises with AI is regenerated
+  for that person and is not passed over again.
 - **A stopped pass is visible.** If the pass cannot apply a draft (a proposal
   fails validation at apply time, say), the whole pass rolls back as one unit
   in every context — under a request and in the background worker alike —
@@ -91,7 +92,9 @@ which operations it accepted, how many it left, and whether it committed.
 A `graph_curate` token is a `stage_evidence` token that can also reach `POST
 /batches/run-now`, `PATCH /graph-drafts/{id}/operations/{op}` with
 `status=accepted`, `POST /graph-drafts/{id}/accept-all`, and `POST
-/graph-drafts/{id}/commit`. The middleware opens those routes; the service
+/graph-drafts/{id}/commit`. The middleware opens those routes; the ordinary
+review rules apply first (the token's user must be the draft's author or
+assigned reviewer, or a global admin, to touch it at all), then the service
 layer decides each call against the project's grant:
 
 - accept-all accepts what the grant admits and leaves the rest proposed;

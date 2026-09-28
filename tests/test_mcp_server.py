@@ -172,6 +172,16 @@ def test_fastmcp_tool_annotations_mark_reads_and_writes_for_copilot() -> None:
     assert refactor_history.annotations.readOnlyHint is True
     assert "lab_tracker_list_question_refactors" in {tool.__name__ for tool in READ_TOOLS}
     assert "lab_tracker_list_question_refactors" not in {tool.__name__ for tool in WRITE_TOOLS}
+    commit_draft = tools_by_name["lab_tracker_commit_graph_draft"]
+    assert commit_draft.annotations is not None
+    assert commit_draft.annotations.readOnlyHint is False
+    assert commit_draft.annotations.destructiveHint is True
+    accept_draft = tools_by_name["lab_tracker_accept_graph_draft_operations"]
+    assert accept_draft.annotations is not None
+    assert accept_draft.annotations.destructiveHint is False
+    get_draft = tools_by_name["lab_tracker_get_graph_draft"]
+    assert get_draft.annotations is not None
+    assert get_draft.annotations.readOnlyHint is True
 
     for graph_tool_name in (
         "lab_tracker_graph_overview",
