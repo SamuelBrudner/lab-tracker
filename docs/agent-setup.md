@@ -244,7 +244,7 @@ a project contributor (or viewer for read-only use).
 | `.cursor/mcp.json` | Cursor |
 | `.gemini/settings.json` | Gemini CLI |
 | `CLAUDE.md`, `AGENTS.md`, `GEMINI.md` (managed block) | Claude Code, Codex CLI and other AGENTS.md readers, Gemini CLI — the same consultation-policy block in each |
-| `.claude/settings.json` | Claude Code hooks (`lt setup status` on session start, `lt prime` before research-facing prompts) |
+| `.claude/settings.json` | Claude Code hooks (`lt setup status` on session start, `lt prime` before research-facing prompts; the opt-in `lt setup agent-hooks` entries go in the personal `.claude/settings.local.json` unless `--shared`) |
 | `AGENTS.lt.md`, `scripts/lt.py`, `lt_ids.json` | Agent-readable integration notes, the client shim, and the project-id mapping (`lt project bind` fills it) |
 
 Choose the instructions for your client:
@@ -289,6 +289,27 @@ the server admits it (a Curate graph token in a project whose owner granted
 delegation).
 Analysis repos can also send evidence automatically on every commit — see
 [analysis graph drafts from CI and git hooks](analysis-graph-drafts-ci.md).
+
+### Optional: capture agent sessions
+
+`lt setup agent-hooks` adds two Claude Code hooks that `lt setup init` never
+installs, because they capture agent conversations. A `SessionEnd` hook runs
+`lt agent session-end`, which stages one bounded, redacted retrospective of
+each session in a bound checkout (the person's prompts, files edited, commands,
+test and lint outcomes, the final message; never the transcript) and asks for
+drafts, so the decisions, dead ends, and pivots it describes reach the review
+queue as proposals. A `PostToolUse` hook on `Write|Edit|MultiEdit|NotebookEdit`
+runs `lt watch touch` in the background, queuing a file the agent writes into a
+configured watch folder right away. Preview with `--dry-run`, apply with
+`--yes`, remove with `--uninstall --yes`. The hooks go into the personal
+`.claude/settings.local.json` (keep it in `.gitignore`), so they capture only
+the sessions of the person who opted in; `--shared` writes the usually
+committed `.claude/settings.json` instead and warns that everyone who clones
+the repository with `lt` configured would then have their sessions captured.
+`lt setup status` reports whether they are installed, in either file.
+Cursor and Codex have comparable hook points but are not supported; details,
+limits, and the `LAB_TRACKER_AGENT_HOOKS=0` kill switch are in
+[agent session capture](agent-session-capture.md).
 
 ## 5. Verify the loop
 

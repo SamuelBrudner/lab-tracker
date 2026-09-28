@@ -250,6 +250,7 @@ def setup_status(target: str | Path = ".", *, brief: bool = False) -> JsonObject
         "autotrack": _autotrack_status(),
         "autotrack_r": _autotrack_r_status(),
         "session": _session_status(root),
+        "agent_hooks": _agent_hooks_status(root),
     }
     payload["suggestions"] = _suggestions(payload)
     if not brief:
@@ -1127,6 +1128,16 @@ def _session_status(root: Path) -> JsonObject:
         status.pop("command", None)
         return status
     return {"present": False, "active": False}
+
+
+def _agent_hooks_status(root: Path) -> JsonObject:
+    """Whether `lt setup agent-hooks` entries are present; an opt-in, never suggested."""
+
+    from lab_tracker_client.agent_hooks import agent_hooks_status
+
+    with suppress(Exception):
+        return agent_hooks_status(root)
+    return {"installed": False, "session_end": False, "watch_touch": False, "files": []}
 
 
 def _hooks_status(root: Path) -> JsonObject:

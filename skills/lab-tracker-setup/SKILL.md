@@ -112,6 +112,19 @@ short, consent-gated sequence on the `lt` CLI.
     verify-mcp --expected-revision <revision>` launches `lt-mcp` over
     stdio, initializes the protocol, calls health, and performs an
     authenticated project read through the saved profile.
+12. **Agent session capture (optional)** — `lt setup agent-hooks
+    --dry-run` previews two Claude Code hooks for the person's own
+    `.claude/settings.local.json`: when a session ends, `lt agent
+    session-end` stages one bounded, redacted retrospective (prompts,
+    files edited, commands, test results; never the transcript) that
+    asks for human-reviewed drafts, and a file the agent writes into a
+    watch folder is queued at once by `lt watch touch`. It records agent
+    conversations, so it is offered rather than assumed: the person
+    decides, and `--yes` applies it for them alone (`--uninstall`
+    removes it; `LAB_TRACKER_AGENT_HOOKS=0` turns it off). `--shared`
+    writes the committed `.claude/settings.json` instead, which would
+    capture the sessions of everyone who clones the repository, so it
+    is a team decision rather than a setup default.
 
 ## After setup
 
@@ -145,4 +158,4 @@ repo; an analysis repo updates by rerunning its pinned `uv add`
 If Lab Tracker is unreachable and the user does not operate a server, point
 them at whoever runs their lab's instance instead of standing one up ad hoc.
 
-<!-- lab-tracker-setup-guide version=0.1.0 sha256=7c43f60e7e62 -->
+<!-- lab-tracker-setup-guide version=0.1.0 sha256=def6032af137 -->

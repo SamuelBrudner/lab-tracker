@@ -1111,6 +1111,10 @@ FastAPI app does not read them. `LAB_TRACKER_BASE_URL` (see
   `autotrack(project_id=...)`, `LAB_TRACKER_PROJECT_ID`, or the checkout's
   `lt_ids.json`; see [notebook-and-script-capture.md](notebook-and-script-capture.md)
   and [lab-tracker-r.md](lab-tracker-r.md)
+- `LAB_TRACKER_AGENT_HOOKS`: `0`, `false`, `no`, or `off` turns off the
+  coding-agent hooks `lt setup agent-hooks` installs: `lt agent session-end`
+  and `lt watch touch` return at once without reading a transcript or queuing
+  anything (default: on). See [agent session capture](agent-session-capture.md)
 - `LAB_TRACKER_CAPTURE_OUTBOX`: `0`, `false`, `no`, or `off` stops figure
   captures (Python client, `lt capture file`, and the MATLAB package) from
   queueing into the checkout's watch outbox when the server is unreachable;

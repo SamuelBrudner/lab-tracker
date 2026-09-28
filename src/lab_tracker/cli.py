@@ -134,7 +134,7 @@ def init_consumer_repo(
         root / ".mcp.json": _mcp_json(resolved_mcp_base_url),
         root / ".cursor" / "mcp.json": _cursor_mcp_json(resolved_mcp_base_url),
         root / ".gemini" / "settings.json": _gemini_settings_json(resolved_mcp_base_url),
-        root / ".claude" / "settings.json": _claude_settings_json(),
+        root / ".claude" / "settings.json": _claude_settings_json_for(root),
         root / "scripts" / "lt.py": _lt_shim(),
         root / "AGENTS.lt.md": _agents_fragment(),
         root / "lt_ids.json": _ids_placeholder(project_name),
@@ -413,7 +413,7 @@ def update_consumer_repo(
         root / ".gemini" / "settings.json": _gemini_settings_json(
             resolved_mcp_base_url
         ),
-        root / ".claude" / "settings.json": _claude_settings_json(),
+        root / ".claude" / "settings.json": _claude_settings_json_for(root),
         root / "scripts" / "lt.py": _lt_shim(),
         root / "AGENTS.lt.md": _agents_fragment(),
     }
@@ -1374,6 +1374,22 @@ def _claude_settings_json() -> str:
         }
     }
     return json.dumps(payload, indent=2) + "\n"
+
+
+def _claude_settings_json_for(root: Path) -> str:
+    """The scaffold settings, keeping `lt setup agent-hooks` entries already opted into.
+
+    `lt update` and `init --force` rewrite `.claude/settings.json` to the
+    canonical scaffold; the agent-hooks entries are a separate consent, so a
+    refresh carries them forward instead of silently dropping them.
+    """
+
+    canonical = _claude_settings_json()
+    with suppress(Exception):
+        from lab_tracker_client.agent_hooks import carry_forward_agent_hooks
+
+        return carry_forward_agent_hooks(canonical, root / ".claude" / "settings.json")
+    return canonical
 
 
 def _lt_shim() -> str:
