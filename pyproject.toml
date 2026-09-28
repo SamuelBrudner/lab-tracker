@@ -132,6 +132,7 @@ follow_imports = "silent"
 warn_unused_configs = true
 show_error_codes = true
 files = [
+  "src/lab_tracker/__init__.py",
   "src/lab_tracker/_version.py",
   "src/lab_tracker_client/_version.py",
   "src/lab_tracker_client/capture_project.py",

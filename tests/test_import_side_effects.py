@@ -6,6 +6,11 @@ module constructs ``Settings`` at import time, a shell or container carrying
 production-style ``LAB_TRACKER_*`` variables without every server secret dies
 with a pydantic traceback before the entry point's own code can run.
 
+``import lab_tracker_client`` must also stay off the server stack: IPython
+startup files, the scripts ``.pth`` hook, and the Jupyter save hook import it
+inside users' own processes, so pulling in the API, auth, SQLAlchemy, or
+FastAPI there costs every kernel start roughly a second.
+
 Each check runs in a fresh interpreter so module caching in the test process
 cannot mask an import-time side effect.
 """
@@ -58,6 +63,19 @@ print(json.dumps({"constructed": constructed}))
 """
 
 
+# Server-only modules the client package must never load.
+SERVER_STACK_MODULES = ("lab_tracker.api", "lab_tracker.auth", "sqlalchemy", "fastapi")
+
+_LOADED_SERVER_MODULES_AFTER_IMPORT = """
+import importlib
+import json
+import sys
+
+importlib.import_module(sys.argv[1])
+print(json.dumps(sorted(set(sys.argv[2:]) & set(sys.modules))))
+"""
+
+
 def _isolated_env(tmp_path: Path) -> dict[str, str]:
     env = {
         key: value
@@ -84,6 +102,33 @@ def test_importing_entry_point_does_not_construct_settings(
     )
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout.strip().splitlines()[-1]) == {"constructed": []}
+
+
+def _server_modules_loaded_by_import(tmp_path: Path, module: str) -> list[str]:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _LOADED_SERVER_MODULES_AFTER_IMPORT,
+            module,
+            *SERVER_STACK_MODULES,
+        ],
+        capture_output=True,
+        text=True,
+        env=_isolated_env(tmp_path),
+        cwd=tmp_path,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+    loaded: list[str] = json.loads(result.stdout.strip().splitlines()[-1])
+    return loaded
+
+
+@pytest.mark.parametrize("module", ["lab_tracker", "lab_tracker_client"])
+def test_importing_package_does_not_load_server_stack(
+    tmp_path: Path, module: str
+) -> None:
+    assert _server_modules_loaded_by_import(tmp_path, module) == []
 
 
 def test_deployment_probe_reports_invalid_settings_as_json_failure_line(
@@ -114,3 +159,16 @@ def test_deployment_probe_reports_invalid_settings_as_json_failure_line(
     payload = json.loads(lines[0])
     assert payload["status"] == "fail"
     assert isinstance(payload["error"], str) and payload["error"]
+
+
+def test_package_exports_stay_reachable() -> None:
+    import lab_tracker
+    from lab_tracker.api import LabTrackerAPI
+
+    assert set(lab_tracker.__all__) == {"__version__", *lab_tracker._LAZY_EXPORTS}
+    for name in lab_tracker.__all__:
+        getattr(lab_tracker, name)
+    assert set(lab_tracker.__all__) <= set(dir(lab_tracker))
+    assert lab_tracker.LabTrackerAPI is LabTrackerAPI
+    with pytest.raises(AttributeError):
+        _ = lab_tracker.not_an_export
