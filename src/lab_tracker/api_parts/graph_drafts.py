@@ -18,6 +18,7 @@ from lab_tracker.config import Settings
 from lab_tracker.graph_drafting import GraphDraftClient, GraphDraftClientFactory
 from lab_tracker.models import (
     AcceptanceMode,
+    DelegatedCurationPolicy,
     ExternalContextPolicy,
     GraphChangeOperationStatus,
     GraphChangeSet,
@@ -39,7 +40,7 @@ from lab_tracker.services.graph_draft_batch_policy import (
     BatchRunQuery,
 )
 from lab_tracker.services.graph_draft_generation import DEFAULT_BATCH_RETRY_ATTEMPTS
-from lab_tracker.services.graph_draft_review import RevisionInputs
+from lab_tracker.services.graph_draft_revision_inputs import RevisionInputs
 from lab_tracker.services.graph_draft_service import GraphDraftService
 
 ResultT = TypeVar("ResultT")
@@ -88,6 +89,9 @@ class GraphDraftsApiMixin:
             actor=actor,
             resource_id_attr="change_set_id",
         )
+
+    def apply_delegated_curation(self, change_set: GraphChangeSet) -> GraphChangeSet:
+        return self.graph_drafts.apply_delegated_curation(change_set)
 
     def create_analysis_graph_draft_from_note(
         self,
@@ -401,6 +405,8 @@ class GraphDraftsApiMixin:
         notification_email: PatchValue[str | None] = NOT_PROVIDED,
         external_context_policy: PatchValue[ExternalContextPolicy | None] = NOT_PROVIDED,
         external_provider_acknowledged: PatchValue[bool | None] = NOT_PROVIDED,
+        delegated_curation: PatchValue[DelegatedCurationPolicy | None] = NOT_PROVIDED,
+        delegated_curation_acknowledged: PatchValue[bool | None] = NOT_PROVIDED,
         actor: AuthContext | None = None,
     ) -> GraphDraftBatchSettings:
         return self._with_usage_event(
@@ -415,6 +421,8 @@ class GraphDraftsApiMixin:
                 notification_email=notification_email,
                 external_context_policy=external_context_policy,
                 external_provider_acknowledged=external_provider_acknowledged,
+                delegated_curation=delegated_curation,
+                delegated_curation_acknowledged=delegated_curation_acknowledged,
                 actor=actor,
             ),
             verb=UsageEventVerb.UPDATE,

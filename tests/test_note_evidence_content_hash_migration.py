@@ -165,8 +165,8 @@ def test_note_hash_revision_extends_the_single_chain() -> None:
     script = ScriptDirectory.from_config(_alembic_config())
 
     assert script.get_revision(_REVISION).down_revision == _PREVIOUS_REVISION
-    heads = script.get_heads()
-    assert heads == [_REVISION]
+    # Later revisions chain from this one; the chain itself stays single-headed.
+    assert len(script.get_heads()) == 1
 
 
 def test_note_hash_migration_backfills_from_metadata_and_indexes(monkeypatch, tmp_path) -> None:

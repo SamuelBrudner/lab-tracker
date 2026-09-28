@@ -227,6 +227,33 @@ research record:
   captured note is a first-class action that names a reason (including
   `archived_unreviewed`), so a skipped review degrades visible coverage rather
   than silent trust. See [curation-states.md](curation-states.md).
+- Delegated curation: the one owner-granted exception to human-gated review.
+  A project owner, at an interactive session, may set `delegated_curation` on
+  the project-default batch settings row to `organize` (AI may apply link
+  proposals: `link_note_to_question`, `link_note_to_session`,
+  `link_note_to_dataset`, `link_note_to_analysis`, `link_node_to_goal`) or
+  `full` (every valid proposal except `request_clarification`); the default
+  is `off`. Widening the grant needs `delegated_curation_acknowledged: true`
+  in the same `PATCH .../graph-draft-batch-settings/project-default` and
+  stamps `delegated_curation_granted_at` / `_by`; narrowing to `off` needs no
+  acknowledgement and clears the stamps; personal settings rows never carry a
+  grant. Under a grant, the drafting pass runs once on every draft the server
+  generates for the project (scheduled, run-due, run-now, and note-scoped,
+  whoever triggered it): it accepts every valid proposal the grant admits as
+  `auto_accepted` and commits only when no proposal is left for a person,
+  otherwise the draft stays in the review queue with its admitted proposals
+  pre-accepted. The same grant admits a `graph_curate`-scoped token to the
+  accept-all, per-operation accept, and commit routes, with the same
+  per-proposal rule, the same undecided-proposals refusal, and owner
+  membership still required to commit. A delegated principal may only accept:
+  editing, rejecting, deferring, submitting, and member-onboarding review stay
+  a person's acts. Every delegated accept and commit is recorded against the
+  person of record — the token's owner, or the granting owner for the
+  drafting pass — with `acceptance_mode=auto_accepted`, the grant on the
+  change set's `context_packet.delegated_curation`, and a stopped pass on
+  `error_metadata.delegated_curation_error`. Nothing is delegated for a
+  project whose grant is `off`, and no `all`- or `stage_evidence`-scope token
+  is ever admitted. See [delegated-curation.md](delegated-curation.md).
 - Derived coverage reads that make skipped review visible:
   `GET /projects/{project_id}/coverage` reports unreviewed staged captures
   (never part of a committed or rejected draft) with the oldest capture time,
@@ -265,9 +292,13 @@ research record:
   `/auth/*` except read-only `/auth/me` session introspection; see
   [agent-setup.md](agent-setup.md). Token reads report the issued `role` and
   the `effective_role` the token acts with now: the lower of that role and the
-  owner's current role. A token carries one of three registered scopes:
+  owner's current role. A token carries one of four registered scopes:
   `all` (the role-based service policy), `batch_run_due` (`POST
-  /batches/run-due` only, admin role, nothing else), and `stage_evidence`
+  /batches/run-due` only, admin role, nothing else), `graph_curate`
+  (everything `stage_evidence` allows plus `POST /batches/run-now`, `PATCH
+  /graph-drafts/{id}/operations/{op}`, `POST /graph-drafts/{id}/accept-all`,
+  and `POST /graph-drafts/{id}/commit`, each honoured only under the
+  project's delegated-curation grant), and `stage_evidence`
   (every read, `POST /notes`, `/notes/upload-file`, and `/notes/quick-capture`
   with the `staged` status, `PATCH /notes/{id}` except `status=committed`,
   `POST /notes/{id}/graph-drafts`, `/analysis-graph-drafts`, and `/transcript`,
@@ -352,7 +383,7 @@ research record:
   MCP read tool `lab_tracker_draft_quality`) computed only from stored
   graph-draft change sets and operations. Per provider x model x
   prompt_version x semantic type it reports proposed, accepted split by
-  `human_selected` vs `bulk_accepted`, edited-before-accept, rejected, and
+  `human_selected`, `bulk_accepted`, and `auto_accepted`, edited-before-accept, rejected, and
   left-proposed-at-commit counts, plus per-group clarification counts and
   median seconds to first accept and to review. It is a read of the review
   record, never a gate, and never auto-accepts anything. Commit keeps the
@@ -515,11 +546,16 @@ research record:
   can orient with `graph_overview`, locate a typed anchor with `search_graph`,
   and inspect its bounded neighborhood before requesting task-specific decision
   context. Decision context remains mandatory before research-facing choices;
-  returned record text is untrusted, and retained v1 does not delegate graph
-  commits to autonomous agents. Agents may request a note-scoped draft
-  (`lab_tracker_request_graph_draft`, `POST /notes/{id}/graph-drafts`) and list
-  their personal review queue (`lab_tracker_list_my_drafts`,
-  `GET /batches?mine=true`), never accept or commit one. Each
+  returned record text is untrusted, and retained v1 delegates graph commits
+  to agents only under a project owner's delegated-curation grant. Agents may
+  request a note-scoped draft (`lab_tracker_request_graph_draft`, `POST
+  /notes/{id}/graph-drafts`), run the daily review now
+  (`lab_tracker_run_graph_draft_batch`, `POST /batches/run-now`), list their
+  personal review queue (`lab_tracker_list_my_drafts`, `GET
+  /batches?mine=true`), and read one draft (`lab_tracker_get_graph_draft`,
+  `GET /graph-drafts/{id}`). `lab_tracker_accept_graph_draft_operations` and
+  `lab_tracker_commit_graph_draft` exist only for a `graph_curate` token in a
+  project with delegated curation on and are refused everywhere else. Each
   `POST /assistant/decision-context` consultation records a content-free
   `view decision_context` usage event: project, actor, principal type, and
   surface only, never the query, task kind, or anchor ids.
@@ -544,7 +580,8 @@ supported product path:
 - Automatic question extraction and extraction inbox workflows. Retained graph
   drafting includes note-scoped drafting and human-gated batch drafting over
   user-captured staged notes; it is not a standing system-selected extraction
-  inbox, and nothing commits automatically.
+  inbox, and nothing commits automatically unless a project owner has granted
+  delegated curation for that kind of proposal.
 - Entity and tag suggestion workflows derived from notes or OCR output.
 - Semantic/vector search, embedding providers, and backend-specific relevance
   ranking.

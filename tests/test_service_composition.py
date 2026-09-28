@@ -98,7 +98,11 @@ def test_api_composes_named_service_instances() -> None:
     assert api.questions.projects is api.projects
     assert api.datasets.sessions is api.sessions
     assert api.graph_drafts.generation.notes is api.notes
-    assert api.graph_drafts.scheduling.notes is api.notes
+    assert api.graph_drafts.scheduling.reservations.notes is api.notes
+    assert api.graph_drafts.scheduling.settings.projects is api.projects
+    assert api.graph_drafts.scheduling.delegation is api.graph_drafts.delegation
+    assert api.graph_drafts.delegation.review is api.graph_drafts.review
+    assert api.graph_drafts.delegation.commit is api.graph_drafts.commit
     assert api.projects.authorization is api.project_authorization
     assert api.questions.authorization is api.project_authorization
     assert api.datasets.authorization is api.project_authorization
@@ -111,6 +115,8 @@ def test_api_composes_named_service_instances() -> None:
     assert api.graph_drafts.review.authorization is api.project_authorization
     assert api.graph_drafts.commit.authorization is api.project_authorization
     assert api.graph_drafts.scheduling.authorization is api.project_authorization
+    assert api.graph_drafts.scheduling.settings.authorization is api.project_authorization
+    assert api.graph_drafts.delegation.authorization is api.project_authorization
 
 
 def test_project_service_can_run_without_api_facade() -> None:

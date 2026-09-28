@@ -199,10 +199,16 @@ class ReviewEmailService(BaseService):
                 )
             if delivery is None:
                 return None
-            if (
-                delivery.event_type != REVIEW_READY_EVENT
-                or self._preference_still_allows(delivery)
-            ):
+            if delivery.event_type != REVIEW_READY_EVENT:
+                return delivery
+            if not self._draft_still_waiting(delivery):
+                self.cancel(
+                    delivery.delivery_id,
+                    claim_token=claim_token,
+                    reason="The draft is no longer waiting for review.",
+                )
+                continue
+            if self._preference_still_allows(delivery):
                 return delivery
             self.cancel(
                 delivery.delivery_id,
@@ -311,6 +317,18 @@ class ReviewEmailService(BaseService):
         ):
             raise ValidationError("Review email delivery lease is no longer active.")
         return delivery
+
+    def _draft_still_waiting(self, delivery: ReviewEmailDelivery) -> bool:
+        """A cue is for a ready draft; one committed or rejected meanwhile is dropped.
+
+        The delegated-curation pass can commit a batch draft right after the
+        cue was queued, so the check happens at send time, not enqueue time.
+        """
+
+        if delivery.change_set_id is None:
+            return False
+        change_set = self.repository.graph_change_sets.get(delivery.change_set_id)
+        return change_set is not None and change_set.status == GraphChangeSetStatus.READY
 
     def _preference_still_allows(self, delivery: ReviewEmailDelivery) -> bool:
         if delivery.recipient_user_id is None or delivery.change_set_id is None:

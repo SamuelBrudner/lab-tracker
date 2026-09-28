@@ -6,8 +6,18 @@ from uuid import UUID
 
 from lab_tracker.auth import AuthContext, Role
 from lab_tracker.errors import AuthError, PermissionDeniedError
-from lab_tracker.models import ProjectMembershipRole
+from lab_tracker.models import (
+    AcceptanceMode,
+    GraphChangeOperation,
+    GraphChangeSet,
+    ProjectMembershipRole,
+)
 from lab_tracker.services.base import BaseService, ServiceContext
+from lab_tracker.services.graph_draft_delegation import (
+    AcceptanceStamp,
+    DelegatedCurationGate,
+    DelegatedCurationGrant,
+)
 
 GROUP_READ_ROLES = {
     ProjectMembershipRole.VIEWER,
@@ -40,6 +50,40 @@ class ProjectAuthorizationPolicy(BaseService):
 
     def __init__(self, context: ServiceContext) -> None:
         super().__init__(context)
+        # The one relaxation of the human-commit gate: a project owner's
+        # delegated-curation grant, decided per principal and per proposal.
+        self.delegation = DelegatedCurationGate(context)
+
+    def delegated_curation_grant(self, project_id: UUID) -> DelegatedCurationGrant:
+        return self.delegation.grant_for_project(project_id)
+
+    def admit_graph_accept(
+        self,
+        actor: AuthContext | None,
+        *,
+        change_set: GraphChangeSet,
+        operation: GraphChangeOperation,
+        requested: AcceptanceMode,
+    ) -> AcceptanceStamp:
+        """Admit one accept: a person as asked, a delegated principal under the grant."""
+
+        return self.delegation.admit_accept(
+            actor, change_set=change_set, operation=operation, requested=requested
+        )
+
+    def require_delegated_grant(
+        self,
+        actor: AuthContext | None,
+        *,
+        change_set: GraphChangeSet,
+        action: str,
+    ) -> DelegatedCurationGrant:
+        return self.delegation.require_grant(actor, change_set=change_set, action=action)
+
+    def admit_graph_commit(self, actor: AuthContext | None, *, change_set: GraphChangeSet) -> str:
+        """Admit a commit and name its person of record (see ``require_interactive``)."""
+
+        return self.delegation.admit_commit(actor, change_set=change_set)
 
     def has_global_read(self, actor: AuthContext | None) -> bool:
         return actor is not None and actor.role == Role.ADMIN

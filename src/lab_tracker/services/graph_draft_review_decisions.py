@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from lab_tracker.auth import AuthContext
-from lab_tracker.errors import ValidationError
+from lab_tracker.errors import PermissionDeniedError, ValidationError
 from lab_tracker.models import (
     DEFERRED_AT_KEY,
     DEFERRED_BY_KEY,
@@ -93,3 +93,42 @@ def rejection_audit_metadata(
     if reason is not None:
         metadata[REJECT_REASON_KEY] = reason.value
     return metadata
+
+
+def ensure_non_interactive_only_accepts(
+    actor: AuthContext | None,
+    operation: GraphChangeOperation,
+    *,
+    payload: PatchValue[dict[str, Any] | None],
+    status: PatchValue[GraphChangeOperationStatus | None],
+    review_note: PatchValue[str | None],
+    deferred: PatchValue[bool | None],
+    reject_reason: PatchValue[GraphOperationRejectReason | None],
+) -> None:
+    """Editing, rejecting, and deferring are a person's verdicts.
+
+    A delegated principal (the drafting pass or a graph_curate token) may only
+    move a still-proposed, undeferred proposal to ``accepted``; a person's
+    rejection or deferral is never overridden, and whether the accept is
+    admitted is decided afterwards against the project's grant.
+    """
+
+    if actor is None or actor.is_interactive:
+        return
+    if (
+        any(is_provided(value) for value in (payload, review_note, deferred, reject_reason))
+        or not is_provided(status)
+        or status is not GraphChangeOperationStatus.ACCEPTED
+    ):
+        raise PermissionDeniedError(
+            "Delegated curation may only accept proposals; editing, rejecting, and "
+            "deferring require an interactive human session."
+        )
+    if (
+        operation.status != GraphChangeOperationStatus.PROPOSED
+        or DEFERRED_AT_KEY in operation.error_metadata
+    ):
+        raise PermissionDeniedError(
+            "Delegated curation may only accept a proposal that is still proposed and "
+            "not deferred; a person's verdict stands."
+        )

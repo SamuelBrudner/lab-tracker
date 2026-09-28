@@ -18,6 +18,7 @@ from lab_tracker.db_models import (
 )
 from lab_tracker.db_types import ensure_uuid
 from lab_tracker.models import (
+    DelegatedCurationPolicy,
     ExternalContextPolicy,
     GraphDraftBatchRun,
     GraphDraftBatchRunStatus,
@@ -87,6 +88,9 @@ def settings_to_model(settings: GraphDraftBatchSettings) -> GraphDraftBatchSetti
         external_context_policy=settings.external_context_policy.value,
         external_provider_acknowledged_at=settings.external_provider_acknowledged_at,
         external_provider_acknowledged_by=settings.external_provider_acknowledged_by,
+        delegated_curation=settings.delegated_curation.value,
+        delegated_curation_granted_at=settings.delegated_curation_granted_at,
+        delegated_curation_granted_by=settings.delegated_curation_granted_by,
         created_at=settings.created_at,
         updated_at=settings.updated_at,
         updated_by=settings.updated_by,
@@ -110,6 +114,9 @@ def apply_settings_to_model(
     row.external_context_policy = settings.external_context_policy.value
     row.external_provider_acknowledged_at = settings.external_provider_acknowledged_at
     row.external_provider_acknowledged_by = settings.external_provider_acknowledged_by
+    row.delegated_curation = settings.delegated_curation.value
+    row.delegated_curation_granted_at = settings.delegated_curation_granted_at
+    row.delegated_curation_granted_by = settings.delegated_curation_granted_by
     row.created_at = settings.created_at
     row.updated_at = settings.updated_at
     row.updated_by = settings.updated_by
@@ -135,6 +142,10 @@ def settings_from_model(row: GraphDraftBatchSettingsModel) -> GraphDraftBatchSet
             row.external_provider_acknowledged_at
         ),
         external_provider_acknowledged_by=row.external_provider_acknowledged_by,
+        # Same flush-time default caveat as above; an unset grant is off.
+        delegated_curation=DelegatedCurationPolicy(row.delegated_curation or "off"),
+        delegated_curation_granted_at=_as_utc_optional(row.delegated_curation_granted_at),
+        delegated_curation_granted_by=row.delegated_curation_granted_by,
         created_at=as_utc(row.created_at),
         updated_at=as_utc(row.updated_at),
         updated_by=row.updated_by,

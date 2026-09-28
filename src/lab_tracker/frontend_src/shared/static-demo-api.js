@@ -812,6 +812,17 @@ function demoPayload(url) {
       updated_at: "2026-06-05T10:10:03.260000Z",
     });
   }
+  if (pathname === `/projects/${PROJECT_ID}/graph-draft-batch-settings/project-default`) {
+    // The demo project keeps every proposal human-gated.
+    return dataResponse({
+      project_id: PROJECT_ID,
+      user_id: null,
+      delegated_curation: "off",
+      delegated_curation_granted_at: null,
+      delegated_curation_granted_by: null,
+      updated_at: "2026-06-05T10:10:03.260000Z",
+    });
+  }
   if (pathname === `/graph-drafts/${GRAPH_DRAFT_ID}`) {
     return dataResponse(GRAPH_DRAFT);
   }

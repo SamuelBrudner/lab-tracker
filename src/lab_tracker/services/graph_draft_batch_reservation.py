@@ -9,9 +9,14 @@ from sqlalchemy.exc import IntegrityError
 
 from lab_tracker.auth import AuthContext
 from lab_tracker.errors import ValidationError
+from lab_tracker.member_onboarding import (
+    SCHEDULED_DRAFT_EXCLUDE,
+    SCHEDULED_DRAFT_POLICY_KEY,
+)
 from lab_tracker.models import (
     GraphDraftBatchRun,
     GraphDraftBatchRunStatus,
+    GraphDraftBatchSettings,
     GraphDraftBatchTrigger,
     Note,
     NoteStatus,
@@ -201,6 +206,96 @@ class GraphDraftBatchReservationCoordinator(BaseService):
                     raise
                 return existing, [], False
             return run, notes, True
+
+    def scheduled_reviewers_for_settings(
+        self,
+        settings: GraphDraftBatchSettings,
+        *,
+        until: datetime,
+    ) -> list[batch_policy.BatchReviewer]:
+        latest_by_reviewer: dict[
+            tuple[str | None, UUID | None],
+            GraphDraftBatchRun | None,
+        ] = {}
+        drafted_note_ids_by_reviewer: dict[tuple[str | None, UUID | None], set[UUID]] = {}
+
+        def note_is_new_for_reviewer(note: Note, reviewer: batch_policy.BatchReviewer) -> bool:
+            key = (reviewer.reviewer, reviewer.reviewer_user_id)
+            if key not in latest_by_reviewer:
+                latest = self.scheduling_repository.latest_successful_graph_draft_batch_run(
+                    settings.project_id,
+                    review_assignee_user_id=reviewer.reviewer_user_id,
+                    review_assignee=reviewer.reviewer,
+                )
+                latest_by_reviewer[key] = latest
+                drafted_note_ids_by_reviewer[key] = (
+                    self.scheduling_repository.successful_graph_draft_batch_source_note_ids_at_window_end(
+                        settings.project_id,
+                        latest.window_end,
+                        review_assignee_user_id=reviewer.reviewer_user_id,
+                        review_assignee=reviewer.reviewer,
+                    )
+                    if latest is not None
+                    else set()
+                )
+            latest = latest_by_reviewer[key]
+            window_start = batch_policy.as_utc(
+                latest.window_end if latest is not None else datetime(1970, 1, 1)
+            )
+            note_created_at = batch_policy.as_utc(note.created_at)
+            if note_created_at > batch_policy.as_utc(until) or note_created_at < window_start:
+                return False
+            return not (
+                latest is not None
+                and note_created_at == window_start
+                and note.note_id in drafted_note_ids_by_reviewer[key]
+            )
+
+        staged_notes = [
+            note
+            for note in self.notes.list_notes(
+                project_id=settings.project_id,
+                status=NoteStatus.STAGED,
+            )
+            if note.metadata.get(SCHEDULED_DRAFT_POLICY_KEY)
+            != SCHEDULED_DRAFT_EXCLUDE
+        ]
+        if settings.user_id is not None:
+            reviewer = batch_policy.BatchReviewer(
+                reviewer=str(settings.user_id),
+                reviewer_user_id=settings.user_id,
+            )
+            if any(
+                batch_policy.note_matches_reviewer(note, reviewer)
+                and note_is_new_for_reviewer(note, reviewer)
+                for note in staged_notes
+            ):
+                return [reviewer]
+            return []
+        explicit_user_ids = {
+            row.user_id
+            for row in self.scheduling_repository.list_graph_draft_batch_settings_for_project(
+                settings.project_id
+            )
+            if row.user_id is not None
+        }
+        reviewers: dict[tuple[str | None, UUID | None], batch_policy.BatchReviewer] = {}
+        for note in staged_notes:
+            if note.created_by_user_id is not None and note.created_by_user_id in explicit_user_ids:
+                continue
+            reviewer = batch_policy.reviewer_for_note(note)
+            if reviewer.reviewer is None and reviewer.reviewer_user_id is None:
+                continue
+            if not note_is_new_for_reviewer(note, reviewer):
+                continue
+            reviewers[(reviewer.reviewer, reviewer.reviewer_user_id)] = reviewer
+        return [
+            reviewers[key]
+            for key in sorted(
+                reviewers,
+                key=lambda item: (str(item[1] or ""), str(item[0] or "")),
+            )
+        ]
 
     def _prepare_graph_draft_batch_run(
         self,

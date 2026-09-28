@@ -13,7 +13,7 @@ accepted, recorded alongside the accepting user and timestamp:
 | --- | --- |
 | `human_selected` | Accepted one operation at a time, after looking at it. |
 | `bulk_accepted` | Accepted as part of an "accept all" over the draft. |
-| `auto_accepted` | Reserved for any future non-interactive acceptance. |
+| `auto_accepted` | Accepted by the drafting pass or a `graph_curate` token under the project owner's delegated-curation grant; nobody looked at it. |
 
 This matters because a confident, plausible AI suggestion that you clicked
 through in a batch is otherwise indistinguishable, in the committed graph, from
@@ -31,6 +31,12 @@ rather than laundering an unreviewed guess into a grant.
   they surface for editing rather than entering the graph silently.
 - Re-opening an operation (back to `proposed` or `rejected`) clears the
   acceptance mark, so a re-opened operation never carries a stale record.
+- Under a delegated-curation grant ([delegated-curation.md](delegated-curation.md))
+  the drafting pass, or a `graph_curate` token calling the two endpoints
+  above, records `auto_accepted`. A person can never ask for that mode, and no
+  principal outside the grant can produce it. `accepted_by` names the person
+  of record — the token's owner, or the granting owner for the drafting pass —
+  and the change set's `context_packet.delegated_curation` names the grant.
 
 The fields appear on each operation in the change-set payload:
 `acceptance_mode`, `accepted_by`, `accepted_by_user_id`, `accepted_at`.

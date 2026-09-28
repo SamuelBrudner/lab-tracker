@@ -4,18 +4,14 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
-from typing import TypeVar
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext
 from lab_tracker.config import Settings
-from lab_tracker.errors import NotFoundError, PermissionDeniedError, ValidationError
+from lab_tracker.errors import NotFoundError, PermissionDeniedError
 from lab_tracker.graph_drafting import GraphDraftClient, GraphDraftClientFactory
-from lab_tracker.member_onboarding import (
-    SCHEDULED_DRAFT_EXCLUDE,
-    SCHEDULED_DRAFT_POLICY_KEY,
-)
 from lab_tracker.models import (
+    DelegatedCurationPolicy,
     ExternalContextPolicy,
     GraphChangeSetStatus,
     GraphDraftBatchRun,
@@ -23,10 +19,9 @@ from lab_tracker.models import (
     GraphDraftBatchSettings,
     GraphDraftBatchTrigger,
     Note,
-    NoteStatus,
     utc_now,
 )
-from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
+from lab_tracker.patching import NOT_PROVIDED, PatchValue
 from lab_tracker.provider_error_redaction import (
     configured_provider_secrets,
     provider_error_message,
@@ -36,6 +31,8 @@ from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.graph_draft_batch_reservation import (
     GraphDraftBatchReservationCoordinator,
 )
+from lab_tracker.services.graph_draft_batch_settings import BatchSettingsCoordinator
+from lab_tracker.services.graph_draft_delegation import DelegatedCurationCoordinator
 from lab_tracker.services.graph_draft_generation import (
     configured_provider_generation_lease_seconds,
     provider_generation_lease_seconds,
@@ -43,36 +40,14 @@ from lab_tracker.services.graph_draft_generation import (
 from lab_tracker.services.graph_draft_scheduling_ports import (
     BatchDraftGenerator,
     SchedulingAuthorization,
-    SchedulingNotes,
-    SchedulingProjects,
     SchedulingProvenanceLinks,
     SchedulingRecords,
     SchedulingRepository,
 )
 from lab_tracker.services.provenance_detection_stage import propose_deterministic_links
-from lab_tracker.services.review_email_service import normalize_review_email
 from lab_tracker.services.shared import actor_user_fk, actor_user_id
 
 logger = logging.getLogger(__name__)
-SettingValueT = TypeVar("SettingValueT")
-EXTERNAL_PROVIDER_ACKNOWLEDGEMENT_REQUIRED = (
-    "Scheduled drafting with an external AI provider requires explicit "
-    "external-provider acknowledgement."
-)
-ACKNOWLEDGE_EXTERNAL_PROVIDER_ACTION = "Acknowledging the external AI provider"
-
-
-def _validated_setting_patch(
-    value: PatchValue[SettingValueT | None],
-    field_name: str,
-) -> PatchValue[SettingValueT]:
-    if not is_provided(value):
-        return NOT_PROVIDED
-    if value is None:
-        raise ValidationError(f"{field_name} must not be null.")
-    return value
-
-
 class BatchSchedulingCoordinator(BaseService):
     """Own batch settings, run preparation, workers, and due dispatch."""
 
@@ -82,26 +57,20 @@ class BatchSchedulingCoordinator(BaseService):
         *,
         records: SchedulingRecords,
         generation: BatchDraftGenerator,
-        projects: SchedulingProjects,
-        notes: SchedulingNotes,
+        settings: BatchSettingsCoordinator,
+        reservations: GraphDraftBatchReservationCoordinator,
         authorization: SchedulingAuthorization,
-        host: batch_policy.DraftingHostFacts,
         provenance_links: SchedulingProvenanceLinks | None = None,
+        delegation: DelegatedCurationCoordinator | None = None,
     ) -> None:
         super().__init__(context)
         self.records = records
         self.generation = generation
-        self.projects = projects
-        self.notes = notes
+        self.settings = settings
+        self.reservations = reservations
         self.authorization = authorization
         self.provenance_links = provenance_links
-        self.reservations = GraphDraftBatchReservationCoordinator(
-            context,
-            projects=projects,
-            notes=notes,
-        )
-        self.review_email_available = host.review_email_available
-        self.external_provider = host.external_provider
+        self.delegation = delegation
 
     @property
     def scheduling_repository(self) -> SchedulingRepository:
@@ -114,34 +83,9 @@ class BatchSchedulingCoordinator(BaseService):
         user_id: UUID | None = None,
         actor: AuthContext | None = None,
     ) -> GraphDraftBatchSettings:
-        # Per-user settings now include a notification address. Keep another
-        # user's address owner-only while preserving ordinary read access to
-        # the project-level default and to one's own settings.
-        if user_id is not None and (actor is None or user_id != actor.user_id):
-            self.authorization.require_owner(project_id, actor=actor)
-        else:
-            self.authorization.require_read(project_id, actor=actor)
-        # Global-read authorization can succeed without consulting the project
-        # repository. Resolve the target only after authorization so missing
-        # projects return the canonical 404 without becoming an existence
-        # oracle for unauthorized callers.
-        self.projects.get_project(project_id)
-        settings = self.scheduling_repository.get_graph_draft_batch_settings_by_project(
-            project_id,
-            user_id=user_id,
+        return self.settings.get_graph_draft_batch_settings(
+            project_id, user_id=user_id, actor=actor
         )
-        if settings is not None:
-            settings.review_email_available = self.review_email_available
-            return settings
-        default = self.scheduling_repository.get_graph_draft_batch_settings_by_project(project_id)
-        settings = batch_policy.default_batch_settings(
-            project_id=project_id,
-            user_id=user_id,
-            actor=actor,
-            inherit_from=default,
-        )
-        settings.review_email_available = self.review_email_available
-        return settings
 
     def update_graph_draft_batch_settings(
         self,
@@ -156,170 +100,25 @@ class BatchSchedulingCoordinator(BaseService):
         notification_email: PatchValue[str | None] = NOT_PROVIDED,
         external_context_policy: PatchValue[ExternalContextPolicy | None] = NOT_PROVIDED,
         external_provider_acknowledged: PatchValue[bool | None] = NOT_PROVIDED,
+        delegated_curation: PatchValue[DelegatedCurationPolicy | None] = NOT_PROVIDED,
+        delegated_curation_acknowledged: PatchValue[bool | None] = NOT_PROVIDED,
         actor: AuthContext | None = None,
     ) -> GraphDraftBatchSettings:
-        enabled = _validated_setting_patch(enabled, "enabled")
-        cadence_minutes = _validated_setting_patch(cadence_minutes, "cadence_minutes")
-        external_context_policy = _validated_setting_patch(
-            external_context_policy, "external_context_policy"
-        )
-        external_provider_acknowledged = _validated_setting_patch(
-            external_provider_acknowledged,
-            "external_provider_acknowledged",
-        )
-        if (
-            is_provided(external_provider_acknowledged)
-            and external_provider_acknowledged is not True
-        ):
-            raise ValidationError("external_provider_acknowledged must be true when provided.")
-        run_at_local_time = _validated_setting_patch(
-            run_at_local_time,
-            "run_at_local_time",
-        )
-        timezone_name = _validated_setting_patch(timezone_name, "timezone_name")
-        user_id = _validated_setting_patch(user_id, "user_id")
-        email_notifications_enabled = _validated_setting_patch(
-            email_notifications_enabled,
-            "email_notifications_enabled",
-        )
-        resolved_user_id = user_id if is_provided(user_id) else None
-        # Contributors may schedule their own project's daily batch -- the
-        # project-level default (user_id is None) and their own per-user
-        # settings (user_id == actor). Editing *another* user's per-user
-        # settings still requires owner.
-        editing_other_user = resolved_user_id is not None and (
-            actor is None or resolved_user_id != actor.user_id
-        )
-        if editing_other_user:
-            self.authorization.require_owner(project_id, actor=actor)
-        else:
-            self.authorization.require_contributor(project_id, actor=actor)
-        self.projects.get_project(project_id)
-        settings = self.scheduling_repository.get_graph_draft_batch_settings_by_project(
+        return self.settings.update_graph_draft_batch_settings(
             project_id,
-            user_id=resolved_user_id,
+            enabled=enabled,
+            cadence_minutes=cadence_minutes,
+            run_at_local_time=run_at_local_time,
+            timezone_name=timezone_name,
+            user_id=user_id,
+            email_notifications_enabled=email_notifications_enabled,
+            notification_email=notification_email,
+            external_context_policy=external_context_policy,
+            external_provider_acknowledged=external_provider_acknowledged,
+            delegated_curation=delegated_curation,
+            delegated_curation_acknowledged=delegated_curation_acknowledged,
+            actor=actor,
         )
-        if settings is None:
-            default = self.scheduling_repository.get_graph_draft_batch_settings_by_project(
-                project_id
-            )
-            settings = batch_policy.default_batch_settings(
-                project_id=project_id,
-                user_id=resolved_user_id,
-                actor=actor,
-                inherit_from=default,
-            )
-        settings.review_email_available = self.review_email_available
-        before = settings.model_copy(deep=True)
-        if is_provided(external_provider_acknowledged):
-            # Consent is a person's act: a service token or automation
-            # principal cannot acknowledge on anyone's behalf.
-            self.authorization.require_interactive(
-                actor,
-                action=ACKNOWLEDGE_EXTERNAL_PROVIDER_ACTION,
-            )
-            settings.external_provider_acknowledged_at = utc_now()
-            settings.external_provider_acknowledged_by = actor_user_id(actor)
-        if is_provided(external_context_policy):
-            settings.external_context_policy = external_context_policy
-        if is_provided(enabled):
-            settings.enabled = enabled
-        if is_provided(cadence_minutes):
-            if cadence_minutes < 60:
-                raise ValidationError("cadence_minutes must be at least 60.")
-            settings.cadence_minutes = cadence_minutes
-        if is_provided(run_at_local_time):
-            batch_policy.validate_run_at_local_time(run_at_local_time)
-            settings.run_at_local_time = run_at_local_time
-        if is_provided(timezone_name):
-            batch_policy.zoneinfo_for(timezone_name)
-            settings.timezone_name = timezone_name
-        if is_provided(notification_email):
-            cleaned_email = (
-                normalize_review_email(notification_email)
-                if notification_email is not None and notification_email.strip()
-                else None
-            )
-            if cleaned_email != settings.notification_email:
-                settings.notification_email = cleaned_email
-                settings.notification_email_confirmed_at = (
-                    utc_now() if cleaned_email is not None else None
-                )
-        if is_provided(email_notifications_enabled):
-            if email_notifications_enabled and not self.review_email_available:
-                raise ValidationError(
-                    "Review email delivery is not enabled on this Lab Tracker host."
-                )
-            settings.email_notifications_enabled = email_notifications_enabled
-        if settings.email_notifications_enabled:
-            if settings.user_id is None:
-                raise ValidationError("Email alerts require per-user batch settings with user_id.")
-            if not settings.notification_email or settings.notification_email_confirmed_at is None:
-                raise ValidationError(
-                    "notification_email is required before email alerts can be enabled."
-                )
-        self._require_external_provider_acknowledgement(settings, before)
-        consent_changed = any(
-            (
-                settings.external_context_policy != before.external_context_policy,
-                settings.external_provider_acknowledged_at
-                != before.external_provider_acknowledged_at,
-            )
-        )
-        scheduling_changed = any(
-            (
-                settings.enabled != before.enabled,
-                settings.cadence_minutes != before.cadence_minutes,
-                settings.run_at_local_time != before.run_at_local_time,
-                settings.timezone_name != before.timezone_name,
-            )
-        )
-        notification_changed = any(
-            (
-                settings.email_notifications_enabled != before.email_notifications_enabled,
-                settings.notification_email != before.notification_email,
-                settings.notification_email_confirmed_at != before.notification_email_confirmed_at,
-            )
-        )
-        if not scheduling_changed and not notification_changed and not consent_changed:
-            return settings
-        if scheduling_changed:
-            settings.next_run_at = (
-                batch_policy.next_run_at(
-                    cadence_minutes=settings.cadence_minutes,
-                    run_at_local_time=settings.run_at_local_time,
-                    timezone_name=settings.timezone_name,
-                )
-                if settings.enabled
-                else None
-            )
-        settings.updated_at = utc_now()
-        settings.updated_by = actor_user_id(actor)
-        with self.unit_of_work():
-            self.scheduling_repository.graph_draft_batch_settings.save(settings)
-        return settings
-
-    def _require_external_provider_acknowledgement(
-        self,
-        settings: GraphDraftBatchSettings,
-        before: GraphDraftBatchSettings,
-    ) -> None:
-        """Gate the two transitions that widen what leaves the instance.
-
-        Turning the cadence on sends the person's staged captures to the
-        provider; switching to ``project_notes`` sends colleagues' notes too.
-        A loopback provider never leaves the host, so nothing is gated.
-        """
-
-        if not self.external_provider or settings.external_provider_acknowledged_at is not None:
-            return
-        enabling = settings.enabled and not before.enabled
-        widening = (
-            settings.external_context_policy is ExternalContextPolicy.PROJECT_NOTES
-            and before.external_context_policy is not ExternalContextPolicy.PROJECT_NOTES
-        )
-        if enabling or widening:
-            raise ValidationError(EXTERNAL_PROVIDER_ACKNOWLEDGEMENT_REQUIRED)
 
     def run_graph_draft_batch_for_project(
         self,
@@ -550,12 +349,18 @@ class BatchSchedulingCoordinator(BaseService):
                 category="runner_error",
                 error=exc,
             )
+        if self.delegation is not None:
+            # Under a delegated-curation grant the pass accepts what the grant
+            # admits and commits when nothing is left for a person; the run
+            # reports the draft as ready either way.
+            change_set = self.delegation.apply_delegated_curation(change_set)
         run.change_set_id = change_set.change_set_id
         run.summary = change_set.summary
         run.error_metadata = dict(change_set.error_metadata)
         run.status = (
             GraphDraftBatchRunStatus.READY
-            if change_set.status == GraphChangeSetStatus.READY
+            if change_set.status
+            in {GraphChangeSetStatus.READY, GraphChangeSetStatus.COMMITTED}
             else GraphDraftBatchRunStatus.FAILED
         )
         run.finished_at = utc_now()
@@ -694,7 +499,7 @@ class BatchSchedulingCoordinator(BaseService):
                 continue
             batch_settings = claimed_settings
             try:
-                self.projects.get_project(batch_settings.project_id)
+                self.reservations.projects.get_project(batch_settings.project_id)
             except NotFoundError:
                 batch_settings.enabled = False
                 batch_settings.next_run_at = None
@@ -703,7 +508,7 @@ class BatchSchedulingCoordinator(BaseService):
                 with self.unit_of_work():
                     self.scheduling_repository.graph_draft_batch_settings.save(batch_settings)
                 continue
-            reviewers = self._scheduled_reviewers_for_settings(
+            reviewers = self.reservations.scheduled_reviewers_for_settings(
                 batch_settings,
                 until=current_time,
             )
@@ -752,96 +557,6 @@ class BatchSchedulingCoordinator(BaseService):
                             close()
                 runs.append(run)
         return runs
-
-    def _scheduled_reviewers_for_settings(
-        self,
-        settings: GraphDraftBatchSettings,
-        *,
-        until: datetime,
-    ) -> list[batch_policy.BatchReviewer]:
-        latest_by_reviewer: dict[
-            tuple[str | None, UUID | None],
-            GraphDraftBatchRun | None,
-        ] = {}
-        drafted_note_ids_by_reviewer: dict[tuple[str | None, UUID | None], set[UUID]] = {}
-
-        def note_is_new_for_reviewer(note: Note, reviewer: batch_policy.BatchReviewer) -> bool:
-            key = (reviewer.reviewer, reviewer.reviewer_user_id)
-            if key not in latest_by_reviewer:
-                latest = self.scheduling_repository.latest_successful_graph_draft_batch_run(
-                    settings.project_id,
-                    review_assignee_user_id=reviewer.reviewer_user_id,
-                    review_assignee=reviewer.reviewer,
-                )
-                latest_by_reviewer[key] = latest
-                drafted_note_ids_by_reviewer[key] = (
-                    self.scheduling_repository.successful_graph_draft_batch_source_note_ids_at_window_end(
-                        settings.project_id,
-                        latest.window_end,
-                        review_assignee_user_id=reviewer.reviewer_user_id,
-                        review_assignee=reviewer.reviewer,
-                    )
-                    if latest is not None
-                    else set()
-                )
-            latest = latest_by_reviewer[key]
-            window_start = batch_policy.as_utc(
-                latest.window_end if latest is not None else datetime(1970, 1, 1)
-            )
-            note_created_at = batch_policy.as_utc(note.created_at)
-            if note_created_at > batch_policy.as_utc(until) or note_created_at < window_start:
-                return False
-            return not (
-                latest is not None
-                and note_created_at == window_start
-                and note.note_id in drafted_note_ids_by_reviewer[key]
-            )
-
-        staged_notes = [
-            note
-            for note in self.notes.list_notes(
-                project_id=settings.project_id,
-                status=NoteStatus.STAGED,
-            )
-            if note.metadata.get(SCHEDULED_DRAFT_POLICY_KEY)
-            != SCHEDULED_DRAFT_EXCLUDE
-        ]
-        if settings.user_id is not None:
-            reviewer = batch_policy.BatchReviewer(
-                reviewer=str(settings.user_id),
-                reviewer_user_id=settings.user_id,
-            )
-            if any(
-                batch_policy.note_matches_reviewer(note, reviewer)
-                and note_is_new_for_reviewer(note, reviewer)
-                for note in staged_notes
-            ):
-                return [reviewer]
-            return []
-        explicit_user_ids = {
-            row.user_id
-            for row in self.scheduling_repository.list_graph_draft_batch_settings_for_project(
-                settings.project_id
-            )
-            if row.user_id is not None
-        }
-        reviewers: dict[tuple[str | None, UUID | None], batch_policy.BatchReviewer] = {}
-        for note in staged_notes:
-            if note.created_by_user_id is not None and note.created_by_user_id in explicit_user_ids:
-                continue
-            reviewer = batch_policy.reviewer_for_note(note)
-            if reviewer.reviewer is None and reviewer.reviewer_user_id is None:
-                continue
-            if not note_is_new_for_reviewer(note, reviewer):
-                continue
-            reviewers[(reviewer.reviewer, reviewer.reviewer_user_id)] = reviewer
-        return [
-            reviewers[key]
-            for key in sorted(
-                reviewers,
-                key=lambda item: (str(item[1] or ""), str(item[0] or "")),
-            )
-        ]
 
     def _record_failed_scheduled_batch_run(
         self,

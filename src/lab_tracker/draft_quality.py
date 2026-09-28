@@ -98,6 +98,7 @@ class _CellCounts:
     accepted_total: int = 0
     accepted_human_selected: int = 0
     accepted_bulk_accepted: int = 0
+    accepted_auto_accepted: int = 0
     edited_before_accept: int = 0
     rejected: int = 0
     left_proposed_at_commit: int = 0
@@ -110,6 +111,8 @@ class _CellCounts:
                 self.accepted_human_selected += 1
             elif row.acceptance_mode == AcceptanceMode.BULK_ACCEPTED:
                 self.accepted_bulk_accepted += 1
+            elif row.acceptance_mode == AcceptanceMode.AUTO_ACCEPTED:
+                self.accepted_auto_accepted += 1
             if row.edited_before_accept:
                 self.edited_before_accept += 1
         elif row.operation_status == GraphChangeOperationStatus.REJECTED:
@@ -221,6 +224,7 @@ def aggregate_draft_quality(
                 accepted_total=counts.accepted_total,
                 accepted_human_selected=counts.accepted_human_selected,
                 accepted_bulk_accepted=counts.accepted_bulk_accepted,
+                accepted_auto_accepted=counts.accepted_auto_accepted,
                 edited_before_accept=counts.edited_before_accept,
                 rejected=counts.rejected,
                 left_proposed_at_commit=counts.left_proposed_at_commit,

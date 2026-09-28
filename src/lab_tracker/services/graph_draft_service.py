@@ -11,6 +11,7 @@ from lab_tracker.config import Settings
 from lab_tracker.graph_drafting import GraphDraftClient, GraphDraftClientFactory
 from lab_tracker.models import (
     AcceptanceMode,
+    DelegatedCurationPolicy,
     ExternalContextPolicy,
     GraphChangeOperationStatus,
     GraphChangeSet,
@@ -30,16 +31,14 @@ from lab_tracker.services.graph_draft_batch_policy import (
     BatchRunQuery,
 )
 from lab_tracker.services.graph_draft_commit import TransactionalDraftCommitCoordinator
+from lab_tracker.services.graph_draft_delegation import DelegatedCurationCoordinator
 from lab_tracker.services.graph_draft_generation import (
     DEFAULT_BATCH_RETRY_ATTEMPTS,
     GraphDraftGenerationCoordinator,
 )
 from lab_tracker.services.graph_draft_records import GraphDraftRecords
-from lab_tracker.services.graph_draft_review import (
-    GraphDraftReviewCoordinator,
-    RevisionInputs,
-    RevisionUpload,
-)
+from lab_tracker.services.graph_draft_review import GraphDraftReviewCoordinator
+from lab_tracker.services.graph_draft_revision_inputs import RevisionInputs, RevisionUpload
 from lab_tracker.services.graph_draft_scheduling import BatchSchedulingCoordinator
 
 __all__ = ["GraphDraftService", "RevisionInputs", "RevisionUpload"]
@@ -56,12 +55,14 @@ class GraphDraftService:
         review: GraphDraftReviewCoordinator,
         commit: TransactionalDraftCommitCoordinator,
         scheduling: BatchSchedulingCoordinator,
+        delegation: DelegatedCurationCoordinator,
     ) -> None:
         self.records = records
         self.generation = generation
         self.review = review
         self.commit = commit
         self.scheduling = scheduling
+        self.delegation = delegation
 
     def create_graph_draft_from_note(
         self,
@@ -96,6 +97,9 @@ class GraphDraftService:
             actor=actor,
             external_provider_acknowledged=external_provider_acknowledged,
         )
+
+    def apply_delegated_curation(self, change_set: GraphChangeSet) -> GraphChangeSet:
+        return self.delegation.apply_delegated_curation(change_set)
 
     def create_batch_graph_draft(
         self,
@@ -322,6 +326,8 @@ class GraphDraftService:
         notification_email: PatchValue[str | None] = NOT_PROVIDED,
         external_context_policy: PatchValue[ExternalContextPolicy | None] = NOT_PROVIDED,
         external_provider_acknowledged: PatchValue[bool | None] = NOT_PROVIDED,
+        delegated_curation: PatchValue[DelegatedCurationPolicy | None] = NOT_PROVIDED,
+        delegated_curation_acknowledged: PatchValue[bool | None] = NOT_PROVIDED,
         actor: AuthContext | None = None,
     ) -> GraphDraftBatchSettings:
         return self.scheduling.update_graph_draft_batch_settings(
@@ -335,6 +341,8 @@ class GraphDraftService:
             notification_email=notification_email,
             external_context_policy=external_context_policy,
             external_provider_acknowledged=external_provider_acknowledged,
+            delegated_curation=delegated_curation,
+            delegated_curation_acknowledged=delegated_curation_acknowledged,
             actor=actor,
         )
 

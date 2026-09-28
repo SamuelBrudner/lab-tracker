@@ -672,6 +672,7 @@ export interface components {
       "size_bytes"?: (number | null);
     };
     "DatasetStatus": "staged" | "committed" | "archived";
+    "DelegatedCurationPolicy": "off" | "organize" | "full";
     "DeviceConsumeRead": {
       "created_at": string;
       "device_token_id": string;
@@ -700,6 +701,7 @@ export interface components {
       "revoked_at"?: (string | null);
     };
     "DraftQualityCell": {
+      "accepted_auto_accepted"?: number;
       "accepted_bulk_accepted"?: number;
       "accepted_human_selected"?: number;
       "accepted_total"?: number;
@@ -913,6 +915,9 @@ export interface components {
     "GraphDraftBatchSettings": {
       "cadence_minutes"?: number;
       "created_at"?: string;
+      "delegated_curation"?: components["schemas"]["DelegatedCurationPolicy"];
+      "delegated_curation_granted_at"?: (string | null);
+      "delegated_curation_granted_by"?: (string | null);
       "email_notifications_enabled"?: boolean;
       "enabled"?: boolean;
       "external_context_policy"?: components["schemas"]["ExternalContextPolicy"];
@@ -932,6 +937,8 @@ export interface components {
     };
     "GraphDraftBatchSettingsUpdate": {
       "cadence_minutes"?: number;
+      "delegated_curation"?: components["schemas"]["DelegatedCurationPolicy"];
+      "delegated_curation_acknowledged"?: true;
       "email_notifications_enabled"?: boolean;
       "enabled"?: boolean;
       "external_context_policy"?: components["schemas"]["ExternalContextPolicy"];
@@ -1118,7 +1125,7 @@ export interface components {
       "label": string;
       "read_only"?: boolean;
       "role"?: components["schemas"]["Role"];
-      "scope"?: "all" | "batch_run_due" | "stage_evidence";
+      "scope"?: "all" | "batch_run_due" | "stage_evidence" | "graph_curate";
     };
     "PersonalAccessTokenIssuedRead": {
       "created_at": string;

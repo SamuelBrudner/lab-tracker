@@ -117,6 +117,49 @@ describe("AgentAccessPage", () => {
     expect(mintBody.scope).toBe("stage_evidence");
   });
 
+  it("mints a graph_curate-scoped editor token for the curate level", async () => {
+    let mintBody = null;
+    installFetchMock([
+      {
+        match: "/auth/tokens",
+        response: [
+          apiResponse([], 200, { limit: 1, offset: 0, total: 0 }),
+          apiResponse([issuedTokenPayload()], 200, { limit: 1, offset: 0, total: 1 }),
+        ],
+      },
+      {
+        match: "/auth/tokens",
+        method: "POST",
+        response: (request) => {
+          mintBody = JSON.parse(request.init.body);
+          return apiResponse(
+            issuedTokenPayload({
+              label: mintBody.label,
+              read_only: mintBody.read_only,
+              role: mintBody.role,
+              scope: mintBody.scope,
+              secret: "lpat_test-secret",
+            }),
+            201
+          );
+        },
+      },
+    ]);
+
+    renderPage({ setFlash: vi.fn() });
+
+    await waitFor(() => expect(screen.getByText("No agent tokens yet.")).toBeInTheDocument());
+    fireEvent.change(screen.getByLabelText("Label"), { target: { value: "Curator" } });
+    fireEvent.change(screen.getByLabelText("Access"), { target: { value: "curate" } });
+    expect(screen.getByText(/only in projects whose owner turned on delegated/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Create agent token" }));
+
+    await waitFor(() => expect(mintBody).not.toBeNull());
+    expect(mintBody.role).toBe("editor");
+    expect(mintBody.read_only).toBe(false);
+    expect(mintBody.scope).toBe("graph_curate");
+  });
+
   it("mints a run-due-scoped token for the scheduler-trigger level", async () => {
     let mintBody = null;
     installFetchMock([
@@ -514,6 +557,7 @@ describe("AgentAccessPage", () => {
     const options = screen.getByLabelText("Access").querySelectorAll("option");
     expect(Array.from(options).map((option) => option.value)).toEqual([
       "stage",
+      "curate",
       "read",
       "scheduler",
     ]);

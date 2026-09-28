@@ -31,6 +31,18 @@ const ACCESS_LEVELS = [
     scope: "stage_evidence",
   },
   {
+    value: "curate",
+    label: "Curate graph (delegated)",
+    description:
+      "Everything in Read + stage evidence, plus running the daily review and accepting " +
+      "or committing its proposals — only in projects whose owner turned on delegated " +
+      "curation, and only for what that grant admits. Every accept is recorded as " +
+      "auto-accepted.",
+    role: "editor",
+    readOnly: false,
+    scope: "graph_curate",
+  },
+  {
     value: "read",
     label: "Read-only",
     description: "Decision context, search, and graph reads. Cannot sync captured evidence.",

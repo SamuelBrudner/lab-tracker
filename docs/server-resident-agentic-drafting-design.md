@@ -99,6 +99,12 @@ in `docs/vision.md` predated the merge by a day and is amended
 alongside this doc. `lab-tracker-1325.1` is closed as
 verified-already-done; the precondition is met.
 
+Later amendment: the gate now has one owner-granted exception, delegated
+curation ([delegated-curation.md](delegated-curation.md)). It relaxes the
+gate only for a project whose owner granted it, only for the drafting pass
+or a `graph_curate` token, and only for the proposals the grant admits; the
+`auto_accepted` mode records those accepts instead of being refused.
+
 ### 2. In-process scheduler tick + job queue and worker (`lab-tracker-1325.2`)
 
 A lifespan asyncio ticker, behind a config flag, fires due batches as

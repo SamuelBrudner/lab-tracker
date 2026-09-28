@@ -46,7 +46,6 @@ from lab_tracker.models import (
     deferred_operation_count,
 )
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
-from lab_tracker.sqlalchemy_repository_parts.graph_drafts import operation_to_model
 
 
 class FakeDraftClient:
@@ -3461,20 +3460,6 @@ def test_update_operation_rejects_auto_accepted_mode(
             actor=_human_actor(),
         )
 
-
-def test_repository_write_rejects_auto_accepted_operation() -> None:
-    """Defense in depth: the persistence layer refuses the reserved mode."""
-    operation = GraphChangeOperation(
-        operation_id=uuid4(),
-        change_set_id=uuid4(),
-        sequence=0,
-        op=GraphChangeOp.CREATE,
-        entity_type=EntityType.QUESTION,
-        status=GraphChangeOperationStatus.ACCEPTED,
-        acceptance_mode=AcceptanceMode.AUTO_ACCEPTED,
-    )
-    with pytest.raises(ValidationError):
-        operation_to_model(operation)
 
 
 # --- Finishable review: deferral verdicts, reject reasons, zero-accept submit ---

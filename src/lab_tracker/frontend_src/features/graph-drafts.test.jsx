@@ -540,6 +540,37 @@ describe("GraphDraftDetailCard accept all", () => {
     await waitFor(() => expect(button).not.toBeDisabled());
   });
 
+  it("labels proposals a delegated pass accepted and says what it applied", async () => {
+    const draft = draftFixture({
+      context_packet: {
+        delegated_curation: {
+          accepted_operation_ids: ["33333333-3333-4333-8333-333333333333"],
+          committed: true,
+          granted_by: "owner-1",
+          left_for_review: 0,
+          policy: "organize",
+        },
+      },
+      operations: [
+        {
+          ...draftFixture().operations[0],
+          acceptance_mode: "auto_accepted",
+          semantic_type: "link_note_to_question",
+          status: "applied",
+        },
+      ],
+      status: "committed",
+    });
+    renderDraft(draft);
+
+    expect(await screen.findByText("auto-accepted")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Applied 1 proposal automatically under the owner's organize grant; nobody reviewed them."
+      )
+    ).toBeInTheDocument();
+  });
+
   it("persists buffered payload and decision-note edits before bulk acceptance", async () => {
     const draft = draftFixture();
     const accepted = {

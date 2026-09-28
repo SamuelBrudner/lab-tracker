@@ -13,6 +13,7 @@ from lab_tracker.api_parts.graph_drafts import GraphDraftsApiMixin
 from lab_tracker.patching import NOT_PROVIDED
 from lab_tracker.services import (
     BatchSchedulingCoordinator,
+    DelegatedCurationCoordinator,
     GraphDraftGenerationCoordinator,
     GraphDraftRecords,
     GraphDraftReviewCoordinator,
@@ -27,6 +28,7 @@ OWNER_TYPES = {
     "review": GraphDraftReviewCoordinator,
     "commit": TransactionalDraftCommitCoordinator,
     "scheduling": BatchSchedulingCoordinator,
+    "delegation": DelegatedCurationCoordinator,
 }
 OWNER_MODULES = (
     "graph_draft_records.py",
@@ -34,7 +36,9 @@ OWNER_MODULES = (
     "graph_draft_review.py",
     "graph_draft_commit.py",
     "graph_draft_batch_reservation.py",
+    "graph_draft_batch_settings.py",
     "graph_draft_scheduling.py",
+    "graph_draft_delegation.py",
 )
 ARCHITECTURE_MODULES = (*OWNER_MODULES, "graph_draft_service.py")
 INTENDED_OWNER_EDGES = {
@@ -42,7 +46,10 @@ INTENDED_OWNER_EDGES = {
     "generation": {"records"},
     "review": {"records", "generation"},
     "commit": {"records"},
-    "scheduling": {"records", "generation"},
+    # The drafting pass accepts through review and commits through commit,
+    # and scheduling runs it after every generated batch.
+    "delegation": {"records", "review", "commit"},
+    "scheduling": {"records", "generation", "delegation"},
 }
 DELEGATE_OWNERS = {
     "create_graph_draft_from_note": "generation",
@@ -59,6 +66,7 @@ DELEGATE_OWNERS = {
     "review_graph_change_set": "review",
     "revise_graph_change_set": "review",
     "commit_graph_change_set": "commit",
+    "apply_delegated_curation": "delegation",
     "build_graph_context_for_note": "generation",
     "build_batch_graph_context": "generation",
     "get_graph_draft_batch_settings": "scheduling",
@@ -480,7 +488,9 @@ def exercise(owner):
 
 
 def test_graph_draft_owner_sizes_and_constructor_breadth_stay_bounded() -> None:
-    assert len(Path(inspect.getfile(GraphDraftService)).read_text().splitlines()) <= 450
+    # A one-hop facade grows by a fixed few lines per delegate; the sixth
+    # owner (delegation) raised the bound from 450.
+    assert len(Path(inspect.getfile(GraphDraftService)).read_text().splitlines()) <= 480
     for owner_type in OWNER_TYPES.values():
         path = Path(inspect.getfile(owner_type))
         assert len(path.read_text().splitlines()) <= 900

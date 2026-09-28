@@ -59,6 +59,7 @@ def _write_tool_annotations(tool: Any) -> ToolAnnotations:
         in {
             "lab_tracker_refactor_question",
             "lab_tracker_update_goal",
+            "lab_tracker_commit_graph_draft",
         },
         openWorldHint=True,
     )
@@ -525,6 +526,87 @@ def lab_tracker_request_graph_draft(
     )
 
 
+def lab_tracker_run_graph_draft_batch(
+    project_id: str,
+    user_hint: str | None = None,
+) -> JsonObject:
+    """Draft the project's staged notes now, as the daily review would.
+
+    POST /batches/run-now: the server-side model proposes graph changes for the
+    staged notes not yet drafted, assigned to the token's user for review. Needs an
+    all-scope or graph_curate token with contributor access. Where the project owner
+    has delegated curation, the server applies the admitted proposals itself before
+    returning. Only when the user asks.
+    """
+    return _write_tool(
+        "lab_tracker_run_graph_draft_batch",
+        lambda client: client.run_graph_draft_batch(project_id=project_id, user_hint=user_hint),
+        hint=next_action(
+            "lab_tracker_list_my_drafts",
+            "The run's draft lands in the review queue; list it, then read it with "
+            "lab_tracker_get_graph_draft before acting.",
+        ),
+    )
+
+
+def lab_tracker_accept_graph_draft_operations(
+    change_set_id: str,
+    operation_ids: list[str] | None = None,
+) -> JsonObject:
+    """Accept a draft's proposals under the project owner's delegated-curation grant.
+
+    Without operation_ids, POST /graph-drafts/{id}/accept-all accepts every valid
+    proposal the grant admits and leaves the rest proposed for a person; with
+    operation_ids, each is accepted individually (PATCH status=accepted) and one
+    outside the grant fails the call. The server refuses (403) unless the token was
+    minted at the Curate graph (delegated) level and the project has delegated
+    curation on; every accept is recorded as auto_accepted. Editing, rejecting, and
+    deferring are a person's verdicts. Only when the user asks.
+    """
+
+    def call(client: Any) -> JsonObject:
+        if not operation_ids:
+            return client.accept_all_graph_draft_operations(change_set_id)
+        payload: JsonObject = {}
+        for operation_id in operation_ids:
+            payload = client.accept_graph_draft_operation(
+                change_set_id=change_set_id, operation_id=operation_id
+            )
+        return payload
+
+    return _write_tool(
+        "lab_tracker_accept_graph_draft_operations",
+        call,
+        hint=next_action(
+            "lab_tracker_commit_graph_draft",
+            "Commit only once every proposal is decided; a draft with proposals left "
+            "for a person stays in the review queue.",
+            arguments={"change_set_id": change_set_id},
+        ),
+    )
+
+
+def lab_tracker_commit_graph_draft(change_set_id: str, message: str) -> JsonObject:
+    """Commit a draft's accepted proposals under the delegated-curation grant.
+
+    POST /graph-drafts/{id}/commit with a non-empty message. The server refuses
+    (403) unless the token was minted at the Curate graph (delegated) level, the
+    token's user is a project owner, the project has delegated curation on, every
+    accepted proposal is within the grant, and no proposal is left undecided. The
+    committed records carry origin=ai_suggested and acceptance_mode=auto_accepted.
+    Only when the user asks.
+    """
+    return _write_tool(
+        "lab_tracker_commit_graph_draft",
+        lambda client: client.commit_graph_draft(change_set_id=change_set_id, message=message),
+        hint=next_action(
+            "lab_tracker_get_graph_draft",
+            "Confirm the committed draft and report what was applied to the user.",
+            arguments={"change_set_id": change_set_id},
+        ),
+    )
+
+
 def lab_tracker_record_evidence_bundle(
     project_id: str,
     primary_question_id: str | None = None,
@@ -666,6 +748,9 @@ WRITE_TOOLS = (
     lab_tracker_link_node_to_goal,
     lab_tracker_upload_visualization_file,
     lab_tracker_request_graph_draft,
+    lab_tracker_run_graph_draft_batch,
+    lab_tracker_accept_graph_draft_operations,
+    lab_tracker_commit_graph_draft,
     lab_tracker_record_evidence_bundle,
 )
 

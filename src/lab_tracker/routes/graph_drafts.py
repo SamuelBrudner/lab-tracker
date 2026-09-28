@@ -29,7 +29,7 @@ from lab_tracker.schemas import (
     GraphDraftSubmitRequest,
     ListEnvelope,
 )
-from lab_tracker.services.graph_draft_review import RevisionInputs, RevisionUpload
+from lab_tracker.services.graph_draft_revision_inputs import RevisionInputs, RevisionUpload
 from lab_tracker.upload_security import (
     enforce_request_content_length_limit,
     enforce_stream_size_limit,
@@ -82,6 +82,9 @@ def build_graph_drafts_router(api: LabTrackerAPI) -> APIRouter:
             close = getattr(draft_client, "close", None)
             if callable(close):
                 close()
+        # Under a project owner's delegated-curation grant the server applies
+        # what the grant admits before the draft reaches a person.
+        change_set = api_from_request(request, api).apply_delegated_curation(change_set)
         return Envelope(data=_attach_graph_usernames(request, change_set))
 
     @router.post(
@@ -112,6 +115,9 @@ def build_graph_drafts_router(api: LabTrackerAPI) -> APIRouter:
             close = getattr(draft_client, "close", None)
             if callable(close):
                 close()
+        # Under a project owner's delegated-curation grant the server applies
+        # what the grant admits before the draft reaches a person.
+        change_set = api_from_request(request, api).apply_delegated_curation(change_set)
         return Envelope(data=_attach_graph_usernames(request, change_set))
 
     @router.get("/graph-drafts", response_model=ListEnvelope[GraphChangeSetSummary])
