@@ -920,7 +920,13 @@ _READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 # Capture routes a stage_evidence token may POST to. The routes additionally
 # require a staged note status and, for bundles, dry_run=true.
 STAGE_EVIDENCE_CAPTURE_POSTS = frozenset(
-    {"/notes", "/notes/upload-file", "/notes/quick-capture", "/evidence-bundles"}
+    {
+        "/notes",
+        "/notes/upload-file",
+        "/notes/quick-capture",
+        "/notes/voice-capture",
+        "/evidence-bundles",
+    }
 )
 # POST routes that are semantically reads: they select and return bounded
 # context without persisting anything, so read-only service tokens may call them.
@@ -966,7 +972,7 @@ def device_principal_can_access(method: str, path: str) -> bool:
         return True
     if method != "POST":
         return False
-    if path in {"/notes", "/notes/upload-file", "/notes/quick-capture"}:
+    if path in {"/notes", "/notes/upload-file", "/notes/quick-capture", "/notes/voice-capture"}:
         return True
     segments = [segment for segment in path.split("/") if segment]
     return len(segments) == 3 and segments[0] == "notes" and segments[2] == "transcript"
