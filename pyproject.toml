@@ -134,6 +134,7 @@ show_error_codes = true
 files = [
   "src/lab_tracker/_version.py",
   "src/lab_tracker_client/_version.py",
+  "src/lab_tracker_client/agent_hooks.py",
   "src/lab_tracker_client/capture_project.py",
   "src/lab_tracker/patching.py",
   "src/lab_tracker/claim_effective_status.py",

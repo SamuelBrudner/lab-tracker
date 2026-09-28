@@ -266,3 +266,12 @@ def test_app_session_link_code_matches_the_prefix_the_watcher_claims() -> None:
     assert f'SESSION_LINK_CODE_PREFIX = "{LINK_CODE_PREFIX}"' in component
     for doc in (_DOCS / "watch-folder-capture.md", _DOCS / "retained-v1-surface.md"):
         assert _APP_LINK_CODE_SENTENCE in _collapsed_whitespace(_read(doc)), doc.name
+
+
+def test_agent_setup_names_every_hook_event_that_carries_lt_context() -> None:
+    from lab_tracker_client.agent_hooks import CONTEXT_EVENTS
+
+    text = _collapsed_whitespace(_read(_DOCS / "agent-setup.md"))
+    assert "`hookSpecificOutput.additionalContext`" in text
+    missing = [event for event in sorted(CONTEXT_EVENTS) if f"on `{event}`" not in text]
+    assert not missing, missing

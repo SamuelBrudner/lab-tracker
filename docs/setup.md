@@ -177,7 +177,9 @@ commits are not consumer-relevant.
 - `lt setup status` reports the same `lt_mcp` check plus a `client` release
   comparison built from its existing `/health` probe (`status`,
   `client_behind_server`, `update_recommended`), and suggests the update only
-  when one is recommended, so the SessionStart hook's `--brief` line names it.
+  when one is recommended, so the SessionStart hook's `--brief` line names it
+  (delivered to the agent as `additionalContext`; see
+  [agent-setup.md](agent-setup.md)).
 - `lt-mcp` over stdio makes one unauthenticated `GET /health` at startup
   (2-second timeout, advisory only: any failure leaves the session unchanged).
   When an update is recommended, the MCP `instructions` start with an

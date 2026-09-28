@@ -247,6 +247,20 @@ a project contributor (or viewer for read-only use).
 | `.claude/settings.json` | Claude Code hooks (`lt setup status` on session start, `lt prime` before research-facing prompts) |
 | `AGENTS.lt.md`, `scripts/lt.py`, `lt_ids.json` | Agent-readable integration notes, the client shim, and the project-id mapping (`lt project bind` fills it) |
 
+The two Claude Code hooks reach the agent through
+`hookSpecificOutput.additionalContext`. Claude Code pipes each hook a JSON
+payload on stdin and parses stdout that starts with `{` and ends with `}` as
+[hook output](https://code.claude.com/docs/en/hooks#json-output), silently
+dropping keys it does not know, so plain `lt` JSON would never reach the
+agent. When stdin carries a hook payload, `lt setup status --brief` returns
+its brief line and remaining suggestions as context on `SessionStart`, and
+`lt prime --if-research-facing` classifies only the payload's `prompt` (not
+the `cwd` or transcript path) and returns the ranked open questions as
+context on `UserPromptSubmit`. Run from a terminal or with other piped
+input, both keep their JSON output. Because detection reads stdin rather
+than a flag, repos scaffolded earlier need only a client upgrade, not
+`lt update`.
+
 Choose the instructions for your client:
 
 - **Claude Code** reads the generated repository `.mcp.json`. Open Claude Code
