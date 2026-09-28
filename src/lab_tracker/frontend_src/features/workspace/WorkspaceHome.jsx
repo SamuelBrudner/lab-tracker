@@ -166,6 +166,8 @@ function WorkspaceHome({
         onCreateSession={sessionActions.handleCreateSession}
         onCloseSession={sessionActions.handleCloseSession}
         navigate={navigate}
+        token={auth.token}
+        ownerId={auth.user?.user_id || ""}
       />
 
       <NotePanel

@@ -2,6 +2,8 @@ import * as React from "react";
 
 import { formatDate, sessionTypeClass } from "../../shared/formatters.js";
 import { AppLink, navigateBack } from "../../shared/routing.jsx";
+import { PhotoImportPanel } from "../bench-capture/PhotoImportPanel.jsx";
+import { SessionDebrief } from "../bench-capture/SessionDebrief.jsx";
 import { SessionCaptureLinkSection } from "./SessionCaptureLinkSection.jsx";
 import { SessionLinkCode } from "./SessionLinkCode.jsx";
 import { SessionLinkedNotesSection } from "./SessionLinkedNotesSection.jsx";
@@ -25,6 +27,10 @@ function SessionDetailCard({
   const [actionError, setActionError] = useState("");
   const [promotionQuestionId, setPromotionQuestionId] = useState("");
   const [promotionBusy, setPromotionBusy] = useState(false);
+  // "closed" right after this page closed the session, "manual" from the
+  // Debrief button; either way the debrief is optional and never blocks.
+  const [debriefMode, setDebriefMode] = useState("");
+  const ownerId = user?.user_id || "";
   const {
     activeQuestionState,
     loadError,
@@ -61,6 +67,7 @@ function SessionDetailCard({
 
   useEffect(() => {
     setActionError("");
+    setDebriefMode("");
   }, [sessionId]);
 
   useEffect(() => {
@@ -83,6 +90,8 @@ function SessionDetailCard({
         return;
       }
       setSession(updated);
+      // The session is closed already; offer the debrief afterwards.
+      setDebriefMode("closed");
     } catch (err) {
       setActionError(err.message || "Failed to close session.");
     }
@@ -126,6 +135,22 @@ function SessionDetailCard({
       </div>
       {error ? <p className="flash error">{error}</p> : null}
       {sessionAccess.error ? <p className="flash error">{sessionAccess.error}</p> : null}
+
+      {session && debriefMode && canWrite ? (
+        <SessionDebrief
+          token={token}
+          ownerId={ownerId}
+          projectId={session.project_id}
+          session={session}
+          canWrite={canWrite}
+          heading={
+            debriefMode === "closed"
+              ? "Session closed. Record a quick debrief?"
+              : "Session debrief"
+          }
+          onDone={() => setDebriefMode("")}
+        />
+      ) : null}
 
       {session ? (
         <div className="stack">
@@ -211,6 +236,16 @@ function SessionDetailCard({
             <SessionCaptureLinkSection token={token} session={session} navigate={navigate} />
           ) : null}
 
+          {canWrite ? (
+            <PhotoImportPanel
+              token={token}
+              ownerId={ownerId}
+              projectId={session.project_id}
+              session={session}
+              canWrite={canWrite}
+            />
+          ) : null}
+
           <SessionOutputsSection outputsState={outputsState} />
 
           <SessionLinkedNotesSection noteState={noteState} navigate={navigate} />
@@ -231,6 +266,11 @@ function SessionDetailCard({
             }}
           >
             Set active project
+          </button>
+        ) : null}
+        {session && canWrite && !debriefMode ? (
+          <button type="button" className="btn-secondary" onClick={() => setDebriefMode("manual")}>
+            Debrief
           </button>
         ) : null}
         {session && session.status === "active" ? (

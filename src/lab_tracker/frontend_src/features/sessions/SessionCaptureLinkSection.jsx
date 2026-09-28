@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { useApiResource } from "../../hooks/useApiResource.js";
+import { NfcTagWriter } from "../bench-capture/NfcTagWriter.jsx";
 
 function captureRoute(session) {
   return `/app/capture?project_id=${encodeURIComponent(
@@ -44,6 +45,7 @@ function SessionCaptureLinkSection({ token, session, navigate }) {
       ) : null}
       {link?.capture_url ? <div className="mono session-capture-url">{link.capture_url}</div> : null}
       {error ? <p className="subtle">{error}</p> : null}
+      {link?.capture_url ? <NfcTagWriter captureUrl={link.capture_url} /> : null}
       <div className="inline">
         <button
           type="button"
