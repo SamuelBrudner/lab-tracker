@@ -7,7 +7,7 @@ import { NotePanel } from "../notes.jsx";
 import { PortfolioHome } from "../portfolio-home.jsx";
 import { CaptureHealthCard } from "./CaptureHealthCard.jsx";
 import { QuestionPanel } from "../questions/QuestionPanel.jsx";
-import { SessionPanel } from "../sessions/index.js";
+import { SessionPanel, SessionSuggestionsCard } from "../sessions/index.js";
 import { ProjectContextCard, RequestEditAccess } from "../../shared/ui.jsx";
 import { OwnerOnboardingQueueBanner } from "../member-onboarding.jsx";
 
@@ -168,6 +168,14 @@ function WorkspaceHome({
         navigate={navigate}
         token={auth.token}
         ownerId={auth.user?.user_id || ""}
+      />
+
+      <SessionSuggestionsCard
+        variant="card"
+        projectId={workspaceData.selectedProjectId}
+        token={auth.token}
+        canWrite={canContribute}
+        onApplied={() => sessionData.refreshActiveSessions?.(workspaceData.selectedProjectId)}
       />
 
       <NotePanel

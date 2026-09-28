@@ -1346,11 +1346,15 @@ class ProvenanceLinkBasis(str, Enum):
     ``worktree_tree_match``: a capture recorded the git tree of the working
     copy it ran in, and a commit note records that same tree as its own: the
     capture was made from exactly that commit's code.
+    ``time_window_match``: a capture that names no session was made (by its
+    ``format_acquired_at``, else its observed time) inside exactly one session
+    window of the project.
     """
 
     CONTENT_HASH_MATCH = "content_hash_match"
     EXACT_ID_MATCH = "exact_id_match"
     WORKTREE_TREE_MATCH = "worktree_tree_match"
+    TIME_WINDOW_MATCH = "time_window_match"
 
 
 class ProvenanceLinkStatus(str, Enum):

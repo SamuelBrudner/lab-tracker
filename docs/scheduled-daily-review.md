@@ -275,3 +275,16 @@ batch keys mean concurrent or redundant calls never double-fire the same review,
 and an off-time poll simply finds nothing due and returns immediately. So the
 trigger can be dumb and frequent; the per-(project, user) cadence does the real
 scheduling.
+
+## What else a run does
+
+Before the model drafts, every run proposes provenance links by rule for a
+person to accept or reject on the review page: captures that share bytes,
+captures whose metadata names a session or commit, and captures made while
+exactly one session was open (`time_window_match`). After the model drafts, a
+session with a heavy bench day (three or more short text, voice, or photo
+captures in the batch) gets one extra **day log** proposal: a timestamped
+`HH:MM — …` note targeting the session, labelled as a deterministic grouping,
+so you can accept one log instead of each capture. The per-capture proposals
+stay. See [session-suggestions.md](session-suggestions.md) for both, and for
+the session suggestions card on the Review page.

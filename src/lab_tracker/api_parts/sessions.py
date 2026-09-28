@@ -9,6 +9,7 @@ its own edit locality. These are mixins: LabTrackerAPI inherits them, so
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, TypeVar
 from uuid import UUID
 
@@ -21,7 +22,8 @@ from lab_tracker.models import (
 )
 
 if TYPE_CHECKING:
-    from lab_tracker.services import SessionService
+    from lab_tracker.services import SessionService, SessionSuggestionService
+    from lab_tracker.services.session_suggestions import SessionSuggestionReport
 
 UsageResultT = TypeVar("UsageResultT")
 
@@ -29,6 +31,7 @@ UsageResultT = TypeVar("UsageResultT")
 class SessionsApiMixin:
     if TYPE_CHECKING:
         sessions: SessionService
+        session_suggestions: SessionSuggestionService
 
         def _with_usage_event(
             self,
@@ -76,6 +79,15 @@ class SessionsApiMixin:
 
     def list_sessions(self, *args: Any, **kwargs: Any) -> Any:
         return self.sessions.list_sessions(*args, **kwargs)
+
+    def suggest_sessions(
+        self,
+        project_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+        now: datetime | None = None,
+    ) -> SessionSuggestionReport:
+        return self.session_suggestions.suggest_sessions(project_id, actor=actor, now=now)
 
     def update_session(self, *args: Any, **kwargs: Any) -> Any:
         return self._with_usage_event(

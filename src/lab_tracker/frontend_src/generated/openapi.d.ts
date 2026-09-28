@@ -86,6 +86,15 @@ export interface paths {
   "/projects/{project_id}/coverage": {
     get: operations["get_project_coverage_projects__project_id__coverage_get"];
   };
+  "/projects/{project_id}/session-suggestions": {
+    get: operations["get_session_suggestions_projects__project_id__session_suggestions_get"];
+  };
+  "/sessions": {
+    post: operations["create_session_sessions_post"];
+  };
+  "/sessions/{session_id}": {
+    patch: operations["update_session_sessions__session_id__patch"];
+  };
   "/datasets": {
     get: operations["list_datasets_datasets_get"];
   };
@@ -447,6 +456,43 @@ export interface operations {
       200: {
         content: {
           "application/json": components["schemas"]["Envelope_ProjectCoverageReport_"];
+        };
+      };
+    };
+  };
+  "get_session_suggestions_projects__project_id__session_suggestions_get": {
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["Envelope_SessionSuggestionReport_"];
+        };
+      };
+    };
+  };
+  "create_session_sessions_post": {
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["SessionCreate"];
+      };
+    };
+    responses: {
+      201: {
+        content: {
+          "application/json": components["schemas"]["Envelope_Session_"];
+        };
+      };
+    };
+  };
+  "update_session_sessions__session_id__patch": {
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["SessionUpdate"];
+      };
+    };
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["Envelope_Session_"];
         };
       };
     };
@@ -819,6 +865,14 @@ export interface components {
     };
     "Envelope_ReviewEmailDelivery_": {
       "data": components["schemas"]["ReviewEmailDelivery"];
+      "meta"?: (Record<string, unknown> | null);
+    };
+    "Envelope_SessionSuggestionReport_": {
+      "data": components["schemas"]["SessionSuggestionReport"];
+      "meta"?: (Record<string, unknown> | null);
+    };
+    "Envelope_Session_": {
+      "data": components["schemas"]["Session"];
       "meta"?: (Record<string, unknown> | null);
     };
     "ExternalArtifactKind": "entity" | "activity";
@@ -1245,6 +1299,62 @@ export interface components {
       "recipient_user_id"?: (string | null);
     };
     "Role": "admin" | "editor" | "viewer";
+    "Session": {
+      "change_set_id"?: (string | null);
+      "created_by"?: (string | null);
+      "created_by_user_id"?: (string | null);
+      "ended_at"?: (string | null);
+      "link_code": string;
+      "origin"?: components["schemas"]["EntityOrigin"];
+      "origin_model"?: (string | null);
+      "origin_prompt_version"?: (string | null);
+      "origin_provider"?: (string | null);
+      "primary_question_id"?: (string | null);
+      "project_id": string;
+      "session_id": string;
+      "session_type": components["schemas"]["SessionType"];
+      "started_at"?: string;
+      "status"?: components["schemas"]["SessionStatus"];
+      "updated_at"?: string;
+    };
+    "SessionCreate": {
+      "primary_question_id"?: (string | null);
+      "project_id": string;
+      "session_type": components["schemas"]["SessionType"];
+      "started_at"?: (string | null);
+    };
+    "SessionStatus": "active" | "closed";
+    "SessionSuggestion": {
+      "booking_instrument"?: (string | null);
+      "booking_note_id"?: (string | null);
+      "booking_summary"?: (string | null);
+      "booking_uid"?: (string | null);
+      "capture_count"?: number;
+      "capture_note_ids"?: Array<string>;
+      "detail": string;
+      "end_at"?: (string | null);
+      "kind": components["schemas"]["SessionSuggestionKind"];
+      "local_date"?: (string | null);
+      "session_id"?: (string | null);
+      "start_at"?: (string | null);
+      "suggestion_id": string;
+      "title": string;
+    };
+    "SessionSuggestionKind": "close_quiet_session" | "start_session_from_captures" | "start_session_from_booking";
+    "SessionSuggestionReport": {
+      "generated_at": string;
+      "lookback_days": number;
+      "min_captures_per_day": number;
+      "project_id": string;
+      "quiet_threshold_minutes": number;
+      "suggestions"?: Array<components["schemas"]["SessionSuggestion"]>;
+      "timezone": string;
+    };
+    "SessionType": "scientific" | "operational";
+    "SessionUpdate": {
+      "ended_at"?: (string | null);
+      "status"?: components["schemas"]["SessionStatus"];
+    };
     "SoftwareRelease": {
       "revision"?: (string | null);
       "version"?: (string | null);

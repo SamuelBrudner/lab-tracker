@@ -3,6 +3,7 @@ import * as React from "react";
 import {
   contextOptions,
   editableStringFields,
+  isDeterministicDayLog,
   nextPayloadWithTarget,
   operationIntent,
   operationTitle,
@@ -64,7 +65,12 @@ function OperationRow({
         <p className="review-proposal-text">{proposed || operationTitle(operation)}</p>
         {operation.rationale ? (
           <p className="review-because">
-            <span className="subtle">Model inference</span> {operation.rationale}
+            <span className="subtle">
+              {isDeterministicDayLog(changeSet, operation)
+                ? "Deterministic grouping (no model)"
+                : "Model inference"}
+            </span>{" "}
+            {operation.rationale}
             {operation.confidence !== null && operation.confidence !== undefined
               ? ` · ${Math.round(operation.confidence * 100)}% confident`
               : ""}

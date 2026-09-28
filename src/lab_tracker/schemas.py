@@ -1152,6 +1152,21 @@ class SessionCreate(RequestModel):
     project_id: UUID
     session_type: SessionType
     primary_question_id: UUID | None = None
+    started_at: datetime | None = Field(
+        default=None,
+        description=(
+            "When the session began, for a session recorded after the fact (for "
+            "example from a session suggestion). Must include a timezone offset "
+            "and must not be in the future; omitted means now."
+        ),
+    )
+
+    @field_validator("started_at")
+    @classmethod
+    def _aware_started_at(cls, value: datetime | None) -> datetime | None:
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise ValueError("started_at must include a timezone offset")
+        return value
 
 
 class SessionUpdate(PatchRequestModel):

@@ -37,6 +37,7 @@ from lab_tracker.note_text import is_text_content_type
 from lab_tracker.provider_error_redaction import provider_error_message
 from lab_tracker.services import graph_draft_batch_policy as batch_policy
 from lab_tracker.services.base import BaseService, ServiceContext
+from lab_tracker.services.graph_draft_day_log import with_day_log_proposals
 from lab_tracker.services.graph_draft_generation_keys import (
     note_generation_key,
     successor_generation_key,
@@ -653,7 +654,8 @@ class GraphDraftGenerationCoordinator(BaseService):
                 )
                 return self._finish_failed_or_current(change_set, claim.claim_token)
             graph_patch, operations = generated
-            change_set.operations = operations
+            day_log = (operations, self._context.active_repository(), self.patch_validator, owner)
+            change_set.operations = with_day_log_proposals(change_set, batch_notes, *day_log)
             change_set.summary = str(graph_patch.get("summary") or "")
             change_set.uncertain_fields = string_list(
                 graph_patch.get("uncertain_fields")

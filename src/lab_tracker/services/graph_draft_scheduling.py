@@ -177,8 +177,9 @@ class BatchSchedulingCoordinator(BaseService):
     ) -> None:
         """Best-effort deterministic stage run once per claimed batch execution.
 
-        Proposes content-hash and exact-id provenance links for human review;
-        each detector's failure is logged and swallowed, never failing the batch.
+        Proposes content-hash, exact-id, and time-window provenance links for
+        human review; each detector's failure is logged and swallowed, never
+        failing the batch.
         """
 
         if self.provenance_links is None:

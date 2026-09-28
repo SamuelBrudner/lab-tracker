@@ -1,8 +1,9 @@
-"""SQLAlchemy repository for provenance links (content-hash and exact-id proposals)."""
+"""SQLAlchemy repository for provenance links (content-hash, exact-id, time-window)."""
 
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import String, cast, func, literal, or_, select, union_all
@@ -12,6 +13,7 @@ from lab_tracker.db_models import (
     DatasetFileModel,
     DatasetModel,
     NoteModel,
+    NoteTargetModel,
     ProvenanceLinkModel,
 )
 from lab_tracker.models import (
@@ -20,6 +22,7 @@ from lab_tracker.models import (
     EntityRef,
     EntityType,
     Note,
+    NoteStatus,
     ProvenanceLink,
 )
 from lab_tracker.repository import EntityRepository
@@ -196,6 +199,42 @@ class SQLAlchemyProvenanceLinkRepository(EntityRepository[ProvenanceLink]):
             for row in self._session.scalars(stmt):
                 rows_by_id.setdefault(row.note_id, row)
         rows = sorted(rows_by_id.values(), key=lambda row: (as_utc(row.created_at), row.note_id))
+        return SQLAlchemyNoteRepository(self._session).notes_from_rows(rows)
+
+    def list_time_window_candidates(
+        self,
+        project_id: UUID,
+        *,
+        created_since: datetime,
+        excluded_metadata_keys: Sequence[str],
+        origins: Sequence[str],
+    ) -> list[Note]:
+        """Recent unarchived captures that name no session; every filter runs in SQL.
+
+        Bounded by ``created_since`` (the detector's lookback), so a long-lived
+        project costs one recent-window scan, not a full-history one.
+        """
+
+        self._session.flush()
+        session_targeted = select(NoteTargetModel.note_id).where(
+            NoteTargetModel.entity_type == EntityType.SESSION.value
+        )
+        stmt = (
+            select(NoteModel)
+            .where(
+                NoteModel.project_id == str(project_id),
+                NoteModel.created_at >= created_since,
+                NoteModel.status != NoteStatus.ARCHIVED.value,
+                NoteModel.origin.in_(list(origins)),
+                NoteModel.note_id.not_in(session_targeted),
+                *(
+                    NoteModel.note_metadata[key].as_string().is_(None)
+                    for key in excluded_metadata_keys
+                ),
+            )
+            .order_by(NoteModel.created_at, NoteModel.note_id)
+        )
+        rows = list(self._session.scalars(stmt))
         return SQLAlchemyNoteRepository(self._session).notes_from_rows(rows)
 
     def query(
