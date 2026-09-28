@@ -444,6 +444,7 @@ def test_setup_autotrack_jupyter_manages_the_server_config_file(
     preview = json.loads(capsys.readouterr().out)
     assert (preview["target"], preview["action"]) == ("jupyter", "would-install")
     assert preview["hook"] == "lab_tracker_client.notebook_capture.post_save_hook"
+    assert preview["content"] == notebook_module.jupyter_hook_source()
     assert not config_file.exists()
 
     lt_cli.main(["setup", "autotrack", "--jupyter", "--yes"])

@@ -730,6 +730,7 @@ def install_jupyter_hook(*, dry_run: bool = False, uninstall: bool = False) -> d
         if dry_run
         else ("updated" if status["installed"] else "installed")
     )
+    payload["content"] = jupyter_hook_source()
     payload["restart_required"] = True
     if not dry_run:
         path.parent.mkdir(parents=True, exist_ok=True)
