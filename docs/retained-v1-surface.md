@@ -214,8 +214,23 @@ research record:
     [server-capture-channels.md](server-capture-channels.md).
   - **New deterministic proposals.** Each batch execution also runs a
     worktree-tree detector (`basis: worktree_tree_match`, a capture to the
-    earliest note whose `repo_git_tree` is the same tree), and `photo_session_id`
-    joins the exact-id detector's session keys. Both write PROPOSED links only.
+    earliest note whose `repo_git_tree` is the same tree) and a time-window
+    detector (`basis: time_window_match`, a recent capture that names no
+    session, made by `format_acquired_at` or else its observed time inside
+    exactly one session window run by the capture's own author when both
+    authors are known). `photo_session_id` joins the exact-id detector's
+    session keys. All of them write PROPOSED links only, and a declined pair
+    never returns.
+  - **Sessions as the clock.** `GET /projects/{project_id}/session-suggestions`
+    computes read-only suggestions: close a quiet session, record a
+    sessionless bench day (offered to the captures' own author), or cover an
+    instrument booking. A person applies one from the Session suggestions card
+    through the ordinary session and note-target routes; `POST /sessions`
+    accepts a back-dated `started_at`. Batch drafts append one deterministic,
+    model-free day-log `create_note` proposal per session with three or more
+    short bench captures; it is recorded in `context_packet.day_logs` and
+    committed with `origin_model=deterministic_day_log`, and each capture's own
+    proposals stay available. See [session-suggestions.md](session-suggestions.md).
 - Package-pinned code-facing idiom teaching rendered from one generator into
   consent-gated managed agent surfaces, with the advisory
   `lab-tracker://code-conventions` MCP resource treating the package text as
