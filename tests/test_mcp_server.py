@@ -172,6 +172,16 @@ def test_fastmcp_tool_annotations_mark_reads_and_writes_for_copilot() -> None:
     assert refactor_history.annotations.readOnlyHint is True
     assert "lab_tracker_list_question_refactors" in {tool.__name__ for tool in READ_TOOLS}
     assert "lab_tracker_list_question_refactors" not in {tool.__name__ for tool in WRITE_TOOLS}
+    commit_draft = tools_by_name["lab_tracker_commit_graph_draft"]
+    assert commit_draft.annotations is not None
+    assert commit_draft.annotations.readOnlyHint is False
+    assert commit_draft.annotations.destructiveHint is True
+    accept_draft = tools_by_name["lab_tracker_accept_graph_draft_operations"]
+    assert accept_draft.annotations is not None
+    assert accept_draft.annotations.destructiveHint is False
+    get_draft = tools_by_name["lab_tracker_get_graph_draft"]
+    assert get_draft.annotations is not None
+    assert get_draft.annotations.readOnlyHint is True
 
     for graph_tool_name in (
         "lab_tracker_graph_overview",
@@ -3078,6 +3088,80 @@ def test_client_create_calls_forward_origin_only_when_given() -> None:
     assert len(bodies) == 5
 
 
+def test_accept_graph_draft_operations_tool_reports_each_outcome(monkeypatch) -> None:
+    from lab_tracker.mcp_tools import write as write_tools
+
+    change_set_id = "22222222-2222-4222-8222-222222222222"
+    admitted = "33333333-3333-4333-8333-333333333333"
+    refused = "44444444-4444-4444-8444-444444444444"
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith(f"/operations/{admitted}"):
+            return _json_response(200, {"data": {"change_set_id": change_set_id, "n": 1}})
+        if request.url.path.endswith(f"/operations/{refused}"):
+            return _json_response(
+                403,
+                {
+                    "error": {
+                        "code": "forbidden",
+                        "message": "does not admit suggest_new_question; a person must review",
+                    }
+                },
+            )
+        if request.url.path.endswith("/accept-all"):
+            return _json_response(200, {"data": {"change_set_id": change_set_id, "all": True}})
+        return _json_response(404, {"error": {"message": "not found"}})
+
+    # Each tool call opens and closes its own client, as client_from_env does.
+    monkeypatch.setattr(
+        write_tools,
+        "client_from_env",
+        lambda: mcp_server.LabTrackerAPIClient(
+            mcp_server.MCPSettings(base_url="http://testserver"),
+            transport=httpx.MockTransport(handler),
+        ),
+    )
+
+    # A refused id never hides an accept that already persisted.
+    mixed = write_tools.lab_tracker_accept_graph_draft_operations(
+        change_set_id, [admitted, refused]
+    )
+    assert mixed["data"]["accepted"] == [admitted]
+    [problem] = mixed["data"]["refused"]
+    assert problem["operation_id"] == refused
+    assert problem["status_code"] == 403
+    assert "does not admit" in problem["message"]
+    assert mixed["data"]["change_set"] == {"change_set_id": change_set_id, "n": 1}
+    assert mixed["next_action"]["tool"] == "lab_tracker_commit_graph_draft"
+    assert [request.method for request in requests] == ["PATCH", "PATCH"]
+    assert json.loads(requests[0].content) == {"status": "accepted"}
+
+    # An empty list is an error, never a silent accept-all.
+    empty = write_tools.lab_tracker_accept_graph_draft_operations(change_set_id, [])
+    assert empty["error"]["code"] == "validation_error"
+    assert "at least one operation" in empty["error"]["message"]
+    assert len(requests) == 2
+
+    # Omitting the list is the explicit accept-all.
+    everything = write_tools.lab_tracker_accept_graph_draft_operations(change_set_id)
+    assert everything["data"] == {"change_set_id": change_set_id, "all": True}
+    assert requests[-1].method == "POST"
+    assert requests[-1].url.path == f"/graph-drafts/{change_set_id}/accept-all"
+
+
+def test_draft_tool_hints_steer_a_curate_token_through_the_queue() -> None:
+    tools = asyncio.run(mcp_server.server.list_tools())
+    tools_by_name = {tool.name: tool for tool in tools}
+    listing = tools_by_name["lab_tracker_list_my_drafts"].description or ""
+    assert "never accept or commit" in listing
+    assert "delegated curation" in listing
+    run_batch = tools_by_name["lab_tracker_run_graph_draft_batch"].description or ""
+    assert "pending" in run_batch
+    assert "lab_tracker_list_my_drafts" in run_batch
+
+
 def test_request_graph_draft_tool_posts_and_hints_review_queue(monkeypatch) -> None:
     from lab_tracker.mcp_tools import write as write_tools
 
@@ -3174,5 +3258,5 @@ def test_list_my_drafts_tool_calls_batches_mine(monkeypatch) -> None:
         "offset": "0",
     }
     assert payload["data"] == []
-    assert payload["next_action"]["tool"] is None
+    assert payload["next_action"]["tool"] == "lab_tracker_get_graph_draft"
     assert "person's action" in payload["next_action"]["reason"]

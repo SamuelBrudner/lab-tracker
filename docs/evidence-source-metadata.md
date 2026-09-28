@@ -61,7 +61,8 @@ configured import root.
 `lt import-folder` imports files as staged evidence notes that record where each
 file came from. Imported notes never become canonical graph records on import,
 and graph changes are never committed automatically — humans review the staged
-notes, and human review remains the commit boundary.
+notes, and human review remains the commit boundary unless the project owner
+has granted delegated curation ([delegated-curation.md](delegated-curation.md)).
 
 Shipped retained-v1 batch graph drafting can propose reviewable graph changes
 from staged notes, either on the configured cadence or from a user-triggered run.

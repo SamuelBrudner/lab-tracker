@@ -60,12 +60,29 @@ def actor_user_fk(
     actor: AuthContext | None,
     repository: UserExistenceReader,
 ) -> UUID | None:
-    if actor is None or actor.user_id == LOCAL_AUTH_USER_ID:
+    if actor is None:
+        return None
+    return user_fk_for(actor.user_id, repository)
+
+
+def user_fk_for(
+    user_id: UUID | str | None,
+    repository: UserExistenceReader,
+) -> UUID | None:
+    """The users-table key for an attribution id, or None when it names no user."""
+
+    if user_id is None:
+        return None
+    try:
+        resolved = user_id if isinstance(user_id, UUID) else UUID(str(user_id))
+    except ValueError:
+        return None
+    if resolved == LOCAL_AUTH_USER_ID:
         return None
     user_exists = getattr(repository, "user_exists", None)
-    if not callable(user_exists) or not user_exists(actor.user_id):
+    if not callable(user_exists) or not user_exists(resolved):
         return None
-    return actor.user_id
+    return resolved
 
 
 def ensure_non_empty(value: str, field_name: str) -> None:

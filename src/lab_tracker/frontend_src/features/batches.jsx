@@ -3,6 +3,7 @@ import * as React from "react";
 import { apiListRequest, apiRequest, buildApiPath } from "../shared/api.js";
 import { formatDate } from "../shared/formatters.js";
 import { DailyReviewScheduleForm } from "./daily-review-schedule.jsx";
+import { DelegatedCurationForm } from "./delegated-curation.jsx";
 
 const { useCallback, useEffect, useMemo, useRef, useState } = React;
 
@@ -503,6 +504,18 @@ function BatchReviewPage({
             setFlash={setFlash}
             onRunNow={runNow}
           />
+
+          {canManageProject && selectedProjectId ? (
+            <div className="stack">
+              <h3>What AI may apply on its own</h3>
+              <DelegatedCurationForm
+                token={token}
+                projectId={selectedProjectId}
+                setBusy={setBusy}
+                setFlash={setFlash}
+              />
+            </div>
+          ) : null}
 
           <div className="stack">
             <h3>Recent Runs</h3>

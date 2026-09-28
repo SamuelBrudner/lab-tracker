@@ -51,6 +51,17 @@ Only interactive human sessions operate this gate at all: a delegated service
 token or an automation principal may draft but can never accept or commit. See
 the human-commit gate in `auth.py` / `project_authorization.py`.
 
+The one exception is **delegated curation**
+([delegated-curation.md](delegated-curation.md)): a project owner may grant,
+at an interactive session and with an explicit acknowledgement, that the
+drafting pass and `graph_curate`-scoped tokens apply a bounded class of
+proposals on their own — links only under `organize`, every valid proposal
+except a clarification request under `full`. The grant relaxes *who* may
+accept and commit, never *how*: those principals may only accept, a commit
+still needs owner authority and every proposal decided, and each accept is
+recorded as `auto_accepted` against the person of record rather than as a
+review that happened.
+
 ## What is deliberately not enforced
 
 - **A mandatory review step on human writes.** Deferred; would resurrect the

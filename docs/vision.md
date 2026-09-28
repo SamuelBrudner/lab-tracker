@@ -108,7 +108,8 @@ edge:
   notes. Large outputs stay put; only paths, hashes, and summaries are stored.
 - **AI agents via MCP** (shipped) and **git post-commit / CI hooks** (shipped):
   agents and analysis repositories stage evidence and can request a draft, but
-  never commit.
+  never commit — except under a project owner's delegated-curation grant, with
+  a token minted for it ([delegated-curation.md](delegated-curation.md)).
 
 The organizing metaphor is "save your own memory," not "submit metadata." No
 capture path asks the scientist to speak ontology or pick a question up front.
@@ -138,8 +139,10 @@ request_ rather than a fabricated finding.
 The scientist works **one review queue**: accept, edit, reject, or defer each
 proposal, or "revise with AI" by feeding back typed, dictated, or image
 feedback. Accepted operations commit through the same validation as manual
-entry. Hard guarantees: nothing commits automatically, proposals referencing
-unknown entities are rejected, and human approval is always required. The
+entry. Hard guarantees: proposals referencing unknown entities are rejected,
+and nothing commits without a person's approval — either at review, or in
+advance through a project owner's delegated-curation grant, which is recorded
+on every change it produces ([delegated-curation.md](delegated-curation.md)). The
 review/commit lifecycle mirrors code review (submit → request changes / reject →
 commit), but the entity under review is the _AI's interpretation of your lab
 notes_, not a colleague's data.
@@ -228,9 +231,11 @@ own provenance. Every accepted operation records _how_ it was accepted —
 — so a confident, plausible suggestion clicked through in a batch is never, later,
 indistinguishable from an edge a person authored and scrutinized. The point is
 that a rubber-stamped guess can never be laundered into a grant as if it were
-reviewed. `auto_accepted` exists in the vocabulary as reserved runway for a future
-non-interactive acceptance, but no path exercises it today. See
-[curation-states.md](curation-states.md).
+reviewed. `auto_accepted` is recorded by exactly one path: a project owner's
+delegated-curation grant, under which the drafting pass or a `graph_curate`
+token applies the proposals the grant admits without review. See
+[curation-states.md](curation-states.md) and
+[delegated-curation.md](delegated-curation.md).
 
 ## The human-commit gate
 
@@ -248,6 +253,15 @@ at both the service and repository layers, with tests covering the `SYSTEM`
 principal and service tokens. The convention-and-policy layer (read-only tokens
 by default, admin-only batch triggering, policy text propagated to every agent)
 remains on top of the structural gate, not instead of it.
+
+**Status (2026-09-28):** the gate gained its one deliberate exception,
+delegated curation. `require_interactive` still refuses every non-interactive
+principal at accept, bulk-accept, and commit unless the project owner has
+granted delegation for that kind of proposal, the principal is the drafting
+pass or a `graph_curate` token, and (for a commit) nothing is left for a
+person; the repository-layer refusal of `auto_accepted` is gone because that
+mode is now the honest record of a delegated accept. The default stays
+human-gated: a project with no grant behaves exactly as before.
 
 ## The endgame: the research object as the artifact
 

@@ -101,7 +101,8 @@ checkpoint, align questions, review proposals, or commit them. A paired personal
 device can read the orientation and make the separate forward capture, but its
 advertised onboarding capabilities remain capture-only. Service,
 system-automation, and any other non-interactive principals cannot make the
-review or commit decisions.
+review or commit decisions; a project's delegated-curation grant never
+applies to onboarding proposals.
 
 Provider failure never discards the checkpoint or reports a draft as ready.
 The manual alignment remains available. Repeated requests reuse the same

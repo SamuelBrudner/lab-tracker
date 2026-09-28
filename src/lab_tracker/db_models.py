@@ -801,6 +801,15 @@ class GraphDraftBatchSettingsModel(Base):
     )
     external_provider_acknowledged_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
     external_provider_acknowledged_by: Mapped[str | None] = mapped_column(String(255))
+    # Stored as the DelegatedCurationPolicy value; the mapper converts.
+    delegated_curation: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="off",
+        server_default="off",
+    )
+    delegated_curation_granted_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    delegated_curation_granted_by: Mapped[str | None] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         UtcDateTime,

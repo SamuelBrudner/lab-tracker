@@ -13,8 +13,13 @@ from lab_tracker.services.experiment_service import ExperimentService
 from lab_tracker.services.exploration_service import ExplorationService
 from lab_tracker.services.goal_service import GoalService
 from lab_tracker.services.graph_draft_applier import GraphPatchApplier
+from lab_tracker.services.graph_draft_batch_reservation import (
+    GraphDraftBatchReservationCoordinator,
+)
+from lab_tracker.services.graph_draft_batch_settings import BatchSettingsCoordinator
 from lab_tracker.services.graph_draft_commit import TransactionalDraftCommitCoordinator
 from lab_tracker.services.graph_draft_context import GraphContextBuilder
+from lab_tracker.services.graph_draft_delegation import DelegatedCurationCoordinator
 from lab_tracker.services.graph_draft_generation import GraphDraftGenerationCoordinator
 from lab_tracker.services.graph_draft_records import GraphDraftRecords
 from lab_tracker.services.graph_draft_review import GraphDraftReviewCoordinator
@@ -42,6 +47,7 @@ __all__ = [
     "ClaimService",
     "DataStoreService",
     "DatasetService",
+    "DelegatedCurationCoordinator",
     "DraftQualityService",
     "EntityVersionService",
     "EvidenceBundleService",
@@ -49,6 +55,7 @@ __all__ = [
     "ExplorationService",
     "GoalService",
     "GraphContextBuilder",
+    "GraphDraftBatchReservationCoordinator",
     "GraphDraftGenerationCoordinator",
     "GraphDraftRecords",
     "GraphDraftReviewCoordinator",
@@ -71,5 +78,6 @@ __all__ = [
     "VisualizationService",
     "SupervisionService",
     "BatchSchedulingCoordinator",
+    "BatchSettingsCoordinator",
     "TransactionalDraftCommitCoordinator",
 ]

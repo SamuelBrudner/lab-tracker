@@ -4,7 +4,9 @@ Status: **DESIGN**; P0a/P0b/P0c/P1 are implemented in this branch.
 Audience: repo maintainer.
 
 Scope anchor: `docs/retained-v1-surface.md` wins over README prose. Product
-guardrail (non-negotiable): **"AI can suggest; only a person commits."**
+guardrail (non-negotiable): **"AI can suggest; only a person commits."** (Its
+one owner-granted exception, delegated curation, came later; see
+[delegated-curation.md](delegated-curation.md).)
 
 ## Decisions that scope this design
 

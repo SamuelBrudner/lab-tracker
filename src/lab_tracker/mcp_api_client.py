@@ -41,6 +41,7 @@ from lab_tracker.models import (
     GoalLinkStatus,
     GoalStatus,
     GoalType,
+    GraphChangeOperationStatus,
     GraphChangeSetStatus,
     GraphDraftMode,
     NoteMetadataScalar,
@@ -1206,6 +1207,70 @@ class LabTrackerAPIClient:
             _api_path("notes", _uuid_path_id(note_id, "note_id"), "graph-drafts"),
             json_payload={
                 "mode": _validate_note_graph_draft_mode(mode),
+                "user_hint": user_hint,
+            },
+        )
+
+    def get_graph_draft(self, change_set_id: str) -> JsonObject:
+        """Read one graph draft with its proposed operations."""
+        return self._request(
+            "GET",
+            _api_path("graph-drafts", _uuid_path_id(change_set_id, "change_set_id")),
+        )
+
+    def accept_graph_draft_operation(
+        self,
+        *,
+        change_set_id: str,
+        operation_id: str,
+    ) -> JsonObject:
+        """Accept one proposed operation (PATCH status=accepted; nothing else)."""
+        return self._request(
+            "PATCH",
+            _api_path(
+                "graph-drafts",
+                _uuid_path_id(change_set_id, "change_set_id"),
+                "operations",
+                _uuid_path_id(operation_id, "operation_id"),
+            ),
+            json_payload={"status": GraphChangeOperationStatus.ACCEPTED.value},
+        )
+
+    def accept_all_graph_draft_operations(self, change_set_id: str) -> JsonObject:
+        """Accept every still-proposed, valid operation the server admits."""
+        return self._request(
+            "POST",
+            _api_path(
+                "graph-drafts", _uuid_path_id(change_set_id, "change_set_id"), "accept-all"
+            ),
+        )
+
+    def commit_graph_draft(self, *, change_set_id: str, message: str) -> JsonObject:
+        """Commit a draft's accepted operations into the graph."""
+        cleaned = message.strip() if isinstance(message, str) else ""
+        if not cleaned:
+            raise LabTrackerAPIValidationError(
+                "message must be a non-empty commit message.",
+                code="validation_error",
+            )
+        return self._request(
+            "POST",
+            _api_path("graph-drafts", _uuid_path_id(change_set_id, "change_set_id"), "commit"),
+            json_payload={"message": cleaned},
+        )
+
+    def run_graph_draft_batch(
+        self,
+        *,
+        project_id: str,
+        user_hint: str | None = None,
+    ) -> JsonObject:
+        """Draft the project's staged notes now (POST /batches/run-now)."""
+        return self._request(
+            "POST",
+            "/batches/run-now",
+            json_payload={
+                "project_id": _uuid_path_id(project_id, "project_id"),
                 "user_hint": user_hint,
             },
         )

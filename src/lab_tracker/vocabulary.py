@@ -155,7 +155,9 @@ CONCEPT_SCHEMES: tuple[ConceptScheme, ...] = (
     ),
     ConceptScheme(
         "acceptanceMode",
-        "How a person accepted the AI-proposed operation that produced a record.",
+        "How the AI-proposed operation that produced a record was accepted: by a "
+        "person one at a time, by a person over the whole draft, or automatically "
+        "under a project owner's delegated-curation grant.",
         ("human_selected", "bulk_accepted", "auto_accepted"),
     ),
     ConceptScheme(
@@ -820,14 +822,18 @@ _PROPERTY_TERMS: tuple[Term, ...] = (
     Term(
         "acceptanceMode",
         "lab:acceptanceMode",
-        "How a person accepted the AI-proposed operation that produced this record "
-        "(for example human_selected, bulk_accepted, or auto_accepted).",
+        "How the AI-proposed operation that produced this record was accepted: by a "
+        "person one at a time, by a person over the whole draft, or automatically "
+        "under a project owner's delegated-curation grant (for example "
+        "human_selected, bulk_accepted, or auto_accepted).",
         emitters=("_apply_curation_provenance",),
     ),
     Term(
         "acceptedBy",
         "lab:acceptedBy",
-        "The person who accepted the AI-proposed operation that produced this record.",
+        "The person who accepted the AI-proposed operation that produced this record; "
+        "for an auto_accepted operation, the person whose credential or grant it "
+        "was applied under.",
         is_id=True,
         range="prov:Person",
         emitters=("_apply_curation_provenance",),

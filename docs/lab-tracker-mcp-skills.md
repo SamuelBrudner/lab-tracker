@@ -252,9 +252,25 @@ path and rejected. Whatever the declared origin, every write made with an
 `lab_tracker_request_graph_draft` asks the server-side model to propose graph
 changes from a staged note (`POST /notes/{note_id}/graph-drafts`, mode
 `graph_context` or `image_only`, optional `user_hint`); the proposal lands in
-the Daily Review queue for a person. `lab_tracker_list_my_drafts` lists that
-personal queue (`GET /batches?mine=true`). Neither tool — and no other — can
-accept or commit a draft.
+the Daily Review queue for a person, unless the project owner's
+delegated-curation grant lets the server apply it first.
+`lab_tracker_run_graph_draft_batch` drafts a project's staged notes now (`POST
+/batches/run-now`) under the same rule. `lab_tracker_list_my_drafts` lists the
+personal queue (`GET /batches?mine=true`) and `lab_tracker_get_graph_draft`
+reads one draft with its operations (`GET /graph-drafts/{change_set_id}`).
+None of these tools accepts or commits a draft itself.
+
+`lab_tracker_accept_graph_draft_operations` and `lab_tracker_commit_graph_draft`
+are the delegated-curation tools. The server admits them only for a token
+minted at the **Curate graph (delegated)** level (scope `graph_curate`) in a
+project whose owner turned delegated curation on, and only for the proposals
+that grant admits: `organize` covers the link proposals (payloads that carry
+nothing but the link), `full` every valid
+proposal except a clarification request. Accept-all skips what the grant does
+not cover and leaves it proposed; a commit is refused while any proposal is
+undecided, and needs owner membership. Every accept is recorded as
+`auto_accepted`. With the grant off, or any other token, both tools return
+`403`. See [delegated-curation.md](delegated-curation.md).
 
 ## Evidence Authoring
 

@@ -64,8 +64,11 @@ The core loop is deliberately small:
    individual operations, or ask the model to revise the draft. A project owner
    commits the accepted operations. **No AI-proposed graph change is committed
    until a person accepts it**, and non-interactive service or automation
-   principals cannot accept, bulk-accept, or commit. Acceptance provenance
-   distinguishes individually selected operations from bulk acceptance.
+   principals cannot accept, bulk-accept, or commit — unless the project owner
+   turns on delegated curation, which lets the drafting pass (and agents with
+   a Curate graph token) apply a bounded class of proposals on their own,
+   each recorded as `auto_accepted`. Acceptance provenance distinguishes
+   individually selected operations from bulk and delegated acceptance.
 4. **Retrieve and export.** Search the record, inspect the project graph, ask
    an MCP-capable assistant for bounded decision context, or export PROV-O /
    JSON-LD provenance and plaintext sidecars that can travel with the data.

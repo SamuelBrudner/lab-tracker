@@ -74,7 +74,12 @@ MCP_SERVER_INSTRUCTIONS = " ".join(
         "Staged evidence flows through the human-gated proposal workflow: the "
         "server drafts graph change proposals from captures, and a person "
         "accepts, edits, or rejects each one. You may stage evidence and, when "
-        "the user asks, trigger or request drafts; never accept or commit them.",
+        "the user asks, trigger or request drafts; never accept or commit them "
+        "yourself, except through lab_tracker_accept_graph_draft_operations and "
+        "lab_tracker_commit_graph_draft when the user asks and the server admits "
+        "it: a token minted at the Curate graph (delegated) level, in a project "
+        "whose owner turned delegated curation on, for the proposals that grant "
+        "covers. Every such accept is recorded as auto_accepted.",
         "Use lab_tracker_get_decision_context, or lab_tracker_next_questions when "
         "the user asks what research thread to advance.",
         "For remote graph navigation, use lab_tracker_graph_overview, then "
@@ -128,7 +133,12 @@ def managed_agent_activation_block() -> str:
             "change proposals (the daily review) that a person accepts, edits, or "
             "rejects in the Lab Tracker app. You may stage evidence and, when the "
             "user asks, trigger or request drafts; never accept, bulk-accept, or "
-            "commit them.",
+            "commit them yourself. The one exception is delegated curation: when "
+            "the user asks, `lab_tracker_accept_graph_draft_operations` and "
+            "`lab_tracker_commit_graph_draft` apply proposals the server admits "
+            "for a token minted at the Curate graph (delegated) level in a "
+            "project whose owner turned delegated curation on; the server refuses "
+            "everything else, and every such accept is recorded as auto_accepted.",
             "",
             COMMIT_CAPTURE_RECOVERY_POLICY,
             "",

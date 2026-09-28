@@ -208,6 +208,14 @@ function OperationRow({
       </div>
       <aside className="review-proposal-actions">
         <span className={statusClass(operation.status)}>{operation.status}</span>
+        {operation.acceptance_mode === "auto_accepted" ? (
+          <span
+            className="pill review-pending"
+            title="Applied under the project owner's delegated-curation grant; nobody reviewed it."
+          >
+            auto-accepted
+          </span>
+        ) : null}
         {operation.deferred_at ? (
           <span className="pill review-pending" title={`Deferred ${operation.deferred_at}`}>
             deferred

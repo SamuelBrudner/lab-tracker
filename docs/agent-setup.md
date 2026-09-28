@@ -10,7 +10,13 @@ commits.** Agents and schedulers *trigger* drafting, the model *proposes*
 graph changes, and a human accepts, edits, or rejects every proposal in the
 review queue. The gate is structural, not just policy — non-interactive
 principals (the built-in scheduler, service tokens) cannot accept,
-bulk-accept, or commit on any code path. See
+bulk-accept, or commit on any code path. The one exception is a grant a
+project owner makes on purpose: **delegated curation** lets the server's own
+drafting pass, and agents holding a **Curate graph (delegated)** token, apply
+the proposals the grant admits without waiting for review, each recorded as
+`auto_accepted` so the graph never mistakes it for a considered review. It
+is off until an owner turns it on. See
+[`delegated-curation.md`](delegated-curation.md),
 [`review-and-commit-model.md`](review-and-commit-model.md) and
 [`vision.md`](vision.md) for why.
 
@@ -134,10 +140,9 @@ stage or draft anything.
 
 For figure capture, repository commit hooks, watch folders, or other staged
 evidence, pick **Read + stage evidence**. Its API scope is `stage_evidence`
-(`POST /auth/tokens` with `"scope": "stage_evidence"`); the Agents page maps
-the level to that scope once the frontend move lands, and until then the level
-mints an `all`-scope editor token. The scope is an exact allow-list applied
-before routing, plus two body-level rules the routes enforce:
+(`POST /auth/tokens` with `"scope": "stage_evidence"`), which the Agents page
+sets for that level. The scope is an exact allow-list applied before routing,
+plus two body-level rules the routes enforce:
 
 - every read (`GET`, `HEAD`, `OPTIONS`) and the two semantic-read POSTs,
   `/assistant/decision-context` and `/external-artifacts/resolve`;
@@ -156,9 +161,27 @@ before routing, plus two body-level rules the routes enforce:
 The writes above additionally require a write-enabled token with the editor or
 admin role; a read-only or viewer token keeps only the reads. It is the
 least-privilege writable choice: it can sync staged captures and request
-drafts, it cannot create a committed record at all, and non-interactive
-principals remain structurally unable to accept or commit a draft. A read-only
-token cannot drain a capture outbox.
+drafts, it cannot create a committed record at all, and outside a
+delegated-curation grant non-interactive principals remain structurally unable
+to accept or commit a draft. A read-only token cannot drain a capture outbox.
+
+For an agent that should also *organize* the graph on its own, pick
+**Curate graph (delegated)**. Its API scope is `graph_curate`: everything
+`stage_evidence` allows, plus `POST /batches/run-now`, accepting proposals
+(`PATCH /graph-drafts/{id}/operations/{op}` with `status=accepted`, `POST
+/graph-drafts/{id}/accept-all`), and `POST /graph-drafts/{id}/commit`. The
+routes are open to the token; whether an accept or commit goes through is
+decided per proposal against the project's delegated-curation grant (see
+[`delegated-curation.md`](delegated-curation.md)): with the grant off every
+accept and commit is refused with `403`, `organize` admits the link
+proposals whose payload carries nothing but the link, `full` admits every
+valid proposal except a clarification request. The ordinary review rules
+still apply first: the token's user must be the draft's author or assigned
+reviewer (or a global admin) to touch it at all.
+The token's user must be a project owner to commit, may only *accept* (never
+edit, reject, or defer), and every accept it makes is recorded as
+`auto_accepted` against that user. Turning the grant on is the owner's act in
+the app; the token cannot widen it.
 
 When a commit made during an agent task reports a Lab Tracker timeout, sync
 failure, or queued event, the agent must treat the outcome as ambiguous because
@@ -260,7 +283,10 @@ OpenAI key locally for Lab Tracker.
 
 Every scaffolded instruction file carries the same policy, whatever the vendor: consult
 `lab_tracker_get_decision_context` before research-facing decisions; stage
-evidence and request drafts only when asked; never accept or commit a draft.
+evidence and request drafts only when asked; never accept or commit a draft
+yourself, except through the delegated-curation tools when the user asks and
+the server admits it (a Curate graph token in a project whose owner granted
+delegation).
 Analysis repos can also send evidence automatically on every commit — see
 [analysis graph drafts from CI and git hooks](analysis-graph-drafts-ci.md).
 
@@ -287,9 +313,10 @@ Analysis repos can also send evidence automatically on every commit — see
 
 | Can | Cannot |
 | --- | --- |
-| Read decision context, search, list, and walk the graph | Accept, bulk-accept, or commit any draft (structurally blocked for non-interactive principals) |
-| Stage evidence notes and figures | With a `stage_evidence` token: create a dataset, analysis, claim, question, goal, or visualization, commit a note, or commit an evidence bundle — the scope has no route for it |
-| Trigger or request drafts when the user asks (`lab_tracker_request_graph_draft`), and list their own review queue (`lab_tracker_list_my_drafts`) | Bypass review — every accepted operation records *how* it was accepted ([curation states](curation-states.md)) |
+| Read decision context, search, list, and walk the graph | Accept, bulk-accept, or commit any draft (structurally blocked for non-interactive principals), except a `graph_curate` token acting under the project owner's delegated-curation grant |
+| Stage evidence notes and figures | With a `stage_evidence` or `graph_curate` token: create a dataset, analysis, claim, question, goal, or visualization, commit a note, or commit an evidence bundle — the scope has no route for it |
+| Trigger or request drafts when the user asks (`lab_tracker_request_graph_draft`, `lab_tracker_run_graph_draft_batch`), list their own review queue (`lab_tracker_list_my_drafts`), and read a draft (`lab_tracker_get_graph_draft`) | Bypass review — every accepted operation records *how* it was accepted ([curation states](curation-states.md)); a delegated accept is `auto_accepted`, never `human_selected` |
+| With a `graph_curate` token in a project whose owner delegated curation: accept the proposals the grant admits (`lab_tracker_accept_graph_draft_operations`) and commit once nothing is left for a person (`lab_tracker_commit_graph_draft`) | Edit, reject, defer, or submit a proposal, review member-onboarding drafts, or widen the grant — all of these stay a person's acts |
 | With an `all`-scope writable token: create canonical records directly, declaring `origin` as `user` or `ai_executed` | Write anonymously: every service-token write stamps the token label as `origin_provider` |
 
 The record stays honest about the division of labor: every entity carries an

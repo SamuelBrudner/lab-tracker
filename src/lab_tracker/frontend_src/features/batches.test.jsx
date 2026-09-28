@@ -374,6 +374,81 @@ describe("BatchReviewPage", () => {
     ).toBeInTheDocument();
   });
 
+  it("shows the owner what AI may apply on its own, loaded from the project default", async () => {
+    installFetchMock([
+      {
+        match: /^\/batches(\/runs)?\?project_id=project-1&/,
+        response: apiResponse([]),
+      },
+      { match: /^\/graph-drafts\?/, response: apiResponse([]) },
+      { match: /^\/projects\/project-1\/coverage/, response: apiResponse({ capture_sources: [] }) },
+      {
+        match: "/projects/project-1/graph-draft-batch-settings",
+        response: apiResponse({
+          cadence_minutes: 1440,
+          enabled: false,
+          external_context_policy: "own_notes_only",
+          project_id: "project-1",
+          review_email_available: false,
+          run_at_local_time: "18:00",
+          settings_id: "settings-1",
+          timezone_name: "America/New_York",
+          user_id: "reviewer-1",
+        }),
+      },
+      {
+        match: "/projects/project-1/graph-draft-batch-settings/project-default",
+        response: apiResponse({
+          delegated_curation: "organize",
+          delegated_curation_granted_at: "2026-09-01T09:00:00Z",
+          delegated_curation_granted_by: "owner-1",
+          project_id: "project-1",
+          settings_id: "settings-default",
+          user_id: null,
+        }),
+      },
+    ]);
+
+    const { rerender } = render(
+      <BatchReviewPage
+        token="token-1"
+        projects={[{ name: "Project One", project_id: "project-1" }]}
+        selectedProjectId="project-1"
+        onSelectedProjectChange={vi.fn()}
+        navigate={vi.fn()}
+        canManageGraph={true}
+        canManageProject={true}
+        setBusy={vi.fn()}
+        setFlash={vi.fn()}
+      />
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "What AI may apply on its own" })
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByLabelText("Delegated curation")).toHaveValue("organize")
+    );
+    expect(screen.getByText(/^Granted /)).toBeInTheDocument();
+
+    rerender(
+      <BatchReviewPage
+        token="token-1"
+        projects={[{ name: "Project One", project_id: "project-1" }]}
+        selectedProjectId="project-1"
+        onSelectedProjectChange={vi.fn()}
+        navigate={vi.fn()}
+        canManageGraph={true}
+        canManageProject={false}
+        setBusy={vi.fn()}
+        setFlash={vi.fn()}
+      />
+    );
+    expect(
+      screen.queryByRole("heading", { name: "What AI may apply on its own" })
+    ).not.toBeInTheDocument();
+  });
+
   it("saves cadence as the reviewer's personal run-due settings", async () => {
     let settingsBody = null;
     const fetchMock = installFetchMock([

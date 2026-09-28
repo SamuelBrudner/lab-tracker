@@ -123,8 +123,8 @@ ORIGIN_PROVIDER_MAX_LENGTH = 80
 
 
 def ensure_scope_allows_note_status(actor: AuthContext, status: NoteStatus) -> None:
-    """Body-level gate: a stage_evidence token may only stage notes."""
-    if actor.is_stage_evidence_scoped and status not in STAGE_EVIDENCE_NOTE_STATUSES:
+    """Body-level gate: a stage_evidence or graph_curate token may only stage notes."""
+    if actor.is_staged_capture_scoped and status not in STAGE_EVIDENCE_NOTE_STATUSES:
         raise ServiceScopeDeniedError(
             "This token may only stage notes; committing requires a person "
             "or an all-scope token."
@@ -132,8 +132,8 @@ def ensure_scope_allows_note_status(actor: AuthContext, status: NoteStatus) -> N
 
 
 def ensure_scope_allows_evidence_bundle(actor: AuthContext, *, dry_run: bool) -> None:
-    """Body-level gate: a stage_evidence token may only preview evidence bundles."""
-    if actor.is_stage_evidence_scoped and not dry_run:
+    """Body-level gate: a stage_evidence or graph_curate token may only preview bundles."""
+    if actor.is_staged_capture_scoped and not dry_run:
         raise ServiceScopeDeniedError(
             "This token may only preview evidence bundles (dry_run=true)."
         )

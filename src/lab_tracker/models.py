@@ -538,6 +538,24 @@ class ExternalContextPolicy(str, Enum):
     PROJECT_NOTES = "project_notes"
 
 
+class DelegatedCurationPolicy(str, Enum):
+    """How much of its own drafting a project lets AI apply without review.
+
+    A project owner grants this on the project-default batch settings row, at
+    an interactive session and with an explicit acknowledgement. It is the one
+    path that exercises ``AcceptanceMode.AUTO_ACCEPTED``: under ``ORGANIZE``
+    the drafting pass and ``graph_curate``-scoped agent tokens may accept and
+    commit the proposals that only wire existing records together (note links
+    to questions, sessions, datasets, analyses; node links to goals); under
+    ``FULL`` every valid proposal except a clarification request. ``OFF`` keeps
+    every proposal human-gated.
+    """
+
+    OFF = "off"
+    ORGANIZE = "organize"
+    FULL = "full"
+
+
 class _DomainModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -935,6 +953,11 @@ class GraphDraftBatchSettings(_DomainModel):
     external_context_policy: ExternalContextPolicy = ExternalContextPolicy.OWN_NOTES_ONLY
     external_provider_acknowledged_at: datetime | None = None
     external_provider_acknowledged_by: str | None = None
+    # Project-level only (user_id is None): what AI may apply on its own, and
+    # the owner who granted it. Personal rows always carry OFF.
+    delegated_curation: DelegatedCurationPolicy = DelegatedCurationPolicy.OFF
+    delegated_curation_granted_at: datetime | None = None
+    delegated_curation_granted_by: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
     updated_by: str | None = None
@@ -1775,6 +1798,7 @@ class DraftQualityCell(_DomainModel):
     accepted_total: int = Field(default=0, ge=0)
     accepted_human_selected: int = Field(default=0, ge=0)
     accepted_bulk_accepted: int = Field(default=0, ge=0)
+    accepted_auto_accepted: int = Field(default=0, ge=0)
     edited_before_accept: int = Field(default=0, ge=0)
     rejected: int = Field(default=0, ge=0)
     left_proposed_at_commit: int = Field(default=0, ge=0)

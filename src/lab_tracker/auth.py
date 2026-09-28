@@ -104,6 +104,28 @@ class AuthContext:
         return self.is_service and self.service_scope == PAT_SCOPE_STAGE_EVIDENCE
 
     @property
+    def is_graph_curate_scoped(self) -> bool:
+        """Whether a graph_curate-scoped service token presents this request.
+
+        Such a token stages evidence like a stage_evidence token and may also
+        accept and commit graph drafts, but only in a project whose owner has
+        delegated curation and only for the operations that delegation admits
+        (``services.graph_draft_delegation``). Every accept it makes is
+        recorded as ``auto_accepted``.
+        """
+        return self.is_service and self.service_scope == PAT_SCOPE_GRAPH_CURATE
+
+    @property
+    def is_staged_capture_scoped(self) -> bool:
+        """Whether this service token's *direct* writes are limited to staged capture.
+
+        True for the stage_evidence and graph_curate scopes: neither may create
+        a committed note or commit an evidence bundle directly. A graph_curate
+        token's only path to a committed record is the delegated review gate.
+        """
+        return self.is_stage_evidence_scoped or self.is_graph_curate_scoped
+
+    @property
     def is_interactive(self) -> bool:
         """Whether a person is directly operating this request.
 
@@ -878,10 +900,22 @@ LPAT_TOKEN_PREFIX = "lpat_"
 # the least-privilege writable scope for capture hooks and coding agents: every
 # read, staged-note capture and patching, draft requests, transcription, and
 # evidence-bundle previews — never a committed record, and never /auth.
+# "graph_curate" is stage_evidence plus the delegated review gate: run-now
+# batches, accepting graph-draft operations, and committing drafts. The
+# middleware admits those routes; the service layer still refuses them unless
+# the project owner has delegated curation for the operations involved.
 PAT_SCOPE_ALL = "all"
 PAT_SCOPE_BATCH_RUN_DUE = "batch_run_due"
 PAT_SCOPE_STAGE_EVIDENCE = "stage_evidence"
-PAT_SCOPES = frozenset({PAT_SCOPE_ALL, PAT_SCOPE_BATCH_RUN_DUE, PAT_SCOPE_STAGE_EVIDENCE})
+PAT_SCOPE_GRAPH_CURATE = "graph_curate"
+PAT_SCOPES = frozenset(
+    {
+        PAT_SCOPE_ALL,
+        PAT_SCOPE_BATCH_RUN_DUE,
+        PAT_SCOPE_STAGE_EVIDENCE,
+        PAT_SCOPE_GRAPH_CURATE,
+    }
+)
 _READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 # Capture routes a stage_evidence token may POST to. The routes additionally
 # require a staged note status and, for bundles, dry_run=true.
@@ -897,6 +931,11 @@ SERVICE_SEMANTIC_READ_POSTS = frozenset(
 # requesting drafts lands proposals in the human review queue, and transcribing
 # only enriches a capture.
 STAGE_EVIDENCE_NOTE_ACTIONS = frozenset({"graph-drafts", "analysis-graph-drafts", "transcript"})
+# The delegated review gate a graph_curate token may additionally reach: one
+# batch trigger and the three draft-review writes. Submit, review, and revise
+# stay a person's actions.
+GRAPH_CURATE_POSTS = frozenset({"/batches/run-now"})
+GRAPH_CURATE_DRAFT_ACTIONS = frozenset({"accept-all", "commit"})
 DEVICE_LAST_USED_UPDATE_INTERVAL = timedelta(minutes=5)
 PERSONAL_ACCESS_TOKEN_LAST_USED_UPDATE_INTERVAL = timedelta(minutes=5)
 PERSONAL_ACCESS_TOKEN_MAX_TTL = timedelta(days=90)
@@ -950,6 +989,30 @@ def _is_note_patch_path(path: str) -> bool:
     return len(segments) == 3 and segments[0] == "" and segments[1] == "notes" and bool(segments[2])
 
 
+def _graph_draft_action_path(path: str) -> str | None:
+    """Return ``<action>`` when ``path`` is exactly ``/graph-drafts/<id>/<action>``."""
+    segments = path.split("/")
+    if len(segments) != 4 or segments[0] != "" or segments[1] != "graph-drafts":
+        return None
+    change_set_id, action = segments[2], segments[3]
+    if not change_set_id or not action:
+        return None
+    return action
+
+
+def _is_graph_draft_operation_path(path: str) -> bool:
+    """Whether ``path`` is exactly ``/graph-drafts/<id>/operations/<operation_id>``."""
+    segments = path.split("/")
+    return (
+        len(segments) == 5
+        and segments[0] == ""
+        and segments[1] == "graph-drafts"
+        and bool(segments[2])
+        and segments[3] == "operations"
+        and bool(segments[4])
+    )
+
+
 def stage_evidence_principal_can_access(
     method: str,
     path: str,
@@ -985,6 +1048,35 @@ def stage_evidence_principal_can_access(
     return method == "PATCH" and _is_note_patch_path(path)
 
 
+def graph_curate_principal_can_access(
+    method: str,
+    path: str,
+    *,
+    read_only: bool,
+    role: Role,
+) -> bool:
+    """Path/method allow-list for graph_curate-scoped lpat_ principals.
+
+    Everything stage_evidence allows, plus the delegated review gate: ``POST
+    /batches/run-now``, ``PATCH /graph-drafts/{id}/operations/{op}``, ``POST
+    /graph-drafts/{id}/accept-all`` and ``POST /graph-drafts/{id}/commit``.
+    The middleware only opens the routes; whether the token may actually
+    accept or commit is decided per operation in the service layer against
+    the project's delegated-curation grant. The same body-level staged-only
+    rules apply to its direct note and bundle writes.
+    """
+    if stage_evidence_principal_can_access(method, path, read_only=read_only, role=role):
+        return True
+    method = method.upper()
+    if read_only or role not in {Role.ADMIN, Role.EDITOR}:
+        return False
+    if method == "POST":
+        return path in GRAPH_CURATE_POSTS or _graph_draft_action_path(path) in (
+            GRAPH_CURATE_DRAFT_ACTIONS
+        )
+    return method == "PATCH" and _is_graph_draft_operation_path(path)
+
+
 def service_principal_can_access(
     method: str,
     path: str,
@@ -1010,6 +1102,8 @@ def service_principal_can_access(
         return stage_evidence_principal_can_access(
             method, path, read_only=read_only, role=role
         )
+    if scope == PAT_SCOPE_GRAPH_CURATE:
+        return graph_curate_principal_can_access(method, path, read_only=read_only, role=role)
     if scope != PAT_SCOPE_ALL:
         # New registered scopes remain fail-closed until this policy gives them
         # an explicit branch above.

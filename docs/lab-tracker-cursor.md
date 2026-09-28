@@ -134,4 +134,6 @@ Read tools are annotated as read-only, and destructive graph edits are marked
 destructive. Cursor gates tool calls behind its own approval flow; keep
 destructive and write tools behind explicit approval.
 
-The product rule is unchanged: AI can suggest; only a person commits.
+The product rule is unchanged: AI can suggest; only a person commits — unless a
+project owner has granted delegated curation, in which case the delegated
+tools apply what that grant admits ([delegated-curation.md](delegated-curation.md)).

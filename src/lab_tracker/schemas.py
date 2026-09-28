@@ -58,6 +58,7 @@ from lab_tracker.models import (
     DatasetFile,
     DatasetStatus,
     DataStore,
+    DelegatedCurationPolicy,
     EntityOrigin,
     EntityRef,
     EntityType,
@@ -461,8 +462,10 @@ class PersonalAccessTokenCreate(RequestModel):
     # "all" keeps the role-based service policy; "batch_run_due" narrows the token
     # to POST /batches/run-due only (the daily-review scheduler credential);
     # "stage_evidence" allows reads plus staged-note capture/patching, draft
-    # requests, transcription, and evidence-bundle previews, never a commit.
-    scope: Literal["all", "batch_run_due", "stage_evidence"] = "all"
+    # requests, transcription, and evidence-bundle previews, never a commit;
+    # "graph_curate" adds run-now batches and accepting/committing graph drafts,
+    # honoured only where the project owner has delegated curation.
+    scope: Literal["all", "batch_run_due", "stage_evidence", "graph_curate"] = "all"
     expires_at: datetime
 
 
@@ -1090,6 +1093,8 @@ class GraphDraftBatchSettingsUpdate(PatchRequestModel):
             "email_notifications_enabled",
             "external_context_policy",
             "external_provider_acknowledged",
+            "delegated_curation",
+            "delegated_curation_acknowledged",
         }
     )
 
@@ -1104,6 +1109,11 @@ class GraphDraftBatchSettingsUpdate(PatchRequestModel):
     # Consent is only ever given, never revoked through a patch: the literal
     # mirrors member onboarding's acknowledgement contract.
     external_provider_acknowledged: Literal[True] | SkipJsonSchema[None] = None
+    # Project-default rows only. Any change to a value other than off (off ->
+    # organize, off -> full, organize <-> full) needs the acknowledgement in the
+    # same request; only turning the grant off never does.
+    delegated_curation: DelegatedCurationPolicy | SkipJsonSchema[None] = None
+    delegated_curation_acknowledged: Literal[True] | SkipJsonSchema[None] = None
 
 
 class GraphDraftBatchRunRequest(RequestModel):

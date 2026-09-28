@@ -6,6 +6,18 @@ import { contextCountLabel, statusClass } from "./format.js";
 // Presentational, read-only "Details & provenance" disclosure for a change set:
 // status/model pills, source notes and artifacts, lifecycle timestamps, and the
 // context-packet summary.
+// One sentence for the pass that ran under the owner's grant: what it
+// accepted on its own, and whether that closed the draft or left it for a person.
+function delegatedCurationSummary(packet) {
+  const accepted = (packet.accepted_operation_ids || []).length;
+  const left = packet.left_for_review || 0;
+  const policy = packet.policy || "off";
+  if (packet.committed) {
+    return `Applied ${accepted} proposal${accepted === 1 ? "" : "s"} automatically under the owner's ${policy} grant; nobody reviewed them.`;
+  }
+  return `Pre-accepted ${accepted} proposal${accepted === 1 ? "" : "s"} under the owner's ${policy} grant; ${left} left for a person.`;
+}
+
 function ProvenanceDetails({ changeSet }) {
   return (
     <details className="context-details review-meta">
@@ -87,6 +99,22 @@ function ProvenanceDetails({ changeSet }) {
               {formatDate(changeSet.committed_at)}
               {changeSet.committed_by_username ? ` by ${changeSet.committed_by_username}` : ""}
             </div>
+          </div>
+        ) : null}
+        {changeSet.context_packet?.delegated_curation ? (
+          <div>
+            <div className="subtle">Delegated curation</div>
+            <p>
+              {delegatedCurationSummary(changeSet.context_packet.delegated_curation)}
+            </p>
+          </div>
+        ) : null}
+        {changeSet.error_metadata?.delegated_curation_error ? (
+          <div>
+            <div className="subtle">Delegated curation stopped</div>
+            <p className="flash error">
+              {changeSet.error_metadata.delegated_curation_error.message}
+            </p>
           </div>
         ) : null}
         {changeSet.context_packet?.context_summary ? (

@@ -37,7 +37,6 @@ from lab_tracker.models import (
 from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.graph_draft_context import EntityResult
 from lab_tracker.services.graph_draft_context import entity_id as graph_entity_id
-from lab_tracker.services.shared import actor_user_id
 
 # Review-audit keys that survive a commit. Validation messages and any other
 # transient review state are cleared when an operation is APPLIED, but the
@@ -93,12 +92,12 @@ class CommitGoals(Protocol):
 
 
 class CommitAuthorization(Protocol):
-    def require_interactive(
+    def admit_graph_commit(
         self,
         actor: AuthContext | None,
         *,
-        action: str,
-    ) -> None: ...
+        change_set: GraphChangeSet,
+    ) -> str: ...
 
     def require_owner(
         self,
@@ -174,7 +173,11 @@ class TransactionalDraftCommitCoordinator(BaseService):
             raise ValidationError("message must not be empty.")
         change_set = self.records.get_graph_change_set(change_set_id)
         self.authorization.require_owner(change_set.project_id, actor=actor)
-        self.authorization.require_interactive(actor, action="Committing graph changes")
+        # A person commits as themselves; the drafting pass or a graph_curate
+        # token is admitted only under the project's delegated-curation grant,
+        # for accepted operations the grant covers, once no proposal is left
+        # for a person, and is recorded against the person of record.
+        committed_by = self.authorization.admit_graph_commit(actor, change_set=change_set)
         if change_set.status == GraphChangeSetStatus.COMMITTING:
             raise ValidationError("This graph draft is already being committed.")
         is_member_onboarding = (
@@ -220,6 +223,9 @@ class TransactionalDraftCommitCoordinator(BaseService):
                 for operation in sorted(change_set.operations, key=lambda item: item.sequence)
                 if operation.status == GraphChangeOperationStatus.ACCEPTED
             ]
+            # The pre-claim admission read a row that may have changed since;
+            # a delegated commit is decided again on what is actually claimed.
+            self.authorization.admit_graph_commit(actor, change_set=change_set)
             if is_member_onboarding:
                 if change_set.status != GraphChangeSetStatus.COMMITTING:
                     raise ValidationError(
@@ -261,7 +267,7 @@ class TransactionalDraftCommitCoordinator(BaseService):
             change_set.status = GraphChangeSetStatus.COMMITTED
             change_set.commit_message = message.strip()
             change_set.committed_at = utc_now()
-            change_set.committed_by = actor_user_id(actor)
+            change_set.committed_by = committed_by
             change_set.updated_at = change_set.committed_at
             self.versions.mark_change_set_committed(
                 change_set.change_set_id,

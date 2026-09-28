@@ -106,7 +106,7 @@ def test_scheduler_tick_does_not_load_non_staged_notes(
     settings = scheduling.get_graph_draft_batch_settings(project.project_id, actor=actor)
     loads = _record_note_loads(monkeypatch, api)
 
-    reviewers = scheduling._scheduled_reviewers_for_settings(
+    reviewers = scheduling.reservations.scheduled_reviewers_for_settings(
         settings,
         until=datetime.now(timezone.utc),
     )

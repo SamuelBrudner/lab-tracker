@@ -144,10 +144,6 @@ def _draft_quality_row_from_tuple(row: Row[Any]) -> DraftQualityRow:
 
 
 def operation_to_model(operation: GraphChangeOperation) -> GraphChangeOperationModel:
-    if operation.acceptance_mode == AcceptanceMode.AUTO_ACCEPTED:
-        raise ValidationError(
-            "auto_accepted is a reserved acceptance mode and must not be persisted."
-        )
     return GraphChangeOperationModel(
         operation_id=str(operation.operation_id),
         change_set_id=str(operation.change_set_id),

@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol
 from uuid import UUID
 
 from lab_tracker.auth import AuthContext
-from lab_tracker.errors import NotFoundError, ValidationError
+from lab_tracker.errors import AuthError, NotFoundError, ValidationError
 from lab_tracker.graph_drafting import (
     PROMPT_VERSION,
     PROVIDER,
@@ -48,15 +47,22 @@ from lab_tracker.models import (
 from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
 from lab_tracker.provider_error_redaction import provider_error_message
 from lab_tracker.services.base import BaseService, ServiceContext
+from lab_tracker.services.graph_draft_delegation import AcceptanceStamp, DelegatedCurationGrant
 from lab_tracker.services.graph_draft_generation import GeneratedDraftProposal
 from lab_tracker.services.graph_draft_review_decisions import (
     apply_deferral,
+    ensure_non_interactive_only_accepts,
     rejection_audit_metadata,
     resolve_reject_reason,
 )
 from lab_tracker.services.graph_draft_revision_hints import compose_revise_hint
+from lab_tracker.services.graph_draft_revision_inputs import (
+    RevisionInputs,
+    prepare_revision_attachments,
+    resolve_revision_feedback,
+)
 from lab_tracker.services.graph_draft_validation import ensure_graph_change_set_revisable
-from lab_tracker.services.shared import UserExistenceReader, actor_user_fk, actor_user_id
+from lab_tracker.services.shared import UserExistenceReader, actor_user_id, user_fk_for
 
 _REVISION_ATTACHMENT_EVIDENCE_MESSAGE = (
     "Reviewer attachment previews are unavailable because revision attachments are not persisted."
@@ -126,6 +132,23 @@ class ReviewPatchValidator(Protocol):
 class ReviewAuthorization(Protocol):
     def has_global_write(self, actor: AuthContext | None) -> bool: ...
 
+    def admit_graph_accept(
+        self,
+        actor: AuthContext | None,
+        *,
+        change_set: GraphChangeSet,
+        operation: GraphChangeOperation,
+        requested: AcceptanceMode,
+    ) -> AcceptanceStamp: ...
+
+    def require_delegated_grant(
+        self,
+        actor: AuthContext | None,
+        *,
+        change_set: GraphChangeSet,
+        action: str,
+    ) -> DelegatedCurationGrant: ...
+
     def membership_role(
         self,
         project_id: UUID,
@@ -152,31 +175,6 @@ class ReviewAuthorization(Protocol):
         *,
         actor: AuthContext | None,
     ) -> None: ...
-
-
-@dataclass(frozen=True)
-class RevisionUpload:
-    """A reviewer-supplied audio or image upload."""
-
-    content: bytes
-    filename: str
-    content_type: str
-
-    @property
-    def is_audio(self) -> bool:
-        return self.content_type.lower().startswith("audio/")
-
-    @property
-    def is_image(self) -> bool:
-        return self.content_type.lower().startswith("image/")
-
-
-@dataclass
-class RevisionInputs:
-    """Optional rich inputs accompanying reviewer revision feedback."""
-
-    audio: RevisionUpload | None = None
-    attachments: list[RevisionUpload] = field(default_factory=list)
 
 
 class GraphDraftReviewCoordinator(BaseService):
@@ -248,6 +246,15 @@ class GraphDraftReviewCoordinator(BaseService):
         provided = (payload, status, review_note, deferred, reject_reason)
         if not any(is_provided(value) for value in provided):
             return change_set
+        ensure_non_interactive_only_accepts(
+            actor,
+            operation,
+            payload=payload,
+            status=status,
+            review_note=review_note,
+            deferred=deferred,
+            reject_reason=reject_reason,
+        )
         if is_provided(payload) and payload is None:
             raise ValidationError("payload must not be null.")
         if is_provided(status) and status is None:
@@ -315,7 +322,7 @@ class GraphDraftReviewCoordinator(BaseService):
             return change_set
         if change_set.purpose == GraphDraftPurpose.MEMBER_CHECKPOINT_ALIGNMENT:
             self._validate_member_onboarding_change_set(change_set)
-        self._stamp_operation_acceptance(operation, acceptance_mode, actor)
+        self._stamp_operation_acceptance(change_set, operation, acceptance_mode, actor)
         operation.updated_at = utc_now()
         change_set.updated_at = utc_now()
         self.records.save_graph_change_set(change_set)
@@ -323,20 +330,24 @@ class GraphDraftReviewCoordinator(BaseService):
 
     def _stamp_operation_acceptance(
         self,
+        change_set: GraphChangeSet,
         operation: GraphChangeOperation,
         acceptance_mode: AcceptanceMode,
         actor: AuthContext | None,
     ) -> None:
-        if acceptance_mode == AcceptanceMode.AUTO_ACCEPTED:
-            raise ValidationError(
-                "auto_accepted is a reserved acceptance mode and cannot be "
-                "recorded; graph operations require an explicit human accept."
-            )
         if operation.status == GraphChangeOperationStatus.ACCEPTED:
-            self.authorization.require_interactive(actor, action="Accepting graph operations")
-            operation.acceptance_mode = acceptance_mode
-            operation.accepted_by = actor_user_id(actor)
-            operation.accepted_by_user_id = actor_user_fk(actor, self.user_reader)
+            # A person's accept is recorded as requested; a non-interactive
+            # principal is admitted only under the project's delegated-curation
+            # grant, and then always as auto_accepted.
+            stamp = self.authorization.admit_graph_accept(
+                actor,
+                change_set=change_set,
+                operation=operation,
+                requested=acceptance_mode,
+            )
+            operation.acceptance_mode = stamp.mode
+            operation.accepted_by = stamp.accepted_by
+            operation.accepted_by_user_id = user_fk_for(stamp.accepted_by, self.user_reader)
             operation.accepted_at = utc_now()
         else:
             operation.acceptance_mode = None
@@ -356,6 +367,18 @@ class GraphDraftReviewCoordinator(BaseService):
                 "Member onboarding proposals require individual review; bulk accept is disabled."
             )
         self._ensure_graph_change_set_editable(change_set, actor=actor)
+        if actor is None:
+            raise AuthError("Authentication required.")
+        # A delegated pass or graph_curate token accepts only what the grant
+        # admits and leaves the rest proposed for a person; the grant lookup
+        # itself refuses principals and projects outside delegation.
+        grant = (
+            None
+            if actor.is_interactive
+            else self.authorization.require_delegated_grant(
+                actor, change_set=change_set, action="Accepting graph operations"
+            )
+        )
         accepted_any = False
         for operation in change_set.operations:
             # Bulk accept covers undecided proposals only: a deferral is a verdict.
@@ -364,12 +387,16 @@ class GraphDraftReviewCoordinator(BaseService):
                 or DEFERRED_AT_KEY in operation.error_metadata
             ):
                 continue
+            if grant is not None and not grant.admits(operation):
+                continue
             try:
                 self.patch_validator.validate_operation(operation, operation.payload)
             except ValidationError:
                 continue
             operation.status = GraphChangeOperationStatus.ACCEPTED
-            self._stamp_operation_acceptance(operation, AcceptanceMode.BULK_ACCEPTED, actor)
+            self._stamp_operation_acceptance(
+                change_set, operation, AcceptanceMode.BULK_ACCEPTED, actor
+            )
             operation.updated_at = utc_now()
             accepted_any = True
         if accepted_any:
@@ -563,12 +590,12 @@ class GraphDraftReviewCoordinator(BaseService):
         self._ensure_graph_change_set_editable(change_set, actor=actor)
         ensure_graph_change_set_revisable(change_set)
         revision_inputs = inputs or RevisionInputs()
-        cleaned, transcript = self._resolve_revision_feedback(
+        cleaned, transcript = resolve_revision_feedback(
             feedback,
             revision_inputs.audio,
             draft_client,
         )
-        extra_images, attachment_labels = self._prepare_revision_attachments(
+        extra_images, attachment_labels = prepare_revision_attachments(
             revision_inputs.attachments
         )
         if not cleaned and not extra_images:
@@ -640,61 +667,6 @@ class GraphDraftReviewCoordinator(BaseService):
         change_set.updated_at = utc_now()
         self.records.save_graph_change_set(change_set)
         return change_set
-
-    @staticmethod
-    def _resolve_revision_feedback(
-        feedback: str | None,
-        audio: RevisionUpload | None,
-        draft_client: GraphDraftClient,
-    ) -> tuple[str, str]:
-        typed = (feedback or "").strip()
-        transcript = ""
-        if audio is not None:
-            if not audio.is_audio:
-                raise ValidationError("Dictated feedback must be an audio upload.")
-            transcribe_audio = getattr(draft_client, "transcribe_audio", None)
-            if not callable(transcribe_audio):
-                raise ValidationError(
-                    "Configured draft client does not support audio transcription."
-                )
-            try:
-                response = transcribe_audio(
-                    audio_bytes=audio.content,
-                    filename=audio.filename,
-                    content_type=audio.content_type,
-                    prompt=typed or None,
-                )
-            except GraphDraftingError as exc:
-                raise ValidationError(
-                    f"Could not transcribe dictated feedback: {provider_error_message(exc)}"
-                ) from exc
-            transcript = _revision_transcript_text(response)
-            if not transcript:
-                raise ValidationError("Dictated feedback transcription returned no text.")
-        combined = "\n\n".join(part for part in (typed, transcript) if part).strip()
-        return combined, transcript
-
-    @staticmethod
-    def _prepare_revision_attachments(
-        attachments: list[RevisionUpload],
-    ) -> tuple[list[dict[str, Any]], list[str]]:
-        extra_images: list[dict[str, Any]] = []
-        labels: list[str] = []
-        for attachment in attachments:
-            if not attachment.is_image:
-                raise ValidationError(
-                    f"Attached file {attachment.content_type!r} is not a supported image type."
-                )
-            if not attachment.content:
-                raise ValidationError(f"Attached image {attachment.filename!r} is empty.")
-            extra_images.append(
-                {
-                    "image_bytes": attachment.content,
-                    "content_type": attachment.content_type,
-                }
-            )
-            labels.append(attachment.filename or "image")
-        return extra_images, labels
 
     @staticmethod
     def _compose_revise_hint(
@@ -886,13 +858,3 @@ class GraphDraftReviewCoordinator(BaseService):
             if operation.operation_id == operation_id:
                 return operation
         raise NotFoundError("Graph draft operation does not exist.")
-
-
-def _revision_transcript_text(transcript: Any) -> str:
-    if isinstance(transcript, str):
-        return transcript.strip()
-    if isinstance(transcript, dict):
-        text = transcript.get("text")
-        if isinstance(text, str):
-            return text.strip()
-    return ""

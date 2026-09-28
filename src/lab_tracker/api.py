@@ -43,9 +43,11 @@ from lab_tracker.services import (
     AcquisitionCollectionService,
     AnalysisService,
     BatchSchedulingCoordinator,
+    BatchSettingsCoordinator,
     ClaimService,
     DatasetService,
     DataStoreService,
+    DelegatedCurationCoordinator,
     DraftQualityService,
     EntityVersionService,
     EvidenceBundleService,
@@ -53,6 +55,7 @@ from lab_tracker.services import (
     ExplorationService,
     GoalService,
     GraphContextBuilder,
+    GraphDraftBatchReservationCoordinator,
     GraphDraftGenerationCoordinator,
     GraphDraftRecords,
     GraphDraftReviewCoordinator,
@@ -335,18 +338,34 @@ class LabTrackerAPI(
             goals=self.goals,
             authorization=self.project_authorization,
         )
+        graph_draft_delegation = DelegatedCurationCoordinator(
+            context,
+            records=graph_draft_records,
+            review=graph_draft_review,
+            commit=graph_draft_commit,
+            authorization=self.project_authorization,
+        )
         graph_draft_scheduling = BatchSchedulingCoordinator(
             context,
             records=graph_draft_records,
             generation=graph_draft_generation,
-            projects=self.projects,
-            notes=self.notes,
-            authorization=self.project_authorization,
-            host=DraftingHostFacts(
-                review_email_available=self._settings.review_email_enabled,
-                external_provider=self._settings.graph_draft_provider_is_external(),
+            settings=BatchSettingsCoordinator(
+                context,
+                projects=self.projects,
+                authorization=self.project_authorization,
+                host=DraftingHostFacts(
+                    review_email_available=self._settings.review_email_enabled,
+                    external_provider=self._settings.graph_draft_provider_is_external(),
+                ),
             ),
+            reservations=GraphDraftBatchReservationCoordinator(
+                context,
+                projects=self.projects,
+                notes=self.notes,
+            ),
+            authorization=self.project_authorization,
             provenance_links=self.provenance_links,
+            delegation=graph_draft_delegation,
         )
         self.graph_drafts: GraphDraftService = GraphDraftService(
             records=graph_draft_records,
@@ -354,6 +373,7 @@ class LabTrackerAPI(
             review=graph_draft_review,
             commit=graph_draft_commit,
             scheduling=graph_draft_scheduling,
+            delegation=graph_draft_delegation,
         )
         self.member_onboarding: MemberOnboardingService = MemberOnboardingService(
             context,

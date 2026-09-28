@@ -12,7 +12,10 @@ flow remains supported for hosts that want cron, launchd, Windows Task Scheduler
 or cloud automation to call `POST /batches/run-due`.
 
 > **The model only ever proposes.** The scheduled job triggers *drafting* — a
-> human still accepts or rejects every proposal before anything is committed.
+> human still accepts or rejects every proposal before anything is committed,
+> unless the project owner has turned on delegated curation, in which case the
+> drafting pass applies the proposals that grant admits and leaves the rest in
+> the queue ([delegated-curation.md](delegated-curation.md)).
 
 This page covers the trigger. For the full agent picture — choosing the
 drafting provider (OpenAI, Anthropic, or Google), credentials, and MCP — see
@@ -250,9 +253,10 @@ project the same way `AGENTS.md` orients Codex. Same reachability and auth
 rules as above.
 
 > Whichever you pick — and whichever agent vendor you prefer — keep the job to
-> **triggering drafts only**. Lab Tracker deliberately does not delegate graph
-> commits to autonomous agents — a person reviews the queue and commits what
-> they keep.
+> **triggering drafts only**. Lab Tracker does not delegate graph commits to
+> the scheduler's credential — a person reviews the queue and commits what
+> they keep, or the project owner grants delegated curation in the app and the
+> server's own drafting pass applies what that grant admits.
 
 ---
 
