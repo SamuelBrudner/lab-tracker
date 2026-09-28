@@ -343,13 +343,15 @@ def normalize_captured_at(value: str | None) -> str:
     normalized = text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text
     try:
         parsed = datetime.fromisoformat(normalized)
-    except ValueError as exc:
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        # A clock at the edge of the calendar (0001-01-01T00:00:00+14:00)
+        # parses but has no UTC equivalent.
+        return parsed.astimezone(timezone.utc).isoformat()
+    except (OverflowError, ValueError) as exc:
         raise ValidationError(
             "captured_at must be an ISO 8601 date and time, e.g. 2026-09-28T10:00:00Z."
         ) from exc
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc).isoformat()
 
 
 def voice_capture_metadata(

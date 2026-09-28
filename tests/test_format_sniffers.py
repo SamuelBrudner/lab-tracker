@@ -461,13 +461,18 @@ class _FakeGroup:
         return node
 
 
-def _fake_h5py(root: _FakeGroup, opened: list[str]) -> types.ModuleType:
+def _fake_h5py(
+    root: _FakeGroup, opened: list[tuple[str, dict[str, Any]]], *, has_locking: bool = True
+) -> types.ModuleType:
     module = types.ModuleType("h5py")
 
     class File(_FakeGroup):
-        def __init__(self, path: str, mode: str) -> None:
+        def __init__(self, path: str, mode: str, **options: Any) -> None:
             assert mode == "r"
-            opened.append(path)
+            if options and not has_locking:
+                # h5py < 3.5 has no ``locking`` argument.
+                raise TypeError("__init__() got an unexpected keyword argument 'locking'")
+            opened.append((path, options))
             if Path(path).read_bytes()[:4] != b"\x89HDF":
                 raise OSError("Unable to open file (file signature not found)")
             super().__init__(root.nodes, root.attrs)
@@ -492,7 +497,7 @@ def test_nwb_with_h5py_reads_session_facts(tmp_path: Path, monkeypatch: pytest.M
         },
         {"nwb_version": b"2.6.0", "neurodata_type": "NWBFile"},
     )
-    opened: list[str] = []
+    opened: list[tuple[str, dict[str, Any]]] = []
     monkeypatch.setitem(sys.modules, "h5py", _fake_h5py(root, opened))
     path = _write(tmp_path, "rec.nwb", b"\x89HDF\r\n\x1a\n" + b"\x00" * 64)
 
@@ -508,7 +513,22 @@ def test_nwb_with_h5py_reads_session_facts(tmp_path: Path, monkeypatch: pytest.M
         "format_acquired_at": "2023-11-02T13:15:00+00:00",
         "format_acquired_at_timezone": "header",
     }
-    assert opened == [str(path)]
+    # Opened without HDF5 file locking, so a scan never blocks the writer.
+    assert opened == [(str(path), {"locking": False})]
+
+
+def test_nwb_on_h5py_without_the_locking_option_still_opens(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _FakeGroup({"identifier": _FakeDataset("abc")}, {"nwb_version": "2.6.0"})
+    opened: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setitem(sys.modules, "h5py", _fake_h5py(root, opened, has_locking=False))
+    path = _write(tmp_path, "old.nwb", b"\x89HDF\r\n\x1a\n")
+
+    fields = sniff_format(path)
+
+    assert fields["format_identifier"] == "abc"
+    assert opened == [(str(path), {})]
 
 
 def test_nwb_1x_style_root_attributes_are_a_fallback(

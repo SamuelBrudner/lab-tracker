@@ -567,7 +567,6 @@ def test_postgres_time_window_candidates_exclude_session_carriers_in_sql(
     for label, metadata, targets in (
         ("plain", {"capture_host_label": "rig-2"}, None),
         ("hinted", {"watch_session_id": session_id}, None),
-        ("decoded", {"decoded_session_link_code": "LT-ABCD"}, None),
         ("targeted", None, [{"entity_type": "session", "entity_id": session_id}]),
     ):
         payload: dict[str, object] = {
@@ -583,6 +582,25 @@ def test_postgres_time_window_candidates_exclude_session_carriers_in_sql(
         )
         assert response.status_code == 201, response.text
         created[label] = response.json()["data"]["note_id"]
+    # decoded_session_link_code is server-stamped: the carrier is a photo
+    # upload whose decoded LT- code names a session outside the project.
+    from lab_tracker.models import encode_session_link_code
+    from lab_tracker.photo_codes import DecodedCode, PhotoCodeDecoder
+
+    label = f"LT-{encode_session_link_code(uuid4())}"
+    decoder = PhotoCodeDecoder(reader=lambda _data, _type: [DecodedCode(label, "QRCode")])
+    postgres_client.app.state.photo_code_decoder = decoder
+    try:
+        photo = postgres_client.post(
+            "/notes/upload-file",
+            data={"project_id": str(project_id)},
+            files={"file": ("session-qr.png", b"photo", "image/png")},
+            headers=postgres_admin_auth_headers,
+        )
+    finally:
+        decoder.close()
+    assert photo.status_code == 201, photo.text
+    assert photo.json()["data"]["metadata"]["decoded_session_link_code"] == label
 
     with postgres_client.app.state.db_session_factory() as session:
         repository = SQLAlchemyLabTrackerRepository(session)

@@ -70,6 +70,10 @@ when the upload is a JPEG, PNG, WebP, GIF, or BMP image. That covers:
 - image files synced by `lt watch`.
 
 TIFF (usually microscopy stacks), HEIC, SVG, and PDF files are not decoded.
+Only the image decoder for the declared content type may open the bytes, and
+the file must really be in that format. For example, an EPS or PDF labelled
+`image/png` is stored as uploaded but never decoded. None of the five
+decoders starts a subprocess.
 
 ### What is recorded
 
@@ -87,10 +91,14 @@ TIFF (usually microscopy stacks), HEIC, SVG, and PDF files are not decoded.
 | `barcode_text_format` | that code's symbology, e.g. `QRCode`, `Code128` |
 | `barcode_count` | distinct codes decoded (at most 16 are considered) |
 
-The server owns these keys. A client that sends one of them on an upload is
-refused with `422`. When a capture is replayed with the same
-`client_capture_id`, the replay is matched against the original with these
-keys ignored, because the decode is best effort.
+The server owns these keys. A request that creates a note with one of them
+(`POST /notes`, `/notes/upload-file`, `/notes/quick-capture`, or an evidence
+bundle's source note) is refused with `422`. `PATCH /notes/{id}` replaces the
+whole metadata bag, so it may send a decoded key back unchanged or drop it (a
+person correcting a misread). Adding a decoded key or changing its value is
+refused. When a capture is replayed with the same `client_capture_id`, the
+replay is matched against the original with these keys ignored, because the
+decode is best effort.
 
 ### Session labels
 
@@ -216,7 +224,9 @@ when it is present.
   1 MiB, the first TIFF IFD up to 4096 entries, and up to 1 MiB of
   ImageDescription. OME-XML parsing stops at the first image's `Pixels`
   element, so large plane lists are never read. h5py reads only the HDF5
-  metadata the sniffer asks for.
+  metadata the sniffer asks for. It opens the file read-only with HDF5 file
+  locking off (h5py 3.5 or later), so a scan never makes acquisition
+  software that is writing the file fail with "unable to lock file".
 - Every value is limited to 256 characters.
 - OME-XML with any DTD or entity declaration is refused, so external entities
   (XXE) and entity expansion ("billion laughs") cannot happen. `defusedxml`

@@ -22,7 +22,9 @@ from lab_tracker.models import (
     Session,
     SessionStatus,
     SessionType,
+    encode_session_link_code,
 )
+from lab_tracker.photo_codes import DecodedCode, PhotoCodeDecoder
 from lab_tracker.services import session_clock
 from lab_tracker.services.provenance_link_service import ProvenanceLinkService
 from lab_tracker.services.provenance_time_windows import (
@@ -568,13 +570,22 @@ def test_time_window_detector_stays_silent_for_overlaps_and_session_carriers(
         "Declared into its session",
         targets=[{"entity_type": "session", "entity_id": first}],
     )
-    _staged_note(
-        client,
-        admin_auth_headers,
-        project_id,
-        "Photo of a session QR",
-        metadata={"decoded_session_link_code": "LT-ABCD"},
-    )
+    # decoded_session_link_code is server-stamped, so the carrier arrives as a
+    # photo whose decoded LT- code names a session outside this project.
+    label = f"LT-{encode_session_link_code(uuid4())}"
+    decoder = PhotoCodeDecoder(reader=lambda _data, _type: [DecodedCode(label, "QRCode")])
+    client.app.state.photo_code_decoder = decoder
+    try:
+        photo = client.post(
+            "/notes/upload-file",
+            data={"project_id": project_id},
+            files={"file": ("session-qr.png", b"photo", "image/png")},
+            headers=admin_auth_headers,
+        )
+    finally:
+        decoder.close()
+    assert photo.status_code == 201, photo.text
+    assert photo.json()["data"]["metadata"]["decoded_session_link_code"] == label
 
     _run_batch(client, admin_auth_headers, project_id)
 
