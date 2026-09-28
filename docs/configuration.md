@@ -1011,12 +1011,14 @@ FastAPI app does not read them. `LAB_TRACKER_BASE_URL` (see
   hostname)
 - `LAB_TRACKER_AUTOTRACK`: `0`, `false`, `no`, or `off` disables the matplotlib
   figure autotrack hook everywhere, including the IPython startup file that
-  `lt setup autotrack` installs (default: on). The hook captures only saves
-  whose project comes from `autotrack(project_id=...)`,
+  `lt setup autotrack` installs, and the R autotrack hooks, including the
+  `~/.Rprofile` block `lt setup autotrack --r` adds (default: on). The hooks
+  capture only saves whose project comes from `autotrack(project_id=...)`,
   `LAB_TRACKER_PROJECT_ID`, or the checkout's `lt_ids.json`
 - `LAB_TRACKER_CAPTURE_OUTBOX`: `0`, `false`, `no`, or `off` stops figure
-  captures from queueing into the checkout's watch outbox when the server is
-  unreachable; the save then reports the failure instead (default: on)
+  captures (Python client, `lt capture file`, and the MATLAB package) from
+  queueing into the checkout's watch outbox when the server is unreachable;
+  the save then reports the failure instead (default: on)
 - `LAB_TRACKER_SKILLS_HOME`: install the generated setup skill into this one
   directory instead of both `~/.claude/skills` and `~/.agents/skills`
 
@@ -1028,8 +1030,9 @@ FastAPI app does not read them. `LAB_TRACKER_BASE_URL` (see
   `LAB_TRACKER_REPO_HOOK_ENABLED` instead (default: on)
 - `LAB_TRACKER_GIT_DRAFT_ENABLED`: older name for
   `LAB_TRACKER_GIT_CAPTURE_ENABLED`, used only when the new name is unset
-- `LAB_TRACKER_LT`: `lt` executable the managed Git and repo hooks run
-  (default: the path recorded when the hook was installed)
+- `LAB_TRACKER_LT`: `lt` executable the managed Git and repo hooks and the R
+  autotrack hooks run (default: the path recorded when the hook or the
+  `~/.Rprofile` block was installed; R then falls back to `lt` on `PATH`)
 - `LAB_TRACKER_PYTHON`: Python interpreter the Windows graph-draft hook
   (`scripts/install-git-graph-draft-hook.ps1`) and `scripts/matlab-smoke.sh`
   run (default: the interpreter recorded at install, or `python3`)

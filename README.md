@@ -256,6 +256,7 @@ MCP, and verification.
 - **Capture and integrate:** [phone capture](docs/phone-capture-quickstart.md) ·
   [watch folders](docs/watch-folder-capture.md) ·
   [MATLAB integration](docs/lab-tracker-matlab.md) ·
+  [R integration](docs/lab-tracker-r.md) ·
   [provenance export](docs/provenance-export.md)
 - **Understand the model:** [vision](docs/vision.md) ·
   [review and commit](docs/review-and-commit-model.md) ·

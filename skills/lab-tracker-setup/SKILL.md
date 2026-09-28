@@ -97,7 +97,9 @@ short, consent-gated sequence on the `lt` CLI.
    a checkout bound with `lt project bind` (or with
    `LAB_TRACKER_PROJECT_ID` set) and skips the rest with a notice.
    Saves made while the server is unreachable queue in the checkout's
-   watch outbox and drain with the next sync.
+   watch outbox and drain with the next sync. For R, `lt setup
+   autotrack --r --yes` adds the same to `~/.Rprofile` for `ggsave()`
+   and the png/jpeg/tiff/bmp/pdf devices.
 10. **Commit hooks** — `lt hooks install --project <project-id> --yes`
     enrolls the current repository: each commit queues durable staged
     evidence that syncs when the server is reachable. Repos are enrolled
@@ -139,4 +141,4 @@ repo; an analysis repo updates by rerunning its pinned `uv add`
 If Lab Tracker is unreachable and the user does not operate a server, point
 them at whoever runs their lab's instance instead of standing one up ad hoc.
 
-<!-- lab-tracker-setup-guide version=0.1.0 sha256=671230086775 -->
+<!-- lab-tracker-setup-guide version=0.1.0 sha256=8579d89e3ac5 -->
