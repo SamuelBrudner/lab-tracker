@@ -281,7 +281,8 @@ scheduling.
 Before the model drafts, every run proposes provenance links by rule for a
 person to accept or reject on the review page: captures that share bytes,
 captures whose metadata names a session or commit, and captures made while
-exactly one session was open (`time_window_match`). After the model drafts, a
+exactly one of their own author's sessions was open (`time_window_match`).
+After the model drafts, a
 session with a heavy bench day (three or more short text, voice, or photo
 captures in the batch) gets one extra **day log** proposal: a timestamped
 `HH:MM — …` note targeting the session, labelled as a deterministic grouping,

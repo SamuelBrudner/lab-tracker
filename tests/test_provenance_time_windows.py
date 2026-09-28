@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.app_parts.middleware import system_auth_context
+from lab_tracker.auth import Role
 from lab_tracker.models import (
     EntityOrigin,
     EntityRef,
@@ -22,14 +23,17 @@ from lab_tracker.models import (
     SessionStatus,
     SessionType,
 )
+from lab_tracker.services import session_clock
 from lab_tracker.services.provenance_link_service import ProvenanceLinkService
 from lab_tracker.services.provenance_time_windows import (
     TIME_WINDOW_LOOKBACK_DAYS,
     time_window_match,
+    time_window_matches,
 )
 from lab_tracker.services.session_clock import (
     FORMAT_ACQUIRED_AT_KEY,
     SESSION_HINT_METADATA_KEYS,
+    SessionTimeline,
     capture_clock,
     parse_format_acquired_at,
     session_window,
@@ -49,6 +53,7 @@ def _session(
     start: datetime,
     end: datetime | None = None,
     status: SessionStatus | None = None,
+    author: UUID | None = None,
 ) -> Session:
     return Session(
         session_id=uuid4(),
@@ -58,6 +63,8 @@ def _session(
         started_at=start,
         ended_at=end,
         updated_at=end or start,
+        created_by=str(author) if author is not None else None,
+        created_by_user_id=author,
     )
 
 
@@ -69,6 +76,7 @@ def _note(
     targets: list[EntityRef] | None = None,
     status: NoteStatus = NoteStatus.STAGED,
     origin: EntityOrigin = EntityOrigin.USER,
+    author: UUID | None = None,
 ) -> Note:
     return Note(
         note_id=uuid4(),
@@ -78,6 +86,8 @@ def _note(
         targets=list(targets or []),
         status=status,
         origin=origin,
+        created_by=str(author) if author is not None else None,
+        created_by_user_id=author,
         created_at=created_at,
     )
 
@@ -220,6 +230,97 @@ def test_time_window_skips_targeted_archived_reviewed_and_foreign_notes() -> Non
         time_window_match(_note(project_id, created_at=at, targets=[question]), [session], now=now)
         is not None
     )
+
+
+def test_time_only_links_a_capture_to_a_session_its_own_author_ran() -> None:
+    """Alice's open session does not claim Bob's bench photo; Bob's own does."""
+
+    project_id = uuid4()
+    alice, bob = uuid4(), uuid4()
+    alices = _session(project_id, start=T0, author=alice)
+    at = T0 + timedelta(minutes=30)
+    now = T0 + timedelta(hours=1)
+    bobs_capture = _note(project_id, created_at=at, author=bob)
+
+    assert time_window_match(bobs_capture, [alices], now=now) is None
+    alices_capture = _note(project_id, created_at=at, author=alice)
+    assert time_window_match(alices_capture, [alices], now=now).session_id == alices.session_id
+
+    # Both ran overlapping sessions: each capture goes to its own author's.
+    bobs = _session(project_id, start=T0 + timedelta(minutes=10), author=bob)
+    assert time_window_match(bobs_capture, [alices, bobs], now=now).session_id == bobs.session_id
+    assert (
+        time_window_match(alices_capture, [alices, bobs], now=now).session_id == alices.session_id
+    )
+
+
+def test_an_unknown_author_on_either_side_falls_back_to_any_session() -> None:
+    project_id = uuid4()
+    alice = uuid4()
+    at = T0 + timedelta(minutes=30)
+    now = T0 + timedelta(hours=1)
+    legacy_session = _session(project_id, start=T0)
+    alices = _session(project_id, start=T0, author=alice)
+
+    anonymous_capture = _note(project_id, created_at=at)
+    assert time_window_match(anonymous_capture, [alices], now=now).session_id == alices.session_id
+    assert time_window_match(anonymous_capture, [alices, legacy_session], now=now) is None
+    bobs_capture = _note(project_id, created_at=at, author=uuid4())
+    assert (
+        time_window_match(bobs_capture, [legacy_session], now=now).session_id
+        == legacy_session.session_id
+    )
+
+
+def test_matching_many_captures_touches_each_session_window_once(monkeypatch) -> None:
+    """2,000 captures against 1,000 sessions: work grows with their sum."""
+
+    project_id = uuid4()
+    sessions = [
+        _session(
+            project_id,
+            start=T0 + timedelta(hours=2 * index),
+            end=T0 + timedelta(hours=2 * index + 1),
+        )
+        for index in range(1000)
+    ]
+    notes = [
+        _note(project_id, created_at=T0 + timedelta(hours=index, minutes=30))
+        for index in range(2000)
+    ]
+    now = T0 + timedelta(days=100)
+    calls = 0
+    real_window = session_clock.session_window
+
+    def counting_window(session: Session, *, now: datetime) -> tuple[datetime, datetime]:
+        nonlocal calls
+        calls += 1
+        return real_window(session, now=now)
+
+    monkeypatch.setattr(session_clock, "session_window", counting_window)
+    timeline = SessionTimeline(sessions, now=now)
+
+    matches = time_window_matches(notes, sessions, now=now, timeline=timeline)
+
+    assert calls == len(sessions)
+    assert timeline.windows_examined <= 2 * len(sessions)
+    # Captures at hh:30 of even hours fall inside a session, odd hours do not.
+    assert len(matches) == len(sessions)
+    by_note = {match.note_id: match.session_id for match in matches}
+    assert by_note[notes[0].note_id] == sessions[0].session_id
+    assert notes[1].note_id not in by_note
+    assert by_note[notes[1998].note_id] == sessions[999].session_id
+
+
+def test_timeline_skips_sessions_that_ended_before_its_floor() -> None:
+    project_id = uuid4()
+    old = _session(project_id, start=T0 - timedelta(days=30), end=T0 - timedelta(days=29))
+    recent = _session(project_id, start=T0, end=T0 + timedelta(hours=1))
+    timeline = SessionTimeline([old, recent], now=T0 + timedelta(days=1), since=T0)
+
+    assert len(timeline) == 1
+    assert timeline.overlaps(T0 - timedelta(minutes=5), T0)
+    assert not timeline.overlaps(T0 + timedelta(hours=2), T0 + timedelta(hours=3))
 
 
 def test_zone_for_name_falls_back_to_utc() -> None:
@@ -526,6 +627,66 @@ def test_time_window_detector_failure_never_fails_the_batch(
     assert [link["basis"] for link in _links(client, admin_auth_headers, project_id)] == [
         ProvenanceLinkBasis.EXACT_ID_MATCH.value
     ]
+
+
+def _member_headers(
+    client: TestClient, admin_headers: dict[str, str], project_id: str
+) -> dict[str, str]:
+    username = f"member-{uuid4().hex[:8]}"
+    user = client.app.state.auth_service.register_user(
+        username=username, password="secret", role=Role.VIEWER
+    )
+    added = client.post(
+        f"/projects/{project_id}/members",
+        json={"user_id": str(user.user_id), "role": "contributor"},
+        headers=admin_headers,
+    )
+    assert added.status_code == 201, added.text
+    login = client.post("/auth/login", json={"username": username, "password": "secret"})
+    assert login.status_code == 200
+    return {"Authorization": f"Bearer {login.json()['data']['access_token']}"}
+
+
+def test_a_colleagues_open_session_does_not_claim_your_capture(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    bob = _member_headers(client, admin_auth_headers, project_id)
+    alices_session = _session_id(client, admin_auth_headers, project_id)
+    alices_note = _staged_note(client, admin_auth_headers, project_id, "Alice at the bench")
+    _staged_note(client, bob, project_id, "Bob at his desk")
+
+    _run_batch(client, admin_auth_headers, project_id)
+
+    (link,) = _time_window_links(client, admin_auth_headers, project_id)
+    assert link["source"] == {"entity_type": "note", "entity_id": alices_note}
+    assert link["target"] == {"entity_type": "session", "entity_id": alices_session}
+
+
+def test_link_listing_can_be_scoped_to_sources_or_targets(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    session_id = _session_id(client, admin_auth_headers, project_id)
+    first = _staged_note(client, admin_auth_headers, project_id, "first")
+    second = _staged_note(client, admin_auth_headers, project_id, "second")
+    _run_batch(client, admin_auth_headers, project_id)
+
+    with client.app.state.db_session_factory() as session:
+        links = SQLAlchemyLabTrackerRepository(session).provenance_links
+        project = UUID(project_id)
+        assert len(links.list_by_project(project)) == 2
+        (only,) = links.list_by_project(project, source_ids=[UUID(first)])
+        assert str(only.source.entity_id) == first
+        assert len(links.list_by_project(project, target_ids=[UUID(session_id)])) == 2
+        assert links.list_by_project(project, target_ids=[uuid4()]) == []
+        assert links.list_by_project(project, source_ids=[]) == []
+        assert [
+            str(link.source.entity_id)
+            for link in links.list_by_project(
+                project, source_ids=[UUID(second)], target_ids=[UUID(session_id)]
+            )
+        ] == [second]
 
 
 def test_session_create_accepts_a_past_start_but_not_a_future_or_naive_one(

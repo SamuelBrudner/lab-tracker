@@ -37,7 +37,9 @@ onboarding checkpoint, and one of
 * photo: an ``image/*`` upload.
 
 A capture's session is its single declared session target, else the session
-id its metadata names, else the one session open at its capture time.
+id its metadata names, else the one session its own author had open at its
+capture time (either author unknown: any session). All of a batch's captures
+are placed in one timeline sweep.
 """
 
 from __future__ import annotations
@@ -70,8 +72,8 @@ from lab_tracker.services.session_clock import (
     capture_clock,
     is_booking_note,
     resolve_capture_timezone,
-    session_for_capture,
     session_label,
+    sessions_for_captures,
 )
 
 logger = logging.getLogger(__name__)
@@ -203,12 +205,11 @@ def plan_day_logs(
     """
 
     by_id = {session.session_id: session for session in sessions}
+    captures = [(note, kind) for note in notes if (kind := bench_capture_kind(note)) is not None]
+    placed = sessions_for_captures([note for note, _kind in captures], sessions, now=now)
     grouped: dict[UUID, list[DayLogEntry]] = defaultdict(list)
-    for note in notes:
-        kind = bench_capture_kind(note)
-        if kind is None:
-            continue
-        session_id = session_for_capture(note, sessions, now=now)
+    for note, kind in captures:
+        session_id = placed.get(note.note_id)
         if session_id is None or session_id not in by_id:
             continue
         grouped[session_id].append(
@@ -358,7 +359,13 @@ def is_day_log_operation(change_set: GraphChangeSet, operation: GraphChangeOpera
 
 
 class _IdentifierCarriers(Protocol):
-    def list_identifier_carriers(self, project_id: UUID, keys: Sequence[str]) -> list[Note]: ...
+    def list_identifier_carriers(
+        self,
+        project_id: UUID,
+        keys: Sequence[str],
+        *,
+        created_since: datetime | None = None,
+    ) -> list[Note]: ...
 
 
 class DayLogValidator(Protocol):
@@ -415,8 +422,12 @@ def with_day_log_proposals(
         )
         if not sessions:
             return operations
+        # A log recorded for these captures was committed after the earliest
+        # of them was created, so older day logs never need to be read.
         recorded = repository.provenance_links.list_identifier_carriers(
-            change_set.project_id, (DAY_LOG_KEY_METADATA,)
+            change_set.project_id,
+            (DAY_LOG_KEY_METADATA,),
+            created_since=min((note.created_at for note in notes), default=None),
         )
         existing_keys = {str(note.metadata.get(DAY_LOG_KEY_METADATA)) for note in recorded}
         plans = plan_day_logs(

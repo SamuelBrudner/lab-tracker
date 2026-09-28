@@ -95,6 +95,10 @@ function SessionSuggestionsCard({
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const generationRef = useRef(0);
+  // Sessions this card already created, by suggestion id, with the steps
+  // done so far. A retry after a failed close or attach finishes those steps
+  // on the same session instead of creating a second one over the window.
+  const appliedRef = useRef(new Map());
 
   const load = useCallback(async () => {
     const generation = ++generationRef.current;
@@ -137,6 +141,32 @@ function SessionSuggestionsCard({
     setHiddenIds((current) => new Set([...current, suggestion.suggestion_id]));
   }
 
+  // Record (or reuse) the suggested session, then close it and attach its
+  // captures. Each finished step is remembered, so a retry only redoes what
+  // failed; attaching skips notes that already target the session.
+  async function applyStart(suggestion, attach) {
+    let progress = appliedRef.current.get(suggestion.suggestion_id);
+    if (!progress) {
+      const created = await sessionsGateway.createSession(
+        { project_id: projectId, session_type: "operational", started_at: suggestion.start_at },
+        { token }
+      );
+      progress = { closed: false, sessionId: created.session_id };
+      appliedRef.current.set(suggestion.suggestion_id, progress);
+    }
+    if (!progress.closed && suggestion.end_at && endsInThePast(suggestion.end_at)) {
+      await sessionsGateway.updateSession(
+        progress.sessionId,
+        { ended_at: suggestion.end_at, status: "closed" },
+        { token }
+      );
+      progress.closed = true;
+    }
+    if (attach) {
+      await attachCaptures(suggestion.capture_note_ids || [], progress.sessionId, token);
+    }
+  }
+
   async function apply(suggestion, { attach = false } = {}) {
     setPendingId(suggestion.suggestion_id);
     setMessage("");
@@ -150,29 +180,25 @@ function SessionSuggestionsCard({
         );
         setMessage("Session ended.");
       } else {
-        const created = await sessionsGateway.createSession(
-          { project_id: projectId, session_type: "operational", started_at: suggestion.start_at },
-          { token }
-        );
-        if (suggestion.end_at && endsInThePast(suggestion.end_at)) {
-          await sessionsGateway.updateSession(
-            created.session_id,
-            { ended_at: suggestion.end_at, status: "closed" },
-            { token }
-          );
-        }
-        if (attach) {
-          await attachCaptures(suggestion.capture_note_ids || [], created.session_id, token);
-        }
+        await applyStart(suggestion, attach);
         setMessage(
           attach ? "Session recorded and captures attached." : "Session recorded."
         );
       }
+      appliedRef.current.delete(suggestion.suggestion_id);
       setHiddenIds((current) => new Set([...current, suggestion.suggestion_id]));
       onApplied?.();
       await load();
     } catch (err) {
-      setError(err?.message || "Could not apply the suggestion.");
+      const reason = err?.message || "request failed.";
+      if (appliedRef.current.has(suggestion.suggestion_id)) {
+        // The session exists; keep the suggestion so a retry can finish it
+        // on that same session, and let the page show the new session now.
+        setError(`Session recorded, but not finished: ${reason} Apply again to finish.`);
+        onApplied?.();
+      } else {
+        setError(err?.message || "Could not apply the suggestion.");
+      }
     } finally {
       setPendingId("");
     }

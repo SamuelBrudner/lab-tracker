@@ -304,12 +304,14 @@ class ProvenanceLinkService(BaseService):
     ) -> int:
         """Propose was_derived_from note -> session links from capture time.
 
-        A recent capture that names no session, made inside exactly one of the
-        project's session windows, derives from that session; overlapping
-        windows propose nothing. A note already linked to any session (in any
-        status, including a rejected time-window guess) is left alone, and the
-        usual pair rule means a declined link is never re-proposed. Always
-        writes PROPOSED; never accepts or commits.
+        A recent capture that names no session, made inside exactly one window
+        among the project's sessions run by its own author (either author
+        unknown: any session), derives from that session; overlapping windows
+        propose nothing. A note already linked to any session (in any status,
+        including a rejected time-window guess) is left alone, and the usual
+        pair rule means a declined link is never re-proposed. Only the links
+        whose source is a candidate are loaded. Always writes PROPOSED; never
+        accepts or commits.
         """
 
         self.authorization.require_contributor(project_id, actor=actor)
@@ -327,7 +329,9 @@ class ProvenanceLinkService(BaseService):
         )
         if not sessions:
             return 0
-        existing = self.repository.provenance_links.list_by_project(project_id)
+        existing = self.repository.provenance_links.list_by_project(
+            project_id, source_ids=[note.note_id for note in notes]
+        )
         linked_to_a_session = {
             link.source.entity_id
             for link in existing

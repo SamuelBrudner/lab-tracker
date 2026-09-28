@@ -148,7 +148,7 @@ and a person accepts or rejects each one. The `basis` says which rule:
 | --- | --- | --- |
 | `content_hash_match` | Two captured artifacts share a content hash | later capture `was_derived_from` the earliest |
 | `exact_id_match` | A capture's metadata names one session or one committed analysis commit | note `was_derived_from` that session or analysis |
-| `time_window_match` | A capture that names no session was made (by `format_acquired_at`, else its observed time) inside exactly one session window of its project, within the last 14 days | note `was_derived_from` that session |
+| `time_window_match` | A capture that names no session was made (by `format_acquired_at`, else its observed time) inside exactly one window among its project's sessions run by the capture's own author (either author unknown: any session), within the last 14 days | note `was_derived_from` that session |
 
 Overlapping session windows are ambiguous and propose nothing; a pair declined
 once is never re-proposed. Only accepted note-to-note links render as

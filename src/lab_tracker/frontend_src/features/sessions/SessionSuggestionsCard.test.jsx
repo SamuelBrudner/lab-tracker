@@ -202,6 +202,60 @@ describe("SessionSuggestionsCard", () => {
     ]);
   });
 
+  it("finishes a half-applied suggestion on the same session instead of creating another", async () => {
+    const two = suggestion({ capture_count: 2, capture_note_ids: ["note-a", "note-b"] });
+    const noteA = { note_id: "note-a", project_id: "project-1", raw_content: "Added buffer" };
+    const noteB = { note_id: "note-b", project_id: "project-1", raw_content: "Spun down" };
+    const attachedA = {
+      ...noteA,
+      targets: [{ entity_id: "session-new", entity_type: "session" }],
+    };
+    const onApplied = vi.fn();
+    const fetchMock = installFetchMock([
+      { match: SUGGESTIONS_PATH, response: [report([two]), report([])] },
+      { match: "/sessions", method: "POST", response: [session()] },
+      {
+        match: "/sessions/session-new",
+        method: "PATCH",
+        response: [session({ status: "closed" })],
+      },
+      { match: "/notes/note-a", response: [apiResponse(noteA), apiResponse(attachedA)] },
+      { match: "/notes/note-a", method: "PATCH", response: [apiResponse(attachedA)] },
+      { match: "/notes/note-b", response: [apiResponse(noteB), apiResponse(noteB)] },
+      {
+        match: "/notes/note-b",
+        method: "PATCH",
+        response: [
+          errorResponse("Database is busy.", 503),
+          apiResponse({ ...noteB, targets: attachedA.targets }),
+        ],
+      },
+    ]);
+    render(
+      <SessionSuggestionsCard projectId="project-1" token="t" canWrite onApplied={onApplied} />
+    );
+
+    const attach = await screen.findByRole("button", { name: "Apply and attach 2 captures" });
+    fireEvent.click(attach);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Session recorded, but not finished: Database is busy. Apply again to finish."
+    );
+    expect(screen.getByText(two.title)).toBeInTheDocument();
+    expect(onApplied).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Apply and attach 2 captures" }));
+
+    expect(await screen.findByText("Session recorded and captures attached.")).toBeInTheDocument();
+    expect(bodies(fetchMock, "POST", "/sessions")).toHaveLength(1);
+    expect(bodies(fetchMock, "PATCH", "/sessions/session-new")).toHaveLength(1);
+    expect(bodies(fetchMock, "PATCH", "/notes/note-a")).toHaveLength(1);
+    expect(bodies(fetchMock, "PATCH", "/notes/note-b")).toEqual([
+      { targets: [{ entity_id: "session-new", entity_type: "session" }] },
+      { targets: [{ entity_id: "session-new", entity_type: "session" }] },
+    ]);
+    expect(onApplied).toHaveBeenCalledTimes(2);
+  });
+
   it("keeps Apply for contributors but lets anyone dismiss", async () => {
     installFetchMock([{ match: SUGGESTIONS_PATH, response: report([suggestion()]) }]);
     render(<SessionSuggestionsCard projectId="project-1" token="t" canWrite={false} />);

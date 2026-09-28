@@ -18,10 +18,14 @@ Three deterministic kinds, each with a stable id so a dismissal sticks:
     time to end it at. Id: session plus last capture, so new captures after a
     dismissal raise a fresh suggestion.
 ``start_session_from_captures``
-    A local day with at least :data:`MIN_CAPTURES_FOR_SESSION` staged captures
-    that name no session and fall inside no session window: suggest a session
-    spanning the first to the last of them. Id: project plus local day, so a
-    dismissed day stays dismissed as more captures arrive.
+    A local day with at least :data:`MIN_CAPTURES_FOR_SESSION` of one person's
+    staged captures that name no session and fall inside no window of a
+    session that person ran: suggest a session spanning the first to the last
+    of them. Only the reader's own captures are offered (applying records the
+    session as the reader, and time only ties a capture to its own author's
+    session); captures with no recorded author count as anyone's. Id: project,
+    local day, and author, so a dismissed day stays dismissed as more captures
+    arrive.
 ``start_session_from_booking``
     An instrument booking note (``booking_start``/``booking_end`` metadata,
     written by a calendar integration) that has begun, within the lookback,
@@ -33,6 +37,13 @@ Days are local days in the zone the project's daily review runs in (the
 person's own review settings, then the project default, else UTC). Captures
 are read with the same clock as the time-window detector:
 ``format_acquired_at`` first, then the note's observed time.
+
+Every read is bounded: candidate captures from the last
+:data:`SUGGESTION_LOOKBACK_DAYS` days (filtered in SQL), booking notes synced in
+the last :data:`BOOKING_NOTE_LOOKBACK_DAYS` days, only the provenance links
+that target an active session, and one
+:class:`~lab_tracker.services.session_clock.SessionTimeline` sweep for every
+window lookup.
 """
 
 from __future__ import annotations
@@ -65,21 +76,25 @@ from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.provenance_time_windows import TIME_WINDOW_NOTE_ORIGINS
 from lab_tracker.services.session_clock import (
     SESSION_HINT_METADATA_KEYS,
+    SessionTimeline,
+    author_key,
     capture_clock,
     carries_session,
+    eligible_sessions,
     is_booking_note,
     parse_format_acquired_at,
     resolve_capture_timezone,
     session_label,
-    sessions_containing,
-    windows_overlap,
 )
-from lab_tracker.services.shared import actor_user_fk
+from lab_tracker.services.shared import actor_user_fk, actor_user_id
 
 # An open session with no capture for this long reads as forgotten.
 QUIET_SESSION_THRESHOLD: Final = timedelta(hours=4)
 # How far back (by note creation, and by booking start) suggestions look.
 SUGGESTION_LOOKBACK_DAYS: Final = 14
+# How long before its start a booking note may have been synced and still be
+# read: calendar integrations sync a rolling window of upcoming bookings.
+BOOKING_NOTE_LOOKBACK_DAYS: Final = 90
 # Sessionless captures on one local day before a session is suggested.
 MIN_CAPTURES_FOR_SESSION: Final = 3
 # Response bounds: suggestions per read, capture ids listed per suggestion,
@@ -278,7 +293,7 @@ def close_quiet_session_suggestions(
 
 def booking_suggestions(
     bookings: Iterable[_Booking],
-    sessions: Sequence[Session],
+    timeline: SessionTimeline,
     sessionless: Sequence[_Capture],
     *,
     project_id: UUID,
@@ -307,7 +322,7 @@ def booking_suggestions(
             continue
         if carries_session(booking.note):
             continue
-        if windows_overlap(booking.start, booking.end, sessions, now=now):
+        if timeline.overlaps(booking.start, booking.end):
             continue
         inside = [
             capture.note.note_id
@@ -359,21 +374,25 @@ def capture_day_suggestions(
     zone: tzinfo,
     covered: Sequence[tuple[datetime, datetime]] = (),
     min_captures: int = MIN_CAPTURES_FOR_SESSION,
+    viewer: str | None = None,
 ) -> list[SessionSuggestion]:
-    """Local days with at least ``min_captures`` sessionless captures.
+    """Local days with at least ``min_captures`` of one person's sessionless captures.
 
-    Captures inside a ``covered`` window (a booking already being suggested)
-    are left to that suggestion.
+    Captures are grouped per day and author (a capture with no recorded author
+    joins ``viewer``'s group), so one person's day never borrows a colleague's
+    captures. Captures inside a ``covered`` window (a booking already being
+    suggested) are left to that suggestion.
     """
 
-    by_day: dict[date, list[_Capture]] = defaultdict(list)
+    by_day: dict[tuple[date, str], list[_Capture]] = defaultdict(list)
     for capture in sessionless:
         if any(start <= capture.at <= end for start, end in covered):
             continue
-        by_day[capture.at.astimezone(zone).date()].append(capture)
+        author = author_key(capture.note) or viewer or ""
+        by_day[(capture.at.astimezone(zone).date(), author)].append(capture)
     suggestions: list[SessionSuggestion] = []
-    for day in sorted(by_day):
-        captures = by_day[day]
+    for day, author in sorted(by_day):
+        captures = by_day[(day, author)]
         if len(captures) < min_captures:
             continue
         first, last = captures[0], captures[-1]
@@ -383,6 +402,7 @@ def capture_day_suggestions(
                     SessionSuggestionKind.START_SESSION_FROM_CAPTURES,
                     project_id,
                     day.isoformat(),
+                    *((author,) if author else ()),
                 ),
                 kind=SessionSuggestionKind.START_SESSION_FROM_CAPTURES,
                 title=(
@@ -411,18 +431,33 @@ def suggest_sessions(
     booking_notes: Iterable[Note],
     now: datetime,
     zone: tzinfo,
+    viewer: str | None = None,
 ) -> list[SessionSuggestion]:
     """Every suggestion for one project, deterministic and bounded.
 
     ``candidate_notes`` are recent notes that may be sessionless captures
     (they are re-checked here); ``booking_notes`` carry booking metadata.
+    ``viewer`` (the reader's author id) limits capture-day suggestions and the
+    captures listed with a booking to the reader's own captures (plus those
+    with no recorded author); ``None`` offers everyone's, grouped per author.
     """
 
     lookback_start = now - timedelta(days=SUGGESTION_LOOKBACK_DAYS)
-    sessionless = [
+    candidates = [
         capture
         for capture in _captures(note for note in candidate_notes if is_sessionless_capture(note))
-        if not sessions_containing(capture.at, sessions, now=now)
+        if viewer is None or author_key(capture.note) in (None, viewer)
+    ]
+    earliest = min([lookback_start, *(capture.at for capture in candidates)])
+    timeline = SessionTimeline(sessions, now=now, since=earliest)
+    sessionless = [
+        capture
+        for capture, open_sessions in zip(
+            candidates,
+            timeline.containing_many([capture.at for capture in candidates]),
+            strict=True,
+        )
+        if not eligible_sessions(capture.note, open_sessions)
     ]
     bookings = [
         booking
@@ -432,7 +467,7 @@ def suggest_sessions(
     closing = close_quiet_session_suggestions(sessions, captures_by_session, now=now, zone=zone)
     booked = booking_suggestions(
         bookings,
-        sessions,
+        timeline,
         sessionless,
         project_id=project_id,
         now=now,
@@ -443,6 +478,7 @@ def suggest_sessions(
         sessionless,
         project_id=project_id,
         zone=zone,
+        viewer=viewer,
         covered=[
             (suggestion.start_at, suggestion.end_at)
             for suggestion in booked
@@ -507,7 +543,9 @@ class SessionSuggestionService(BaseService):
             origins=sorted(origin.value for origin in TIME_WINDOW_NOTE_ORIGINS),
         )
         booking_notes = repository.provenance_links.list_identifier_carriers(
-            project.project_id, (BOOKING_START_KEY,)
+            project.project_id,
+            (BOOKING_START_KEY,),
+            created_since=current - timedelta(days=BOOKING_NOTE_LOOKBACK_DAYS),
         )
         suggestions = suggest_sessions(
             project_id=project.project_id,
@@ -517,6 +555,7 @@ class SessionSuggestionService(BaseService):
             booking_notes=booking_notes,
             now=current,
             zone=zone,
+            viewer=actor_user_id(actor),
         )
         return SessionSuggestionReport(
             project_id=project.project_id,
@@ -542,7 +581,10 @@ class SessionSuggestionService(BaseService):
             return {}
         repository = self.repository
         linked = _linked_session_notes(
-            repository.provenance_links.list_by_project(project_id), active_ids
+            repository.provenance_links.list_by_project(
+                project_id, target_ids=sorted(active_ids, key=str)
+            ),
+            active_ids,
         )
         captures: dict[UUID, list[Note]] = {}
         for session_id in sorted(active_ids, key=str):
@@ -568,6 +610,7 @@ class SessionSuggestionService(BaseService):
 
 
 __all__ = [
+    "BOOKING_NOTE_LOOKBACK_DAYS",
     "MAX_LISTED_CAPTURES",
     "MAX_SUGGESTIONS",
     "MIN_CAPTURES_FOR_SESSION",
