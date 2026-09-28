@@ -144,7 +144,7 @@ def load_settings(path: Path) -> tuple[str, JsonObject]:
     if hooks is not None and not isinstance(hooks, dict):
         raise LTValidationError(f"{path}: `hooks` must be a JSON object.")
     for event, groups in (hooks or {}).items():
-        if not isinstance(groups, list):
+        if groups is not None and not isinstance(groups, list):
             raise LTValidationError(f"{path}: `hooks.{event}` must be a list.")
     return text, parsed
 
@@ -154,11 +154,14 @@ def with_managed_hooks(settings: Mapping[str, Any]) -> JsonObject:
 
     A canonical group already present stays where it is; stale variants of a
     managed command are removed (dropping a group only when that emptied it);
-    a missing entry is appended to its event's list.
+    a missing entry is appended to its event's list. ``"hooks": null`` (and a
+    null event list) counts as empty.
     """
 
     updated: JsonObject = copy.deepcopy(dict(settings))
-    hooks = updated.setdefault("hooks", {})
+    hooks = updated.get("hooks")
+    if not isinstance(hooks, dict):
+        hooks = updated["hooks"] = {}
     for managed in MANAGED_HOOKS:
         groups, kept_canonical = _without_managed(hooks.get(managed.event) or [], managed)
         if not kept_canonical:
@@ -182,7 +185,7 @@ def without_managed_hooks(settings: Mapping[str, Any]) -> JsonObject:
         if managed.event not in hooks:
             continue
         original = hooks[managed.event]
-        groups, _kept = _without_managed(original, managed, keep_canonical=False)
+        groups, _kept = _without_managed(original or [], managed, keep_canonical=False)
         if groups:
             hooks[managed.event] = groups
         elif original:

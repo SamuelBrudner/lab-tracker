@@ -231,6 +231,36 @@ def test_install_refuses_a_settings_file_it_cannot_edit_safely(
         assert path.read_text(encoding="utf-8") == broken
 
 
+@pytest.mark.parametrize(
+    "seed",
+    [
+        {"hooks": None, "env": {"A": "1"}},
+        {"hooks": {"SessionEnd": None, "PostToolUse": None}, "env": {"A": "1"}},
+    ],
+)
+@pytest.mark.parametrize("extra", [[], ["--shared"]])
+def test_null_hooks_count_as_empty(tmp_path: Path, capsys, seed: dict, extra: list[str]) -> None:
+    repo = tmp_path / "repo"
+    (repo / ".claude").mkdir(parents=True)
+    path = _path(repo, SHARED if extra else LOCAL)
+    path.write_text(json.dumps(seed), encoding="utf-8")
+
+    absent = _run(capsys, "--target", str(repo), "--uninstall", "--yes", *extra)
+    assert absent["action"] == "absent"
+    assert json.loads(path.read_text(encoding="utf-8")) == seed
+
+    installed = _run(capsys, "--target", str(repo), "--yes", *extra)
+
+    assert installed["action"] == "installed"
+    settings = json.loads(path.read_text(encoding="utf-8"))
+    assert settings["env"] == {"A": "1"}
+    assert settings["hooks"]["SessionEnd"] == [agent_hooks.SESSION_END_HOOK.group()]
+    assert settings["hooks"]["PostToolUse"] == [agent_hooks.WATCH_TOUCH_HOOK.group()]
+
+    _run(capsys, "--target", str(repo), "--uninstall", "--yes", *extra)
+    assert json.loads(path.read_text(encoding="utf-8")) == {"env": {"A": "1"}}
+
+
 def _git_repo(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "init", "-q", str(path)], check=True)  # noqa: S603, S607

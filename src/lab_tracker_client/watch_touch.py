@@ -33,6 +33,7 @@ from lab_tracker_client.agent_session import (
     drain_watch_outbox,
     hook_base_dir,
     hook_cwd,
+    record_drain,
     redact_secrets,
 )
 from lab_tracker_client.client import LabTracker
@@ -214,12 +215,15 @@ def touch(
     payload["action"] = action
     payload["outbox"] = str(config.outbox_path())
     if fresh and sync:
+        # No server configured: queue only -- no network call and no notice.
         try:
-            payload["sync"] = drain_watch_outbox(
+            summary = drain_watch_outbox(
                 config, client_factory=client_factory, limit=TOUCH_SYNC_LIMIT
             )
         except Exception as exc:  # noqa: BLE001 - queued events retry on the next sync.
             payload["sync_error"] = redact_secrets(str(exc))[:500]
+        else:
+            record_drain(payload, summary)
     return payload
 
 

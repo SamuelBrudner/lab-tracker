@@ -1104,15 +1104,23 @@ def drain_watch_outbox(
     *,
     client_factory: Callable[[], LabTracker] | None = None,
     limit: int = SYNC_EVENT_LIMIT,
-) -> JsonObject:
+) -> JsonObject | None:
     """Best-effort bounded drain of the checkout's watch outbox after a hook queued work.
 
-    One unauthenticated ``/health`` probe first, so an unreachable server
+    Returns ``None`` without any network call when no server is configured
+    (no ``LAB_TRACKER_BASE_URL``/MCP base URL and no saved profile URL, the
+    same rule as ``lt run``): the client's localhost default is never probed,
+    so whatever happens to listen there never receives a capture. Otherwise
+    one unauthenticated ``/health`` probe first, so an unreachable server
     costs a single short timeout instead of one per queued event; then at
     most ``limit`` events. Draft requests ride on each event's own
     ``payload.request_draft``. Raises on any failure; callers record it.
     """
 
+    from lab_tracker_client.run_capture import server_configured
+
+    if client_factory is None and not server_configured():
+        return None
     factory = client_factory or (lambda: LabTracker.from_env(timeout_seconds=SYNC_TIMEOUT_SECONDS))
     client = factory()
     try:
@@ -1129,7 +1137,7 @@ def _drain_after_capture(
     client_factory: Callable[[], LabTracker] | None,
 ) -> None:
     try:
-        payload["sync"] = drain_watch_outbox(config, client_factory=client_factory)
+        summary = drain_watch_outbox(config, client_factory=client_factory)
     except Exception as exc:  # noqa: BLE001 - the event is durable; a later sync retries.
         payload["sync_error"] = redact_secrets(str(exc))[:500]
         print(
@@ -1138,6 +1146,21 @@ def _drain_after_capture(
             "`lt outbox sync` retries.",
             file=sys.stderr,
         )
+        return
+    record_drain(payload, summary)
+
+
+# Queued only: no server URL in the environment or the saved connection profile.
+SYNC_SKIPPED_NOT_CONFIGURED = "no_server_configured"
+
+
+def record_drain(payload: JsonObject, summary: JsonObject | None) -> None:
+    """Put a drain outcome on a hook payload; no server configured is quiet by design."""
+
+    if summary is None:
+        payload["sync_skipped"] = SYNC_SKIPPED_NOT_CONFIGURED
+    else:
+        payload["sync"] = summary
 
 
 __all__ = [
