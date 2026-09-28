@@ -1012,14 +1012,17 @@ FastAPI app does not read them. `LAB_TRACKER_BASE_URL` (see
 - `LAB_TRACKER_AUTOTRACK`: `0`, `false`, `no`, or `off` disables the matplotlib
   figure autotrack hook everywhere, including the IPython startup file that
   `lt setup autotrack` installs, its capture of figures a notebook displays
-  inline, the Jupyter notebook save hook (`--jupyter`), and the scripts `.pth`
-  hook (`--scripts`, checked at every interpreter start) (default: on). The
-  hooks capture only when the project comes from `autotrack(project_id=...)`,
-  `LAB_TRACKER_PROJECT_ID`, or the checkout's `lt_ids.json`; see
-  [notebook-and-script-capture.md](notebook-and-script-capture.md)
+  inline, the Jupyter notebook save hook (`--jupyter`), the scripts `.pth`
+  hook (`--scripts`, checked at every interpreter start), and the R autotrack
+  hooks, including the `~/.Rprofile` block `lt setup autotrack --r` adds
+  (default: on). The hooks capture only when the project comes from
+  `autotrack(project_id=...)`, `LAB_TRACKER_PROJECT_ID`, or the checkout's
+  `lt_ids.json`; see [notebook-and-script-capture.md](notebook-and-script-capture.md)
+  and [lab-tracker-r.md](lab-tracker-r.md)
 - `LAB_TRACKER_CAPTURE_OUTBOX`: `0`, `false`, `no`, or `off` stops figure
-  captures from queueing into the checkout's watch outbox when the server is
-  unreachable; the save then reports the failure instead (default: on)
+  captures (Python client, `lt capture file`, and the MATLAB package) from
+  queueing into the checkout's watch outbox when the server is unreachable;
+  the save then reports the failure instead (default: on)
 - `LAB_TRACKER_SKILLS_HOME`: install the generated setup skill into this one
   directory instead of both `~/.claude/skills` and `~/.agents/skills`
 
@@ -1031,10 +1034,11 @@ FastAPI app does not read them. `LAB_TRACKER_BASE_URL` (see
   `LAB_TRACKER_REPO_HOOK_ENABLED` instead (default: on)
 - `LAB_TRACKER_GIT_DRAFT_ENABLED`: older name for
   `LAB_TRACKER_GIT_CAPTURE_ENABLED`, used only when the new name is unset
-- `LAB_TRACKER_LT`: `lt` executable the managed Git and repo hooks run
-  (default: the path recorded when the hook was installed); the Slurm
-  `scripts/slurm-task-epilog.sh` template also honours it (default there: the
-  `lt` that submitted the job, recorded in its run manifest, then `lt` on
+- `LAB_TRACKER_LT`: `lt` executable the managed Git and repo hooks and the R
+  autotrack hooks run (default: the path recorded when the hook or the
+  `~/.Rprofile` block was installed; R then falls back to `lt` on `PATH`); the
+  Slurm `scripts/slurm-task-epilog.sh` template also honours it (default there:
+  the `lt` that submitted the job, recorded in its run manifest, then `lt` on
   `PATH`)
 - `LAB_TRACKER_PYTHON`: Python interpreter the Windows graph-draft hook
   (`scripts/install-git-graph-draft-hook.ps1`) and `scripts/matlab-smoke.sh`

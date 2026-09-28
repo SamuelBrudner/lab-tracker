@@ -257,6 +257,7 @@ MCP, and verification.
   [watch folders](docs/watch-folder-capture.md) ·
   [notebooks and scripts](docs/notebook-and-script-capture.md) ·
   [MATLAB integration](docs/lab-tracker-matlab.md) ·
+  [R integration](docs/lab-tracker-r.md) ·
   [provenance export](docs/provenance-export.md)
 - **Understand the model:** [vision](docs/vision.md) ·
   [review and commit](docs/review-and-commit-model.md) ·

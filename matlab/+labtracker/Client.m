@@ -107,6 +107,7 @@ classdef Client < handle
             parser.addParameter('Status', 'staged');
             parser.addParameter('ClientCaptureId', '');
             parser.addParameter('TranscribedText', '');
+            parser.addParameter('Targets', '');
             parser.parse(filePath, varargin{:});
 
             resolvedProjectId = char(string(parser.Results.ProjectId));
@@ -134,6 +135,10 @@ classdef Client < handle
             if strlength(string(parser.Results.TranscribedText)) > 0
                 fields.transcribed_text = char(string(parser.Results.TranscribedText));
             end
+            if strlength(string(parser.Results.Targets)) > 0
+                % JSON list of {entity_type, entity_id} declared note targets.
+                fields.targets = char(string(parser.Results.Targets));
+            end
 
             [payload, statusCode] = obj.requestMultipart('/notes/upload-file', fields, path);
             if ~isfield(payload, 'data')
@@ -151,6 +156,7 @@ classdef Client < handle
             parser.addParameter('LogicalId', '');
             parser.addParameter('PreviewMaxBytes', 2000000);
             parser.addParameter('VersionEveryChange', false);
+            parser.addParameter('Targets', '');
             parser.parse(filePath, varargin{:});
 
             path = char(string(filePath));
@@ -207,7 +213,8 @@ classdef Client < handle
                 'ProjectId', parser.Results.ProjectId, ...
                 'Metadata', metadata, ...
                 'Status', 'staged', ...
-                'ClientCaptureId', clientCaptureId);
+                'ClientCaptureId', clientCaptureId, ...
+                'Targets', parser.Results.Targets);
 
             if ~isempty(cleanup)
                 clear cleanup;

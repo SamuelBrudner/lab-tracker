@@ -1480,7 +1480,10 @@ def _stale_reason(event: Mapping[str, Any]) -> str:
         if (
             fingerprint.checksum != source.get("content_hash")
             or fingerprint.size_bytes != source.get("size_bytes")
-            or fingerprint.mtime != source.get("mtime")
+            # An adapter that cannot reproduce Python's float st_mtime bit for
+            # bit (the MATLAB offline queue) records none; hash and size still
+            # decide.
+            or ("mtime" in source and fingerprint.mtime != source.get("mtime"))
         ):
             return f"watched file changed since scan: {path}"
     manifest_path = _optional_str(source.get("manifest_path"))

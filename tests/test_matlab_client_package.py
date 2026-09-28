@@ -20,6 +20,10 @@ def test_matlab_package_files_exist() -> None:
         "+labtracker/+internal/sha256File.m",
         "+labtracker/+internal/fileUri.m",
         "+labtracker/+internal/figureMetadata.m",
+        "+labtracker/+internal/queueOffline.m",
+        "+labtracker/+internal/activeSession.m",
+        "+labtracker/+internal/captureProject.m",
+        "+labtracker/+internal/runMetadata.m",
         "examples/capture_figure_smoke.m",
     }
 
@@ -110,3 +114,56 @@ def test_matlab_runtime_smoke_runner_and_runbook_exist() -> None:
     assert "scripts/matlab-smoke.sh" in matlab_doc
     # The runbook must warn that a green exit alone does not prove a capture.
     assert "result.action" in matlab_doc
+
+
+def test_matlab_capture_queues_offline_and_reads_the_checkout_context() -> None:
+    """Parity with the Python capture core, checked as source contracts (the
+    Octave run in test_matlab_offline_queue.py exercises it where available)."""
+
+    internal = PACKAGE_ROOT / "+internal"
+    upload = _read(PACKAGE_ROOT / "uploadFigure.m")
+    for helper in (
+        "captureProject",
+        "activeSession",
+        "captureMetadata",
+        "sessionTarget",
+        "isTransportFailure",
+        "queueOffline",
+        "circuitBreaker",
+        "warnOnce",
+    ):
+        assert f"labtracker.internal.{helper}(" in upload
+    queue = _read(internal / "queueOffline.m")
+    for text in (
+        "lab-tracker-matlab-figure",
+        "staged-note",
+        "LAB_TRACKER_CAPTURE_OUTBOX",
+        "writeJsonAtomic",
+        "watchOutboxPath",
+    ):
+        assert text in queue
+    atomic = _read(internal / "writeJsonAtomic.m")
+    assert ".tmp" in atomic and "movefile" in atomic
+    assert "java.security.MessageDigest" in _read(internal / "sha256File.m")
+    outbox = _read(internal / "watchOutboxPath.m")
+    assert "LAB_TRACKER_WATCH_OUTBOX" in outbox
+    session = _read(internal / "activeSession.m")
+    for text in (
+        "LAB_TRACKER_SESSION_ID",
+        "LAB_TRACKER_SESSION_CONTEXT",
+        "session.json",
+        "expires_at",
+    ):
+        assert text in session
+    assert "lt_ids.json" in _read(internal / "captureProject.m")
+    run = _read(internal / "runMetadata.m")
+    for key in (
+        "run_captured_at",
+        "run_git_commit",
+        "run_git_commit_error",
+        "run_git_dirty",
+        "run_git_status_error",
+        "run_repo_remote_url",
+        "credentialFreeRemote",
+    ):
+        assert key in run

@@ -170,7 +170,8 @@ the same way.
 ## Offline Figure Queue
 
 Figure saves that cannot reach the server (`lab_tracker_client.savefig`,
-`capture_figures`, or the autotrack hook) are queued into this same watch
+`capture_figures`, the autotrack hook, `lt capture file`, the R autotrack
+hooks, or the MATLAB `labtracker.savefig`) are queued into this same watch
 outbox instead of being dropped, under the same capture id and project a live
 save would use, and drain with the next `lt watch run`, `lt watch sync`, or `lt outbox
 sync` (see [repo-report-capture.md](repo-report-capture.md) for the
@@ -185,6 +186,43 @@ The same outbox holds the daily notebook pages the Jupyter save hook writes
 carries the reserved `payload.deliver_after` time (its local day's end); a
 sync leaves such an event pending, reported as skipped with reason `not_due`,
 until that time has passed.
+
+MATLAB writes the event itself (see [lab-tracker-matlab.md](lab-tracker-matlab.md));
+its events carry no `mtime`, so the sync checks their content hash and size
+alone before uploading.
+
+## Capturing One Saved File From Any Runtime
+
+`lt capture file PATH` runs the same fail-soft capture as `savefig` on a file
+that is already on disk, so any runtime or pipeline step can shell out to it:
+
+```bash
+lt capture file results/summary.png --metadata stage=final
+lt capture file out/fit.pdf --require-bound --metadata capture_language=julia
+lt capture file table.csv --kind table --logical-id results/table --project PROJECT_UUID
+```
+
+- stdout is the capture result as JSON (`action`, `path`, `client_capture_id`,
+  `evidence_content_hash`, `metadata`, `note_id` when stored, `queued_event`
+  when queued, `reason`, `errors`) plus `notices`, the stderr lines the
+  capture printed, so a caller that discards stderr can still show them;
+- the exit status is 0 for every capture outcome (`imported`, `coalesced`,
+  `queued`, `skipped`, `failed`) and nonzero only for a usage error, so a
+  capture never fails the step that called it;
+- `--require-bound` applies autotrack's rule: the file is captured only when
+  its project comes from `--project`, `LAB_TRACKER_PROJECT_ID`, or the
+  checkout's `lt_ids.json`; otherwise nothing is sent or queued and the result
+  is `skipped` with reason `project_unbound`;
+- `--metadata KEY=VALUE` (repeatable) adds scalar note metadata; `true`,
+  `false`, and numbers that print back unchanged are typed, anything else is
+  a string;
+- `--output PATH` also writes the result JSON to `PATH` atomically, for a
+  caller that runs the command in the background (the R hooks do).
+
+Each invocation is a new process, so the circuit breaker that spares a
+Python session repeated connect timeouts lasts for one file only: with the
+server down, each call waits at most one clamped connect timeout (2.5 s)
+before queueing.
 
 A figure save goes to the project named by, in order: the `project_id`
 argument, `LAB_TRACKER_PROJECT_ID`, the saved file's checkout binding

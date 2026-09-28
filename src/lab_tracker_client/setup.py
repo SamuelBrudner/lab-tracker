@@ -248,6 +248,7 @@ def setup_status(target: str | Path = ".", *, brief: bool = False) -> JsonObject
         "hooks": _hooks_status(root),
         "skills": _skills_status(),
         "autotrack": _autotrack_status(),
+        "autotrack_r": _autotrack_r_status(),
         "session": _session_status(root),
     }
     payload["suggestions"] = _suggestions(payload)
@@ -1108,6 +1109,14 @@ def _autotrack_status() -> JsonObject:
     with suppress(Exception):
         status.update(autotrack_hook_status())
     return status
+
+
+def _autotrack_r_status() -> JsonObject:
+    from lab_tracker_client.r_autotrack import rprofile_status
+
+    with suppress(Exception):
+        return rprofile_status()
+    return {"rprofile": None, "installed": False, "up_to_date": None}
 
 
 def _session_status(root: Path) -> JsonObject:
