@@ -51,6 +51,29 @@ URL for phone capture.
 - **Scan into a session.** On the serving computer, open an active session
   and scan its **Capture into this session** QR code (or tap **Capture** on the
   session). Every capture from that page arrives linked to the session.
+- **Tap a tag instead.** The same section writes the session's capture link to
+  an NFC sticker (**Write NFC tag** on Chrome for Android, or copy the link into
+  any NFC writer app). Tapping the tag opens capture for that session.
+- **Share a batch once.** When the share sheet hands Lab Tracker several items,
+  **Trust shares into _session_ for 1h / 2h / 4h** imports them, and the next
+  ones, straight into that session until the window ends or you tap **Stop**.
+- **Import the session's photos.** With a session selected, **Import photos**
+  uploads many photos at once as one group, with per-file progress and retry.
+- **Debrief.** Closing a session offers a one-button voice debrief (three
+  prompts); **Skip** is one tap and never holds the close back.
+
+## Bench Shortcuts
+
+- **Kiosk scan station:** open `/app/capture?kiosk=1` on a shared bench PC with
+  a USB barcode scanner; every scan becomes a staged note in the chosen session.
+- **Hands-free voice:** an iOS Shortcut or Android automation can post a voice
+  memo to `POST /notes/voice-capture` with its own paired-device credential,
+  created under **Devices → Hands-free shortcut**.
+- **Desktop bookmarklet:** **Devices → Desktop bookmarklet** saves the page you
+  are reading (title, address, selection) through the capture page.
+
+Setup, what each one records, limits, and kill switches are in
+[`docs/bench-capture.md`](bench-capture.md).
 
 ## Firewall Checks
 
