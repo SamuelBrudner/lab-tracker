@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import mimetypes
 import os
 import stat
@@ -30,9 +31,11 @@ from lab_tracker_client.capture_project import (
 from lab_tracker_client.client import (
     DECLARED_TARGET_SOURCE_CONFIG_DEFAULT,
     DECLARED_TARGET_SOURCE_KEY,
+    MAX_PAGE_SIZE,
     EntityRef,
     LabTracker,
     LTAPIError,
+    LTConflictError,
     LTError,
     LTRecord,
     LTValidationError,
@@ -134,7 +137,23 @@ SESSION_TARGET_DROPPED_NOTICE = (
 # (session id, project id) pairs the server refused, so later saves in this
 # process skip the target instead of being refused again.
 _REFUSED_SESSION_TARGETS: set[tuple[str, str]] = set()
+# (endpoint, project id, client capture id) -> note id of the staged note a
+# capture id already made, so a re-capture in this process (a notebook cell
+# re-run) finds its note without scanning the project's notes.
+_CAPTURE_NOTE_IDS: dict[tuple[str, str, str], str] = {}
+# A re-capture whose note is not in that cache scans at most this many notes.
+CAPTURE_NOTE_LOOKUP_MAX_NOTES = 5000
+# How the server words the 409 for a capture id replayed with other fields
+# (note_service._ensure_matching_capture_note); any other conflict is a failure.
+CAPTURE_ID_REUSE_MESSAGE = "was already used with different field(s)"
 AUTOTRACK_NO_PROJECT_WHY = "that checkout is not bound to a project (no lt_ids.json)"
+# A plain script is a new process on every run, so under the scripts .pth the
+# unbound notice is remembered in the client config dir: each checkout (or
+# loose folder) is named at most once a week, in a bounded file.
+_PERSISTENT_UNBOUND_NOTICES = [False]
+UNBOUND_NOTICE_FILENAME = "autotrack-notices.json"
+UNBOUND_NOTICE_REPEAT_SECONDS = 7 * 24 * 3600
+UNBOUND_NOTICE_MAX_ENTRIES = 256
 AUTOTRACK_OUTSIDE_CHECKOUT_WHY = (
     "that folder is not inside a git checkout, so no lt_ids.json binds it to a project"
 )
@@ -777,6 +796,25 @@ def _capture_saved_figure(
                     project_id=resolved_project_id,
                     kind=kind,
                 )
+            except LTConflictError as conflict:
+                # A re-capture under the same capture id differs from the first
+                # upload at least in its observed-at time, so the server refuses
+                # the replay; coalesce into the note that capture id made.
+                existing_note = (
+                    _existing_capture_note(
+                        resolved_client,
+                        endpoint_key=endpoint_key,
+                        project_id=resolved_project_id,
+                        client_capture_id=client_capture_id,
+                        content_hash=content_hash,
+                        timeout=capture_timeout,
+                    )
+                    if CAPTURE_ID_REUSE_MESSAGE in str(conflict.error_message or conflict)
+                    else None
+                )
+                if existing_note is None:
+                    raise
+                note, status_code = existing_note, 200
             except Exception as exc:
                 if not _is_transport_failure(exc):
                     raise
@@ -815,6 +853,7 @@ def _capture_saved_figure(
                 )
             # The endpoint answered: close any open breaker for it.
             _close_circuit(endpoint_key)
+            _remember_capture_note(endpoint_key, resolved_project_id, client_capture_id, note)
             if status_code == 200:
                 return _coalesced_result(
                     client=resolved_client,
@@ -857,6 +896,65 @@ def _capture_saved_figure(
                 "errors": [str(exc)],
             }
         )
+
+
+def _remember_capture_note(
+    endpoint_key: str | None, project_id: str, client_capture_id: str, note: Any
+) -> None:
+    with suppress(AttributeError, KeyError, TypeError):
+        key = (endpoint_key or "", str(project_id), client_capture_id)
+        _CAPTURE_NOTE_IDS[key] = str(note.id)
+
+
+def _existing_capture_note(
+    client: LabTracker,
+    *,
+    endpoint_key: str | None,
+    project_id: str,
+    client_capture_id: str,
+    content_hash: str,
+    timeout: Any,
+) -> LTRecord | None:
+    """The staged note ``client_capture_id`` already made in ``project_id``, if any.
+
+    Tries the note this process remembers for it, then the project's notes
+    carrying this content hash (an unchanged re-save), then up to
+    :data:`CAPTURE_NOTE_LOOKUP_MAX_NOTES` of the project's notes.
+    """
+
+    remembered = _CAPTURE_NOTE_IDS.get((endpoint_key or "", str(project_id), client_capture_id))
+    if remembered:
+        try:
+            note: LTRecord | None = client._data_record(
+                client._request("GET", f"/notes/{remembered}", timeout=timeout)
+            )
+        except LTError:
+            note = None
+        if note is not None and note.get("client_capture_id") == client_capture_id:
+            return note
+    for params in (
+        {"project_id": str(project_id), "evidence_content_hash": content_hash},
+        {"project_id": str(project_id)},
+    ):
+        offset = 0
+        while offset < CAPTURE_NOTE_LOOKUP_MAX_NOTES:
+            page = client._request(
+                "GET",
+                "/notes",
+                params={**params, "limit": MAX_PAGE_SIZE, "offset": offset},
+                timeout=timeout,
+            )
+            data = page.get("data")
+            items = data if isinstance(data, list) else []
+            for item in items:
+                if isinstance(item, Mapping) and item.get("client_capture_id") == (
+                    client_capture_id
+                ):
+                    return LTRecord(item)
+            if len(items) < MAX_PAGE_SIZE:
+                break
+            offset += len(items)
+    return None
 
 
 def _coalesced_result(
@@ -1220,7 +1318,7 @@ def _warn_unbound_autotrack(path: Path, capture_project: CaptureProject | None) 
     root = capture_checkout_root(path)
     if root is None and capture_project is None:
         folder = path.expanduser().parent.resolve()
-        _warn_once(
+        _warn_unbound_once(
             f"{AUTOTRACK_UNBOUND_REASON}:{folder}",
             AUTOTRACK_UNBOUND_NOTICE.format(
                 checkout=folder,
@@ -1231,12 +1329,51 @@ def _warn_unbound_autotrack(path: Path, capture_project: CaptureProject | None) 
         return
     why = AUTOTRACK_WATCH_CONFIG_WHY if capture_project is not None else AUTOTRACK_NO_PROJECT_WHY
     checkout = root or path.expanduser().parent.resolve()
-    _warn_once(
+    _warn_unbound_once(
         f"{AUTOTRACK_UNBOUND_REASON}:{checkout}",
         AUTOTRACK_UNBOUND_NOTICE.format(
             checkout=checkout, why=why, remedy=AUTOTRACK_CHECKOUT_REMEDY
         ),
     )
+
+
+def _warn_unbound_once(key: str, message: str) -> None:
+    if key in _WARNED:
+        return
+    if _PERSISTENT_UNBOUND_NOTICES[0] and not _claim_unbound_notice(key):
+        _WARNED.add(key)
+        return
+    _warn_once(key, message)
+
+
+def _claim_unbound_notice(key: str, *, now: float | None = None) -> bool:
+    """Record that ``key``'s notice is shown now; False if shown within the week."""
+
+    base = os.getenv("LAB_TRACKER_CONFIG_DIR")
+    path = (Path(base).expanduser() if base else Path.home() / ".lab-tracker") / (
+        UNBOUND_NOTICE_FILENAME
+    )
+    current = time.time() if now is None else now
+    shown: dict[str, float] = {}
+    with suppress(OSError, ValueError, TypeError):
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            shown = {
+                str(name): float(when)
+                for name, when in loaded.items()
+                if isinstance(when, (int, float))
+                and current - float(when) < UNBOUND_NOTICE_REPEAT_SECONDS
+            }
+    if key in shown:
+        return False
+    shown[key] = current
+    newest = sorted(shown.items(), key=lambda item: item[1])[-UNBOUND_NOTICE_MAX_ENTRIES:]
+    with suppress(OSError):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        partial = path.with_name(f".{path.name}.{uuid.uuid4().hex}.partial")
+        partial.write_text(json.dumps(dict(newest), sort_keys=True), encoding="utf-8")
+        os.replace(partial, path)
+    return True
 
 
 def _queue_capture_offline(
@@ -1553,6 +1690,8 @@ def _reset_figure_capture_state_for_tests() -> None:
     _BREAKERS.clear()
     _WARNED.clear()
     _REFUSED_SESSION_TARGETS.clear()
+    _CAPTURE_NOTE_IDS.clear()
+    _PERSISTENT_UNBOUND_NOTICES[0] = False
     _reset_session_hints_for_tests()
     _reset_worktree_tree_cache_for_tests()
     _RUN_CONTEXT.set(None)
