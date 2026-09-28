@@ -114,6 +114,19 @@ class ProvenanceLinkRepository(EntityRepository[ProvenanceLink], Protocol):
         """Return the project's notes whose metadata sets any of ``keys`` (with
         their targets), in creation order: the exact-id detector's input."""
 
+    def list_time_window_candidates(
+        self,
+        project_id: UUID,
+        *,
+        created_since: datetime,
+        excluded_metadata_keys: Sequence[str],
+        origins: Sequence[str],
+    ) -> list[Note]:
+        """Return the project's unarchived notes created at or after
+        ``created_since`` with one of ``origins``, no session target, and none
+        of ``excluded_metadata_keys`` set (with their targets), in creation
+        order: the time-window detector's input."""
+
 
 class VisualizationRepository(EntityRepository[Visualization], Protocol):
     """Visualization persistence with the row lock asset mutations hold."""

@@ -1710,6 +1710,34 @@ describe("GraphDraftDetailCard keyboard review", () => {
     expect(within(section).getByText("session session-1")).toBeInTheDocument();
   });
 
+  it("labels a time-window provenance proposal in the reviewer's words", async () => {
+    const draft = draftFixture();
+    renderDraft(draft, {
+      routes: [
+        {
+          match: /^\/provenance-links\?/,
+          response: apiResponse([
+            {
+              basis: "time_window_match",
+              content_hash: null,
+              link_id: "link-3",
+              project_id: "project-1",
+              relation: "was_derived_from",
+              source: { entity_id: "note-d", entity_type: "note" },
+              status: "proposed",
+              target: { entity_id: "session-2", entity_type: "session" },
+            },
+          ]),
+        },
+      ],
+    });
+
+    const section = await screen.findByRole("region", { name: "Proposed provenance links" });
+    expect(within(section).getByText(/made during this session/)).toBeInTheDocument();
+    expect(within(section).queryByText(/time_window_match/)).not.toBeInTheDocument();
+    expect(within(section).getByText("session session-2")).toBeInTheDocument();
+  });
+
   it("gives claim statements and falsification criteria typed editors", async () => {
     const draft = draftFixture({
       operations: [

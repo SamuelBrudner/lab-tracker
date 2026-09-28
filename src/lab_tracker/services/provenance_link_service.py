@@ -1,6 +1,6 @@
 """Deterministic, human-gated provenance-link proposals.
 
-Two detectors run on every batch execution (synchronous, queued worker, or
+Three detectors run on every batch execution (synchronous, queued worker, or
 due dispatch) and propose ``was_derived_from`` links for a human to accept or
 reject:
 
@@ -15,6 +15,12 @@ reject:
   ``code_version`` in the project. The note is the source, the named entity
   the target; ambiguous prefixes and targets the note already carries propose
   nothing.
+* Time window: when a capture that names no session (no session target, no
+  session id or link code in its metadata) was made -- by its
+  ``format_acquired_at``, else its observed time -- inside exactly one session
+  window of the project. The note is the source, the session the target;
+  overlapping windows propose nothing, and only notes created in the last
+  ``TIME_WINDOW_LOOKBACK_DAYS`` days are scanned.
 
 Nothing is ever auto-committed: the detectors only write PROPOSED links, a
 pair already linked in any status (including rejected) is never re-proposed,
@@ -26,6 +32,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import datetime
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext
@@ -51,6 +58,13 @@ from lab_tracker.services.provenance_id_matches import (
     ID_MATCH_SESSION_METADATA_KEYS,
     IdMatch,
     id_matches_for_notes,
+)
+from lab_tracker.services.provenance_time_windows import (
+    TIME_WINDOW_EXCLUDED_METADATA_KEYS,
+    TIME_WINDOW_NOTE_ORIGINS,
+    TimeWindowMatch,
+    time_window_lookback_start,
+    time_window_matches,
 )
 from lab_tracker.services.shared import actor_user_fk, actor_user_id
 
@@ -104,6 +118,18 @@ def id_match_proposals(matches: list[IdMatch]) -> list[_Proposal]:
         )
         for match in matches
     ]
+
+
+def time_window_proposals(matches: list[TimeWindowMatch]) -> list[_Proposal]:
+    return [
+        _Proposal(
+            source=EntityRef(entity_type=EntityType.NOTE, entity_id=match.note_id),
+            target=EntityRef(entity_type=EntityType.SESSION, entity_id=match.session_id),
+            basis=ProvenanceLinkBasis.TIME_WINDOW_MATCH,
+        )
+        for match in matches
+    ]
+
 
 _PROVENANCE_LINK_TRANSITIONS: dict[ProvenanceLinkStatus, set[ProvenanceLinkStatus]] = {
     ProvenanceLinkStatus.PROPOSED: {
@@ -207,18 +233,68 @@ class ProvenanceLinkService(BaseService):
         matches = id_matches_for_notes(notes, sessions=sessions, analyses=analyses)
         return self._save_new_proposals(project_id, id_match_proposals(matches), actor=actor)
 
+    def propose_links_from_time_windows(
+        self,
+        project_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+        now: datetime | None = None,
+    ) -> int:
+        """Propose was_derived_from note -> session links from capture time.
+
+        A recent capture that names no session, made inside exactly one of the
+        project's session windows, derives from that session; overlapping
+        windows propose nothing. A note already linked to any session (in any
+        status, including a rejected time-window guess) is left alone, and the
+        usual pair rule means a declined link is never re-proposed. Always
+        writes PROPOSED; never accepts or commits.
+        """
+
+        self.authorization.require_contributor(project_id, actor=actor)
+        current = now or utc_now()
+        notes = self.repository.provenance_links.list_time_window_candidates(
+            project_id,
+            created_since=time_window_lookback_start(current),
+            excluded_metadata_keys=TIME_WINDOW_EXCLUDED_METADATA_KEYS,
+            origins=sorted(origin.value for origin in TIME_WINDOW_NOTE_ORIGINS),
+        )
+        if not notes:
+            return 0
+        sessions, _total = self.repository.query_sessions(
+            project_id=project_id, limit=None, offset=0
+        )
+        if not sessions:
+            return 0
+        existing = self.repository.provenance_links.list_by_project(project_id)
+        linked_to_a_session = {
+            link.source.entity_id
+            for link in existing
+            if link.source.entity_type == EntityType.NOTE
+            and link.target.entity_type == EntityType.SESSION
+        }
+        matches = [
+            match
+            for match in time_window_matches(notes, sessions, now=current)
+            if match.note_id not in linked_to_a_session
+        ]
+        return self._save_new_proposals(
+            project_id, time_window_proposals(matches), actor=actor, existing=existing
+        )
+
     def _save_new_proposals(
         self,
         project_id: UUID,
         proposals: list[_Proposal],
         *,
         actor: AuthContext | None,
+        existing: list[ProvenanceLink] | None = None,
     ) -> int:
         """Write each proposal whose (source, target, relation) pair is new; return the count."""
 
         if not proposals:
             return 0
-        existing = self.repository.provenance_links.list_by_project(project_id)
+        if existing is None:
+            existing = self.repository.provenance_links.list_by_project(project_id)
         seen_pairs = {
             (link.source.entity_id, link.target.entity_id, link.relation) for link in existing
         }

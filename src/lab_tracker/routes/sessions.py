@@ -57,6 +57,7 @@ def build_sessions_router(api: LabTrackerAPI) -> APIRouter:
             project_id=payload.project_id,
             session_type=payload.session_type,
             primary_question_id=payload.primary_question_id,
+            started_at=payload.started_at,
             actor=actor,
         )
         return Envelope(data=session)

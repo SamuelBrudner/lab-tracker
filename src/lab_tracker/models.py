@@ -1343,10 +1343,14 @@ class ProvenanceLinkBasis(str, Enum):
     ``exact_id_match``: a capture's own metadata names exactly one session or
     committed analysis in the project (a session id, or a git commit that
     matches one committed ``code_version``).
+    ``time_window_match``: a capture that names no session was made (by its
+    ``format_acquired_at``, else its observed time) inside exactly one session
+    window of the project.
     """
 
     CONTENT_HASH_MATCH = "content_hash_match"
     EXACT_ID_MATCH = "exact_id_match"
+    TIME_WINDOW_MATCH = "time_window_match"
 
 
 class ProvenanceLinkStatus(str, Enum):

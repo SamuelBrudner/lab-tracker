@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
@@ -42,6 +42,10 @@ from lab_tracker.services.shared import (
 
 if TYPE_CHECKING:
     from lab_tracker.services.dataset_service import DatasetService
+
+# A back-dated start may run this far ahead of the server clock (client skew)
+# before it counts as "in the future".
+SESSION_START_CLOCK_SKEW = timedelta(minutes=5)
 
 
 class SessionService(BaseService):
@@ -86,6 +90,7 @@ class SessionService(BaseService):
         session_type: SessionType,
         *,
         primary_question_id: UUID | None = None,
+        started_at: datetime | None = None,
         actor: AuthContext | None = None,
         origin: EntityOrigin = EntityOrigin.USER,
         change_set_id: UUID | None = None,
@@ -93,8 +98,22 @@ class SessionService(BaseService):
         origin_model: str | None = None,
         origin_prompt_version: str | None = None,
     ) -> Session:
+        """Start a session now, or record one that began at ``started_at``.
+
+        A back-dated start (a session recorded after the fact, e.g. applied
+        from a session suggestion) must be timezone-aware and not in the
+        future beyond :data:`SESSION_START_CLOCK_SKEW`.
+        """
+
         self.authorization.require_contributor(project_id, actor=actor)
         self.projects.get_project(project_id)
+        now = utc_now()
+        if started_at is not None:
+            if started_at.tzinfo is None or started_at.utcoffset() is None:
+                raise ValidationError("started_at must include a timezone offset.")
+            started_at = started_at.astimezone(timezone.utc)
+            if started_at > now + SESSION_START_CLOCK_SKEW:
+                raise ValidationError("started_at must not be in the future.")
         if session_type == SessionType.SCIENTIFIC:
             if primary_question_id is None:
                 raise ValidationError("Scientific sessions require a primary question.")
@@ -112,6 +131,7 @@ class SessionService(BaseService):
             session_type=session_type,
             status=SessionStatus.ACTIVE,
             primary_question_id=primary_question_id,
+            started_at=started_at or now,
             created_by=actor_user_id(actor),
             created_by_user_id=actor_user_fk(actor, self.repository),
             origin=origin,

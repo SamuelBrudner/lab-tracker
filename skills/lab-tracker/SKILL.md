@@ -355,6 +355,7 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 - `primary_question_id` (optional): string(uuid) | null
 - `project_id` (required): string(uuid)
 - `session_type` (required): SessionType enum: scientific, operational
+- `started_at` (optional): string(date-time) | null
 
 #### Datasets: `DatasetCreate`
 - Required: `project_id`, `primary_question_id`

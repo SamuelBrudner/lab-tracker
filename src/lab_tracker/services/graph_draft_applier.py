@@ -285,6 +285,7 @@ class GraphPatchApplier:
                 project_id=data.project_id,
                 session_type=data.session_type,
                 primary_question_id=data.primary_question_id,
+                started_at=data.started_at,
                 actor=actor,
                 **origin_kwargs,
             )
