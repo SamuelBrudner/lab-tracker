@@ -16,6 +16,7 @@ error. Run them by hand (or with ``--dry-run``) to see the JSON payload.
 from __future__ import annotations
 
 import argparse
+import sys
 from typing import Any
 
 import lab_tracker_client.agent_hooks as agent_hooks
@@ -126,19 +127,23 @@ def add_setup_agent_hooks_parser(
     hooks_parser = setup_commands.add_parser(
         "agent-hooks",
         help=(
-            "Add Claude Code hooks to this checkout's .claude/settings.json: SessionEnd runs "
-            "'lt agent session-end' (a redacted retrospective of each agent session, staged "
-            "for review) and PostToolUse on Write/Edit runs 'lt watch touch'. This captures "
-            "agent conversations, so it is a separate opt-in that 'lt setup init' never makes."
+            "Add Claude Code hooks to this checkout's personal .claude/settings.local.json: "
+            "SessionEnd runs 'lt agent session-end' (a redacted retrospective of each agent "
+            "session, staged for review) and PostToolUse on Write/Edit runs 'lt watch "
+            "touch'. This captures agent conversations, so it is a separate opt-in that "
+            "'lt setup init' never makes."
         ),
     )
     hooks_parser.add_argument(
         "--target", default=".", help="Checkout path. Defaults to the current directory."
     )
     hooks_parser.add_argument(
-        "--local",
+        "--shared",
         action="store_true",
-        help="Edit the personal .claude/settings.local.json instead of .claude/settings.json.",
+        help=(
+            "Edit the usually committed .claude/settings.json instead, enrolling everyone "
+            "who clones the repository with lt configured (prints a warning)."
+        ),
     )
     hooks_parser.add_argument(
         "--uninstall", action="store_true", help="Remove the managed hook entries."
@@ -190,9 +195,11 @@ def _cmd_setup_agent_hooks(args: argparse.Namespace) -> Any:
             "lt setup agent-hooks edits the checkout's agent settings to capture coding-agent "
             "sessions; pass --yes to consent or --dry-run to preview."
         )
+    if args.shared and not args.uninstall:
+        print(f"warning: {agent_hooks.SHARED_SCOPE_WARNING}", file=sys.stderr)
     try:
         payload = agent_hooks.install_agent_hooks(
-            args.target, local=args.local, uninstall=args.uninstall, dry_run=args.dry_run
+            args.target, shared=args.shared, uninstall=args.uninstall, dry_run=args.dry_run
         )
     except (LTValidationError, OSError, UnicodeDecodeError) as exc:
         raise SystemExit(f"lt setup agent-hooks: {exc}") from None

@@ -1,7 +1,10 @@
 """Consent-gated install of the coding-agent lifecycle hooks: ``lt setup agent-hooks``.
 
-Two Claude Code hook entries, added to a checkout's ``.claude/settings.json``
-(or, with ``--local``, the personal ``.claude/settings.local.json``):
+Two Claude Code hook entries, added by default to the checkout's personal
+``.claude/settings.local.json`` (Claude Code merges it with the shared file;
+it is meant to stay out of git), or, only with ``--shared``, to the usually
+committed ``.claude/settings.json``, which enrolls everyone who clones the
+repository with ``lt`` configured:
 
 * ``SessionEnd`` -> ``lt agent session-end --fail-silent``: one bounded,
   redacted retrospective of the finished session, queued as a staged note
@@ -18,9 +21,10 @@ managed entry is recognised by its command (``lt agent session-end ...`` or
 ``lt watch touch ...``, with or without a path to ``lt``). Everything else in
 the file -- the scaffolded ``SessionStart``/``UserPromptSubmit`` hooks and any
 hook a person added -- is preserved; installing twice changes nothing, and
-``--uninstall`` removes only the managed entries. ``lt update`` carries the
-managed entries forward when it refreshes the scaffolded settings file
-(:func:`carry_forward_agent_hooks`).
+``--uninstall`` removes only the managed entries (from the file the scope
+names; the other file is reported). ``lt update`` never touches the personal
+file and carries managed entries in the shared file forward when it refreshes
+the scaffold (:func:`carry_forward_agent_hooks`).
 """
 
 from __future__ import annotations
@@ -34,6 +38,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from lab_tracker_client import gitinfo
 from lab_tracker_client.client import LTValidationError
 from lab_tracker_client.watch_touch import find_checkout_watch_config
 
@@ -41,6 +46,19 @@ JsonObject = dict[str, Any]
 
 SETTINGS_RELATIVE = Path(".claude") / "settings.json"
 LOCAL_SETTINGS_RELATIVE = Path(".claude") / "settings.local.json"
+SCOPE_LOCAL = "local"
+SCOPE_SHARED = "shared"
+SCOPE_FILES: tuple[tuple[str, Path], ...] = (
+    (SCOPE_LOCAL, LOCAL_SETTINGS_RELATIVE),
+    (SCOPE_SHARED, SETTINGS_RELATIVE),
+)
+SHARED_SCOPE_WARNING = (
+    "--shared writes .claude/settings.json, which is usually committed: once it is, "
+    "EVERYONE who clones this repository and has `lt` configured will have their "
+    "coding-agent sessions captured (a retrospective of each session staged into the "
+    "bound project) without opting in themselves. Leave out --shared to keep the hooks "
+    "in your personal .claude/settings.local.json."
+)
 # SessionEnd hooks share a 1.5 s budget unless a hook's own timeout raises it
 # (Claude Code caps the raise at 60 s).
 SESSION_END_TIMEOUT_SECONDS = 60
@@ -84,11 +102,11 @@ WATCH_TOUCH_HOOK = ManagedHook(
 MANAGED_HOOKS: tuple[ManagedHook, ...] = (SESSION_END_HOOK, WATCH_TOUCH_HOOK)
 
 
-def settings_path(target: str | Path = ".", *, local: bool = False) -> Path:
-    """The settings file ``lt setup agent-hooks`` edits for a checkout."""
+def settings_path(target: str | Path = ".", *, shared: bool = False) -> Path:
+    """The settings file ``lt setup agent-hooks`` edits: personal unless ``shared``."""
 
     root = Path(target).expanduser().resolve()
-    return root / (LOCAL_SETTINGS_RELATIVE if local else SETTINGS_RELATIVE)
+    return root / (SETTINGS_RELATIVE if shared else LOCAL_SETTINGS_RELATIVE)
 
 
 def is_managed_hook(entry: Any, managed: ManagedHook | None = None) -> bool:
@@ -221,14 +239,19 @@ def managed_hooks_present(settings: Mapping[str, Any]) -> dict[str, bool]:
 def install_agent_hooks(
     target: str | Path = ".",
     *,
-    local: bool = False,
+    shared: bool = False,
     uninstall: bool = False,
     dry_run: bool = False,
 ) -> JsonObject:
-    """Add (or with ``uninstall`` remove) the managed hook entries; returns a diff payload."""
+    """Add (or with ``uninstall`` remove) the managed hook entries; returns a diff payload.
+
+    The personal ``.claude/settings.local.json`` is the default; ``shared``
+    edits the committed ``.claude/settings.json`` instead.
+    """
 
     root = Path(target).expanduser().resolve()
-    path = settings_path(root, local=local)
+    scope = SCOPE_SHARED if shared else SCOPE_LOCAL
+    path = settings_path(root, shared=shared)
     existing_text, settings = load_settings(path)
     proposed = without_managed_hooks(settings) if uninstall else with_managed_hooks(settings)
     proposed_text = render_settings(proposed)
@@ -247,13 +270,16 @@ def install_agent_hooks(
         "command": "setup-agent-hooks",
         "action": action,
         "settings_path": str(path),
-        "scope": "local" if local else "project",
+        "scope": scope,
         "dry_run": dry_run,
         "hooks": [managed.describe() for managed in MANAGED_HOOKS],
         "diff": _diff(path, existing_text, proposed_text) if changes else "",
     }
-    if not uninstall:
-        payload["warnings"] = _install_warnings(root, local=local)
+    warnings = [] if uninstall else _install_warnings(root, shared=shared)
+    other = _other_scope_note(root, scope, uninstall=uninstall)
+    if other:
+        warnings.append(other)
+    payload["warnings"] = warnings
     if changes and not dry_run:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(proposed_text, encoding="utf-8", newline="\n")
@@ -265,7 +291,7 @@ def agent_hooks_status(target: str | Path = ".") -> JsonObject:
 
     root = Path(target).expanduser().resolve()
     files: list[JsonObject] = []
-    for scope, relative in (("project", SETTINGS_RELATIVE), ("local", LOCAL_SETTINGS_RELATIVE)):
+    for scope, relative in SCOPE_FILES:
         path = root / relative
         entry: JsonObject = {"scope": scope, "path": str(path), "present": path.exists()}
         if path.exists():
@@ -284,6 +310,7 @@ def agent_hooks_status(target: str | Path = ".") -> JsonObject:
         "installed": all(installed.values()),
         "session_end": installed[SESSION_END_HOOK.event],
         "watch_touch": installed[WATCH_TOUCH_HOOK.event],
+        "scopes": [str(item["scope"]) for item in files if any((item.get("hooks") or {}).values())],
         "files": files,
     }
 
@@ -307,8 +334,8 @@ def carry_forward_agent_hooks(canonical_text: str, existing_path: Path) -> str:
     return render_settings(with_managed_hooks(canonical))
 
 
-def _install_warnings(root: Path, *, local: bool) -> list[str]:
-    warnings: list[str] = []
+def _install_warnings(root: Path, *, shared: bool) -> list[str]:
+    warnings: list[str] = [SHARED_SCOPE_WARNING] if shared else []
     if shutil.which("lt") is None:
         warnings.append(
             "The hooks call `lt`, but no `lt` executable is on the current PATH; they "
@@ -320,14 +347,46 @@ def _install_warnings(root: Path, *, local: bool) -> list[str]:
             "No .lab-tracker/watch.json in this checkout: `lt watch touch` has nothing to "
             "capture until `lt watch add <folder>` registers a watch folder."
         )
-    if not local:
+    if not shared and local_settings_tracked_risk(root):
         warnings.append(
-            ".claude/settings.json is usually committed, so these hooks travel with the "
-            "repository: a teammate whose `lt` is configured would capture their sessions "
-            "into the bound project too. `--local` installs into the personal "
-            ".claude/settings.local.json instead."
+            ".claude/settings.local.json is not ignored by git in this checkout, so a "
+            "`git add -A` could commit this personal opt-in for everyone; add "
+            "`.claude/settings.local.json` to .gitignore."
         )
     return warnings
+
+
+def local_settings_tracked_risk(root: Path) -> bool:
+    """True when ``root`` is a git checkout that does not ignore the personal settings file.
+
+    One bounded ``git check-ignore`` probe; ``False`` outside a checkout or
+    when git cannot answer (nothing to warn about with confidence).
+    """
+
+    probe = gitinfo.run_git(root, "check-ignore", "-q", LOCAL_SETTINGS_RELATIVE.as_posix())
+    if probe.ok:
+        return False
+    # Exit 1 (not ignored) has empty stderr; exit 128 (not a repository) says why.
+    return not probe.stderr and not probe.timed_out and not probe.unavailable
+
+
+def _other_scope_note(root: Path, scope: str, *, uninstall: bool) -> str:
+    """Name managed entries in the file this run does not edit, so none are forgotten."""
+
+    other_scope, relative = next(item for item in SCOPE_FILES if item[0] != scope)
+    other_path = root / relative
+    try:
+        _text, parsed = load_settings(other_path)
+    except (LTValidationError, OSError, UnicodeDecodeError):
+        return ""
+    if not any(managed_hooks_present(parsed).values()):
+        return ""
+    flag = " --shared" if other_scope == SCOPE_SHARED else ""
+    verb = "still has" if uninstall else "also has"
+    return (
+        f"{relative.as_posix()} {verb} the agent hooks; "
+        f"`lt setup agent-hooks{flag} --uninstall --yes` removes them from it."
+    )
 
 
 def _diff(path: Path, existing: str, proposed: str) -> str:

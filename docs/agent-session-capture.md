@@ -23,25 +23,39 @@ these hooks, and `lt setup status` only reports whether they are installed
 (`agent_hooks`); it never suggests them.
 
 ```bash
-lt setup agent-hooks --dry-run     # show the .claude/settings.json diff
-lt setup agent-hooks --yes         # apply it
+lt setup agent-hooks --dry-run     # show the .claude/settings.local.json diff
+lt setup agent-hooks --yes         # apply it, for you alone
 lt setup agent-hooks --uninstall --yes
 ```
 
 - A non-interactive run without `--yes` or `--dry-run` fails without writing.
-- `--local` writes the personal `.claude/settings.local.json` instead.
-  `.claude/settings.json` is usually committed, so hooks installed there travel
-  with the repository: a teammate who clones it and has a configured `lt` would
-  capture their own sessions into the bound project too. Choose `--local` when
-  the opt-in is yours alone. (Claude Code merges hooks from both files.)
+- **The personal `.claude/settings.local.json` is the default.** Claude Code
+  merges it with the shared `.claude/settings.json`, so the scaffolded
+  `SessionStart`/`UserPromptSubmit` hooks keep working and the capture hooks
+  apply only to the person who opted in. The file must stay out of version
+  control: Lab Tracker's scaffold does not manage `.gitignore`, so add
+  `.claude/settings.local.json` to it if it is not ignored already.
+  `lt setup agent-hooks` checks with `git check-ignore` and warns when it is not.
+- **`--shared` writes the usually committed `.claude/settings.json` instead**
+  and prints a warning, because once that file is committed **everyone who
+  clones the repository and has `lt` configured has their coding-agent sessions
+  captured** into the bound project without opting in themselves. That is a
+  team decision, never a setup default. (Earlier drafts of this command had a
+  `--local` flag; the personal file is now the default and `--local` is not
+  accepted.)
+- `--uninstall` removes the entries from the file its scope names (the personal
+  file, or the shared file with `--shared`) and reports when the other file
+  still has them.
 - The managed entries are recognised by their command (`lt agent session-end
   ...`, `lt watch touch ...`). Everything else in the file, including the
-  scaffolded `SessionStart`/`UserPromptSubmit` hooks and any hook you added,
-  is preserved; installing twice changes nothing, and `--uninstall` removes
-  only the managed entries.
-- `lt update` (and `lt setup init --force`) rewrite `.claude/settings.json` to
-  the current scaffold but carry the agent-hooks entries forward, so a refresh
-  never silently drops the opt-in.
+  scaffolded hooks and any hook you added, is preserved; installing twice
+  changes nothing, and `--uninstall` removes only the managed entries.
+- `lt update` (and `lt setup init --force`) never touch the personal file. They
+  rewrite `.claude/settings.json` to the current scaffold but carry agent-hooks
+  entries installed there with `--shared` forward, so a refresh never silently
+  drops that opt-in either.
+- `lt setup status` reports the hooks from either file (`agent_hooks.scopes` is
+  `["local"]`, `["shared"]`, or both).
 - The `SessionEnd` entry sets `"timeout": 60`. Claude Code gives all
   `SessionEnd` hooks a shared 1.5-second budget unless a hook's own timeout
   raises it (up to 60 seconds); starting `lt` alone takes about a second. The
@@ -174,7 +188,8 @@ Over-redaction is the accepted failure mode.
   output. Run them by hand, or with `--dry-run`, to see the JSON.
 - **Kill switch:** `LAB_TRACKER_AGENT_HOOKS=0` (or `false`, `no`, `off`) turns
   both hooks into no-ops everywhere; `lt setup agent-hooks --uninstall --yes`
-  removes them from the repo.
+  removes them from the personal settings file (add `--shared` for the
+  committed one).
 
 ## Other agents
 
