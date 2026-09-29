@@ -5,12 +5,20 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import shlex
 from pathlib import Path
 
 import httpx
 import pytest
 
-from lab_tracker.cli import _doctor, init_consumer_repo, update_consumer_repo
+from lab_tracker.cli import (
+    InitResult,
+    _doctor,
+    init_consumer_repo,
+    refresh_setup_skills,
+    update_consumer_repo,
+)
 from lab_tracker.decision_context_constants import (
     MCP_SERVER_INSTRUCTIONS,
     code_conventions_version_line,
@@ -25,6 +33,7 @@ from lab_tracker.setup_guide import (
     setup_skill_markdown,
 )
 from lab_tracker_client import cli as lt_cli
+from lab_tracker_client import registry as repo_registry
 from lab_tracker_client import setup as setup_helpers
 
 
@@ -332,6 +341,170 @@ def test_setup_status_exposes_and_checks_each_default_skill_target(
         "lab-tracker-setup skill" in suggestion
         for suggestion in healthy["suggestions"]
     )
+
+
+def _default_skill_paths(agent_home: Path) -> dict[str, Path]:
+    return {
+        "claude": agent_home / ".claude" / "skills" / "lab-tracker-setup" / "SKILL.md",
+        "codex": agent_home / ".agents" / "skills" / "lab-tracker-setup" / "SKILL.md",
+    }
+
+
+def _write_skill(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def _suggestion_containing(suggestions: list[str], marker: str) -> str:
+    return next(item for item in suggestions if marker in item)
+
+
+def _assert_skills_only_suggestion(suggestion: str) -> None:
+    assert "`lt update --skills-only`" in suggestion
+    assert "leaves this repository's files alone" in suggestion
+    # The pre-fix commands also scaffolded ten files into the working directory.
+    assert "--install-skills" not in suggestion
+    assert "lt setup init" not in suggestion
+
+
+def test_skill_suggestions_name_the_skills_only_command(
+    default_agent_home,
+    monkeypatch,
+) -> None:
+    repo = default_agent_home.parent / "repo-skill-suggestions"
+    repo.mkdir()
+    monkeypatch.setattr(
+        setup_helpers, "probe_health_diagnostics", lambda _url: {"reachable": True}
+    )
+    paths = _default_skill_paths(default_agent_home)
+    _write_skill(paths["claude"], setup_skill_markdown())
+
+    missing = _suggestion_containing(
+        setup_helpers.setup_status(repo)["suggestions"], "missing from: codex"
+    )
+    _assert_skills_only_suggestion(missing)
+
+    _write_skill(paths["codex"], "custom stale skill")
+    stale_status = setup_helpers.setup_status(repo)
+    stale = _suggestion_containing(stale_status["suggestions"], "skills are stale")
+    _assert_skills_only_suggestion(stale)
+
+    # Status payloads that predate the per-agent target list take the legacy branch.
+    legacy_status = {**stale_status, "skills": {"installed": True, "up_to_date": False}}
+    legacy = _suggestion_containing(
+        setup_helpers._suggestions(legacy_status), "skill is stale"
+    )
+    _assert_skills_only_suggestion(legacy)
+
+
+@pytest.mark.parametrize("state", ["stale", "missing"])
+def test_suggested_skill_fix_command_runs_verbatim_and_leaves_cwd_untouched(
+    default_agent_home,
+    monkeypatch,
+    state: str,
+) -> None:
+    scratch = default_agent_home.parent / "not-a-consumer-repo"
+    scratch.mkdir()
+    monkeypatch.chdir(scratch)
+    monkeypatch.setattr(
+        setup_helpers, "probe_health_diagnostics", lambda _url: {"reachable": True}
+    )
+    paths = _default_skill_paths(default_agent_home)
+    if state == "stale":
+        for name, path in paths.items():
+            _write_skill(path, f"{name} customised skill")
+        marker = "skills are stale"
+    else:
+        _write_skill(paths["claude"], setup_skill_markdown())
+        marker = "missing from: codex"
+
+    suggestion = _suggestion_containing(
+        setup_helpers.setup_status(scratch)["suggestions"], marker
+    )
+    command = re.search(r"`(lt [^`]+)`", suggestion)
+    assert command is not None, suggestion
+    argv = shlex.split(command.group(1))
+    assert argv[0] == "lt"
+
+    lt_cli.main(argv[1:])
+
+    for path in paths.values():
+        assert path.read_text(encoding="utf-8") == setup_skill_markdown()
+    if state == "stale":
+        for name, path in paths.items():
+            backup = path.with_name(path.name + ".bak-lt-update")
+            assert backup.read_text(encoding="utf-8") == f"{name} customised skill"
+    # The whole point of the fix: nothing lands in the directory it ran from.
+    assert list(scratch.iterdir()) == []
+    assert not repo_registry.registry_path().exists()
+    healthy = setup_helpers.setup_status(scratch)
+    assert healthy["skills"]["all_up_to_date"] is True
+    assert not any(
+        "lab-tracker-setup skill" in item for item in healthy["suggestions"]
+    )
+
+
+def test_refresh_setup_skills_touches_nothing_but_the_skill_homes(
+    default_agent_home,
+    monkeypatch,
+) -> None:
+    scratch = default_agent_home.parent / "scratch-cwd"
+    scratch.mkdir()
+    monkeypatch.chdir(scratch)
+    paths = _default_skill_paths(default_agent_home)
+
+    created = refresh_setup_skills()
+    assert set(created.created) == set(paths.values())
+    for path in paths.values():
+        assert path.read_text(encoding="utf-8") == setup_skill_markdown()
+
+    # Each customised target gets its own refresh backup.
+    for name, path in paths.items():
+        path.write_text(f"{name} customised skill", encoding="utf-8")
+    refreshed = refresh_setup_skills()
+    assert set(refreshed.overwritten) == set(paths.values())
+    for name, path in paths.items():
+        backup = path.with_name(path.name + ".bak-lt-update")
+        assert path.read_text(encoding="utf-8") == setup_skill_markdown()
+        assert backup.read_text(encoding="utf-8") == f"{name} customised skill"
+        assert refreshed.backups[path] == backup
+
+    assert set(refresh_setup_skills().up_to_date) == set(paths.values())
+    assert set(refreshed.as_dict()) == set(InitResult().as_dict())
+    assert refreshed.offers == []
+    assert refreshed.warnings == []
+    assert list(scratch.iterdir()) == []
+    assert not repo_registry.registry_path().exists()
+    assert sorted(item.name for item in default_agent_home.iterdir()) == [
+        ".agents",
+        ".claude",
+    ]
+
+
+def test_refresh_setup_skills_dry_run_writes_nothing(
+    default_agent_home,
+    monkeypatch,
+) -> None:
+    scratch = default_agent_home.parent / "scratch-cwd-dry"
+    scratch.mkdir()
+    monkeypatch.chdir(scratch)
+    paths = _default_skill_paths(default_agent_home)
+    _write_skill(paths["claude"], "stale claude skill")
+
+    result = refresh_setup_skills(dry_run=True)
+
+    assert set(result.diffs) == set(paths.values())
+    assert paths["claude"].read_text(encoding="utf-8") == "stale claude skill"
+    assert not paths["claude"].with_name("SKILL.md.bak-lt-update").exists()
+    assert paths["claude"] in result.backups
+    assert not (default_agent_home / ".agents").exists()
+    assert list(scratch.iterdir()) == []
+
+
+def test_setup_guide_documents_skills_only() -> None:
+    guide = " ".join(setup_guide_markdown().split())
+    assert "`lt update --skills-only`" in guide
+    assert "current directory" in guide
 
 
 def test_doctor_content_only_drift(tmp_path) -> None:

@@ -74,7 +74,12 @@ short, consent-gated sequence on the `lt` CLI.
    (MCP config, prompt hooks, `lt_ids.json`). The MCP files use the
    saved/env Lab Tracker URL when one exists, otherwise localhost;
    the setup skill is installed in both Claude and Codex user homes;
-   `lt update` refreshes them after a package upgrade.
+   `lt update` refreshes them after a package upgrade. To install or
+   refresh only the setup skill (for example when `lt setup status`
+   reports it missing or stale), `lt update --skills-only` works
+   machine-wide and never touches the current directory or any repo
+   (`--dry-run` previews; it cannot be combined with `--yes` or
+   `--target`).
 7. **Project binding** — `lt project bind --project-id <project-id>
    --yes` verifies the selected project and records its exact id in
    `lt_ids.json`.
@@ -154,7 +159,8 @@ graph automatically. Server-side AI drafting uses the operator's
 configured provider credential; no local OpenAI key is needed for Lab
 Tracker. `lt doctor` and `lt setup status` surface drift after package
 upgrades and confirm that `lt-mcp` can start, and `lt update` is the
-refresh path. When the server moves to a newer MAJOR.MINOR release
+refresh path for a repo (`lt update --skills-only` is the one for the
+setup skill alone). When the server moves to a newer MAJOR.MINOR release
 (docs/versioning.md), `lt setup status`, `lt-mcp` notices, and the
 Daily review name each client that should update; a PATCH-only gap is
 reported, never suggested. The `uv tool` install updates with the
@@ -179,4 +185,4 @@ repo; an analysis repo updates by rerunning its pinned `uv add`
 If Lab Tracker is unreachable and the user does not operate a server, point
 them at whoever runs their lab's instance instead of standing one up ad hoc.
 
-<!-- lab-tracker-setup-guide version=0.1.0 sha256=ae2dc90a0296 -->
+<!-- lab-tracker-setup-guide version=0.1.0 sha256=40cf62390b24 -->

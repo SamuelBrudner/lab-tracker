@@ -469,6 +469,47 @@ def update_consumer_repo(
     return result
 
 
+def refresh_setup_skills(*, dry_run: bool = False) -> InitResult:
+    """Install or refresh only the ``lab-tracker-setup`` skill, machine-wide.
+
+    This is the skills half of ``update_consumer_repo(install_skills=True)`` on
+    its own. It takes no target, so it cannot scaffold: it never creates a
+    directory, writes a repo file, enrolls a repo in the applied-repos
+    registry, or resolves the MCP URL. A missing skill is created, a
+    customised one is backed up to ``SKILL.md.bak-lt-update`` before it is
+    refreshed, and ``dry_run`` only records the diffs.
+    """
+
+    result = InitResult()
+    _install_setup_skill(result=result, dry_run=dry_run)
+    return result
+
+
+def reject_skills_only_conflicts(prog: str, *, yes: bool, target: str | None) -> None:
+    """Fail loudly when ``update --skills-only`` is mixed with repo-scoped flags.
+
+    ``--skills-only`` never reads or writes a repository, so ``--yes`` (consent
+    for a repo's conventions blocks) and an explicit ``--target`` would be
+    silently ignored, misleading the caller about what was changed. ``target``
+    is ``None`` when the flag was not passed. Exits 1 (not argparse's 2, which
+    is reserved for unrecognized arguments), before anything is written.
+    """
+
+    given = [
+        flag
+        for flag, present in (("--yes", yes), ("--target", target is not None))
+        if present
+    ]
+    if given:
+        flags = " and ".join(given)
+        raise SystemExit(
+            f"{prog} update --skills-only refreshes only the lab-tracker-setup skill "
+            "machine-wide and never touches a repository, so it cannot be combined "
+            f"with {flags}. Drop {flags}, or drop --skills-only to update the "
+            "repository."
+        )
+
+
 def _update_scaffold_file(
     path: Path,
     content: str,
@@ -711,7 +752,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     update_parser.add_argument(
         "--target",
-        default=".",
+        default=None,
         help="Consumer repo path to update. Defaults to the current directory.",
     )
     update_parser.add_argument(
@@ -727,7 +768,21 @@ def main(argv: list[str] | None = None) -> None:
     update_parser.add_argument(
         "--install-skills",
         action="store_true",
-        help="Also refresh the lab-tracker-setup skill in the Claude and Codex homes.",
+        help=(
+            "Also refresh the lab-tracker-setup skill in the Claude and Codex "
+            "homes, in addition to updating the repo (use --skills-only to leave "
+            "the repo alone)."
+        ),
+    )
+    update_parser.add_argument(
+        "--skills-only",
+        action="store_true",
+        help=(
+            "Install or refresh only the lab-tracker-setup skill in the Claude and "
+            "Codex homes, machine-wide; implies --install-skills and never touches "
+            "the current directory or any repo. Cannot be combined with --yes or "
+            "--target; --dry-run previews."
+        ),
     )
     serve_parser = subcommands.add_parser(
         "serve",
@@ -853,16 +908,22 @@ def main(argv: list[str] | None = None) -> None:
         print(json.dumps(result.as_dict(), indent=2))
         _print_init_warnings(result)
     elif args.command == "update":
-        from lab_tracker_client.setup import resolved_base_url_for_setup
+        if args.skills_only:
+            # Before resolving the MCP URL: skills-only never uses it, so a
+            # malformed LAB_TRACKER_BASE_URL must not break the command.
+            reject_skills_only_conflicts(parser.prog, yes=args.yes, target=args.target)
+            result = refresh_setup_skills(dry_run=args.dry_run)
+        else:
+            from lab_tracker_client.setup import resolved_base_url_for_setup
 
-        mcp_base_url, _ = resolved_base_url_for_setup()
-        result = update_consumer_repo(
-            args.target,
-            mcp_base_url=mcp_base_url,
-            yes=args.yes,
-            dry_run=args.dry_run,
-            install_skills=args.install_skills,
-        )
+            mcp_base_url, _ = resolved_base_url_for_setup()
+            result = update_consumer_repo(
+                args.target or ".",
+                mcp_base_url=mcp_base_url,
+                yes=args.yes,
+                dry_run=args.dry_run,
+                install_skills=args.install_skills,
+            )
         print(json.dumps(result.as_dict(), indent=2))
         _print_init_warnings(result)
     elif args.command == "serve":

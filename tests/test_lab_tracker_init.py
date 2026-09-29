@@ -41,6 +41,8 @@ from lab_tracker.decision_context_constants import (
     managed_code_conventions_block,
 )
 from lab_tracker.demo_seed import DemoSeedResult
+from lab_tracker.setup_guide import setup_skill_markdown
+from lab_tracker_client import registry as repo_registry
 from lab_tracker_client.cli import main as lt_main
 
 
@@ -537,6 +539,196 @@ def test_lt_update_cli_delegates(tmp_path: Path, capsys: pytest.CaptureFixture[s
     assert str(settings) in payload["overwritten"]
     assert str(settings) in payload["backups"]
     assert "lt prime" in settings.read_text(encoding="utf-8")
+
+
+_BOTH_UPDATE_CLIS = pytest.mark.parametrize(
+    "main",
+    [lt_main, lab_tracker_main],
+    ids=["lt", "lab_tracker"],
+)
+
+
+@pytest.fixture
+def skill_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    home = tmp_path / "skills-home"
+    monkeypatch.setenv("LAB_TRACKER_SKILLS_HOME", str(home))
+    monkeypatch.setenv("LAB_TRACKER_CONFIG_DIR", str(tmp_path / "lt-config"))
+    return home
+
+
+@pytest.fixture
+def scratch_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """An empty directory that is not a consumer repo, used as the cwd."""
+
+    scratch = tmp_path / "scratch-cwd"
+    scratch.mkdir()
+    monkeypatch.chdir(scratch)
+    return scratch
+
+
+def _seed_stale_skill(skill_home: Path) -> Path:
+    skill_path = skill_home / "lab-tracker-setup" / "SKILL.md"
+    skill_path.parent.mkdir(parents=True)
+    skill_path.write_text("customised skill", encoding="utf-8")
+    return skill_path
+
+
+def _backup_of(path: Path) -> Path:
+    return path.with_name(path.name + ".bak-lt-update")
+
+
+@_BOTH_UPDATE_CLIS
+def test_update_skills_only_cli_never_scaffolds(
+    main, skill_home: Path, scratch_cwd: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    skill_path = _seed_stale_skill(skill_home)
+
+    main(["update", "--skills-only"])
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert skill_path.read_text(encoding="utf-8") == setup_skill_markdown()
+    assert _backup_of(skill_path).read_text(encoding="utf-8") == "customised skill"
+    assert payload["overwritten"] == [str(skill_path)]
+    assert payload["backups"] == {str(skill_path): str(_backup_of(skill_path))}
+    assert payload["created"] == []
+    assert payload["offers"] == []
+    assert payload["warnings"] == []
+    assert captured.err == ""
+    assert list(scratch_cwd.iterdir()) == []
+    assert not repo_registry.registry_path().exists()
+
+
+@_BOTH_UPDATE_CLIS
+@pytest.mark.parametrize(
+    "flags",
+    [["--skills-only"], ["--install-skills", "--skills-only"]],
+    ids=["skills-only", "install-skills-and-skills-only"],
+)
+def test_update_skills_only_spellings_are_identical(
+    main,
+    flags: list[str],
+    skill_home: Path,
+    scratch_cwd: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    main(["update", *flags])
+
+    payload = json.loads(capsys.readouterr().out)
+    skill_path = skill_home / "lab-tracker-setup" / "SKILL.md"
+    assert payload["created"] == [str(skill_path)]
+    assert skill_path.read_text(encoding="utf-8") == setup_skill_markdown()
+    assert sorted(item.name for item in skill_home.iterdir()) == ["lab-tracker-setup"]
+    assert list(scratch_cwd.iterdir()) == []
+
+
+@_BOTH_UPDATE_CLIS
+@pytest.mark.parametrize(
+    ("extra_flags", "named_flag"),
+    [
+        (["--yes"], "--yes"),
+        (["--target", "{target}"], "--target"),
+        (["--target", "."], "--target"),
+        (["--yes", "--target", "{target}"], "--yes and --target"),
+    ],
+    ids=["yes", "target", "current-directory-target", "both"],
+)
+def test_update_skills_only_rejects_contradictory_flags(
+    main,
+    extra_flags: list[str],
+    named_flag: str,
+    tmp_path: Path,
+    skill_home: Path,
+    scratch_cwd: Path,
+) -> None:
+    skill_path = _seed_stale_skill(skill_home)
+    never_created = tmp_path / "never-created"
+    argv = [flag.format(target=never_created) for flag in extra_flags]
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(["update", "--skills-only", *argv])
+
+    # A string SystemExit code is what makes the process exit 1 with the message.
+    assert isinstance(excinfo.value.code, str)
+    assert "--skills-only" in excinfo.value.code
+    assert named_flag in excinfo.value.code
+    assert skill_path.read_text(encoding="utf-8") == "customised skill"
+    assert not _backup_of(skill_path).exists()
+    assert not never_created.exists()
+    assert list(scratch_cwd.iterdir()) == []
+
+
+@_BOTH_UPDATE_CLIS
+def test_update_skills_only_dry_run_writes_nothing(
+    main, skill_home: Path, scratch_cwd: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    skill_path = _seed_stale_skill(skill_home)
+
+    main(["update", "--skills-only", "--dry-run"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert list(payload["diffs"]) == [str(skill_path)]
+    assert payload["overwritten"] == [str(skill_path)]
+    assert skill_path.read_text(encoding="utf-8") == "customised skill"
+    assert not _backup_of(skill_path).exists()
+    assert list(scratch_cwd.iterdir()) == []
+    assert not repo_registry.registry_path().exists()
+
+
+@_BOTH_UPDATE_CLIS
+def test_update_skills_only_ignores_malformed_base_url_env(
+    main,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    skill_home: Path,
+    scratch_cwd: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("LAB_TRACKER_BASE_URL", "not a url")
+
+    # Skills-only never resolves the MCP URL, so a bad one cannot break it...
+    main(["update", "--skills-only"])
+    assert json.loads(capsys.readouterr().out)["created"]
+
+    # ...while a repo update, which bakes the URL into MCP configs, still fails.
+    with pytest.raises(ValueError):
+        main(["update", "--target", str(tmp_path / "repo")])
+
+
+@_BOTH_UPDATE_CLIS
+def test_update_install_skills_without_skills_only_still_refreshes_repo(
+    main,
+    tmp_path: Path,
+    skill_home: Path,
+    scratch_cwd: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo = tmp_path / "consumer"
+    init_consumer_repo(repo, yes=True)
+    mcp_json = repo / ".mcp.json"
+    mcp_json.write_text("{}\n", encoding="utf-8")
+    skill_path = _seed_stale_skill(skill_home)
+
+    main(["update", "--install-skills", "--target", str(repo)])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert str(mcp_json) in payload["overwritten"]
+    assert str(mcp_json) in payload["backups"]
+    assert str(skill_path) in payload["overwritten"]
+    assert skill_path.read_text(encoding="utf-8") == setup_skill_markdown()
+    assert list(scratch_cwd.iterdir()) == []
+
+
+@_BOTH_UPDATE_CLIS
+def test_update_without_target_still_defaults_to_the_current_directory(
+    main, skill_home: Path, scratch_cwd: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    main(["update"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert str(scratch_cwd / ".mcp.json") in payload["created"]
+    assert (scratch_cwd / ".mcp.json").is_file()
+    assert not skill_home.exists()
 
 
 def test_generated_scripts_lt_help_runs(tmp_path: Path) -> None:

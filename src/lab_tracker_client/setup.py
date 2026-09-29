@@ -67,6 +67,7 @@ _MCP_PROBE_SHUTDOWN_GRACE_SECONDS = 2.0
 _MCP_SERVER_MODULE = "lab_tracker.mcp_server"
 _MCP_IMPORT_TRACEBACK_LIMIT = 2000
 _FULL_GIT_REVISION = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
+_SKILLS_ONLY_SCOPE_NOTE = "and leaves this repository's files alone (`--dry-run` previews)."
 
 _SCAFFOLD_FILES = (
     ".mcp.json",
@@ -374,23 +375,27 @@ def _suggestions(status: JsonObject) -> list[str]:
         for target in skill_targets
         if target.get("installed") and target.get("up_to_date") is not True
     ]
+    # Skill state is machine-wide, so the fix must not depend on (or write
+    # into) the current directory: `lt update --skills-only` touches only the
+    # agent skill homes, unlike `lt setup init`/`lt update --install-skills`,
+    # which also scaffold or refresh this repository.
     if missing_skill_targets:
         names = ", ".join(missing_skill_targets)
         suggestions.append(
             f"The lab-tracker-setup skill is missing from: {names}; "
-            "`lt setup init --install-skills` installs it."
+            f"`lt update --skills-only` installs it {_SKILLS_ONLY_SCOPE_NOTE}"
         )
     elif stale_skill_targets:
         suggestions.append(
             "One or more installed lab-tracker-setup skills are stale; "
-            "`lt update --install-skills` refreshes them."
+            f"`lt update --skills-only` refreshes them {_SKILLS_ONLY_SCOPE_NOTE}"
         )
     elif not skill_targets and skills.get("installed") and skills.get("up_to_date") is False:
         # Backward-compatible fallback for status payloads produced before
         # multi-agent skill targets were exposed.
         suggestions.append(
             "The installed lab-tracker-setup skill is stale; "
-            "`lt update --install-skills` refreshes it."
+            f"`lt update --skills-only` refreshes it {_SKILLS_ONLY_SCOPE_NOTE}"
         )
     return suggestions
 

@@ -163,7 +163,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     update_parser.add_argument(
         "--target",
-        default=".",
+        default=None,
         help="Consumer repo path to update. Defaults to the current directory.",
     )
     update_parser.add_argument(
@@ -179,7 +179,21 @@ def _build_parser() -> argparse.ArgumentParser:
     update_parser.add_argument(
         "--install-skills",
         action="store_true",
-        help="Also refresh the lab-tracker-setup skill in the Claude and Codex homes.",
+        help=(
+            "Also refresh the lab-tracker-setup skill in the Claude and Codex "
+            "homes, in addition to updating the repo (use --skills-only to leave "
+            "the repo alone)."
+        ),
+    )
+    update_parser.add_argument(
+        "--skills-only",
+        action="store_true",
+        help=(
+            "Install or refresh only the lab-tracker-setup skill in the Claude and "
+            "Codex homes, machine-wide; implies --install-skills and never touches "
+            "the current directory or any repo. Cannot be combined with --yes or "
+            "--target; --dry-run previews."
+        ),
     )
     update_parser.set_defaults(func=_cmd_update, needs_client=False)
 
@@ -2552,11 +2566,20 @@ def _cmd_doctor(args: argparse.Namespace) -> Any:
 
 
 def _cmd_update(args: argparse.Namespace) -> Any:
-    from lab_tracker.cli import update_consumer_repo
+    from lab_tracker.cli import (
+        refresh_setup_skills,
+        reject_skills_only_conflicts,
+        update_consumer_repo,
+    )
 
+    if args.skills_only:
+        # Before resolving the MCP URL: skills-only never uses it, so a
+        # malformed LAB_TRACKER_BASE_URL must not break the command.
+        reject_skills_only_conflicts("lt", yes=args.yes, target=args.target)
+        return refresh_setup_skills(dry_run=args.dry_run).as_dict()
     mcp_base_url, _ = setup_helpers.resolved_base_url_for_setup()
     result = update_consumer_repo(
-        args.target,
+        args.target or ".",
         mcp_base_url=mcp_base_url,
         yes=args.yes,
         dry_run=args.dry_run,
