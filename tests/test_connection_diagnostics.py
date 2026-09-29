@@ -88,6 +88,8 @@ def test_stage_and_conditional_funnel_guidance(kind, expected):
     assert result["diagnosis"] == expected
     assert "secret" not in str(result)
     assert ("tailscale funnel status" in result["next_step"]) == (kind == "tls")
+    assert ("`tailscale status`" in result["next_step"]) == (kind == "tls")
+    assert ("Publishing Through Tailscale Funnel" in result["next_step"]) == (kind == "tls")
     if kind == "tls":
         assert "If this host uses" in result["detail"]
         assert "cannot confirm" in result["detail"]
@@ -269,3 +271,20 @@ def test_setup_connect_without_a_base_url_does_not_probe(monkeypatch, tmp_path, 
     assert "server_reachable" not in payload
     assert "server_diagnostic" not in payload
 
+
+@pytest.mark.parametrize("cause", ["handshake timed out", "handshake timed out."])
+def test_error_message_separates_the_cause_from_the_diagnostic(cause):
+    def handler(request):
+        trace = request.extensions["trace"]
+        trace("connection.start_tls.started", {"server_hostname": b"origin.example"})
+        trace("connection.start_tls.failed", {})
+        raise httpx.ConnectTimeout(cause, request=request)
+
+    with (
+        LabTracker(base_url="https://origin.example", transport=httpx.MockTransport(handler)) as lt,
+        pytest.raises(LTAPIError) as caught,
+    ):
+        lt.health()
+    message = str(caught.value)
+    assert "failed: handshake timed out. The TCP connection succeeded" in message
+    assert ".." not in message

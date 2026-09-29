@@ -39,6 +39,18 @@ JsonObject = dict[str, Any]
 MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 
 
+_SENTENCE_END = (".", "!", "?")
+
+
+def _join_sentences(*parts: str) -> str:
+    """Join message parts with spaces, ending each non-final part with a full stop."""
+
+    return " ".join(
+        part if part.endswith(_SENTENCE_END) or index == len(parts) - 1 else part + "."
+        for index, part in enumerate(parts)
+    )
+
+
 class TransportAuth(Protocol):
     """Per-facade auth policy injected into the shared transport."""
 
@@ -136,7 +148,7 @@ class HttpTransport:
             # Keep each facade's public exception type while attaching safe metadata.
             setattr(wrapped, "connection_diagnostic", diagnostic)  # noqa: B010
             wrapped.args = (
-                f"{wrapped} {diagnostic['detail']} {diagnostic['next_step']}",
+                _join_sentences(str(wrapped), diagnostic["detail"], diagnostic["next_step"]),
             )
             raise wrapped from exc
 
