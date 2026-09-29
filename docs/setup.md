@@ -421,3 +421,12 @@ Alternatively, set `LAB_TRACKER_DEBUG=1` in the client environment. Debug mode
 does not override an explicit `--fail-silent` hook invocation. Invalid command
 arguments retain argparse's exit code 2; unexpected programming errors still
 surface normally.
+
+The error names the failing connection stage where it can be observed.
+`lt setup status` (`server`) and `lt setup connect --base-url <url> --dry-run`
+(`server_diagnostic`) return the same `diagnosis`, `detail`, and `next_step`
+fields; see
+[Diagnose an unavailable connection](agent-setup.md#diagnose-an-unavailable-connection).
+If the server is published through a public Tailscale Funnel, the host-side
+checklist is
+[Publishing Through Tailscale Funnel](self-hosted-operations.md#publishing-through-tailscale-funnel).

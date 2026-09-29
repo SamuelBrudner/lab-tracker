@@ -364,11 +364,14 @@ considered per-operation review.
 ## Diagnose an unavailable connection
 
 Run `lt setup status` to inspect `server.reachable`. Failed probes also return
-`diagnosis`, `detail`, and `next_step`. The probe uses the existing two-second
-HTTP timeout and observes the actual request; it makes no extra network probes
-and does not require the Tailscale CLI. MCP transport failures expose the same
-`diagnosis` and `next_step` while preserving their fail-soft
-`proceed_without_graph_context` action.
+`diagnosis`, `detail`, and `next_step`. `lt setup connect --base-url <url>`
+(with `--dry-run` or `--yes`) runs the same probe: it keeps `server_reachable`
+and adds a `server_diagnostic` object with those three fields, plus
+`status_code` for `http_error`, whenever a diagnosis exists. The probe uses the
+existing two-second HTTP timeout and observes the actual request; it makes no
+extra network probes and does not require the Tailscale CLI. MCP transport
+failures expose the same `diagnosis` and `next_step` while preserving their
+fail-soft `proceed_without_graph_context` action.
 
 | Diagnosis | Observation and next step |
 |---|---|
@@ -381,11 +384,17 @@ and does not require the Tailscale CLI. MCP transport failures expose the same
 | `transport_error` | The transport did not supply enough evidence to identify the stage. |
 
 For a `.ts.net` address, a TLS stall includes conditional Funnel guidance:
-on the **Lab Tracker host**, check `tailscale funnel status` and the service
-listening on its proxied port. An offline Funnel origin is one possible cause,
+on the **Lab Tracker host**, check `tailscale funnel status`, `tailscale status`,
+and the service listening on its proxied port. An offline Funnel origin is one possible cause,
 not something a client can prove from the timeout alone. Public Funnel clients
 do not need to join the tailnet. DNS resolution and a successful TCP connection
-do not prove that the origin is serving.
+do not prove that the origin is serving. A TLS stall is not the same as an HTTP
+502 from a stopped backend. In the maintainer's recorded incidents a stopped
+backend behind a working Funnel returned a 502 after the handshake completed,
+while a stalled handshake usually pointed at the Tailscale node or its public
+ingress path; that is a heuristic, not a diagnosis of your instance. For a
+host-side checklist, including what to test from outside the tailnet, see
+[Publishing Through Tailscale Funnel](self-hosted-operations.md#publishing-through-tailscale-funnel).
 
 For compatibility, `reachable` remains true for HTTP responses below 500,
 including authentication errors; it describes connectivity, not token validity
