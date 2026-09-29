@@ -311,13 +311,22 @@ scp-style `host:path` into `host/path` and lowercases, so a laptop clone of
 `git@github.com:Lab/Analysis.git` and the runner's
 `https://github.com/Lab/Analysis` both yield
 `github.com/lab/analysis@<sha>` (the same identity
-`scripts/create-analysis-graph-draft.py` emits). That identity is both the
-note's `evidence_source_external_id` and its `client_capture_id`, and the
-server keeps one note per `(project, client_capture_id)`: whichever capture
-arrives first creates the note, and the other — whose content differs (host,
-branch, annotations) — is refused with HTTP 409 ("already used with different
-field(s)") instead of creating a parallel note. The action reports that
-refusal as a notice, not a failure.
+`scripts/create-analysis-graph-draft.py` emits). That identity is the note's
+`evidence_source_external_id`, and the commit capture itself also uses it as
+its `client_capture_id`; the server keeps one note per
+`(project, client_capture_id)`. Whichever capture arrives first creates the
+commit note. The other — whose content differs (host, branch) — is refused
+with HTTP 409 ("already used with different field(s)"), and `lt` settles it
+by what it carries (full rules in
+[repo-report-capture.md](repo-report-capture.md#one-commit-one-note)):
+
+- A bare capture is marked synced with reason `already_captured`; no second
+  note is created. The action passes no `--tag` precisely so that its default
+  capture is bare, and reports this as a notice, not a failure.
+- A capture with a `question-id` or PR text (`include-pr-text`) also has
+  something the first note lacks, so it is kept: it is written as a new event
+  and uploaded as a staged note of its own (reason `recaptured`), next to the
+  commit note. The action reports that as a notice too.
 
 Limits:
 
@@ -326,8 +335,13 @@ Limits:
   committing machines' origin; the action applies it to `lt`'s own git calls
   through `GIT_CONFIG_*` environment variables and leaves the checkout alone.
 - If CI captures a commit before a laptop's queued hook event syncs, that
-  local event is refused the same way and stays `failed` in
-  `lt outbox status`. It is a duplicate of the CI note and safe to delete.
+  local event settles the same way: a bare hook event is marked synced as
+  `already_captured` (shown as `sync_reason` by `lt outbox status`), and one
+  annotated with `--summary`, `--tag` and the like becomes a note of its own.
+  Neither stays `failed`.
+- A `lab-tracker-ref` older than this behavior still leaves the losing event
+  `failed` with the server's 409 wording; the action reports that as the same
+  "already captured" notice.
 - The runner's outbox is discarded with the job: a capture that cannot reach
   the server is lost (the hook remains the durable path).
 - Only the pushed head commit is captured; merge commits are skipped by the

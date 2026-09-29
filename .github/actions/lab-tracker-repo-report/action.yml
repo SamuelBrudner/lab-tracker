@@ -3,7 +3,8 @@ description: >-
   Capture the pushed commit as a staged Lab Tracker note with `lt repo report
   --fail-silent`. The capture shares the local post-commit hook's evidence
   identity (<normalized-remote>@<sha>), so a commit already captured by the
-  hook is not recorded twice. Never fails the workflow.
+  hook is not recorded twice (a question or PR text is kept as a note of its
+  own). Never fails the workflow.
 author: Lab Tracker
 
 inputs:
@@ -164,7 +165,10 @@ runs:
           exit 0
         fi
 
-        set -- repo report --config "$work/repo.json" --tag github-actions --fail-silent
+        # No --tag: a tag is an annotation, and a bare capture that loses the
+        # race to the post-commit hook settles as already captured instead of
+        # landing as a second note. The question and PR text stay opt-in.
+        set -- repo report --config "$work/repo.json" --fail-silent
         if [ -n "$LT_QUESTION_ID" ]; then
           set -- "$@" --question "$LT_QUESTION_ID"
         fi
@@ -193,8 +197,14 @@ runs:
         # --fail-silent: lt prints its JSON only when the capture synced; a
         # queued-but-unsynced capture explains itself on stderr.
         "$LT" "$@" >"$work/report.json" 2>"$work/report.err"
-        if grep -q "was already used with different field" "$work/report.err"; then
+        # lt reports a capture another clone already made as a synced event with
+        # reason already_captured; a pinned client older than that prints the
+        # server's 409 wording on stderr instead.
+        if grep -q '"reason": "already_captured"' "$work/report.json" \
+          || grep -q "was already used with different field" "$work/report.err"; then
           annotate notice "commit ${head} is already captured under its <remote>@<sha> identity (usually by the post-commit hook); nothing new was recorded."
+        elif grep -q '"reason": "recaptured"' "$work/report.json"; then
+          annotate notice "commit ${head} is already captured under its <remote>@<sha> identity; this run's question or PR text was recorded as a staged note of its own."
         elif grep -q "^lab-tracker: skipped commit" "$work/report.err"; then
           annotate notice "$(grep -m 1 "^lab-tracker: skipped commit" "$work/report.err")"
         elif [ -s "$work/report.json" ]; then

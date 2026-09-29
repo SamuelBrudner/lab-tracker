@@ -22,7 +22,7 @@ import re
 import sys
 import uuid
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -37,9 +37,11 @@ from lab_tracker.repository_conventions import (
 from lab_tracker_client import outbox as _outbox
 from lab_tracker_client.client import (
     CAPTURE_HOST_METADATA_KEYS,
+    DECLARED_TARGET_SOURCE_CONFIG_DEFAULT,
     DECLARED_TARGET_SOURCE_KEY,
     EvidenceNoteIndex,
     LabTracker,
+    LTConflictError,
     LTRecord,
     LTValidationError,
     build_evidence_metadata,
@@ -73,6 +75,14 @@ REPO_EVIDENCE_ADAPTER = "lt-repo"
 REPO_CAPTURE_KIND = "repo_event"
 ALLOWED_EVENT_TYPES = {"commit", "report", "finish"}
 TERMINAL_SYNC_STATES = {"synced"}
+# Sync reason for a commit capture whose commit identity another capture
+# (another clone, or CI) already holds on the server.
+ALREADY_CAPTURED_REASON = "already_captured"
+# Result reason for the event a sync writes to keep such a capture's annotation.
+RECAPTURED_REASON = "recaptured"
+# How the server words the 409 for a client_capture_id replayed with other
+# fields (note_service._ensure_matching_capture_note).
+CAPTURE_ID_REUSE_MESSAGE = "was already used with different field(s)"
 
 JsonObject = dict[str, Any]
 
@@ -611,6 +621,7 @@ def outbox_status(outbox: str | Path) -> JsonObject:
                 "sync_status": status,
                 "note_id": event.get("sync", {}).get("note_id"),
                 "change_set_id": event.get("sync", {}).get("change_set_id"),
+                "sync_reason": event.get("sync", {}).get("reason"),
                 "last_error": event.get("sync", {}).get("last_error"),
             }
         )
@@ -1231,19 +1242,32 @@ def _sync_event(
                 reason="dry_run",
             )
         if note is None:
-            note = client._upload_note_file_payload(
-                project_id=project_id,
-                path=path.with_suffix(".md"),
-                payload=evidence_bytes,
-                metadata=metadata,
-                status="staged",
-                content_type="text/markdown",
-                client_capture_id=_client_capture_id(source_external_id),
-                targets=declared_targets(
-                    question_id=_optional_str(event.get("question_id")),
-                    dataset_ids=event["dataset_ids"],
-                ),
-            )
+            try:
+                note = client._upload_note_file_payload(
+                    project_id=project_id,
+                    path=path.with_suffix(".md"),
+                    payload=evidence_bytes,
+                    metadata=metadata,
+                    status="staged",
+                    content_type="text/markdown",
+                    client_capture_id=event_client_capture_id(event),
+                    targets=declared_targets(
+                        question_id=_optional_str(event.get("question_id")),
+                        dataset_ids=event["dataset_ids"],
+                    ),
+                )
+            except LTConflictError as exc:
+                if not _is_commit_identity_conflict(event, exc):
+                    raise
+                if _annotations(validate_event(dict(event))):
+                    return _recapture_annotation(
+                        client,
+                        path,
+                        event,
+                        note_indexes=note_indexes,
+                        request_draft=request_draft,
+                    )
+                return _settle_captured_elsewhere(path, event)
             index[evidence_key] = note
             action = "imported"
         else:
@@ -1418,7 +1442,9 @@ def event_source_external_id(event: Mapping[str, Any]) -> str:
     """Stable evidence id for a captured commit: ``<normalized-remote>@<commit>``.
 
     Shared with the analysis-graph-draft CI script so the hook path and the CI
-    path dedup to the same evidence key for one commit (see lt-81s6.8).
+    path dedup to the same evidence key for one commit (see lt-81s6.8). Every
+    event at a commit carries it; :func:`event_client_capture_id` decides which
+    of them may claim it as the note's capture key.
     """
 
     payload = validate_event(dict(event))
@@ -1426,6 +1452,124 @@ def event_source_external_id(event: Mapping[str, Any]) -> str:
     remote = normalize_remote(str(source.get("repo_remote_url") or "")) or "local"
     commit = str(source.get("git_commit") or payload["run_id"])
     return f"{remote}@{commit}"
+
+
+def event_client_capture_id(event: Mapping[str, Any]) -> str:
+    """The server idempotency key for this event's note, bounded to 120 chars.
+
+    The commit capture itself (the hook's deterministic ``commit`` event) keys on
+    the commit identity, so one commit keeps one commit note however many
+    clones capture it. Every other event at that commit -- ``finish``, ``report``
+    and a recaptured annotation -- is meant as a note of its own and appends
+    ``:<event_type>:<event_id>``; a replay of the same event keeps its key.
+    """
+
+    payload = validate_event(dict(event))
+    identity = event_source_external_id(payload)
+    if _is_commit_capture(payload):
+        return _client_capture_id(identity)
+    return _client_capture_id(f"{identity}:{payload['event_type']}:{payload['event_id']}")
+
+
+def _is_commit_capture(event: Mapping[str, Any]) -> bool:
+    commit = str(event["source"].get("git_commit") or "")
+    return (
+        event["event_type"] == "commit"
+        and bool(commit)
+        and event["event_id"] == _default_event_id("commit", event["source"], commit)
+    )
+
+
+def _is_commit_identity_conflict(event: Mapping[str, Any], exc: LTConflictError) -> bool:
+    """Whether ``exc`` says another capture already made this commit's note."""
+
+    reused = CAPTURE_ID_REUSE_MESSAGE in str(exc.error_message or exc)
+    return reused and _is_commit_capture(validate_event(dict(event)))
+
+
+def _annotations(event: Mapping[str, Any]) -> list[str]:
+    """What an event records beyond a bare hook capture: ``lt repo report`` flags."""
+
+    question_from_config = event["question_id_source"] == DECLARED_TARGET_SOURCE_CONFIG_DEFAULT
+    recorded = {
+        "summary": _has_explicit_summary(event),
+        "question": bool(event["question_id"]) and not question_from_config,
+        "datasets": bool(event["dataset_ids"]),
+        "tags": bool(event["tags"]),
+        "artifacts": bool(event["artifacts"]),
+    }
+    return [name for name, present in recorded.items() if present]
+
+
+def _has_explicit_summary(event: Mapping[str, Any]) -> bool:
+    explicit = event["payload"].get("summary_is_explicit")
+    if explicit is None:
+        # Recorded before the flag existed: any summary but the default counts.
+        return event["summary"] != _default_summary(event["event_type"], event["source"])
+    return bool(explicit)
+
+
+def _recapture_annotation(
+    client: LabTracker,
+    path: Path,
+    event: JsonObject,
+    *,
+    note_indexes: dict[str, EvidenceNoteIndex],
+    request_draft: bool,
+) -> RepoSyncResult:
+    """Keep an annotated commit capture that another capture beat to its commit.
+
+    As when annotating an already-synced capture, the annotation is written as
+    a new event and synced as a note of its own. Its id derives from this event,
+    so a sync interrupted after writing it finds the same event again.
+    """
+
+    seed = json.dumps({key: value for key, value in event.items() if key != "sync"}, sort_keys=True)
+    recaptured_event_id = hashlib.sha256(f"recapture:{seed}".encode()).hexdigest()[:32]
+    recaptured_path = write_event(
+        {**event, "event_id": recaptured_event_id, "sync": {"status": "pending"}}, path.parent
+    )
+    event["sync"] = {**event["sync"], "recaptured_event_id": recaptured_event_id}
+    _settle_captured_elsewhere(path, event)
+    recaptured = read_event(recaptured_path)
+    try:
+        result = _sync_event(
+            client,
+            path=recaptured_path,
+            event=recaptured,
+            note_indexes=note_indexes,
+            dry_run=False,
+            request_draft=request_draft,
+        )
+    except Exception as exc:  # noqa: BLE001 - fail the recapture, never the settled event.
+        _record_sync_failure(recaptured_path, recaptured, str(exc), dry_run=False)
+        return RepoSyncResult(
+            action="failed",
+            path=str(recaptured_path),
+            run_id=str(recaptured["run_id"]),
+            event_type=str(recaptured["event_type"]),
+            reason=RECAPTURED_REASON,
+            error=str(exc),
+        )
+    return replace(result, reason=result.reason or RECAPTURED_REASON)
+
+
+def _settle_captured_elsewhere(path: Path, event: JsonObject) -> RepoSyncResult:
+    _record_sync_success(
+        path,
+        event,
+        note_id=None,
+        change_set_id=None,
+        draft_error="",
+        reason=ALREADY_CAPTURED_REASON,
+    )
+    return RepoSyncResult(
+        action="skipped",
+        path=str(path),
+        run_id=str(event["run_id"]),
+        event_type=str(event["event_type"]),
+        reason=ALREADY_CAPTURED_REASON,
+    )
 
 
 def normalize_remote(remote: str) -> str:
@@ -1450,9 +1594,10 @@ def _record_sync_success(
     path: Path,
     event: JsonObject,
     *,
-    note_id: str,
+    note_id: str | None,
     change_set_id: str | None,
     draft_error: str,
+    reason: str = "",
 ) -> None:
     sync = dict(event.get("sync") or {})
     sync.update(
@@ -1461,6 +1606,7 @@ def _record_sync_success(
             "note_id": note_id,
             "synced_at": utc_now(),
             "last_error": draft_error or None,
+            "reason": reason or None,
         }
     )
     if change_set_id:
