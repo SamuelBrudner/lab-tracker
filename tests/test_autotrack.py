@@ -356,3 +356,58 @@ def test_setup_autotrack_help_names_the_only_saves_it_captures() -> None:
     for source in _AUTOTRACK_PROJECT_SOURCES:
         assert source in help_text
     assert "lt_ids.json" in summary
+
+
+def test_saves_to_real_open_files_are_flushed_then_captured(
+    fake_matplotlib, monkeypatch, tmp_path: Path
+) -> None:
+    """A figure saved into an open file object is captured from that file's
+    path once the bytes are flushed; in-memory buffers stay ignored."""
+
+    import os
+    import tempfile
+
+    seen: list[tuple[Path, bytes]] = []
+
+    def fake_capture(**kwargs):
+        path = Path(kwargs["path"])
+        seen.append((path, path.read_bytes()))
+
+    monkeypatch.setattr(figure_module, "_capture_saved_figure", fake_capture)
+    autotrack()
+
+    target = tmp_path / "handle.png"
+    with open(target, "wb") as handle:
+        FakeFigure(b"through-a-handle").savefig(handle)
+    assert seen == [(target, b"through-a-handle")]
+
+    with tempfile.NamedTemporaryFile(suffix=".png", dir=tmp_path) as named:
+        FakeFigure(b"named-temp").savefig(named)
+        assert seen[-1] == (Path(named.name), b"named-temp")
+
+    buffer = io.BytesIO()
+    FakeFigure().savefig(buffer)
+    buffer.name = str(target)  # a name alone does not make a buffer a file
+    FakeFigure().savefig(buffer)
+    with open(tmp_path / "table.csv", "wb") as handle:
+        FakeFigure().savefig(handle)  # not a figure pattern
+    descriptor = os.open(tmp_path / "fd.png", os.O_WRONLY | os.O_CREAT)
+    with os.fdopen(descriptor, "wb") as by_descriptor:
+        FakeFigure().savefig(by_descriptor)  # name is an int, not a path
+    assert len(seen) == 2
+
+
+def test_a_hook_failure_after_the_save_never_fails_the_save(
+    fake_matplotlib, captured, tmp_path: Path
+) -> None:
+    class Hostile(io.BytesIO):
+        name = str(tmp_path / "hostile.png")
+
+        def fileno(self) -> int:
+            raise RuntimeError("not a real file")
+
+    autotrack()
+    target = Hostile()
+    assert FakeFigure(b"kept").savefig(target) == "saved"
+    assert target.getvalue() == b"kept"
+    assert captured == []

@@ -3,19 +3,17 @@ function value = clientCaptureId(logicalId, contentHash)
 if nargin < 2
     contentHash = '';
 end
-cleaned = char(string(logicalId));
-cleaned = strrep(cleaned, '\', '/');
-parts = split(string(cleaned), '/');
-parts = strip(parts);
-parts(parts == "") = [];
+cleaned = strrep(labtracker.internal.textOf(logicalId), '\', '/');
+parts = strtrim(strsplit(cleaned, '/'));
+parts = parts(~cellfun(@isempty, parts));
 if isempty(parts)
     cleaned = 'figure';
 else
-    cleaned = char(join(parts, '/'));
+    cleaned = strjoin(parts, '/');
 end
 value = ['figure:', cleaned];
-if strlength(string(contentHash)) > 0
-    hashText = char(string(contentHash));
+hashText = labtracker.internal.textOf(contentHash);
+if ~isempty(hashText)
     value = [value, ':', hashText(1:min(12, numel(hashText)))];
 end
 if numel(value) > 120

@@ -55,6 +55,7 @@ from lab_tracker_client.evidence_index import outbox_note_index
 from lab_tracker_client.gitinfo import (
     CommitFilter,
     commit_skip_reason,
+    commit_tree_id,
     dirty_label,
     dirty_metadata,
     dirty_state_fields,
@@ -290,6 +291,12 @@ def make_event(
         )
     commit = str(resolved_source.get("git_commit") or "")
     evidence_body = ""
+    if resolved_event_type == "commit" and commit and not resolved_source.get("git_tree"):
+        # The commit's own tree (never the working copy): captures whose
+        # worktree tree equals it were made from exactly this commit's code.
+        tree = commit_tree_id(resolved_cwd, commit)
+        if tree:
+            resolved_source["git_tree"] = tree
     if resolved_event_type == "commit" and commit:
         # Local import avoids a module cycle: git_capture uses normalize_remote
         # from this module for deterministic commit identities.
@@ -1389,6 +1396,8 @@ def event_metadata(
         metadata["repo_git_commit"] = str(source["git_commit"])
     elif source.get("git_commit_error"):
         metadata["repo_git_commit_error"] = str(source["git_commit_error"])
+    if payload["event_type"] == "commit" and source.get("git_tree"):
+        metadata["repo_git_tree"] = str(source["git_tree"])
     remote = sanitize_remote_url(str(source.get("repo_remote_url") or ""))
     if remote:
         metadata["repo_remote_url"] = remote

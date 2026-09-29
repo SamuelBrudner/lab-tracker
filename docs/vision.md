@@ -106,6 +106,15 @@ edge:
   offline outbox events — watched files or Slurm run facts (job id, exit code,
   git commit, metrics, log excerpts, artifact pointers) — that sync into staged
   notes. Large outputs stay put; only paths, hashes, and summaries are stored.
+- **Where analysis and bench work already happen** (shipped 2026-09-28):
+  figures a notebook displays inline, daily notebook pages, plain scripts, R
+  and MATLAB saves, `lt run` and pipeline-framework runs, CI and Slurm
+  epilogs, coding-agent session retrospectives, instrument file headers,
+  barcodes and session QR codes in photos, a bench kiosk, NFC station tags,
+  phone shortcuts, and opt-in server channels (Slack, email, instrument
+  calendars, registered-store scans). Each lands staged notes or proposed
+  links only; see the [capture guide](capture-guide.md) and the low-effort
+  capture entry in [retained-v1-surface.md](retained-v1-surface.md).
 - **AI agents via MCP** (shipped) and **git post-commit / CI hooks** (shipped):
   agents and analysis repositories stage evidence and can request a draft, but
   never commit — except under a project owner's delegated-curation grant, with
@@ -276,10 +285,13 @@ scans the graph for gaps before write-up — supported claims lacking evidence o
 falsification criteria, answered questions without committed data, broken external
 references. In keeping with pointer-not-reimplementation, Lab Tracker owns the
 semantic edges, lessons, agency tags, and the compile itself, but does _not_
-reimplement ARA's code kernel, compiler, or full seal certificate. The one ARA
-slice still designed-not-built is the session-end retrospective harvester that
-would distill an agent conversation into human-gated proposals. See the
-`ara-*.md` design docs.
+reimplement ARA's code kernel, compiler, or full seal certificate. The
+session-end retrospective harvester shipped on 2026-09-28 as an opt-in coding-agent
+hook (`lt setup agent-hooks`): it stages one bounded, redacted retrospective note
+per session and asks for a draft, so the decisions, dead ends, and pivots it
+proposes wait in the human review queue. Per-idea agency tags (suggested versus
+executed by the agent) are still designed, not built. See the `ara-*.md` design
+docs and [agent-session-capture.md](agent-session-capture.md).
 
 The provenance also has to outlive the software: `lt export` writes self-contained
 PROV-O sidecars next to the data files, because the `.nwb` opens in ten years and

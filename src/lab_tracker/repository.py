@@ -102,17 +102,47 @@ class ProvenanceLinkRepository(EntityRepository[ProvenanceLink], Protocol):
         project_id: UUID,
         *,
         status: str | None = None,
+        source_ids: Sequence[UUID] | None = None,
+        target_ids: Sequence[UUID] | None = None,
     ) -> list[ProvenanceLink]:
-        """Return a project's links (optionally one status) in creation order."""
+        """Return a project's links (optionally one status, or only links whose
+        source or target is among the given entity ids) in creation order."""
 
     def list_content_hash_carriers(self, project_id: UUID) -> list[ContentHashCarrier]:
         """Return every note/dataset-file carrier of a content hash that at least
         two carriers in the project share, ordered by content_hash, captured_at,
         entity_type, entity_id."""
 
-    def list_identifier_carriers(self, project_id: UUID, keys: Sequence[str]) -> list[Note]:
+    def list_identifier_carriers(
+        self,
+        project_id: UUID,
+        keys: Sequence[str],
+        *,
+        created_since: datetime | None = None,
+    ) -> list[Note]:
         """Return the project's notes whose metadata sets any of ``keys`` (with
-        their targets), in creation order: the exact-id detector's input."""
+        their targets; optionally only those created at or after
+        ``created_since``), in creation order: the exact-id detector's input."""
+
+    def list_metadata_value_carriers(
+        self, project_id: UUID, keys: Sequence[str], values: Sequence[str]
+    ) -> list[Note]:
+        """Return the project's notes whose metadata sets any of ``keys`` to one
+        of ``values`` exactly, in creation order: the worktree-tree detector's
+        capture input, bounded to the trees some commit note carries."""
+
+    def list_time_window_candidates(
+        self,
+        project_id: UUID,
+        *,
+        created_since: datetime,
+        excluded_metadata_keys: Sequence[str],
+        origins: Sequence[str],
+    ) -> list[Note]:
+        """Return the project's unarchived notes created at or after
+        ``created_since`` with one of ``origins``, no session target, and none
+        of ``excluded_metadata_keys`` set (with their targets), in creation
+        order: the time-window detector's input."""
 
 
 class VisualizationRepository(EntityRepository[Visualization], Protocol):

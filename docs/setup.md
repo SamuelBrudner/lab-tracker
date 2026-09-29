@@ -10,6 +10,10 @@ The supported runtime surface is defined in
 [`retained-v1-surface.md`](retained-v1-surface.md); if it and this guide
 disagree, the retained-surface document wins.
 
+Once the server runs, the [capture guide](capture-guide.md) shows how to wire
+each way your lab works (phone and bench, notebooks and scripts, runs and
+pipelines, watch folders, coding agents, and server channels) into it.
+
 ## Contents
 
 - [Prerequisites and install](#prerequisites-and-install)
@@ -153,7 +157,10 @@ integration files — the `.claude/settings.json` prompt hook, `.mcp.json`,
 `AGENTS.lt.md` — are rewritten to the current canonical text. A file whose
 content differs is first preserved next to itself as `*.bak-lt-update`, and
 `lt_ids.json` is never touched. `--dry-run` previews the changes; run
-`lt doctor` afterwards to confirm the repo is in sync.
+`lt doctor` afterwards to confirm the repo is in sync. Hook entries that
+`lt setup agent-hooks --shared` added are carried forward into the refreshed
+`.claude/settings.json` rather than dropped; the personal
+`.claude/settings.local.json` is never touched.
 
 ### Know when a client install is broken or behind its server
 
@@ -382,6 +389,7 @@ npm run build
 - [One-click cloud deploy (Render)](one-click-cloud-deploy.md)
 - [Self-hosted operations (backup/restore/upgrade, first admin)](self-hosted-operations.md)
 - [Serve the shared graph on a LAN/VPN](lan-shared-graph.md)
+- [Capture guide (every capture path and its setup)](capture-guide.md)
 - [Phone capture quickstart](phone-capture-quickstart.md)
 - [Windows fresh-clone setup](windows-fresh-clone.md)
 

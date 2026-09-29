@@ -70,6 +70,9 @@ _PUBLIC_PATHS = frozenset(
         "/openapi.json",
         "/docs",
         "/redoc",
+        # Slack capture: authenticated by Slack's signing-secret HMAC, not a token.
+        "/integrations/slack/commands",
+        "/integrations/slack/interactivity",
     }
 )
 

@@ -1,5 +1,18 @@
 # ARA Session Retrospective Design
 
+_Status: first slice implemented (2026-09) — see
+[agent-session-capture.md](agent-session-capture.md). An opt-in Claude Code
+`SessionEnd` hook (`lt setup agent-hooks`) runs `lt agent session-end`, which
+stages one bounded, redacted retrospective note per session (the person's
+prompts, files edited, commands, test/lint outcomes, final message; never the
+transcript) with `payload.request_draft`, so the server's drafter proposes
+decisions, dead ends, and pivots into the human review queue. Deviation from
+the capture shape below: the harvester does not author the `GraphChangeSet`
+itself; it stages evidence and the existing draft path proposes the
+operations. Not yet built: per-idea provenance tags distinguishing what the
+agent suggested from what it executed, and evidence references resolved to
+retained entities._
+
 ## Decision
 
 Session-end retrospective capture should reuse the existing graph-draft batch

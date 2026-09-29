@@ -2,7 +2,8 @@
 
 A figure saved inside ``run_context`` records the git commit it was made
 from; a repo or HPC event records its commit; a watched file records the
-session its folder named. When one of those identifiers matches exactly one
+session its folder named; a photo records the session whose ``LT-`` code it
+shows. When one of those identifiers matches exactly one
 entity in the project, the link is a fact, not an inference. This module
 turns such facts into proposed :class:`~lab_tracker.models.ProvenanceLink`
 rows with ``basis=exact_id_match`` (the same human-gated rows and review
@@ -29,9 +30,15 @@ ID_MATCH_COMMIT_METADATA_KEYS: tuple[str, ...] = (
     "hpc_git_commit",
     "git_commit",
 )
-# Note-metadata keys the capture clients stamp with a session id
-# (a watched folder's session, a figure saved under an active session).
-ID_MATCH_SESSION_METADATA_KEYS: tuple[str, ...] = ("watch_session_id", "capture_session_id")
+# Note-metadata keys that name a session id: stamped by the capture clients
+# (a watched folder's session, a figure saved under an active session) and by
+# the server for a photo whose decoded LT- code resolves to exactly one
+# session in the note's own project (photo_codes).
+ID_MATCH_SESSION_METADATA_KEYS: tuple[str, ...] = (
+    "watch_session_id",
+    "capture_session_id",
+    "photo_session_id",
+)
 # Stamped by a client that sends its declared targets with the note. A note
 # that carries it together with a session target had its session decided at
 # capture; one that declared only a question or dataset (or whose session a

@@ -2,6 +2,7 @@
 // presentational sections, plus the small per-device capture-context store.
 
 import { DRAFT_KEY_PREFIX } from "../../hooks/useLocalDraft.js";
+import { readLinkCaptureChannel } from "../bench-capture/bench-helpers.js";
 
 function captureNotes(notes) {
   return notes.filter((note) => note.metadata?.capture_source === "mobile_capture");
@@ -43,13 +44,21 @@ function readCaptureLaunchContext(search = window.location.search) {
     const params = new URLSearchParams(search || "");
     const returnPath = params.get("return_to") || "";
     return {
+      // Only channels a written link may declare (an NFC tag); see bench-helpers.
+      captureChannel: readLinkCaptureChannel(search),
       checkpointNoteId: params.get("checkpoint_note_id") || "",
       projectId: params.get("project_id") || "",
       returnPath: returnPath.startsWith("/app/") ? returnPath : "",
       sessionId: params.get("session_id") || "",
     };
   } catch {
-    return { checkpointNoteId: "", projectId: "", returnPath: "", sessionId: "" };
+    return {
+      captureChannel: "",
+      checkpointNoteId: "",
+      projectId: "",
+      returnPath: "",
+      sessionId: "",
+    };
   }
 }
 

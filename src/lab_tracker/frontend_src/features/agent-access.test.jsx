@@ -414,6 +414,11 @@ describe("AgentAccessPage", () => {
       `lt hooks install --project ${PROJECT.project_id} --yes`
     );
     expect(commandText).toContain("lt setup status");
+    const optionalCapture = screen.getByText(/Optional capture, each previewed/);
+    for (const verb of ["lt setup autotrack", "lt setup schedule", "lt setup agent-hooks"]) {
+      expect(optionalCapture).toHaveTextContent(verb);
+    }
+    expect(optionalCapture).toHaveTextContent("lt run -- <command>");
     expect(commandText).toContain(
       "claude mcp add --transport stdio --scope user lab-tracker -- lt-mcp"
     );

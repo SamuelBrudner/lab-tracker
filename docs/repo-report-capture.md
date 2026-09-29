@@ -123,7 +123,11 @@ requires human review.
 
 Every `git commit` records a `commit` event: commit SHA, branch, remote, commit
 subject/author, dirty-tree flag, environment fingerprint, file summary, and a
-bounded textual diff. Events are idempotent per commit — a re-fired hook updates
+bounded textual diff. The note also carries the commit's own tree id
+(`repo_git_tree`): figures, `lt run` runs, and HPC jobs made from exactly that
+code -- even before it was committed -- are proposed as derived from this
+commit's note (basis `worktree_tree_match`, see
+[run-capture.md](run-capture.md#code-identity-for-uncommitted-code)). Events are idempotent per commit — a re-fired hook updates
 nothing and creates no duplicates. The hook only lands the capture in the
 staged-note inbox; graph proposal generation waits for the configured
 daily-review schedule or an explicit on-demand review trigger.
@@ -202,7 +206,10 @@ Every event at a commit carries the commit's evidence identity,
 `<normalized-remote>@<commit>`, as `evidence_source_external_id` — the same
 identity `scripts/create-analysis-graph-draft.py` emits, so hook-based and
 CI-based capture of one commit share one identity rather than parallel note
-streams. The server keeps one note per project and `client_capture_id`, and
+streams. The reusable GitHub Action `.github/actions/lab-tracker-repo-report`
+runs `lt repo report --fail-silent` in CI with that identity; see
+[pipeline-capture.md](pipeline-capture.md#ci-capture-github-action) for its
+inputs. The server keeps one note per project and `client_capture_id`, and
 that key decides which events are meant as notes of their own:
 
 | Event | `client_capture_id` |

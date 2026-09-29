@@ -583,3 +583,36 @@ def test_sync_outbox_path_drains_by_path(tmp_path, monkeypatch) -> None:
     assert summary["results"][0]["note_id"] == "note-path"
     assert read_event(path)["sync"]["status"] == "synced"
     assert outbox_status(config.outbox_path())["skipped_commits"] == 0
+
+
+def test_log_excerpt_redacts_a_token_split_by_the_read_offset(tmp_path) -> None:
+    """A secret cut by the tail offset must not survive without its prefix."""
+
+    from lab_tracker_client.hpc import LOG_REDACTION_MARGIN_CHARS, _read_log_excerpt
+
+    token = "ghp_" + "A1b2C3d4E5f6G7h8I9j0" * 2
+    filler = "step ok\n" * 2000
+    # Place the token so a plain 4000-character tail would start inside it.
+    tail = "\n" + "x" * (4000 - 10) + "\n"
+    log = tmp_path / "slurm-2.out"
+    log.write_text(filler + "auth " + token + tail, encoding="utf-8")
+    assert len(token) < LOG_REDACTION_MARGIN_CHARS
+
+    excerpt = _read_log_excerpt([log], max_chars=4000)
+
+    # A plain 4000-character tail starts 8 characters before the token ends.
+    assert token[-8:] not in excerpt
+    assert excerpt.endswith("x" * 20)
+
+
+def test_log_excerpt_keeps_the_tail_of_a_log_without_line_breaks(tmp_path) -> None:
+    from lab_tracker_client.hpc import _read_log_excerpt
+
+    log = tmp_path / "progress.log"
+    log.write_text("\r50%|#####     | step" * 2000 + "\rdone", encoding="utf-8")
+
+    excerpt = _read_log_excerpt([log], max_chars=4000)
+
+    body = excerpt.split("\n", 1)[1]
+    assert body.endswith("done")
+    assert len(body) > 3000

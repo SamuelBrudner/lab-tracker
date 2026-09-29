@@ -29,6 +29,7 @@ from alembic.config import Config
 from lab_tracker._version import DISTRIBUTION_NAME, __version__
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.backup import BackupError, create_sqlite_backup, restore_sqlite_backup
+from lab_tracker.capture_channels.cli import add_integrations_parsers, run_integrations_command
 from lab_tracker.config import get_settings
 from lab_tracker.db import get_engine, get_session_factory
 from lab_tracker.decision_context_constants import (
@@ -133,7 +134,7 @@ def init_consumer_repo(
         root / ".mcp.json": _mcp_json(resolved_mcp_base_url),
         root / ".cursor" / "mcp.json": _cursor_mcp_json(resolved_mcp_base_url),
         root / ".gemini" / "settings.json": _gemini_settings_json(resolved_mcp_base_url),
-        root / ".claude" / "settings.json": _claude_settings_json(),
+        root / ".claude" / "settings.json": _claude_settings_json_for(root),
         root / "scripts" / "lt.py": _lt_shim(),
         root / "AGENTS.lt.md": _agents_fragment(),
         root / "lt_ids.json": _ids_placeholder(project_name),
@@ -412,7 +413,7 @@ def update_consumer_repo(
         root / ".gemini" / "settings.json": _gemini_settings_json(
             resolved_mcp_base_url
         ),
-        root / ".claude" / "settings.json": _claude_settings_json(),
+        root / ".claude" / "settings.json": _claude_settings_json_for(root),
         root / "scripts" / "lt.py": _lt_shim(),
         root / "AGENTS.lt.md": _agents_fragment(),
     }
@@ -832,6 +833,7 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="Overwrite the target database after you have stopped Lab Tracker.",
     )
+    add_integrations_parsers(subcommands)
 
     args = parser.parse_args(argv)
     if args.command == "init":
@@ -917,6 +919,10 @@ def main(argv: list[str] | None = None) -> None:
             print(f"Restore failed: {exc}", file=sys.stderr)
             raise SystemExit(1) from exc
         print(json.dumps(result.as_dict(), indent=2))
+    elif args.command == "integrations":
+        exit_code = run_integrations_command(args)
+        if exit_code:
+            raise SystemExit(exit_code)
 
 
 def _alembic_config() -> Config:
@@ -1370,6 +1376,22 @@ def _claude_settings_json() -> str:
     return json.dumps(payload, indent=2) + "\n"
 
 
+def _claude_settings_json_for(root: Path) -> str:
+    """The scaffold settings, keeping `lt setup agent-hooks` entries already opted into.
+
+    `lt update` and `init --force` rewrite `.claude/settings.json` to the
+    canonical scaffold; the agent-hooks entries are a separate consent, so a
+    refresh carries them forward instead of silently dropping them.
+    """
+
+    canonical = _claude_settings_json()
+    with suppress(Exception):
+        from lab_tracker_client.agent_hooks import carry_forward_agent_hooks
+
+        return carry_forward_agent_hooks(canonical, root / ".claude" / "settings.json")
+    return canonical
+
+
 def _lt_shim() -> str:
     return dedent(
         '''\
@@ -1411,9 +1433,19 @@ def _agents_fragment() -> str:
         Guided setup lives on the `lt` CLI: `lt setup status` is a read-only
         inventory of server reachability and what is configured in this repo.
         Setup write commands take `--dry-run` previews (`lt setup init`,
-        `lt watch add`), and `lt setup connect`, `lt project bind`, and
-        `lt hooks install` also require `--yes`; suggest them to the user
+        `lt watch add`), and `lt setup connect`, `lt project bind`,
+        `lt hooks install`, `lt setup autotrack`, `lt setup schedule`, and
+        `lt setup agent-hooks` also require `--yes`; suggest them to the user
         rather than applying them unprompted.
+
+        Capture that needs no code changes, once this checkout is bound to a
+        project: `lt setup autotrack` captures figures notebooks save or
+        display (`--jupyter`, `--scripts`, and `--r` extend it), `lt run
+        --output <dir> -- <command>` records one analysis run, `lt pipeline
+        report` records a pipeline run, and `lt capture file <path>` stages one
+        saved file from any language. The `lab-tracker://setup-guide` MCP
+        resource lists every capture path; offer them rather than enabling
+        them unasked.
 
         The proposal workflow is human-gated: evidence staged from this repo
         (notes, figures, watch folders, commit hooks) can be swept into

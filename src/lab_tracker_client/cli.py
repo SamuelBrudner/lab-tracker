@@ -13,9 +13,13 @@ from pathlib import Path
 from typing import Any
 
 import lab_tracker_client.auth as auth_helpers
+import lab_tracker_client.autotrack_setup as autotrack_setup
+import lab_tracker_client.cli_agent as agent_cli
+import lab_tracker_client.cli_capture as cli_capture
 import lab_tracker_client.figure_autotrack as autotrack_helpers
 import lab_tracker_client.git_capture as git_capture
 import lab_tracker_client.hooks as hook_install
+import lab_tracker_client.r_autotrack as r_autotrack
 import lab_tracker_client.registry as repo_registry
 import lab_tracker_client.repo as repo_capture
 import lab_tracker_client.schedule as schedule_helpers
@@ -26,6 +30,9 @@ from lab_tracker import repository_conventions as repo_context
 from lab_tracker.assistant_next_questions import is_research_facing_prompt
 from lab_tracker_client import outbox as _outbox
 from lab_tracker_client._version import __version__
+from lab_tracker_client.cli_hpc_epilog import add_hpc_epilog_parser
+from lab_tracker_client.cli_pipeline import add_pipeline_parsers
+from lab_tracker_client.cli_run import add_run_parsers
 from lab_tracker_client.client import (
     NOTE_STATUS_VALUES,
     EntityRef,
@@ -91,7 +98,15 @@ def main(argv: list[str] | None = None) -> None:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="lt", description="Lab Tracker consumer CLI.")
+    parser = argparse.ArgumentParser(
+        prog="lt",
+        description="Lab Tracker consumer CLI.",
+        epilog=(
+            "Start with 'lt setup status' (read-only) to see what capture is set up "
+            "here. Capture paths and their setup: docs/capture-guide.md in the Lab "
+            "Tracker repository, or the lab-tracker://setup-guide MCP resource."
+        ),
+    )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument(
         "--debug",
@@ -174,6 +189,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_git_parsers(subcommands)
     _add_hooks_parsers(subcommands)
     _add_agent_context_parsers(subcommands)
+    agent_cli.add_agent_parsers(subcommands)
 
     prime_parser = subcommands.add_parser(
         "prime",
@@ -274,9 +290,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
     _add_watch_parsers(subcommands)
     _add_outbox_parsers(subcommands)
+    cli_capture.add_capture_parsers(subcommands)
     _add_session_parsers(subcommands)
     _add_hpc_parsers(subcommands)
     _add_repo_parsers(subcommands)
+    add_pipeline_parsers(subcommands)
+    add_run_parsers(subcommands)
 
     export_parser = subcommands.add_parser(
         "export",
@@ -465,17 +484,40 @@ def _add_setup_parsers(subcommands: argparse._SubParsersAction) -> None:
             "startup file that calls lab_tracker_client.autotrack(). Only saves whose "
             "project comes from autotrack(project_id=...), LAB_TRACKER_PROJECT_ID, or "
             "the checkout's lt_ids.json are captured; any other save is skipped with a "
-            "notice."
+            "notice. With --r, manage the R profile block instead (ggsave() and the "
+            "png/jpeg/tiff/bmp/pdf devices, same rule)."
         ),
     )
     autotrack_parser.add_argument(
         "--uninstall", action="store_true", help="Remove the managed IPython startup file."
     )
     autotrack_parser.add_argument(
+        "--r",
+        dest="r_profile",
+        action="store_true",
+        help="Manage the R autotrack block in ~/.Rprofile (or R_PROFILE_USER) instead.",
+    )
+    autotrack_parser.add_argument(
         "--dry-run", action="store_true", help="Show the change without writing it."
     )
     autotrack_parser.add_argument(
         "--yes", action="store_true", help="Consent to writing the IPython startup file."
+    )
+    autotrack_parser.add_argument(
+        "--jupyter",
+        action="store_true",
+        help=(
+            "Instead, enable the Jupyter Server save hook: each bound notebook's saves "
+            "become one staged lab-notebook page per day."
+        ),
+    )
+    autotrack_parser.add_argument(
+        "--scripts",
+        action="store_true",
+        help=(
+            "Instead, add a .pth file to this Python environment so plain scripts "
+            "capture figures they save or plt.show()."
+        ),
     )
     autotrack_parser.set_defaults(func=_cmd_setup_autotrack, needs_client=False)
 
@@ -518,6 +560,7 @@ def _add_setup_parsers(subcommands: argparse._SubParsersAction) -> None:
         help="Consent to modifying the OS scheduler.",
     )
     schedule_parser.set_defaults(func=_cmd_setup_schedule, needs_client=False)
+    agent_cli.add_setup_agent_hooks_parser(setup_commands)
 
 
 def _add_project_parsers(subcommands: argparse._SubParsersAction) -> None:
@@ -928,6 +971,7 @@ def _add_watch_parsers(subcommands: argparse._SubParsersAction) -> None:
         help="Suppress errors and error exit codes for scheduler runs.",
     )
     run_parser.set_defaults(func=_cmd_watch_run)
+    agent_cli.add_watch_touch_parser(watch_commands)
 
 
 def _add_outbox_parsers(subcommands: argparse._SubParsersAction) -> None:
@@ -1152,6 +1196,7 @@ def _add_hpc_parsers(subcommands: argparse._SubParsersAction) -> None:
     sync_parser.add_argument("--request-draft", action="store_true")
     sync_parser.add_argument("--limit", type=int, help="Maximum events to process.")
     sync_parser.set_defaults(func=_cmd_hpc_sync)
+    add_hpc_epilog_parser(hpc_commands)
 
 
 def _add_capture_context_args(parser: argparse.ArgumentParser) -> None:
@@ -1931,6 +1976,25 @@ def _cmd_watch_run(client: LabTracker, args: argparse.Namespace) -> Any:
 
 
 def _cmd_setup_autotrack(args: argparse.Namespace) -> Any:
+    if args.r_profile and (args.jupyter or args.scripts):
+        raise SystemExit(
+            "lt setup autotrack: run --r on its own, separately from --jupyter/--scripts."
+        )
+    if args.jupyter or args.scripts:
+        return autotrack_setup.setup_autotrack_targets(
+            jupyter=args.jupyter,
+            scripts=args.scripts,
+            yes=args.yes,
+            dry_run=args.dry_run,
+            uninstall=args.uninstall,
+        )
+    if args.r_profile:
+        if not (args.yes or args.dry_run):
+            raise SystemExit(
+                "lt setup autotrack --r edits your R profile (~/.Rprofile); "
+                "pass --yes to consent or --dry-run to preview."
+            )
+        return r_autotrack.install_rprofile(dry_run=args.dry_run, uninstall=args.uninstall)
     if not (args.yes or args.dry_run):
         raise SystemExit(
             "lt setup autotrack writes an IPython startup file; "

@@ -181,6 +181,26 @@ function requireReviewedShareIds(shareIds) {
   return new Set(shareIds);
 }
 
+// The idempotency key of one parked share. Every capture page (another tab,
+// a second trusted-window import, a retry) derives the same key for the same
+// share, so importing it twice replays one capture instead of creating two.
+function shareCaptureId(share) {
+  return `share-inbox-${Number(share.receivedAt) || 0}-${share.id}`;
+}
+
+// Serializes share imports across this origin's open pages where the browser
+// has Web Locks; an import that waited re-reads the inbox, so a share another
+// page already imported is gone by the time it runs.
+const SHARE_IMPORT_LOCK = "lab-tracker-share-import";
+
+function withShareImportLock(work) {
+  const locks = typeof navigator === "undefined" ? undefined : navigator.locks;
+  if (!locks || typeof locks.request !== "function") {
+    return work();
+  }
+  return locks.request(SHARE_IMPORT_LOCK, () => work());
+}
+
 async function listReviewedShares(storage, shareIds) {
   const reviewed = requireReviewedShareIds(shareIds);
   if (reviewed.size === 0) {
@@ -191,6 +211,8 @@ async function listReviewedShares(storage, shareIds) {
 
 // Imports exactly the shares the user reviewed (`shareIds`), so a share that
 // lands in the inbox after the review was shown is never imported unseen.
+// `targets` and `extraMetadata` carry a person's declared context (a trusted
+// share window's session and capture_channel) onto every imported share.
 async function migrateIncomingShares({
   createTextNote = null,
   projectId,
@@ -198,6 +220,8 @@ async function migrateIncomingShares({
   uploadQueue,
   shareIds,
   storage = createIndexedDbShareStorage(),
+  targets = [],
+  extraMetadata = {},
 }) {
   requireReviewedShareIds(shareIds);
   if (!projectId || !uploadQueue) {
@@ -230,10 +254,12 @@ async function migrateIncomingShares({
         continue;
       }
       await createTextNote({
-        metadata: buildShareMetadata(share),
+        clientCaptureId: shareCaptureId(share),
+        metadata: { ...buildShareMetadata(share), ...extraMetadata },
         projectId,
         rawContent,
         share,
+        targets,
       });
       await storage.remove(share.id);
       migrated += 1;
@@ -241,8 +267,12 @@ async function migrateIncomingShares({
     }
     const fields = {
       project_id: projectId,
-      metadata: JSON.stringify(buildShareMetadata(share)),
+      metadata: JSON.stringify({ ...buildShareMetadata(share), ...extraMetadata }),
+      client_capture_id: shareCaptureId(share),
     };
+    if (targets.length > 0) {
+      fields.targets = JSON.stringify(targets);
+    }
     await uploadQueue.enqueue({
       endpoint: UPLOAD_FILE_PATH,
       file: share.file,
@@ -271,6 +301,7 @@ export {
   SHARE_INBOX_MAX_BYTES,
   SHARE_INBOX_MAX_PENDING,
   SHARE_INBOX_MAX_SHARE_BYTES,
+  SHARE_IMPORT_LOCK,
   SHARE_INBOX_UPDATED_MESSAGE,
   STORE,
   createIndexedDbShareStorage,
@@ -279,6 +310,8 @@ export {
   expiredSharesMessage,
   listReviewableShares,
   migrateIncomingShares,
+  shareCaptureId,
   shareInboxAvailable,
   shareTooLargeMessage,
+  withShareImportLock,
 };
