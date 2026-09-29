@@ -711,7 +711,9 @@ def test_session_create_accepts_a_past_start_but_not_a_future_or_naive_one(
         headers=admin_auth_headers,
     )
     assert created.status_code == 201, created.text
-    assert datetime.fromisoformat(created.json()["data"]["started_at"]) == past
+    # Python 3.10's fromisoformat does not accept the API's "Z" suffix.
+    started_at = created.json()["data"]["started_at"].replace("Z", "+00:00")
+    assert datetime.fromisoformat(started_at) == past
 
     future = client.post(
         "/sessions",
