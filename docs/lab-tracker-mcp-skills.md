@@ -395,3 +395,5 @@ The skill's Capture Surfaces section lists every capture path with its setup
 command and doc; the generated `lab-tracker-setup` skill (installed by
 `lt setup init --install-skills`) walks a person through enabling them, and
 [capture-guide.md](capture-guide.md) is the same map for people.
+`lt update --skills-only` refreshes that generated skill machine-wide without
+touching the current directory.

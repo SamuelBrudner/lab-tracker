@@ -7,6 +7,7 @@ code moves instead of silently going stale.
 
 from __future__ import annotations
 
+import argparse
 import inspect
 import json
 import re
@@ -19,6 +20,7 @@ from lab_tracker import graph_drafting
 from lab_tracker.cli import update_consumer_repo
 from lab_tracker.decision_context_constants import AGENT_CONSULTATION_POLICY
 from lab_tracker.mcp_tools import READ_TOOLS, WRITE_TOOLS
+from lab_tracker_client import cli as lt_cli
 from lab_tracker_client.auth import auth_doctor
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -182,6 +184,39 @@ def test_lt_update_docs_list_every_rewritten_scaffold_file(
     section = _read(doc).split(section_start, 1)[1].lstrip("\n").split("\n\n", 1)[0]
     missing = [name for name in rewritten if f"`{name}`" not in section]
     assert not missing, f"{doc.name} omits files `lt update` rewrites: {missing}"
+
+
+# `lt update` flags named in prose must exist, and the machine-wide skills
+# refresh must stay documented next to the repo-scoped update.
+_LT_UPDATE_INVOCATION = re.compile(r"\b(?:lt|lab-tracker) update\b([^\n`]*)")
+_LONG_FLAG = re.compile(r"--[a-z][a-z-]*")
+
+
+def _lt_update_option_strings() -> set[str]:
+    parser = lt_cli._build_parser()
+    subparsers = next(
+        action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
+    )
+    return set(subparsers.choices["update"]._option_string_actions)
+
+
+def test_documented_lt_update_flags_exist() -> None:
+    accepted = _lt_update_option_strings()
+    assert "--skills-only" in accepted
+    unknown = [
+        f"{path.relative_to(_REPO_ROOT)}: {match.group(0).strip()}"
+        for path in (*_maintained_docs(), _SKILL_PATH)
+        for match in _LT_UPDATE_INVOCATION.finditer(_read(path))
+        if set(_LONG_FLAG.findall(match.group(1))) - accepted
+    ]
+    assert not unknown, f"documented `lt update` flags that the parser rejects: {unknown}"
+
+
+@pytest.mark.parametrize("doc", [_DOCS / "setup.md", _SKILL_PATH])
+def test_lt_update_docs_describe_the_skills_only_refresh(doc: Path) -> None:
+    text = " ".join(_read(doc).split())
+    assert "`lt update --skills-only`" in text
+    assert "machine-wide" in text
 
 
 # L24/L25: examples must use the sanctioned LPAT, never deprecated login.

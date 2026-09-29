@@ -162,6 +162,18 @@ content differs is first preserved next to itself as `*.bak-lt-update`, and
 `.claude/settings.json` rather than dropped; the personal
 `.claude/settings.local.json` is never touched.
 
+`lt update --skills-only` (equivalently `lab-tracker update --skills-only`) is
+the machine-wide counterpart for the setup skill. It installs or refreshes only
+the `lab-tracker-setup` skill in the Claude and Codex skill homes
+(`~/.claude/skills` and `~/.agents/skills`, or the single home named by
+`LAB_TRACKER_SKILLS_HOME`) and never touches the current directory, any
+repository, or the applied-repos registry, so it runs from anywhere and needs
+no repo. A customised skill is preserved next to itself as
+`SKILL.md.bak-lt-update`, and `--dry-run` previews. `lt setup status` suggests
+it when a skill is missing or stale. Because it never reads a repo, it refuses
+`--yes` and `--target`. `lt update --install-skills` still refreshes the skill
+in addition to the repo.
+
 ### Know when a client install is broken or behind its server
 
 A release is the `[project].version` in `pyproject.toml`, versioned by

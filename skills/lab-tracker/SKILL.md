@@ -77,6 +77,13 @@ previous file kept next to it as `*.bak-lt-update`. `lt_ids.json` is never
 touched. Use `--dry-run` to preview and `lt doctor` to confirm the repo is in
 sync afterwards.
 
+To refresh only the `lab-tracker-setup` skill, machine-wide, run
+`lt update --skills-only`. It installs or refreshes the skill in the Claude and
+Codex skill homes and never touches the current directory or any repository
+(`--dry-run` previews; `--yes` and `--target` are refused). `lt setup status`
+suggests it when a skill is missing or stale. `lt update --install-skills`
+still refreshes the repo as well.
+
 For substantive, rerunnable notes, prefer `lab_tracker_client.LabTracker` or
 the generated `scripts.lt.upsert_note(...)`. Notes are idempotent by the first
 non-blank line of `content`; treat that first line as a stable marker.
