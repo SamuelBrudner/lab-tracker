@@ -162,7 +162,9 @@ upgrades and confirm that `lt-mcp` can start, and `lt update` is the
 refresh path for a repo (`lt update --skills-only` is the one for the
 setup skill alone). When the server moves to a newer MAJOR.MINOR release
 (docs/versioning.md), `lt setup status`, `lt-mcp` notices, and the
-Daily review name each client that should update; a PATCH-only gap is
+Daily review name the clients that should update (the Daily review sees
+only captures from `lt watch`, `lt-hpc`, the repo hooks, and figure
+capture); a PATCH-only gap is
 reported, never suggested. The `uv tool` install updates with the
 Setup page's server-pinned install, then `lt update` refreshes each
 repo; an analysis repo updates by rerunning its pinned `uv add`
@@ -185,4 +187,4 @@ repo; an analysis repo updates by rerunning its pinned `uv add`
 If Lab Tracker is unreachable and the user does not operate a server, point
 them at whoever runs their lab's instance instead of standing one up ad hoc.
 
-<!-- lab-tracker-setup-guide version=0.1.0 sha256=40cf62390b24 -->
+<!-- lab-tracker-setup-guide version=0.1.0 sha256=d24ec4da3ad5 -->

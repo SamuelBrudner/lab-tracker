@@ -13,6 +13,7 @@ import json
 import re
 from pathlib import Path
 
+import httpx
 import pytest
 from read_opacity_inventory import READ_OPACITY_VARIANTS_BY_SUITE
 
@@ -23,6 +24,7 @@ from lab_tracker.mcp_tools import READ_TOOLS, WRITE_TOOLS
 from lab_tracker_client import cli as lt_cli
 from lab_tracker_client import setup as setup_helpers
 from lab_tracker_client.auth import auth_doctor
+from lab_tracker_client.client import LabTracker
 from lab_tracker_client.transport import HEALTH_PROBE_DEADLINE_SECONDS
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -221,25 +223,72 @@ def test_lt_update_docs_describe_the_skills_only_refresh(doc: Path) -> None:
     assert "machine-wide" in text
 
 
-# The lt-mcp smoke check is bounded, and its prose names the bound it enforces.
-def test_setup_doc_states_the_lt_mcp_smoke_check_limit() -> None:
-    text = " ".join(_read(_DOCS / "setup.md").split())
+# The lt-mcp smoke check and the /health probes are bounded, and the prose that
+# says so names the bounds the code enforces. Both advisory /health probes share
+# the per-phase timeout and the response deadline.
+_RELEASE_AWARENESS_DOCS = [_DOCS / "setup.md", _DOCS / "retained-v1-surface.md"]
+
+
+@pytest.mark.parametrize("doc", _RELEASE_AWARENESS_DOCS, ids=lambda path: path.name)
+def test_docs_state_the_lt_mcp_smoke_check_limit(doc: Path) -> None:
+    text = " ".join(_read(doc).split())
     assert f"{setup_helpers._MCP_IMPORT_TIMEOUT_SECONDS:g}-second limit" in text
 
 
-# Both advisory /health probes share the per-phase timeout and the response
-# deadline that the release-awareness prose states.
-def test_setup_doc_states_the_health_probe_bounds() -> None:
-    text = " ".join(_read(_DOCS / "setup.md").split())
+@pytest.mark.parametrize("doc", _RELEASE_AWARENESS_DOCS, ids=lambda path: path.name)
+def test_docs_state_the_health_probe_bounds(doc: Path) -> None:
+    text = " ".join(_read(doc).split())
     timeout = setup_helpers._HEALTH_PROBE_TIMEOUT_SECONDS
     assert timeout == mcp_server._RELEASE_PROBE_TIMEOUT_SECONDS
     assert f"{timeout:g}-second connect and read timeouts" in text
-    assert f"{HEALTH_PROBE_DEADLINE_SECONDS:g}-second limit on receiving the whole response" in text
+    assert f"{HEALTH_PROBE_DEADLINE_SECONDS:g}-second deadline checked as the response" in text
 
 
 def test_lt_doctor_help_names_the_lt_mcp_check() -> None:
     help_text = " ".join(lt_cli._build_parser().format_help().split())
     assert "code-facing idiom blocks and that lt-mcp can start" in help_text
+
+
+# Only these capture paths record the capturing client's release and install id,
+# so only they can name a stale client (docs/setup.md, capture_client_release).
+_RELEASE_STAMPING_MODULES = {"figure.py", "hpc.py", "repo.py", "watch.py"}
+
+
+def test_only_the_documented_capture_paths_stamp_the_client_release() -> None:
+    client_dir = _REPO_ROOT / "src" / "lab_tracker_client"
+    callers = {
+        path.name
+        for path in client_dir.rglob("*.py")
+        if path.name != "client.py" and "capture_host_metadata(" in _read(path)
+    }
+    assert callers == _RELEASE_STAMPING_MODULES, (
+        "a capture path started or stopped recording the client release; update "
+        "docs/setup.md, docs/retained-v1-surface.md, and capture_client_release.py"
+    )
+
+
+def test_notes_made_by_hand_or_import_carry_no_release_or_install_id(tmp_path: Path) -> None:
+    stamp_keys = ("capture_install_id", "capture_client_version", "capture_client_revision")
+    sent: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json={"data": [], "meta": {"total": 0}})
+        sent.append(request.content.decode("utf-8", "replace"))
+        note = {"note_id": "n-1", "project_id": "p-1", "status": "staged", "metadata": {}}
+        return httpx.Response(201, json={"data": note})
+
+    client = LabTracker(base_url="http://127.0.0.1:9", transport=httpx.MockTransport(handler))
+    upload = tmp_path / "data.csv"
+    upload.write_text("a,b\n", encoding="utf-8")
+
+    client.upsert_note(project_id="p-1", content="typed note")
+    client.quick_capture("quick thought", project_id="p-1")
+    client.upload_note_file(project_id="p-1", file_path=upload)
+    client.import_evidence_file(project_id="p-1", file_path=upload)
+
+    assert len(sent) == 4
+    assert not [key for body in sent for key in stamp_keys if key in body]
 
 
 # L24/L25: examples must use the sanctioned LPAT, never deprecated login.

@@ -201,20 +201,25 @@ commits are not consumer-relevant.
   comparison built from its existing `/health` probe (`status`,
   `client_behind_server`, `update_recommended`), and suggests the update only
   when one is recommended, so the SessionStart hook's `--brief` line names it.
-  The probe has 2-second connect and read timeouts and a 4-second limit on
-  receiving the whole response, so a server that sends its headers and then
+  The probe has 2-second connect and read timeouts and a 4-second deadline
+  checked as the response arrives, so a server that sends its headers and then
   trickles the body cannot hold the hook open.
 - `lt-mcp` over stdio makes one unauthenticated `GET /health` at startup with
-  the same 2-second timeouts and 4-second response limit. It is advisory only:
-  any failure, including one while building the HTTP client, is written to
-  stderr and leaves the session unchanged.
+  the same 2-second timeouts and 4-second deadline. It is advisory only: any
+  failure, including one while building the HTTP client, is written to stderr
+  and leaves the session unchanged.
   When an update is recommended, the MCP `instructions` start with an
   `UPDATE AVAILABLE` notice and every tool result carries the same notice in
   `_lab_tracker_update_notice`. A hosted endpoint skips the check; it ships
   with its server.
-- Captures always record `capture_client_version` (`0.0.0+unknown` when the
-  client cannot read its own release) and, when known, `capture_client_revision`
-  next to the host identity. The coverage read
+- Captures made by `lt watch`, `lt-hpc`, the repo hooks (`lt repo report`), and
+  figure capture always record `capture_client_version` (`0.0.0+unknown` when
+  the client cannot read its own release) and, when known,
+  `capture_client_revision` next to the host identity. A note made by hand or
+  import (`lt note`, `lt quick`, `lt import-folder`, and the SDK's
+  `upsert_note`, `quick_capture`, and `upload_note_file`) and the MATLAB
+  package record neither an install id nor a client release, so they can never
+  produce an update notice. The coverage read
   (`GET /projects/{project_id}/coverage`) judges each capture source on its
   own: it reports the release the source's newest capture was made with, its
   `release_status` against the server's, and `update_recommended`, and writes
@@ -234,9 +239,9 @@ commits are not consumer-relevant.
 One install id covers every Python environment on a machine, and the notice's
 fix depends on which environment made the capture:
 
-- **Tool environment** (`lt watch`, `lt-hpc`, the repo and git hooks,
-  `lt import-folder`, and anything else launched from the `uv tool` install):
-  install the server's release with the Agents page's install command
+- **Tool environment** (`lt watch`, `lt-hpc`, and the repo hooks, all launched
+  from the `uv tool` install): install the server's release with the Agents
+  page's install command
   (`uv tool install --force "lab-tracker @ git+https://github.com/SamuelBrudner/lab-tracker.git@<revision>"`),
   then run `lt update` in each consumer repo and restart the MCP host so it
   launches the new `lt-mcp`.

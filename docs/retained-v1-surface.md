@@ -629,11 +629,13 @@ research record:
   [external-artifact-resolution-design.md](external-artifact-resolution-design.md).
 - Advisory client-update awareness keyed to release versions: `GET /health`
   reports the server's `[project].version` and source revision; `lt doctor` and
-  `lt setup status` check that the installed `lt-mcp` imports and compare the
-  client's release with the server's; stdio `lt-mcp` prefixes its MCP
-  instructions and adds `_lab_tracker_update_notice` to every tool result when
-  an update is recommended; and captures record the capturing client's
-  release. Each coverage `capture_sources` row carries its newest capture's
+  `lt setup status` check that the installed `lt-mcp` imports (in a child
+  interpreter), and `lt setup status` compares the client's release with the
+  server's; stdio `lt-mcp` prefixes its MCP instructions and adds
+  `_lab_tracker_update_notice` to every tool result when an update is
+  recommended; and captures made by `lt watch`, `lt-hpc`, the repo hooks, and
+  figure capture record the capturing client's release (a note made by hand or
+  import, and the MATLAB package, do not). Each coverage `capture_sources` row carries its newest capture's
   `capture_client_version`/`capture_client_revision`, its `release_status`
   against the report's `server_release`, `update_recommended`, the
   `watched_folder` of a watch source, and a per-source `update_notice` when
@@ -647,7 +649,11 @@ research record:
   offline and drained later carries the release that queued it. Only a newer
   server `MAJOR.MINOR` produces a notice ([versioning.md](versioning.md)); a
   PATCH-only gap and revision drift within a release are reported, never
-  suggested. None of these checks blocks capture, a session, or MCP startup.
+  suggested. None of these checks blocks capture, and each is bounded, so none
+  holds a session or MCP startup open: the import check has a 15-second limit,
+  and the `lt setup status` and `lt-mcp` `/health` probes have 2-second connect
+  and read timeouts and a 4-second deadline checked as the response arrives.
+  A failed `lt-mcp` probe is written to stderr and startup continues.
   See [setup.md](setup.md#know-when-a-client-install-is-broken-or-behind-its-server).
 - Read-only assistant and MCP endpoints over the retained graph. Remote agents
   can orient with `graph_overview`, locate a typed anchor with `search_graph`,
