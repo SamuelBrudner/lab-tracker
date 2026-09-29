@@ -347,11 +347,15 @@ def _terminal_delivers_interrupts() -> bool:
     """True when stdin is a terminal whose foreground process group is ours.
 
     Only then does the terminal send Ctrl-C/Ctrl-\\ to the command as well.
+    Windows has no process groups, so the signal is always forwarded there
+    (a console Ctrl-C already reaches the command; forwarding it is harmless).
     """
 
+    if sys.platform == "win32":
+        return False
     try:
         return os.isatty(0) and os.tcgetpgrp(0) == os.getpgrp()
-    except (AttributeError, OSError):
+    except OSError:
         return False
 
 
