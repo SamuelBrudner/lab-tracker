@@ -46,6 +46,24 @@ function renderPage(props = {}) {
   );
 }
 
+// Without an immutable source revision, step 5 shows only its withheld warning: no
+// client list, intro, /mcp hint, or organization-policy note. The step used to show
+// the intro and the /mcp note even then; this pins the deliberate change.
+function expectClientStepWithheld() {
+  const step = screen
+    .getByRole("heading", { name: "Connect your coding assistant" })
+    .closest("li");
+  expect(
+    within(step).getByText(/MCP verification is blocked until the server reports/)
+  ).toHaveClass("warn");
+  expect(step.querySelectorAll(".subtle")).toHaveLength(0);
+  expect(step.textContent).not.toContain("/mcp");
+  expect(step.textContent).not.toContain("administrator may need to allow this server");
+  expect(step.textContent).not.toContain("Claude Desktop chat");
+  expect(step.textContent).not.toContain("Codex in the ChatGPT desktop app");
+  expect(within(step).queryByRole("link")).toBeNull();
+}
+
 describe("OnboardingPage", () => {
   it.each([
     {
@@ -357,13 +375,7 @@ describe("OnboardingPage", () => {
     expect(commandText).not.toContain("lt setup init");
     expect(commandText).not.toContain("lt project bind");
     expect(commandText).not.toContain("lt hooks install");
-    // No client guidance or docs link is shown without an immutable revision.
-    const clientStep = screen
-      .getByRole("heading", { name: "Connect your coding assistant" })
-      .closest("li");
-    expect(clientStep.textContent).not.toContain("Claude Desktop chat");
-    expect(clientStep.textContent).not.toContain("Codex in the ChatGPT desktop app");
-    expect(within(clientStep).queryByRole("link")).toBeNull();
+    expectClientStepWithheld();
     expect(document.body.textContent).toContain("Do not install from GitHub main");
     expect(document.body.textContent).toContain(
       "Local repository commands are withheld"
@@ -393,5 +405,6 @@ describe("OnboardingPage", () => {
     expect(commandText).not.toContain("uv tool install");
     expect(commandText).not.toContain("lt setup init");
     expect(commandText).not.toContain("lt setup verify-mcp");
+    expectClientStepWithheld();
   });
 });

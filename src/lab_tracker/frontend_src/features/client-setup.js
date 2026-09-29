@@ -11,8 +11,9 @@ const FULL_GIT_REVISION = /^[0-9a-f]{40}$/i;
 // step with it (tests/test_docs_drift.py checks that they are documented).
 const MCP_CLIENTS_INTRO =
   "Each assistant registers Lab Tracker in its own settings, so follow only " +
-  "the one you use. Claude Code reads the repository .mcp.json that setup " +
-  "writes. Claude Desktop chat and both Codex apps keep their registration in " +
+  "the one you use. Claude Code reads the .mcp.json that lt setup init writes " +
+  "in the repository. Claude Desktop chat and both Codex products, the " +
+  "ChatGPT desktop app and the Codex CLI, keep their registration in " +
   "user-level settings that Lab Tracker never writes.";
 
 const MCP_CLIENTS = [
@@ -20,10 +21,10 @@ const MCP_CLIENTS = [
     id: "claude-code",
     name: "Claude Code (terminal, IDE, or the Claude Desktop Code tab)",
     guidance:
-      "The repository .mcp.json from the previous step is enough, and it " +
-      "carries no token. Open Claude Code in that repository and approve the " +
-      "server when prompted. Register for your user account only for access " +
-      "outside that repository.",
+      "The .mcp.json that lt setup init writes in your repository is enough, " +
+      "and it carries no token. Open Claude Code in that repository and " +
+      "approve the server when prompted. Register for your user account only " +
+      "for access outside that repository.",
     commands: [
       {
         title:
@@ -81,7 +82,7 @@ const MCP_CLIENTS = [
 const MCP_VERIFY_TITLE =
   "Any client: verify that lt-mcp launches, authenticates, and matches this server";
 const MCP_VERIFY_NOTE =
-  "The verifier runs in this terminal's environment. For a desktop app, add " +
+  "The verifier runs in your terminal's environment. For a desktop app, add " +
   "--command with the absolute path you registered, then ask the assistant " +
   "to call lab_tracker_list_projects with limit 1: a registration listing " +
   "alone does not prove authentication.";

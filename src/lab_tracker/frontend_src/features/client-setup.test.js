@@ -79,6 +79,31 @@ describe("matchingClientSetup", () => {
     expect(byId["claude-desktop-chat"].guidance).toContain("no token");
   });
 
+  it("words the shared copy so it is true on the Setup and the Agents page", () => {
+    const setup = matchingClientSetup(REVISION);
+    const byId = Object.fromEntries(
+      setup.mcpClients.map((client) => [client.id, client])
+    );
+    const shared = [
+      setup.mcpClientsIntro,
+      setup.mcpVerifyNote,
+      ...setup.mcpClients.map((client) => client.guidance),
+    ].join("\n");
+
+    // The Agents page has no numbered steps, and Setup step 4 does not run
+    // lt setup init, so the copy names the file init creates instead.
+    expect(shared).not.toMatch(/previous step/i);
+    expect(byId["claude-code"].guidance).toContain("lt setup init");
+    expect(byId["claude-code"].guidance).toContain(".mcp.json");
+    expect(setup.mcpClientsIntro).toContain("lt setup init");
+    // It is read in a browser, so the verifier runs in the reader's terminal.
+    expect(shared).not.toMatch(/this terminal/i);
+    expect(setup.mcpVerifyNote).toContain("your terminal");
+    // The Codex CLI is a command line tool; only the ChatGPT desktop one is an app.
+    expect(shared).not.toMatch(/Codex apps/i);
+    expect(setup.mcpClientsIntro).toContain("Codex CLI");
+  });
+
   it("puts no credential in any client instruction", () => {
     const text = JSON.stringify(matchingClientSetup(REVISION).mcpClients);
 
