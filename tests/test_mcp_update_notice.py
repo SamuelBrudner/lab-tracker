@@ -211,7 +211,11 @@ def test_probe_reports_the_reason_on_one_bounded_stderr_line(monkeypatch, capsys
     assert len(lines[0]) < 1000
 
 
-def test_main_starts_the_server_when_the_update_check_cannot_run(monkeypatch, capsys) -> None:
+def test_main_starts_the_server_when_the_update_check_cannot_run_for_a_loopback_target(
+    monkeypatch, capsys
+) -> None:
+    # A loopback target skips the target-safety gate, which builds its own client
+    # for any other target; only the update check's client is unbuildable here.
     events: list[tuple[str, ...]] = []
 
     class FakeServer:
@@ -226,7 +230,8 @@ def test_main_starts_the_server_when_the_update_check_cannot_run(monkeypatch, ca
         raise ImportError(SOCKS_WITHOUT_SOCKSIO)
 
     monkeypatch.setenv("LAB_TRACKER_MCP_TRANSPORT", "stdio")
-    monkeypatch.setattr(mcp_server, "_ensure_mcp_target_safe", lambda _s, *, hosted: None)
+    monkeypatch.delenv("LAB_TRACKER_MCP_BASE_URL", raising=False)
+    monkeypatch.setenv("LAB_TRACKER_BASE_URL", "http://127.0.0.1:8000")
     monkeypatch.setattr(mcp_server, "LabTrackerAPIClient", unbuildable)
     monkeypatch.setattr(mcp_server, "build_server", fake_build)
 
