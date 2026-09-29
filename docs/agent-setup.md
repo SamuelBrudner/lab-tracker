@@ -274,15 +274,18 @@ for the client you use; the steps for another client do not apply to it.
 | Codex in the ChatGPT desktop app | you, in the app's **Settings**, or `~/.codex/config.toml` | no |
 | Codex CLI | you, with `codex mcp add`, or `~/.codex/config.toml` | no |
 
-Two rules hold for every client.
+Two rules apply in this section. The first covers the registrations you make by
+hand, Claude Desktop chat and both Codex products; the second covers all four
+clients. Cursor and GitHub Copilot follow their own pages, linked at the end of
+this section, and those pages set out their own credential placement.
 
-**No credentials in a client's settings file.** The saved connection profile
-(`~/.lab-tracker/config.json`, written by `lt setup connect --save-token`) is
-permission-hardened, and `lt-mcp` reads the API URL and token from it when a host
-launches it without a shell. Keep the token there. Never paste an `lpat_` token
-or `LAB_TRACKER_MCP_API_KEY` into `claude_desktop_config.json`, a Codex
-`config.toml`, or another client settings file. Two caveats follow from how
-`lt-mcp` merges its settings:
+**No credentials in the Claude Desktop or Codex settings file.** The saved
+connection profile (`~/.lab-tracker/config.json`, written by
+`lt setup connect --save-token`) is permission-hardened, and `lt-mcp` reads the API
+URL and token from it when a host launches it without a shell. Keep the token
+there. For Claude Desktop chat and both Codex products, never paste an `lpat_`
+token or `LAB_TRACKER_MCP_API_KEY` into `claude_desktop_config.json` or the Codex
+`config.toml`. Two caveats follow from how `lt-mcp` merges its settings:
 
 - A `LAB_TRACKER_BASE_URL` in the entry or the environment that differs from the
   profile's base URL makes `lt-mcp` drop the profile token, because a saved token
@@ -496,7 +499,7 @@ The saved connection profile normally supplies the API URL and LPAT. For a clien
 that a shell launches, environment variables still override it when you need
 them — `LAB_TRACKER_BASE_URL` points the MCP server at your instance, and
 `LAB_TRACKER_MCP_API_KEY` supplies the token when auth is on — but keep them out
-of desktop-app settings files, as above. Full variable reference in
+of the Claude Desktop and Codex settings files, as above. Full variable reference in
 [`lab-tracker-mcp-skills.md`](lab-tracker-mcp-skills.md).
 
 Server-side AI drafting uses the Lab Tracker operator's configured provider

@@ -517,6 +517,32 @@ def test_codex_cli_section_names_the_missing_executable_failure() -> None:
     assert "codex mcp add lab-tracker -- lt-mcp" in body
 
 
+_CREDENTIALS_RULE_CLIENTS = ("Claude Desktop chat", "Codex")
+# Clients whose own pages put credentials in a settings file, so the matrix rule must
+# not claim to cover them.
+_CREDENTIALS_RULE_EXCLUDED = ("Cursor", ".cursor", "Copilot")
+
+
+def _credentials_rule() -> str:
+    intro = _collapsed_whitespace(_client_matrix().split("\n#### ", 1)[0])
+    start = intro.index("**No credentials")
+    return intro[start : intro.index("**Verify in three parts", start)]
+
+
+def test_credentials_rule_is_scoped_to_the_clients_registered_by_hand() -> None:
+    intro = _collapsed_whitespace(_client_matrix().split("\n#### ", 1)[0])
+    rule = _credentials_rule()
+    # docs/lab-tracker-cursor.md sends credentials to ~/.cursor/mcp.json, so a rule
+    # stated for "every client" would contradict a page the matrix links to.
+    assert "~/.cursor/mcp.json" in _collapsed_whitespace(_read(_DOCS / "lab-tracker-cursor.md"))
+    assert "every client" not in intro
+    assert "another client settings file" not in intro
+    for client in _CREDENTIALS_RULE_CLIENTS:
+        assert client in rule, client
+    for excluded in _CREDENTIALS_RULE_EXCLUDED:
+        assert excluded not in rule, excluded
+
+
 def test_client_matrix_makes_no_unverified_vendor_claims() -> None:
     # A bare command failing in a GUI, and the deprecation status of
     # `codex mcp add`, are claims the vendors' own documentation does not make.
