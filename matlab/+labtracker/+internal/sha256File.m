@@ -1,11 +1,11 @@
 function digest = sha256File(path)
 %SHA256FILE Stream a file through Java SHA-256 and return lowercase hex.
-fid = fopen(char(string(path)), 'rb');
+fid = fopen(labtracker.internal.textOf(path), 'rb');
 if fid < 0
-    error('labtracker:io', 'Could not open file for hashing: %s', char(string(path)));
+    error('labtracker:io', 'Could not open file for hashing: %s', labtracker.internal.textOf(path));
 end
 cleanup = onCleanup(@() fclose(fid));
-md = java.security.MessageDigest.getInstance('SHA-256');
+md = javaMethod('getInstance', 'java.security.MessageDigest', 'SHA-256');
 while true
     chunk = fread(fid, [1, 1048576], '*uint8');
     if isempty(chunk)

@@ -37,7 +37,8 @@ function sourceFileMetadata(file) {
 // Assemble the capture metadata bag written onto a note. captured_at is the
 // composition clock: it is stamped here, before any queueing, so an offline
 // capture replayed hours later still says when it was actually composed.
-// The clock is injectable so tests can pin it.
+// The clock is injectable so tests can pin it. `captureChannel` names the
+// bench path that made the capture (kiosk, nfc, share, import, debrief, ...).
 function buildCaptureMetadata({
   captureMode,
   kind,
@@ -45,6 +46,7 @@ function buildCaptureMetadata({
   file = null,
   hint = "",
   voiceNoteType = "",
+  captureChannel = "",
   now = () => Date.now(),
 }) {
   const metadata = {
@@ -57,6 +59,9 @@ function buildCaptureMetadata({
   };
   if (bundleId) {
     metadata.capture_bundle_id = bundleId;
+  }
+  if (captureChannel) {
+    metadata.capture_channel = captureChannel;
   }
   if (hint.trim()) {
     metadata.capture_hint = hint.trim();
@@ -144,6 +149,8 @@ async function queueRawFileNoteOffline({
   return true;
 }
 
+// A caller that may retry the same capture (a per-file Retry) passes its own
+// clientCaptureId, so the server treats the retry as a replay, not a new note.
 async function uploadOrQueueRawFile({
   token,
   projectId,
@@ -152,8 +159,8 @@ async function uploadOrQueueRawFile({
   metadata,
   targets = [],
   queue = getUploadQueue(),
+  clientCaptureId = newCaptureId(),
 }) {
-  const clientCaptureId = newCaptureId();
   try {
     return await uploadRawFileNote({
       token,
@@ -224,8 +231,8 @@ async function createOrQueueTextCapture({
   targets = [],
   metadata,
   queue = getUploadQueue(),
+  clientCaptureId = newCaptureId(),
 }) {
-  const clientCaptureId = newCaptureId();
   try {
     return await createTextCapture({
       token,

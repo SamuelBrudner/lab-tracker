@@ -920,7 +920,13 @@ _READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 # Capture routes a stage_evidence token may POST to. The routes additionally
 # require a staged note status and, for bundles, dry_run=true.
 STAGE_EVIDENCE_CAPTURE_POSTS = frozenset(
-    {"/notes", "/notes/upload-file", "/notes/quick-capture", "/evidence-bundles"}
+    {
+        "/notes",
+        "/notes/upload-file",
+        "/notes/quick-capture",
+        "/notes/voice-capture",
+        "/evidence-bundles",
+    }
 )
 # POST routes that are semantically reads: they select and return bounded
 # context without persisting anything, so read-only service tokens may call them.
@@ -936,6 +942,9 @@ STAGE_EVIDENCE_NOTE_ACTIONS = frozenset({"graph-drafts", "analysis-graph-drafts"
 # stay a person's actions.
 GRAPH_CURATE_POSTS = frozenset({"/batches/run-now"})
 GRAPH_CURATE_DRAFT_ACTIONS = frozenset({"accept-all", "commit"})
+# Admin-only scheduler triggers: the due daily-review batches and the due
+# server capture pollers (docs/server-capture-channels.md).
+SCHEDULER_RUN_DUE_POSTS = frozenset({"/batches/run-due", "/integrations/run-due"})
 DEVICE_LAST_USED_UPDATE_INTERVAL = timedelta(minutes=5)
 PERSONAL_ACCESS_TOKEN_LAST_USED_UPDATE_INTERVAL = timedelta(minutes=5)
 PERSONAL_ACCESS_TOKEN_MAX_TTL = timedelta(days=90)
@@ -966,7 +975,7 @@ def device_principal_can_access(method: str, path: str) -> bool:
         return True
     if method != "POST":
         return False
-    if path in {"/notes", "/notes/upload-file", "/notes/quick-capture"}:
+    if path in {"/notes", "/notes/upload-file", "/notes/quick-capture", "/notes/voice-capture"}:
         return True
     segments = [segment for segment in path.split("/") if segment]
     return len(segments) == 3 and segments[0] == "notes" and segments[2] == "transcript"
@@ -1096,8 +1105,9 @@ def service_principal_can_access(
         # other writes, no /auth — so a leaked scheduler credential cannot read
         # other data or make arbitrary writes (it can still kick off the
         # human-gated drafting run, which is its purpose). Still gated on the
-        # admin role that running the daily review requires.
-        return method == "POST" and path == "/batches/run-due" and role is Role.ADMIN
+        # admin role that running the daily review requires. The same scheduler
+        # credential may also run the due capture pollers, which only stage notes.
+        return method == "POST" and path in SCHEDULER_RUN_DUE_POSTS and role is Role.ADMIN
     if scope == PAT_SCOPE_STAGE_EVIDENCE:
         return stage_evidence_principal_can_access(
             method, path, read_only=read_only, role=role
@@ -1112,7 +1122,7 @@ def service_principal_can_access(
         return False
     if method in _READ_METHODS:
         return True
-    if method == "POST" and path == "/batches/run-due":
+    if method == "POST" and path in SCHEDULER_RUN_DUE_POSTS:
         return role is Role.ADMIN
     if read_only and method == "POST" and path in SERVICE_SEMANTIC_READ_POSTS:
         # Semantically read-only POSTs: artifact resolution selects a captured

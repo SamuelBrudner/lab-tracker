@@ -63,6 +63,15 @@ Each file event records the absolute file URI, root-relative external ID,
 content hash, size, and observed mtime. Sync refuses to upload a file if it
 changed after the scan; rescan the folder to capture the new version.
 
+Instrument files also carry facts from their headers. FCS, OME-TIFF, and NWB
+(with `h5py`) files get `format_kind`, `format_acquired_at` (ISO-8601 UTC),
+and other `format_*` keys in the staged note's metadata. The sniffer reads
+at most 2 MiB of each file. A malformed header only adds
+`format_sniff_error` and never fails the scan. Set
+`LAB_TRACKER_WATCH_FORMAT_SNIFF=0` to turn this off. See
+[decoded-labels-and-file-headers.md](decoded-labels-and-file-headers.md) for
+the fields and the timezone rule for header clocks that have no UTC offset.
+
 `lt import-folder` remains supported for one-shot folder import. It now shares
 the same file discovery rules as `lt watch`: symlinked files are skipped, hidden
 paths are ignored, and include/exclude globs are matched against both the
@@ -170,11 +179,59 @@ the same way.
 ## Offline Figure Queue
 
 Figure saves that cannot reach the server (`lab_tracker_client.savefig`,
-`capture_figures`, or the autotrack hook) are queued into this same watch
+`capture_figures`, the autotrack hook, `lt capture file`, the R autotrack
+hooks, or the MATLAB `labtracker.savefig`) are queued into this same watch
 outbox instead of being dropped, under the same capture id and project a live
 save would use, and drain with the next `lt watch run`, `lt watch sync`, or `lt outbox
 sync` (see [repo-report-capture.md](repo-report-capture.md) for the
 all-adapter drain). Set `LAB_TRACKER_CAPTURE_OUTBOX=0` to disable the queue.
+A figure that was only displayed inline or shown (never saved) has no file to
+point at, so its queued bytes are kept under the outbox's `blobs/` folder, one
+file per distinct content; they can be deleted once `lt outbox status` shows
+the events synced.
+
+The same outbox holds the daily notebook pages the Jupyter save hook writes
+([notebook-and-script-capture.md](notebook-and-script-capture.md)). Each page
+carries the reserved `payload.deliver_after` time (its local day's end); a
+sync leaves such an event pending, reported as skipped with reason `not_due`,
+until that time has passed.
+
+MATLAB writes the event itself (see [lab-tracker-matlab.md](lab-tracker-matlab.md));
+its events carry no `mtime`, so the sync checks their content hash and size
+alone before uploading.
+
+## Capturing One Saved File From Any Runtime
+
+`lt capture file PATH` runs the same fail-soft capture as `savefig` on a file
+that is already on disk, so any runtime or pipeline step can shell out to it:
+
+```bash
+lt capture file results/summary.png --metadata stage=final
+lt capture file out/fit.pdf --require-bound --metadata capture_language=julia
+lt capture file table.csv --kind table --logical-id results/table --project PROJECT_UUID
+```
+
+- stdout is the capture result as JSON (`action`, `path`, `client_capture_id`,
+  `evidence_content_hash`, `metadata`, `note_id` when stored, `queued_event`
+  when queued, `reason`, `errors`) plus `notices`, the stderr lines the
+  capture printed, so a caller that discards stderr can still show them;
+- the exit status is 0 for every capture outcome (`imported`, `coalesced`,
+  `queued`, `skipped`, `failed`) and nonzero only for a usage error, so a
+  capture never fails the step that called it;
+- `--require-bound` applies autotrack's rule: the file is captured only when
+  its project comes from `--project`, `LAB_TRACKER_PROJECT_ID`, or the
+  checkout's `lt_ids.json`; otherwise nothing is sent or queued and the result
+  is `skipped` with reason `project_unbound`;
+- `--metadata KEY=VALUE` (repeatable) adds scalar note metadata; `true`,
+  `false`, and numbers that print back unchanged are typed, anything else is
+  a string;
+- `--output PATH` also writes the result JSON to `PATH` atomically, for a
+  caller that runs the command in the background (the R hooks do).
+
+Each invocation is a new process, so the circuit breaker that spares a
+Python session repeated connect timeouts lasts for one file only: with the
+server down, each call waits at most one clamped connect timeout (2.5 s)
+before queueing.
 
 A figure save goes to the project named by, in order: the `project_id`
 argument, `LAB_TRACKER_PROJECT_ID`, the saved file's checkout binding
@@ -225,6 +282,19 @@ lt watch scan
 lt watch status
 lt watch sync
 ```
+
+## Files a Coding Agent Writes
+
+`lt watch touch <path>` (or an agent's `PostToolUse` hook payload on stdin)
+queues just that file when a configured watch would capture it, with the same
+event identity a scan gives it, then syncs best-effort; any other path returns
+at once without scanning or network. The opt-in `lt setup agent-hooks` wires it
+to Claude Code's `Write`/`Edit`/`MultiEdit`/`NotebookEdit` tools, so watched
+folders fill as the agent writes instead of at the next scheduled run. Only the
+checkout's own `.lab-tracker/watch.json` is consulted, relative roots are
+anchored at the checkout, and a staged-note watch needs a declared project
+(watch config, `lt_ids.json`, or `LAB_TRACKER_PROJECT_ID`). See
+[agent session capture](agent-session-capture.md).
 
 ## HPC Adapter
 

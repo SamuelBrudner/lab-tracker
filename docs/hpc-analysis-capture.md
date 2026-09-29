@@ -60,8 +60,22 @@ The wrapper records the command, run id, parsed Slurm job id, git commit, dirty
 state, working directory, and stdout/stderr excerpt. It also exports
 `LAB_TRACKER_HPC_RUN_ID`, `LAB_TRACKER_HPC_OUTBOX`, and `LAB_TRACKER_HPC_CONFIG`
 to the submission command. Slurm's default `--export=ALL` behavior passes those
-through to the job; if a site or script uses `--export=NONE`, pass the variables
-explicitly.
+through to the job.
+
+For a job the scheduler accepted, the wrapper also writes a **run manifest**
+into the submit directory: `.lab-tracker/hpc-runs/job-<job id>.json` (with a
+`.<cluster>` suffix when `sbatch --parsable -M` printed one). It records the
+run id, job id, config path, resolved outbox, the explicit
+`--project`/`--question`/`--dataset`/`--tag` values, and the `lt` executable
+that submitted the job. Slurm sets `SLURM_SUBMIT_DIR` and `SLURM_JOB_ID` in
+every job even under `--export=NONE`, so `lt hpc begin` and `lt hpc finish`
+inside such a job find their run, config and outbox through the manifest when
+`LAB_TRACKER_HPC_RUN_ID` is absent (array tasks use `SLURM_ARRAY_JOB_ID`). The
+job still needs `lt` on its `PATH` or called by absolute path. The manifest is
+written right after `sbatch` returns, so it is there long before any job can
+start; a manifest that cannot be written (read-only submit directory) prints
+one warning and never fails the submission. `.lab-tracker/` is host-local
+scratch; keep it gitignored.
 
 ### Script Hooks
 
@@ -77,11 +91,71 @@ lt hpc finish --run "$LAB_TRACKER_HPC_RUN_ID" --exit-code "$status" \
 exit "$status"
 ```
 
-`finish` can also include log excerpts:
+`finish` can also include log excerpts (the last 4,000 characters, with
+tokens, passwords and `user:password@` URLs scrubbed):
 
 ```bash
 lt hpc finish --run run-001 --exit-code 0 --log slurm-12345.out
 ```
+
+### Slurm Epilog (No Job-Script Edits)
+
+With the submit wrapper plus a cluster-wide `TaskEpilog`, every job submitted
+through `lt hpc submit` records its finish without a single line in the job
+script. Administrators install the template once;
+users do nothing per job.
+
+`lt hpc epilog` reads Slurm's environment (`SLURM_JOB_ID`,
+`SLURM_ARRAY_JOB_ID`/`SLURM_ARRAY_TASK_ID`, `SLURM_SUBMIT_DIR` or
+`SLURM_JOB_WORK_DIR`, `SLURM_CLUSTER_NAME`, and `SLURM_JOB_EXIT_CODE2` /
+`SLURM_JOB_EXIT_CODE` where the epilog type provides them) and the run
+manifest, then writes the same `finish` event `lt hpc finish` would, carrying
+the submit's declared question, datasets and tags, the submit directory's git
+state, and the tail of Slurm's default output file (`slurm-<job>.out` or
+`slurm-<array job>_<task>.out` in the submit directory, or `--log`). It is:
+
+- **idempotent** — a run (per array task) that already has a finish event,
+  because the job called `lt hpc finish` itself or an earlier task epilog
+  ran, is left alone (`"action": "already_finished"`), and the epilog's own
+  event id is deterministic;
+- **fail-silent** with `--fail-silent`, and a quiet no-op outside a job, for a
+  job without a manifest (plain `sbatch`), or with
+  `LAB_TRACKER_HPC_EPILOG_ENABLED=0`;
+- **offline** — it only writes the user's outbox. The scheduled
+  `lt watch run` / `lt hpc sync` on a login node drains it.
+
+Install `scripts/slurm-task-epilog.sh` (all nodes):
+
+```bash
+install -m 0755 scripts/slurm-task-epilog.sh /etc/slurm/lab-tracker-task-epilog.sh
+# slurm.conf
+TaskEpilog=/etc/slurm/lab-tracker-task-epilog.sh
+scontrol reconfigure
+```
+
+If the site already has a `TaskEpilog`, call the template from it. The
+template acts only for the batch step (`SLURM_STEP_ID` unset or `batch`,
+`SLURM_PROCID` 0) of jobs whose run manifest exists, runs the `lt` recorded in
+the manifest (or `LAB_TRACKER_LT`, then `lt` on `PATH`) under a 60-second
+`timeout`, discards its output, and always exits 0.
+
+Which epilog, and why `TaskEpilog`:
+
+| Slurm hook | Runs where, as whom | Sees | Fit |
+| --- | --- | --- | --- |
+| `Prolog` / `Epilog` | `slurmd` on each allocated node, as `SlurmdUser` (normally root) | job id, user, uid, partition; the exit code on recent releases; not the job's environment | Not recommended: it would read user-writable manifests and run a user-installed `lt` as root, a privilege-escalation path, and needs a `runuser` hop to write the user's outbox |
+| `PrologSlurmctld` / `EpilogSlurmctld` | `slurmctld` on the controller, as `SlurmUser` | the job record, including `SLURM_JOB_EXIT_CODE(2)` | Not suitable: the controller usually cannot reach users' scratch or checkouts, must not run user code, and a slow script delays scheduling |
+| `TaskProlog` / `TaskEpilog` | `slurmstepd` on the compute node, **as the job user**, once per task of each step, in the task's environment | `SLURM_JOB_ID`, `SLURM_SUBMIT_DIR`, array ids, cluster name — everything the job sees | **Recommended**: no privilege boundary is crossed, it reaches the user's own files, and it runs whether or not the job script calls `lt` |
+| `SrunProlog` / `SrunEpilog`, `srun --task-epilog` | `srun`, as the user | the `srun` environment | Not suitable: `srun` steps only, and `--task-epilog` is per-job user effort |
+
+Limitation: Slurm gives a `TaskEpilog` no exit status, so an epilog-written
+finish records state `ended` with an unknown exit code (the summary says so).
+Jobs that call `lt hpc finish --exit-code "$status"` themselves keep their exit
+code; the epilog then does nothing. A site that prefers a privileged epilog
+can pass the exit code with `--exit-code`, or rely on
+`SLURM_JOB_EXIT_CODE2`/`SLURM_JOB_EXIT_CODE`, but must drop to the job user
+first — check `man slurm.conf` for which variables your Slurm release sets in
+which epilog.
 
 ### Watch Folders
 
@@ -142,6 +216,16 @@ Each event becomes an idempotent staged evidence note. The note contains:
 - git commit and dirty state when available (a `git status` that times out after
   `LAB_TRACKER_GIT_TIMEOUT_SECONDS`, default 10 seconds, or fails is recorded as
   unknown, never as clean)
+- the git tree id of the submitted working copy (`hpc_git_worktree_tree`), the
+  identity of the exact code the job runs even when it was never committed:
+  `lt hpc submit` takes it before `sbatch` (older `slurm-*.out` files left
+  out) and records it on the submit event and in the submit manifest, and the
+  job's `begin`/`finish`/epilog events reuse it, so edits made after
+  submitting and the job's own growing output never change it. Only a job with
+  no submitted tree computes its own, without `slurm-*.out` and its `--log`
+  files. A `lt repo` commit with the same tree is proposed as the code the job
+  derived from (see
+  [run-capture.md](run-capture.md#code-identity-for-uncommitted-code))
 - artifact pointers with titles and summaries
 - compact log excerpts and metrics
 
@@ -168,8 +252,17 @@ lt hpc status
 
 - `HPC config not found`: run `lt hpc init` in the checkout or set
   `LAB_TRACKER_HPC_CONFIG`.
-- Submitted jobs do not see `LAB_TRACKER_HPC_RUN_ID`: check whether the Slurm
-  script or site config overrides environment export.
+- Submitted jobs do not see `LAB_TRACKER_HPC_RUN_ID`: expected under
+  `--export=NONE`; `lt hpc begin`/`finish` fall back to the run manifest in
+  the submit directory. If that fails, check that
+  `.lab-tracker/hpc-runs/job-<job id>.json` exists there (`lt hpc submit`
+  prints `run_manifest` or `run_manifest_error`).
+- The epilog records nothing: only jobs submitted through `lt hpc submit`
+  have a manifest; run `lt hpc epilog` by hand inside `salloc` with
+  `SLURM_JOB_ID`/`SLURM_SUBMIT_DIR` set to see its JSON result.
+- Pipelines on the cluster (Snakemake, Nextflow, Kedro, DVC) can record each
+  run's declared inputs and outputs with `lt pipeline`; see
+  [pipeline-capture.md](pipeline-capture.md).
 - Sync fails but events remain local: fix connectivity/authentication and rerun
   `lt hpc sync`; failed events are retryable.
 - Draft creation fails: the evidence note may still be synced. Configure the

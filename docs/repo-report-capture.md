@@ -123,7 +123,11 @@ requires human review.
 
 Every `git commit` records a `commit` event: commit SHA, branch, remote, commit
 subject/author, dirty-tree flag, environment fingerprint, file summary, and a
-bounded textual diff. Events are idempotent per commit — a re-fired hook updates
+bounded textual diff. The note also carries the commit's own tree id
+(`repo_git_tree`): figures, `lt run` runs, and HPC jobs made from exactly that
+code -- even before it was committed -- are proposed as derived from this
+commit's note (basis `worktree_tree_match`, see
+[run-capture.md](run-capture.md#code-identity-for-uncommitted-code)). Events are idempotent per commit — a re-fired hook updates
 nothing and creates no duplicates. The hook only lands the capture in the
 staged-note inbox; graph proposal generation waits for the configured
 daily-review schedule or an explicit on-demand review trigger.
@@ -191,6 +195,10 @@ evidence index. The
 shared evidence identity is `<normalized-remote>@<commit>` — the same identity
 `scripts/create-analysis-graph-draft.py` emits, so hook-based and CI-based
 capture of one commit dedup to one identity rather than parallel note streams.
+The reusable GitHub Action `.github/actions/lab-tracker-repo-report` runs
+`lt repo report --fail-silent` in CI with that identity; see
+[pipeline-capture.md](pipeline-capture.md#ci-capture-github-action) for its
+inputs and for exactly how the two captures of one commit resolve to one note.
 
 Under today's device-token allowlist the staged-note sink works with a device
 token; graph-draft requests (`--request-draft`) and any future first-class

@@ -543,9 +543,13 @@ describe("createUploadQueue", () => {
 
     await enqueueOwned(queue);
     expect(listener).toHaveBeenCalledTimes(1);
+    expect(listener).toHaveBeenLastCalledWith(undefined);
 
-    await drainAsOwner(queue);
+    const results = await drainAsOwner(queue);
     expect(listener).toHaveBeenCalledTimes(2);
+    // A drain hands listeners its results, so a page can tell uploaded from dropped.
+    expect(listener).toHaveBeenLastCalledWith(results);
+    expect(results.uploaded).toHaveLength(1);
 
     unsubscribe();
     await enqueueOwned(queue);

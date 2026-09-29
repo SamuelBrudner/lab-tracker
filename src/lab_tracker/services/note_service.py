@@ -39,6 +39,7 @@ from lab_tracker.models import (
 )
 from lab_tracker.note_text import NoteTextExcerpt, decode_utf8_excerpt, is_text_content_type
 from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
+from lab_tracker.photo_codes import DECODED_CODE_METADATA_KEYS
 from lab_tracker.provider_error_redaction import provider_error_message
 from lab_tracker.reference_registry import DeletableEntity
 from lab_tracker.services.analysis_service import AnalysisService
@@ -99,13 +100,15 @@ def _canonical_capture_metadata(
     metadata: dict[str, NoteMetadataScalar],
 ) -> dict[str, NoteMetadataScalar]:
     # The upload route stamps ingestion time after storing each physical copy.
-    # Transcription fields are a later server-derived mutation, so neither can
+    # Transcription fields are a later server-derived mutation, and decoded
+    # photo codes are best effort under a time budget, so none of them can
     # turn an exact replay of the original upload into a conflict.
     return {
         key: value
         for key, value in metadata.items()
         if key != "source_file_ingested_at"
         and key not in _TRANSCRIPTION_MUTATION_METADATA_KEYS
+        and key not in DECODED_CODE_METADATA_KEYS
     }
 
 

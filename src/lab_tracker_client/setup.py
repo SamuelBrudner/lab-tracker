@@ -248,7 +248,9 @@ def setup_status(target: str | Path = ".", *, brief: bool = False) -> JsonObject
         "hooks": _hooks_status(root),
         "skills": _skills_status(),
         "autotrack": _autotrack_status(),
+        "autotrack_r": _autotrack_r_status(),
         "session": _session_status(root),
+        "agent_hooks": _agent_hooks_status(root),
     }
     payload["suggestions"] = _suggestions(payload)
     if not brief:
@@ -1098,11 +1100,24 @@ def _hpc_status(root: Path) -> JsonObject:
 
 
 def _autotrack_status() -> JsonObject:
+    from lab_tracker_client.autotrack_setup import autotrack_hook_status
     from lab_tracker_client.figure_autotrack import ipython_startup_status
 
+    status: JsonObject = {"startup_file": None, "installed": False, "up_to_date": None}
     with suppress(Exception):
-        return ipython_startup_status()
-    return {"startup_file": None, "installed": False, "up_to_date": None}
+        status = ipython_startup_status()
+    # The Jupyter save hook and the scripts .pth, next to the IPython startup file.
+    with suppress(Exception):
+        status.update(autotrack_hook_status())
+    return status
+
+
+def _autotrack_r_status() -> JsonObject:
+    from lab_tracker_client.r_autotrack import rprofile_status
+
+    with suppress(Exception):
+        return rprofile_status()
+    return {"rprofile": None, "installed": False, "up_to_date": None}
 
 
 def _session_status(root: Path) -> JsonObject:
@@ -1113,6 +1128,16 @@ def _session_status(root: Path) -> JsonObject:
         status.pop("command", None)
         return status
     return {"present": False, "active": False}
+
+
+def _agent_hooks_status(root: Path) -> JsonObject:
+    """Whether `lt setup agent-hooks` entries are present; an opt-in, never suggested."""
+
+    from lab_tracker_client.agent_hooks import agent_hooks_status
+
+    with suppress(Exception):
+        return agent_hooks_status(root)
+    return {"installed": False, "session_end": False, "watch_touch": False, "files": []}
 
 
 def _hooks_status(root: Path) -> JsonObject:

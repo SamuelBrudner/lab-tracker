@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { formatDate } from "../../shared/formatters.js";
+import { TrustShareChoices } from "../bench-capture/TrustedShareBanner.jsx";
 
 function shareHeadline(share) {
   if (share.file) {
@@ -27,6 +28,8 @@ function SharedInboxReview({
   busy,
   onImport,
   onDiscard,
+  trustSessionLabel = "",
+  onTrust = null,
 }) {
   if (shares.length === 0) {
     return null;
@@ -75,6 +78,9 @@ function SharedInboxReview({
           Discard
         </button>
       </div>
+      {canWrite && targetProject ? (
+        <TrustShareChoices sessionLabel={trustSessionLabel} disabled={busy} onTrust={onTrust} />
+      ) : null}
     </section>
   );
 }

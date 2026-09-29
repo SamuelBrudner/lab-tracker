@@ -8,5 +8,6 @@ import * as graphDrafts from "./graph-drafts.js";
 import * as memberOnboarding from "./member-onboarding.js";
 import * as notes from "./notes.js";
 import * as projects from "./projects.js";
+import * as sessions from "./sessions.js";
 
-export { auth, datasets, graphDrafts, memberOnboarding, notes, projects };
+export { auth, datasets, graphDrafts, memberOnboarding, notes, projects, sessions };

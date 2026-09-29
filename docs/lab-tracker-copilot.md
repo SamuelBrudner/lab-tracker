@@ -121,3 +121,12 @@ are marked destructive so the IDE prompts before use.
 The product rule is unchanged: AI can suggest; only a person commits — unless a
 project owner has granted delegated curation, in which case the delegated
 tools apply what that grant admits ([delegated-curation.md](delegated-curation.md)).
+
+## Capture Paths
+
+Copilot's MCP connection reads and writes the record; capture that runs on its
+own comes from the `lt` CLI and the app. The [capture guide](capture-guide.md)
+lists every path, and the `lab-tracker://setup-guide` MCP resource gives an
+agent the same list with the consent-gated setup commands. The coding-agent
+session hooks (`lt setup agent-hooks`) are for Claude Code; Copilot has no
+supported equivalent yet.

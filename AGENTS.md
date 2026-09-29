@@ -48,6 +48,21 @@ decision context remains mandatory before a research-facing decision.
 If Lab Tracker is unavailable or ambiguous, state that explicitly. Do not create
 or mutate Lab Tracker records unless the user explicitly asks.
 
+## Capture Surfaces
+
+Low-effort capture paths live in several places:
+
+- `src/lab_tracker_client`: figure capture and autotrack (`figure.py`, `figure_autotrack.py`, `display_capture.py`, `notebook_capture.py`, `script_capture.py`, `r_autotrack.py`, `cli_capture.py`), runs and pipelines (`run_capture.py`, `pipeline_capture.py`, `integrations/`, `hpc.py`, `repo.py`), folders and instrument headers (`watch.py`, `format_sniffers.py`), coding-agent hooks (`agent_session.py`, `agent_hooks.py`, `watch_touch.py`), and the one shared secret redactor (`redaction.py`).
+- `src/lab_tracker`: server channels (`capture_channels/`), photo codes (`photo_codes.py`, `gs1.py`), `routes/voice_capture.py`, the provenance detectors (`services/provenance_*`), `services/session_suggestions.py`, and `services/graph_draft_day_log.py`.
+- `src/lab_tracker/frontend_src/features/bench-capture`, plus the R package in `r/labtracker` and MATLAB in `matlab/+labtracker`.
+
+`docs/capture-guide.md` maps these for users. When a capture path changes, keep its discoverable surfaces in step:
+
+- the feature doc and `docs/capture-guide.md`;
+- the setup guide in `src/lab_tracker/setup_guide.py`, then regenerate `skills/lab-tracker-setup/SKILL.md`;
+- the agent texts in `src/lab_tracker/decision_context_constants.py` (MCP instructions, activation block, `code_facing_idioms`) and `_agents_fragment` in `src/lab_tracker/cli.py`;
+- the Capture Surfaces section of `skills/lab-tracker/SKILL.md`.
+
 ## Landing the Plane (Session Completion)
 
 Follow the **Session Completion** section below, using the git policy of the

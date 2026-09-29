@@ -1,11 +1,13 @@
 """The deterministic provenance stage every claimed batch execution runs once.
 
-Two rule-based detectors propose human-gated :class:`ProvenanceLink` rows
+Four rule-based detectors propose human-gated :class:`ProvenanceLink` rows
 before the model drafts: the content-hash detector (two captures share
-bytes) and the exact-id detector (a capture's own metadata names one session
-or committed analysis). Both are best effort: a failure in either is logged
-and swallowed so it can never flip the LLM batch to FAILED, block drafting,
-or stop the other detector from running.
+bytes), the exact-id detector (a capture's own metadata names one session
+or committed analysis), the worktree-tree detector (a capture ran in exactly
+a commit's code), and the time-window detector (a capture that names no
+session was made inside exactly one session window). Each is best effort: a
+failure in one is logged and swallowed so it can never flip the LLM batch to
+FAILED, block drafting, or stop the other detectors from running.
 """
 
 from __future__ import annotations
@@ -26,6 +28,8 @@ def _detectors(links: SchedulingProvenanceLinks) -> tuple[tuple[str, Detector], 
     return (
         ("content-hash", links.propose_links_from_content_hash),
         ("exact-id", links.propose_links_from_id_matches),
+        ("worktree-tree", links.propose_links_from_tree_matches),
+        ("time-window", links.propose_links_from_time_windows),
     )
 
 

@@ -605,6 +605,7 @@ def test_provenance_link_repository_contract_declares_detector_queries() -> None
         "list_by_project",
         "list_content_hash_carriers",
         "list_identifier_carriers",
+        "list_time_window_candidates",
     ):
         assert callable(getattr(contract, method_name, None)), method_name
         assert inspect.signature(getattr(contract, method_name)) == inspect.signature(
