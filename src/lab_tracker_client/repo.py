@@ -22,7 +22,7 @@ import re
 import sys
 import uuid
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -74,9 +74,11 @@ REPO_EVIDENCE_ADAPTER = "lt-repo"
 REPO_CAPTURE_KIND = "repo_event"
 ALLOWED_EVENT_TYPES = {"commit", "report", "finish"}
 TERMINAL_SYNC_STATES = {"synced"}
-# Sync reason for a bare commit capture whose commit identity another capture
+# Sync reason for a commit capture whose commit identity another capture
 # (another clone, or CI) already holds on the server.
 ALREADY_CAPTURED_REASON = "already_captured"
+# Result reason for the event a sync writes to keep such a capture's annotation.
+RECAPTURED_REASON = "recaptured"
 # How the server words the 409 for a client_capture_id replayed with other
 # fields (note_service._ensure_matching_capture_note).
 CAPTURE_ID_REUSE_MESSAGE = "was already used with different field(s)"
@@ -1250,7 +1252,14 @@ def _sync_event(
             except LTConflictError as exc:
                 if not _is_commit_identity_conflict(event, exc):
                     raise
-                _refuse_dropping_annotations(event, exc)
+                if _annotations(validate_event(dict(event))):
+                    return _recapture_annotation(
+                        client,
+                        path,
+                        event,
+                        note_indexes=note_indexes,
+                        request_draft=request_draft,
+                    )
                 return _settle_captured_elsewhere(path, event)
             index[evidence_key] = note
             action = "imported"
@@ -1469,18 +1478,6 @@ def _is_commit_identity_conflict(event: Mapping[str, Any], exc: LTConflictError)
     return reused and _is_commit_capture(validate_event(dict(event)))
 
 
-def _refuse_dropping_annotations(event: Mapping[str, Any], exc: LTConflictError) -> None:
-    """Keep an annotated capture failed: the note that won may lack its annotation."""
-
-    annotations = _annotations(validate_event(dict(event)))
-    if annotations:
-        raise LTConflictError(
-            f"{event_source_external_id(event)} is already captured by another note; "
-            f"this event also records {', '.join(annotations)}, which marking it "
-            f"synced would drop, so it stays failed. Server: {exc}"
-        ) from exc
-
-
 def _annotations(event: Mapping[str, Any]) -> list[str]:
     """What an event records beyond a bare hook capture: ``lt repo report`` flags."""
 
@@ -1501,6 +1498,51 @@ def _has_explicit_summary(event: Mapping[str, Any]) -> bool:
         # Recorded before the flag existed: any summary but the default counts.
         return event["summary"] != _default_summary(event["event_type"], event["source"])
     return bool(explicit)
+
+
+def _recapture_annotation(
+    client: LabTracker,
+    path: Path,
+    event: JsonObject,
+    *,
+    note_indexes: dict[str, EvidenceNoteIndex],
+    request_draft: bool,
+) -> RepoSyncResult:
+    """Keep an annotated commit capture that another capture beat to its commit.
+
+    As when annotating an already-synced capture, the annotation is written as
+    a new event and synced as a note of its own. Its id derives from this event,
+    so a sync interrupted after writing it finds the same event again.
+    """
+
+    seed = json.dumps({key: value for key, value in event.items() if key != "sync"}, sort_keys=True)
+    recaptured_event_id = hashlib.sha256(f"recapture:{seed}".encode()).hexdigest()[:32]
+    recaptured_path = write_event(
+        {**event, "event_id": recaptured_event_id, "sync": {"status": "pending"}}, path.parent
+    )
+    event["sync"] = {**event["sync"], "recaptured_event_id": recaptured_event_id}
+    _settle_captured_elsewhere(path, event)
+    recaptured = read_event(recaptured_path)
+    try:
+        result = _sync_event(
+            client,
+            path=recaptured_path,
+            event=recaptured,
+            note_indexes=note_indexes,
+            dry_run=False,
+            request_draft=request_draft,
+        )
+    except Exception as exc:  # noqa: BLE001 - fail the recapture, never the settled event.
+        _record_sync_failure(recaptured_path, recaptured, str(exc), dry_run=False)
+        return RepoSyncResult(
+            action="failed",
+            path=str(recaptured_path),
+            run_id=str(recaptured["run_id"]),
+            event_type=str(recaptured["event_type"]),
+            reason=RECAPTURED_REASON,
+            error=str(exc),
+        )
+    return replace(result, reason=result.reason or RECAPTURED_REASON)
 
 
 def _settle_captured_elsewhere(path: Path, event: JsonObject) -> RepoSyncResult:

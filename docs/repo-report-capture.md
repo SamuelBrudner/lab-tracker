@@ -141,7 +141,9 @@ Annotating a *pending* capture updates it in place (`action: updated`); a bare
 hook re-fire never reverts an annotation (`unchanged`); annotating an already
 *synced* capture writes a new event so the staged note is never desynced
 (`recaptured`). A recaptured annotation syncs as a note of its own next to the
-commit's note (see [One commit, one note](#one-commit-one-note)).
+commit's note. The same happens at sync time to an annotated pending capture
+when another clone or CI already captured the commit (see
+[One commit, one note](#one-commit-one-note)).
 
 ### Run Outputs
 
@@ -224,11 +226,16 @@ carries:
   marked `synced` with reason `already_captured` and no note id: the commit is
   already captured, so there is nothing to retry. `lt outbox status` shows the
   reason as `sync_reason`.
-- A commit capture that carries any of those stays `failed`, with an error
-  naming what it records: marking it synced would silently drop an annotation
-  the other note may lack. A capture recorded before annotations were tracked
-  (no `summary_is_explicit` or `question_id_source`) counts a non-default
-  summary or any question as one. See [Troubleshooting](#troubleshooting).
+- A commit capture that carries any of those is settled the same way, but
+  marking it synced alone would drop an annotation the other note may lack.
+  So, as when annotating an already-synced capture, the sync writes it as a
+  new event and uploads it in the same run as a note of its own (result
+  reason `recaptured`; the settled event records `recaptured_event_id`). The
+  new event's id derives from the original, so a sync interrupted halfway
+  finds the same event again; if its upload fails, only the new event is
+  retried. A capture recorded before annotations were tracked (no
+  `summary_is_explicit` or `question_id_source`) counts a non-default summary
+  or any question as an annotation.
 - Every other refusal stays `failed` as before: a `finish`, `report` or
   recaptured event whose own key was refused, or a 409 for another reason.
 
@@ -297,10 +304,3 @@ credentials. See
   `lt repo report` from it manually.
 - Commits recorded but never syncing: run `lt repo status`, then
   `lt repo sync` on a machine that can reach Lab Tracker.
-- A commit event stays `failed` with "is already captured by another note;
-  this event also records ...": another capture of that commit made its note
-  first (another clone, CI, or this event's own upload before you annotated
-  it), and this event's annotation is not on it. The annotation is only in
-  the event file that `lt outbox status` lists. Copy it over by hand (for
-  example while reviewing the commit's note), then delete the file; until
-  then every sync reports it again.
