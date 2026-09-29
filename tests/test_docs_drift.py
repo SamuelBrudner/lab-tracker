@@ -21,6 +21,7 @@ from lab_tracker.cli import update_consumer_repo
 from lab_tracker.decision_context_constants import AGENT_CONSULTATION_POLICY
 from lab_tracker.mcp_tools import READ_TOOLS, WRITE_TOOLS
 from lab_tracker_client import cli as lt_cli
+from lab_tracker_client import setup as setup_helpers
 from lab_tracker_client.auth import auth_doctor
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -217,6 +218,17 @@ def test_lt_update_docs_describe_the_skills_only_refresh(doc: Path) -> None:
     text = " ".join(_read(doc).split())
     assert "`lt update --skills-only`" in text
     assert "machine-wide" in text
+
+
+# The lt-mcp smoke check is bounded, and its prose names the bound it enforces.
+def test_setup_doc_states_the_lt_mcp_smoke_check_limit() -> None:
+    text = " ".join(_read(_DOCS / "setup.md").split())
+    assert f"{setup_helpers._MCP_IMPORT_TIMEOUT_SECONDS:g}-second limit" in text
+
+
+def test_lt_doctor_help_names_the_lt_mcp_check() -> None:
+    help_text = " ".join(lt_cli._build_parser().format_help().split())
+    assert "code-facing idiom blocks and that lt-mcp can start" in help_text
 
 
 # L24/L25: examples must use the sanctioned LPAT, never deprecated login.

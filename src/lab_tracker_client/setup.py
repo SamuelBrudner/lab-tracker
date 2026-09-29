@@ -11,22 +11,19 @@ swallowed health probe.
 from __future__ import annotations
 
 import difflib
-import importlib
 import json
-import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import threading
 import time
-import traceback
-from collections.abc import Iterator
-from contextlib import contextmanager, suppress
+from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import httpx
 
@@ -55,6 +52,7 @@ from lab_tracker_client.client import (
 )
 from lab_tracker_client.connection_diagnostics import ConnectionTrace
 from lab_tracker_client.hooks import HOOK_BLOCK_BEGIN, hook_lt_path, hook_path_for_repo
+from lab_tracker_client.redaction import redact_capture_text
 from lab_tracker_client.repo import HOOK_BEGIN_MARKER as REPO_HOOK_BLOCK_BEGIN
 
 JsonObject = dict[str, Any]
@@ -66,6 +64,43 @@ _MCP_PROBE_POLL_INTERVAL_SECONDS = 0.02
 _MCP_PROBE_SHUTDOWN_GRACE_SECONDS = 2.0
 _MCP_SERVER_MODULE = "lab_tracker.mcp_server"
 _MCP_IMPORT_TRACEBACK_LIMIT = 2000
+# The smoke check gives a cold import (slow disk, first run after an install)
+# this long before it calls the server module unimportable.
+_MCP_IMPORT_TIMEOUT_SECONDS = 15.0
+# Sentinel exit status of a child whose import raised, so a raise is told apart
+# from the child dying on its own.
+_MCP_IMPORT_FAILED_EXIT_CODE = 111
+# Longest error the one-line --brief suggestion carries; `lt doctor` has the rest.
+_BRIEF_ERROR_LIMIT = 160
+_MCP_IMPORT_CHILD_CODE = """\
+import importlib
+import sys
+import traceback
+
+# ``-c`` puts the working directory first on sys.path; a console script does not,
+# so drop it and let a folder in the current directory never shadow the install.
+if sys.path and sys.path[0] == "":
+    del sys.path[0]
+try:
+    importlib.import_module(sys.argv[1])
+except BaseException as exc:  # SystemExit and KeyboardInterrupt are import failures too.
+    traceback.print_exc()
+    print(" ".join(f"{type(exc).__name__}: {exc}".split()))
+    sys.exit(int(sys.argv[2]))
+"""
+_MCP_IMPORT_FAILED_NEXT_STEP = (
+    "lt-mcp cannot start in this environment, so agents see the Lab "
+    "Tracker MCP server fail to connect. Reinstalling the client with "
+    "the install command on the server's Agents page replaces the "
+    "broken dependencies; `lt doctor` then confirms the fix."
+)
+_MCP_IMPORT_TIMEOUT_NEXT_STEP = (
+    "The lt-mcp server module did not finish importing within the check's time "
+    "limit, so agents may see the Lab Tracker MCP server time out while it "
+    "connects. A hung or very slow dependency import can cause this; rerun "
+    "`lt doctor` to see whether it repeats, and if it does, the install "
+    "command on the server's Agents page reinstalls the client."
+)
 _FULL_GIT_REVISION = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
 _SKILLS_ONLY_SCOPE_NOTE = "and leaves this repository's files alone (`--dry-run` previews)."
 
@@ -289,8 +324,8 @@ def _install_suggestions(status: JsonObject) -> list[str]:
     lt_mcp = status["lt_mcp"]
     if lt_mcp.get("importable") is False:
         suggestions.append(
-            f"lt-mcp cannot start in this environment ({lt_mcp.get('error')}); the "
-            "install command on the server's Agents page reinstalls the client, and "
+            f"lt-mcp cannot start in this environment ({_brief_error(lt_mcp.get('error'))}); "
+            "the install command on the server's Agents page reinstalls the client, and "
             "`lt doctor` shows the full traceback."
         )
     client = status["client"]
@@ -306,6 +341,15 @@ def _install_suggestions(status: JsonObject) -> list[str]:
             f"its server (release {server.version}); {update_steps(server)}."
         )
     return suggestions
+
+
+def _brief_error(error: object) -> str:
+    """One line, at most ``_BRIEF_ERROR_LIMIT`` characters, for the SessionStart line."""
+
+    line = " ".join(str(error or "unknown error").split())
+    if len(line) <= _BRIEF_ERROR_LIMIT:
+        return line
+    return line[: _BRIEF_ERROR_LIMIT - 3] + "..."
 
 
 def _suggestions(status: JsonObject) -> list[str]:
@@ -508,49 +552,112 @@ def probe_health_diagnostics(base_url: str) -> JsonObject:
 
 
 def mcp_startup_check() -> JsonObject:
-    """Offline smoke check that this Python environment can start ``lt-mcp``.
+    """Offline, bounded smoke check that this Python environment can start ``lt-mcp``.
 
     Importing the server module also builds its default server object and
     registers every tool, which catches dependency breakage (an ``mcp`` release
     without ``mcp.server.fastmcp``, a missing package) right after an install
-    instead of when an agent first launches ``lt-mcp``. In-process keeps it
-    cheap enough for the SessionStart hook: no stdio session, no network I/O.
-    ``lt setup verify-mcp`` stays the deeper, opt-in connectivity check.
+    instead of when an agent first launches ``lt-mcp``.
+
+    The import runs in a child interpreter (``sys.executable``, the environment
+    ``lt`` itself runs from), because an import can hang, call ``sys.exit``, or
+    crash the interpreter, and none of that may hang or kill ``lt doctor`` or
+    the SessionStart hook's ``lt setup status --brief --fail-silent``. A
+    timeout, a non-zero exit (including a signal), and an import error are all
+    reported as ``importable: false``. No stdio MCP session, network I/O, or
+    credential is involved; ``lt setup verify-mcp`` stays the deeper, opt-in
+    connectivity check.
     """
 
     payload: JsonObject = {"module": _MCP_SERVER_MODULE, "python": sys.executable}
-    try:
-        with _preserved_root_logging():
-            importlib.import_module(_MCP_SERVER_MODULE)
-    except Exception as exc:  # noqa: BLE001 - any import failure means lt-mcp cannot start.
-        traceback_text = "".join(traceback.format_exception(exc))
-        payload.update(
-            importable=False,
-            error=f"{type(exc).__name__}: {exc}",
-            traceback=traceback_text[-_MCP_IMPORT_TRACEBACK_LIMIT:],
-            next_step=(
-                "lt-mcp cannot start in this environment, so agents see the Lab "
-                "Tracker MCP server fail to connect. Reinstalling the client with "
-                "the install command on the server's Agents page replaces the "
-                "broken dependencies; `lt doctor` then confirms the fix."
-            ),
-        )
+    failure = _mcp_import_failure()
+    if failure is None:
+        payload["importable"] = True
         return payload
-    payload["importable"] = True
+    payload.update(
+        importable=False,
+        error=failure.error,
+        traceback=_bounded_child_output(failure.stderr),
+        next_step=(
+            _MCP_IMPORT_TIMEOUT_NEXT_STEP if failure.timed_out else _MCP_IMPORT_FAILED_NEXT_STEP
+        ),
+    )
     return payload
 
 
-@contextmanager
-def _preserved_root_logging() -> Iterator[None]:
-    """Keep FastMCP's constructor-time ``logging.basicConfig`` out of ``lt``'s output."""
+class _ImportFailure(NamedTuple):
+    error: str
+    stderr: str
+    timed_out: bool
 
-    root = logging.getLogger()
-    handlers, level = list(root.handlers), root.level
+
+def _mcp_import_failure() -> _ImportFailure | None:
+    """Import the server module in a child interpreter; ``None`` when it imported.
+
+    When the import raises (anything, a ``SystemExit`` included) the child
+    prints one normalised ``Type: message`` line last on stdout and exits with
+    ``_MCP_IMPORT_FAILED_EXIT_CODE``; any other non-zero status is the child
+    dying on its own.
+    """
+
     try:
-        yield
-    finally:
-        root.handlers[:] = handlers
-        root.setLevel(level)
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                _MCP_IMPORT_CHILD_CODE,
+                _MCP_SERVER_MODULE,
+                str(_MCP_IMPORT_FAILED_EXIT_CODE),
+            ],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            stdin=subprocess.DEVNULL,
+            timeout=_MCP_IMPORT_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        error = (
+            f"TimeoutError: importing {_MCP_SERVER_MODULE} did not finish within "
+            f"{_MCP_IMPORT_TIMEOUT_SECONDS:g} seconds"
+        )
+        return _ImportFailure(error, _decoded_output(exc.stderr), timed_out=True)
+    except OSError as exc:  # the interpreter itself could not start
+        return _ImportFailure(f"{type(exc).__name__}: {exc}", "", timed_out=False)
+    if completed.returncode == 0:
+        return None
+    stdout_lines = completed.stdout.splitlines()
+    if completed.returncode == _MCP_IMPORT_FAILED_EXIT_CODE and stdout_lines:
+        error = redact_capture_text(stdout_lines[-1][:_MCP_IMPORT_TRACEBACK_LIMIT])
+    else:
+        died = _describe_child_exit(completed.returncode)
+        error = f"the interpreter importing {_MCP_SERVER_MODULE} {died}"
+    return _ImportFailure(error, completed.stderr, timed_out=False)
+
+
+def _describe_child_exit(returncode: int) -> str:
+    if returncode >= 0:
+        return f"exited with status {returncode}"
+    try:
+        name = signal.Signals(-returncode).name
+    except ValueError:
+        name = f"signal {-returncode}"
+    return f"was killed by {name}"
+
+
+def _decoded_output(value: str | bytes | None) -> str:
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return value or ""
+
+
+def _bounded_child_output(output: str) -> str:
+    """The redacted last ``_MCP_IMPORT_TRACEBACK_LIMIT`` characters of the child's stderr."""
+
+    # Trim before redacting so a noisy child cannot make the redactor scan
+    # megabytes; the extra head keeps a secret at the cut from being split.
+    recent = output[-_MCP_IMPORT_TRACEBACK_LIMIT * 2 :]
+    return redact_capture_text(recent)[-_MCP_IMPORT_TRACEBACK_LIMIT:]
 
 
 def verify_client_revision(expected_revision: str) -> JsonObject:

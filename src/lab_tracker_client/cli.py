@@ -132,7 +132,10 @@ def _build_parser() -> argparse.ArgumentParser:
     doctor_parser = subcommands.add_parser(
         "doctor",
         aliases=["check-idioms"],
-        help="Check managed Lab Tracker code-facing idiom blocks.",
+        help=(
+            "Check managed Lab Tracker code-facing idiom blocks and that lt-mcp "
+            "can start (a bounded import check in a child interpreter)."
+        ),
     )
     doctor_parser.add_argument(
         "--target",

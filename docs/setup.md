@@ -189,10 +189,14 @@ release is reported (`same_revision`) but never suggested either, since most
 commits are not consumer-relevant.
 
 - `lt doctor` (and `lt doctor --all`, once per sweep) imports the MCP server
-  in-process and reports `lt_mcp.importable`, with the error, traceback, and
-  next step when it fails. A failure exits `1` like drift; `--fail-silent`
-  keeps prompt hooks quiet. There is no network I/O; `lt setup verify-mcp`
-  remains the deeper connectivity check.
+  module in a child interpreter, the same Python `lt` runs from, and reports
+  `lt_mcp.importable`, with the error, a bounded traceback tail, and next step
+  when it fails. The child has a 15-second limit, and a timeout, a non-zero
+  exit (a `sys.exit` or a crash while importing), and an import error each
+  report `importable: false`, so a hung or crashing import can neither hang
+  nor end `lt`. A failure exits `1` like drift; `--fail-silent` keeps prompt
+  hooks quiet. There is no network I/O; `lt setup verify-mcp` remains the
+  deeper connectivity check.
 - `lt setup status` reports the same `lt_mcp` check plus a `client` release
   comparison built from its existing `/health` probe (`status`,
   `client_behind_server`, `update_recommended`), and suggests the update only

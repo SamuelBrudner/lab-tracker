@@ -4,7 +4,7 @@ drift semantics, status suggestions/--brief, and the SessionStart hook."""
 from __future__ import annotations
 
 import json
-import logging
+import os
 import re
 import shlex
 from pathlib import Path
@@ -602,7 +602,9 @@ def broken_mcp_install(tmp_path, monkeypatch):
         "from mcp.server.fastmcp_removed_upstream import FastMCP  # noqa: F401\n",
         encoding="utf-8",
     )
-    monkeypatch.syspath_prepend(str(site))
+    # The check imports in a child interpreter, which sees only PYTHONPATH.
+    python_path = [str(site), *filter(None, [os.environ.get("PYTHONPATH")])]
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(python_path))
     monkeypatch.setattr(setup_helpers, "_MCP_SERVER_MODULE", "broken_lt_mcp_server")
 
 
@@ -662,25 +664,6 @@ def test_doctor_fails_loudly_when_lt_mcp_cannot_import(
     # Prompt hooks stay silent, exactly as they do for drift.
     lt_cli.main(["doctor", "--target", str(repo), "--fail-silent"])
     assert capsys.readouterr().out == ""
-
-
-def test_lt_mcp_check_keeps_server_logging_setup_out_of_lt(tmp_path, monkeypatch) -> None:
-    # FastMCP's constructor calls logging.basicConfig at import time; without
-    # containment every later INFO log (alembic, httpx) leaks onto lt's stderr.
-    site = tmp_path / "logging-site"
-    site.mkdir()
-    (site / "logging_lt_mcp_server.py").write_text(
-        "import logging\nlogging.basicConfig(level=logging.DEBUG, force=True)\n",
-        encoding="utf-8",
-    )
-    monkeypatch.syspath_prepend(str(site))
-    monkeypatch.setattr(setup_helpers, "_MCP_SERVER_MODULE", "logging_lt_mcp_server")
-    root = logging.getLogger()
-    handlers, level = list(root.handlers), root.level
-
-    assert setup_helpers.mcp_startup_check()["importable"] is True
-    assert root.handlers == handlers
-    assert root.level == level
 
 
 def test_doctor_all_checks_the_install_once_per_sweep(broken_mcp_install, capsys) -> None:
