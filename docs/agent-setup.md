@@ -258,14 +258,15 @@ a project contributor (or viewer for read-only use).
 
 Registration is per client, and each client reads a different file.
 `lt setup init` writes the repository files in the table above, and the
-`.mcp.json` it writes carries no token. That covers Claude Code. With
-`--install-skills` it also writes the generated setup skill into the user-level
-Claude and Codex skill homes (`~/.claude/skills` and `~/.agents/skills`), and it
-records the repository in `~/.lab-tracker/applied-repos.json`. It never writes a
-client's own MCP registration file (`claude_desktop_config.json`,
-`~/.codex/config.toml`, or `~/.claude.json`), so Claude Desktop chat and both
-Codex products are registered by hand, once per machine. Follow only the section
-for the client you use; the steps for another client do not apply to it.
+`.mcp.json` it writes carries no token. That covers Claude Code. Any run without
+`--dry-run` also records the repository in `~/.lab-tracker/applied-repos.json`,
+and `--install-skills` additionally writes the generated setup skill into the
+user-level Claude and Codex skill homes (`~/.claude/skills` and
+`~/.agents/skills`). It never writes a client's own MCP registration file
+(`claude_desktop_config.json`, `~/.codex/config.toml`, or `~/.claude.json`), so
+Claude Desktop chat and both Codex products are registered by hand, once per
+machine. Follow only the section for the client you use; the steps for another
+client do not apply to it.
 
 | Client | Registered through | Written by `lt setup init` |
 | --- | --- | --- |
@@ -442,6 +443,13 @@ requirement. Because the configuration is shared, the equivalent entry in
 command = "<absolute path to lt-mcp>"
 ```
 
+On Windows, write the path as a single-quoted TOML literal string, such as
+`command = 'C:\Users\<user>\bin\lt-mcp.exe'`, or keep the double quotes and double
+every backslash, as in `command = "C:\\Users\\<user>\\bin\\lt-mcp.exe"`. A
+double-quoted string with single backslashes does not parse (`\U` starts a unicode
+escape), and because `~/.codex/config.toml` is shared by the Codex products, one bad
+path makes the whole file invalid TOML, not only this entry.
+
 Verify:
 
 1. Registration check: type `/mcp` in the composer to view connected servers.
@@ -492,6 +500,8 @@ Verify:
 [GitHub Copilot MCP setup](lab-tracker-copilot.md). Cursor details, including
 what to do when a GUI-launched Cursor cannot find `lt-mcp`, are in
 [Cursor MCP setup](lab-tracker-cursor.md).
+
+#### All clients
 
 Official references: [Claude Code MCP](https://code.claude.com/docs/en/mcp),
 [Claude Code in the Desktop app](https://code.claude.com/docs/en/desktop),

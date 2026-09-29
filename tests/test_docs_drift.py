@@ -61,6 +61,14 @@ def _maintained_docs() -> list[Path]:
     ]
 
 
+@pytest.fixture(autouse=True)
+def _clear_appdata(monkeypatch: pytest.MonkeyPatch) -> None:
+    # `lt auth doctor` also scans `%APPDATA%\Claude`. Keep that candidate out of the
+    # enumeration so the doc-example checks do not depend on the Claude Desktop
+    # entries of the machine running them (tests/test_auth_cli.py does the same).
+    monkeypatch.delenv("APPDATA", raising=False)
+
+
 # L11: offline queued capture shipped (IndexedDB upload queue).
 def test_configuration_doc_does_not_call_offline_capture_deferred() -> None:
     text = " ".join(_read(_DOCS / "configuration.md").split())
@@ -349,13 +357,16 @@ def test_documented_codex_toml_example_passes_lt_auth_doctor(tmp_path: Path) -> 
         assert report["warning_count"] == 0, report
 
 
+@pytest.mark.parametrize("desktop_location", ["macos", "windows-appdata"])
 def test_auth_doctor_reports_no_auth_for_the_documented_hand_registered_entries(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, desktop_location: str
 ) -> None:
     # `lt auth doctor` classifies auth only from an entry's own `env`, and never reads
     # the saved profile that supplies the token and URL. The documented entries carry
     # no `env`, so doctor reports `none` and no base URL for them; the Desktop
     # registration check in agent-setup.md must say so (see the test below).
+    # The Desktop file goes where agent-setup.md says it lives on macOS or Windows;
+    # `auth.py` enumerates both on every platform, so this does not depend on the OS.
     desktop = next(
         json.loads(block)
         for block in _fenced_blocks(_read(_AGENT_SETUP_DOC), "json")
@@ -365,7 +376,13 @@ def test_auth_doctor_reports_no_auth_for_the_documented_hand_registered_entries(
         block for block in _fenced_blocks(_read(_AGENT_SETUP_DOC), "toml") if "mcp_servers" in block
     )
     home = tmp_path / "home"
-    desktop_config = home / ".config" / "Claude" / "claude_desktop_config.json"
+    if desktop_location == "macos":
+        desktop_dir = home / "Library" / "Application Support" / "Claude"
+    else:
+        appdata = tmp_path / "AppData" / "Roaming"
+        monkeypatch.setenv("APPDATA", str(appdata))
+        desktop_dir = appdata / "Claude"
+    desktop_config = desktop_dir / "claude_desktop_config.json"
     codex_config = home / ".codex" / "config.toml"
     for path in (desktop_config, codex_config):
         path.parent.mkdir(parents=True)
@@ -378,6 +395,10 @@ def test_auth_doctor_reports_no_auth_for_the_documented_hand_registered_entries(
         reg["surface"]: (reg["auth_mode"], reg["base_url"]) for reg in report["registrations"]
     }
     assert observed == {"codex": ("none", None), "claude-desktop": ("none", None)}, report
+    desktop_paths = [
+        reg["path"] for reg in report["registrations"] if reg["surface"] == "claude-desktop"
+    ]
+    assert desktop_paths == [str(desktop_config)], report
 
 
 _DOCTOR_NO_ENV_SENTENCE = (
@@ -465,6 +486,13 @@ _CLIENT_HEADINGS = (
     "Codex in the ChatGPT desktop app",
     "Codex CLI",
 )
+_SHARED_GUIDANCE_HEADING = "All clients"
+_INIT_USER_LEVEL_SENTENCE = (
+    "Any run without `--dry-run` also records the repository in "
+    "`~/.lab-tracker/applied-repos.json`, and `--install-skills` additionally writes "
+    "the generated setup skill into the user-level Claude and Codex skill homes "
+    "(`~/.claude/skills` and `~/.agents/skills`)."
+)
 _CLAUDE_DESKTOP_SUPPORT_STATUS = (
     "Claude Desktop chat is supported by manual registration only: "
     "`lt` never writes `claude_desktop_config.json`."
@@ -484,11 +512,27 @@ def _client_matrix() -> str:
     return re.split(r"(?m)^#{2,3} ", section, maxsplit=1)[0]
 
 
-def _client_sections() -> dict[str, str]:
-    """Each per-client `####` section of the matrix, keyed by its heading."""
+def _matrix_subsections() -> dict[str, str]:
+    """Every `####` subsection of the matrix, keyed by its heading."""
 
     parts = re.split(r"(?m)^#### (.+)$", _client_matrix())
     return dict(zip(parts[1::2], parts[2::2], strict=True))
+
+
+def _client_sections() -> dict[str, str]:
+    """The per-client subsections of the matrix, without the shared guidance."""
+
+    return {
+        heading: body
+        for heading, body in _matrix_subsections().items()
+        if heading != _SHARED_GUIDANCE_HEADING
+    }
+
+
+def _shared_guidance() -> str:
+    """The cross-client paragraphs, under their own heading rather than a client's."""
+
+    return _matrix_subsections()[_SHARED_GUIDANCE_HEADING]
 
 
 def test_agent_setup_labels_a_section_for_every_client() -> None:
@@ -501,6 +545,58 @@ def test_agent_setup_states_the_claude_desktop_support_status() -> None:
     sections = _client_sections()
     desktop = next(body for name, body in sections.items() if name.startswith("Claude Desktop"))
     assert _CLAUDE_DESKTOP_SUPPORT_STATUS in _collapsed_whitespace(desktop)
+
+
+_SHARED_GUIDANCE_PHRASES = (
+    "Official references",
+    "The saved connection profile normally supplies the API URL and LPAT.",
+    "Server-side AI drafting uses the Lab Tracker operator's configured provider",
+    "Every scaffolded instruction file carries the same policy",
+)
+
+
+def test_shared_client_guidance_has_its_own_heading_not_a_clients() -> None:
+    # These paragraphs apply to every client. Under the Cursor and GitHub Copilot
+    # heading, heading navigation scopes them to those two and `_client_sections()`
+    # hands them to the wrong client.
+    shared = _collapsed_whitespace(_shared_guidance())
+    for phrase in _SHARED_GUIDANCE_PHRASES:
+        assert phrase in shared, phrase
+    cursor = _collapsed_whitespace(
+        next(body for name, body in _client_sections().items() if name.startswith("Cursor"))
+    )
+    assert "lab-tracker-cursor.md" in cursor
+    for phrase in _SHARED_GUIDANCE_PHRASES:
+        assert phrase not in cursor, phrase
+    # It stays inside the matrix, after the client sections, so the matrix-wide checks
+    # below (banned vendor phrases, credential placement) still scan it.
+    assert f"#### {_SHARED_GUIDANCE_HEADING}" in _client_matrix()
+    assert list(_matrix_subsections())[-1] == _SHARED_GUIDANCE_HEADING
+
+
+_CODEX_WINDOWS_PATH = r"C:\Users\someone\bin\lt-mcp.exe"
+
+
+def test_codex_desktop_toml_note_gives_windows_path_forms_that_parse() -> None:
+    # A Windows path pasted into a TOML basic string is a parse error (`\U` opens a
+    # unicode escape), and ~/.codex/config.toml is shared by the Codex products.
+    with pytest.raises(tomllib.TOMLDecodeError):
+        tomllib.loads(f'command = "{_CODEX_WINDOWS_PATH}"')
+    body = _collapsed_whitespace(
+        next(
+            body
+            for name, body in _client_sections().items()
+            if name.startswith("Codex in the ChatGPT desktop app")
+        )
+    )
+    assert body.index("[mcp_servers.lab-tracker]") < body.index("single-quoted TOML literal")
+    assert body.index("single-quoted TOML literal") < body.index("Verify:")
+    assert "double every backslash" in body
+    forms = re.findall(r"`(command = [^`]+)`", body)
+    assert [form[len("command = ")] for form in forms] == ["'", '"']
+    for form in forms:
+        parsed = tomllib.loads(form.replace("<user>", "someone"))
+        assert parsed == {"command": _CODEX_WINDOWS_PATH}, form
 
 
 def test_scaffold_files_are_written_without_yes_and_the_docs_say_so(tmp_path: Path) -> None:
@@ -546,6 +642,30 @@ def test_client_matrix_names_the_user_level_files_init_writes(
     assert "never writes a client's own MCP registration file" in intro
 
 
+def test_init_records_the_repo_registry_on_every_real_run_and_the_docs_say_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("LAB_TRACKER_SKILLS_HOME", raising=False)
+    monkeypatch.delenv("LAB_TRACKER_CONFIG_DIR", raising=False)
+    monkeypatch.setattr(Path, "home", classmethod(lambda _path_cls: tmp_path))
+    skill_homes = [home for _name, home in _skills_homes()]
+
+    init_consumer_repo((tmp_path / "preview").resolve(), dry_run=True)
+    assert not registry_path().exists()
+
+    # The registry is written by a real run whether or not skills are installed; only
+    # `--install-skills` touches the skill homes.
+    init_consumer_repo((tmp_path / "plain").resolve())
+    assert registry_path().is_file()
+    assert not any(home.exists() for home in skill_homes)
+    init_consumer_repo((tmp_path / "with-skills").resolve(), install_skills=True)
+    assert all(home.is_dir() for home in skill_homes)
+
+    intro = _collapsed_whitespace(_client_matrix().split("\n#### ", 1)[0])
+    assert _INIT_USER_LEVEL_SENTENCE in intro
+    assert "With `--install-skills` it also writes" not in intro
+
+
 def test_every_client_section_gives_the_three_part_verification() -> None:
     sections = _client_sections()
     for label in _CLIENT_HEADINGS:
@@ -580,8 +700,11 @@ def test_credentials_rule_is_scoped_to_the_clients_registered_by_hand() -> None:
     # docs/lab-tracker-cursor.md sends credentials to ~/.cursor/mcp.json, so a rule
     # stated for "every client" would contradict a page the matrix links to.
     assert "~/.cursor/mcp.json" in _collapsed_whitespace(_read(_DOCS / "lab-tracker-cursor.md"))
-    assert "every client" not in intro
-    assert "another client settings file" not in intro
+    shared = _collapsed_whitespace(_shared_guidance())
+    for text in (intro, shared):
+        assert "every client" not in text
+        assert "another client settings file" not in text
+    assert "keep them out of the Claude Desktop and Codex settings files" in shared
     for client in _CREDENTIALS_RULE_CLIENTS:
         assert client in rule, client
     for excluded in _CREDENTIALS_RULE_EXCLUDED:
