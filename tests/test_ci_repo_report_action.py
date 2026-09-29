@@ -115,6 +115,12 @@ if [ "$2" = "report" ]; then
   [ -n "${LAB_TRACKER_ACCESS_TOKEN:-}" ] && echo token-present >> "$FAKE_LT_DIR/env"
   case "${FAKE_MODE:-ok}" in
     ok) echo '{"action": "captured"}' ;;
+    already_captured)
+      printf '{"action": "captured", "sync": {"results": [%s]}}\\n' \
+        '{"action": "skipped", "reason": "already_captured"}' ;;
+    recaptured)
+      printf '{"action": "captured", "sync": {"results": [%s]}}\\n' \
+        '{"action": "imported", "reason": "recaptured"}' ;;
     conflict)
       echo "lab-tracker: repo capture did not fully sync - 1 event(s) failed to sync" \\
         "(Note client_capture_id 'x' was already used with different field(s))." >&2 ;;
@@ -198,6 +204,9 @@ def test_report_step_runs_lt_repo_report_with_pr_text_and_remote_override(tmp_pa
         str(tmp_path / "runner" / "lab-tracker-repo-report" / "repo.json"),
     ]
     assert "--fail-silent" in args
+    # A tag is an annotation: it would keep a CI capture that lost the race to
+    # the post-commit hook from settling as already captured.
+    assert "--tag" not in args
     assert args[args.index("--question") + 1] == "question-9"
     summary = args[args.index("--summary") + 1 :]
     summary_text = "\n".join(summary)
@@ -233,7 +242,30 @@ def test_report_step_skips_without_reporting(tmp_path, overrides, expected) -> N
     assert not (calls / "args.report").exists()
 
 
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [
+        ("already_captured", "is already captured under its <remote>@<sha> identity"),
+        ("recaptured", "was recorded as a staged note of its own"),
+    ],
+)
+def test_report_step_explains_a_commit_lt_settled_against_an_earlier_capture(
+    tmp_path, mode, expected
+) -> None:
+    repo = tmp_path / "checkout"
+    sha = _commit_repo(repo, "https://github.com/Lab/Analysis")
+
+    completed, _calls = _run_report_step(tmp_path, repo, FAKE_MODE=mode)
+
+    assert completed.returncode == 0
+    assert f"::notice title=Lab Tracker::commit {sha} " in completed.stdout
+    assert expected in completed.stdout
+    assert "captured as a staged note." not in completed.stdout
+
+
 def test_report_step_explains_a_commit_the_hook_already_captured(tmp_path) -> None:
+    """A client pinned before lt settled these itself prints the server's 409 wording."""
+
     repo = tmp_path / "checkout"
     _commit_repo(repo, "https://github.com/Lab/Analysis")
     (repo / "lt_ids.json").write_text(json.dumps({"project_id": "bound"}), encoding="utf-8")
@@ -325,38 +357,92 @@ def test_remote_url_override_reaches_lts_git_calls_only(tmp_path, monkeypatch) -
     assert "https://github.com/Lab/Analysis" in (repo / ".git" / "config").read_text()
 
 
-def test_server_keeps_one_note_per_commit_identity(
-    tmp_path, monkeypatch, client: TestClient, admin_auth_headers: dict[str, str]
-) -> None:
-    for name in ("LAB_TRACKER_REPO_CONFIG", "LAB_TRACKER_REPO_OUTBOX", "LAB_TRACKER_REPO_RUN_ID"):
-        monkeypatch.delenv(name, raising=False)
-    project = client.post("/projects", json={"name": "CI dedupe"}, headers=admin_auth_headers)
-    assert project.status_code in (200, 201), project.text
-    project_id = project.json()["data"]["project_id"]
+def _capture_and_sync(
+    checkout: Path, monkeypatch, client: TestClient, headers: dict[str, str], project_id: str, **kw
+):
+    """Capture ``checkout``'s HEAD as ``lt repo report`` does, then drain its outbox."""
+
+    config = repo_capture.init_config(
+        project_id=project_id, config_path=checkout / ".lab-tracker" / "repo.json"
+    )
+    repo_capture.capture_commit(config, cwd=checkout, **kw)
+    token = headers["Authorization"].split(" ", 1)[1]
+    with LabTracker(
+        base_url="http://testserver", access_token=token, transport=client._transport
+    ) as lt:
+        return repo_capture.sync_outbox_path(lt, config.outbox_path())
+
+
+def _commit_notes(client: TestClient, headers: dict[str, str], project_id: str) -> list[dict]:
+    notes = client.get("/notes", params={"project_id": project_id}, headers=headers)
+    return [note for note in notes.json()["data"] if note["metadata"].get("repo_git_commit")]
+
+
+def _clone_pair(tmp_path: Path) -> tuple[Path, Path]:
     local = tmp_path / "laptop"
     _commit_repo(local, "git@github.com:Lab/Analysis.git")
     ci = tmp_path / "runner-checkout"
     subprocess.run(["git", "clone", "-q", str(local), str(ci)], check=True)
+    # actions/checkout: an https origin without credentials or a .git suffix.
     _git(ci, "remote", "set-url", "origin", "https://github.com/Lab/Analysis")
-    token = admin_auth_headers["Authorization"].split(" ", 1)[1]
-    results = []
-    for checkout, host in ((local, "laptop"), (ci, "github-runner")):
-        monkeypatch.setenv("LAB_TRACKER_CAPTURE_HOST", host)
-        config = repo_capture.init_config(
-            project_id=project_id, config_path=checkout / ".lab-tracker" / "repo.json"
-        )
-        repo_capture.capture_commit(config, cwd=checkout, tags=[host])
-        with LabTracker(
-            base_url="http://testserver", access_token=token, transport=client._transport
-        ) as lt:
-            results.append(repo_capture.sync_outbox_path(lt, config.outbox_path()))
+    return local, ci
 
-    hook, ci_sync = results
-    assert hook["errors"] == []
-    assert [item["action"] for item in hook["results"]] == ["imported"]
-    [refused] = ci_sync["errors"]
-    assert "already used with different field" in refused["error"]
-    notes = client.get(
-        "/notes", params={"project_id": project_id}, headers=admin_auth_headers
-    ).json()["data"]
-    assert len([note for note in notes if note["metadata"].get("repo_git_commit")]) == 1
+
+def _new_project(client: TestClient, headers: dict[str, str], name: str) -> str:
+    project = client.post("/projects", json={"name": name}, headers=headers)
+    assert project.status_code in (200, 201), project.text
+    return project.json()["data"]["project_id"]
+
+
+@pytest.mark.parametrize("order", [("laptop", "ci"), ("ci", "laptop")])
+def test_server_keeps_one_note_per_commit_identity(
+    tmp_path, monkeypatch, client: TestClient, admin_auth_headers: dict[str, str], order
+) -> None:
+    """The hook and the action (which passes no tag) capture one commit in either order."""
+
+    for name in ("LAB_TRACKER_REPO_CONFIG", "LAB_TRACKER_REPO_OUTBOX", "LAB_TRACKER_REPO_RUN_ID"):
+        monkeypatch.delenv(name, raising=False)
+    project_id = _new_project(client, admin_auth_headers, "CI dedupe")
+    checkouts = dict(zip(("laptop", "ci"), _clone_pair(tmp_path), strict=True))
+    syncs = {}
+    for host in order:
+        monkeypatch.setenv("LAB_TRACKER_CAPTURE_HOST", host)
+        syncs[host] = _capture_and_sync(
+            checkouts[host], monkeypatch, client, admin_auth_headers, project_id
+        )
+
+    first, second = (syncs[host] for host in order)
+    assert first["errors"] == second["errors"] == []
+    assert [item["action"] for item in first["results"]] == ["imported"]
+    # The loser is settled as already captured: not a failure, not a second note.
+    assert [(item["action"], item["reason"]) for item in second["results"]] == [
+        ("skipped", "already_captured")
+    ]
+    assert len(_commit_notes(client, admin_auth_headers, project_id)) == 1
+
+
+def test_a_ci_capture_with_pr_text_that_loses_the_race_keeps_it_as_its_own_note(
+    tmp_path, monkeypatch, client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    for name in ("LAB_TRACKER_REPO_CONFIG", "LAB_TRACKER_REPO_OUTBOX", "LAB_TRACKER_REPO_RUN_ID"):
+        monkeypatch.delenv(name, raising=False)
+    project_id = _new_project(client, admin_auth_headers, "CI PR text")
+    local, ci = _clone_pair(tmp_path)
+    monkeypatch.setenv("LAB_TRACKER_CAPTURE_HOST", "laptop")
+    _capture_and_sync(local, monkeypatch, client, admin_auth_headers, project_id)
+
+    monkeypatch.setenv("LAB_TRACKER_CAPTURE_HOST", "github-runner")
+    ci_sync = _capture_and_sync(
+        ci, monkeypatch, client, admin_auth_headers, project_id, summary="Widen the window"
+    )
+
+    assert ci_sync["errors"] == []
+    assert [(item["action"], item["reason"]) for item in ci_sync["results"]] == [
+        ("imported", "recaptured")
+    ]
+    identities = {
+        note["metadata"]["evidence_source_external_id"]
+        for note in _commit_notes(client, admin_auth_headers, project_id)
+    }
+    assert len(identities) == 1
+    assert len(_commit_notes(client, admin_auth_headers, project_id)) == 2
