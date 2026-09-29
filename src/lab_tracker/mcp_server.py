@@ -23,6 +23,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from lab_tracker.auth import LPAT_TOKEN_PREFIX
 from lab_tracker.client_release import (
     ReleaseComparison,
+    ReleaseIdentity,
     installed_release,
     release_from_health,
     update_steps,
@@ -42,6 +43,7 @@ from lab_tracker.mcp_api_client import (
     MCPSettings,
     client_from_env,
     lab_tracker_api_error,
+    redact_auth_secrets,
 )
 from lab_tracker.mcp_tools import (
     register_hosted_write_tools,
@@ -115,6 +117,9 @@ ALLOWED_ORIGINS_ENV = "LAB_TRACKER_MCP_ALLOWED_ORIGINS"
 # tool's own shape.
 UPDATE_NOTICE_KEY = "_lab_tracker_update_notice"
 _RELEASE_PROBE_TIMEOUT_SECONDS = 2.0
+# Longest reason the skipped update check writes to stderr, so a hostile or
+# verbose failure cannot flood the MCP host's log.
+_UPDATE_CHECK_REASON_LIMIT = 300
 _TRUE_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
 _FALSE_ENV_VALUES = frozenset({"", "0", "false", "no", "off"})
 _ALLOWED_HOST_PATTERN = (
@@ -285,28 +290,50 @@ def probe_client_update_notice(api_settings: MCPSettings) -> str | None:
     Only a newer server (MAJOR, MINOR) recommends one (``client_release``); a
     PATCH-only gap stays quiet.
 
-    One bounded, unauthenticated ``GET /health``. Any failure returns ``None``
-    so the session behaves exactly as it would without the check: a staleness
-    hint must never block or fail MCP startup.
+    One bounded, unauthenticated ``GET /health``. Any failure, including one
+    while building the HTTP client (httpx reads the proxy variables there), is
+    reported on stderr and returns ``None`` so the session behaves exactly as it
+    would without the check: a staleness hint must never block or fail MCP
+    startup.
     """
 
-    probe = LabTrackerAPIClient(
-        replace(api_settings, timeout_seconds=_RELEASE_PROBE_TIMEOUT_SECONDS)
-    )
     try:
-        health = probe.health()
-    except Exception:  # noqa: BLE001 - see docstring: the check is advisory only.
+        comparison = ReleaseComparison(
+            client=installed_release(), server=_probe_server_release(api_settings)
+        )
+        update_recommended = comparison.update_recommended
+    except Exception as exc:  # noqa: BLE001 - see docstring: the check is advisory only.
+        _warn_update_check_skipped(exc)
         return None
-    finally:
-        probe.close()
-    comparison = ReleaseComparison(client=installed_release(), server=release_from_health(health))
-    if not comparison.update_recommended:
+    if not update_recommended:
         return None
     return (
         f"UPDATE AVAILABLE: this Lab Tracker MCP client runs release "
         f"{comparison.client.version}, but its server runs release "
         f"{comparison.server.version}. Tell the person that "
         f"{update_steps(comparison.server)}."
+    )
+
+
+def _probe_server_release(api_settings: MCPSettings) -> ReleaseIdentity:
+    probe = LabTrackerAPIClient(
+        replace(api_settings, timeout_seconds=_RELEASE_PROBE_TIMEOUT_SECONDS)
+    )
+    try:
+        return release_from_health(probe.health())
+    finally:
+        probe.close()
+
+
+def _warn_update_check_skipped(exc: Exception) -> None:
+    reason = " ".join(redact_auth_secrets(f"{type(exc).__name__}: {exc}").split())
+    if len(reason) > _UPDATE_CHECK_REASON_LIMIT:
+        reason = reason[: _UPDATE_CHECK_REASON_LIMIT - 3] + "..."
+    print(
+        "NOTICE: could not check whether this Lab Tracker MCP client is behind its "
+        f"server ({reason}); starting without the update check.",
+        file=sys.stderr,
+        flush=True,
     )
 
 

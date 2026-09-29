@@ -744,6 +744,36 @@ def test_status_stays_quiet_without_a_newer_server_release(
     assert payload["suggestions"] == []
 
 
+@pytest.mark.parametrize("unreadable_side", ["server", "client"])
+def test_status_treats_an_oversized_release_as_unreadable(
+    isolated_homes, monkeypatch, capsys, unreadable_side
+) -> None:
+    # A version past CPython's integer-string limit (4300 digits) made int()
+    # raise, and --fail-silent then dropped the whole status.
+    oversized = "9" * 5000
+    repo = _healthy_status_repo(isolated_homes, monkeypatch, "consumer-oversized")
+    client_version = oversized if unreadable_side == "client" else "0.4.0"
+    monkeypatch.setattr(
+        setup_helpers,
+        "installed_release",
+        lambda: setup_helpers.ReleaseIdentity(version=client_version, revision="a" * 40),
+    )
+    _server_reports_release(monkeypatch, oversized if unreadable_side == "server" else "99.0.0")
+    capsys.readouterr()
+
+    payload = setup_helpers.setup_status(repo)
+
+    assert payload["client"]["status"] == "unknown"
+    assert payload["client"]["client_behind_server"] is False
+    assert payload["client"]["update_recommended"] is False
+    assert payload["suggestions"] == []
+    # --fail-silent turns any crash into empty output, so a printed line proves
+    # the hook's status survived.
+    lt_cli.main(["setup", "status", "--target", str(repo), "--brief", "--fail-silent"])
+    brief = json.loads(capsys.readouterr().out)
+    assert brief["brief"] == "lab-tracker: capture is configured; server reachable."
+
+
 def test_status_reports_a_patch_release_gap_without_nagging(isolated_homes, monkeypatch) -> None:
     # docs/versioning.md: a PATCH release is a backward-compatible fix.
     repo = _healthy_status_repo(isolated_homes, monkeypatch, "consumer-patch")

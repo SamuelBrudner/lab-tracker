@@ -269,6 +269,15 @@ def test_a_client_that_cannot_read_its_own_release_is_unknown_not_predating() ->
     assert judged.update_notice is None
 
 
+def test_a_capture_with_an_oversized_client_version_is_unknown_not_an_error() -> None:
+    # The version is stored capture metadata, so it is untrusted input.
+    judged = _judge(_watch("9" * 5000))
+
+    assert judged.release_status == "unknown"
+    assert judged.update_recommended is False
+    assert judged.update_notice is None
+
+
 def test_captures_without_an_install_id_are_never_addressed() -> None:
     judged = _judge(_metadata(None, install_id=None, host=None))
 

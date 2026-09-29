@@ -11,11 +11,14 @@ import pytest
 
 from lab_tracker import _version, client_release
 from lab_tracker.client_release import (
+    MAX_RELEASE_VERSION_LENGTH,
     ReleaseComparison,
     ReleaseIdentity,
     client_install_command,
+    feature_line,
     project_install_command,
     project_update_steps,
+    recommends_update,
     release_from_health,
     release_key,
     update_steps,
@@ -23,6 +26,14 @@ from lab_tracker.client_release import (
 
 REVISION_A = "a" * 40
 REVISION_B = "b" * 40
+# Longer than CPython's default integer-string limit (4300 digits), which makes
+# ``int()`` raise ValueError instead of parsing.
+OVERSIZED_VERSIONS = [
+    pytest.param("9" * 5000, id="one-huge-segment"),
+    pytest.param("1." + "9" * 5000, id="huge-minor"),
+    pytest.param(".".join(["1"] * 2500), id="thousands-of-segments"),
+    pytest.param("0." + "0" * 4400 + "1", id="long-run-of-zeros"),
+]
 
 
 @pytest.mark.parametrize(
@@ -45,6 +56,35 @@ def test_release_key_ignores_trailing_zero_components() -> None:
 @pytest.mark.parametrize("version", [None, "", "0+unknown", "0.2.0rc1", "1.0.0+local", "v1.0"])
 def test_release_key_refuses_anything_but_a_plain_release(version: str | None) -> None:
     assert release_key(version) is None
+
+
+@pytest.mark.parametrize("version", OVERSIZED_VERSIONS)
+def test_release_key_treats_an_oversized_version_as_unreadable(version: str) -> None:
+    # Hostile input (a capture's stored version, a /health body) must degrade to
+    # "unknown" like any other unreadable version, never raise.
+    assert release_key(version) is None
+    assert feature_line(version) is None
+    assert recommends_update(version, "0.2.0") is False
+    assert recommends_update("0.1.0", version) is False
+    for client_version, server_version in [
+        (version, "0.2.0"),
+        ("0.1.0", version),
+        (version, version),
+    ]:
+        comparison = ReleaseComparison(
+            client=ReleaseIdentity(version=client_version),
+            server=ReleaseIdentity(version=server_version),
+        )
+        assert comparison.status == "unknown"
+        assert comparison.update_recommended is False
+        assert comparison.as_dict()["client_behind_server"] is False
+
+
+def test_release_key_accepts_a_version_up_to_the_length_limit() -> None:
+    at_limit = "9" * MAX_RELEASE_VERSION_LENGTH
+
+    assert release_key(at_limit) == (int(at_limit),)
+    assert release_key(at_limit + "9") is None
 
 
 @pytest.mark.parametrize(

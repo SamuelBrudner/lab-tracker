@@ -29,6 +29,10 @@ SOURCE_REPOSITORY_URL = "https://github.com/SamuelBrudner/lab-tracker.git"
 # (MAJOR, MINOR): the part of a release that carries features and, on 0.y.z,
 # incompatibilities (docs/versioning.md).
 FEATURE_LINE_LENGTH = 2
+# A release version is a few short dotted integers. Anything longer is not one,
+# and ``int()`` refuses digit runs past CPython's integer-string limit (4300),
+# so a hostile version must be rejected before it is parsed.
+MAX_RELEASE_VERSION_LENGTH = 64
 # The project-dependency step when the server's source revision is unknown. The
 # Setup page shows its pinned `uv add` command only once the server reports a
 # revision (client-setup.js matchingClientSetup), so this names the release,
@@ -103,10 +107,16 @@ def release_key(version: str | None) -> tuple[int, ...] | None:
     """Order dotted-integer releases (semver or date-based); ``None`` otherwise.
 
     Pre-release, local, and ``0+unknown`` versions deliberately compare as
-    unknown, so an unreadable version can never produce an update nag.
+    unknown, so an unreadable version can never produce an update nag. So does
+    one longer than ``MAX_RELEASE_VERSION_LENGTH``: a captured or reported
+    version is untrusted input, and this parser must never raise on it.
     """
 
-    if version is None or _RELEASE_VERSION.fullmatch(version) is None:
+    if (
+        version is None
+        or len(version) > MAX_RELEASE_VERSION_LENGTH
+        or _RELEASE_VERSION.fullmatch(version) is None
+    ):
         return None
     parts = [int(part) for part in version.split(".")]
     while len(parts) > 1 and parts[-1] == 0:

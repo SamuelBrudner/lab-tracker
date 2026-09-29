@@ -183,6 +183,18 @@ def test_mcp_health_keeps_fail_soft_and_exposes_diagnostic(monkeypatch):
     assert result["next_action"]["action"] == "proceed_without_graph_context"
 
 
+def test_health_probe_stays_fail_soft_when_httpx_rejects_the_proxy_setting(monkeypatch):
+    # httpx reads the proxy variables while building the client; a SOCKS proxy
+    # without the optional socksio package raises ImportError there, and the
+    # session-start status must still report instead of crashing.
+    monkeypatch.setenv("ALL_PROXY", "socks5://127.0.0.1:9")
+
+    result = setup.probe_health_diagnostics("http://127.0.0.1:9")
+
+    assert result["reachable"] is False
+    assert result["diagnosis"] in {"transport_error", "proxy_connection_failed"}
+
+
 def test_malformed_health_url_stays_fail_soft():
     assert setup.probe_health_diagnostics("https://[invalid")["reachable"] is False
 
