@@ -306,7 +306,14 @@ def read_image_codes(
     pillow_format = _PILLOW_FORMAT_BY_CONTENT_TYPE.get(content_type.strip().lower())
     if pillow_format is None:
         raise PhotoCodeLimitError(f"{content_type!r} is not a decodable photo type")
-    with image_module.open(io.BytesIO(data), formats=(pillow_format,)) as image:
+    # Bytes that are not a readable image of the declared type (a HEIC photo
+    # labelled JPEG, a truncated upload) are an expected skip, not a failure.
+    unreadable = getattr(image_module, "UnidentifiedImageError", ())
+    try:
+        opened = image_module.open(io.BytesIO(data), formats=(pillow_format,))
+    except unreadable as exc:
+        raise PhotoCodeLimitError(f"upload is not a readable {pillow_format} image") from exc
+    with opened as image:
         if image.format not in _OPENED_FORMATS[pillow_format]:
             raise PhotoCodeLimitError(
                 f"{content_type} upload opened as {image.format}; not decoding it"

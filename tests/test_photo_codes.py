@@ -477,8 +477,9 @@ def test_an_eps_labelled_as_a_photo_never_reaches_pillows_eps_loader(
     calls = _forbid_subprocesses(monkeypatch)
 
     for content_type in sorted(DECODABLE_CONTENT_TYPES):
-        with pytest.raises(image_module.UnidentifiedImageError):
+        with pytest.raises(PhotoCodeLimitError) as refused:
             photo_codes.read_image_codes(_EPS, content_type)
+        assert isinstance(refused.value.__cause__, image_module.UnidentifiedImageError)
     decoder = PhotoCodeDecoder()
     try:
         assert decoder.decode(_EPS, content_type="image/png", timeout_seconds=5) is None
@@ -488,12 +489,33 @@ def test_an_eps_labelled_as_a_photo_never_reaches_pillows_eps_loader(
     assert calls == []
 
 
+def test_an_unreadable_image_is_a_quiet_skip_not_a_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    pytest.importorskip("PIL.Image")
+    pytest.importorskip("zxingcpp")
+    decoder = PhotoCodeDecoder()
+    try:
+        with caplog.at_level("INFO", logger="lab_tracker.photo_codes"):
+            result = decoder.decode(
+                b"not a png at all", content_type="image/png", timeout_seconds=5
+            )
+    finally:
+        decoder.close()
+
+    assert result is None
+    assert [record.levelname for record in caplog.records] == ["INFO"]
+    assert "not a readable PNG image" in caplog.records[0].getMessage()
+    assert caplog.records[0].exc_info is None
+
+
 def test_a_photo_must_be_the_format_its_content_type_declares() -> None:
     image_module = pytest.importorskip("PIL.Image")
     png = _symbol_png("hello")
 
-    with pytest.raises(image_module.UnidentifiedImageError):
+    with pytest.raises(PhotoCodeLimitError) as refused:
         photo_codes.read_image_codes(png, "image/jpeg")
+    assert isinstance(refused.value.__cause__, image_module.UnidentifiedImageError)
     with pytest.raises(PhotoCodeLimitError):
         photo_codes.read_image_codes(png, "image/tiff")
     assert [code.text for code in photo_codes.read_image_codes(png, "IMAGE/PNG")] == ["hello"]
