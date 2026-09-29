@@ -23,6 +23,7 @@ authority and re-checks Content-Length.
 from __future__ import annotations
 
 import os
+import threading
 import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -42,13 +43,16 @@ MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 
 # The advisory /health probes (`lt setup status`, the `lt-mcp` startup check) must
 # not hold a session. httpx timeouts apply to each connect, write, and read on its
-# own, so a server that answers and then trickles its body a byte at a time never
-# trips them; this is the wall-clock limit checked as the response arrives.
+# own, so a server that answers and then trickles its headers or body a byte at a
+# time never trips them; this is the wall-clock limit on the response.
 HEALTH_PROBE_DEADLINE_SECONDS = 4.0
 # /health answers with a small JSON document; anything larger is cut, not read.
 HEALTH_PROBE_MAX_BODY_BYTES = 64 * 1024
 # Headers that describe the bytes on the wire, which the returned response no longer has.
 _WIRE_ENCODING_HEADERS = frozenset({"content-encoding", "content-length", "transfer-encoding"})
+# What a stalled read raises once the watchdog has closed its connection. Connect
+# and proxy failures are not in it: they keep their own, more specific diagnosis.
+_READ_FAILURES = (httpx.ReadError, httpx.RemoteProtocolError)
 
 
 def request_within_deadline(
@@ -68,21 +72,63 @@ def request_within_deadline(
     The result is an ordinary, fully read :class:`httpx.Response` with the
     body decoded, so callers use it exactly as they would ``client.request``'s.
 
-    The deadline is checked when the headers arrive and after each body chunk,
-    so it can be overrun by one read, which httpx's own per-phase timeout
-    bounds. It does not cover the wait for the headers themselves: a server
-    that trickles its *headers* is limited only by those per-phase timeouts.
-    Exceeding it raises :class:`httpx.ReadTimeout`, like any stalled response.
+    The deadline runs from the call and covers the wait for the response
+    headers as well as the body. It is checked as each chunk arrives, and a
+    watchdog timer closes ``client`` when it expires, which fails a read still
+    waiting on a server that trickles its headers or body a byte at a time.
+    That read notices the close when its next byte or per-phase timeout
+    arrives, so the deadline can be overrun by one read, which httpx's own
+    per-phase timeout bounds. Opening the connection is limited only by those
+    per-phase timeouts: the watchdog cannot interrupt a connect in progress.
+    Exceeding the deadline raises :class:`httpx.ReadTimeout`, like any stalled
+    response.
+
+    An expired deadline leaves ``client`` closed, so pass one that serves this
+    request alone.
     """
 
     started = time.monotonic()
+    expired = threading.Event()
+
+    def out_of_time() -> httpx.ReadTimeout:
+        return httpx.ReadTimeout(
+            f"The response did not finish within {deadline_seconds:g} seconds."
+        )
 
     def check_deadline() -> None:
         if time.monotonic() - started > deadline_seconds:
-            raise httpx.ReadTimeout(
-                f"The response did not finish within {deadline_seconds:g} seconds."
-            )
+            raise out_of_time()
 
+    def close_client() -> None:
+        expired.set()
+        client.close()
+
+    watchdog = threading.Timer(deadline_seconds, close_client)
+    watchdog.daemon = True
+    watchdog.start()
+    try:
+        return _read_response(
+            client, method, url, max_body_bytes, check_deadline=check_deadline, **kwargs
+        )
+    except _READ_FAILURES as exc:
+        # The watchdog closed the connection under a read that was still waiting;
+        # a plain socket reports that as a read error, a TLS one as a disconnect.
+        if expired.is_set():
+            raise out_of_time() from exc
+        raise
+    finally:
+        watchdog.cancel()
+
+
+def _read_response(
+    client: httpx.Client,
+    method: str,
+    url: str,
+    max_body_bytes: int,
+    *,
+    check_deadline: Callable[[], None],
+    **kwargs: Any,
+) -> httpx.Response:
     body = bytearray()
     with client.stream(method, url, **kwargs) as response:
         check_deadline()
@@ -207,8 +253,9 @@ class HttpTransport:
     ) -> httpx.Response:
         """Raw send with connection-error wrapping; no auth header, no retry.
 
-        ``deadline_seconds`` also limits the whole response (see
-        :func:`request_within_deadline`); ``None`` keeps httpx's per-phase timeouts.
+        ``deadline_seconds`` also limits the whole response, headers included (see
+        :func:`request_within_deadline`), and an expired one closes this transport's
+        client; ``None`` keeps httpx's per-phase timeouts.
         """
 
         # Only forward an explicit per-request timeout; passing timeout=None to

@@ -310,7 +310,10 @@ class LabTrackerAPIClient:
         )
 
     def health(self, *, deadline_seconds: float | None = None) -> JsonObject:
-        """``GET /health``; ``deadline_seconds`` also limits the whole response."""
+        """``GET /health``; ``deadline_seconds`` also limits the whole response.
+
+        An expired deadline closes this client, so use a client made for the probe.
+        """
 
         return self._request(
             "GET", "/health", authenticated=False, deadline_seconds=deadline_seconds

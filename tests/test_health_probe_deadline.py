@@ -103,6 +103,17 @@ def drip(connection: socket.socket, stop: threading.Event) -> None:
         time.sleep(DRIP_INTERVAL_SECONDS)
 
 
+def drip_headers(connection: socket.socket, stop: threading.Event) -> None:
+    """Send the response head one byte at a time, so no header ever completes."""
+
+    head = _response_head("Content-Length: 0", "X-Pad: " + "a" * DRIP_BYTES)
+    for offset in range(len(head)):
+        if stop.is_set():
+            return
+        connection.sendall(head[offset : offset + 1])
+        time.sleep(DRIP_INTERVAL_SECONDS)
+
+
 @pytest.fixture(autouse=True)
 def loopback_only(monkeypatch: pytest.MonkeyPatch) -> None:
     # Keep the loopback server off any sandbox or CI proxy.
@@ -173,11 +184,97 @@ def test_a_trickled_body_hits_the_deadline_not_the_per_phase_timeout() -> None:
     assert f"{TEST_DEADLINE_SECONDS:g} seconds" in str(caught.value)
 
 
+def test_trickled_headers_hit_the_deadline_not_the_per_phase_timeout() -> None:
+    with raw_server(drip_headers) as url, httpx.Client(timeout=2.0) as client:
+        started = time.monotonic()
+        with pytest.raises(httpx.ReadTimeout) as caught:
+            request_within_deadline(
+                client, "GET", url + "/health", deadline_seconds=TEST_DEADLINE_SECONDS
+            )
+        elapsed = time.monotonic() - started
+
+    assert elapsed < ELAPSED_LIMIT_SECONDS
+    assert f"{TEST_DEADLINE_SECONDS:g} seconds" in str(caught.value)
+
+
+class StalledTransport(httpx.BaseTransport):
+    """Blocks a request until its client is closed, then fails as ``failure`` builds it."""
+
+    def __init__(self, failure: Callable[[], Exception]) -> None:
+        self._failure = failure
+        self._closed = threading.Event()
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        assert self._closed.wait(timeout=10), "the watchdog never closed the client"
+        raise self._failure()
+
+    def close(self) -> None:
+        self._closed.set()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        # A plain socket closed under a read raises a read error; a TLS one reports
+        # that the server disconnected.
+        lambda: httpx.ReadError("Bad file descriptor"),
+        lambda: httpx.RemoteProtocolError("Server disconnected without sending a response."),
+    ],
+    ids=["read-error", "tls-disconnect"],
+)
+def test_a_read_the_watchdog_closed_reads_as_the_deadline(
+    failure: Callable[[], Exception],
+) -> None:
+    with httpx.Client(transport=StalledTransport(failure)) as client:
+        started = time.monotonic()
+        with pytest.raises(httpx.ReadTimeout) as caught:
+            request_within_deadline(
+                client, "GET", "http://lab.invalid/health", deadline_seconds=TEST_DEADLINE_SECONDS
+            )
+        elapsed = time.monotonic() - started
+
+    assert elapsed < ELAPSED_LIMIT_SECONDS
+    assert f"{TEST_DEADLINE_SECONDS:g} seconds" in str(caught.value)
+
+
+def test_a_connect_failure_after_the_deadline_keeps_its_own_error() -> None:
+    transport = StalledTransport(lambda: httpx.ConnectTimeout("connect timed out"))
+    with httpx.Client(transport=transport) as client, pytest.raises(httpx.ConnectTimeout):
+        request_within_deadline(
+            client, "GET", "http://lab.invalid/health", deadline_seconds=TEST_DEADLINE_SECONDS
+        )
+
+
+def test_a_response_that_finishes_inside_the_deadline_is_not_cut_by_the_watchdog() -> None:
+    with raw_server(answer(HEALTH_BODY)) as url, httpx.Client(timeout=2.0) as client:
+        response = request_within_deadline(
+            client, "GET", url + "/health", deadline_seconds=TEST_DEADLINE_SECONDS
+        )
+        time.sleep(TEST_DEADLINE_SECONDS * 2)
+
+        # The finished request must not leave a timer that closes the client later.
+        assert not client.is_closed
+
+    assert response.json()["status"] == "ok"
+
+
 def test_setup_status_probe_reports_a_trickled_response_instead_of_waiting(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(setup_helpers, "HEALTH_PROBE_DEADLINE_SECONDS", TEST_DEADLINE_SECONDS)
     with raw_server(drip) as url:
+        started = time.monotonic()
+        result = setup_helpers.probe_health_diagnostics(url)
+        elapsed = time.monotonic() - started
+
+    assert elapsed < ELAPSED_LIMIT_SECONDS
+    assert result["reachable"] is False
+    assert result["diagnosis"] == "http_response_timeout"
+
+
+def test_setup_status_probe_reports_trickled_headers_instead_of_waiting(monkeypatch) -> None:
+    monkeypatch.setattr(setup_helpers, "HEALTH_PROBE_DEADLINE_SECONDS", TEST_DEADLINE_SECONDS)
+    with raw_server(drip_headers) as url:
         started = time.monotonic()
         result = setup_helpers.probe_health_diagnostics(url)
         elapsed = time.monotonic() - started
@@ -207,6 +304,21 @@ def test_setup_status_probe_keeps_a_huge_reply_reachable_without_a_release() -> 
 
 def test_mcp_client_health_deadline_raises_the_unavailable_error(monkeypatch) -> None:
     with raw_server(drip) as url:
+        client = LabTrackerAPIClient(MCPSettings(base_url=url, timeout_seconds=2.0))
+        try:
+            started = time.monotonic()
+            with pytest.raises(LabTrackerAPIUnavailableError) as caught:
+                client.health(deadline_seconds=TEST_DEADLINE_SECONDS)
+            elapsed = time.monotonic() - started
+        finally:
+            client.close()
+
+    assert elapsed < ELAPSED_LIMIT_SECONDS
+    assert caught.value.connection_diagnostic["diagnosis"] == "http_response_timeout"
+
+
+def test_mcp_client_health_deadline_covers_trickled_headers() -> None:
+    with raw_server(drip_headers) as url:
         client = LabTrackerAPIClient(MCPSettings(base_url=url, timeout_seconds=2.0))
         try:
             started = time.monotonic()
@@ -257,6 +369,25 @@ def test_lt_mcp_startup_check_gives_up_on_a_trickled_response(monkeypatch, capsy
         lambda: ReleaseIdentity(version="0.1.0", revision="a" * 40),
     )
     with raw_server(drip) as url:
+        started = time.monotonic()
+        notice = mcp_server.probe_client_update_notice(MCPSettings(base_url=url))
+        elapsed = time.monotonic() - started
+
+    assert notice is None
+    assert elapsed < ELAPSED_LIMIT_SECONDS
+    err = capsys.readouterr().err
+    assert "starting without the update check" in err
+    assert f"did not finish within {TEST_DEADLINE_SECONDS:g} seconds" in err
+
+
+def test_lt_mcp_startup_check_gives_up_on_trickled_headers(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(mcp_server, "HEALTH_PROBE_DEADLINE_SECONDS", TEST_DEADLINE_SECONDS)
+    monkeypatch.setattr(
+        mcp_server,
+        "installed_release",
+        lambda: ReleaseIdentity(version="0.1.0", revision="a" * 40),
+    )
+    with raw_server(drip_headers) as url:
         started = time.monotonic()
         notice = mcp_server.probe_client_update_notice(MCPSettings(base_url=url))
         elapsed = time.monotonic() - started

@@ -241,7 +241,10 @@ def test_docs_state_the_health_probe_bounds(doc: Path) -> None:
     timeout = setup_helpers._HEALTH_PROBE_TIMEOUT_SECONDS
     assert timeout == mcp_server._RELEASE_PROBE_TIMEOUT_SECONDS
     assert f"{timeout:g}-second connect and read timeouts" in text
-    assert f"{HEALTH_PROBE_DEADLINE_SECONDS:g}-second deadline checked as the response" in text
+    # The deadline covers the wait for the headers, not only the body.
+    deadline = f"{HEALTH_PROBE_DEADLINE_SECONDS:g}-second deadline on the whole response"
+    assert deadline in text
+    assert "headers included" in text
 
 
 def test_lt_doctor_help_names_the_lt_mcp_check() -> None:

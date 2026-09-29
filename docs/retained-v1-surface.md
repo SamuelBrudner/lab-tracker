@@ -649,10 +649,13 @@ research record:
   offline and drained later carries the release that queued it. Only a newer
   server `MAJOR.MINOR` produces a notice ([versioning.md](versioning.md)); a
   PATCH-only gap and revision drift within a release are reported, never
-  suggested. None of these checks blocks capture, and each is bounded, so none
-  holds a session or MCP startup open: the import check has a 15-second limit,
-  and the `lt setup status` and `lt-mcp` `/health` probes have 2-second connect
-  and read timeouts and a 4-second deadline checked as the response arrives.
+  suggested. None of these checks blocks capture, and each has a limit so that
+  it does not hold a session or MCP startup open: the import check has a
+  15-second limit, and the `lt setup status` and `lt-mcp` `/health` probes have
+  2-second connect and read timeouts and a 4-second deadline on the whole
+  response, headers included, so a server that trickles its headers or its body
+  is cut at the deadline (give or take one read). Opening the connection is
+  governed by the connect timeout alone.
   A failed `lt-mcp` probe is written to stderr and startup continues.
   See [setup.md](setup.md#know-when-a-client-install-is-broken-or-behind-its-server).
 - Read-only assistant and MCP endpoints over the retained graph. Remote agents
