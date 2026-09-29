@@ -253,34 +253,242 @@ a project contributor (or viewer for read-only use).
 | `.claude/settings.json` | Claude Code hooks (`lt setup status` on session start, `lt prime` before research-facing prompts; the opt-in `lt setup agent-hooks` entries go in the personal `.claude/settings.local.json` unless `--shared`) |
 | `AGENTS.lt.md`, `scripts/lt.py`, `lt_ids.json` | Agent-readable integration notes, the client shim, and the project-id mapping (`lt project bind` fills it) |
 
-Choose the instructions for your client:
+### Choose your client
 
-- **Claude Code** reads the generated repository `.mcp.json`. Open Claude Code
-  in that repository and approve the server when prompted. For access outside
-  that repository, register it for your user account instead:
-  `claude mcp add --transport stdio --scope user lab-tracker -- lt-mcp`.
-  Use `claude mcp list` or `/mcp` in Claude Code to check the connection. Run
-  `lt setup verify-mcp --expected-revision <full-revision>` from the same
-  environment to verify health, authentication, and the installed client revision.
-  These instructions target Claude Code; Claude Desktop has separate client
-  configuration.
-- **Codex CLI** registers MCP servers in `~/.codex/config.toml`: add
-  it with `codex mcp add lab-tracker -- lt-mcp`. Then run
-  `lt setup verify-mcp --expected-revision <full-revision>` from the same
-  environment that launches Codex. The verifier actually starts `lt-mcp`,
-  initializes MCP over stdio, calls Lab Tracker health, and makes an
-  authenticated project read through the saved profile. `codex mcp list`
-  confirms registration only. A project-scoped `.codex/config.toml` also
-  works, but only in repos the user has marked trusted—which is why the
-  scaffold does not write one.
-- **GitHub Copilot** IDEs use a different config schema — see
-  [GitHub Copilot MCP setup](lab-tracker-copilot.md); Cursor details are in
-  [Cursor MCP setup](lab-tracker-cursor.md).
+Registration is per client, and each client reads a different file.
+`lt setup init` writes only the repository files in the table above, and the
+`.mcp.json` it writes carries no token. That covers Claude Code. It never edits
+an application's own settings, so Claude Desktop chat and both Codex products
+are registered by hand, once per machine. Follow only the section for the client
+you use; the steps for another client do not apply to it.
 
-The saved connection profile normally supplies the API URL and LPAT. Environment
-variables still override it when you need them — `LAB_TRACKER_BASE_URL` points
-the MCP server at your instance, and `LAB_TRACKER_MCP_API_KEY` supplies the
-token when auth is on. Full variable reference in
+| Client | Registered through | Written by `lt setup init` |
+| --- | --- | --- |
+| Claude Code (terminal, IDE, and the Claude Desktop app's Code tab) | the repository `.mcp.json`, or `claude mcp add` | yes, `.mcp.json` |
+| Claude Desktop chat | you, in `claude_desktop_config.json` | no |
+| Codex in the ChatGPT desktop app | you, in the app's **Settings**, or `~/.codex/config.toml` | no |
+| Codex CLI | you, with `codex mcp add`, or `~/.codex/config.toml` | no |
+
+Two rules hold for every client.
+
+**No credentials in a client's settings file.** The saved connection profile
+(`~/.lab-tracker/config.json`, written by `lt setup connect --save-token`) is
+permission-hardened, and `lt-mcp` reads the API URL and token from it when a host
+launches it without a shell. Keep the token there. Never paste an `lpat_` token
+or `LAB_TRACKER_MCP_API_KEY` into `claude_desktop_config.json`, a Codex
+`config.toml`, or another client settings file. Two caveats follow from how
+`lt-mcp` merges its settings:
+
+- A `LAB_TRACKER_BASE_URL` in the entry or the environment that differs from the
+  profile's base URL makes `lt-mcp` drop the profile token, because a saved token
+  is never sent to a different server. Leave `env` out of a desktop entry. To
+  reach another instance, run `lt setup connect` for it instead.
+- A variable exported only in a shell startup file, such as
+  `LAB_TRACKER_BASE_URL` or `LAB_TRACKER_CONFIG_DIR`, may not reach a desktop
+  app. Without `LAB_TRACKER_CONFIG_DIR`, `lt-mcp` looks for the profile in the
+  default `~/.lab-tracker` directory.
+
+**Verify in three parts.** Registration alone proves little, so each section
+below ends with the same three checks:
+
+1. **Registration check.** The client's own listing shows the server. This does
+   not prove that authentication works.
+2. **Launch check.** `lt setup verify-mcp --expected-revision <full-revision>`
+   starts `lt-mcp` over stdio, initializes MCP, calls Lab Tracker health, and
+   makes an authenticated project read through the saved profile. It runs in
+   your terminal's environment and, by default, prefers the `lt-mcp` next to the
+   `lt` you ran, so a pass shows that the executable and the profile work from a
+   terminal, not what a desktop app launched. For a desktop app, add
+   `--command <the absolute path you registered>`.
+3. **In-client read.** Ask the assistant to call `lab_tracker_list_projects` with
+   `limit` 1. It should return a project, or an empty list when you belong to
+   none, rather than an authentication error. Only this check exercises exactly
+   what the client started.
+
+#### Claude Code (terminal, IDE, and the Desktop app Code tab)
+
+This covers `claude` in a terminal, Claude Code in an IDE, and the Code tab of
+the Claude Desktop app. Anthropic's documentation says the Code tab reads the
+same `.mcp.json` and `~/.claude.json` configuration as the command line.
+
+Prerequisites: `lt` and `lt-mcp` installed as described above, a saved connection
+profile (with a token when the server requires authentication), and the repository
+you are onboarding. The `claude mcp` commands need the `claude` command line on
+your `PATH`; Anthropic notes that installing the VS Code extension does not put it
+there, so use `/mcp` in the extension's chat panel instead.
+
+Register, from the analysis repository:
+
+```bash
+lt setup init --install-skills --dry-run
+lt setup init --install-skills --yes
+```
+
+The dry run previews the files and `--yes` writes them. Among them is `.mcp.json`,
+whose `lab-tracker` server runs `lt-mcp` with only `LAB_TRACKER_BASE_URL` in its
+environment and no token. Open `claude` in that repository and approve the server
+when prompted. Claude Code asks for approval in an interactive session before it
+uses a project-scoped `.mcp.json` server, and a cloned repository cannot approve
+its own servers. Until you approve it, `claude mcp list` shows the server as
+`Pending approval`. To reach Lab Tracker outside this repository, register it for
+your user account instead:
+`claude mcp add --transport stdio --scope user lab-tracker -- lt-mcp`.
+Start a new session after registering.
+
+Verify:
+
+1. Registration check: `claude mcp list` shows `lab-tracker` connected rather
+   than pending approval, or run `/mcp` inside a session.
+2. Launch check: `lt setup verify-mcp --expected-revision <full-revision>`.
+3. In-client read: ask Claude Code to call `lab_tracker_list_projects` with
+   `limit` 1.
+
+#### Claude Desktop chat
+
+Claude Desktop chat is supported by manual registration only: `lt` never writes
+`claude_desktop_config.json`. A chat is not tied to an analysis repository, so the
+repository features (commit hooks, watch folders, autotrack, `lt run`) are not
+part of this route; the Lab Tracker MCP tools are what it provides.
+
+Prerequisites: Claude Desktop, `lt-mcp` installed with `uv tool install` as
+described above, and a saved connection profile (with a token when the server
+requires authentication).
+
+Register:
+
+1. Find the absolute path of `lt-mcp`: `command -v lt-mcp` in a macOS or Linux
+   shell, or `(Get-Command lt-mcp).Source` in PowerShell. `uv tool dir --bin`
+   prints the directory `uv tool` installs executables into.
+2. In Claude Desktop, open **Settings**, then **Developer**, then **Edit Config**.
+   The MCP project's guide lists the file as
+   `~/Library/Application Support/Claude/claude_desktop_config.json` on macOS and
+   `%APPDATA%\Claude\claude_desktop_config.json` on Windows.
+
+Then add the entry, keeping any servers already in the file. If `mcpServers`
+exists, add only the `lab-tracker` key inside it. Use the absolute path from
+step 1 and no `env` block:
+
+```json
+{
+  "mcpServers": {
+    "lab-tracker": {
+      "command": "<absolute path to lt-mcp>"
+    }
+  }
+}
+```
+
+On Windows the command typically ends in `lt-mcp.exe`, and every backslash is
+doubled in JSON. Finally, completely quit Claude Desktop and reopen it.
+
+The absolute path is a precaution. Anthropic's Desktop page says, about local Code
+sessions, that the app "does not always inherit your full shell environment", and
+the MCP project's guide asks that file paths in this file be absolute, so an
+absolute `command` removes any doubt about whether the app can find `lt-mcp`. The
+same Desktop page says the app loads the servers in this file into local Code tab
+sessions, and uses this file's definition when `.mcp.json` or `~/.claude.json`
+names the same server.
+
+Verify:
+
+1. Registration check: after reopening, open the connectors list (the guide
+   describes it under the conversation input's "Add files, connectors, and more"
+   control) and check that `lab-tracker` and its tools appear. The logs are
+   `mcp.log` and `mcp-server-lab-tracker.log` in `~/Library/Logs/Claude` on macOS
+   and `%APPDATA%\Claude\logs` on Windows. `lt auth doctor` lists the
+   registration it finds in this file and flags deprecated username and password
+   credentials; it does not launch the server.
+2. Launch check:
+   `lt setup verify-mcp --expected-revision <full-revision> --command <absolute path from step 1>`.
+3. In-client read: ask Claude to call `lab_tracker_list_projects` with `limit` 1.
+   Claude Desktop may ask you to approve the tool call.
+
+#### Codex in the ChatGPT desktop app
+
+OpenAI's MCP documentation calls this product the ChatGPT desktop app and says it,
+the Codex CLI, and the IDE extension share MCP configuration for the same Codex
+host, stored in `~/.codex/config.toml`. The steps below use the app's
+**Settings** (or that shared file) rather than the `codex` command.
+
+Prerequisites: the ChatGPT desktop app with Codex, `lt-mcp` installed with
+`uv tool install` as described above, a saved connection profile (with a token
+when the server requires authentication), and the absolute path of `lt-mcp`
+(`command -v lt-mcp`, or `(Get-Command lt-mcp).Source` in PowerShell).
+
+Register: open **Settings**, select **MCP servers**, then **Add server**. Name it
+`lab-tracker`, choose **STDIO**, and enter the absolute path of `lt-mcp` as the
+command. Leave arguments and environment empty. Save the server, then select
+**Restart**. OpenAI's documentation does not describe the environment the desktop
+app gives a STDIO server, so the absolute path is a precaution rather than a
+requirement. Because the configuration is shared, the equivalent entry in
+`~/.codex/config.toml` is:
+
+```toml
+[mcp_servers.lab-tracker]
+command = "<absolute path to lt-mcp>"
+```
+
+Verify:
+
+1. Registration check: type `/mcp` in the composer to view connected servers.
+2. Launch check:
+   `lt setup verify-mcp --expected-revision <full-revision> --command <the absolute path you registered>`.
+3. In-client read: ask Codex to call `lab_tracker_list_projects` with `limit` 1.
+
+#### Codex CLI
+
+Use this section only if you run `codex` in a terminal. The `codex` command comes
+from the Codex CLI, which has its own install steps on
+[OpenAI's Codex CLI page](https://learn.chatgpt.com/docs/codex/cli) (a shell
+installer, npm, or Homebrew), and it must be on your `PATH` before `codex mcp`
+works. A shell that answers `command not found: codex` (for example
+`zsh: command not found: codex`) cannot find the executable: either the CLI is
+not installed there, or it is installed in a directory that is not on `PATH`.
+Install it, or add its directory to `PATH`. OpenAI's
+[environment-variable page](https://learn.chatgpt.com/docs/config-file/environment-variables)
+lists `~/.local/bin` as the default install directory of the standalone installer
+on macOS and Linux. `uv tool dir --bin` prints the directory that holds `lt` and
+`lt-mcp`, and `uv tool update-shell` ensures that directory is on your shell's
+`PATH`. If you use the desktop app instead, follow the previous section; it does
+not need this.
+
+Prerequisites: the `codex` command on `PATH`, `lt-mcp` installed with
+`uv tool install` as described above, and a saved connection profile (with a
+token when the server requires authentication).
+
+Register: `codex mcp add lab-tracker -- lt-mcp`. A project-scoped
+`.codex/config.toml` also works, but only in repos you have marked trusted, which
+is why the scaffold does not write one. OpenAI documents `codex mcp add`,
+`codex mcp list`, the desktop **Settings** route above, and a hand-edited
+`config.toml` side by side on its
+[Codex MCP page](https://learn.chatgpt.com/docs/extend/mcp), so use that page for
+the current steps.
+
+Verify:
+
+1. Registration check: `codex mcp list`, or `/mcp` in the `codex` terminal
+   interface. This confirms registration only.
+2. Launch check: `lt setup verify-mcp --expected-revision <full-revision>`, run in
+   the same terminal environment that launches `codex`.
+3. In-client read: ask Codex to call `lab_tracker_list_projects` with `limit` 1.
+
+#### Cursor and GitHub Copilot
+
+**GitHub Copilot** IDEs use a different config schema — see
+[GitHub Copilot MCP setup](lab-tracker-copilot.md). Cursor details, including
+what to do when a GUI-launched Cursor cannot find `lt-mcp`, are in
+[Cursor MCP setup](lab-tracker-cursor.md).
+
+Official references: [Claude Code MCP](https://code.claude.com/docs/en/mcp),
+[Claude Code in the Desktop app](https://code.claude.com/docs/en/desktop),
+[Connect to local MCP servers](https://modelcontextprotocol.io/docs/develop/connect-local-servers)
+for Claude Desktop, and [Codex MCP](https://learn.chatgpt.com/docs/extend/mcp).
+
+The saved connection profile normally supplies the API URL and LPAT. For a client
+that a shell launches, environment variables still override it when you need
+them — `LAB_TRACKER_BASE_URL` points the MCP server at your instance, and
+`LAB_TRACKER_MCP_API_KEY` supplies the token when auth is on — but keep them out
+of desktop-app settings files, as above. Full variable reference in
 [`lab-tracker-mcp-skills.md`](lab-tracker-mcp-skills.md).
 
 Server-side AI drafting uses the Lab Tracker operator's configured provider

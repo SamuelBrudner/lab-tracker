@@ -79,7 +79,12 @@ short, consent-gated sequence on the `lt` CLI.
    reports it missing or stale), `lt update --skills-only` works
    machine-wide and never touches the current directory or any repo
    (`--dry-run` previews; it cannot be combined with `--yes` or
-   `--target`).
+   `--target`). Claude Code reads the scaffolded `.mcp.json`, which
+   carries no token, and asks the person to approve the server on
+   first run. Claude Desktop chat, Codex in the ChatGPT desktop app,
+   and the Codex CLI keep their MCP registration in user-level
+   settings that setup never writes; `docs/agent-setup.md` in the Lab
+   Tracker repository lists each client's registration.
 7. **Project binding** — `lt project bind --project-id <project-id>
    --yes` verifies the selected project and records its exact id in
    `lt_ids.json`.
@@ -116,7 +121,11 @@ short, consent-gated sequence on the `lt` CLI.
 11. **MCP launch verification** — after client registration, `lt setup
     verify-mcp --expected-revision <revision>` launches `lt-mcp` over
     stdio, initializes the protocol, calls health, and performs an
-    authenticated project read through the saved profile.
+    authenticated project read through the saved profile. It uses the
+    terminal's environment, so for a desktop app it takes `--command
+    <absolute path>` naming the `lt-mcp` that app registered, and the
+    in-client check is asking the assistant to call
+    `lab_tracker_list_projects` with limit 1.
 12. **Agent session capture (optional)** — `lt setup agent-hooks
     --dry-run` previews two Claude Code hooks for the person's own
     `.claude/settings.local.json`: when a session ends, `lt agent
@@ -188,4 +197,4 @@ repo; an analysis repo updates by rerunning its pinned `uv add`
 If Lab Tracker is unreachable and the user does not operate a server, point
 them at whoever runs their lab's instance instead of standing one up ad hoc.
 
-<!-- lab-tracker-setup-guide version=0.1.0 sha256=5b1c20cac07e -->
+<!-- lab-tracker-setup-guide version=0.1.0 sha256=e40af99b0808 -->

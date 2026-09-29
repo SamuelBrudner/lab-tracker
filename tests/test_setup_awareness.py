@@ -99,6 +99,21 @@ def test_setup_guide_states_consent_rules_non_imperatively() -> None:
         assert forbidden not in lowered
 
 
+def test_setup_guide_names_the_clients_that_setup_never_registers() -> None:
+    guide = " ".join(setup_guide_markdown().split())
+    # Claude Code is the only client whose config the scaffold writes; the rest
+    # register in user-level settings, and the per-client steps live in the docs.
+    assert "asks the person to approve the server on first run" in guide
+    for client in ("Claude Desktop chat", "Codex in the ChatGPT desktop app", "Codex CLI"):
+        assert client in guide, client
+    assert "setup never writes" in guide
+    assert "docs/agent-setup.md" in guide
+    # A GUI client needs the absolute lt-mcp path, and only an in-client read
+    # proves what that client launched.
+    assert "--command <absolute path>" in guide
+    assert "lab_tracker_list_projects" in guide
+
+
 def test_mcp_surface_points_at_setup_guide() -> None:
     assert lab_tracker_setup_guide() == setup_guide_markdown()
     assert "lab-tracker://setup-guide" in MCP_SERVER_INSTRUCTIONS

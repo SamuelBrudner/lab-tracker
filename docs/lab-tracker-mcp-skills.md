@@ -389,7 +389,9 @@ symlinks so repo updates are picked up by new agent sessions:
 ```
 
 Restart Codex or Claude after changing MCP or skill config so the new server and
-skill are loaded.
+skill are loaded. Registration and verification for each client (Claude Code,
+Claude Desktop chat, Codex in the ChatGPT desktop app, Codex CLI) are in
+[Choose your client](agent-setup.md#choose-your-client).
 
 The skill's Capture Surfaces section lists every capture path with its setup
 command and doc; the generated `lab-tracker-setup` skill (installed by

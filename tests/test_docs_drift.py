@@ -17,6 +17,11 @@ import httpx
 import pytest
 from read_opacity_inventory import READ_OPACITY_VARIANTS_BY_SUITE
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - exercised by Python 3.10 CI
+    import tomli as tomllib
+
 from lab_tracker import graph_drafting, mcp_server
 from lab_tracker.cli import update_consumer_repo
 from lab_tracker.decision_context_constants import AGENT_CONSULTATION_POLICY
@@ -31,6 +36,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 _DOCS = _REPO_ROOT / "docs"
 _SKILL_PATH = _REPO_ROOT / "skills" / "lab-tracker" / "SKILL.md"
 _MCP_SKILLS_DOC = _DOCS / "lab-tracker-mcp-skills.md"
+_AGENT_SETUP_DOC = _DOCS / "agent-setup.md"
 
 
 def _read(path: Path) -> str:
@@ -305,11 +311,10 @@ def test_vscode_mcp_inputs_mark_username_password_as_deprecated() -> None:
     assert "deprecated" not in inputs["lt-token"].lower(), inputs["lt-token"]
 
 
-def test_documented_mcp_json_example_passes_lt_auth_doctor(tmp_path: Path) -> None:
+@pytest.mark.parametrize("doc", [_MCP_SKILLS_DOC, _AGENT_SETUP_DOC], ids=lambda path: path.name)
+def test_documented_mcp_json_example_passes_lt_auth_doctor(tmp_path: Path, doc: Path) -> None:
     examples = [
-        json.loads(block)
-        for block in _fenced_blocks(_read(_MCP_SKILLS_DOC), "json")
-        if '"mcpServers"' in block
+        json.loads(block) for block in _fenced_blocks(_read(doc), "json") if '"mcpServers"' in block
     ]
     assert examples
     for index, example in enumerate(examples):
@@ -319,6 +324,40 @@ def test_documented_mcp_json_example_passes_lt_auth_doctor(tmp_path: Path) -> No
         report = auth_doctor(repo, home=tmp_path / "empty-home")
         assert report["deprecated_count"] == 0, report
         assert report["warning_count"] == 0, report
+
+
+def test_documented_codex_toml_example_passes_lt_auth_doctor(tmp_path: Path) -> None:
+    examples = [
+        block for block in _fenced_blocks(_read(_AGENT_SETUP_DOC), "toml") if "mcp_servers" in block
+    ]
+    assert examples
+    for index, example in enumerate(examples):
+        parsed = tomllib.loads(example)
+        entry = parsed["mcp_servers"]["lab-tracker"]
+        assert entry["command"] != "lt-mcp", "a desktop entry uses the absolute path"
+        assert "env" not in entry, "credentials stay in the saved profile"
+        home = tmp_path / f"home-{index}"
+        (home / ".codex").mkdir(parents=True)
+        (home / ".codex" / "config.toml").write_text(example, encoding="utf-8")
+        report = auth_doctor(tmp_path / "repo", home=home)
+        assert [reg["surface"] for reg in report["registrations"]] == ["codex"], report
+        assert report["deprecated_count"] == 0, report
+        assert report["warning_count"] == 0, report
+
+
+def test_claude_desktop_example_uses_an_absolute_command_and_no_credentials() -> None:
+    blocks = [
+        block
+        for block in _fenced_blocks(_read(_AGENT_SETUP_DOC), "json")
+        if '"mcpServers"' in block
+    ]
+    assert blocks
+    for block in blocks:
+        entry = json.loads(block)["mcpServers"]["lab-tracker"]
+        assert entry["command"] != "lt-mcp", "a desktop entry uses the absolute path"
+        assert "env" not in entry, "credentials stay in the saved profile"
+        assert "lpat_" not in block
+        assert "LAB_TRACKER_MCP" not in block
 
 
 def test_docs_state_mcp_tool_counts_that_match_the_registered_tuples() -> None:
@@ -366,3 +405,86 @@ def test_app_session_link_code_matches_the_prefix_the_watcher_claims() -> None:
     assert f'SESSION_LINK_CODE_PREFIX = "{LINK_CODE_PREFIX}"' in component
     for doc in (_DOCS / "watch-folder-capture.md", _DOCS / "retained-v1-surface.md"):
         assert _APP_LINK_CODE_SENTENCE in _collapsed_whitespace(_read(doc)), doc.name
+
+
+# Per-client MCP registration: the matrix in docs/agent-setup.md, the generated setup
+# guide, and the web Setup and Agents pages (client-setup.js) must describe one thing.
+_CLIENT_MATRIX_HEADING = "Choose your client"
+_CLIENT_HEADINGS = (
+    "Claude Code",
+    "Claude Desktop chat",
+    "Codex in the ChatGPT desktop app",
+    "Codex CLI",
+)
+_CLAUDE_DESKTOP_SUPPORT_STATUS = (
+    "Claude Desktop chat is supported by manual registration only: "
+    "`lt` never writes `claude_desktop_config.json`."
+)
+
+
+def _client_matrix() -> str:
+    """The "Choose your client" section of agent-setup.md, up to the next h2/h3."""
+
+    text = _read(_AGENT_SETUP_DOC)
+    section = text.split(f"### {_CLIENT_MATRIX_HEADING}", 1)[1]
+    return re.split(r"(?m)^#{2,3} ", section, maxsplit=1)[0]
+
+
+def _client_sections() -> dict[str, str]:
+    """Each per-client `####` section of the matrix, keyed by its heading."""
+
+    parts = re.split(r"(?m)^#### (.+)$", _client_matrix())
+    return dict(zip(parts[1::2], parts[2::2], strict=True))
+
+
+def test_agent_setup_labels_a_section_for_every_client() -> None:
+    headings = list(_client_sections())
+    for label in _CLIENT_HEADINGS:
+        assert any(heading.startswith(label) for heading in headings), (label, headings)
+
+
+def test_agent_setup_states_the_claude_desktop_support_status() -> None:
+    sections = _client_sections()
+    desktop = next(body for name, body in sections.items() if name.startswith("Claude Desktop"))
+    assert _CLAUDE_DESKTOP_SUPPORT_STATUS in _collapsed_whitespace(desktop)
+
+
+def test_every_client_section_gives_the_three_part_verification() -> None:
+    sections = _client_sections()
+    for label in _CLIENT_HEADINGS:
+        name = next(heading for heading in sections if heading.startswith(label))
+        body = sections[name]
+        assert "lt setup verify-mcp --expected-revision <full-revision>" in body, name
+        assert "lab_tracker_list_projects" in body, name
+
+
+def test_codex_cli_section_names_the_missing_executable_failure() -> None:
+    sections = _client_sections()
+    body = next(body for name, body in sections.items() if name.startswith("Codex CLI"))
+    assert "command not found: codex" in body
+    assert "codex mcp add lab-tracker -- lt-mcp" in body
+
+
+def test_client_matrix_makes_no_unverified_vendor_claims() -> None:
+    # A bare command failing in a GUI, and the deprecation status of
+    # `codex mcp add`, are claims the vendors' own documentation does not make.
+    lowered = _collapsed_whitespace(_client_matrix()).lower()
+    for claim in ("silently", "will fail", "always fails"):
+        assert claim not in lowered, claim
+    for name, body in _client_sections().items():
+        if name.startswith("Codex"):
+            assert "deprecat" not in body.lower(), name
+
+
+def test_documented_verify_mcp_flags_exist() -> None:
+    parser = lt_cli._build_parser()
+    top = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+    setup = top.choices["setup"]
+    setup_verbs = next(a for a in setup._actions if isinstance(a, argparse._SubParsersAction))
+    accepted = set(setup_verbs.choices["verify-mcp"]._option_string_actions)
+    assert {"--command", "--expected-revision"} <= accepted
+    invocation = re.compile(r"\blt setup verify-mcp\b([^\n`]*)")
+    text = _read(_AGENT_SETUP_DOC)
+    flags = {flag for match in invocation.finditer(text) for flag in _LONG_FLAG.findall(match[1])}
+    assert "--command" in flags
+    assert not flags - accepted, sorted(flags - accepted)
