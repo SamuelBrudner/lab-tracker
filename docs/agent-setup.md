@@ -408,7 +408,10 @@ Verify:
    `mcp.log` and `mcp-server-lab-tracker.log` in `~/Library/Logs/Claude` on macOS
    and `%APPDATA%\Claude\logs` on Windows. `lt auth doctor` lists the
    registration it finds in this file and flags deprecated username and password
-   credentials; it does not launch the server.
+   credentials; it does not launch the server. For an entry without `env`,
+   `lt auth doctor` reports auth mode `none` and no base URL. That is expected:
+   the token and URL come from the saved profile, which `lt auth doctor` does not
+   read. Do not add credentials to the entry to change that result.
 2. Launch check:
    `lt setup verify-mcp --expected-revision <full-revision> --command <absolute path from step 1>`.
 3. In-client read: ask Claude to call `lab_tracker_list_projects` with `limit` 1.

@@ -349,6 +349,51 @@ def test_documented_codex_toml_example_passes_lt_auth_doctor(tmp_path: Path) -> 
         assert report["warning_count"] == 0, report
 
 
+def test_auth_doctor_reports_no_auth_for_the_documented_hand_registered_entries(
+    tmp_path: Path,
+) -> None:
+    # `lt auth doctor` classifies auth only from an entry's own `env`, and never reads
+    # the saved profile that supplies the token and URL. The documented entries carry
+    # no `env`, so doctor reports `none` and no base URL for them; the Desktop
+    # registration check in agent-setup.md must say so (see the test below).
+    desktop = next(
+        json.loads(block)
+        for block in _fenced_blocks(_read(_AGENT_SETUP_DOC), "json")
+        if '"mcpServers"' in block
+    )
+    codex = next(
+        block for block in _fenced_blocks(_read(_AGENT_SETUP_DOC), "toml") if "mcp_servers" in block
+    )
+    home = tmp_path / "home"
+    desktop_config = home / ".config" / "Claude" / "claude_desktop_config.json"
+    codex_config = home / ".codex" / "config.toml"
+    for path in (desktop_config, codex_config):
+        path.parent.mkdir(parents=True)
+    desktop_config.write_text(json.dumps(desktop), encoding="utf-8")
+    codex_config.write_text(codex, encoding="utf-8")
+
+    report = auth_doctor(tmp_path / "repo", home=home)
+
+    observed = {
+        reg["surface"]: (reg["auth_mode"], reg["base_url"]) for reg in report["registrations"]
+    }
+    assert observed == {"codex": ("none", None), "claude-desktop": ("none", None)}, report
+
+
+_DOCTOR_NO_ENV_SENTENCE = (
+    "For an entry without `env`, `lt auth doctor` reports auth mode `none` and no base URL. "
+    "That is expected: the token and URL come from the saved profile, "
+    "which `lt auth doctor` does not read."
+)
+
+
+def test_claude_desktop_registration_check_explains_the_doctor_none_result() -> None:
+    desktop = next(
+        body for name, body in _client_sections().items() if name.startswith("Claude Desktop")
+    )
+    assert _DOCTOR_NO_ENV_SENTENCE in _collapsed_whitespace(desktop)
+
+
 def test_claude_desktop_example_uses_an_absolute_command_and_no_credentials() -> None:
     blocks = [
         block
