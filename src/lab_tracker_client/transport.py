@@ -23,6 +23,7 @@ authority and re-checks Content-Length.
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, BinaryIO, Protocol
@@ -37,6 +38,70 @@ JsonObject = dict[str, Any]
 # from the server config (which would pull starlette into the consumer package)
 # so a client can reject an oversize file locally before transferring it.
 MAX_UPLOAD_BYTES = 100 * 1024 * 1024
+
+
+# The advisory /health probes (`lt setup status`, the `lt-mcp` startup check) must
+# not hold a session. httpx timeouts apply to each connect, write, and read on its
+# own, so a server that answers and then trickles its body a byte at a time never
+# trips them; this is the wall-clock limit on receiving the whole response.
+HEALTH_PROBE_DEADLINE_SECONDS = 4.0
+# /health answers with a small JSON document; anything larger is cut, not read.
+HEALTH_PROBE_MAX_BODY_BYTES = 64 * 1024
+# Headers that describe the bytes on the wire, which the returned response no longer has.
+_WIRE_ENCODING_HEADERS = frozenset({"content-encoding", "content-length", "transfer-encoding"})
+
+
+def request_within_deadline(
+    client: httpx.Client,
+    method: str,
+    url: str,
+    *,
+    deadline_seconds: float,
+    max_body_bytes: int = HEALTH_PROBE_MAX_BODY_BYTES,
+    **kwargs: Any,
+) -> httpx.Response:
+    """Send one request, giving up once its response has taken ``deadline_seconds``.
+
+    The body is streamed, so a slow or endless one is noticed as it arrives
+    instead of after ``read()`` returns, and it is cut at ``max_body_bytes``
+    (a cut body no longer parses as JSON, so it reads as an unusable reply).
+    The result is an ordinary, fully read :class:`httpx.Response` with the
+    body decoded, so callers use it exactly as they would ``client.request``'s.
+
+    The deadline is checked when the headers arrive and after each body chunk,
+    so it can be overrun by one read, which httpx's own per-phase timeout
+    bounds. It does not cover the wait for the headers themselves: a server
+    that trickles its *headers* is limited only by those per-phase timeouts.
+    Exceeding it raises :class:`httpx.ReadTimeout`, like any stalled response.
+    """
+
+    started = time.monotonic()
+
+    def check_deadline() -> None:
+        if time.monotonic() - started > deadline_seconds:
+            raise httpx.ReadTimeout(
+                f"The response did not finish within {deadline_seconds:g} seconds."
+            )
+
+    body = bytearray()
+    with client.stream(method, url, **kwargs) as response:
+        check_deadline()
+        for chunk in response.iter_bytes():
+            body += chunk
+            if len(body) >= max_body_bytes:
+                break
+            check_deadline()
+        headers = [
+            (name, value)
+            for name, value in response.headers.multi_items()
+            if name.lower() not in _WIRE_ENCODING_HEADERS
+        ]
+        return httpx.Response(
+            response.status_code,
+            headers=headers,
+            content=bytes(body[:max_body_bytes]),
+            request=response.request,
+        )
 
 
 _SENTENCE_END = (".", "!", "?")
@@ -131,8 +196,20 @@ class HttpTransport:
     def close(self) -> None:
         self._client.close()
 
-    def send(self, method: str, path: str, *, timeout: Any = None, **kwargs: Any) -> httpx.Response:
-        """Raw send with connection-error wrapping; no auth header, no retry."""
+    def send(
+        self,
+        method: str,
+        path: str,
+        *,
+        timeout: Any = None,
+        deadline_seconds: float | None = None,
+        **kwargs: Any,
+    ) -> httpx.Response:
+        """Raw send with connection-error wrapping; no auth header, no retry.
+
+        ``deadline_seconds`` also limits the whole response (see
+        :func:`request_within_deadline`); ``None`` keeps httpx's per-phase timeouts.
+        """
 
         # Only forward an explicit per-request timeout; passing timeout=None to
         # httpx would disable the timeout rather than use the client default.
@@ -141,7 +218,11 @@ class HttpTransport:
         trace = ConnectionTrace(self._base_url)
         kwargs["extensions"] = {"trace": trace}
         try:
-            return self._client.request(method, path, **kwargs)
+            if deadline_seconds is None:
+                return self._client.request(method, path, **kwargs)
+            return request_within_deadline(
+                self._client, method, path, deadline_seconds=deadline_seconds, **kwargs
+            )
         except httpx.HTTPError as exc:
             diagnostic = trace.diagnose(exc)
             wrapped = self._auth.wrap_transport_error(method, path, exc)
@@ -165,6 +246,7 @@ class HttpTransport:
         retry_on_unauthorized: bool = True,
         preserve_json_nulls: bool = False,
         timeout: Any = None,
+        deadline_seconds: float | None = None,
     ) -> httpx.Response:
         """Send with the surface header + bearer auth and a single 401 retry.
 
@@ -185,6 +267,7 @@ class HttpTransport:
             files=files,
             headers=headers,
             timeout=timeout,
+            deadline_seconds=deadline_seconds,
         )
         if response.status_code == 401 and authenticated and retry_on_unauthorized:
             headers["Authorization"] = f"Bearer {self._auth.refresh_bearer(response)}"
@@ -197,6 +280,7 @@ class HttpTransport:
                 files=files,
                 headers=headers,
                 timeout=timeout,
+                deadline_seconds=deadline_seconds,
             )
         return response
 

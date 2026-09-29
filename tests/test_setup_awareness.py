@@ -785,12 +785,14 @@ def test_status_compares_the_release_the_health_probe_reads(
         lambda: setup_helpers.ReleaseIdentity(version="0.4.0", revision="a" * 40),
     )
 
-    def get(_self, _url, **_kwargs):
+    def send(_self, request, **_kwargs):
         return httpx.Response(
-            200, json={"app": {"version": "0.5.0", "source_revision": SERVER_REVISION}}
+            200,
+            json={"app": {"version": "0.5.0", "source_revision": SERVER_REVISION}},
+            request=request,
         )
 
-    monkeypatch.setattr(httpx.Client, "get", get)
+    monkeypatch.setattr(httpx.Client, "send", send)
 
     payload = setup_helpers.setup_status(repo)
 

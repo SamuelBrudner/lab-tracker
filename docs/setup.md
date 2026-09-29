@@ -201,8 +201,13 @@ commits are not consumer-relevant.
   comparison built from its existing `/health` probe (`status`,
   `client_behind_server`, `update_recommended`), and suggests the update only
   when one is recommended, so the SessionStart hook's `--brief` line names it.
-- `lt-mcp` over stdio makes one unauthenticated `GET /health` at startup
-  (2-second timeout, advisory only: any failure leaves the session unchanged).
+  The probe has 2-second connect and read timeouts and a 4-second limit on
+  receiving the whole response, so a server that sends its headers and then
+  trickles the body cannot hold the hook open.
+- `lt-mcp` over stdio makes one unauthenticated `GET /health` at startup with
+  the same 2-second timeouts and 4-second response limit. It is advisory only:
+  any failure, including one while building the HTTP client, is written to
+  stderr and leaves the session unchanged.
   When an update is recommended, the MCP `instructions` start with an
   `UPDATE AVAILABLE` notice and every tool result carries the same notice in
   `_lab_tracker_update_notice`. A hosted endpoint skips the check; it ships

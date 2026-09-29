@@ -106,6 +106,7 @@ from lab_tracker.mcp_tools.write import (
     lab_tracker_update_goal,
     lab_tracker_upload_visualization_file,
 )
+from lab_tracker_client.transport import HEALTH_PROBE_DEADLINE_SECONDS
 
 MCPTransport = Literal["stdio", "streamable-http"]
 _VALID_TRANSPORTS: set[str] = {"stdio", "streamable-http"}
@@ -320,7 +321,7 @@ def _probe_server_release(api_settings: MCPSettings) -> ReleaseIdentity:
         replace(api_settings, timeout_seconds=_RELEASE_PROBE_TIMEOUT_SECONDS)
     )
     try:
-        return release_from_health(probe.health())
+        return release_from_health(probe.health(deadline_seconds=HEALTH_PROBE_DEADLINE_SECONDS))
     finally:
         probe.close()
 

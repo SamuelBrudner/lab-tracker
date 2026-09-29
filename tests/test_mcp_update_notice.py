@@ -15,6 +15,7 @@ from lab_tracker.decision_context_constants import MCP_SERVER_INSTRUCTIONS
 from lab_tracker.mcp_api_client import LabTrackerAPIUnavailableError, MCPSettings
 from lab_tracker.mcp_tools import read as read_tools
 from lab_tracker.mcp_tools import register_read_tools, register_write_tools
+from lab_tracker_client.transport import HEALTH_PROBE_DEADLINE_SECONDS
 
 SERVER_REVISION = "b" * 40
 NOTICE = "UPDATE AVAILABLE: test notice"
@@ -99,12 +100,14 @@ def test_update_notice_keeps_the_registered_tool_contract() -> None:
 
 class _HealthProbe:
     seen_timeouts: list[float] = []
+    seen_deadlines: list[float | None] = []
 
     def __init__(self, settings: MCPSettings, health: Any) -> None:
         self._health = health
         _HealthProbe.seen_timeouts.append(settings.timeout_seconds)
 
-    def health(self) -> dict[str, Any]:
+    def health(self, *, deadline_seconds: float | None = None) -> dict[str, Any]:
+        _HealthProbe.seen_deadlines.append(deadline_seconds)
         if isinstance(self._health, Exception):
             raise self._health
         return self._health
@@ -140,8 +143,10 @@ def test_probe_names_both_releases_and_the_pinned_update(monkeypatch) -> None:
     assert "server runs release 0.2.0" in notice
     assert "Tell the person" in notice
     assert f"lab-tracker.git@{SERVER_REVISION}" in notice
-    # Bounded well below the API client's ordinary request timeout.
+    # Bounded well below the API client's ordinary request timeout, and the
+    # whole response by one shared wall-clock deadline.
     assert _HealthProbe.seen_timeouts[-1] == 2.0
+    assert _HealthProbe.seen_deadlines[-1] == HEALTH_PROBE_DEADLINE_SECONDS
 
 
 @pytest.mark.parametrize(

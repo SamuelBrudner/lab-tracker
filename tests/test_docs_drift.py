@@ -16,13 +16,14 @@ from pathlib import Path
 import pytest
 from read_opacity_inventory import READ_OPACITY_VARIANTS_BY_SUITE
 
-from lab_tracker import graph_drafting
+from lab_tracker import graph_drafting, mcp_server
 from lab_tracker.cli import update_consumer_repo
 from lab_tracker.decision_context_constants import AGENT_CONSULTATION_POLICY
 from lab_tracker.mcp_tools import READ_TOOLS, WRITE_TOOLS
 from lab_tracker_client import cli as lt_cli
 from lab_tracker_client import setup as setup_helpers
 from lab_tracker_client.auth import auth_doctor
+from lab_tracker_client.transport import HEALTH_PROBE_DEADLINE_SECONDS
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _DOCS = _REPO_ROOT / "docs"
@@ -224,6 +225,16 @@ def test_lt_update_docs_describe_the_skills_only_refresh(doc: Path) -> None:
 def test_setup_doc_states_the_lt_mcp_smoke_check_limit() -> None:
     text = " ".join(_read(_DOCS / "setup.md").split())
     assert f"{setup_helpers._MCP_IMPORT_TIMEOUT_SECONDS:g}-second limit" in text
+
+
+# Both advisory /health probes share the per-phase timeout and the response
+# deadline that the release-awareness prose states.
+def test_setup_doc_states_the_health_probe_bounds() -> None:
+    text = " ".join(_read(_DOCS / "setup.md").split())
+    timeout = setup_helpers._HEALTH_PROBE_TIMEOUT_SECONDS
+    assert timeout == mcp_server._RELEASE_PROBE_TIMEOUT_SECONDS
+    assert f"{timeout:g}-second connect and read timeouts" in text
+    assert f"{HEALTH_PROBE_DEADLINE_SECONDS:g}-second limit on receiving the whole response" in text
 
 
 def test_lt_doctor_help_names_the_lt_mcp_check() -> None:

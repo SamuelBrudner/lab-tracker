@@ -54,6 +54,7 @@ from lab_tracker_client.connection_diagnostics import ConnectionTrace
 from lab_tracker_client.hooks import HOOK_BLOCK_BEGIN, hook_lt_path, hook_path_for_repo
 from lab_tracker_client.redaction import redact_capture_text
 from lab_tracker_client.repo import HOOK_BEGIN_MARKER as REPO_HOOK_BLOCK_BEGIN
+from lab_tracker_client.transport import HEALTH_PROBE_DEADLINE_SECONDS, request_within_deadline
 
 JsonObject = dict[str, Any]
 
@@ -534,7 +535,13 @@ def probe_health_diagnostics(base_url: str) -> JsonObject:
     try:
         normalized = normalize_instance_base_url(base_url)
         with httpx.Client(timeout=_HEALTH_PROBE_TIMEOUT_SECONDS) as client:
-            response = client.get(normalized + "/health", extensions={"trace": trace})
+            response = request_within_deadline(
+                client,
+                "GET",
+                normalized + "/health",
+                deadline_seconds=HEALTH_PROBE_DEADLINE_SECONDS,
+                extensions={"trace": trace},
+            )
         payload: JsonObject = {"reachable": response.status_code < 500}
         if response.status_code >= 400:
             payload.update(

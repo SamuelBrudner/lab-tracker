@@ -119,11 +119,11 @@ def test_unobserved_timeout_does_not_claim_tls_or_funnel():
 def test_health_http_status_preserves_reachability_contract(monkeypatch, status, reachable):
     calls = []
 
-    def get(_self, url, **kwargs):
-        calls.append(url)
-        return httpx.Response(status)
+    def send(_self, request, **_kwargs):
+        calls.append(str(request.url))
+        return httpx.Response(status, request=request)
 
-    monkeypatch.setattr(httpx.Client, "get", get)
+    monkeypatch.setattr(httpx.Client, "send", send)
     result = setup.probe_health_diagnostics("https://origin.ts.net")
     assert result["reachable"] is reachable
     assert calls == ["https://origin.ts.net/health"]
@@ -136,12 +136,14 @@ def test_health_http_status_preserves_reachability_contract(monkeypatch, status,
 
 
 def test_health_probe_reports_the_server_release(monkeypatch):
-    def get(_self, _url, **_kwargs):
+    def send(_self, request, **_kwargs):
         return httpx.Response(
-            200, json={"status": "ok", "app": {"version": "0.9.0", "source_revision": "B" * 40}}
+            200,
+            json={"status": "ok", "app": {"version": "0.9.0", "source_revision": "B" * 40}},
+            request=request,
         )
 
-    monkeypatch.setattr(httpx.Client, "get", get)
+    monkeypatch.setattr(httpx.Client, "send", send)
 
     result = setup.probe_health_diagnostics("https://origin.ts.net")
 
@@ -149,10 +151,10 @@ def test_health_probe_reports_the_server_release(monkeypatch):
 
 
 def test_health_probe_without_a_json_body_stays_reachable_without_a_release(monkeypatch):
-    def get(_self, _url, **_kwargs):
-        return httpx.Response(200, text="<html>ok</html>")
+    def send(_self, request, **_kwargs):
+        return httpx.Response(200, text="<html>ok</html>", request=request)
 
-    monkeypatch.setattr(httpx.Client, "get", get)
+    monkeypatch.setattr(httpx.Client, "send", send)
 
     result = setup.probe_health_diagnostics("https://origin.ts.net")
 
@@ -234,7 +236,11 @@ def test_setup_connect_reports_actual_tls_stall(monkeypatch, tmp_path, capsys):
 def test_setup_connect_reports_health_http_status(
     monkeypatch, tmp_path, capsys, status, reachable
 ):
-    monkeypatch.setattr(httpx.Client, "get", lambda _self, _url, **_kwargs: httpx.Response(status))
+    monkeypatch.setattr(
+        httpx.Client,
+        "send",
+        lambda _self, request, **_kwargs: httpx.Response(status, request=request),
+    )
     payload, _ = _setup_connect_dry_run(monkeypatch, tmp_path, capsys, "https://origin.ts.net")
     assert payload["server_reachable"] is reachable
     if status < 400:
@@ -251,14 +257,14 @@ def test_setup_connect_reports_health_http_status(
 def test_setup_connect_funnel_guidance_only_for_an_observed_tls_stall(
     monkeypatch, tmp_path, capsys, failed_event
 ):
-    def get(_self, _url, *, extensions, **_kwargs):
-        trace = extensions["trace"]
+    def send(_self, request, **_kwargs):
+        trace = request.extensions["trace"]
         if failed_event == "start_tls":
             trace("connection.start_tls.started", {"server_hostname": b"origin.ts.net"})
         trace(f"connection.{failed_event}.failed", {})
         raise httpx.ConnectTimeout("secret handshake detail")
 
-    monkeypatch.setattr(httpx.Client, "get", get)
+    monkeypatch.setattr(httpx.Client, "send", send)
     payload, _ = _setup_connect_dry_run(monkeypatch, tmp_path, capsys, "https://origin.ts.net")
     assert payload["server_reachable"] is False
     diagnostic = payload["server_diagnostic"]
@@ -273,10 +279,10 @@ def test_setup_connect_funnel_guidance_only_for_an_observed_tls_stall(
 
 
 def test_setup_connect_without_a_base_url_does_not_probe(monkeypatch, tmp_path, capsys):
-    def get(_self, _url, **_kwargs):
+    def send(_self, _request, **_kwargs):
         raise AssertionError("no --base-url, so no health probe")
 
-    monkeypatch.setattr(httpx.Client, "get", get)
+    monkeypatch.setattr(httpx.Client, "send", send)
     monkeypatch.setenv("LAB_TRACKER_CONFIG_DIR", str(tmp_path / "lt-home"))
     lt_cli.main(["setup", "connect", "--project", "p-1", "--dry-run"])
     payload = json.loads(capsys.readouterr().out)
