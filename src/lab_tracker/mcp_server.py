@@ -118,9 +118,9 @@ ALLOWED_ORIGINS_ENV = "LAB_TRACKER_MCP_ALLOWED_ORIGINS"
 # tool's own shape.
 UPDATE_NOTICE_KEY = "_lab_tracker_update_notice"
 _RELEASE_PROBE_TIMEOUT_SECONDS = 2.0
-# Longest reason the skipped update check writes to stderr, so a hostile or
+# Longest reason a skipped startup check writes to stderr, so a hostile or
 # verbose failure cannot flood the MCP host's log.
-_UPDATE_CHECK_REASON_LIMIT = 300
+_STARTUP_REASON_LIMIT = 300
 _TRUE_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
 _FALSE_ENV_VALUES = frozenset({"", "0", "false", "no", "off"})
 _ALLOWED_HOST_PATTERN = (
@@ -327,15 +327,21 @@ def _probe_server_release(api_settings: MCPSettings) -> ReleaseIdentity:
 
 
 def _warn_update_check_skipped(exc: Exception) -> None:
-    reason = " ".join(redact_auth_secrets(f"{type(exc).__name__}: {exc}").split())
-    if len(reason) > _UPDATE_CHECK_REASON_LIMIT:
-        reason = reason[: _UPDATE_CHECK_REASON_LIMIT - 3] + "..."
     print(
         "NOTICE: could not check whether this Lab Tracker MCP client is behind its "
-        f"server ({reason}); starting without the update check.",
+        f"server ({_one_line_reason(exc)}); starting without the update check.",
         file=sys.stderr,
         flush=True,
     )
+
+
+def _one_line_reason(exc: Exception) -> str:
+    """``Type: message`` on one redacted line of at most ``_STARTUP_REASON_LIMIT`` characters."""
+
+    reason = " ".join(redact_auth_secrets(f"{type(exc).__name__}: {exc}").split())
+    if len(reason) > _STARTUP_REASON_LIMIT:
+        reason = reason[: _STARTUP_REASON_LIMIT - 3] + "..."
+    return reason
 
 
 def build_server(
@@ -456,13 +462,21 @@ def _ensure_mcp_target_safe(
     Hosted (streamable-http) servers always probe and fail closed: they boot only
     once ``/readiness`` confirms ``auth.enabled``. Local stdio servers skip
     loopback targets and, for remote targets, stay fail-soft on probe errors (a
-    local agent proceeds without graph context) but warn loudly on stderr.
+    local agent proceeds without graph context) but warn loudly on stderr. That
+    includes a client that cannot be built at all, which httpx does when the
+    proxy variables name a SOCKS proxy and ``socksio`` is not installed.
     """
 
     settings = settings or MCPSettings.from_env()
     if not hosted and _is_loopback_url(settings.base_url):
         return
-    client = LabTrackerAPIClient(settings)
+    try:
+        client = LabTrackerAPIClient(settings)
+    except Exception as exc:  # noqa: BLE001 - stdio stays fail-soft, hosted re-raises.
+        if hosted:
+            raise
+        _warn_startup_probe_could_not_run(settings, exc)
+        return
     try:
         payload = client.readiness()
     except LabTrackerAPIError as exc:
@@ -547,6 +561,18 @@ def _warn_startup_target_probe_failed(
         "server is starting anyway; tools will report Lab Tracker as unavailable "
         "until the API answers. Relaunch the MCP server once the API is reachable so "
         "the probe can run.",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def _warn_startup_probe_could_not_run(settings: MCPSettings, exc: Exception) -> None:
+    print(
+        "WARNING: Lab Tracker MCP startup safety probe could not run against "
+        f"{settings.base_url} ({_one_line_reason(exc)}), so it could not confirm that the "
+        "API enforces authentication. The server is starting anyway, but tool calls "
+        "that need the API are likely to fail the same way until this is fixed. Relaunch "
+        "the MCP server after fixing it so the probe can run.",
         file=sys.stderr,
         flush=True,
     )

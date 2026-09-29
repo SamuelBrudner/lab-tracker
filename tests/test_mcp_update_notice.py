@@ -241,6 +241,66 @@ def test_main_starts_the_server_when_the_update_check_cannot_run_for_a_loopback_
     assert "socksio" in capsys.readouterr().err
 
 
+class _RecordingServer:
+    def __init__(self, events: list[tuple[str, ...]]) -> None:
+        self._events = events
+
+    def run(self, *, transport: str) -> None:
+        self._events.append(("run", transport))
+
+
+def _stub_server_build(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, ...]]:
+    events: list[tuple[str, ...]] = []
+
+    def fake_build(settings=None, *, client_update_notice=None):
+        events.append(("build", settings.transport, str(client_update_notice)))
+        return _RecordingServer(events)
+
+    monkeypatch.setattr(mcp_server, "build_server", fake_build)
+    return events
+
+
+def _remote_stdio_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LAB_TRACKER_MCP_TRANSPORT", "stdio")
+    monkeypatch.delenv("LAB_TRACKER_MCP_BASE_URL", raising=False)
+    monkeypatch.setenv("LAB_TRACKER_BASE_URL", "http://lab.example.test")
+
+
+def test_main_starts_the_server_when_no_client_can_be_built_for_a_remote_target(
+    monkeypatch, capsys
+) -> None:
+    # A remote target runs the real target-safety gate, which builds its own
+    # client before the update check does; both must stay advisory.
+    def unbuildable(_settings: MCPSettings) -> None:
+        raise ImportError(SOCKS_WITHOUT_SOCKSIO)
+
+    _remote_stdio_env(monkeypatch)
+    monkeypatch.setattr(mcp_server, "LabTrackerAPIClient", unbuildable)
+    events = _stub_server_build(monkeypatch)
+
+    mcp_server.main()
+
+    assert events == [("build", "stdio", "None"), ("run", "stdio")]
+    err = capsys.readouterr().err
+    assert "startup safety probe could not run" in err
+    assert "could not check whether this Lab Tracker MCP client is behind its server" in err
+
+
+def test_main_starts_the_server_under_a_socks_proxy_setting(monkeypatch, capsys) -> None:
+    # The real repro: with ALL_PROXY=socks5://... and no socksio installed, httpx
+    # raised ImportError out of lt-mcp's startup for every remote API target.
+    for name in ("NO_PROXY", "no_proxy", "HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ALL_PROXY", "socks5://127.0.0.1:9")
+    _remote_stdio_env(monkeypatch)
+    events = _stub_server_build(monkeypatch)
+
+    mcp_server.main()
+
+    assert events == [("build", "stdio", "None"), ("run", "stdio")]
+    assert "WARNING" in capsys.readouterr().err
+
+
 def test_main_passes_the_stdio_notice_to_the_server_and_stderr(monkeypatch, capsys) -> None:
     events: list[tuple[str, ...]] = []
 
