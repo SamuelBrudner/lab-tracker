@@ -252,15 +252,20 @@ a project contributor (or viewer for read-only use).
 | `CLAUDE.md`, `AGENTS.md`, `GEMINI.md` (managed block) | Claude Code, Codex CLI and other AGENTS.md readers, Gemini CLI — the same consultation-policy block in each |
 | `.claude/settings.json` | Claude Code hooks (`lt setup status` on session start, `lt prime` before research-facing prompts; the opt-in `lt setup agent-hooks` entries go in the personal `.claude/settings.local.json` unless `--shared`) |
 | `AGENTS.lt.md`, `scripts/lt.py`, `lt_ids.json` | Agent-readable integration notes, the client shim, and the project-id mapping (`lt project bind` fills it) |
+| `.cursor/rules/lab-tracker.mdc` (only with `--yes`) | Cursor (the managed code-conventions block that `--yes` also adds to `CLAUDE.md` and `AGENTS.md`) |
 
 ### Choose your client
 
 Registration is per client, and each client reads a different file.
-`lt setup init` writes only the repository files in the table above, and the
-`.mcp.json` it writes carries no token. That covers Claude Code. It never edits
-an application's own settings, so Claude Desktop chat and both Codex products
-are registered by hand, once per machine. Follow only the section for the client
-you use; the steps for another client do not apply to it.
+`lt setup init` writes the repository files in the table above, and the
+`.mcp.json` it writes carries no token. That covers Claude Code. With
+`--install-skills` it also writes the generated setup skill into the user-level
+Claude and Codex skill homes (`~/.claude/skills` and `~/.agents/skills`), and it
+records the repository in `~/.lab-tracker/applied-repos.json`. It never writes a
+client's own MCP registration file (`claude_desktop_config.json`,
+`~/.codex/config.toml`, or `~/.claude.json`), so Claude Desktop chat and both
+Codex products are registered by hand, once per machine. Follow only the section
+for the client you use; the steps for another client do not apply to it.
 
 | Client | Registered through | Written by `lt setup init` |
 | --- | --- | --- |
@@ -324,9 +329,12 @@ lt setup init --install-skills --dry-run
 lt setup init --install-skills --yes
 ```
 
-The dry run previews the files and `--yes` writes them. Among them is `.mcp.json`,
-whose `lab-tracker` server runs `lt-mcp` with only `LAB_TRACKER_BASE_URL` in its
-environment and no token. Open `claude` in that repository and approve the server
+The dry run previews the files; running without `--dry-run` writes them, and
+`--yes` additionally consents to the managed code-conventions blocks in
+`CLAUDE.md`, `AGENTS.md`, and `.cursor/rules/lab-tracker.mdc`. Among the files
+written is `.mcp.json`, whose `lab-tracker` server runs `lt-mcp` with only
+`LAB_TRACKER_BASE_URL` in its environment and no token. Open `claude` in that
+repository and approve the server
 when prompted. Claude Code asks for approval in an interactive session before it
 uses a project-scoped `.mcp.json` server, and a cloned repository cannot approve
 its own servers. Until you approve it, `claude mcp list` shows the server as

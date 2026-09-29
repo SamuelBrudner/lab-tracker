@@ -23,13 +23,14 @@ except ModuleNotFoundError:  # pragma: no cover - exercised by Python 3.10 CI
     import tomli as tomllib
 
 from lab_tracker import graph_drafting, mcp_server
-from lab_tracker.cli import update_consumer_repo
+from lab_tracker.cli import _skills_homes, init_consumer_repo, update_consumer_repo
 from lab_tracker.decision_context_constants import AGENT_CONSULTATION_POLICY
 from lab_tracker.mcp_tools import READ_TOOLS, WRITE_TOOLS
 from lab_tracker_client import cli as lt_cli
 from lab_tracker_client import setup as setup_helpers
 from lab_tracker_client.auth import auth_doctor
 from lab_tracker_client.client import LabTracker
+from lab_tracker_client.registry import registry_path
 from lab_tracker_client.transport import HEALTH_PROBE_DEADLINE_SECONDS
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -423,6 +424,11 @@ _CLAUDE_DESKTOP_SUPPORT_STATUS = (
     "Claude Desktop chat is supported by manual registration only: "
     "`lt` never writes `claude_desktop_config.json`."
 )
+_INIT_WRITES_SENTENCE = (
+    "The dry run previews the files; running without `--dry-run` writes them, and "
+    "`--yes` additionally consents to the managed code-conventions blocks in "
+    "`CLAUDE.md`, `AGENTS.md`, and `.cursor/rules/lab-tracker.mdc`."
+)
 
 
 def _client_matrix() -> str:
@@ -450,6 +456,49 @@ def test_agent_setup_states_the_claude_desktop_support_status() -> None:
     sections = _client_sections()
     desktop = next(body for name, body in sections.items() if name.startswith("Claude Desktop"))
     assert _CLAUDE_DESKTOP_SUPPORT_STATUS in _collapsed_whitespace(desktop)
+
+
+def test_scaffold_files_are_written_without_yes_and_the_docs_say_so(tmp_path: Path) -> None:
+    def created(root: Path, **options: bool) -> set[str]:
+        result = init_consumer_repo(root, **options)
+        return {path.relative_to(root).as_posix() for path in result.created}
+
+    plain = created((tmp_path / "plain").resolve())
+    consenting = created((tmp_path / "consenting").resolve(), yes=True)
+    # `--yes` is not what writes the scaffold: it only adds the conventions blocks,
+    # and `.cursor/rules/lab-tracker.mdc` is the file that only exists because of it.
+    assert ".mcp.json" in plain
+    assert ".cursor/rules/lab-tracker.mdc" not in plain
+    assert ".cursor/rules/lab-tracker.mdc" in consenting
+    sections = _client_sections()
+    claude_code = next(body for name, body in sections.items() if name.startswith("Claude Code"))
+    prose = _collapsed_whitespace(claude_code)
+    assert _INIT_WRITES_SENTENCE in prose
+    assert "`--yes` writes" not in prose
+
+
+def test_client_matrix_names_the_user_level_files_init_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("LAB_TRACKER_SKILLS_HOME", raising=False)
+    monkeypatch.delenv("LAB_TRACKER_CONFIG_DIR", raising=False)
+    monkeypatch.setattr(Path, "home", classmethod(lambda _path_cls: tmp_path))
+    user_level = [
+        f"~/{path.relative_to(tmp_path).as_posix()}"
+        for path in [home for _name, home in _skills_homes()] + [registry_path()]
+    ]
+    assert user_level == [
+        "~/.claude/skills",
+        "~/.agents/skills",
+        "~/.lab-tracker/applied-repos.json",
+    ]
+    intro = _collapsed_whitespace(_client_matrix().split("\n#### ", 1)[0])
+    # `--install-skills` and the applied-repos registry write outside the repository,
+    # so the intro must not claim that init writes only the repository files.
+    for location in user_level:
+        assert location in intro, location
+    assert "writes only the repository files" not in intro
+    assert "never writes a client's own MCP registration file" in intro
 
 
 def test_every_client_section_gives_the_three_part_verification() -> None:
