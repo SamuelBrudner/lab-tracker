@@ -86,7 +86,9 @@ try:
     importlib.import_module(sys.argv[1])
 except BaseException as exc:  # SystemExit and KeyboardInterrupt are import failures too.
     traceback.print_exc()
-    print(" ".join(f"{type(exc).__name__}: {exc}".split()))
+    # ASCII only, so a message no stdout encoding can write cannot lose the line.
+    line = " ".join(f"{type(exc).__name__}: {exc}".split())
+    print(line.encode("ascii", "backslashreplace").decode("ascii"))
     sys.exit(int(sys.argv[2]))
 """
 _MCP_IMPORT_FAILED_NEXT_STEP = (

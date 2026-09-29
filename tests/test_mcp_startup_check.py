@@ -21,8 +21,9 @@ from lab_tracker_client import cli as lt_cli
 from lab_tracker_client import setup as setup_helpers
 
 FAKE_MODULE = "fake_lt_mcp_server"
-# Short enough to keep a hang test fast; only the hang tests wait for it.
-HANG_TIMEOUT_SECONDS = 0.5
+# Long enough for a loaded machine to start the child before it is killed; only
+# the hang tests wait for it.
+HANG_TIMEOUT_SECONDS = 2.0
 # A hung import must give up near its timeout, never wait for the module.
 HANG_ELAPSED_LIMIT_SECONDS = 20.0
 
@@ -94,6 +95,16 @@ def test_a_multi_line_import_error_stays_one_line(monkeypatch, tmp_path) -> None
     payload = setup_helpers.mcp_startup_check()
 
     assert payload["error"] == "ImportError: C-extensions failed. Rebuild them. See the docs."
+
+
+def test_a_non_ascii_import_error_survives_any_stdout_encoding(monkeypatch, tmp_path) -> None:
+    _use_module(monkeypatch, tmp_path, "raise ImportError('caf\\u00e9 \\u4e2d missing')\n")
+    monkeypatch.setenv("PYTHONIOENCODING", "ascii")
+
+    payload = setup_helpers.mcp_startup_check()
+
+    assert payload["importable"] is False
+    assert payload["error"] == "ImportError: caf\\xe9 \\u4e2d missing"
 
 
 @pytest.mark.parametrize(

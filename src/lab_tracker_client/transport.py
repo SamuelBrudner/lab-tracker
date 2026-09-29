@@ -43,7 +43,7 @@ MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 # The advisory /health probes (`lt setup status`, the `lt-mcp` startup check) must
 # not hold a session. httpx timeouts apply to each connect, write, and read on its
 # own, so a server that answers and then trickles its body a byte at a time never
-# trips them; this is the wall-clock limit on receiving the whole response.
+# trips them; this is the wall-clock limit checked as the response arrives.
 HEALTH_PROBE_DEADLINE_SECONDS = 4.0
 # /health answers with a small JSON document; anything larger is cut, not read.
 HEALTH_PROBE_MAX_BODY_BYTES = 64 * 1024
