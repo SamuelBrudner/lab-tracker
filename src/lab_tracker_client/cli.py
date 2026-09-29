@@ -62,6 +62,8 @@ from lab_tracker_client.hpc import sync_outbox_path as hpc_sync_outbox_path
 JsonObject = dict[str, Any]
 # Every adapter outbox under <repo>/.lab-tracker/outbox, in reporting order.
 OUTBOX_ADAPTERS = ("watch", "repo", "hpc")
+# Probe fields `lt setup connect` surfaces as `server_diagnostic`.
+_SERVER_DIAGNOSTIC_KEYS = ("diagnosis", "detail", "next_step", "status_code")
 SKIP_NOTICE = (
     "lab-tracker: skipped commit {sha} ({reason}); {total} commit(s) skipped in this "
     "repo so far. 'lt outbox status' shows the count; 'lt repo report --force-capture' "
@@ -1645,8 +1647,20 @@ def _cmd_setup_connect(args: argparse.Namespace) -> Any:
     except setup_helpers.ConnectionProfileSecurityError as exc:
         raise SystemExit(str(exc)) from None
     if args.base_url:
-        payload["server_reachable"] = setup_helpers.probe_health(args.base_url)
+        payload.update(_server_probe_fields(args.base_url))
     return payload
+
+
+def _server_probe_fields(base_url: str) -> JsonObject:
+    """`server_reachable` plus, only when the probe explains a failure, `server_diagnostic`."""
+
+    probe = setup_helpers.probe_health_diagnostics(base_url)
+    fields: JsonObject = {"server_reachable": probe["reachable"]}
+    if "diagnosis" in probe:
+        fields["server_diagnostic"] = {
+            key: probe[key] for key in _SERVER_DIAGNOSTIC_KEYS if key in probe
+        }
+    return fields
 
 
 def _cmd_setup_verify_client(args: argparse.Namespace) -> Any:

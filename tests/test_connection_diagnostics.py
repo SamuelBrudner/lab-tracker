@@ -1,5 +1,6 @@
 """Failure stages use observed connections, not assumptions about tailnets."""
 
+import json
 import socket
 import ssl
 import threading
@@ -11,6 +12,7 @@ import pytest
 from lab_tracker.mcp_api_client import LabTrackerAPIClient, MCPSettings
 from lab_tracker.mcp_tools import read
 from lab_tracker_client import LabTracker, LTAPIError, setup
+from lab_tracker_client import cli as lt_cli
 from lab_tracker_client.connection_diagnostics import ConnectionTrace
 
 
@@ -187,3 +189,83 @@ def test_read_timeout_is_not_reported_as_tls_stall():
     result = ConnectionTrace("https://origin.ts.net").diagnose(httpx.ReadTimeout(""))
     assert result["diagnosis"] == "http_response_timeout"
     assert "Funnel" not in str(result)
+
+
+def _setup_connect_dry_run(monkeypatch, tmp_path, capsys, base_url):
+    """Run ``lt setup connect --dry-run`` and return (payload, config dir)."""
+    config_dir = tmp_path / "lt-home"
+    monkeypatch.setenv("LAB_TRACKER_CONFIG_DIR", str(config_dir))
+    lt_cli.main(["setup", "connect", "--base-url", base_url, "--dry-run"])
+    return json.loads(capsys.readouterr().out), config_dir
+
+
+def test_setup_connect_reports_actual_tls_stall(monkeypatch, tmp_path, capsys):
+    # NO_PROXY keeps the loopback probe off any sandbox/CI proxy.
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1")
+    monkeypatch.setattr(setup, "_HEALTH_PROBE_TIMEOUT_SECONDS", 0.1)
+    with stalled_tls_server() as url:
+        payload, config_dir = _setup_connect_dry_run(monkeypatch, tmp_path, capsys, url)
+    assert payload["command"] == "setup-connect"
+    assert payload["server_reachable"] is False
+    diagnostic = payload["server_diagnostic"]
+    assert diagnostic["diagnosis"] == "tls_handshake_stalled"
+    assert "TLS handshake did not complete" in diagnostic["detail"]
+    assert diagnostic["next_step"]
+    assert "status_code" not in diagnostic
+    assert "Funnel" not in json.dumps(diagnostic)  # 127.0.0.1 is not a .ts.net name
+    assert not config_dir.exists()
+
+
+@pytest.mark.parametrize("status,reachable", [(200, True), (401, True), (503, False)])
+def test_setup_connect_reports_health_http_status(
+    monkeypatch, tmp_path, capsys, status, reachable
+):
+    monkeypatch.setattr(httpx.Client, "get", lambda _self, _url, **_kwargs: httpx.Response(status))
+    payload, _ = _setup_connect_dry_run(monkeypatch, tmp_path, capsys, "https://origin.ts.net")
+    assert payload["server_reachable"] is reachable
+    if status < 400:
+        assert "server_diagnostic" not in payload
+    else:
+        diagnostic = payload["server_diagnostic"]
+        assert diagnostic["diagnosis"] == "http_error"
+        assert diagnostic["status_code"] == status
+        assert set(diagnostic) == {"diagnosis", "detail", "next_step", "status_code"}
+        assert "Funnel" not in json.dumps(diagnostic)
+
+
+@pytest.mark.parametrize("failed_event", ["start_tls", "connect_tcp"])
+def test_setup_connect_funnel_guidance_only_for_an_observed_tls_stall(
+    monkeypatch, tmp_path, capsys, failed_event
+):
+    def get(_self, _url, *, extensions, **_kwargs):
+        trace = extensions["trace"]
+        if failed_event == "start_tls":
+            trace("connection.start_tls.started", {"server_hostname": b"origin.ts.net"})
+        trace(f"connection.{failed_event}.failed", {})
+        raise httpx.ConnectTimeout("secret handshake detail")
+
+    monkeypatch.setattr(httpx.Client, "get", get)
+    payload, _ = _setup_connect_dry_run(monkeypatch, tmp_path, capsys, "https://origin.ts.net")
+    assert payload["server_reachable"] is False
+    diagnostic = payload["server_diagnostic"]
+    assert "secret" not in json.dumps(payload)
+    if failed_event == "start_tls":
+        assert diagnostic["diagnosis"] == "tls_handshake_stalled"
+        assert "cannot confirm" in diagnostic["detail"]
+        assert "tailscale funnel status" in diagnostic["next_step"]
+    else:
+        assert diagnostic["diagnosis"] == "tcp_connection_failed"
+        assert "Funnel" not in json.dumps(diagnostic)
+
+
+def test_setup_connect_without_a_base_url_does_not_probe(monkeypatch, tmp_path, capsys):
+    def get(_self, _url, **_kwargs):
+        raise AssertionError("no --base-url, so no health probe")
+
+    monkeypatch.setattr(httpx.Client, "get", get)
+    monkeypatch.setenv("LAB_TRACKER_CONFIG_DIR", str(tmp_path / "lt-home"))
+    lt_cli.main(["setup", "connect", "--project", "p-1", "--dry-run"])
+    payload = json.loads(capsys.readouterr().out)
+    assert "server_reachable" not in payload
+    assert "server_diagnostic" not in payload
+
