@@ -441,7 +441,11 @@ function OnboardingPage({
               />
               <p className="subtle">
                 {clientSetup.mcpVerifyNote}{" "}
-                <a href={clientSetup.clientDocsUrl}>
+                <a
+                  href={clientSetup.clientDocsUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
                   {clientSetup.clientDocsLabel}
                 </a>
                 .

@@ -199,7 +199,15 @@ function ClientMcpGuide({ clientSetup, copyText }) {
       })}
       <p className="subtle">
         {clientSetup.mcpVerifyNote}{" "}
-        <a href={clientSetup.clientDocsUrl}>{clientSetup.clientDocsLabel}</a>.
+        {/* A new tab: this page holds the once-shown token only in its state. */}
+        <a
+          href={clientSetup.clientDocsUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          {clientSetup.clientDocsLabel}
+        </a>
+        .
       </p>
     </>
   );

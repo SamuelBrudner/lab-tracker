@@ -31,6 +31,10 @@ function expectPerClientGuidance() {
   );
   expect(docsLinks).toHaveLength(1);
   expect(docsLinks[0]).toHaveAttribute("href", CLIENT_DOCS_URL);
+  // The issued token lives only in this page's state, so the docs link must open a
+  // new tab: following it in this one would discard the once-shown secret.
+  expect(docsLinks[0]).toHaveAttribute("target", "_blank");
+  expect(docsLinks[0]).toHaveAttribute("rel", "noopener noreferrer");
 }
 const PROJECT = {
   name: "Deerhake lab",

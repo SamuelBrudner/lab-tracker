@@ -307,10 +307,14 @@ describe("OnboardingPage", () => {
     expect(clientText).toContain("Codex in the ChatGPT desktop app");
     expect(clientText).toContain("Codex CLI (needs the codex command on your PATH)");
     expect(clientText).toContain("command not found: codex");
-    expect(within(clientStep).getByRole("link", { name: /per-client steps/ })).toHaveAttribute(
+    const docsLink = within(clientStep).getByRole("link", { name: /per-client steps/ });
+    expect(docsLink).toHaveAttribute(
       "href",
       `https://github.com/SamuelBrudner/lab-tracker/blob/${SOURCE_REVISION}/docs/agent-setup.md#choose-your-client`
     );
+    // Same link as the Agents page, which must not navigate the app away.
+    expect(docsLink).toHaveAttribute("target", "_blank");
+    expect(docsLink).toHaveAttribute("rel", "noopener noreferrer");
 
     fireEvent.click(
       screen.getByRole("button", { name: "Create an agent token" })
