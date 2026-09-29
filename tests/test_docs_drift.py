@@ -245,6 +245,12 @@ def test_docs_state_the_health_probe_bounds(doc: Path) -> None:
     deadline = f"{HEALTH_PROBE_DEADLINE_SECONDS:g}-second deadline on the whole response"
     assert deadline in text
     assert "headers included" in text
+    # Neither the deadline nor the connect timeout bounds name resolution, and the
+    # connect timeout applies to each resolved address (verified with a stalled
+    # getaddrinfo and a host with several unreachable addresses), so the docs
+    # must not present the connect timeout as the whole bound on connecting.
+    assert "Getting connected is outside that deadline" in text
+    assert "each address a name resolves to" in text
 
 
 def test_lt_doctor_help_names_the_lt_mcp_check() -> None:
@@ -252,24 +258,8 @@ def test_lt_doctor_help_names_the_lt_mcp_check() -> None:
     assert "code-facing idiom blocks and that lt-mcp can start" in help_text
 
 
-# Only these capture paths record the capturing client's release and install id,
-# so only they can name a stale client (docs/setup.md, capture_client_release).
-_RELEASE_STAMPING_MODULES = {"figure.py", "hpc.py", "repo.py", "watch.py"}
-
-
-def test_only_the_documented_capture_paths_stamp_the_client_release() -> None:
-    client_dir = _REPO_ROOT / "src" / "lab_tracker_client"
-    callers = {
-        path.name
-        for path in client_dir.rglob("*.py")
-        if path.name != "client.py" and "capture_host_metadata(" in _read(path)
-    }
-    assert callers == _RELEASE_STAMPING_MODULES, (
-        "a capture path started or stopped recording the client release; update "
-        "docs/setup.md, docs/retained-v1-surface.md, and capture_client_release.py"
-    )
-
-
+# Which capture paths DO record the release is pinned by behaviour in
+# tests/test_capture_release_stamping.py; this is the other half of that claim.
 def test_notes_made_by_hand_or_import_carry_no_release_or_install_id(tmp_path: Path) -> None:
     stamp_keys = ("capture_install_id", "capture_client_version", "capture_client_revision")
     sent: list[str] = []

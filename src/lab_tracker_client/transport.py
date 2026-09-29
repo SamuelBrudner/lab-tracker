@@ -78,10 +78,11 @@ def request_within_deadline(
     waiting on a server that trickles its headers or body a byte at a time.
     That read notices the close when its next byte or per-phase timeout
     arrives, so the deadline can be overrun by one read, which httpx's own
-    per-phase timeout bounds. Opening the connection is limited only by those
-    per-phase timeouts: the watchdog cannot interrupt a connect in progress.
-    Exceeding the deadline raises :class:`httpx.ReadTimeout`, like any stalled
-    response.
+    per-phase timeout bounds. Getting connected is not covered: the watchdog
+    cannot interrupt name resolution or a connect in progress, resolution has no
+    limit of its own, and httpx's connect timeout applies to each address a name
+    resolves to, not to all of them together. Exceeding the deadline raises
+    :class:`httpx.ReadTimeout`, like any stalled response.
 
     An expired deadline leaves ``client`` closed, so pass one that serves this
     request alone.

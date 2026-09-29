@@ -204,24 +204,35 @@ commits are not consumer-relevant.
   The probe has 2-second connect and read timeouts and a 4-second deadline on
   the whole response, headers included, so a server that trickles its headers
   or its body is cut at the deadline (give or take one read) and cannot hold
-  the hook open. Opening the connection is governed by the connect timeout
-  alone.
+  the hook open. Getting connected is outside that deadline: name resolution
+  takes as long as the system resolver takes, and the connect timeout applies
+  to each address a name resolves to, so a host with several unreachable
+  addresses takes several times the connect timeout to fail.
 - `lt-mcp` over stdio makes one unauthenticated `GET /health` at startup with
-  the same 2-second timeouts and 4-second deadline on the whole response. It is
-  advisory only: any failure, including one while building the HTTP client, is
-  written to stderr and leaves the session unchanged.
+  the same 2-second timeouts and 4-second response deadline, and the same
+  caveat about connecting. It is advisory only: any failure, including one
+  while building the HTTP client, is written to stderr and leaves the session
+  unchanged. The safety probe that `lt-mcp` runs against a remote API target
+  just before it refuses to start only when it confirms that the API has
+  authentication disabled; when it cannot run at all, including because the
+  HTTP client cannot be built (for example `ALL_PROXY=socks5://...` without the
+  optional `socksio` package), that is a stderr warning and the server still
+  starts.
   When an update is recommended, the MCP `instructions` start with an
   `UPDATE AVAILABLE` notice and every tool result carries the same notice in
   `_lab_tracker_update_notice`. A hosted endpoint skips the check; it ships
   with its server.
-- Captures made by `lt watch`, `lt-hpc`, the repo hooks (`lt repo report`), and
-  figure capture always record `capture_client_version` (`0.0.0+unknown` when
-  the client cannot read its own release) and, when known,
-  `capture_client_revision` next to the host identity. A note made by hand or
-  import (`lt note`, `lt quick`, `lt import-folder`, and the SDK's
-  `upsert_note`, `quick_capture`, and `upload_note_file`) and the MATLAB
-  package record neither an install id nor a client release, so they can never
-  produce an update notice. The coverage read
+- A capture queued through the watch outbox (`lt watch`, including
+  `lt watch touch`; `lt run`; `lt pipeline report`; `lt agent session-end`; the
+  Jupyter save hook; and `lt git snapshot`) or made by `lt hpc`, the repo hooks
+  (`lt repo report`), or figure capture (`lt capture` and in-script saves)
+  always records `capture_client_version` (`0.0.0+unknown` when the client
+  cannot read its own release) and, when known, `capture_client_revision`, next
+  to the host identity and its install id. A note made by hand or import
+  (`lt note`, `lt quick`, `lt import-folder`, and the SDK's `upsert_note`,
+  `quick_capture`, and `upload_note_file`) and the MATLAB package record
+  neither an install id nor a client release, so they can never produce an
+  update notice. The coverage read
   (`GET /projects/{project_id}/coverage`) judges each capture source on its
   own: it reports the release the source's newest capture was made with, its
   `release_status` against the server's, and `update_recommended`, and writes
@@ -241,15 +252,17 @@ commits are not consumer-relevant.
 One install id covers every Python environment on a machine, and the notice's
 fix depends on which environment made the capture:
 
-- **Tool environment** (`lt watch`, `lt-hpc`, and the repo hooks, all launched
+- **Tool environment** (`lt watch`, `lt run`, `lt pipeline`, `lt hpc`, the repo
+  and git hooks, the agent-session hook, and any other `lt` command launched
   from the `uv tool` install): install the server's release with the Agents
   page's install command
   (`uv tool install --force "lab-tracker @ git+https://github.com/SamuelBrudner/lab-tracker.git@<revision>"`),
   then run `lt update` in each consumer repo and restart the MCP host so it
   launches the new `lt-mcp`.
 - **Analysis repo** (in-script captures such as `savefig` from
-  `lab_tracker_client`, adapter `lab-tracker-client-figure`, or captures that
-  carry `run_*` metadata): in that repo, rerun the Setup page's pinned project
+  `lab_tracker_client`, adapter `lab-tracker-client-figure`, the Jupyter save
+  hook, adapter `lab-tracker-client-notebook`, or captures that carry `run_*`
+  metadata): in that repo, rerun the Setup page's pinned project
   dependency (`uv add "lab-tracker @ git+https://github.com/SamuelBrudner/lab-tracker.git@<revision>"`,
   guided setup step 5). `lt update` refreshes integration files only and does
   not change that pin.

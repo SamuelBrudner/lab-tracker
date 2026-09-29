@@ -1,24 +1,28 @@
 """Which capture sources were made by a lab-tracker client behind this server.
 
-A capture made by ``lt watch``, ``lt-hpc``, the repo hooks (``lt repo report``),
-or figure capture carries the capturing client's release next to the host
-identity (``capture_client_version`` and ``capture_client_revision``, written by
-``lab_tracker_client.client.capture_host_metadata``, which only those paths
-call). A note made by hand or import (``lt note``, ``lt quick``,
-``lt import-folder``, the SDK's ``upsert_note``, ``quick_capture`` and
-``upload_note_file``) and the MATLAB package carry no install id or client
-release, so they can never produce a notice. The coverage read compares the
-release of each capture source's newest capture with this server's release, so
-a client that is behind can be named by what it captures instead of only being
-discovered by someone running a check on that machine.
+A capture queued through the watch outbox (``lt watch``, ``lt run``,
+``lt pipeline``, coding-agent session, notebook and git capture), by ``lt hpc``,
+by the repo hooks (``lt repo report``), or by figure capture carries the
+capturing client's release next to the host identity (``capture_client_version``
+and ``capture_client_revision``, written by
+``lab_tracker_client.client.capture_host_metadata``, which ``watch.make_event``,
+``hpc.make_event``, ``repo.make_event`` and figure capture call). A note made by
+hand or import (``lt note``, ``lt quick``, ``lt import-folder``, the SDK's
+``upsert_note``, ``quick_capture`` and ``upload_note_file``) and the MATLAB
+package carry no install id or client release, so they can never produce a
+notice. The coverage read compares the release of each capture source's newest
+capture with this server's release, so a client that is behind can be named by
+what it captures instead of only being discovered by someone running a check on
+that machine.
 
 Each source is judged on its own. One install id (``~/.lab-tracker/install-id``)
 spans every Python environment on a machine: the ``uv tool`` install that runs
-``lt watch``, ``lt-hpc``, and the repo hooks, and each analysis repo's own
-pinned dependency that saves figures in-script. Those environments run releases
-of their own, so neither can speak for the other, and each is updated
-differently: the tool environment by reinstalling the server's release, an
-analysis repo by repinning its dependency.
+the ``lt`` commands (``lt watch``, ``lt run``, ``lt pipeline``, ``lt hpc``, and
+the repo hooks), and each analysis repo's own pinned dependency that saves
+figures or notebooks in-script. Those environments run releases of their own, so
+neither can speak for the other, and each is updated differently: the tool
+environment by reinstalling the server's release, an analysis repo by repinning
+its dependency.
 
 A notice is written only when an update is recommended (the client's
 (MAJOR, MINOR) is older than the server's, see ``lab_tracker.client_release``

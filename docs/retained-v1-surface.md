@@ -633,9 +633,11 @@ research record:
   interpreter), and `lt setup status` compares the client's release with the
   server's; stdio `lt-mcp` prefixes its MCP instructions and adds
   `_lab_tracker_update_notice` to every tool result when an update is
-  recommended; and captures made by `lt watch`, `lt-hpc`, the repo hooks, and
-  figure capture record the capturing client's release (a note made by hand or
-  import, and the MATLAB package, do not). Each coverage `capture_sources` row carries its newest capture's
+  recommended; and captures queued through the watch outbox (`lt watch`,
+  `lt run`, `lt pipeline`, agent sessions, notebook and git capture), by
+  `lt hpc`, by the repo hooks, and by figure capture record the capturing
+  client's release (a note made by hand or import, and the MATLAB package, do
+  not). Each coverage `capture_sources` row carries its newest capture's
   `capture_client_version`/`capture_client_revision`, its `release_status`
   against the report's `server_release`, `update_recommended`, the
   `watched_folder` of a watch source, and a per-source `update_notice` when
@@ -649,14 +651,16 @@ research record:
   offline and drained later carries the release that queued it. Only a newer
   server `MAJOR.MINOR` produces a notice ([versioning.md](versioning.md)); a
   PATCH-only gap and revision drift within a release are reported, never
-  suggested. None of these checks blocks capture, and each has a limit so that
-  it does not hold a session or MCP startup open: the import check has a
-  15-second limit, and the `lt setup status` and `lt-mcp` `/health` probes have
-  2-second connect and read timeouts and a 4-second deadline on the whole
-  response, headers included, so a server that trickles its headers or its body
-  is cut at the deadline (give or take one read). Opening the connection is
-  governed by the connect timeout alone.
-  A failed `lt-mcp` probe is written to stderr and startup continues.
+  suggested. None of these checks blocks capture, and each is limited so that
+  a slow answer does not hold a session or MCP startup open: the import check
+  has a 15-second limit, and the `lt setup status` and `lt-mcp` `/health`
+  probes have 2-second connect and read timeouts and a 4-second deadline on the
+  whole response, headers included, so a server that trickles its headers or
+  its body is cut at the deadline (give or take one read). Getting connected is
+  outside that deadline: name resolution takes as long as the system resolver
+  takes, and the connect timeout applies to each address a name resolves to.
+  A failed `lt-mcp` probe, including a client that cannot be built, is written
+  to stderr and startup continues.
   See [setup.md](setup.md#know-when-a-client-install-is-broken-or-behind-its-server).
 - Read-only assistant and MCP endpoints over the retained graph. Remote agents
   can orient with `graph_overview`, locate a typed anchor with `search_graph`,
