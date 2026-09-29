@@ -1,6 +1,6 @@
 import * as React from "react";
 
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { apiResponse, errorResponse, installFetchMock } from "../test/utils.js";
@@ -296,6 +296,21 @@ describe("OnboardingPage", () => {
     expect(document.body.textContent).toContain(
       "The skill installer covers Claude and Codex user skill homes."
     );
+    // Step 5 names each client's own route instead of a CLI-only path.
+    const clientStep = screen
+      .getByRole("heading", { name: "Connect your coding assistant" })
+      .closest("li");
+    const clientText = clientStep.textContent;
+    expect(clientText).toContain("Claude Code (terminal, IDE, or the Claude Desktop Code tab)");
+    expect(clientText).toContain("Claude Desktop chat");
+    expect(clientText).toContain("manual registration only");
+    expect(clientText).toContain("Codex in the ChatGPT desktop app");
+    expect(clientText).toContain("Codex CLI (needs the codex command on your PATH)");
+    expect(clientText).toContain("command not found: codex");
+    expect(within(clientStep).getByRole("link", { name: /per-client steps/ })).toHaveAttribute(
+      "href",
+      `https://github.com/SamuelBrudner/lab-tracker/blob/${SOURCE_REVISION}/docs/agent-setup.md#choose-your-client`
+    );
 
     fireEvent.click(
       screen.getByRole("button", { name: "Create an agent token" })
@@ -338,6 +353,13 @@ describe("OnboardingPage", () => {
     expect(commandText).not.toContain("lt setup init");
     expect(commandText).not.toContain("lt project bind");
     expect(commandText).not.toContain("lt hooks install");
+    // No client guidance or docs link is shown without an immutable revision.
+    const clientStep = screen
+      .getByRole("heading", { name: "Connect your coding assistant" })
+      .closest("li");
+    expect(clientStep.textContent).not.toContain("Claude Desktop chat");
+    expect(clientStep.textContent).not.toContain("Codex in the ChatGPT desktop app");
+    expect(within(clientStep).queryByRole("link")).toBeNull();
     expect(document.body.textContent).toContain("Do not install from GitHub main");
     expect(document.body.textContent).toContain(
       "Local repository commands are withheld"

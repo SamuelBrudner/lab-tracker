@@ -415,40 +415,43 @@ function OnboardingPage({
             </div>
             <span className="pill">Run once</span>
           </div>
-          <p className="subtle">
-            Choose Claude Code or Codex CLI below. Claude Code can use the
-            repository <code>.mcp.json</code> generated in the previous step;
-            approve the server when prompted. For access outside that repository,
-            use the Claude Code user registration command. Then run the shared
-            verifier to check MCP health, authentication, and client revision.
-          </p>
           {clientSetup ? (
             <>
+              <p className="subtle">{clientSetup.mcpClientsIntro}</p>
+              {clientSetup.mcpClients.map((client) => (
+                <React.Fragment key={client.id}>
+                  <p>
+                    <strong>{client.name}</strong>
+                  </p>
+                  <p className="subtle">{client.guidance}</p>
+                  {client.commands.map((item) => (
+                    <SetupCommand
+                      key={item.command}
+                      label={item.title}
+                      command={item.command}
+                      setFlash={setFlash}
+                    />
+                  ))}
+                </React.Fragment>
+              ))}
               <SetupCommand
-                label="Claude Code: register for your user account (optional with repo .mcp.json)"
-                command="claude mcp add --transport stdio --scope user lab-tracker -- lt-mcp"
-                setFlash={setFlash}
-              />
-              <SetupCommand
-                label="Claude Code: check the connection"
-                command="claude mcp list"
-                setFlash={setFlash}
-              />
-              <SetupCommand
-                label="Codex CLI: register Lab Tracker MCP"
-                command="codex mcp add lab-tracker -- lt-mcp"
-                setFlash={setFlash}
-              />
-              <SetupCommand
-                label="For either client: verify MCP health, auth, and client revision"
+                label={clientSetup.mcpVerifyTitle}
                 command={clientSetup.verifyMcpCommand}
                 setFlash={setFlash}
               />
-              <SetupCommand
-                label="Codex CLI: confirm registration"
-                command="codex mcp list"
-                setFlash={setFlash}
-              />
+              <p className="subtle">
+                {clientSetup.mcpVerifyNote}{" "}
+                <a href={clientSetup.clientDocsUrl}>
+                  {clientSetup.clientDocsLabel}
+                </a>
+                .
+              </p>
+              <p className="subtle">
+                In Claude Code, the Codex CLI, and Codex in the ChatGPT desktop
+                app, <code>/mcp</code> shows connected servers. If your
+                organization manages MCP policy, an administrator may need to
+                allow this server.
+              </p>
             </>
           ) : (
             <p className="warn">
@@ -456,10 +459,6 @@ function OnboardingPage({
               source revision.
             </p>
           )}
-          <p className="subtle">
-            In Claude Code or Codex CLI, <code>/mcp</code> shows MCP status. If your organization
-            manages MCP policy, an administrator may need to allow this server.
-          </p>
         </li>
 
         <li className="card-inset setup-step">

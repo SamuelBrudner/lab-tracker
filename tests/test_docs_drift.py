@@ -37,6 +37,9 @@ _DOCS = _REPO_ROOT / "docs"
 _SKILL_PATH = _REPO_ROOT / "skills" / "lab-tracker" / "SKILL.md"
 _MCP_SKILLS_DOC = _DOCS / "lab-tracker-mcp-skills.md"
 _AGENT_SETUP_DOC = _DOCS / "agent-setup.md"
+_CLIENT_SETUP_JS = (
+    _REPO_ROOT / "src" / "lab_tracker" / "frontend_src" / "features" / "client-setup.js"
+)
 
 
 def _read(path: Path) -> str:
@@ -488,3 +491,27 @@ def test_documented_verify_mcp_flags_exist() -> None:
     flags = {flag for match in invocation.finditer(text) for flag in _LONG_FLAG.findall(match[1])}
     assert "--command" in flags
     assert not flags - accepted, sorted(flags - accepted)
+
+
+def test_client_setup_js_commands_are_documented_in_agent_setup() -> None:
+    literals = re.findall(r'"((?:claude|codex) mcp [^"]+)"', _read(_CLIENT_SETUP_JS))
+    assert "claude mcp add --transport stdio --scope user lab-tracker -- lt-mcp" in literals
+    assert "codex mcp add lab-tracker -- lt-mcp" in literals
+    documented = _read(_AGENT_SETUP_DOC)
+    missing = [command for command in literals if command not in documented]
+    assert not missing, f"web setup commands absent from docs/agent-setup.md: {missing}"
+
+
+def _github_anchor(heading: str) -> str:
+    return re.sub(r"[^\w\- ]", "", heading.lower()).replace(" ", "-")
+
+
+def test_client_setup_js_docs_link_targets_an_existing_heading() -> None:
+    source = _read(_CLIENT_SETUP_JS)
+    path = re.search(r'CLIENT_SETUP_DOC_PATH = "([^"]+)"', source)
+    anchor = re.search(r'CLIENT_SETUP_DOC_ANCHOR = "([^"]+)"', source)
+    assert path and anchor
+    assert (_REPO_ROOT / path[1]).is_file()
+    headings = re.findall(r"(?m)^#{1,6} (.+)$", _read(_REPO_ROOT / path[1]))
+    assert anchor[1] in {_github_anchor(heading) for heading in headings}
+    assert anchor[1] == _github_anchor(_CLIENT_MATRIX_HEADING)
