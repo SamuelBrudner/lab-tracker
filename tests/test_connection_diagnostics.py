@@ -95,6 +95,9 @@ def test_stage_and_conditional_funnel_guidance(kind, expected):
         assert "If this host uses" in result["detail"]
         assert "cannot confirm" in result["detail"]
         assert "do not need to join" in result["next_step"]
+        # The installed wheel does not ship docs/, so name the guide, not a path.
+        assert "guide in the Lab Tracker repository" in result["next_step"]
+        assert "docs/" not in result["next_step"]
 
 
 @pytest.mark.parametrize(

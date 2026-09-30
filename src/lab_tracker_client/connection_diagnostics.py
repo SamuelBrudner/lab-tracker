@@ -80,7 +80,7 @@ class ConnectionTrace:
                         "service is listening on the proxied port. Funnel clients do not need to "
                         "join the tailnet. Also check that the node is connected with "
                         "`tailscale status`; see \"Publishing Through Tailscale Funnel\" in "
-                        "docs/self-hosted-operations.md."
+                        "the self-hosted operations guide in the Lab Tracker repository."
                     )
             else:
                 diagnosis = "tls_handshake_failed"
