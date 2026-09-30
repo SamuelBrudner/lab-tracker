@@ -220,12 +220,16 @@ commits are not consumer-relevant.
   the same 2-second timeouts and 4-second response deadline, and the same
   caveat about connecting. It is advisory only: any failure, including one
   while building the HTTP client, is written to stderr and leaves the session
-  unchanged. The safety probe that `lt-mcp` runs against a remote API target
-  just before it refuses to start only when it confirms that the API has
-  authentication disabled; when it cannot run at all, including because the
-  HTTP client cannot be built (for example `ALL_PROXY=socks5://...` without the
-  optional `socksio` package), that is a stderr warning and the server still
-  starts.
+  unchanged. `lt-mcp` runs a separate startup safety probe (`GET /readiness`)
+  before that check. Over stdio it probes only a remote API target, not a
+  loopback one, and refuses to start only when the probe confirms that the API
+  has authentication disabled. If the probe fails, it writes a stderr warning
+  and the server still starts. The server also still starts, after one stderr
+  notice, when the HTTP client cannot be built (for example
+  `ALL_PROXY=socks5://...` without the optional `socksio` package). A hosted
+  (streamable-http) `lt-mcp` is stricter: it always probes, including a
+  loopback target, and also refuses to start when it cannot confirm that the
+  API has authentication enabled.
   When an update is recommended, the MCP `instructions` start with an
   `UPDATE AVAILABLE` notice and every tool result carries the same notice in
   `_lab_tracker_update_notice`. A hosted endpoint skips the check; it ships

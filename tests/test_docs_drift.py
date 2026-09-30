@@ -336,6 +336,30 @@ def test_docs_state_the_health_probe_bounds(doc: Path) -> None:
     assert "each address a name resolves to" in text
 
 
+def test_agent_setup_doc_states_the_same_health_probe_bounds_as_the_code() -> None:
+    # `lt setup status` and `lt setup connect` share the probe; the guide once
+    # called its bound "the existing two-second HTTP timeout" and named no deadline.
+    text = " ".join(_read(_AGENT_SETUP_DOC).split())
+    timeout = setup_helpers._HEALTH_PROBE_TIMEOUT_SECONDS
+    assert f"{timeout:g}-second connect and read timeouts" in text
+    assert f"{HEALTH_PROBE_DEADLINE_SECONDS:g}-second deadline on the whole response" in text
+    assert "two-second HTTP timeout" not in text
+
+
+def test_setup_doc_describes_the_lt_mcp_startup_safety_probe_as_the_code_behaves() -> None:
+    # The behaviour itself is pinned by tests/test_mcp_server.py and
+    # tests/test_mcp_hosted_surface.py (loopback skip, hosted fail-closed, stdio
+    # fail-soft, an unbuildable client); this pins that the prose says the same.
+    text = " ".join(_read(_DOCS / "setup.md").split())
+    assert "just before it refuses to start" not in text
+    assert "separate startup safety probe (`GET /readiness`) before that check" in text
+    assert "Over stdio it probes only a remote API target, not a loopback one" in text
+    assert "refuses to start only when the probe confirms that the API has authentication" in text
+    assert "still starts, after one stderr notice, when the HTTP client cannot be built" in text
+    assert "A hosted (streamable-http) `lt-mcp` is stricter: it always probes" in text
+    assert "refuses to start when it cannot confirm that the API has authentication enabled" in text
+
+
 def test_funnel_runbook_names_what_a_public_local_instance_must_change(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

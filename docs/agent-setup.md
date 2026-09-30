@@ -600,9 +600,11 @@ Run `lt setup status` to inspect `server.reachable`. Failed probes also return
 `diagnosis`, `detail`, and `next_step`. `lt setup connect --base-url <url>`
 (with `--dry-run` or `--yes`) runs the same probe: it keeps `server_reachable`
 and adds a `server_diagnostic` object with those three fields, plus
-`status_code` for `http_error`, whenever a diagnosis exists. The probe uses the
-existing two-second HTTP timeout and observes the actual request; it makes no
-extra network probes and does not require the Tailscale CLI. MCP transport
+`status_code` for `http_error`, whenever a diagnosis exists. The probe has
+2-second connect and read timeouts and a 4-second deadline on the whole response
+(see [setup.md](setup.md#know-when-a-client-install-is-broken-or-behind-its-server)
+for what that deadline does not cover), and it observes the actual request; it
+makes no extra network probes and does not require the Tailscale CLI. MCP transport
 failures expose the same `diagnosis` and `next_step` while preserving their
 fail-soft `proceed_without_graph_context` action.
 
