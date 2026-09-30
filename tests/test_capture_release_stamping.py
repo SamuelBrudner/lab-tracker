@@ -9,6 +9,7 @@ builders, and the commands whose notes are drained from them), by construction
 
 from __future__ import annotations
 
+import argparse
 import json
 import re
 import subprocess
@@ -20,6 +21,7 @@ import pytest
 
 import lab_tracker_client.figure as figure_module
 from lab_tracker_client import LabTracker, hpc, pipeline_capture, repo, watch
+from lab_tracker_client import cli as lt_cli
 from lab_tracker_client.figure import capture_figure_bytes
 from lab_tracker_client.pipeline_capture import PipelineRun, report_pipeline_run
 from lab_tracker_client.run_capture import RunOptions, run_command
@@ -43,7 +45,7 @@ _STAMPING_MODULES = {
     "git_capture.py": "lt git snapshot",
     "hpc.py": "lt hpc",
     "notebook_capture.py": "Jupyter save hook",
-    "pipeline_capture.py": "lt pipeline report",
+    "pipeline_capture.py": "lt pipeline",
     "repo.py": "lt repo report",
     "run_capture.py": "lt run",
     "watch.py": "lt watch",
@@ -182,6 +184,36 @@ def test_an_lt_pipeline_note_carries_the_client_release_and_install_id(tmp_path:
     _assert_stamped(metadata, where="the lt pipeline note")
 
 
+_NEXTFLOW_TRACE = (
+    "task_id\thash\tnative_id\tname\tstatus\texit\tsubmit\tduration\tcomplete\n"
+    "1\tab/1\t11\tALIGN\tCOMPLETED\t0\t2026-09-28 09:00:00.000\t1m\t2026-09-28 09:01:00.000\n"
+)
+_DVC_LOCK = "schema: '2.0'\nstages:\n  prepare:\n    cmd: python prepare.py\n"
+
+
+@pytest.mark.parametrize("engine", ["nextflow", "dvc"])
+def test_every_lt_pipeline_subcommand_records_the_client_release_and_install_id(
+    tmp_path: Path, engine: str
+) -> None:
+    checkout = tmp_path / "pipeline"
+    checkout.mkdir()
+    subprocess.run(["git", "init", "-q", str(checkout)], check=True)  # noqa: S603, S607
+    (checkout / "lt_ids.json").write_text(json.dumps({"project_id": PROJECT_ID}))
+    if engine == "nextflow":
+        trace = checkout / "trace.txt"
+        trace.write_text(_NEXTFLOW_TRACE, encoding="utf-8")
+        argv = ["pipeline", "nextflow", "--trace", str(trace)]
+    else:
+        (checkout / "dvc.lock").write_text(_DVC_LOCK, encoding="utf-8")
+        argv = ["pipeline", "dvc", "--status", "success"]
+
+    lt_cli.main([*argv, "--cwd", str(checkout), "--no-drain"])
+
+    [path] = (checkout / ".lab-tracker" / "outbox" / "watch").glob("*.json")
+    event = json.loads(path.read_text(encoding="utf-8"))
+    _assert_stamped(event["host"], where=f"lt pipeline {engine}")
+
+
 def test_a_figure_capture_note_carries_the_client_release_and_install_id(tmp_path: Path) -> None:
     checkout = tmp_path / "analysis"
     checkout.mkdir()
@@ -232,3 +264,37 @@ def test_setup_docs_name_the_paths_that_record_the_release_and_those_that_do_not
     assert unrecorded, "docs/setup.md must say which notes carry no client release"
     assert [name for name in _STAMPING_MODULES.values() if name not in recorded] == []
     assert [name for name in _UNSTAMPED_PATHS if name not in unrecorded] == []
+
+
+def _recorded_paragraph() -> str:
+    text = " ".join(_SETUP_DOC.read_text(encoding="utf-8").split())
+    opening = "- A capture queued through the watch outbox"
+    return text.split(opening, 1)[1].split("A note made by hand or import", 1)[0]
+
+
+def test_setup_docs_name_every_lt_pipeline_subcommand() -> None:
+    parser = lt_cli._build_parser()
+    top = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+    pipeline = next(
+        a
+        for a in top.choices["pipeline"]._actions
+        if isinstance(a, argparse._SubParsersAction)
+    )
+    recorded = _recorded_paragraph()
+
+    assert set(pipeline.choices) == {"report", "nextflow", "dvc"}
+    assert [name for name in pipeline.choices if f"`{name}`" not in recorded] == []
+
+
+def test_setup_docs_do_not_file_every_lt_command_under_the_tool_install() -> None:
+    text = " ".join(_SETUP_DOC.read_text(encoding="utf-8").split())
+    # `lt capture file` writes a lab-tracker-client-* adapter, so the server files it
+    # with the in-script captures; `lt note` and friends record no release at all.
+    assert "any other `lt` command" not in text
+    assert "`lt capture file`, and the R package's autotrack that runs it" in text
+
+
+def test_setup_docs_do_not_say_a_hand_made_note_can_never_name_a_client() -> None:
+    text = " ".join(_SETUP_DOC.read_text(encoding="utf-8").split())
+    assert "can never produce" not in text
+    assert "puts a `capture_install_id` in a note's metadata by hand" in text

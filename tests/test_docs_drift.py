@@ -360,6 +360,11 @@ def test_setup_doc_describes_the_lt_mcp_startup_safety_probe_as_the_code_behaves
     assert "refuses to start when it cannot confirm that the API has authentication enabled" in text
 
 
+def test_retained_surface_names_the_lt_hpc_command_not_its_adapter_id() -> None:
+    # `lt hpc` is the command; `lt-hpc` is only the adapter id its notes carry.
+    assert "`lt-hpc`" not in _read(_DOCS / "retained-v1-surface.md")
+
+
 def test_funnel_runbook_names_what_a_public_local_instance_must_change(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

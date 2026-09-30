@@ -371,7 +371,7 @@ research record:
   `capture_install_id`/`capture_host_label`). Each listed source also carries
   its capture health: how many notes it delivered in the last `recent_days`
   (7), how many of its staged notes are still unreviewed, and a `quiet` flag
-  for a scheduled source (the `lt watch` family or `lt-hpc`) that captured
+  for a scheduled source (the `lt watch` family or `lt hpc`) that captured
   inside `quiet_window_days` (30) but not inside the recent window, so a
   stalled scheduler, expired token, or moved folder is visible on the home
   page's Capture health card instead of showing up as an emptier review

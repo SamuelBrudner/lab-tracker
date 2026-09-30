@@ -235,16 +235,21 @@ commits are not consumer-relevant.
   `_lab_tracker_update_notice`. A hosted endpoint skips the check; it ships
   with its server.
 - A capture queued through the watch outbox (`lt watch`, including
-  `lt watch touch`; `lt run`; `lt pipeline report`; `lt agent session-end`; the
-  Jupyter save hook; and `lt git snapshot`) or made by `lt hpc`, the repo hooks
-  (`lt repo report`), or figure capture (`lt capture` and in-script saves)
-  always records `capture_client_version` (`0.0.0+unknown` when the client
-  cannot read its own release) and, when known, `capture_client_revision`, next
-  to the host identity and its install id. A note made by hand or import
-  (`lt note`, `lt quick`, `lt import-folder`, and the SDK's `upsert_note`,
-  `quick_capture`, and `upload_note_file`) and the MATLAB package record
-  neither an install id nor a client release, so they can never produce an
-  update notice. The coverage read
+  `lt watch touch`; `lt run`; `lt pipeline` with `report`, `nextflow`, or `dvc`,
+  and the Snakemake and Kedro hooks, which build the same event;
+  `lt agent session-end`; the Jupyter save hook; and `lt git snapshot`) or made
+  by `lt hpc`, the repo hooks (`lt repo report`), or figure capture
+  (`lt capture file`, which the R package's autotrack runs, and in-script
+  saves) always records `capture_client_version` (`0.0.0+unknown` when the
+  client cannot read its own release) and, when known,
+  `capture_client_revision`, next to the host identity and its install id. A
+  note made by hand or import (`lt note`, `lt quick`, `lt import-folder`, and
+  the SDK's `upsert_note`, `quick_capture`, and `upload_note_file`) and the
+  MATLAB package record neither an install id nor a client release themselves,
+  so they name no client and produce no update notice, unless a caller puts a
+  `capture_install_id` in a note's metadata by hand: the coverage read judges
+  any note that carries an install id as a capture from that install. The
+  coverage read
   (`GET /projects/{project_id}/coverage`) judges each capture source on its
   own: it reports the release the source's newest capture was made with, its
   `release_status` against the server's, and `update_recommended`, and writes
@@ -264,10 +269,9 @@ commits are not consumer-relevant.
 One install id covers every Python environment on a machine, and the notice's
 fix depends on which environment made the capture:
 
-- **Tool environment** (`lt watch`, `lt run`, `lt pipeline`, `lt hpc`, the repo
-  and git hooks, the agent-session hook, and any other `lt` command launched
-  from the `uv tool` install): install the server's release with the Agents
-  page's install command
+- **Tool environment** (`lt watch`, `lt run`, `lt pipeline`, `lt hpc`,
+  `lt git snapshot`, the repo hook, and the agent-session hook): install the
+  server's release with the Agents page's install command
   (`uv tool install --force "lab-tracker @ git+https://github.com/SamuelBrudner/lab-tracker.git@<revision>"`),
   then run `lt update` in each consumer repo and restart the MCP host so it
   launches the new `lt-mcp`.
@@ -278,6 +282,11 @@ fix depends on which environment made the capture:
   dependency (`uv add "lab-tracker @ git+https://github.com/SamuelBrudner/lab-tracker.git@<revision>"`,
   guided setup step 5). `lt update` refreshes integration files only and does
   not change that pin.
+
+`lt capture file`, and the R package's autotrack that runs it, is a
+special case: it is filed with the analysis-repo captures because it writes a
+`lab-tracker-client-*` adapter, but the release it records is that of the `lt`
+executable that ran it, so update that install.
 
 ## Multi-client Postgres runtime
 

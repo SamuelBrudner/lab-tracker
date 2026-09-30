@@ -186,11 +186,14 @@ def capture_host_metadata() -> dict[str, NoteMetadataScalar]:
 
     It reaches every capture queued through ``watch.make_event`` (``lt watch``,
     ``lt run``, ``lt pipeline``, coding-agent session, notebook and git capture),
-    ``hpc.make_event``, ``repo.make_event``, and figure capture. A note made by
-    hand or import (``upsert_note``, ``quick_capture``,
-    ``upload_note_file``, ``lt note``, ``lt quick``, ``lt import-folder``) and
-    the MATLAB package do not record it, so they carry no install id or client
-    release and can never name a stale client.
+    ``hpc.make_event``, ``repo.make_event``, and figure capture (``lt capture
+    file`` included, so the R package's captures record the release of the
+    ``lt`` they run). A note made by hand or import (``upsert_note``,
+    ``quick_capture``, ``upload_note_file``, ``lt note``, ``lt quick``,
+    ``lt import-folder``) and the MATLAB package do not record it, so they
+    carry no install id or client release of their own and name no stale
+    client, unless a caller writes a ``capture_install_id`` into the note's
+    metadata by hand.
     """
 
     metadata: dict[str, NoteMetadataScalar] = {}
