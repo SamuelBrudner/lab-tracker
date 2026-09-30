@@ -487,7 +487,10 @@ def _add_setup_parsers(subcommands: argparse._SubParsersAction) -> None:
     verify_mcp_parser.add_argument(
         "--command",
         default="lt-mcp",
-        help="MCP executable to launch. Defaults to lt-mcp on PATH.",
+        help=(
+            "MCP executable to launch. Defaults to the lt-mcp installed beside "
+            "this lt, else lt-mcp on PATH."
+        ),
     )
     verify_mcp_parser.add_argument(
         "--timeout",

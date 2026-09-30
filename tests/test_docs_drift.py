@@ -24,6 +24,11 @@ except ModuleNotFoundError:  # pragma: no cover - exercised by Python 3.10 CI
     import tomli as tomllib
 
 from lab_tracker import graph_drafting, mcp_server
+from lab_tracker.capture_client_release import (
+    EVIDENCE_ADAPTER_KEY,
+    CaptureEnvironment,
+    capture_environment,
+)
 from lab_tracker.cli import _skills_homes, init_consumer_repo, update_consumer_repo
 from lab_tracker.cli import main as lab_tracker_main
 from lab_tracker.config import Settings
@@ -355,7 +360,9 @@ def test_setup_doc_describes_the_lt_mcp_startup_safety_probe_as_the_code_behaves
     assert "separate startup safety probe (`GET /readiness`) before that check" in text
     assert "Over stdio it probes only a remote API target, not a loopback one" in text
     assert "refuses to start only when the probe confirms that the API has authentication" in text
-    assert "still starts, after one stderr notice, when the HTTP client cannot be built" in text
+    assert "still starts when the HTTP client cannot be built" in text
+    assert "each probe that needs the client writes its own stderr line" in text
+    assert "after one stderr notice" not in text
     assert "A hosted (streamable-http) `lt-mcp` is stricter: it always probes" in text
     assert "refuses to start when it cannot confirm that the API has authentication enabled" in text
 
@@ -950,3 +957,34 @@ def test_client_setup_js_docs_link_targets_an_existing_heading() -> None:
     headings = re.findall(r"(?m)^#{1,6} (.+)$", _read(_REPO_ROOT / path[1]))
     assert anchor[1] in {_github_anchor(heading) for heading in headings}
     assert anchor[1] == _github_anchor(_CLIENT_MATRIX_HEADING)
+
+
+def test_verify_mcp_command_help_matches_the_documented_default(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # agent-setup.md says verify-mcp prefers the lt-mcp next to the lt you ran;
+    # `_resolve_mcp_executable` does so, and the flag's own help must agree.
+    with pytest.raises(SystemExit) as exit_info:
+        lt_cli.main(["setup", "verify-mcp", "--help"])
+    assert exit_info.value.code == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "Defaults to the lt-mcp installed beside this lt, else lt-mcp on PATH" in help_text
+    assert "Defaults to lt-mcp on PATH" not in help_text
+    assert "prefers the `lt-mcp` next to the `lt` you ran" in " ".join(
+        _read(_AGENT_SETUP_DOC).split()
+    )
+
+
+def test_lt_run_counts_as_the_tool_environment_although_it_writes_run_metadata() -> None:
+    # The `lt-` adapter is judged before `run_*` metadata, so a stale `lt run`
+    # capture gets the tool-install fix; only a non-`lt-` adapter with `run_*`
+    # metadata marks an analysis repo. docs/setup.md must say the same.
+    lt_run = {EVIDENCE_ADAPTER_KEY: "lt-run", "run_id": "r1", "run_git_commit": "abc1234"}
+    in_script = {EVIDENCE_ADAPTER_KEY: "lab-tracker-client-run", "run_id": "r1"}
+    assert capture_environment(lt_run) is CaptureEnvironment.TOOL
+    assert capture_environment(in_script) is CaptureEnvironment.ANALYSIS_REPO
+    setup_doc = " ".join(_read(_DOCS / "setup.md").split())
+    assert (
+        "since an `lt-` adapter such as `lt run` always counts as the tool environment"
+        in setup_doc
+    )

@@ -224,9 +224,11 @@ commits are not consumer-relevant.
   before that check. Over stdio it probes only a remote API target, not a
   loopback one, and refuses to start only when the probe confirms that the API
   has authentication disabled. If the probe fails, it writes a stderr warning
-  and the server still starts. The server also still starts, after one stderr
-  notice, when the HTTP client cannot be built (for example
-  `ALL_PROXY=socks5://...` without the optional `socksio` package). A hosted
+  and the server still starts. The server also still starts when the HTTP client
+  cannot be built (for example `ALL_PROXY=socks5://...` without the optional
+  `socksio` package): each probe that needs the client writes its own stderr
+  line, so a remote target shows both the safety probe's warning and the
+  update check's notice. A hosted
   (streamable-http) `lt-mcp` is stricter: it always probes, including a
   loopback target, and also refuses to start when it cannot confirm that the
   API has authentication enabled.
@@ -278,7 +280,9 @@ fix depends on which environment made the capture:
 - **Analysis repo** (in-script captures such as `savefig` from
   `lab_tracker_client`, adapter `lab-tracker-client-figure`, the Jupyter save
   hook, adapter `lab-tracker-client-notebook`, or captures that carry `run_*`
-  metadata): in that repo, rerun the Setup page's pinned project
+  metadata under an adapter that is not an `lt-` command, since an `lt-`
+  adapter such as `lt run` always counts as the tool environment): in that
+  repo, rerun the Setup page's pinned project
   dependency (`uv add "lab-tracker @ git+https://github.com/SamuelBrudner/lab-tracker.git@<revision>"`,
   guided setup step 5). `lt update` refreshes integration files only and does
   not change that pin.

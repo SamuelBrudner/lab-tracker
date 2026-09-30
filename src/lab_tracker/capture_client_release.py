@@ -70,7 +70,8 @@ WATCH_ADAPTER_PREFIX = "lt-watch"
 TOOL_ADAPTER_PREFIX = "lt-"
 # `lab_tracker_client` captures made inside an analysis script (savefig).
 IN_SCRIPT_ADAPTER_PREFIX = "lab-tracker-client-"
-# `lab_tracker_client.run_context` metadata, written only in-script.
+# `run_*` metadata: written in-script by `lab_tracker_client.run_context` and
+# also by `lt run`, whose `lt-` adapter is judged first (see capture_environment).
 RUN_METADATA_PREFIX = "run_"
 # A source that has not captured for this long is not addressed: the notice
 # is for clients people are still using. It is the coverage read's quiet
@@ -161,10 +162,12 @@ def watched_folder(metadata: Mapping[str, NoteMetadataScalar]) -> str | None:
 def capture_environment(metadata: Mapping[str, NoteMetadataScalar]) -> CaptureEnvironment:
     """The environment that made a capture: an `lt` command, or an analysis script.
 
-    `lt` adapters run from the tool install; a ``lab-tracker-client-*`` adapter
-    or ``run_*`` metadata marks a capture made in-script from an analysis
-    repo's own environment. Any other adapter is treated as launched from the
-    tool install. ``lt capture file`` (which the R package runs) also writes a
+    The adapter is judged first: an ``lt-*`` adapter ran from the tool install,
+    ``lt run`` included although it also writes ``run_*`` metadata. Otherwise a
+    ``lab-tracker-client-*`` adapter or ``run_*`` metadata marks a capture made
+    in-script from an analysis repo's own environment, and any other adapter is
+    treated as launched from the tool install. ``lt capture file`` (which the R
+    package runs) also writes a
     ``lab-tracker-client-*`` adapter, so it is filed with the in-script captures
     although an ``lt`` executable made it.
     """

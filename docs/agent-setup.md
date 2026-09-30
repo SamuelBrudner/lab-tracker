@@ -209,8 +209,10 @@ Install the exact requirement shown by the server in two places:
 The tool environment alone is not enough for analysis code that imports
 `lab_tracker_client`; the project environment needs its own dependency.
 
-Then, in the analysis repo, one command scaffolds the integration for every
-major agent and installs the generated setup skill for both Claude and Codex:
+Then, in the analysis repo, one command writes the repository files for Claude
+Code, Cursor and Gemini CLI (table below) and installs the generated setup
+skill for both Claude and Codex. Codex and Claude Desktop chat register the MCP
+server by hand; see [Choose your client](#choose-your-client).
 
 ```bash
 lt setup init --install-skills --dry-run
