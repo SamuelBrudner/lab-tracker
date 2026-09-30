@@ -290,6 +290,25 @@ def test_the_traceback_tail_is_bounded_and_redacted(monkeypatch, tmp_path) -> No
     assert "early" not in payload["traceback"]
 
 
+def test_a_token_straddling_the_error_line_cut_is_redacted_whole(monkeypatch, tmp_path) -> None:
+    token = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6"
+    prefix = "RuntimeError: "
+    # Start the token eight characters before the cut, so a cut made before the
+    # redaction would leave the unrecognisable prefix "ghp_A1b2" behind.
+    start = setup_helpers._MCP_IMPORT_TRACEBACK_LIMIT - len("ghp_A1b2")
+    filler = "a" * (start - len(prefix) - 1)
+    _use_module(monkeypatch, tmp_path, f"raise RuntimeError({filler + ' ' + token!r})\n")
+
+    payload = setup_helpers.mcp_startup_check()
+
+    assert payload["importable"] is False
+    assert payload["error"].startswith(prefix + "a")
+    assert "ghp_" not in payload["error"]
+    assert "A1b2" not in payload["error"]
+    assert len(payload["error"]) <= setup_helpers._MCP_IMPORT_TRACEBACK_LIMIT
+    assert "A1b2" not in payload["traceback"]
+
+
 def test_doctor_and_status_survive_a_hung_import(monkeypatch, tmp_path, capsys) -> None:
     _use_module(monkeypatch, tmp_path, "import time\ntime.sleep(30)\n")
     monkeypatch.setattr(setup_helpers, "_MCP_IMPORT_TIMEOUT_SECONDS", HANG_TIMEOUT_SECONDS)

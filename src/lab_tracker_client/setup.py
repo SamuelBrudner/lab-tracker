@@ -640,7 +640,7 @@ def _mcp_import_failure() -> _ImportFailure | None:
         return None
     stdout_lines = completed.stdout.splitlines()
     if completed.returncode == _MCP_IMPORT_FAILED_EXIT_CODE and stdout_lines:
-        error = redact_capture_text(stdout_lines[-1][:_MCP_IMPORT_TRACEBACK_LIMIT])
+        error = _bounded_error_line(stdout_lines[-1])
     else:
         died = _describe_child_exit(completed.returncode)
         error = f"the interpreter importing {_MCP_SERVER_MODULE} {died}"
@@ -661,6 +661,16 @@ def _decoded_output(value: str | bytes | None) -> str:
     if isinstance(value, bytes):
         return value.decode(errors="replace")
     return value or ""
+
+
+def _bounded_error_line(line: str) -> str:
+    """The redacted first ``_MCP_IMPORT_TRACEBACK_LIMIT`` characters of the child's error line."""
+
+    # Redact before cutting, so a secret at the cut is replaced whole instead of
+    # leaving a prefix the redactor no longer recognises. Trim first, with extra
+    # tail, so a huge line cannot make the redactor scan megabytes.
+    head = line[: _MCP_IMPORT_TRACEBACK_LIMIT * 2]
+    return redact_capture_text(head)[:_MCP_IMPORT_TRACEBACK_LIMIT]
 
 
 def _bounded_child_output(output: str) -> str:
