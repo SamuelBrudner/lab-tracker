@@ -216,6 +216,24 @@ def test_the_working_directory_cannot_shadow_the_server_module(monkeypatch, tmp_
     assert "shadowed" not in payload["traceback"]
 
 
+@pytest.mark.parametrize("shadow", ["traceback", "importlib"])
+def test_the_working_directory_cannot_shadow_the_harnesss_own_imports(
+    monkeypatch, tmp_path, shadow: str
+) -> None:
+    # The harness imports these itself, so a same-named file in the cwd must not
+    # be picked up (and reported as a broken install) before the cwd is dropped.
+    _use_module(monkeypatch, tmp_path, "VALUE = 1\n")
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    shadowing = cwd / f"{shadow}.py"
+    shadowing.write_text(f"raise RuntimeError('shadowed {shadow}')\n", encoding="utf-8")
+    monkeypatch.chdir(cwd)
+
+    payload = setup_helpers.mcp_startup_check()
+
+    assert payload["importable"] is True, payload
+
+
 def test_the_check_leaves_this_process_alone(monkeypatch, tmp_path) -> None:
     # FastMCP's constructor calls logging.basicConfig at import time; in this
     # process it would leak every later INFO log (alembic, httpx) onto lt's stderr.

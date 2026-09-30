@@ -74,14 +74,17 @@ _MCP_IMPORT_FAILED_EXIT_CODE = 111
 # Longest error the one-line --brief suggestion carries; `lt doctor` has the rest.
 _BRIEF_ERROR_LIMIT = 160
 _MCP_IMPORT_CHILD_CODE = """\
-import importlib
 import sys
-import traceback
 
 # ``-c`` puts the working directory first on sys.path; a console script does not,
 # so drop it and let a folder in the current directory never shadow the install.
+# This comes before every other import, this harness's own included.
 if sys.path and sys.path[0] == "":
     del sys.path[0]
+
+import importlib
+import traceback
+
 try:
     importlib.import_module(sys.argv[1])
 except BaseException as exc:  # SystemExit and KeyboardInterrupt are import failures too.
