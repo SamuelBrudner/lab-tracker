@@ -611,6 +611,8 @@ fail-soft `proceed_without_graph_context` action.
 | `dns_resolution_failed` | Name resolution failed; check the hostname and resolver. |
 | `tcp_connection_failed` | TCP could not connect; check the address, listener, routing, and firewall. |
 | `tls_handshake_stalled` | TCP connected, but TLS timed out; ask the operator to inspect the HTTPS listener or reverse proxy. |
+| `tls_handshake_failed` | TCP connected, but the TLS handshake failed without timing out; check the host's HTTPS listener and proxy TLS configuration. |
+| `proxy_connection_failed` | The connection to the configured HTTP proxy failed; check the client's proxy settings and the proxy service. |
 | `tls_certificate_error` | Certificate verification failed; check the hostname, certificate, clock, and CA configuration. Do not disable verification. |
 | `http_response_timeout` | The connection was established, but an HTTP response timed out; inspect application/proxy logs. |
 | `http_error` | The health endpoint returned HTTP 4xx/5xx; inspect its status and application/proxy configuration. |
@@ -622,11 +624,12 @@ and the service listening on its proxied port. An offline Funnel origin is one p
 not something a client can prove from the timeout alone. Public Funnel clients
 do not need to join the tailnet. DNS resolution and a successful TCP connection
 do not prove that the origin is serving. A TLS stall is not the same as an HTTP
-502 from a stopped backend. In the maintainer's recorded incidents a stopped
-backend behind a working Funnel returned a 502 after the handshake completed,
-while a stalled handshake usually pointed at the Tailscale node or its public
-ingress path; that is a heuristic, not a diagnosis of your instance. For a
-host-side checklist, including what to test from outside the tailnet, see
+502 from a stopped backend. In one recorded incident a stopped backend behind a
+working Funnel returned a 502 after the handshake completed; in another, a
+stalled handshake cleared after the Tailscale node was reconnected, though its
+cause was not confirmed. Two incidents are not a rule and not a diagnosis of
+your instance. For a host-side checklist, including what to test from outside
+the tailnet, see
 [Publishing Through Tailscale Funnel](self-hosted-operations.md#publishing-through-tailscale-funnel).
 
 For compatibility, `reachable` remains true for HTTP responses below 500,

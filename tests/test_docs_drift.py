@@ -8,6 +8,7 @@ code moves instead of silently going stale.
 from __future__ import annotations
 
 import argparse
+import ast
 import inspect
 import json
 import re
@@ -30,6 +31,7 @@ from lab_tracker.decision_context_constants import AGENT_CONSULTATION_POLICY
 from lab_tracker.mcp_tools import READ_TOOLS, WRITE_TOOLS
 from lab_tracker.setup_guide import setup_guide_markdown
 from lab_tracker_client import cli as lt_cli
+from lab_tracker_client import connection_diagnostics
 from lab_tracker_client import setup as setup_helpers
 from lab_tracker_client.auth import auth_doctor
 from lab_tracker_client.client import LabTracker
@@ -359,6 +361,43 @@ def test_funnel_runbook_names_what_a_public_local_instance_must_change(
     assert "LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE=never" in section
     assert "LAB_TRACKER_AUTH_ENABLED=true" in section
     assert "Authentication being on is not enough in the `local` environment" in section
+
+
+@pytest.mark.parametrize("doc", [_AGENT_SETUP_DOC, _DOCS / "self-hosted-operations.md"])
+def test_funnel_docs_stay_within_what_the_recorded_incidents_show(doc: Path) -> None:
+    # The evidence is one 502 from a stopped backend and one TLS stall whose cause
+    # was not confirmed, so neither doc may present a stalled handshake as usually
+    # pointing at one place.
+    text = " ".join(_read(doc).split())
+    assert "usually pointed" not in text
+    assert "usually points" not in text
+    assert "maintainer's recorded" not in text
+    assert "not a rule" in text
+
+
+def _emitted_diagnosis_codes() -> set[str]:
+    """Every literal ``diagnosis`` value the connection probe can report."""
+
+    codes: set[str] = set()
+    for module in (connection_diagnostics, setup_helpers):
+        for node in ast.walk(ast.parse(inspect.getsource(module))):
+            value: ast.expr | None = None
+            if (
+                isinstance(node, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == "diagnosis" for t in node.targets)
+            ) or (isinstance(node, ast.keyword) and node.arg == "diagnosis"):
+                value = node.value
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                codes.add(value.value)
+    return codes
+
+
+def test_agent_setup_diagnosis_table_lists_every_diagnosis_the_probe_reports() -> None:
+    codes = _emitted_diagnosis_codes()
+    assert {"tls_handshake_failed", "proxy_connection_failed", "http_error"} <= codes
+    text = _read(_AGENT_SETUP_DOC)
+    missing = sorted(code for code in codes if f"| `{code}` |" not in text)
+    assert not missing, f"diagnosis codes missing from the agent-setup table: {missing}"
 
 
 def test_lt_doctor_help_names_the_lt_mcp_check() -> None:

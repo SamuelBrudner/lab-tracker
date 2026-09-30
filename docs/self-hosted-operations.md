@@ -144,14 +144,16 @@ The client sees only which stage failed. Work through these on the host:
    normally that host, so it shares that blind spot.
 2. **Tell a TLS stall from a 502.** Tailscale documents that the node terminates
    TLS for Funnel traffic and passes the decrypted request to the local
-   service. So a stopped backend usually appears as an HTTP error after the
-   handshake completes (in the maintainer's recorded incident with nothing
-   listening on the backend port, a 502), while a handshake that never
-   completes usually points at the node or its public ingress path rather than
-   at Lab Tracker. This is a heuristic from the documented design and two
-   recorded incidents, not a diagnosis of your instance. As a further hint, not
-   a rule: if every published port stalls, look at node-level Tailscale state
-   first; if only one does, look at that port's mapping.
+   service. So a stopped backend is expected to appear as an HTTP error after
+   the handshake completes (one recorded incident with nothing listening on the
+   backend port returned a 502), whereas a handshake that never completes
+   happens before the request reaches Lab Tracker, so the node or its public
+   ingress path is a plausible place to look. This is an inference from the
+   documented design and two recorded incidents (one 502, and one stall whose
+   cause was not confirmed), not a rule and not a diagnosis of your instance.
+   As a further hint, not a rule: if every published port stalls, look at
+   node-level Tailscale state first; if only one does, look at that port's
+   mapping.
 3. **Check the node and the mapping.** `tailscale status` should show the node
    connected to the expected tailnet. `tailscale funnel status` (add `--json`
    for machine-readable output) should list the published port and its target,
@@ -161,8 +163,8 @@ The client sees only which stage failed. Work through these on the host:
    `tailscale funnel --help` for your version.
 4. **Rule out the backend.** On the host, run
    `curl http://127.0.0.1:<host-port>/health` and `docker compose ps`. This is
-   cheap to check, though per step 2 a dead backend is not the usual cause of a
-   stalled handshake.
+   cheap to check, though a dead backend is expected to show as an HTTP error
+   rather than a stalled handshake (step 2).
 5. **Check persistence and prerequisites.** Confirm the Funnel was started with
    `--bg` and is still listed after a reboot or Tailscale restart. Re-check
    MagicDNS, HTTPS certificates, and the `funnel` node attribute in the admin
