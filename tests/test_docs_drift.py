@@ -25,6 +25,7 @@ except ModuleNotFoundError:  # pragma: no cover - exercised by Python 3.10 CI
 from lab_tracker import graph_drafting, mcp_server
 from lab_tracker.cli import _skills_homes, init_consumer_repo, update_consumer_repo
 from lab_tracker.cli import main as lab_tracker_main
+from lab_tracker.config import Settings
 from lab_tracker.decision_context_constants import AGENT_CONSULTATION_POLICY
 from lab_tracker.mcp_tools import READ_TOOLS, WRITE_TOOLS
 from lab_tracker.setup_guide import setup_guide_markdown
@@ -331,6 +332,33 @@ def test_docs_state_the_health_probe_bounds(doc: Path) -> None:
     # must not present the connect timeout as the whole bound on connecting.
     assert "Getting connected is outside that deadline" in text
     assert "each address a name resolves to" in text
+
+
+def test_funnel_runbook_names_what_a_public_local_instance_must_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Authentication being on is not enough in the `local` environment: viewer
+    # self-registration defaults to on there, and the first-admin token is shown
+    # to any peer address that looks private, which is every client behind a proxy.
+    for name in (
+        "LAB_TRACKER_AUTH_ENABLED",
+        "LAB_TRACKER_AUTH_SECRET_KEY",
+        "LAB_TRACKER_AUTH_PUBLIC_VIEWER_REGISTRATION_ENABLED",
+        "LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "local")
+    local = Settings(_env_file=None)
+    assert local.is_public_viewer_registration_enabled() is True
+    assert local.effective_bootstrap_admin_token_disclosure() == "local"
+
+    text = " ".join(_read(_DOCS / "self-hosted-operations.md").split())
+    section = text.split("## Publishing Through Tailscale Funnel", 1)[1]
+    section = section.split("### When a client cannot connect", 1)[0]
+    assert "LAB_TRACKER_AUTH_PUBLIC_VIEWER_REGISTRATION_ENABLED=false" in section
+    assert "LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE=never" in section
+    assert "LAB_TRACKER_AUTH_ENABLED=true" in section
+    assert "Authentication being on is not enough in the `local` environment" in section
 
 
 def test_lt_doctor_help_names_the_lt_mcp_check() -> None:

@@ -91,10 +91,24 @@ authoritative.
 
 **A Funnel origin is publicly reachable.** Anyone on the internet who can
 resolve the name can send requests to the app, whether or not they are on your
-tailnet. Publish only an instance that has authentication enabled. Outside
-`LAB_TRACKER_ENVIRONMENT=local`, `LAB_TRACKER_AUTH_ENABLED` is on and cannot be
-disabled (see [Configuration](configuration.md)); never publish an instance
-running in the `local` environment with auth off.
+tailnet. Publish only an instance whose `LAB_TRACKER_ENVIRONMENT` is not
+`local`. Outside `local`, `LAB_TRACKER_AUTH_ENABLED` is on and cannot be
+disabled, public viewer self-registration is off unless you turn it on with
+`LAB_TRACKER_AUTH_PUBLIC_VIEWER_REGISTRATION_ENABLED=true` (leave it unset or
+`false` for a public origin; when it is on, any caller can create a viewer
+account), and `LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE` defaults to
+`never` (see [Configuration](configuration.md)).
+
+Authentication being on is not enough in the `local` environment. There
+`LAB_TRACKER_AUTH_PUBLIC_VIEWER_REGISTRATION_ENABLED` defaults to `true`, so a
+`local` instance published with auth on still lets any internet caller register
+a viewer account, and `LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE` defaults to
+`local`, which trusts the connection's peer address (behind a proxy that is a
+private address for every client). If you must publish a `local` instance, set
+`LAB_TRACKER_AUTH_ENABLED=true`,
+`LAB_TRACKER_AUTH_PUBLIC_VIEWER_REGISTRATION_ENABLED=false`, and
+`LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE=never` first, and never publish
+one with auth off.
 
 Funnel's requirements, per Tailscale's documentation: MagicDNS and HTTPS
 certificates enabled for the tailnet, a `funnel` node attribute in the tailnet
