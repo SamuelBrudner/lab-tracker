@@ -152,14 +152,23 @@ def _read_response(
 
 
 _SENTENCE_END = (".", "!", "?")
+# A part that ends in a colon introduces the next part (the wrapped error text
+# was empty, e.g. ``httpx.PoolTimeout()``), so a full stop would be stray.
+_SENTENCE_OR_INTRODUCER_END = (*_SENTENCE_END, ":")
 
 
 def _join_sentences(*parts: str) -> str:
-    """Join message parts with spaces, ending each non-final part with a full stop."""
+    """Join message parts with spaces, ending each non-final part with a full stop.
 
+    Blank parts are dropped, and a part that already ends a sentence or ends in a
+    colon is left as it is.
+    """
+
+    kept = [part.rstrip() for part in parts if part.strip()]
+    last = len(kept) - 1
     return " ".join(
-        part if part.endswith(_SENTENCE_END) or index == len(parts) - 1 else part + "."
-        for index, part in enumerate(parts)
+        part if part.endswith(_SENTENCE_OR_INTRODUCER_END) or index == last else part + "."
+        for index, part in enumerate(kept)
     )
 
 

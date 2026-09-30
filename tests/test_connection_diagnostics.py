@@ -14,6 +14,7 @@ from lab_tracker.mcp_tools import read
 from lab_tracker_client import LabTracker, LTAPIError, setup
 from lab_tracker_client import cli as lt_cli
 from lab_tracker_client.connection_diagnostics import ConnectionTrace
+from lab_tracker_client.transport import _join_sentences
 
 
 @contextmanager
@@ -306,3 +307,45 @@ def test_error_message_separates_the_cause_from_the_diagnostic(cause):
     message = str(caught.value)
     assert "failed: handshake timed out. The TCP connection succeeded" in message
     assert ".." not in message
+
+
+@pytest.mark.parametrize(
+    ("cause", "expected"),
+    [
+        ("", "failed: The request failed; its connection stage"),
+        ("boom:", "failed: boom: The request failed; its connection stage"),
+    ],
+    ids=["empty", "trailing-colon"],
+)
+def test_error_message_has_no_stray_full_stop_after_an_empty_or_colon_cause(cause, expected):
+    # httpx.PoolTimeout() has an empty message, so the wrapped text ends in "failed: ".
+    def handler(request):
+        raise httpx.PoolTimeout(cause, request=request)
+
+    with (
+        LabTracker(base_url="https://origin.example", transport=httpx.MockTransport(handler)) as lt,
+        pytest.raises(LTAPIError) as caught,
+    ):
+        lt.health()
+    message = str(caught.value)
+    assert expected in message
+    assert ": ." not in message
+    assert ":." not in message
+    assert ".." not in message
+
+
+@pytest.mark.parametrize(
+    ("parts", "expected"),
+    [
+        (("failed:", "One.", "Two."), "failed: One. Two."),
+        (("failed: ", "One.", "Two."), "failed: One. Two."),
+        (("failed", "One.", "Two."), "failed. One. Two."),
+        (("Done!", "One?", "Two"), "Done! One? Two"),
+        (("", "One.", "Two."), "One. Two."),
+        (("   ", "One", "Two"), "One. Two"),
+        (("Only",), "Only"),
+        ((), ""),
+    ],
+)
+def test_join_sentences_punctuates_only_where_a_full_stop_belongs(parts, expected):
+    assert _join_sentences(*parts) == expected
