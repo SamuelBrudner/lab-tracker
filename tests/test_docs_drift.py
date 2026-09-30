@@ -24,8 +24,10 @@ except ModuleNotFoundError:  # pragma: no cover - exercised by Python 3.10 CI
 
 from lab_tracker import graph_drafting, mcp_server
 from lab_tracker.cli import _skills_homes, init_consumer_repo, update_consumer_repo
+from lab_tracker.cli import main as lab_tracker_main
 from lab_tracker.decision_context_constants import AGENT_CONSULTATION_POLICY
 from lab_tracker.mcp_tools import READ_TOOLS, WRITE_TOOLS
+from lab_tracker.setup_guide import setup_guide_markdown
 from lab_tracker_client import cli as lt_cli
 from lab_tracker_client import setup as setup_helpers
 from lab_tracker_client.auth import auth_doctor
@@ -239,6 +241,66 @@ def test_lt_update_docs_describe_the_skills_only_refresh(doc: Path) -> None:
     text = " ".join(_read(doc).split())
     assert "`lt update --skills-only`" in text
     assert "machine-wide" in text
+
+
+# `--skills-only` writes only under the skill homes, and a relative
+# LAB_TRACKER_SKILLS_HOME resolves against the current directory (pinned by
+# tests/test_lab_tracker_init.py), so every "never touches the current directory"
+# claim carries that qualifier.
+_RELATIVE_SKILLS_HOME_QUALIFIER = (
+    "a relative `LAB_TRACKER_SKILLS_HOME` resolves against the current directory"
+)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        _read(_DOCS / "setup.md"),
+        _read(_AGENT_SETUP_DOC),
+        _read(_SKILL_PATH),
+        _read(_MCP_SKILLS_DOC),
+        setup_guide_markdown(),
+    ],
+    ids=["setup.md", "agent-setup.md", "lab-tracker-skill", "mcp-skills.md", "setup-guide"],
+)
+def test_skills_only_docs_qualify_the_current_directory_claim(text: str) -> None:
+    assert _RELATIVE_SKILLS_HOME_QUALIFIER in " ".join(text.split())
+
+
+@pytest.mark.parametrize("main", [lt_cli.main, lab_tracker_main], ids=["lt", "lab-tracker"])
+def test_skills_only_help_qualifies_the_current_directory_claim(
+    main, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        main(["update", "--help"])
+
+    assert excinfo.value.code == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "LAB_TRACKER_SKILLS_HOME is a relative path (use an absolute one)" in help_text
+
+
+def test_setup_doc_defines_the_applied_repos_registry() -> None:
+    text = " ".join(_read(_DOCS / "setup.md").split())
+    assert f"`~/.lab-tracker/{registry_path().name}`" in text
+    assert "`lt doctor --all` sweeps it" in text
+
+
+def test_setup_guide_does_not_say_a_bare_lt_update_refreshes_the_skill() -> None:
+    guide = " ".join(setup_guide_markdown().split())
+    assert "`lt update` refreshes them" not in guide
+    assert "refreshes everything after upgrades" not in guide
+    assert "`lt update --install-skills` refreshes the skill" in guide
+
+
+@pytest.mark.parametrize(
+    "doc", [_DOCS / "setup.md", _SKILL_PATH], ids=["setup.md", "lab-tracker-skill"]
+)
+def test_lt_update_docs_say_only_install_skills_refreshes_the_skill_with_the_repo(
+    doc: Path,
+) -> None:
+    text = " ".join(_read(doc).split())
+    assert "Bare `lt update` refreshes the repo's files only" in text
+    assert "`lt update --install-skills` refreshes the skill in addition to the repo" in text
 
 
 # The lt-mcp smoke check and the /health probes are bounded, and the prose that

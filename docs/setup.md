@@ -166,13 +166,21 @@ content differs is first preserved next to itself as `*.bak-lt-update`, and
 the machine-wide counterpart for the setup skill. It installs or refreshes only
 the `lab-tracker-setup` skill in the Claude and Codex skill homes
 (`~/.claude/skills` and `~/.agents/skills`, or the single home named by
-`LAB_TRACKER_SKILLS_HOME`) and never touches the current directory, any
-repository, or the applied-repos registry, so it runs from anywhere and needs
-no repo. A customised skill is preserved next to itself as
+`LAB_TRACKER_SKILLS_HOME`). It writes only the skill files and their skill
+directories (a missing skill home is created), and it touches no repository
+and not the applied-repos registry. With the default homes or an absolute
+`LAB_TRACKER_SKILLS_HOME` it touches no file in the current directory either,
+so it runs from anywhere and needs no repo. The applied-repos registry is the
+list of repositories that setup commands such as `lt setup init` and `lt update`
+recorded on this machine, in `~/.lab-tracker/applied-repos.json` (in
+`LAB_TRACKER_CONFIG_DIR` when that is set); `lt doctor --all` sweeps it. Set
+`LAB_TRACKER_SKILLS_HOME` to an absolute path: a relative
+`LAB_TRACKER_SKILLS_HOME` resolves against the current directory, which then
+receives the skill. A customised skill is preserved next to itself as
 `SKILL.md.bak-lt-update`, and `--dry-run` previews. `lt setup status` suggests
 it when a skill is missing or stale. Because it never reads a repo, it refuses
-`--yes` and `--target`. `lt update --install-skills` still refreshes the skill
-in addition to the repo.
+`--yes` and `--target`. Bare `lt update` refreshes the repo's files only;
+`lt update --install-skills` refreshes the skill in addition to the repo.
 
 ### Know when a client install is broken or behind its server
 

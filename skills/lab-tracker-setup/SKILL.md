@@ -73,18 +73,21 @@ short, consent-gated sequence on the `lt` CLI.
    integration files
    (MCP config, prompt hooks, `lt_ids.json`). The MCP files use the
    saved/env Lab Tracker URL when one exists, otherwise localhost;
-   the setup skill is installed in both Claude and Codex user homes;
-   `lt update` refreshes them after a package upgrade. To install or
-   refresh only the setup skill (for example when `lt setup status`
-   reports it missing or stale), `lt update --skills-only` works
-   machine-wide and never touches the current directory or any repo
-   (`--dry-run` previews; it cannot be combined with `--yes` or
-   `--target`). Claude Code reads the scaffolded `.mcp.json`, which
-   carries no token, and asks the person to approve the server on
-   first run. Claude Desktop chat, Codex in the ChatGPT desktop app,
-   and the Codex CLI keep their MCP registration in user-level
-   settings that setup never writes; `docs/agent-setup.md` in the Lab
-   Tracker repository lists each client's registration.
+   `--install-skills` also installs the setup skill in both Claude and
+   Codex user homes. After a package upgrade, `lt update` refreshes
+   the repo's files only; `lt update --install-skills` refreshes the
+   skill as well. To install or refresh only the setup skill (for
+   example when `lt setup status` reports it missing or stale),
+   `lt update --skills-only` works machine-wide and touches no repo or
+   file in the current directory (`--dry-run` previews; it cannot be
+   combined with `--yes` or `--target`); a relative
+   `LAB_TRACKER_SKILLS_HOME` resolves against the current directory,
+   so keep that override absolute. Claude Code reads the scaffolded
+   `.mcp.json`, which carries no token, and asks the person to
+   approve the server on first run. Claude Desktop chat, Codex in the
+   ChatGPT desktop app, and the Codex CLI keep their MCP registration in
+   user-level settings that setup never writes; `docs/agent-setup.md`
+   in the Lab Tracker repository lists each client's registration.
 7. **Project binding** — `lt project bind --project-id <project-id>
    --yes` verifies the selected project and records its exact id in
    `lt_ids.json`.
@@ -192,9 +195,10 @@ repo; an analysis repo updates by rerunning its pinned `uv add`
 4. Commit hooks are per-repo consent: name the repo, show the preview, and
    let the user apply `lt hooks install --yes` themselves when in doubt.
 5. Close by re-running `lt setup status` and reflecting the healthy state
-   back; mention that `lt update` refreshes everything after upgrades.
+   back; mention that after upgrades `lt update` refreshes a repo's files
+   and `lt update --skills-only` refreshes this skill.
 
 If Lab Tracker is unreachable and the user does not operate a server, point
 them at whoever runs their lab's instance instead of standing one up ad hoc.
 
-<!-- lab-tracker-setup-guide version=0.1.0 sha256=e40af99b0808 -->
+<!-- lab-tracker-setup-guide version=0.1.0 sha256=fd442116d57f -->

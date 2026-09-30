@@ -241,7 +241,9 @@ def _skills_homes() -> tuple[tuple[str, Path], ...]:
 
     The explicit environment override predates Codex support and remains a
     single-target escape hatch for custom installs and isolated tests. Without
-    it, install the generated setup skill for both supported agent homes.
+    it, install the generated setup skill for both supported agent homes. A
+    relative override is taken as written and so resolves against the current
+    directory; it should be an absolute path.
     """
 
     override = os.getenv("LAB_TRACKER_SKILLS_HOME")
@@ -473,11 +475,15 @@ def refresh_setup_skills(*, dry_run: bool = False) -> InitResult:
     """Install or refresh only the ``lab-tracker-setup`` skill, machine-wide.
 
     This is the skills half of ``update_consumer_repo(install_skills=True)`` on
-    its own. It takes no target, so it cannot scaffold: it never creates a
-    directory, writes a repo file, enrolls a repo in the applied-repos
-    registry, or resolves the MCP URL. A missing skill is created, a
-    customised one is backed up to ``SKILL.md.bak-lt-update`` before it is
-    refreshed, and ``dry_run`` only records the diffs.
+    its own. It takes no target, so it cannot scaffold: it writes no repo file,
+    enrolls no repo in the applied-repos registry, and does not resolve the MCP
+    URL. It writes only the skill files and their skill directories, so a
+    missing skill home is created. A customised skill is backed up to
+    ``SKILL.md.bak-lt-update`` before it is refreshed, and ``dry_run`` only
+    records the diffs. With the default homes or an absolute
+    ``LAB_TRACKER_SKILLS_HOME`` that leaves the current directory and every
+    repository alone; a relative override resolves against the current
+    directory (see :func:`_skills_homes`), so set it to an absolute path.
     """
 
     result = InitResult()
@@ -779,9 +785,10 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help=(
             "Install or refresh only the lab-tracker-setup skill in the Claude and "
-            "Codex homes, machine-wide; implies --install-skills and never touches "
-            "the current directory or any repo. Cannot be combined with --yes or "
-            "--target; --dry-run previews."
+            "Codex homes, machine-wide; implies --install-skills and touches no "
+            "repo or file in the current directory, unless LAB_TRACKER_SKILLS_HOME "
+            "is a relative path (use an absolute one). Cannot be combined with "
+            "--yes or --target; --dry-run previews."
         ),
     )
     serve_parser = subcommands.add_parser(

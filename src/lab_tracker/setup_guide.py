@@ -76,18 +76,21 @@ def setup_guide_markdown() -> str:
         "   integration files\n"
         "   (MCP config, prompt hooks, `lt_ids.json`). The MCP files use the\n"
         "   saved/env Lab Tracker URL when one exists, otherwise localhost;\n"
-        "   the setup skill is installed in both Claude and Codex user homes;\n"
-        "   `lt update` refreshes them after a package upgrade. To install or\n"
-        "   refresh only the setup skill (for example when `lt setup status`\n"
-        "   reports it missing or stale), `lt update --skills-only` works\n"
-        "   machine-wide and never touches the current directory or any repo\n"
-        "   (`--dry-run` previews; it cannot be combined with `--yes` or\n"
-        "   `--target`). Claude Code reads the scaffolded `.mcp.json`, which\n"
-        "   carries no token, and asks the person to approve the server on\n"
-        "   first run. Claude Desktop chat, Codex in the ChatGPT desktop app,\n"
-        "   and the Codex CLI keep their MCP registration in user-level\n"
-        "   settings that setup never writes; `docs/agent-setup.md` in the Lab\n"
-        "   Tracker repository lists each client's registration.\n"
+        "   `--install-skills` also installs the setup skill in both Claude and\n"
+        "   Codex user homes. After a package upgrade, `lt update` refreshes\n"
+        "   the repo's files only; `lt update --install-skills` refreshes the\n"
+        "   skill as well. To install or refresh only the setup skill (for\n"
+        "   example when `lt setup status` reports it missing or stale),\n"
+        "   `lt update --skills-only` works machine-wide and touches no repo or\n"
+        "   file in the current directory (`--dry-run` previews; it cannot be\n"
+        "   combined with `--yes` or `--target`); a relative\n"
+        "   `LAB_TRACKER_SKILLS_HOME` resolves against the current directory,\n"
+        "   so keep that override absolute. Claude Code reads the scaffolded\n"
+        "   `.mcp.json`, which carries no token, and asks the person to\n"
+        "   approve the server on first run. Claude Desktop chat, Codex in the\n"
+        "   ChatGPT desktop app, and the Codex CLI keep their MCP registration in\n"
+        "   user-level settings that setup never writes; `docs/agent-setup.md`\n"
+        "   in the Lab Tracker repository lists each client's registration.\n"
         "7. **Project binding** — `lt project bind --project-id <project-id>\n"
         "   --yes` verifies the selected project and records its exact id in\n"
         "   `lt_ids.json`.\n"
@@ -254,7 +257,8 @@ _SKILL_CONVERSATION = """\
 4. Commit hooks are per-repo consent: name the repo, show the preview, and
    let the user apply `lt hooks install --yes` themselves when in doubt.
 5. Close by re-running `lt setup status` and reflecting the healthy state
-   back; mention that `lt update` refreshes everything after upgrades.
+   back; mention that after upgrades `lt update` refreshes a repo's files
+   and `lt update --skills-only` refreshes this skill.
 
 If Lab Tracker is unreachable and the user does not operate a server, point
 them at whoever runs their lab's instance instead of standing one up ad hoc.

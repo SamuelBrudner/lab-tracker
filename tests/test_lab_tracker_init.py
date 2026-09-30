@@ -659,6 +659,45 @@ def test_update_skills_only_rejects_contradictory_flags(
 
 
 @_BOTH_UPDATE_CLIS
+def test_update_skills_only_creates_only_the_skill_directories(
+    main, skill_home: Path, scratch_cwd: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The skill home does not exist yet: installing creates it (and the skill
+    # directory in it), and nothing at all under the current directory.
+    assert not skill_home.exists()
+
+    main(["update", "--skills-only"])
+
+    capsys.readouterr()
+    assert sorted(path.relative_to(skill_home).as_posix() for path in skill_home.rglob("*")) == [
+        "lab-tracker-setup",
+        "lab-tracker-setup/SKILL.md",
+    ]
+    assert list(scratch_cwd.iterdir()) == []
+
+
+@_BOTH_UPDATE_CLIS
+def test_update_skills_only_resolves_a_relative_skills_home_against_the_cwd(
+    main,
+    monkeypatch: pytest.MonkeyPatch,
+    scratch_cwd: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Why the docs say to use an absolute LAB_TRACKER_SKILLS_HOME: a relative one
+    # is taken relative to the current directory, which then gets the skill.
+    monkeypatch.setenv("LAB_TRACKER_SKILLS_HOME", "relative-skills")
+    monkeypatch.setenv("LAB_TRACKER_CONFIG_DIR", str(tmp_path / "lt-config"))
+
+    main(["update", "--skills-only"])
+
+    payload = json.loads(capsys.readouterr().out)
+    skill_path = scratch_cwd / "relative-skills" / "lab-tracker-setup" / "SKILL.md"
+    assert skill_path.is_file()
+    assert Path(payload["created"][0]).resolve() == skill_path.resolve()
+
+
+@_BOTH_UPDATE_CLIS
 def test_update_skills_only_dry_run_writes_nothing(
     main, skill_home: Path, scratch_cwd: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

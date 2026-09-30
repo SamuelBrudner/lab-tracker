@@ -79,10 +79,12 @@ sync afterwards.
 
 To refresh only the `lab-tracker-setup` skill, machine-wide, run
 `lt update --skills-only`. It installs or refreshes the skill in the Claude and
-Codex skill homes and never touches the current directory or any repository
-(`--dry-run` previews; `--yes` and `--target` are refused). `lt setup status`
-suggests it when a skill is missing or stale. `lt update --install-skills`
-still refreshes the repo as well.
+Codex skill homes and touches no repository or file in the current directory
+(`--dry-run` previews; `--yes` and `--target` are refused; a relative
+`LAB_TRACKER_SKILLS_HOME` resolves against the current directory, so keep that
+override absolute). `lt setup status` suggests it when a skill is missing or
+stale. Bare `lt update` refreshes the repo's files only;
+`lt update --install-skills` refreshes the skill in addition to the repo.
 
 For substantive, rerunnable notes, prefer `lab_tracker_client.LabTracker` or
 the generated `scripts.lt.upsert_note(...)`. Notes are idempotent by the first

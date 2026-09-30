@@ -398,4 +398,5 @@ command and doc; the generated `lab-tracker-setup` skill (installed by
 `lt setup init --install-skills`) walks a person through enabling them, and
 [capture-guide.md](capture-guide.md) is the same map for people.
 `lt update --skills-only` refreshes that generated skill machine-wide without
-touching the current directory.
+touching the current directory (a relative `LAB_TRACKER_SKILLS_HOME` resolves
+against the current directory, so keep that override absolute).

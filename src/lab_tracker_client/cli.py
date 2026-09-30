@@ -195,9 +195,10 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Install or refresh only the lab-tracker-setup skill in the Claude and "
-            "Codex homes, machine-wide; implies --install-skills and never touches "
-            "the current directory or any repo. Cannot be combined with --yes or "
-            "--target; --dry-run previews."
+            "Codex homes, machine-wide; implies --install-skills and touches no "
+            "repo or file in the current directory, unless LAB_TRACKER_SKILLS_HOME "
+            "is a relative path (use an absolute one). Cannot be combined with "
+            "--yes or --target; --dry-run previews."
         ),
     )
     update_parser.set_defaults(func=_cmd_update, needs_client=False)

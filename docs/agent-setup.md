@@ -227,9 +227,10 @@ binding without writing `lt_ids.json`.
 
 The generated setup skill is machine-wide, not per repo. When `lt setup status`
 reports it missing or stale, `lt update --skills-only` (`--dry-run` previews)
-refreshes it in the Claude and Codex homes without touching the current
-directory, so it is safe to run outside an analysis repo. The `lt setup init`
-step above is for onboarding a repo.
+refreshes it in the Claude and Codex homes and touches no file in the current
+directory, so it is safe to run outside an analysis repo (a relative
+`LAB_TRACKER_SKILLS_HOME` resolves against the current directory, so keep that
+override absolute). The `lt setup init` step above is for onboarding a repo.
 
 The Agent access page verifies the selected project's effective membership with
 the newly issued token before displaying connection, binding, or capture
