@@ -1103,7 +1103,9 @@ def _add_auth_parsers(subcommands: argparse._SubParsersAction) -> None:
         "doctor",
         help=(
             "Enumerate every lab-tracker MCP registration and flag deprecated "
-            "username/password auth (drift that causes silent 401s)."
+            "username/password auth (drift that causes silent 401s). For a Claude "
+            "Desktop entry, also report its command and warn when an absolute "
+            "command path is not an existing file."
         ),
     )
     doctor_parser.add_argument(

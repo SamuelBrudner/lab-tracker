@@ -10,14 +10,18 @@ green elsewhere.
 ``auth_doctor`` enumerates every registration it can find and reports, per
 surface: the effective auth mode (``api_key`` LPAT vs deprecated
 ``username_password`` vs ``none``), the base URL, and a warning when the
-deprecated username/password env is present. It is strictly read-only and
-fail-soft: unreadable or malformed files are skipped, never raised.
+deprecated username/password env is present. For a Claude Desktop entry it also
+reports the registered ``command`` (whether it is absolute and whether it exists),
+warns when an absolute ``command`` is not an existing file, and adds a neutral
+note when the command is not absolute. It is strictly read-only and fail-soft:
+unreadable or malformed files are skipped, never raised.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import shutil
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -49,6 +53,18 @@ _DESKTOP_RELAUNCH_NOTE = (
     "Claude Desktop only re-reads MCP env on a full quit-and-reopen (Cmd/Ctrl+Q), "
     "not a window reload — restart it after changing credentials."
 )
+# A precaution, not a prediction: which PATH the app searches is the app's business,
+# so this never claims a bare command fails.
+_DESKTOP_NON_ABSOLUTE_NOTE = (
+    "Claude Desktop entry '{server}' uses the command '{command}', which is not an "
+    "absolute path. If the app cannot find it, set the command to the absolute path "
+    "of the executable."
+)
+_DESKTOP_MISSING_COMMAND_WARNING = (
+    "The registered command '{command}' is an absolute path that is not an existing "
+    "file; correct it to the executable that starts the server, then fully quit and "
+    "reopen Claude Desktop."
+)
 
 
 @dataclass
@@ -60,6 +76,9 @@ class AuthRegistration:
     base_url: str | None = None
     warning: str | None = None
     scope: str | None = None
+    command: str | None = None
+    command_is_absolute: bool | None = None
+    command_exists: bool | None = None
 
     def to_dict(self) -> JsonObject:
         payload: JsonObject = {
@@ -71,9 +90,27 @@ class AuthRegistration:
         }
         if self.scope:
             payload["scope"] = self.scope
+        if self.command is not None:
+            payload["command"] = self.command
+            payload["command_is_absolute"] = self.command_is_absolute
+            payload["command_exists"] = self.command_exists
         if self.warning:
             payload["warning"] = self.warning
         return payload
+
+
+@dataclass(frozen=True)
+class _CommandFacts:
+    """What the doctor can see about a registered ``command`` from this machine.
+
+    ``exists`` is whether an absolute command is an existing file, or whether a
+    non-absolute one resolves from this process's working directory and ``PATH``.
+    The latter says nothing about the search path a GUI app uses.
+    """
+
+    command: str
+    is_absolute: bool
+    exists: bool
 
 
 @dataclass
@@ -90,21 +127,22 @@ def auth_doctor(target: str | Path = ".", *, home: str | Path | None = None) -> 
     home_dir = Path(home).expanduser() if home is not None else Path.home()
 
     registrations: list[AuthRegistration] = []
-    saw_desktop = False
+    desktop_registrations: list[AuthRegistration] = []
     for source in _config_sources(root, home_dir):
         config = _load_config(source.path)
         if config is None:
             continue
         found = _registrations_from_config(source, config)
-        if found and source.is_desktop:
-            saw_desktop = True
+        if source.is_desktop:
+            desktop_registrations.extend(found)
         registrations.extend(found)
 
     deprecated = [r for r in registrations if r.auth_mode == AUTH_USERNAME_PASSWORD]
     warnings = [r for r in registrations if r.warning]
     notes: list[str] = []
-    if saw_desktop:
+    if desktop_registrations:
         notes.append(_DESKTOP_RELAUNCH_NOTE)
+        notes.extend(_desktop_command_notes(desktop_registrations))
 
     return {
         "command": "auth-doctor",
@@ -205,6 +243,7 @@ def _registrations_from_server_map(
             continue
         env = entry.get("env") if isinstance(entry.get("env"), dict) else {}
         auth_mode, warning = _classify_auth(env)
+        facts = _command_facts(entry) if source.is_desktop else None
         registrations.append(
             AuthRegistration(
                 surface=source.surface,
@@ -212,11 +251,56 @@ def _registrations_from_server_map(
                 server=str(name),
                 auth_mode=auth_mode,
                 base_url=_first_clean(env, _BASE_URL_ENVS),
-                warning=warning,
+                warning=_join_warnings(warning, _missing_command_warning(facts)),
                 scope=scope,
+                command=facts.command if facts else None,
+                command_is_absolute=facts.is_absolute if facts else None,
+                command_exists=facts.exists if facts else None,
             )
         )
     return registrations
+
+
+def _command_facts(entry: JsonObject) -> _CommandFacts | None:
+    command = _clean(entry.get("command"))
+    if command is None:
+        return None
+    if Path(command).is_absolute():
+        return _CommandFacts(command, is_absolute=True, exists=_is_existing_file(command))
+    return _CommandFacts(command, is_absolute=False, exists=_resolves_from_here(command))
+
+
+def _is_existing_file(command: str) -> bool:
+    try:
+        return Path(command).is_file()
+    except (OSError, ValueError):  # fail-soft: an unreadable path is "not a file we can see".
+        return False
+
+
+def _resolves_from_here(command: str) -> bool:
+    try:
+        return shutil.which(command) is not None
+    except (OSError, ValueError):  # fail-soft, e.g. an embedded NUL in the command.
+        return False
+
+
+def _missing_command_warning(facts: _CommandFacts | None) -> str | None:
+    if facts is None or not facts.is_absolute or facts.exists:
+        return None
+    return _DESKTOP_MISSING_COMMAND_WARNING.format(command=facts.command)
+
+
+def _join_warnings(*warnings: str | None) -> str | None:
+    return " ".join(warning for warning in warnings if warning) or None
+
+
+def _desktop_command_notes(registrations: list[AuthRegistration]) -> list[str]:
+    notes = [
+        _DESKTOP_NON_ABSOLUTE_NOTE.format(server=r.server, command=r.command)
+        for r in registrations
+        if r.command is not None and r.command_is_absolute is False
+    ]
+    return list(dict.fromkeys(notes))  # the same entry can sit in several candidate files.
 
 
 def _is_lab_tracker_entry(name: str, entry: JsonObject) -> bool:
