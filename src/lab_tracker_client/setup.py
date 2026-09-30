@@ -329,11 +329,7 @@ def _install_suggestions(status: JsonObject) -> list[str]:
     suggestions: list[str] = []
     lt_mcp = status["lt_mcp"]
     if lt_mcp.get("importable") is False:
-        suggestions.append(
-            f"lt-mcp cannot start in this environment ({_brief_error(lt_mcp.get('error'))}); "
-            "the install command on the server's Agents page reinstalls the client, and "
-            "`lt doctor` shows the full traceback."
-        )
+        suggestions.append(_lt_mcp_suggestion(lt_mcp))
     client = status["client"]
     # Only a newer server (MAJOR, MINOR) is worth a suggestion; a PATCH-only
     # gap stays in the ``client`` report as information.
@@ -347,6 +343,33 @@ def _install_suggestions(status: JsonObject) -> list[str]:
             f"its server (release {server.version}); {update_steps(server)}."
         )
     return suggestions
+
+
+def _lt_mcp_suggestion(lt_mcp: JsonObject) -> str:
+    """The one-line suggestion for a failed smoke check, worded for what it can promise.
+
+    Only an import that raised or crashed leaves a traceback for ``lt doctor`` to
+    show. A timeout has none, and its own next step is to rerun ``lt doctor``
+    before reinstalling; an interpreter that could not start has none either.
+    """
+
+    error = _brief_error(lt_mcp.get("error"))
+    reinstall = "the install command on the server's Agents page reinstalls the client"
+    if lt_mcp.get("next_step") == _MCP_IMPORT_TIMEOUT_NEXT_STEP:
+        return (
+            f"lt-mcp did not finish importing in time ({error}); a hung or very slow "
+            f"dependency import can cause this, so rerun `lt doctor` to see whether it "
+            f"repeats, and if it does, {reinstall}."
+        )
+    if not str(lt_mcp.get("traceback") or "").strip():
+        return (
+            f"lt-mcp may not be able to start in this environment ({error}); rerun "
+            f"`lt doctor` to see whether it repeats, and if it does, {reinstall}."
+        )
+    return (
+        f"lt-mcp cannot start in this environment ({error}); {reinstall}, and "
+        "`lt doctor` shows the full traceback."
+    )
 
 
 def _brief_error(error: object) -> str:

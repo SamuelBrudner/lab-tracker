@@ -326,8 +326,9 @@ def test_doctor_and_status_survive_a_hung_import(monkeypatch, tmp_path, capsys) 
 
     lt_cli.main(["setup", "status", "--target", str(repo), "--brief", "--fail-silent"])
     brief = json.loads(capsys.readouterr().out)
-    assert brief["suggestions"][0].startswith("lt-mcp cannot start in this environment")
+    assert brief["suggestions"][0].startswith("lt-mcp did not finish importing in time")
     assert "TimeoutError" in brief["brief"]
+    assert "traceback" not in brief["brief"]
 
 
 def test_brief_line_keeps_the_error_to_one_short_line(monkeypatch, tmp_path) -> None:
@@ -357,7 +358,11 @@ def test_brief_line_for_a_short_one_line_error_is_unchanged(monkeypatch, tmp_pat
     monkeypatch.setattr(
         setup_helpers,
         "mcp_startup_check",
-        lambda: {"importable": False, "error": "ModuleNotFoundError: No module named 'x'"},
+        lambda: {
+            "importable": False,
+            "error": "ModuleNotFoundError: No module named 'x'",
+            "traceback": "Traceback (most recent call last):\n  ...",
+        },
     )
     _isolate_status(monkeypatch, tmp_path)
 
@@ -367,3 +372,47 @@ def test_brief_line_for_a_short_one_line_error_is_unchanged(monkeypatch, tmp_pat
         "lt-mcp cannot start in this environment "
         "(ModuleNotFoundError: No module named 'x'); the install command"
     )
+
+
+@pytest.mark.parametrize(
+    "stderr_tail", ["", "a warning the slow import wrote"], ids=["silent", "noisy"]
+)
+def test_brief_line_for_a_timed_out_check_promises_no_traceback(
+    monkeypatch, tmp_path, stderr_tail: str
+) -> None:
+    # A timeout has no traceback, only whatever the child wrote before it was
+    # killed, and its own next step is to rerun `lt doctor` before reinstalling.
+    monkeypatch.setattr(
+        setup_helpers,
+        "mcp_startup_check",
+        lambda: {
+            "importable": False,
+            "error": "TimeoutError: importing lab_tracker.mcp_server did not finish in 15 seconds",
+            "traceback": stderr_tail,
+            "next_step": setup_helpers._MCP_IMPORT_TIMEOUT_NEXT_STEP,
+        },
+    )
+    _isolate_status(monkeypatch, tmp_path)
+
+    suggestion = setup_helpers.setup_status(tmp_path)["suggestions"][0]
+
+    assert suggestion.startswith("lt-mcp did not finish importing in time (TimeoutError:")
+    assert "traceback" not in suggestion
+    assert "cannot start" not in suggestion
+    assert suggestion.index("rerun `lt doctor`") < suggestion.index("install command")
+
+
+def test_brief_line_for_an_interpreter_that_cannot_start_promises_no_traceback(
+    monkeypatch, tmp_path
+) -> None:
+    _use_module(monkeypatch, tmp_path, "VALUE = 1\n")
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "no-such-python"))
+    _isolate_status(monkeypatch, tmp_path)
+
+    check = setup_helpers.mcp_startup_check()
+    suggestion = setup_helpers.setup_status(tmp_path)["suggestions"][0]
+
+    assert check["traceback"] == ""
+    assert suggestion.startswith("lt-mcp may not be able to start in this environment (")
+    assert "traceback" not in suggestion
+    assert "rerun `lt doctor`" in suggestion
