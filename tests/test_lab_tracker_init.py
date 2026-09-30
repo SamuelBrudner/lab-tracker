@@ -658,6 +658,20 @@ def test_update_skills_only_rejects_contradictory_flags(
     assert list(scratch_cwd.iterdir()) == []
 
 
+@pytest.mark.parametrize(
+    ("main", "command"),
+    [(lt_main, "lt"), (lab_tracker_main, "lab-tracker")],
+    ids=["lt", "lab-tracker"],
+)
+def test_update_skills_only_conflict_names_the_command_the_docs_use(
+    main, command: str, skill_home: Path, scratch_cwd: Path
+) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        main(["update", "--skills-only", "--yes"])
+
+    assert str(excinfo.value.code).startswith(f"{command} update --skills-only refreshes only")
+
+
 @_BOTH_UPDATE_CLIS
 def test_update_skills_only_creates_only_the_skill_directories(
     main, skill_home: Path, scratch_cwd: Path, capsys: pytest.CaptureFixture[str]

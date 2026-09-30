@@ -370,6 +370,8 @@ def _uninstall_setup_skill_at_path(
 
 
 _UPDATE_BACKUP_SUFFIX = ".bak-lt-update"
+# The name the docs give this command, whichever installed script name ran it.
+_DOCUMENTED_PROG = "lab-tracker"
 
 # One activation block per agent instruction file, kept byte-identical so
 # Claude Code (CLAUDE.md), Codex CLI and other AGENTS.md readers, and
@@ -918,7 +920,7 @@ def main(argv: list[str] | None = None) -> None:
         if args.skills_only:
             # Before resolving the MCP URL: skills-only never uses it, so a
             # malformed LAB_TRACKER_BASE_URL must not break the command.
-            reject_skills_only_conflicts(parser.prog, yes=args.yes, target=args.target)
+            reject_skills_only_conflicts(_DOCUMENTED_PROG, yes=args.yes, target=args.target)
             result = refresh_setup_skills(dry_run=args.dry_run)
         else:
             from lab_tracker_client.setup import resolved_base_url_for_setup
