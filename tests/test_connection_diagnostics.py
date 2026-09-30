@@ -189,16 +189,47 @@ def test_mcp_health_keeps_fail_soft_and_exposes_diagnostic(monkeypatch):
     assert result["next_action"]["action"] == "proceed_without_graph_context"
 
 
-def test_health_probe_stays_fail_soft_when_httpx_rejects_the_proxy_setting(monkeypatch):
+SOCKS_WITHOUT_SOCKSIO = (
+    "Using SOCKS proxy, but the 'socksio' package is not installed. "
+    "Make sure to install httpx using `pip install httpx[socks]`."
+)
+
+
+def test_health_probe_stays_fail_soft_when_the_http_client_cannot_be_built(monkeypatch):
     # httpx reads the proxy variables while building the client; a SOCKS proxy
     # without the optional socksio package raises ImportError there, and the
-    # session-start status must still report instead of crashing.
+    # session-start status must still report instead of crashing. Simulated so
+    # the result does not depend on whether socksio is installed.
+    def unbuildable(*_args, **_kwargs):
+        raise ImportError(SOCKS_WITHOUT_SOCKSIO)
+
+    monkeypatch.setattr(httpx, "Client", unbuildable)
+
+    result = setup.probe_health_diagnostics("http://127.0.0.1:9")
+
+    assert result["reachable"] is False
+    assert result["diagnosis"] == "transport_error"
+    assert result["detail"]
+    assert result["next_step"]
+
+
+def test_health_probe_stays_fail_soft_under_a_socks_proxy_setting(monkeypatch):
+    # The real client, whichever way this environment goes: without socksio httpx
+    # rejects the setting while building the client (transport_error); with it the
+    # probe reaches for the unreachable proxy (tcp_connection_failed, or a
+    # proxy_connection_failed where httpx names the proxy). It must never raise.
     monkeypatch.setenv("ALL_PROXY", "socks5://127.0.0.1:9")
 
     result = setup.probe_health_diagnostics("http://127.0.0.1:9")
 
     assert result["reachable"] is False
-    assert result["diagnosis"] in {"transport_error", "proxy_connection_failed"}
+    assert result["diagnosis"] in {
+        "transport_error",
+        "proxy_connection_failed",
+        "tcp_connection_failed",
+    }
+    assert result["detail"]
+    assert result["next_step"]
 
 
 def test_malformed_health_url_stays_fail_soft():
