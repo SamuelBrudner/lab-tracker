@@ -557,6 +557,40 @@ def test_auth_doctor_reports_no_auth_for_the_documented_hand_registered_entries(
         reg["path"] for reg in report["registrations"] if reg["surface"] == "claude-desktop"
     ]
     assert desktop_paths == [str(desktop_config)], report
+    # The placeholder is not an absolute path, so doctor only adds its neutral note; the
+    # missing-path warning is reserved for a real absolute path that does not exist.
+    assert report["warning_count"] == 0, report
+
+
+def test_documented_claude_desktop_example_with_a_real_path_passes_lt_auth_doctor(
+    tmp_path: Path,
+) -> None:
+    # Once the reader replaces the placeholder with the path of an installed `lt-mcp`,
+    # doctor finds the file and has nothing to say beyond the relaunch reminder.
+    desktop = next(
+        json.loads(block)
+        for block in _fenced_blocks(_read(_AGENT_SETUP_DOC), "json")
+        if '"mcpServers"' in block
+    )
+    executable = tmp_path / "bin" / "lt-mcp"
+    executable.parent.mkdir()
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    desktop["mcpServers"]["lab-tracker"]["command"] = str(executable)
+    home = tmp_path / "home"
+    desktop_config = home / "Library" / "Application Support" / "Claude"
+    desktop_config.mkdir(parents=True)
+    (desktop_config / "claude_desktop_config.json").write_text(
+        json.dumps(desktop), encoding="utf-8"
+    )
+
+    report = auth_doctor(tmp_path / "repo", home=home)
+
+    (registration,) = report["registrations"]
+    assert registration["command"] == str(executable), report
+    assert registration["command_is_absolute"] is True, report
+    assert registration["command_exists"] is True, report
+    assert report["warning_count"] == 0, report
+    assert len(report["notes"]) == 1, report  # only the quit-and-reopen reminder
 
 
 _DOCTOR_NO_ENV_SENTENCE = (

@@ -410,10 +410,18 @@ Verify:
    `mcp.log` and `mcp-server-lab-tracker.log` in `~/Library/Logs/Claude` on macOS
    and `%APPDATA%\Claude\logs` on Windows. `lt auth doctor` lists the
    registration it finds in this file and flags deprecated username and password
-   credentials; it does not launch the server. For an entry without `env`,
-   `lt auth doctor` reports auth mode `none` and no base URL. That is expected:
-   the token and URL come from the saved profile, which `lt auth doctor` does not
-   read. Do not add credentials to the entry to change that result.
+   credentials; it does not launch the server and never edits the file. For an
+   entry without `env`, `lt auth doctor` reports auth mode `none` and no base
+   URL. That is expected: the token and URL come from the saved profile, which
+   `lt auth doctor` does not read. Do not add credentials to the entry to change
+   that result. `lt auth doctor` also reports the entry's `command` as `command`,
+   `command_is_absolute` and `command_exists` in its JSON output. It warns when
+   the command is an absolute path that is not an existing file, for example
+   after `lt-mcp` moved. When the command is not an absolute path, it adds a
+   note (not a warning) suggesting the absolute path in case the app cannot find
+   the command, and `command_exists` then describes what your shell finds, not
+   what the app finds. When no Claude Desktop config has a `lab-tracker` entry,
+   it reports nothing about Claude Desktop.
 2. Launch check:
    `lt setup verify-mcp --expected-revision <full-revision> --command <absolute path from step 1>`.
 3. In-client read: ask Claude to call `lab_tracker_list_projects` with `limit` 1.
