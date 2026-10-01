@@ -252,6 +252,7 @@ def test_the_check_leaves_this_process_alone(monkeypatch, tmp_path) -> None:
     assert FAKE_MODULE not in sys.modules
 
 
+@pytest.mark.usefixtures("offline_server")
 def test_import_output_stays_out_of_the_lt_json_output(
     monkeypatch, tmp_path, capsys
 ) -> None:
@@ -309,6 +310,7 @@ def test_a_token_straddling_the_error_line_cut_is_redacted_whole(monkeypatch, tm
     assert "A1b2" not in payload["traceback"]
 
 
+@pytest.mark.usefixtures("offline_server")
 def test_doctor_and_status_survive_a_hung_import(monkeypatch, tmp_path, capsys) -> None:
     _use_module(monkeypatch, tmp_path, "import time\ntime.sleep(30)\n")
     monkeypatch.setattr(setup_helpers, "_MCP_IMPORT_TIMEOUT_SECONDS", HANG_TIMEOUT_SECONDS)

@@ -436,9 +436,11 @@ def test_agent_setup_diagnosis_table_lists_every_diagnosis_the_probe_reports() -
     assert not missing, f"diagnosis codes missing from the agent-setup table: {missing}"
 
 
-def test_lt_doctor_help_names_the_lt_mcp_check() -> None:
+def test_lt_doctor_help_names_every_check_it_runs() -> None:
     help_text = " ".join(lt_cli._build_parser().format_help().split())
-    assert "code-facing idiom blocks and that lt-mcp can start" in help_text
+    assert "code-facing idiom blocks, that lt-mcp can start" in help_text
+    assert "whether this client is behind its server" in help_text
+    assert "an unreachable server is a warning, not a failure" in help_text
 
 
 # Which capture paths DO record the release is pinned by behaviour in

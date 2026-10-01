@@ -133,8 +133,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "doctor",
         aliases=["check-idioms"],
         help=(
-            "Check managed Lab Tracker code-facing idiom blocks and that lt-mcp "
-            "can start (a bounded import check in a child interpreter)."
+            "Check managed Lab Tracker code-facing idiom blocks, that lt-mcp "
+            "can start (a bounded import check in a child interpreter), and "
+            "whether this client is behind its server (one bounded /health "
+            "request; an unreachable server is a warning, not a failure)."
         ),
     )
     doctor_parser.add_argument(
@@ -2546,6 +2548,7 @@ def _cmd_doctor(args: argparse.Namespace) -> Any:
     if not getattr(args, "all", False):
         payload = _doctor(args.target)
         payload["lt_mcp"] = setup_helpers.mcp_startup_check()
+        payload.update(setup_helpers.doctor_release_check())
         return payload
     repos = []
     pruned = []
@@ -2582,6 +2585,7 @@ def _cmd_doctor(args: argparse.Namespace) -> Any:
         "repos": repos,
         # One install serves every registered repo, so check it once per sweep.
         "lt_mcp": setup_helpers.mcp_startup_check(),
+        **setup_helpers.doctor_release_check(),
     }
     if pruned:
         result["pruned"] = pruned

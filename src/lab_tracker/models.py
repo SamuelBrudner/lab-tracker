@@ -1730,8 +1730,8 @@ class ProjectCoverageCaptureSource(_DomainModel):
       flagged.
     - Client release: whether the client that made the source's newest capture
       runs a release behind this server's (``release_status``), and whether that
-      gap is worth updating for (``update_recommended``: an older MAJOR.MINOR,
-      see ``docs/versioning.md``), spelled out as an ``update_notice`` on each
+      gap is worth updating for (``update_recommended``: any older release,
+      PATCH included, see ``docs/versioning.md``), spelled out as an ``update_notice`` on each
       such source that captured inside the quiet window (see
       ``lab_tracker.capture_client_release``).
     """

@@ -4,14 +4,15 @@ A release is the ``[project].version`` in ``pyproject.toml``, versioned by
 ``docs/versioning.md``: Semantic Versioning, and while on ``0.y.z`` a MINOR
 bump for features and any incompatibility and a PATCH bump only for
 backward-compatible fixes. ``status`` is truthful: a client on any older
-release is *behind*. One rule decides whether that is worth a nag:
-``update_recommended`` is true only when the client's (MAJOR, MINOR) is older
-than the server's, and every update notice (the coverage read's
-``update_notice``, the ``lt-mcp`` notice, the ``lt setup status`` suggestion)
-keys on it. A PATCH-only gap is reported as information, never suggested.
-Exact source revisions are reported but never nag on their own either: most
-commits are not consumer-relevant, and a notice that fires on every deploy
-teaches people to ignore it.
+release is *behind*, and one rule decides whether that is worth a nag:
+``update_recommended`` is true exactly when the client's release is older than
+the server's, a PATCH gap included, because a PATCH release is where fixes for a
+broken install land. Every update notice (the coverage read's
+``update_notice``, the ``lt-mcp`` notice, the ``lt setup status`` suggestion and
+the ``lt doctor`` warning) keys on it. Exact source revisions are reported but
+never nag on their own: most commits are not consumer-relevant, a release is the
+unit a maintainer chose to cut, and a notice that fires on every deploy teaches
+people to ignore it.
 """
 
 from __future__ import annotations
@@ -26,9 +27,6 @@ from typing import Any, Literal
 from lab_tracker import _version
 
 SOURCE_REPOSITORY_URL = "https://github.com/SamuelBrudner/lab-tracker.git"
-# (MAJOR, MINOR): the part of a release that carries features and, on 0.y.z,
-# incompatibilities (docs/versioning.md).
-FEATURE_LINE_LENGTH = 2
 # A release version is a few short dotted integers. Anything longer is not one,
 # and ``int()`` refuses digit runs past CPython's integer-string limit (4300),
 # so a hostile version must be rejected before it is parsed.
@@ -43,7 +41,6 @@ UNKNOWN_REVISION_PROJECT_INSTALL = (
 )
 
 ReleaseStatus = Literal["current", "behind", "ahead", "unknown"]
-FeatureLine = tuple[int, ...]
 
 _FULL_GIT_REVISION = re.compile(r"^[0-9a-f]{40}$")
 _RELEASE_VERSION = re.compile(r"^[0-9]+(?:\.[0-9]+)*$")
@@ -124,24 +121,17 @@ def release_key(version: str | None) -> tuple[int, ...] | None:
     return tuple(parts)
 
 
-def feature_line(version: str | None) -> FeatureLine | None:
-    """The (MAJOR, MINOR) of a plain dotted release; ``None`` when unreadable."""
-
-    if version is None or release_key(version) is None:
-        return None
-    parts = [int(part) for part in version.split(".")]
-    parts.extend([0] * FEATURE_LINE_LENGTH)
-    return tuple(parts[:FEATURE_LINE_LENGTH])
-
-
 def recommends_update(client_version: str | None, server_version: str | None) -> bool:
-    """True only when the client's (MAJOR, MINOR) is older than the server's."""
+    """True when the client's release is older than the server's, PATCH gaps included.
 
-    client_line = feature_line(client_version)
-    server_line = feature_line(server_version)
-    if client_line is None or server_line is None:
+    An unreadable version on either side never recommends anything.
+    """
+
+    client_release = release_key(client_version)
+    server_release = release_key(server_version)
+    if client_release is None or server_release is None:
         return False
-    return client_line < server_line
+    return client_release < server_release
 
 
 def normalized_revision(value: object) -> str | None:

@@ -155,8 +155,6 @@ def test_probe_names_both_releases_and_the_pinned_update(monkeypatch) -> None:
         # Same release, different commit: revision drift alone never nags.
         {"app": {"version": "0.1.0", "source_revision": SERVER_REVISION}},
         {"app": {"version": "0.0.9", "source_revision": SERVER_REVISION}},
-        # A PATCH release is a backward-compatible fix (docs/versioning.md).
-        {"app": {"version": "0.1.7", "source_revision": SERVER_REVISION}},
         # A server from before /health reported its release.
         {"app": {"source_revision": SERVER_REVISION}},
         # A version too long to be a release is unreadable, not an error.
@@ -167,6 +165,17 @@ def test_probe_names_both_releases_and_the_pinned_update(monkeypatch) -> None:
 )
 def test_probe_fails_open_without_a_newer_server_release(monkeypatch, health: Any) -> None:
     assert _probe_with(monkeypatch, health) is None
+
+
+def test_probe_recommends_the_update_for_a_patch_release_gap(monkeypatch) -> None:
+    # A PATCH release is where a fix for a broken install lands (docs/versioning.md).
+    health = {"app": {"version": "0.1.7", "source_revision": SERVER_REVISION}}
+
+    notice = _probe_with(monkeypatch, health)
+
+    assert notice is not None
+    assert notice.startswith("UPDATE AVAILABLE: this Lab Tracker MCP client runs release 0.1.0")
+    assert "server runs release 0.1.7" in notice
 
 
 def test_probe_ignores_an_installed_release_it_cannot_read(monkeypatch) -> None:

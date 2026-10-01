@@ -170,18 +170,21 @@ Captures stage for human review — nothing commits to the research
 graph automatically. Server-side AI drafting uses the operator's
 configured provider credential; no local OpenAI key is needed for Lab
 Tracker. `lt doctor` and `lt setup status` surface drift after package
-upgrades and confirm that `lt-mcp` can start, and `lt update` is the
-refresh path for a repo (`lt update --skills-only` is the one for the
-setup skill alone). When the server moves to a newer MAJOR.MINOR release
-(docs/versioning.md), `lt setup status`, `lt-mcp` notices, and the
-Daily review name the clients that should update (each is judged by its
-captures: `lt watch`, `lt run`, `lt pipeline`, `lt hpc`, the repo hooks,
-agent sessions, notebook saves, and figure saves record their client's
-release, notes made by hand or import do not); a PATCH-only gap is
-reported, never suggested. The `uv tool` install updates with the
-Setup page's server-pinned install, then `lt update` refreshes each
-repo; an analysis repo updates by rerunning its pinned `uv add`
-(step 5), which `lt update` does not change.
+upgrades and confirm that `lt-mcp` can start, and both compare this
+client's release with the server's (`lt doctor` only warns when the
+server cannot be reached). `lt update` is the refresh path for a repo
+(`lt update --skills-only` is the one for the setup skill alone). When
+the server runs a newer release, a PATCH release included
+(docs/versioning.md), `lt setup status`, `lt doctor`, `lt-mcp` notices,
+and the Daily review name the clients that should update (each is
+judged by its captures: `lt watch`, `lt run`, `lt pipeline`, `lt hpc`,
+the repo hooks, agent sessions, notebook saves, and figure saves record
+their client's release, notes made by hand or import do not); the same
+release at a different commit is reported, never suggested. The
+`uv tool` install updates with the Setup page's server-pinned install,
+then `lt update` refreshes each repo; an analysis repo updates by
+rerunning its pinned `uv add` (step 5), which `lt update` does not
+change.
 <!-- END GENERATED SETUP GUIDE -->
 
 ## Conversation shape
@@ -201,4 +204,4 @@ repo; an analysis repo updates by rerunning its pinned `uv add`
 If Lab Tracker is unreachable and the user does not operate a server, point
 them at whoever runs their lab's instance instead of standing one up ad hoc.
 
-<!-- lab-tracker-setup-guide version=0.1.0 sha256=fd442116d57f -->
+<!-- lab-tracker-setup-guide version=0.1.0 sha256=1cb97be4d733 -->

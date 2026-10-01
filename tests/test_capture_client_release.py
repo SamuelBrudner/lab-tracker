@@ -219,12 +219,15 @@ def test_every_stale_source_on_a_machine_is_judged_on_its_own() -> None:
     assert current_figure.update_notice is None
 
 
-def test_a_patch_release_gap_is_reported_but_never_nags() -> None:
+def test_a_patch_release_gap_gets_a_notice() -> None:
     judged = _judge(_watch("0.5.0"), server=ReleaseIdentity(version="0.5.3", revision="b" * 40))
 
     assert judged.release_status == "behind"
-    assert judged.update_recommended is False
-    assert judged.update_notice is None
+    assert judged.update_recommended is True
+    notice = judged.update_notice
+    assert notice is not None
+    assert "release 0.5.0" in notice
+    assert "0.5.3" in notice
 
 
 @pytest.mark.parametrize(

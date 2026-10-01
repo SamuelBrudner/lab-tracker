@@ -189,12 +189,12 @@ A release is the `[project].version` in `pyproject.toml`, versioned by
 for features and any incompatibility, PATCH only for backward-compatible
 fixes). The server reports it as `app.version` on `GET /health`, next to
 `app.source_revision`. The release status is truthful: a client on any older
-release is *behind*. One rule decides whether that is worth a nag: an update is
-*recommended* (`update_recommended`) only when the client's `MAJOR.MINOR` is
-older than the server's. Every notice below keys on that rule, so a PATCH-only
-gap is reported as information and never suggested. Revision drift within one
-release is reported (`same_revision`) but never suggested either, since most
-commits are not consumer-relevant.
+release is *behind*, and an update is *recommended* (`update_recommended`)
+exactly then: any server release newer than the client's, a PATCH release
+included, because a PATCH release is where a fix for a broken install lands.
+Every notice below keys on that rule. Revision drift within one release is
+reported (`same_revision`) but never suggested, since most commits are not
+consumer-relevant and a release is the unit a maintainer chose to cut.
 
 - `lt doctor` (and `lt doctor --all`, once per sweep) imports the MCP server
   module in a child interpreter, the same Python `lt` runs from, and reports
@@ -203,8 +203,15 @@ commits are not consumer-relevant.
   exit (a `sys.exit` or a crash while importing), and an import error each
   report `importable: false`, so a hung or crashing import can neither hang
   nor end `lt`. A failure exits `1` like drift; `--fail-silent` keeps prompt
-  hooks quiet. There is no network I/O; `lt setup verify-mcp` remains the
-  deeper connectivity check.
+  hooks quiet. `lt doctor` also tries to reach the server: one `GET /health`,
+  the bounded probe described under `lt setup status` below, compared with this
+  client's release and reported as `server`, `client` and `warnings`. It fails
+  soft. A server that cannot be reached or read is a warning carrying the probe's
+  diagnosis, and an address that does not parse is a warning with the diagnosis
+  `server_check_failed`; either way the release check is skipped. A client behind
+  its server is a warning that names the update steps. Warnings never change the
+  exit code, which stays decided by drift and the `lt-mcp` check.
+  `lt setup verify-mcp` remains the deeper connectivity check.
 - `lt setup status` reports the same `lt_mcp` check plus a `client` release
   comparison built from its existing `/health` probe (`status`,
   `client_behind_server`, `update_recommended`), and suggests the update only

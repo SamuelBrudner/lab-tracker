@@ -644,6 +644,7 @@ def _server_reports_release(monkeypatch, version: str, revision: str = SERVER_RE
     )
 
 
+@pytest.mark.usefixtures("offline_server")
 def test_doctor_reports_that_lt_mcp_can_start(tmp_path, capsys) -> None:
     repo = tmp_path / "repo"
     init_consumer_repo(repo, yes=True)
@@ -656,6 +657,7 @@ def test_doctor_reports_that_lt_mcp_can_start(tmp_path, capsys) -> None:
     assert "error" not in payload["lt_mcp"]
 
 
+@pytest.mark.usefixtures("offline_server")
 def test_doctor_fails_loudly_when_lt_mcp_cannot_import(
     tmp_path, broken_mcp_install, capsys
 ) -> None:
@@ -681,6 +683,7 @@ def test_doctor_fails_loudly_when_lt_mcp_cannot_import(
     assert capsys.readouterr().out == ""
 
 
+@pytest.mark.usefixtures("offline_server")
 def test_doctor_all_checks_the_install_once_per_sweep(broken_mcp_install, capsys) -> None:
     with pytest.raises(SystemExit):
         lt_cli.main(["doctor", "--all"])
@@ -689,6 +692,178 @@ def test_doctor_all_checks_the_install_once_per_sweep(broken_mcp_install, capsys
     assert payload["command"] == "doctor-all"
     assert payload["repos"] == []
     assert payload["lt_mcp"]["importable"] is False
+
+
+def _installed_release(monkeypatch, version: str) -> None:
+    monkeypatch.setattr(
+        setup_helpers,
+        "installed_release",
+        lambda: setup_helpers.ReleaseIdentity(version=version, revision="a" * 40),
+    )
+
+
+def _doctor_payload(repo, capsys, *extra: str) -> dict:
+    lt_cli.main(["doctor", "--target", str(repo), *extra])
+    return json.loads(capsys.readouterr().out)
+
+
+def test_doctor_warns_when_the_client_is_a_patch_release_behind(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    repo = tmp_path / "repo"
+    init_consumer_repo(repo, yes=True)
+    _installed_release(monkeypatch, "0.4.0")
+    _server_reports_release(monkeypatch, "0.4.1")
+
+    payload = _doctor_payload(repo, capsys)  # a warning must not raise SystemExit
+
+    assert payload["server"]["reachable"] is True
+    assert payload["client"]["status"] == "behind"
+    assert payload["client"]["update_recommended"] is True
+    [warning] = payload["warnings"]
+    assert "(release 0.4.0) is behind its server (release 0.4.1)" in warning
+    assert f"lab-tracker.git@{SERVER_REVISION}" in warning
+    assert not any(target["drifted"] for target in payload["targets"])
+
+
+def test_doctor_is_quiet_when_the_client_is_current(tmp_path, monkeypatch, capsys) -> None:
+    repo = tmp_path / "repo"
+    init_consumer_repo(repo, yes=True)
+    _installed_release(monkeypatch, "0.4.0")
+    _server_reports_release(monkeypatch, "0.4.0", revision="c" * 40)  # same release, new commit
+
+    payload = _doctor_payload(repo, capsys)
+
+    assert payload["client"]["status"] == "current"
+    assert payload["warnings"] == []
+
+
+def test_doctor_tries_the_server_but_only_warns_when_it_cannot_connect(
+    tmp_path, offline_server, capsys
+) -> None:
+    repo = tmp_path / "repo"
+    init_consumer_repo(repo, yes=True)
+
+    payload = _doctor_payload(repo, capsys)  # no SystemExit: an unreachable server is soft
+
+    assert payload["server"]["reachable"] is False
+    assert payload["client"]["status"] == "unknown"
+    assert payload["client"]["update_recommended"] is False
+    [warning] = payload["warnings"]
+    assert payload["server"]["base_url"] in warning
+    assert "tcp_connection_failed" in warning
+    assert "release check was skipped" in warning
+    assert "Check the server address and port." in warning
+    # The warning is data, so prompt hooks that keep drift output still get it.
+    assert _doctor_payload(repo, capsys, "--fail-silent")["warnings"] == payload["warnings"]
+
+
+def test_doctor_reports_an_http_error_from_the_server_as_a_warning(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    repo = tmp_path / "repo"
+    init_consumer_repo(repo, yes=True)
+    monkeypatch.setattr(
+        setup_helpers,
+        "probe_health_diagnostics",
+        lambda _url: {
+            "reachable": True,
+            "diagnosis": "http_error",
+            "status_code": 404,
+            "detail": "HTTP connection succeeded; server returned HTTP 404.",
+            "next_step": "Check the URL, access requirements, and application or proxy logs.",
+        },
+    )
+
+    [warning] = _doctor_payload(repo, capsys)["warnings"]
+
+    assert "http_error" in warning
+    assert "server returned HTTP 404" in warning
+
+
+def test_doctor_warns_when_the_releases_cannot_be_compared(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    repo = tmp_path / "repo"
+    init_consumer_repo(repo, yes=True)
+    _installed_release(monkeypatch, "0.4.0")
+    monkeypatch.setattr(setup_helpers, "probe_health_diagnostics", lambda _url: {"reachable": True})
+
+    payload = _doctor_payload(repo, capsys)
+
+    assert payload["client"]["status"] == "unknown"
+    [warning] = payload["warnings"]
+    assert "release (0.4.0) with the server's (unknown)" in warning
+
+
+def test_doctor_survives_a_malformed_server_address(tmp_path, monkeypatch, capsys) -> None:
+    repo = tmp_path / "repo"
+    init_consumer_repo(repo, yes=True)
+    monkeypatch.setenv("LAB_TRACKER_BASE_URL", "not a url")
+
+    payload = _doctor_payload(repo, capsys)
+
+    assert payload["server"]["base_url"] is None
+    assert payload["server"]["diagnosis"] == "server_check_failed"
+    [warning] = payload["warnings"]
+    assert "server_check_failed" in warning
+    assert "LAB_TRACKER_BASE_URL" in warning
+
+
+def test_doctor_survives_a_probe_that_raises(tmp_path, monkeypatch, capsys) -> None:
+    repo = tmp_path / "repo"
+    init_consumer_repo(repo, yes=True)
+
+    def explode(_url: str) -> dict:
+        raise RuntimeError("probe exploded")
+
+    monkeypatch.setattr(setup_helpers, "probe_health_diagnostics", explode)
+
+    [warning] = _doctor_payload(repo, capsys)["warnings"]
+
+    assert "server_check_failed" in warning
+    assert "RuntimeError: probe exploded" in warning
+
+
+def test_doctor_exit_code_ignores_warnings_but_not_a_broken_install(
+    tmp_path, broken_mcp_install, offline_server, capsys
+) -> None:
+    repo = tmp_path / "repo"
+    init_consumer_repo(repo, yes=True)
+
+    with pytest.raises(SystemExit) as excinfo:
+        lt_cli.main(["doctor", "--target", str(repo)])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert excinfo.value.code == 1  # the install decides the exit code...
+    assert payload["lt_mcp"]["importable"] is False
+    assert payload["warnings"]  # ...and the soft warning is still reported
+
+
+def test_doctor_all_checks_the_server_once_per_sweep(tmp_path, monkeypatch, capsys) -> None:
+    repos = [tmp_path / "one", tmp_path / "two"]
+    for repo in repos:
+        init_consumer_repo(repo, yes=True)
+    monkeypatch.setattr(
+        repo_registry, "list_repos", lambda: [{"root": str(r), "actions": []} for r in repos]
+    )
+    _installed_release(monkeypatch, "0.4.0")
+    probes: list[str] = []
+
+    def probe(url: str) -> dict:
+        probes.append(url)
+        return {"reachable": True, "release": {"version": "0.4.2", "revision": SERVER_REVISION}}
+
+    monkeypatch.setattr(setup_helpers, "probe_health_diagnostics", probe)
+
+    lt_cli.main(["doctor", "--all"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["command"] == "doctor-all"
+    assert len(payload["repos"]) == 2
+    assert len(probes) == 1
+    assert payload["client"]["update_recommended"] is True
+    assert len(payload["warnings"]) == 1
 
 
 def test_status_suggests_reinstalling_a_broken_lt_mcp_first(
@@ -772,8 +947,8 @@ def test_status_treats_an_oversized_release_as_unreadable(
     assert brief["brief"] == "lab-tracker: capture is configured; server reachable."
 
 
-def test_status_reports_a_patch_release_gap_without_nagging(isolated_homes, monkeypatch) -> None:
-    # docs/versioning.md: a PATCH release is a backward-compatible fix.
+def test_status_suggests_the_update_for_a_patch_release_gap(isolated_homes, monkeypatch) -> None:
+    # A PATCH release is where a fix for a broken install lands (docs/versioning.md).
     repo = _healthy_status_repo(isolated_homes, monkeypatch, "consumer-patch")
     monkeypatch.setattr(
         setup_helpers,
@@ -786,8 +961,9 @@ def test_status_reports_a_patch_release_gap_without_nagging(isolated_homes, monk
 
     assert payload["client"]["status"] == "behind"
     assert payload["client"]["client_behind_server"] is True
-    assert payload["client"]["update_recommended"] is False
-    assert payload["suggestions"] == []
+    assert payload["client"]["update_recommended"] is True
+    [suggestion] = payload["suggestions"]
+    assert "(release 0.4.0) is behind its server (release 0.4.3)" in suggestion
 
 
 def test_status_compares_the_release_the_health_probe_reads(

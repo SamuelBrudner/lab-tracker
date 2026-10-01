@@ -15,7 +15,6 @@ from lab_tracker.client_release import (
     ReleaseComparison,
     ReleaseIdentity,
     client_install_command,
-    feature_line,
     project_install_command,
     project_update_steps,
     recommends_update,
@@ -63,7 +62,6 @@ def test_release_key_treats_an_oversized_version_as_unreadable(version: str) -> 
     # Hostile input (a capture's stored version, a /health body) must degrade to
     # "unknown" like any other unreadable version, never raise.
     assert release_key(version) is None
-    assert feature_line(version) is None
     assert recommends_update(version, "0.2.0") is False
     assert recommends_update("0.1.0", version) is False
     for client_version, server_version in [
@@ -113,10 +111,10 @@ def test_release_status_only_reports_behind_across_a_release_boundary(
 @pytest.mark.parametrize(
     ("client_version", "server_version", "status", "recommended"),
     [
-        # docs/versioning.md: PATCH is a backward-compatible fix, reported only.
-        ("0.1.0", "0.1.1", "behind", False),
-        ("1.2.0", "1.2.5", "behind", False),
-        # A MINOR (features, and on 0.y.z incompatibilities) or MAJOR gap nags.
+        # A PATCH release is where a fix for a broken install lands (docs/versioning.md).
+        ("0.1.0", "0.1.1", "behind", True),
+        ("1.2.0", "1.2.5", "behind", True),
+        # So is a MINOR (features, and on 0.y.z incompatibilities) or MAJOR gap.
         ("0.1.0", "0.2.0", "behind", True),
         ("0.1.9", "0.2.0", "behind", True),
         ("0.9.3", "1.0.0", "behind", True),
@@ -128,7 +126,7 @@ def test_release_status_only_reports_behind_across_a_release_boundary(
         ("0.1.0", "0.2.0rc1", "unknown", False),
     ],
 )
-def test_update_is_recommended_only_across_a_feature_release(
+def test_update_is_recommended_whenever_the_server_release_is_newer(
     client_version: str | None, server_version: str, status: str, recommended: bool
 ) -> None:
     comparison = ReleaseComparison(
@@ -139,6 +137,8 @@ def test_update_is_recommended_only_across_a_feature_release(
     assert comparison.status == status
     assert comparison.update_recommended is recommended
     assert comparison.as_dict()["update_recommended"] is recommended
+    # The nag and the truthful status can no longer disagree.
+    assert comparison.update_recommended is (comparison.status == "behind")
 
 
 def test_revision_drift_within_a_release_is_reported_but_not_behind() -> None:

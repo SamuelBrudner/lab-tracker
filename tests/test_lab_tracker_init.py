@@ -323,6 +323,7 @@ def test_upsert_managed_block_replaces_single_marker_corruption() -> None:
     assert block in content
 
 
+@pytest.mark.usefixtures("offline_server")
 def test_doctor_reports_code_conventions_drift(tmp_path: Path, capsys) -> None:
     init_consumer_repo(tmp_path, yes=True)
 
@@ -362,6 +363,7 @@ def test_doctor_treats_safe_default_absent_blocks_as_not_installed(
     assert json.loads(capsys.readouterr().out)["command"] == "doctor"
 
 
+@pytest.mark.usefixtures("offline_server")
 def test_lt_doctor_delegates_and_honors_fail_silent(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],

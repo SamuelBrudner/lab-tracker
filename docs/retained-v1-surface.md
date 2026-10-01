@@ -630,8 +630,8 @@ research record:
 - Advisory client-update awareness keyed to release versions: `GET /health`
   reports the server's `[project].version` and source revision; `lt doctor` and
   `lt setup status` check that the installed `lt-mcp` imports (in a child
-  interpreter), and `lt setup status` compares the client's release with the
-  server's; stdio `lt-mcp` prefixes its MCP instructions and adds
+  interpreter) and compare the client's release with the server's (`lt doctor`
+  fails soft: a server it cannot reach is a warning, never a failure); stdio `lt-mcp` prefixes its MCP instructions and adds
   `_lab_tracker_update_notice` to every tool result when an update is
   recommended; and captures queued through the watch outbox (`lt watch`,
   `lt run`, `lt pipeline`, agent sessions, notebook and git capture), by
@@ -648,10 +648,10 @@ research record:
   an analysis repo's pinned `uv add` dependency; the home page's Capture
   health card marks every source whose client is behind with a "client
   behind" pill that carries the notice when there is one. A capture queued
-  offline and drained later carries the release that queued it. Only a newer
-  server `MAJOR.MINOR` produces a notice ([versioning.md](versioning.md)); a
-  PATCH-only gap and revision drift within a release are reported, never
-  suggested. None of these checks blocks capture, and each is limited so that
+  offline and drained later carries the release that queued it. Any newer
+  server release, a PATCH release included, produces a notice
+  ([versioning.md](versioning.md)); revision drift within one release is
+  reported, never suggested. None of these checks blocks capture, and each is limited so that
   a slow answer does not hold a session or MCP startup open: the import check
   has a 15-second limit, and the `lt setup status` and `lt-mcp` `/health`
   probes have 2-second connect and read timeouts and a 4-second deadline on the

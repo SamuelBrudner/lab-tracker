@@ -25,9 +25,10 @@ neither can speak for the other, and each is updated differently: the tool
 environment by reinstalling the server's release, an analysis repo by repinning
 its dependency.
 
-A notice is written only when an update is recommended (the client's
-(MAJOR, MINOR) is older than the server's, see ``lab_tracker.client_release``
-and ``docs/versioning.md``), the source carries an install id, and it captured
+A notice is written only when an update is recommended (the client's release
+is older than the server's, a PATCH gap included, see
+``lab_tracker.client_release`` and ``docs/versioning.md``), the source carries
+an install id, and it captured
 within ``UPDATE_NOTICE_WINDOW_DAYS`` (the coverage read's quiet window,
 ``QUIET_CAPTURE_WINDOW_DAYS``).
 """

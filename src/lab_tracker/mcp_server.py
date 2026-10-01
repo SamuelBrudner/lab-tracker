@@ -288,8 +288,8 @@ class LabTrackerFastMCP(FastMCP):
 def probe_client_update_notice(api_settings: MCPSettings) -> str | None:
     """Return an agent-facing notice when an update is recommended for this client.
 
-    Only a newer server (MAJOR, MINOR) recommends one (``client_release``); a
-    PATCH-only gap stays quiet.
+    Any server release newer than this client's recommends one (``client_release``),
+    a PATCH release included; the same release at a different commit stays quiet.
 
     One bounded, unauthenticated ``GET /health``. Any failure, including one
     while building the HTTP client (httpx reads the proxy variables there), is

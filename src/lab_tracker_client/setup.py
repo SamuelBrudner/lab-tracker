@@ -263,12 +263,7 @@ def setup_status(target: str | Path = ".", *, brief: bool = False) -> JsonObject
 
     root = Path(target).expanduser().resolve()
     profile = load_connection_profile()
-    base_url, base_url_source = _resolve_base_url(profile)
-    server: JsonObject = {
-        "base_url": base_url,
-        "source": base_url_source,
-        **probe_health_diagnostics(base_url),
-    }
+    server = _server_status(profile)
     payload: JsonObject = {
         "command": "setup-status",
         "target": str(root),
@@ -313,6 +308,94 @@ def setup_status(target: str | Path = ".", *, brief: bool = False) -> JsonObject
     }
 
 
+def _server_status(profile: dict[str, str]) -> JsonObject:
+    """Resolve the server address and probe its ``/health`` once (bounded, fail-soft)."""
+
+    base_url, base_url_source = _resolve_base_url(profile)
+    return {
+        "base_url": base_url,
+        "source": base_url_source,
+        **probe_health_diagnostics(base_url),
+    }
+
+
+def doctor_release_check() -> JsonObject:
+    """``lt doctor``'s client/server release check: it tries to connect and never raises.
+
+    One bounded ``GET /health``, the same probe ``lt setup status`` uses. A server
+    that cannot be reached or read, or an address that does not parse, becomes a
+    warning and the check is skipped; drift and the ``lt-mcp`` import check stay
+    the only things that decide ``lt doctor``'s exit code.
+    """
+
+    try:
+        server = _server_status(load_connection_profile())
+    except Exception as exc:  # noqa: BLE001 - fail soft: a warning, never a doctor failure.
+        server = _unusable_server(exc)
+    client = _client_release_status(server)
+    return {"server": server, "client": client, "warnings": _release_warnings(server, client)}
+
+
+def _unusable_server(exc: Exception) -> JsonObject:
+    """The ``server`` block when the check itself could not run (a bad address, a crash)."""
+
+    reason = _brief_error(redact_capture_text(f"{type(exc).__name__}: {exc}"))
+    return {
+        "base_url": None,
+        "source": None,
+        "reachable": False,
+        "diagnosis": "server_check_failed",
+        "detail": f"The server check could not run ({reason}).",
+        "next_step": (
+            "Check LAB_TRACKER_BASE_URL and the saved connection profile; "
+            "`lt setup status` shows both."
+        ),
+    }
+
+
+def _release_warnings(server: JsonObject, client: JsonObject) -> list[str]:
+    """At most one soft warning: the server was unusable, unreadable, or is ahead."""
+
+    if server.get("diagnosis"):
+        return [_server_check_skipped_warning(server)]
+    if client.get("status") == "unknown":
+        return [_unreadable_release_warning(client)]
+    if client.get("update_recommended"):
+        return [_behind_server_message(client)]
+    return []
+
+
+def _server_check_skipped_warning(server: JsonObject) -> str:
+    where = server.get("base_url") or "the configured server"
+    explanation = " ".join(
+        str(server[key]) for key in ("detail", "next_step") if server.get(key)
+    )
+    return (
+        f"Could not check this client's release against the Lab Tracker server at {where} "
+        f"({server['diagnosis']}), so the client/server release check was skipped. {explanation}"
+    ).rstrip()
+
+
+def _unreadable_release_warning(client: JsonObject) -> str:
+    client_version = client["client"]["version"] or "unknown"
+    server_version = client["server"]["version"] or "unknown"
+    return (
+        f"Could not compare this client's release ({client_version}) with the server's "
+        f"({server_version}), so the client/server release check was skipped."
+    )
+
+
+def _behind_server_message(client: JsonObject) -> str:
+    server = ReleaseIdentity.from_values(
+        client["server"]["version"],
+        client["server"]["revision"],
+    )
+    return (
+        f"This lab-tracker client (release {client['client']['version']}) is behind "
+        f"its server (release {server.version}); {update_steps(server)}."
+    )
+
+
 def _client_release_status(server: JsonObject) -> JsonObject:
     """Compare this client's installed release with the one ``/health`` reported."""
 
@@ -331,17 +414,10 @@ def _install_suggestions(status: JsonObject) -> list[str]:
     if lt_mcp.get("importable") is False:
         suggestions.append(_lt_mcp_suggestion(lt_mcp))
     client = status["client"]
-    # Only a newer server (MAJOR, MINOR) is worth a suggestion; a PATCH-only
-    # gap stays in the ``client`` report as information.
+    # Any newer server release is worth a suggestion, a PATCH release included;
+    # revision drift within one release is not (it stays in the ``client`` report).
     if client.get("update_recommended"):
-        server = ReleaseIdentity.from_values(
-            client["server"]["version"],
-            client["server"]["revision"],
-        )
-        suggestions.append(
-            f"This lab-tracker client (release {client['client']['version']}) is behind "
-            f"its server (release {server.version}); {update_steps(server)}."
-        )
+        suggestions.append(_behind_server_message(client))
     return suggestions
 
 
