@@ -1,0 +1,15 @@
+{
+  "source_revision": "124764cb",
+  "base_revision": "901c3aa3c61dd2218122e179d94ff40bf7f5d7ae",
+  "source_version": "0.1.0",
+  "built_at": "2026-10-02",
+  "assets": {
+    "styles.css": "5baa4fd0bfa5e666aa56eae64cbfa746b44c2347adba38ac999766981fe3225a",
+    "icon-192.png": "3d026929ec3c62c449bef19872a9331098a391c04584c43a4a124f58dd853ed6",
+    "app.css": "1243b61a71923367ce620fb944427c80c9b03e863e18374fcf4f74d6d06f63fc",
+    "icon-180.png": "3d7b509fbbe667c0b8645ea3d0d8aac31c9669cd78117652ad273c345c4a16bb",
+    "manifest.json": "090e5157fe26036ec242107cac3521f36656d5b68976ae976d67ec9aff8ff32d",
+    "app.js": "594eb7b6272ba545c83f8c97a601590983bfabb65e2aa9c55d4709eef7040632",
+    "icon-512.png": "39b7f43f260fb39a1b9588f1fa94b77019ed3442ceefe8a2b6bf1c4058ea6d40"
+  }
+}

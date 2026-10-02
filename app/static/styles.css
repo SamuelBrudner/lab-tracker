@@ -1,16 +1,118 @@
 @import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap");
 
+/* =============================================================================
+   Design tokens — three tiers.
+
+   1. PRIMITIVE  raw values. Referenced only by the semantic tier below; never
+                 by a component rule.
+   2. SEMANTIC   what a value means (--ink, --line, --shadow-2). Components use
+                 these.
+   3. REGISTER   posture-scoped values that differ between the Work and Read
+                 registers (--pad, --measure, --shadow-surface). Components use
+                 these wherever the two postures should diverge.
+
+   This tier split is deliberately pixel-identical: every legacy variable below
+   resolves to the exact value it held before, and no component rule changed.
+   design-tokens.test.js resolves the var() chains and asserts those values, so
+   an accidental colour shift fails the build rather than the eye.
+
+   Scales are derived from values already present in this file rather than
+   invented, so migrating a rule to a token is a rename and not a redesign.
+   ============================================================================= */
+
 :root {
-  --bg: #f6f5f3;
-  --card: #ffffff;
-  --ink: #1b1d21;
-  --ink-soft: #50555f;
-  --line: #d6d2cb;
-  --accent: #0d8b6f;
-  --accent-soft: #daf4ec;
-  --danger: #a4202f;
-  --danger-soft: #ffe6e7;
-  --shadow: 0 14px 30px rgba(21, 23, 30, 0.08);
+  /* --- Primitive: colour ------------------------------------------------- */
+  --color-paper-0: #f6f5f3;
+  --color-paper-1: #ffffff;
+  --color-ink-900: #1b1d21;
+  --color-ink-500: #50555f;
+  --color-line-200: #d6d2cb;
+  --color-jade-600: #0d8b6f;
+  --color-jade-050: #daf4ec;
+  --color-rust-700: #a4202f;
+  --color-rust-050: #ffe6e7;
+  /* Shared channel for the shadow ramp, so elevation tints stay consistent. */
+  --color-shadow-rgb: 21, 23, 30;
+
+  /* --- Primitive: type (7 steps, anchored at 16px = --text-base) ---------- */
+  --text-2xs: 0.73rem;
+  --text-xs: 0.78rem;
+  --text-sm: 0.82rem;
+  --text-md: 0.88rem;
+  --text-base: 1rem;
+  --text-lg: 1.1rem;
+  --text-xl: 1.6rem;
+  --leading-tight: 1.25;
+  --leading-normal: 1.45;
+  --leading-loose: 1.6;
+
+  /* --- Primitive: spacing ------------------------------------------------ */
+  --sp-1: 0.25rem;
+  --sp-2: 0.4rem;
+  --sp-3: 0.6rem;
+  --sp-4: 0.8rem;
+  --sp-5: 1rem;
+  --sp-6: 1.2rem;
+  --sp-7: 1.6rem;
+
+  /* --- Primitive: radius ------------------------------------------------- */
+  --radius-xs: 6px;
+  --radius-sm: 8px;
+  --radius-md: 11px;
+  --radius-lg: 14px;
+  --radius-xl: 18px;
+  --radius-2xl: 24px;
+  --radius-pill: 999px;
+  --radius-circle: 50%;
+
+  /* --- Primitive: elevation ---------------------------------------------- */
+  --shadow-0: none;
+  --shadow-1: 0 4px 14px rgba(var(--color-shadow-rgb), 0.06);
+  --shadow-2: 0 8px 16px rgba(var(--color-shadow-rgb), 0.1);
+  --shadow-3: 0 14px 30px rgba(var(--color-shadow-rgb), 0.08);
+
+  /* --- Primitive: motion -------------------------------------------------
+     Honour prefers-reduced-motion at the point of use; the accessibility floor
+     lands in lab-tracker-83m2.6. */
+  --duration-fast: 120ms;
+  --duration-base: 200ms;
+  --duration-slow: 420ms;
+  --ease-standard: ease;
+  --ease-out: ease-out;
+  --ease-emphasized: cubic-bezier(0.2, 0, 0, 1);
+
+  /* --- Primitive: z-index ------------------------------------------------
+     Five named layers so stacking is declared rather than discovered. */
+  --z-base: 0;
+  --z-sticky: 10;
+  --z-overlay: 100;
+  --z-sheet: 200;
+  --z-toast: 300;
+
+  /* --- Semantic ----------------------------------------------------------
+     The legacy variable names, kept verbatim so no component rule changes.
+     Each resolves to the identical value it held before this tier existed. */
+  --bg: var(--color-paper-0);
+  --card: var(--color-paper-1);
+  --ink: var(--color-ink-900);
+  --ink-soft: var(--color-ink-500);
+  --line: var(--color-line-200);
+  --accent: var(--color-jade-600);
+  --accent-soft: var(--color-jade-050);
+  --danger: var(--color-rust-700);
+  --danger-soft: var(--color-rust-050);
+  --shadow: var(--shadow-3);
+
+  /* --- Register: Work (default) ------------------------------------------
+     Read overrides these in lab-tracker-83m2.8; defining them here means the
+     Read register is a token swap rather than a second set of components. */
+  --font-body: "Space Grotesk", "Segoe UI", sans-serif;
+  --leading-body: var(--leading-normal);
+  --measure: 68ch;
+  --pad: var(--sp-6);
+  --gap: var(--sp-3);
+  --radius-surface: var(--radius-xl);
+  --shadow-surface: var(--shadow-3);
 }
 
 * {
@@ -82,6 +184,28 @@ body {
 .app-nav-link.active {
   background: var(--accent);
   color: #fff;
+}
+
+.app-nav-group {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  align-items: center;
+}
+
+.app-nav-group > summary {
+  list-style: none;
+  cursor: pointer;
+}
+
+.app-nav-group > summary::-webkit-details-marker {
+  display: none;
+}
+
+.app-nav-group-links {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
 }
 
 h1 {
@@ -416,7 +540,7 @@ button:disabled {
   align-items: center;
   display: flex;
   flex-wrap: wrap;
-  gap: 0.45rem 0.6rem;
+  gap: 0.45rem 0.4rem;
 }
 
 .project-graph-axis-label {
@@ -424,35 +548,13 @@ button:disabled {
   font-size: 0.82rem;
   font-weight: 700;
   letter-spacing: 0;
+  margin-right: 0.2rem;
   text-transform: uppercase;
-}
-
-.project-graph-axis-steps {
-  align-items: center;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.28rem;
-}
-
-.project-graph-axis-step {
-  background: #f9f7f4;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  color: var(--ink);
-  font-size: 0.82rem;
-  font-weight: 700;
-  padding: 0.22rem 0.55rem;
 }
 
 .project-graph-axis-arrow {
   color: var(--muted);
   font-weight: 700;
-}
-
-.project-graph-legend {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.42rem;
 }
 
 .project-graph-legend-item {
@@ -469,6 +571,33 @@ button:disabled {
   padding: 0.24rem 0.62rem 0.24rem 0.4rem;
 }
 
+button.project-graph-legend-item {
+  cursor: pointer;
+  font-family: inherit;
+}
+
+button.project-graph-legend-item:hover {
+  border-color: var(--muted);
+}
+
+.project-graph-legend-item.is-hidden {
+  opacity: 0.45;
+}
+
+.project-graph-legend-key {
+  padding-left: 0.55rem;
+}
+
+.project-graph-edge-label-toggle {
+  cursor: pointer;
+  gap: 0.4rem;
+  padding-left: 0.55rem;
+}
+
+.project-graph-edge-label-toggle input {
+  margin: 0;
+}
+
 .project-graph-legend-swatch {
   border: 1px solid;
   border-radius: 999px;
@@ -477,7 +606,23 @@ button:disabled {
   width: 0.8rem;
 }
 
+.project-graph-legend-swatch-dashed {
+  background: transparent;
+  border: 1px dashed #6b7280;
+  border-radius: 2px;
+  height: 0;
+  width: 1.1rem;
+}
+
+.project-graph-body {
+  align-items: stretch;
+  display: flex;
+  gap: 0.65rem;
+}
+
 .project-graph-canvas {
+  flex: 1 1 auto;
+  min-width: 0;
   width: 100%;
   height: min(68vh, 720px);
   min-height: 520px;
@@ -491,6 +636,49 @@ button:disabled {
   border-radius: 8px;
   font-size: 0.78rem;
   line-height: 1.25;
+}
+
+/* Backstop for the JS-side label truncation: never let a node grow taller
+   than its layout row, whatever the label length. */
+.project-graph-canvas .react-flow__node-default {
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  display: -webkit-box;
+  overflow: hidden;
+}
+
+.project-graph-detail {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  display: flex;
+  flex: 0 0 260px;
+  flex-direction: column;
+  gap: 0.55rem;
+  max-height: min(68vh, 720px);
+  overflow-y: auto;
+  padding: 0.75rem;
+}
+
+.project-graph-detail-head {
+  align-items: center;
+  display: flex;
+  gap: 0.5rem;
+  justify-content: space-between;
+}
+
+.project-graph-detail-type {
+  border: 1px solid;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  padding: 0.2rem 0.6rem;
+}
+
+.project-graph-detail-label {
+  font-size: 0.92rem;
+  line-height: 1.4;
+  margin: 0;
+  overflow-wrap: anywhere;
 }
 
 .item-rejected {
@@ -617,6 +805,35 @@ button:disabled {
   color: var(--accent);
 }
 
+/* Live in-page recording: the mic turns into the Stop control. Colour and the
+   chip text carry the state; the pulse is decoration only. */
+.capture-composer-mic.recording {
+  background: var(--danger-soft, #fdecec);
+  color: var(--danger, #b42318);
+  animation: capture-mic-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes capture-mic-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(180, 35, 24, 0.35);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(180, 35, 24, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .capture-composer-mic.recording {
+    animation: none;
+  }
+}
+
+.capture-attachment-chip.recording {
+  border-color: var(--danger, #b42318);
+  color: var(--danger, #b42318);
+}
+
 .capture-composer-icon .capture-icon {
   height: 22px;
   width: 22px;
@@ -661,6 +878,11 @@ button:disabled {
 
 .capture-composer-input:focus {
   outline: none;
+}
+
+.capture-composer-input::placeholder {
+  color: var(--ink-soft);
+  opacity: 1;
 }
 
 .capture-attachment-menu {
@@ -802,16 +1024,6 @@ button:disabled {
   gap: 0.45rem;
 }
 
-.capture-actions {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  gap: 0.55rem;
-}
-
-.capture-actions button {
-  min-height: 44px;
-}
-
 .capture-pending {
   border: 1px solid var(--line);
   border-radius: 14px;
@@ -950,6 +1162,8 @@ button:disabled {
   padding: 0.7rem;
   font-size: 0.88rem;
   line-height: 1.35;
+  max-height: 36rem;
+  overflow: auto;
 }
 
 .review-fields {
@@ -981,9 +1195,138 @@ button:disabled {
   background: var(--paper-2, #faf8f3);
 }
 
+.audio-review-console {
+  display: grid;
+  gap: 0.65rem;
+  margin: 0.25rem 0 0.75rem;
+  padding: 0.85rem;
+  border-left: 4px solid var(--accent);
+  border-radius: 14px;
+  background: linear-gradient(135deg, var(--accent-soft), #fbfffd 62%);
+}
+
+.audio-review-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.audio-review-heading h3 {
+  margin: 0 0 0.2rem;
+}
+
+.audio-review-primary-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 0.5rem;
+}
+
+.audio-review-primary-actions button {
+  min-height: 44px;
+}
+
+.audio-review-primary-actions .recording {
+  border-color: var(--danger, #c0392b);
+  color: var(--danger, #c0392b);
+  background: var(--danger-soft);
+}
+
+.audio-review-unavailable {
+  flex: 1 1 16rem;
+  align-self: center;
+}
+
+.audio-recording-status {
+  margin: 0;
+  color: var(--danger);
+  font-size: 0.88rem;
+  font-weight: 700;
+}
+
+.audio-review-recording {
+  flex-wrap: wrap;
+  margin: 0;
+}
+
+.audio-review-more {
+  border-top: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+  padding-top: 0.55rem;
+}
+
+.audio-review-more > summary {
+  color: var(--ink-soft);
+  font-size: 0.88rem;
+}
+
+.audio-review-more-body {
+  display: grid;
+  justify-items: start;
+  gap: 0.5rem;
+  padding-top: 0.25rem;
+}
+
+.audio-review-more-body .ai-revise-input {
+  margin-bottom: 0;
+}
+
+.audio-review-submit {
+  justify-self: start;
+}
+
 .ai-revise-input {
   width: 100%;
   margin: 0.4rem 0 0.5rem;
+}
+
+.ai-revise-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.ai-revise-attach {
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+}
+
+.ai-revise-attach.disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.ai-revise-tools .recording {
+  border-color: var(--danger, #c0392b);
+  color: var(--danger, #c0392b);
+}
+
+.ai-revise-files {
+  list-style: none;
+  margin: 0 0 0.5rem;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.ai-revise-attachment {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.4rem;
+}
+
+.ai-revise-file-name {
+  font-size: 0.85rem;
+  word-break: break-all;
+}
+
+.ai-revise-audio {
+  height: 2rem;
+  max-width: 16rem;
 }
 
 .advanced-json {
@@ -1004,6 +1347,16 @@ button:disabled {
 .context-details summary {
   cursor: pointer;
   font-weight: 700;
+}
+
+.advanced-disclosure > summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--ink-soft);
+}
+
+.advanced-disclosure[open] > summary {
+  margin-bottom: 0.6rem;
 }
 
 .highlight {
@@ -1033,6 +1386,23 @@ button:disabled {
 .batch-banner {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+.app-update-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+.flash.draft-recovery {
+  align-items: center;
+  background: var(--accent-soft);
+  border-color: #b9e2d4;
+  display: flex;
   flex-wrap: wrap;
   gap: 0.6rem;
 }
@@ -1128,6 +1498,551 @@ button:disabled {
   margin-top: 0.85rem;
 }
 
+.daily-review-report {
+  display: grid;
+  gap: 0.6rem;
+  margin-top: 0.9rem;
+}
+
+.review-title-row {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.review-title-row h2 {
+  margin: 0;
+}
+
+.review-lead {
+  font-size: 0.92rem;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.review-summary {
+  margin: 0 0 0.5rem;
+  font-size: 1.02rem;
+  line-height: 1.6;
+}
+
+.review-summary p {
+  margin: 0 0 0.7rem;
+}
+
+.review-summary p:last-child {
+  margin-bottom: 0;
+}
+
+.summary-clamp {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.review-report {
+  margin-top: 0.4rem;
+}
+
+.review-view-switch {
+  align-items: center;
+  display: flex;
+  gap: 0.55rem;
+  justify-content: flex-end;
+  margin-top: 0.25rem;
+}
+
+.review-view-toggle {
+  background: var(--accent-soft);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  display: inline-grid;
+  gap: 2px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  padding: 2px;
+}
+
+.review-view-toggle button {
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-pill);
+  box-shadow: none;
+  color: var(--ink);
+  font-size: 0.86rem;
+  min-height: 34px;
+  padding: 0.35rem 0.8rem;
+}
+
+.review-view-toggle button:hover {
+  box-shadow: none;
+  transform: none;
+}
+
+.review-view-toggle button[aria-pressed="true"] {
+  background: var(--accent);
+  color: #fff;
+}
+
+.review-view-toggle button:focus-visible,
+.proposal-citation:focus-visible,
+.proposal-citation-close:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--accent) 65%, white 35%);
+  outline-offset: 2px;
+}
+
+.review-narrative {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  margin: 0.7rem auto 0.25rem;
+  padding: clamp(0.9rem, 2vw, 1.4rem);
+  width: min(100%, 76ch);
+}
+
+.review-narrative-intro {
+  border-bottom: 1px solid var(--line);
+  color: var(--ink-soft);
+  font-size: 0.88rem;
+  line-height: 1.5;
+  margin: 0 0 1rem;
+  padding: 0 0 0.8rem;
+}
+
+.review-narrative-summary,
+.review-narrative-prose {
+  font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+  font-size: clamp(1.04rem, 1.4vw, 1.16rem);
+  line-height: 1.72;
+}
+
+.review-narrative-summary p,
+.review-narrative-prose p {
+  margin: 0 0 1rem;
+}
+
+.review-narrative-summary p:last-child,
+.review-narrative-prose p:last-child {
+  margin-bottom: 0;
+}
+
+.review-narrative-prose {
+  border-top: 1px solid var(--line);
+  margin-top: 1rem;
+  padding-top: 1rem;
+}
+
+.review-narrative-proposal {
+  font-weight: 600;
+}
+
+.proposal-citation-wrap {
+  display: inline-block;
+  font-family: var(--font-body);
+  line-height: 1.3;
+  position: relative;
+}
+
+.proposal-citation {
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  box-shadow: none;
+  color: var(--accent);
+  font-size: 0.82em;
+  font-weight: 800;
+  line-height: 1;
+  min-height: 0;
+  padding: 0.08rem 0.2rem;
+  vertical-align: super;
+}
+
+.proposal-citation:hover,
+.proposal-citation[aria-expanded="true"] {
+  background: var(--accent-soft);
+  box-shadow: none;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  transform: none;
+}
+
+.proposal-citation-card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-3);
+  color: var(--ink);
+  display: grid;
+  font-size: 0.9rem;
+  font-weight: 400;
+  gap: 0.55rem;
+  line-height: 1.4;
+  padding: 0.85rem;
+  position: absolute;
+  right: -0.25rem;
+  text-align: left;
+  top: 100%;
+  width: min(360px, calc(100vw - 2rem));
+  z-index: var(--z-overlay);
+}
+
+.proposal-citation-heading {
+  align-items: center;
+  display: flex;
+  gap: 0.5rem;
+  justify-content: space-between;
+}
+
+.proposal-citation-intent {
+  color: var(--ink-soft);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.proposal-citation-text {
+  font-size: 0.98rem;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.proposal-citation-rationale {
+  color: var(--ink-soft);
+}
+
+.proposal-citation-rationale .subtle,
+.proposal-citation-note {
+  font-weight: 700;
+}
+
+.proposal-citation-evidence {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.proposal-citation-evidence .source-snippet {
+  display: block;
+  margin: 0;
+}
+
+.proposal-citation-note {
+  display: grid;
+  font-size: 0.82rem;
+  gap: 0.3rem;
+}
+
+.proposal-citation-note textarea {
+  font-weight: 400;
+  min-height: 76px;
+}
+
+.proposal-citation-actions {
+  display: grid;
+  gap: 0.4rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.proposal-citation-actions button {
+  min-height: 40px;
+  padding-inline: 0.45rem;
+}
+
+.proposal-citation-actions .btn-secondary {
+  color: var(--ink);
+  grid-column: 1 / -1;
+}
+
+.proposal-citation-close {
+  justify-self: end;
+  min-height: 32px;
+}
+
+.review-proposal {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 188px;
+  gap: 1.1rem;
+  align-items: start;
+  padding: 0.95rem 0;
+  border-top: 1px solid var(--line);
+}
+
+.review-proposal-body {
+  display: grid;
+  gap: 0.32rem;
+  min-width: 0;
+}
+
+/* Keyboard review: the focused proposal is the one j/k landed on and the one
+   a / r / d act upon. */
+.review-proposal.focused {
+  background: var(--accent-soft);
+  box-shadow: inset 4px 0 0 var(--accent);
+  border-radius: 8px;
+  padding-left: 0.6rem;
+  padding-right: 0.6rem;
+}
+
+.review-proposal:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.review-keys {
+  margin: 0;
+  font-size: 0.85rem;
+}
+
+.review-keys kbd {
+  display: inline-block;
+  min-width: 1.4em;
+  padding: 0 0.3em;
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: var(--surface, #fff);
+  font-family: inherit;
+  font-size: 0.85em;
+  text-align: center;
+}
+
+.review-committed {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 0.8rem 1rem;
+  background: var(--accent-soft);
+  display: grid;
+  gap: 0.6rem;
+}
+
+.review-drafts-from-captures {
+  margin-top: 0.4rem;
+}
+
+.capture-health-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.35rem;
+}
+
+.capture-health-quiet strong {
+  color: var(--danger, #b42318);
+}
+
+.capture-health-flag {
+  margin-left: auto;
+}
+
+.capture-health-flag + .capture-health-flag {
+  margin-left: 0;
+}
+
+.pill.capture-health-behind {
+  background: #fff8e5;
+  border-color: #ecdcb0;
+}
+
+.review-proposal-intent {
+  margin: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 0.73rem;
+}
+
+.review-proposal-text {
+  margin: 0;
+  font-size: 1.02rem;
+  font-weight: 500;
+  line-height: 1.45;
+}
+
+.review-because {
+  margin: 0.12rem 0 0;
+  line-height: 1.5;
+  color: var(--ink-soft);
+  font-size: 0.92rem;
+}
+
+.review-because .subtle {
+  font-weight: 700;
+}
+
+.review-evidence {
+  margin-top: 0.1rem;
+}
+
+.review-source-evidence,
+.review-shared-evidence {
+  display: grid;
+  gap: 0.5rem;
+  margin-top: 0.55rem;
+}
+
+.review-shared-evidence {
+  margin: 0.8rem 0 0.35rem;
+  padding: 0.8rem;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #f7f6f3;
+}
+
+.source-artifact-shared-note,
+.source-artifact-shared-link {
+  margin: 0;
+  font-size: 0.86rem;
+  line-height: 1.4;
+}
+
+.review-source-artifact-list {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.review-source-artifact {
+  min-width: 0;
+  padding: 0.65rem;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface, #fff);
+}
+
+.source-artifact-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  margin-bottom: 0.5rem;
+}
+
+.source-artifact-heading strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.source-artifact-preview {
+  max-height: 28rem;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #f7f6f3;
+}
+
+.source-artifact-preview.expanded {
+  max-height: none;
+}
+
+.source-artifact-preview .source-image-frame {
+  width: 100%;
+  margin: 0;
+}
+
+.source-artifact-image {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.source-artifact-expand {
+  margin-top: 0.35rem;
+}
+
+.source-artifact-state,
+.source-artifact-warning,
+.source-artifact-code {
+  margin: 0.5rem 0 0;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.source-artifact-state {
+  padding: 0.6rem;
+  border-radius: 8px;
+  background: #f7f6f3;
+}
+
+.source-artifact-missing,
+.source-artifact-fetch-error {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.source-artifact-warning {
+  color: #735314;
+  font-weight: 600;
+}
+
+.source-artifact-details {
+  margin-top: 0.45rem;
+}
+
+.source-artifact-details summary {
+  cursor: pointer;
+  color: var(--accent);
+  font-size: 0.84rem;
+  font-weight: 600;
+}
+
+.source-artifact-details dl {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 0.3rem 0.7rem;
+  margin: 0.55rem 0 0;
+  font-size: 0.82rem;
+}
+
+.source-artifact-details dt {
+  color: var(--ink-soft);
+  font-weight: 600;
+}
+
+.source-artifact-details dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.review-edit > summary {
+  cursor: pointer;
+  font-size: 0.85rem;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.review-proposal-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  align-items: stretch;
+}
+
+.review-unsure {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 0.6rem 0.8rem;
+  background: var(--accent-soft);
+}
+
+.review-actions {
+  border-top: 1px solid var(--line);
+  margin-top: 0.4rem;
+  padding-top: 0.9rem;
+  display: grid;
+  gap: 0.75rem;
+}
+
+.review-tally {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  font-size: 1.05rem;
+}
+
+.review-meta {
+  margin-top: 0.4rem;
+}
+
 @media (max-width: 980px) {
   .span-4,
   .span-6,
@@ -1174,11 +2089,27 @@ button:disabled {
     grid-template-columns: 1fr;
   }
 
-  .capture-layout {
+  .review-proposal {
     grid-template-columns: 1fr;
   }
 
-  .capture-actions {
+  .review-proposal-actions {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+
+  .proposal-citation-card {
+    bottom: 1rem;
+    left: 1rem;
+    max-height: calc(100vh - 2rem);
+    overflow-y: auto;
+    position: fixed;
+    right: 1rem;
+    top: auto;
+    width: auto;
+  }
+
+  .capture-layout {
     grid-template-columns: 1fr;
   }
 
@@ -1222,6 +2153,171 @@ button:disabled {
   margin-top: 0.7rem;
 }
 
+.setup-page {
+  padding: clamp(1rem, 2.4vw, 1.5rem);
+}
+
+.setup-page > .item-head {
+  align-items: flex-start;
+}
+
+.setup-steps {
+  display: grid;
+  gap: 0.8rem;
+  list-style: none;
+  margin: 1rem 0;
+  padding: 0;
+}
+
+.setup-step {
+  margin-top: 0;
+}
+
+.setup-step > .item-head {
+  align-items: flex-start;
+}
+
+.setup-step h3 {
+  margin-bottom: 0.25rem;
+}
+
+.setup-step details {
+  margin-top: 0.75rem;
+}
+
+.setup-step summary {
+  color: var(--accent);
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.setup-project-form {
+  margin-top: 0.7rem;
+}
+
+.member-onboarding-entry > .row-between,
+.member-onboarding-page > .item-head {
+  align-items: flex-start;
+  gap: 1rem;
+}
+
+.member-onboarding-heading-actions {
+  align-items: flex-end;
+  flex: 0 0 auto;
+}
+
+.member-onboarding-checkpoint fieldset {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  margin: 0;
+  padding: 0.75rem;
+}
+
+.member-onboarding-checkpoint legend {
+  font-weight: 700;
+  padding: 0 0.25rem;
+}
+
+.member-onboarding-question-input {
+  align-items: end;
+  margin-bottom: 0.55rem;
+}
+
+.member-onboarding-question-input label {
+  flex: 1 1 26rem;
+}
+
+.member-onboarding-saved-checkpoint p,
+.member-onboarding-saved-checkpoint ol {
+  margin-bottom: 0;
+}
+
+.member-onboarding-payoff {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.member-onboarding-map .item {
+  align-items: center;
+  display: flex;
+  gap: 0.65rem;
+  justify-content: space-between;
+}
+
+.member-onboarding-map .map-state-awaiting_owner,
+.member-onboarding-map .map-state-member_reviewed,
+.member-onboarding-map .map-state-pending,
+.member-onboarding-map .map-state-proposed {
+  background: transparent;
+  border-style: dashed;
+  border-width: 2px;
+}
+
+.member-onboarding-map .map-state-unreviewed {
+  opacity: 0.62;
+}
+
+.member-onboarding-map .map-status-proposed {
+  opacity: 0.62;
+}
+
+.member-onboarding-map .map-state-personal {
+  border-left: 4px solid var(--accent);
+}
+
+.member-onboarding-map-legend {
+  margin-top: 0.65rem;
+}
+
+.member-onboarding-brief {
+  max-height: 30rem;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+.member-onboarding-owner-queue {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.member-onboarding-owner-queue .row-between {
+  gap: 0.75rem;
+}
+
+.setup-project-orientation {
+  margin-top: 0.75rem;
+}
+
+.capture-locked-checkpoint {
+  border-left: 4px solid var(--accent);
+}
+
+.setup-readiness {
+  border-top: 1px solid var(--line);
+  margin-top: 0.85rem;
+  padding-top: 0.75rem;
+}
+
+.setup-finish {
+  align-items: flex-start;
+  border-top: 1px solid var(--line);
+  padding-top: 1rem;
+}
+
+.setup-finish .subtle {
+  max-width: 44rem;
+}
+
+.eyebrow {
+  color: var(--accent);
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  margin: 0 0 0.2rem;
+  text-transform: uppercase;
+}
+
 .enrollment-url {
   display: flex;
   flex-wrap: wrap;
@@ -1238,6 +2334,21 @@ button:disabled {
   background: #f4f3f0;
   padding: 0.35rem 0.5rem;
   border-radius: 7px;
+}
+
+.command-snippet {
+  margin-top: 0.7rem;
+}
+
+.command-block {
+  font-family: "IBM Plex Mono", "Menlo", monospace;
+  font-size: 0.82rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+  background: #f4f3f0;
+  padding: 0.5rem 0.6rem;
+  border-radius: 7px;
+  margin: 0.35rem 0 0;
 }
 
 .list-clean {
@@ -1316,6 +2427,270 @@ button:disabled {
   padding: 1.6rem 1.2rem;
 }
 
+:root[data-theme="dark"] {
+  --bg: #14161a;
+  --card: #1e2128;
+  --ink: #e9e7e2;
+  --ink-soft: #9aa1ac;
+  --muted: #9aa1ac;
+  --line: #31353d;
+  --accent: #28b896;
+  --accent-soft: #103930;
+  --danger: #e06a76;
+  --danger-soft: #3a2025;
+  --paper-2: #242832;
+  --shadow: 0 16px 34px rgba(0, 0, 0, 0.5);
+}
+
+:root[data-theme="dark"],
+:root[data-theme="dark"] body {
+  background: radial-gradient(circle at 20% 0, #181b21 0%, #141619 45%, #121316 100%);
+}
+
+:root[data-theme="dark"] .hero {
+  background: rgba(30, 33, 40, 0.82);
+}
+
+:root[data-theme="dark"] .app-nav-link,
+:root[data-theme="dark"] .btn-secondary,
+:root[data-theme="dark"] .tab,
+:root[data-theme="dark"] .pill,
+:root[data-theme="dark"] .project-graph-legend-item {
+  background: #262a32;
+}
+
+:root[data-theme="dark"] input,
+:root[data-theme="dark"] select,
+:root[data-theme="dark"] textarea,
+:root[data-theme="dark"] .review-pane,
+:root[data-theme="dark"] .note-text,
+:root[data-theme="dark"] .source-snippet,
+:root[data-theme="dark"] .manifest-preview,
+:root[data-theme="dark"] .enrollment-url code,
+:root[data-theme="dark"] .command-block,
+:root[data-theme="dark"] .capture-pending,
+:root[data-theme="dark"] .project-graph-canvas {
+  background: #181b21;
+  color: var(--ink);
+}
+
+:root[data-theme="dark"] .item,
+:root[data-theme="dark"] .review-queue-item,
+:root[data-theme="dark"] .kpi {
+  background: #1a1d24;
+}
+
+:root[data-theme="dark"] .card-inset,
+:root[data-theme="dark"] .ai-revise {
+  background: #23272f;
+}
+
+:root[data-theme="dark"] .mono {
+  color: #aab0ba;
+}
+
+:root[data-theme="dark"] .item-staged {
+  background: #122a23;
+  border-color: #1f5a48;
+}
+
+:root[data-theme="dark"] .item-rejected {
+  background: #221f19;
+}
+
+:root[data-theme="dark"] .item-error,
+:root[data-theme="dark"] .flash.error,
+:root[data-theme="dark"] .pill.review-rejected {
+  background: #2e1a1e;
+  border-color: #6a2f37;
+}
+
+:root[data-theme="dark"] .pill.role-admin,
+:root[data-theme="dark"] .pill.session-operational,
+:root[data-theme="dark"] .pill.relevance-top,
+:root[data-theme="dark"] .review-queue-item.selected {
+  background: #16304a;
+  border-color: #2f5577;
+}
+
+:root[data-theme="dark"] .flash.ok,
+:root[data-theme="dark"] .install-nudge,
+:root[data-theme="dark"] .pill.session-scientific,
+:root[data-theme="dark"] .pill.review-approved,
+:root[data-theme="dark"] .pill.relevance-high {
+  border-color: #1f5a48;
+}
+
+:root[data-theme="dark"] .pill.review-pending,
+:root[data-theme="dark"] .pill.relevance-med,
+:root[data-theme="dark"] .warn,
+:root[data-theme="dark"] .pending-uploads-badge {
+  background: #2e2616;
+  border-color: #5c4a1f;
+  color: #e6c878;
+}
+
+:root[data-theme="dark"] .capture-composer {
+  background: #23272f;
+  border-color: var(--line);
+}
+
+:root[data-theme="dark"] .capture-composer-input {
+  background: #181b21;
+  border-color: var(--line);
+  color: var(--ink);
+}
+
+:root[data-theme="dark"] .capture-composer-icon {
+  background: #262a32;
+  color: var(--ink);
+}
+
+:root[data-theme="dark"] .capture-attachment-option,
+:root[data-theme="dark"] .capture-attachment-chip {
+  background: #181b21;
+  border-color: var(--line);
+  color: var(--ink);
+}
+
+:root[data-theme="dark"] .capture-attachment-chip button {
+  background: #262a32;
+  color: var(--ink-soft);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14161a;
+    --card: #1e2128;
+    --ink: #e9e7e2;
+    --ink-soft: #9aa1ac;
+    --muted: #9aa1ac;
+    --line: #31353d;
+    --accent: #28b896;
+    --accent-soft: #103930;
+    --danger: #e06a76;
+    --danger-soft: #3a2025;
+    --paper-2: #242832;
+    --shadow: 0 16px 34px rgba(0, 0, 0, 0.5);
+  }
+
+  :root,
+  body {
+    background: radial-gradient(circle at 20% 0, #181b21 0%, #141619 45%, #121316 100%);
+  }
+
+  .hero {
+    background: rgba(30, 33, 40, 0.82);
+  }
+
+  .app-nav-link,
+  .btn-secondary,
+  .tab,
+  .pill,
+  .project-graph-legend-item {
+    background: #262a32;
+  }
+
+  input,
+  select,
+  textarea,
+  .review-pane,
+  .note-text,
+  .source-snippet,
+  .manifest-preview,
+  .enrollment-url code,
+  .command-block,
+  .capture-pending,
+  .project-graph-canvas {
+    background: #181b21;
+    color: var(--ink);
+  }
+
+  .item,
+  .review-queue-item,
+  .kpi {
+    background: #1a1d24;
+  }
+
+  .card-inset,
+  .ai-revise {
+    background: #23272f;
+  }
+
+  .mono {
+    color: #aab0ba;
+  }
+
+  .item-staged {
+    background: #122a23;
+    border-color: #1f5a48;
+  }
+
+  .item-rejected {
+    background: #221f19;
+  }
+
+  .item-error,
+  .flash.error,
+  .pill.review-rejected {
+    background: #2e1a1e;
+    border-color: #6a2f37;
+  }
+
+  .pill.role-admin,
+  .pill.session-operational,
+  .pill.relevance-top,
+  .review-queue-item.selected {
+    background: #16304a;
+    border-color: #2f5577;
+  }
+
+  .flash.ok,
+  .install-nudge,
+  .pill.session-scientific,
+  .pill.review-approved,
+  .pill.relevance-high {
+    border-color: #1f5a48;
+  }
+
+  .pill.review-pending,
+  .pill.relevance-med,
+  .warn,
+  .pending-uploads-badge {
+    background: #2e2616;
+    border-color: #5c4a1f;
+    color: #e6c878;
+  }
+
+  .capture-composer {
+    background: #23272f;
+    border-color: var(--line);
+  }
+
+  .capture-composer-input {
+    background: #181b21;
+    border-color: var(--line);
+    color: var(--ink);
+  }
+
+  .capture-composer-icon {
+    background: #262a32;
+    color: var(--ink);
+  }
+
+  .capture-attachment-option,
+  .capture-attachment-chip {
+    background: #181b21;
+    border-color: var(--line);
+    color: var(--ink);
+  }
+
+  .capture-attachment-chip button {
+    background: #262a32;
+    color: var(--ink-soft);
+  }
+}
+
 .invite-panel {
   border-bottom: 1px solid var(--line);
   margin-bottom: 1rem;
@@ -1346,4 +2721,182 @@ button:disabled {
   .invite-result {
     grid-template-columns: 1fr;
   }
+
+  .project-graph-body {
+    flex-direction: column;
+  }
+
+  .project-graph-detail {
+    flex-basis: auto;
+    max-height: none;
+  }
+}
+
+@media (max-width: 640px) {
+  .setup-page > .item-head,
+  .setup-step > .item-head,
+  .setup-finish {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .setup-finish .btn-primary {
+    width: 100%;
+  }
+
+  .member-onboarding-entry > .row-between,
+  .member-onboarding-page > .item-head,
+  .member-onboarding-owner-queue .row-between {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .member-onboarding-heading-actions {
+    align-items: stretch;
+  }
+
+  .member-onboarding-payoff {
+    grid-template-columns: 1fr;
+  }
+
+  .review-app-shell {
+    max-width: 34rem;
+    padding: 0.4rem;
+  }
+
+  .review-app-shell .hero {
+    border-radius: 14px;
+    padding: 0.7rem 0.75rem;
+  }
+
+  .review-app-shell .hero-row > div > .subtle {
+    display: none;
+  }
+
+  .review-app-shell .app-nav {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding-bottom: 0.15rem;
+  }
+
+  .review-app-shell .grid {
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+  }
+
+  .review-app-shell .card {
+    border-radius: 14px;
+    padding: 0.75rem;
+  }
+
+  .audio-review-console {
+    margin: 0.1rem -0.15rem 0.65rem;
+    padding: 0.75rem;
+  }
+
+  .audio-review-heading {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+
+  .audio-review-status {
+    align-self: flex-start;
+  }
+
+  .audio-review-primary-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .audio-review-primary-actions button,
+  .audio-review-submit {
+    min-height: 48px;
+  }
+
+  .audio-review-unavailable {
+    grid-column: 1 / -1;
+  }
+
+  .audio-review-submit,
+  .ai-revise-audio {
+    justify-self: stretch;
+    width: 100%;
+    max-width: none;
+  }
+
+  .review-proposal-actions {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .review-proposal-actions .pill {
+    grid-column: 1 / -1;
+    justify-self: start;
+  }
+
+  .review-proposal-actions button {
+    min-height: 46px;
+    padding-inline: 0.45rem;
+  }
+}
+
+/* Review-page controls added with the reject-reason and set-aside flow. */
+.review-reason-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2, 0.4rem);
+  align-items: center;
+  margin-top: 0.4rem;
+}
+
+.review-reason-chip {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface, transparent);
+  color: inherit;
+  padding: 0.2rem 0.65rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.review-reason-chip:hover:not(:disabled) {
+  background: var(--accent-soft);
+}
+
+.review-reason-chip kbd {
+  display: inline-block;
+  min-width: 1.2em;
+  margin-right: 0.35em;
+  padding: 0 0.25em;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font-weight: 600;
+}
+
+.review-quality {
+  margin: 0 0 0.4rem;
+  font-size: 0.9rem;
+}
+
+.review-source-notes,
+.provenance-proposals {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 0.6rem 0.8rem;
+}
+
+.review-source-note,
+.provenance-proposal {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.review-source-note label {
+  display: inline-flex;
+  gap: 0.4rem;
+  align-items: center;
 }
