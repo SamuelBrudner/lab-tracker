@@ -990,3 +990,27 @@ def test_lt_run_counts_as_the_tool_environment_although_it_writes_run_metadata()
         "since an `lt-` adapter such as `lt run` always counts as the tool environment"
         in setup_doc
     )
+
+
+def test_no_doc_still_states_the_retired_major_minor_only_update_rule() -> None:
+    # A PATCH release now notifies (docs/versioning.md). The dedicated-instance
+    # README kept the old rule for a while because it lives outside docs/, so
+    # scan every directory that carries maintained prose.
+    root = _DOCS.parent
+    paths = [
+        *_DOCS.glob("*.md"),
+        *(root / "deployments").rglob("*.md"),
+        *(root / "skills").rglob("*.md"),
+    ]
+    retired = (
+        "only when a client's `MAJOR.MINOR`",
+        "a PATCH release is reported",
+        "PATCH-only gap",
+    )
+    stale = [
+        f"{path.relative_to(root)}: {phrase}"
+        for path in paths
+        for phrase in retired
+        if phrase in " ".join(path.read_text(encoding="utf-8").split())
+    ]
+    assert not stale, f"docs still state the retired MAJOR.MINOR-only rule: {stale}"
